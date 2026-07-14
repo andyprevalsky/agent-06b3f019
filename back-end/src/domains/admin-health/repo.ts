@@ -24,6 +24,11 @@ export interface WaitlistSignupRecord {
   createdAt: Date;
 }
 
+export interface SubscriptionUserRecord {
+  userId: string;
+  stripeCustomerId: string;
+}
+
 export async function findUserForAdminCheck(userId: string): Promise<AdminUserRecord | null> {
   return prisma.user.findUnique({
     where: { userId },
@@ -40,19 +45,43 @@ export async function countUsersCreatedBefore(end: Date): Promise<number> {
   });
 }
 
-export async function findUsersCreatedBetween(
-  start: Date,
-  end: Date
+export async function findVerifiedUsersCreatedBefore(
+  end: Date,
+  excludedUserIds: string[]
 ): Promise<UserCreatedRecord[]> {
-  return prisma.user.findMany({
+  const users = await prisma.user.findMany({
     where: {
       isAnonymous: false,
-      createdAt: { gte: start, lt: end },
+      phone: { not: null },
+      userId: { notIn: excludedUserIds },
+      createdAt: { lt: end },
     },
     select: {
       userId: true,
       createdAt: true,
+      phone: true,
     },
+  });
+  return users
+    .filter((user) => (user.phone ?? '').trim() !== '')
+    .map(({ userId, createdAt }) => ({ userId, createdAt }));
+}
+
+export async function findUsersByIds(userIds: string[]): Promise<UserCreatedRecord[]> {
+  if (userIds.length === 0) return [];
+  return prisma.user.findMany({
+    where: { userId: { in: userIds }, isAnonymous: false },
+    select: { userId: true, createdAt: true },
+  });
+}
+
+export async function findSubscriptionUsersByCustomerIds(
+  stripeCustomerIds: string[]
+): Promise<SubscriptionUserRecord[]> {
+  if (stripeCustomerIds.length === 0) return [];
+  return prisma.subscription.findMany({
+    where: { stripeCustomerId: { in: stripeCustomerIds } },
+    select: { userId: true, stripeCustomerId: true },
   });
 }
 

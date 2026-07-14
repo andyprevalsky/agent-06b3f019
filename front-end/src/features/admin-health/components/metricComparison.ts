@@ -12,10 +12,10 @@ export type SeriesMetricKey =
   | 'tamaraLinearPoints';
 
 const PRIOR_LABEL: Record<AdminHealthTimeSlice, string> = {
-  weekly: 'prior week',
-  monthly: 'prior month',
-  quarterly: 'prior quarter',
-  yearly: 'prior year',
+  weekly: 'prior 7 days',
+  monthly: 'prior 30 days',
+  quarterly: 'prior 90 days',
+  yearly: 'prior 365 days',
 };
 
 export function priorPeriodLabel(timeSlice: AdminHealthTimeSlice): string {

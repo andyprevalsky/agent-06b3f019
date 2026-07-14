@@ -10,6 +10,7 @@
  *   - authorization: Andy's admin account can read company-health metrics
  *   - response shape: metrics include revenue, waitlist signups, users, runs, retention, and velocity
  *   - parameter handling: supported time slices are accepted
+ *   - periodization: every supported time slice uses contiguous rolling-day buckets
  *   - error-surface: failures return { error: string }
  *
  * Usage:
@@ -121,12 +122,52 @@ const AdminHealthResponseSchema = z.object({
   }),
 });
 const ErrorResponseSchema = z.object({ error: z.string() });
+type AdminHealthResponse = z.infer<typeof AdminHealthResponseSchema>;
 
 interface TestResult {
   name: string;
   passed: boolean;
   error?: string;
   duration: number;
+}
+
+function assertRollingPeriods(
+  body: AdminHealthResponse,
+  expectedPoints: number,
+  expectedDays: number
+): void {
+  if (body.series.length !== expectedPoints) {
+    throw new Error(`Expected ${expectedPoints} points, got ${body.series.length}`);
+  }
+  const expectedDurationMs = expectedDays * 24 * 60 * 60 * 1000;
+  for (let index = 0; index < body.series.length; index += 1) {
+    const point = body.series[index];
+    if (Date.parse(point.end) - Date.parse(point.start) !== expectedDurationMs) {
+      throw new Error(`${body.timeSlice} point ${index} is not ${expectedDays} rolling days`);
+    }
+    const previous = body.series[index - 1];
+    if (previous !== undefined && previous.end !== point.start) {
+      throw new Error(`${body.timeSlice} points ${index - 1} and ${index} are not contiguous`);
+    }
+  }
+  const first = body.series[0];
+  const latest = body.series.at(-1);
+  if (first === undefined || latest === undefined) throw new Error('Expected non-empty series');
+  if (body.range.start !== latest.start || body.range.end !== latest.end) {
+    throw new Error('Summary range must match the latest rolling period');
+  }
+  if (body.historyRange.start !== first.start || body.historyRange.end !== latest.end) {
+    throw new Error('History range must span every rolling period');
+  }
+  const generatedAt = new Date(body.generatedAt);
+  const retrievalDayStart = Date.UTC(
+    generatedAt.getUTCFullYear(),
+    generatedAt.getUTCMonth(),
+    generatedAt.getUTCDate()
+  );
+  if (Date.parse(latest.end) !== retrievalDayStart) {
+    throw new Error('Latest rolling period must end at the last complete UTC day');
+  }
 }
 
 async function request(
@@ -216,20 +257,105 @@ function assertNoImpossibleConversion(body: z.infer<typeof AdminHealthResponseSc
       throw new Error(`Funnel step ${step.id} has an impossible conversion rate`);
     }
   }
+  for (const source of ['client_analytics', 'database'] as const) {
+    const steps = body.funnel.steps.filter((step) => step.source === source);
+    const readySteps = steps.filter((step) => step.status === 'ready');
+    if (readySteps.length === 0) continue;
+    if (readySteps.length !== steps.length) {
+      throw new Error(`${source} funnel cannot mix ready and unavailable steps`);
+    }
+    if (readySteps[0]?.conversionRate !== 1) {
+      throw new Error(`${source} funnel must restart at its own 100% denominator`);
+    }
+    for (let index = 1; index < readySteps.length; index += 1) {
+      const previous = readySteps[index - 1].count;
+      const current = readySteps[index].count;
+      if (previous === null || current === null || current > previous) {
+        throw new Error(`${source} funnel counts must be non-increasing`);
+      }
+    }
+  }
 }
 
-async function countLiveStripeSubscribers(): Promise<number> {
+async function assertDatabaseActivationCounts(body: AdminHealthResponse): Promise<void> {
+  const { ADMIN_USER_IDS } = await import('../../domains/admin-health/config');
+  const { findRootTasksBetween, findVerifiedUsersCreatedBefore } =
+    await import('../../domains/admin-health/repo');
+  const users = await findVerifiedUsersCreatedBefore(
+    new Date(body.range.end),
+    Array.from(ADMIN_USER_IDS)
+  );
+  const cohortIds = new Set(
+    users.filter((user) => user.createdAt >= new Date(body.range.start)).map((user) => user.userId)
+  );
+  const tasks = (
+    await findRootTasksBetween(new Date(body.range.start), new Date(body.range.end))
+  ).filter((task) => cohortIds.has(task.userId));
+  const taskCountByUser = new Map<string, number>();
+  for (const task of tasks) {
+    taskCountByUser.set(task.userId, (taskCountByUser.get(task.userId) ?? 0) + 1);
+  }
+  const expected = [
+    cohortIds.size,
+    Array.from(taskCountByUser.values()).filter((count) => count >= 1).length,
+    Array.from(taskCountByUser.values()).filter((count) => count >= 2).length,
+    Array.from(taskCountByUser.values()).filter((count) => count >= 3).length,
+  ];
+  const actual = body.funnel.steps
+    .filter((step) => step.source === 'database')
+    .map((step) => step.count);
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error(
+      `Database activation must match verified new-account task depth: expected ${expected.join(',')}, got ${actual.join(',')}`
+    );
+  }
+}
+
+async function expectedAdminHealthUserIds(): Promise<Set<string>> {
+  const { ADMIN_HEALTH_ADDITIONAL_USER_IDS, ADMIN_HEALTH_EXCLUDED_USER_IDS } =
+    await import('../../domains/admin-health/config');
+  const { prisma } = await import('../../providers/database');
   const { getVerifiedStripeMetricsClient } = await import('../../providers/stripe');
   const stripe = await getVerifiedStripeMetricsClient();
   const customerIds = new Set<string>();
+  const subscriptionIdByCustomerId = new Map<string, string>();
   for await (const subscription of stripe.subscriptions.list({ status: 'all', limit: 100 })) {
     if (!subscription.livemode) throw new Error('Admin health must query live-mode Stripe data');
     if (subscription.status !== 'active' && subscription.status !== 'trialing') continue;
     const customerId =
       typeof subscription.customer === 'string' ? subscription.customer : subscription.customer.id;
     customerIds.add(customerId);
+    subscriptionIdByCustomerId.set(customerId, subscription.id);
   }
-  return customerIds.size;
+  const subscriptions = await prisma.subscription.findMany({
+    where: { stripeCustomerId: { in: Array.from(customerIds) } },
+    select: { userId: true, stripeCustomerId: true },
+  });
+  const userIds = new Set(
+    subscriptions
+      .map((subscription) => subscription.userId)
+      .filter((userId) => !ADMIN_HEALTH_EXCLUDED_USER_IDS.has(userId))
+  );
+  for (const [customerId, subscriptionId] of subscriptionIdByCustomerId) {
+    if (subscriptions.some((subscription) => subscription.stripeCustomerId === customerId)) {
+      continue;
+    }
+    const sessions = await stripe.checkout.sessions.list({
+      subscription: subscriptionId,
+      limit: 1,
+    });
+    const userId = sessions.data[0]?.client_reference_id;
+    if (userId && !ADMIN_HEALTH_EXCLUDED_USER_IDS.has(userId)) userIds.add(userId);
+  }
+  const additionalUsers = await prisma.user.findMany({
+    where: {
+      userId: { in: Array.from(ADMIN_HEALTH_ADDITIONAL_USER_IDS) },
+      isAnonymous: false,
+    },
+    select: { userId: true },
+  });
+  for (const user of additionalUsers) userIds.add(user.userId);
+  return userIds;
 }
 
 async function liveStripeRevenueCents(start: string, end: string): Promise<number> {
@@ -299,8 +425,19 @@ async function testAdminHappyWeekly() {
   assertWaitlistMetrics(res.data);
   const body = assertSchema(AdminHealthResponseSchema, res.data, 'GET /admin-health weekly');
   if (body.timeSlice !== 'weekly') throw new Error(`Expected weekly, got ${body.timeSlice}`);
-  if (body.series.length !== 12)
-    throw new Error(`Expected 12 weekly points, got ${body.series.length}`);
+  assertRollingPeriods(body, 12, 7);
+  const cachedRes = await request(`${BASE_URL}/api/admin-health?timeSlice=weekly`, {
+    headers: authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
+  });
+  assertStatus(cachedRes.status, 200, cachedRes.data);
+  const cachedBody = assertSchema(
+    AdminHealthResponseSchema,
+    cachedRes.data,
+    'GET /admin-health weekly cached'
+  );
+  if (cachedBody.generatedAt !== body.generatedAt) {
+    throw new Error('Same-day weekly requests must reuse the backend day cache');
+  }
   const latest = body.series.at(-1);
   if (latest === undefined) throw new Error('Expected a latest weekly series point');
   if (body.range.start !== latest.start || body.range.end !== latest.end) {
@@ -319,10 +456,19 @@ async function testAdminHappyWeekly() {
     throw new Error('Tasks per user must match the current weekly period');
   }
   if (process.env.STRIPE_SECRET_KEY) {
-    const liveSubscriberCount = await countLiveStripeSubscribers();
-    if (body.summary.userCount !== liveSubscriberCount) {
+    const expectedUserIds = await expectedAdminHealthUserIds();
+    if (body.summary.userCount !== expectedUserIds.size) {
       throw new Error(
-        `User count must match live active/trialing Stripe subscribers: expected ${liveSubscriberCount}, got ${body.summary.userCount}`
+        `User count must match the configured user cohort: expected ${expectedUserIds.size}, got ${body.summary.userCount}`
+      );
+    }
+    const { findRootTasksBetween } = await import('../../domains/admin-health/repo');
+    const cohortTaskCount = (
+      await findRootTasksBetween(new Date(body.range.start), new Date(body.range.end))
+    ).filter((task) => expectedUserIds.has(task.userId)).length;
+    if (body.summary.taskCount !== cohortTaskCount) {
+      throw new Error(
+        `Task count must use the same user cohort: expected ${cohortTaskCount}, got ${body.summary.taskCount}`
       );
     }
     const liveRevenue = await liveStripeRevenueCents(body.range.start, body.range.end);
@@ -354,6 +500,14 @@ async function testAdminHappyWeekly() {
   );
   generatedWeek.setUTCHours(0, 0, 0, 0);
   for (const cohort of body.retentionCohorts) {
+    const weekZero = cohort.points.find((point) => point.week === 0);
+    if (
+      weekZero === undefined ||
+      weekZero.retainedUsers !== cohort.size ||
+      weekZero.retentionRate !== 1
+    ) {
+      throw new Error(`Cohort ${cohort.cohortWeek} must start at 100% week-zero retention`);
+    }
     for (const point of cohort.points) {
       const pointWeek = Date.parse(`${cohort.cohortWeek}T00:00:00.000Z`) + point.week * 604_800_000;
       if (pointWeek > generatedWeek.getTime()) {
@@ -381,6 +535,7 @@ async function testAdminHappyWeekly() {
     if (step.count !== null) throw new Error(`Unavailable funnel step ${step.id} has a fake count`);
   }
   assertNoImpossibleConversion(body);
+  await assertDatabaseActivationCounts(body);
   if (process.env.AMPLITUDE_API_KEY && process.env.AMPLITUDE_SECRET_KEY) {
     for (const id of [
       'landing_page_viewed',
@@ -405,6 +560,17 @@ async function testAdminHappyMonthly() {
   assertStatus(res.status, 200, res.data);
   const body = assertSchema(AdminHealthResponseSchema, res.data, 'GET /admin-health monthly');
   if (body.timeSlice !== 'monthly') throw new Error(`Expected monthly, got ${body.timeSlice}`);
+  assertRollingPeriods(body, 12, 30);
+}
+
+async function testAdminHappyQuarterly() {
+  const res = await request(`${BASE_URL}/api/admin-health?timeSlice=quarterly`, {
+    headers: authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
+  });
+  assertStatus(res.status, 200, res.data);
+  const body = assertSchema(AdminHealthResponseSchema, res.data, 'GET /admin-health quarterly');
+  if (body.timeSlice !== 'quarterly') throw new Error(`Expected quarterly, got ${body.timeSlice}`);
+  assertRollingPeriods(body, 8, 90);
 }
 
 async function testAdminHappyYearly() {
@@ -414,6 +580,7 @@ async function testAdminHappyYearly() {
   assertStatus(res.status, 200, res.data);
   const body = assertSchema(AdminHealthResponseSchema, res.data, 'GET /admin-health yearly');
   if (body.timeSlice !== 'yearly') throw new Error(`Expected yearly, got ${body.timeSlice}`);
+  assertRollingPeriods(body, 5, 365);
   assertNoImpossibleConversion(body);
 }
 
@@ -423,6 +590,7 @@ async function main() {
     { name: 'GET /api/admin-health non-admin -> 403', fn: testNonAdminForbidden },
     { name: 'GET /api/admin-health weekly admin -> metrics', fn: testAdminHappyWeekly },
     { name: 'GET /api/admin-health monthly admin -> metrics', fn: testAdminHappyMonthly },
+    { name: 'GET /api/admin-health quarterly admin -> metrics', fn: testAdminHappyQuarterly },
     { name: 'GET /api/admin-health yearly admin -> metrics', fn: testAdminHappyYearly },
   ];
 

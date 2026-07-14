@@ -1,10 +1,10 @@
 import type { AdminHealthPeriod } from './types';
 
-const ACTIVE_SUBSCRIPTION_STATUSES = new Set(['active', 'trialing']);
-const NEVER_ACTIVATED_SUBSCRIPTION_STATUSES = new Set(['incomplete', 'incomplete_expired']);
+const KNOWN_MEMBERSHIP_STATUSES = new Set(['active', 'trialing', 'canceled']);
 
 export interface SubscriberLifecycle {
   customerId: string;
+  userId: string | null;
   startedAt: Date;
   endedAt: Date | null;
   status: string;
@@ -13,17 +13,21 @@ export interface SubscriberLifecycle {
 export interface SubscriberSeriesPoint {
   userCount: number;
   newUsers: number;
+  userIds: Set<string>;
+}
+
+export interface AdditionalUserLifecycle {
+  userId: string;
+  startedAt: Date;
 }
 
 function isCountableLifecycle(lifecycle: SubscriberLifecycle): boolean {
-  return !NEVER_ACTIVATED_SUBSCRIPTION_STATUSES.has(lifecycle.status);
+  return KNOWN_MEMBERSHIP_STATUSES.has(lifecycle.status);
 }
 
-function wasSubscribedAt(lifecycle: SubscriberLifecycle, at: number, now: number): boolean {
-  const isCurrentSnapshot = at >= now && lifecycle.endedAt === null;
+function wasIncludedAt(lifecycle: SubscriberLifecycle, at: number): boolean {
   return (
     isCountableLifecycle(lifecycle) &&
-    (!isCurrentSnapshot || ACTIVE_SUBSCRIPTION_STATUSES.has(lifecycle.status)) &&
     lifecycle.startedAt.getTime() < at &&
     (lifecycle.endedAt === null || lifecycle.endedAt.getTime() > at)
   );
@@ -32,29 +36,46 @@ function wasSubscribedAt(lifecycle: SubscriberLifecycle, at: number, now: number
 export function buildSubscriberSeries(
   periods: AdminHealthPeriod[],
   lifecycles: SubscriberLifecycle[],
-  now = new Date()
+  now = new Date(),
+  additionalUsers: AdditionalUserLifecycle[] = []
 ): SubscriberSeriesPoint[] {
   const eligible = lifecycles.filter(isCountableLifecycle);
-  const firstSubscriptionByCustomer = new Map<string, number>();
+  const firstInclusionByUser = new Map<string, number>();
   for (const lifecycle of eligible) {
+    if (lifecycle.userId === null) continue;
     const startedAt = lifecycle.startedAt.getTime();
-    const current = firstSubscriptionByCustomer.get(lifecycle.customerId);
+    const current = firstInclusionByUser.get(lifecycle.userId);
     if (current === undefined || startedAt < current) {
-      firstSubscriptionByCustomer.set(lifecycle.customerId, startedAt);
+      firstInclusionByUser.set(lifecycle.userId, startedAt);
+    }
+  }
+  for (const user of additionalUsers) {
+    const startedAt = user.startedAt.getTime();
+    const current = firstInclusionByUser.get(user.userId);
+    if (current === undefined || startedAt < current) {
+      firstInclusionByUser.set(user.userId, startedAt);
     }
   }
 
   return periods.map((period) => {
     const start = Date.parse(period.start);
     const end = Math.min(Date.parse(period.end), now.getTime());
-    const subscribedCustomers = new Set(
+    const userIds = new Set(
       eligible
-        .filter((lifecycle) => wasSubscribedAt(lifecycle, end, now.getTime()))
-        .map((lifecycle) => lifecycle.customerId)
+        .filter((lifecycle) => wasIncludedAt(lifecycle, end))
+        .flatMap((lifecycle) => (lifecycle.userId === null ? [] : [lifecycle.userId]))
     );
-    const newUsers = Array.from(firstSubscriptionByCustomer.values()).filter(
-      (startedAt) => startedAt >= start && startedAt < end
-    ).length;
-    return { userCount: subscribedCustomers.size, newUsers };
+    for (const user of additionalUsers) {
+      if (user.startedAt.getTime() < end) userIds.add(user.userId);
+    }
+    const newUserIds = new Set(
+      Array.from(firstInclusionByUser.entries())
+        .filter(([, startedAt]) => startedAt >= start && startedAt < end)
+        .map(([userId]) => userId)
+    );
+    for (const userId of newUserIds) {
+      if (!userIds.has(userId)) newUserIds.delete(userId);
+    }
+    return { userCount: userIds.size, newUsers: newUserIds.size, userIds };
   });
 }

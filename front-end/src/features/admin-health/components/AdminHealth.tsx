@@ -6,7 +6,11 @@
  *   -> AdminHealth view
  *      -> GET /api/admin-health?timeSlice=...
  *         -> backend admin check
+ *         -> rolling 7|30|90|365-day periods anchored to the UTC retrieval day
+ *         -> backend day + time-slice response cache
  *         -> Stripe charges + Prisma waitlist/task/user metrics + Linear/GitHub velocity
+ *      -> ordered website funnel -> horizontal volume BarChart + comparison tiles
+ *      -> verified-account activation -> separate BarChart + comparison tiles
  *
  * VIEW DATA:
  * [LOADING] <-- loading: true
@@ -24,6 +28,8 @@ import { Activity, CircleCheckBig, Loader2, TrendingUp, UserPlus, Users, Zap } f
 import {
   Area,
   AreaChart,
+  Bar,
+  BarChart,
   CartesianGrid,
   Legend,
   Line,
@@ -68,15 +74,15 @@ function formatPercent(value: number): string {
   }).format(value);
 }
 
-function subscriberNoun(count: number): string {
-  return count === 1 ? 'subscriber' : 'subscribers';
+function userNoun(count: number): string {
+  return count === 1 ? 'user' : 'users';
 }
 
-const PERIOD_COPY: Record<AdminHealthTimeSlice, { title: string; noun: string }> = {
-  weekly: { title: 'Week', noun: 'week' },
-  monthly: { title: 'Month', noun: 'month' },
-  quarterly: { title: 'Quarter', noun: 'quarter' },
-  yearly: { title: 'Year', noun: 'year' },
+const PERIOD_COPY: Record<AdminHealthTimeSlice, { title: string; range: string }> = {
+  weekly: { title: '7 Days', range: 'last 7 complete UTC days' },
+  monthly: { title: '30 Days', range: 'last 30 complete UTC days' },
+  quarterly: { title: '90 Days', range: 'last 90 complete UTC days' },
+  yearly: { title: '365 Days', range: 'last 365 complete UTC days' },
 };
 
 function MetricPanel({
@@ -178,27 +184,104 @@ function FunnelStepMetrics({
   return <span className="text-xs text-muted-foreground">Needs analytics</span>;
 }
 
-function FunnelSection({ data }: { data: AdminHealthData }) {
+export function funnelEndToEnd(steps: AdminHealthFunnelStep[]) {
+  const first = steps[0];
+  const last = steps.at(-1);
+  const conversionRate =
+    first?.count === null ||
+    first?.count === undefined ||
+    first.count === 0 ||
+    last?.count === null ||
+    last?.count === undefined ||
+    last.count > first.count
+      ? null
+      : last.count / first.count;
+  const previousConversionRate =
+    first?.previousCount === null ||
+    first?.previousCount === undefined ||
+    first.previousCount === 0 ||
+    last?.previousCount === null ||
+    last?.previousCount === undefined ||
+    last.previousCount > first.previousCount
+      ? null
+      : last.previousCount / first.previousCount;
+  return {
+    conversionRate,
+    conversionRateChange: relativeChange(conversionRate, previousConversionRate),
+  };
+}
+
+function FunnelGroup({
+  title,
+  detail,
+  steps,
+  timeSlice,
+  chartLabel,
+  listLabel,
+}: {
+  title: string;
+  detail: string;
+  steps: AdminHealthFunnelStep[];
+  timeSlice: AdminHealthTimeSlice;
+  chartLabel: string;
+  listLabel: string;
+}) {
+  const endToEnd = funnelEndToEnd(steps);
   return (
-    <SectionPanel title="Activation Funnel" eyebrow="Landing page to third task">
+    <div className="rounded-lg border border-border/60 bg-background/65 p-4">
+      <div className="mb-4">
+        <h3 className="font-semibold">{title}</h3>
+        <p className="mt-1 text-xs leading-5 text-muted-foreground">{detail}</p>
+      </div>
       <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md bg-muted/45 px-3 py-2">
         <p className="text-xs font-medium text-muted-foreground">End-to-end conversion</p>
         <p className="text-xl font-semibold tabular-nums">
-          {data.funnel.endToEnd.conversionRate === null
+          {endToEnd.conversionRate === null
             ? 'Unavailable'
-            : formatPercent(data.funnel.endToEnd.conversionRate)}
+            : formatPercent(endToEnd.conversionRate)}
         </p>
-        <MetricChange
-          value={data.funnel.endToEnd.conversionRateChange}
-          timeSlice={data.timeSlice}
-          compact
-        />
+        <MetricChange value={endToEnd.conversionRateChange} timeSlice={timeSlice} compact />
+      </div>
+      <div
+        role="img"
+        aria-label={chartLabel}
+        className="mb-4 w-full min-w-0"
+        style={{ height: Math.max(260, steps.length * 56) }}
+      >
+        <ResponsiveContainer width="100%" height="100%">
+          <BarChart
+            data={steps}
+            layout="vertical"
+            margin={{ top: 8, right: 24, left: 16, bottom: 8 }}
+          >
+            <CartesianGrid
+              strokeDasharray="3 3"
+              horizontal={false}
+              stroke="rgba(148,163,184,0.32)"
+            />
+            <XAxis type="number" allowDecimals={false} tickLine={false} axisLine={false} />
+            <YAxis
+              type="category"
+              dataKey="label"
+              width={180}
+              tickLine={false}
+              axisLine={false}
+              fontSize={12}
+            />
+            <Tooltip
+              formatter={(value) =>
+                value === null || value === undefined ? 'Unavailable' : formatNumber(Number(value))
+              }
+            />
+            <Bar dataKey="count" name="Volume" fill="#7c3aed" radius={[0, 4, 4, 0]} />
+          </BarChart>
+        </ResponsiveContainer>
       </div>
       <ol
-        aria-label="Activation funnel steps"
-        className="grid grid-cols-2 overflow-hidden rounded-md border border-border/60 lg:grid-cols-5"
+        aria-label={listLabel}
+        className="grid grid-cols-1 overflow-hidden rounded-md border border-border/60 sm:grid-cols-2 xl:grid-cols-3"
       >
-        {data.funnel.steps.map((step, index) => (
+        {steps.map((step, index) => (
           <li key={step.id} className="min-w-0 border-b border-r border-border/60 p-3">
             <div className="flex items-center justify-between gap-2">
               <div className="flex h-5 w-5 shrink-0 items-center justify-center rounded bg-muted text-[10px] font-semibold text-muted-foreground">
@@ -209,10 +292,37 @@ function FunnelSection({ data }: { data: AdminHealthData }) {
               </p>
             </div>
             <p className="mt-2 min-h-8 text-xs font-medium leading-4">{step.label}</p>
-            <FunnelStepMetrics step={step} timeSlice={data.timeSlice} />
+            <FunnelStepMetrics step={step} timeSlice={timeSlice} />
           </li>
         ))}
       </ol>
+    </div>
+  );
+}
+
+function FunnelSection({ data }: { data: AdminHealthData }) {
+  const acquisitionSteps = data.funnel.steps.filter((step) => step.source === 'client_analytics');
+  const activationSteps = data.funnel.steps.filter((step) => step.source === 'database');
+  return (
+    <SectionPanel title="Conversion Funnels" eyebrow="Separate populations · valid denominators">
+      <div className="grid grid-cols-1 gap-4 2xl:grid-cols-2">
+        <FunnelGroup
+          title="Website Acquisition"
+          detail="Ordered Amplitude users completing every prior website step within 24 hours."
+          steps={acquisitionSteps}
+          timeSlice={data.timeSlice}
+          chartLabel="Website acquisition funnel volume"
+          listLabel="Website acquisition steps"
+        />
+        <FunnelGroup
+          title="New-Account Activation"
+          detail="Verified-phone accounts created in the period; task depth is measured before the period ends."
+          steps={activationSteps}
+          timeSlice={data.timeSlice}
+          chartLabel="New-account activation funnel volume"
+          listLabel="New-account activation steps"
+        />
+      </div>
     </SectionPanel>
   );
 }
@@ -295,7 +405,7 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
       <MetricPanel
         title="# of Users"
         value={formatNumber(data.summary.userCount)}
-        detail={`${formatNumber(newUsers)} new ${subscriberNoun(newUsers)} this period.`}
+        detail={`${formatNumber(newUsers)} new ${userNoun(newUsers)} this period.`}
         icon={<Users className="h-5 w-5" />}
         change={
           <MetricChange value={seriesMetricChange(data, 'userCount')} timeSlice={data.timeSlice} />
@@ -304,7 +414,7 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
       <MetricPanel
         title={`Avg Tasks / User / ${period.title}`}
         value={formatNumber(data.summary.tasksIssuedPerUser)}
-        detail={`${formatNumber(data.summary.taskCount)} root tasks this ${period.noun} / ${formatNumber(data.summary.userCount)} subscribed ${data.summary.userCount === 1 ? 'user' : 'users'}.`}
+        detail={`${formatNumber(data.summary.taskCount)} root tasks in the ${period.range} / ${formatNumber(data.summary.userCount)} ${userNoun(data.summary.userCount)}.`}
         icon={<TrendingUp className="h-5 w-5" />}
         change={
           <MetricChange
@@ -360,7 +470,7 @@ function EfficiencyCharts({ data }: { data: AdminHealthData }) {
               <Line
                 type="monotone"
                 dataKey="tasksIssuedPerUser"
-                name={`Avg tasks / user / ${period.noun}`}
+                name={`Avg tasks / user / ${period.range}`}
                 stroke="#7c3aed"
                 strokeWidth={2}
                 dot={{ r: 3 }}
@@ -443,7 +553,10 @@ function RetentionChart({ data }: { data: AdminHealthData }) {
   );
 
   return (
-    <SectionPanel title="Weekly Cohort Retention Curves" eyebrow="Task-trigger retention">
+    <SectionPanel
+      title="Verified-User Weekly Retention"
+      eyebrow="First-root-task cohorts · admins excluded"
+    >
       {data.retentionCohorts.length === 0 ? (
         <EmptyChart label="No cohort activity in this range." />
       ) : (

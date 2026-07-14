@@ -7,8 +7,33 @@ import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import AdminHealth from '@/pages/AdminHealth';
 import { fetchAdminHealthData } from '@/features/admin-health/api';
+import { funnelEndToEnd } from '@/features/admin-health/components/AdminHealth';
 
 const API_BASE = 'http://localhost:3001/api';
+const defaultResizeObserver = window.ResizeObserver;
+
+class ChartResizeObserver {
+  private readonly callback: ResizeObserverCallback;
+
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback;
+  }
+
+  observe(target: Element) {
+    this.callback(
+      [
+        {
+          target,
+          contentRect: { width: 1200, height: 420 } as DOMRectReadOnly,
+        } as ResizeObserverEntry,
+      ],
+      this as unknown as ResizeObserver,
+    );
+  }
+
+  unobserve() {}
+  disconnect() {}
+}
 
 function mockSession() {
   localStorage.setItem(
@@ -160,6 +185,7 @@ function installAdminHealthHandler() {
 describe('AdminHealth page', () => {
   beforeEach(() => {
     sessionStorage.clear();
+    window.ResizeObserver = ChartResizeObserver as unknown as typeof ResizeObserver;
     mockSession();
     installAdminHealthHandler();
   });
@@ -167,6 +193,7 @@ describe('AdminHealth page', () => {
   afterEach(() => {
     localStorage.clear();
     sessionStorage.clear();
+    window.ResizeObserver = defaultResizeObserver;
   });
 
   it('renders company health metrics and charts from the admin endpoint', async () => {
@@ -187,28 +214,46 @@ describe('AdminHealth page', () => {
     expect(screen.getByText('Email and phone entries added this month.')).toBeInTheDocument();
     expect(screen.getByText('# of Users')).toBeInTheDocument();
     expect(screen.getAllByText('42').length).toBeGreaterThan(0);
-    expect(screen.getByText('2 new subscribers this period.')).toBeInTheDocument();
-    expect(screen.getAllByText('Avg Tasks / User / Month').length).toBeGreaterThan(0);
+    expect(screen.getByText('2 new users this period.')).toBeInTheDocument();
+    expect(screen.getAllByText('Avg Tasks / User / 30 Days').length).toBeGreaterThan(0);
     expect(screen.getAllByText('3.05').length).toBeGreaterThan(0);
     expect(
-      screen.getByText('128 root tasks this month / 42 subscribed users.'),
+      screen.getByText('128 root tasks in the last 30 complete UTC days / 42 users.'),
     ).toBeInTheDocument();
     expect(screen.queryByText('Tasks and Users')).not.toBeInTheDocument();
     expect(screen.getByText('Output Tokens / Task')).toBeInTheDocument();
     expect(screen.getAllByText('1,840').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Task Completion Rate').length).toBeGreaterThan(0);
     expect(screen.getAllByText('82%').length).toBeGreaterThan(0);
-    expect(screen.getByText('Activation Funnel')).toBeInTheDocument();
-    expect(screen.getByText('Landing page viewed')).toBeInTheDocument();
-    expect(screen.getByText('Query box clicked')).toBeInTheDocument();
-    expect(screen.getByText('Content typed')).toBeInTheDocument();
-    expect(screen.getByText('Goal submitted')).toBeInTheDocument();
-    expect(screen.getByText('Phone entered / OTP requested')).toBeInTheDocument();
-    expect(screen.getByText('OTP code submitted')).toBeInTheDocument();
-    expect(screen.getByText('First task created')).toBeInTheDocument();
-    expect(screen.getByText('Second task created')).toBeInTheDocument();
-    expect(screen.getByText('Third task created')).toBeInTheDocument();
-    expect(screen.getByText('Weekly Cohort Retention Curves')).toBeInTheDocument();
+    expect(screen.getByText('Conversion Funnels')).toBeInTheDocument();
+    expect(screen.getByText('Website Acquisition')).toBeInTheDocument();
+    expect(screen.getByText('New-Account Activation')).toBeInTheDocument();
+    const acquisitionChart = screen.getByRole('img', {
+      name: 'Website acquisition funnel volume',
+    });
+    const activationChart = screen.getByRole('img', {
+      name: 'New-account activation funnel volume',
+    });
+    await waitFor(
+      () => {
+        expect(acquisitionChart.querySelectorAll('.recharts-bar-rectangle')).toHaveLength(6);
+        expect(activationChart.querySelectorAll('.recharts-bar-rectangle')).toHaveLength(4);
+      },
+      { timeout: 3_000 },
+    );
+    const acquisitionSteps = screen.getByRole('list', { name: 'Website acquisition steps' });
+    const activationSteps = screen.getByRole('list', { name: 'New-account activation steps' });
+    expect(within(acquisitionSteps).getByText('Landing page viewed')).toBeInTheDocument();
+    expect(within(acquisitionSteps).getByText('Query box clicked')).toBeInTheDocument();
+    expect(within(acquisitionSteps).getByText('Content typed')).toBeInTheDocument();
+    expect(within(acquisitionSteps).getByText('Goal submitted')).toBeInTheDocument();
+    expect(within(acquisitionSteps).getByText('Phone entered / OTP requested')).toBeInTheDocument();
+    expect(within(acquisitionSteps).getByText('OTP code submitted')).toBeInTheDocument();
+    expect(within(activationSteps).getByText('Account created')).toBeInTheDocument();
+    expect(within(activationSteps).getByText('First task created')).toBeInTheDocument();
+    expect(within(activationSteps).getByText('Second task created')).toBeInTheDocument();
+    expect(within(activationSteps).getByText('Third task created')).toBeInTheDocument();
+    expect(screen.getByText('Verified-User Weekly Retention')).toBeInTheDocument();
     expect(screen.getByText('Linear Points Completed')).toBeInTheDocument();
     expect(screen.getByText('GitHub Commits Landed')).toBeInTheDocument();
     expect(screen.getByText('Andy Linear points completed')).toBeInTheDocument();
@@ -216,12 +261,12 @@ describe('AdminHealth page', () => {
     expect(screen.getByText('GitHub commits landed')).toBeInTheDocument();
     expect(screen.getByRole('img', { name: 'Linear points over time' })).toBeInTheDocument();
     expect(screen.getByRole('img', { name: 'GitHub commits over time' })).toBeInTheDocument();
-    expect(screen.getByText('End-to-end conversion')).toBeInTheDocument();
-    const funnelSteps = screen.getByRole('list', { name: 'Activation funnel steps' });
-    expect(within(funnelSteps).getAllByRole('listitem')).toHaveLength(10);
+    expect(screen.getAllByText('End-to-end conversion')).toHaveLength(2);
+    expect(within(acquisitionSteps).getAllByRole('listitem')).toHaveLength(6);
+    expect(within(activationSteps).getAllByRole('listitem')).toHaveLength(4);
     expect(screen.getAllByText('Volume')).toHaveLength(10);
     expect(screen.getAllByText('Conversion')).toHaveLength(10);
-    expect(screen.getAllByLabelText(/vs prior month/).length).toBeGreaterThan(10);
+    expect(screen.getAllByLabelText(/vs prior 30 days/).length).toBeGreaterThan(10);
   });
 
   it('requests the selected time slice with auth', async () => {
@@ -257,7 +302,23 @@ describe('AdminHealth page', () => {
     });
   });
 
-  it('reuses a fresh session cache without persisting admin metrics locally', async () => {
+  it('rejects anomalous end-to-end funnel growth in current and prior periods', () => {
+    const currentAnomaly = makeFunnelSteps().slice(0, 6);
+    currentAnomaly[5].count = currentAnomaly[0].count + 1;
+    expect(funnelEndToEnd(currentAnomaly)).toEqual({
+      conversionRate: null,
+      conversionRateChange: null,
+    });
+
+    const priorAnomaly = makeFunnelSteps().slice(0, 6);
+    priorAnomaly[5].previousCount = priorAnomaly[0].previousCount + 1;
+    expect(funnelEndToEnd(priorAnomaly)).toEqual({
+      conversionRate: 0.2,
+      conversionRateChange: null,
+    });
+  });
+
+  it('delegates reusable caching to the backend without persisting admin metrics locally', async () => {
     clearCaptures();
     await fetchAdminHealthData('weekly');
     await fetchAdminHealthData('weekly');
@@ -266,9 +327,9 @@ describe('AdminHealth page', () => {
       (request) =>
         request.method === 'GET' && request.url.includes('/admin-health?timeSlice=weekly'),
     );
-    expect(requests).toHaveLength(1);
+    expect(requests).toHaveLength(2);
     expect(Object.keys(localStorage).some((key) => key.startsWith('admin-health:'))).toBe(false);
-    expect(Object.keys(sessionStorage).some((key) => key.startsWith('admin-health:'))).toBe(true);
+    expect(Object.keys(sessionStorage).some((key) => key.startsWith('admin-health:'))).toBe(false);
   });
 
   it('does not share cached admin metrics across authenticated users', async () => {
@@ -298,6 +359,31 @@ describe('AdminHealth page', () => {
     } finally {
       setItem.mockRestore();
     }
+  });
+
+  it('rejects unauthenticated requests before calling the backend', async () => {
+    localStorage.removeItem('rose-session');
+    clearCaptures();
+
+    await expect(fetchAdminHealthData('weekly')).rejects.toThrow('Not authenticated');
+    expect(
+      capturedRequests.some(
+        (request) =>
+          request.method === 'GET' && request.url.includes('/admin-health?timeSlice=weekly'),
+      ),
+    ).toBe(false);
+  });
+
+  it('surfaces backend failures instead of rendering stale health data', async () => {
+    server.use(
+      http.get(`${API_BASE}/admin-health`, () =>
+        HttpResponse.json({ error: 'metrics unavailable' }, { status: 503 }),
+      ),
+    );
+
+    await expect(fetchAdminHealthData('weekly')).rejects.toThrow(
+      'Failed to load admin health (503)',
+    );
   });
 
   it('keeps the request timeout active while parsing the response body', async () => {
