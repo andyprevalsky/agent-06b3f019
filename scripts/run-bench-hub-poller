@@ -18,13 +18,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$ROOT_DIR"
-# shellcheck source=lib/cloudbench-env.sh
-source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 
 HUB_URL="${HUB_URL:-http://localhost:3001}"
 RUN_BENCH_BIN="${RUN_BENCH_BIN:-scripts/run-bench}"   # test hook: stub the runner
 POLL_INTERVAL="${POLL_INTERVAL:-10}"
-HUB_CAPACITY_RETRY_SECONDS="${HUB_CAPACITY_RETRY_SECONDS:-$POLL_INTERVAL}"
 LOCAL_RUNNER=0
 ONCE=0
 for arg in "$@"; do
@@ -34,10 +31,6 @@ for arg in "$@"; do
         *) echo "unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
-case "$HUB_CAPACITY_RETRY_SECONDS" in
-    ''|*[!0-9]*|0) echo "❌ HUB_CAPACITY_RETRY_SECONDS must be a positive integer" >&2; exit 2 ;;
-esac
-
 if [ -z "${BACKEND_API_KEY:-}" ]; then
     BACKEND_API_KEY="$(grep -E '^BACKEND_API_KEY=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')"
 fi
@@ -248,22 +241,8 @@ process_request() {  # process_request <request_json>
     fi
 
     echo "   launching: $RUN_BENCH_BIN ${runner_args[*]} (log: $log_file)"
-    local exit_code=0 capacity_attempt=0
-    : > "$log_file"
-    while :; do
-        exit_code=0
-        "$RUN_BENCH_BIN" "${runner_args[@]}" >> "$log_file" 2>&1 || exit_code=$?
-        [ "$exit_code" -ne "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] && break
-
-        capacity_attempt=$((capacity_attempt + 1))
-        echo "   ⏳ cloud benchmark capacity busy; request stays active (attempt $capacity_attempt, retry in ${HUB_CAPACITY_RETRY_SECONDS}s)"
-        if ! hub PATCH "/api/benchmarks/run-requests/$req_id" \
-            "{\"action\":\"progress\",\"progress\":{\"stage\":\"waiting_for_cloud_benchmark_capacity\",\"reason\":\"lease_busy\",\"attempt\":$capacity_attempt,\"retry_in_seconds\":$HUB_CAPACITY_RETRY_SECONDS}}" \
-            >/dev/null; then
-            echo "   ⚠ could not upload capacity-wait progress; retrying runner without ending the request" >&2
-        fi
-        sleep "$HUB_CAPACITY_RETRY_SECONDS"
-    done
+    local exit_code=0
+    "$RUN_BENCH_BIN" "${runner_args[@]}" > "$log_file" 2>&1 || exit_code=$?
     kill_snapshot_loop
 
     # Final bundle: newest run record produced after launch (local or fleet).

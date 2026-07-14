@@ -113,26 +113,13 @@ async function within<T>(
 
 // ── stub runner: real artifact layout, seconds not minutes ──────────────────
 
-function writeStubRunner(dir: string, mode: 'pass' | 'fail' | 'capacity-busy-then-pass'): string {
+function writeStubRunner(dir: string, mode: 'pass' | 'fail'): string {
   const stub = path.join(dir, 'stub-run-bench');
   const script = `#!/usr/bin/env bash
 # Stub runner for the pipeline blackbox — emits the REAL artifact layout the
 # poller discovers (report-card.json under agents/.context/benchmarks/<id>/ and
 # a final run record under agents/benchmarks/runs/), then exits.
 set -euo pipefail
-${
-  mode === 'capacity-busy-then-pass'
-    ? `ATTEMPT_FILE="\${HUB_PIPELINE_BUSY_ATTEMPT_FILE:?}"
-ATTEMPT="$(cat "$ATTEMPT_FILE" 2>/dev/null || echo 0)"
-ATTEMPT=$((ATTEMPT + 1))
-printf '%s\\n' "$ATTEMPT" > "$ATTEMPT_FILE"
-if [ "$ATTEMPT" -eq 1 ]; then
-  echo "CLOUDBENCH_RETRYABLE_CAPACITY=lease_busy" >&2
-  echo "Cloud benchmark app is leased by another controller (HTTP 409); waiting is safe." >&2
-  exit 75
-fi`
-    : ''
-}
 shift || true  # --local
 TASK="\${1:-chat-mode}"
 STAMP="stub-$(date +%s)-$$"
@@ -177,8 +164,7 @@ function startPoller(
   stubPath: string,
   log: string,
   hubUrl: string = BASE_URL,
-  continuous = false,
-  extraEnv: NodeJS.ProcessEnv = {}
+  continuous = false
 ): ChildProcess {
   // Spawn Bash directly instead of relying on the script's env/bash shebang.
   // Signalling a shebang wrapper can leave its real poller child orphaned.
@@ -194,7 +180,6 @@ function startPoller(
       // Catalog export is production behavior, not part of this pipeline
       // contract. Keep the black-box hermetic so it cannot rewrite source.
       HUB_SKIP_CATALOG_EXPORT: '1',
-      ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -375,56 +360,6 @@ async function legFailureHonesty(tmp: string): Promise<void> {
   }
 }
 
-async function legCapacityBusyWaitsAndRetries(tmp: string): Promise<void> {
-  const stub = writeStubRunner(tmp, 'capacity-busy-then-pass');
-  const attemptFile = path.join(tmp, 'capacity-busy-attempts');
-  let runId: string | null = null;
-  let poller: ChildProcess | null = null;
-  try {
-    const created = await api('POST', '/api/benchmarks/run-requests', {
-      task_names: ['chat-mode'],
-      scope: SCOPE,
-    });
-    assert(created.status === 201, `dispatch failed: ${created.status}`);
-    const request = (created.data as { request: RequestRow }).request;
-    runId = request.runId;
-
-    poller = startPoller(stub, path.join(tmp, 'poller-capacity-busy.log'), BASE_URL, false, {
-      HUB_CAPACITY_RETRY_SECONDS: '1',
-      HUB_PIPELINE_BUSY_ATTEMPT_FILE: attemptFile,
-    });
-
-    await within('capacity-busy result observed', 25_000, async () => {
-      if (!fs.existsSync(attemptFile)) return null;
-      return fs.readFileSync(attemptFile, 'utf8').trim() === '1' ? true : null;
-    });
-    const waiting = await getRequest(request.id);
-    assert(
-      waiting.status === 'running' && waiting.error === null,
-      'FAIL: retryable lease contention became a terminal failed dispatch'
-    );
-
-    const completed = await within('capacity wait retries to completion', 60_000, async () => {
-      const row = await getRequest(request.id);
-      return row.status === 'completed' ? row : null;
-    });
-    assert(completed.error === null, 'capacity retry left a terminal error on the request');
-    assert(
-      fs.readFileSync(attemptFile, 'utf8').trim() === '2',
-      'capacity runner was not retried once'
-    );
-
-    const final = await getRun(request.runId!);
-    assert(
-      final !== null && !final.live && final.tasks[0].status === 'passed',
-      'capacity retry did not preserve the successful final bundle'
-    );
-  } finally {
-    await stopPoller(poller);
-    await cleanup(runId);
-  }
-}
-
 async function legLatePollerPickup(tmp: string): Promise<void> {
   const stub = writeStubRunner(tmp, 'pass');
   let runId: string | null = null;
@@ -545,10 +480,6 @@ async function main(): Promise<void> {
   const legs: Array<[string, (tmp: string) => Promise<void>]> = [
     ['happy path: dispatch → claim → live → completed (hard deadlines)', legHappyPath],
     ['failure honesty: generic exit 1 → failed + error + dashboard reflects', legFailureHonesty],
-    [
-      'capacity busy: claimed request waits, retries, then completes',
-      legCapacityBusyWaitsAndRetries,
-    ],
     ['late poller: queued is visible, then still picked up', legLatePollerPickup],
     ['hub outage at completion: poller survives, spools, flushes on recovery', legHubOutageSpool],
   ];

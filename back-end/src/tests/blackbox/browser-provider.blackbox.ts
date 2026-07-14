@@ -11,6 +11,7 @@ import {
   kernelProxyCandidates,
   resolveKernelProxyMode,
 } from '../../providers/browser/kernelProxy';
+import { retryWithBackoff } from '../../providers/retry';
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
@@ -23,6 +24,18 @@ function isRetryableKernelNavigationError(error: unknown): boolean {
     'net::ERR_PROXY_CONNECTION_FAILED',
     'net::ERR_TUNNEL_CONNECTION_FAILED',
     'Timeout 30000ms exceeded',
+  ].some((fragment) => message.includes(fragment));
+}
+
+function isRetryableKernelInitError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return [
+    'unexpected EOF',
+    'proxy connection failed',
+    'HTTP 429',
+    'HTTP 502',
+    'HTTP 503',
+    'HTTP 504',
   ].some((fragment) => message.includes(fragment));
 }
 
@@ -58,6 +71,18 @@ interface BrowserApiResponse {
   resized?: boolean;
   viewport?: { width?: number; height?: number };
   browser_session_metadata?: BrowserMetadataResponse;
+}
+
+async function initializeKernelSession(
+  post: (path: string, body?: unknown) => Promise<BrowserApiResponse>,
+  body: unknown
+): Promise<BrowserApiResponse> {
+  return retryWithBackoff(() => post('/init', body), {
+    maxRetries: 3,
+    fixedDelays: [1_000, 2_000],
+    isRetryable: isRetryableKernelInitError,
+    component: 'Kernel provider blackbox init',
+  });
 }
 
 function withProvider(value: string | undefined, test: () => void): void {
@@ -180,6 +205,14 @@ const tests: Array<[string, () => void]> = [
         !isRetryableKernelNavigationError(new Error('Kernel CDP navigation failed')),
         'semantic navigation failures must fail closed'
       );
+      assert(
+        isRetryableKernelInitError(new Error('/init 500: proxy connection failed: unexpected EOF')),
+        'expected a transient proxy init failure to be retryable'
+      );
+      assert(
+        !isRetryableKernelInitError(new Error('/init 400: unsupported provider')),
+        'semantic init failures must fail closed'
+      );
     },
   ],
 ];
@@ -235,7 +268,7 @@ async function runLiveProviderParity(): Promise<void> {
   });
 
   try {
-    const init = await post('/init', {
+    const init = await initializeKernelSession(post, {
       user_id: userId,
       agent_id: agentId,
       start_url: 'https://example.com',
