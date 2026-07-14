@@ -124,10 +124,14 @@ MINTED_AGENT_ACCOUNT_TASK_NAMES = {
 }
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
-# Tasks whose setup restores a whole-DB snapshot (drops + recreates tables).
-# The parallel scheduler runs these serially after the batch drains — a
-# mid-batch restore destroys every concurrent task's rows (poll 404 cascade).
-EXCLUSIVE_DB_RESTORE_TASK_NAMES = {GREP_EXPLORE_STRESS_TASK_NAME}
+AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
+# Tasks whose fixtures destructively mutate shared benchmark DB state. The
+# parallel scheduler runs these serially after the batch drains so they cannot
+# corrupt an in-flight sibling task. Each fixture must also restore its state.
+EXCLUSIVE_SHARED_DB_TASK_NAMES = {
+    GREP_EXPLORE_STRESS_TASK_NAME,
+    AMAZON_PASSKEY_TASK_NAME,
+}
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 USER_DATA_PROD_DOCUMENT_SOURCES = {"chatgpt", "claude", "apple_notes", "obsidian"}
 USER_DATA_PROD_CHECKLIST_KEYS = {"provider_validation_checklist", "provider_verification_checklist"}
@@ -1909,6 +1913,12 @@ async def poll_agent(
                 if time.time() - chat_assistant_seen_at >= 10:
                     return data, approvals_triggered, approvals_resolved, None
 
+        if task.success_on_browser_auth_evidence:
+            auth_evidence_passed, _ = evaluate_task(task, data, approvals_triggered)
+            if auth_evidence_passed:
+                print("    ✅ Ordered browser authentication evidence observed")
+                return data, approvals_triggered, approvals_resolved, None
+
         # Agent mode: done on terminal status
         if status in TERMINAL_STATUSES:
             return data, approvals_triggered, approvals_resolved, None
@@ -2310,6 +2320,245 @@ def evaluate_task(
     status = agent.get("status", "UNKNOWN")
     messages = data.get("messages", [])
     progress = agent.get("progress", 0)
+
+    observed_providers: set[str] = set()
+    credential_ref_kinds: set[str] = set()
+    provider_scopes: dict[str, set[str]] = {}
+    credential_scopes: dict[str, set[str]] = {}
+    browser_session_metadata_by_scope: dict[str, list[tuple[int, dict]]] = {}
+    credential_indexes_by_scope_kind: dict[tuple[str, str], list[int]] = {}
+    message_evidence_by_scope: dict[str, list[tuple[int, str]]] = {}
+    structured_responses: list[tuple[str, dict]] = []
+    tool_call_scopes: dict[str, set[str]] = {}
+    for message in messages:
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        auxiliary = metadata.get("auxiliary")
+        scope_value = metadata.get("subAgentId") or metadata.get("task_id")
+        if not scope_value and isinstance(auxiliary, dict):
+            scope_value = auxiliary.get("subAgentId") or auxiliary.get("task_id")
+        if not scope_value:
+            continue
+        for candidate in (metadata, auxiliary):
+            if not isinstance(candidate, dict):
+                continue
+            tool_call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
+            if tool_call_id:
+                tool_call_scopes.setdefault(str(tool_call_id), set()).add(str(scope_value))
+
+    for message_index, message in enumerate(messages):
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        auxiliary = metadata.get("auxiliary")
+        scope_value = metadata.get("subAgentId") or metadata.get("task_id")
+        if not scope_value and isinstance(auxiliary, dict):
+            scope_value = auxiliary.get("subAgentId") or auxiliary.get("task_id")
+        if not scope_value:
+            tool_call_id = metadata.get("toolCallId") or metadata.get("tool_call_id")
+            linked_scopes = tool_call_scopes.get(str(tool_call_id), set()) if tool_call_id else set()
+            if len(linked_scopes) == 1:
+                scope_value = next(iter(linked_scopes))
+        task_scope = str(scope_value) if scope_value else f"message:{message_index}"
+        candidates = [metadata]
+        if isinstance(auxiliary, dict):
+            candidates.append(auxiliary)
+        browser_session_value = next(
+            (
+                candidate.get("browser_session_id") or candidate.get("browser_url")
+                for candidate in candidates
+                if candidate.get("browser_session_id") or candidate.get("browser_url")
+            ),
+            None,
+        )
+        scope = (
+            f"{task_scope}|browser_session:{browser_session_value}"
+            if browser_session_value
+            else task_scope
+        )
+
+        # Only completed browser actions are grounded page evidence. Task
+        # prompts, verifier prose, and assistant restatements can contain the
+        # expected text without proving it was ever visible in the browser.
+        action_type = next(
+            (candidate.get("action_type") for candidate in candidates if candidate.get("action_type")),
+            None,
+        )
+        tool_status = next(
+            (candidate.get("toolStatus") for candidate in candidates if candidate.get("toolStatus")),
+            None,
+        )
+        # This auth probe's greeting markers must come from a DOM element the
+        # browser actually clicked. Input/select titles include model-supplied
+        # values and could otherwise manufacture the expected greeting text.
+        grounded_action_types = {"click"}
+        if message.get("role") == "TOOL" and tool_status == "FINISHED" and action_type in grounded_action_types:
+            evidence = "\n".join(
+                candidate["title"]
+                for candidate in candidates
+                if isinstance(candidate.get("title"), str)
+            )
+            if evidence:
+                message_evidence_by_scope.setdefault(scope, []).append((message_index, evidence))
+        for candidate in candidates:
+            session_metadata = candidate.get("browser_session_metadata")
+            if isinstance(session_metadata, dict):
+                browser_session_metadata_by_scope.setdefault(scope, []).append((message_index, session_metadata))
+                if isinstance(session_metadata.get("provider"), str):
+                    provider = session_metadata["provider"]
+                    observed_providers.add(provider)
+                    provider_scopes.setdefault(provider, set()).add(scope)
+            credential_ref = candidate.get("credential_ref") or candidate.get("credentialRef")
+            # USER OTP availability messages mean a code was fetched, not
+            # exercised. TOOL credential refs are the durable usage signal.
+            if (
+                message.get("role") == "TOOL"
+                and isinstance(credential_ref, dict)
+                and isinstance(credential_ref.get("kind"), str)
+            ):
+                kind = credential_ref["kind"]
+                credential_ref_kinds.add(kind)
+                credential_scopes.setdefault(kind, set()).add(scope)
+                credential_indexes_by_scope_kind.setdefault((scope, kind), []).append(message_index)
+            structured_response = candidate.get("structured_response") or candidate.get("structuredResponse")
+            if isinstance(structured_response, dict):
+                structured_responses.append((scope, structured_response))
+
+    if task.expected_credential_ref_kind:
+        expected_kind = task.expected_credential_ref_kind
+        if expected_kind not in credential_ref_kinds:
+            return False, f"Expected credential_ref kind {expected_kind} but none was observed"
+
+    forbidden_kinds = set(task.forbidden_credential_ref_kinds)
+    observed_forbidden_kinds = forbidden_kinds & credential_ref_kinds
+    if observed_forbidden_kinds:
+        observed = ", ".join(sorted(observed_forbidden_kinds))
+        return False, f"Observed forbidden credential_ref kind(s): {observed}"
+
+    if task.expected_browser_provider:
+        expected_provider = task.expected_browser_provider
+        if expected_provider not in observed_providers:
+            observed = ", ".join(sorted(observed_providers)) or "none"
+            return False, f"Expected browser provider {expected_provider} but observed: {observed}"
+        if task.expected_credential_ref_kind:
+            provider_task_scopes = provider_scopes.get(expected_provider, set())
+            credential_task_scopes = credential_scopes.get(task.expected_credential_ref_kind, set())
+            if not provider_task_scopes.intersection(credential_task_scopes):
+                return (
+                    False,
+                    f"Expected browser provider {expected_provider} and credential_ref kind "
+                    f"{task.expected_credential_ref_kind} on the same browser session",
+                )
+
+    matching_session_metadata_scopes: set[str] = set()
+    matching_session_metadata_indexes: dict[str, list[int]] = {}
+    if task.expected_browser_session_metadata_values:
+        expected_metadata = task.expected_browser_session_metadata_values
+        for scope, metadata_items in browser_session_metadata_by_scope.items():
+            first_credential_index = min(
+                credential_indexes_by_scope_kind.get(
+                    (scope, task.expected_credential_ref_kind or ""),
+                    [len(messages)],
+                )
+            )
+            matching_indexes = [
+                message_index
+                for message_index, metadata_item in metadata_items
+                if message_index < first_credential_index
+                and all(metadata_item.get(key) == value for key, value in expected_metadata.items())
+            ]
+            if matching_indexes:
+                matching_session_metadata_scopes.add(scope)
+                matching_session_metadata_indexes[scope] = matching_indexes
+        if not matching_session_metadata_scopes:
+            return False, "Expected isolated browser session metadata was not observed"
+
+    matching_pre_credential_scopes: set[str] = set()
+    if task.expected_pre_credential_message_contains:
+        expected_kind = task.expected_credential_ref_kind
+        if not expected_kind:
+            return False, "Pre-credential evidence requires expected_credential_ref_kind"
+        for scope in credential_scopes.get(expected_kind, set()):
+            first_credential_index = min(credential_indexes_by_scope_kind.get((scope, expected_kind), [len(messages)]))
+            session_metadata_index = min(matching_session_metadata_indexes.get(scope, [-1]))
+            prior_evidence = "\n".join(
+                evidence
+                for message_index, evidence in message_evidence_by_scope.get(scope, [])
+                if session_metadata_index < message_index < first_credential_index
+            ).lower()
+            if all(needle.lower() in prior_evidence for needle in task.expected_pre_credential_message_contains):
+                matching_pre_credential_scopes.add(scope)
+        if not matching_pre_credential_scopes:
+            return False, "Expected signed-out evidence before passkey use was not observed"
+
+    matching_post_credential_scopes: set[str] = set()
+    if task.expected_post_credential_message_contains:
+        expected_kind = task.expected_credential_ref_kind
+        if not expected_kind:
+            return False, "Post-credential evidence requires expected_credential_ref_kind"
+        for scope in credential_scopes.get(expected_kind, set()):
+            first_credential_index = min(credential_indexes_by_scope_kind.get((scope, expected_kind), [len(messages)]))
+            later_evidence = "\n".join(
+                evidence
+                for message_index, evidence in message_evidence_by_scope.get(scope, [])
+                if message_index > first_credential_index
+            ).lower()
+            if all(needle.lower() in later_evidence for needle in task.expected_post_credential_message_contains):
+                matching_post_credential_scopes.add(scope)
+        if not matching_post_credential_scopes:
+            return False, "Expected authenticated page evidence after passkey use was not observed"
+
+    has_structured_response_requirements = bool(
+        task.expected_structured_response_values
+        or task.expected_structured_response_contains
+        or task.required_structured_response_fields
+    )
+    matching_structured_scopes: set[str] = set()
+    if has_structured_response_requirements:
+        expected_values = task.expected_structured_response_values or {}
+        expected_contains = task.expected_structured_response_contains or {}
+
+        def _structured_response_matches(response: dict) -> bool:
+            if not all(response.get(key) == expected for key, expected in expected_values.items()):
+                return False
+            for key, raw_needles in expected_contains.items():
+                value = response.get(key)
+                needles = [raw_needles] if isinstance(raw_needles, str) else raw_needles
+                if not isinstance(value, str) or not isinstance(needles, list):
+                    return False
+                if not all(isinstance(needle, str) and needle.lower() in value.lower() for needle in needles):
+                    return False
+            return all(response.get(key) not in (None, "", [], {}) for key in task.required_structured_response_fields)
+
+        matching_structured_scopes = {
+            scope for scope, response in structured_responses if _structured_response_matches(response)
+        }
+        if not matching_structured_scopes:
+            return False, "Expected authenticated structured browser response evidence was not observed"
+
+    if task.expected_browser_provider and task.expected_credential_ref_kind:
+        provider_task_scopes = provider_scopes.get(task.expected_browser_provider, set())
+        credential_task_scopes = credential_scopes.get(task.expected_credential_ref_kind, set())
+        correlated_scopes = provider_task_scopes.intersection(credential_task_scopes)
+        if task.expected_browser_session_metadata_values:
+            correlated_scopes.intersection_update(matching_session_metadata_scopes)
+        if task.expected_pre_credential_message_contains:
+            correlated_scopes.intersection_update(matching_pre_credential_scopes)
+        if task.expected_post_credential_message_contains:
+            correlated_scopes.intersection_update(matching_post_credential_scopes)
+        if has_structured_response_requirements:
+            correlated_scopes.intersection_update(matching_structured_scopes)
+        if not correlated_scopes:
+            if has_structured_response_requirements:
+                return (
+                    False,
+                    "Expected provider, credential, and authenticated response evidence on the same browser session",
+                )
+            return False, "Expected provider, credential, and authenticated page evidence on the same browser session"
+
+    if task.success_on_browser_auth_evidence:
+        return True, None
 
     # Chat mode: just needs ASSISTANT response
     if task.is_chat_mode:
@@ -2852,7 +3101,7 @@ def _sync_compute_tokens() -> None:
         print("    🔑 Refreshed compute tokens from prod")
 
 
-def _sync_browser_credentials() -> None:
+def _sync_browser_credentials() -> bool:
     """Refresh live browser auth state (cookies + browser context/storage +
     passwords/passkeys) from prod into the isolated benchmark DB. Same pattern as
     _sync_compute_tokens: a one-time setup-db sync goes stale as cookies expire,
@@ -2861,7 +3110,7 @@ def _sync_browser_credentials() -> None:
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Credential sync skipped: local Victoria DB not found")
-        return
+        return False
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
@@ -2876,11 +3125,42 @@ def _sync_browser_credentials() -> None:
         )
     except Exception as exc:
         print(f"    ⚠ Credential sync error: {exc}")
-        return
+        return False
     if result.returncode != 0:
         print(f"    ⚠ Credential sync failed: {(result.stderr or result.stdout).strip()[:200]}")
-    else:
-        print("    🍪 Refreshed browser cookies + passwords from prod")
+        return False
+    print("    🍪 Refreshed browser cookies + passwords from prod")
+    return True
+
+
+def _sync_passkeys() -> None:
+    """Refresh only passkeys from prod into the isolated benchmark DB.
+
+    Unlike the broad base fixture, this deliberately excludes cookies, origin
+    storage, browser profiles, and passwords. Failure is fatal because an old
+    or missing passkey would invalidate the benchmark rather than merely make
+    it less convenient.
+    """
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for passkey-only sync")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    try:
+        result = subprocess.run(
+            ["npx", "tsx", "scripts/seed-local.ts", "--passkeys-only"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Passkey-only sync failed: {exc}") from exc
+    if result.returncode != 0:
+        raise RuntimeError(f"Passkey-only sync failed: {(result.stderr or result.stdout).strip()[:500]}")
+    print("    🔐 Refreshed passkeys only from prod")
 
 
 @dataclass
@@ -2916,6 +3196,12 @@ def _apply_base_live_fixture(ctx: LiveFixtureContext) -> dict:
     return {"fixture": "base", "browser_credentials": True}
 
 
+def _apply_compute_tokens(ctx: LiveFixtureContext) -> dict:
+    """Refresh compute tokens without importing any browser authentication state."""
+    _sync_compute_tokens()
+    return {"fixture": "compute_tokens"}
+
+
 def _apply_amazon_auth(ctx: LiveFixtureContext) -> dict:
     """Build active CookieBundle rows for the amazon auth realm from synced
     prod cookies so the browser agent starts logged in."""
@@ -2932,11 +3218,146 @@ def _apply_amazon_auth(ctx: LiveFixtureContext) -> dict:
     return {"fixture": "amazon_auth", "bundle_count": bundle_count}
 
 
+def _apply_compute_tokens(_ctx: LiveFixtureContext) -> dict:
+    _sync_compute_tokens()
+    return {"fixture": "compute_tokens"}
+
+
+def _apply_amazon_passkey(ctx: LiveFixtureContext) -> dict:
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Amazon passkey fixture requires a local Victoria database")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    result = subprocess.run(
+        ["npx", "tsx", "scripts/seed-local.ts", "--passkeys-only"],
+        cwd=REPO_ROOT / "back-end",
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Amazon passkey sync failed: {(result.stderr or result.stdout).strip()[:300]}"
+        )
+
+    user = _sql_literal(ctx.user_id)
+    realm = _sql_literal(ctx.auth_realm)
+    snapshot_sql = (
+        "SELECT json_build_object("
+        "'steel_ids', COALESCE((SELECT json_agg(id) FROM \"SteelSessionAuth\" "
+        f"WHERE \"userId\" = {user} AND \"authRealm\" = {realm} AND \"disabledAt\" IS NULL), '[]'::json), "
+        "'bundle_ids', COALESCE((SELECT json_agg(id) FROM \"CookieBundle\" "
+        f"WHERE \"userId\" = {user} AND \"authRealm\" = {realm} AND \"disabledAt\" IS NULL), '[]'::json), "
+        "'password_ids', COALESCE((SELECT json_agg(id) FROM \"BrowserPassword\" "
+        f"WHERE \"userId\" = {user} AND \"disabledAt\" IS NULL), '[]'::json), "
+        "'profiles', COALESCE((SELECT json_agg(row_to_json(profile)) "
+        'FROM "BrowserProviderProfile" profile JOIN "BrowserContext" context '
+        'ON context.id = profile."contextId" '
+        f"WHERE context.\"userId\" = {user} AND profile.provider = 'kernel'), '[]'::json)"
+        ")::text;"
+    )
+    snapshot = json.loads(_run_local_victoria_sql(snapshot_sql))
+    passkey_sql = (
+        'SELECT COUNT(*) FROM "PasskeyCredential" '
+        f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL;'
+    )
+    passkey_count = int(_run_local_victoria_sql(passkey_sql).splitlines()[-1].strip() or "0")
+    if passkey_count <= 0:
+        raise RuntimeError(f"No enabled passkey found for {ctx.auth_realm}")
+
+    disabled_reason = _sql_literal("disabled by passkey-only benchmark fixture")
+    cleanup_sql = (
+        'WITH steel AS (UPDATE "SteelSessionAuth" SET "disabledAt" = NOW(), '
+        f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
+        f'AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id), '
+        'bundles AS (UPDATE "CookieBundle" SET "disabledAt" = NOW(), '
+        f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
+        f'AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id), '
+        'passwords AS (UPDATE "BrowserPassword" SET "disabledAt" = NOW(), '
+        f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
+        'AND "disabledAt" IS NULL RETURNING id), '
+        f'cookies AS (DELETE FROM "Cookie" WHERE "userId" = {user} RETURNING id), '
+        f'local_storage AS (DELETE FROM "LocalStorageOrigin" WHERE "userId" = {user} RETURNING id), '
+        f'indexed_db AS (DELETE FROM "IndexedDBOrigin" WHERE "userId" = {user} RETURNING id), '
+        f'cache_storage AS (DELETE FROM "CacheStorageOrigin" WHERE "userId" = {user} RETURNING id), '
+        f'permissions AS (DELETE FROM "BrowserPermission" WHERE "userId" = {user} RETURNING id), '
+        'profiles AS (DELETE FROM "BrowserProviderProfile" profile USING "BrowserContext" context '
+        f'WHERE profile."contextId" = context.id AND context."userId" = {user} '
+        "AND profile.provider = 'kernel' RETURNING profile.id) "
+        "SELECT (SELECT COUNT(*) FROM cookies) + (SELECT COUNT(*) FROM local_storage) + "
+        "(SELECT COUNT(*) FROM indexed_db) + (SELECT COUNT(*) FROM cache_storage) + "
+        "(SELECT COUNT(*) FROM permissions) + (SELECT COUNT(*) FROM profiles);"
+    )
+    cleared = int(_run_local_victoria_sql(cleanup_sql).splitlines()[-1].strip() or "0")
+    print(f"    🔐 Prepared {passkey_count} Amazon passkey(s); cleared {cleared} saved-state row(s)")
+    return {
+        "fixture": "amazon_passkey",
+        "passkey_count": passkey_count,
+        "cleared": cleared,
+        "user_id": ctx.user_id,
+        "auth_realm": ctx.auth_realm,
+        "restore_snapshot": snapshot,
+    }
+
+
+def _restore_amazon_passkey_fixture(manifest: dict) -> None:
+    """Restore shared browser auth after the destructive passkey-only run."""
+    snapshot = manifest.get("restore_snapshot")
+    if not isinstance(snapshot, dict):
+        raise RuntimeError("Amazon passkey fixture did not capture a restore snapshot")
+    if not _sync_browser_credentials():
+        raise RuntimeError("Amazon passkey fixture could not restore live browser credentials")
+
+    user = _sql_literal(str(manifest["user_id"]))
+
+    def ids_sql(key: str) -> str:
+        values = snapshot.get(key)
+        if not isinstance(values, list):
+            raise RuntimeError(f"Amazon passkey restore snapshot has invalid {key}")
+        return ", ".join(_sql_literal(str(value)) for value in values)
+
+    statements: list[str] = []
+    for table, key in (
+        ("SteelSessionAuth", "steel_ids"),
+        ("CookieBundle", "bundle_ids"),
+        ("BrowserPassword", "password_ids"),
+    ):
+        identifiers = ids_sql(key)
+        if identifiers:
+            statements.append(
+                f'UPDATE "{table}" SET "disabledAt" = NULL, "disabledReason" = NULL '
+                f"WHERE id IN ({identifiers})"
+            )
+
+    statements.append(
+        'DELETE FROM "BrowserProviderProfile" profile USING "BrowserContext" context '
+        'WHERE profile."contextId" = context.id '
+        f'AND context."userId" = {user} AND profile.provider = \'kernel\''
+    )
+    profiles = snapshot.get("profiles")
+    if not isinstance(profiles, list):
+        raise RuntimeError("Amazon passkey restore snapshot has invalid profiles")
+    if profiles:
+        profiles_json = _sql_literal(json.dumps(profiles, separators=(",", ":")))
+        statements.append(
+            'INSERT INTO "BrowserProviderProfile" '
+            'SELECT * FROM json_populate_recordset(NULL::"BrowserProviderProfile", '
+            f"{profiles_json}::json)"
+        )
+    _run_local_victoria_sql("; ".join(statements) + ";")
+    print("    🧹 Restored shared browser auth after Amazon passkey fixture")
+
+
 # Runtime bindings for the metadata registry in live_fixtures.py. Kept in sync by
 # the assertion below so a fixture can never be declared without an applier.
 LIVE_FIXTURE_APPLIERS = {
     "base": _apply_base_live_fixture,
+    "compute_tokens": _apply_compute_tokens,
     "amazon_auth": _apply_amazon_auth,
+    "amazon_passkey": _apply_amazon_passkey,
 }
 assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
     f"live-fixture appliers {sorted(LIVE_FIXTURE_APPLIERS)} must match "
@@ -4653,14 +5074,6 @@ async def run_single_task(
             f"across {provider_count} providers"
         )
 
-    # Live fixtures (compute tokens, browser cookies/passwords, amazon auth) must
-    # always be current from prod at runtime — a frozen DB fixture or whole-DB
-    # snapshot restore above can leave stale/expired tokens/cookies, which would
-    # force claudeAuth into the paid waterfall or log the browser out. Applied
-    # right before the agent starts, after any frozen fixture has touched the DB.
-    # Every live task inherits the `base` fixture; extras compose on top.
-    _apply_live_fixtures(task, base_url)
-
     phone_callee: Optional[PhoneCalleeSession] = None
     if task.phone_persona:
         phone_callee = PhoneCalleeSession(task.name, task.phone_persona)
@@ -4689,6 +5102,7 @@ async def run_single_task(
     world_model_fidelity: Optional[dict] = None
     realtime_monitor: Optional[SupabaseRealtimeSmokeMonitor] = None
     realtime_tree_task: Optional[asyncio.Task] = None
+    live_fixture_manifests: list[dict] = []
 
     temp_csv_paths: list = []  # track temp files for cleanup
 
@@ -4735,6 +5149,11 @@ async def run_single_task(
         print(f"    🔌 Realtime monitor subscribed to agent:{agent_id[:12]}")
 
     try:
+        # Apply live fixtures inside the cleanup boundary. The passkey-only
+        # fixture intentionally removes shared browser state and must restore it
+        # even when agent creation or evaluation fails.
+        live_fixture_manifests = _apply_live_fixtures(task, base_url)
+
         # Handle attachments: create agent first, upload files, then post file messages
         if all_attachments:
             agent_id = await create_agent(base_url, task)
@@ -5244,6 +5663,16 @@ async def run_single_task(
                 _run_plaid_transactions_fixture("cleanup")
             except Exception as exc:
                 print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
+        passkey_manifest = next(
+            (
+                manifest
+                for manifest in live_fixture_manifests
+                if manifest.get("fixture") == "amazon_passkey"
+            ),
+            None,
+        )
+        if passkey_manifest is not None:
+            _restore_amazon_passkey_fixture(passkey_manifest)
         if previous_benchmark_user_id is None:
             os.environ.pop("BENCHMARK_RUN_USER_ID", None)
         else:
@@ -6185,16 +6614,16 @@ async def main_async(args):
             if max_concurrency is not None and max_concurrency < 1:
                 raise ValueError("--max-concurrency must be >= 1")
 
-            # Tasks whose setup replays a whole-DB snapshot (psql < dump with
-            # --clean --if-exists) drop and recreate tables, destroying every
-            # concurrent task's Agent rows mid-flight (poll 404 cascade). They
-            # must never share the DB with in-flight tasks — run them serially
-            # after the parallel batch drains.
-            exclusive_db_tasks = [t for t in tasks if t.name in EXCLUSIVE_DB_RESTORE_TASK_NAMES]
-            parallel_batch = [t for t in tasks if t.name not in EXCLUSIVE_DB_RESTORE_TASK_NAMES]
+            # Destructive shared-DB fixtures must never overlap in-flight tasks.
+            # Run them serially after the normal parallel batch drains.
+            exclusive_db_tasks = [t for t in tasks if t.name in EXCLUSIVE_SHARED_DB_TASK_NAMES]
+            parallel_batch = [t for t in tasks if t.name not in EXCLUSIVE_SHARED_DB_TASK_NAMES]
             if exclusive_db_tasks:
                 names = ", ".join(t.name for t in exclusive_db_tasks)
-                print(f"\n  Deferring {len(exclusive_db_tasks)} DB-restore task(s) to a serial phase: {names}")
+                print(
+                    f"\n  Deferring {len(exclusive_db_tasks)} destructive DB fixture task(s) "
+                    f"to a serial phase: {names}"
+                )
 
             if max_concurrency is None or max_concurrency >= len(parallel_batch):
                 print(f"\n  Running {len(parallel_batch)} tasks in parallel...")
@@ -6254,7 +6683,7 @@ async def main_async(args):
                             run.task_results.append(result)
                     _emit_report({pending_results[future].name for future in pending})
                 for task in exclusive_db_tasks:
-                    print(f"\n  Running DB-restore task serially: {task.name}")
+                    print(f"\n  Running destructive DB fixture task serially: {task.name}")
                     _report_running.clear()
                     _report_running.add(task.name)
                     result = await run_single_task(

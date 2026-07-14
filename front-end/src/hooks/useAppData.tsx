@@ -23,9 +23,10 @@
  * - refreshModels(), refreshTools() for manual refresh
  */
 
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { useState, useEffect, ReactNode } from 'react';
 import { getTools, Tool as ApiTool } from '@/lib/api';
 import { BACKEND_BASE_URL } from '@/lib/backendUrl';
+import { AppDataContext } from './appDataContext';
 
 // Re-export Tool type for convenience
 export type Tool = ApiTool;
@@ -41,19 +42,6 @@ export interface Model {
     completion?: string;
   };
 }
-
-interface AppDataContextType {
-  models: Model[];
-  modelsLoading: boolean;
-  modelsError: string | null;
-  tools: ApiTool[];
-  toolsLoading: boolean;
-  toolsError: string | null;
-  refreshModels: () => Promise<void>;
-  refreshTools: () => Promise<void>;
-}
-
-const AppDataContext = createContext<AppDataContextType | undefined>(undefined);
 
 // Normalize URL - strip trailing slash to prevent double slashes
 const BACKEND_API_URL = BACKEND_BASE_URL;
@@ -131,12 +119,4 @@ export function AppDataProvider({ children }: { children: ReactNode }) {
       {children}
     </AppDataContext.Provider>
   );
-}
-
-export function useAppData() {
-  const context = useContext(AppDataContext);
-  if (context === undefined) {
-    throw new Error('useAppData must be used within an AppDataProvider');
-  }
-  return context;
 }

@@ -79,17 +79,50 @@ function assert(cond: boolean, message: string): void {
   if (!cond) throw new Error(message);
 }
 
+/** Dispatch a run request exactly like the UI (scoped so pollers don't cross-claim). */
+async function dispatchRequest(taskNames: string[]): Promise<RequestRow> {
+  const created = await api('POST', '/api/benchmarks/run-requests', {
+    task_names: taskNames,
+    scope: SCOPE,
+  });
+  assert(created.status === 201, `dispatch failed: ${created.status}`);
+  return (created.data as { request: RequestRow }).request;
+}
+
+/** Wait until the request row reaches `status` (returns the row; throws with `stage` on timeout). */
+function awaitStatus(
+  id: string,
+  stage: string,
+  deadlineMs: number,
+  status: string
+): Promise<RequestRow> {
+  return within(stage, deadlineMs, async () => {
+    const row = await getRequest(id);
+    return row.status === status ? row : null;
+  });
+}
+
 /**
  * Wait for `check` to return a truthy value within `deadlineMs`, polling every
  * second (via the canonical retry provider). Throws with the STAGE name on
  * expiry — the anti-stuck primitive.
  */
+// Under coverage instrumentation (NODE_V8_COVERAGE is exported to this test
+// process AND inherited by the spawned run-bench-hub-poller child), both the
+// backend and the poller run ~2-3x slower, so the multi-stage poller watchdogs
+// need proportionally longer budgets. Diagnosed: the identical cases pass
+// uninstrumented against the full stack — this is instrumentation overhead, not
+// a product regression. The full-stack blackbox gate keeps the tight timeouts as
+// the real performance signal; only the coverage harness is relaxed.
+const TIMEOUT_SCALE = process.env.NODE_V8_COVERAGE ? 3 : 1;
+
 async function within<T>(
   stage: string,
   deadlineMs: number,
   check: () => Promise<T | null | false>
 ): Promise<T> {
-  const attempts = Math.max(2, Math.ceil(deadlineMs / 1000));
+  const scaledDeadlineMs = deadlineMs * TIMEOUT_SCALE;
+  const attempts = Math.max(2, Math.ceil(scaledDeadlineMs / 1000));
   try {
     return await retryWithBackoff(
       async () => {
@@ -107,24 +140,38 @@ async function within<T>(
       }
     );
   } catch {
-    throw new Error(`STUCK at stage "${stage}" — no progress within ${deadlineMs / 1000}s`);
+    throw new Error(`STUCK at stage "${stage}" — no progress within ${scaledDeadlineMs / 1000}s`);
   }
 }
 
 // ── stub runner: real artifact layout, seconds not minutes ──────────────────
 
-function writeStubRunner(dir: string, mode: 'pass' | 'fail'): string {
+function writeStubRunner(dir: string, mode: 'pass' | 'fail' | 'capacity-busy-then-pass'): string {
   const stub = path.join(dir, 'stub-run-bench');
   const script = `#!/usr/bin/env bash
 # Stub runner for the pipeline blackbox — emits the REAL artifact layout the
-# poller discovers (report-card.json under agents/.context/benchmarks/<id>/ and
-# a final run record under agents/benchmarks/runs/), then exits.
+# poller discovers (report-card.json + run.json in the request-owned context),
+# then exits.
 set -euo pipefail
+${
+  mode === 'capacity-busy-then-pass'
+    ? `ATTEMPT_FILE="\${HUB_PIPELINE_BUSY_ATTEMPT_FILE:?}"
+ATTEMPT="$(cat "$ATTEMPT_FILE" 2>/dev/null || echo 0)"
+ATTEMPT=$((ATTEMPT + 1))
+printf '%s\\n' "$ATTEMPT" > "$ATTEMPT_FILE"
+if [ "$ATTEMPT" -eq 1 ]; then
+  echo "CLOUDBENCH_RETRYABLE_CAPACITY=lease_busy" >&2
+  echo "Cloud benchmark app is leased by another controller (HTTP 409); waiting is safe." >&2
+  exit 75
+fi`
+    : ''
+}
 shift || true  # --local
 TASK="\${1:-chat-mode}"
 STAMP="stub-$(date +%s)-$$"
-CARD_DIR="agents/.context/benchmarks/$STAMP"
-mkdir -p "$CARD_DIR" agents/benchmarks/runs
+ARTIFACT_ROOT="\${BENCHMARK_CONTEXT_DIR:-agents/.context/benchmarks}"
+CARD_DIR="$ARTIFACT_ROOT"
+mkdir -p "$CARD_DIR"
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$CARD_DIR/report-card.json" <<CARD
 {"run_id":"$STAMP","timestamp":"$NOW","elapsed_s":7.5,
@@ -137,7 +184,7 @@ sleep 18  # long enough for one live snapshot (15s cadence) to observe "running"
 ${
   mode === 'fail'
     ? `echo "stub runner exploding on purpose" >&2
-exit 7`
+exit 1`
     : `cat > "$CARD_DIR/report-card.json" <<CARD
 {"run_id":"$STAMP","timestamp":"$NOW","elapsed_s":19.0,
  "cost":{"agents_llm_usd":0.02,"wmh_grounding_usd":0.0,"infra_usd":0.01,"total_usd":0.03,"fast_cache_hit_rate":97},
@@ -145,7 +192,7 @@ exit 7`
  "per_task":[{"name":"$TASK","status":"passed","duration_s":18.0,"cost_usd":0.03,
    "agent_url":"http://localhost/?agent-id=stub-agent-1","world_model_mode":"real","fast_mode":true}]}
 CARD
-cat > "agents/benchmarks/runs/$(date +%Y%m%d_%H%M%S)_$TASK.json" <<RUN
+cat > "$ARTIFACT_ROOT/run.json" <<RUN
 {"run_id":"$STAMP","timestamp":"$NOW","suite":"stub",
  "tasks":[{"name":"$TASK","passed":true,"status":"COMPLETED","agent_id":"stub-agent-1",
    "duration_seconds":18.0,"cost_cents":3,"tokens_in":1200,"tokens_out":300,
@@ -160,11 +207,42 @@ exit 0`
   return stub;
 }
 
+function writeForeignArtifactRunner(dir: string): {
+  stub: string;
+  cardDir: string;
+  runFile: string;
+} {
+  const foreignId = `foreign-${process.pid}-${Date.now()}`;
+  const cardDir = path.join(REPO_ROOT, 'agents', '.context', 'benchmarks', foreignId);
+  const runFile = path.join(REPO_ROOT, 'agents', 'benchmarks', 'runs', `${foreignId}.json`);
+  const stub = path.join(dir, 'stub-run-bench-foreign');
+  const script = `#!/usr/bin/env bash
+set -euo pipefail
+shift || true
+TASK="\${1:-chat-mode}"
+NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+mkdir -p "${cardDir}" "$(dirname "${runFile}")"
+cat > "${cardDir}/report-card.json" <<CARD
+{"run_id":"${foreignId}","timestamp":"$NOW","elapsed_s":1,
+ "per_task":[{"name":"$TASK","status":"passed"}]}
+CARD
+cat > "${runFile}" <<RUN
+{"run_id":"${foreignId}","timestamp":"$NOW","suite":"foreign",
+ "tasks":[{"name":"$TASK","passed":true,"status":"COMPLETED"}]}
+RUN
+echo "foreign artifact emitted; owned runner failed" >&2
+exit 7
+`;
+  fs.writeFileSync(stub, script, { mode: 0o755 });
+  return { stub, cardDir, runFile };
+}
+
 function startPoller(
   stubPath: string,
   log: string,
   hubUrl: string = BASE_URL,
-  continuous = false
+  continuous = false,
+  extraEnv: NodeJS.ProcessEnv = {}
 ): ChildProcess {
   // Spawn Bash directly instead of relying on the script's env/bash shebang.
   // Signalling a shebang wrapper can leave its real poller child orphaned.
@@ -180,6 +258,7 @@ function startPoller(
       // Catalog export is production behavior, not part of this pipeline
       // contract. Keep the black-box hermetic so it cannot rewrite source.
       HUB_SKIP_CATALOG_EXPORT: '1',
+      ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -254,12 +333,7 @@ async function legHappyPath(tmp: string): Promise<void> {
   let poller: ChildProcess | null = null;
   try {
     // dispatch exactly like the UI
-    const created = await api('POST', '/api/benchmarks/run-requests', {
-      task_names: ['chat-mode'],
-      scope: SCOPE,
-    });
-    assert(created.status === 201, `dispatch failed: ${created.status}`);
-    const request = (created.data as { request: RequestRow }).request;
+    const request = await dispatchRequest(['chat-mode']);
     runId = request.runId;
 
     // INVARIANT: the run dashboard exists + is linked from second zero
@@ -274,10 +348,8 @@ async function legHappyPath(tmp: string): Promise<void> {
 
     // the REAL poller claims it fast
     poller = startPoller(stub, path.join(tmp, 'poller-happy.log'));
-    await within('claimed by poller', 25_000, async () => {
-      const row = await getRequest(request.id);
-      return row.status === 'running' && row.claimedBy !== null ? row : null;
-    });
+    const claimed = await awaitStatus(request.id, 'claimed by poller', 25_000, 'running');
+    assert(claimed.claimedBy !== null, 'poller claimed the request but recorded no claimedBy');
 
     // live snapshot arrives with the dashboard essence: code + cost + running task
     await within('live snapshot with code+cost', 45_000, async () => {
@@ -291,10 +363,7 @@ async function legHappyPath(tmp: string): Promise<void> {
     });
 
     // completes: request completed, run final + passed + elapsed recorded
-    await within('request completed', 60_000, async () => {
-      const row = await getRequest(request.id);
-      return row.status === 'completed' ? row : null;
-    });
+    await awaitStatus(request.id, 'request completed', 60_000, 'completed');
     const final = await within('final bundle recorded', 20_000, async () => {
       const run = await getRun(request.runId!);
       return run !== null && !run.live && run.tasks[0].status === 'passed' ? run : null;
@@ -330,19 +399,11 @@ async function legFailureHonesty(tmp: string): Promise<void> {
   let runId: string | null = null;
   let poller: ChildProcess | null = null;
   try {
-    const created = await api('POST', '/api/benchmarks/run-requests', {
-      task_names: ['chat-mode'],
-      scope: SCOPE,
-    });
-    assert(created.status === 201, `dispatch failed: ${created.status}`);
-    const request = (created.data as { request: RequestRow }).request;
+    const request = await dispatchRequest(['chat-mode']);
     runId = request.runId;
 
     poller = startPoller(stub, path.join(tmp, 'poller-fail.log'));
-    const failed = await within('request marked failed', 90_000, async () => {
-      const row = await getRequest(request.id);
-      return row.status === 'failed' ? row : null;
-    });
+    const failed = await awaitStatus(request.id, 'request marked failed', 90_000, 'failed');
     assert(failed.error !== null && failed.error !== '', 'failure has no error text');
 
     // the linked dashboard reflects the failure — never a silent zombie
@@ -360,16 +421,59 @@ async function legFailureHonesty(tmp: string): Promise<void> {
   }
 }
 
+async function legCapacityBusyWaitsAndRetries(tmp: string): Promise<void> {
+  const stub = writeStubRunner(tmp, 'capacity-busy-then-pass');
+  const attemptFile = path.join(tmp, 'capacity-busy-attempts');
+  let runId: string | null = null;
+  let poller: ChildProcess | null = null;
+  try {
+    const request = await dispatchRequest(['chat-mode']);
+    runId = request.runId;
+
+    poller = startPoller(stub, path.join(tmp, 'poller-capacity-busy.log'), BASE_URL, false, {
+      HUB_CAPACITY_RETRY_SECONDS: '1',
+      HUB_PIPELINE_BUSY_ATTEMPT_FILE: attemptFile,
+    });
+
+    await within('capacity-busy result observed', 25_000, async () => {
+      if (!fs.existsSync(attemptFile)) return null;
+      return fs.readFileSync(attemptFile, 'utf8').trim() === '1' ? true : null;
+    });
+    const waiting = await getRequest(request.id);
+    assert(
+      waiting.status === 'running' && waiting.error === null,
+      'FAIL: retryable lease contention became a terminal failed dispatch'
+    );
+
+    const completed = await awaitStatus(
+      request.id,
+      'capacity retry completed',
+      60_000,
+      'completed'
+    );
+    assert(completed.error === null, 'capacity retry left a terminal error on the request');
+    assert(
+      fs.readFileSync(attemptFile, 'utf8').trim() === '2',
+      'capacity runner was not retried once'
+    );
+
+    const final = await getRun(request.runId!);
+    assert(
+      final !== null && !final.live && final.tasks[0].status === 'passed',
+      'capacity retry did not preserve the successful final bundle'
+    );
+  } finally {
+    await stopPoller(poller);
+    await cleanup(runId);
+  }
+}
+
 async function legLatePollerPickup(tmp: string): Promise<void> {
   const stub = writeStubRunner(tmp, 'pass');
   let runId: string | null = null;
   let poller: ChildProcess | null = null;
   try {
-    const created = await api('POST', '/api/benchmarks/run-requests', {
-      task_names: ['chat-mode'],
-      scope: SCOPE,
-    });
-    const request = (created.data as { request: RequestRow }).request;
+    const request = await dispatchRequest(['chat-mode']);
     runId = request.runId;
 
     // with NO poller: the request stays queued but the dashboard exists and
@@ -385,12 +489,131 @@ async function legLatePollerPickup(tmp: string): Promise<void> {
 
     // a poller arriving late still executes it
     poller = startPoller(stub, path.join(tmp, 'poller-late.log'));
-    await within('late poller completes the run', 90_000, async () => {
-      const row = await getRequest(request.id);
-      return row.status === 'completed' ? row : null;
-    });
+    await awaitStatus(request.id, 'late poller completes the run', 90_000, 'completed');
   } finally {
     await stopPoller(poller);
+    await cleanup(runId);
+  }
+}
+
+async function legForeignArtifactIsolation(tmp: string): Promise<void> {
+  const foreign = writeForeignArtifactRunner(tmp);
+  let runId: string | null = null;
+  let poller: ChildProcess | null = null;
+  const log = path.join(tmp, 'poller-foreign.log');
+  try {
+    const request = await dispatchRequest(['chat-mode']);
+    runId = request.runId;
+
+    poller = startPoller(foreign.stub, log);
+    const failed = await awaitStatus(request.id, 'foreign artifact rejected', 30_000, 'failed');
+    assert(
+      failed.error?.includes('no run bundle produced (exit 7)') === true,
+      `foreign artifact was not rejected honestly: ${failed.error}`
+    );
+    const pollerLog = fs.readFileSync(log, 'utf8');
+    assert(
+      pollerLog.includes('no run bundle found after exit=7'),
+      'poller did not report the missing request-owned bundle'
+    );
+    assert(!pollerLog.includes('uploading final bundle'), 'poller uploaded a foreign run bundle');
+  } finally {
+    await stopPoller(poller);
+    fs.rmSync(foreign.cardDir, { recursive: true, force: true });
+    fs.rmSync(foreign.runFile, { force: true });
+    await cleanup(runId);
+  }
+}
+
+async function legSnapshotStopsBeforeTerminal(tmp: string): Promise<void> {
+  const stub = writeStubRunner(tmp, 'pass');
+  let runId: string | null = null;
+  let poller: ChildProcess | null = null;
+  let snapshotStarted = false;
+  let terminalSeen = false;
+  let staleProgressAfterTerminal = false;
+  const heldSnapshotTimers = new Set<NodeJS.Timeout>();
+
+  // Hold the live-snapshot response until after the runner exits. A leaked
+  // uploader will then send its progress PATCH after the terminal PATCH; a
+  // correctly reaped uploader disappears before the held response is released.
+  const proxy = http.createServer((req, res) => {
+    const requestPath = req.url ?? '';
+    const forward = (body?: Buffer): void => {
+      const upstreamHeaders = { ...req.headers };
+      if (body !== undefined) upstreamHeaders['content-length'] = String(body.length);
+      const upstream = http.request(
+        `${BASE_URL}${requestPath}`,
+        { method: req.method, headers: upstreamHeaders },
+        (response) => {
+          res.writeHead(response.statusCode ?? 502, response.headers);
+          response.pipe(res);
+        }
+      );
+      upstream.on('error', () => {
+        if (!res.headersSent) res.writeHead(502);
+        res.end();
+      });
+      if (body === undefined) req.pipe(upstream);
+      else upstream.end(body);
+    };
+
+    if (req.method === 'POST' && requestPath.startsWith('/api/benchmarks/runs?live=1')) {
+      snapshotStarted = true;
+      req.resume();
+      const timer = setTimeout(() => {
+        heldSnapshotTimers.delete(timer);
+        if (res.destroyed) return;
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end('{}');
+      }, 7_000);
+      heldSnapshotTimers.add(timer);
+      return;
+    }
+
+    if (req.method === 'PATCH' && requestPath.includes('/api/benchmarks/run-requests/')) {
+      const chunks: Buffer[] = [];
+      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      req.on('end', () => {
+        const body = Buffer.concat(chunks);
+        try {
+          const action = (JSON.parse(body.toString()) as { action?: string }).action;
+          if (action === 'complete' || action === 'fail') terminalSeen = true;
+          if (action === 'progress' && terminalSeen) staleProgressAfterTerminal = true;
+        } catch {
+          // The backend remains authoritative for malformed-request handling.
+        }
+        forward(body);
+      });
+      return;
+    }
+
+    forward();
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+  const address = proxy.address();
+  const proxyUrl = `http://127.0.0.1:${
+    typeof address === 'object' && address !== null ? address.port : 0
+  }`;
+
+  try {
+    const request = await dispatchRequest(['chat-mode']);
+    runId = request.runId;
+
+    poller = startPoller(stub, path.join(tmp, 'poller-snapshot-teardown.log'), proxyUrl);
+    await within('snapshot upload enters proxy', 30_000, async () => snapshotStarted || null);
+    await awaitStatus(request.id, 'completes after snapshot cancel', 60_000, 'completed');
+    await new Promise((resolve) => setTimeout(resolve, 8_000));
+
+    assert(terminalSeen, 'terminal completion PATCH never reached the hub');
+    assert(
+      !staleProgressAfterTerminal,
+      'snapshot uploader survived completion and sent stale progress after the terminal PATCH'
+    );
+  } finally {
+    for (const timer of heldSnapshotTimers) clearTimeout(timer);
+    await stopPoller(poller);
+    proxy.close();
     await cleanup(runId);
   }
 }
@@ -426,22 +649,14 @@ async function legHubOutageSpool(tmp: string): Promise<void> {
 
   const spoolDir = path.join(REPO_ROOT, '.context', 'hub-upload-spool');
   try {
-    const created = await api('POST', '/api/benchmarks/run-requests', {
-      task_names: ['chat-mode'],
-      scope: SCOPE,
-    });
-    assert(created.status === 201, `dispatch failed: ${created.status}`);
-    const request = (created.data as { request: RequestRow }).request;
+    const request = await dispatchRequest(['chat-mode']);
     runId = request.runId;
 
     // This leg exercises the production poller's long-running recovery mode.
     // A one-shot poller intentionally exits after one empty/transient queue
     // read, which can make the proxy setup—not outage recovery—the assertion.
     poller = startPoller(stub, path.join(tmp, 'poller-outage.log'), proxyUrl, true);
-    await within('claimed (via proxy)', 25_000, async () => {
-      const row = await getRequest(request.id);
-      return row.status === 'running' ? row : null;
-    });
+    await awaitStatus(request.id, 'claimed (via proxy)', 25_000, 'running');
 
     // OUTAGE: kill the hub from the poller's perspective mid-run
     await new Promise<void>((resolve) => proxy.close(() => resolve()));
@@ -456,10 +671,7 @@ async function legHubOutageSpool(tmp: string): Promise<void> {
 
     // hub is back (BASE_URL was healthy all along) — a fresh poller tick flushes
     flusher = startPoller(stub, path.join(tmp, 'poller-flush.log'));
-    await within('spool flushed after recovery', 40_000, async () => {
-      const row = await getRequest(request.id);
-      return row.status === 'completed' ? row : null;
-    });
+    await awaitStatus(request.id, 'spool flushed after recovery', 40_000, 'completed');
     assert(!fs.existsSync(spoolFile), 'spool file should be removed after flush');
   } finally {
     await stopPoller(poller);
@@ -479,8 +691,14 @@ async function main(): Promise<void> {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-pipeline-'));
   const legs: Array<[string, (tmp: string) => Promise<void>]> = [
     ['happy path: dispatch → claim → live → completed (hard deadlines)', legHappyPath],
-    ['failure honesty: runner crash → failed + error + dashboard reflects', legFailureHonesty],
+    ['failure honesty: generic exit 1 → failed + error + dashboard reflects', legFailureHonesty],
+    [
+      'capacity busy: claimed request waits, retries, then completes',
+      legCapacityBusyWaitsAndRetries,
+    ],
     ['late poller: queued is visible, then still picked up', legLatePollerPickup],
+    ['artifact isolation: newer foreign bundle is rejected', legForeignArtifactIsolation],
+    ['snapshot uploader is reaped before terminal completion', legSnapshotStopsBeforeTerminal],
     ['hub outage at completion: poller survives, spools, flushes on recovery', legHubOutageSpool],
   ];
   const results: StepResult[] = [];
@@ -500,8 +718,7 @@ async function main(): Promise<void> {
   }
   fs.rmSync(tmp, { recursive: true, force: true });
 
-  console.log('\nBenchmark Hub PIPELINE black-box');
-  console.log('='.repeat(60));
+  console.log(`\nBenchmark Hub PIPELINE black-box\n${'='.repeat(60)}`);
   for (const r of results) {
     console.log(
       `${r.passed ? '  PASS' : '  FAIL'}  ${r.name}${r.passed ? '' : ` -- ${r.error}`} (${Math.round(r.duration / 1000)}s)`

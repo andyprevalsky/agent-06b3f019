@@ -55,11 +55,13 @@ export function useAgentOps({
     isFullySignedIn: auth.isFullySignedIn,
     userId: auth.user?.id,
     clientSource,
-    setSelectedAgentIdContext: ctx.setSelectedAgentId,
     setCurrentView,
     setLoginModalOpen,
     setIsLoadingNetwork: loading.setIsLoadingNetwork,
     loadAgents: agentList.loadAgents,
+    stagePendingAgentCreation: ctx.stagePendingAgentCreation,
+    reconcilePendingAgentCreation: ctx.reconcilePendingAgentCreation,
+    rollbackPendingAgentCreation: ctx.rollbackPendingAgentCreation,
   });
 
   return { actions, messaging };

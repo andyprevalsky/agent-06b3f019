@@ -61,6 +61,48 @@ function validateSessionFilePath(filePath: string): void {
   }
 }
 
+interface BrowserSessionMetadataInput {
+  provider: string;
+  proxySource: string;
+  proxyLocation: ProxyGeoLocation;
+  profileId: string | null;
+  profileSource: string;
+}
+
+interface BrowserSessionInjectionMetadataInput {
+  cookies: { injected: boolean; cookieCount: number; authSource: string };
+  localStorage: { originCount: number };
+  indexedDB: { originCount: number };
+  permissions: { grantCount: number };
+  cacheStorage: { originCount: number };
+}
+
+export function buildBrowserSessionMetadata(
+  session: BrowserSessionMetadataInput,
+  injectionResult: BrowserSessionInjectionMetadataInput
+) {
+  return {
+    provider: session.provider,
+    proxy_source: session.proxySource,
+    proxy_location: session.proxyLocation,
+    profile_id: session.profileId,
+    profile_source: session.profileSource,
+    auth_source: injectionResult.cookies.authSource,
+    cookies_injected: injectionResult.cookies.injected,
+    cookies_count: injectionResult.cookies.cookieCount,
+    local_storage_origin_count: injectionResult.localStorage.originCount,
+    indexed_db_origin_count: injectionResult.indexedDB.originCount,
+    permission_grant_count: injectionResult.permissions.grantCount,
+    cache_storage_origin_count: injectionResult.cacheStorage.originCount,
+    ...(session.provider === 'steel'
+      ? {
+          steel_profile_id: session.profileId,
+          steel_profile_source: session.profileSource,
+        }
+      : {}),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -132,19 +174,7 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     session_id: session.sessionId,
     debug_url: session.debugUrl,
     ws_url: session.wsUrl,
-    browser_session_metadata: {
-      provider: session.provider,
-      proxy_source: session.proxySource,
-      proxy_location: session.proxyLocation,
-      profile_id: session.profileId,
-      profile_source: session.profileSource,
-      ...(session.provider === 'steel'
-        ? {
-            steel_profile_id: session.profileId,
-            steel_profile_source: session.profileSource,
-          }
-        : {}),
-    },
+    browser_session_metadata: buildBrowserSessionMetadata(session, injectionResult),
     cookies_injected: injectionResult.cookies.injected,
     cookies_count: injectionResult.cookies.cookieCount,
     auth_source: injectionResult.cookies.authSource,

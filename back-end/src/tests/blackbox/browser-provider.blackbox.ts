@@ -11,9 +11,19 @@ import {
   kernelProxyCandidates,
   resolveKernelProxyMode,
 } from '../../providers/browser/kernelProxy';
+import { retryWithBackoff } from '../../providers/retry';
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
+}
+
+function isTransientKernelConnectionError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    message.includes('proxy connection failed') ||
+    message.includes('context deadline exceeded') ||
+    message.includes('Client.Timeout exceeded')
+  );
 }
 
 function isRetryableKernelNavigationError(error: unknown): boolean {
@@ -221,6 +231,16 @@ async function runLiveProviderParity(): Promise<void> {
     if (!response.ok) throw new Error(`${path} ${response.status}: ${JSON.stringify(json)}`);
     return json;
   };
+  const postWithKernelConnectionRetry = async (
+    path: string,
+    body?: unknown
+  ): Promise<BrowserApiResponse> =>
+    retryWithBackoff(() => post(path, body), {
+      maxRetries: 3,
+      fixedDelays: [750, 1_500],
+      isRetryable: isTransientKernelConnectionError,
+      component: `browser-provider:${path}`,
+    });
 
   await prisma.user.create({ data: { userId, name: 'Kernel Provider Blackbox' } });
   await prisma.agent.create({
@@ -235,7 +255,7 @@ async function runLiveProviderParity(): Promise<void> {
   });
 
   try {
-    const init = await post('/init', {
+    const init = await postWithKernelConnectionRetry('/init', {
       user_id: userId,
       agent_id: agentId,
       start_url: 'https://example.com',
@@ -380,7 +400,7 @@ async function runLiveProviderParity(): Promise<void> {
     });
     liveSessionId = undefined;
 
-    const resumed = await post('/resume', { task_id: init.task_id });
+    const resumed = await postWithKernelConnectionRetry('/resume', { task_id: init.task_id });
     liveSessionId = String(resumed.session_id);
     const resumedMetadata = resumed.browser_session_metadata ?? {};
     assert(resumed.task_id === init.task_id, 'resume changed the stable task ID');

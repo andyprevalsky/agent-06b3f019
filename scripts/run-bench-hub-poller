@@ -18,10 +18,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 cd "$ROOT_DIR"
+# shellcheck source=lib/cloudbench-env.sh
+source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
 
 HUB_URL="${HUB_URL:-http://localhost:3001}"
 RUN_BENCH_BIN="${RUN_BENCH_BIN:-scripts/run-bench}"   # test hook: stub the runner
 POLL_INTERVAL="${POLL_INTERVAL:-10}"
+HUB_CAPACITY_RETRY_SECONDS="${HUB_CAPACITY_RETRY_SECONDS:-$POLL_INTERVAL}"
 LOCAL_RUNNER=0
 ONCE=0
 for arg in "$@"; do
@@ -31,6 +34,9 @@ for arg in "$@"; do
         *) echo "unknown arg: $arg" >&2; exit 2 ;;
     esac
 done
+case "$HUB_CAPACITY_RETRY_SECONDS" in
+    ''|*[!0-9]*|0) echo "❌ HUB_CAPACITY_RETRY_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
 
 if [ -z "${BACKEND_API_KEY:-}" ]; then
     BACKEND_API_KEY="$(grep -E '^BACKEND_API_KEY=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')"
@@ -125,57 +131,66 @@ print(f"catalog export: {len(merged)} tasks, {changed} updated from DB → {path
 PY
 }
 
-snapshot_loop() {  # snapshot_loop <request_id> <hub_run_id> <start_epoch>
-    local req_id="$1" hub_run_id="$2" start_epoch="$3"
-    while :; do
-        sleep 15
-        HUB_CODE_SUMMARY="$CODE_SUMMARY" python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$start_epoch" <<'PY' || true
-import glob, json, os, sys, urllib.request
-hub, key, user, req_id, run_id, start = sys.argv[1:7]
+snapshot_loop() {  # snapshot_loop <request_id> <hub_run_id> <start_epoch> <artifact_root> <local_artifact_root> <task_names>
+    local req_id="$1" hub_run_id="$2" start_epoch="$3" artifact_root="$4" local_artifact_root="$5" task_names="$6"
+    # This function is launched in the background. exec makes SNAP_PID the
+    # uploader itself (not a wrapper shell with a python child), so teardown can
+    # terminate and reap the complete snapshot loop before a terminal PATCH.
+    HUB_CODE_SUMMARY="$CODE_SUMMARY" exec python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$start_epoch" "$artifact_root" "$local_artifact_root" "$task_names" <<'PY'
+import collections, glob, json, os, sys, time, urllib.request
+hub, key, user, req_id, run_id, start, artifact_root, local_artifact_root, expected_raw = sys.argv[1:10]
 start = float(start)
-# newest report-card.json produced after our launch. local.py's emitter
-# resolves BENCHMARK_CONTEXT_DIR against AGENTS_DIR, so isolated-stack cards
-# land under agents/.context/benchmarks/<run-id>/ (NOT repo-root .context/).
-cards = [p for p in
-         glob.glob("agents/.context/benchmarks/*/report-card.json") +
-         glob.glob(".context/benchmarks/*/report-card.json") +
-         glob.glob(".context/benchmarks/*/*/report-card.json") +
-         glob.glob(".context/fleet/runs/*/_batch/report-card.json")
-         if os.path.getmtime(p) > start]
-if not cards:
-    sys.exit(0)
-card = json.load(open(max(cards, key=os.path.getmtime)))
-tasks = []
-for row in card.get("per_task") or []:
-    url = row.get("agent_url") or ""
-    agent_id = url.split("agent-id=")[-1] if "agent-id=" in url else None
-    dur = row.get("duration_s")
-    cost = row.get("cost_usd")
-    tasks.append({
-        "name": row.get("name"), "status": row.get("status") or "running",
-        "passed": True if row.get("status") == "passed" else (False if row.get("status") in ("failed", "error") else None),
-        "agent_id": agent_id, "duration_seconds": dur,
-        "cost_cents": round(cost * 100, 2) if isinstance(cost, (int, float)) else None,
-        "world_model_mode": row.get("world_model_mode"),
-        "fast_mode": bool(row.get("fast_mode")),
-    })
-bundle = {"run_id": run_id, "timestamp": card.get("timestamp") or "", "suite": "hub-dispatch",
-          "source": "hub-poller", "tasks": tasks,
-          "code": os.environ.get("HUB_CODE_SUMMARY") or None,
-          "elapsed_s": card.get("elapsed_s"),
-          "cost": card.get("cost"), "metadata": card.get("metadata")}
+expected = collections.Counter(expected_raw.split())
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 def post(path, body, method="POST"):
     req = urllib.request.Request(hub.rstrip("/") + path, data=json.dumps(body).encode(),
         headers={"X-API-Key": key, "X-User-Id": user, "Content-Type": "application/json"},
         method=method)
     opener.open(req, timeout=20).read()
-post("/api/benchmarks/runs?live=1", bundle)
-# the run-request update route is PATCH-only (urllib defaults data= to POST)
-post(f"/api/benchmarks/run-requests/{req_id}",
-     {"action": "progress", "progress": card, "run_id": run_id}, method="PATCH")
+
+while True:
+    time.sleep(15)
+    try:
+        # Only inspect this request's output root. Mtime alone is not ownership:
+        # another benchmark producer can write a newer canonical artifact while
+        # this request is running or unwinding.
+        cards = [p for p in
+                 glob.glob(os.path.join(local_artifact_root, "report-card.json")) +
+                 glob.glob(os.path.join(artifact_root, "fleet", "runs", "*", "_batch", "report-card.json"))
+                 if os.path.getmtime(p) > start]
+        if not cards:
+            continue
+        card = json.load(open(max(cards, key=os.path.getmtime)))
+        actual = collections.Counter(row.get("name") for row in card.get("per_task") or [])
+        if actual != expected:
+            continue
+        tasks = []
+        for row in card.get("per_task") or []:
+            url = row.get("agent_url") or ""
+            agent_id = url.split("agent-id=")[-1] if "agent-id=" in url else None
+            dur = row.get("duration_s")
+            cost = row.get("cost_usd")
+            tasks.append({
+                "name": row.get("name"), "status": row.get("status") or "running",
+                "passed": True if row.get("status") == "passed" else (False if row.get("status") in ("failed", "error") else None),
+                "agent_id": agent_id, "duration_seconds": dur,
+                "cost_cents": round(cost * 100, 2) if isinstance(cost, (int, float)) else None,
+                "world_model_mode": row.get("world_model_mode"),
+                "fast_mode": bool(row.get("fast_mode")),
+            })
+        bundle = {"run_id": run_id, "timestamp": card.get("timestamp") or "", "suite": "hub-dispatch",
+                  "source": "hub-poller", "tasks": tasks,
+                  "code": os.environ.get("HUB_CODE_SUMMARY") or None,
+                  "elapsed_s": card.get("elapsed_s"),
+                  "cost": card.get("cost"), "metadata": card.get("metadata")}
+        post("/api/benchmarks/runs?live=1", bundle)
+        # the run-request update route is PATCH-only (urllib defaults data= to POST)
+        post(f"/api/benchmarks/run-requests/{req_id}",
+             {"action": "progress", "progress": card, "run_id": run_id}, method="PATCH")
+    except Exception:
+        # Snapshot upload is best-effort; the terminal result remains authoritative.
+        pass
 PY
-    done
 }
 
 # The snapshot_loop child must never outlive the poller: an interrupt (or a
@@ -184,7 +199,10 @@ PY
 # happy path and the exit trap — reaps whichever snapshot loop is live.
 SNAP_PID=""
 kill_snapshot_loop() {
-    [ -n "${SNAP_PID:-}" ] && kill "$SNAP_PID" 2>/dev/null || true
+    if [ -n "${SNAP_PID:-}" ]; then
+        kill "$SNAP_PID" 2>/dev/null || true
+        wait "$SNAP_PID" 2>/dev/null || true
+    fi
     SNAP_PID=""
 }
 poller_cleanup() {
@@ -205,6 +223,13 @@ process_request() {  # process_request <request_json>
     sim_on="$(printf '%s' "$req" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin).get("simOn") or []))' 2>/dev/null || true)"
     if [ -z "$req_id" ] || [ -z "$task_names" ]; then
         echo "⚠ malformed run-request (missing id/taskNames) — skipping: $(printf '%.200s' "$req")" >&2
+        return 0
+    fi
+    # req_id is interpolated into artifact paths (and a later `rm -rf`). Enforce a
+    # strict allowlist so hostile/garbled queue data (e.g. "../../../target") can
+    # never escape the artifact roots and delete other poller-accessible data.
+    if [[ ! "$req_id" =~ ^[A-Za-z0-9_-]{1,128}$ ]]; then
+        echo "⚠ malformed run-request (invalid id) — skipping: $(printf '%.200s' "$req_id")" >&2
         return 0
     fi
 
@@ -228,13 +253,18 @@ process_request() {  # process_request <request_json>
     # launch timestamp.
     local start_epoch; start_epoch="$(python3 -c 'import time; print(time.time())')"
     local log_file=".context/hub-poller-run-$req_id.log"
+    local artifact_root="$ROOT_DIR/.context/hub-poller-runs/$req_id"
+    local local_artifact_root="$ROOT_DIR/agents/.context/benchmarks/hub-$req_id"
+    rm -rf "$artifact_root" "$local_artifact_root"
+    mkdir -p "$artifact_root/fleet/runs" "$local_artifact_root"
 
-    snapshot_loop "$req_id" "$hub_run_id" "$start_epoch" & SNAP_PID=$!
+    snapshot_loop "$req_id" "$hub_run_id" "$start_epoch" "$artifact_root" "$local_artifact_root" "$task_names" & SNAP_PID=$!
 
-    local runner_args=()
+    local runner_args=() task_args=()
     [ "$LOCAL_RUNNER" = "1" ] && runner_args+=(--local)
-    # shellcheck disable=SC2086
-    runner_args+=($task_names)
+    read -r -a task_args <<< "$task_names"
+    runner_args+=("${task_args[@]}")
+    [ "$LOCAL_RUNNER" = "1" ] && runner_args+=(--run-id "hub-$req_id")
     # --sim-on is a cloud-fleet flag; the local runner derives sim from the
     # task catalog (world_model_mode), so only pass it through for fleet runs.
     if [ -n "$sim_on" ] && [ "$LOCAL_RUNNER" != "1" ]; then
@@ -242,21 +272,49 @@ process_request() {  # process_request <request_json>
     fi
 
     echo "   launching: $RUN_BENCH_BIN ${runner_args[*]} (log: $log_file)"
-    local exit_code=0
-    "$RUN_BENCH_BIN" "${runner_args[@]}" > "$log_file" 2>&1 || exit_code=$?
+    local exit_code=0 capacity_attempt=0
+    : > "$log_file"
+    while :; do
+        exit_code=0
+        BENCHMARK_CONTEXT_DIR="$local_artifact_root" \
+            CLOUDBENCH_RUNS_ROOT="$artifact_root/fleet/runs" \
+            "$RUN_BENCH_BIN" "${runner_args[@]}" >> "$log_file" 2>&1 || exit_code=$?
+        [ "$exit_code" -ne "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] && break
+
+        capacity_attempt=$((capacity_attempt + 1))
+        echo "   ⏳ cloud benchmark capacity busy; request stays active (attempt $capacity_attempt, retry in ${HUB_CAPACITY_RETRY_SECONDS}s)"
+        if ! hub PATCH "/api/benchmarks/run-requests/$req_id" \
+            "{\"action\":\"progress\",\"progress\":{\"stage\":\"waiting_for_cloud_benchmark_capacity\",\"reason\":\"lease_busy\",\"attempt\":$capacity_attempt,\"retry_in_seconds\":$HUB_CAPACITY_RETRY_SECONDS}}" \
+            >/dev/null; then
+            echo "   ⚠ could not upload capacity-wait progress; retrying runner without ending the request" >&2
+        fi
+        sleep "$HUB_CAPACITY_RETRY_SECONDS"
+    done
     kill_snapshot_loop
 
-    # Final bundle: newest run record produced after launch (local or fleet).
+    # Final bundle: newest request-owned run record with exactly the requested
+    # task multiset. Never fall back to canonical global globs: concurrent
+    # benchmark processes legitimately write there.
     local final
-    final="$(python3 - "$start_epoch" <<'PY'
-import glob, os, sys
-start = float(sys.argv[1])
+    final="$(python3 - "$start_epoch" "$artifact_root" "$local_artifact_root" "$task_names" <<'PY'
+import collections, glob, json, os, sys
+start, artifact_root, local_artifact_root, expected_raw = float(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+expected = collections.Counter(expected_raw.split())
 candidates = [p for p in
-              glob.glob("agents/benchmarks/runs/*.json") +
-              glob.glob(".context/fleet/runs/*/_batch/run.json") +
-              glob.glob(".context/fleet/runs/*/*/cloudbench-run.json")
+              glob.glob(os.path.join(local_artifact_root, "run.json")) +
+              glob.glob(os.path.join(artifact_root, "fleet", "runs", "*", "_batch", "run.json")) +
+              glob.glob(os.path.join(artifact_root, "fleet", "runs", "*", "*", "cloudbench-run.json"))
               if os.path.getmtime(p) > start]
-print(max(candidates, key=os.path.getmtime) if candidates else "")
+owned = []
+for path in candidates:
+    try:
+        bundle = json.load(open(path))
+        actual = collections.Counter(task.get("name") for task in bundle.get("tasks") or [])
+        if actual == expected:
+            owned.append(path)
+    except Exception:
+        continue
+print(max(owned, key=os.path.getmtime) if owned else "")
 PY
 )"
     if [ -n "$final" ]; then
@@ -264,21 +322,30 @@ PY
         # A hub outage here must NEVER kill the poller or strand the request
         # as 'running' — on failure, spool the completion and flush it on a
         # later loop tick (or the next poller start).
-        if ! HUB_CODE_SUMMARY="$CODE_SUMMARY" python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$final" "$exit_code" "$start_epoch" <<'PY'
-import glob, json, os, sys, urllib.request
-hub, key, user, req_id, run_id, path, exit_code, start = sys.argv[1:9]
+        if ! HUB_CODE_SUMMARY="$CODE_SUMMARY" python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$final" "$exit_code" "$start_epoch" "$artifact_root" "$local_artifact_root" "$task_names" <<'PY'
+import collections, glob, json, os, sys, urllib.request
+hub, key, user, req_id, run_id, path, exit_code, start, artifact_root, local_artifact_root, expected_raw = sys.argv[1:12]
 bundle = json.load(open(path))
 bundle["run_id"] = run_id  # request-scoped id: stable across snapshot + final
 bundle.setdefault("source", "hub-poller")
 bundle["code"] = os.environ.get("HUB_CODE_SUMMARY") or None
 # fold the newest report card's cost breakdown + elapsed into the final bundle
 cards = [p for p in
-         glob.glob("agents/.context/benchmarks/*/report-card.json") +
-         glob.glob(".context/benchmarks/*/report-card.json") +
-         glob.glob(".context/fleet/runs/*/_batch/report-card.json")
+         glob.glob(os.path.join(local_artifact_root, "report-card.json")) +
+         glob.glob(os.path.join(artifact_root, "fleet", "runs", "*", "_batch", "report-card.json"))
          if os.path.getmtime(p) > float(start)]
-if cards:
-    card = json.load(open(max(cards, key=os.path.getmtime)))
+expected = collections.Counter(expected_raw.split())
+owned_cards = []
+for card_path in cards:
+    try:
+        candidate = json.load(open(card_path))
+        actual = collections.Counter(row.get("name") for row in candidate.get("per_task") or [])
+        if actual == expected:
+            owned_cards.append((card_path, candidate))
+    except Exception:
+        continue
+if owned_cards:
+    _, card = max(owned_cards, key=lambda item: os.path.getmtime(item[0]))
     bundle.setdefault("cost", card.get("cost"))
     bundle.setdefault("elapsed_s", card.get("elapsed_s"))
     bundle.setdefault("metadata", card.get("metadata"))

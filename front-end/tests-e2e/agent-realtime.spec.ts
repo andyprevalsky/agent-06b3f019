@@ -13,14 +13,14 @@ import { expect, test } from '@playwright/test';
 
 import {
   FRONTEND_URL,
-  IS_PROD,
+  HAS_INJECTED_SESSION,
   attachRecorder,
   createAgent,
   deleteAgent,
   expectDevAuthenticated,
-  expectProdSessionRecognized,
+  expectInjectedSessionRecognized,
   hasUncaughtErrors,
-  injectProdSession,
+  injectSemanticSession,
   loadBenchmarkTask,
 } from './helpers';
 
@@ -35,15 +35,15 @@ test.describe('agent-realtime', () => {
     const agentId = await createAgent(task.prompt);
 
     try {
-      if (IS_PROD) {
-        await injectProdSession(page);
+      if (HAS_INJECTED_SESSION) {
+        await injectSemanticSession(page);
       }
       await page.goto(`${FRONTEND_URL}/?agent-id=${agentId}`, {
         waitUntil: 'domcontentloaded',
       });
 
-      if (IS_PROD) {
-        await expectProdSessionRecognized(page);
+      if (HAS_INJECTED_SESSION) {
+        await expectInjectedSessionRecognized(page);
       } else {
         await expectDevAuthenticated(page, rec);
       }

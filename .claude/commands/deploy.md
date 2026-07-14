@@ -301,7 +301,7 @@ bash scripts/kill-services.sh           # kill the whole tree; preserves DB cont
 
 `scripts/kill-services.sh` is worktree-scoped (uses `$PWD` as the filter), walks descendants via `pgrep -P`, SIGTERMs then SIGKILLs survivors, and deliberately leaves the Postgres container intact. Re-run it any time you need a clean slate — it is idempotent.
 
-Spin up the local stack through `scripts/run.sh --benchmark`. This stack serves blackbox and semantic gates; Pre-Deploy smoke runs separately in the cloud. In benchmark mode, `run.sh` starts `back-end`, `agents`, and `research` and skips `front-end` + `mac-app`. When this command is used inside Conductor, `run.sh` derives the backend, worker-health, and research ports from `CONDUCTOR_PORT`.
+Spin up the local stack through `scripts/run.sh --benchmark`. This stack serves blackbox and semantic gates; Pre-Deploy smoke runs separately in the cloud. In benchmark mode, `run.sh` starts `back-end`, `front-end`, and `agents`, and skips `mac-app`. When this command is used inside Conductor, `run.sh` derives the backend, frontend, and worker-health ports from `CONDUCTOR_PORT`.
 
 ```bash
 # Conductor provides the base port; run.sh fans out backend/frontend/health/research from it.
@@ -312,7 +312,8 @@ fi
 
 export SMOKE_BASE_URL="http://localhost:$CONDUCTOR_PORT"
 export SMOKE_HEALTH_URL="http://localhost:$((CONDUCTOR_PORT + 2))"
-export SMOKE_RESEARCH_URL="http://localhost:$((CONDUCTOR_PORT + 3))"
+SEMANTIC_QUEUE_WORKSPACE="${CONDUCTOR_WORKSPACE_NAME:-local}"
+export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMANTIC_QUEUE_WORKSPACE}-deploy-$(date -u +%Y%m%d%H%M%S)-$$"
 
 cd "$(git rev-parse --show-toplevel)"
 ```
@@ -322,7 +323,7 @@ cd "$(git rev-parse --show-toplevel)"
 ```bash
 # Step 1: Ensure DB is running BEFORE run.sh starts (so run.sh won't own/stop it)
 DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"
-LOCAL_DB_PORT=$((CONDUCTOR_PORT + 10))
+LOCAL_DB_PORT=$((CONDUCTOR_PORT + 5))
 
 if ! docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
   if docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
@@ -349,27 +350,22 @@ echo "DB pre-started: $DB_CONTAINER on port $LOCAL_DB_PORT"
 # Step 2: Launch run.sh using the Bash tool's run_in_background parameter.
 # run.sh will detect the DB as already-running and won't stop it on cleanup.
 # Use run_in_background=true for this command:
-DISABLE_GMAIL_SYNC=1 bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1
+DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=1 TRACE_ARCHIVE_ENABLED=0 \
+  bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1
 ```
+
+The local latency gate disables trace-archive fixture recording because that
+out-of-band benchmark recorder copies the user's full browser environment and
+is not part of the visible chat lifecycle. The post-deploy production semantic
+gate below runs against the normally configured deployed services, so production
+instrumentation remains covered before `/deploy` can report success.
 
 Then, in separate (foreground) Bash calls, wait for each service:
 
 ```bash
-# Wait for backend, worker health, and research to be ready
+# Wait for backend, frontend, and worker health to be ready
 for i in $(seq 1 60); do curl -s "$SMOKE_BASE_URL/health" > /dev/null 2>&1 && break; sleep 2; done
 for i in $(seq 1 60); do curl -s "$SMOKE_HEALTH_URL/health" > /dev/null 2>&1 && break; sleep 2; done
-for i in $(seq 1 60); do curl -s "$SMOKE_RESEARCH_URL/functions/v1/completions" > /dev/null 2>&1 && break; sleep 2; done
-```
-
-**Also start the frontend dev server** (required by Step 6b semantic tests). `run.sh --benchmark` intentionally skips the front-end, so launch it as a sibling background process:
-
-```bash
-# Start front-end dev server in a separate background process (needed for semantic tests).
-# run_in_background=true for this command:
-(cd front-end && VITE_PORT=$((CONDUCTOR_PORT + 1)) npm run dev > frontend-logs.log 2>&1)
-```
-
-```bash
 export SMOKE_FRONTEND_URL="http://localhost:$((CONDUCTOR_PORT + 1))"
 for i in $(seq 1 60); do curl -sf "$SMOKE_FRONTEND_URL" > /dev/null 2>&1 && break; sleep 2; done
 ```
@@ -379,7 +375,6 @@ for i in $(seq 1 60); do curl -sf "$SMOKE_FRONTEND_URL" > /dev/null 2>&1 && brea
 ```bash
 cd "$(git rev-parse --show-toplevel)"
 bash scripts/kill-services.sh                    # kills run.sh tree, preserves DB
-(cd research/supabase && supabase stop 2>/dev/null) || true   # stop supabase compose stack
 ```
 
 `kill-services.sh` is a superset of the old `pkill -f "scripts/run.sh --benchmark"` approach: `pkill` only signals bash wrappers, so detached node/python grandchildren survive (the real root cause of the zombie-run.sh problem). `kill-services.sh` walks descendants explicitly. Use `scripts/teardown.sh` instead if you also want to delete the DB container + volume (destructive).
@@ -623,7 +618,7 @@ Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree
 
 Semantic tests exercise real user flows through Playwright/Chromium against the full local stack (backend + worker + research + **frontend**). They are the only gate that proves realtime broadcasts reach the UI and that the login path still works end-to-end.
 
-**Skip criteria are the same as Step 6 (smoke).** If you ran smoke, you run semantic. If smoke was safely skipped per the "When smoke can be skipped" table, record semantic as skipped too with the same reason. **Never skip semantic tests unless smoke was also skipped.**
+**Semantic tests run on every /deploy and may never be skipped.** This is independent of the smoke-benchmark change classifier: documentation-only, test-only, frontend-only, and backend-only deploys all run the complete semantic suite. A deploy changes production state even when the app diff is small, so the user-visible frontend contract is always re-proven.
 
 ### Running semantic tests
 
@@ -631,9 +626,11 @@ With the full stack from Step 5 still running (backend, worker, research, **and 
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
+SEMANTIC_WORKERS=4 BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
   bash front-end/scripts/run-semantic-tests.sh
 ```
+
+The runner generates one authenticated session and shares it across all four Playwright workers. Every semantic spec runs. Inside the lifecycle spec, the `direct_answer`, `web_search`, `agent_plan`, and `agent_execute` paths run concurrently; each path takes five independent samples and every sample must complete the full browser lifecycle in under five seconds.
 
 This runs every `.spec.ts` under `front-end/tests-e2e/` via headless Chromium. To run a single test:
 
@@ -699,9 +696,11 @@ If Chromium is missing, install once: `cd front-end && npx playwright install ch
 
 # ║ is required) ║
 
-# ║ 6b. Semantic tests: 100% pass whenever smoke ran (skip together ║
+# ║ 6b. Semantic tests: 100% pass on every /deploy; never skipped. ║
 
-# ║ with smoke — never skip one without the other) ║
+# ║ Includes four concurrent chat paths × five full-lifecycle samples, ║
+
+# ║ with every sample below the five-second ratchet. ║
 
 # ║ ║
 
@@ -1045,7 +1044,7 @@ Determine which deploy workflows are relevant based on what files changed in the
 - Changes in `agents/` → poll `deploy-agents.yml`
 - Changes in `research/supabase/functions/` or `research/deploy.sh` → poll `deploy-research.yml`
 - Changes in `back-end/` → Render auto-deploys (no workflow to poll). **Do NOT just "wait ~60s" — run Step 13a to confirm the merged commit went live AND the app is functionally healthy.**
-- Changes in `front-end/` → Vercel auto-deploys (no workflow to poll, just wait ~60s)
+- Changes in `front-end/` → Vercel auto-deploys. Wait for a successful GitHub deployment status tied to the merged SHA; a fixed sleep is not proof that the new frontend is live.
 - Changes in `mac-app/` → check if PR had `MAC-APP-RELEASE` label; if so, poll `release-mac-app.yml`
 
 For GitHub Action workflows, wait for the new run to appear then watch it:
@@ -1062,6 +1061,30 @@ gh run watch "$RUN_ID"
 ```
 
 This avoids watching a stale run that started before the merge. Repeat for each relevant workflow.
+
+For a frontend change, wait for Vercel to report the merged commit as live:
+
+```bash
+if [ -n "$CHANGED_FRONTEND" ]; then
+  MERGED_SHA=$(git rev-parse main)
+  VERCEL_OK=""
+  for i in $(seq 1 90); do
+    DEPLOYMENT_ID=$(gh api "repos/{owner}/{repo}/deployments?sha=$MERGED_SHA" \
+      --jq '[.[] | select(.creator.login == "vercel[bot]")][0].id // empty')
+    if [ -n "$DEPLOYMENT_ID" ]; then
+      VERCEL_STATE=$(gh api "repos/{owner}/{repo}/deployments/$DEPLOYMENT_ID/statuses" \
+        --jq '.[0].state // "pending"')
+      echo "  Vercel: state=$VERCEL_STATE deployment=$DEPLOYMENT_ID"
+      case "$VERCEL_STATE" in
+        success) VERCEL_OK=1; break ;;
+        failure|error|inactive) VERCEL_OK=failed; break ;;
+      esac
+    fi
+    sleep 10
+  done
+  [ "$VERCEL_OK" = "1" ] || { echo "❌ Vercel did not bring $MERGED_SHA live"; exit 1; }
+fi
+```
 
 If a deploy fails:
 
@@ -1155,6 +1178,35 @@ sys.exit(1 if bad else 0)
 If this exits non-zero, the deploy is **unhealthy even though it's live** — treat as a deploy failure: diagnose the error (most likely a schema/migration mismatch or missing env var — see the 2026-06-27 incident for the migration-vs-DB drift pattern), fix it, new PR, continue from Step 9. Do NOT proceed to Step 14 with errors in the prod log.
 
 **Migration-specific note:** if the error is a Prisma "column/table does not exist", the deployed code expects a schema the prod DB doesn't have. Verify the migration is both present in `back-end/prisma/migrations/` AND actually applied to prod (the migration row in `_prisma_migrations` can be marked applied while the column is absent if a stray `prisma db push` from another workspace dropped it — `back-end/.env` `DATABASE_URL` points at prod). Re-apply the missing DDL idempotently (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`) and re-run Step 2.
+
+## Step 13b: Production semantic frontend gate (no skip — always runs)
+
+After all changed services are live and Step 13a is green when applicable, dispatch the trusted production semantic workflow. This runs every frontend semantic spec in one job with four Playwright workers and one shared authenticated session. It includes the four-path, five-sample, full-lifecycle chat ratchet.
+
+```bash
+SEMANTIC_DISPATCH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+gh workflow run chat-lifecycle-ratchet.yml --ref main \
+  -f frontend_url=https://roselabs.ai \
+  -f backend_url=https://navi-j9a9.onrender.com
+
+SEMANTIC_RUN_ID=""
+for i in $(seq 1 40); do
+  SEMANTIC_RUN_ID=$(gh run list \
+    --workflow chat-lifecycle-ratchet.yml \
+    --event workflow_dispatch \
+    --branch main \
+    --limit 20 \
+    --json databaseId,createdAt \
+    --jq ".[] | select(.createdAt >= \"$SEMANTIC_DISPATCH_TS\") | .databaseId" \
+    | head -1)
+  [ -n "$SEMANTIC_RUN_ID" ] && break
+  sleep 5
+done
+[ -n "$SEMANTIC_RUN_ID" ] || { echo "❌ Production semantic workflow did not start"; exit 1; }
+gh run watch "$SEMANTIC_RUN_ID" --exit-status
+```
+
+This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs, fix the root cause in a new PR, and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
 
 ## Step 14: New branch
 

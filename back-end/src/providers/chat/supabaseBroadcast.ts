@@ -1,6 +1,15 @@
 /**
  * Supabase Realtime broadcast utility for chat mode.
  * Broadcasts to agent:{agentId} channel - MUST match exact format from Python worker.
+ *
+ * Assistant stream lifecycle / system context:
+ *
+ *   Router/Generator STARTED (seq 0) -> normal batch timer
+ *                         first DELTA (seq 1) -> cancel timer + immediate FIFO drain
+ *                         later DELTAS / DONE -> normal batch timer
+ *   Router DONE + clear_on_done -> frontend removes bubble
+ *   Generator RESPONSE -> ATTENTION_STREAM accumulated frames -> keyed TOOL INSERT
+ *   Python worker stream payloads -> unchanged; drain priority is never serialized
  */
 
 import { v4 as uuidv4 } from 'uuid';
@@ -44,6 +53,16 @@ let flushTimer: NodeJS.Timeout | null = null;
 let draining = false;
 const idleResolvers: Array<() => void> = [];
 
+interface AssistantStreamOptions {
+  /** Remove a purely ephemeral stream at its terminal event. */
+  clearOnDone?: boolean;
+}
+
+interface BroadcastOptions {
+  /** Bypass the batch delay without changing the queued event's wire shape. */
+  immediateDrain?: boolean;
+}
+
 /**
  * Stream assistant response chunks - EXACT same format as Python worker
  *
@@ -52,6 +71,7 @@ const idleResolvers: Array<() => void> = [];
  * @param delta - The NEW text chunk (not accumulated)
  * @param done - Whether streaming is complete
  * @param sequence - Sequence number for ordering
+ * @param options - Optional lifecycle metadata for phase-specific streams
  */
 export async function broadcastAssistantStream(
   agentId: string,
@@ -61,7 +81,8 @@ export async function broadcastAssistantStream(
   sequence: number = 0,
   isClaude: boolean = false,
   isGpt: boolean = false,
-  llmStartedAtMs?: number
+  llmStartedAtMs?: number,
+  options?: AssistantStreamOptions
 ): Promise<void> {
   log.info('[Broadcast] ASSISTANT_STREAM', {
     agentId,
@@ -72,6 +93,7 @@ export async function broadcastAssistantStream(
     isClaude,
     isGpt,
     llmStartedAtMs,
+    clearOnDone: done ? options?.clearOnDone : undefined,
   });
   const payload: Record<string, unknown> = {
     agentId: agentId,
@@ -83,11 +105,17 @@ export async function broadcastAssistantStream(
   payload.is_claude = isClaude;
   payload.is_gpt = isGpt;
   if (llmStartedAtMs !== undefined) payload.llm_started_at_ms = llmStartedAtMs;
-  await broadcast({
-    topic: `agent:${agentId}`,
-    event: 'ASSISTANT_STREAM',
-    payload,
-  });
+  if (done && options?.clearOnDone !== undefined) {
+    payload.clear_on_done = options.clearOnDone;
+  }
+  await broadcast(
+    {
+      topic: `agent:${agentId}`,
+      event: 'ASSISTANT_STREAM',
+      payload,
+    },
+    { immediateDrain: delta.length > 0 && !done && sequence === 1 }
+  );
 }
 
 /**
@@ -141,6 +169,36 @@ export async function broadcastToolEvent(
     event: 'TOOL_STREAM',
     payload,
   });
+}
+
+export async function broadcastAttentionStream(
+  agentId: string,
+  event: {
+    streamId: string;
+    toolCallId: string;
+    message: string;
+    done: boolean;
+    sequence: number;
+  }
+): Promise<void> {
+  await broadcast(
+    {
+      topic: `agent:${agentId}`,
+      event: 'ATTENTION_STREAM',
+      payload: {
+        agentId,
+        stream_id: event.streamId,
+        tool_call_id: event.toolCallId,
+        message: event.message,
+        is_question: false,
+        done: event.done,
+        sequence: event.sequence,
+      },
+    },
+    {
+      immediateDrain: event.message.length > 0 && !event.done && event.sequence === 1,
+    }
+  );
 }
 
 /**
@@ -237,11 +295,14 @@ export function generateStreamId(): string {
 /**
  * Core broadcast function - sends to Supabase Realtime
  */
-async function broadcast(params: {
-  topic: string;
-  event: string;
-  payload: Record<string, unknown>;
-}): Promise<void> {
+async function broadcast(
+  params: {
+    topic: string;
+    event: string;
+    payload: Record<string, unknown>;
+  },
+  options: BroadcastOptions = {}
+): Promise<void> {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     log.warn('[Broadcast] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
     return;
@@ -256,7 +317,9 @@ async function broadcast(params: {
   });
 
   scheduleBroadcastDrain(
-    broadcastQueue.length >= BROADCAST_BATCH_SIZE ? 0 : BROADCAST_FLUSH_DELAY_MS
+    options.immediateDrain || broadcastQueue.length >= BROADCAST_BATCH_SIZE
+      ? 0
+      : BROADCAST_FLUSH_DELAY_MS
   );
 }
 

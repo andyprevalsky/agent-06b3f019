@@ -23,7 +23,7 @@ import {
   NetworkView,
   SIDEBAR_WIDTH_COLLAPSED,
 } from '@/features/terminal-component-group';
-import { useAppData } from '@/hooks/useAppData';
+import { useAppData } from '@/hooks/appDataContext';
 import {
   ADMIN_PHONE_DIGITS,
   ADMIN_USER_IDS,

@@ -50,11 +50,29 @@ LIVE_FIXTURES: dict[str, LiveFixtureSpec] = {
             "Inherited by every live task unless it declares its own live_fixtures."
         ),
     ),
+    "compute_tokens": LiveFixtureSpec(
+        name="compute_tokens",
+        description=(
+            "Live prod-synced compute tokens only. Use this instead of base when a "
+            "benchmark must not import browser cookies, storage, passwords, or passkeys."
+        ),
+    ),
     "amazon_auth": LiveFixtureSpec(
         name="amazon_auth",
         description=(
             "Active CookieBundle rows for amazon.com built from the user's "
             "synced prod cookies, so the browser agent starts logged in."
+        ),
+    ),
+    "compute_tokens": LiveFixtureSpec(
+        name="compute_tokens",
+        description="Refresh only live LLM compute credentials from production.",
+    ),
+    "amazon_passkey": LiveFixtureSpec(
+        name="amazon_passkey",
+        description=(
+            "Refresh Amazon passkeys, then remove saved browser state, passwords, "
+            "cookie sessions, and the persisted Kernel profile."
         ),
     ),
 }

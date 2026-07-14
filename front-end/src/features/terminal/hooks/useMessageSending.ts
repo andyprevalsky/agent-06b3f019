@@ -1,8 +1,15 @@
 /**
- * Terminal feature — message sending hook.
+ * STATE MACHINE: terminal message sending
  *
- * Handles message input, creating agents from goals,
- * sending messages to existing agents, and auto-submit after login.
+ * [IDLE] -- existing agent --> [POSTING MESSAGE] --------> [IDLE]
+ *    |
+ *    +-- new goal --> [STAGED AGENT + USER BUBBLE] --> [CREATING]
+ *                              |                         |
+ *                              |                         +-- success --> [CANONICAL]
+ *                              +-- selected-id-scoped failure ---------> [ROLLED BACK]
+ *
+ * The staged transition is synchronous. Agent creation, canonical detail,
+ * and the sidebar refresh happen after the new conversation is visible.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -11,23 +18,26 @@ import * as amplitude from '@amplitude/analytics-browser';
 import { useToast } from '@/hooks/use-toast';
 import { DEFAULT_FAST_MODE_USER_IDS, FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
 import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
+import { getItem, removeItem } from '@/lib/storage';
 
 import { DEFAULT_MODEL, DEFAULT_PRICE_LIMIT_CENTS } from '../config';
 import { createAgent, postMessage, resumeAgent, checkAndRespondToAttention } from '../api';
-import type { FilePointer, AgentDetail, TerminalView } from '../types';
+import type { FilePointer, AgentDetail, PendingAgentCreationInput, TerminalView } from '../types';
 
-interface UseMessageSendingArgs {
+export interface UseMessageSendingArgs {
   selectedAgentId: string | null;
   agentDetail: AgentDetail | null;
   canSubmitGoals: boolean;
   isFullySignedIn: boolean;
   userId?: string | null;
   clientSource: string;
-  setSelectedAgentIdContext: (id: string | null) => void;
   setCurrentView: (v: TerminalView) => void;
   setLoginModalOpen: (v: boolean) => void;
   setIsLoadingNetwork: (v: boolean) => void;
   loadAgents: () => Promise<void>;
+  stagePendingAgentCreation: (input: PendingAgentCreationInput) => void;
+  reconcilePendingAgentCreation: (agentId: string) => Promise<void>;
+  rollbackPendingAgentCreation: (agentId: string) => boolean;
 }
 
 export function useMessageSending({
@@ -37,18 +47,20 @@ export function useMessageSending({
   isFullySignedIn,
   userId,
   clientSource,
-  setSelectedAgentIdContext,
   setCurrentView,
   setLoginModalOpen,
   setIsLoadingNetwork,
   loadAgents,
+  stagePendingAgentCreation,
+  reconcilePendingAgentCreation,
+  rollbackPendingAgentCreation,
 }: UseMessageSendingArgs) {
   const { toast } = useToast();
 
   const [messageInput, setMessageInput] = useState(() => {
-    const prefill = localStorage.getItem('onboarding_prefill_query');
+    const prefill = getItem('onboarding_prefill_query');
     if (prefill) {
-      localStorage.removeItem('onboarding_prefill_query');
+      removeItem('onboarding_prefill_query');
       return prefill;
     }
     return '';
@@ -141,19 +153,37 @@ export function useMessageSending({
         setIsSendingMessage(true);
 
         if (!selectedAgentId) {
-          setIsLoadingNetwork(true);
-          const newAgent = await createAgent({
-            goal: messageInput,
-            model: selectedModel,
-            source: clientSource,
-            attachments: attachments && attachments.length > 0 ? attachments : undefined,
-            price_limit_cents: pendingPriceLimitCents,
-            ...(userCanUseFastMode ? { fast_mode_cache_enabled: fastMode } : {}),
-          });
-          await loadAgents();
+          const agentId = crypto.randomUUID();
+          const submittedGoal = messageInput;
           setCurrentView('agents');
-          setSelectedAgentIdContext(newAgent.agent_id);
+          stagePendingAgentCreation({
+            agentId,
+            goal: submittedGoal,
+            model: selectedModel,
+            source: clientSource as 'WEB' | 'MAC_APP',
+            priceLimitCents: pendingPriceLimitCents,
+          });
           setMessageInput('');
+          setIsLoadingNetwork(true);
+          try {
+            const newAgent = await createAgent({
+              agent_id: agentId,
+              goal: submittedGoal,
+              model: selectedModel,
+              source: clientSource as 'WEB' | 'MAC_APP',
+              attachments: attachments && attachments.length > 0 ? attachments : undefined,
+              price_limit_cents: pendingPriceLimitCents,
+              ...(userCanUseFastMode ? { fast_mode_cache_enabled: fastMode } : {}),
+            });
+            if (newAgent.agent_id !== agentId) {
+              throw new Error('Created agent ID did not match the requested agent ID');
+            }
+            await reconcilePendingAgentCreation(agentId);
+            void loadAgents();
+          } catch (error) {
+            if (rollbackPendingAgentCreation(agentId)) setMessageInput(submittedGoal);
+            throw error;
+          }
           toast({
             title: 'Agent created',
             description: 'Your new agent has been created and is starting',
@@ -209,9 +239,11 @@ export function useMessageSending({
       userCanUseFastMode,
       loadAgents,
       setCurrentView,
-      setSelectedAgentIdContext,
       setLoginModalOpen,
       setIsLoadingNetwork,
+      stagePendingAgentCreation,
+      reconcilePendingAgentCreation,
+      rollbackPendingAgentCreation,
       toast,
     ],
   );

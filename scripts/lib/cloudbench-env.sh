@@ -3,6 +3,10 @@
 # Shared fail-closed helpers for the cloud benchmark environment handoff.
 # This file is sourced by both the macOS controller and Linux benchmark VMs.
 
+# sysexits.h EX_TEMPFAIL: the caller may retry this exact failure without
+# weakening handling for ordinary runner/configuration failures.
+CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE=75
+
 cloudbench_env_value() {
   local path="$1" key="$2"
   python3 - "$path" "$key" <<'PY'
@@ -237,17 +241,40 @@ PY
 }
 
 cloudbench_controller_lock_acquire() {
-  local path="$1"
-  mkdir -p "$(dirname "$path")"
+  local path="$1" owner status
+  if ! mkdir -p "$(dirname "$path")"; then
+    echo "FATAL: could not create cloud benchmark controller lock directory" >&2
+    return 1
+  fi
   if command -v shlock >/dev/null 2>&1; then
-    shlock -p "$$" -f "$path" || return 1
+    status=0
+    shlock -p "$$" -f "$path" || status=$?
+    if [ "$status" -ne 0 ]; then
+      owner="$(cat "$path" 2>/dev/null || true)"
+      if [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null; then
+        echo "CLOUDBENCH_RETRYABLE_CAPACITY=local_lock_busy" >&2
+        return "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE"
+      fi
+      echo "FATAL: cloud benchmark local controller lock acquisition failed" >&2
+      return 1
+    fi
     CLOUDBENCH_CONTROLLER_LOCK_KIND="shlock"
   elif command -v flock >/dev/null 2>&1; then
-    exec {CLOUDBENCH_CONTROLLER_LOCK_FD}<> "$path"
-    if ! flock -n "$CLOUDBENCH_CONTROLLER_LOCK_FD"; then
+    if ! exec {CLOUDBENCH_CONTROLLER_LOCK_FD}<> "$path"; then
+      echo "FATAL: could not open cloud benchmark local controller lock" >&2
+      return 1
+    fi
+    status=0
+    flock -n "$CLOUDBENCH_CONTROLLER_LOCK_FD" || status=$?
+    if [ "$status" -ne 0 ]; then
       exec {CLOUDBENCH_CONTROLLER_LOCK_FD}>&-
       unset CLOUDBENCH_CONTROLLER_LOCK_FD
-      return 1
+      if [ "$status" -eq 1 ]; then
+        echo "CLOUDBENCH_RETRYABLE_CAPACITY=local_lock_busy" >&2
+        return "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE"
+      fi
+      echo "FATAL: cloud benchmark local controller lock acquisition failed (exit $status)" >&2
+      return "$status"
     fi
     printf '%s\n' "$$" > "$path"
     CLOUDBENCH_CONTROLLER_LOCK_KIND="flock"

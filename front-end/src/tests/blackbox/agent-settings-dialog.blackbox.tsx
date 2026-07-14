@@ -184,7 +184,7 @@ describe('AgentSettingsDialog', () => {
         (r) => r.method === 'PATCH' && r.url.includes('/api/agents/'),
       );
       expect(req).toBeDefined();
-      expect((req!.body as any).price_limit_cents).toBe(999);
+      expect((req!.body as never).price_limit_cents).toBe(999);
     });
     await waitFor(() => expect(onUpdate).toHaveBeenCalled());
   });

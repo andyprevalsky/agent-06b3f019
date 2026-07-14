@@ -2,7 +2,8 @@
  * STATE MACHINE: MessageListView render tail
  *
  * [TOOL ACTIVE] -> render tool last; thinking hidden
- * [NO TOOL + THINKING] -> render banners/attention, then thinking last
+ * [FINAL ANSWER STREAM] -> render attention independently of thinking state
+ * [NO TOOL + THINKING] -> render banners, then thinking last
  * [IDLE] -> render persisted content only
  *
  * Presentational shell for MessageList. Receives all state/derived values
@@ -29,6 +30,7 @@ import { MessageListItems } from './MessageListItems';
 import { StatusBanners, WebPreviewBanner } from './StatusBanners';
 import { ThinkingIndicator } from './ThinkingIndicator';
 import { StreamingTools, StreamingAttentionBubble } from './StreamingMessageItems';
+import { shouldShowStreamingAttention } from './streamingAttentionVisibility';
 
 export interface MessageListViewProps {
   containerRef: React.RefObject<HTMLDivElement>;
@@ -130,8 +132,7 @@ export function MessageListView(props: MessageListViewProps) {
   } = props;
 
   const showMainBanners = showStatusBanners && subAgentId === undefined;
-  const showAttention =
-    streaming.attention !== null && subAgentId === undefined && streaming.bubbles.size > 0;
+  const showAttention = shouldShowStreamingAttention(streaming.attention, subAgentId);
   const showWebPreview = showMainBanners && agent !== null && getClientSource() === 'WEB';
   const thinkingStreamTokenCount = Math.round(streaming.charCount / 4);
 

@@ -13,43 +13,228 @@ async function run(): Promise<void> {
 
   process.env.SUPABASE_URL = 'https://supabase.test';
   process.env.SUPABASE_SERVICE_ROLE_KEY = 'test-service-role-key';
-  process.env.SUPABASE_BROADCAST_FLUSH_DELAY_MS = '25';
+  process.env.SUPABASE_BROADCAST_FLUSH_DELAY_MS = '100';
   process.env.SUPABASE_BROADCAST_BATCH_SIZE = '100';
 
-  const fetchResolvers: Array<() => void> = [];
-  const requestBodies: Array<{ messages: unknown[] }> = [];
+  const requestBodies: Array<{
+    messages: Array<{
+      event: string;
+      payload: { record: Record<string, unknown> };
+    }>;
+  }> = [];
   let fetchCalls = 0;
 
   globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
     fetchCalls += 1;
-    requestBodies.push(JSON.parse(String(init?.body)) as { messages: unknown[] });
-    await new Promise<void>((resolve) => fetchResolvers.push(resolve));
+    requestBodies.push(
+      JSON.parse(String(init?.body)) as {
+        messages: Array<{
+          event: string;
+          payload: { record: Record<string, unknown> };
+        }>;
+      }
+    );
     return new Response('', { status: 202 });
   }) as typeof fetch;
 
   const broadcast = await import('../../providers/chat/supabaseBroadcast');
 
   try {
-    await Promise.all(
-      Array.from({ length: 25 }, (_, i) =>
+    await broadcast.broadcastAssistantStream(
+      'immediate-agent',
+      'immediate-stream',
+      '',
+      false,
+      0,
+      false,
+      false,
+      1_700_000_000_000
+    );
+    await sleep(20);
+    assert.strictEqual(fetchCalls, 0, 'empty stream starts should retain the batch delay');
+
+    await broadcast.broadcastAssistantStream(
+      'immediate-agent',
+      'immediate-stream',
+      'first token',
+      false,
+      1,
+      false,
+      false,
+      1_700_000_000_000
+    );
+    await sleep(20);
+    assert.strictEqual(fetchCalls, 1, 'the first nonempty delta should drain immediately');
+    assert.deepStrictEqual(
+      requestBodies[0].messages.map((message) => message.payload.record.sequence),
+      [0, 1],
+      'an immediate drain must preserve FIFO order with the queued stream start'
+    );
+    assert.strictEqual(
+      Object.hasOwn(requestBodies[0].messages[1].payload.record, 'immediateDrain'),
+      false,
+      'the drain priority flag must remain internal and never reach Supabase'
+    );
+
+    await broadcast.__flushBroadcastQueueForTests();
+
+    await Promise.all([
+      broadcast.broadcastAssistantStream(
+        'normal-agent',
+        'later-stream',
+        'later token',
+        false,
+        2,
+        false,
+        false,
+        1_700_000_000_001
+      ),
+      broadcast.broadcastAssistantStream(
+        'normal-agent',
+        'terminal-stream',
+        '',
+        true,
+        3,
+        false,
+        false,
+        1_700_000_000_002
+      ),
+      broadcast.broadcastAssistantStream(
+        'normal-agent',
+        'empty-start-stream',
+        '',
+        false,
+        0,
+        false,
+        false,
+        1_700_000_000_003
+      ),
+    ]);
+    await sleep(20);
+    assert.strictEqual(
+      fetchCalls,
+      1,
+      'later deltas, terminal events, and empty starts should retain the batch delay'
+    );
+    await sleep(100);
+    assert.strictEqual(fetchCalls, 2, 'ordinary stream events should drain after the batch delay');
+
+    await broadcast.__flushBroadcastQueueForTests();
+
+    await Promise.all([
+      ...Array.from({ length: 25 }, (_, i) =>
         broadcast.broadcastMessageInsert(`agent-${i}`, {
           id: `message-${i}`,
           timestamp: new Date('2026-07-08T00:00:00.000Z'),
           text: `message ${i}`,
           role: 'TOOL',
         })
-      )
+      ),
+      broadcast.broadcastAssistantStream(
+        'router-agent',
+        'router-stream',
+        '',
+        true,
+        2,
+        false,
+        false,
+        1_700_000_000_000,
+        { clearOnDone: true }
+      ),
+      broadcast.broadcastAssistantStream(
+        'generator-agent',
+        'generator-stream',
+        '',
+        true,
+        3,
+        false,
+        false,
+        1_700_000_000_001
+      ),
+      broadcast.broadcastAssistantStream(
+        'active-agent',
+        'active-stream',
+        'still streaming',
+        false,
+        4,
+        false,
+        false,
+        1_700_000_000_002,
+        { clearOnDone: true }
+      ),
+    ]);
+
+    assert.strictEqual(fetchCalls, 2, 'broadcast calls should resolve after enqueue, not network');
+    await sleep(120);
+    assert.strictEqual(fetchCalls, 3, 'queued broadcasts should share one Supabase request');
+    assert.strictEqual(requestBodies[2].messages.length, 28);
+
+    const routerTerminal = requestBodies[2].messages.find(
+      (message) => message.payload.record.stream_id === 'router-stream'
+    );
+    const generatorTerminal = requestBodies[2].messages.find(
+      (message) => message.payload.record.stream_id === 'generator-stream'
+    );
+    const activeStream = requestBodies[2].messages.find(
+      (message) => message.payload.record.stream_id === 'active-stream'
+    );
+    assert.strictEqual(routerTerminal?.event, 'ASSISTANT_STREAM');
+    assert.strictEqual(routerTerminal?.payload.record.clear_on_done, true);
+    assert.strictEqual(generatorTerminal?.event, 'ASSISTANT_STREAM');
+    assert.strictEqual(
+      Object.hasOwn(generatorTerminal?.payload.record ?? {}, 'clear_on_done'),
+      false,
+      'ordinary assistant streams must preserve the existing payload shape'
+    );
+    assert.strictEqual(
+      Object.hasOwn(activeStream?.payload.record ?? {}, 'clear_on_done'),
+      false,
+      'clear_on_done must never be emitted before a terminal event'
     );
 
-    assert.strictEqual(fetchCalls, 0, 'broadcast calls should resolve after enqueue, not network');
-    await sleep(50);
-    assert.strictEqual(fetchCalls, 1, 'queued broadcasts should share one Supabase request');
-    assert.strictEqual(requestBodies[0].messages.length, 25);
-
-    fetchResolvers.forEach((resolve) => resolve());
     await broadcast.__flushBroadcastQueueForTests();
+
+    const attentionFetchBaseline = fetchCalls;
+    await broadcast.broadcastAttentionStream('attention-agent', {
+      streamId: 'answer-stream',
+      toolCallId: 'answer-tool',
+      message: '',
+      done: false,
+      sequence: 0,
+    });
+    await sleep(20);
+    assert.strictEqual(
+      fetchCalls,
+      attentionFetchBaseline,
+      'empty attention starts should retain the batch delay'
+    );
+    await broadcast.broadcastAttentionStream('attention-agent', {
+      streamId: 'answer-stream',
+      toolCallId: 'answer-tool',
+      message: 'Hello',
+      done: false,
+      sequence: 1,
+    });
+    await sleep(20);
+    assert.strictEqual(
+      fetchCalls,
+      attentionFetchBaseline + 1,
+      'the first visible answer should drain immediately'
+    );
+    const attentionMessages = requestBodies.at(-1)?.messages ?? [];
+    assert.deepStrictEqual(
+      attentionMessages.map((message) => ({
+        event: message.event,
+        toolCallId: message.payload.record.tool_call_id,
+        sequence: message.payload.record.sequence,
+      })),
+      [
+        { event: 'ATTENTION_STREAM', toolCallId: 'answer-tool', sequence: 0 },
+        { event: 'ATTENTION_STREAM', toolCallId: 'answer-tool', sequence: 1 },
+      ],
+      'attention immediate drain must preserve keyed FIFO ordering'
+    );
   } finally {
-    fetchResolvers.forEach((resolve) => resolve());
     await broadcast.__flushBroadcastQueueForTests();
     globalThis.fetch = originalFetch;
     if (oldUrl === undefined) delete process.env.SUPABASE_URL;

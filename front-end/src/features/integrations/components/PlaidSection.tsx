@@ -11,7 +11,7 @@
 import { Loader2, Plus, Wrench } from 'lucide-react';
 
 import ConnectedAccountChip from './ConnectedAccountChip';
-import DropdownIconFrame, { dropdownIconPreset } from './DropdownIconFrame';
+import DropdownIconFrame, { DropdownIconPreset } from './DropdownIconFrame';
 import PlaidLogoIcon from './PlaidLogoIcon';
 import type { PlaidItem, PlaidSyncState } from '../types';
 
@@ -146,7 +146,7 @@ export default function PlaidSection({
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
       <div className="p-4 flex items-center justify-between">
         <div className="flex min-w-0 items-center gap-3">
-          <DropdownIconFrame {...dropdownIconPreset.plaid} isSynced={isConnected}>
+          <DropdownIconFrame {...DropdownIconPreset.plaid} isSynced={isConnected}>
             <PlaidLogoIcon />
           </DropdownIconFrame>
           <div className="flex min-w-0 flex-col">

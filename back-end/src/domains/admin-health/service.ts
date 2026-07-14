@@ -51,14 +51,17 @@ export function buildSignupCohort(
   const start = new Date(period.start);
   const end = new Date(period.end);
   const cohortUsers = users.filter((user) => user.createdAt >= start && user.createdAt < end);
-  const createdAtByUser = new Map(cohortUsers.map((user) => [user.userId, user.createdAt]));
-  const userIds = new Set(createdAtByUser.keys());
+  const userIds = new Set(cohortUsers.map((user) => user.userId));
   return {
     userIds,
-    tasks: tasks.filter((task) => {
-      const userCreatedAt = createdAtByUser.get(task.userId);
-      return userCreatedAt !== undefined && task.createdAt >= userCreatedAt && task.createdAt < end;
-    }),
+    // Attribute every root task a cohort user issued within the period window.
+    // The signup funnel (querybox -> goal submission -> account creation) commits the
+    // first task's root agent moments BEFORE the User row's createdAt, so a task can
+    // legitimately predate its own signup timestamp by milliseconds. Bounding by the
+    // period window (not by each user's createdAt) keeps that first task counted.
+    tasks: tasks.filter(
+      (task) => userIds.has(task.userId) && task.createdAt >= start && task.createdAt < end
+    ),
   };
 }
 
