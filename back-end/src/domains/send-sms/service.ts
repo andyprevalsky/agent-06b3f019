@@ -6,6 +6,7 @@ import {
   notifyAgentStarted,
   notifyPlannerMessage,
   notifyWriteLock,
+  notifyAgentCardSetup,
   notifyCompletion,
   notifyCostLimit,
 } from '../../providers/smsSupervisor/outboundEvents';
@@ -200,6 +201,14 @@ async function dispatchByEventType(
         (payload.attention_request_id as string | undefined) ?? '',
         (payload.workflow_id as string | undefined) ?? '',
         payload.metadata
+      );
+      break;
+
+    case 'agentcard_setup':
+      await notifyAgentCardSetup(
+        data.user_id,
+        { id: data.agent_id },
+        (payload.setup_url as string | undefined) ?? ''
       );
       break;
 

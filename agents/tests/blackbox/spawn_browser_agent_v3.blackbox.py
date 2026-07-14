@@ -200,6 +200,7 @@ def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
 
 def test_browser_task_prompt_does_not_duplicate_system_prompt():
     from domains.spawn_browser_agent_v3.service import (
+        append_completion_evidence,
         build_browser_dynamic_system_context,
         build_browser_task_prompt,
     )
@@ -238,6 +239,18 @@ def test_browser_task_prompt_does_not_duplicate_system_prompt():
     assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" in messages[0]["content"]
     assert "# Dynamic Context" not in messages[0]["content"]
     assert "Use saved auth if available" in messages[0]["content"]
+
+    payment_summary = append_completion_evidence(
+        "**Status**: SUCCESS",
+        browser_url="https://rose-guangzhou.ngrok.app/test_payment/confirmation/tp_123",
+        structured_response={
+            "order_confirmation_id": "tp_123",
+            "purchased_product_names": ["Aurora Notebook", "Ceramic Mug", "Canvas Tote"],
+        },
+    )
+    assert "Payment confirmed" in payment_summary
+    assert "Order ID: tp_123" in payment_summary
+    assert "Aurora Notebook, Ceramic Mug, Canvas Tote" in payment_summary
 
 
 async def test_browser_agent_recording_writes_local_html_replay():
@@ -5383,6 +5396,7 @@ async def test_execute_click_with_element_humanizer_missing_coords_refuses_fallb
     session.highlight_interaction_element = AsyncMock()
     dom = MagicMock()
     dom.get_element_coordinates = AsyncMock(return_value=None)
+    dom.get_browser_state = AsyncMock()
     element = MagicMock()
     element.get_all_children_text = MagicMock(return_value="hi")
     ah = MagicMock()
@@ -5409,6 +5423,41 @@ async def test_execute_click_with_element_humanizer_missing_coords_refuses_fallb
     assert "Cannot humanize click" in out["error"]
     hu.click_at_coords.assert_not_called()
     session.event_bus.dispatch.assert_not_called()
+
+
+async def test_execute_click_with_element_humanizer_refreshes_stale_coordinates():
+    from domains.spawn_browser_agent_v3.service_actions import _execute_click
+
+    session = MagicMock()
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_element_coordinates = AsyncMock(side_effect=[None, (44, 55)])
+    dom.get_browser_state = AsyncMock()
+    element = MagicMock()
+    element.get_all_children_text = MagicMock(return_value="Pay $43.96")
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+
+    out = await _execute_click(
+        session=session,
+        dom_service=dom,
+        action_history=ah,
+        element=element,
+        index=21,
+        coords=None,
+        thinking=None,
+        humanizer=hu,
+        write_lock_enabled=False,
+        write_lock_approvals=None,
+        current_url="https://example.com/test_payment",
+        system_name="Rose",
+    )
+
+    assert out == {"success": True, "message": ""}
+    dom.get_browser_state.assert_awaited_once_with(include_screenshot=False)
+    hu.click_at_coords.assert_awaited_once_with(44, 55)
 
 
 async def test_execute_click_with_coords_no_humanizer():
@@ -5790,6 +5839,65 @@ async def test_execute_input_text_element_with_humanizer():
     hu.type_text.assert_awaited_once_with("hello")
 
 
+async def test_is_payment_field_uses_dom_attributes_without_get_page():
+    from browser_tools.write_lock import is_payment_field
+
+    session = SimpleNamespace()
+    element = SimpleNamespace(
+        attributes={
+            "id": "card-expiry",
+            "autocomplete": "cc-exp",
+            "placeholder": "MM/YY",
+        }
+    )
+
+    assert await is_payment_field(session, element, 1) is True
+
+
+async def test_execute_input_text_element_humanizer_refreshes_dom_when_coords_missing():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_browser_state = AsyncMock(return_value={})
+    dom.get_element_coordinates = AsyncMock(side_effect=[None, (7, 8)])
+    element = MagicMock()
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+
+    with patch(
+        "browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)
+    ):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=1,
+            coords=None,
+            params={"text": "hello"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs=None,
+            password_origins=None,
+            current_url="https://x.com",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    dom.get_browser_state.assert_awaited_once_with(include_screenshot=False)
+    assert dom.get_element_coordinates.await_count == 2
+    hu.click_at_coords.assert_awaited_once_with(7, 8)
+    hu.type_text.assert_awaited_once_with("hello")
+
+
 async def test_execute_input_text_element_humanizer_missing_coords_refuses_typetext_fallback():
     from domains.spawn_browser_agent_v3 import service_actions
 
@@ -5829,6 +5937,347 @@ async def test_execute_input_text_element_humanizer_missing_coords_refuses_typet
     hu.click_at_coords.assert_not_called()
     hu.type_text.assert_not_called()
     session.event_bus.dispatch.assert_not_called()
+
+
+async def test_execute_input_text_payment_secret_ref_bypasses_payment_warning():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_element_coordinates = AsyncMock(return_value=(11, 12))
+    element = MagicMock()
+    element.tag_name = "input"
+    element.attributes = {"autocomplete": "cc-number"}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+
+    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=8,
+            coords=None,
+            params={"text": "card_number"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={
+                "card_number": "4111111111111111",
+                "card_name": "Rose Labs",
+                "card_expiry": "12/30",
+                "card_cvv": "123",
+            },
+            password_origins=None,
+            current_url="https://checkout.example.com/pay",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    assert out["typed_text"] == "[encrypted_data]"
+    hu.click_at_coords.assert_awaited_once_with(11, 12)
+    hu.type_text.assert_awaited_once_with("4111111111111111")
+
+
+async def test_execute_input_text_payment_secret_ref_direct_fill_sets_exact_value():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    page = MagicMock()
+    page.evaluate = AsyncMock(
+        return_value={
+            "filled": True,
+            "x": 222,
+            "y": 333,
+            "selector": 'input[autocomplete="cc-number"]',
+            "valueLength": 16,
+        }
+    )
+    session = _fake_session_with_event_bus()
+    session.get_page = AsyncMock(return_value=page)
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_element_coordinates = AsyncMock(return_value=(11, 12))
+    element = MagicMock()
+    element.tag_name = "input"
+    element.attributes = {"autocomplete": "cc-number"}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+
+    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=8,
+            coords=None,
+            params={"text": "card_number"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={
+                "card_number": "4111111111111111",
+                "card_name": "Rose Labs",
+                "card_expiry": "12/30",
+                "card_cvv": "123",
+            },
+            password_origins=None,
+            current_url="https://checkout.example.com/pay",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    assert out["typed_text"] == "[encrypted_data]"
+    assert out["payment_ref_direct_fill"] is True
+    assert out["payment_refs_filled"] == ["card_number", "card_name", "card_expiry", "card_cvv"]
+    assert page.evaluate.await_count == 4
+    payloads = [call.args[1] for call in page.evaluate.await_args_list]
+    assert payloads == [
+        {"refName": "card_number", "value": "4111111111111111"},
+        {"refName": "card_name", "value": "Rose Labs"},
+        {"refName": "card_expiry", "value": "12/30"},
+        {"refName": "card_cvv", "value": "123"},
+    ]
+    hu.click_at_coords.assert_not_called()
+    hu.press_key.assert_not_called()
+    hu.type_text.assert_not_called()
+    ah.record_action.assert_awaited_once()
+    recorded = ah.record_action.await_args.kwargs
+    assert recorded["coordinates"] == {"x": 222, "y": 333}
+    assert recorded["result"]["payment_ref_direct_fill"] is True
+    assert recorded["result"]["payment_refs_filled"] == [
+        "card_number",
+        "card_name",
+        "card_expiry",
+        "card_cvv",
+    ]
+
+
+async def test_execute_input_text_payment_secret_ref_waits_for_page_ready_before_retry():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    page = MagicMock()
+    page.evaluate = AsyncMock(
+        side_effect=[
+            {"filled": False, "reason": "field_not_found"},
+            {
+                "filled": True,
+                "x": 222,
+                "y": 333,
+                "selector": 'input[autocomplete="cc-number"]',
+                "valueLength": 16,
+            },
+            {"filled": True, "x": 223, "y": 334, "selector": "input#card-name"},
+            {"filled": True, "x": 224, "y": 335, "selector": "input#card-expiry"},
+            {"filled": True, "x": 225, "y": 336, "selector": "input#card-cvv"},
+        ]
+    )
+    session = _fake_session_with_event_bus()
+    session.get_page = AsyncMock(return_value=page)
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_element_coordinates = AsyncMock(return_value=None)
+    element = MagicMock()
+    element.tag_name = "input"
+    element.attributes = {"autocomplete": "cc-number"}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+
+    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)), patch.object(
+        service_actions,
+        "wait_for_navigation_ready",
+        AsyncMock(return_value={"ready": True, "reason": "content_present"}),
+    ) as wait_ready:
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=8,
+            coords=None,
+            params={"text": "card_number"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={
+                "card_number": "4111111111111111",
+                "card_name": "Rose Labs",
+                "card_expiry": "12/30",
+                "card_cvv": "123",
+            },
+            password_origins=None,
+            current_url="https://checkout.example.com/pay",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    assert out["payment_ref_direct_fill"] is True
+    assert out["payment_refs_filled"] == ["card_number", "card_name", "card_expiry", "card_cvv"]
+    wait_ready.assert_awaited_once_with(
+        dom,
+        url="https://checkout.example.com/pay",
+        timeout_seconds=3.0,
+        reload_blank_spa_once=True,
+    )
+    assert page.evaluate.await_count == 5
+    hu.click_at_coords.assert_not_called()
+    hu.type_text.assert_not_called()
+
+
+async def test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_without_page():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    cdp_client = MagicMock()
+    cdp_client.send.Runtime.evaluate = AsyncMock(
+        return_value={
+            "result": {
+                "value": {
+                    "filled": True,
+                    "x": 444,
+                    "y": 555,
+                    "selector": 'input#card-name',
+                    "valueLength": 9,
+                }
+            }
+        }
+    )
+    cdp_session = SimpleNamespace(cdp_client=cdp_client, session_id="cdp-1")
+    session = _fake_session_with_event_bus()
+    session.get_or_create_cdp_session = AsyncMock(return_value=cdp_session)
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_element_coordinates = AsyncMock(return_value=None)
+    element = MagicMock()
+    element.tag_name = "input"
+    element.attributes = {"id": "card-name"}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+
+    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=7,
+            coords=None,
+            params={"text": "card_name"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={
+                "card_number": "4111111111111111",
+                "card_name": "Rose Labs",
+                "card_expiry": "12/30",
+                "card_cvv": "123",
+            },
+            password_origins=None,
+            current_url="https://checkout.example.com/pay",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    assert out["payment_ref_direct_fill"] is True
+    assert out["payment_refs_filled"] == ["card_name", "card_number", "card_expiry", "card_cvv"]
+    assert session.get_or_create_cdp_session.await_count == 4
+    for call in session.get_or_create_cdp_session.await_args_list:
+        assert call.kwargs == {"focus": True}
+    assert cdp_client.send.Runtime.evaluate.await_count == 4
+    evaluate_kwargs = cdp_client.send.Runtime.evaluate.await_args_list[0].kwargs
+    assert evaluate_kwargs["session_id"] == "cdp-1"
+    assert '"refName": "card_name"' in evaluate_kwargs["params"]["expression"]
+    assert '"value": "Rose Labs"' in evaluate_kwargs["params"]["expression"]
+    expressions = [
+        call.kwargs["params"]["expression"]
+        for call in cdp_client.send.Runtime.evaluate.await_args_list
+    ]
+    assert any('"refName": "card_number"' in expression for expression in expressions)
+    assert any('"refName": "card_expiry"' in expression for expression in expressions)
+    assert any('"refName": "card_cvv"' in expression for expression in expressions)
+    hu.click_at_coords.assert_not_called()
+    hu.type_text.assert_not_called()
+    recorded = ah.record_action.await_args.kwargs
+    assert recorded["coordinates"] == {"x": 444, "y": 555}
+
+
+async def test_execute_input_text_payment_secret_ref_recovers_dead_backend_node_with_selector():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    page = MagicMock()
+    page.evaluate = AsyncMock(
+        side_effect=[
+            {"filled": False, "reason": "field_not_found"},
+            {"filled": False, "reason": "field_not_found"},
+            {"x": 222, "y": 333, "selector": 'input[autocomplete="cc-number"]'},
+        ]
+    )
+    session = _fake_session_with_event_bus()
+    session.get_page = AsyncMock(return_value=page)
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_element_coordinates = AsyncMock(return_value=None)
+    dom.get_browser_state = AsyncMock()
+    element = MagicMock()
+    element.tag_name = "input"
+    element.attributes = {"autocomplete": "cc-number"}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+
+    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=8,
+            coords=None,
+            params={"text": "card_number"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={
+                "card_number": "4111111111111111",
+                "card_name": "Rose Labs",
+                "card_expiry": "12/30",
+                "card_cvv": "123",
+            },
+            password_origins=None,
+            current_url="https://checkout.example.com/pay",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    dom.get_browser_state.assert_awaited_once_with(include_screenshot=False)
+    assert page.evaluate.await_count == 3
+    hu.click_at_coords.assert_awaited_once_with(222, 333)
+    hu.type_text.assert_awaited_once_with("4111111111111111")
 
 
 async def test_execute_input_text_secret_redacts():
@@ -6114,6 +6563,114 @@ async def test_execute_goto_injects_local_storage_swallows_error():
             config=_fake_config(),
         )
     assert out["success"] is True
+
+
+async def test_wait_for_navigation_ready_reloads_blank_spa_shell_once():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    class FakePage:
+        def __init__(self):
+            self.reloads = 0
+            self.evaluations = 0
+
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        async def evaluate(self, _code):
+            self.evaluations += 1
+            if self.reloads == 0:
+                return json.dumps({
+                    "hasAppRoot": True,
+                    "appRootReady": False,
+                    "plainPageReady": False,
+                    "bodyTextLength": 677,
+                    "rootChildren": 0,
+                    "blankSpaShell": True,
+                })
+            return {
+                "hasAppRoot": True,
+                "appRootReady": True,
+                "plainPageReady": False,
+                "bodyTextLength": 12,
+                "rootChildren": 1,
+                "blankSpaShell": False,
+            }
+
+        async def reload(self):
+            self.reloads += 1
+            return None
+
+    page = FakePage()
+    session = _fake_session_with_event_bus()
+    session.get_current_page = AsyncMock(return_value=page)
+    dom = MagicMock()
+    dom.session = session
+
+    with patch.object(service_actions.asyncio, "sleep", AsyncMock()):
+        out = await service_actions.wait_for_navigation_ready(
+            dom_service=dom,
+            url="https://x.com/app",
+            timeout_seconds=0.001,
+        )
+
+    assert out["ready"] is True
+    assert page.reloads == 1
+    assert page.evaluations >= 2
+
+
+async def test_wait_for_navigation_ready_regotos_stuck_loading_document_once():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    class FakePage:
+        def __init__(self):
+            self.gotos = []
+            self.evaluations = 0
+
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        async def evaluate(self, _code):
+            self.evaluations += 1
+            if not self.gotos:
+                return {
+                    "readyState": "loading",
+                    "hasAppRoot": False,
+                    "appRootReady": False,
+                    "plainPageReady": False,
+                    "bodyTextLength": 0,
+                    "bodyChildren": 0,
+                    "blankSpaShell": False,
+                }
+            return {
+                "readyState": "complete",
+                "hasAppRoot": True,
+                "appRootReady": True,
+                "plainPageReady": False,
+                "bodyTextLength": 12,
+                "rootChildren": 1,
+                "blankSpaShell": False,
+            }
+
+        async def goto(self, url, **_kwargs):
+            self.gotos.append(url)
+            return None
+
+    page = FakePage()
+    session = _fake_session_with_event_bus()
+    session.get_current_page = AsyncMock(return_value=page)
+    dom = MagicMock()
+    dom.session = session
+
+    with patch.object(service_actions.asyncio, "sleep", AsyncMock()):
+        out = await service_actions.wait_for_navigation_ready(
+            dom_service=dom,
+            url="https://x.com/app",
+            timeout_seconds=0.001,
+        )
+
+    assert out["ready"] is True
+    assert page.gotos == ["https://x.com/app"]
+    assert page.evaluations >= 2
 
 
 # ── _execute_extract ─────────────────────────────────────────────────
@@ -8543,12 +9100,31 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
         "card_expiry": "12/30",
         "card_cvv": "123",
     }
+    assert resume_state["payment_card_last4"] == "4242"
 
     payment_ready = next(event for event in events if getattr(event, "title", "") == "Payment card ready")
     assert payment_ready.status == MessageStatus.FINISHED
     final_event = events[-1]
     assert final_event.status == MessageStatus.FINISHED
     assert final_event.metadata["structured_response"] == {"purchase_complete": True}
+
+
+def test_payment_card_verifier_evidence_exposes_only_valid_last_four():
+    from domains.spawn_browser_agent_v3.handler import _build_payment_card_verifier_evidence
+
+    evidence = _build_payment_card_verifier_evidence("4242")
+    assert evidence == {
+        "role": "TOOL",
+        "text": "Approved one-time payment card last four: 4242",
+        "metadata": {
+            "toolName": "payment_card_ready",
+            "toolStatus": "FINISHED",
+            "paymentCardLast4": "4242",
+        },
+    }
+    assert _build_payment_card_verifier_evidence("4242424242424242") is None
+    assert _build_payment_card_verifier_evidence("42x2") is None
+    assert _build_payment_card_verifier_evidence(None) is None
 
 
 # ========================================
@@ -8559,6 +9135,11 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
+
+    r.record(
+        "payment_card_verifier_evidence_only_last_four",
+        test_payment_card_verifier_evidence_exposes_only_valid_last_four,
+    )
 
     await r.record_async("cdp_use_websocket_direct", test_cdp_use_websocket_patch_disables_proxy_discovery)
     r.record("browser_action_log_summary_redacts_payment_secrets", test_browser_action_log_summary_redacts_payment_secrets)
@@ -9052,8 +9633,16 @@ async def run_all_tests():
         "execute_click_element_humanizer_missing_coords",
         test_execute_click_with_element_humanizer_missing_coords_refuses_fallback,
     )
-    await r.record_async("execute_click_coords_no_humanizer", test_execute_click_with_coords_no_humanizer)
-    await r.record_async("execute_click_no_target", test_execute_click_no_element_no_coords)
+    await r.record_async(
+        "execute_click_element_humanizer_refreshes_stale_coordinates",
+        test_execute_click_with_element_humanizer_refreshes_stale_coordinates,
+    )
+    await r.record_async(
+        "execute_click_coords_no_humanizer", test_execute_click_with_coords_no_humanizer
+    )
+    await r.record_async(
+        "execute_click_no_target", test_execute_click_no_element_no_coords
+    )
     await r.record_async(
         "execute_click_write_lock_purchase",
         test_execute_click_write_lock_purchase_triggers_approval,
@@ -9105,10 +9694,40 @@ async def run_all_tests():
         test_execute_input_text_element_with_humanizer,
     )
     await r.record_async(
+        "is_payment_field_dom_attributes_without_get_page",
+        test_is_payment_field_uses_dom_attributes_without_get_page,
+    )
+    await r.record_async(
+        "execute_input_text_el_humanizer_refreshes_dom",
+        test_execute_input_text_element_humanizer_refreshes_dom_when_coords_missing,
+    )
+    await r.record_async(
         "execute_input_text_el_humanizer_missing_coords",
         test_execute_input_text_element_humanizer_missing_coords_refuses_typetext_fallback,
     )
-    await r.record_async("execute_input_text_secret_redacts", test_execute_input_text_secret_redacts)
+    await r.record_async(
+        "execute_input_text_payment_secret_ref_bypasses_warning",
+        test_execute_input_text_payment_secret_ref_bypasses_payment_warning,
+    )
+    await r.record_async(
+        "execute_input_text_payment_secret_ref_direct_fill",
+        test_execute_input_text_payment_secret_ref_direct_fill_sets_exact_value,
+    )
+    await r.record_async(
+        "execute_input_text_payment_secret_ref_direct_fill_waits_for_ready",
+        test_execute_input_text_payment_secret_ref_waits_for_page_ready_before_retry,
+    )
+    await r.record_async(
+        "execute_input_text_payment_secret_ref_direct_fill_cdp",
+        test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_without_page,
+    )
+    await r.record_async(
+        "execute_input_text_payment_secret_ref_selector_recovery",
+        test_execute_input_text_payment_secret_ref_recovers_dead_backend_node_with_selector,
+    )
+    await r.record_async(
+        "execute_input_text_secret_redacts", test_execute_input_text_secret_redacts
+    )
     await r.record_async(
         "execute_input_text_credential_ref",
         test_execute_input_text_secret_returns_credential_ref,
@@ -9132,6 +9751,14 @@ async def run_all_tests():
     await r.record_async(
         "execute_goto_injects_ls_error",
         test_execute_goto_injects_local_storage_swallows_error,
+    )
+    await r.record_async(
+        "navigation_ready_reloads_blank_spa",
+        test_wait_for_navigation_ready_reloads_blank_spa_shell_once,
+    )
+    await r.record_async(
+        "navigation_ready_regotos_loading_doc",
+        test_wait_for_navigation_ready_regotos_stuck_loading_document_once,
     )
 
     await r.record_async("execute_extract_disabled", test_execute_extract_disabled)

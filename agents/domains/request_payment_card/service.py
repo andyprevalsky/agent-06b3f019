@@ -31,7 +31,9 @@ def _to_int(value: Any) -> int:
     return 0
 
 
-def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[str, Any]:
+def normalize_payment_payload(
+    tool_call: Dict[str, Any], user_id: str, agent_id: str | None = None
+) -> Dict[str, Any]:
     line_items = []
     for item in _to_list(tool_call.get("line_items") or tool_call.get("lineItems")):
         if not isinstance(item, dict):
@@ -59,6 +61,7 @@ def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[s
 
     payload = {
         "userId": user_id,
+        "agentId": agent_id,
         "merchant": str(tool_call.get("merchant") or "").strip(),
         "currency": str(tool_call.get("currency") or "USD").upper(),
         "lineItems": line_items,
@@ -73,6 +76,7 @@ def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[s
 def build_payment_fingerprint(payload: Dict[str, Any]) -> str:
     stable = {
         "userId": payload.get("userId"),
+        "agentId": payload.get("agentId"),
         "merchant": str(payload.get("merchant") or "").strip().lower(),
         "currency": payload.get("currency", "USD"),
         "lineItems": payload.get("lineItems") or [],

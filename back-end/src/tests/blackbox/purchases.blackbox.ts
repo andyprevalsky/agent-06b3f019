@@ -25,6 +25,10 @@ import {
   assert,
   assertStatus,
   FakeCardProvider,
+  FakeWalletFundingProvider,
+  FailingDetailsCardProvider,
+  FailingMintCardProvider,
+  FundingInProgressCardProvider,
   RepurchaseProvider,
   StubCardStateProvider,
   seedHeldPurchase,
@@ -186,15 +190,18 @@ const tests: Array<[string, () => Promise<void>]> = [
       const userId = await createSubscribedUser('service-idempotent');
       const fingerprint = `service-idempotent-${randomUUID()}`;
       const provider = new FakeCardProvider();
+      const walletFundingProvider = new FakeWalletFundingProvider();
 
       await withFakeStripe(async (calls) => {
         const first = await purchasesService.mintPurchaseCard(
           validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
-          provider
+          provider,
+          walletFundingProvider
         );
         const second = await purchasesService.mintPurchaseCard(
           validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
-          provider
+          provider,
+          walletFundingProvider
         );
 
         assert(first.cardId === provider.cardId, 'first mint should return fake card id');
@@ -210,6 +217,18 @@ const tests: Array<[string, () => Promise<void>]> = [
         );
         assert(provider.mintCalls === 1, `expected one provider mint, got ${provider.mintCalls}`);
         assert(
+          provider.mintRequests[0]?.fundsSource === 'company_flow',
+          'purchase card should request AgentCard company_flow funding'
+        );
+        assert(
+          walletFundingProvider.fundCalls.length === 0,
+          `company_flow should not pre-fund the user wallet, got ${walletFundingProvider.fundCalls.length}`
+        );
+        assert(
+          walletFundingProvider.confirmCalls.length === 0,
+          `auto-approved company flow should not call confirm_collection, got ${walletFundingProvider.confirmCalls.length}`
+        );
+        assert(
           provider.detailCalls === 2,
           `expected details for both responses, got ${provider.detailCalls}`
         );
@@ -224,6 +243,15 @@ const tests: Array<[string, () => Promise<void>]> = [
           row?.stripePaymentIntentId !== null,
           'purchase spend should store the payment intent id'
         );
+        const funding = await prisma.purchaseWalletFunding.findUnique({
+          where: { purchaseId: row?.id ?? '' },
+        });
+        assert(funding !== null, 'purchase should record AgentCard wallet funding');
+        assert(funding?.status === 'FUNDED', `expected wallet funding FUNDED, got ${funding?.status}`);
+        assert(
+          funding?.providerTransferId === provider.providerTransferId,
+          'wallet funding should record provider transfer id'
+        );
         assert(
           calls.charges[0].includes('"statement_descriptor_suffix":"Test Merchant"'),
           'charge should set merchant descriptor suffix'
@@ -232,9 +260,48 @@ const tests: Array<[string, () => Promise<void>]> = [
           calls.charges[0].includes('"capture_method":"manual"'),
           'mint must authorize a manual-capture hold, not an immediate charge'
         );
+        assert(calls.captures.length === 1, 'funding completion must capture the hold once');
+        assert(calls.cancels.length === 0, 'successful funding must not cancel the hold');
+      });
+    },
+  ],
+  [
+    'service confirms AgentCard company-wallet collection and retries mint',
+    async () => {
+      const userId = await createSubscribedUser('service-company-confirm');
+      const fingerprint = `service-company-confirm-${randomUUID()}`;
+      const provider = new FundingInProgressCardProvider();
+      const walletFundingProvider = new FakeWalletFundingProvider();
+
+      await withFakeStripe(async () => {
+        const result = await purchasesService.mintPurchaseCard(
+          validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
+          provider,
+          walletFundingProvider
+        );
+
+        assert(result.cardId === provider.cardId, 'retry should return minted card');
+        assert(provider.mintCalls === 2, `expected two mint attempts, got ${provider.mintCalls}`);
         assert(
-          calls.captures.length === 0 && calls.cancels.length === 0,
-          'minting alone must not capture or cancel the hold'
+          walletFundingProvider.confirmCalls.length === 1,
+          `expected one confirm_collection, got ${walletFundingProvider.confirmCalls.length}`
+        );
+        assert(
+          walletFundingProvider.confirmCalls[0]?.providerTransferId === provider.providerTransferId,
+          'confirm_collection should use AgentCard transfer id'
+        );
+
+        const row = await prisma.purchaseSpend.findFirst({
+          where: { userId, fingerprint },
+          orderBy: { createdAt: 'desc' },
+        });
+        const funding = await prisma.purchaseWalletFunding.findUnique({
+          where: { purchaseId: row?.id ?? '' },
+        });
+        assert(funding?.status === 'FUNDED', `expected FUNDED, got ${funding?.status}`);
+        assert(
+          funding?.providerTransferId === provider.providerTransferId,
+          'funding row should retain confirmed transfer id'
         );
       });
     },
@@ -306,15 +373,25 @@ const tests: Array<[string, () => Promise<void>]> = [
       const consumedCardId = `held-card-${randomUUID()}`;
       const seeded = await seedHeldPurchase(userId, fingerprint, consumedCardId);
       const provider = new RepurchaseProvider(consumedCardId);
+      const walletFundingProvider = new FakeWalletFundingProvider();
 
       await withFakeStripe(async (calls) => {
         const result = await purchasesService.mintPurchaseCard(
           validMintBody({ userId, fingerprint, totalCents: 1080 }) as never,
-          provider
+          provider,
+          walletFundingProvider
         );
         assert(result.cardId === provider.newCardId, 're-purchase should mint a NEW card');
         assert(provider.mintCalls === 1, 'should mint exactly one new card');
         assert(calls.charges.length === 1, 're-purchase should charge exactly once');
+        assert(
+          provider.mintRequests[0]?.fundsSource === 'company_flow',
+          're-purchase should request AgentCard company_flow funding'
+        );
+        assert(
+          walletFundingProvider.fundCalls.length === 0,
+          're-purchase should not pre-fund the user wallet'
+        );
 
         const oldRow = await prisma.purchaseSpend.findUnique({ where: { id: seeded.id } });
         assert(
@@ -325,6 +402,204 @@ const tests: Array<[string, () => Promise<void>]> = [
         assert(rows.length === 2, `expected 2 rows for the re-bought cart, got ${rows.length}`);
         const held = rows.find((r) => r.status === PurchaseSpendStatus.HELD);
         assert(held?.cardId === provider.newCardId, 'the new row should hold the new card');
+      });
+    },
+  ],
+  [
+    'mint cancels the Stripe hold if AgentCard card issuance fails before company transfer',
+    async () => {
+      const userId = await createSubscribedUser('mint-card-failure');
+      const fingerprint = `mint-card-failure-${randomUUID()}`;
+      const provider = new FailingMintCardProvider();
+      const walletFundingProvider = new FakeWalletFundingProvider();
+
+      await withFakeStripe(async (calls) => {
+        let threw = false;
+        try {
+          await purchasesService.mintPurchaseCard(
+            validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
+            provider,
+            walletFundingProvider
+          );
+        } catch (error) {
+          threw = true;
+          assert(
+            error instanceof Error && error.message.includes('card mint failed'),
+            `unexpected error: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+
+        assert(threw, 'mint should throw when card issuance fails');
+        assert(
+          walletFundingProvider.fundCalls.length === 0,
+          'company_flow should not pre-fund the user wallet'
+        );
+        assert(
+          walletFundingProvider.reclaimCalls.length === 0,
+          'no AgentCard funding should be reclaimed before create_card returns a transfer'
+        );
+        assert(calls.cancels.length === 1, 'Stripe hold should be canceled');
+
+        const row = await prisma.purchaseSpend.findFirst({
+          where: { userId, fingerprint },
+          orderBy: { createdAt: 'desc' },
+        });
+        assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);
+        const funding = await prisma.purchaseWalletFunding.findUnique({
+          where: { purchaseId: row?.id ?? '' },
+        });
+        assert(funding === null, 'no wallet funding row should be created before a transfer exists');
+      });
+    },
+  ],
+  [
+    'mint reclaims the issued AgentCard and refunds Stripe if detail retrieval fails after funding',
+    async () => {
+      const userId = await createSubscribedUser('mint-details-failure');
+      const fingerprint = `mint-details-failure-${randomUUID()}`;
+      const provider = new FailingDetailsCardProvider();
+      const walletFundingProvider = new FakeWalletFundingProvider();
+
+      await withFakeStripe(async (calls) => {
+        let errorMessage = '';
+        try {
+          await purchasesService.mintPurchaseCard(
+            validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
+            provider,
+            walletFundingProvider
+          );
+        } catch (error) {
+          errorMessage = error instanceof Error ? error.message : String(error);
+        }
+        assert(errorMessage.includes('card details failed'), `unexpected error: ${errorMessage}`);
+        assert(provider.closeCalls === 1, 'issued AgentCard should be closed after detail failure');
+        assert(calls.captures.length === 1, 'AgentCard funding should capture Stripe before details');
+        assert(calls.cancels.length === 0, 'a captured Stripe payment must not be canceled');
+        assert(calls.refunds.length === 1, 'captured Stripe payment should be refunded once');
+        assert(
+          walletFundingProvider.reclaimCalls.length === 1,
+          'AgentCard company transfer should be reclaimed before refunding Stripe'
+        );
+        const row = await prisma.purchaseSpend.findFirst({
+          where: { userId, fingerprint },
+          orderBy: { createdAt: 'desc' },
+        });
+        assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);
+        assert(
+          calls.refundIdempotencyKeys[0] === `purchase-refund:${row?.id}`,
+          'refund must use the purchase-scoped idempotency key'
+        );
+        const funding = await prisma.purchaseWalletFunding.findUnique({
+          where: { purchaseId: row?.id ?? '' },
+        });
+        assert(
+          funding?.status === 'RECLAIMED',
+          `expected wallet funding RECLAIMED, got ${funding?.status}`
+        );
+      });
+    },
+  ],
+  [
+    'mint recovers stale charging rows before retrying the same cart',
+    async () => {
+      const userId = await createSubscribedUser('stale-charging-retry');
+      const fingerprint = `stale-charging-${randomUUID()}`;
+      const oldPurchase = await prisma.purchaseSpend.create({
+        data: {
+          userId,
+          fingerprint,
+          merchant: 'Stale Merchant',
+          lineItemsJson: { totalCents: 1000 },
+          totalCents: 1000,
+          status: PurchaseSpendStatus.CHARGING,
+          stripePaymentIntentId: `pi_stale_${randomUUID()}`,
+          updatedAt: new Date(Date.now() - 60 * 60 * 1000),
+        },
+      });
+      await prisma.purchaseWalletFunding.create({
+        data: {
+          purchaseId: oldPurchase.id,
+          userId,
+          amountCents: 1000,
+          currency: 'usd',
+          status: 'FUNDED',
+          providerTransferId: `wft_stale_${randomUUID()}`,
+          idempotencyKey: `purchase-wallet-fund:${oldPurchase.id}`,
+        },
+      });
+      const provider = new FakeCardProvider();
+      const walletFundingProvider = new FakeWalletFundingProvider();
+
+      await withFakeStripe(async (calls) => {
+        const result = await purchasesService.mintPurchaseCard(
+          validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
+          provider,
+          walletFundingProvider
+        );
+
+        assert(result.cardId === provider.cardId, 'retry should mint a fresh card');
+        assert(calls.cancels.length === 1, 'stale Stripe hold should be canceled');
+        assert(calls.charges.length === 1, 'retry should create one fresh Stripe hold');
+        assert(
+          walletFundingProvider.reclaimCalls.length === 1,
+          'stale wallet funding should be reclaimed'
+        );
+        assert(
+          provider.mintRequests[0]?.fundsSource === 'company_flow',
+          'retry should request company_flow for the fresh purchase'
+        );
+        assert(
+          walletFundingProvider.fundCalls.length === 0,
+          'retry should not pre-fund the user wallet'
+        );
+
+        const oldRow = await prisma.purchaseSpend.findUnique({ where: { id: oldPurchase.id } });
+        assert(oldRow?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${oldRow?.status}`);
+        const newRow = await prisma.purchaseSpend.findFirst({
+          where: { userId, fingerprint, status: PurchaseSpendStatus.HELD },
+          orderBy: { createdAt: 'desc' },
+        });
+        assert(newRow !== null, 'retry should create a new HELD purchase row');
+        assert(newRow?.id !== oldPurchase.id, 'retry must not reuse the reclaimed funding row');
+      });
+    },
+  ],
+  [
+    'mint retries failed rows with a fresh purchase idempotency boundary',
+    async () => {
+      const userId = await createSubscribedUser('failed-retry-fresh-row');
+      const fingerprint = `failed-retry-${randomUUID()}`;
+      const oldPurchase = await prisma.purchaseSpend.create({
+        data: {
+          userId,
+          fingerprint,
+          merchant: 'Failed Merchant',
+          lineItemsJson: { totalCents: 1000 },
+          totalCents: 1000,
+          status: PurchaseSpendStatus.FAILED,
+        },
+      });
+      const provider = new FakeCardProvider();
+      const walletFundingProvider = new FakeWalletFundingProvider();
+
+      await withFakeStripe(async (calls) => {
+        const result = await purchasesService.mintPurchaseCard(
+          validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
+          provider,
+          walletFundingProvider
+        );
+
+        assert(result.cardId === provider.cardId, 'retry should mint a card');
+        assert(calls.charges.length === 1, 'retry should create one fresh Stripe hold');
+
+        const oldRow = await prisma.purchaseSpend.findUnique({ where: { id: oldPurchase.id } });
+        assert(oldRow?.status === PurchaseSpendStatus.FAILED, 'old failed row must stay failed');
+        const newRow = await prisma.purchaseSpend.findFirst({
+          where: { userId, fingerprint, status: PurchaseSpendStatus.HELD },
+          orderBy: { createdAt: 'desc' },
+        });
+        assert(newRow !== null, 'retry should create a new HELD purchase row');
+        assert(newRow?.id !== oldPurchase.id, 'retry must not reuse the failed purchase row');
       });
     },
   ],

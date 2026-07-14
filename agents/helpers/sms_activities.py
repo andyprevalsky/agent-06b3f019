@@ -134,7 +134,7 @@ async def _notify_sms_event_real(user_id: str, event_type: str, agent_id: str, p
     """
     Send a lifecycle SMS notification via the backend /api/send-sms/notify endpoint.
 
-    Event types: agent_started, planner_message, write_lock, completion, cost_limit
+    Event types: agent_started, planner_message, write_lock, agentcard_setup, completion, cost_limit
 
     Args:
         user_id: User ID

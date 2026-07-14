@@ -69,6 +69,7 @@ CHANGED_RESEARCH=$(echo "$CHANGED" | grep -E '^research/' || true)
 CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
 CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
 CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS$CHANGED_RESEARCH" ] && echo "yes" || echo "")
+CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
 ```
 
 ## Step 0p: Prompt human-approval guard (no skip — always runs)
@@ -299,9 +300,12 @@ if [ -z "$CONDUCTOR_PORT" ]; then
   exit 1
 fi
 
+export CONDUCTOR_WORKSPACE_NAME="${CONDUCTOR_WORKSPACE_NAME:-$(basename "$(git rev-parse --show-toplevel)")}"
+
 export SMOKE_BASE_URL="http://localhost:$CONDUCTOR_PORT"
 export SMOKE_HEALTH_URL="http://localhost:$((CONDUCTOR_PORT + 2))"
 export SMOKE_RESEARCH_URL="http://localhost:$((CONDUCTOR_PORT + 3))"
+export SMOKE_FRONTEND_URL="http://localhost:$((CONDUCTOR_PORT + 1))"
 
 cd "$(git rev-parse --show-toplevel)"
 ```
@@ -311,7 +315,7 @@ cd "$(git rev-parse --show-toplevel)"
 ```bash
 # Step 1: Ensure DB is running BEFORE run.sh starts (so run.sh won't own/stop it)
 DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"
-LOCAL_DB_PORT=$((CONDUCTOR_PORT + 10))
+LOCAL_DB_PORT=$((CONDUCTOR_PORT + 5))
 
 if ! docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
   if docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
@@ -336,10 +340,14 @@ echo "DB pre-started: $DB_CONTAINER on port $LOCAL_DB_PORT"
 
 ```bash
 # Step 2: Launch run.sh using the Bash tool's run_in_background parameter.
+# Keep all service output redirected so the managed session cannot exhaust its output budget.
 # run.sh will detect the DB as already-running and won't stop it on cleanup.
 # Use run_in_background=true for this command:
-DISABLE_GMAIL_SYNC=1 bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1
+BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 \
+  bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1
 ```
+
+Poll the background Bash call at least every 30 seconds while Steps 5-6b run. This keeps the managed process session active without streaming the high-volume service logs; use `.context/deploy-smoke.log` only for targeted diagnosis.
 
 Then, in separate (foreground) Bash calls, wait for each service:
 
@@ -350,16 +358,9 @@ for i in $(seq 1 60); do curl -s "$SMOKE_HEALTH_URL/health" > /dev/null 2>&1 && 
 for i in $(seq 1 60); do curl -s "$SMOKE_RESEARCH_URL/functions/v1/completions" > /dev/null 2>&1 && break; sleep 2; done
 ```
 
-**Also start the frontend dev server** (required by Step 6b semantic tests). `run.sh --benchmark` intentionally skips the front-end, so launch it as a sibling background process:
+`BENCHMARK_BUNDLED_FRONTEND=true` builds and serves the frontend through Vite preview as part of the managed `run.sh` tree. The bundled server is required for browser-agent lifecycle tests; the module-by-module development server is not reliable through the benchmark tunnel.
 
 ```bash
-# Start front-end dev server in a separate background process (needed for semantic tests).
-# run_in_background=true for this command:
-(cd front-end && VITE_PORT=$((CONDUCTOR_PORT + 1)) npm run dev > frontend-logs.log 2>&1)
-```
-
-```bash
-export SMOKE_FRONTEND_URL="http://localhost:$((CONDUCTOR_PORT + 1))"
 for i in $(seq 1 60); do curl -sf "$SMOKE_FRONTEND_URL" > /dev/null 2>&1 && break; sleep 2; done
 ```
 
@@ -628,7 +629,7 @@ fi
 
 If benchmarks **fail**: do NOT delete agents yet — keep them alive for diagnosis. Diagnose and fix the issue first (see below), then delete agents, then teardown, then re-run from the top of the Test Loop.
 
-**After cleanup (or after diagnosis on failure), run the teardown helper from Step 5.**
+**After smoke-agent cleanup, keep the stack running for Steps 6a and 6b. Run the Step 5 teardown only after both gates finish, or immediately when either gate fails.**
 
 ### Diagnosing failures
 
@@ -654,6 +655,39 @@ cd agents && python benchmarks/run_benchmark.py --compare <run_a.json> <run_b.js
 ```
 
 Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree, or `agent_logs.py <agent_id> --tree --source worker|backend|research|messages` for per-source raw events.
+
+## Step 6a: AgentCard sandbox lifecycle gate
+
+Skip only when `$CHANGED_AGENTCARD_PAYMENT` is empty. Otherwise, tear down the shared Step 5 stack, then run each payment lifecycle task in its own bounded stack through the agent benchmark harness. **Execute each command below as a separate foreground Bash call; do not combine them into a loop or one tool call.** The launcher owns startup, bundled frontend readiness, benchmark execution, and teardown, preventing process-session limits or stale workers from interrupting another lifecycle.
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+bash scripts/kill-services.sh
+```
+
+```bash
+CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
+  bash scripts/run-agentcard-lifecycle-task.sh agent-payment-test-shop --bootstrap
+```
+
+```bash
+CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
+  bash scripts/run-agentcard-lifecycle-task.sh agent-payment-setup-resume
+```
+
+```bash
+CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
+  bash scripts/run-agentcard-lifecycle-task.sh agent-payment-idempotent-abandonment
+```
+
+```bash
+CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
+  bash scripts/run-agentcard-lifecycle-task.sh agent-payment-abandonment
+```
+
+The first bootstrap command must also report an AgentCard sandbox pool of at least $500. This is test-only float provisioned through the authenticated admin session; it does not bypass Organization MCP in the purchase path. All four tasks must pass with their full purchase, Stripe, AgentCard card, organization transfer, attention, and cleanup assertions. A missing lifecycle snapshot, skipped task, unreclaimed abandonment transfer, or unrefunded Stripe capture blocks deploy. Record the four task results and total cost in `TEST_REPORT`.
+
+After all four pass, relaunch the Step 5 stack and readiness checks before Step 6b. Keep that background Bash call actively polled as described in Step 5.
 
 ## Step 6b: Semantic tests + fix
 
@@ -690,6 +724,8 @@ If Chromium is missing, install once: `cd front-end && npx playwright install ch
 2. Check `front-end/frontend-logs.log`, `back-end/backend-logs.log`, `agents/navi-worker-log.txt` for backend-side errors that correlate with the UI failure.
 3. Fix the root cause in code.
 4. Restart services (Step 5) and re-run the failed semantic test.
+
+After Steps 6a and 6b pass, run the mandatory Step 5 teardown. If either fails, preserve the failed agent long enough to collect diagnostics, complete any payment lifecycle cleanup, then tear down before restarting the Test Loop.
 
 ---
 
@@ -730,6 +766,10 @@ If Chromium is missing, install once: `cd front-end && npx playwright install ch
 # ║ limited to safe paths; if ANY must-run path is touched, smoke ║
 
 # ║ is required) ║
+
+# ║ 6a. AgentCard sandbox lifecycle: 4/4 pass whenever the payment ║
+
+# ║ lifecycle surface changed ║
 
 # ║ 6b. Semantic tests: 100% pass whenever smoke ran (skip together ║
 
@@ -1137,6 +1177,23 @@ sys.exit(1 if bad else 0)
 If this exits non-zero, the deploy is **unhealthy even though it's live** — treat as a deploy failure: diagnose the error (most likely a schema/migration mismatch or missing env var — see the 2026-06-27 incident for the migration-vs-DB drift pattern), fix it, new PR, continue from Step 9. Do NOT proceed to Step 14 with errors in the prod log.
 
 **Migration-specific note:** if the error is a Prisma "column/table does not exist", the deployed code expects a schema the prod DB doesn't have. Verify the migration is both present in `back-end/prisma/migrations/` AND actually applied to prod (the migration row in `_prisma_migrations` can be marked applied while the column is absent if a stray `prisma db push` from another workspace dropped it — `back-end/.env` `DATABASE_URL` points at prod). Re-apply the missing DDL idempotently (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`) and re-run Step 2.
+
+## Step 13b: AgentCard production lifecycle gate
+
+Skip only when `$CHANGED_AGENTCARD_PAYMENT` is empty. Run after both the backend and frontend merged commits are live:
+
+```bash
+cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
+python benchmarks/run_benchmark.py \
+  --task agent-payment-production-abandonment \
+  --prod \
+  --ci \
+  --bootstrap
+```
+
+This production-only task reserves exactly $0.50 from the existing AgentCard organization float, captures the matching live Stripe payment, issues a live AgentCard, and deliberately leaves merchant checkout unsubmitted. The benchmark must then close the card, observe the organization transfer as `reclaimed` with `livemode=true`, refund the Stripe capture, and report no open payment attention request.
+
+The runner performs the abandon/reclaim/refund action idempotently on success, failure, cancellation, and verifier errors before deleting the benchmark agent. Any missing cleanup snapshot or non-terminal lifecycle state fails the command. Do not declare the deploy complete until this task passes; if the process is forcibly killed, recover the printed agent ID through `/api/test-payment/lifecycle/abandon` and verify the same terminal assertions before rerunning.
 
 ## Step 14: New branch
 

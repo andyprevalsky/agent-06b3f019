@@ -1133,6 +1133,7 @@ enum PurchaseSpendStatus {
   FAILED
   CAPTURE_FAILED
   FUNDING_RECLAIM_FAILED
+  REFUND_FAILED
 }
 
 enum PurchaseWalletFundingStatus {
@@ -1217,4 +1218,3 @@ model SmsShortcode {
   @@index([userId])
   @@index([expiresAt])
 }
-

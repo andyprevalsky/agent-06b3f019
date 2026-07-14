@@ -43,7 +43,6 @@ import {
   RefreshCw,
   Cloud,
   LifeBuoy,
-  VenetianMask,
   CreditCard,
   type LucideIcon,
 } from 'lucide-react';
@@ -78,8 +77,8 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   // Main agent tools
   spawn_agent: Cloud, // Spawn cloud agent (persistent, fault-tolerant environment)
   grep: FileSearch, // Local data search (message threads)
-  browser_agent: VenetianMask, // Stealth browser agent (humanized/undetectable)
-  spawn_browser_agent: VenetianMask,
+  browser_agent: Globe,
+  spawn_browser_agent: Globe,
   send_sms: MessageSquare,
   send_sms_as_user: MessageSquare,
   send_email: Mail,

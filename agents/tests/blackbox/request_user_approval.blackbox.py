@@ -86,6 +86,36 @@ async def test_create_approval_minimal_params():
     assert "metadata" not in body
 
 
+async def test_resolve_attention_request_boundary():
+    """resolve_attention_request_activity marks an existing attention request answered."""
+    setup_mock({
+        "/api/attention-requests/req-setup/respond": {
+            "status": 200,
+            "json": {"success": True, "request_id": "req-setup"},
+        },
+    })
+    with patch("temporalio.activity.heartbeat"):
+        from tools.request_user_approval import resolve_attention_request_activity
+
+        result = await resolve_attention_request_activity(
+            "user-123",
+            "req-setup",
+            "AgentCard setup completed.",
+        )
+
+    assert result["success"] is True
+    assert result["request_id"] == "req-setup"
+    call = assert_captured_call(
+        url_contains="/api/attention-requests/req-setup/respond",
+        method="POST",
+        header_present="X-API-Key",
+    )
+    body = json.loads(call["requestBody"])
+    headers = {k.lower(): v for k, v in call["requestHeaders"].items()}
+    assert body["response"] == "AgentCard setup completed."
+    assert headers["x-user-id"] == "user-123"
+
+
 async def test_user_rejected_error_defaults():
     """UserRejectedError has default rejection message of empty string."""
     from domains.request_user_approval.types import UserRejectedError
@@ -431,12 +461,83 @@ async def test_direct_sms_source_attempts_sms_notify():
     assert payload["metadata"]["writeLockNotification"]["action"] == "Buy item"
 
 
+async def test_direct_attention_returns_without_waiting_and_emits_attention_metadata():
+    """Non-blocking attention handoffs create a request and post an in-progress user attention event."""
+    from domains.request_user_approval.service import request_user_attention_direct
+
+    wf = _WFInstance()
+    fake = _FakeWFModule(activity_results={"create_approval_request_activity": "req-setup"})
+    restore = _patch_service_workflow(fake)
+    try:
+        result = await request_user_attention_direct(
+            workflow_instance=wf,
+            question="One Time Agent Payment Setup is required.\n\nOpen this setup link:\nhttps://rose.test/setup",
+            title="One Time Agent Payment Setup",
+            metadata={
+                "attentionKind": "agentcard_user_connect_required",
+                "agentCardSetup": {
+                    "status": "connect_required",
+                    "setupUrl": "https://rose.test/setup",
+                },
+            },
+        )
+    finally:
+        restore()
+
+    assert result["attention_request_id"] == "req-setup"
+    assert len(wf.handled_events) == 1
+    event, _tool_call_id, _tool_name = wf.handled_events[0]
+    assert event.title == "One Time Agent Payment Setup"
+    assert event.status.name == "IN_PROGRESS"
+    assert event.metadata["isUserAttentionMessage"] is True
+    assert event.metadata["attentionKind"] == "agentcard_user_connect_required"
+    assert event.metadata["attentionRequestId"] == "req-setup"
+    assert event.metadata["agentCardSetup"]["status"] == "connect_required"
+
+
+async def test_direct_attention_sms_source_sends_agentcard_setup_notify():
+    """AgentCard setup handoffs propagate through SMS for SMS-source root agents."""
+    from domains.request_user_approval.service import request_user_attention_direct
+
+    wf = _WFInstance()
+    wf.agent_source = "SMS"
+    wf.parent_workflow_id = None
+    activity_calls = []
+
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": "req-setup-sms",
+            "notify_sms_event_activity": lambda: activity_calls.append("notify") or None,
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        await request_user_attention_direct(
+            workflow_instance=wf,
+            question="One Time Agent Payment Setup is required.",
+            title="One Time Agent Payment Setup",
+            metadata={"attentionKind": "agentcard_user_connect_required"},
+            sms_event_type="agentcard_setup",
+            sms_payload={"setup_url": "https://rose.test/setup"},
+        )
+    finally:
+        restore()
+
+    assert "notify" in activity_calls
+    notify_call = next(c for c in fake.activity_calls if c["name"] == "notify_sms_event_activity")
+    assert notify_call["args"][1] == "agentcard_setup"
+    payload = notify_call["args"][3]
+    assert payload["attention_request_id"] == "req-setup-sms"
+    assert payload["setup_url"] == "https://rose.test/setup"
+
+
 async def run_all_tests():
     print("request-user-approval blackbox tests:")
     r = BlackboxResult()
     await r.record_async("happy_path", test_create_approval_happy_path)
     await r.record_async("boundary", test_create_approval_boundary)
     await r.record_async("minimal_params", test_create_approval_minimal_params)
+    await r.record_async("resolve_attention_boundary", test_resolve_attention_request_boundary)
     await r.record_async("user_rejected_defaults", test_user_rejected_error_defaults)
     await r.record_async("user_rejected_custom", test_user_rejected_error_custom)
     await r.record_async("manager_singleton", test_manager_singleton)
@@ -448,6 +549,8 @@ async def run_all_tests():
     await r.record_async("direct_approval", test_direct_approval_returns_response_text)
     await r.record_async("direct_create_fail", test_direct_create_failure_propagates)
     await r.record_async("direct_sms_notify", test_direct_sms_source_attempts_sms_notify)
+    await r.record_async("direct_attention", test_direct_attention_returns_without_waiting_and_emits_attention_metadata)
+    await r.record_async("direct_attention_sms", test_direct_attention_sms_source_sends_agentcard_setup_notify)
     teardown_mock()
     return r.all_passed
 

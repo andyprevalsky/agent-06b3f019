@@ -1,0 +1,290 @@
+import {
+  AgentCardOrgRuntimeError,
+  callOrgTool,
+  type AgentCardOrgToolCaller,
+} from './agentcard/org-runtime';
+import { createLogger } from './logger';
+
+const log = createLogger('WalletFunding');
+const RELEASE_LOOKUP_ATTEMPTS = 20;
+const RELEASE_LOOKUP_DELAY_MS = 3_000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export interface WalletFundingRequest {
+  userId: string;
+  agentId?: string;
+  purchaseId: string;
+  amountCents: number;
+  currency: string;
+  idempotencyKey: string;
+}
+
+export interface WalletFundingResult {
+  providerTransferId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface WalletFundingCollectionRequest extends WalletFundingRequest {
+  providerTransferId: string;
+  outcome: 'succeeded' | 'failed';
+}
+
+export interface WalletFundingReclaimRequest extends WalletFundingRequest {
+  providerTransferId?: string;
+  cardId?: string;
+  reason: string;
+}
+
+export interface WalletFundingProvider {
+  /**
+   * Legacy hook retained for older call sites. Company-flow funding is now triggered by
+   * AgentCard create_card; Rose only confirms collection once AgentCard returns transfer_id.
+   */
+  fundUserWallet(request: WalletFundingRequest): Promise<WalletFundingResult>;
+  confirmCollection(request: WalletFundingCollectionRequest): Promise<WalletFundingResult>;
+  reclaimUserWalletFunding(request: WalletFundingReclaimRequest): Promise<WalletFundingResult>;
+}
+
+export class WalletFundingProviderError extends Error {
+  constructor(
+    message: string,
+    readonly status = 502,
+    readonly code = 'agentcard_wallet_funding_failed',
+    readonly details?: Record<string, unknown>
+  ) {
+    super(message);
+    this.name = 'WalletFundingProviderError';
+  }
+}
+
+export function isWalletFundingReleasePendingError(error: unknown): boolean {
+  return (
+    error instanceof WalletFundingProviderError &&
+    error.code === 'agentcard_company_transfer_release_pending'
+  );
+}
+
+export function isWalletFundingConsumedDuringReclaimError(error: unknown): boolean {
+  return (
+    error instanceof WalletFundingProviderError &&
+    error.code === 'agentcard_company_transfer_consumed_during_reclaim'
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (typeof value === 'object' && value !== null) return value as Record<string, unknown>;
+  return {};
+}
+
+function resultRecord(result: unknown): Record<string, unknown> {
+  const envelope = asRecord(result);
+  if (envelope.toolResult !== undefined) return asRecord(envelope.toolResult);
+  if (envelope.structuredContent !== undefined) return asRecord(envelope.structuredContent);
+  const content = envelope.content;
+  if (Array.isArray(content)) {
+    const text = content
+      .map((part) => asRecord(part))
+      .filter((part) => part.type === 'text' && typeof part.text === 'string')
+      .map((part) => String(part.text).trim())
+      .filter(Boolean)
+      .join('\n');
+    if (text !== '') {
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        return asRecord(parsed);
+      } catch {
+        return { message: text };
+      }
+    }
+  }
+  return envelope;
+}
+
+function assertToolSuccess(toolName: string, result: unknown): Record<string, unknown> {
+  const envelope = asRecord(result);
+  const record = resultRecord(result);
+  const status = record.status;
+  const code = record.code ?? record.error;
+  if (envelope.isError === true || status === 'error' || status === 'failed') {
+    const message =
+      typeof record.message === 'string'
+        ? record.message
+        : `AgentCard company wallet tool ${toolName} failed`;
+    throw new WalletFundingProviderError(message, 502, 'agentcard_company_wallet_failed', {
+      toolName,
+      code,
+    });
+  }
+  return record;
+}
+
+function transferMetadata(
+  request: WalletFundingCollectionRequest | WalletFundingReclaimRequest,
+  extra: Record<string, unknown>
+): Record<string, unknown> {
+  return {
+    provider: 'agentcard',
+    purchase_id: request.purchaseId,
+    user_id: request.userId,
+    amount_cents: request.amountCents,
+    currency: request.currency,
+    ...(request.agentId !== undefined ? { agent_id: request.agentId } : {}),
+    ...(request.providerTransferId !== undefined
+      ? { transfer_id: request.providerTransferId }
+      : {}),
+    ...extra,
+  };
+}
+
+function maskId(value: string): string {
+  if (value.length <= 8) return value;
+  return `${value.slice(0, 4)}...${value.slice(-4)}`;
+}
+
+/**
+ * Confirms AgentCard company-wallet collection through Organization MCP.
+ *
+ * Funds now move as part of AgentCard create_card(company_flow). Rose's responsibility is to
+ * confirm that our Stripe hold succeeded for the returned transfer_id. Closing an unused card is
+ * still handled by close_card; AgentCard emits transfer.released and keeps unused spending power as
+ * headroom for that user.
+ */
+export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvider {
+  constructor(
+    private readonly toolCaller: AgentCardOrgToolCaller = callOrgTool,
+    private readonly releaseRetry: {
+      attempts: number;
+      delayMs: number;
+      replayCloseEvery: number;
+    } = {
+      attempts: RELEASE_LOOKUP_ATTEMPTS,
+      delayMs: RELEASE_LOOKUP_DELAY_MS,
+      replayCloseEvery: 5,
+    }
+  ) {}
+
+  async fundUserWallet(request: WalletFundingRequest): Promise<WalletFundingResult> {
+    log.info('Company-flow card creation will trigger AgentCard wallet funding', {
+      user_id: maskId(request.userId),
+      purchase_id: request.purchaseId,
+      amount_cents: request.amountCents,
+    });
+    return {
+      metadata: {
+        provider: 'agentcard',
+        funding_model: 'company_flow',
+        status: 'awaiting_create_card_transfer',
+      },
+    };
+  }
+
+  async confirmCollection(request: WalletFundingCollectionRequest): Promise<WalletFundingResult> {
+    log.info('Confirming AgentCard company-wallet collection', {
+      user_id: maskId(request.userId),
+      purchase_id: request.purchaseId,
+      transfer_id: maskId(request.providerTransferId),
+      outcome: request.outcome,
+    });
+    let result: unknown;
+    try {
+      result = await this.toolCaller('confirm_collection', {
+        transfer_id: request.providerTransferId,
+        outcome: request.outcome,
+      });
+    } catch (error) {
+      if (error instanceof AgentCardOrgRuntimeError) {
+        throw new WalletFundingProviderError(
+          error.message,
+          error.status,
+          error.code,
+          error.details
+        );
+      }
+      throw error;
+    }
+    const record = assertToolSuccess('confirm_collection', result);
+    return {
+      providerTransferId: request.providerTransferId,
+      metadata: transferMetadata(request, {
+        status: 'collection_confirmed',
+        outcome: request.outcome,
+        agentcard_result: record,
+      }),
+    };
+  }
+
+  async reclaimUserWalletFunding(
+    request: WalletFundingReclaimRequest
+  ): Promise<WalletFundingResult> {
+    log.info('Recording AgentCard company-wallet funding release request', {
+      user_id: maskId(request.userId),
+      purchase_id: request.purchaseId,
+      transfer_id:
+        request.providerTransferId !== undefined ? maskId(request.providerTransferId) : undefined,
+      reason: request.reason,
+    });
+    if (request.providerTransferId === undefined) {
+      throw new WalletFundingProviderError(
+        'AgentCard company transfer id is required to confirm funding release',
+        409,
+        'agentcard_company_transfer_missing'
+      );
+    }
+
+    for (let attempt = 1; attempt <= this.releaseRetry.attempts; attempt += 1) {
+      let result: unknown;
+      try {
+        result = await this.toolCaller('list_transfers', { limit: 100 });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/too many requests|rate.?limit|\b429\b/i.test(message)) throw error;
+        if (attempt < this.releaseRetry.attempts) {
+          await delay(this.releaseRetry.delayMs);
+          continue;
+        }
+        break;
+      }
+      const record = assertToolSuccess('list_transfers', result);
+      const transfers = Array.isArray(record.transfers) ? record.transfers : [];
+      const transfer = transfers
+        .map((value) => asRecord(value))
+        .find((value) => value.id === request.providerTransferId);
+      const releasedCents = transfer?.released_cents;
+      const status = transfer?.status;
+      if (
+        typeof releasedCents === 'number' &&
+        releasedCents >= request.amountCents &&
+        (status === 'reclaimed' || status === 'released')
+      ) {
+        return {
+          providerTransferId: request.providerTransferId,
+          metadata: transferMetadata(request, {
+            status: 'release_confirmed',
+            reason: request.reason,
+            release_attempt: attempt,
+            agentcard_transfer: transfer,
+          }),
+        };
+      }
+      if (request.cardId !== undefined && attempt % this.releaseRetry.replayCloseEvery === 0) {
+        const closeResult = await this.toolCaller('close_card', { card_id: request.cardId });
+        assertToolSuccess('close_card', closeResult);
+      }
+      if (attempt < this.releaseRetry.attempts) await delay(this.releaseRetry.delayMs);
+    }
+
+    throw new WalletFundingProviderError(
+      'AgentCard company transfer release is still pending',
+      409,
+      'agentcard_company_transfer_release_pending',
+      { transferId: request.providerTransferId }
+    );
+  }
+}
+
+export function createWalletFundingProvider(): WalletFundingProvider {
+  return new AgentCardCompanyWalletFundingProvider();
+}

@@ -78,17 +78,20 @@ def test_normalize_payload_accepts_serialized_browser_tool_args():
     assert payload["totalCents"] == 2808
 
 
-def test_fingerprint_is_stable_and_user_scoped():
+def test_fingerprint_is_stable_and_agent_scoped():
     from domains.request_payment_card.service import normalize_payment_payload
 
-    base = normalize_payment_payload(_sample_tool_call(), "user-123")
+    base = normalize_payment_payload(_sample_tool_call(), "user-123", "agent-123")
     same = normalize_payment_payload(
         {**_sample_tool_call(), "merchant": " example shop "},
         "user-123",
+        "agent-123",
     )
-    other_user = normalize_payment_payload(_sample_tool_call(), "user-456")
+    other_agent = normalize_payment_payload(_sample_tool_call(), "user-123", "agent-456")
+    other_user = normalize_payment_payload(_sample_tool_call(), "user-456", "agent-123")
 
     assert base["fingerprint"] == same["fingerprint"]
+    assert base["fingerprint"] != other_agent["fingerprint"]
     assert base["fingerprint"] != other_user["fingerprint"]
 
 
@@ -230,15 +233,81 @@ async def test_payment_helper_import_is_workflow_sandbox_safe():
     assert result["same_fingerprint"] is True
 
 
+async def test_mint_purchase_card_activity_returns_agentcard_setup_state():
+    setup_mock(
+        {
+            "/api/purchases/mint": {
+                "status": 409,
+                "json": {
+                    "error": "User has not connected AgentCard",
+                    "code": "agentcard_setup_required",
+                    "agentcardStatus": "connect_required",
+                    "setupAction": "connect_agentcard",
+                    "connectUrl": "https://rose.test/api/agentcard/connect?user=user-123",
+                    "setupUrl": "https://agentcard.test/setup",
+                    "setupTool": "start_kyc",
+                },
+            }
+        }
+    )
+
+    from domains.request_payment_card.service import normalize_payment_payload
+    from tools.request_payment_card import mint_purchase_card_activity
+
+    payload = normalize_payment_payload(_sample_tool_call(), "user-123")
+    result = await mint_purchase_card_activity("user-123", payload)
+
+    assert result["status"] == "agentcard_setup_required"
+    assert result["code"] == "agentcard_setup_required"
+    assert result["setupAction"] == "connect_agentcard"
+    assert result["connectUrl"].endswith("/api/agentcard/connect?user=user-123")
+    assert result["setupUrl"] == "https://agentcard.test/setup"
+    assert result["setupTool"] == "start_kyc"
+
+
+async def test_agentcard_status_activity_boundary():
+    setup_mock(
+        {
+            "/api/agentcard/status": {
+                "status": 200,
+                "json": {
+                    "connected": True,
+                    "expiresAt": "2026-07-04T06:46:35.925Z",
+                    "expired": False,
+                },
+            }
+        }
+    )
+
+    from tools.request_payment_card import agentcard_status_activity
+
+    result = await agentcard_status_activity("user-123")
+
+    assert result["connected"] is True
+    assert result["expired"] is False
+    call = assert_captured_call(url_contains="/api/agentcard/status", method="GET")
+    assert "x-api-key" in {k.lower() for k in call["requestHeaders"]}
+    assert call["requestHeaders"]["x-user-id"] == "user-123"
+
+
 async def run_all_tests():
     print("request-payment-card blackbox tests:")
     result = BlackboxResult()
     result.record("normalize_payload", test_normalize_payload_builds_receipt_metadata_and_fingerprint)
-    result.record("fingerprint_stability", test_fingerprint_is_stable_and_user_scoped)
+    result.record(
+        "normalize_payload_serialized_args",
+        test_normalize_payload_accepts_serialized_browser_tool_args,
+    )
+    result.record("fingerprint_stability", test_fingerprint_is_stable_and_agent_scoped)
     result.record("question_no_secrets", test_question_contains_receipt_but_no_card_secrets)
     await result.record_async("lookup_boundary", test_lookup_purchase_activity_boundary)
     await result.record_async("mint_boundary", test_mint_purchase_card_activity_boundary)
     await result.record_async("workflow_sandbox_import", test_payment_helper_import_is_workflow_sandbox_safe)
+    await result.record_async(
+        "mint_agentcard_setup_state",
+        test_mint_purchase_card_activity_returns_agentcard_setup_state,
+    )
+    await result.record_async("agentcard_status_boundary", test_agentcard_status_activity_boundary)
     teardown_mock()
     return result.all_passed
 

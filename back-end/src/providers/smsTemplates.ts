@@ -47,6 +47,9 @@ export const SMS_TEMPLATES = {
   authAssistance: (_prefix: string, authRealm: string, _url: string) =>
     `Login needed for ${authRealm}.\nOpen Rose to sign in: ${ROSE_LABS_URL}`,
 
+  agentCardSetup: (_prefix: string, setupUrl: string) =>
+    `One Time Agent Payment Setup needed before I can issue this payment card.\nOpen: ${setupUrl || ROSE_LABS_URL}`,
+
   agentCompleted: (_prefix: string, summary: string, _url: string) =>
     `Done: ${summary}\n\nFull report: ${ROSE_LABS_URL}`,
 

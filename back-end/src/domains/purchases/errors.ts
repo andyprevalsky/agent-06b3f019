@@ -2,7 +2,9 @@
 export class PurchaseError extends Error {
   constructor(
     message: string,
-    readonly statusCode = 400
+    readonly statusCode = 400,
+    readonly code?: string,
+    readonly details: Record<string, unknown> = {}
   ) {
     super(message);
   }

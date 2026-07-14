@@ -8,6 +8,7 @@
  */
 import React from 'react';
 import { act, fireEvent, render, screen } from '@testing-library/react';
+import { Globe } from 'lucide-react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import FastModeToggle from '@/features/terminal-component-group/components/FastModeToggle';
@@ -372,5 +373,7 @@ describe('RoseToolSetChip contents', () => {
   it('uses a dedicated clean icon for Browser Agent', () => {
     expect(TOOL_ICONS.browser_agent).toBeDefined();
     expect(TOOL_ICONS.browser_agent).not.toBe(TOOL_ICONS.default);
+    expect(TOOL_ICONS.browser_agent).toBe(Globe);
+    expect(TOOL_ICONS.spawn_browser_agent).toBe(Globe);
   });
 });

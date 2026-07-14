@@ -86,3 +86,58 @@ async def create_approval_request_activity(
     except Exception as e:
         logger.error("Failed to create approval request", error=str(e))
         raise
+
+
+@activity.defn
+async def resolve_attention_request_activity(
+    user_id: str,
+    request_id: str,
+    response_text: str,
+) -> Dict[str, Any]:
+    """Resolve an existing attention request through the backend API."""
+    try:
+        config = load_config()
+        backend_url = config.backend.api_url
+        payload = {"response": response_text}
+
+        logger.info(
+            "Resolving attention request",
+            request_id=request_id,
+            user_id=user_id,
+            backend_url=backend_url,
+        )
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{backend_url}/api/attention-requests/{request_id}/respond",
+                json=payload,
+                headers={
+                    "X-API-Key": config.backend.api_key,
+                    "X-User-Id": user_id,
+                    "Content-Type": "application/json",
+                },
+                timeout=CREATE_REQUEST_TIMEOUT_SECONDS,
+            )
+
+            if response.status_code != 200:
+                logger.error(
+                    "Failed to resolve attention request - HTTP error",
+                    status_code=response.status_code,
+                    response_body=response.text,
+                    request_id=request_id,
+                    user_id=user_id,
+                )
+
+            response.raise_for_status()
+            data = response.json()
+            logger.info("Attention request resolved", request_id=request_id, user_id=user_id)
+            return data
+
+    except Exception as e:
+        logger.error(
+            "Failed to resolve attention request",
+            error=str(e),
+            request_id=request_id,
+            user_id=user_id,
+        )
+        raise

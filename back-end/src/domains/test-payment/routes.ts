@@ -1,10 +1,14 @@
-import { Router, type Response } from 'express';
+import { Router, type NextFunction, type Request, type Response } from 'express';
+import { authenticate, type AuthRequest } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { TEST_PAYMENT_ENABLED } from './config';
+import { PRODUCTION_BENCHMARK_USER_ID, TEST_PAYMENT_ENABLED } from './config';
 import {
+  abandonTestPayment,
+  configureBenchmarkAgentCardSetup,
   confirmPhoneBenchmarkPayment,
   confirmTestPayment,
   getTestPaymentCatalog,
+  getTestPaymentLifecycle,
   recordPhoneBenchmarkPaymentAudit,
   resolvePublicBaseUrl,
   TestPaymentError,
@@ -12,8 +16,31 @@ import {
 
 const router = Router();
 
-function rejectWhenDisabled(res: Response): boolean {
-  if (TEST_PAYMENT_ENABLED) return false;
+function requireProductionBenchmarkAccess(req: Request, res: Response, next: NextFunction): void {
+  if (process.env.NODE_ENV !== 'production') {
+    next();
+    return;
+  }
+  authenticate(req as AuthRequest, res, () => {
+    const authRequest = req as AuthRequest;
+    if (authRequest.isInternal === true || authRequest.user?.id === PRODUCTION_BENCHMARK_USER_ID) {
+      next();
+      return;
+    }
+    res.status(403).json({ error: 'Production payment benchmark access denied' });
+  });
+}
+
+function rejectWhenDisabled(
+  res: Response,
+  options: { allowProductionBenchmark?: boolean } = {}
+): boolean {
+  if (
+    TEST_PAYMENT_ENABLED ||
+    (options.allowProductionBenchmark === true && process.env.NODE_ENV === 'production')
+  ) {
+    return false;
+  }
   res.status(404).json({ error: 'Not found' });
   return true;
 }
@@ -66,8 +93,44 @@ function stringArg(args: Record<string, unknown>, key: string): string {
 router.get(
   '/items',
   asyncHandler(async (_req, res) => {
-    if (rejectWhenDisabled(res)) return;
+    if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
     res.json(getTestPaymentCatalog());
+  })
+);
+
+router.post(
+  '/lifecycle/agentcard-setup',
+  requireProductionBenchmarkAccess,
+  asyncHandler(async (req, res) => {
+    if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
+    try {
+      res.json(await configureBenchmarkAgentCardSetup(req.body as Record<string, unknown>));
+    } catch (error) {
+      if (error instanceof TestPaymentError) {
+        res.status(error.statusCode).json({ error: error.message });
+        return;
+      }
+      res.status(500).json({ error: 'Failed to configure benchmark AgentCard setup' });
+    }
+  })
+);
+
+router.post(
+  '/lifecycle/abandon',
+  requireProductionBenchmarkAccess,
+  asyncHandler(async (req, res) => {
+    if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
+    try {
+      const body = req.body as Record<string, unknown>;
+      const result = await abandonTestPayment(typeof body.agentId === 'string' ? body.agentId : '');
+      res.json(result);
+    } catch (error) {
+      if (error instanceof TestPaymentError) {
+        res.status(error.statusCode).json({ error: error.message });
+        return;
+      }
+      res.status(500).json({ error: 'Failed to abandon test payment lifecycle' });
+    }
   })
 );
 
@@ -78,6 +141,26 @@ router.get(
   asyncHandler(async (_req, res) => {
     if (rejectWhenDisabled(res)) return;
     res.json({ url: await resolvePublicBaseUrl() });
+  })
+);
+
+router.get(
+  '/lifecycle',
+  requireProductionBenchmarkAccess,
+  asyncHandler(async (req, res) => {
+    if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
+    try {
+      const result = await getTestPaymentLifecycle(
+        typeof req.query.agentId === 'string' ? req.query.agentId : ''
+      );
+      res.json(result);
+    } catch (error) {
+      if (error instanceof TestPaymentError) {
+        res.status(error.statusCode).json({ error: error.message });
+        return;
+      }
+      res.status(500).json({ error: 'Failed to read test payment lifecycle' });
+    }
   })
 );
 

@@ -460,6 +460,41 @@ export async function notifyAuthAssistance(
 }
 
 /**
+ * Notify user that AgentCard setup is required before issuing a payment card.
+ */
+export async function notifyAgentCardSetup(
+  userId: string,
+  agent: { id: string },
+  setupUrl: string
+): Promise<void> {
+  const startTime = Date.now();
+
+  log.info('notifyAgentCardSetup', {
+    userId,
+    agentId: agent.id,
+    hasSetupUrl: setupUrl.trim() !== '',
+  });
+
+  const phone = await getUserPhone(userId);
+  if (!phone) {
+    log.info('No phone for user, skipping', { userId });
+    return;
+  }
+
+  const prefix = agent.id.substring(0, 6);
+  const message = SMS_TEMPLATES.agentCardSetup(prefix, setupUrl);
+  const result = await sendSms(phone, message);
+
+  log.info('agentCardSetup SMS sent', {
+    userId,
+    agentPrefix: prefix,
+    success: result.success,
+    messageSid: result.messageSid,
+    durationMs: Date.now() - startTime,
+  });
+}
+
+/**
  * Notify user that an agent has completed.
  */
 export async function notifyCompletion(

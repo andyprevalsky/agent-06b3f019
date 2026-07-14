@@ -37,6 +37,7 @@ import apiKeysRouter from './domains/api-keys/routes';
 import smsWebhookRouter from './domains/sms-webhook/routes';
 import credentialPropagationRouter from './domains/credential-propagation/routes';
 import purchasesRouter, { agentCardWebhookHandler } from './domains/purchases/routes';
+import agentcardRouter from './domains/agentcard/routes';
 import testPaymentRouter from './domains/test-payment/routes';
 import {
   setSupervisorFixtureOverride,
@@ -99,6 +100,14 @@ import { runGmailSyncJob } from './services/integrations/gmailSync';
 import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaidTransactions';
 import { grep as userDataGrep } from './domains/data/service';
 import { registerUserDataGrep } from './providers/userDataSearch';
+import {
+  reconcileDissolvedPurchaseHolds,
+  reconcileFailedPurchaseRefunds,
+  reconcileFailedPurchaseFundingReclaims,
+  reconcileStaleChargingPurchases,
+  reconcileTerminalAgentPurchaseCards,
+} from './providers/purchaseCleanup';
+import { runAgentCardOrgWalletMonitor } from './providers/agentcard/org-wallet-monitor';
 // x402 payment middleware
 import { paymentMiddleware } from 'x402-express';
 import { facilitator } from '@coinbase/x402';
@@ -508,6 +517,9 @@ app.use('/api/upload', uploadRouter);
 app.use('/api/feedback', feedbackRouter);
 app.use('/api/data', dataRouter);
 app.use('/api/purchases', purchasesRouter);
+// AgentCard "for companies": org-managed cardholder onboarding plus the optional
+// per-user MCP tool surface. Browser callbacks are public; status/tools require auth.
+app.use('/api/agentcard', agentcardRouter);
 app.use('/api/test-payment', testPaymentRouter);
 app.use('/api/fast-cache', fastCacheRouter); // Fast Mode aggressive cache get/set/purge
 app.use('/api/archive', archiveRouter); // Encrypted trace archive + scoped DB fixtures
@@ -599,6 +611,68 @@ app.listen(PORT, () => {
     };
     cron.schedule('*/5 * * * *', runPlaidSync);
     cronLog.info('Plaid transaction sync scheduled (every 5 minutes)');
+  }
+
+  if (process.env.DISABLE_PURCHASE_HOLD_RECONCILE === '1') {
+    createLogger('Cron').info(
+      'Purchase hold reconciliation disabled by DISABLE_PURCHASE_HOLD_RECONCILE'
+    );
+  } else {
+    const cronLog = createLogger('Cron');
+    let purchaseReconcileRunning = false;
+    const runPurchaseHoldReconcile = () => {
+      if (purchaseReconcileRunning) {
+        cronLog.info('Purchase hold reconciliation already running; skipping overlapping tick');
+        return;
+      }
+      purchaseReconcileRunning = true;
+      cronLog.info('Running purchase hold reconciliation job...');
+      Promise.all([
+        reconcileDissolvedPurchaseHolds(),
+        reconcileStaleChargingPurchases(),
+        reconcileFailedPurchaseRefunds(),
+        reconcileFailedPurchaseFundingReclaims(),
+        reconcileTerminalAgentPurchaseCards(),
+      ])
+        .catch((err) => {
+          cronLog.error('Purchase hold reconciliation job error', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => {
+          purchaseReconcileRunning = false;
+        });
+    };
+    cron.schedule('* * * * *', runPurchaseHoldReconcile);
+    cronLog.info('Purchase hold reconciliation scheduled (every minute)');
+  }
+
+  if (process.env.DISABLE_AGENTCARD_ORG_WALLET_MONITOR === '1') {
+    createLogger('Cron').info(
+      'AgentCard org-wallet monitor disabled by DISABLE_AGENTCARD_ORG_WALLET_MONITOR'
+    );
+  } else {
+    const cronLog = createLogger('Cron');
+    let walletMonitorRunning = false;
+    const runWalletMonitor = () => {
+      if (walletMonitorRunning) {
+        cronLog.info('AgentCard org-wallet monitor already running; skipping overlapping tick');
+        return;
+      }
+      walletMonitorRunning = true;
+      runAgentCardOrgWalletMonitor()
+        .catch((err) => {
+          cronLog.error('AgentCard org-wallet monitor error', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        })
+        .finally(() => {
+          walletMonitorRunning = false;
+        });
+    };
+    runWalletMonitor();
+    cron.schedule('* * * * *', runWalletMonitor);
+    cronLog.info('AgentCard org-wallet monitor scheduled (every minute)');
   }
 });
 

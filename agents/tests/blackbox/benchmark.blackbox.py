@@ -174,6 +174,51 @@ def test_toast_nopa_benchmark_routes_browser_to_toast_not_generic_search():
     assert task.expected_payment_receipt["lineItems"] == [{"name": "The Rocky Sandwich", "quantity": 1}]
 
 
+def test_payment_benchmark_enables_bundled_frontend_before_stack_start():
+    """The ngrok payment surface must serve a bundle, not Vite's module graph."""
+    import os
+    from unittest.mock import patch
+
+    from benchmarks import local
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        local.configure_task_environment(["agent-payment-idempotent-abandonment"])
+        assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
+
+
+async def test_edge_warmup_requires_explicit_research_port():
+    """Retired research ports must not add a failing warmup to every local benchmark."""
+    import os
+
+    from benchmarks import run_benchmark as bench
+
+    class UnexpectedClient:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("edge warmup must not derive the retired research port")
+
+    previous_port = os.environ.pop("RESEARCH_PORT", None)
+    original_client = bench.httpx.AsyncClient
+    try:
+        bench.httpx.AsyncClient = UnexpectedClient
+        await bench._warmup_edge_functions("http://localhost:55100")
+    finally:
+        bench.httpx.AsyncClient = original_client
+        if previous_port is not None:
+            os.environ["RESEARCH_PORT"] = previous_port
+
+
+def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
+    """The deploy lifecycle helper must provision its declared sandbox float gate."""
+    helper = (
+        Path(__file__).resolve().parents[3] / "scripts" / "run-agentcard-lifecycle-task.sh"
+    ).read_text()
+
+    assert 'if [ "$BOOTSTRAP_FLAG" = "--bootstrap" ]' in helper
+    assert "scripts/setup-benchmark-payment.ts" in helper
+    assert "DATABASE_URL=" in helper
+
+
 def test_payment_receipt_validation_allows_partial_live_receipts():
     """Live merchant receipts should validate stable fields without pinning tax/price drift."""
     from benchmarks.benchmark_tasks import BenchmarkTask
@@ -255,6 +300,267 @@ def test_success_on_payment_card_request_passes_before_agent_completion():
     }
 
     assert evaluate_task(task, data, approvals_triggered=1) == (True, None)
+
+
+def test_payment_receipt_tax_rate_qualifier_preserves_exact_amount():
+    """A displayed tax-rate qualifier is equivalent only when its amount is exact."""
+    from benchmarks.benchmark_tasks import BenchmarkTask
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = BenchmarkTask(
+        name="tax-qualified-receipt",
+        title="Tax Qualified Receipt",
+        prompt="",
+        timeout_seconds=1,
+        is_chat_mode=False,
+        expected_tools=[],
+        tags=[],
+        price_limit_cents=100,
+        requires_browser_agent=False,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling="auto_approve",
+        start_phase="execute",
+        expected_payment_receipt={"fees": [{"label": "Tax", "amountCents": 297}]},
+    )
+    request = {
+        "metadata": {
+            "requestPaymentCard": {
+                "fees": [{"label": "Tax (8.25%)", "amountCents": 297}]
+            }
+        }
+    }
+
+    assert _validate_payment_receipt(task, request) is None
+    request["metadata"]["requestPaymentCard"]["fees"][0]["amountCents"] = 298
+    assert "expected 297, got 298" in _validate_payment_receipt(task, request)
+
+
+def test_payment_lifecycle_validation_cross_checks_nested_provider_state():
+    """Payment benchmarks fail when any cross-provider terminal state disagrees."""
+    from benchmarks.benchmark_tasks import BenchmarkTask
+    from benchmarks.run_benchmark import _validate_payment_lifecycle
+
+    task = BenchmarkTask(
+        name="payment-lifecycle",
+        title="Payment Lifecycle",
+        prompt="",
+        timeout_seconds=1,
+        is_chat_mode=False,
+        expected_tools=[],
+        tags=[],
+        price_limit_cents=100,
+        requires_browser_agent=False,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling="auto_approve",
+        start_phase="execute",
+        expected_payment_lifecycle={
+            "purchase": {"status": "CLEARED"},
+            "stripeHold": {"status": "succeeded", "amountReceivedCents": 4396},
+            "orgTransfer": {"status": "consumed", "releasedCents": 0},
+            "attention": {"openKinds": []},
+        },
+    )
+    lifecycle = {
+        "purchase": {"status": "CLEARED", "id": "purchase-1"},
+        "stripeHold": {"status": "succeeded", "amountReceivedCents": 4396},
+        "orgTransfer": {"status": "consumed", "releasedCents": 0},
+        "attention": {"openKinds": [], "resolvedKinds": []},
+    }
+
+    assert _validate_payment_lifecycle(
+        task, {"_benchmark": {"payment_lifecycle": lifecycle}}
+    ) is None
+    lifecycle["orgTransfer"]["releasedCents"] = 4396
+    assert _validate_payment_lifecycle(
+        task, {"_benchmark": {"payment_lifecycle": lifecycle}}
+    ) == "payment_lifecycle.orgTransfer.releasedCents mismatch: expected 0, got 4396"
+
+
+async def test_abandonment_waits_for_cron_reconciliation():
+    """A delayed AgentCard release is observed through the same lifecycle endpoint cron updates."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    lifecycles = [
+        {
+            "purchase": {"status": "FUNDING_RECLAIM_FAILED"},
+            "walletFunding": {"status": "RECLAIM_FAILED"},
+        },
+        {
+            "purchase": {"status": "FUNDING_RECLAIM_FAILED"},
+            "walletFunding": {"status": "RECLAIM_FAILED"},
+        },
+        get_task_by_name("agent-payment-abandonment").expected_payment_lifecycle,
+    ]
+    reads = 0
+
+    async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal reads
+        reads += 1
+        return lifecycles.pop(0)
+
+    result = await _wait_for_expected_payment_lifecycle(
+        "http://localhost:55120",
+        "agent-123",
+        get_task_by_name("agent-payment-abandonment"),
+        lifecycles.pop(0),
+        timeout_seconds=1,
+        poll_interval_seconds=0,
+        fetch_lifecycle=fetch_lifecycle,
+    )
+
+    assert result["purchase"]["status"] == "VOIDED"
+    assert reads == 2
+
+
+async def test_abandonment_retries_a_pending_company_release():
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    task = get_task_by_name("agent-payment-abandonment")
+    recoveries = 0
+
+    async def recover_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal recoveries
+        recoveries += 1
+        return task.expected_payment_lifecycle
+
+    result = await _wait_for_expected_payment_lifecycle(
+        "http://localhost:55120",
+        "agent-123",
+        task,
+        {
+            "purchase": {"status": "HELD"},
+            "walletFunding": {"status": "RECLAIMING"},
+        },
+        timeout_seconds=1,
+        poll_interval_seconds=0,
+        recover_lifecycle=recover_lifecycle,
+    )
+
+    assert result["purchase"]["status"] == "VOIDED"
+    assert recoveries == 1
+
+
+def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
+    """Checkout text alone cannot pass the AgentCard lifecycle benchmark."""
+    from benchmarks.benchmark_tasks import get_task_by_name, get_tasks_by_tag, suite_tasks
+    from benchmarks.run_benchmark import _validate_payment_lifecycle
+
+    task = get_task_by_name("agent-payment-test-shop")
+
+    assert "visible Rose Labs Test Payment checkout" in task.prompt
+    assert "do not navigate to source files or API endpoints" in task.prompt
+    assert "preserve the merchant" not in task.prompt.lower()
+    assert task.expected_payment_lifecycle["purchase"]["status"] == "CLEARED"
+    assert task.expected_payment_lifecycle["walletFunding"]["status"] == "CONSUMED"
+    assert task.expected_payment_lifecycle["orgTransfer"]["livemode"] is False
+    assert _validate_payment_lifecycle(task, {"_benchmark": {}}) == (
+        "missing payment lifecycle snapshot"
+    )
+
+    idempotency = get_task_by_name("agent-payment-idempotent-abandonment")
+    assert idempotency.expected_tools == ["spawn_browser_agent"]
+    assert idempotency.expected_tool_counts["spawn_browser_agent"] == 2
+    assert idempotency.min_tool_counts["request_payment_card"] == 2
+    assert "invoke spawn_browser_agent exactly twice" in idempotency.prompt
+    assert idempotency.expected_payment_lifecycle["purchase"]["status"] == "CLEARED"
+    abandonment = get_task_by_name("agent-payment-abandonment")
+    assert abandonment.payment_card_request_action == "abandon"
+    assert abandonment.expected_payment_lifecycle["purchase"]["status"] == "VOIDED"
+    assert abandonment.expected_payment_lifecycle["walletFunding"]["status"] == "RECLAIMED"
+    assert abandonment.expected_payment_lifecycle["stripeRefund"]["status"] == "succeeded"
+
+    setup = get_task_by_name("agent-payment-setup-resume")
+    assert setup.expected_attention_kinds == [
+        "payment_approval",
+        "agentcard_user_cardholder_onboarding_required",
+    ]
+    assert setup.agentcard_setup_action == "complete"
+    assert setup.expected_payment_lifecycle["purchase"]["status"] == "CLEARED"
+
+    production = get_task_by_name("agent-payment-production-abandonment")
+    assert production.production_only is True
+    assert production.payment_card_request_action == "abandon"
+    assert production.expected_payment_receipt["totalCents"] == 50
+    assert production.expected_payment_lifecycle["purchase"]["status"] == "VOIDED"
+    assert production.expected_payment_lifecycle["stripeRefund"]["amountCents"] == 50
+    assert production.expected_payment_lifecycle["orgTransfer"]["livemode"] is True
+    assert production.name not in {task.name for task in suite_tasks()}
+
+    assert [
+        task.name for task in get_tasks_by_tag("agentcard-lifecycle-sandbox")
+    ] == [
+        "agent-payment-test-shop",
+        "agent-payment-setup-resume",
+        "agent-payment-idempotent-abandonment",
+        "agent-payment-abandonment",
+    ]
+    assert "?benchmark=agentcard-abandonment" in abandonment.prompt
+
+
+def test_production_payment_lifecycle_refuses_sandbox_target():
+    import pytest
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_task_target
+
+    task = get_task_by_name("agent-payment-production-abandonment")
+    with pytest.raises(RuntimeError, match="production-only"):
+        _validate_task_target(task, "http://localhost:55120")
+    _validate_task_target(task, "https://api.roselabs.ai")
+
+
+def test_agentcard_setup_fixture_is_seeded_only_for_local_non_setup_tasks():
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _agentcard_setup_fixture_action
+
+    standard = get_task_by_name("agent-payment-test-shop")
+    setup = get_task_by_name("agent-payment-setup-resume")
+    production = get_task_by_name("agent-payment-production-abandonment")
+
+    assert _agentcard_setup_fixture_action(standard, "http://localhost:55120") == "complete"
+    assert _agentcard_setup_fixture_action(setup, "http://localhost:55120") == "reset"
+    assert _agentcard_setup_fixture_action(production, "https://api.roselabs.ai") is None
+
+
+def test_expected_attention_kind_uses_ordered_sequence():
+    from types import SimpleNamespace
+
+    from benchmarks.run_benchmark import _expected_attention_kind
+
+    task = SimpleNamespace(
+        expected_attention_kind=None,
+        expected_attention_kinds=[
+            "payment_approval",
+            "agentcard_user_cardholder_onboarding_required",
+        ],
+    )
+    assert _expected_attention_kind(task, 0) == "payment_approval"
+    assert _expected_attention_kind(task, 1) == "agentcard_user_cardholder_onboarding_required"
+    assert _expected_attention_kind(task, 2) is None
+
+
+def test_agentcard_setup_attention_is_not_auto_approved():
+    from types import SimpleNamespace
+
+    from benchmarks.run_benchmark import _should_auto_approve_attention
+
+    task = SimpleNamespace(agentcard_setup_action="complete")
+    assert _should_auto_approve_attention(
+        task,
+        {"metadata": {"attentionKind": "payment_approval"}},
+    )
+    assert not _should_auto_approve_attention(
+        task,
+        {
+            "metadata": {
+                "attentionKind": "agentcard_user_cardholder_onboarding_required"
+            }
+        },
+    )
 
 
 def test_cached_sub_agent_child_tool_counts_are_counted_once():
@@ -418,6 +724,10 @@ def test_benchmark_run_serializes_world_model_fidelity_and_ignores_unknown_task_
                 "dimensions": {"schema_validity": 1.0},
             },
             world_model_mode="simulate",
+            payment_lifecycle={
+                "purchase": {"status": "VOIDED"},
+                "orgTransfer": {"status": "reclaimed", "releasedCents": 4396},
+            },
         )
     )
     with tempfile.TemporaryDirectory() as tmp:
@@ -432,6 +742,8 @@ def test_benchmark_run_serializes_world_model_fidelity_and_ignores_unknown_task_
     assert loaded.task_results[0].world_model_fidelity["mean_score"] == 0.9
     assert loaded.task_results[0].world_model_mode == "simulate"
     assert loaded.task_results[0].archive_manifest_ref.endswith("manifest.json.gz.enc")
+    assert loaded.task_results[0].payment_lifecycle["purchase"]["status"] == "VOIDED"
+    assert loaded.task_results[0].payment_lifecycle["orgTransfer"]["releasedCents"] == 4396
 
 
 def test_minted_benchmark_cleanup_preserves_cached_agent_identity_by_default():
@@ -1891,6 +2203,57 @@ async def test_create_agent_uses_goal_override_when_env_set():
     assert "model" not in bodies[0]
 
 
+async def test_create_agent_sends_task_response_schema():
+    """Lifecycle tasks can prevent an inferred verifier schema from contradicting the prompt."""
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    bodies = []
+
+    class FakeResponse:
+        status_code = 201
+        text = ""
+
+        def json(self):
+            return {"agent_id": "agent-123"}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, headers, json):
+            bodies.append(json)
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+        task = get_task_by_name("agent-payment-abandonment")
+        await bench.create_agent("http://localhost:55120", task)
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+
+    fields = bodies[0]["response_schema"]["fields"]
+    assert [field["name"] for field in fields] == [
+        "selected_product_names",
+        "one_time_payment_card_number",
+        "order_not_placed",
+    ]
+    assert all(field["required"] is True for field in fields)
+
+
 def test_keep_failed_agents_only_preserves_failures():
     """The diagnostic flag preserves failed agents but still cleans up passes."""
     import os
@@ -2142,6 +2505,25 @@ def test_local_services_manifest_reports_anon_capability():
     )
     assert not services_manifest_anon_enabled({"env": {"benchmark_anon_steel_profile": True}})
     assert not services_manifest_anon_enabled({"ports": {"backend": 55120}})
+
+
+def test_local_manifest_uses_isolated_system_database_identity():
+    """System-Postgres benchmark fixtures must not share the blackbox `victoria` database."""
+    from benchmarks.local import manifest_database_url
+
+    manifest = {
+        "ports": {"local_db": 60245},
+        "database": {
+            "use_system_postgres": True,
+            "port": 5432,
+            "name": "victoria_bench_1783809252_85375_82461",
+        },
+    }
+
+    assert manifest_database_url(manifest) == (
+        "postgresql://postgres:postgres@localhost:5432/"
+        "victoria_bench_1783809252_85375_82461"
+    )
 
 
 def test_local_extract_results_path_and_diagnostic_commands():
@@ -2598,6 +2980,75 @@ def test_logical_tool_counts_ignore_progress_messages():
         "spawn_browser_agent": 3,
         "spawn_claude_code_agent": 1,
         "message_person": 1,
+    }
+
+
+def test_logical_tool_counts_include_model_facing_routed_calls():
+    """A model-facing spawn_agent call remains observable after browser routing."""
+    from benchmarks.run_benchmark import _count_logical_tool_calls_from_messages
+
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "type": "browser",
+                        "tool_call_id": "browser-1",
+                    },
+                    {
+                        "tool": "spawn_agent",
+                        "type": "browser",
+                        "tool_call_id": "browser-2",
+                    },
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "payment-request-1",
+                "action_type": "request_payment_card",
+                "subAgentId": "browser-task-1",
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "payment-request-2",
+                "action_type": "request_payment_card",
+                "subAgentId": "browser-task-2",
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "browser-1",
+                "title": "Browser automation complete",
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "browser-2",
+                "title": "Browser automation complete",
+            },
+        },
+    ]
+
+    assert _count_logical_tool_calls_from_messages(messages) == {
+        "spawn_agent": 2,
+        "spawn_browser_agent": 2,
+        "request_payment_card": 2,
     }
 
 
@@ -3238,7 +3689,7 @@ def test_suite_selection_excludes_incomplete_and_external_entries():
         "phone-call-client-intake",
         "phone-call-payment",
     } <= suite_names
-    assert len(suite_names) == 34
+    assert len(suite_names) == 37
 
 
 def test_every_task_has_base_image_fixture_by_default():
@@ -3676,6 +4127,7 @@ async def run_all_tests():
     r.record("benchmark_env_disable_approval", test_benchmark_env_override_can_disable_approval_handling)
     await r.record_async("create_agent_write_lock_override", test_create_agent_sends_write_lock_override_when_env_set)
     await r.record_async("create_agent_goal_override", test_create_agent_uses_goal_override_when_env_set)
+    await r.record_async("create_agent_response_schema", test_create_agent_sends_task_response_schema)
     r.record("keep_failed_agents_cleanup_policy", test_keep_failed_agents_only_preserves_failures)
     r.record("keep_agents_cleanup_policy", test_keep_agents_preserves_passed_and_failed_runs)
     r.record("local_plan_load_separate", test_local_plan_runs_load_tests_separately)
@@ -3685,6 +4137,10 @@ async def run_all_tests():
     r.record("local_args_single_load", test_local_benchmark_args_for_single_load_task_not_parallel)
     r.record("local_failed_tasks_from_run", test_local_failed_tasks_from_run_reads_result_json)
     r.record("local_services_manifest_validation", test_local_services_manifest_validation_requires_ports)
+    r.record(
+        "local_manifest_system_database_identity",
+        test_local_manifest_uses_isolated_system_database_identity,
+    )
     r.record("local_results_and_diagnostics", test_local_extract_results_path_and_diagnostic_commands)
     r.record("agent_cache_provider_accounting", test_agent_cache_stats_respects_provider_accounting)
     r.record("local_parse_args_rejects_ambiguous_selection", test_local_parse_args_rejects_ambiguous_selection)
@@ -3729,6 +4185,10 @@ async def run_all_tests():
     r.record("local_worker_health_url_derived", test_local_worker_health_url_derives_from_backend_port)
     r.record("benchmark_memory_baseline_guarded", test_benchmark_memory_baseline_endpoint_is_guarded)
     r.record("logical_tool_counts_ignore_progress", test_logical_tool_counts_ignore_progress_messages)
+    r.record(
+        "logical_tool_counts_model_facing_routed_calls",
+        test_logical_tool_counts_include_model_facing_routed_calls,
+    )
     r.record("tool_count_expectations", test_tool_count_expectations_support_minimums_and_forbidden_tools)
     r.record(
         "user_data_prod_grep_provider_filters",
@@ -3747,8 +4207,44 @@ async def run_all_tests():
         test_toast_nopa_benchmark_routes_browser_to_toast_not_generic_search,
     )
     r.record(
+        "payment_benchmark_bundled_frontend",
+        test_payment_benchmark_enables_bundled_frontend_before_stack_start,
+    )
+    await r.record_async(
+        "edge_warmup_explicit_research_port",
+        test_edge_warmup_requires_explicit_research_port,
+    )
+    r.record(
+        "agentcard_lifecycle_bootstrap_float",
+        test_agentcard_lifecycle_bootstrap_provisions_sandbox_float,
+    )
+    r.record(
         "success_on_payment_card_request",
         test_success_on_payment_card_request_passes_before_agent_completion,
+    )
+    r.record(
+        "payment_receipt_tax_rate_qualifier",
+        test_payment_receipt_tax_rate_qualifier_preserves_exact_amount,
+    )
+    r.record(
+        "payment_lifecycle_cross_provider_state",
+        test_payment_lifecycle_validation_cross_checks_nested_provider_state,
+    )
+    await r.record_async(
+        "abandonment_waits_for_cron_reconciliation",
+        test_abandonment_waits_for_cron_reconciliation,
+    )
+    r.record(
+        "agent_payment_requires_lifecycle_evidence",
+        test_agent_payment_catalog_requires_terminal_lifecycle_evidence,
+    )
+    r.record(
+        "ordered_attention_kind_sequence",
+        test_expected_attention_kind_uses_ordered_sequence,
+    )
+    r.record(
+        "agentcard_setup_attention_not_auto_approved",
+        test_agentcard_setup_attention_is_not_auto_approved,
     )
     r.record(
         "cached_sub_agent_child_tool_counts",

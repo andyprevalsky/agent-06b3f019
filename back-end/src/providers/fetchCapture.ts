@@ -320,6 +320,25 @@ export function installFetchCapture(): Router {
       });
     }
 
+    // AgentCard MCP is a stateful payment boundary. Replaying tools/call responses
+    // (especially list_transfers) can hide a card issued seconds earlier and make
+    // the benchmark exercise stale financial state. Preserve capture metadata but
+    // always read the provider's current response.
+    if (url.includes('agentcard.sh')) {
+      try {
+        const response = await originalFetch(input, init);
+        entry.durationMs = Date.now() - start;
+        entry.responseStatus = response.status;
+        captures.push(entry);
+        return response;
+      } catch (err) {
+        entry.durationMs = Date.now() - start;
+        entry.error = err instanceof Error ? err.message : String(err);
+        captures.push(entry);
+        throw err;
+      }
+    }
+
     try {
       const headersJson = JSON.stringify(fullHeaders);
 

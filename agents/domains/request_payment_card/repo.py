@@ -13,6 +13,17 @@ from helpers.tracing import current_root_agent_id
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 
 
+def _error_payload(response: httpx.Response) -> Dict[str, Any]:
+    try:
+        body = response.json()
+    except ValueError:
+        body = {"error": response.text}
+    if not isinstance(body, dict):
+        body = {"error": str(body)}
+    body.setdefault("statusCode", response.status_code)
+    return body
+
+
 @activity.defn
 async def lookup_purchase_activity(user_id: str, fingerprint: str) -> Dict[str, Any]:
     async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
@@ -86,12 +97,41 @@ async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dic
                 "Content-Type": "application/json",
             },
         )
-        response.raise_for_status()
+        if response.status_code >= 400:
+            payload = _error_payload(response)
+            if payload.get("code") == "agentcard_setup_required":
+                return {
+                    "status": "agentcard_setup_required",
+                    **payload,
+                }
+            response.raise_for_status()
         result = response.json()
         archive_root_agent_id = current_root_agent_id() or str(payload.get("agentId") or user_id)
         archive_json(
             root_agent_id=archive_root_agent_id,
             path=f"provider/payment/mint/{body['fingerprint']}.json.gz.enc",
             payload={"request": body, "response": result},
+        )
+        return result
+
+
+@activity.defn
+async def agentcard_status_activity(user_id: str) -> Dict[str, Any]:
+    config = load_config()
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{config.backend.api_url}/api/agentcard/status",
+            headers={
+                "X-API-Key": config.backend.api_key,
+                "X-User-Id": user_id,
+                "Content-Type": "application/json",
+            },
+        )
+        response.raise_for_status()
+        result = response.json()
+        archive_json(
+            root_agent_id=user_id,
+            path="provider/agentcard/status.json.gz.enc",
+            payload={"request": {"user_id": user_id}, "response": result},
         )
         return result

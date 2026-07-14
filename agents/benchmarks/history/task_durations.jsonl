@@ -1171,3 +1171,12 @@
 {"task": "browser-biometrics-webdecoy", "duration_seconds": 176.5, "cost_cents": 3.0, "timestamp": "2026-07-01T04:34:31.176931+00:00", "agent_id": "a83fb824-a331-44a8-97a3-ebfd6de3d8de"}
 {"task": "parallel-tool-calls", "duration_seconds": 201.7, "cost_cents": 7.0, "timestamp": "2026-07-01T04:34:31.176931+00:00", "agent_id": "ed06eed2-22fc-4747-a1fb-364a221de185"}
 {"task": "test-mass-agent-run-0", "duration_seconds": 19.6, "cost_cents": 0.0, "timestamp": "2026-07-08T05:40:29.398207+00:00", "agent_id": "6ff575ae-12f0-4d8f-8c36-fd6d3e1bb89e"}
+{"task": "agent-payment-test-shop", "duration_seconds": 372.7, "cost_cents": 5.0, "timestamp": "2026-07-03T12:37:04.898710+00:00", "agent_id": "d563eac8-b7fc-4f1a-bd1b-8eaf2b0ddeb4"}
+{"task": "agent-payment-test-shop", "duration_seconds": 357.8, "cost_cents": 3.0, "timestamp": "2026-07-03T13:13:25.418662+00:00", "agent_id": "65d8685d-4b48-445a-bf4e-fd167b5103f6"}
+{"task": "agent-payment-test-shop", "duration_seconds": 189.9, "cost_cents": 1.0, "timestamp": "2026-07-11T20:43:44.158853+00:00", "agent_id": "1cff65d3-26bd-4867-854c-f430c67f3b54"}
+{"task": "agent-payment-test-shop", "duration_seconds": 178.3, "cost_cents": 1.0, "timestamp": "2026-07-11T21:00:52.078746+00:00", "agent_id": "ff121dba-ee55-4e12-8890-fa3e86dc3997"}
+{"task": "agent-payment-abandonment", "duration_seconds": 308.5, "cost_cents": 2.0, "timestamp": "2026-07-11T22:55:56.827692+00:00", "agent_id": "6f6672ec-098e-43e7-8757-13a4ee8f145f"}
+{"task": "agent-payment-idempotent-abandonment", "duration_seconds": 350.2, "cost_cents": 3.0, "timestamp": "2026-07-12T00:40:08.333851+00:00", "agent_id": "fce07090-4116-499a-ad31-655c22ba5a60"}
+{"task": "agent-payment-test-shop", "duration_seconds": 253.7, "cost_cents": 4.0, "timestamp": "2026-07-12T00:48:09.548153+00:00", "agent_id": "7610a6b0-4654-46d1-8d40-254deedc3a5f"}
+{"task": "agent-payment-abandonment", "duration_seconds": 252.7, "cost_cents": 2.0, "timestamp": "2026-07-12T00:54:18.874954+00:00", "agent_id": "39e7836c-37f3-4c2a-89a7-aa636a257afa"}
+{"task": "agent-payment-setup-resume", "duration_seconds": 222.4, "cost_cents": 3.0, "timestamp": "2026-07-12T01:30:41.945113+00:00", "agent_id": "41d47be1-bef5-4f2e-b730-16794e548e19"}

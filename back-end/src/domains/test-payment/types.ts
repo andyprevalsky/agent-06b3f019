@@ -46,9 +46,59 @@ export interface TestPaymentConfirmation {
   orderId: string;
   status: string;
   paymentIntentId: string;
+  purchaseId?: string;
+  cardId?: string;
   receipt: {
     lineItems: TestPaymentReceiptLine[];
     totals: TestPaymentTotals;
+  };
+}
+
+export interface TestPaymentLifecycle {
+  agentId: string;
+  purchase: null | {
+    id: string;
+    status: string;
+    merchant: string;
+    totalCents: number;
+    cardId: string | null;
+    stripePaymentIntentId: string | null;
+  };
+  walletFunding: null | {
+    status: string;
+    amountCents: number;
+    providerTransferId: string | null;
+    reclaimProviderTransferId: string | null;
+  };
+  stripeHold: null | {
+    id: string;
+    status: string;
+    amountCents: number;
+    amountCapturableCents: number;
+    amountReceivedCents: number;
+  };
+  stripeRefund: null | {
+    id: string;
+    status: string;
+    amountCents: number;
+  };
+  agentCard: null | {
+    id: string;
+    status: string;
+    balanceCents: number;
+  };
+  orgTransfer: null | {
+    id: string;
+    status: string;
+    amountCents: number;
+    transferredCents: number;
+    releasedCents: number;
+    cardId: string | null;
+    livemode: boolean;
+  };
+  attention: {
+    openKinds: string[];
+    resolvedKinds: string[];
   };
 }
 

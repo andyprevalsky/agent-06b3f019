@@ -8,6 +8,7 @@ import { createLogger } from '../../providers/logger';
 import { resumeAgentWorkflow } from '../../providers/agentResume';
 import { classifyAgentFailureForSurface } from '../../providers/credentialPropagation';
 import { finalizeAgent } from '../../providers/traceArchiveLifecycle';
+import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
 import type { Prisma, UpdateStatusBody } from './types';
 import * as repo from './repo';
 
@@ -243,7 +244,15 @@ interface AgentStatusFields {
   messageCount: number;
 }
 
-export async function updateAgentStatus(agentId: string, body: UpdateStatusBody) {
+interface UpdateAgentStatusDependencies {
+  cleanupPurchaseCards?: (agentId: string) => Promise<void>;
+}
+
+export async function updateAgentStatus(
+  agentId: string,
+  body: UpdateStatusBody,
+  dependencies: UpdateAgentStatusDependencies = {}
+) {
   const agent = await repo.findAgentById(agentId);
 
   if (!agent) {
@@ -311,6 +320,15 @@ export async function updateAgentStatus(agentId: string, body: UpdateStatusBody)
 
   await broadcastAgentUpdate(agentId, broadcastPayload);
   if (TERMINAL_STATUSES.has(fields.status) && agent.parentAgentId === null) {
+    try {
+      await (dependencies.cleanupPurchaseCards ?? cleanupAgentPurchaseCards)(agentId);
+    } catch (error) {
+      log.warn('Terminal purchase-card cleanup unavailable; cron will retry', {
+        agent_id: agentId,
+        status: fields.status,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     try {
       await finalizeAgent({ rootAgentId: agentId });
     } catch (error) {

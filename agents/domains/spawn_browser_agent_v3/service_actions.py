@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+import json
 from io import BytesIO
 import time as time_module
 from typing import TYPE_CHECKING, Any, Dict, Optional
@@ -17,7 +18,7 @@ import structlog
 from PIL import Image
 
 from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
-from domains.spawn_browser_agent_v3.service_crypto import has_payment_card_secret_refs
+from domains.spawn_browser_agent_v3.service_crypto import PAYMENT_CARD_SECRET_REFS, has_payment_card_secret_refs
 
 if TYPE_CHECKING:
     from browser_tools.dom_service import ActionHistory, DOMService
@@ -119,6 +120,139 @@ def get_domain_from_url(url: str) -> str:
         return domain
     except Exception:
         return ""
+
+
+async def wait_for_navigation_ready(
+    dom_service: DOMService,
+    *,
+    url: str,
+    timeout_seconds: float = 5.0,
+    reload_blank_spa_once: bool = True,
+) -> Dict[str, Any]:
+    """Wait for a navigated page to have usable content; reload one empty SPA shell."""
+    session = getattr(dom_service, "session", None)
+    get_current_page = getattr(session, "get_current_page", None)
+    if not get_current_page:
+        return {"ready": False, "reason": "no_current_page"}
+
+    try:
+        page_result = get_current_page()
+        page = await page_result if inspect.isawaitable(page_result) else page_result
+    except Exception as exc:
+        logger.warning("Navigation readiness could not get current page", url=url, error=str(exc))
+        return {"ready": False, "reason": "get_current_page_failed", "error": str(exc)}
+
+    async def _wait_for_content(deadline: float) -> Dict[str, Any]:
+        last_state: Dict[str, Any] = {}
+        while time_module.monotonic() < deadline:
+            try:
+                wait_for_load_state = getattr(page, "wait_for_load_state", None)
+                if wait_for_load_state:
+                    try:
+                        wait_result = wait_for_load_state("domcontentloaded", timeout=1500)
+                        if inspect.isawaitable(wait_result):
+                            await wait_result
+                    except Exception:
+                        pass
+
+                evaluate = getattr(page, "evaluate", None)
+                if not evaluate:
+                    return {"ready": False, "reason": "no_page_evaluate", "state": last_state}
+                evaluate_result = evaluate(
+                    """() => {
+                        const body = document.body;
+                        const roots = Array.from(document.querySelectorAll('#root, #__next, [data-reactroot]'));
+                        const rootStats = roots.map((root) => ({
+                            children: root.children ? root.children.length : 0,
+                            textLength: ((root.innerText || root.textContent || '').trim()).length,
+                            controls: root.querySelectorAll
+                              ? root.querySelectorAll('button, input, select, textarea, a[href], [role="button"]').length
+                              : 0,
+                        }));
+                        const rootChildren = rootStats.reduce((sum, item) => sum + item.children, 0);
+                        const rootTextLength = rootStats.reduce((sum, item) => sum + item.textLength, 0);
+                        const rootControls = rootStats.reduce((sum, item) => sum + item.controls, 0);
+                        const bodyTextLength = body ? ((body.innerText || '').trim()).length : 0;
+                        const bodyChildren = body && body.children ? body.children.length : 0;
+                        const bodyControls = body && body.querySelectorAll
+                          ? body.querySelectorAll('button, input, select, textarea, a[href], [role="button"]').length
+                          : 0;
+                        const hasAppRoot = roots.length > 0;
+                        const appRootReady = hasAppRoot && (rootChildren > 0 || rootTextLength > 0 || rootControls > 0);
+                        const plainPageReady = !hasAppRoot && (bodyTextLength > 0 || bodyControls > 0);
+                        return {
+                            readyState: document.readyState,
+                            href: location.href,
+                            title: document.title,
+                            hasAppRoot,
+                            appRootReady,
+                            plainPageReady,
+                            bodyTextLength,
+                            bodyChildren,
+                            bodyControls,
+                            rootChildren,
+                            rootTextLength,
+                            rootControls,
+                            blankSpaShell: hasAppRoot && !appRootReady,
+                        };
+                    }"""
+                )
+                if not inspect.isawaitable(evaluate_result):
+                    return {"ready": False, "reason": "page_evaluate_not_awaitable", "state": last_state}
+                state = await evaluate_result
+                if isinstance(state, str):
+                    try:
+                        state = json.loads(state)
+                    except Exception:
+                        pass
+                last_state = state if isinstance(state, dict) else {"raw": state}
+                if last_state.get("appRootReady") or last_state.get("plainPageReady"):
+                    return {"ready": True, "state": last_state}
+            except Exception as exc:
+                last_state = {"error": str(exc)}
+            await asyncio.sleep(0.25)
+        return {"ready": False, "state": last_state}
+
+    first = await _wait_for_content(time_module.monotonic() + timeout_seconds)
+    if first.get("ready") or not reload_blank_spa_once:
+        if not first.get("ready"):
+            logger.warning("Navigation finished without usable page content", url=url, state=first.get("state"))
+        return first
+
+    state = first.get("state") if isinstance(first.get("state"), dict) else {}
+    stuck_loading_shell = (
+        state.get("readyState") == "loading"
+        and not state.get("hasAppRoot")
+        and not state.get("bodyChildren")
+        and not state.get("bodyTextLength")
+    )
+    if not state.get("blankSpaShell") and not stuck_loading_shell:
+        logger.warning("Navigation finished before page content became ready", url=url, state=state)
+        return first
+
+    if stuck_loading_shell:
+        logger.warning("Navigation stayed on an empty loading document; reloading once", url=url, state=state)
+    else:
+        logger.warning("Navigation produced blank SPA shell; reloading once", url=url, state=state)
+    try:
+        goto = getattr(page, "goto", None)
+        reload_page = getattr(page, "reload", None)
+        if stuck_loading_shell and goto:
+            await goto(url, wait_until="domcontentloaded", timeout=10000)
+        elif reload_page:
+            await reload_page()
+        elif goto:
+            await goto(url, wait_until="domcontentloaded", timeout=10000)
+        else:
+            return first
+    except Exception as exc:
+        logger.warning("Blank SPA shell reload failed", url=url, error=str(exc))
+        return {"ready": False, "reason": "reload_failed", "state": state, "error": str(exc)}
+
+    second = await _wait_for_content(time_module.monotonic() + timeout_seconds)
+    if not second.get("ready"):
+        logger.warning("Page still lacked usable content after reload", url=url, state=second.get("state"))
+    return second
 
 
 def _get_base_domain(domain: str) -> str:
@@ -558,6 +692,384 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
+async def _refresh_element_coordinates(
+    dom_service: Any,
+    index: Any,
+) -> Optional[tuple[int, int]]:
+    """Refresh DOM state once and retry coordinate resolution for stale selector entries."""
+    if index is None:
+        return None
+
+    refresh = getattr(dom_service, "get_browser_state", None)
+    if callable(refresh):
+        try:
+            await _maybe_await(refresh(include_screenshot=False))
+        except TypeError:
+            await _maybe_await(refresh(False))
+        except Exception as exc:
+            logger.debug("DOM refresh before coordinate retry failed", index=index, error=str(exc))
+
+    coords = getattr(dom_service, "get_element_coordinates", None)
+    if not callable(coords):
+        return None
+
+    return await _maybe_await(coords(index))
+
+
+async def _resolve_payment_ref_coordinates(session: Any, ref_name: str) -> Optional[tuple[int, int]]:
+    """Resolve coordinates for a visible payment input by semantic card ref."""
+    if not session or ref_name not in PAYMENT_CARD_SECRET_REFS:
+        return None
+
+    get_page = getattr(session, "get_page", None) or getattr(session, "get_current_page", None)
+    if not callable(get_page):
+        return None
+
+    try:
+        page = await _maybe_await(get_page())
+    except Exception:
+        return None
+    if not page or not hasattr(page, "evaluate"):
+        return None
+
+    try:
+        result = await _maybe_await(
+            page.evaluate(
+                """
+                (refName) => {
+                    const selectorsByRef = {
+                        card_number: [
+                            'input[autocomplete="cc-number"]',
+                            'input#card-number',
+                            'input[name="card-number"]',
+                            'input[name="card_number"]',
+                            'input[id*="card"][id*="number"]',
+                            'input[name*="card"][name*="number"]'
+                        ],
+                        card_name: [
+                            'input[autocomplete="cc-name"]',
+                            'input#card-name',
+                            'input[name="card-name"]',
+                            'input[name="card_name"]',
+                            'input[id*="card"][id*="name"]',
+                            'input[name*="card"][name*="name"]'
+                        ],
+                        card_expiry: [
+                            'input[autocomplete="cc-exp"]',
+                            'input#card-expiry',
+                            'input[name="card-expiry"]',
+                            'input[name="card_expiry"]',
+                            'input[id*="expir"]',
+                            'input[name*="expir"]',
+                            'input[placeholder*="MM/YY"]'
+                        ],
+                        card_cvv: [
+                            'input[autocomplete="cc-csc"]',
+                            'input#card-cvv',
+                            'input#card-cvc',
+                            'input[name="card-cvv"]',
+                            'input[name="card_cvv"]',
+                            'input[name="cvc"]',
+                            'input[name="cvv"]',
+                            'input[id*="cvv"]',
+                            'input[id*="cvc"]',
+                            'input[id*="security"]',
+                            'input[name*="security"]'
+                        ],
+                    };
+                    const selectors = selectorsByRef[refName] || [];
+                    const isVisible = (el) => {
+                        if (!el || el.disabled || el.readOnly) return false;
+                        const rect = el.getBoundingClientRect();
+                        const style = window.getComputedStyle(el);
+                        return rect.width > 0 && rect.height > 0
+                            && style.visibility !== 'hidden'
+                            && style.display !== 'none';
+                    };
+                    for (const selector of selectors) {
+                        for (const el of document.querySelectorAll(selector)) {
+                            if (!isVisible(el)) continue;
+                            el.scrollIntoView({ block: 'center', inline: 'nearest' });
+                            const rect = el.getBoundingClientRect();
+                            return {
+                                x: Math.round(rect.left + rect.width / 2),
+                                y: Math.round(rect.top + rect.height / 2),
+                                selector,
+                            };
+                        }
+                    }
+                    const patternsByRef = {
+                        card_number: ['cc-number', 'card number', 'card-number', 'card_number', 'cardnumber'],
+                        card_name: ['cc-name', 'cardholder', 'card holder', 'name on card', 'card name', 'card-name', 'card_name'],
+                        card_expiry: ['cc-exp', 'expiration', 'expiry', 'exp date', 'mm/yy', 'mm / yy'],
+                        card_cvv: ['cc-csc', 'cvv', 'cvc', 'security code', 'security-code', 'security_code'],
+                    };
+                    const addText = (parts, value) => {
+                        if (typeof value !== 'string') return;
+                        const trimmed = value.trim();
+                        if (trimmed) parts.push(trimmed);
+                    };
+                    const textSignalFor = (el) => {
+                        const parts = [];
+                        for (const attr of ['autocomplete', 'name', 'id', 'placeholder', 'aria-label', 'title']) {
+                            addText(parts, el.getAttribute(attr));
+                        }
+                        const id = el.getAttribute('id');
+                        if (id) {
+                            const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+                            if (label) addText(parts, label.innerText || label.textContent);
+                        }
+                        const wrappingLabel = el.closest('label');
+                        if (wrappingLabel) addText(parts, wrappingLabel.innerText || wrappingLabel.textContent);
+                        let node = el.previousElementSibling;
+                        let hops = 0;
+                        while (node && hops < 2) {
+                            addText(parts, node.innerText || node.textContent);
+                            node = node.previousElementSibling;
+                            hops += 1;
+                        }
+                        let parent = el.parentElement;
+                        hops = 0;
+                        while (parent && hops < 2) {
+                            addText(parts, parent.innerText || parent.textContent);
+                            parent = parent.parentElement;
+                            hops += 1;
+                        }
+                        return parts.join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+                    };
+                    const patterns = patternsByRef[refName] || [];
+                    let best = null;
+                    for (const el of document.querySelectorAll('input, textarea')) {
+                        if (!isVisible(el)) continue;
+                        const signal = textSignalFor(el);
+                        let score = 0;
+                        for (const pattern of patterns) {
+                            if (signal.includes(pattern)) score += pattern.length;
+                        }
+                        if (refName === 'card_name' && signal.includes('name') && signal.includes('card')) {
+                            score += 12;
+                        }
+                        if (refName === 'card_number' && signal.includes('card') && signal.includes('number')) {
+                            score += 12;
+                        }
+                        if (refName === 'card_expiry' && signal.includes('exp')) {
+                            score += 8;
+                        }
+                        if (refName === 'card_cvv' && (signal.includes('security') || signal.includes('cvv') || signal.includes('cvc'))) {
+                            score += 8;
+                        }
+                        if (!best || score > best.score) {
+                            best = { el, score, signal };
+                        }
+                    }
+                    if (best && best.score > 0) {
+                        best.el.scrollIntoView({ block: 'center', inline: 'nearest' });
+                        const rect = best.el.getBoundingClientRect();
+                        return {
+                            x: Math.round(rect.left + rect.width / 2),
+                            y: Math.round(rect.top + rect.height / 2),
+                            selector: 'semantic-payment-field',
+                            score: best.score,
+                            signal: best.signal.slice(0, 120),
+                        };
+                    }
+                    return null;
+                }
+                """,
+                ref_name,
+            )
+        )
+    except Exception as exc:
+        logger.debug("Payment ref selector coordinate lookup failed", ref_name=ref_name, error=str(exc))
+        return None
+
+    if not isinstance(result, dict) or not isinstance(result.get("x"), (int, float)):
+        return None
+    return int(result["x"]), int(result["y"])
+
+
+async def _fill_payment_ref_directly(session: Any, ref_name: str, value: str) -> Optional[Dict[str, Any]]:
+    """Fill an approved one-time payment-card ref into its semantic field atomically."""
+    if not session or ref_name not in PAYMENT_CARD_SECRET_REFS:
+        return None
+
+    payload = {"refName": ref_name, "value": value}
+    fill_script = """
+        ({ refName, value }) => {
+            const selectorsByRef = {
+                card_number: [
+                    'input[autocomplete="cc-number"]',
+                    'input#card-number',
+                    'input[name="card-number"]',
+                    'input[name="card_number"]',
+                    'input[id*="card"][id*="number"]',
+                    'input[name*="card"][name*="number"]'
+                ],
+                card_name: [
+                    'input[autocomplete="cc-name"]',
+                    'input#card-name',
+                    'input[name="card-name"]',
+                    'input[name="card_name"]',
+                    'input[id*="card"][id*="name"]',
+                    'input[name*="card"][name*="name"]'
+                ],
+                card_expiry: [
+                    'input[autocomplete="cc-exp"]',
+                    'input#card-expiry',
+                    'input[name="card-expiry"]',
+                    'input[name="card_expiry"]',
+                    'input[id*="expir"]',
+                    'input[name*="expir"]',
+                    'input[placeholder*="MM/YY"]'
+                ],
+                card_cvv: [
+                    'input[autocomplete="cc-csc"]',
+                    'input#card-cvv',
+                    'input#card-cvc',
+                    'input[name="card-cvv"]',
+                    'input[name="card_cvv"]',
+                    'input[name="cvc"]',
+                    'input[name="cvv"]',
+                    'input[id*="cvv"]',
+                    'input[id*="cvc"]',
+                    'input[id*="security"]',
+                    'input[name*="security"]'
+                ],
+            };
+            const isVisible = (el) => {
+                if (!el || el.disabled || el.readOnly) return false;
+                const rect = el.getBoundingClientRect();
+                const style = window.getComputedStyle(el);
+                return rect.width > 0 && rect.height > 0
+                    && style.visibility !== 'hidden'
+                    && style.display !== 'none';
+            };
+            const addText = (parts, text) => {
+                if (typeof text !== 'string') return;
+                const trimmed = text.trim();
+                if (trimmed) parts.push(trimmed);
+            };
+            const signalFor = (el) => {
+                const parts = [];
+                for (const attr of ['autocomplete', 'name', 'id', 'placeholder', 'aria-label', 'title']) {
+                    addText(parts, el.getAttribute(attr));
+                }
+                const id = el.getAttribute('id');
+                if (id) {
+                    const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+                    if (label) addText(parts, label.innerText || label.textContent);
+                }
+                const wrappingLabel = el.closest('label');
+                if (wrappingLabel) addText(parts, wrappingLabel.innerText || wrappingLabel.textContent);
+                let node = el.previousElementSibling;
+                let hops = 0;
+                while (node && hops < 2) {
+                    addText(parts, node.innerText || node.textContent);
+                    node = node.previousElementSibling;
+                    hops += 1;
+                }
+                let parent = el.parentElement;
+                hops = 0;
+                while (parent && hops < 2) {
+                    addText(parts, parent.innerText || parent.textContent);
+                    parent = parent.parentElement;
+                    hops += 1;
+                }
+                return parts.join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+            };
+            const findField = () => {
+                for (const selector of selectorsByRef[refName] || []) {
+                    for (const el of document.querySelectorAll(selector)) {
+                        if (isVisible(el)) return { el, selector, score: 100 };
+                    }
+                }
+
+                const patternsByRef = {
+                    card_number: ['cc-number', 'card number', 'card-number', 'card_number', 'cardnumber'],
+                    card_name: ['cc-name', 'cardholder', 'card holder', 'name on card', 'card name', 'card-name', 'card_name'],
+                    card_expiry: ['cc-exp', 'expiration', 'expiry', 'exp date', 'mm/yy', 'mm / yy'],
+                    card_cvv: ['cc-csc', 'cvv', 'cvc', 'security code', 'security-code', 'security_code'],
+                };
+                let best = null;
+                for (const el of document.querySelectorAll('input, textarea')) {
+                    if (!isVisible(el)) continue;
+                    const signal = signalFor(el);
+                    let score = 0;
+                    for (const pattern of patternsByRef[refName] || []) {
+                        if (signal.includes(pattern)) score += pattern.length;
+                    }
+                    if (refName === 'card_name' && signal.includes('name') && signal.includes('card')) score += 12;
+                    if (refName === 'card_number' && signal.includes('card') && signal.includes('number')) score += 12;
+                    if (refName === 'card_expiry' && signal.includes('exp')) score += 8;
+                    if (refName === 'card_cvv' && (signal.includes('security') || signal.includes('cvv') || signal.includes('cvc'))) score += 8;
+                    if (!best || score > best.score) best = { el, selector: 'semantic-payment-field', score, signal };
+                }
+                return best && best.score > 0 ? best : null;
+            };
+
+            const match = findField();
+            if (!match) return { filled: false, reason: 'field_not_found' };
+
+            const el = match.el;
+            el.scrollIntoView({ block: 'center', inline: 'nearest' });
+            el.focus();
+            const prototype = el instanceof HTMLTextAreaElement
+                ? HTMLTextAreaElement.prototype
+                : HTMLInputElement.prototype;
+            const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+            if (descriptor && descriptor.set) {
+                descriptor.set.call(el, value);
+            } else {
+                el.value = value;
+            }
+            el.dispatchEvent(new InputEvent('input', {
+                bubbles: true,
+                inputType: 'insertReplacementText',
+                data: value,
+            }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            const rect = el.getBoundingClientRect();
+            return {
+                filled: true,
+                x: Math.round(rect.left + rect.width / 2),
+                y: Math.round(rect.top + rect.height / 2),
+                selector: match.selector,
+                score: match.score,
+                valueLength: String(value || '').length,
+            };
+        }
+    """
+
+    result: Any = None
+    try:
+        get_page = getattr(session, "get_page", None) or getattr(session, "get_current_page", None)
+        if callable(get_page):
+            page = await _maybe_await(get_page())
+            if page and hasattr(page, "evaluate"):
+                result = await _maybe_await(page.evaluate(fill_script, payload))
+    except Exception as exc:
+        logger.debug("Payment ref direct fill via page failed", ref_name=ref_name, error=str(exc))
+
+    if not isinstance(result, dict):
+        try:
+            get_cdp = getattr(session, "get_or_create_cdp_session", None)
+            if callable(get_cdp):
+                cdp_session = await _maybe_await(get_cdp(focus=True))
+                expression = f"({fill_script})({json.dumps(payload)})"
+                cdp_result = await cdp_session.cdp_client.send.Runtime.evaluate(
+                    params={"expression": expression, "returnByValue": True},
+                    session_id=cdp_session.session_id,
+                )
+                result = cdp_result.get("result", {}).get("value")
+        except Exception as exc:
+            logger.debug("Payment ref direct fill via CDP failed", ref_name=ref_name, error=str(exc))
+
+    if not isinstance(result, dict) or result.get("filled") is not True:
+        logger.debug("Payment ref direct fill did not find a target", ref_name=ref_name, result=result)
+        return None
+    return result
+
+
 async def _browser_click_write_lock_signal(session: Any, coords: Optional[Dict[str, Any]]) -> str:
     """Collect text/attributes from the element hit by a click and its composed ancestor path."""
     if not session or not coords:
@@ -699,6 +1211,8 @@ async def _execute_click(  # noqa: C901
     element_coords = None
     if element:
         coord_tuple = await _maybe_await(dom_service.get_element_coordinates(index))
+        if not coord_tuple:
+            coord_tuple = await _refresh_element_coordinates(dom_service, index)
         element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
 
     # Write lock checks for index-based clicks
@@ -981,13 +1495,15 @@ async def _execute_input_text(  # noqa: C901
     clear_before_typing = params.get("clear", True) is not False
     display_text = text
     credential_ref = (credential_refs_by_secret_ref or {}).get(text)
+    secret_ref_name = text if secret_refs and text in secret_refs else None
+    is_payment_card_secret_ref = secret_ref_name in PAYMENT_CARD_SECRET_REFS
 
     # Check if this is a password or card reference that needs decryption
-    if secret_refs and text in secret_refs:
+    if secret_ref_name:
         display_text = "[encrypted_data]"
 
-        if password_origins and text in password_origins:
-            expected_origin = password_origins[text]
+        if password_origins and secret_ref_name in password_origins:
+            expected_origin = password_origins[secret_ref_name]
             current_domain = urlparse(current_url).netloc.lower() if current_url else ""
             expected_domain = urlparse(expected_origin).netloc.lower() if expected_origin else ""
 
@@ -998,12 +1514,18 @@ async def _execute_input_text(  # noqa: C901
                     "error": f"Password origin mismatch: expected {expected_domain}, got {current_domain}",
                 }
 
-        text = secret_refs[text]
+        text = secret_refs[secret_ref_name]
         logger.info("\U0001f510 Typing encrypted credential (password/card)", redacted=True)
 
     # Write lock check for payment fields
     if write_lock_enabled and element and index is not None and await is_payment_field(session, element, index):
-        if not is_approval_valid(write_lock_approvals, "payment", current_url):
+        if is_payment_card_secret_ref and has_payment_card_secret_refs(secret_refs):
+            logger.info(
+                "Write lock bypassed: approved payment card secret ref",
+                ref_name=secret_ref_name,
+                url=current_url,
+            )
+        elif not is_approval_valid(write_lock_approvals, "payment", current_url):
             element_text = getattr(element, "text_content", "") or ""
             tag_name = getattr(element, "tag_name", "") or getattr(element, "node_name", "input")
             field_desc = f"{tag_name} field"
@@ -1024,8 +1546,74 @@ async def _execute_input_text(  # noqa: C901
         else:
             logger.info("Write lock bypassed: existing approval valid", approval_type="payment", url=current_url)
 
+    if is_payment_card_secret_ref and has_payment_card_secret_refs(secret_refs):
+        fill_result = await _fill_payment_ref_directly(session, secret_ref_name or "", text)
+        if not fill_result:
+            readiness = await wait_for_navigation_ready(
+                dom_service,
+                url=current_url,
+                timeout_seconds=3.0,
+                reload_blank_spa_once=True,
+            )
+            logger.debug(
+                "Retried approved payment card direct fill after page readiness",
+                ref_name=secret_ref_name,
+                readiness=readiness,
+            )
+            fill_result = await _fill_payment_ref_directly(session, secret_ref_name or "", text)
+        if fill_result:
+            filled_refs = [secret_ref_name] if secret_ref_name else []
+            for other_ref in PAYMENT_CARD_SECRET_REFS:
+                if other_ref == secret_ref_name:
+                    continue
+                other_value = (secret_refs or {}).get(other_ref)
+                if not other_value:
+                    continue
+                other_result = await _fill_payment_ref_directly(session, other_ref, other_value)
+                if other_result:
+                    filled_refs.append(other_ref)
+
+            element_coords = None
+            if isinstance(fill_result.get("x"), (int, float)) and isinstance(fill_result.get("y"), (int, float)):
+                element_coords = {"x": int(fill_result["x"]), "y": int(fill_result["y"])}
+
+            await action_history.record_action(
+                dom_service=dom_service,
+                action="input_text",
+                thinking=thinking,
+                index=index,
+                coordinates=element_coords,
+                params={"text": display_text, "clear": clear_before_typing},
+                result={
+                    "success": True,
+                    "payment_ref_direct_fill": True,
+                    "payment_refs_filled": filled_refs,
+                    "selector": fill_result.get("selector"),
+                },
+            )
+            logger.info(
+                "Filled approved payment card secret ref directly",
+                ref_name=secret_ref_name,
+                filled_refs=filled_refs,
+                selector=fill_result.get("selector"),
+            )
+            result = {
+                "success": True,
+                "message": "",
+                "typed_text": display_text,
+                "payment_ref_direct_fill": True,
+                "payment_refs_filled": filled_refs,
+            }
+            if credential_ref:
+                result["credential_ref"] = credential_ref
+            return result
+
     if element:
         coord_tuple = await dom_service.get_element_coordinates(index)
+        if humanizer and not coord_tuple:
+            coord_tuple = await _refresh_element_coordinates(dom_service, index)
+        if humanizer and not coord_tuple and is_payment_card_secret_ref:
+            coord_tuple = await _resolve_payment_ref_coordinates(session, secret_ref_name or "")
         element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
 
         asyncio.create_task(session.highlight_interaction_element(element))
@@ -1182,6 +1770,8 @@ async def _execute_goto(
                 logger.info(f"\U0001f4be Injected {result_data.get('count', 0)} localStorage entries for {origin}")
         except Exception as e:
             logger.warning(f"Failed to inject localStorage for {url}: {e}")
+
+    await wait_for_navigation_ready(dom_service, url=url)
 
     await action_history.record_action(
         dom_service=dom_service,

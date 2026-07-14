@@ -41,8 +41,15 @@ from domains.knowledge_base.handler import query_blueprints_activity, save_bluep
 from domains.message_person.repo import fetch_recent_messages_activity, generate_message_activity
 from domains.read_message_history.handler import read_message_history_activity
 from domains.reasoning.handler import execute_reasoning_activity
-from domains.request_payment_card.repo import lookup_purchase_activity, mint_purchase_card_activity
-from domains.request_user_approval.repo import create_approval_request_activity
+from domains.request_payment_card.repo import (
+    agentcard_status_activity,
+    lookup_purchase_activity,
+    mint_purchase_card_activity,
+)
+from domains.request_user_approval.repo import (
+    create_approval_request_activity,
+    resolve_attention_request_activity,
+)
 from domains.spawn_agent.service import (
     _resolve_explore_attachments_activity,
     fetch_full_network_metadata,
@@ -1023,6 +1030,8 @@ async def main():
             spawn_sub_agents_batch_activity,
             fetch_parent_attachments_activity,
             create_approval_request_activity,
+            resolve_attention_request_activity,
+            agentcard_status_activity,
             lookup_purchase_activity,
             mint_purchase_card_activity,
             spawn_browser_agent_activity_v3,  # V3: browser-use + Rose API

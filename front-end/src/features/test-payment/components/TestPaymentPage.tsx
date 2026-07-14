@@ -1,9 +1,11 @@
 /**
  * STATE MACHINE: TestPaymentPage
  *
- * [DEV_GATE] -- production build --> [DISABLED]
- * [DEV_GATE] -- dev build --> [LOADING_ITEMS]
+ * [ACCESS_GATE] -- production without lifecycle query --> [DISABLED]
+ * [ACCESS_GATE] -- production lifecycle query --> [LIVE_FIXTURE]
+ * [ACCESS_GATE] -- dev build --> [LOADING_ITEMS]
  * [LOADING_ITEMS] -- success --> [SHOPPING]
+ * [LIVE_FIXTURE] -- static item loaded --> [CHECKOUT_READY]
  * [SHOPPING] -- user selects required items --> [CHECKOUT_READY]
  * [CHECKOUT_READY] -- submit card --> [CONFIRMING]
  * [CONFIRMING] -- success --> [CONFIRMED]
@@ -17,7 +19,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Check, CreditCard, Loader2, ShoppingCart } from 'lucide-react';
 import {
+  ABANDONMENT_BENCHMARK_QUERY,
+  ABANDONMENT_BENCHMARK_ITEMS,
   EMPTY_CARD_FORM,
+  LIVE_LIFECYCLE_BENCHMARK_QUERY,
+  LIVE_LIFECYCLE_ITEM,
   REQUIRED_ITEM_IDS,
   SHIPPING_LABEL,
   TAX_LABEL,
@@ -37,10 +43,10 @@ function calculateSubtotal(items: TestPaymentItem[], selectedIds: string[]): num
   );
 }
 
-function calculateTotals(items: TestPaymentItem[], selectedIds: string[]) {
+function calculateTotals(items: TestPaymentItem[], selectedIds: string[], includeFees = true) {
   const subtotalCents = calculateSubtotal(items, selectedIds);
-  const taxCents = Math.round(subtotalCents * 0.0825);
-  const shippingCents = 499;
+  const taxCents = includeFees ? Math.round(subtotalCents * 0.0825) : 0;
+  const shippingCents = includeFees ? 499 : 0;
   return {
     subtotalCents,
     taxCents,
@@ -122,17 +128,19 @@ function ProductGrid({
   );
 }
 
-function ReceiptSummary({
+export function ReceiptSummary({
   items,
   selectedIds,
+  includeFees = true,
 }: {
   items: TestPaymentItem[];
   selectedIds: string[];
+  includeFees?: boolean;
 }) {
   const selected = selectedIds
     .map((id) => items.find((item) => item.id === id))
     .filter(Boolean) as TestPaymentItem[];
-  const totals = calculateTotals(items, selectedIds);
+  const totals = calculateTotals(items, selectedIds, includeFees);
   return (
     <aside
       data-merchant={TEST_PAYMENT_MERCHANT_NAME}
@@ -147,6 +155,9 @@ function ReceiptSummary({
         <h2 className="text-lg font-semibold">Order summary</h2>
       </div>
       <p className="text-sm text-muted-foreground">Merchant: {TEST_PAYMENT_MERCHANT_NAME}</p>
+      <p className="text-sm text-muted-foreground" data-testid="test-payment-checkout-reference">
+        Checkout reference: TP-CART-{totals.totalCents}
+      </p>
       <div className="space-y-2">
         {selected.map((item) => (
           <div
@@ -172,22 +183,26 @@ function ReceiptSummary({
           <span>Subtotal</span>
           <span>{formatCents(totals.subtotalCents)}</span>
         </div>
-        <div
-          data-fee-label={TAX_LABEL}
-          data-fee-amount-cents={totals.taxCents}
-          className="flex justify-between"
-        >
-          <span>{TAX_LABEL}</span>
-          <span>{formatCents(totals.taxCents)}</span>
-        </div>
-        <div
-          data-fee-label={SHIPPING_LABEL}
-          data-fee-amount-cents={totals.shippingCents}
-          className="flex justify-between"
-        >
-          <span>{SHIPPING_LABEL}</span>
-          <span>{formatCents(totals.shippingCents)}</span>
-        </div>
+        {includeFees ? (
+          <>
+            <div
+              data-fee-label={TAX_LABEL}
+              data-fee-amount-cents={totals.taxCents}
+              className="flex justify-between"
+            >
+              <span>{TAX_LABEL}</span>
+              <span>{formatCents(totals.taxCents)}</span>
+            </div>
+            <div
+              data-fee-label={SHIPPING_LABEL}
+              data-fee-amount-cents={totals.shippingCents}
+              className="flex justify-between"
+            >
+              <span>{SHIPPING_LABEL}</span>
+              <span>{formatCents(totals.shippingCents)}</span>
+            </div>
+          </>
+        ) : null}
         <div
           data-total-cents={totals.totalCents}
           className="flex justify-between text-base font-semibold"
@@ -360,33 +375,49 @@ export function Confirmation({ confirmation }: { confirmation: TestPaymentConfir
 
 export default function TestPaymentPage() {
   const isDev = import.meta.env.DEV === true;
-  const [items, setItems] = useState<TestPaymentItem[]>([]);
-  const [selectedIds, setSelectedIds] = useState<string[]>([...REQUIRED_ITEM_IDS]);
+  const benchmarkMode = new URLSearchParams(window.location.search).get('benchmark');
+  const isLiveLifecycleFixture = benchmarkMode === LIVE_LIFECYCLE_BENCHMARK_QUERY;
+  const isAbandonmentFixture = isDev && benchmarkMode === ABANDONMENT_BENCHMARK_QUERY;
+  const isEnabled = isDev || isLiveLifecycleFixture;
+  const [items, setItems] = useState<TestPaymentItem[]>(
+    isLiveLifecycleFixture
+      ? [LIVE_LIFECYCLE_ITEM]
+      : isAbandonmentFixture
+        ? ABANDONMENT_BENCHMARK_ITEMS
+        : [],
+  );
+  const [selectedIds, setSelectedIds] = useState<string[]>(
+    isLiveLifecycleFixture ? [LIVE_LIFECYCLE_ITEM.id] : [...REQUIRED_ITEM_IDS],
+  );
   const [card, setCard] = useState<TestPaymentCardForm>(EMPTY_CARD_FORM);
   const [confirmation, setConfirmation] = useState<TestPaymentConfirmation | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(!isLiveLifecycleFixture && !isAbandonmentFixture);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!isDev) return;
+    if (!isDev || isLiveLifecycleFixture || isAbandonmentFixture) return;
     fetchTestPaymentItems()
       .then(setItems)
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setLoading(false));
-  }, [isDev]);
+  }, [isAbandonmentFixture, isDev, isLiveLifecycleFixture]);
 
-  const totals = useMemo(() => calculateTotals(items, selectedIds), [items, selectedIds]);
-  const canSubmit = selectedIds.length === 3 && !submitting && items.length === 5;
+  const totals = useMemo(
+    () => calculateTotals(items, selectedIds, !isLiveLifecycleFixture),
+    [isLiveLifecycleFixture, items, selectedIds],
+  );
+  const expectedItemCount = isLiveLifecycleFixture ? 1 : 3;
+  const canSubmit = selectedIds.length === expectedItemCount && !submitting && items.length > 0;
 
-  if (!isDev) return <DisabledPage />;
+  if (!isEnabled) return <DisabledPage />;
   if (confirmation) return <Confirmation confirmation={confirmation} />;
 
   return (
     <main className="min-h-screen bg-background p-6 text-foreground">
       <div className="mx-auto max-w-7xl space-y-6">
         <header className="space-y-2">
-          <p className="text-sm font-medium uppercase text-muted-foreground">Dev-only checkout</p>
+          <p className="text-sm font-medium uppercase text-muted-foreground">Rose Labs Checkout</p>
           <h1 className="text-4xl font-semibold">Test Payment</h1>
           <p className="max-w-2xl text-muted-foreground">Merchant: {TEST_PAYMENT_MERCHANT_NAME}</p>
         </header>
@@ -402,7 +433,11 @@ export default function TestPaymentPage() {
 
         <div className="grid gap-5 lg:grid-cols-[1fr_360px]">
           <CardForm card={card} setCard={setCard} disabled={submitting} />
-          <ReceiptSummary items={items} selectedIds={selectedIds} />
+          <ReceiptSummary
+            items={items}
+            selectedIds={selectedIds}
+            includeFees={!isLiveLifecycleFixture}
+          />
         </div>
 
         {error && (
@@ -418,6 +453,9 @@ export default function TestPaymentPage() {
             setSubmitting(true);
             setError(null);
             try {
+              if (isLiveLifecycleFixture || isAbandonmentFixture) {
+                throw new Error('This checkout is unavailable');
+              }
               setConfirmation(await confirmTestPayment(selectedIds, card));
             } catch (err) {
               setError(err instanceof Error ? err.message : String(err));
@@ -428,7 +466,7 @@ export default function TestPaymentPage() {
           className="inline-flex items-center rounded-md bg-foreground px-5 py-3 font-medium text-background disabled:cursor-not-allowed disabled:opacity-50"
         >
           {submitting ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-          Pay {formatCents(totals.totalCents)}
+          {isLiveLifecycleFixture ? 'Place order' : 'Pay'} {formatCents(totals.totalCents)}
         </button>
       </div>
     </main>

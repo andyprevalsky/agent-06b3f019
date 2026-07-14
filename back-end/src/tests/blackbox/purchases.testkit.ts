@@ -7,7 +7,15 @@ import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { stripe } from '../../providers/stripe';
-import type { CardProvider } from '../../providers/card-provider';
+import type { CardProvider, CardProviderMintRequest } from '../../providers/card-provider';
+import { AgentCardProviderError } from '../../providers/card-provider';
+import type {
+  WalletFundingCollectionRequest,
+  WalletFundingProvider,
+  WalletFundingRequest,
+  WalletFundingReclaimRequest,
+  WalletFundingResult,
+} from '../../providers/wallet-funding';
 
 export function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -21,21 +29,25 @@ export function assertStatus(actual: number, expected: number, data: unknown): v
 
 export class FakeCardProvider implements CardProvider {
   mintCalls = 0;
+  mintRequests: CardProviderMintRequest[] = [];
   detailCalls = 0;
   closeCalls = 0;
   readonly cardId = `fake-card-${randomUUID()}`;
+  readonly providerTransferId = `owt_${randomUUID()}`;
   readonly pan = '4242424242424242';
   readonly cvv = '123';
   readonly expiry = '12/30';
 
-  async mintCard() {
+  async mintCard(request: CardProviderMintRequest) {
     this.mintCalls += 1;
+    this.mintRequests.push(request);
     return {
       cardId: this.cardId,
       last4: '4242',
       expiry: this.expiry,
       spendLimitCents: 1000,
       status: 'active',
+      providerTransferId: this.providerTransferId,
     };
   }
 
@@ -87,17 +99,21 @@ export class StubCardStateProvider implements CardProvider {
  */
 export class RepurchaseProvider implements CardProvider {
   mintCalls = 0;
+  mintRequests: CardProviderMintRequest[] = [];
   readonly newCardId = `new-card-${randomUUID()}`;
+  readonly providerTransferId = `owt_${randomUUID()}`;
   readonly newPan = '4242424242429999';
   constructor(private readonly consumedCardId: string) {}
-  async mintCard() {
+  async mintCard(request: CardProviderMintRequest) {
     this.mintCalls += 1;
+    this.mintRequests.push(request);
     return {
       cardId: this.newCardId,
       last4: this.newPan.slice(-4),
       expiry: '12/30',
       spendLimitCents: 1080,
       status: 'OPEN',
+      providerTransferId: this.providerTransferId,
     };
   }
   async getDetails(cardId: string) {
@@ -113,6 +129,85 @@ export class RepurchaseProvider implements CardProvider {
     return { pan: this.newPan, cvv: '123', expiry: '12/30', balanceCents: 1080, status: 'OPEN' };
   }
   async closeCard(): Promise<void> {}
+}
+
+export class FailingMintCardProvider extends FakeCardProvider {
+  async mintCard(): Promise<never> {
+    this.mintCalls += 1;
+    throw new Error('card mint failed');
+  }
+}
+
+export class FailingDetailsCardProvider extends FakeCardProvider {
+  async getDetails(): Promise<never> {
+    this.detailCalls += 1;
+    throw new Error('card details failed');
+  }
+}
+
+export class FundingInProgressCardProvider extends FakeCardProvider {
+  private returnedFundingGate = false;
+
+  async mintCard(request: CardProviderMintRequest) {
+    if (!this.returnedFundingGate) {
+      this.returnedFundingGate = true;
+      this.mintCalls += 1;
+      this.mintRequests.push(request);
+      throw new AgentCardProviderError(
+        'AgentCard company funding is in progress',
+        409,
+        undefined,
+        'agentcard_company_funding_in_progress',
+        {
+          agentcardStatus: 'funding_in_progress',
+          transferId: this.providerTransferId,
+          retryAfterSeconds: 0,
+        }
+      );
+    }
+    return super.mintCard(request);
+  }
+}
+
+export class FakeWalletFundingProvider implements WalletFundingProvider {
+  fundCalls: WalletFundingRequest[] = [];
+  confirmCalls: WalletFundingCollectionRequest[] = [];
+  reclaimCalls: WalletFundingReclaimRequest[] = [];
+  failReclaim = false;
+
+  async fundUserWallet(request: WalletFundingRequest): Promise<WalletFundingResult> {
+    this.fundCalls.push(request);
+    return {
+      providerTransferId: `wft_${request.purchaseId}`,
+      metadata: { ok: true, purchase_id: request.purchaseId },
+    };
+  }
+
+  async confirmCollection(
+    request: WalletFundingCollectionRequest
+  ): Promise<WalletFundingResult> {
+    this.confirmCalls.push(request);
+    return {
+      providerTransferId: request.providerTransferId,
+      metadata: {
+        ok: true,
+        purchase_id: request.purchaseId,
+        transfer_id: request.providerTransferId,
+        outcome: request.outcome,
+      },
+    };
+  }
+
+  async reclaimUserWalletFunding(
+    request: WalletFundingReclaimRequest
+  ): Promise<WalletFundingResult> {
+    this.reclaimCalls.push(request);
+    if (this.failReclaim) throw new Error('wallet reclaim failed');
+    return {
+      providerTransferId: `wfr_${request.purchaseId}`,
+      metadata: { ok: true, purchase_id: request.purchaseId, reason: request.reason },
+    };
+  }
 }
 
 export async function seedHeldPurchase(userId: string, fingerprint: string, cardId: string) {
@@ -136,8 +231,10 @@ export async function seedHeldPurchase(userId: string, fingerprint: string, card
 export interface FakeStripeCalls {
   charges: string[];
   refunds: string[];
+  refundIdempotencyKeys: Array<string | undefined>;
   captures: string[];
   cancels: string[];
+  retrieves: string[];
 }
 
 /**
@@ -145,14 +242,21 @@ export interface FakeStripeCalls {
  * records charge params and the hold capture/cancel/refund calls. `create` returns a stable
  * PaymentIntent id so a later capture/cancel can be tied back to the row.
  */
-export async function withFakeStripe<T>(fn: (calls: FakeStripeCalls) => Promise<T>) {
+export async function withFakeStripe<T>(
+  fn: (calls: FakeStripeCalls) => Promise<T>,
+  opts: {
+    retrievePaymentIntent?: (id: string) => Promise<unknown> | unknown;
+    refundError?: Error;
+  } = {}
+) {
   const paymentIntents = stripe.paymentIntents as unknown as {
     create: (params: unknown) => Promise<{ id: string }>;
     capture: (id: string, params?: unknown) => Promise<{ id: string; status: string }>;
     cancel: (id: string, params?: unknown) => Promise<{ id: string; status: string }>;
+    retrieve: (id: string) => Promise<unknown>;
   };
   const refunds = stripe.refunds as unknown as {
-    create: (params: unknown) => Promise<{ id: string }>;
+    create: (params: unknown, options?: { idempotencyKey?: string }) => Promise<{ id: string }>;
   };
   const customers = stripe.customers as unknown as {
     retrieve: (customerId: string) => Promise<{
@@ -164,9 +268,17 @@ export async function withFakeStripe<T>(fn: (calls: FakeStripeCalls) => Promise<
   const originalPaymentIntentCreate = paymentIntents.create;
   const originalPaymentIntentCapture = paymentIntents.capture;
   const originalPaymentIntentCancel = paymentIntents.cancel;
+  const originalPaymentIntentRetrieve = paymentIntents.retrieve;
   const originalRefundCreate = refunds.create;
   const originalCustomerRetrieve = customers.retrieve;
-  const calls: FakeStripeCalls = { charges: [], refunds: [], captures: [], cancels: [] };
+  const calls: FakeStripeCalls = {
+    charges: [],
+    refunds: [],
+    refundIdempotencyKeys: [],
+    captures: [],
+    cancels: [],
+    retrieves: [],
+  };
 
   customers.retrieve = async (customerId: string) => ({
     id: customerId,
@@ -185,9 +297,16 @@ export async function withFakeStripe<T>(fn: (calls: FakeStripeCalls) => Promise<
     calls.cancels.push(id);
     return { id, status: 'canceled' };
   };
-  refunds.create = async (params: unknown) => {
+  paymentIntents.retrieve = async (id: string) => {
+    calls.retrieves.push(id);
+    if (opts.retrievePaymentIntent !== undefined) return opts.retrievePaymentIntent(id);
+    return { id, status: 'requires_capture', amount_capturable: 1000 };
+  };
+  refunds.create = async (params: unknown, options?: { idempotencyKey?: string }) => {
+    if (opts.refundError !== undefined) throw opts.refundError;
     const id = `re_${randomUUID()}`;
     calls.refunds.push(JSON.stringify(params));
+    calls.refundIdempotencyKeys.push(options?.idempotencyKey);
     return { id };
   };
 
@@ -197,6 +316,7 @@ export async function withFakeStripe<T>(fn: (calls: FakeStripeCalls) => Promise<
     paymentIntents.create = originalPaymentIntentCreate;
     paymentIntents.capture = originalPaymentIntentCapture;
     paymentIntents.cancel = originalPaymentIntentCancel;
+    paymentIntents.retrieve = originalPaymentIntentRetrieve;
     refunds.create = originalRefundCreate;
     customers.retrieve = originalCustomerRetrieve;
   }

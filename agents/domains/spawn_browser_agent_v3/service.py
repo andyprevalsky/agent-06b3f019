@@ -263,6 +263,41 @@ def build_context_summary(
     return "\n".join(summary_parts)
 
 
+def append_completion_evidence(
+    message: str,
+    *,
+    browser_url: str | None = None,
+    structured_response: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Add deterministic final evidence that should not depend on model wording."""
+    extra_parts: List[str] = []
+    structured_response = structured_response or {}
+
+    order_id = structured_response.get("order_confirmation_id")
+    if (
+        browser_url
+        and "/test_payment/confirmation/" in browser_url
+        and order_id
+        and "payment confirmed" not in message.lower()
+    ):
+        extra_parts.append(f"\n**Confirmation**: Payment confirmed\nOrder ID: {order_id}")
+
+    if structured_response:
+        lines = ["\n**Extracted Output:**"]
+        for key, value in structured_response.items():
+            label = str(key).replace("_", " ").title()
+            if isinstance(value, list):
+                display_value = ", ".join(str(item) for item in value)
+            else:
+                display_value = str(value)
+            lines.append(f"- **{label}:** {display_value}")
+        extra_parts.append("\n".join(lines))
+
+    if not extra_parts:
+        return message
+    return f"{message}\n{''.join(extra_parts)}"
+
+
 # ========================================
 # SESSION FILE EXTRACTION
 # ========================================

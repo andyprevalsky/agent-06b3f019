@@ -632,7 +632,7 @@
   {
     "name": "agent-payment-test-shop",
     "title": "Agent Payment Test Shop",
-    "prompt": "Use a browser agent to go to {frontend_url}/test_payment. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote.",
+    "prompt": "Use a browser agent to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. The checkout merchant is Rose Labs Test Payment.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -640,7 +640,8 @@
     ],
     "tags": [
       "browser",
-      "payment"
+      "payment",
+      "agentcard-lifecycle-sandbox"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
@@ -687,6 +688,472 @@
           "amountCents": 499
         }
       ]
+    },
+    "expected_payment_lifecycle": {
+      "purchase": {
+        "status": "CLEARED",
+        "merchant": "Rose Labs Test Payment",
+        "totalCents": 4396
+      },
+      "walletFunding": {
+        "status": "CONSUMED",
+        "amountCents": 4396
+      },
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 4396,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 4396
+      },
+      "agentCard": {
+        "balanceCents": 0
+      },
+      "orgTransfer": {
+        "status": "consumed",
+        "amountCents": 4396,
+        "transferredCents": 4396,
+        "releasedCents": 0,
+        "livemode": false
+      },
+      "attention": {
+        "openKinds": []
+      }
+    },
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "agent-payment-setup-resume",
+    "title": "Agent Payment Setup And Auto Resume",
+    "prompt": "Use a browser agent to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. If One Time Agent Payment Setup is required after payment approval, wait for the user to complete it and then continue automatically with the same checkout.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "payment",
+      "setup",
+      "agentcard-lifecycle-sandbox"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_attention_kinds": [
+      "payment_approval",
+      "agentcard_user_cardholder_onboarding_required"
+    ],
+    "agentcard_setup_action": "complete",
+    "start_phase": "execute",
+    "expected_payment_receipt": {
+      "merchant": "Rose Labs Test Payment",
+      "currency": "USD",
+      "subtotalCents": 3600,
+      "totalCents": 4396,
+      "lineItems": [
+        {
+          "name": "Aurora Notebook",
+          "imageUrl": "https://placehold.co/320x220/png?text=Aurora+Notebook",
+          "unitPriceCents": 1200,
+          "quantity": 1,
+          "lineTotalCents": 1200
+        },
+        {
+          "name": "Ceramic Mug",
+          "imageUrl": "https://placehold.co/320x220/png?text=Ceramic+Mug",
+          "unitPriceCents": 900,
+          "quantity": 1,
+          "lineTotalCents": 900
+        },
+        {
+          "name": "Canvas Tote",
+          "imageUrl": "https://placehold.co/320x220/png?text=Canvas+Tote",
+          "unitPriceCents": 1500,
+          "quantity": 1,
+          "lineTotalCents": 1500
+        }
+      ],
+      "fees": [
+        {
+          "label": "Tax",
+          "amountCents": 297
+        },
+        {
+          "label": "Shipping",
+          "amountCents": 499
+        }
+      ]
+    },
+    "expected_payment_lifecycle": {
+      "purchase": {
+        "status": "CLEARED",
+        "merchant": "Rose Labs Test Payment",
+        "totalCents": 4396
+      },
+      "walletFunding": {
+        "status": "CONSUMED",
+        "amountCents": 4396
+      },
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 4396,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 4396
+      },
+      "stripeRefund": null,
+      "agentCard": {
+        "balanceCents": 0
+      },
+      "orgTransfer": {
+        "status": "consumed",
+        "amountCents": 4396,
+        "transferredCents": 4396,
+        "releasedCents": 0,
+        "livemode": false
+      },
+      "attention": {
+        "openKinds": []
+      }
+    },
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "agent-payment-idempotent-abandonment",
+    "title": "Agent Payment Idempotent Settlement",
+    "prompt": "The root agent must invoke spawn_browser_agent exactly twice, sequentially, against {frontend_url}/test_payment. In each browser task, select exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote; prepare the visible Rose Labs Test Payment checkout; independently request a one-time payment card for the same unchanged order; and report the card last four. The first browser agent must leave checkout unsubmitted. Wait for it to finish before invoking the second browser agent. The second browser agent must independently request the same card again, verify the last four matches the first result, then submit the visible checkout and report the order confirmation. Use only the visible checkout UI; do not navigate to source files or API endpoints.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_browser_agent"
+    ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 2
+    },
+    "min_tool_counts": {
+      "request_payment_card": 2
+    },
+    "tags": [
+      "browser",
+      "payment",
+      "idempotency",
+      "settlement",
+      "agentcard-lifecycle-sandbox"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_attention_kind": "payment_approval",
+    "start_phase": "execute",
+    "expected_payment_receipt": {
+      "merchant": "Rose Labs Test Payment",
+      "currency": "USD",
+      "subtotalCents": 3600,
+      "totalCents": 4396,
+      "lineItems": [
+        {
+          "name": "Aurora Notebook",
+          "imageUrl": "https://placehold.co/320x220/png?text=Aurora+Notebook",
+          "unitPriceCents": 1200,
+          "quantity": 1,
+          "lineTotalCents": 1200
+        },
+        {
+          "name": "Ceramic Mug",
+          "imageUrl": "https://placehold.co/320x220/png?text=Ceramic+Mug",
+          "unitPriceCents": 900,
+          "quantity": 1,
+          "lineTotalCents": 900
+        },
+        {
+          "name": "Canvas Tote",
+          "imageUrl": "https://placehold.co/320x220/png?text=Canvas+Tote",
+          "unitPriceCents": 1500,
+          "quantity": 1,
+          "lineTotalCents": 1500
+        }
+      ],
+      "fees": [
+        {
+          "label": "Tax",
+          "amountCents": 297
+        },
+        {
+          "label": "Shipping",
+          "amountCents": 499
+        }
+      ]
+    },
+    "expected_payment_lifecycle": {
+      "purchase": {
+        "status": "CLEARED",
+        "merchant": "Rose Labs Test Payment",
+        "totalCents": 4396
+      },
+      "walletFunding": {
+        "status": "CONSUMED",
+        "amountCents": 4396
+      },
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 4396,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 4396
+      },
+      "stripeRefund": null,
+      "agentCard": {
+        "balanceCents": 0
+      },
+      "orgTransfer": {
+        "status": "consumed",
+        "amountCents": 4396,
+        "transferredCents": 4396,
+        "releasedCents": 0,
+        "livemode": false
+      },
+      "attention": {
+        "openKinds": []
+      }
+    },
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "agent-payment-abandonment",
+    "title": "Agent Payment Abandonment Compensation",
+    "prompt": "Use one browser agent to go to {frontend_url}/test_payment?benchmark=agentcard-abandonment. Select exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Prepare the visible Rose Labs Test Payment checkout and request a one-time payment card for the exact order. Do not submit payment.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "payment",
+      "compensation",
+      "agentcard-lifecycle-sandbox"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_attention_kind": "payment_approval",
+    "start_phase": "execute",
+    "success_on_payment_card_request": true,
+    "payment_card_request_action": "abandon",
+    "response_schema": {
+      "fields": [
+        {
+          "name": "selected_product_names",
+          "type": "list[str]",
+          "required": true,
+          "description": "Exactly the products visibly selected in checkout"
+        },
+        {
+          "name": "one_time_payment_card_number",
+          "type": "str",
+          "required": true,
+          "description": "The one-time payment card number issued for the prepared checkout"
+        },
+        {
+          "name": "order_not_placed",
+          "type": "bool",
+          "required": true,
+          "description": "True when Place order was not clicked and no merchant order was submitted"
+        }
+      ]
+    },
+    "expected_payment_receipt": {
+      "merchant": "Rose Labs Test Payment",
+      "currency": "USD",
+      "subtotalCents": 3600,
+      "totalCents": 4396,
+      "lineItems": [
+        {
+          "name": "Aurora Notebook",
+          "imageUrl": "https://placehold.co/320x220/png?text=Aurora+Notebook",
+          "unitPriceCents": 1200,
+          "quantity": 1,
+          "lineTotalCents": 1200
+        },
+        {
+          "name": "Ceramic Mug",
+          "imageUrl": "https://placehold.co/320x220/png?text=Ceramic+Mug",
+          "unitPriceCents": 900,
+          "quantity": 1,
+          "lineTotalCents": 900
+        },
+        {
+          "name": "Canvas Tote",
+          "imageUrl": "https://placehold.co/320x220/png?text=Canvas+Tote",
+          "unitPriceCents": 1500,
+          "quantity": 1,
+          "lineTotalCents": 1500
+        }
+      ],
+      "fees": [
+        {
+          "label": "Tax",
+          "amountCents": 297
+        },
+        {
+          "label": "Shipping",
+          "amountCents": 499
+        }
+      ]
+    },
+    "expected_payment_lifecycle": {
+      "purchase": {
+        "status": "VOIDED",
+        "merchant": "Rose Labs Test Payment",
+        "totalCents": 4396
+      },
+      "walletFunding": {
+        "status": "RECLAIMED",
+        "amountCents": 4396
+      },
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 4396,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 4396
+      },
+      "stripeRefund": {
+        "status": "succeeded",
+        "amountCents": 4396
+      },
+      "agentCard": {
+        "balanceCents": 0
+      },
+      "orgTransfer": {
+        "status": "reclaimed",
+        "amountCents": 4396,
+        "transferredCents": 4396,
+        "releasedCents": 4396,
+        "livemode": false
+      },
+      "attention": {
+        "openKinds": []
+      }
+    },
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "agent-payment-production-abandonment",
+    "title": "Agent Payment Production Lifecycle",
+    "prompt": "Use one browser agent to go to {frontend_url}/test_payment?benchmark=agentcard-live-lifecycle. Prepare the visible Rose Labs Test Payment checkout for the single Agent Card Lifecycle Probe item. Request a one-time payment card for exactly $0.50. Do not click Place order and do not submit payment.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "payment",
+      "agentcard-lifecycle-production"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_attention_kind": "payment_approval",
+    "start_phase": "execute",
+    "success_on_payment_card_request": true,
+    "payment_card_request_action": "abandon",
+    "production_only": true,
+    "response_schema": {
+      "fields": [
+        {
+          "name": "selected_product_names",
+          "type": "list[str]",
+          "required": true,
+          "description": "Exactly the product visibly selected in checkout"
+        },
+        {
+          "name": "one_time_payment_card_number",
+          "type": "str",
+          "required": true,
+          "description": "The one-time payment card number issued for the prepared checkout"
+        },
+        {
+          "name": "order_not_placed",
+          "type": "bool",
+          "required": true,
+          "description": "True when Place order was not clicked and no merchant order was submitted"
+        }
+      ]
+    },
+    "expected_payment_receipt": {
+      "merchant": "Rose Labs Test Payment",
+      "currency": "USD",
+      "subtotalCents": 50,
+      "totalCents": 50,
+      "lineItems": [
+        {
+          "name": "Agent Card Lifecycle Probe",
+          "imageUrl": "https://placehold.co/320x220/png?text=Agent+Card+Lifecycle+Probe",
+          "unitPriceCents": 50,
+          "quantity": 1,
+          "lineTotalCents": 50
+        }
+      ],
+      "fees": []
+    },
+    "expected_payment_lifecycle": {
+      "purchase": {
+        "status": "VOIDED",
+        "merchant": "Rose Labs Test Payment",
+        "totalCents": 50
+      },
+      "walletFunding": {
+        "status": "RECLAIMED",
+        "amountCents": 50
+      },
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 50,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 50
+      },
+      "stripeRefund": {
+        "status": "succeeded",
+        "amountCents": 50
+      },
+      "agentCard": {
+        "balanceCents": 0
+      },
+      "orgTransfer": {
+        "status": "reclaimed",
+        "amountCents": 50,
+        "transferredCents": 50,
+        "releasedCents": 50,
+        "livemode": true
+      },
+      "attention": {
+        "openKinds": []
+      }
+    },
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "production-backend",
+        "production-frontend"
+      ],
+      "secrets": [
+        "stripe-live",
+        "agentcard-live"
+      ],
+      "live_targets": [
+        "api.roselabs.ai",
+        "roselabs.ai"
+      ],
+      "context_notes": "Production-only bounded lifecycle. The card is never submitted to a merchant; benchmark cleanup must reclaim the AgentCard organization transfer and refund the Stripe capture."
     },
     "bench": "pipeline-e2e"
   },

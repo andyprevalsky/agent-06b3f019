@@ -1,0 +1,81 @@
+#!/usr/bin/env tsx
+/* eslint-disable no-console */
+
+import assert from 'node:assert/strict';
+import { AgentCardOrgRuntime } from '../../providers/agentcard/org-runtime';
+
+const ENV_NAMES = [
+  'AGENTCARD_ORG_MCP_ACCESS_TOKEN',
+  'AGENTCARD_API_KEY',
+  'AGENTCARD_ADMIN_MCP_ACCESS_TOKEN',
+  'AGENTCARD_ORG_OAUTH_CLIENT_ID',
+  'AGENTCARD_ORG_OAUTH_CLIENT_SECRET',
+  'AGENTCARD_OAUTH_CLIENT_ID',
+  'AGENTCARD_OAUTH_CLIENT_SECRET',
+] as const;
+
+async function main(): Promise<void> {
+  const original = Object.fromEntries(ENV_NAMES.map((name) => [name, process.env[name]]));
+  try {
+    for (const name of ENV_NAMES) delete process.env[name];
+    process.env.AGENTCARD_OAUTH_CLIENT_ID = 'wizard-client';
+    process.env.AGENTCARD_OAUTH_CLIENT_SECRET = 'wizard-secret';
+
+    let tokenRequests = 0;
+    let calledWithToken = '';
+    const runtime = new AgentCardOrgRuntime(
+      async (accessToken, toolName, args) => {
+        calledWithToken = accessToken;
+        assert.equal(toolName, 'list_transfers');
+        assert.deepEqual(args, { limit: 100 });
+        return { structuredContent: { transfers: [] } };
+      },
+      async (_input, init) => {
+        tokenRequests += 1;
+        const form = new URLSearchParams(String(init?.body));
+        assert.equal(form.get('grant_type'), 'client_credentials');
+        assert.equal(form.get('client_id'), 'wizard-client');
+        assert.equal(form.get('client_secret'), 'wizard-secret');
+        return new Response(
+          JSON.stringify({ access_token: 'fresh-org-token', expires_in: 3600 }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+    );
+
+    await runtime.callTool('list_transfers', { limit: 100 });
+    await runtime.callTool('list_transfers', { limit: 100 });
+    assert.equal(calledWithToken, 'fresh-org-token');
+    assert.equal(tokenRequests, 1, 'client-credential tokens should be cached until near expiry');
+
+    let retryTokenRequests = 0;
+    let toolCalls = 0;
+    const retryingRuntime = new AgentCardOrgRuntime(
+      async (accessToken) => {
+        toolCalls += 1;
+        if (toolCalls === 1) throw new Error('Invalid or expired organization token');
+        assert.equal(accessToken, 'org-token-2');
+        return { structuredContent: { transfers: [] } };
+      },
+      async () => {
+        retryTokenRequests += 1;
+        return new Response(
+          JSON.stringify({ access_token: `org-token-${retryTokenRequests}`, expires_in: 3600 }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+    );
+    await retryingRuntime.callTool('list_transfers', { limit: 100 });
+    assert.equal(retryTokenRequests, 2, 'an MCP auth rejection must refresh once');
+    assert.equal(toolCalls, 2, 'an MCP auth rejection must retry the tool once');
+    console.log('AgentCard org runtime tests passed');
+  } finally {
+    for (const name of ENV_NAMES) {
+      const value = original[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+void main();

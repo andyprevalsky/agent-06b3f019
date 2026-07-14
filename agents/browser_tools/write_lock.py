@@ -285,12 +285,31 @@ async def is_payment_field(
     Returns:
         True if the element appears to be a payment field
     """
-    if not session or not element:
+    if not element:
         return False
 
     try:
+        element_attrs = getattr(element, "attributes", None) or {}
+        if isinstance(element_attrs, dict):
+            attrs = {str(k).lower(): str(v).lower() for k, v in element_attrs.items() if v is not None}
+
+            autocomplete = attrs.get("autocomplete", "")
+            if autocomplete in PAYMENT_AUTOCOMPLETE_VALUES:
+                logger.info(f"Payment field detected: autocomplete='{autocomplete}'")
+                return True
+
+            for attr_name in ["name", "id", "placeholder", "aria-label"]:
+                attr_value = attrs.get(attr_name, "")
+                for pattern in PAYMENT_FIELD_PATTERNS:
+                    if pattern in attr_value:
+                        logger.info(f"Payment field detected: {attr_name}='{attr_value}' matches '{pattern}'")
+                        return True
+
+        if not session:
+            return False
+
         # Get the Playwright page
-        get_page = getattr(session, "get_page", None)
+        get_page = getattr(session, "get_page", None) or getattr(session, "get_current_page", None)
         if not callable(get_page):
             return False
 

@@ -28,6 +28,8 @@ class BenchmarkTask:
     row_end: Optional[int] = None    # Slice CSV attachments ending at this 1-indexed data row (inclusive)
     expected_approval_count: Optional[int] = None  # Exact number of approvals expected (used with count_only)
     expected_attention_kind: Optional[str] = None  # metadata.attentionKind expected for approval-style tasks
+    expected_attention_kinds: List[str] = field(default_factory=list)  # Ordered typed attention sequence
+    agentcard_setup_action: Optional[str] = None  # Benchmark user action for hosted setup (for example, complete)
     min_agent_count: Optional[int] = None  # Minimum total agents in tree (root + sub-agents)
     expected_tool_counts: Optional[dict] = None  # Exact tool call counts (toolName → count)
     min_tool_counts: Optional[dict] = None  # Minimum tool call counts (toolName → min count)
@@ -35,7 +37,11 @@ class BenchmarkTask:
     forbidden_tools: List[str] = field(default_factory=list)  # Tool names that must not be called
     sub_agent_count: Optional[int] = None  # Default fan-out for load-test style tasks; substitutes {n} in prompt
     expected_payment_receipt: Optional[dict] = None  # Expected request_payment_card approval receipt metadata
+    expected_payment_lifecycle: Optional[dict] = None  # Expected post-checkout state across purchase, Stripe, and AgentCard
     success_on_payment_card_request: bool = False  # Treat a validated payment-card request as terminal success
+    payment_card_request_action: Optional[str] = None  # Benchmark lifecycle action after card issuance (for example, abandon)
+    production_only: bool = False  # Refuse to run against a local/sandbox backend
+    response_schema: Optional[dict] = None  # Explicit root verifier contract when prompt inference is ambiguous
     phone_persona: Optional[dict] = None  # Vapi callee persona (system_prompt, first_message, structured_data_schema)
     pinned_facts: Optional[dict] = None  # Ground-truth facts fixed before the run and cross-validated afterward
     expected_call_findings: List[str] = field(default_factory=list)  # Substrings the agent must report after the call
@@ -168,7 +174,11 @@ def suite_tasks() -> List[BenchmarkTask]:
     entries (back-end vitest smokes) are catalogued but excluded from agent suite runs.
     Explicit `--task <name>` selection bypasses this filter for dev iteration.
     """
-    return [t for t in all_tasks() if t.runner == "agent" and t.status == "ready"]
+    return [
+        t
+        for t in all_tasks()
+        if t.runner == "agent" and t.status == "ready" and not t.production_only
+    ]
 
 
 def get_task_by_name(name: str) -> BenchmarkTask:

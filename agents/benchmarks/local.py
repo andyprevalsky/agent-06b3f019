@@ -40,6 +40,12 @@ BENCHMARK_CONTEXT_ROOT = REPO_ROOT / ".context" / "benchmarks"
 CHECKPOINT_ROOT = REPO_ROOT / ".context" / "benchmark-checkpoints"
 RUNS_DIR = AGENTS_DIR / "benchmarks" / "runs"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
+AGENT_PAYMENT_TASK_NAMES = {
+    AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
+    "agent-payment-idempotent-abandonment",
+    "agent-payment-abandonment",
+    "agent-payment-setup-resume",
+}
 BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 
 
@@ -494,18 +500,20 @@ def _kill_scoped_processes_by_run_id(stack: ServiceStack) -> None:
 
 
 def needs_frontend_tunnel(tasks: Sequence[str]) -> bool:
-    return AGENT_PAYMENT_TEST_SHOP_TASK_NAME in set(tasks) and not os.environ.get("BENCHMARK_FRONTEND_URL")
+    return bool(AGENT_PAYMENT_TASK_NAMES & set(tasks)) and not os.environ.get("BENCHMARK_FRONTEND_URL")
 
 
 def needs_payment_fixture(tasks: Sequence[str]) -> bool:
-    return AGENT_PAYMENT_TEST_SHOP_TASK_NAME in set(tasks)
+    return bool(AGENT_PAYMENT_TASK_NAMES & set(tasks))
+
+
+def configure_task_environment(tasks: Sequence[str]) -> None:
+    if needs_frontend_tunnel(tasks):
+        os.environ["BENCHMARK_BUNDLED_FRONTEND"] = "true"
 
 
 def seed_payment_fixture(manifest: dict) -> None:
-    db_port = manifest.get("ports", {}).get("local_db")
-    if not db_port:
-        raise ValueError("Invalid services manifest: missing local_db port")
-    database_url = f"postgresql://postgres:postgres@localhost:{db_port}/victoria"
+    database_url = manifest_database_url(manifest)
     env = {
         **os.environ,
         "DATABASE_URL": database_url,
@@ -639,13 +647,10 @@ def stop_services(process: subprocess.Popen | None = None, *, stack: ServiceStac
 
 
 def apply_manifest_environment(manifest: dict) -> None:
-    ports = manifest.get("ports") if isinstance(manifest, dict) else {}
     urls = manifest.get("urls") if isinstance(manifest, dict) else {}
-    db_port = ports.get("local_db") if isinstance(ports, dict) else None
-    if db_port:
-        database_url = f"postgresql://postgres:postgres@localhost:{db_port}/victoria"
-        os.environ["DATABASE_URL"] = f"{database_url}?connection_limit=50&pool_timeout=30"
-        os.environ["DIRECT_URL"] = database_url
+    database_url = manifest_database_url(manifest)
+    os.environ["DATABASE_URL"] = f"{database_url}?connection_limit=50&pool_timeout=30"
+    os.environ["DIRECT_URL"] = database_url
     task_queue = manifest.get("temporal_task_queue")
     if task_queue:
         os.environ["TEMPORAL_TASK_QUEUE"] = str(task_queue)
@@ -796,10 +801,13 @@ def manifest_frontend_url(manifest: dict) -> str:
 def manifest_database_url(manifest: dict) -> str:
     ports = manifest.get("ports") if isinstance(manifest, dict) else {}
     database = manifest.get("database") if isinstance(manifest, dict) else {}
-    port = 5432 if isinstance(database, dict) and database.get("use_system_postgres") else ports.get("local_db")
+    port = database.get("port") if isinstance(database, dict) else None
+    if not port:
+        port = 5432 if isinstance(database, dict) and database.get("use_system_postgres") else ports.get("local_db")
     if not port:
         raise ValueError("Services manifest is missing local_db port")
-    return f"postgresql://postgres:postgres@localhost:{port}/victoria"
+    name = database.get("name", "victoria") if isinstance(database, dict) else "victoria"
+    return f"postgresql://postgres:postgres@localhost:{port}/{name}"
 
 
 def manifest_task_queue(manifest: dict) -> str:
@@ -1109,6 +1117,7 @@ def run_benchmark_invocation(
     print(f"\n== Running {invocation.label}: {', '.join(invocation.tasks)}")
     print("$ " + " ".join(command))
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    env.setdefault("BENCHMARK_FAST_MODE_CACHE", "false")
     process = subprocess.Popen(
         command,
         cwd=AGENTS_DIR,
@@ -1352,6 +1361,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     promote_direct_external_runner_tasks(args)
     selected_tasks = tasks_from_args(args)
+    configure_task_environment(selected_tasks)
     if checkpoint_requested(args) and len(selected_tasks) != 1:
         raise ValueError("--checkpoint requires exactly one resolved benchmark task")
     process: subprocess.Popen | None = None
@@ -1400,7 +1410,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"context={stack.context_dir.relative_to(REPO_ROOT)} "
                 f"backend={ports.get('backend')} "
                 f"frontend={ports.get('frontend')} "
-                f"db={ports.get('local_db')} "
+                f"db={(manifest.get('database') or {}).get('port') or ports.get('local_db')} "
+                f"db_name={(manifest.get('database') or {}).get('name') or 'victoria'} "
                 f"queue={manifest.get('temporal_task_queue')}"
             )
         if needs_payment_fixture(selected_tasks):
