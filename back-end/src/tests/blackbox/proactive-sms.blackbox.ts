@@ -49,7 +49,10 @@ interface LeasedJobResult {
 function completionFixture(message: string, delayMs = 0): string {
   return JSON.stringify({
     reasoning: 'reviewed the person and selected a useful check-in',
-    tool_calls: [{ tool: 'attempt_completion', arguments: { message } }],
+    tool_calls: [
+      { tool: 'send_user_message', arguments: { message } },
+      { tool: 'attempt_completion', arguments: {} },
+    ],
     ...(delayMs > 0 ? { delay_ms: delayMs } : {}),
   });
 }

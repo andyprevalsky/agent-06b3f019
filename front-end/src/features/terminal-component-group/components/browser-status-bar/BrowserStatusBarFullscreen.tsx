@@ -9,12 +9,15 @@
  *
  * AGENT OVERLAY STATE:
  * [ACTIVE] -> border glow + cursor stitch + "Agent in progress" chip
- * [WAITING_FOR_AUTH_ASSISTANCE] -> no active overlay; "Agent waiting for assistance" chip
+ * [WAITING_FOR_AUTH_ASSISTANCE] -> connected request + "Agent waiting for assistance" handoff
  * [DISCONNECTED] -> blurred resume overlay
+ *
+ * VIEWPORT STATE:
+ * [MOUNTED] -> observe browser pane -> debounce dimensions -> resize remote provider viewport
  */
 
 import { createPortal } from 'react-dom';
-import type { MouseEvent } from 'react';
+import { useRef, type MouseEvent } from 'react';
 import { X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
@@ -26,6 +29,7 @@ import type { Message } from '../../hooks';
 import { BrowserProxyLocationChip } from './BrowserProxyLocationChip';
 import { BrowserWriteLockApproval } from './BrowserWriteLockApproval';
 import { StepProgressBar } from './StepProgressBar';
+import { useBrowserViewportSync } from './useBrowserViewportSync';
 import type {
   BrowserSessionMetadata,
   OutputSchemaRef,
@@ -43,6 +47,7 @@ interface FullscreenProps {
   stepProgress: StepProgress | null;
   isDisconnected: boolean;
   isWaitingForAuthAssistance: boolean;
+  authAssistanceRequest?: string;
   isResuming: boolean;
   pendingWriteLockApproval: PendingWriteLockApproval | null;
   onClose: (e: MouseEvent) => void;
@@ -108,24 +113,31 @@ function TakeControlChip({ onResume, isResuming }: { onResume: () => void; isRes
 function WaitingForAssistanceChip({
   onResume,
   isResuming,
+  request,
 }: {
   onResume: () => void;
   isResuming: boolean;
+  request: string;
 }) {
   return (
     <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-10">
-      <div className="flex items-center gap-3 pl-4 pr-2 py-2 rounded-full bg-navi-black shadow-2xl">
-        <span className="text-sm font-medium text-navi-white">Agent waiting for assistance</span>
-        <button
-          onClick={onResume}
-          disabled={isResuming}
-          className={cn(
-            'text-sm font-medium ml-2 px-3 py-1 rounded-full bg-blue-500 text-white hover:bg-blue-400 transition-colors',
-            isResuming && 'opacity-50 cursor-not-allowed',
-          )}
-        >
-          {isResuming ? 'Loading...' : 'Start Agent'}
-        </button>
+      <div className="flex w-max max-w-[calc(100vw-352px)] flex-col items-stretch overflow-hidden rounded-[20px] border border-white/10 bg-navi-black/90 shadow-2xl backdrop-blur-md">
+        <div className="px-4 py-2.5 text-center">
+          <span className="whitespace-nowrap text-sm font-medium text-navi-white">{request}</span>
+        </div>
+        <div className="flex items-center justify-between gap-3 border-t border-white/10 py-2 pl-4 pr-2">
+          <span className="text-sm font-medium text-navi-white">Agent waiting for assistance</span>
+          <button
+            onClick={onResume}
+            disabled={isResuming}
+            className={cn(
+              'text-sm font-medium ml-2 px-3 py-1 rounded-full bg-blue-500 text-white hover:bg-blue-400 transition-colors',
+              isResuming && 'opacity-50 cursor-not-allowed',
+            )}
+          >
+            {isResuming ? 'Loading...' : 'Start Agent'}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -181,7 +193,7 @@ function BrowserFrameHeader({
   );
 }
 
-function FullscreenSidebar({
+function TaskProgressSidebar({
   taskId,
   outputSchema,
   stepProgress,
@@ -209,7 +221,11 @@ function FullscreenSidebar({
           </h4>
           <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="top" />
         </div>
-        {stepProgress && <StepProgressBar progress={stepProgress} />}
+        {stepProgress && (
+          <div className="mt-1">
+            <StepProgressBar progress={stepProgress} />
+          </div>
+        )}
       </div>
       <div className="flex-1 overflow-y-auto overflow-x-hidden p-3">
         <div className="pb-[80vh]">
@@ -243,15 +259,18 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
     stepProgress,
     isDisconnected,
     isWaitingForAuthAssistance,
+    authAssistanceRequest,
     isResuming,
     pendingWriteLockApproval,
     onClose,
     onResume,
   } = props;
+  const browserPaneRef = useRef<HTMLDivElement>(null);
+  useBrowserViewportSync(taskId, browserPaneRef);
 
   return createPortal(
     <div className="fixed inset-0 z-50 bg-background flex flex-row">
-      <FullscreenSidebar
+      <TaskProgressSidebar
         taskId={taskId}
         outputSchema={outputSchema}
         stepProgress={stepProgress}
@@ -267,7 +286,7 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
           browserSessionMetadata={browserSessionMetadata}
           onClose={onClose}
         />
-        <div className="flex-1 relative bg-white">
+        <div ref={browserPaneRef} className="flex-1 relative bg-white">
           <iframe
             src={browserUrl}
             className="w-full h-full border-0"
@@ -283,7 +302,11 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
             <TakeControlChip onResume={onResume} isResuming={isResuming} />
           )}
           {isWaitingForAuthAssistance && (
-            <WaitingForAssistanceChip onResume={onResume} isResuming={isResuming} />
+            <WaitingForAssistanceChip
+              onResume={onResume}
+              isResuming={isResuming}
+              request={authAssistanceRequest ?? 'Complete the sign-in so I can continue'}
+            />
           )}
           {isDisconnected && !isWaitingForAuthAssistance && (
             <DisconnectedOverlay onResume={onResume} isResuming={isResuming} />

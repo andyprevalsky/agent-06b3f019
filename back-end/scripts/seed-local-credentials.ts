@@ -12,6 +12,18 @@ import type {
 
 type PasskeyRecord = PasskeyCredential;
 
+export async function syncRequiredCredentialTable<T>(
+  tableName: string,
+  sync: () => Promise<T>
+): Promise<T> {
+  try {
+    return await sync();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`${tableName} credential sync failed: ${message}`);
+  }
+}
+
 export type IntegrationModel = {
   upsert(args: Prisma.IntegrationUpsertArgs): Promise<Pick<Integration, 'id'>>;
 };
@@ -41,21 +53,20 @@ export async function syncIntegrationCredentials(
 }
 
 export type CookieModel = {
-  upsert(args: Prisma.CookieUpsertArgs): Promise<Pick<Cookie, 'id'>>;
+  upsert(args: Prisma.CookieUpsertArgs): Promise<unknown>;
 };
 
-export async function syncCookies(
+export async function syncCookieCredentials(
   localCookie: CookieModel,
-  cookies: Cookie[],
-  batchSize = 500
+  cookies: Cookie[]
 ): Promise<number> {
-  for (let index = 0; index < cookies.length; index += batchSize) {
-    const batch = cookies.slice(index, index + batchSize);
+  const concurrency = 8;
+  for (let index = 0; index < cookies.length; index += concurrency) {
     await Promise.all(
-      batch.map((cookie) => {
+      cookies.slice(index, index + concurrency).map(async (cookie) => {
         const { id: remoteId, ...updateData } = cookie;
         void remoteId;
-        return localCookie.upsert({
+        await localCookie.upsert({
           where: {
             userId_domain_name_path_topFrameSiteKey_browserSource_browserProfile: {
               userId: cookie.userId,
@@ -69,7 +80,6 @@ export async function syncCookies(
           },
           create: cookie,
           update: updateData,
-          select: { id: true },
         });
       })
     );
@@ -77,147 +87,92 @@ export async function syncCookies(
   return cookies.length;
 }
 
-async function syncInBatches<T>(
-  records: T[],
-  syncRecord: (record: T) => Promise<unknown>,
-  batchSize: number
+type BrowserOriginRecord = LocalStorageOrigin | IndexedDBOrigin | CacheStorageOrigin;
+
+export type OriginModel<T extends BrowserOriginRecord> = {
+  upsert(args: {
+    where: { userId_origin: { userId: string; origin: string } };
+    create: T;
+    update: Omit<T, 'id'>;
+  }): Promise<unknown>;
+};
+
+export async function syncOriginCredentials<T extends BrowserOriginRecord>(
+  localOrigin: OriginModel<T>,
+  origins: T[]
 ): Promise<number> {
-  for (let index = 0; index < records.length; index += batchSize) {
-    await Promise.all(records.slice(index, index + batchSize).map(syncRecord));
+  for (const origin of origins) {
+    const { id: remoteId, ...updateData } = origin;
+    void remoteId;
+    await localOrigin.upsert({
+      where: { userId_origin: { userId: origin.userId, origin: origin.origin } },
+      create: origin,
+      update: updateData,
+    });
   }
-  return records.length;
+  return origins.length;
 }
 
-type LocalStorageOriginModel = {
-  upsert(args: Prisma.LocalStorageOriginUpsertArgs): Promise<unknown>;
+export type BrowserPermissionModel = {
+  upsert(args: {
+    where: {
+      userId_origin_permission: { userId: string; origin: string; permission: string };
+    };
+    create: BrowserPermission;
+    update: Omit<BrowserPermission, 'id'>;
+  }): Promise<unknown>;
 };
 
-export async function syncLocalStorageOrigins(
-  model: LocalStorageOriginModel,
-  records: LocalStorageOrigin[],
-  batchSize = 500
+export async function syncBrowserPermissionCredentials(
+  localPermission: BrowserPermissionModel,
+  permissions: BrowserPermission[]
 ): Promise<number> {
-  return syncInBatches(
-    records,
-    (record) => {
-      const { id, ...update } = record;
-      void id;
-      return model.upsert({
-        where: { userId_origin: { userId: record.userId, origin: record.origin } },
-        create: record,
-        update,
-      });
-    },
-    batchSize
-  );
-}
-
-type IndexedDBOriginModel = {
-  upsert(args: Prisma.IndexedDBOriginUpsertArgs): Promise<unknown>;
-};
-
-export async function syncIndexedDBOrigins(
-  model: IndexedDBOriginModel,
-  records: IndexedDBOrigin[],
-  batchSize = 500
-): Promise<number> {
-  return syncInBatches(
-    records,
-    (record) => {
-      const { id, ...update } = record;
-      void id;
-      return model.upsert({
-        where: { userId_origin: { userId: record.userId, origin: record.origin } },
-        create: record,
-        update,
-      });
-    },
-    batchSize
-  );
-}
-
-type BrowserPermissionModel = {
-  upsert(args: Prisma.BrowserPermissionUpsertArgs): Promise<unknown>;
-};
-
-export async function syncBrowserPermissions(
-  model: BrowserPermissionModel,
-  records: BrowserPermission[],
-  batchSize = 500
-): Promise<number> {
-  return syncInBatches(
-    records,
-    (record) => {
-      const { id, ...update } = record;
-      void id;
-      return model.upsert({
-        where: {
-          userId_origin_permission: {
-            userId: record.userId,
-            origin: record.origin,
-            permission: record.permission,
-          },
+  for (const permission of permissions) {
+    const { id: remoteId, ...updateData } = permission;
+    void remoteId;
+    await localPermission.upsert({
+      where: {
+        userId_origin_permission: {
+          userId: permission.userId,
+          origin: permission.origin,
+          permission: permission.permission,
         },
-        create: record,
-        update,
-      });
-    },
-    batchSize
-  );
+      },
+      create: permission,
+      update: updateData,
+    });
+  }
+  return permissions.length;
 }
 
-type CacheStorageOriginModel = {
-  upsert(args: Prisma.CacheStorageOriginUpsertArgs): Promise<unknown>;
+export type BrowserPasswordModel = {
+  upsert(args: {
+    where: { userId_origin_username: { userId: string; origin: string; username: string } };
+    create: BrowserPassword;
+    update: Omit<BrowserPassword, 'id'>;
+  }): Promise<unknown>;
 };
 
-export async function syncCacheStorageOrigins(
-  model: CacheStorageOriginModel,
-  records: CacheStorageOrigin[],
-  batchSize = 500
+export async function syncBrowserPasswordCredentials(
+  localPassword: BrowserPasswordModel,
+  passwords: BrowserPassword[]
 ): Promise<number> {
-  return syncInBatches(
-    records,
-    (record) => {
-      const { id, ...update } = record;
-      void id;
-      return model.upsert({
-        where: { userId_origin: { userId: record.userId, origin: record.origin } },
-        create: record,
-        update,
-      });
-    },
-    batchSize
-  );
-}
-
-type BrowserPasswordModel = {
-  upsert(args: Prisma.BrowserPasswordUpsertArgs): Promise<unknown>;
-};
-
-export async function syncBrowserPasswords(
-  model: BrowserPasswordModel,
-  records: BrowserPassword[],
-  batchSize = 500
-): Promise<number> {
-  return syncInBatches(
-    records,
-    (record) => {
-      const { id, ...update } = record;
-      void id;
-      return model.upsert({
-        where: {
-          userId_origin_username: {
-            userId: record.userId,
-            origin: record.origin,
-            username: record.username,
-          },
+  for (const password of passwords) {
+    const { id: remoteId, ...updateData } = password;
+    void remoteId;
+    await localPassword.upsert({
+      where: {
+        userId_origin_username: {
+          userId: password.userId,
+          origin: password.origin,
+          username: password.username,
         },
-        create: record,
-        update,
-      });
-    },
-    batchSize
-  );
+      },
+      create: password,
+      update: updateData,
+    });
+  }
+  return passwords.length;
 }
 
 type PasskeyCredentialModel = {

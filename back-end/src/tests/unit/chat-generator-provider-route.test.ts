@@ -62,33 +62,29 @@ function directGeneratorOptions() {
   });
 }
 
-async function testPhaseUsesOpenRouterPinnedToCerebras(): Promise<void> {
+async function testPhaseUsesDirectCerebras(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const oldOpenRouterKey = process.env.OPENROUTER_API_KEY;
   const oldCerebrasKey = process.env.CEREBRAS_API_KEY;
-  process.env.OPENROUTER_API_KEY = 'openrouter-cerebras';
-  process.env.CEREBRAS_API_KEY = 'direct-must-not-run';
+  process.env.OPENROUTER_API_KEY = 'openrouter-must-not-run';
+  process.env.CEREBRAS_API_KEY = 'direct-cerebras';
   const calls: string[] = [];
   let capturedBody: Record<string, unknown> = {};
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     calls.push(url);
-    if (url !== OPENROUTER_API_URL) throw new Error(`Generator leaked to ${url}`);
+    if (url !== CEREBRAS_API_URL) throw new Error(`Generator leaked to ${url}`);
     capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
     return sseResponse(GENERATOR_SSE);
   }) as typeof fetch;
   try {
     const options = phaseGeneratorOptions();
     const chunks = await collect(await createStreamingCompletion(options));
-    assert.deepEqual(calls, [OPENROUTER_API_URL]);
-    assert.equal(capturedBody.model, 'z-ai/glm-4.7');
+    assert.deepEqual(calls, [CEREBRAS_API_URL]);
+    assert.equal(capturedBody.model, 'zai-glm-4.7');
     assert.equal(capturedBody.temperature, 0.7);
-    assert.deepEqual(capturedBody.reasoning, { effort: 'none', exclude: true });
-    assert.deepEqual(capturedBody.provider, {
-      only: ['cerebras'],
-      allow_fallbacks: false,
-      require_parameters: true,
-    });
+    assert.equal(capturedBody.clear_thinking, true);
+    assert.equal(capturedBody.reasoning_effort, 'none');
     assert.deepEqual(capturedBody.messages, options.messages);
     assert.deepEqual(capturedBody.response_format, options.response_format);
     const format = capturedBody.response_format as {
@@ -97,9 +93,9 @@ async function testPhaseUsesOpenRouterPinnedToCerebras(): Promise<void> {
     assert.equal(format.json_schema?.name, 'generator_response');
     assert.equal(format.json_schema?.strict, true);
     assert.deepEqual(format.json_schema?.schema, GENERATOR_JSON_SCHEMA);
-    assert.equal(chunks[0]?.actual_model, 'z-ai/glm-4.7');
-    assert.equal(chunks[0]?.pool_name, 'openrouter-cerebras');
-    assert.equal(calls.includes(CEREBRAS_API_URL), false);
+    assert.equal(chunks[0]?.actual_model, 'zai-glm-4.7');
+    assert.equal(chunks[0]?.pool_name, 'cerebras-direct');
+    assert.equal(calls.includes(OPENROUTER_API_URL), false);
   } finally {
     globalThis.fetch = originalFetch;
     if (oldOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
@@ -178,7 +174,7 @@ async function testDirectPreHeaderStallSurfacesPromptlyWithoutFallback(): Promis
 }
 
 async function run(): Promise<void> {
-  await testPhaseUsesOpenRouterPinnedToCerebras();
+  await testPhaseUsesDirectCerebras();
   await testDirectFailureSurfacesWithoutFallback();
   await testDirectPreHeaderStallSurfacesPromptlyWithoutFallback();
   process.stdout.write('PASS Chat Generator provider routes are explicit and fail closed\n');

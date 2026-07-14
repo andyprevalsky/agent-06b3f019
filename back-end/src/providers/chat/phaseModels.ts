@@ -1,8 +1,8 @@
 /**
  * Chat model selection boundary.
  *
- * requested model ──┬─ router ──> Rose Lite ──> OpenRouter ──> Cerebras GLM-4.7
- *                   ├─ generator ──> Rose Lite ──> OpenRouter ──> Cerebras GLM-4.7
+ * requested model ──┬─ router ──> Rose Lite ──> Cerebras GLM-4.7
+ *                   ├─ generator ──> Rose Lite ──> Cerebras GLM-4.7
  *                   └─ Temporal ──> persisted requested model (outside this module)
  *
  * Both synchronous chat phases are latency-sensitive and use the Rose Lite pool.
@@ -13,9 +13,9 @@ import type { CompletionOptions } from '../rose';
 
 const CHAT_ROUTER_MODEL = 'rose-labs/rose-1-lite';
 const CHAT_ROUTER_PROVIDER_ROUTE: NonNullable<CompletionOptions['provider_route']> =
-  'openrouter-cerebras';
+  'direct-cerebras';
 const CHAT_GENERATOR_PROVIDER_ROUTE: NonNullable<CompletionOptions['provider_route']> =
-  'openrouter-cerebras';
+  'direct-cerebras';
 
 export type ChatProviderRoute = NonNullable<CompletionOptions['provider_route']>;
 

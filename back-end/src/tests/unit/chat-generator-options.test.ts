@@ -21,7 +21,7 @@ async function run(): Promise<void> {
   });
 
   assert.strictEqual(options.model, 'rose-labs/rose-1-lite');
-  assert.strictEqual(options.provider_route, 'openrouter-cerebras');
+  assert.strictEqual(options.provider_route, 'direct-cerebras');
   assert.strictEqual(options.provider_fast_mode, true);
   assert.strictEqual(options.abort_signal, abortController.signal);
   assert.strictEqual(options.temperature, 0.7);
@@ -51,9 +51,9 @@ async function run(): Promise<void> {
   );
 
   const originalFetch = globalThis.fetch;
-  const oldOpenRouterKey = process.env.OPENROUTER_API_KEY;
+  const oldCerebrasKey = process.env.CEREBRAS_API_KEY;
   const oldGptKey = process.env.GPT_API_KEY;
-  delete process.env.OPENROUTER_API_KEY;
+  delete process.env.CEREBRAS_API_KEY;
   process.env.GPT_API_KEY = 'shared-provider-must-not-run';
   let providerCalls = 0;
   globalThis.fetch = (async () => {
@@ -64,20 +64,20 @@ async function run(): Promise<void> {
   try {
     await assert.rejects(async () => {
       for await (const chunk of await createStreamingCompletion(options)) {
-        assert.fail(`unexpected chunk without OpenRouter key: ${chunk.actual_model}`);
+        assert.fail(`unexpected chunk without Cerebras key: ${chunk.actual_model}`);
       }
-    }, /OPENROUTER_API_KEY/);
-    assert.strictEqual(providerCalls, 0, 'missing OpenRouter key must fail before provider calls');
+    }, /CEREBRAS_API_KEY/);
+    assert.strictEqual(providerCalls, 0, 'missing Cerebras key must fail before provider calls');
   } finally {
     globalThis.fetch = originalFetch;
-    if (oldOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
-    else process.env.OPENROUTER_API_KEY = oldOpenRouterKey;
+    if (oldCerebrasKey === undefined) delete process.env.CEREBRAS_API_KEY;
+    else process.env.CEREBRAS_API_KEY = oldCerebrasKey;
     if (oldGptKey === undefined) delete process.env.GPT_API_KEY;
     else process.env.GPT_API_KEY = oldGptKey;
   }
 
   process.stdout.write('PASS chat Generator options exclude ignored compute-auth fields\n');
-  process.stdout.write('PASS Generator pinned Cerebras route fails closed without leakage\n');
+  process.stdout.write('PASS Generator direct Cerebras route fails closed without leakage\n');
 }
 
 run().catch((error: unknown) => {

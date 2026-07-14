@@ -1186,6 +1186,56 @@ def test_keycap_input_synthesis_generates_variable_key_timings():
     assert all(0.03 <= timing.dwell_s <= 0.15 for timing in timings)
 
 
+def test_keycap_input_synthesis_rng_isolated_from_global_numpy_state():
+    import random
+
+    import numpy as np
+
+    from browser_tools.input_synthesis import KeycapTimingSynthesizer
+
+    numpy_state = np.random.get_state()
+    try:
+        sequences = []
+        for numpy_seed in (17, 229):
+            np.random.seed(numpy_seed)
+            synth = KeycapTimingSynthesizer(rng=random.Random(11), basis_count=48)
+            sequences.append([synth.next(char) for char in "hello world."])
+    finally:
+        np.random.set_state(numpy_state)
+
+    assert sequences[0] == sequences[1]
+    for timings in sequences:
+        intervals = [round(timing.interval_s, 4) for timing in timings]
+        assert len(set(intervals)) > 5
+
+
+def test_keycap_controller_generate_n_uses_injected_rng():
+    import random
+
+    import numpy as np
+
+    from keycap import Controller
+
+    random_state = random.getstate()
+    try:
+        generated = []
+        for global_seed in (17, 229):
+            random.seed(global_seed)
+            controller = Controller(
+                n=None,
+                D=[],
+                alpha=[],
+                w=[],
+                rng=np.random.default_rng(11),
+            )
+            generated.append(controller.n)
+    finally:
+        random.setstate(random_state)
+
+    assert generated[0] == generated[1]
+    assert 500 <= generated[0] <= 5000
+
+
 def test_mouse_click_synthesis_uses_paper_duration_distribution():
     import random
 
@@ -7714,6 +7764,10 @@ async def test_spawn_browser_activity_raises_when_new_session_has_no_cdp_url():
             "domains.spawn_browser_agent_v3.handler.init_browser_session",
             AsyncMock(return_value=session_data),
         ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.fetch_auth_options",
+            AsyncMock(return_value={"realm": "example.com"}),
+        ),
     ):
         try:
             await spawn_browser_agent_activity_v3(
@@ -7794,7 +7848,6 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_live_session
     }
     resume_mock = AsyncMock()
     fetch_mock = AsyncMock(return_value=session_info)
-
     with (
         patch(
             "domains.spawn_browser_agent_v3.handler.load_config",
@@ -7836,6 +7889,85 @@ async def test_spawn_browser_activity_auth_assistance_resume_reuses_live_session
     assert fetch_mock.await_args.args[1] == "task-1"
     assert fetch_mock.await_args.kwargs == {"validate_live": True}
     resume_mock.assert_not_awaited()
+
+
+async def test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refreshed_session():
+    """A handoff refresh may replace the provider session while keeping the browser task stable."""
+    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
+
+    session_info = {
+        "session_id": "session-refreshed-by-auth-page",
+        "debug_url": "https://kernel.example/refreshed",
+        "ws_url": "ws://refreshed-by-auth-page",
+        "fingerprint_injection": {"ua": "test"},
+        "passwords": [],
+        "same_session_available": True,
+    }
+    resume_mock = AsyncMock(
+        return_value={
+            "session_id": "unexpected-second-session",
+            "debug_url": "https://kernel.example/unexpected",
+            "ws_url": None,
+            "fingerprint_injection": {"ua": "test"},
+            "passwords": [],
+        }
+    )
+    fetch_mock = AsyncMock(return_value=session_info)
+    connected_cdp_urls = []
+
+    def capture_refreshed_cdp(*, cdp_url):
+        connected_cdp_urls.append(cdp_url)
+        raise RuntimeError("stop-after-refreshed-cdp-selection")
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.load_config",
+            return_value=_fake_config(),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat"),
+        patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume_mock),
+        patch("domains.spawn_browser_agent_v3.handler.fetch_session_info", fetch_mock),
+        patch("browser_tools.dom_service.DOMService", capture_refreshed_cdp),
+        patch("domains.spawn_browser_agent_v3.handler.close_browser_session", AsyncMock()),
+        patch("domains.spawn_browser_agent_v3.handler.save_browser_action_message", AsyncMock()),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._propagate_browser_credentials_with_progress",
+            AsyncMock(return_value={"outcome": "unknown", "refs": 0, "applied": 0}),
+        ),
+    ):
+        try:
+            await spawn_browser_agent_activity_v3(
+                user_id="user-1",
+                agent_id="agent-1",
+                goal="Buy socks",
+                tool_call_id="tool-1",
+                task_id="task-1",
+                is_resume=True,
+                output_schema={"fields": [{"name": "result", "type": "string"}]},
+                use_claude_mode=False,
+                write_lock_resume_state={
+                    "approval_type": "auth_assistance",
+                    "task_id": "task-1",
+                    # This was the provider session when the worker paused. The
+                    # auth page refreshed that expired session before the user
+                    # signed in, so the task now owns a different live session.
+                    "session_id": "session-before-handoff-refresh",
+                    "cdp_url": "ws://old",
+                },
+            )
+        except RuntimeError as exc:
+            assert "stop-after-refreshed-cdp-selection" in str(exc)
+        else:
+            raise AssertionError("expected test CDP interception to stop the activity")
+
+    assert fetch_mock.await_count == 1
+    assert fetch_mock.await_args.args[1] == "task-1"
+    assert fetch_mock.await_args.kwargs == {"validate_live": True}
+    # The refreshed live session is the only provider browser that should be
+    # used after handoff. Creating another browser races profile persistence.
+    resume_mock.assert_not_awaited()
+    assert connected_cdp_urls == ["ws://refreshed-by-auth-page"]
+    assert session_info["resume_mode"] == "backend_refreshed_session"
 
 
 async def test_spawn_browser_activity_auth_assistance_resume_falls_back_when_live_session_expired():
@@ -8710,10 +8842,13 @@ async def test_manager_auth_assistance_pauses_and_resumes():
             events.append(event)
 
     titles = [getattr(event, "title", "") for event in events]
+    assert titles.count("Starting up a browser") == 1
     assert "Requesting User Assistance for example.com Login" in titles
     assert "User Assistance Received" in titles
     assert events[-1].status == MessageStatus.FINISHED
     assert workflow_instance.is_paused is False
+    assert len(start_calls) == 2
+    assert {call[1]["args"][3] for call in start_calls} == {"tool-1"}
     first_auth_event = next(
         event for event in events if getattr(event, "title", "") == "Requesting User Assistance for example.com Login"
     )
@@ -9701,6 +9836,14 @@ async def run_all_tests():
         "keycap_input_synthesis_timing",
         test_keycap_input_synthesis_generates_variable_key_timings,
     )
+    r.record(
+        "keycap_input_synthesis_rng_isolation",
+        test_keycap_input_synthesis_rng_isolated_from_global_numpy_state,
+    )
+    r.record(
+        "keycap_controller_generate_n_injected_rng",
+        test_keycap_controller_generate_n_uses_injected_rng,
+    )
     await r.record_async(
         "browser_humanizer_click_synthesis",
         test_browser_humanizer_click_uses_synthesized_mouse_and_cursor_updates,
@@ -9860,6 +10003,10 @@ async def run_all_tests():
     await r.record_async(
         "activity_auth_assistance_resume_reuses_live",
         test_spawn_browser_activity_auth_assistance_resume_reuses_live_session,
+    )
+    await r.record_async(
+        "activity_auth_assistance_resume_reuses_backend_refreshed",
+        test_spawn_browser_activity_auth_assistance_resume_reuses_backend_refreshed_session,
     )
     await r.record_async(
         "activity_auth_assistance_resume_fallback_expired",

@@ -11,12 +11,12 @@
  *
  * System context / state flow:
  *
- *   startInitialChatContext ──┬─ messages ──> Router (GLM) ──> OpenRouter → Cerebras
+ *   startInitialChatContext ──┬─ messages ──> Router (GLM) ──> Cerebras
  *                             │                 │                 (fail closed)
  *                             │                 ├─ escalation ──> Temporal (router only)
  *                             │                 v
  *                             │             Generator (Lite)
- *                             │                 └─ OpenRouter -> Cerebras GLM-4.7
+ *                             │                 └─ Cerebras GLM-4.7
  *                             ├─ direct_answer ──> reuse initial message snapshot
  *                             │    └─ Router-start Generator ──> buffered until commit
  *                             ├─ web_search/future writes ──> refresh messages
@@ -157,6 +157,7 @@ export async function handleChatMessage(config: {
       agentId: config.agentId,
       role: 'TOOL',
       text: '',
+      skipDuplicateToolCheck: true,
       metadata: {
         toolCallId: cloudAgentToolCallId,
         toolName: CLOUD_AGENT_TOOL_NAME,
@@ -222,6 +223,7 @@ export async function handleChatMessage(config: {
       agentId: config.agentId,
       role: 'TOOL',
       text: '',
+      skipDuplicateToolCheck: true,
       metadata: {
         title: searchTitle,
         toolName: 'web_search',
@@ -246,6 +248,7 @@ export async function handleChatMessage(config: {
       agentId: config.agentId,
       role: 'TOOL',
       text: `Web search: "${decision.query}"\n\n${searchResult.answer}\n\nSources: ${searchResult.sources.join(', ')}`,
+      skipDuplicateToolCheck: true,
       metadata: {
         title: `Web search completed for ${displayQuery}`,
         toolName: 'web_search',
@@ -295,6 +298,7 @@ export async function handleChatMessage(config: {
     agentId: config.agentId,
     role: 'TOOL',
     text: generatorResponse.response,
+    skipDuplicateToolCheck: true,
     metadata: {
       toolCallId: generatorResponse.toolCallId,
       toolName: 'send_message_to_user',

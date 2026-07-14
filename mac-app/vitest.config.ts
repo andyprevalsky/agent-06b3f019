@@ -40,8 +40,17 @@ export default defineConfig({
     globals: true,
     css: false,
     pool: 'forks',
-    testTimeout: 10000,
-    hookTimeout: 10000,
+    // /deploy intentionally runs coverage and blackbox verification together.
+    // Bound each Vitest process so the pair cannot over-subscribe every CPU
+    // core and starve async module setup past the suite's real timeouts.
+    minWorkers: 1,
+    maxWorkers: 2,
+    // Both verification jobs run at the same time and exercise large dynamic
+    // Electron module graphs. Keep the same contention-safe ceiling for the
+    // non-coverage suite; the old 10s limit could expire while importing the
+    // entrypoint even though the test completed normally in isolation.
+    testTimeout: 30000,
+    hookTimeout: 30000,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'text-summary', 'json-summary'],

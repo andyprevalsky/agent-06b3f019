@@ -8,7 +8,7 @@
  * callers iterate. RoseStreamChunk is the typed normalized form used inside
  * the orchestration layer.
  */
-export type MessageRole = 'system' | 'user' | 'assistant';
+export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
 export interface ContentBlock {
   type: string;

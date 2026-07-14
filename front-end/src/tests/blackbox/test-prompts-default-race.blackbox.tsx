@@ -10,9 +10,8 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/features/terminal-component-group/config', async (importOriginal) => {
-  const actual = await importOriginal<
-    typeof import('@/features/terminal-component-group/config')
-  >();
+  const actual =
+    await importOriginal<typeof import('@/features/terminal-component-group/config')>();
   return { ...actual, IS_DEV_MODE: true, IS_VITEST: false };
 });
 

@@ -17,6 +17,8 @@ export interface CreateMessageParams {
   role: 'USER' | 'ASSISTANT' | 'TOOL' | 'SYSTEM';
   metadata?: Record<string, unknown> | null;
   filePointer?: object | null; // FilePointer for file attachment messages (JSON)
+  /** The caller generated a unique toolCallId inside a non-retried request. */
+  skipDuplicateToolCheck?: boolean;
 }
 
 function stringMetadataValue(
@@ -119,7 +121,8 @@ export async function createMessage(params: CreateMessageParams) {
     return idempotentDuplicate;
   }
 
-  const duplicate = await findDuplicateToolMessage(params);
+  const duplicate =
+    params.skipDuplicateToolCheck === true ? null : await findDuplicateToolMessage(params);
   if (duplicate !== null) {
     log.info('deduped duplicate tool message', {
       agent_id: params.agentId,

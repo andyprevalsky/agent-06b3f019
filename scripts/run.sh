@@ -864,6 +864,9 @@ data = {
             "volume": os.environ.get("DB_VOLUME", ""),
             "owned_by_run_sh": os.environ.get("DB_OWNED_BY_US", "false").lower() == "true",
             "use_system_postgres": os.environ.get("USE_SYSTEM_PG", "false").lower() == "true",
+            "runtime_port": 5432
+            if os.environ.get("USE_SYSTEM_PG", "false").lower() == "true"
+            else env_int("LOCAL_DB_PORT"),
         },
     "env": {
         "benchmark_anon_steel_profile": os.environ.get("BENCHMARK_ANON_STEEL_PROFILE", "").lower() in ("1", "true", "yes", "on"),
@@ -1099,7 +1102,10 @@ export FRONTEND_LOG_FILE="${FRONTEND_LOG_FILE:-$PWD/front-end/frontend-logs.log}
 export NAVI_WORKER_LOG_FILE="${NAVI_WORKER_LOG_FILE:-$PWD/agents/navi-worker-log.txt}"
 
 if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
-    BENCHMARK_LOG_DIR="$PWD/$RUN_CONTEXT_DIR/logs"
+    case "$RUN_CONTEXT_DIR" in
+        /*) BENCHMARK_LOG_DIR="$RUN_CONTEXT_DIR/logs" ;;
+        *) BENCHMARK_LOG_DIR="$PWD/$RUN_CONTEXT_DIR/logs" ;;
+    esac
     mkdir -p "$BENCHMARK_LOG_DIR"
     export BACKEND_LOG_FILE="$BENCHMARK_LOG_DIR/backend.log"
     export FRONTEND_LOG_FILE="$BENCHMARK_LOG_DIR/frontend.log"
@@ -1217,8 +1223,13 @@ while true; do
         pid="${PIDS[$i]}"
         if ! kill -0 "$pid" 2>/dev/null; then
             # Process is gone — get its exit code
-            wait "$pid" 2>/dev/null
-            code=$?
+            # `run.sh` uses `set -e`; a bare non-zero `wait` would trigger the
+            # EXIT trap before we can identify the failed service and code.
+            if wait "$pid" 2>/dev/null; then
+                code=0
+            else
+                code=$?
+            fi
             name="${NAMES[$i]}"
             if [ "$name" = "ngrok" ]; then
                 echo "⚠️  ngrok (PID $pid) exited with code $code; keeping local services running."

@@ -60,9 +60,9 @@ async function run(): Promise<void> {
   try {
     const phases = selectChatPhaseModels('rose-labs/rose-1-ultra');
     assert.equal(phases.router, 'rose-labs/rose-1-lite');
-    assert.equal(phases.routerProviderRoute, 'openrouter-cerebras');
+    assert.equal(phases.routerProviderRoute, 'direct-cerebras');
     assert.equal(phases.generator, 'rose-labs/rose-1-lite');
-    assert.equal(phases.generatorProviderRoute, 'openrouter-cerebras');
+    assert.equal(phases.generatorProviderRoute, 'direct-cerebras');
     const chunks = await collect(
       await createStreamingCompletion({
         model: phases.router,
@@ -84,7 +84,7 @@ async function run(): Promise<void> {
             },
           },
         },
-        provider_route: phases.routerProviderRoute,
+        provider_route: 'openrouter-cerebras',
       })
     );
 
@@ -137,7 +137,7 @@ async function run(): Promise<void> {
           { role: 'system', content: 'exact-generator-system-prompt' },
           { role: 'user', content: 'generate this response' },
         ],
-        provider_route: phases.generatorProviderRoute,
+        provider_route: 'openrouter-cerebras',
       })
     );
     assert.deepEqual(calls, [OPENROUTER_API_URL, CEREBRAS_API_URL]);

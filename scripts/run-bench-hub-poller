@@ -222,11 +222,11 @@ process_request() {  # process_request <request_json>
     fi
 
     local hub_run_id="hub-$req_id"
-    # Preserve sub-second precision. Integer seconds can make a final bundle
-    # from the immediately preceding request look newer than this request and
-    # falsely attach its verdict (especially in the failure path).
-    local start_epoch
-    start_epoch="$(python3 -c 'import time; print(time.time())')"
+    # Sub-second precision is required here. With integer seconds, a request
+    # that starts immediately after another one can treat the prior request's
+    # artifact as its own because both files compare newer than the rounded
+    # launch timestamp.
+    local start_epoch; start_epoch="$(python3 -c 'import time; print(time.time())')"
     local log_file=".context/hub-poller-run-$req_id.log"
 
     snapshot_loop "$req_id" "$hub_run_id" "$start_epoch" & SNAP_PID=$!

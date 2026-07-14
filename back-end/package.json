@@ -24,7 +24,7 @@
     "test:blackbox:runner": "tsx src/tests/blackbox/run.ts",
     "test:blackbox:existing": "BLACKBOX_TEST_USE_EXISTING_BACKEND=1 bash scripts/run-blackbox-tests.sh",
     "test:endpoint-smoke": "tsx scripts/prod-endpoint-smoke.ts",
-    "test:structural": "tsx src/tests/structural/layer-deps.test.ts && tsx src/tests/structural/migration-drift.test.ts && tsx src/tests/structural/integrations-config.test.ts && tsx src/tests/structural/browser-context-nullability.test.ts && tsx src/tests/structural/prompt-personality-sync.test.ts && tsx src/tests/structural/sms-prompt-layering.test.ts && tsx src/tests/structural/user-facing-writing-style.test.ts",
+    "test:structural": "tsx src/tests/structural/layer-deps.test.ts && tsx src/tests/structural/migration-drift.test.ts && tsx src/tests/structural/integrations-config.test.ts && tsx src/tests/structural/browser-context-nullability.test.ts && tsx src/tests/structural/prompt-personality-sync.test.ts && tsx src/tests/structural/sms-prompt-layering.test.ts && tsx src/tests/structural/sms-environment-tool.test.ts && tsx src/tests/structural/user-facing-writing-style.test.ts && bash scripts/local-db-container.test.sh",
     "test:coverage": "bash scripts/run-coverage.sh",
     "test:coverage:report": "bash scripts/run-coverage.sh --report-only",
     "test:all": "npm run test:structural && npm run test:api && npm run test:x402 && npm run test:blackbox",

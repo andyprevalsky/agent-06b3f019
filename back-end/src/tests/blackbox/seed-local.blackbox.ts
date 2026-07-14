@@ -1,12 +1,29 @@
 #!/usr/bin/env tsx
 
 import {
-  syncCookies,
+  syncCookieCredentials,
+  syncBrowserPasswordCredentials,
+  syncBrowserPermissionCredentials,
   syncIntegrationCredentials,
+  syncOriginCredentials,
   syncPasskeyCredentials,
+  syncRequiredCredentialTable,
+  type BrowserPasswordModel,
+  type BrowserPermissionModel,
   type CookieModel,
   type IntegrationModel,
+  type OriginModel,
 } from '../../../scripts/seed-local-credentials';
+import {
+  PrismaClient,
+  type BrowserPassword,
+  type BrowserPermission,
+  type Cookie,
+  type LocalStorageOrigin,
+} from '@prisma/client';
+import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 type TestFn = () => Promise<void>;
 const tests: Array<{ name: string; fn: TestFn }> = [];
@@ -36,112 +53,6 @@ type PasskeyRecord = {
 function compoundKey(pk: { userId: string; rpId: string; credentialId: string }) {
   return `${pk.userId}:${pk.rpId}:${pk.credentialId}`;
 }
-
-test('syncCookies preserves a local id for the same browser cookie identity', async () => {
-  const remote = {
-    id: 'remote-cookie-id',
-    userId: 'seed-user',
-    domain: '.example.com',
-    name: 'session',
-    path: '/',
-    value: 'fresh-cookie',
-    expiresUtc: 100n,
-    isSecure: true,
-    isHttpOnly: true,
-    browserSource: 'chrome',
-    syncedAt: new Date('2026-07-13T00:00:00Z'),
-    creationUtc: 1n,
-    hasExpires: true,
-    isPersistent: true,
-    lastAccessUtc: 2n,
-    lastUpdateUtc: 3n,
-    priority: 1,
-    sameSite: 0,
-    sourcePort: 443,
-    sourceScheme: 2,
-    topFrameSiteKey: '',
-    browserProfile: 'Profile 1',
-  };
-  const local = { ...remote, id: 'local-cookie-id', value: 'stale-cookie' };
-  const rows = new Map([[local.id, local]]);
-  const identityKey = (cookie: typeof remote) =>
-    [
-      cookie.userId,
-      cookie.domain,
-      cookie.name,
-      cookie.path,
-      cookie.topFrameSiteKey,
-      cookie.browserSource,
-      cookie.browserProfile,
-    ].join('\u0000');
-  const localModel: CookieModel = {
-    upsert: async (args) => {
-      const where = args.where as {
-        id?: string;
-        userId_domain_name_path_topFrameSiteKey_browserSource_browserProfile?: {
-          userId: string;
-          domain: string;
-          name: string;
-          path: string;
-          topFrameSiteKey: string;
-          browserSource: string;
-          browserProfile: string;
-        };
-      };
-      const compound = where.userId_domain_name_path_topFrameSiteKey_browserSource_browserProfile;
-      const existing = where.id
-        ? rows.get(where.id)
-        : [...rows.values()].find(
-            (row) =>
-              identityKey(row) ===
-              identityKey({
-                ...remote,
-                ...compound,
-              })
-          );
-
-      if (existing) {
-        const updated = { ...existing, ...(args.update as Partial<typeof remote>) };
-        rows.set(existing.id, updated);
-        return { id: existing.id };
-      }
-
-      const created = args.create as typeof remote;
-      if ([...rows.values()].some((row) => identityKey(row) === identityKey(created))) {
-        throw Object.assign(new Error('Unique constraint failed on browser cookie identity'), {
-          code: 'P2002',
-        });
-      }
-      rows.set(created.id, created);
-      return { id: created.id };
-    },
-  };
-
-  const { id: ignoredRemoteId, ...oldUpdate } = remote;
-  void ignoredRemoteId;
-  let reproducedCollision = false;
-  try {
-    await localModel.upsert({
-      where: { id: remote.id },
-      create: remote,
-      update: oldUpdate,
-      select: { id: true },
-    });
-  } catch (error) {
-    reproducedCollision = (error as { code?: string }).code === 'P2002';
-  }
-  assert(reproducedCollision, 'expected id-based upsert to reproduce the P2002 collision');
-
-  const count = await syncCookies(localModel, [remote]);
-
-  assert(count === 1, `expected one synced cookie, got ${count}`);
-  assert(rows.size === 1, `expected one cookie after sync, got ${rows.size}`);
-  assert(rows.has(local.id), 'expected local primary key to be preserved');
-  assert(
-    rows.get(local.id)?.value === remote.value,
-    'expected remote cookie value to refresh local'
-  );
-});
 
 test('syncPasskeyCredentials copies passkeys and never moves local signCount backward', async () => {
   const userId = 'seed-user';
@@ -277,6 +188,310 @@ test('syncIntegrationCredentials preserves a local id for the same user and name
   assert(where.userId_name?.name === remote.name, 'expected compound integration name selector');
   const update = captured?.update as Record<string, unknown>;
   assert(!('id' in update), 'expected update not to rewrite local primary key');
+});
+
+test('syncCookieCredentials preserves a local id for the same browser cookie identity', async () => {
+  const remote: Cookie = {
+    id: 'remote-cookie-id',
+    userId: 'seed-user',
+    domain: '.example.com',
+    name: 'session',
+    path: '/',
+    value: 'fresh-cookie-value',
+    expiresUtc: 123n,
+    isSecure: true,
+    isHttpOnly: true,
+    browserSource: 'chrome',
+    syncedAt: new Date('2026-07-13T00:00:00Z'),
+    creationUtc: 100n,
+    hasExpires: true,
+    isPersistent: true,
+    lastAccessUtc: 110n,
+    lastUpdateUtc: 120n,
+    priority: 1,
+    sameSite: 0,
+    sourcePort: 443,
+    sourceScheme: 2,
+    topFrameSiteKey: '',
+    browserProfile: 'Default',
+  };
+  let captured: Record<string, unknown> | undefined;
+  const localModel: CookieModel = {
+    upsert: async (args) => {
+      captured = args;
+      return {};
+    },
+  };
+
+  const count = await syncCookieCredentials(localModel, [remote]);
+
+  assert(count === 1, `expected one synced cookie, got ${count}`);
+  const where = captured?.where as {
+    userId_domain_name_path_topFrameSiteKey_browserSource_browserProfile?: {
+      userId?: string;
+      domain?: string;
+      name?: string;
+      path?: string;
+      topFrameSiteKey?: string;
+      browserSource?: string;
+      browserProfile?: string;
+    };
+  };
+  const identity = where.userId_domain_name_path_topFrameSiteKey_browserSource_browserProfile;
+  assert(identity?.userId === remote.userId, 'expected cookie user id selector');
+  assert(identity?.domain === remote.domain, 'expected cookie domain selector');
+  assert(identity?.name === remote.name, 'expected cookie name selector');
+  assert(identity?.path === remote.path, 'expected cookie path selector');
+  assert(identity?.topFrameSiteKey === remote.topFrameSiteKey, 'expected top-frame selector');
+  assert(identity?.browserSource === remote.browserSource, 'expected browser source selector');
+  assert(identity?.browserProfile === remote.browserProfile, 'expected browser profile selector');
+  const update = captured?.update as Record<string, unknown>;
+  assert(!('id' in update), 'expected update not to rewrite local cookie primary key');
+  assert(update.value === remote.value, 'expected production cookie value refreshed');
+});
+
+test('syncCookieCredentials bounds local database writes', async () => {
+  const now = new Date('2026-07-13T00:00:00Z');
+  const cookies: Cookie[] = Array.from({ length: 10 }, (_, index) => ({
+    id: `remote-cookie-${index}`,
+    userId: 'seed-user',
+    domain: '.example.com',
+    name: `session-${index}`,
+    path: '/',
+    value: `value-${index}`,
+    expiresUtc: null,
+    isSecure: true,
+    isHttpOnly: true,
+    browserSource: 'chrome',
+    syncedAt: now,
+    creationUtc: null,
+    hasExpires: false,
+    isPersistent: false,
+    lastAccessUtc: null,
+    lastUpdateUtc: null,
+    priority: 1,
+    sameSite: 0,
+    sourcePort: 443,
+    sourceScheme: 2,
+    topFrameSiteKey: '',
+    browserProfile: 'Default',
+  }));
+  let activeWrites = 0;
+  let maxActiveWrites = 0;
+  const localModel: CookieModel = {
+    upsert: async () => {
+      activeWrites += 1;
+      maxActiveWrites = Math.max(maxActiveWrites, activeWrites);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      activeWrites -= 1;
+      return {};
+    },
+  };
+
+  await syncCookieCredentials(localModel, cookies);
+
+  assert(maxActiveWrites === 8, `expected eight active cookie writes, got ${maxActiveWrites}`);
+});
+
+test('browser-state sync helpers use every schema identity instead of remote primary ids', async () => {
+  const now = new Date('2026-07-13T00:00:00Z');
+  const origin: LocalStorageOrigin = {
+    id: 'remote-origin-id',
+    userId: 'seed-user',
+    origin: 'https://example.com',
+    entries: [{ key: 'session', value: 'fresh' }],
+    hash: 'fresh-origin-hash',
+    updatedAt: now,
+  };
+  const permission: BrowserPermission = {
+    id: 'remote-permission-id',
+    userId: 'seed-user',
+    origin: 'https://example.com',
+    permission: 'notifications',
+    setting: 1,
+    syncedAt: now,
+  };
+  const password: BrowserPassword = {
+    id: 'remote-password-id',
+    userId: 'seed-user',
+    origin: 'https://example.com',
+    username: 'user@example.com',
+    encryptedPassword: 'fresh-envelope',
+    dateLastUsed: 10n,
+    dateCreated: 5n,
+    browserSource: 'chrome',
+    syncedAt: now,
+    browserProfile: 'Default',
+    disabledAt: null,
+    disabledReason: null,
+  };
+  const captured: Record<string, Record<string, unknown>> = {};
+  const originModel: OriginModel<LocalStorageOrigin> = {
+    upsert: async (args) => {
+      captured.origin = args as unknown as Record<string, unknown>;
+      return {};
+    },
+  };
+  const permissionModel: BrowserPermissionModel = {
+    upsert: async (args) => {
+      captured.permission = args as unknown as Record<string, unknown>;
+      return {};
+    },
+  };
+  const passwordModel: BrowserPasswordModel = {
+    upsert: async (args) => {
+      captured.password = args as unknown as Record<string, unknown>;
+      return {};
+    },
+  };
+
+  await syncOriginCredentials(originModel, [origin]);
+  await syncBrowserPermissionCredentials(permissionModel, [permission]);
+  await syncBrowserPasswordCredentials(passwordModel, [password]);
+
+  const originWhere = captured.origin.where as {
+    userId_origin?: { userId?: string; origin?: string };
+  };
+  assert(originWhere.userId_origin?.userId === origin.userId, 'expected origin user selector');
+  assert(originWhere.userId_origin?.origin === origin.origin, 'expected origin URL selector');
+  const permissionWhere = captured.permission.where as {
+    userId_origin_permission?: { userId?: string; origin?: string; permission?: string };
+  };
+  assert(
+    permissionWhere.userId_origin_permission?.permission === permission.permission,
+    'expected permission identity selector'
+  );
+  const passwordWhere = captured.password.where as {
+    userId_origin_username?: { userId?: string; origin?: string; username?: string };
+  };
+  assert(
+    passwordWhere.userId_origin_username?.username === password.username,
+    'expected password identity selector'
+  );
+  for (const [name, args] of Object.entries(captured)) {
+    const update = args.update as Record<string, unknown>;
+    assert(!('id' in update), `expected ${name} update not to rewrite local primary key`);
+  }
+});
+
+test('required credential table sync propagates write failures', async () => {
+  let failure: unknown;
+  try {
+    await syncRequiredCredentialTable('Cookies', async () => {
+      throw new Error('database write rejected');
+    });
+  } catch (err) {
+    failure = err;
+  }
+
+  assert(failure instanceof Error, 'expected required credential sync to reject');
+  assert(failure.message.includes('Cookies'), 'expected failing table name in propagated error');
+  assert(
+    failure.message.includes('database write rejected'),
+    'expected original database failure in propagated error'
+  );
+});
+
+test('full sync defers browser-auth failure until later tables finish', async () => {
+  const source = readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
+  const fullSyncCollector = source.indexOf('const browserAuthSyncFailures: Error[] = [];');
+  const collectedBrowserSync = source.indexOf(
+    'await syncBrowserAuthForCurrentMode(browserAuthSyncFailures);'
+  );
+  const laterTable = source.indexOf("await syncTable('Goal Blueprints'");
+  const deferredFailure = source.indexOf('throwBrowserAuthSyncFailures(browserAuthSyncFailures);');
+  const credentialsOnlyBranch = source.indexOf('if (CREDENTIALS_ONLY)');
+  const failFastBrowserSync = source.indexOf(
+    'await syncBrowserAuthForCurrentMode();',
+    credentialsOnlyBranch
+  );
+
+  assert(fullSyncCollector > 0, 'expected full sync to collect browser-auth failures');
+  assert(
+    collectedBrowserSync > fullSyncCollector,
+    'expected full sync to pass its failure collector to browser-auth sync'
+  );
+  assert(laterTable > collectedBrowserSync, 'expected later full-sync tables after browser auth');
+  assert(
+    deferredFailure > laterTable,
+    'expected collected browser-auth failures to throw only after later tables finish'
+  );
+  assert(
+    failFastBrowserSync > credentialsOnlyBranch && failFastBrowserSync < fullSyncCollector,
+    'expected credentials-only sync to remain fail-fast'
+  );
+});
+
+test('browser-state natural-key sync crosses the real Prisma uniqueness boundary', async () => {
+  const databaseUrl = process.env.DATABASE_URL;
+  assert(databaseUrl, 'DATABASE_URL is required for the seed-local database blackbox');
+  const hostname = new URL(databaseUrl).hostname;
+  assert(
+    ['localhost', '127.0.0.1', '::1'].includes(hostname),
+    `seed-local database blackbox requires local Postgres, got ${hostname}`
+  );
+  const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+  const suffix = randomUUID();
+  const userId = `seed-local-blackbox-${suffix}`;
+  const cookieIdentity = {
+    userId,
+    domain: '.example.com',
+    name: 'session',
+    path: '/',
+    topFrameSiteKey: '',
+    browserSource: 'chrome',
+    browserProfile: 'Default',
+  };
+  const originUrl = `https://${suffix}.example.com`;
+  try {
+    const localCookie = await prisma.cookie.create({
+      data: {
+        id: `local-cookie-${suffix}`,
+        ...cookieIdentity,
+        value: 'stale-local-value',
+      },
+    });
+    const localOrigin = await prisma.localStorageOrigin.create({
+      data: {
+        id: `local-origin-${suffix}`,
+        userId,
+        origin: originUrl,
+        entries: [{ key: 'session', value: 'stale' }],
+        hash: 'stale-hash',
+      },
+    });
+
+    await syncCookieCredentials(prisma.cookie, [
+      {
+        ...localCookie,
+        id: `remote-cookie-${suffix}`,
+        value: 'fresh-production-value',
+      },
+    ]);
+    await syncOriginCredentials(prisma.localStorageOrigin, [
+      {
+        ...localOrigin,
+        id: `remote-origin-${suffix}`,
+        entries: [{ key: 'session', value: 'fresh' }],
+        hash: 'fresh-hash',
+      },
+    ]);
+
+    const cookies = await prisma.cookie.findMany({ where: cookieIdentity });
+    const origins = await prisma.localStorageOrigin.findMany({
+      where: { userId, origin: originUrl },
+    });
+    assert(cookies.length === 1, `expected one cookie identity row, got ${cookies.length}`);
+    assert(cookies[0].id === localCookie.id, 'expected local cookie primary id preserved');
+    assert(cookies[0].value === 'fresh-production-value', 'expected cookie value refreshed');
+    assert(origins.length === 1, `expected one origin identity row, got ${origins.length}`);
+    assert(origins[0].id === localOrigin.id, 'expected local origin primary id preserved');
+    assert(origins[0].hash === 'fresh-hash', 'expected origin payload refreshed');
+  } finally {
+    await prisma.cookie.deleteMany({ where: { userId } });
+    await prisma.localStorageOrigin.deleteMany({ where: { userId } });
+    await prisma.$disconnect();
+  }
 });
 
 (async () => {

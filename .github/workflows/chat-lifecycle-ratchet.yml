@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   semantic:
-    name: All semantic flows and chat lifecycle ratchet
+    name: Semantic frontend flows
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.deployment_status.state == 'success' &&
@@ -56,6 +56,7 @@ jobs:
         env:
           BACKEND_URL: ${{ inputs.backend_url || 'https://navi-j9a9.onrender.com' }}
           FRONTEND_URL: ${{ inputs.frontend_url || github.event.deployment_status.environment_url || 'https://roselabs.ai' }}
+          SEMANTIC_GREP_INVERT: chat full-lifecycle latency
           SEMANTIC_WORKERS: 4
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -67,6 +68,56 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: semantic-frontend-${{ github.run_id }}
+          path: |
+            front-end/playwright-report
+            front-end/test-results
+          if-no-files-found: ignore
+          retention-days: 14
+
+  lifecycle:
+    name: Chat full-lifecycle latency ratchet
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.deployment_status.state == 'success' &&
+       github.event.deployment.creator.login == 'vercel[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out trusted lifecycle harness
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install test dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Install Chromium
+        working-directory: front-end
+        run: npx playwright install chromium --with-deps
+
+      - name: Run five samples across every chat lifecycle
+        env:
+          BACKEND_URL: ${{ inputs.backend_url || 'https://navi-j9a9.onrender.com' }}
+          FRONTEND_URL: ${{ inputs.frontend_url || github.event.deployment_status.environment_url || 'https://roselabs.ai' }}
+          SEMANTIC_WORKERS: 1
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          TEST_API_KEY: ${{ secrets.BACKEND_API_KEY }}
+        run: bash front-end/scripts/run-semantic-tests.sh --prod chat-lifecycle-latency
+
+      - name: Upload lifecycle failure artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chat-lifecycle-${{ github.run_id }}
           path: |
             front-end/playwright-report
             front-end/test-results

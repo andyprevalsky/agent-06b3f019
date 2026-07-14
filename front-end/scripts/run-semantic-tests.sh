@@ -106,7 +106,11 @@ if ! [[ "$SEMANTIC_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
 fi
 
 if [[ $# -eq 0 ]]; then
-  exec npx playwright test --reporter=list --workers="$SEMANTIC_WORKERS"
+  PLAYWRIGHT_ARGS=(--reporter=list --workers="$SEMANTIC_WORKERS")
+  if [[ -n "${SEMANTIC_GREP_INVERT:-}" ]]; then
+    PLAYWRIGHT_ARGS+=(--grep-invert="$SEMANTIC_GREP_INVERT")
+  fi
+  exec npx playwright test "${PLAYWRIGHT_ARGS[@]}"
 fi
 
 TEST_NAME="$1"

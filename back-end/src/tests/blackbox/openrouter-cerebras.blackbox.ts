@@ -77,7 +77,7 @@ async function run(): Promise<void> {
             },
           },
         },
-        provider_route: phases.generatorProviderRoute,
+        provider_route: 'openrouter-cerebras',
       })
     );
 

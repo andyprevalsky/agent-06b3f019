@@ -51,13 +51,9 @@ const tests: Array<[string, () => Promise<void> | void]> = [
 
       assertEqual(selected.requested, requestedModel, 'persisted requested model');
       assertEqual(selected.router, 'rose-labs/rose-1-lite', 'router model');
-      assertEqual(selected.routerProviderRoute, 'openrouter-cerebras', 'router provider route');
+      assertEqual(selected.routerProviderRoute, 'direct-cerebras', 'router provider route');
       assertEqual(selected.generator, 'rose-labs/rose-1-lite', 'generator model');
-      assertEqual(
-        selected.generatorProviderRoute,
-        'openrouter-cerebras',
-        'generator provider route'
-      );
+      assertEqual(selected.generatorProviderRoute, 'direct-cerebras', 'generator provider route');
       const generatorPool = poolForModel(selected.generator);
       assertEqual(generatorPool, 'rose-1-lite', 'generator pool');
       if (!generatorPool) throw new Error('generator model did not resolve to a Rose pool');

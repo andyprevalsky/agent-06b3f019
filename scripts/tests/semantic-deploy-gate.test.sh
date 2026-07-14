@@ -41,15 +41,17 @@ require_text "$LIFECYCLE_SPEC" "test.use({ trace: 'off', video: 'off' });" "late
 require_text "$ROOT_DIR/front-end/tests-e2e/helpers.ts" "waitForTemporalWorkflow" "agent lifecycle ratchet must expose an authoritative Temporal-start helper"
 require_text "$LIFECYCLE_SPEC" "waitForTemporalWorkflow" "agent lifecycle terminal must wait for persisted Temporal startup"
 
-# CI runs the complete semantic suite in one job so all workers share one session.
+# CI runs UI semantics and the latency ratchet as concurrent jobs. The ratchet
+# owns a runner and executes samples sequentially so renderer contention cannot
+# become part of the product latency measurement.
 require_text "$WORKFLOW" "workflow_dispatch:" "production semantic gate must support /deploy dispatch"
 require_text "$WORKFLOW" "SEMANTIC_WORKERS: 4" "production semantic gate must use four concurrent workers"
 require_text "$WORKFLOW" "bash front-end/scripts/run-semantic-tests.sh --prod" "production gate must run every semantic spec"
+require_text "$WORKFLOW" "SEMANTIC_GREP_INVERT: chat full-lifecycle latency" "UI semantic job must exclude the separately gated latency spec"
+require_text "$WORKFLOW" "SEMANTIC_WORKERS: 1" "latency ratchet must avoid renderer contention"
+require_text "$WORKFLOW" "--prod chat-lifecycle-latency" "production gate must run the lifecycle ratchet"
 if grep -Fq "matrix:" "$WORKFLOW"; then
   fail "production semantic gate must not split paths into separate sessions"
-fi
-if grep -Fq "chat-lifecycle-latency" "$WORKFLOW"; then
-  fail "production semantic gate must run the full suite, not only the latency spec"
 fi
 if grep -Fq 'npm run dev > frontend-logs.log' "$DEPLOY_COMMAND"; then
   fail "/deploy must not start a second frontend; run.sh --benchmark already owns it"

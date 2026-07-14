@@ -34,6 +34,19 @@ const GrepMatch = z.object({
     field: z.string().optional(),
   }),
   content: z.string(),
+  records: z
+    .array(
+      z.object({
+        message_id: z.string(),
+        channel: z.string(),
+        from: z.string(),
+        to: z.string(),
+        timestamp: z.string(),
+        message: z.string(),
+        relation: z.enum(['before', 'match', 'after']),
+      })
+    )
+    .optional(),
 });
 
 const GrepResponse = z.object({
@@ -57,6 +70,11 @@ const GrepResponse = z.object({
   ),
   applied_limit: z.number(),
   applied_offset: z.number(),
+  returned: z.number(),
+  has_more: z.boolean(),
+  next_offset: z.number().nullable(),
+  display_order: z.enum(['oldest_first', 'newest_first']),
+  context_unit: z.enum(['message_record', 'logical_line', 'mixed']),
   summaries: z
     .object({
       transactions: z
@@ -200,13 +218,27 @@ async function seedFixture() {
         channel: 'EMAIL',
         from: 'lighthouse@example.com',
         to: 'benchmark@example.com',
+        timestamp: new Date('2026-01-01T09:00:00Z'),
+        externalId: `before-context-${randomUUID()}`,
+        message: 'Before-context evidence: finance owner noted',
+      },
+      {
+        personId: lighthouse.id,
+        channel: 'EMAIL',
+        from: 'lighthouse@example.com',
+        to: 'benchmark@example.com',
         timestamp: new Date('2026-01-01T10:00:00Z'),
         externalId: `quarterly-${randomUUID()}`,
-        message: [
-          'Before-context evidence: finance owner noted',
-          'Aurora budget: phase-17 approved',
-          'After-context evidence: forecast packet delivered',
-        ].join('\n'),
+        message: 'Aurora budget: phase-17 approved',
+      },
+      {
+        personId: lighthouse.id,
+        channel: 'EMAIL',
+        from: 'lighthouse@example.com',
+        to: 'benchmark@example.com',
+        timestamp: new Date('2026-01-01T11:00:00Z'),
+        externalId: `after-context-${randomUUID()}`,
+        message: 'After-context evidence: forecast packet delivered',
       },
       {
         personId: lighthouse.id,
@@ -654,6 +686,17 @@ async function testFlags(userId: string): Promise<void> {
   const context = assertBody(res.data);
   requireContent(context, 'Before-context evidence');
   requireContent(context, 'After-context evidence');
+  const contextRecords = context.matches[0]?.records;
+  if (
+    contextRecords?.map((record) => record.relation).join(',') !== 'before,match,after' ||
+    contextRecords[0]?.message !== 'Before-context evidence: finance owner noted' ||
+    contextRecords[1]?.message !== 'Aurora budget: phase-17 approved' ||
+    contextRecords[2]?.message !== 'After-context evidence: forecast packet delivered'
+  ) {
+    throw new Error(
+      `Expected aligned oldest-first message records, got ${JSON.stringify(context)}`
+    );
+  }
 
   res = await requestGrep(userId, {
     pattern: 'Aurora budget',
@@ -671,9 +714,20 @@ async function testFlags(userId: string): Promise<void> {
   });
   assertStatus(res.status, 200, res.data);
   const paged = assertBody(res.data);
-  requireContent(paged, 'Ledger entry 10');
+  requireContent(paged, 'Ledger entry 21');
   if (paged.applied_limit !== 5 || paged.applied_offset !== 20) {
     throw new Error(`Expected pagination metadata, got ${JSON.stringify(paged)}`);
+  }
+  if (
+    paged.returned !== 5 ||
+    paged.has_more !== true ||
+    paged.next_offset !== 25 ||
+    paged.display_order !== 'oldest_first' ||
+    paged.context_unit !== 'message_record'
+  ) {
+    throw new Error(
+      `Expected explicit message pagination/order metadata, got ${JSON.stringify(paged)}`
+    );
   }
 }
 

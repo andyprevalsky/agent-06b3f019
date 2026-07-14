@@ -410,6 +410,9 @@ class KeycapTimingSynthesizer:
         max_velocity: float = 38.0,
     ) -> None:
         self._rng = rng or random.Random()
+        numpy_seed_rng = random.Random()
+        numpy_seed_rng.setstate(self._rng.getstate())
+        self._numpy_rng = np.random.default_rng(numpy_seed_rng.getrandbits(128))
         self._basis_count = max(500, min(5000, basis_count))
         self._min_velocity = max(1.0, min_velocity)
         self._max_velocity = max(self._min_velocity, max_velocity)
@@ -418,7 +421,12 @@ class KeycapTimingSynthesizer:
         self._generate_times()
 
     def _generate_times(self) -> None:
-        controller = Controller(n=self._basis_count, min_velocity=self._min_velocity, max_velocity=self._max_velocity)
+        controller = Controller(
+            n=self._basis_count,
+            min_velocity=self._min_velocity,
+            max_velocity=self._max_velocity,
+            rng=self._numpy_rng,
+        )
         plant = Plant(controller)
         plant.default_design_controller()
         t = np.linspace(0, 1, 1000)
