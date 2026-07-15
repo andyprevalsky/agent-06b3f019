@@ -2359,3 +2359,27 @@ def test_cloud_git_sync_uses_safe_directory_everywhere() -> None:
     assert bare not in cloud, f"root-run git on the volume checkout must use -c safe.directory: {bare}"
     # And the safe.directory form must be present where those syncs happen.
     assert "git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO'" in cloud
+
+
+def test_start_barrier_tolerates_infra_failures() -> None:
+    """RCA (2026-07-15): at fleet width some isolated stacks sporadically fail
+    on-box startup (resource/timing races under N concurrent full stacks). The
+    all-or-nothing barrier returned failure the instant ANY child exited before
+    signalling ready, aborting the whole batch — a 30/31-healthy run reported
+    ZERO results, twice. The barrier must EXCLUDE a stack that dies before ready
+    (infra failure, not a benchmark verdict), keep the live set, release for the
+    survivors, and fail only if EVERY stack dies."""
+    fleet = FLEET_SCRIPT.read_text()
+    fn = _extract_fleet_function(fleet, "release_start_barrier() {")
+    # A single dead child no longer aborts: the old `return 1` on child exit is gone.
+    assert "isolated runner exited before synchronized start barrier" not in fn
+    # It excludes the dead stack and keeps going.
+    assert "excluding it (infra)" in fn
+    # It only fails when the whole live set is gone.
+    assert 'live" -eq 0 ]' in fn and "every isolated stack failed" in fn
+    # Release only targets the ready machines, and a single release RPC failing
+    # does not abort the batch.
+    assert 'is_ready[$j]}" = "1" ] || continue' in fn
+    assert "a start-barrier release RPC failed" in fn
+    # Timeout releases the ready set instead of aborting.
+    assert "releasing the ready set anyway" in fn

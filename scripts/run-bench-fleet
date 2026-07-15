@@ -1845,39 +1845,60 @@ echo ""
 # healthy; only then do we touch every machine's release file in parallel.
 release_start_barrier() {
     [ "$SYNCHRONIZED_START" = "1" ] || return 0
-    local expected="${#CHILD_PIDS[@]}" ready deadline now out p mid
+    # TOLERANT barrier: at fleet width some isolated stacks sporadically fail on-box
+    # startup (resource/timing races under N concurrent full stacks). An all-or-
+    # nothing barrier turned ONE such infra failure into a whole-batch abort, so a
+    # 30/31-healthy run reported ZERO results. Instead, exclude a stack that dies
+    # before signalling ready (it's an infra failure, not a benchmark verdict),
+    # keep waiting for the live set, and release the barrier for the survivors.
+    # Only fail if EVERY stack dies. The excluded bench's child already exited
+    # non-zero and is reported as such in the aggregate.
+    local total="${#CHILD_PIDS[@]}" ready deadline now out p mid j live
+    local -a is_ready=() is_dead=()
+    for j in "${!CHILD_PIDS[@]}"; do is_ready[$j]=0; is_dead[$j]=0; done
     deadline=$(( $(date +%s) + START_BARRIER_WAIT_SECONDS ))
-    echo "⏸️  waiting for $expected isolated stacks at synchronized start barrier..."
+    echo "⏸️  waiting for $total isolated stacks at synchronized start barrier..."
     while :; do
-        ready=0
-        for out in "${CHILD_OUT[@]}"; do
-            grep -aFq "synchronized start barrier ready: $RUN_ID" "$out/fleet-child.log" 2>/dev/null && ready=$((ready + 1))
-        done
-        [ "$ready" = "$expected" ] && break
-        for p in "${CHILD_PIDS[@]}"; do
-            if ! kill -0 "$p" 2>/dev/null; then
-                echo "❌ isolated runner exited before synchronized start barrier ($ready/$expected ready)" >&2
-                return 1
+        ready=0; live=0
+        for j in "${!CHILD_PIDS[@]}"; do
+            [ "${is_dead[$j]}" = "1" ] && continue
+            out="${CHILD_OUT[$j]}"; p="${CHILD_PIDS[$j]}"
+            if [ "${is_ready[$j]}" = "0" ] && \
+               grep -aFq "synchronized start barrier ready: $RUN_ID" "$out/fleet-child.log" 2>/dev/null; then
+                is_ready[$j]=1
+            fi
+            if [ "${is_ready[$j]}" = "1" ]; then
+                ready=$((ready + 1)); live=$((live + 1))
+            elif ! kill -0 "$p" 2>/dev/null; then
+                # exited before signalling ready → infra failure; exclude it.
+                is_dead[$j]=1
+                echo "⚠️  [${CHILD_BENCH[$j]}] isolated stack failed before the start barrier — excluding it (infra) and continuing with the rest" >&2
+            else
+                live=$((live + 1))
             fi
         done
+        [ "$live" -eq 0 ] && { echo "❌ every isolated stack failed before the start barrier" >&2; return 1; }
+        [ "$ready" -ge "$live" ] && break
         now="$(date +%s)"
         if [ "$now" -ge "$deadline" ]; then
-            echo "❌ synchronized start barrier timed out ($ready/$expected ready)" >&2
-            return 1
+            echo "⚠️  start barrier timed out ($ready/$live live ready) — releasing the ready set anyway" >&2
+            break
         fi
         sleep 2
     done
-    echo "✅ all $expected isolated stacks reached the synchronized start barrier"
-    echo "🚦 releasing synchronized start barrier on all machines..."
+    echo "✅ $ready/$total isolated stacks reached the barrier ($(( total - ready )) excluded as infra failures)"
+    echo "🚦 releasing synchronized start barrier on the ready machines..."
     local release_pids=()
-    for mid in "${CHILD_MACHINE[@]}"; do
+    for j in "${!CHILD_MACHINE[@]}"; do
+        [ "${is_ready[$j]}" = "1" ] || continue
+        mid="${CHILD_MACHINE[$j]}"
         ( FLY ssh console -a "$APP" --machine "$mid" -q \
             -C "touch '/data/cloudbench-start-$RUN_ID.release'" >/dev/null 2>&1 ) &
         release_pids+=("$!")
     done
-    for p in "${release_pids[@]}"; do
-        wait "$p" || { echo "❌ failed to release synchronized start barrier" >&2; return 1; }
-    done
+    # A single release RPC failing must not abort the batch either.
+    for p in "${release_pids[@]}"; do wait "$p" || echo "⚠️  a start-barrier release RPC failed (that stack proceeds on its own timeout)" >&2; done
+    return 0
 }
 
 if ! release_start_barrier; then
