@@ -222,6 +222,16 @@ test.describe('chat full-lifecycle latency', () => {
       const recorder = attachRecorder(page);
       const results: LifecycleSample[] = [];
 
+      // Bypass the waitlist/invite gate. Users without a redeemed invite code
+      // get the "You're On The Waitlist!" modal on submit (server-side
+      // User.usedInviteCode), which blocks agent creation and navigation. This
+      // latency test measures the chat lifecycle, not invite-gated onboarding
+      // (covered by login.spec.ts), so treat the session as already ungated —
+      // same bypass as cloud-agent-lifecycle.spec.ts.
+      await page.route('**/api/invite-codes/check', (route) =>
+        route.fulfill({ json: { needsInviteCode: false } }),
+      );
+
       await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
       if (HAS_INJECTED_SESSION) await expectInjectedSessionRecognized(page);
       else await expectDevAuthenticated(page, recorder);

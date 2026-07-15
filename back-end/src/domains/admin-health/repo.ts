@@ -20,6 +20,10 @@ export interface UserCreatedRecord {
   createdAt: Date;
 }
 
+export interface WaitlistSignupRecord {
+  createdAt: Date;
+}
+
 export interface SubscriptionUserRecord {
   userId: string;
   stripeCustomerId: string;
@@ -78,6 +82,16 @@ export async function findSubscriptionUsersByCustomerIds(
   return prisma.subscription.findMany({
     where: { stripeCustomerId: { in: stripeCustomerIds } },
     select: { userId: true, stripeCustomerId: true },
+  });
+}
+
+export async function findWaitlistSignupsBetween(
+  start: Date,
+  end: Date
+): Promise<WaitlistSignupRecord[]> {
+  return prisma.waitlist.findMany({
+    where: { createdAt: { gte: start, lt: end } },
+    select: { createdAt: true },
   });
 }
 

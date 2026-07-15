@@ -185,12 +185,18 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'cloudbench_controller_lock_acquire_wait' \
   "fleet controllers must wait for the workspace-local controller lock"
+require_text "$ROOT_DIR/scripts/run-predeploy-cloud" \
+  'bash "$ROOT_DIR/scripts/tests/cloudbench-multi-workstream.test.sh"' \
+  "pre-deploy cloud gate must run the permanent concurrency regression"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'CLOUDBENCH_ENV_VERIFIED=1' \
   "fleet children must receive proof that the controller verified the environment"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'set -C; printf '"'"'%s\n'"'"' "$$" > "$claim_path"' \
-  "pool claims must be atomic (noclobber) so concurrent controllers cannot double-claim"
+  'write_pool_claim "$claim_path"' \
+  "pool claims must use the atomic host/PID-birth ownership writer"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'printf '"'"'pid_start=%s\n'"'"' "$FLEET_OWNER_PID_START"' \
+  "pool and fleet ownership must disambiguate PID reuse"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'verify_app_environment' \
   "run-bench-cloud must expose the read-only environment preflight"

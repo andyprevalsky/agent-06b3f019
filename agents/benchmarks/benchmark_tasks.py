@@ -29,6 +29,16 @@ class BenchmarkTask:
     row_end: Optional[int] = None    # Slice CSV attachments ending at this 1-indexed data row (inclusive)
     expected_approval_count: Optional[int] = None  # Exact number of approvals expected (used with count_only)
     expected_attention_kind: Optional[str] = None  # metadata.attentionKind expected for approval-style tasks
+    expected_credential_ref_kind: Optional[str] = None  # credential_ref.kind that must be observed before terminal success
+    forbidden_credential_ref_kinds: List[str] = field(default_factory=list)  # credential paths that invalidate the run
+    expected_browser_provider: Optional[str] = None  # browser_session_metadata.provider required for provider-specific probes
+    expected_browser_session_metadata_values: Optional[dict] = None  # exact session/injection metadata required for isolation probes
+    expected_pre_credential_message_contains: List[str] = field(default_factory=list)  # evidence required before credential use
+    expected_post_credential_message_contains: List[str] = field(default_factory=list)  # authenticated evidence required after use
+    success_on_browser_auth_evidence: bool = False  # stop once ordered browser-auth evidence is durable
+    expected_structured_response_values: Optional[dict] = None  # exact browser result fields required for success
+    expected_structured_response_contains: Optional[dict] = None  # required substrings by browser result field
+    required_structured_response_fields: List[str] = field(default_factory=list)  # non-empty browser result fields
     expected_gate: Optional[dict] = None  # Expected metadata.gate fields for gate-blocked tasks
     min_agent_count: Optional[int] = None  # Minimum total agents in tree (root + sub-agents)
     expected_tool_counts: Optional[dict] = None  # Exact tool call counts (toolName → count)

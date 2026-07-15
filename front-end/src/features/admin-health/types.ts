@@ -6,6 +6,7 @@ export interface AdminHealthSeriesPoint {
   start: string;
   end: string;
   revenueCents: number | null;
+  waitlistSignups: number;
   userCount: number;
   newUsers: number;
   taskCount: number;
@@ -63,6 +64,7 @@ export interface AdminHealthData {
   };
   summary: {
     revenueCents: number | null;
+    waitlistSignups: number;
     userCount: number;
     taskCount: number;
     tasksIssuedPerUser: number;

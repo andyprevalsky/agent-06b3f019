@@ -55,7 +55,11 @@ export function buildPeriods(
 ): AdminHealthPeriod[] {
   const count = POINTS_BY_SLICE[timeSlice];
   const days = DAYS_BY_SLICE[timeSlice];
-  const currentEnd = startOfUtcDay(now);
+  // End the latest period at the start of TOMORROW so the in-progress day is
+  // included dashboard-wide (the current bucket is "this period so far,
+  // through now"). Ending at start-of-today silently dropped same-day rows —
+  // e.g. waitlist signups made today never appeared until the next UTC day.
+  const currentEnd = startOfNextUtcDay(now);
   const firstStart = addDays(currentEnd, -days * count);
   return Array.from({ length: count }, (_, index) => {
     const start = addDays(firstStart, days * index);

@@ -50,6 +50,13 @@ LIVE_FIXTURES: dict[str, LiveFixtureSpec] = {
             "Inherited by every live task unless it declares its own live_fixtures."
         ),
     ),
+    "compute_tokens": LiveFixtureSpec(
+        name="compute_tokens",
+        description=(
+            "Live prod-synced compute tokens only. Use this instead of base when a "
+            "benchmark must not import browser cookies, storage, passwords, or passkeys."
+        ),
+    ),
     "amazon_auth": LiveFixtureSpec(
         name="amazon_auth",
         description=(
