@@ -233,7 +233,7 @@ Typical signatures to look for: `peer closed connection` during streaming, `[NO 
 
 5. **Zod schema changes require approval** - Propose changes before implementing
 
-6. **Follow RCA methodology for every bug** - Before diagnosing any bug, read `docs/root-cause-analysis.md` and follow the steps exactly. Never skip the evidence-gathering step (Step 0), never fix a symptom without tracing the critical path, and never rationalize a failure as "pre-existing"
+6. **Follow RCA methodology for every bug** - Invoke `/RCA` (or read `docs/root-cause-analysis.md`) and follow the steps exactly. Never skip the evidence-gathering step (Step 0), never fix a symptom without tracing the critical path, never rationalize a failure as "pre-existing". **HARD GATE: never report a root cause without a LOCAL REPRO you ran and watched fail, plus a fix that makes that same repro pass. A theory ("probably load/a race/a 404") is not a deliverable — reproduce it or classify it as an open observability gap.**
 
 7. **Search before implementing** - When adding new features, first search the codebase for similar patterns (e.g., when adding a new tool, study existing tools)
 
