@@ -87,7 +87,7 @@ def test_prisma_client_regenerates_only_when_schema_fingerprint_changes(
     first = _run_prisma_sync(repo, env)
     assert first.returncode == 0, first.stderr
     assert generate_log.read_text().splitlines() == [
-        f"prisma generate --schema {repo / 'back-end/prisma/schema.prisma'}"
+        f"--no-install prisma generate --schema {repo / 'back-end/prisma/schema.prisma'}"
     ]
     first_fingerprint = marker.read_text()
 
@@ -2222,7 +2222,7 @@ def test_run_is_visible_in_hub_from_fire_time(tmp_path: Path) -> None:
     and the hub started right after the controller lock, before any
     preflight/heal/machine work, and the phase updates at each stage."""
     fleet = FLEET_SCRIPT.read_text()
-    lock_at = fleet.index('if ! cloudbench_controller_lock_acquire "$LOCK_DIR"')
+    lock_at = fleet.index('if ! cloudbench_controller_lock_acquire_wait')
     card_at = fleet.index('write_startup_card "controller starting"')
     hub_at = fleet.index("start_central_hub\n")
     verify_at = fleet.index('Verifying the shared benchmark app environment')
