@@ -762,7 +762,14 @@ fi
 
 # SSH-exec a shell snippet on the machine, streaming output. $1 = machine id.
 ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
-    FLY ssh console -a "$APP" --machine "$1" -C "bash -lc $(printf '%q' "$2")"
+    # base64 the command instead of printf %q: a multi-line command quotes to
+    # $'set -e\n...', which the remote `-C` shell (not guaranteed bash) does not
+    # expand — the literal $'...' reaches `bash -lc` and fails (observed: heal
+    # git-sync/sync-deps SSH commands failing while the same commands run fine
+    # by hand). base64 has no shell-special bytes, so it survives any shell.
+    local b64
+    b64="$(printf '%s' "$2" | base64 | tr -d '\n')"
+    FLY ssh console -a "$APP" --machine "$1" -C "bash -lc \"printf %s $b64 | base64 -d | bash -l\""
 }
 
 # Retry-wrapped, QUIET ssh -C read. `flyctl ssh console -C` buffers stdout until
