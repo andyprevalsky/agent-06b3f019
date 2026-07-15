@@ -350,7 +350,7 @@ echo "DB pre-started: $DB_CONTAINER on port $LOCAL_DB_PORT"
 # Step 2: Launch run.sh using the Bash tool's run_in_background parameter.
 # run.sh will detect the DB as already-running and won't stop it on cleanup.
 # Use run_in_background=true for this command:
-DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=1 TRACE_ARCHIVE_ENABLED=0 \
+DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8 TRACE_ARCHIVE_ENABLED=0 \
   bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1
 ```
 
