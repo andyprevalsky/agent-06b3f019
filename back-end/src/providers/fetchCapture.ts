@@ -23,7 +23,8 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { resolve } from 'path';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { fastForward as ff, FileSystemCache } from '@with-logic/fast-forward';
+import { fastForward as ff } from '@with-logic/fast-forward';
+import { NonBlockingFileCache } from './nonBlockingFetchCache';
 
 /**
  * AsyncLocalStorage for propagating a capture token from inbound HTTP requests
@@ -108,7 +109,7 @@ class FetchReplayClient {
 
 const captures: CapturedCall[] = [];
 let nextId = 1;
-let fsCache: FileSystemCache | null = null;
+let fsCache: NonBlockingFileCache | null = null;
 
 /** Control-plane calls create mutable remote resources and must never be replayed. */
 export function shouldBypassOutboundReplay(url: string): boolean {
@@ -132,7 +133,7 @@ export function installFetchCapture(): Router {
 
   // Set up fast-forward with persistent filesystem cache
   const cacheDir = resolve(__dirname, '../../../.context/fast-forward-cache');
-  fsCache = new FileSystemCache({ cacheDir, namespace: 'outbound-fetch' });
+  fsCache = new NonBlockingFileCache({ cacheDir, namespace: 'outbound-fetch' });
 
   const rawClient = new FetchReplayClient(originalFetch);
 
