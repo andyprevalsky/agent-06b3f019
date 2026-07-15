@@ -2342,3 +2342,20 @@ echo
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "alpha beta gamma", result.stdout
     assert result.stderr.count("duplicate bench") == 3
+
+
+def test_cloud_git_sync_uses_safe_directory_everywhere() -> None:
+    """RCA (2026-07-15): --refresh-deps and --refresh-wmh ran `git -C
+    '$REMOTE_REPO'` as ROOT on the rose-owned /data/repo checkout, so git's
+    dubious-ownership guard fired ('detected dubious ownership in repository at
+    /data/repo') and every fetch/checkout/reset failed — the central heal could
+    not run, leaving the warm snapshot stale and each fleet box paying a slow
+    dep-rsync + Prisma regen that aborted the batch. Every root-run git on the
+    volume checkout must set -c safe.directory (verified on the warm box: bare
+    git -> dubious ownership; with safe.directory -> resolves HEAD)."""
+    cloud = CLOUD_SCRIPT.read_text()
+    # No bare `git -C '$REMOTE_REPO'` may remain (root-run heal/wmh sync paths).
+    bare = "git -C '$REMOTE_REPO'"
+    assert bare not in cloud, f"root-run git on the volume checkout must use -c safe.directory: {bare}"
+    # And the safe.directory form must be present where those syncs happen.
+    assert "git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO'" in cloud
