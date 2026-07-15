@@ -140,6 +140,24 @@ while [ $# -gt 0 ]; do
         *)                BENCHES+=("$1"); shift ;;
     esac
 done
+# Dedupe bench names (preserve first-seen order). Each bench gets ONE isolated
+# machine keyed on $FLEET_DIR/$bench, so a duplicate name (e.g. a duplicate
+# catalog entry) would share an out-dir/machine and trip the isolation guard
+# ("machine … allocated twice"), aborting the whole batch. A duplicate is
+# meaningless anyway — you can't isolate two runs of the same name — so run it
+# once and warn.
+if [ "${#BENCHES[@]}" -ge 1 ]; then
+    _seen_benches=" "
+    _deduped_benches=()
+    for _b in "${BENCHES[@]}"; do
+        case "$_seen_benches" in
+            *" $_b "*) echo "⚠️  duplicate bench '$_b' — running once (can't isolate two runs of the same name)" >&2 ;;
+            *) _deduped_benches+=("$_b"); _seen_benches="$_seen_benches$_b " ;;
+        esac
+    done
+    BENCHES=("${_deduped_benches[@]}")
+fi
+
 # --provision-pool takes no bench args; everything else needs at least one bench.
 [ -n "$PROVISION_POOL" ] || true
 [ -n "$PROVISION_POOL" ] || [ "${#BENCHES[@]}" -ge 1 ] || { echo "usage: run-bench-fleet <bench> [<bench>...] [--sim-on a,b] [--ref X]  |  --provision-pool N" >&2; exit 2; }

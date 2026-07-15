@@ -2313,3 +2313,32 @@ echo "reap_exit=$?"
     assert "refusing to provision" not in result.stderr, result.stderr
     assert "reap_exit=0" in result.stdout, f"{result.stdout}\n{result.stderr}"
     assert not (reg / "clones" / "cloudbench-gone").exists(), "absent clone record must be reaped"
+
+
+def test_fleet_dedupes_duplicate_bench_names() -> None:
+    """RCA (2026-07-15): the daily catalog gained duplicate task names via a
+    merge. run-bench-fleet keys each bench's isolated machine on
+    $FLEET_DIR/$bench, so a duplicate name shared an out-dir/machine and tripped
+    'isolation violation: machine … allocated twice', aborting all 31 benches at
+    t+312s. The fleet must dedupe bench args (first-seen order) and run once."""
+    fleet = FLEET_SCRIPT.read_text()
+    # the dedupe runs before the isolation-checked launch loop
+    assert "duplicate bench" in fleet
+    dedupe_at = fleet.index("_deduped_benches=()")
+    launch_at = fleet.index("# ── Phase 1:")
+    assert dedupe_at < launch_at, "dedupe must precede provisioning"
+
+    # functional: a b a c b -> a b c (order preserved, dupes dropped)
+    block_start = fleet.index('if [ "${#BENCHES[@]}" -ge 1 ]; then', dedupe_at - 400)
+    block_end = fleet.index("\nfi\n", block_start) + 3
+    dedupe_block = fleet[block_start:block_end]
+    script = f"""set -uo pipefail
+BENCHES=(alpha beta alpha gamma beta alpha)
+{dedupe_block}
+printf '%s ' "${{BENCHES[@]}}"
+echo
+"""
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "alpha beta gamma", result.stdout
+    assert result.stderr.count("duplicate bench") == 3
