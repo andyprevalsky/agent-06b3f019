@@ -1,4 +1,5 @@
 import type { MessageChannel } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 
 /**
@@ -42,22 +43,43 @@ export async function createQueueEntry(
   userId: string,
   agentId: string,
   phoneNumber: string,
-  message: string
+  message: string,
+  id?: string,
+  expiresAt?: Date
 ) {
+  if (id !== undefined) {
+    return prisma.imessageQueue.upsert({
+      where: { id },
+      update: {},
+      create: {
+        id,
+        userId,
+        agentId,
+        phoneNumber,
+        message,
+        expiresAt,
+      },
+    });
+  }
   return prisma.imessageQueue.create({
     data: {
       userId,
       agentId,
       phoneNumber,
       message,
+      expiresAt,
     },
   });
 }
 
-/** Pop (find + delete) the oldest pending iMessage for a user, atomically.
- *  Uses FOR UPDATE SKIP LOCKED to prevent concurrent pops from grabbing the same row.
+/** Take the oldest pending iMessage for a user, atomically.
+ *
+ * Acknowledgement-capable clients receive a lease token. Legacy clients retain
+ * their historical one-shot pop behavior: the row is terminally marked as
+ * dispatched (rather than deleted) so it cannot be resent and the idempotency
+ * receipt survives. Uses FOR UPDATE SKIP LOCKED to prevent concurrent claims.
  */
-export async function popOldestForUser(userId: string) {
+export async function popOldestForUser(userId: string, supportsAcknowledgements: boolean) {
   return prisma.$transaction(async (tx) => {
     const rows = await tx.$queryRawUnsafe<
       Array<{
@@ -67,9 +89,27 @@ export async function popOldestForUser(userId: string) {
         phoneNumber: string;
         message: string;
         createdAt: Date;
+        expiresAt: Date | null;
+        claimedAt: Date | null;
+        claimToken: string | null;
+        dispatchedAt: Date | null;
+        sentAt: Date | null;
+        failedAt: Date | null;
+        lastError: string | null;
+        attempts: number;
+        failures: number;
       }>
     >(
-      `SELECT * FROM "ImessageQueue" WHERE "userId" = $1 ORDER BY "createdAt" ASC LIMIT 1 FOR UPDATE SKIP LOCKED`,
+      `SELECT * FROM "ImessageQueue"
+       WHERE "userId" = $1
+         AND "sentAt" IS NULL
+         AND "failedAt" IS NULL
+         AND "dispatchedAt" IS NULL
+         AND ("expiresAt" IS NULL OR "expiresAt" > NOW())
+         AND ("claimedAt" IS NULL OR "claimedAt" < NOW() - INTERVAL '2 minutes')
+       ORDER BY "createdAt" ASC
+       LIMIT 1
+       FOR UPDATE SKIP LOCKED`,
       userId
     );
 
@@ -78,10 +118,91 @@ export async function popOldestForUser(userId: string) {
     }
 
     const oldest = rows[0];
-    await tx.imessageQueue.delete({
+    const claimToken = supportsAcknowledgements ? randomUUID() : null;
+    await tx.imessageQueue.update({
       where: { id: oldest.id },
+      data: supportsAcknowledgements
+        ? {
+            claimedAt: new Date(),
+            claimToken,
+            attempts: { increment: 1 },
+          }
+        : {
+            dispatchedAt: new Date(),
+            claimedAt: null,
+            claimToken: null,
+            attempts: { increment: 1 },
+          },
     });
 
-    return oldest;
+    return { ...oldest, claimToken };
+  });
+}
+
+/** Record a result for the current lease only. Failed sends are released for
+ * retry until the third reported send failure, independent of lease expiry. */
+export async function recordQueueDeliveryResult(params: {
+  userId: string;
+  id: string;
+  claimToken: string;
+  success: boolean;
+  error?: string;
+}) {
+  return prisma.$transaction(async (tx) => {
+    const rows = await tx.$queryRawUnsafe<Array<{ claimToken: string | null; failures: number }>>(
+      `SELECT "claimToken", "failures" FROM "ImessageQueue"
+       WHERE "id" = $1 AND "userId" = $2
+       FOR UPDATE`,
+      params.id,
+      params.userId
+    );
+    const row = rows[0];
+    if (row === undefined) return { kind: 'not_found' as const };
+    if (row.claimToken !== params.claimToken) return { kind: 'stale_claim' as const };
+
+    if (params.success) {
+      const entry = await tx.imessageQueue.update({
+        where: { id: params.id },
+        data: {
+          sentAt: new Date(),
+          claimedAt: null,
+          claimToken: null,
+          lastError: null,
+        },
+      });
+      return { kind: 'recorded' as const, entry };
+    }
+
+    const failures = row.failures + 1;
+    const terminal = failures >= 3;
+    const entry = await tx.imessageQueue.update({
+      where: { id: params.id },
+      data: {
+        claimedAt: null,
+        claimToken: null,
+        failures,
+        failedAt: terminal ? new Date() : null,
+        lastError: params.error ?? 'Mac sender failed',
+      },
+    });
+    return { kind: 'recorded' as const, entry };
+  });
+}
+
+export async function findQueueEntryForUser(userId: string, id: string) {
+  return prisma.imessageQueue.findFirst({ where: { id, userId } });
+}
+
+export async function markImessageBridgeSeen(userId: string, seenAt: Date) {
+  return prisma.user.updateMany({
+    where: { userId },
+    data: { imessageBridgeLastSeenAt: seenAt },
+  });
+}
+
+export async function findImessageBridgeLastSeen(userId: string) {
+  return prisma.user.findUnique({
+    where: { userId },
+    select: { imessageBridgeLastSeenAt: true },
   });
 }

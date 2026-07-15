@@ -492,13 +492,18 @@
   },
   {
     "name": "message-person",
-    "title": "Send Email + iMessage",
-    "prompt": "Send a friendly hello message to the phone number 972-977-7432 via both email and iMessage. The email should go to test@example.com. Keep both messages short and friendly.",
+    "title": "Send iMessage Through Mac Queue",
+    "description": "Regression bench for approved iMessage send confirmed by the authenticated Mac Messages bridge",
+    "prompt": "Send a short, friendly iMessage to 972-977-7432 saying this is the Rose iMessage send bench. Do not use email.",
     "timeout_seconds": 180,
     "is_chat_mode": false,
     "expected_tools": [
       "message_person"
     ],
+    "expected_tool_counts": {
+      "message_person": 1
+    },
+    "tool_count_scope": "root",
     "tags": [
       "smoke",
       "approval"
@@ -509,8 +514,115 @@
     "attachment": null,
     "approval_handling": "auto_approve",
     "start_phase": "execute",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "message_person",
+        "backend iMessage queue",
+        "macOS Messages bridge"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "Apple Messages via the authenticated Mac app"
+      ],
+      "context_notes": "The runner preflights a fresh heartbeat from an updated, authenticated Mac polling the exact benchmark backend. The evaluator requires FINISHED metadata with queue_id and sent_at written only after AppleScript success. Product behavior keeps an unacknowledged message queued indefinitely, but this online-relay benchmark passes only on a confirmed send."
+    },
+    "evaluators": [
+      {
+        "id": "confirmed_imessage_send",
+        "method": "static_check",
+        "criteria": [
+          "Exactly one message_person call is made",
+          "The approved message is accepted by the backend iMessage queue",
+          "The authenticated Mac runs the Messages AppleScript successfully",
+          "The terminal tool event contains queue_id, status=sent, and sent_at"
+        ],
+        "checks": [
+          {
+            "type": "message_person_confirmed_send"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "regression:5851f75f-9c0b-4287-ba50-5fb0877aac9d",
+      "blackbox:agents/tests/blackbox/message_person.blackbox.py",
+      "blackbox:back-end/src/tests/blackbox/imessage.blackbox.ts",
+      "blackbox:mac-app/tests/blackbox/i-message-queue-service.blackbox.ts",
+      "blackbox:mac-app/tests/blackbox/i-message-sender.blackbox.ts"
+    ],
     "bench": "pipeline-e2e",
-    "group": "pre-deploy"
+    "group": "daily",
+    "fast_cache": "off"
+  },
+  {
+    "name": "message-person-agent-sms",
+    "title": "Send Immediately From Agent Phone",
+    "description": "Live regression bench proving agent_sms sends immediately through AgentPhone and never enters the user's iMessage queue",
+    "prompt": "Send a short, friendly text to 972-977-7432 saying this is the Rose agent SMS send bench. Use the agent_sms channel from your own agent phone. Do not use the user's iMessage relay and do not use email.",
+    "timeout_seconds": 180,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "message_person"
+    ],
+    "expected_tool_counts": {
+      "message_person": 1
+    },
+    "tool_count_scope": "root",
+    "tags": [
+      "approval"
+    ],
+    "price_limit_cents": 50,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "execute",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "message_person",
+        "AgentPhone outbound messages"
+      ],
+      "secrets": [
+        "AGENTPHONE_API_KEY"
+      ],
+      "live_targets": [
+        "AgentPhone POST /v1/messages"
+      ],
+      "context_notes": "The evaluator requires a FINISHED agent_sms receipt with provider=agentphone, provider_channel, and message_id, and rejects any iMessage queue_id. AgentPhone acceptance is immediate but does not guarantee recipient-device delivery."
+    },
+    "evaluators": [
+      {
+        "id": "immediate_agent_sms_send",
+        "method": "static_check",
+        "criteria": [
+          "Exactly one message_person call is made",
+          "The selected transport is agent_sms",
+          "AgentPhone accepts the outbound message immediately",
+          "The terminal tool event contains provider=agentphone, provider_channel, status=sent, and message_id",
+          "No iMessage queue_id is present"
+        ],
+        "checks": [
+          {
+            "type": "message_person_agent_sms_send"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "regression:5851f75f-9c0b-4287-ba50-5fb0877aac9d",
+      "blackbox:agents/tests/blackbox/message_person.blackbox.py",
+      "blackbox:back-end/src/tests/blackbox/agent-phone.blackbox.ts",
+      "unit:back-end/src/tests/unit/agentphone-provider.test.ts"
+    ],
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "fast_cache": "off"
   },
   {
     "name": "gate-subscription-free-credit",

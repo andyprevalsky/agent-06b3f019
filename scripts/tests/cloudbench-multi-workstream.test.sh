@@ -242,7 +242,7 @@ def run_fake_driver(mdir):
             }, fh)
         with open(os.path.join(context, "run.json"), "w") as fh:
             json.dump({
-                "summary": {"passed": 1, "failed": 0, "skipped": 0,
+                "summary": {"total": 1, "passed": 1, "failed": 0, "skipped": 0,
                             "pass_rate": 1.0, "total_duration_seconds": 1.0,
                             "total_cost_cents": 0},
                 "tasks": [task],

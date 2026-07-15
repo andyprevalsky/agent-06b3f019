@@ -20,6 +20,9 @@
  */
 export const OSASCRIPT_BIN = 'osascript';
 
+/** Keep both the primary and fallback attempts inside the queue's two-minute lease. */
+export const OSASCRIPT_TIMEOUT_MS = 30_000;
+
 /**
  * Validation error surfaced when `to` or `message` is empty/blank.
  */

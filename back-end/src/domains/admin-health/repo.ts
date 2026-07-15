@@ -89,10 +89,16 @@ export async function findWaitlistSignupsBetween(
   start: Date,
   end: Date
 ): Promise<WaitlistSignupRecord[]> {
-  return prisma.waitlist.findMany({
-    where: { createdAt: { gte: start, lt: end } },
-    select: { createdAt: true },
+  // Only phone-bearing signups count. The legacy email waitlist (~3k rows with
+  // no phone) is not a real product signup, so entries without a phone number
+  // are cleared out of this metric.
+  const rows = await prisma.waitlist.findMany({
+    where: { createdAt: { gte: start, lt: end }, phone: { not: null } },
+    select: { createdAt: true, phone: true },
   });
+  return rows
+    .filter((row) => (row.phone ?? '').trim() !== '')
+    .map(({ createdAt }) => ({ createdAt }));
 }
 
 export async function findRootTasksBetween(start: Date, end: Date): Promise<RootTaskRecord[]> {

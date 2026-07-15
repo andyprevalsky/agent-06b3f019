@@ -6,6 +6,7 @@ No I/O, no framework dependencies.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -15,7 +16,32 @@ from domains.message_person.repo import (
 from domains.message_person.repo import (
     generate_message_activity as generate_message_activity,
 )
+from domains.message_person.repo import queue_imessage_activity as queue_imessage_activity
+from domains.message_person.repo import send_agent_sms_activity as send_agent_sms_activity
 from domains.message_person.types import PersonIdFields
+
+
+def build_agent_sms_idempotency_key(
+    agent_id: str,
+    phone_number: str,
+    context: list[dict[str, Any]],
+) -> str:
+    """Deduplicate model retries while allowing a later explicit user turn."""
+    user_turn = "initial"
+    for message in reversed(context):
+        if str(message.get("role", "")).upper() != "USER":
+            continue
+        user_turn = str(
+            message.get("message_id")
+            or message.get("id")
+            or message.get("timestamp")
+            or message.get("text")
+            or message.get("message")
+            or "initial"
+        )
+        break
+    digest = hashlib.sha256(f"{agent_id}\0{phone_number}\0{user_turn}".encode()).hexdigest()
+    return f"message_person_agent_sms_{digest[:48]}"
 
 
 def classify_person_id(person_id: str) -> PersonIdFields:

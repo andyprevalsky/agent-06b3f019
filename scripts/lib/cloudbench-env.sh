@@ -333,6 +333,32 @@ cloudbench_controller_lock_acquire() {
   CLOUDBENCH_CONTROLLER_LOCK_PATH="$path"
 }
 
+cloudbench_controller_lock_acquire_wait() {
+  local path="$1" retry_seconds="${2:-10}" status owner
+  case "$retry_seconds" in
+    ''|*[!0-9]*|0)
+      echo "FATAL: cloud benchmark controller retry interval must be a positive integer" >&2
+      return 2
+      ;;
+  esac
+
+  while true; do
+    status=0
+    cloudbench_controller_lock_acquire "$path" || status=$?
+    [ "$status" -eq 0 ] && return 0
+
+    owner="$(cat "$path" 2>/dev/null || true)"
+    if [[ "$owner" =~ ^[0-9]+$ ]] && kill -0 "$owner" 2>/dev/null; then
+      echo "Cloud benchmark controller is busy (local pid $owner); retrying in ${retry_seconds}s..."
+      sleep "$retry_seconds"
+      continue
+    fi
+
+    echo "FATAL: cloud benchmark controller lock failed without a live owner" >&2
+    return "$status"
+  done
+}
+
 cloudbench_controller_lock_release() {
   local path="${1:-${CLOUDBENCH_CONTROLLER_LOCK_PATH:-}}" owner
   [ -n "$path" ] || return 0

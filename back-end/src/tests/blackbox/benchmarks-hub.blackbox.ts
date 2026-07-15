@@ -27,8 +27,11 @@
  *     reverted to their original values
  */
 
-import { z } from 'zod';
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { config } from 'dotenv';
+import { z } from 'zod';
 
 config();
 
@@ -206,6 +209,59 @@ async function testCatalog_groupsAreLabelDriven(): Promise<void> {
   // Every task must carry a resolvable group (label or derived fallback).
   for (const t of tasks) {
     assert(typeof t.group === 'string' && t.group.length > 0, `task ${t.name} has no group`);
+  }
+  const messagePerson = tasks.find((task) => task.name === 'message-person');
+  assert(messagePerson, 'message-person missing from benchmark catalog');
+  assert(
+    messagePerson.group === 'daily',
+    `message-person must be daily, got ${messagePerson.group}`
+  );
+}
+
+async function testCatalog_dailyMigrationUpgradesLegacyMessagePerson(): Promise<void> {
+  const prisma = new PrismaClient();
+  try {
+    const current = await prisma.benchmarkTask.findUnique({ where: { name: 'message-person' } });
+    assert(current, 'message-person missing before migration test');
+    const definition = current.definition as Record<string, unknown>;
+    const legacyDefinition = { ...definition, tags: ['smoke', 'approval'] };
+    delete legacyDefinition.group;
+    await prisma.benchmarkTask.update({
+      where: { name: 'message-person' },
+      data: {
+        tags: ['smoke', 'approval'],
+        definition: legacyDefinition as Prisma.InputJsonObject,
+      },
+    });
+
+    const migration = readFileSync(
+      resolve('prisma/migrations/20260712011500_move_message_person_to_daily/migration.sql'),
+      'utf8'
+    );
+    await prisma.$executeRawUnsafe(migration);
+
+    const migrated = await prisma.benchmarkTask.findUnique({
+      where: { name: 'message-person' },
+    });
+    assert(migrated, 'message-person missing after migration');
+    assert(!migrated.tags.includes('smoke'), 'migration left message-person in smoke tags');
+    assert(migrated.tags.includes('approval'), 'migration removed the approval tag');
+    const migratedDefinition = migrated.definition as Record<string, unknown>;
+    assert(migratedDefinition.group === 'Daily', 'migration did not persist group=Daily');
+    assert(
+      JSON.stringify(migratedDefinition.tags) === JSON.stringify(['approval']),
+      `migration definition tags are incorrect: ${JSON.stringify(migratedDefinition.tags)}`
+    );
+
+    const response = await request(`${BASE_URL}/api/benchmarks/tasks`, {
+      headers: internalHeaders,
+    });
+    assertStatus(response.status, 200, response.data);
+    const tasks = (response.data as { tasks: Array<{ name: string; group: string }> }).tasks;
+    const messagePerson = tasks.find((task) => task.name === 'message-person');
+    assert(messagePerson?.group === 'daily', 'migrated message-person is not daily in the Hub');
+  } finally {
+    await prisma.$disconnect();
   }
 }
 
@@ -585,6 +641,10 @@ async function runAll(): Promise<void> {
     ['auth: POST /runs rejects unauthenticated', testAuth_uploadRejectsUnauthenticated],
     ['catalog: tasks + stats shape', testCatalog_returnsTasksWithStatsShape],
     ['catalog: groups are label-driven', testCatalog_groupsAreLabelDriven],
+    [
+      'catalog: Daily migration upgrades legacy message-person',
+      testCatalog_dailyMigrationUpgradesLegacyMessagePerson,
+    ],
     ['catalog: stats present from history ledger', testCatalog_statsPresentForTasksWithHistory],
     ['catalog: retired tasks invisible everywhere', testCatalog_retiredTasksInvisible],
     ['patch: edit + revert description', testPatch_editAndRevertDescription],

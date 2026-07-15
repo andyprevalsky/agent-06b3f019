@@ -18,11 +18,6 @@ const DEVELOPMENT_ORIGINS = [
   'http://localhost:8081',
 ] as const;
 
-interface CorsEnvironment {
-  NODE_ENV?: string;
-  ALLOWED_ORIGINS?: string;
-}
-
 function parseOrigins(value: string | undefined): string[] {
   if (value === undefined) return [];
   return [
@@ -35,7 +30,7 @@ function parseOrigins(value: string | undefined): string[] {
   ];
 }
 
-export function resolveAllowedOrigins(environment: CorsEnvironment): string[] {
+export function resolveAllowedOrigins(environment: Readonly<NodeJS.ProcessEnv>): string[] {
   const configuredOrigins = parseOrigins(environment.ALLOWED_ORIGINS);
   if (environment.NODE_ENV !== 'production') {
     return configuredOrigins.length > 0 ? configuredOrigins : [...DEVELOPMENT_ORIGINS];

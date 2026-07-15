@@ -58,6 +58,7 @@ CONTEXT_DIR="$REPO_DIR/.context/cloudbench"
 RUN_OUTPUT_MARKER="/tmp/cloudbench-run-start.$$"
 FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$REPO_DIR/scripts/cloudbench-fetch-ref.sh}"
 SYNC_DEPS_SCRIPT="${CLOUDBENCH_SYNC_DEPS_SCRIPT:-$REPO_DIR/scripts/cloudbench-sync-deps.sh}"
+SYNC_PRISMA_SCRIPT="${CLOUDBENCH_SYNC_PRISMA_SCRIPT:-$REPO_DIR/scripts/cloudbench-sync-prisma-client.sh}"
 CURRENT_RUN_ARTIFACT_SCRIPT="${CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT:-$REPO_DIR/scripts/cloudbench-current-run-artifact.py}"
 PREPARE_PATCH_SCRIPT="${CLOUDBENCH_PREPARE_PATCH_SCRIPT:-$REPO_DIR/scripts/cloudbench-prepare-patch.sh}"
 
@@ -132,7 +133,7 @@ emit_report_and_result() {
         echo "run_file: $latest_run"
         cat "$latest_run"
     else
-        echo '{"error":"no runs/*.json produced"}'
+        echo '{"error":"no fresh matching benchmark run produced"}'
     fi
     echo ""
     echo "$RESULT_END"
@@ -196,6 +197,13 @@ fi
 # The controller credential is needed only for this exact fetch. Do not let it
 # flow into the benchmark stack, workers, or agent subprocess environments.
 unset CLOUDBENCH_GITHUB_TOKEN_B64
+# reset --hard does not remove untracked files created by an earlier uploaded
+# worktree patch. Remove only non-ignored untracked files; dependency/cache trees
+# are ignored and remain warm.
+if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -fd 2>&1 | sed 's/^/   /'; then
+    log "FATAL: could not remove stale untracked worktree files"
+    finish 1
+fi
 log "checkout at $(gosu "$APP_USER" git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if [ -n "${LOCAL_PATCH_FILE:-}" ] && [ -s "$LOCAL_PATCH_FILE" ]; then
     log "applying uploaded local workspace patch on top of checkout"
@@ -258,6 +266,14 @@ step dep_sync
 # hard infrastructure error: the image must be rebuilt before this ref can run.
 if ! bash "$SYNC_DEPS_SCRIPT" "$DEPS_DIR" "$REPO_DIR"; then
     log "FATAL: cloudbench dependency synchronization failed"
+    finish 1
+fi
+
+# Prisma's generated client is compiled from schema.prisma, not just the npm
+# manifests. A warm dependency tree can therefore be package-current but
+# schema-stale when a benchmark checks out another ref or applies a local patch.
+if ! bash "$SYNC_PRISMA_SCRIPT" "$REPO_DIR" "$APP_USER"; then
+    log "FATAL: Prisma client synchronization failed"
     finish 1
 fi
 chown -R "$APP_USER:$APP_USER" "$REPO_DIR/node_modules" "$REPO_DIR/back-end/node_modules" "$REPO_DIR/agents/venv" 2>/dev/null || true

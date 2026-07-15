@@ -24,6 +24,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { runSyncStep, syncUserRecord } from '../../../scripts/seed-local-helpers';
 
 type TestFn = () => Promise<void>;
 const tests: Array<{ name: string; fn: TestFn }> = [];
@@ -53,6 +54,83 @@ type PasskeyRecord = {
 function compoundKey(pk: { userId: string; rpId: string; credentialId: string }) {
   return `${pk.userId}:${pk.rpId}:${pk.credentialId}`;
 }
+
+test('syncUserRecord does not request branch-only columns from production', async () => {
+  const user = {
+    id: 'user-row',
+    userId: 'seed-user',
+    name: 'Seed User',
+    addressLine1: null,
+    addressLine2: null,
+    city: null,
+    state: null,
+    postalCode: null,
+    country: 'United States',
+    createdAt: new Date('2026-07-01T00:00:00Z'),
+    updatedAt: new Date('2026-07-01T00:00:00Z'),
+    inviteCode: null,
+    inviteCodeUses: 0,
+    usedInviteCode: null,
+    encryptedPaymentInformation: null,
+    phone: null,
+    isAnonymous: false,
+    onboardingCompletedAt: null,
+    imessageBridgeLastSeenAt: null,
+    systemName: null,
+    profilePicture: null,
+    customSystemPrompt: null,
+    voicePreferenceId: null,
+  };
+  let upserted = false;
+  const { imessageBridgeLastSeenAt, ...productionUser } = user;
+  void imessageBridgeLastSeenAt;
+  const remote = {
+    findUnique: async (args: { where: { userId: string }; select?: Record<string, boolean> }) => {
+      if (!args.select || args.select.imessageBridgeLastSeenAt) {
+        throw new Error('The column `User.imessageBridgeLastSeenAt` does not exist');
+      }
+      return productionUser;
+    },
+  };
+  const local = {
+    upsert: async () => {
+      upserted = true;
+    },
+  };
+
+  const count = await syncUserRecord(remote, local, user.userId);
+
+  assert(count === 1, `expected one synced user, got ${count}`);
+  assert(upserted, 'expected the production user to be upserted locally');
+});
+
+test('runSyncStep fails closed when a table sync fails', async () => {
+  let rejected = false;
+  try {
+    await runSyncStep('User', async () => {
+      throw new Error('remote schema mismatch');
+    });
+  } catch (err) {
+    rejected = err instanceof Error && err.message.includes('remote schema mismatch');
+  }
+  assert(rejected, 'expected a failed table sync to reject the overall sync');
+});
+
+test('syncUserRecord permits a missing optional pool-token user', async () => {
+  let upserted = false;
+  const count = await syncUserRecord(
+    { findUnique: async () => null },
+    {
+      upsert: async () => {
+        upserted = true;
+      },
+    },
+    'synthetic-pool-user'
+  );
+
+  assert(count === 0, `expected no synced user, got ${count}`);
+  assert(!upserted, 'expected no local upsert for a missing optional user');
+});
 
 test('syncPasskeyCredentials copies passkeys and never moves local signCount backward', async () => {
   const userId = 'seed-user';

@@ -20,6 +20,9 @@
 import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
+
+import { findWaitlistSignupsBetween } from '../../domains/admin-health/repo';
+import { prisma } from '../../providers/database';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -588,6 +591,33 @@ async function testAdminHappyYearly() {
   assertNoImpossibleConversion(body);
 }
 
+// Waitlist signups are a phone-verified product signal: entries without a phone
+// number (the legacy email-only waitlist) must be cleared out of the metric.
+async function testWaitlist_excludesPhonelessSignups() {
+  const marker = `blackbox-wl-${Date.now()}`;
+  const start = new Date('2000-01-01T00:00:00.000Z');
+  const end = new Date('2000-01-02T00:00:00.000Z');
+  const at = new Date('2000-01-01T12:00:00.000Z');
+  try {
+    await prisma.waitlist.createMany({
+      data: [
+        { name: marker, phone: `+1999${Date.now() % 10000000}`, createdAt: at },
+        { name: marker, email: `${marker}-a@example.com`, phone: null, createdAt: at },
+        { name: marker, email: `${marker}-b@example.com`, phone: '', createdAt: at },
+      ],
+    });
+    const rows = await findWaitlistSignupsBetween(start, end);
+    if (rows.length !== 1) {
+      throw new Error(
+        `Expected exactly 1 phone-bearing signup in the window, got ${rows.length} ` +
+          `(phone-less rows must be excluded)`
+      );
+    }
+  } finally {
+    await prisma.waitlist.deleteMany({ where: { name: marker } });
+  }
+}
+
 async function main() {
   const tests = [
     { name: 'GET /api/admin-health no auth -> 401', fn: testNoAuth },
@@ -596,6 +626,10 @@ async function main() {
     { name: 'GET /api/admin-health monthly admin -> metrics', fn: testAdminHappyMonthly },
     { name: 'GET /api/admin-health quarterly admin -> metrics', fn: testAdminHappyQuarterly },
     { name: 'GET /api/admin-health yearly admin -> metrics', fn: testAdminHappyYearly },
+    {
+      name: 'waitlist metric excludes phone-less signups',
+      fn: testWaitlist_excludesPhonelessSignups,
+    },
   ];
 
   const results = await runPool(tests, CASE_CONCURRENCY);

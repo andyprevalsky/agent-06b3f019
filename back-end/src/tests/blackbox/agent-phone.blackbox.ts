@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
 
@@ -48,7 +48,10 @@ async function createUser() {
   return userId;
 }
 
-async function cleanup(userId: string) {
+async function cleanup(userId: string, operationKeys: string[] = []) {
+  if (operationKeys.length > 0) {
+    await prisma.toolSideEffect.deleteMany({ where: { operationKey: { in: operationKeys } } });
+  }
   await prisma.agentIdentity.deleteMany({ where: { userId } });
   await prisma.user.deleteMany({ where: { userId } });
 }
@@ -57,6 +60,23 @@ function headers(userId?: string): Record<string, string> {
   return {
     'X-API-Key': API_KEY,
     ...(userId !== undefined ? { 'X-User-Id': userId } : {}),
+  };
+}
+
+function outboundOperationKey(userId: string, agentId: string, idempotencyKey: string) {
+  const digest = createHash('sha256')
+    .update(`${userId}\0${agentId}\0${idempotencyKey}`)
+    .digest('hex');
+  return `agentphone.message:${digest}`;
+}
+
+function outboundPayload(userId: string, idempotencyKey: string) {
+  return {
+    user_id: userId,
+    agent_id: 'agent-1',
+    idempotency_key: idempotencyKey,
+    phone_number: '+19729777432',
+    message: 'Immediate AgentPhone boundary test',
   };
 }
 
@@ -112,6 +132,143 @@ test('agent phone messages route returns empty list without an AgentPhone identi
     assert(unsupportedBody.count === 0, 'expected no messages for non-AgentPhone identity');
   } finally {
     await cleanup(userId);
+  }
+});
+
+test('outbound Agent SMS enforces auth, validation, and configured sender identity', async () => {
+  const userId = await createUser();
+  try {
+    const noAuth = await request(`${BASE_URL}/api/agentphone/messages/send`, {
+      method: 'POST',
+      body: JSON.stringify(outboundPayload(userId, 'no-auth')),
+    });
+    assert(noAuth.status === 401, `expected outbound auth boundary, got ${noAuth.status}`);
+
+    const invalid = await request(`${BASE_URL}/api/agentphone/messages/send`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        ...outboundPayload(userId, 'invalid-phone'),
+        phone_number: '9729777432',
+      }),
+    });
+    assert(invalid.status === 400, `expected invalid phone 400, got ${invalid.status}`);
+
+    const noIdentity = await request(`${BASE_URL}/api/agentphone/messages/send`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify(outboundPayload(userId, 'no-identity')),
+    });
+    assert(noIdentity.status === 409, `expected missing sender 409, got ${noIdentity.status}`);
+  } finally {
+    await cleanup(userId);
+  }
+});
+
+test('outbound Agent SMS replays completed receipt without another provider send', async () => {
+  const userId = await createUser();
+  const idempotencyKey = 'completed-replay';
+  const operationKey = outboundOperationKey(userId, 'agent-1', idempotencyKey);
+  try {
+    await prisma.agentIdentity.create({
+      data: {
+        userId,
+        email: `${userId}@example.test`,
+        phone: '+19125550100',
+        phoneProvider: 'agentphone',
+        phoneProviderAgentId: 'provider-agent-1',
+        phoneProviderNumberId: 'number-1',
+      },
+    });
+    const response = {
+      success: true,
+      status: 'sent',
+      message_id: 'msg-existing',
+      provider: 'agentphone',
+      provider_channel: 'sms',
+      from_number: '+19125550100',
+      to_number: '+19729777432',
+      conversation_id: 'conv-existing',
+    };
+    await prisma.toolSideEffect.create({
+      data: {
+        operationKey,
+        operationType: 'agentphone.message',
+        status: 'SUCCEEDED',
+        externalId: 'msg-existing',
+        request: outboundPayload(userId, idempotencyKey),
+        response,
+      },
+    });
+    const queueCountBefore = await prisma.imessageQueue.count({ where: { userId } });
+
+    const replay = await request(`${BASE_URL}/api/agentphone/messages/send`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify(outboundPayload(userId, idempotencyKey)),
+    });
+    assert(replay.status === 200, `completed replay failed: ${JSON.stringify(replay.data)}`);
+    assert(
+      (replay.data as { message_id?: unknown }).message_id === 'msg-existing',
+      'completed replay lost provider receipt'
+    );
+
+    const conflict = await request(`${BASE_URL}/api/agentphone/messages/send`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({
+        ...outboundPayload(userId, idempotencyKey),
+        message: 'Different payload must not reuse the receipt',
+      }),
+    });
+    assert(conflict.status === 409, `expected idempotency conflict 409, got ${conflict.status}`);
+    const queueCountAfter = await prisma.imessageQueue.count({ where: { userId } });
+    assert(
+      queueCountAfter === queueCountBefore,
+      'AgentPhone replay/conflict path mutated the user iMessage queue'
+    );
+  } finally {
+    await cleanup(userId, [operationKey]);
+  }
+});
+
+test('outbound Agent SMS refuses an ambiguous retry instead of duplicating a text', async () => {
+  const userId = await createUser();
+  const idempotencyKey = 'ambiguous-start';
+  const operationKey = outboundOperationKey(userId, 'agent-1', idempotencyKey);
+  try {
+    await prisma.agentIdentity.create({
+      data: {
+        userId,
+        email: `${userId}@example.test`,
+        phone: '+19125550100',
+        phoneProvider: 'agentphone',
+        phoneProviderAgentId: 'provider-agent-1',
+        phoneProviderNumberId: 'number-1',
+      },
+    });
+    await prisma.toolSideEffect.create({
+      data: {
+        operationKey,
+        operationType: 'agentphone.message',
+        status: 'STARTED',
+        request: outboundPayload(userId, idempotencyKey),
+      },
+    });
+    const ambiguous = await request(`${BASE_URL}/api/agentphone/messages/send`, {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify(outboundPayload(userId, idempotencyKey)),
+    });
+    assert(ambiguous.status === 409, `expected ambiguous retry 409, got ${ambiguous.status}`);
+    assert(
+      String((ambiguous.data as { error?: unknown }).error)
+        .toLowerCase()
+        .includes('refusing'),
+      `ambiguous retry error was not explicit: ${JSON.stringify(ambiguous.data)}`
+    );
+  } finally {
+    await cleanup(userId, [operationKey]);
   }
 });
 
