@@ -1,10 +1,182 @@
 """Blackbox tests for benchmark helpers."""
 
 import json
+import importlib.util
 import os
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 
 from _test_utils import BlackboxResult
+
+
+def _load_cloudbench_result_module():
+    module_path = Path(__file__).resolve().parents[3] / "scripts" / "cloudbench_result.py"
+    spec = importlib.util.spec_from_file_location("cloudbench_result", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _cloudbench_run(task_name: str, *, passed: bool, timestamp: str) -> dict:
+    return {
+        "timestamp": timestamp,
+        "summary": {
+            "total": 1,
+            "passed": 1 if passed else 0,
+            "failed": 0 if passed else 1,
+            "pass_rate": 1.0 if passed else 0.0,
+        },
+        "tasks": [{"name": task_name, "passed": passed, "agent_id": "agent-fixture"}],
+    }
+
+
+def test_cloudbench_result_rejects_stale_passing_artifact_from_another_task():
+    validator = _load_cloudbench_result_module()
+    stale_wrong_run = _cloudbench_run(
+        "spawn-sub-agents",
+        passed=True,
+        timestamp="2026-07-08T17:49:44+00:00",
+    )
+
+    errors = validator.validate_run_document(
+        stale_wrong_run,
+        ["message-person-agent-sms"],
+        require_pass=True,
+        not_before_epoch=1783828800,
+    )
+
+    assert any("task identity mismatch" in error for error in errors)
+    assert any("predates this invocation" in error for error in errors)
+
+
+def test_cloudbench_result_accepts_only_fresh_exact_passing_task_set():
+    validator = _load_cloudbench_result_module()
+    fresh_run = _cloudbench_run(
+        "message-person-agent-sms",
+        passed=True,
+        timestamp="2026-07-12T04:01:00+00:00",
+    )
+
+    errors = validator.validate_run_document(
+        fresh_run,
+        ["message-person-agent-sms"],
+        require_pass=True,
+        not_before_epoch=1783828800,
+    )
+
+    assert errors == []
+
+
+def test_cloudbench_result_preserves_fresh_failure_but_never_counts_it_as_pass():
+    validator = _load_cloudbench_result_module()
+    failed_run = _cloudbench_run(
+        "message-person-agent-sms",
+        passed=False,
+        timestamp="2026-07-12T04:01:00+00:00",
+    )
+
+    assert validator.validate_run_document(failed_run, ["message-person-agent-sms"]) == []
+    pass_errors = validator.validate_run_document(
+        failed_run,
+        ["message-person-agent-sms"],
+        require_pass=True,
+    )
+    assert any("not all passing" in error for error in pass_errors)
+
+
+def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success():
+    repo_root = Path(__file__).resolve().parents[3]
+    driver = (repo_root / "scripts" / "cloudbench-run.sh").read_text()
+    controller = (repo_root / "scripts" / "run-bench-cloud").read_text()
+    fleet = (repo_root / "scripts" / "run-bench-fleet").read_text()
+
+    assert "CURRENT_RUN_ARTIFACT_SCRIPT" in driver
+    assert "RUN_OUTPUT_MARKER" in driver
+    assert 'git -C "$REPO_DIR" clean -fd' in driver
+    assert driver.index('rm -rf "$CONTEXT_DIR"') < driver.index("applying uploaded local workspace patch")
+    assert "cloudbench-sync-prisma-client.sh" in driver
+    assert 'bash "$SYNC_PRISMA_SCRIPT" "$REPO_DIR" "$APP_USER"' in driver
+    assert "NEEDS_IMESSAGE_RELAY" in controller
+    assert "cloudbench-imessage-relay.ts" in controller
+    assert "bridge heartbeat established" in controller
+    assert "IMESSAGE_RELAY_OK" in controller
+    assert '.vm.${APP}.internal' in controller
+    assert "cat '$REMOTE_REPO/.context/cloudbench/run.json'" in controller
+    assert "BENCH_EXIT:-1" in controller
+    assert 'RUN_PASS_OK" = "1' in controller
+    assert "CHILD_EXIT_CODES" in fleet
+    assert "declare -A" not in fleet
+    assert "scripts/cloudbench_result.py" in fleet
+    assert "create-worktree-patch.sh" in fleet
+    assert "create-worktree-patch.sh" in controller
+    assert "remote-logs/cloudbench-driver.log" in controller
+    assert "logs/worker.log" in controller
+
+
+def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
+    repo_root = Path(__file__).resolve().parents[3]
+    behavioral_suite = repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", str(behavioral_suite), "-k", "prisma_client"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "2 passed" in result.stdout
+
+
+def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
+    repo_root = Path(__file__).resolve().parents[3]
+    patch_script = repo_root / "scripts" / "create-worktree-patch.sh"
+    with tempfile.TemporaryDirectory() as raw_dir:
+        fixture = Path(raw_dir)
+        subprocess.run(["git", "init", "-q", str(fixture)], check=True)
+        subprocess.run(["git", "-C", str(fixture), "config", "user.email", "bench@example.com"], check=True)
+        subprocess.run(["git", "-C", str(fixture), "config", "user.name", "Bench Test"], check=True)
+        tracked = fixture / "tracked.txt"
+        tracked.write_text("before\n")
+        subprocess.run(["git", "-C", str(fixture), "add", "tracked.txt"], check=True)
+        subprocess.run(["git", "-C", str(fixture), "commit", "-qm", "fixture"], check=True)
+
+        tracked.write_text("after\n")
+        staged = fixture / "staged.txt"
+        staged.write_text("staged\n")
+        subprocess.run(["git", "-C", str(fixture), "add", "staged.txt"], check=True)
+        (fixture / "untracked.txt").write_text("new\n")
+        patch = subprocess.run(
+            ["bash", str(patch_script), str(fixture)],
+            check=True,
+            capture_output=True,
+        ).stdout
+
+        subprocess.run(["git", "-C", str(fixture), "reset", "--hard", "-q", "HEAD"], check=True)
+        subprocess.run(["git", "-C", str(fixture), "clean", "-fdq"], check=True)
+        subprocess.run(["git", "-C", str(fixture), "apply", "-"], input=patch, check=True)
+
+        assert tracked.read_text() == "after\n"
+        assert staged.read_text() == "staged\n"
+        assert (fixture / "untracked.txt").read_text() == "new\n"
+
+
+def test_run_context_normalization_keeps_absolute_workspace_path_single_rooted():
+    repo_root = Path(__file__).resolve().parents[3]
+    helper = repo_root / "scripts" / "lib" / "run-context.sh"
+    command = (
+        f"source {helper!s}; "
+        "normalize_run_context_dir /data/repo /data/repo/.context/cloudbench; "
+        "normalize_run_context_dir /data/repo .context/local"
+    )
+
+    output = subprocess.run(["bash", "-c", command], check=True, capture_output=True, text=True).stdout.splitlines()
+
+    assert output == [".context/cloudbench", ".context/local"]
 
 
 def test_extract_worker_pids_from_ps_matches_macos_python_executable():
@@ -182,9 +354,7 @@ def test_mid_run_feedback_schema_evaluator_requires_exact_stability():
     from benchmarks.run_benchmark import _validate_mid_run_feedback_schema
 
     task = get_task_by_name("response-schema-non-goal-feedback")
-    initial_schema = {
-        "fields": [{"name": "city_populations", "type": "list[object]", "required": True}]
-    }
+    initial_schema = {"fields": [{"name": "city_populations", "type": "list[object]", "required": True}]}
     task._mid_run_feedback_posted = True
     task._mid_run_feedback_initial_schema = initial_schema
 
@@ -852,7 +1022,7 @@ def test_minted_benchmark_seeds_cached_agent_identity_when_missing():
     assert len(queries) == 2
     assert 'INSERT INTO "AgentIdentity"' in queries[1]
     assert "rose.harbor47@mail.roselabs.ai" in queries[1]
-    assert "+18159823405" in queries[1]
+    assert "+19123613984" in queries[1]
     assert '"phoneProvider"' in queries[1]
     assert "agentphone" in queries[1]
 
@@ -878,6 +1048,36 @@ def test_minted_benchmark_does_not_seed_cached_agent_identity_when_present():
 
     assert len(queries) == 1
     assert 'SELECT 1 FROM "AgentIdentity"' in queries[0]
+
+
+def test_agent_sms_benchmark_prepares_phone_only_agentphone_sender():
+    """The real Agent SMS bench replaces stale selectors with its live from_number."""
+    import benchmarks.run_benchmark as bench
+
+    original_seed = bench._seed_local_benchmark_agent_identity_if_missing
+    original_sql = bench._run_local_victoria_sql
+    try:
+        bench._seed_local_benchmark_agent_identity_if_missing = lambda user_id: "rose@example.test"
+        queries = []
+        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "ready"
+        assert bench._prepare_local_agent_sms_sender("user-123") == "rose@example.test"
+        assert len(queries) == 2
+        assert 'phone = \'+19123613984\'' in queries[0]
+        assert '"phoneProviderAgentId" = NULL' in queries[0]
+        assert '"phoneProviderNumberId" = NULL' in queries[0]
+        assert '"userId" = \'user-123\'' in queries[0]
+
+        responses = iter(["1", "invalid"])
+        bench._run_local_victoria_sql = lambda sql: next(responses)
+        try:
+            bench._prepare_local_agent_sms_sender("user-123")
+        except RuntimeError as error:
+            assert "sender selector" in str(error)
+        else:
+            raise AssertionError("missing AgentPhone sender selector was accepted")
+    finally:
+        bench._seed_local_benchmark_agent_identity_if_missing = original_seed
+        bench._run_local_victoria_sql = original_sql
 
 
 def test_minted_x_benchmark_uses_live_x_default_target():
@@ -3205,6 +3405,174 @@ def test_cache_coverage_uses_root_scoped_tool_counts():
     }
 
 
+def test_message_person_benchmark_requires_confirmed_send():
+    """Neither FINISHED nor enqueue alone can satisfy the send benchmark."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_message_person_confirmed_send
+
+    task = get_task_by_name("message-person")
+    assert task.expected_tool_counts == {"message_person": 1}
+    assert task.tool_count_scope == "root"
+
+    false_success = {
+        "messages": [
+            {
+                "metadata": {
+                    "toolName": "message_person",
+                    "toolStatus": "FINISHED",
+                    "title": "iMessage sent",
+                }
+            }
+        ]
+    }
+    assert _validate_message_person_confirmed_send(false_success) is not None
+
+    enqueue_only = {
+        "messages": [
+            {
+                "metadata": {
+                    "toolName": "message_person",
+                    "toolStatus": "FINISHED",
+                    "data": {
+                        "delivery": {
+                            "channel": "imessage",
+                            "queue_id": "imq_receipt_1",
+                        }
+                    },
+                }
+            }
+        ]
+    }
+    assert _validate_message_person_confirmed_send(enqueue_only) is not None
+
+    confirmed_send = {
+        "messages": [
+            {
+                "metadata": {
+                    "toolName": "message_person",
+                    "toolStatus": "FINISHED",
+                    "data": {
+                        "delivery": {
+                            "channel": "imessage",
+                            "queue_id": "imq_receipt_1",
+                            "status": "sent",
+                            "sent_at": "2026-07-11T22:00:00.000Z",
+                        }
+                    },
+                }
+            }
+        ]
+    }
+    assert _validate_message_person_confirmed_send(confirmed_send) is None
+
+
+def test_message_person_agent_sms_benchmark_requires_immediate_provider_receipt():
+    """The Agent SMS bench cannot pass on queue metadata or a label-only FINISHED event."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_message_person_agent_sms_send
+
+    task = get_task_by_name("message-person-agent-sms")
+    assert task.group == "Daily"
+    assert task.expected_tool_counts == {"message_person": 1}
+    assert task.tool_count_scope == "root"
+
+    wrong_transport = {
+        "messages": [
+            {
+                "metadata": {
+                    "toolName": "message_person",
+                    "toolStatus": "FINISHED",
+                    "data": {
+                        "delivery": {
+                            "channel": "imessage",
+                            "status": "queued",
+                            "queue_id": "imq-wrong",
+                        }
+                    },
+                }
+            }
+        ]
+    }
+    assert _validate_message_person_agent_sms_send(wrong_transport) is not None
+
+    provider_send = {
+        "messages": [
+            {
+                "metadata": {
+                    "toolName": "message_person",
+                    "toolStatus": "FINISHED",
+                    "data": {
+                        "delivery": {
+                            "channel": "agent_sms",
+                            "status": "sent",
+                            "provider": "agentphone",
+                            "provider_channel": "sms",
+                            "message_id": "msg-live-receipt",
+                        }
+                    },
+                }
+            }
+        ]
+    }
+    assert _validate_message_person_agent_sms_send(provider_send) is None
+
+
+async def test_message_person_bridge_preflight_requires_fresh_mac():
+    """The live send bench cannot launch against a backend with no active Mac poller."""
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+    payload = {"connected": True, "last_seen_at": "2026-07-11T22:00:00.000Z"}
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, headers):
+            calls.append((url, headers))
+            return FakeResponse()
+
+    async def fake_headers():
+        return {"X-API-Key": "bench-key", "X-User-Id": "bench-user"}
+
+    original_client = bench.httpx.AsyncClient
+    original_headers = bench._api_headers
+    bench.httpx.AsyncClient = FakeClient
+    bench._api_headers = fake_headers
+    try:
+        await bench._preflight_message_person_bridge("https://backend.example")
+        assert calls == [
+            (
+                "https://backend.example/api/imessage/bridge/status",
+                {"X-API-Key": "bench-key", "X-User-Id": "bench-user"},
+            )
+        ]
+
+        payload = {"connected": False, "last_seen_at": None}
+        try:
+            await bench._preflight_message_person_bridge("https://backend.example")
+            raise AssertionError("Disconnected Mac bridge should fail the preflight")
+        except RuntimeError as exc:
+            assert "authenticated Mac app polling this exact backend" in str(exc)
+    finally:
+        bench.httpx.AsyncClient = original_client
+        bench._api_headers = original_headers
+
+
 def test_tool_count_expectations_support_minimums_and_forbidden_tools():
     """Benchmark tasks can require direct tools and reject unintended sub-agents."""
     from benchmarks.run_benchmark import _validate_tool_count_expectations
@@ -3703,6 +4071,63 @@ def test_phone_auto_approval_requires_active_callee_number():
 
     assert _phone_approval_matches_callee(task, {"question": "Make a phone call to +1 (415) 555-0123?"})
     assert not _phone_approval_matches_callee(task, {"question": "Make a phone call to +1 (650) 555-0123?"})
+
+
+def test_root_exact_tool_count_fails_fast_after_duplicate_call():
+    """An irreversible exact-count violation must fail before the task timeout."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _root_exact_tool_count_exceeded
+
+    task = get_task_by_name("message-person-agent-sms")
+    messages = [
+        {
+            "metadata": {
+                "toolName": "message_person",
+                "toolCallId": "send-1",
+                "toolStatus": "IN_PROGRESS",
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "message_person",
+                "toolCallId": "send-1",
+                "toolStatus": "ERROR",
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "message_person",
+                "toolCallId": "send-2",
+                "toolStatus": "IN_PROGRESS",
+            }
+        },
+    ]
+
+    error = _root_exact_tool_count_exceeded(task, messages)
+    assert error is not None
+    assert "expected 1, got 2" in error
+    assert _root_exact_tool_count_exceeded(task, messages[:2]) is None
+
+
+def test_message_side_effect_benchmarks_force_fast_cache_off():
+    """Cached agent decisions cannot prove a live external side effect."""
+    import os
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _resolved_fast_mode_cache
+
+    previous = os.environ.get("BENCHMARK_FAST_MODE_CACHE")
+    os.environ["BENCHMARK_FAST_MODE_CACHE"] = "true"
+    try:
+        for name in ("message-person", "message-person-agent-sms"):
+            task = get_task_by_name(name)
+            assert task.fast_cache == "off"
+            assert _resolved_fast_mode_cache(task) is False
+    finally:
+        if previous is None:
+            os.environ.pop("BENCHMARK_FAST_MODE_CACHE", None)
+        else:
+            os.environ["BENCHMARK_FAST_MODE_CACHE"] = previous
 
 
 def test_unified_catalog_validates_and_covers_benchmark_tasks():
@@ -4344,6 +4769,34 @@ def test_checkpoint_validation_mass_agent_sequence_remains_strict():
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    r.record(
+        "cloudbench_rejects_stale_wrong_task",
+        test_cloudbench_result_rejects_stale_passing_artifact_from_another_task,
+    )
+    r.record(
+        "cloudbench_accepts_fresh_exact_pass",
+        test_cloudbench_result_accepts_only_fresh_exact_passing_task_set,
+    )
+    r.record(
+        "cloudbench_preserves_failure_without_passing",
+        test_cloudbench_result_preserves_fresh_failure_but_never_counts_it_as_pass,
+    )
+    r.record(
+        "cloudbench_shell_contract_requires_identity_and_exit",
+        test_cloudbench_shell_controllers_require_fresh_identity_and_child_success,
+    )
+    r.record(
+        "cloudbench_prisma_freshness_permanent_gate",
+        test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate,
+    )
+    r.record(
+        "cloudbench_patch_includes_untracked_files",
+        test_cloudbench_worktree_patch_includes_tracked_and_untracked_files,
+    )
+    r.record(
+        "run_context_absolute_path_single_rooted",
+        test_run_context_normalization_keeps_absolute_workspace_path_single_rooted,
+    )
     r.record("phone_call_tasks_two_sided_verification", test_phone_call_tasks_define_two_sided_verification)
     r.record("phone_callee_end_call_config", test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap)
     r.record("phone_findings_matcher_squashes_separators", test_missing_call_findings_tolerates_spacing_and_punctuation)
@@ -4396,6 +4849,10 @@ async def run_all_tests():
     r.record(
         "minted_seed_identity_skips_existing",
         test_minted_benchmark_does_not_seed_cached_agent_identity_when_present,
+    )
+    r.record(
+        "agent_sms_benchmark_prepares_phone_sender",
+        test_agent_sms_benchmark_prepares_phone_only_agentphone_sender,
     )
     r.record(
         "minted_x_default_target",
@@ -4545,6 +5002,20 @@ async def run_all_tests():
     r.record("local_worker_health_url_derived", test_local_worker_health_url_derives_from_backend_port)
     r.record("benchmark_memory_baseline_guarded", test_benchmark_memory_baseline_endpoint_is_guarded)
     r.record("logical_tool_counts_ignore_progress", test_logical_tool_counts_ignore_progress_messages)
+    r.record("root_exact_tool_count_fail_fast", test_root_exact_tool_count_fails_fast_after_duplicate_call)
+    r.record("message_side_effect_fast_cache_off", test_message_side_effect_benchmarks_force_fast_cache_off)
+    r.record(
+        "message_person_requires_confirmed_send",
+        test_message_person_benchmark_requires_confirmed_send,
+    )
+    r.record(
+        "message_person_agent_sms_requires_provider_receipt",
+        test_message_person_agent_sms_benchmark_requires_immediate_provider_receipt,
+    )
+    await r.record_async(
+        "message_person_requires_fresh_mac_bridge",
+        test_message_person_bridge_preflight_requires_fresh_mac,
+    )
     r.record("tool_count_expectations", test_tool_count_expectations_support_minimums_and_forbidden_tools)
     r.record(
         "user_data_prod_grep_provider_filters",

@@ -22,8 +22,8 @@
  *     is re-thrown wrapped in "Failed to send iMessage:" — the fallback error is dropped.
  *
  * Boundary capture:
- *   - System boundary is `child_process.execFile('osascript', ['-e', <script>])` invoked
- *     via util.promisify(execFile). The mock records every call (command + args) so tests
+ *   - System boundary is `child_process.execFile('osascript', ['-e', <script>], {timeout})`
+ *     via util.promisify(execFile). The mock records every call so tests
  *     assert on the exact shell-level contract. No outbound HTTP calls are expected from
  *     this domain — fetchCaptures is asserted empty as a hard invariant.
  *
@@ -43,6 +43,7 @@ import { fetchCaptures, clearFetchCaptures, installFetchCapture } from './fetch-
 interface ExecFileCall {
   command: string;
   args: readonly string[];
+  options: { timeout?: number };
 }
 
 type ExecFileHandler = (
@@ -70,8 +71,13 @@ vi.mock('child_process', () => {
     result: { stdout: string; stderr: string }
   ) => void;
 
-  const execFile = (command: string, args: readonly string[], callback: ExecFileCb): void => {
-    cp.calls.push({ command, args });
+  const execFile = (
+    command: string,
+    args: readonly string[],
+    options: { timeout?: number },
+    callback: ExecFileCb
+  ): void => {
+    cp.calls.push({ command, args, options });
     // promisify(execFile) wraps a Node-style callback: err !== null rejects, else
     // resolves with { stdout, stderr }. Defer to the microtask queue to match async shape.
     const result = cp.handler(command, args);
@@ -145,6 +151,7 @@ describe('i-message-sender blackbox', () => {
     // First arg is always `-e`, second is the script body.
     expect(calls[0].args).toHaveLength(2);
     expect(calls[0].args[0]).toBe('-e');
+    expect(calls[0].options.timeout).toBe(30_000);
   });
 
   it('boundary capture: primary script contains recipient + message verbatim, uses buddy lookup', async () => {

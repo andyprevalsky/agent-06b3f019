@@ -1,15 +1,23 @@
 /**
  * i-message-queue-service — service layer
  *
- * Business logic: drain the backend queue by repeatedly popping messages and
- * dispatching them to the AppleScript sender. Errors during send are logged
- * but swallowed — the message is already popped, so we continue the drain
- * instead of retrying.
+ * Business logic: claim backend queue items, dispatch them to the AppleScript
+ * sender, and acknowledge each result. Failed sends are released by the
+ * backend for a bounded retry instead of being lost.
  */
 
 import { logConsole, logConsoleError } from '../../base/logger';
+import { getErrorMessage } from '../../../shared/utils/error';
 import { LOG_TAG } from './config';
-import { getSession, popQueuedMessage, sendIMessage } from './repo';
+import {
+  clearSentQueueMarker,
+  getSession,
+  hasSentQueueMarker,
+  markQueueMessageSent,
+  popQueuedMessage,
+  reportDeliveryResult,
+  sendIMessage,
+} from './repo';
 import type { QueuedMessage } from './types';
 
 /**
@@ -21,18 +29,46 @@ function maskPhone(phoneNumber: string): string {
 }
 
 /**
- * Send a single queued message via AppleScript. Errors are logged and
- * swallowed — the message was already popped from the queue.
+ * Send a claimed message and report the result to the durable queue.
  */
-async function sendOne(msg: QueuedMessage): Promise<void> {
+async function sendOne(accessToken: string, msg: QueuedMessage): Promise<void> {
   const maskedPhone = maskPhone(msg.phone_number);
 
-  try {
-    await sendIMessage(msg.phone_number, msg.message);
-    logConsole(LOG_TAG, `Sent iMessage to ${maskedPhone}`);
-  } catch (err) {
-    logConsoleError(LOG_TAG, `Failed to send to ${maskedPhone}`, err);
+  if (!hasSentQueueMarker(msg.id)) {
+    try {
+      await sendIMessage(msg.phone_number, msg.message);
+      // Persist before the backend ACK. If ACK is lost, the next lease only
+      // retries the acknowledgement and never runs AppleScript a second time.
+      markQueueMessageSent(msg.id);
+    } catch (err) {
+      const error = getErrorMessage(err);
+      const outcome = await reportDeliveryResult(accessToken, msg.id, {
+        claim_token: msg.claim_token,
+        success: false,
+        error,
+      });
+      if (!outcome.ok) {
+        logConsoleError(
+          LOG_TAG,
+          `Failed to report send failure for ${maskedPhone}`,
+          outcome.statusText
+        );
+      }
+      logConsoleError(LOG_TAG, `Failed to send to ${maskedPhone}`, err);
+      return;
+    }
   }
+
+  const outcome = await reportDeliveryResult(accessToken, msg.id, {
+    claim_token: msg.claim_token,
+    success: true,
+  });
+  if (!outcome.ok) {
+    logConsoleError(LOG_TAG, `Sent but failed to acknowledge ${maskedPhone}`, outcome.statusText);
+    return;
+  }
+  clearSentQueueMarker(msg.id);
+  logConsole(LOG_TAG, `Sent iMessage to ${maskedPhone}`);
 }
 
 /**
@@ -59,6 +95,6 @@ export async function drainQueue(): Promise<void> {
       continue;
     }
 
-    await sendOne(outcome.data.message);
+    await sendOne(session.access_token, outcome.data.message);
   }
 }
