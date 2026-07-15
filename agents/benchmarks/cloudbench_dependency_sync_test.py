@@ -2266,3 +2266,50 @@ def test_controller_names_the_signal_that_killed_it() -> None:
     fleet = FLEET_SCRIPT.read_text()
     for sig in ("HUP", "INT", "TERM"):
         assert f"controller received {sig}" in fleet, f"unannounced {sig} trap"
+
+
+def test_stale_registry_reaps_absent_clone_and_does_not_block(tmp_path: Path) -> None:
+    """RCA (2026-07-15): a dead run's durable registry can hold a clone recorded
+    by NAME whose machine no longer exists on Fly (never materialized, or was
+    destroyed). When a new controller recovers that stale registry,
+    reap_registry_clones treated the absent machine as 'not provider-visible
+    yet' and refused to provision — permanently blocking every future run.
+    registry_resolve_name already waits CLOUDBENCH_CLONE_LOOKUP_SECONDS then
+    reports absence definitively, so an absent clone in a STALE (dead-owner)
+    registry is safely gone and its record must be reaped, not fatal."""
+    fleet = FLEET_SCRIPT.read_text()
+    helpers = "".join(
+        _extract_fleet_function(fleet, sig)
+        for sig in (
+            "registry_meta_value() {",
+            "registry_resolve_name() {",
+            "registry_machine_details() {",
+            "reap_registry_clones() {",
+        )
+    )
+    root = tmp_path / "cloudbench-fleet-ownership"
+    reg = root / "deadtoken"
+    (reg / "clones").mkdir(parents=True)
+    # a clone recorded by name only (no id) whose machine is absent on Fly
+    (reg / "clones" / "cloudbench-gone").write_text("name=cloudbench-gone\n")
+
+    script = f"""set -uo pipefail
+APP=bench-app
+FLEET_OWNERSHIP_ROOT="$ROOT"
+CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
+FLY() {{
+  if [ "$1 $2" = "machines list" ]; then echo "[]"; fi   # clone is absent
+}}
+{helpers}
+reap_registry_clones "$REG" stale
+echo "reap_exit=$?"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"ROOT": str(root), "REG": str(reg), "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+    # must NOT refuse; must reap the absent clone's record and succeed
+    assert "refusing to provision" not in result.stderr, result.stderr
+    assert "reap_exit=0" in result.stdout, f"{result.stdout}\n{result.stderr}"
+    assert not (reg / "clones" / "cloudbench-gone").exists(), "absent clone record must be reaped"

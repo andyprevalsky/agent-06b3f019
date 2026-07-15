@@ -541,8 +541,14 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale>
             case $? in
                 0) id="$resolved"; printf 'id=%s\n' "$id" >> "$record" ;;
                 1)
-                    echo "❌ owned clone name '$clone_name' is not provider-visible yet; retaining ownership and refusing to provision" >&2
-                    return 1
+                    # registry_resolve_name already waited the lookup deadline
+                    # and found NO machine with this name: it never materialized
+                    # (failed clone) or was already destroyed. There is nothing
+                    # to reap, so drop the stale record and continue — refusing
+                    # here permanently blocks every future run on a phantom clone.
+                    echo "🧹 owned clone name '$clone_name' has no provider machine (gone) — dropping stale record" >&2
+                    rm -f "$record"
+                    continue
                     ;;
                 *) echo "❌ ambiguous/unreadable stale clone name '$clone_name'; refusing to provision" >&2; return 1 ;;
             esac
