@@ -13,6 +13,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 
 from domains.message_person.service import (
+    build_agent_sms_idempotency_key,
     build_cold_outreach_person,
     build_conversation_summary,
     classify_person_id,
@@ -21,6 +22,8 @@ from domains.message_person.service import (
     format_messages_for_context,
     format_person_display,
     generate_message_activity,
+    queue_imessage_activity,
+    send_agent_sms_activity,
 )
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager, extract_root_error
 from tools.read_message_history import read_message_history_activity
@@ -163,8 +166,8 @@ class MessagePersonManager(ToolManager):
             return
 
         # -- Step 4: User approval --
-        recipient = person_phone if channel == "imessage" else person_email_addr
-        channel_label = "iMessage" if channel == "imessage" else "Email"
+        recipient = person_email_addr if channel == "email" else person_phone
+        channel_label = {"imessage": "iMessage", "agent_sms": "Agent SMS", "email": "Email"}[channel]
 
         approval_error = await self._request_approval(
             workflow_instance,
@@ -181,19 +184,27 @@ class MessagePersonManager(ToolManager):
             yield approval_error
             return
 
-        # -- Step 5: Send --
-        # Channel-specific send activities (queue_imessage_activity, send_email_activity)
-        # were removed along with their parent ghost tools. message_person now stops at
-        # message generation + approval; an external integration is responsible for delivery.
+        # -- Step 5: Deliver --
         yield ToolEvent(
             type=EventType.POST_MESSAGE,
-            title=f"Send pending for {channel_label} to {person_display}",
-            message=(
-                f"Message approved for **{person_display}** but no send transport is wired up. "
-                "Connect an iMessage/email integration to deliver this message."
-            ),
+            title=f"{'Queueing' if channel == 'imessage' else 'Sending'} {channel_label} to {person_display}",
+            message=f"Submitting the approved {channel_label} for delivery to **{person_display}**...",
             status=MessageStatus.IN_PROGRESS,
         )
+
+        delivery_result = await self._deliver_message(
+            channel=channel,
+            user_id=user_id,
+            agent_id=agent_id,
+            tool_call_id=tool_call_id,
+            context=workflow_instance.context,
+            person_phone=person_phone,
+            generated_message=generated_message,
+            person_display=person_display,
+        )
+        if isinstance(delivery_result, ToolEvent):
+            yield delivery_result
+            return
 
         # -- Done --
         yield self._build_finished_event(
@@ -204,6 +215,7 @@ class MessagePersonManager(ToolManager):
             from_email,
             generated_subject,
             generated_message,
+            delivery_result,
             gen_usage,
             model,
         )
@@ -224,11 +236,11 @@ class MessagePersonManager(ToolManager):
                 message="person_id is required.",
                 status=MessageStatus.ERROR,
             )
-        if channel not in ("imessage", "email"):
+        if channel not in ("imessage", "agent_sms", "email"):
             return ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Invalid channel",
-                message=f"Channel must be 'imessage' or 'email', got: '{channel}'",
+                message=f"Channel must be 'imessage', 'agent_sms', or 'email', got: '{channel}'",
                 status=MessageStatus.ERROR,
             )
         if channel == "email" and not from_email:
@@ -255,10 +267,10 @@ class MessagePersonManager(ToolManager):
         person_email: str | None,
         person_display: str,
     ) -> ToolEvent | None:
-        if channel == "imessage" and not person_phone:
+        if channel in ("imessage", "agent_sms") and not person_phone:
             return ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title=f"Cannot send iMessage to {person_display}",
+                title=f"Cannot send {'iMessage' if channel == 'imessage' else 'Agent SMS'} to {person_display}",
                 message=f"No phone number found for {person_display}. Try the email channel instead.",
                 status=MessageStatus.ERROR,
             )
@@ -499,6 +511,142 @@ class MessagePersonManager(ToolManager):
         return None
 
     @staticmethod
+    def _agent_sms_terminal_failure(provider_error: str) -> str:
+        """Tell the agent and user the safe lifecycle after an unconfirmed send."""
+        return (
+            "Agent SMS was not confirmed and will not be retried automatically. "
+            "Do not call message_person again for this send unless the user explicitly requests a new attempt. "
+            f"Provider error: {provider_error}"
+        )
+
+    @staticmethod
+    async def _deliver_message(
+        channel: str,
+        user_id: str,
+        agent_id: str,
+        tool_call_id: str,
+        context: list[dict[str, Any]],
+        person_phone: str | None,
+        generated_message: str,
+        person_display: str,
+    ) -> dict[str, Any] | ToolEvent:
+        if channel == "email":
+            return ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"Failed to send Email to {person_display}",
+                message=(
+                    "Email delivery is not available through message_person. The message was approved but was not sent."
+                ),
+                status=MessageStatus.ERROR,
+            )
+
+        if not person_phone:
+            return ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"Failed to send message to {person_display}",
+                message="A phone number is required for this channel.",
+                status=MessageStatus.ERROR,
+            )
+
+        if channel == "agent_sms":
+            idempotency_key = build_agent_sms_idempotency_key(
+                agent_id,
+                person_phone,
+                context,
+            )
+            try:
+                result = await workflow.execute_activity(
+                    send_agent_sms_activity,
+                    args=[user_id, agent_id, idempotency_key, person_phone, generated_message],
+                    start_to_close_timeout=timedelta(seconds=45),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+            except Exception as exc:
+                return ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"Failed to send Agent SMS to {person_display}",
+                    message=MessagePersonManager._agent_sms_terminal_failure(extract_root_error(exc)),
+                    status=MessageStatus.ERROR,
+                )
+            if (
+                result.get("success") is not True
+                or result.get("status") != "sent"
+                or not isinstance(result.get("message_id"), str)
+                or not result.get("message_id")
+            ):
+                return ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title=f"Failed to send Agent SMS to {person_display}",
+                    message=MessagePersonManager._agent_sms_terminal_failure(
+                        result.get("error", "AgentPhone did not confirm that it accepted the message")
+                    ),
+                    status=MessageStatus.ERROR,
+                )
+            return {
+                "channel": "agent_sms",
+                "status": "sent",
+                "provider": "agentphone",
+                "message_id": result["message_id"],
+                "provider_channel": result.get("provider_channel"),
+                "from_number": result.get("from_number"),
+                "to_number": result.get("to_number"),
+                "conversation_id": result.get("conversation_id"),
+            }
+
+        try:
+            result = await workflow.execute_activity(
+                queue_imessage_activity,
+                args=[user_id, agent_id, tool_call_id, person_phone, generated_message],
+                start_to_close_timeout=timedelta(seconds=150),
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3,
+                    backoff_coefficient=2.0,
+                    initial_interval=timedelta(seconds=1),
+                    maximum_interval=timedelta(seconds=10),
+                ),
+            )
+        except Exception as exc:
+            return ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"Failed to queue iMessage to {person_display}",
+                message=extract_root_error(exc),
+                status=MessageStatus.ERROR,
+            )
+
+        queue_id = result.get("queue_id")
+        delivery_status = result.get("status")
+        sent_at = result.get("sent_at")
+        if result.get("success") is not True or not isinstance(queue_id, str) or not queue_id:
+            return ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"Failed to send iMessage to {person_display}",
+                message=result.get("error", "The Mac app did not confirm the iMessage send"),
+                status=MessageStatus.ERROR,
+            )
+        if delivery_status == "sent" and isinstance(sent_at, str) and sent_at:
+            return {
+                "channel": "imessage",
+                "queue_id": queue_id,
+                "status": "sent",
+                "sent_at": sent_at,
+            }
+        if delivery_status != "queued":
+            return ToolEvent(
+                type=EventType.POST_MESSAGE,
+                title=f"Failed to send iMessage to {person_display}",
+                message=result.get("error", "The iMessage transport returned an invalid state"),
+                status=MessageStatus.ERROR,
+            )
+        return {
+            "channel": "imessage",
+            "queue_id": queue_id,
+            "status": "queued",
+            "relay_connected": result.get("relay_connected") is True,
+            "relay_last_seen_at": result.get("relay_last_seen_at"),
+            "last_transport_status": result.get("last_transport_status", "queued"),
+        }
+
+    @staticmethod
     def _build_finished_event(
         channel: str,
         channel_label: str,
@@ -507,6 +655,7 @@ class MessagePersonManager(ToolManager):
         from_email: str,
         generated_subject: str | None,
         generated_message: str,
+        delivery_receipt: dict[str, Any],
         gen_usage: dict[str, Any],
         model: str,
     ) -> ToolEvent:
@@ -516,28 +665,36 @@ class MessagePersonManager(ToolManager):
             if generated_subject:
                 finished_parts.append(f"**Subject:** {generated_subject}")
         finished_parts.append(f"\n**Message:**\n{generated_message}")
-        finished_data = None
+        is_queued = channel == "imessage" and delivery_receipt.get("status") == "queued"
+        if is_queued:
+            finished_parts.append(
+                "\n**Delivery status:** Queued. The user's Mac relay is not currently able to confirm "
+                "delivery. It will send when that Mac is back online; there is no guarantee when that will be."
+            )
+        finished_data: dict[str, Any] = {"delivery": delivery_receipt}
         if gen_usage:
-            finished_data = {
-                "usage": {
-                    "llm": [
-                        {
-                            "tokens_in": gen_usage.get("prompt_tokens", 0),
-                            "tokens_out": gen_usage.get("completion_tokens", 0),
-                            "model": gen_usage.get("actual_model", model),
-                            "provider": "message_person",
-                            "cache_read_input_tokens": gen_usage.get("cache_read_input_tokens", 0),
-                            "cache_creation_input_tokens": gen_usage.get("cache_creation_input_tokens", 0),
-                            # Propagate fast-cache replay so a replayed message_person
-                            # call bills $0 instead of its replayed output tokens.
-                            "from_fast_cache": gen_usage.get("from_fast_cache", False),
-                        }
-                    ]
-                }
+            finished_data["usage"] = {
+                "llm": [
+                    {
+                        "tokens_in": gen_usage.get("prompt_tokens", 0),
+                        "tokens_out": gen_usage.get("completion_tokens", 0),
+                        "model": gen_usage.get("actual_model", model),
+                        "provider": "message_person",
+                        "cache_read_input_tokens": gen_usage.get("cache_read_input_tokens", 0),
+                        "cache_creation_input_tokens": gen_usage.get("cache_creation_input_tokens", 0),
+                        # Propagate fast-cache replay so a replayed message_person
+                        # call bills $0 instead of its replayed output tokens.
+                        "from_fast_cache": gen_usage.get("from_fast_cache", False),
+                    }
+                ],
             }
         return ToolEvent(
             type=EventType.POST_MESSAGE,
-            title=f"{channel_label} sent to {person_display}",
+            title=(
+                f"{channel_label} queued for {person_display}"
+                if is_queued
+                else f"{channel_label} sent to {person_display}"
+            ),
             message="\n".join(finished_parts),
             status=MessageStatus.FINISHED,
             data=finished_data,
@@ -550,7 +707,7 @@ _manager: MessagePersonManager | None = None
 
 
 def get_manager() -> MessagePersonManager:
-    global _manager  # noqa: PLW0603
+    global _manager
     if _manager is None:
         _manager = MessagePersonManager()
     return _manager

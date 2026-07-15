@@ -11,7 +11,7 @@
 
 import { execFile } from 'child_process';
 import { promisify } from 'util';
-import { OSASCRIPT_BIN } from './config';
+import { OSASCRIPT_BIN, OSASCRIPT_TIMEOUT_MS } from './config';
 
 const execFileAsync = promisify(execFile);
 
@@ -21,5 +21,5 @@ const execFileAsync = promisify(execFile);
  * service layer has no use for them).
  */
 export async function runOsascript(script: string): Promise<void> {
-  await execFileAsync(OSASCRIPT_BIN, ['-e', script]);
+  await execFileAsync(OSASCRIPT_BIN, ['-e', script], { timeout: OSASCRIPT_TIMEOUT_MS });
 }

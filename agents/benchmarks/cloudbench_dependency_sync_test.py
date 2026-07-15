@@ -1,10 +1,12 @@
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "cloudbench-sync-deps.sh"
+PRISMA_SYNC_SCRIPT = ROOT / "scripts" / "cloudbench-sync-prisma-client.sh"
 ENV_HELPER_SCRIPT = ROOT / "scripts" / "lib" / "cloudbench-env.sh"
 ARTIFACT_SCRIPT = ROOT / "scripts" / "cloudbench-current-run-artifact.py"
 FETCH_SCRIPT = ROOT / "scripts" / "cloudbench-fetch-ref.sh"
@@ -35,6 +37,92 @@ def _write_manifests(root: Path, *, lock: str = "same", requirements: str = "sam
     req = root / "agents/requirements.txt"
     req.parent.mkdir(parents=True, exist_ok=True)
     req.write_text(requirements)
+
+
+def _write_prisma_fixture(root: Path) -> tuple[Path, Path, dict[str, str]]:
+    repo = root / "repo"
+    schema = repo / "back-end/prisma/schema.prisma"
+    schema.parent.mkdir(parents=True)
+    schema.write_text("model Alpha { id String @id }\n")
+    (repo / "node_modules/.prisma").mkdir(parents=True)
+
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    gosu = bin_dir / "gosu"
+    gosu.write_text("#!/usr/bin/env bash\nset -eu\nshift\nexec \"$@\"\n")
+    gosu.chmod(0o755)
+    npx = bin_dir / "npx"
+    npx.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "printf '%s\\n' \"$*\" >> \"$PRISMA_GENERATE_LOG\"\n"
+        "[ \"${PRISMA_GENERATE_FAIL:-0}\" != 1 ]\n"
+    )
+    npx.chmod(0o755)
+
+    generate_log = root / "prisma-generate.log"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PRISMA_GENERATE_LOG"] = str(generate_log)
+    return repo, generate_log, env
+
+
+def _run_prisma_sync(repo: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(PRISMA_SYNC_SCRIPT), str(repo), "rose"],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+
+def test_prisma_client_regenerates_only_when_schema_fingerprint_changes(
+    tmp_path: Path,
+) -> None:
+    repo, generate_log, env = _write_prisma_fixture(tmp_path)
+    marker = repo / "node_modules/.prisma/.rose-schema-fingerprint"
+
+    first = _run_prisma_sync(repo, env)
+    assert first.returncode == 0, first.stderr
+    assert generate_log.read_text().splitlines() == [
+        f"--no-install prisma generate --schema {repo / 'back-end/prisma/schema.prisma'}"
+    ]
+    first_fingerprint = marker.read_text()
+
+    unchanged = _run_prisma_sync(repo, env)
+    assert unchanged.returncode == 0, unchanged.stderr
+    assert len(generate_log.read_text().splitlines()) == 1
+    assert marker.read_text() == first_fingerprint
+
+    (repo / "back-end/prisma/schema.prisma").write_text(
+        "model Alpha { id String @id gateKey String? }\n"
+    )
+    changed = _run_prisma_sync(repo, env)
+    assert changed.returncode == 0, changed.stderr
+    assert len(generate_log.read_text().splitlines()) == 2
+    assert marker.read_text() != first_fingerprint
+
+
+def test_prisma_client_generation_failure_is_fatal_and_keeps_old_fingerprint(
+    tmp_path: Path,
+) -> None:
+    repo, generate_log, env = _write_prisma_fixture(tmp_path)
+    marker = repo / "node_modules/.prisma/.rose-schema-fingerprint"
+    baseline = _run_prisma_sync(repo, env)
+    assert baseline.returncode == 0, baseline.stderr
+    baseline_fingerprint = marker.read_text()
+
+    (repo / "back-end/prisma/schema.prisma").write_text(
+        "model Alpha { id String @id newField Boolean @default(false) }\n"
+    )
+    env["PRISMA_GENERATE_FAIL"] = "1"
+    failed = _run_prisma_sync(repo, env)
+
+    assert failed.returncode != 0
+    assert "Prisma client generation failed" in failed.stderr
+    assert len(generate_log.read_text().splitlines()) == 2
+    assert marker.read_text() == baseline_fingerprint
 
 
 def test_refreshes_stale_volume_dependency_trees(tmp_path: Path) -> None:
@@ -284,12 +372,12 @@ def test_deploy_smoke_gate_uses_the_visible_cloud_runner() -> None:
     assert "git ls-files --others --exclude-standard" in deploy
 
 
-def test_cloud_patch_includes_staged_and_unstaged_tracked_changes() -> None:
+def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()
 
-    assert 'git -C "$ROOT_DIR" diff HEAD --binary' in cloud
-    assert 'git -C "$ROOT_DIR" diff HEAD --binary' in fleet
+    assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in cloud
+    assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in fleet
 
 
 def test_fetch_ref_never_falls_back_to_stale_fetch_head(tmp_path: Path) -> None:

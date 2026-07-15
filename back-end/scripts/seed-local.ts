@@ -21,6 +21,7 @@ import {
   syncPasskeyCredentials,
   syncRequiredCredentialTable,
 } from './seed-local-credentials';
+import { runSyncStep, syncUserRecord } from './seed-local-helpers';
 
 // Parse .env file directly to get remote DB URL
 // (process.env.DATABASE_URL is already overridden to local by run.sh)
@@ -70,12 +71,7 @@ const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
 const local = new PrismaClient(); // uses process.env.DATABASE_URL (local)
 
 async function syncTable(name: string, fn: () => Promise<number>): Promise<void> {
-  try {
-    const count = await fn();
-    console.log(`  ✅ ${name}: ${count} synced`);
-  } catch (err) {
-    console.error(`  ❌ ${name}: ${err instanceof Error ? err.message : err}`);
-  }
+  await runSyncStep(name, fn);
 }
 
 async function syncRequiredTable(
@@ -115,15 +111,7 @@ async function syncIntegrations(): Promise<number> {
   // Pool tokens reference foreign users — ensure those User records exist locally
   const poolUserIds = [...new Set(poolIntegrations.map((i) => i.userId))];
   for (const uid of poolUserIds) {
-    const user = await remote.user.findUnique({ where: { userId: uid } });
-    if (user) {
-      const { id, ...rest } = user;
-      await local.user.upsert({
-        where: { userId: uid },
-        create: user as any,
-        update: rest as any,
-      });
-    }
+    await syncUserRecord(remote.user, local.user, uid);
   }
   // Integrations are unique by (userId, name). A local credential may have a
   // different primary key from its production counterpart, so syncing by id
@@ -408,15 +396,9 @@ async function sync() {
 
   // ── User ──
   await syncTable('User', async () => {
-    const user = await remote.user.findUnique({ where: { userId: DEV_USER_ID } });
-    if (!user) throw new Error(`User ${DEV_USER_ID} not found in remote`);
-    const { id, ...rest } = user;
-    await local.user.upsert({
-      where: { userId: DEV_USER_ID },
-      create: user as any,
-      update: rest as any,
-    });
-    return 1;
+    const count = await syncUserRecord(remote.user, local.user, DEV_USER_ID);
+    if (count === 0) throw new Error(`User ${DEV_USER_ID} not found in remote`);
+    return count;
   });
 
   // ── Credits ──

@@ -1,13 +1,17 @@
 """Blackbox tests for message-person domain."""
 
 import asyncio
-from unittest.mock import patch
+import json
+from unittest.mock import AsyncMock, patch
+
+import httpx
 
 from _test_utils import (
     BlackboxResult,
     assert_captured_call,
     get_captured_requests,
     setup_mock,
+    setup_mock_fn,
     teardown_mock,
 )
 
@@ -15,6 +19,23 @@ from _test_utils import (
 def _setup():
     setup_mock(
         {
+            "/api/imessage/queue/queue-1/status": {
+                "status": 200,
+                "json": {
+                    "success": True,
+                    "status": "sent",
+                    "sent_at": "2026-07-11T22:00:00.000Z",
+                },
+            },
+            "/api/imessage/queue": {
+                "status": 200,
+                "json": {
+                    "success": True,
+                    "queue_id": "queue-1",
+                    "relay_connected": True,
+                    "relay_last_seen_at": "2026-07-11T21:59:59.000Z",
+                },
+            },
             "/api/people/messages/recent": {
                 "status": 200,
                 "json": {
@@ -31,6 +52,294 @@ def _setup():
             },
         }
     )
+
+
+async def test_queue_imessage_activity_waits_for_delivery_confirmation():
+    """The agent-to-backend boundary returns only confirmed send."""
+    _setup()
+    with patch("temporalio.activity.heartbeat"):
+        from domains.message_person.repo import queue_imessage_activity
+
+        result = await queue_imessage_activity(
+            user_id="user-42",
+            agent_id="agent-42",
+            tool_call_id="call-42",
+            phone_number="+19729777432",
+            message="Hello from Rose",
+        )
+
+    assert result == {
+        "success": True,
+        "queue_id": "queue-1",
+        "status": "sent",
+        "sent_at": "2026-07-11T22:00:00.000Z",
+    }
+    call = assert_captured_call(
+        url_contains="/api/imessage/queue",
+        method="POST",
+        header_present="X-API-Key",
+    )
+    payload = json.loads(call["requestBody"])
+    assert payload == {
+        "user_id": "user-42",
+        "agent_id": "agent-42",
+        "idempotency_key": "call-42",
+        "phone_number": "+19729777432",
+        "message": "Hello from Rose",
+    }
+    status_call = assert_captured_call(
+        index=1,
+        url_contains="/api/imessage/queue/queue-1/status",
+        method="GET",
+        header_present="X-User-Id",
+    )
+    status_headers = {k.lower(): v for k, v in status_call["requestHeaders"].items()}
+    assert status_headers["x-user-id"] == "user-42"
+
+
+async def test_queue_imessage_activity_waits_through_pending_status():
+    """A pending queue state is polled until the Mac reports success."""
+    status_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal status_calls
+        if request.method == "POST" and request.url.path == "/api/imessage/queue":
+            return httpx.Response(
+                200,
+                json={"success": True, "queue_id": "queue-delayed", "relay_connected": True},
+            )
+        if request.method == "GET" and request.url.path == "/api/imessage/queue/queue-delayed/status":
+            status_calls += 1
+            if status_calls == 1:
+                return httpx.Response(200, json={"success": True, "status": "queued", "sent_at": None})
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "status": "sent",
+                    "sent_at": "2026-07-11T22:01:00.000Z",
+                },
+            )
+        return httpx.Response(404, json={"error": f"No mock for {request.url}"})
+
+    setup_mock_fn(handler)
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("domains.message_person.repo.asyncio.sleep", new_callable=AsyncMock) as sleep,
+    ):
+        from domains.message_person.repo import queue_imessage_activity
+
+        result = await queue_imessage_activity(
+            user_id="user-42",
+            agent_id="agent-42",
+            tool_call_id="call-delayed",
+            phone_number="+19729777432",
+            message="Delayed confirmation",
+        )
+
+    assert result["status"] == "sent"
+    assert result["sent_at"] == "2026-07-11T22:01:00.000Z"
+    assert status_calls == 2
+    sleep.assert_awaited_once_with(2)
+
+
+async def test_queue_imessage_activity_checks_final_buffered_status():
+    """A send ACK near the lease/expiry boundary is observed before timeout."""
+    status_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal status_calls
+        if request.method == "POST" and request.url.path == "/api/imessage/queue":
+            return httpx.Response(
+                200,
+                json={"success": True, "queue_id": "queue-boundary", "relay_connected": True},
+            )
+        if request.method == "GET" and request.url.path == "/api/imessage/queue/queue-boundary/status":
+            status_calls += 1
+            if status_calls < 4:
+                return httpx.Response(200, json={"success": True, "status": "sending", "sent_at": None})
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "status": "sent",
+                    "sent_at": "2026-07-11T22:02:00.000Z",
+                },
+            )
+        return httpx.Response(404, json={"error": f"No mock for {request.url}"})
+
+    setup_mock_fn(handler)
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("domains.message_person.repo.asyncio.sleep", new_callable=AsyncMock) as sleep,
+    ):
+        from domains.message_person.repo import queue_imessage_activity
+
+        result = await queue_imessage_activity(
+            user_id="user-42",
+            agent_id="agent-42",
+            tool_call_id="call-boundary",
+            phone_number="+19729777432",
+            message="Boundary confirmation",
+        )
+
+    assert result["status"] == "sent"
+    assert status_calls == 4
+    assert sleep.await_count == 3
+
+
+async def test_queue_imessage_activity_offline_returns_durable_queued_receipt_without_polling():
+    """An offline relay leaves the approved send queued and tells the agent immediately."""
+    setup_mock(
+        {
+            "/api/imessage/queue": {
+                "status": 200,
+                "json": {
+                    "success": True,
+                    "queue_id": "queue-offline",
+                    "relay_connected": False,
+                    "relay_last_seen_at": None,
+                },
+            },
+        }
+    )
+    with patch("temporalio.activity.heartbeat"):
+        from domains.message_person.repo import queue_imessage_activity
+
+        result = await queue_imessage_activity(
+            user_id="user-42",
+            agent_id="agent-42",
+            tool_call_id="call-offline",
+            phone_number="+19729777432",
+            message="Send when the Mac returns",
+        )
+
+    assert result == {
+        "success": True,
+        "queue_id": "queue-offline",
+        "status": "queued",
+        "relay_connected": False,
+        "relay_last_seen_at": None,
+    }
+    assert len(get_captured_requests()) == 1
+
+
+async def test_queue_imessage_activity_online_timeout_stays_queued_for_later():
+    """A fresh heartbeat is not a send guarantee; missing ACK remains queued, never failed/sent."""
+    status_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal status_calls
+        if request.method == "POST" and request.url.path == "/api/imessage/queue":
+            return httpx.Response(
+                200,
+                json={
+                    "success": True,
+                    "queue_id": "queue-relay-dropped",
+                    "relay_connected": True,
+                    "relay_last_seen_at": "2026-07-11T22:00:00.000Z",
+                },
+            )
+        if request.method == "GET" and request.url.path == "/api/imessage/queue/queue-relay-dropped/status":
+            status_calls += 1
+            return httpx.Response(200, json={"success": True, "status": "queued", "sent_at": None})
+        return httpx.Response(404, json={"error": f"No mock for {request.url}"})
+
+    setup_mock_fn(handler)
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("domains.message_person.repo.IMESSAGE_ACK_POLL_ATTEMPTS", 2),
+        patch("domains.message_person.repo.asyncio.sleep", new_callable=AsyncMock) as sleep,
+    ):
+        from domains.message_person.repo import queue_imessage_activity
+
+        result = await queue_imessage_activity(
+            user_id="user-42",
+            agent_id="agent-42",
+            tool_call_id="call-relay-dropped",
+            phone_number="+19729777432",
+            message="Still durable",
+        )
+
+    assert result["success"] is True
+    assert result["status"] == "queued"
+    assert result["relay_connected"] is True
+    assert result["queue_id"] == "queue-relay-dropped"
+    assert status_calls == 2
+    sleep.assert_awaited_once_with(2)
+
+
+async def test_send_agent_sms_activity_is_immediate_and_never_touches_imessage_queue():
+    """agent_sms uses the AgentPhone boundary exactly once and has no queue lifecycle."""
+    setup_mock(
+        {
+            "/api/agentphone/messages/send": {
+                "status": 200,
+                "json": {
+                    "success": True,
+                    "status": "sent",
+                    "message_id": "msg-agent-1",
+                    "provider": "agentphone",
+                    "provider_channel": "sms",
+                    "from_number": "+19125550100",
+                    "to_number": "+19729777432",
+                    "conversation_id": "conv-1",
+                },
+            },
+        }
+    )
+    with patch("temporalio.activity.heartbeat"):
+        from domains.message_person.repo import send_agent_sms_activity
+
+        result = await send_agent_sms_activity(
+            user_id="user-42",
+            agent_id="agent-42",
+            tool_call_id="call-agent-sms",
+            phone_number="+19729777432",
+            message="Immediate from Rose",
+        )
+
+    assert result["status"] == "sent"
+    assert result["message_id"] == "msg-agent-1"
+    calls = get_captured_requests()
+    assert len(calls) == 1
+    assert "/api/agentphone/messages/send" in calls[0]["url"]
+    assert "/api/imessage/queue" not in calls[0]["url"]
+    assert json.loads(calls[0]["requestBody"]) == {
+        "user_id": "user-42",
+        "agent_id": "agent-42",
+        "idempotency_key": "call-agent-sms",
+        "phone_number": "+19729777432",
+        "message": "Immediate from Rose",
+    }
+
+
+async def test_send_agent_sms_activity_surfaces_provider_rejection_without_queue_fallback():
+    """A carrier/config rejection is terminal and cannot silently fall back to user iMessage."""
+    setup_mock(
+        {
+            "/api/agentphone/messages/send": {
+                "status": 502,
+                "json": {"error": "AgentPhone HTTP 403: outbound SMS is not enabled"},
+            },
+        }
+    )
+    with patch("temporalio.activity.heartbeat"):
+        from domains.message_person.repo import send_agent_sms_activity
+
+        result = await send_agent_sms_activity(
+            user_id="user-42",
+            agent_id="agent-42",
+            tool_call_id="call-agent-sms-rejected",
+            phone_number="+19729777432",
+            message="Must not reroute",
+        )
+
+    assert result == {"success": False, "error": "AgentPhone HTTP 403: outbound SMS is not enabled"}
+    calls = get_captured_requests()
+    assert len(calls) == 1
+    assert "/api/agentphone/messages/send" in calls[0]["url"]
+    assert all("/api/imessage/queue" not in call["url"] for call in calls)
 
 
 async def test_fetch_recent_messages_happy_path():
@@ -74,8 +383,8 @@ async def test_fetch_recent_messages_boundary():
     assert "days=7" in call["url"]
 
 
-async def test_no_httpx_from_generate_message():
-    """generate_message_activity uses call_llm, not raw httpx — zero captured calls."""
+async def test_agent_sms_generation_uses_text_prompt_without_subject_or_httpx():
+    """agent_sms drafts a text, not an email, and generation makes no transport call."""
     _setup()
     with (
         patch("temporalio.activity.heartbeat"),
@@ -95,10 +404,16 @@ async def test_no_httpx_from_generate_message():
             messages_context="Recent thread with Alice",
             exa_context="",
             intent="Follow up on project",
-            channel="sms",
+            channel="agent_sms",
         )
 
     assert "message" in result
+    assert result["subject"] is None
+    _, kwargs = mock_llm.call_args
+    prompt = kwargs["messages"][-1]["content"]
+    assert "# Channel\nAgent SMS" in prompt
+    assert "message from the agent phone" in prompt
+    assert "Do NOT include a subject line" in prompt
     # call_llm doesn't use httpx, so no captured calls from it
     captures = get_captured_requests()
     assert len(captures) == 0
@@ -202,6 +517,20 @@ def test_classify_person_id_single_word_fallback():
 
     out = classify_person_id("Madonna")
     assert out == {"first_name": "Madonna", "last_name": ""}
+
+
+def test_agent_sms_idempotency_key_is_stable_for_logical_send():
+    from domains.message_person.service import build_agent_sms_idempotency_key
+
+    first_turn = [{"role": "USER", "message_id": "turn-1", "text": "send it"}]
+    first = build_agent_sms_idempotency_key("agent-1", "+15551234567", first_turn)
+    retry = build_agent_sms_idempotency_key("agent-1", "+15551234567", first_turn)
+    assert first == retry
+    assert first.startswith("message_person_agent_sms_")
+    assert first != build_agent_sms_idempotency_key("agent-2", "+15551234567", first_turn)
+    assert first != build_agent_sms_idempotency_key("agent-1", "+15557654321", first_turn)
+    second_turn = [*first_turn, {"role": "USER", "message_id": "turn-2", "text": "send it again"}]
+    assert first != build_agent_sms_idempotency_key("agent-1", "+15551234567", second_turn)
 
 
 # ── format_messages_for_context ────────────────────────────────────
@@ -388,6 +717,19 @@ def test_handler_validate_inputs_happy():
     assert ev is None
 
 
+def test_handler_validate_inputs_agent_sms_happy():
+    from domains.message_person.handler import MessagePersonManager
+
+    assert MessagePersonManager._validate_inputs("Alice Smith", "agent_sms", "", "ping") is None
+
+
+def test_message_person_schema_exposes_distinct_phone_transports():
+    from utils.tool_schemas import MessagePersonTool
+
+    channel_schema = MessagePersonTool.model_json_schema()["properties"]["channel"]
+    assert channel_schema["enum"] == ["imessage", "agent_sms", "email"]
+
+
 def test_handler_validate_channel_no_phone():
     from domains.message_person.handler import MessagePersonManager
 
@@ -408,6 +750,15 @@ def test_handler_validate_channel_happy():
     from domains.message_person.handler import MessagePersonManager
 
     assert MessagePersonManager._validate_channel("imessage", "+15551234", None, "Alice") is None
+
+
+def test_handler_validate_channel_agent_sms_needs_phone():
+    from domains.message_person.handler import MessagePersonManager
+
+    missing = MessagePersonManager._validate_channel("agent_sms", None, "alice@example.com", "Alice")
+    assert missing is not None
+    assert "phone number" in missing.message.lower()
+    assert MessagePersonManager._validate_channel("agent_sms", "+15551234", None, "Alice") is None
     assert MessagePersonManager._validate_channel("email", None, "a@b.com", "Alice") is None
 
 
@@ -442,6 +793,12 @@ def test_build_finished_event_imessage():
         from_email="",
         generated_subject=None,
         generated_message=generated_message,
+        delivery_receipt={
+            "channel": "imessage",
+            "queue_id": "queue-1",
+            "status": "sent",
+            "sent_at": "2026-07-11T22:00:00.000Z",
+        },
         gen_usage={"prompt_tokens": 100, "completion_tokens": 20, "actual_model": "rose-ultra"},
         model="rose-labs/rose-1-lite",
     )
@@ -451,6 +808,8 @@ def test_build_finished_event_imessage():
     assert ev.message.endswith(generated_message)
     # LLM usage attached
     assert ev.data and ev.data["usage"]["llm"][0]["tokens_in"] == 100
+    assert ev.data["delivery"]["status"] == "sent"
+    assert ev.data["delivery"]["sent_at"] == "2026-07-11T22:00:00.000Z"
 
 
 def test_build_finished_event_email_with_subject():
@@ -465,14 +824,44 @@ def test_build_finished_event_email_with_subject():
         from_email="sender@mine.com",
         generated_subject="Hello",
         generated_message=generated_message,
+        delivery_receipt={"channel": "email", "message_id": "gmail-1"},
         gen_usage={},
         model="rose-labs/rose-1-lite",
     )
     assert "sender@mine.com" in ev.message
     assert "Hello" in ev.message
     assert ev.message.endswith(generated_message)
-    # No usage → no data
-    assert ev.data is None
+    assert ev.data == {"delivery": {"channel": "email", "message_id": "gmail-1"}}
+
+
+def test_build_finished_event_imessage_queued_is_truthful_about_uncertain_timing():
+    from domains.message_person.handler import MessagePersonManager
+    from tools.base import MessageStatus
+
+    ev = MessagePersonManager._build_finished_event(
+        channel="imessage",
+        channel_label="iMessage",
+        person_display="Alice",
+        recipient="+15551234",
+        from_email="",
+        generated_subject=None,
+        generated_message="Hey Alice",
+        delivery_receipt={
+            "channel": "imessage",
+            "queue_id": "queue-offline",
+            "status": "queued",
+            "relay_connected": False,
+        },
+        gen_usage={},
+        model="rose-labs/rose-1-lite",
+    )
+
+    assert ev.status == MessageStatus.FINISHED
+    assert "queued" in ev.title.lower()
+    assert "mac" in ev.message.lower()
+    assert "no guarantee" in ev.message.lower()
+    assert "sent" not in ev.title.lower()
+    assert ev.data and ev.data["delivery"]["status"] == "queued"
 
 
 # ── MessagePersonManager end-to-end via patched workflow module ─────
@@ -791,7 +1180,7 @@ async def test_handler_generate_message_raises_yields_error():
 
 
 async def test_handler_cold_outreach_email_path():
-    """No person found but email id is provided -> cold outreach flow gets through approval."""
+    """Unsupported email delivery fails instead of claiming that it was sent."""
     from domains.message_person.handler import MessagePersonManager
     from tools.base import MessageStatus
 
@@ -834,8 +1223,10 @@ async def test_handler_cold_outreach_email_path():
 
     assert approved["called"]
     finished = [e for e in events if e.status == MessageStatus.FINISHED]
-    assert len(finished) == 1
-    assert "Email sent" in finished[0].title
+    errors = [e for e in events if e.status == MessageStatus.ERROR]
+    assert finished == []
+    assert len(errors) == 1
+    assert "Email delivery is not available" in errors[0].message
 
 
 async def test_handler_user_rejects_approval():
@@ -875,12 +1266,8 @@ async def test_handler_user_rejects_approval():
     assert any("too soon" in (e.message or "") for e in errs)
 
 
-async def test_handler_successful_imessage_finished_event():
-    """End-to-end happy path for iMessage yields FINISHED event with usage.
-
-    After ghost-tool removal message_person no longer dispatches a send activity;
-    it stops after generate + approval and emits a FINISHED event.
-    """
+async def test_handler_successful_imessage_requires_delivery_confirmation():
+    """iMessage reaches FINISHED only after the Mac confirms delivery."""
     from domains.message_person.handler import MessagePersonManager
     from tools.base import MessageStatus
 
@@ -897,6 +1284,12 @@ async def test_handler_successful_imessage_finished_event():
             "generate_message_activity": {
                 "message": "Hello Alice!",
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "actual_model": "rose-1-lite"},
+            },
+            "queue_imessage_activity": {
+                "success": True,
+                "queue_id": "queue-42",
+                "status": "sent",
+                "sent_at": "2026-07-11T22:00:00.000Z",
             },
         }
     )
@@ -917,14 +1310,246 @@ async def test_handler_successful_imessage_finished_event():
     assert len(finished) == 1
     assert finished[0].data is not None
     assert finished[0].data["usage"]["llm"][0]["tokens_in"] == 10
+    assert finished[0].data["delivery"] == {
+        "channel": "imessage",
+        "queue_id": "queue-42",
+        "status": "sent",
+        "sent_at": "2026-07-11T22:00:00.000Z",
+    }
+    queue_calls = [call for call in fake.calls if call["name"] == "queue_imessage_activity"]
+    assert len(queue_calls) == 1
+    assert queue_calls[0]["args"] == ["user-1", "agent-1", "tc-ok", "+15551234567", "Hello Alice!"]
+    assert queue_calls[0]["kwargs"]["start_to_close_timeout"].total_seconds() == 150
+
+
+async def test_handler_offline_imessage_finishes_as_queued_not_sent():
+    """An accepted durable queue write is success, with truthful offline relay status."""
+    from domains.message_person.handler import MessagePersonManager
+    from tools.base import MessageStatus
+
+    async def fake_approval(*args, **kwargs):
+        return {"response": "ok", "question": "", "attention_request_id": None}
+
+    fake = _FakeWFModule(
+        activity_results={
+            "read_message_history_activity": {
+                "person": {"firstName": "Alice", "lastName": "Smith", "phoneNumber": "+15551234567"},
+                "messages": [],
+            },
+            "fetch_recent_messages_activity": {"messages": []},
+            "generate_message_activity": {"message": "Hello Alice!", "usage": {}},
+            "queue_imessage_activity": {
+                "success": True,
+                "queue_id": "queue-offline",
+                "status": "queued",
+                "relay_connected": False,
+                "relay_last_seen_at": None,
+            },
+        }
+    )
+    restore = _patch_handler_workflow(fake)
+    with patch("domains.message_person.handler.request_user_approval_direct", fake_approval):
+        try:
+            events = await _collect(
+                MessagePersonManager().execute_tool(
+                    workflow_instance=_WFInstance(),
+                    tool_call={"person_id": "Alice Smith", "channel": "imessage", "intent": "ping"},
+                    tool_call_id="tc-offline",
+                )
+            )
+        finally:
+            restore()
+
+    finished = [event for event in events if event.status == MessageStatus.FINISHED]
+    assert len(finished) == 1
+    assert finished[0].data and finished[0].data["delivery"]["status"] == "queued"
+    assert "queued" in finished[0].title.lower()
+    assert "sent" not in finished[0].title.lower()
+
+
+async def test_handler_agent_sms_is_immediate_single_attempt_and_never_queues():
+    """agent_sms has a distinct, non-queued, non-retrying transport path."""
+    from domains.message_person.handler import MessagePersonManager
+    from tools.base import MessageStatus
+
+    async def fake_approval(*args, **kwargs):
+        return {"response": "ok", "question": "", "attention_request_id": None}
+
+    fake = _FakeWFModule(
+        activity_results={
+            "read_message_history_activity": {
+                "person": {"firstName": "Alice", "lastName": "Smith", "phoneNumber": "+15551234567"},
+                "messages": [],
+            },
+            "fetch_recent_messages_activity": {"messages": []},
+            "generate_message_activity": {"message": "Hello from Rose", "usage": {}},
+            "send_agent_sms_activity": {
+                "success": True,
+                "status": "sent",
+                "message_id": "msg-42",
+                "provider": "agentphone",
+                "provider_channel": "sms",
+                "from_number": "+19125550100",
+                "to_number": "+15551234567",
+                "conversation_id": "conv-42",
+            },
+        }
+    )
+    restore = _patch_handler_workflow(fake)
+    with patch("domains.message_person.handler.request_user_approval_direct", fake_approval):
+        try:
+            events = await _collect(
+                MessagePersonManager().execute_tool(
+                    workflow_instance=_WFInstance(),
+                    tool_call={"person_id": "Alice Smith", "channel": "agent_sms", "intent": "ping"},
+                    tool_call_id="tc-agent-sms",
+                )
+            )
+        finally:
+            restore()
+
+    finished = [event for event in events if event.status == MessageStatus.FINISHED]
+    assert len(finished) == 1
+    assert finished[0].data and finished[0].data["delivery"]["channel"] == "agent_sms"
+    assert [call for call in fake.calls if call["name"] == "queue_imessage_activity"] == []
+    sends = [call for call in fake.calls if call["name"] == "send_agent_sms_activity"]
+    assert len(sends) == 1
+    from domains.message_person.service import build_agent_sms_idempotency_key
+
+    expected_key = build_agent_sms_idempotency_key("agent-1", "+15551234567", [])
+    assert sends[0]["args"] == ["user-1", "agent-1", expected_key, "+15551234567", "Hello from Rose"]
+    assert sends[0]["kwargs"]["retry_policy"].maximum_attempts == 1
+
+
+async def test_handler_agent_sms_provider_failure_is_terminal_and_never_queues():
+    """Provider rejection produces one error event without retrying through user iMessage."""
+    from domains.message_person.handler import MessagePersonManager
+    from tools.base import MessageStatus
+
+    async def fake_approval(*args, **kwargs):
+        return {"response": "ok", "question": "", "attention_request_id": None}
+
+    fake = _FakeWFModule(
+        activity_results={
+            "read_message_history_activity": {
+                "person": {"firstName": "Alice", "lastName": "Smith", "phoneNumber": "+15551234567"},
+                "messages": [],
+            },
+            "fetch_recent_messages_activity": {"messages": []},
+            "generate_message_activity": {"message": "Hello from Rose", "usage": {}},
+            "send_agent_sms_activity": {
+                "success": False,
+                "error": "AgentPhone HTTP 403: outbound SMS is not enabled",
+            },
+        }
+    )
+    restore = _patch_handler_workflow(fake)
+    with patch("domains.message_person.handler.request_user_approval_direct", fake_approval):
+        try:
+            events = await _collect(
+                MessagePersonManager().execute_tool(
+                    workflow_instance=_WFInstance(),
+                    tool_call={"person_id": "Alice Smith", "channel": "agent_sms", "intent": "ping"},
+                    tool_call_id="tc-agent-sms-rejected",
+                )
+            )
+        finally:
+            restore()
+
+    assert [event for event in events if event.status == MessageStatus.FINISHED] == []
+    errors = [event for event in events if event.status == MessageStatus.ERROR]
+    assert len(errors) == 1
+    assert "outbound SMS is not enabled" in errors[0].message
+    assert "Do not call message_person again" in errors[0].message
+    assert "unless the user explicitly requests a new attempt" in errors[0].message
+    assert len([call for call in fake.calls if call["name"] == "send_agent_sms_activity"]) == 1
+    assert [call for call in fake.calls if call["name"] == "queue_imessage_activity"] == []
+
+
+async def test_handler_imessage_queue_failure_is_terminal_error():
+    """A rejected queue write cannot be transformed into a sent event."""
+    from domains.message_person.handler import MessagePersonManager
+    from tools.base import MessageStatus
+
+    async def fake_approval(*args, **kwargs):
+        return {"response": "ok", "question": "", "attention_request_id": None}
+
+    fake = _FakeWFModule(
+        activity_results={
+            "read_message_history_activity": {
+                "person": {"firstName": "Alice", "lastName": "Smith", "phoneNumber": "+15551234567"},
+                "messages": [],
+            },
+            "fetch_recent_messages_activity": {"messages": []},
+            "generate_message_activity": {"message": "Hello Alice!", "usage": {}},
+            "queue_imessage_activity": {"success": False, "error": "backend unavailable"},
+        }
+    )
+    restore = _patch_handler_workflow(fake)
+    with patch("domains.message_person.handler.request_user_approval_direct", fake_approval):
+        try:
+            events = await _collect(
+                MessagePersonManager().execute_tool(
+                    workflow_instance=_WFInstance(),
+                    tool_call={"person_id": "Alice Smith", "channel": "imessage", "intent": "ping"},
+                    tool_call_id="tc-failed-queue",
+                )
+            )
+        finally:
+            restore()
+
+    assert [event for event in events if event.status == MessageStatus.FINISHED] == []
+    errors = [event for event in events if event.status == MessageStatus.ERROR]
+    assert len(errors) == 1
+    assert "backend unavailable" in errors[0].message
+
+
+def test_message_person_prompt_forbids_automatic_agent_sms_retry():
+    """A lost provider receipt must not become an accidental duplicate SMS."""
+    from tools.prompts.message_person import PROMPT
+
+    normalized = " ".join(PROMPT.lower().split())
+    assert "never automatically retry a failed or unconfirmed agent_sms send" in normalized
+    assert "only if the user explicitly asks for a new attempt" in normalized
 
 
 async def run_all_tests():
     print("message-person blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "queue_imessage_activity_confirmed_send",
+        test_queue_imessage_activity_waits_for_delivery_confirmation,
+    )
+    await r.record_async(
+        "queue_imessage_activity_pending_then_sent",
+        test_queue_imessage_activity_waits_through_pending_status,
+    )
+    await r.record_async(
+        "queue_imessage_activity_final_buffered_status",
+        test_queue_imessage_activity_checks_final_buffered_status,
+    )
+    await r.record_async(
+        "queue_imessage_activity_offline_queued_without_polling",
+        test_queue_imessage_activity_offline_returns_durable_queued_receipt_without_polling,
+    )
+    await r.record_async(
+        "queue_imessage_activity_online_timeout_stays_queued",
+        test_queue_imessage_activity_online_timeout_stays_queued_for_later,
+    )
+    await r.record_async(
+        "send_agent_sms_activity_immediate_no_imessage_queue",
+        test_send_agent_sms_activity_is_immediate_and_never_touches_imessage_queue,
+    )
+    await r.record_async(
+        "send_agent_sms_activity_provider_rejection_no_queue",
+        test_send_agent_sms_activity_surfaces_provider_rejection_without_queue_fallback,
+    )
     await r.record_async("fetch_recent_messages_happy_path", test_fetch_recent_messages_happy_path)
     await r.record_async("fetch_recent_messages_boundary", test_fetch_recent_messages_boundary)
-    await r.record_async("no_httpx_from_generate_message", test_no_httpx_from_generate_message)
+    await r.record_async(
+        "agent_sms_generation_text_prompt_no_httpx",
+        test_agent_sms_generation_uses_text_prompt_without_subject_or_httpx,
+    )
     await r.record_async(
         "generate_message_forwards_compute_token",
         test_generate_message_activity_forwards_compute_tokens_to_llm,
@@ -937,6 +1562,7 @@ async def run_all_tests():
     r.record("classify_name_two", test_classify_person_id_name_two_parts)
     r.record("classify_name_multi", test_classify_person_id_name_multi_word_last)
     r.record("classify_single_word", test_classify_person_id_single_word_fallback)
+    r.record("agent_sms_stable_idempotency_key", test_agent_sms_idempotency_key_is_stable_for_logical_send)
     # format_messages
     r.record("format_messages_empty", test_format_messages_for_context_empty)
     r.record("format_messages_happy", test_format_messages_for_context_happy)
@@ -964,13 +1590,27 @@ async def run_all_tests():
     r.record("handler_validate_email_needs_from", test_handler_validate_inputs_email_needs_from)
     r.record("handler_validate_missing_intent", test_handler_validate_inputs_missing_intent)
     r.record("handler_validate_happy", test_handler_validate_inputs_happy)
+    r.record("handler_validate_agent_sms_happy", test_handler_validate_inputs_agent_sms_happy)
+    r.record(
+        "message_person_schema_distinct_phone_transports",
+        test_message_person_schema_exposes_distinct_phone_transports,
+    )
+    r.record(
+        "message_person_prompt_no_automatic_agent_sms_retry",
+        test_message_person_prompt_forbids_automatic_agent_sms_retry,
+    )
     r.record("handler_channel_no_phone", test_handler_validate_channel_no_phone)
     r.record("handler_channel_no_email", test_handler_validate_channel_no_email)
     r.record("handler_channel_happy", test_handler_validate_channel_happy)
+    r.record("handler_channel_agent_sms_needs_phone", test_handler_validate_channel_agent_sms_needs_phone)
     # ambiguous/finished events
     r.record("ambiguous_error", test_build_ambiguous_error)
     r.record("finished_event_imessage", test_build_finished_event_imessage)
     r.record("finished_event_email", test_build_finished_event_email_with_subject)
+    r.record(
+        "finished_event_imessage_queued_truthful",
+        test_build_finished_event_imessage_queued_is_truthful_about_uncertain_timing,
+    )
     # handler end-to-end paths
     await r.record_async("handler_missing_person_id", test_handler_missing_person_id_yields_error)
     await r.record_async("handler_read_history_failure", test_handler_read_history_failure_yields_error)
@@ -985,7 +1625,26 @@ async def run_all_tests():
     await r.record_async("handler_gen_raises", test_handler_generate_message_raises_yields_error)
     await r.record_async("handler_cold_outreach_email", test_handler_cold_outreach_email_path)
     await r.record_async("handler_user_rejects", test_handler_user_rejects_approval)
-    await r.record_async("handler_imessage_success", test_handler_successful_imessage_finished_event)
+    await r.record_async(
+        "handler_imessage_success_requires_confirmed_send",
+        test_handler_successful_imessage_requires_delivery_confirmation,
+    )
+    await r.record_async(
+        "handler_imessage_offline_finishes_queued",
+        test_handler_offline_imessage_finishes_as_queued_not_sent,
+    )
+    await r.record_async(
+        "handler_agent_sms_immediate_single_attempt_no_queue",
+        test_handler_agent_sms_is_immediate_single_attempt_and_never_queues,
+    )
+    await r.record_async(
+        "handler_agent_sms_provider_failure_no_queue",
+        test_handler_agent_sms_provider_failure_is_terminal_and_never_queues,
+    )
+    await r.record_async(
+        "handler_imessage_queue_failure",
+        test_handler_imessage_queue_failure_is_terminal_error,
+    )
     teardown_mock()
     return r.all_passed
 
