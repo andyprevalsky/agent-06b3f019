@@ -31,6 +31,8 @@ const task = (id: string, createdAt: string, userId = 'subscriber-user') => ({
   status: 'COMPLETED' as AgentStatus,
 });
 
+const waitlistSignup = (createdAt: string) => ({ createdAt: new Date(createdAt) });
+
 const series = buildSeries(
   periods,
   [
@@ -41,6 +43,11 @@ const series = buildSeries(
     task('jun-2', '2026-06-10T00:00:00.000Z'),
     task('jun-3', '2026-06-20T00:00:00.000Z'),
     task('jun-outside-cohort', '2026-06-21T00:00:00.000Z', 'outside-user'),
+  ],
+  [
+    waitlistSignup('2026-05-07T00:00:00.000Z'),
+    waitlistSignup('2026-06-08T00:00:00.000Z'),
+    waitlistSignup('2026-06-21T00:00:00.000Z'),
   ],
   [
     { userCount: 2, newUsers: 2, userIds: new Set(['subscriber-user']) },
@@ -57,6 +64,11 @@ assert.deepStrictEqual(
   series.map((point) => point.tasksIssuedPerUser),
   [1, 3],
   "Each bucket must divide only that period's tasks by that period's subscribed users"
+);
+assert.deepStrictEqual(
+  series.map((point) => point.waitlistSignups),
+  [1, 2],
+  'Each bucket must include waitlist entries created during that period'
 );
 assert.deepStrictEqual(
   series.map((point) => point.taskCount),
@@ -84,7 +96,8 @@ assert.deepStrictEqual(
 );
 
 const now = new Date('2026-07-12T19:30:00.000Z');
-const retrievalDayStart = '2026-07-12T00:00:00.000Z';
+// The latest period ends at the START OF TOMORROW so the in-progress day is included.
+const latestPeriodEnd = '2026-07-13T00:00:00.000Z';
 const rollingDays = {
   weekly: 7,
   monthly: 30,
@@ -98,8 +111,8 @@ for (const [timeSlice, days] of Object.entries(rollingDays)) {
   assert.ok(latest, `Expected a latest ${timeSlice} period`);
   assert.strictEqual(
     latest.end,
-    retrievalDayStart,
-    `${timeSlice} must end at the last complete UTC day`
+    latestPeriodEnd,
+    `${timeSlice} must end at the start of the next UTC day so today is included`
   );
   assert.strictEqual(
     Date.parse(latest.end) - Date.parse(latest.start),
@@ -124,7 +137,9 @@ for (const [timeSlice, days] of Object.entries(rollingDays)) {
   assert.strictEqual(
     buildPeriods(timeSlice as keyof typeof rollingDays, new Date('2026-07-13T01:00:00.000Z')).at(-1)
       ?.end,
-    '2026-07-13T00:00:00.000Z',
+    '2026-07-14T00:00:00.000Z',
     `${timeSlice} periods must roll over on the next UTC retrieval day`
   );
 }
+
+process.stdout.write('admin-health period metrics: passed\n');

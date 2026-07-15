@@ -313,6 +313,305 @@ def test_success_on_payment_card_request_passes_before_agent_completion():
     assert evaluate_task(task, data, approvals_triggered=1) == (True, None)
 
 
+def test_expected_passkey_credential_ref_is_required_even_when_approval_is_terminal():
+    """A passkey benchmark cannot pass from checkout state alone."""
+    from benchmarks.benchmark_tasks import BenchmarkTask
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = BenchmarkTask(
+        name="amazon-passkey-terminal",
+        title="Amazon Passkey Terminal",
+        prompt="",
+        timeout_seconds=1,
+        is_chat_mode=False,
+        expected_tools=[],
+        tags=[],
+        price_limit_cents=100,
+        requires_browser_agent=True,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling="ignore",
+        start_phase="execute",
+        expected_attention_kind="payment_approval",
+        expected_credential_ref_kind="passkey",
+        forbidden_credential_ref_kinds=["password", "email_otp", "sms_otp"],
+        expected_browser_provider="kernel",
+        expected_browser_session_metadata_values={
+            "profile_source": "new_user_persistent",
+            "auth_source": "none",
+            "cookies_injected": False,
+            "cookies_count": 0,
+            "local_storage_origin_count": 0,
+            "indexed_db_origin_count": 0,
+            "permission_grant_count": 0,
+            "cache_storage_origin_count": 0,
+        },
+        expected_pre_credential_message_contains=["Hello, sign in"],
+        expected_post_credential_message_contains=["Hello, Andy"],
+        success_on_browser_auth_evidence=True,
+    )
+    base_data = {
+        "agent": {"status": "ACTIVE", "progress": 0.01},
+        "_benchmark": {"expected_attention_kind_seen": "payment_approval"},
+    }
+    with_passkey = {
+        **base_data,
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "browser_url": "https://kernel.example/live/session-1",
+                    "browser_session_metadata": {
+                        "provider": "kernel",
+                        "profile_source": "new_user_persistent",
+                        "auth_source": "none",
+                        "cookies_injected": False,
+                        "cookies_count": 0,
+                        "local_storage_origin_count": 0,
+                        "indexed_db_origin_count": 0,
+                        "permission_grant_count": 0,
+                        "cache_storage_origin_count": 0,
+                    },
+                },
+            },
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "title": 'Clicking <a "Hello, sign in Account & Lists">',
+                    "toolStatus": "FINISHED",
+                    "action_type": "click",
+                    "browser_url": "https://kernel.example/live/session-1",
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "toolName": "browser_session_auth",
+                    "browser_url": "https://kernel.example/live/session-1",
+                    "credential_ref": {"kind": "passkey", "id": "passkey-row"},
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": "DOM shows Hello, Andy / Account & Lists",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "title": 'Clicking <a "Hello, Andy Account & Lists">',
+                    "toolStatus": "FINISHED",
+                    "action_type": "click",
+                    "browser_url": "https://kernel.example/live/session-1",
+                },
+            },
+        ],
+    }
+    without_passkey = {**base_data, "messages": []}
+
+    assert evaluate_task(task, with_passkey, approvals_triggered=1) == (True, None)
+    passed, reason = evaluate_task(task, without_passkey, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected credential_ref kind passkey but none was observed"
+
+    wrong_provider = {
+        **base_data,
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "credential_ref": {"kind": "passkey", "id": "passkey-row"},
+                    "browser_session_metadata": {"provider": "steel"},
+                },
+            }
+        ],
+    }
+    passed, reason = evaluate_task(task, wrong_provider, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected browser provider kernel but observed: steel"
+
+    split_browser_tasks = {
+        **base_data,
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "subAgentId": "kernel-task",
+                    "browser_url": "https://kernel.example/live/session-a",
+                    "browser_session_metadata": {"provider": "kernel"},
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "subAgentId": "passkey-task",
+                    "browser_url": "https://kernel.example/live/session-b",
+                    "credential_ref": {"kind": "passkey", "id": "passkey-row"},
+                },
+            },
+        ],
+    }
+    passed, reason = evaluate_task(task, split_browser_tasks, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected browser provider kernel and credential_ref kind passkey on the same browser session"
+
+    password_fallback = {
+        **with_passkey,
+        "messages": [
+            *with_passkey["messages"],
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "browser_url": "https://kernel.example/live/session-1",
+                    "credential_ref": {"kind": "password", "id": "password-row"},
+                },
+            },
+        ],
+    }
+    passed, reason = evaluate_task(task, password_fallback, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Observed forbidden credential_ref kind(s): password"
+
+    no_authenticated_page = {
+        **with_passkey,
+        "messages": [
+            with_passkey["messages"][0],
+            with_passkey["messages"][1],
+            with_passkey["messages"][2],
+        ],
+    }
+    passed, reason = evaluate_task(task, no_authenticated_page, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected authenticated page evidence after passkey use was not observed"
+
+    typed_greeting_is_not_page_evidence = {
+        **with_passkey,
+        "messages": [
+            with_passkey["messages"][0],
+            with_passkey["messages"][1],
+            with_passkey["messages"][2],
+            {
+                **with_passkey["messages"][3],
+                "metadata": {
+                    **with_passkey["messages"][3]["metadata"],
+                    "title": "Typed 'Hello, Andy' into Amazon search",
+                    "action_type": "input_text",
+                },
+            },
+        ],
+    }
+    passed, reason = evaluate_task(task, typed_greeting_is_not_page_evidence, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected authenticated page evidence after passkey use was not observed"
+
+    detached_authenticated_result = {
+        **with_passkey,
+        "messages": [
+            with_passkey["messages"][0],
+            with_passkey["messages"][1],
+            {
+                "role": "TOOL",
+                "metadata": with_passkey["messages"][2]["metadata"],
+            },
+            {
+                "role": "TOOL",
+                "text": "DOM shows Hello, Andy / Account & Lists",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "title": 'Clicking <a "Hello, Andy Account & Lists">',
+                    "toolStatus": "FINISHED",
+                    "action_type": "click",
+                    "browser_url": "https://kernel.example/live/session-2",
+                },
+            },
+        ],
+    }
+    passed, reason = evaluate_task(task, detached_authenticated_result, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected authenticated page evidence after passkey use was not observed"
+
+    reused_kernel_profile = {
+        **with_passkey,
+        "messages": [
+            {
+                **with_passkey["messages"][0],
+                "metadata": {
+                    **with_passkey["messages"][0]["metadata"],
+                    "browser_session_metadata": {
+                        **with_passkey["messages"][0]["metadata"]["browser_session_metadata"],
+                        "profile_source": "user_persistent",
+                    },
+                },
+            },
+            with_passkey["messages"][1],
+            with_passkey["messages"][2],
+            with_passkey["messages"][3],
+        ],
+    }
+    passed, reason = evaluate_task(task, reused_kernel_profile, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected isolated browser session metadata was not observed"
+
+    no_signed_out_precondition = {
+        **with_passkey,
+        "messages": [
+            with_passkey["messages"][0],
+            {
+                **with_passkey["messages"][1],
+                "metadata": {
+                    **with_passkey["messages"][1]["metadata"],
+                    "title": "Navigated to Amazon",
+                },
+            },
+            with_passkey["messages"][2],
+            with_passkey["messages"][3],
+        ],
+    }
+    passed, reason = evaluate_task(task, no_signed_out_precondition, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected signed-out evidence before passkey use was not observed"
+
+    instruction_only_precondition = {
+        **with_passkey,
+        "messages": [
+            with_passkey["messages"][0],
+            {
+                **with_passkey["messages"][1],
+                "text": "Task: first confirm Hello, sign in, then authenticate",
+                "metadata": {
+                    **with_passkey["messages"][1]["metadata"],
+                    "title": "Task Started",
+                    "action_type": "task_started",
+                },
+            },
+            with_passkey["messages"][2],
+            with_passkey["messages"][3],
+        ],
+    }
+    passed, reason = evaluate_task(task, instruction_only_precondition, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected signed-out evidence before passkey use was not observed"
+
+    fetched_but_unused_otp = {
+        **with_passkey,
+        "messages": [
+            *with_passkey["messages"],
+            {
+                "role": "USER",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "credential_ref": {"kind": "email_otp", "id": "email-row"},
+                },
+            },
+        ],
+    }
+    assert evaluate_task(task, fetched_but_unused_otp, approvals_triggered=1) == (True, None)
+
+
 def test_cached_sub_agent_child_tool_counts_are_counted_once():
     """Fast Mode sub-agent result replay preserves logical child tool counts."""
     from benchmarks.run_benchmark import _count_logical_tool_calls_from_messages
@@ -655,6 +954,86 @@ def test_browser_agent_cookie_bundle_bootstrap_can_be_skipped_with_env():
             os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] = original_env
 
     assert queries == []
+
+
+def test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile():
+    """The passkey live fixture must remove every alternative Amazon auth path."""
+    import benchmarks.run_benchmark as bench
+
+    queries = []
+    original_run_sql = bench._run_local_victoria_sql
+    original_sync_passkeys = bench._sync_passkeys
+    try:
+        bench._sync_passkeys = lambda: None
+        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "1\t4\t5\t1"
+        manifest = bench._apply_amazon_passkey(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="user-123",
+                auth_realm="amazon.com",
+            )
+        )
+    finally:
+        bench._run_local_victoria_sql = original_run_sql
+        bench._sync_passkeys = original_sync_passkeys
+
+    assert manifest == {
+        "fixture": "amazon_passkey",
+        "passkey_count": 1,
+        "alternative_auth_disabled_count": 4,
+        "browser_state_deleted_count": 5,
+        "kernel_profiles_detached_count": 1,
+    }
+    assert len(queries) == 1
+    sql = queries[0]
+    assert 'FROM "PasskeyCredential"' in sql
+    assert 'UPDATE "PasskeyCredential"' not in sql
+    assert '"authRealm" = \'amazon.com\'' in sql
+    assert 'LOWER("rpId")' not in sql
+    assert 'UPDATE "SteelSessionAuth"' in sql
+    assert 'UPDATE "CookieBundle"' in sql
+    assert 'UPDATE "BrowserPassword"' in sql
+    assert 'DELETE FROM "Cookie"' in sql
+    assert 'DELETE FROM "LocalStorageOrigin"' in sql
+    assert 'DELETE FROM "IndexedDBOrigin"' in sql
+    assert 'DELETE FROM "BrowserPermission"' in sql
+    assert 'DELETE FROM "CacheStorageOrigin"' in sql
+    assert 'DELETE FROM "BrowserProviderProfile"' in sql
+    assert 'profiles."provider" = \'kernel\'' in sql
+    assert "amazon.com" in sql
+
+
+def test_amazon_passkey_catalog_requires_live_passkey_kernel_evidence():
+    """The catalog exposes a dedicated live Kernel/passkey Amazon benchmark."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-agent-amazon-passkey")
+
+    assert task.environment["live_fixtures"] == ["compute_tokens", "amazon_passkey"]
+    assert task.expected_browser_provider == "kernel"
+    assert task.expected_credential_ref_kind == "passkey"
+    assert task.expected_browser_session_metadata_values == {
+        "profile_source": "new_user_persistent",
+        "auth_source": "none",
+        "cookies_injected": False,
+        "cookies_count": 0,
+        "local_storage_origin_count": 0,
+        "indexed_db_origin_count": 0,
+        "permission_grant_count": 0,
+        "cache_storage_origin_count": 0,
+    }
+    assert task.expected_pre_credential_message_contains == ["Hello, sign in"]
+    assert task.expected_post_credential_message_contains == ["Hello, Andy"]
+    assert task.success_on_browser_auth_evidence is True
+    assert task.forbidden_credential_ref_kinds == ["password", "email_otp", "sms_otp"]
+    assert task.expected_structured_response_values is None
+    assert task.expected_structured_response_contains is None
+    assert task.required_structured_response_fields == []
+    assert task.evaluators[0]["method"] == "static_check"
+    assert task.expected_attention_kind is None
+    assert task.approval_handling is None
+    assert "password" in task.prompt.lower()
+    assert "otp" in task.prompt.lower()
 
 
 def test_benchmark_agent_source_override_validates_known_sources():
@@ -4345,6 +4724,14 @@ async def run_all_tests():
         test_browser_agent_cookie_bundle_bootstrap_can_be_skipped_with_env,
     )
     r.record(
+        "amazon_passkey_fixture_isolation",
+        test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile,
+    )
+    r.record(
+        "amazon_passkey_catalog_contract",
+        test_amazon_passkey_catalog_requires_live_passkey_kernel_evidence,
+    )
+    r.record(
         "anon_benchmark_mode_disables_saved_auth",
         test_anon_benchmark_mode_disables_saved_auth_material,
     )
@@ -4496,6 +4883,10 @@ async def run_all_tests():
     r.record(
         "success_on_payment_card_request",
         test_success_on_payment_card_request_passes_before_agent_completion,
+    )
+    r.record(
+        "expected_passkey_credential_ref",
+        test_expected_passkey_credential_ref_is_required_even_when_approval_is_terminal,
     )
     r.record(
         "cached_sub_agent_child_tool_counts",

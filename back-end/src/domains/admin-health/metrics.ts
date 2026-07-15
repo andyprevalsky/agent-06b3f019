@@ -276,6 +276,7 @@ export function compareFunnelSteps(
 export function buildSeries(
   periods: AdminHealthPeriod[],
   tasks: repo.RootTaskRecord[],
+  waitlistSignups: repo.WaitlistSignupRecord[],
   subscribers: SubscriberSeriesPoint[],
   revenue: Array<{ revenueCents: number | null }>,
   velocity: Array<{
@@ -285,16 +286,18 @@ export function buildSeries(
   }>
 ): AdminHealthSeriesPoint[] {
   const tasksByPeriod = periods.map(() => [] as repo.RootTaskRecord[]);
+  const waitlistSignupsByPeriod = periods.map(() => 0);
   for (const task of tasks) {
     const index = findPeriodIndex(periods, task.createdAt);
     if (index >= 0) tasksByPeriod[index].push(task);
   }
+  for (const signup of waitlistSignups) {
+    const index = findPeriodIndex(periods, signup.createdAt);
+    if (index >= 0) waitlistSignupsByPeriod[index] += 1;
+  }
+  const emptySubscriber: SubscriberSeriesPoint = { userCount: 0, newUsers: 0, userIds: new Set() };
   return periods.map((period, index) => {
-    const subscriberPoint = subscribers[index] ?? {
-      userCount: 0,
-      newUsers: 0,
-      userIds: new Set<string>(),
-    };
+    const subscriberPoint = subscribers[index] ?? emptySubscriber;
     const periodTasks = tasksByPeriod[index].filter((task) =>
       subscriberPoint.userIds.has(task.userId)
     );
@@ -302,6 +305,7 @@ export function buildSeries(
       ...period,
       ...revenue[index],
       ...velocity[index],
+      waitlistSignups: waitlistSignupsByPeriod[index],
       userCount: subscriberPoint.userCount,
       newUsers: subscriberPoint.newUsers,
       taskCount: periodTasks.length,

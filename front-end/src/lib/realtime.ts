@@ -1,4 +1,4 @@
-import { supabase, getSession } from './supabase';
+import { supabase, getSession, isRealtimeReady } from './supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 
 // Import and re-export all types from realtime-types.ts
@@ -130,14 +130,24 @@ export async function subscribeToChannel(
     throw new Error('Not authenticated');
   }
 
-  // IMPORTANT: Call setAuth immediately before creating each channel
-  // This ensures the new channel gets the correct token in its join payload.
-  // Supabase doesn't automatically apply setAuth to new channels created later.
+  // Bind the realtime socket's auth token before creating the channel so the
+  // private-channel join payload carries it (see RealtimeChannel._rejoin, which
+  // only attaches access_token when socket.accessTokenValue is populated).
+  //
+  // In the normal app flow useAuth's setRealtimeAuth() has ALREADY bound the
+  // token — canSubscribe/realtimeReady gate every app subscription behind that.
+  // In that case a per-channel setAuth() is a redundant no-op (RealtimeClient
+  // ._performAuth early-returns when the token is unchanged), and re-entering
+  // setAuth() while the shared socket is mid-connect only adds churn. So we only
+  // set it here as a fallback for callers that may subscribe before
+  // setRealtimeAuth() has run (isRealtimeReady() === false).
   // See: https://github.com/supabase/realtime-js/pull/126
-  console.log(`[Realtime] subscribeToChannel(${channelName}) - calling setAuth with user token`);
-  console.log(`[Realtime] Token preview: ${session.access_token.slice(0, 50)}...`);
-  await supabase.realtime.setAuth(session.access_token);
-  console.log(`[Realtime] setAuth completed for ${channelName}`);
+  if (!isRealtimeReady()) {
+    console.log(
+      `[Realtime] subscribeToChannel(${channelName}) - binding auth token (realtime not yet initialized)`,
+    );
+    await supabase.realtime.setAuth(session.access_token);
+  }
 
   // Private channels in production (RLS checks Supabase managed DB).
   // In dev, use public channels since agents live in a local DB.
@@ -155,7 +165,12 @@ export async function subscribeToChannel(
   let resolved = false;
   let disconnectNotified = false;
   return new Promise((resolve, reject) => {
-    channel.subscribe((status) => {
+    // realtime-js passes a second `err` argument on CHANNEL_ERROR/TIMED_OUT
+    // (the phx_join error reply, or the normalized transport reason). We MUST
+    // surface it — a bare "CHANNEL_ERROR" hides whether the join was rejected
+    // for auth/RLS reasons vs a transport drop, which is exactly what's needed
+    // to diagnose intermittent subscription failures.
+    channel.subscribe((status, err) => {
       // Log all status changes for debugging
       console.log(`🔌 ${logPrefix} channel (${shortName}) status: ${status}`);
 
@@ -165,15 +180,20 @@ export async function subscribeToChannel(
         disconnectNotified = false; // Reset on successful (re)join
         resolve(channel);
       } else if (status === 'CHANNEL_ERROR') {
-        console.error(`❌ Disconnected from ${channelName} - CHANNEL_ERROR`);
-        if (!resolved) reject(new Error(`Channel error for ${channelName}`));
+        const reason = err?.message || 'unknown';
+        console.error(
+          `❌ Disconnected from ${channelName} - CHANNEL_ERROR: ${reason}`,
+          err?.cause ?? err ?? '',
+        );
+        if (!resolved) reject(new Error(`Channel error for ${channelName}: ${reason}`));
         else if (onDisconnect && !disconnectNotified) {
           disconnectNotified = true;
           onDisconnect();
         }
       } else if (status === 'TIMED_OUT') {
-        console.error(`❌ Disconnected from ${channelName} - TIMED_OUT`);
-        if (!resolved) reject(new Error(`Subscription timed out for ${channelName}`));
+        const reason = err?.message || 'unknown';
+        console.error(`❌ Disconnected from ${channelName} - TIMED_OUT: ${reason}`, err ?? '');
+        if (!resolved) reject(new Error(`Subscription timed out for ${channelName}: ${reason}`));
         else if (onDisconnect && !disconnectNotified) {
           disconnectNotified = true;
           onDisconnect();

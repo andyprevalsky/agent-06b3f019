@@ -272,14 +272,19 @@ def test_predeploy_cloud_runner_selects_the_catalog_smoke_group() -> None:
     ]
 
 
-def test_deploy_smoke_gate_uses_the_visible_cloud_runner() -> None:
+def test_deploy_smoke_gate_uses_the_local_isolated_runner() -> None:
+    # The deploy Step 6 smoke gate runs the Pre-Deploy group through the LOCAL
+    # isolated stack (run-bench --local / run.sh --benchmark), not the cloud
+    # fleet — deploy.md is the committed source of truth for this policy.
     deploy = DEPLOY_COMMAND.read_text()
     step = deploy.split("## Step 6: Smoke benchmarks + fix", 1)[1].split(
         "## Step 6b: Semantic tests + fix", 1
     )[0]
 
-    assert "scripts/run-predeploy-cloud" in step
-    assert "Benchmarks → Runs" in step
+    assert "run-bench --local" in step
+    assert "run.sh --benchmark" in step
+    assert "local isolated" in step
+    assert "Do NOT use" in step  # the cloud fleet is explicitly excluded from the gate
     assert "7/7" in step
     assert "run_benchmark.py --suite smoke" not in step
     assert "git diff --name-only HEAD" in deploy
@@ -1033,7 +1038,8 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
     helper = ENV_HELPER_SCRIPT.read_text()
     assert "cloudbench_terminate_and_wait() {" in helper
     assert 'kill -KILL "$pid"' in helper
-    assert "trap 'exit 129' HUP" in fleet
+    # fleet traps name the signal before exiting (still exit 129/130/143)
+    assert "controller received HUP" in fleet and "exit 129' HUP" in fleet
     assert "trap 'exit 129' HUP" in cloud
 
 
@@ -1044,9 +1050,12 @@ def test_pool_reconcile_leaves_concurrent_owner_untouched(tmp_path: Path) -> Non
     function_end = fleet.index("\n}\n", reconcile_start) + 3
     reconcile_functions = fleet[function_start:function_end]
 
-    pool_file = tmp_path / "pool.ids"
+    git_common = tmp_path / "git-common"
+    pool_file = git_common / "cloudbench-pools" / "workspace.ids"
+    claims_dir = git_common / "cloudbench-pool-claims"
     states_file = tmp_path / "states"
     operations_file = tmp_path / "operations"
+    pool_file.parent.mkdir(parents=True)
     pool_file.write_text("abc123\n")
     states_file.write_text("started\n")
     operations_file.write_text("")
@@ -1057,7 +1066,9 @@ def test_pool_reconcile_leaves_concurrent_owner_untouched(tmp_path: Path) -> Non
             "-c",
             f"""set -uo pipefail
 APP=bench-app
+GIT_COMMON_DIR="$GIT_COMMON"
 POOL_IDS_FILE="$POOL_FILE"
+POOL_CLAIMS_DIR="$CLAIMS_DIR"
 UNAVAILABLE_POOL_IDS=()
 FLY() {{
   if [ "$1 $2" = "machines list" ]; then
@@ -1082,6 +1093,8 @@ printf 'refresh\\n' >> "$OPERATIONS_FILE"
         ],
         env={
             "POOL_FILE": str(pool_file),
+            "GIT_COMMON": str(git_common),
+            "CLAIMS_DIR": str(claims_dir),
             "STATES_FILE": str(states_file),
             "OPERATIONS_FILE": str(operations_file),
             "CLOUDBENCH_POOL_STOP_DELAY": "0",
@@ -1104,6 +1117,9 @@ printf 'refresh\\n' >> "$OPERATIONS_FILE"
 
 def test_pool_claims_survive_command_substitution_and_stay_distinct(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
+    write_start = fleet.index("write_pool_claim() {")
+    write_end = fleet.index("\n}\n", write_start) + 3
+    write_function = fleet[write_start:write_end]
     function_start = fleet.index("claim_pool_machine() {")
     function_end = fleet.index("\n}\n", function_start) + 3
     claim_function = fleet[function_start:function_end]
@@ -1123,12 +1139,15 @@ POOL_IDS_FILE="$POOL_FILE"
 CLAIMED_POOL_FILE="$CLAIMS_FILE"
 POOL_CLAIMS_DIR="$GLOBAL_CLAIMS"
 UNAVAILABLE_POOL_IDS=(abc123)
+FLEET_OWNER_HOST=test-host
+FLEET_OWNER_PID_START='Mon Jan  1 00:00:00 2001'
 machine_storage_ready() {{ return 0; }}
 FLY() {{
   if [ "$1 $2" = "machine status" ]; then printf 'State stopped\\n'; return 0; fi
   if [ "$1 $2" = "machine start" ]; then printf '%s\\n' "$3" >> "$STARTS_FILE"; return 0; fi
   return 2
 }}
+{write_function}
 {claim_function}
 first="$(claim_pool_machine)"
 second="$(claim_pool_machine)"
@@ -1248,6 +1267,8 @@ FLY() {{
   return 2
 }}
 fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
+fleet_registry_record_name() {{ return 0; }}
+fleet_registry_record_id() {{ return 0; }}
 {clone_function}
 clone_machine_target "$LEDGER"
 """,
@@ -1335,11 +1356,13 @@ def test_pool_promotes_only_successful_owned_clone_ids() -> None:
     pool_function = fleet[pool_start:pool_end]
 
     clone_call = 'id="$(clone_machine_target "$OWNED_CLONES_FILE")"'
-    promotion = 'printf \'%s\\n\' "$id" >> "$POOL_IDS_FILE"'
+    promotion = 'if pool_ledger_record_id "$id"; then'
+    registry_release = 'fleet_registry_release_id "$id"'
     release = 'grep -Fxv "$id" "$OWNED_CLONES_FILE"'
     assert clone_call in pool_function
     assert pool_function.index(clone_call) < pool_function.index(promotion)
-    assert pool_function.index(promotion) < pool_function.index(release)
+    assert pool_function.index(promotion) < pool_function.index(registry_release)
+    assert pool_function.index(registry_release) < pool_function.index(release)
     assert 'clone_machine_target "$POOL_IDS_FILE"' not in pool_function
 
 
@@ -1492,6 +1515,8 @@ CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
 CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
 {timeout_fn}
 fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
+fleet_registry_record_name() {{ return 0; }}
+fleet_registry_record_id() {{ return 0; }}
 {resolver}
 {cloner}
 clone_machine_target "$LEDGER"
@@ -1547,6 +1572,8 @@ CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
 CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
 {timeout_fn}
 fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
+fleet_registry_record_name() {{ return 0; }}
+fleet_registry_record_id() {{ return 0; }}
 {resolver}
 {cloner}
 clone_machine_target "$LEDGER"
@@ -1609,6 +1636,8 @@ CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
 CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
 {timeout_fn}
 fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
+fleet_registry_record_name() {{ return 0; }}
+fleet_registry_record_id() {{ return 0; }}
 {resolver}
 {cloner}
 clone_machine_target "$LEDGER"
@@ -1655,9 +1684,12 @@ def test_fleet_provisions_clones_concurrently() -> None:
     # one slow clone cannot block the others (or the whole batch).
     assert "CHILD_PIDS+=" not in phase1
     assert "run-bench-cloud" not in phase1
-    # cleanup reaps the per-bench primary ledgers → no leak if killed mid-provision
-    assert '"$FLEET_DIR"/*/primary.ids' in fleet
-    assert '"$FLEET_DIR"/*/primary.names' in fleet
+    # No leak if killed mid-provision: each concurrent clone records into the
+    # durable fleet-ownership registry (inside clone_machine_target), which the
+    # cleanup reaps via reap_registry_clones — authoritative even across
+    # workspace deletion, and it calls reap_machine (which also reaps volumes).
+    assert "fleet_registry_record_name" in fleet
+    assert "reap_registry_clones" in fleet
 
 
 def test_reap_machine_destroys_the_clones_forked_volume(tmp_path: Path) -> None:

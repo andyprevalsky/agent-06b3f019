@@ -47,4 +47,14 @@ describe('blackbox realtime transport', () => {
     expect(second.state).toBe('joined');
     expect(await within(supabase.removeChannel(second))).toBe('ok');
   });
+
+  it('surfaces the join-error reason on CHANNEL_ERROR instead of a bare error', async () => {
+    storeTestSession();
+
+    // The mock rejects joins for topics containing "deny-join" with
+    // { reason: 'access denied' }. subscribeToChannel must propagate that reason
+    // — a bare "Channel error" would hide auth/RLS vs transport failures and make
+    // intermittent subscription drops undiagnosable.
+    await expect(within(subscribeToChannel('test:deny-join', {}))).rejects.toThrow(/access denied/);
+  });
 });

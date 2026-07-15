@@ -1913,6 +1913,12 @@ async def poll_agent(
                 if time.time() - chat_assistant_seen_at >= 10:
                     return data, approvals_triggered, approvals_resolved, None
 
+        if task.success_on_browser_auth_evidence:
+            auth_evidence_passed, _ = evaluate_task(task, data, approvals_triggered)
+            if auth_evidence_passed:
+                print("    ✅ Ordered browser authentication evidence observed")
+                return data, approvals_triggered, approvals_resolved, None
+
         # Agent mode: done on terminal status
         if status in TERMINAL_STATUSES:
             return data, approvals_triggered, approvals_resolved, None
@@ -2314,6 +2320,245 @@ def evaluate_task(
     status = agent.get("status", "UNKNOWN")
     messages = data.get("messages", [])
     progress = agent.get("progress", 0)
+
+    observed_providers: set[str] = set()
+    credential_ref_kinds: set[str] = set()
+    provider_scopes: dict[str, set[str]] = {}
+    credential_scopes: dict[str, set[str]] = {}
+    browser_session_metadata_by_scope: dict[str, list[tuple[int, dict]]] = {}
+    credential_indexes_by_scope_kind: dict[tuple[str, str], list[int]] = {}
+    message_evidence_by_scope: dict[str, list[tuple[int, str]]] = {}
+    structured_responses: list[tuple[str, dict]] = []
+    tool_call_scopes: dict[str, set[str]] = {}
+    for message in messages:
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        auxiliary = metadata.get("auxiliary")
+        scope_value = metadata.get("subAgentId") or metadata.get("task_id")
+        if not scope_value and isinstance(auxiliary, dict):
+            scope_value = auxiliary.get("subAgentId") or auxiliary.get("task_id")
+        if not scope_value:
+            continue
+        for candidate in (metadata, auxiliary):
+            if not isinstance(candidate, dict):
+                continue
+            tool_call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
+            if tool_call_id:
+                tool_call_scopes.setdefault(str(tool_call_id), set()).add(str(scope_value))
+
+    for message_index, message in enumerate(messages):
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        auxiliary = metadata.get("auxiliary")
+        scope_value = metadata.get("subAgentId") or metadata.get("task_id")
+        if not scope_value and isinstance(auxiliary, dict):
+            scope_value = auxiliary.get("subAgentId") or auxiliary.get("task_id")
+        if not scope_value:
+            tool_call_id = metadata.get("toolCallId") or metadata.get("tool_call_id")
+            linked_scopes = tool_call_scopes.get(str(tool_call_id), set()) if tool_call_id else set()
+            if len(linked_scopes) == 1:
+                scope_value = next(iter(linked_scopes))
+        task_scope = str(scope_value) if scope_value else f"message:{message_index}"
+        candidates = [metadata]
+        if isinstance(auxiliary, dict):
+            candidates.append(auxiliary)
+        browser_session_value = next(
+            (
+                candidate.get("browser_session_id") or candidate.get("browser_url")
+                for candidate in candidates
+                if candidate.get("browser_session_id") or candidate.get("browser_url")
+            ),
+            None,
+        )
+        scope = (
+            f"{task_scope}|browser_session:{browser_session_value}"
+            if browser_session_value
+            else task_scope
+        )
+
+        # Only completed browser actions are grounded page evidence. Task
+        # prompts, verifier prose, and assistant restatements can contain the
+        # expected text without proving it was ever visible in the browser.
+        action_type = next(
+            (candidate.get("action_type") for candidate in candidates if candidate.get("action_type")),
+            None,
+        )
+        tool_status = next(
+            (candidate.get("toolStatus") for candidate in candidates if candidate.get("toolStatus")),
+            None,
+        )
+        # This auth probe's greeting markers must come from a DOM element the
+        # browser actually clicked. Input/select titles include model-supplied
+        # values and could otherwise manufacture the expected greeting text.
+        grounded_action_types = {"click"}
+        if message.get("role") == "TOOL" and tool_status == "FINISHED" and action_type in grounded_action_types:
+            evidence = "\n".join(
+                candidate["title"]
+                for candidate in candidates
+                if isinstance(candidate.get("title"), str)
+            )
+            if evidence:
+                message_evidence_by_scope.setdefault(scope, []).append((message_index, evidence))
+        for candidate in candidates:
+            session_metadata = candidate.get("browser_session_metadata")
+            if isinstance(session_metadata, dict):
+                browser_session_metadata_by_scope.setdefault(scope, []).append((message_index, session_metadata))
+                if isinstance(session_metadata.get("provider"), str):
+                    provider = session_metadata["provider"]
+                    observed_providers.add(provider)
+                    provider_scopes.setdefault(provider, set()).add(scope)
+            credential_ref = candidate.get("credential_ref") or candidate.get("credentialRef")
+            # USER OTP availability messages mean a code was fetched, not
+            # exercised. TOOL credential refs are the durable usage signal.
+            if (
+                message.get("role") == "TOOL"
+                and isinstance(credential_ref, dict)
+                and isinstance(credential_ref.get("kind"), str)
+            ):
+                kind = credential_ref["kind"]
+                credential_ref_kinds.add(kind)
+                credential_scopes.setdefault(kind, set()).add(scope)
+                credential_indexes_by_scope_kind.setdefault((scope, kind), []).append(message_index)
+            structured_response = candidate.get("structured_response") or candidate.get("structuredResponse")
+            if isinstance(structured_response, dict):
+                structured_responses.append((scope, structured_response))
+
+    if task.expected_credential_ref_kind:
+        expected_kind = task.expected_credential_ref_kind
+        if expected_kind not in credential_ref_kinds:
+            return False, f"Expected credential_ref kind {expected_kind} but none was observed"
+
+    forbidden_kinds = set(task.forbidden_credential_ref_kinds)
+    observed_forbidden_kinds = forbidden_kinds & credential_ref_kinds
+    if observed_forbidden_kinds:
+        observed = ", ".join(sorted(observed_forbidden_kinds))
+        return False, f"Observed forbidden credential_ref kind(s): {observed}"
+
+    if task.expected_browser_provider:
+        expected_provider = task.expected_browser_provider
+        if expected_provider not in observed_providers:
+            observed = ", ".join(sorted(observed_providers)) or "none"
+            return False, f"Expected browser provider {expected_provider} but observed: {observed}"
+        if task.expected_credential_ref_kind:
+            provider_task_scopes = provider_scopes.get(expected_provider, set())
+            credential_task_scopes = credential_scopes.get(task.expected_credential_ref_kind, set())
+            if not provider_task_scopes.intersection(credential_task_scopes):
+                return (
+                    False,
+                    f"Expected browser provider {expected_provider} and credential_ref kind "
+                    f"{task.expected_credential_ref_kind} on the same browser session",
+                )
+
+    matching_session_metadata_scopes: set[str] = set()
+    matching_session_metadata_indexes: dict[str, list[int]] = {}
+    if task.expected_browser_session_metadata_values:
+        expected_metadata = task.expected_browser_session_metadata_values
+        for scope, metadata_items in browser_session_metadata_by_scope.items():
+            first_credential_index = min(
+                credential_indexes_by_scope_kind.get(
+                    (scope, task.expected_credential_ref_kind or ""),
+                    [len(messages)],
+                )
+            )
+            matching_indexes = [
+                message_index
+                for message_index, metadata_item in metadata_items
+                if message_index < first_credential_index
+                and all(metadata_item.get(key) == value for key, value in expected_metadata.items())
+            ]
+            if matching_indexes:
+                matching_session_metadata_scopes.add(scope)
+                matching_session_metadata_indexes[scope] = matching_indexes
+        if not matching_session_metadata_scopes:
+            return False, "Expected isolated browser session metadata was not observed"
+
+    matching_pre_credential_scopes: set[str] = set()
+    if task.expected_pre_credential_message_contains:
+        expected_kind = task.expected_credential_ref_kind
+        if not expected_kind:
+            return False, "Pre-credential evidence requires expected_credential_ref_kind"
+        for scope in credential_scopes.get(expected_kind, set()):
+            first_credential_index = min(credential_indexes_by_scope_kind.get((scope, expected_kind), [len(messages)]))
+            session_metadata_index = min(matching_session_metadata_indexes.get(scope, [-1]))
+            prior_evidence = "\n".join(
+                evidence
+                for message_index, evidence in message_evidence_by_scope.get(scope, [])
+                if session_metadata_index < message_index < first_credential_index
+            ).lower()
+            if all(needle.lower() in prior_evidence for needle in task.expected_pre_credential_message_contains):
+                matching_pre_credential_scopes.add(scope)
+        if not matching_pre_credential_scopes:
+            return False, "Expected signed-out evidence before passkey use was not observed"
+
+    matching_post_credential_scopes: set[str] = set()
+    if task.expected_post_credential_message_contains:
+        expected_kind = task.expected_credential_ref_kind
+        if not expected_kind:
+            return False, "Post-credential evidence requires expected_credential_ref_kind"
+        for scope in credential_scopes.get(expected_kind, set()):
+            first_credential_index = min(credential_indexes_by_scope_kind.get((scope, expected_kind), [len(messages)]))
+            later_evidence = "\n".join(
+                evidence
+                for message_index, evidence in message_evidence_by_scope.get(scope, [])
+                if message_index > first_credential_index
+            ).lower()
+            if all(needle.lower() in later_evidence for needle in task.expected_post_credential_message_contains):
+                matching_post_credential_scopes.add(scope)
+        if not matching_post_credential_scopes:
+            return False, "Expected authenticated page evidence after passkey use was not observed"
+
+    has_structured_response_requirements = bool(
+        task.expected_structured_response_values
+        or task.expected_structured_response_contains
+        or task.required_structured_response_fields
+    )
+    matching_structured_scopes: set[str] = set()
+    if has_structured_response_requirements:
+        expected_values = task.expected_structured_response_values or {}
+        expected_contains = task.expected_structured_response_contains or {}
+
+        def _structured_response_matches(response: dict) -> bool:
+            if not all(response.get(key) == expected for key, expected in expected_values.items()):
+                return False
+            for key, raw_needles in expected_contains.items():
+                value = response.get(key)
+                needles = [raw_needles] if isinstance(raw_needles, str) else raw_needles
+                if not isinstance(value, str) or not isinstance(needles, list):
+                    return False
+                if not all(isinstance(needle, str) and needle.lower() in value.lower() for needle in needles):
+                    return False
+            return all(response.get(key) not in (None, "", [], {}) for key in task.required_structured_response_fields)
+
+        matching_structured_scopes = {
+            scope for scope, response in structured_responses if _structured_response_matches(response)
+        }
+        if not matching_structured_scopes:
+            return False, "Expected authenticated structured browser response evidence was not observed"
+
+    if task.expected_browser_provider and task.expected_credential_ref_kind:
+        provider_task_scopes = provider_scopes.get(task.expected_browser_provider, set())
+        credential_task_scopes = credential_scopes.get(task.expected_credential_ref_kind, set())
+        correlated_scopes = provider_task_scopes.intersection(credential_task_scopes)
+        if task.expected_browser_session_metadata_values:
+            correlated_scopes.intersection_update(matching_session_metadata_scopes)
+        if task.expected_pre_credential_message_contains:
+            correlated_scopes.intersection_update(matching_pre_credential_scopes)
+        if task.expected_post_credential_message_contains:
+            correlated_scopes.intersection_update(matching_post_credential_scopes)
+        if has_structured_response_requirements:
+            correlated_scopes.intersection_update(matching_structured_scopes)
+        if not correlated_scopes:
+            if has_structured_response_requirements:
+                return (
+                    False,
+                    "Expected provider, credential, and authenticated response evidence on the same browser session",
+                )
+            return False, "Expected provider, credential, and authenticated page evidence on the same browser session"
+
+    if task.success_on_browser_auth_evidence:
+        return True, None
 
     # Chat mode: just needs ASSISTANT response
     if task.is_chat_mode:
@@ -2888,6 +3133,36 @@ def _sync_browser_credentials() -> bool:
     return True
 
 
+def _sync_passkeys() -> None:
+    """Refresh only passkeys from prod into the isolated benchmark DB.
+
+    Unlike the broad base fixture, this deliberately excludes cookies, origin
+    storage, browser profiles, and passwords. Failure is fatal because an old
+    or missing passkey would invalidate the benchmark rather than merely make
+    it less convenient.
+    """
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for passkey-only sync")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    try:
+        result = subprocess.run(
+            ["npx", "tsx", "scripts/seed-local.ts", "--passkeys-only"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Passkey-only sync failed: {exc}") from exc
+    if result.returncode != 0:
+        raise RuntimeError(f"Passkey-only sync failed: {(result.stderr or result.stdout).strip()[:500]}")
+    print("    🔐 Refreshed passkeys only from prod")
+
+
 @dataclass
 class LiveFixtureContext:
     """Runtime inputs handed to a live-fixture applier."""
@@ -2919,6 +3194,12 @@ def _apply_base_live_fixture(ctx: LiveFixtureContext) -> dict:
         return {"fixture": "base", "browser_credentials": False}
     _sync_browser_credentials()
     return {"fixture": "base", "browser_credentials": True}
+
+
+def _apply_compute_tokens(ctx: LiveFixtureContext) -> dict:
+    """Refresh compute tokens without importing any browser authentication state."""
+    _sync_compute_tokens()
+    return {"fixture": "compute_tokens"}
 
 
 def _apply_amazon_auth(ctx: LiveFixtureContext) -> dict:
@@ -3074,8 +3355,8 @@ def _restore_amazon_passkey_fixture(manifest: dict) -> None:
 # the assertion below so a fixture can never be declared without an applier.
 LIVE_FIXTURE_APPLIERS = {
     "base": _apply_base_live_fixture,
-    "amazon_auth": _apply_amazon_auth,
     "compute_tokens": _apply_compute_tokens,
+    "amazon_auth": _apply_amazon_auth,
     "amazon_passkey": _apply_amazon_passkey,
 }
 assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (

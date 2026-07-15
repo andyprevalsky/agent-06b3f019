@@ -8,7 +8,7 @@
  *         -> backend admin check
  *         -> rolling 7|30|90|365-day periods anchored to the UTC retrieval day
  *         -> backend day + time-slice response cache
- *         -> Stripe charges + Prisma task/user metrics + Linear/GitHub velocity
+ *         -> Stripe charges + Prisma waitlist/task/user metrics + Linear/GitHub velocity
  *      -> ordered website funnel -> horizontal volume BarChart + comparison tiles
  *      -> verified-account activation -> separate BarChart + comparison tiles
  *
@@ -48,6 +48,7 @@ import { MetricChange } from './MetricChange';
 import { MetricSectionHeader } from './MetricHierarchy';
 import PrimaryMetricSection from './PrimaryMetricSection';
 import VelocitySection from './VelocitySection';
+import WaitlistSignupsChart from './WaitlistSignupsChart';
 import { relativeChange, seriesMetricChange } from './metricComparison';
 import type {
   AdminHealthData,
@@ -633,6 +634,7 @@ export default function AdminHealth() {
                 title="General Health Metrics"
                 description="Internal execution signals that support product and operational health."
               />
+              <WaitlistSignupsChart data={data} />
               <VelocitySection data={data} />
             </section>
           </div>
