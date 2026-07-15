@@ -118,10 +118,7 @@ async function main(): Promise<void> {
 
     // Assert the LIVE list is forwarded in full — compare against whatever the
     // server advertised, never a fixed/expected app-level allowlist.
-    assert.deepStrictEqual(
-      tools.map((t) => t.name).sort(),
-      advertised.map((t) => t.name).sort()
-    );
+    assert.deepStrictEqual(tools.map((t) => t.name).sort(), advertised.map((t) => t.name).sort());
     // inputSchema is passed through verbatim (so future params work with no change).
     const future = tools.find((t) => t.name === 'teleport_card_v9');
     assert.deepStrictEqual(future?.inputSchema, advertised[3].inputSchema);
@@ -157,7 +154,12 @@ async function main(): Promise<void> {
     });
 
     // 1) First create_card is gated on approval.
-    const gated = (await mcpCallTool('tok', 'create_card', { amount_cents: 2500 }, server.fetch)) as {
+    const gated = (await mcpCallTool(
+      'tok',
+      'create_card',
+      { amount_cents: 2500 },
+      server.fetch
+    )) as {
       structuredContent?: Record<string, unknown>;
     };
     assert.strictEqual(gated.structuredContent?.approval_required, true);
@@ -173,7 +175,12 @@ async function main(): Promise<void> {
     assert.strictEqual(resolved.structuredContent?.approved, true);
 
     // 3) Retry create_card now succeeds.
-    const card = (await mcpCallTool('tok', 'create_card', { amount_cents: 2500 }, server.fetch)) as {
+    const card = (await mcpCallTool(
+      'tok',
+      'create_card',
+      { amount_cents: 2500 },
+      server.fetch
+    )) as {
       structuredContent?: Record<string, unknown>;
     };
     assert.strictEqual(card.structuredContent?.card_id, 'card_123');

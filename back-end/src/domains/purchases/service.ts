@@ -3,35 +3,21 @@ import {
   isCardLive,
   type CardProvider,
   type CardProviderDetailsResult,
-  AgentCardProviderError,
 } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
-import {
-  cancelAuthorizedHold,
-  captureAuthorizedHold,
-  refundCapturedPurchase,
-  stripe,
-} from '../../providers/stripe';
-import {
-  createWalletFundingProvider,
-  WalletFundingProviderError,
-  type WalletFundingProvider,
-} from '../../providers/wallet-funding';
+import { cancelAuthorizedHold } from '../../providers/stripe';
+import { type WalletFundingProvider } from '../../providers/wallet-funding';
 import {
   benchmarkPurchaseKycRequired,
   MAX_PURCHASE_CENTS,
   PURCHASE_APPROVAL_CACHE_HOURS,
+  PURCHASE_STALE_CHARGING_MS,
 } from './config';
 import { PurchaseError } from './errors';
-import { isKycRequiredError, kycRequiredPurchaseError } from './kyc';
-import { getCustomerDefaultPaymentMethodId } from './stripeCustomer';
+import { kycRequiredPurchaseError } from './kyc';
 import * as repo from './repo';
-import { archivePurchaseBoundary } from './archive';
-import {
-  confirmPurchaseWalletCollection,
-  recordPurchaseWalletFunding,
-  reclaimPurchaseWalletFunding,
-} from './walletFunding';
+import { reclaimPurchaseWalletFunding } from './walletFunding';
+import { chargeAndIssueCard } from './charge';
 import {
   PurchaseSpendStatus,
   type MintPurchaseInput,
@@ -49,11 +35,6 @@ export {
 } from './reconcile';
 
 const log = createLogger('Purchases');
-const STALE_CHARGING_MS = Number(process.env.PURCHASE_STALE_CHARGING_MS ?? 15 * 60 * 1000);
-const COMPANY_FLOW_MAX_WAIT_MS = Number(
-  process.env.AGENTCARD_COMPANY_FLOW_MAX_WAIT_MS ?? 60 * 1000
-);
-const COMPANY_FLOW_RETRY_MS = Number(process.env.AGENTCARD_COMPANY_FLOW_RETRY_MS ?? 2 * 1000);
 const RETRYABLE_PURCHASE_STATUSES = new Set<PurchaseSpendStatus>([
   PurchaseSpendStatus.FAILED,
   PurchaseSpendStatus.REFUNDED,
@@ -68,56 +49,12 @@ function assertPositiveCents(value: number, field: string): void {
   }
 }
 
-function sanitizeDescriptorSuffix(merchant: string): string {
-  const cleaned = merchant
-    .replace(/[^a-zA-Z0-9 ._-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return (cleaned || 'Purchase').slice(0, 22);
-}
-
 function normalizeCurrency(currency: string): string {
   const normalized = currency.trim().toLowerCase();
   if (normalized !== 'usd') {
     throw new PurchaseError('Only USD purchases are currently supported');
   }
   return normalized;
-}
-
-function isStripeMissingCustomerError(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null) return false;
-  const candidate = error as {
-    code?: unknown;
-    param?: unknown;
-    message?: unknown;
-    raw?: { code?: unknown; param?: unknown };
-  };
-  const code = typeof candidate.code === 'string' ? candidate.code : candidate.raw?.code;
-  const param = typeof candidate.param === 'string' ? candidate.param : candidate.raw?.param;
-  return (
-    (code === 'resource_missing' && param === 'customer') ||
-    (typeof candidate.message === 'string' && candidate.message.includes('No such customer'))
-  );
-}
-
-function toPurchaseBoundaryError(error: unknown): Error {
-  if (error instanceof PurchaseError) return error;
-  if (isStripeMissingCustomerError(error)) {
-    return new PurchaseError(
-      'Stored Stripe billing customer does not exist for the current Stripe environment',
-      402
-    );
-  }
-  if (error instanceof AgentCardProviderError) {
-    const statusCode =
-      error.status !== undefined && error.status >= 400 && error.status < 500 ? error.status : 502;
-    return new PurchaseError(error.message, statusCode, error.code, error.details);
-  }
-  if (error instanceof WalletFundingProviderError) {
-    const statusCode = error.status >= 400 && error.status < 500 ? error.status : 502;
-    return new PurchaseError(error.message, statusCode, error.code, error.details);
-  }
-  return error instanceof Error ? error : new Error(String(error));
 }
 
 function isReusableStatus(status: PurchaseSpendStatus): boolean {
@@ -127,37 +64,8 @@ function isReusableStatus(status: PurchaseSpendStatus): boolean {
 function isStaleChargingPurchase(purchase: PurchaseSpend): boolean {
   return (
     purchase.status === PurchaseSpendStatus.CHARGING &&
-    Date.now() - purchase.updatedAt.getTime() > STALE_CHARGING_MS
+    Date.now() - purchase.updatedAt.getTime() > PURCHASE_STALE_CHARGING_MS
   );
-}
-
-function companyFundingInProgressDetails(error: unknown):
-  | {
-      transferId: string;
-      retryAfterSeconds?: number;
-      agentcardResult?: Record<string, unknown>;
-    }
-  | undefined {
-  if (!(error instanceof AgentCardProviderError)) return undefined;
-  if (error.code !== 'agentcard_company_funding_in_progress') return undefined;
-  const details = error.details ?? {};
-  const transferId = details.transferId;
-  if (typeof transferId !== 'string' || transferId.trim() === '') return undefined;
-  const retryAfterSeconds = details.retryAfterSeconds;
-  const agentcardResult = details.agentcardResult;
-  return {
-    transferId,
-    ...(typeof retryAfterSeconds === 'number' && Number.isFinite(retryAfterSeconds)
-      ? { retryAfterSeconds }
-      : {}),
-    ...(typeof agentcardResult === 'object' && agentcardResult !== null
-      ? { agentcardResult: agentcardResult as Record<string, unknown> }
-      : {}),
-  };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -349,233 +257,6 @@ async function openPendingPurchase(
     lineItemsJson: receipt,
     totalCents: input.totalCents,
   });
-}
-
-async function mintCompanyFlowCard(
-  purchase: PurchaseSpend,
-  input: MintPurchaseInput,
-  cardProvider: CardProvider,
-  walletFundingProvider: WalletFundingProvider
-) {
-  const cardRequest = {
-    amountCents: input.totalCents,
-    idempotencyKey: `purchase:${purchase.id}`,
-    fundsSource: 'company_flow' as const,
-  };
-  const deadline = Date.now() + COMPANY_FLOW_MAX_WAIT_MS;
-  let confirmedTransferId: string | undefined;
-
-  for (;;) {
-    try {
-      return {
-        cardRequest,
-        minted: await cardProvider.mintCard(cardRequest),
-        providerTransferId: confirmedTransferId,
-      };
-    } catch (error) {
-      const funding = companyFundingInProgressDetails(error);
-      if (funding === undefined) throw error;
-
-      if (confirmedTransferId !== funding.transferId) {
-        const walletFunding = await confirmPurchaseWalletCollection(
-          purchase,
-          'usd',
-          funding.transferId,
-          funding.agentcardResult,
-          walletFundingProvider
-        );
-        confirmedTransferId = funding.transferId;
-        await archivePurchaseBoundary(input.agentId, purchase.id, 'agentcard-company-funding', {
-          funding_id: walletFunding.id,
-          provider_transfer_id: walletFunding.providerTransferId,
-          status: walletFunding.status,
-        });
-      }
-
-      if (Date.now() >= deadline) {
-        throw new PurchaseError(
-          'AgentCard company funding is still in progress; retry this purchase shortly',
-          409,
-          'agentcard_company_funding_in_progress',
-          { transferId: funding.transferId }
-        );
-      }
-
-      const retryMs =
-        funding.retryAfterSeconds !== undefined
-          ? Math.max(250, Math.min(funding.retryAfterSeconds * 1000, COMPANY_FLOW_RETRY_MS))
-          : COMPANY_FLOW_RETRY_MS;
-      await sleep(retryMs);
-    }
-  }
-}
-
-/**
- * Authorize the user's saved card, mint the company-funded single-use card, then capture the
- * user's charge as soon as AgentCard confirms the transfer. A returned card is therefore always
- * fully funded. If any later setup step fails, close/reclaim the card and refund the charge.
- */
-async function chargeAndIssueCard(
-  purchase: PurchaseSpend,
-  input: MintPurchaseInput,
-  stripeCustomerId: string,
-  cardProvider?: CardProvider,
-  walletFundingProvider?: WalletFundingProvider
-): Promise<MintPurchaseResult> {
-  let paymentIntentId: string | undefined;
-  let paymentIntentCaptured = false;
-  let paymentReversalFailed = false;
-  let walletWasFunded = false;
-  let walletReclaimFailed = false;
-  let activeWalletFundingProvider: WalletFundingProvider | undefined;
-  let activeCardProvider: CardProvider | undefined;
-  let issuedCardId: string | undefined;
-  const purchaseId = purchase.id;
-  try {
-    const paymentMethodId = await getCustomerDefaultPaymentMethodId(stripeCustomerId);
-    const stripeRequest = {
-      amount: input.totalCents,
-      currency: 'usd',
-      customer: stripeCustomerId,
-      payment_method: paymentMethodId,
-      confirm: true,
-      off_session: true,
-      capture_method: 'manual' as const,
-      statement_descriptor_suffix: sanitizeDescriptorSuffix(input.merchant),
-      metadata: {
-        userId: input.userId,
-        agentId: input.agentId ?? '',
-        fingerprint: input.fingerprint,
-        purchaseSpendId: purchaseId,
-      },
-    };
-    const paymentIntent = await stripe.paymentIntents.create(
-      stripeRequest,
-      // Per-row idempotency: a retried mint of the SAME purchase never double-charges Stripe.
-      { idempotencyKey: `purchase-charge:${purchaseId}` }
-    );
-    paymentIntentId = paymentIntent.id;
-    await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.CHARGING, {
-      stripePaymentIntentId: paymentIntent.id,
-    });
-    await archivePurchaseBoundary(input.agentId, purchaseId, 'stripe-payment-intent', {
-      request: stripeRequest,
-      response: paymentIntent,
-    });
-
-    activeWalletFundingProvider = walletFundingProvider ?? createWalletFundingProvider();
-    activeCardProvider = cardProvider ?? createCardProvider(input.userId);
-    const { cardRequest, minted, providerTransferId } = await mintCompanyFlowCard(
-      purchase,
-      input,
-      activeCardProvider,
-      activeWalletFundingProvider
-    );
-    const transferId = minted.providerTransferId ?? providerTransferId;
-    issuedCardId = minted.cardId;
-    if (transferId === undefined || transferId.trim() === '') {
-      throw new PurchaseError(
-        'AgentCard issued a card without a company transfer id',
-        502,
-        'agentcard_company_transfer_missing'
-      );
-    }
-    walletWasFunded = true;
-    await recordPurchaseWalletFunding(purchase, 'usd', transferId, minted.metadata);
-    await captureAuthorizedHold(paymentIntent.id);
-    paymentIntentCaptured = true;
-    const details = await activeCardProvider.getDetails(minted.cardId);
-    await archivePurchaseBoundary(input.agentId, purchaseId, 'agentcard-mint-and-details', {
-      mint_request: cardRequest,
-      mint_response: minted,
-      details_response: details,
-    });
-
-    await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.HELD, {
-      cardId: minted.cardId,
-      stripePaymentIntentId: paymentIntent.id,
-    });
-
-    return {
-      purchaseId,
-      cardId: minted.cardId,
-      pan: details.pan,
-      cvv: details.cvv,
-      expiry: details.expiry,
-      last4: minted.last4,
-      status: PurchaseSpendStatus.HELD,
-    };
-  } catch (error) {
-    const boundaryError = toPurchaseBoundaryError(error);
-    if (
-      boundaryError instanceof PurchaseError &&
-      boundaryError.code === 'agentcard_company_funding_in_progress'
-    ) {
-      walletReclaimFailed = true;
-    }
-    if (issuedCardId !== undefined && activeCardProvider !== undefined) {
-      try {
-        await activeCardProvider.closeCard(issuedCardId);
-        await reclaimPurchaseWalletFunding(
-          { ...purchase, cardId: issuedCardId },
-          'mint_failed_after_card_issue',
-          activeWalletFundingProvider
-        );
-        walletWasFunded = false;
-      } catch (cleanupError) {
-        walletReclaimFailed = true;
-        log.error('Failed to close issued AgentCard after purchase setup failure', {
-          purchase_id: purchaseId,
-          card_id: issuedCardId,
-          error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
-        });
-      }
-    }
-    if (walletWasFunded && !walletReclaimFailed) {
-      walletReclaimFailed = true;
-      log.error('AgentCard company funding was confirmed but card issue did not complete', {
-        purchase_id: purchaseId,
-        user_id: input.userId,
-        error: boundaryError.message,
-      });
-    }
-    if (paymentIntentId !== undefined && !walletReclaimFailed) {
-      const reversePayment = paymentIntentCaptured
-        ? refundCapturedPurchase(paymentIntentId, purchaseId)
-        : cancelAuthorizedHold(paymentIntentId);
-      await reversePayment.catch((reverseError) => {
-        paymentReversalFailed = true;
-        log.warn('Failed to reverse Stripe payment after purchase mint failure', {
-          purchase_id: purchaseId,
-          stripe_payment_intent_id: paymentIntentId,
-          captured: paymentIntentCaptured,
-          error: reverseError instanceof Error ? reverseError.message : String(reverseError),
-        });
-      });
-    }
-    log.error('Failed to mint purchase card', {
-      purchase_id: purchaseId,
-      user_id: input.userId,
-      agent_id: input.agentId,
-      error: boundaryError.message,
-    });
-    await repo.updatePurchaseStatus(
-      purchaseId,
-      walletReclaimFailed
-        ? PurchaseSpendStatus.FUNDING_RECLAIM_FAILED
-        : paymentIntentCaptured && paymentReversalFailed
-          ? PurchaseSpendStatus.REFUND_FAILED
-          : PurchaseSpendStatus.FAILED,
-      {
-        stripePaymentIntentId: paymentIntentId ?? null,
-      }
-    );
-    // A genuine AgentCard KYC rejection (not the MCP per-user setup flow, whose
-    // error text carries no kyc_required code) surfaces as a typed kyc_required
-    // PurchaseError so the agent workflow can raise a KYC gate and retry.
-    if (isKycRequiredError(error)) throw kycRequiredPurchaseError();
-    throw boundaryError;
-  }
 }
 
 export async function mintPurchaseCard(

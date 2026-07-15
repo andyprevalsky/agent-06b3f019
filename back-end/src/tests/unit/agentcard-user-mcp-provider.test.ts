@@ -273,35 +273,38 @@ async function main(): Promise<void> {
 
   await test('maps live text wallet funding response to setup required', async () => {
     const calls: Call[] = [];
-    const provider = new AgentCardUserMcpProvider('user-wallet-text', async (userId, name, args) => {
-      calls.push({ userId, name, args });
-      if (name === 'create_card') {
-        return {
-          content: [
-            {
-              type: 'text',
-              text:
-                'Your wallet needs $43.96 more USDC to create this card. ' +
-                'Fund it with the fund_wallet tool (debit card or Apple Pay) or send USDC directly.',
-            },
-          ],
-        };
+    const provider = new AgentCardUserMcpProvider(
+      'user-wallet-text',
+      async (userId, name, args) => {
+        calls.push({ userId, name, args });
+        if (name === 'create_card') {
+          return {
+            content: [
+              {
+                type: 'text',
+                text:
+                  'Your wallet needs $43.96 more USDC to create this card. ' +
+                  'Fund it with the fund_wallet tool (debit card or Apple Pay) or send USDC directly.',
+              },
+            ],
+          };
+        }
+        if (name === 'get_wallet') {
+          return toolResult({ wallet: { address: '0xabc', balanceUsdc: '0.00' } });
+        }
+        if (name === 'fund_wallet') {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: 'Funding requires email verification and an Apple Pay checkout.',
+              },
+            ],
+          };
+        }
+        throw new Error(`unexpected tool ${name}`);
       }
-      if (name === 'get_wallet') {
-        return toolResult({ wallet: { address: '0xabc', balanceUsdc: '0.00' } });
-      }
-      if (name === 'fund_wallet') {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: 'Funding requires email verification and an Apple Pay checkout.',
-            },
-          ],
-        };
-      }
-      throw new Error(`unexpected tool ${name}`);
-    });
+    );
 
     await assert.rejects(
       () => provider.mintCard({ amountCents: 4396 }),

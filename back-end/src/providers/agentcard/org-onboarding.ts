@@ -69,9 +69,7 @@ function isExpired(config: OrgOnboardingConfig): boolean {
   return Number.isFinite(expiresAt) && expiresAt <= Date.now();
 }
 
-export async function startOrgCardholderOnboarding(
-  userId: string
-): Promise<OrgOnboardingConfig> {
+export async function startOrgCardholderOnboarding(userId: string): Promise<OrgOnboardingConfig> {
   const existing = await getOrgOnboardingConfig(userId);
   if (existing !== undefined && !isExpired(existing)) return existing;
 
@@ -135,7 +133,9 @@ export async function completeOrgCardholderOnboarding(
   userId: string,
   sessionId: string
 ): Promise<string> {
-  const result = resultRecord(await callOrgTool('get_onboarding_session', { session_id: sessionId }));
+  const result = resultRecord(
+    await callOrgTool('get_onboarding_session', { session_id: sessionId })
+  );
   const externalUserId = stringField(result, ['external_user_id', 'externalUserId']);
   if (externalUserId !== undefined && externalUserId !== userId) {
     throw new Error('AgentCard onboarding session does not belong to this user');

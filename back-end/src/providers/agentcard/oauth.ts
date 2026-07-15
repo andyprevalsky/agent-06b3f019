@@ -63,10 +63,7 @@ interface RawTokenResponse {
   error_description?: unknown;
 }
 
-async function postToken(
-  body: URLSearchParams,
-  fetchImpl: FetchLike
-): Promise<TokenSet> {
+async function postToken(body: URLSearchParams, fetchImpl: FetchLike): Promise<TokenSet> {
   const response = await fetchImpl(AGENTCARD_TOKEN_ENDPOINT, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
@@ -77,9 +74,11 @@ async function postToken(
 
   if (!response.ok) {
     const code = typeof json.error === 'string' ? json.error : String(response.status);
-    const detail =
-      typeof json.error_description === 'string' ? `: ${json.error_description}` : '';
-    throw new AgentCardOAuthError(`AgentCard token request failed (${code})${detail}`, response.status);
+    const detail = typeof json.error_description === 'string' ? `: ${json.error_description}` : '';
+    throw new AgentCardOAuthError(
+      `AgentCard token request failed (${code})${detail}`,
+      response.status
+    );
   }
 
   if (typeof json.access_token !== 'string' || json.access_token === '') {

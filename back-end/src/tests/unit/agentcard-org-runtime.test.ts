@@ -36,10 +36,10 @@ async function main(): Promise<void> {
         assert.equal(form.get('grant_type'), 'client_credentials');
         assert.equal(form.get('client_id'), 'wizard-client');
         assert.equal(form.get('client_secret'), 'wizard-secret');
-        return new Response(
-          JSON.stringify({ access_token: 'fresh-org-token', expires_in: 3600 }),
-          { status: 200, headers: { 'content-type': 'application/json' } }
-        );
+        return new Response(JSON.stringify({ access_token: 'fresh-org-token', expires_in: 3600 }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
       }
     );
 

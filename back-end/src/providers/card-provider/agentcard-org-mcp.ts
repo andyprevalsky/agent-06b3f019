@@ -150,10 +150,7 @@ function throwForGate(record: Record<string, unknown>, result: unknown): void {
       {
         agentcardStatus: code,
         transferId,
-        retryAfterSeconds: optionalNumber(record, [
-          'retry_after_seconds',
-          'retryAfterSeconds',
-        ]),
+        retryAfterSeconds: optionalNumber(record, ['retry_after_seconds', 'retryAfterSeconds']),
         agentcardResult: record,
       }
     );
@@ -319,9 +316,7 @@ export class AgentCardOrgMcpProvider implements CardProvider {
       dollarsToCents(labeledValue(text, 'Balance'));
     const status = optionalString(record, ['cardStatus', 'status']) ?? labeledValue(text, 'Status');
     if (balanceCents === undefined) {
-      throw new AgentCardProviderError(
-        'AgentCard Organization MCP response missing balance_cents'
-      );
+      throw new AgentCardProviderError('AgentCard Organization MCP response missing balance_cents');
     }
     return {
       pan: requiredString(pan, 'pan'),

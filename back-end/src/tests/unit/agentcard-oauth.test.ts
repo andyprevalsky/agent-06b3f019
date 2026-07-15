@@ -16,10 +16,7 @@ import {
   isExpired,
   refreshAccessToken,
 } from '../../providers/agentcard/oauth';
-import {
-  AGENTCARD_MCP_RESOURCE,
-  AGENTCARD_TOKEN_ENDPOINT,
-} from '../../providers/agentcard/config';
+import { AGENTCARD_MCP_RESOURCE, AGENTCARD_TOKEN_ENDPOINT } from '../../providers/agentcard/config';
 
 let passed = 0;
 const failures: string[] = [];
@@ -39,7 +36,10 @@ const base64Url = (buf: Buffer): string =>
   buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 
 /** Capture the last token-endpoint request as a parsed form. */
-function captureFetch(response: Record<string, unknown>, status = 200): {
+function captureFetch(
+  response: Record<string, unknown>,
+  status = 200
+): {
   fetchImpl: typeof fetch;
   last: () => { url: string; form: URLSearchParams };
 } {
@@ -170,8 +170,7 @@ async function main(): Promise<void> {
       400
     );
     await assert.rejects(
-      () =>
-        refreshAccessToken({ refreshToken: 'rt', clientId: 'c', clientSecret: 'x', fetchImpl }),
+      () => refreshAccessToken({ refreshToken: 'rt', clientId: 'c', clientSecret: 'x', fetchImpl }),
       /invalid_client.*client authentication failed/
     );
   });

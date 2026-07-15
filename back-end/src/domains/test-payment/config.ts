@@ -1,6 +1,10 @@
 export const TEST_PAYMENT_ENABLED =
   process.env.NODE_ENV !== 'production' && process.env.ENABLE_TEST_PAYMENT !== 'false';
 
+export function isProductionEnv(): boolean {
+  return process.env.NODE_ENV === 'production';
+}
+
 export const TEST_PAYMENT_PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL ?? '')
   .trim()
   .replace(/\/$/, '');
@@ -11,4 +15,8 @@ export const PRODUCTION_BENCHMARK_USER_ID = (
 
 export function getPhoneBenchmarkPaymentAuditPathOverride(): string {
   return (process.env.PHONE_BENCHMARK_PAYMENT_AUDIT_PATH ?? '').trim();
+}
+
+export function getBenchmarkAgentCardCardholderIdOverride(): string {
+  return (process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID ?? '').trim();
 }

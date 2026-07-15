@@ -236,13 +236,13 @@ const tests: Array<[string, () => Promise<void>]> = [
             },
           }) as never,
         findAttentionRequests: async () =>
-          ([
+          [
             {
               id: 'attention-1',
               userResponse: 'setup_complete',
               metadata: { attentionKind: 'agentcard_user_cardholder_onboarding_required' },
             },
-          ]) as never,
+          ] as never,
         getCardSummary: async () => ({ status: 'CLOSED', balanceCents: 0 }),
         retrieveStripeHold: async () => ({
           id: 'pi-hold-1',
@@ -287,9 +287,7 @@ const tests: Array<[string, () => Promise<void>]> = [
       assert(result.orgTransfer?.livemode === false, 'expected sandbox transfer');
       assert(result.attention.openKinds.length === 0, 'setup attention should be resolved');
       assert(
-        result.attention.resolvedKinds.includes(
-          'agentcard_user_cardholder_onboarding_required'
-        ),
+        result.attention.resolvedKinds.includes('agentcard_user_cardholder_onboarding_required'),
         'expected resolved setup attention'
       );
       assert(!JSON.stringify(result).includes('424242'), 'lifecycle must not expose PAN data');
@@ -398,7 +396,10 @@ const tests: Array<[string, () => Promise<void>]> = [
         assert(settlements[0]?.amountCents === 4396, 'expected exact card charge amount');
         assert(settlements[0]?.merchant === 'Rose Labs Test Payment', 'expected merchant');
         assert(calls.paymentMethods.length === 0, 'AgentCard PAN must not be raw-tokenized');
-        assert(calls.paymentIntents.length === 0, 'AgentCard PAN must not use a substitute Stripe charge');
+        assert(
+          calls.paymentIntents.length === 0,
+          'AgentCard PAN must not use a substitute Stripe charge'
+        );
       });
     },
   ],

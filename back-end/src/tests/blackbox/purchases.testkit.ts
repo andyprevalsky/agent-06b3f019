@@ -7,8 +7,11 @@ import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { stripe } from '../../providers/stripe';
-import type { CardProvider, CardProviderMintRequest } from '../../providers/card-provider';
-import { AgentCardProviderError } from '../../providers/card-provider';
+import {
+  AgentCardProviderError,
+  type CardProvider,
+  type CardProviderMintRequest,
+} from '../../providers/card-provider';
 import type {
   WalletFundingCollectionRequest,
   WalletFundingProvider,
@@ -145,6 +148,37 @@ export class FailingDetailsCardProvider extends FakeCardProvider {
   }
 }
 
+/**
+ * Mints a live card but omits the company transfer id, exercising the charge guard that rejects a
+ * card the provider issued without a confirmed backing transfer.
+ */
+export class NoTransferIdCardProvider extends FakeCardProvider {
+  async mintCard(request: CardProviderMintRequest) {
+    this.mintCalls += 1;
+    this.mintRequests.push(request);
+    return {
+      cardId: this.cardId,
+      last4: '4242',
+      expiry: this.expiry,
+      spendLimitCents: 1000,
+      status: 'active',
+      providerTransferId: undefined,
+    };
+  }
+}
+
+/** Mints a live card, then fails BOTH getDetails and the failure-path closeCard. */
+export class FailingDetailsAndCloseCardProvider extends FakeCardProvider {
+  async getDetails(): Promise<never> {
+    this.detailCalls += 1;
+    throw new Error('card details failed');
+  }
+  async closeCard(): Promise<never> {
+    this.closeCalls += 1;
+    throw new Error('card close failed');
+  }
+}
+
 export class FundingInProgressCardProvider extends FakeCardProvider {
   private returnedFundingGate = false;
 
@@ -169,6 +203,25 @@ export class FundingInProgressCardProvider extends FakeCardProvider {
   }
 }
 
+/**
+ * Rejects mint with an `agentcard_company_funding_in_progress` error that carries NO usable transfer
+ * id, so the company-flow loop rethrows immediately (no retry/sleep) and the charge rollback takes
+ * its funding-reclaim-required branch.
+ */
+export class FundingInProgressNoTransferCardProvider extends FakeCardProvider {
+  async mintCard(request: CardProviderMintRequest): Promise<never> {
+    this.mintCalls += 1;
+    this.mintRequests.push(request);
+    throw new AgentCardProviderError(
+      'AgentCard company funding is in progress',
+      409,
+      undefined,
+      'agentcard_company_funding_in_progress',
+      { agentcardStatus: 'funding_in_progress' }
+    );
+  }
+}
+
 export class FakeWalletFundingProvider implements WalletFundingProvider {
   fundCalls: WalletFundingRequest[] = [];
   confirmCalls: WalletFundingCollectionRequest[] = [];
@@ -183,9 +236,7 @@ export class FakeWalletFundingProvider implements WalletFundingProvider {
     };
   }
 
-  async confirmCollection(
-    request: WalletFundingCollectionRequest
-  ): Promise<WalletFundingResult> {
+  async confirmCollection(request: WalletFundingCollectionRequest): Promise<WalletFundingResult> {
     this.confirmCalls.push(request);
     return {
       providerTransferId: request.providerTransferId,

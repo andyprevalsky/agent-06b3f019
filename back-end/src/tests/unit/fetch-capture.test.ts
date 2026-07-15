@@ -130,7 +130,10 @@ async function run(): Promise<void> {
     const surgeBody = (await surge.json()) as { id?: string };
     assert.strictEqual(surgeBody.id, 'blackbox-surge-message-5');
 
-    const agentCardBody = JSON.stringify({ method: 'tools/call', params: { name: 'list_transfers' } });
+    const agentCardBody = JSON.stringify({
+      method: 'tools/call',
+      params: { name: 'list_transfers' },
+    });
     const agentCardResponses: number[] = [];
     for (let index = 0; index < 2; index += 1) {
       const response = await fetch('https://api.agentcard.sh/mcp', {

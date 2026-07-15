@@ -122,11 +122,7 @@ export async function mcpCallTool(
   args: Record<string, unknown>,
   fetchImpl?: FetchLike
 ): Promise<unknown> {
-  return withClient(
-    accessToken,
-    (client) => client.callTool({ name, arguments: args }),
-    fetchImpl
-  );
+  return withClient(accessToken, (client) => client.callTool({ name, arguments: args }), fetchImpl);
 }
 
 /**

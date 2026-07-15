@@ -248,6 +248,32 @@ interface UpdateAgentStatusDependencies {
   cleanupPurchaseCards?: (agentId: string) => Promise<void>;
 }
 
+/** Best-effort cleanup fired once a root agent reaches a terminal status. */
+async function runTerminalAgentCleanup(
+  agentId: string,
+  status: string,
+  dependencies: UpdateAgentStatusDependencies
+): Promise<void> {
+  try {
+    await (dependencies.cleanupPurchaseCards ?? cleanupAgentPurchaseCards)(agentId);
+  } catch (error) {
+    log.warn('Terminal purchase-card cleanup unavailable; cron will retry', {
+      agent_id: agentId,
+      status,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  try {
+    await finalizeAgent({ rootAgentId: agentId });
+  } catch (error) {
+    log.warn('Trace archive finalization unavailable', {
+      agent_id: agentId,
+      status,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 export async function updateAgentStatus(
   agentId: string,
   body: UpdateStatusBody,
@@ -320,24 +346,7 @@ export async function updateAgentStatus(
 
   await broadcastAgentUpdate(agentId, broadcastPayload);
   if (TERMINAL_STATUSES.has(fields.status) && agent.parentAgentId === null) {
-    try {
-      await (dependencies.cleanupPurchaseCards ?? cleanupAgentPurchaseCards)(agentId);
-    } catch (error) {
-      log.warn('Terminal purchase-card cleanup unavailable; cron will retry', {
-        agent_id: agentId,
-        status: fields.status,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-    try {
-      await finalizeAgent({ rootAgentId: agentId });
-    } catch (error) {
-      log.warn('Trace archive finalization unavailable', {
-        agent_id: agentId,
-        status: fields.status,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+    await runTerminalAgentCleanup(agentId, fields.status, dependencies);
   }
 
   return updated;

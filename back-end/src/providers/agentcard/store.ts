@@ -135,9 +135,7 @@ export async function saveOrgOnboardingConfig(
     orgManaged: true,
     onboardingSessionId: onboarding.sessionId,
     onboardingSetupUrl: onboarding.setupUrl,
-    ...(onboarding.expiresAt !== undefined
-      ? { onboardingExpiresAt: onboarding.expiresAt }
-      : {}),
+    ...(onboarding.expiresAt !== undefined ? { onboardingExpiresAt: onboarding.expiresAt } : {}),
   } as Prisma.InputJsonObject;
   await repo.saveIntegrationConfig(userId, config, false);
 }

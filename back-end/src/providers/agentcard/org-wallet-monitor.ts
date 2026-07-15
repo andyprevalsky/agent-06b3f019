@@ -97,9 +97,7 @@ function lowBalanceMessage(params: {
   fallbackDepositAddress?: string;
 }): string {
   const depositAddress = params.wallet.depositAddress ?? params.fallbackDepositAddress;
-  const depositLine = depositAddress
-    ? `\nDeposit USDC on Base: ${depositAddress}`
-    : '';
+  const depositLine = depositAddress ? `\nDeposit USDC on Base: ${depositAddress}` : '';
   return (
     `Rose AgentCard org wallet is low: ${formatUsd(params.wallet.availableCents)} available ` +
     `(<${formatUsd(params.thresholdCents)}). Re-up: ${params.reloadUrl}${depositLine}`

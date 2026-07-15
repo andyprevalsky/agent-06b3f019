@@ -127,18 +127,14 @@ async function main(): Promise<void> {
     idempotencyKey: 'purchase:instant',
   });
   assert.strictEqual(instantMinted.providerTransferId, 'owt-instant');
-  assert.deepStrictEqual(instantCalls.map((call) => call.name), [
-    'create_card',
-    'get_card_details',
-    'list_transfers',
-    'list_transfers',
-    'list_transfers',
-  ]);
-  assert.deepStrictEqual(instantCalls.slice(2).map((call) => call.args), [
-    { status: 'consumed', limit: 100 },
-    { limit: 100 },
-    { status: 'consumed', limit: 100 },
-  ]);
+  assert.deepStrictEqual(
+    instantCalls.map((call) => call.name),
+    ['create_card', 'get_card_details', 'list_transfers', 'list_transfers', 'list_transfers']
+  );
+  assert.deepStrictEqual(
+    instantCalls.slice(2).map((call) => call.args),
+    [{ status: 'consumed', limit: 100 }, { limit: 100 }, { status: 'consumed', limit: 100 }]
+  );
 
   let orgMintCalls = 0;
   const routing = new AgentCardRoutingProvider('rose-user-123', {

@@ -1,7 +1,7 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { authenticate, type AuthRequest } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { PRODUCTION_BENCHMARK_USER_ID, TEST_PAYMENT_ENABLED } from './config';
+import { isProductionEnv, PRODUCTION_BENCHMARK_USER_ID, TEST_PAYMENT_ENABLED } from './config';
 import {
   abandonTestPayment,
   configureBenchmarkAgentCardSetup,
@@ -17,7 +17,7 @@ import {
 const router = Router();
 
 function requireProductionBenchmarkAccess(req: Request, res: Response, next: NextFunction): void {
-  if (process.env.NODE_ENV !== 'production') {
+  if (!isProductionEnv()) {
     next();
     return;
   }
@@ -35,10 +35,7 @@ function rejectWhenDisabled(
   res: Response,
   options: { allowProductionBenchmark?: boolean } = {}
 ): boolean {
-  if (
-    TEST_PAYMENT_ENABLED ||
-    (options.allowProductionBenchmark === true && process.env.NODE_ENV === 'production')
-  ) {
+  if (TEST_PAYMENT_ENABLED || (options.allowProductionBenchmark === true && isProductionEnv())) {
     return false;
   }
   res.status(404).json({ error: 'Not found' });

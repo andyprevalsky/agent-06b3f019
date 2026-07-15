@@ -67,12 +67,14 @@ export class AgentCardRoutingProvider implements CardProvider {
   }
 
   private providers(): Promise<{ org?: CardProvider; user: CardProvider }> {
-    this.resolved ??= this.dependencies.resolveOrgCardholderId(this.userId).then((cardholderId) => ({
-      ...(cardholderId !== undefined
-        ? { org: this.dependencies.createOrgProvider(cardholderId) }
-        : {}),
-      user: this.dependencies.createUserProvider(this.userId),
-    }));
+    this.resolved ??= this.dependencies
+      .resolveOrgCardholderId(this.userId)
+      .then((cardholderId) => ({
+        ...(cardholderId !== undefined
+          ? { org: this.dependencies.createOrgProvider(cardholderId) }
+          : {}),
+        user: this.dependencies.createUserProvider(this.userId),
+      }));
     return this.resolved;
   }
 }

@@ -40,8 +40,6 @@ import purchasesRouter, { agentCardWebhookHandler } from './domains/purchases/ro
 import agentcardRouter from './domains/agentcard/routes';
 import testPaymentRouter from './domains/test-payment/routes';
 import {
-  PROACTIVE_SMS_CRON_EXPRESSION,
-  PROACTIVE_SMS_TIME_ZONE,
   setSupervisorFixtureOverride,
   clearSupervisorFixtureOverride,
   runProactiveSmsOutreachJob,
@@ -66,19 +64,9 @@ import { tracingMiddleware } from './providers/tracing';
 import { getTemporalClient } from './providers/temporal';
 import { isCorsOriginAllowed, resolveAllowedOrigins } from './providers/corsConfig';
 import { BAZAAR_DESCRIPTION } from './providers/bazaarDescription';
-import cron from 'node-cron';
-import { runGmailSyncJob } from './services/integrations/gmailSync';
-import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaidTransactions';
 import { grep as userDataGrep } from './domains/data/service';
 import { registerUserDataGrep } from './providers/userDataSearch';
-import {
-  reconcileDissolvedPurchaseHolds,
-  reconcileFailedPurchaseRefunds,
-  reconcileFailedPurchaseFundingReclaims,
-  reconcileStaleChargingPurchases,
-  reconcileTerminalAgentPurchaseCards,
-} from './providers/purchaseCleanup';
-import { runAgentCardOrgWalletMonitor } from './providers/agentcard/org-wallet-monitor';
+import { registerCronJobs } from './serverCron';
 // x402 payment middleware
 import { paymentMiddleware } from 'x402-express';
 import { facilitator } from '@coinbase/x402';
@@ -585,131 +573,9 @@ app.listen(PORT, () => {
       error: err instanceof Error ? err.message : String(err),
     });
   });
-  // Contract-test backends should not run unrelated background jobs.
-  if (process.env.DISABLE_GMAIL_SYNC === '1') {
-    createLogger('Cron').info('Gmail sync disabled by DISABLE_GMAIL_SYNC');
-  } else {
-    // Start Gmail sync cron job (every 5 minutes, plus immediate run on startup)
-    const cronLog = createLogger('Cron');
-    const runSync = () => {
-      cronLog.info('Running Gmail sync job...');
-      runGmailSyncJob().catch((err) => {
-        cronLog.error('Gmail sync job error', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-    };
-    runSync();
-    cron.schedule('*/5 * * * *', runSync);
-    cronLog.info('Gmail sync scheduled (every 5 minutes)');
-  }
-
-  if (process.env.DISABLE_PLAID_SYNC === '1') {
-    createLogger('Cron').info('Plaid sync disabled by DISABLE_PLAID_SYNC');
-  } else {
-    const cronLog = createLogger('Cron');
-    const runPlaidSync = () => {
-      cronLog.info('Running Plaid transaction sync job...');
-      runPlaidTransactionSyncJob().catch((err) => {
-        cronLog.error('Plaid transaction sync job error', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-    };
-    cron.schedule('*/5 * * * *', runPlaidSync);
-    cronLog.info('Plaid transaction sync scheduled (every 5 minutes)');
-  }
-
-  if (process.env.DISABLE_PURCHASE_HOLD_RECONCILE === '1') {
-    createLogger('Cron').info(
-      'Purchase hold reconciliation disabled by DISABLE_PURCHASE_HOLD_RECONCILE'
-    );
-  } else {
-    const cronLog = createLogger('Cron');
-    let purchaseReconcileRunning = false;
-    const runPurchaseHoldReconcile = () => {
-      if (purchaseReconcileRunning) {
-        cronLog.info('Purchase hold reconciliation already running; skipping overlapping tick');
-        return;
-      }
-      purchaseReconcileRunning = true;
-      cronLog.info('Running purchase hold reconciliation job...');
-      Promise.all([
-        reconcileDissolvedPurchaseHolds(),
-        reconcileStaleChargingPurchases(),
-        reconcileFailedPurchaseRefunds(),
-        reconcileFailedPurchaseFundingReclaims(),
-        reconcileTerminalAgentPurchaseCards(),
-      ])
-        .catch((err) => {
-          cronLog.error('Purchase hold reconciliation job error', {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        })
-        .finally(() => {
-          purchaseReconcileRunning = false;
-        });
-    };
-    cron.schedule('* * * * *', runPurchaseHoldReconcile);
-    cronLog.info('Purchase hold reconciliation scheduled (every minute)');
-  }
-
-  if (process.env.DISABLE_AGENTCARD_ORG_WALLET_MONITOR === '1') {
-    createLogger('Cron').info(
-      'AgentCard org-wallet monitor disabled by DISABLE_AGENTCARD_ORG_WALLET_MONITOR'
-    );
-  } else {
-    const cronLog = createLogger('Cron');
-    let walletMonitorRunning = false;
-    const runWalletMonitor = () => {
-      if (walletMonitorRunning) {
-        cronLog.info('AgentCard org-wallet monitor already running; skipping overlapping tick');
-        return;
-      }
-      walletMonitorRunning = true;
-      runAgentCardOrgWalletMonitor()
-        .catch((err) => {
-          cronLog.error('AgentCard org-wallet monitor error', {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        })
-        .finally(() => {
-          walletMonitorRunning = false;
-        });
-    };
-    runWalletMonitor();
-    cron.schedule('* * * * *', runWalletMonitor);
-    cronLog.info('AgentCard org-wallet monitor scheduled (every minute)');
-  }
-
-  if (!isProduction || process.env.DISABLE_PROACTIVE_SMS === '1') {
-    createLogger('Cron').info('Proactive SMS outreach disabled', {
-      reason: !isProduction ? 'non-production' : 'DISABLE_PROACTIVE_SMS',
-    });
-  } else {
-    const cronLog = createLogger('Cron');
-    const runProactiveOutreach = () => {
-      cronLog.info('Running proactive SMS outreach job...');
-      runProactiveSmsOutreachJobWithLease()
-        .then((result) => {
-          if (!result.acquired) {
-            cronLog.info('Proactive SMS outreach skipped; another replica owns the lease');
-          }
-        })
-        .catch((err) => {
-          cronLog.error('Proactive SMS outreach job error', {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
-    };
-    cron.schedule(PROACTIVE_SMS_CRON_EXPRESSION, runProactiveOutreach, {
-      timezone: PROACTIVE_SMS_TIME_ZONE,
-    });
-    cronLog.info('Proactive SMS outreach scheduled', {
-      cron: PROACTIVE_SMS_CRON_EXPRESSION,
-      timezone: PROACTIVE_SMS_TIME_ZONE,
-    });
-  }
+  // Contract-test backends should not run unrelated background jobs; each job
+  // self-gates on its DISABLE_* env flag inside registerCronJobs.
+  registerCronJobs(isProduction);
 });
 
 // Graceful shutdown

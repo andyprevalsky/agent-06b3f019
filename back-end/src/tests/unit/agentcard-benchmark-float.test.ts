@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import { ensureAgentCardSandboxFloat } from '../../providers/agentcard/benchmark-float';
 
 async function main(): Promise<void> {
-  const calls: Array<{ url: string; method: string; body?: string; authorization: string | null }> = [];
+  const calls: Array<{ url: string; method: string; body?: string; authorization: string | null }> =
+    [];
   let balanceCents = 1_644;
   const fetchImpl = async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const url = String(input);

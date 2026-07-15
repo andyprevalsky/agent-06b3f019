@@ -88,12 +88,18 @@ router.get(
     }
     try {
       await service.handleCallback(code, state);
-      resultPage(res, { success: true, message: 'AgentCard connected. You can close this window.' });
+      resultPage(res, {
+        success: true,
+        message: 'AgentCard connected. You can close this window.',
+      });
     } catch (err) {
       log.error('AgentCard callback failed', {
         error: err instanceof Error ? err.message : String(err),
       });
-      resultPage(res, { success: false, message: 'Failed to connect AgentCard. Please try again.' });
+      resultPage(res, {
+        success: false,
+        message: 'Failed to connect AgentCard. Please try again.',
+      });
     }
   })
 );
@@ -102,8 +108,7 @@ router.get(
 router.get(
   '/onboarding/callback',
   asyncHandler(async (req: Request, res: Response) => {
-    const sessionId =
-      typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
+    const sessionId = typeof req.query.session_id === 'string' ? req.query.session_id.trim() : '';
     const userId = typeof req.query.state === 'string' ? req.query.state.trim() : '';
     if (sessionId === '' || userId === '') {
       resultPage(res, { success: false, message: 'Missing onboarding session or state' });

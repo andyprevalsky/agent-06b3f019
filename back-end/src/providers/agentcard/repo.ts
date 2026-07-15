@@ -11,7 +11,10 @@ import { prisma } from '../database';
 import { AGENTCARD_INTEGRATION_NAME } from './config';
 import type { StoredTokenConfig } from './types';
 
-export async function saveTokenConfig(userId: string, tokenConfig: StoredTokenConfig): Promise<void> {
+export async function saveTokenConfig(
+  userId: string,
+  tokenConfig: StoredTokenConfig
+): Promise<void> {
   const config = tokenConfig as Prisma.InputJsonObject;
   await prisma.integration.upsert({
     where: { userId_name: { userId, name: AGENTCARD_INTEGRATION_NAME } },
