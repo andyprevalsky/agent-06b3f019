@@ -313,6 +313,134 @@ def test_success_on_payment_card_request_passes_before_agent_completion():
     assert evaluate_task(task, data, approvals_triggered=1) == (True, None)
 
 
+def _required_ecommerce_judge_task():
+    from benchmarks.benchmark_tasks import BenchmarkTask
+
+    return BenchmarkTask(
+        name="ecommerce-judge-test",
+        title="Ecommerce Judge Test",
+        prompt="Complete the purchase",
+        timeout_seconds=60,
+        is_chat_mode=False,
+        expected_tools=["spawn_agent"],
+        tags=["ecommerce"],
+        price_limit_cents=100,
+        requires_browser_agent=True,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling="ignore",
+        start_phase="execute",
+        expected_attention_kinds=["write_lock", "payment_approval"],
+        enforce_declared_evaluators=True,
+        evaluators=[
+            {
+                "id": "commerce-outcome",
+                "method": "single_turn_llm_judge",
+                "criteria": ["The requested item and terminal checkout state are grounded"],
+                "judge_prompt": "Fail unless the transaction outcome is grounded in tool evidence.",
+                "pass_threshold": 1.0,
+            }
+        ],
+    )
+
+
+def test_ecommerce_attention_kind_rejects_auth_blocker():
+    """A login handoff cannot masquerade as a terminal commerce write lock."""
+    from benchmarks.run_benchmark import _attention_request_matches_task
+
+    task = _required_ecommerce_judge_task()
+    auth_request = {"metadata": {"attentionKind": "auth_assistance"}}
+    write_lock_request = {
+        "metadata": {"requestUserApproval": {"writePermission": True}}
+    }
+
+    assert _attention_request_matches_task(task, auth_request) is False
+    assert _attention_request_matches_task(task, write_lock_request) is True
+
+
+async def test_required_declared_evaluator_controls_pass_fail():
+    """A required declared judge is executed and its score controls the run."""
+    import benchmarks.run_benchmark as bench
+
+    task = _required_ecommerce_judge_task()
+    data = {
+        "agent": {"agent_id": "agent-commerce", "status": "ACTIVE"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Reached checkout",
+                "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+            }
+        ],
+        "_benchmark": {"attention_request_kind_seen": "write_lock"},
+    }
+    scores = iter(
+        [
+            {"score": 0.0, "reasoning": "The requested item is not evidenced."},
+            {"score": 1.0, "reasoning": "Every criterion is grounded."},
+        ]
+    )
+    calls = []
+    original_call = bench._call_declared_llm_judge
+
+    async def fake_call(task_arg, evaluator_arg, data_arg):
+        calls.append((task_arg.name, evaluator_arg["id"], data_arg["agent"]["agent_id"]))
+        return next(scores)
+
+    try:
+        bench._call_declared_llm_judge = fake_call
+        passed, reason, results = await bench._run_declared_evaluators(task, data)
+        assert passed is False
+        assert "requested item is not evidenced" in reason.lower()
+        assert results[0]["passed"] is False
+
+        passed, reason, results = await bench._run_declared_evaluators(task, data)
+        assert passed is True
+        assert reason is None
+        assert results[0]["passed"] is True
+    finally:
+        bench._call_declared_llm_judge = original_call
+
+    assert calls == [
+        ("ecommerce-judge-test", "commerce-outcome", "agent-commerce"),
+        ("ecommerce-judge-test", "commerce-outcome", "agent-commerce"),
+    ]
+
+
+def test_base_live_fixture_fails_when_live_auth_refresh_fails():
+    """A live benchmark never starts with missing/stale browser auth."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    original_compute = bench._sync_compute_tokens
+    original_browser = bench._sync_browser_credentials
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    raised = False
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda: True
+        bench._sync_browser_credentials = lambda: False
+        bench._apply_base_live_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="user-123",
+                auth_realm="amazon.com",
+            )
+        )
+    except RuntimeError as exc:
+        raised = "browser credential" in str(exc).lower()
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_browser_credentials = original_browser
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    assert raised, "base live fixture must fail closed when credential refresh fails"
+
+
 def test_expected_passkey_credential_ref_is_required_even_when_approval_is_terminal():
     """A passkey benchmark cannot pass from checkout state alone."""
     from benchmarks.benchmark_tasks import BenchmarkTask
@@ -957,15 +1085,27 @@ def test_browser_agent_cookie_bundle_bootstrap_can_be_skipped_with_env():
 
 
 def test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile():
-    """The passkey live fixture must remove every alternative Amazon auth path."""
+    """The passkey fixture syncs through its boundary and snapshots destructive state."""
     import benchmarks.run_benchmark as bench
 
     queries = []
+    sync_calls = []
+    sql_results = iter(
+        [
+            '{"steel_ids": [], "bundle_ids": [], "password_ids": [], "profiles": []}',
+            "1",
+            "10",
+        ]
+    )
     original_run_sql = bench._run_local_victoria_sql
     original_sync_passkeys = bench._sync_passkeys
+    original_subprocess_run = bench.subprocess.run
     try:
-        bench._sync_passkeys = lambda: None
-        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "1\t4\t5\t1"
+        bench._sync_passkeys = lambda: sync_calls.append("passkeys")
+        bench.subprocess.run = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("fixture bypassed _sync_passkeys")
+        )
+        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or next(sql_results)
         manifest = bench._apply_amazon_passkey(
             bench.LiveFixtureContext(
                 base_url="http://localhost:54121",
@@ -976,31 +1116,39 @@ def test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile():
     finally:
         bench._run_local_victoria_sql = original_run_sql
         bench._sync_passkeys = original_sync_passkeys
+        bench.subprocess.run = original_subprocess_run
 
     assert manifest == {
         "fixture": "amazon_passkey",
         "passkey_count": 1,
-        "alternative_auth_disabled_count": 4,
-        "browser_state_deleted_count": 5,
-        "kernel_profiles_detached_count": 1,
+        "cleared": 10,
+        "user_id": "user-123",
+        "auth_realm": "amazon.com",
+        "restore_snapshot": {
+            "steel_ids": [],
+            "bundle_ids": [],
+            "password_ids": [],
+            "profiles": [],
+        },
     }
-    assert len(queries) == 1
-    sql = queries[0]
-    assert 'FROM "PasskeyCredential"' in sql
-    assert 'UPDATE "PasskeyCredential"' not in sql
-    assert '"authRealm" = \'amazon.com\'' in sql
-    assert 'LOWER("rpId")' not in sql
-    assert 'UPDATE "SteelSessionAuth"' in sql
-    assert 'UPDATE "CookieBundle"' in sql
-    assert 'UPDATE "BrowserPassword"' in sql
-    assert 'DELETE FROM "Cookie"' in sql
-    assert 'DELETE FROM "LocalStorageOrigin"' in sql
-    assert 'DELETE FROM "IndexedDBOrigin"' in sql
-    assert 'DELETE FROM "BrowserPermission"' in sql
-    assert 'DELETE FROM "CacheStorageOrigin"' in sql
-    assert 'DELETE FROM "BrowserProviderProfile"' in sql
-    assert 'profiles."provider" = \'kernel\'' in sql
-    assert "amazon.com" in sql
+    assert sync_calls == ["passkeys"]
+    assert len(queries) == 3
+    assert 'FROM "SteelSessionAuth"' in queries[0]
+    assert 'FROM "CookieBundle"' in queries[0]
+    assert 'FROM "BrowserPassword"' in queries[0]
+    assert 'FROM "PasskeyCredential"' in queries[1]
+    assert 'UPDATE "PasskeyCredential"' not in queries[1]
+    cleanup_sql = queries[2]
+    assert 'UPDATE "SteelSessionAuth"' in cleanup_sql
+    assert 'UPDATE "CookieBundle"' in cleanup_sql
+    assert 'UPDATE "BrowserPassword"' in cleanup_sql
+    assert 'DELETE FROM "Cookie"' in cleanup_sql
+    assert 'DELETE FROM "LocalStorageOrigin"' in cleanup_sql
+    assert 'DELETE FROM "IndexedDBOrigin"' in cleanup_sql
+    assert 'DELETE FROM "BrowserPermission"' in cleanup_sql
+    assert 'DELETE FROM "CacheStorageOrigin"' in cleanup_sql
+    assert 'DELETE FROM "BrowserProviderProfile"' in cleanup_sql
+    assert "amazon.com" in cleanup_sql
 
 
 def test_amazon_passkey_catalog_requires_live_passkey_kernel_evidence():
@@ -3751,6 +3899,40 @@ def test_unified_catalog_delineates_bench_axes():
     assert live["environment"]["live_targets"] == ["https://www.amazon.com"]
 
 
+def test_daily_ecommerce_v1_catalog_has_ten_distinct_transaction_flows():
+    """The daily ecommerce slice stays focused, complete, and stable."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.fixtures import DEFAULT_BASE_IMAGE
+    from benchmarks.long_horizon import validate_catalog
+
+    expected_names = {
+        "browser-opentable-reservation",
+        "browser-toast-nopa-write-lock",
+        "browser-instacart-grocery-order",
+        "browser-doordash-usb-c-cable",
+        "minted-agent-accounts-uber",
+        "browser-agent-amazon-cookie-payment",
+        "browser-alchemy-springs-sauna",
+        "browser-hotel-booking",
+        "browser-event-ticket",
+        "browser-amazon-return",
+    }
+    tasks = validate_catalog()
+    ecommerce = [task for task in tasks if "ecommerce" in task.get("tags", [])]
+
+    assert {task["name"] for task in ecommerce} == expected_names
+    assert len(ecommerce) == 10
+    assert all(task.get("group", "").lower() == "daily" for task in ecommerce)
+    assert all(task.get("status", "ready") == "ready" for task in ecommerce)
+    assert all(task.get("enforce_declared_evaluators") is True for task in ecommerce)
+    assert len({task["prompt"] for task in ecommerce}) == len(ecommerce)
+    assert "browser-uber-ride" not in {task["name"] for task in tasks}
+    for name in expected_names:
+        loaded = get_task_by_name(name)
+        assert DEFAULT_BASE_IMAGE in loaded.environment["base_images"]
+        assert loaded.environment["live_fixtures"][0] == "base"
+
+
 def test_browser_search_single_result_tasks_use_browser_only():
     """Google/Bing search benchmarks exercise browser search, not web_search."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -4575,6 +4757,18 @@ async def run_all_tests():
         test_success_on_payment_card_request_passes_before_agent_completion,
     )
     r.record(
+        "ecommerce_attention_rejects_auth_blocker",
+        test_ecommerce_attention_kind_rejects_auth_blocker,
+    )
+    await r.record_async(
+        "required_declared_evaluator_controls_pass_fail",
+        test_required_declared_evaluator_controls_pass_fail,
+    )
+    r.record(
+        "base_live_fixture_auth_failure_is_fatal",
+        test_base_live_fixture_fails_when_live_auth_refresh_fails,
+    )
+    r.record(
         "expected_passkey_credential_ref",
         test_expected_passkey_credential_ref_is_required_even_when_approval_is_terminal,
     )
@@ -4588,6 +4782,10 @@ async def run_all_tests():
     r.record(
         "unified_catalog_bench_axes",
         test_unified_catalog_delineates_bench_axes,
+    )
+    r.record(
+        "daily_ecommerce_v1_catalog",
+        test_daily_ecommerce_v1_catalog_has_ten_distinct_transaction_flows,
     )
     r.record(
         "unified_catalog_multiple_evaluators",

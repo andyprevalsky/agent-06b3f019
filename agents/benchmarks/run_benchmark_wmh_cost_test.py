@@ -95,7 +95,7 @@ def test_base_live_fixture_skips_browser_creds_in_simulate(monkeypatch):
     uplink and stalls agent creation). Compute tokens are still refreshed."""
     monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "simulate")
     calls = []
-    monkeypatch.setattr(rb, "_sync_compute_tokens", lambda: calls.append("compute"))
+    monkeypatch.setattr(rb, "_sync_compute_tokens", lambda: calls.append("compute") or True)
     monkeypatch.setattr(rb, "_sync_browser_credentials", lambda: calls.append("browser"))
 
     manifest = rb._apply_base_live_fixture(_fixture_ctx())
@@ -109,8 +109,8 @@ def test_base_live_fixture_syncs_browser_creds_when_live(monkeypatch):
     exercise real browser auth."""
     monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "real")
     calls = []
-    monkeypatch.setattr(rb, "_sync_compute_tokens", lambda: calls.append("compute"))
-    monkeypatch.setattr(rb, "_sync_browser_credentials", lambda: calls.append("browser"))
+    monkeypatch.setattr(rb, "_sync_compute_tokens", lambda: calls.append("compute") or True)
+    monkeypatch.setattr(rb, "_sync_browser_credentials", lambda: calls.append("browser") or True)
 
     manifest = rb._apply_base_live_fixture(_fixture_ctx())
 

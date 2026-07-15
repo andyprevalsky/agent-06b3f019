@@ -837,6 +837,7 @@
   {
     "name": "browser-agent-amazon-cookie-payment",
     "title": "Amazon Cookie Auth Payment Write Lock",
+    "description": "Buy a qualifying Amazon beanie through the cart path using live cookie auth and stop at the write lock.",
     "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
@@ -845,8 +846,10 @@
     ],
     "tags": [
       "browser",
-      "auth"
+      "auth",
+      "ecommerce"
     ],
+    "group": "daily",
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -874,6 +877,19 @@
       ],
       "context_notes": "Live Amazon via synced-prod cookie auth. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle used to reach the payment write-lock."
     },
+    "evaluators": [
+      {
+        "id": "amazon-beanie-checkout",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The selected product is one black, well-made beanie priced under $35",
+          "The agent uses the normal cart and checkout path rather than Buy Now",
+          "The agent reaches the final purchase write-lock with the qualifying item"
+        ],
+        "judge_prompt": "Pass only when browser/tool evidence grounds the exact product, price, cart path, and terminal write-lock. Authentication assistance is a failure."
+      }
+    ],
+    "enforce_declared_evaluators": true,
     "bench": "pipeline-e2e"
   },
   {
@@ -1017,8 +1033,10 @@
     "tags": [
       "browser",
       "auth",
-      "bot-challenge"
+      "bot-challenge",
+      "ecommerce"
     ],
+    "group": "daily",
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -1037,12 +1055,91 @@
     },
     "success_on_payment_card_request": true,
     "start_phase": "execute",
+    "evaluators": [
+      {
+        "id": "toast-payment-receipt",
+        "method": "static_check",
+        "criteria": [
+          "A validated payment-card request names Nopa Fish on Toast and contains one The Rocky Sandwich line item"
+        ],
+        "checks": [
+          {
+            "type": "expected_payment_receipt"
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
     "bench": "pipeline-e2e"
   },
   {
-    "name": "minted-agent-accounts-uber",
-    "title": "Minted Agent Accounts Uber",
-    "prompt": "Stateful benchmark implemented by run_benchmark.py: delete local minted accounts for the benchmark user, create an Uber-style rider account with a real AgentMail minted inbox, verify the MintedAccount row, then start a fresh booking task in the same Steel browser profile and stop on write-lock approval before payment/request submission.",
+    "name": "browser-opentable-reservation",
+    "title": "OpenTable Restaurant Reservation",
+    "description": "Reserve a flexible Sunday dinner table through OpenTable without choosing a prepaid experience.",
+    "prompt": "Use OpenTable to reserve a table for 2 at Prospect, 300 Spear Street, San Francisco, this Sunday at 7:00 PM. If 7:00 PM is unavailable, choose the closest standard table between 6:00 PM and 8:00 PM. Do not choose or pay for a prepaid experience. Complete the reservation using the saved guest details and stop at the final write-lock approval if the harness requires it.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "reservation"
+    ],
+    "group": "daily",
+    "price_limit_cents": 250,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_attention_kinds": [
+      "write_lock"
+    ],
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base"
+      ],
+      "services": [
+        "opentable.com",
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.opentable.com/restaurant/profile/45907/reserve"
+      ],
+      "context_notes": "Live OpenTable inventory changes continuously. The task allows a two-hour window while holding restaurant, party size, date, and non-prepaid reservation type fixed."
+    },
+    "evaluators": [
+      {
+        "id": "opentable-reservation",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The agent reaches the final reservation write-lock or a confirmed reservation",
+          "The reservation is for Prospect, two people, this Sunday, between 6:00 PM and 8:00 PM",
+          "The agent does not select a prepaid experience"
+        ],
+        "judge_prompt": "Review the browser transcript and attention requests. Pass only if the exact restaurant, party size, relative date, allowed time window, and non-prepaid constraint are satisfied."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:ecommerce-v1-2026-07-14"
+    ]
+  },
+  {
+    "name": "browser-instacart-grocery-order",
+    "title": "Instacart Grocery Delivery",
+    "description": "Build and check out a small household grocery basket for same-day delivery.",
+    "prompt": "Use Instacart to order one dozen large eggs, one bunch of bananas, and one half-gallon of whole milk from a single San Francisco grocery store for delivery to my saved address. Prefer the least expensive well-rated options, allow only like-for-like substitutions, keep the item subtotal under $35, and choose the earliest available delivery window. Complete checkout and stop at the payment/write-lock approval if the harness requires it.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1050,14 +1147,419 @@
     ],
     "tags": [
       "browser",
-      "auth"
+      "auth",
+      "ecommerce",
+      "grocery"
     ],
+    "group": "daily",
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_attention_kinds": [
+      "payment_approval",
+      "write_lock"
+    ],
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base"
+      ],
+      "services": [
+        "instacart.com",
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.instacart.com/grocery-delivery/ca/near-me-in-san-francisco-ca"
+      ],
+      "context_notes": "Live Instacart catalog, inventory, pricing, saved delivery address, authentication state, and checkout write-lock."
+    },
+    "evaluators": [
+      {
+        "id": "instacart-grocery-checkout",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The cart contains exactly one dozen eggs, bananas, and a half-gallon of whole milk from one store",
+          "The item subtotal is under $35 and substitutions are limited to equivalent products",
+          "The agent reaches the payment/write-lock or completed checkout with the earliest available delivery window"
+        ],
+        "judge_prompt": "Review the browser transcript, cart evidence, and attention requests. Pass only if the basket, price cap, single-store constraint, substitutions, and delivery window all match."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:ecommerce-v1-2026-07-14"
+    ]
+  },
+  {
+    "name": "browser-doordash-usb-c-cable",
+    "title": "DoorDash USB-C Cable Delivery",
+    "description": "Buy a constrained electronics item through rapid local retail delivery.",
+    "prompt": "Use DoorDash to order one USB-C to USB-C charging cable for delivery to my saved address in San Francisco. It must be at least 6 feet long, support at least 60W charging, cost no more than $30 before taxes and fees, and arrive at the earliest available time. Do not buy a USB-A cable, adapter, multi-pack, or cable with a permanently attached wall charger. Complete checkout and stop at the payment/write-lock approval if the harness requires it.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "rapid-delivery"
+    ],
+    "group": "daily",
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_attention_kinds": [
+      "payment_approval",
+      "write_lock"
+    ],
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base"
+      ],
+      "services": [
+        "doordash.com",
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.doordash.com/products/usbc-cable/ugp_c671cf61-ba10-4433-b46a-3cce19227d69"
+      ],
+      "context_notes": "Live DoorDash retail inventory, saved address/auth state, product-spec comparison, delivery timing, and checkout write-lock."
+    },
+    "evaluators": [
+      {
+        "id": "doordash-usb-c-checkout",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The selected item is one USB-C to USB-C cable at least 6 feet long with at least 60W charging support",
+          "The selected item costs no more than $30 before taxes and fees and is not an adapter, multi-pack, USB-A cable, or attached charger",
+          "The agent reaches the payment/write-lock or completed checkout with the earliest available delivery"
+        ],
+        "judge_prompt": "Review product details, cart evidence, and attention requests. Pass only when every connector, length, wattage, quantity, price, exclusion, and delivery constraint is grounded in the transcript."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:ecommerce-v1-2026-07-14"
+    ]
+  },
+  {
+    "name": "browser-alchemy-springs-sauna",
+    "title": "Alchemy Springs Sauna Session",
+    "description": "Book a time-slotted local wellness service with a flexible Sunday window.",
+    "prompt": "Book one standard Sauna Garden session for me at Alchemy Springs, 939 Post Street, San Francisco, this Sunday. Choose the earliest available start time between 10:00 AM and 2:00 PM, use my saved guest details, and do not add classes, treatments, memberships, gift cards, or merchandise. Complete checkout and stop at the payment/write-lock approval if the harness requires it.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "appointment"
+    ],
+    "group": "daily",
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_attention_kinds": [
+      "payment_approval",
+      "write_lock"
+    ],
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base"
+      ],
+      "services": [
+        "alchemysprings.com",
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.alchemysprings.com/visit"
+      ],
+      "context_notes": "Live Alchemy Springs Sauna Garden inventory and booking checkout for one person at the official 939 Post Street location."
+    },
+    "evaluators": [
+      {
+        "id": "alchemy-sauna-booking",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The booking is for one standard Sauna Garden session at Alchemy Springs this Sunday",
+          "The selected start is the earliest available between 10:00 AM and 2:00 PM",
+          "No classes, treatments, memberships, gift cards, or merchandise are added, and the agent reaches payment/write-lock or confirmation"
+        ],
+        "judge_prompt": "Review the booking transcript and attention requests. Pass only if the service, person count, date, earliest allowed time, exclusions, and terminal checkout state all match."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:ecommerce-v1-2026-07-14"
+    ]
+  },
+  {
+    "name": "browser-hotel-booking",
+    "title": "Refundable Hotel Booking",
+    "description": "Reserve a one-night hotel stay while comparing room price and cancellation terms.",
+    "prompt": "Book a one-night stay for one adult at Hotel Kabuki in San Francisco from this Saturday to Sunday. Choose the lowest-priced non-smoking room with free cancellation, keep the room rate under $400 before taxes and fees, and do not select a nonrefundable rate, package, room upgrade, or add-on. Complete the reservation and stop at the payment/write-lock approval if the harness requires it.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "lodging"
+    ],
+    "group": "daily",
+    "price_limit_cents": 350,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_attention_kinds": [
+      "payment_approval",
+      "write_lock"
+    ],
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base"
+      ],
+      "services": [
+        "booking.com",
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.booking.com"
+      ],
+      "context_notes": "Live lodging inventory and rate rules. The benchmark fixes hotel, occupancy, relative dates, refundability, smoking preference, and price cap while allowing room inventory to vary."
+    },
+    "evaluators": [
+      {
+        "id": "refundable-hotel-booking",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The reservation is for Hotel Kabuki, one adult, Saturday to Sunday, in a non-smoking room",
+          "The selected rate is the lowest-priced option with free cancellation and is under $400 before taxes and fees",
+          "No nonrefundable rate, package, upgrade, or add-on is selected, and the agent reaches payment/write-lock or confirmation"
+        ],
+        "judge_prompt": "Review the room/rate evidence and attention requests. Pass only if the exact hotel, dates, occupancy, refundability, room constraints, price cap, and terminal booking state are grounded."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:ecommerce-v1-2026-07-14",
+      "coverage-gap:lodging"
+    ]
+  },
+  {
+    "name": "browser-event-ticket",
+    "title": "AMC Movie Ticket with Seat Selection",
+    "description": "Buy a time-slotted entertainment ticket that requires format and seat selection.",
+    "prompt": "Buy one adult movie ticket at AMC Metreon 16 in San Francisco for this Friday. Choose the earliest standard-format, non-horror movie starting between 7:00 PM and 9:00 PM, select an available seat closest to the horizontal and vertical center of the auditorium, keep the ticket price under $30 before fees, and add no concessions, memberships, donations, or upgrades. Complete checkout and stop at the payment/write-lock approval if the harness requires it.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "ticketing"
+    ],
+    "group": "daily",
+    "price_limit_cents": 350,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_attention_kinds": [
+      "payment_approval",
+      "write_lock"
+    ],
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base"
+      ],
+      "services": [
+        "amctheatres.com",
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
+      ],
+      "context_notes": "Live movie/showtime/seat inventory. The benchmark fixes venue, date, time window, format, genre exclusion, seating heuristic, price cap, and no-add-on constraints."
+    },
+    "evaluators": [
+      {
+        "id": "movie-ticket-seat-selection",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The ticket is for one adult at AMC Metreon 16 this Friday for the earliest qualifying non-horror standard-format show between 7:00 PM and 9:00 PM",
+          "The selected available seat is closest to the auditorium center and the ticket price is under $30 before fees",
+          "No concessions, memberships, donations, or upgrades are added, and the agent reaches payment/write-lock or confirmation"
+        ],
+        "judge_prompt": "Review showtime, format, genre, seat-map, cart, and attention evidence. Pass only if every selection and exclusion is supported and the terminal checkout state is reached."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:ecommerce-v1-2026-07-14",
+      "coverage-gap:ticketing"
+    ]
+  },
+  {
+    "name": "browser-amazon-return",
+    "title": "Amazon Return and Refund Initiation",
+    "description": "Exercise the post-purchase lifecycle by initiating a return with refund-method and drop-off constraints.",
+    "prompt": "On Amazon, initiate a return for the most recent delivered physical item that is still return-eligible. Choose refund to the original payment method and the nearest free no-box/no-label drop-off option if one is offered. Do not return digital content, groceries, gift cards, or an item marked final sale. Stop at the final write-lock approval before submitting the return if the harness requires it. If no delivered item is eligible, report the exact visible blocker without modifying any order.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "returns"
+    ],
+    "group": "daily",
+    "price_limit_cents": 350,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_attention_kinds": [
+      "write_lock"
+    ],
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base",
+        "amazon_auth"
+      ],
+      "services": [
+        "amazon.com",
+        "write_lock"
+      ],
+      "secrets": [
+        "amazon_auth_bundle"
+      ],
+      "live_targets": [
+        "https://www.amazon.com/gp/your-account/order-history"
+      ],
+      "context_notes": "Live Amazon order history with synced account authentication. A deterministic eligible-order fixture is the main stability risk for this post-purchase flow."
+    },
+    "evaluators": [
+      {
+        "id": "amazon-return-initiation",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The agent chooses the most recent delivered eligible physical item and excludes digital content, groceries, gift cards, and final-sale items",
+          "The return uses the original payment method and the nearest free no-box/no-label drop-off when offered",
+          "The agent reaches the final return write-lock without submitting"
+        ],
+        "judge_prompt": "Review order-history, eligibility, refund, drop-off, and attention evidence. Pass only if the agent follows the post-purchase constraints and reaches the correct final write-lock; no eligible order is a benchmark failure."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:ecommerce-v1-2026-07-14",
+      "coverage-gap:post-purchase"
+    ]
+  },
+  {
+    "name": "minted-agent-accounts-uber",
+    "title": "Minted Agent Accounts Uber",
+    "description": "Create or reuse the benchmark-safe Uber identity, then request an exact UberX route and stop at the final write lock.",
+    "prompt": "Using the stateful minted-account Uber flow, create or sign in to the benchmark rider account and request an UberX ride now from 88 Howard Street, San Francisco, CA 94105 to FITNESS SF Transbay, 425 Mission Street, San Francisco, CA 94105. Confirm both exact map pins, do not select a premium or shared ride, and stop at the final write-lock approval before requesting the driver.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "transportation"
+    ],
+    "group": "daily",
     "price_limit_cents": 400,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
+    "evaluators": [
+      {
+        "id": "uber-ride-request",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The pickup pin is 88 Howard Street and the destination pin is FITNESS SF Transbay at 425 Mission Street",
+          "The selected service is UberX, not a premium or shared tier",
+          "The agent reaches the final ride-request write-lock"
+        ],
+        "judge_prompt": "Pass only if browser/tool evidence grounds both exact addresses, both map pins, the UberX tier, and the terminal ride-request write-lock. Authentication assistance or an account blocker is a failure."
+      }
+    ],
+    "enforce_declared_evaluators": true,
     "bench": "pipeline-e2e"
   },
   {
@@ -2155,134 +2657,5 @@
     },
     "requires_claude_code": false,
     "requires_browser_agent": false
-  },
-  {
-    "name": "browser-agent-amazon-passkey",
-    "tags": [
-      "browser",
-      "auth"
-    ],
-    "bench": "rose-bench",
-    "title": "Amazon Kernel Passkey Authentication",
-    "prompt": "Open https://www.amazon.com and first confirm the page visibly shows the signed-out 'Hello, sign in' state. Then sign in using the saved Amazon passkey. Do not use a password, OTP, cookie/session authentication, or ask me to sign in. Once Amazon shows an authenticated account state, stop and report success.",
-    "source": [
-      "commit:8923d6e87",
-      "live-amazon:kernel-passkey"
-    ],
-    "attachment": null,
-    "evaluators": [
-      {
-        "id": "kernel-passkey-authentication",
-        "checks": [
-          {
-            "type": "browser_provider",
-            "value": "kernel"
-          },
-          {
-            "type": "browser_session_metadata_values",
-            "value": {
-              "auth_source": "none",
-              "cookies_count": 0,
-              "profile_source": "new_user_persistent",
-              "cookies_injected": false,
-              "permission_grant_count": 0,
-              "indexed_db_origin_count": 0,
-              "cache_storage_origin_count": 0,
-              "local_storage_origin_count": 0
-            }
-          },
-          {
-            "type": "message_before_credential_contains",
-            "value": [
-              "Hello, sign in"
-            ],
-            "credential_kind": "passkey"
-          },
-          {
-            "type": "credential_ref_kind",
-            "value": "passkey"
-          },
-          {
-            "type": "message_after_credential_contains",
-            "value": [
-              "Hello, Andy"
-            ],
-            "credential_kind": "passkey"
-          },
-          {
-            "type": "forbidden_credential_ref_kinds",
-            "value": [
-              "password",
-              "email_otp",
-              "sms_otp"
-            ]
-          }
-        ],
-        "method": "static_check",
-        "criteria": [
-          "Browser session metadata identifies Kernel as the provider",
-          "Browser session metadata proves a new profile with zero cookie or origin-state injection",
-          "The transcript shows Amazon signed out before passkey use",
-          "A passkey credential_ref is persisted before task completion",
-          "Amazon shows an authenticated account state",
-          "The transcript uses neither password nor OTP"
-        ]
-      }
-    ],
-    "description": "Live Amazon sign-in from a fresh Kernel profile using only the synced passkey",
-    "environment": {
-      "mode": "live",
-      "secrets": [
-        "amazon_passkey"
-      ],
-      "services": [
-        "amazon.com",
-        "kernel"
-      ],
-      "base_images": [],
-      "db_fixtures": [],
-      "live_targets": [
-        "https://www.amazon.com"
-      ],
-      "context_notes": "compute_tokens refreshes only LLM credentials. amazon_passkey syncs only the live passkey, deletes Amazon cookies and origin storage, disables saved-session/password alternatives, and detaches the local Kernel profile mapping so the run proves CDP passkey injection from a fresh profile.",
-      "live_fixtures": [
-        "compute_tokens",
-        "amazon_passkey"
-      ]
-    },
-    "start_phase": "execute",
-    "is_chat_mode": false,
-    "expected_tools": [
-      "spawn_agent"
-    ],
-    "timeout_seconds": 300,
-    "approval_handling": null,
-    "price_limit_cents": 200,
-    "requires_claude_code": false,
-    "requires_browser_agent": true,
-    "expected_browser_provider": "kernel",
-    "expected_credential_ref_kind": "passkey",
-    "forbidden_credential_ref_kinds": [
-      "password",
-      "email_otp",
-      "sms_otp"
-    ],
-    "success_on_browser_auth_evidence": true,
-    "expected_browser_session_metadata_values": {
-      "auth_source": "none",
-      "cookies_count": 0,
-      "profile_source": "new_user_persistent",
-      "cookies_injected": false,
-      "permission_grant_count": 0,
-      "indexed_db_origin_count": 0,
-      "cache_storage_origin_count": 0,
-      "local_storage_origin_count": 0
-    },
-    "expected_pre_credential_message_contains": [
-      "Hello, sign in"
-    ],
-    "expected_post_credential_message_contains": [
-      "Hello, Andy"
-    ]
   }
 ]

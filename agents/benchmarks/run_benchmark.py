@@ -317,6 +317,8 @@ def _attention_request_kind(req: dict) -> str:
 def _attention_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
     if task.expected_gate:
         return _gate_request_matches_task(task, req)
+    if task.expected_attention_kinds:
+        return _attention_request_kind(req) in task.expected_attention_kinds
     expected_kind = task.expected_attention_kind
     if not expected_kind:
         return True
@@ -2134,7 +2136,7 @@ async def poll_agent(
                                         f"    ✅ Auto-approved payment-card prerequisite {req_id[:8]}"
                                     )
                                     continue
-                                expected_kind = task.expected_attention_kind
+                                expected_kind = task.expected_attention_kind or task.expected_attention_kinds
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
                                     "unexpected_attention_kind": observed_kind,
@@ -2163,6 +2165,12 @@ async def poll_agent(
                                 }
                                 return data, approvals_triggered, approvals_resolved, receipt_error
                             approvals_triggered += 1
+                            observed_kind = _attention_request_kind(req)
+                            data["_benchmark"] = {
+                                **data.get("_benchmark", {}),
+                                "attention_request_kind_seen": observed_kind,
+                                "attention_request_id": req_id,
+                            }
                             if task.expected_attention_kind:
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
@@ -2200,8 +2208,8 @@ async def poll_agent(
                                 print(f"    ✅ Counted and released approval request {req_id[:8]}")
                             if task.approval_handling == "ignore":
                                 kind_label = (
-                                    f" ({task.expected_attention_kind})"
-                                    if task.expected_attention_kind
+                                    f" ({observed_kind})"
+                                    if task.expected_attention_kind or task.expected_attention_kinds
                                     else ""
                                 )
                                 print(f"    ✅ Approval request observed{kind_label} {req_id[:8]}")
@@ -2571,6 +2579,8 @@ def evaluate_task(
     # that the approval was actually triggered (the agent won't complete).
     if task.approval_handling == "ignore":
         if approvals_triggered == 0:
+            if task.expected_attention_kinds:
+                return False, f"Expected one of {task.expected_attention_kinds} attention requests (to ignore) but none was triggered"
             if task.expected_attention_kind:
                 return False, f"Expected {task.expected_attention_kind} attention request (to ignore) but none was triggered"
             return False, "Expected approval request (to ignore) but none were triggered"
@@ -2578,6 +2588,11 @@ def evaluate_task(
             benchmark_state = data.get("_benchmark", {})
             if benchmark_state.get("expected_attention_kind_seen") != task.expected_attention_kind:
                 return False, f"Expected {task.expected_attention_kind} attention request but it was not observed"
+        if task.expected_attention_kinds:
+            benchmark_state = data.get("_benchmark", {})
+            observed_kind = benchmark_state.get("attention_request_kind_seen")
+            if observed_kind not in task.expected_attention_kinds:
+                return False, f"Expected one of {task.expected_attention_kinds} attention requests, observed {observed_kind}"
         return True, None
 
     if task.name == CALENDLY_TASK_NAME:
@@ -3070,16 +3085,17 @@ def _run_gate_fixture(task_name: str, action: str) -> dict:
     return _parse_last_json_line(result.stdout)
 
 
-def _sync_compute_tokens() -> None:
+def _sync_compute_tokens() -> bool:
     """Refresh the compute-token integrations (claude_code / gpt_code + pool)
-    from prod into the isolated benchmark DB. Best-effort but loud: a frozen DB
+    from prod into the isolated benchmark DB. Returns False on any failure so
+    the live-fixture caller can fail closed. A frozen DB
     fixture or whole-DB snapshot restore can leave stale/expired compute tokens,
     which forces the agent's claudeAuth fetch to fail into the paid waterfall.
     Reads the prod source from back-end/.env; writes to the isolated DB."""
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Compute-token sync skipped: local Victoria DB not found")
-        return
+        return False
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
@@ -3094,11 +3110,12 @@ def _sync_compute_tokens() -> None:
         )
     except Exception as exc:
         print(f"    ⚠ Compute-token sync error: {exc}")
-        return
+        return False
     if result.returncode != 0:
         print(f"    ⚠ Compute-token sync failed: {(result.stderr or result.stdout).strip()[:200]}")
-    else:
-        print("    🔑 Refreshed compute tokens from prod")
+        return False
+    print("    🔑 Refreshed compute tokens from prod")
+    return True
 
 
 def _sync_browser_credentials() -> bool:
@@ -3188,17 +3205,20 @@ def _apply_base_live_fixture(ctx: LiveFixtureContext) -> dict:
     overhead — and on a throttled cloud uplink it blows the 180s sync budget,
     stalling agent creation. Compute tokens are still refreshed because WMH
     inference (RoseWMHProvider) and the agent's own LLM waterfall lease them."""
-    _sync_compute_tokens()
+    if not _sync_compute_tokens():
+        raise RuntimeError("Base live fixture could not refresh compute tokens")
     if _is_simulate_mode():
         print("    🌍 simulate mode — skipping browser cookie/password sync (WMH mocks env tools)")
         return {"fixture": "base", "browser_credentials": False}
-    _sync_browser_credentials()
+    if not _sync_browser_credentials():
+        raise RuntimeError("Base live fixture could not refresh browser credentials/auth state")
     return {"fixture": "base", "browser_credentials": True}
 
 
 def _apply_compute_tokens(ctx: LiveFixtureContext) -> dict:
     """Refresh compute tokens without importing any browser authentication state."""
-    _sync_compute_tokens()
+    if not _sync_compute_tokens():
+        raise RuntimeError("Compute-token live fixture could not refresh compute tokens")
     return {"fixture": "compute_tokens"}
 
 
@@ -3218,30 +3238,8 @@ def _apply_amazon_auth(ctx: LiveFixtureContext) -> dict:
     return {"fixture": "amazon_auth", "bundle_count": bundle_count}
 
 
-def _apply_compute_tokens(_ctx: LiveFixtureContext) -> dict:
-    _sync_compute_tokens()
-    return {"fixture": "compute_tokens"}
-
-
 def _apply_amazon_passkey(ctx: LiveFixtureContext) -> dict:
-    database_url = _local_victoria_database_url()
-    if not database_url:
-        raise RuntimeError("Amazon passkey fixture requires a local Victoria database")
-    env = os.environ.copy()
-    env["DATABASE_URL"] = database_url
-    env["DIRECT_URL"] = database_url
-    result = subprocess.run(
-        ["npx", "tsx", "scripts/seed-local.ts", "--passkeys-only"],
-        cwd=REPO_ROOT / "back-end",
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Amazon passkey sync failed: {(result.stderr or result.stdout).strip()[:300]}"
-        )
+    _sync_passkeys()
 
     user = _sql_literal(ctx.user_id)
     realm = _sql_literal(ctx.auth_realm)
@@ -4695,6 +4693,9 @@ async def run_minted_agent_account_task(
         prompt=signup_prompt,
         approval_handling=None,
         expected_attention_kind=None,
+        expected_attention_kinds=[],
+        evaluators=[],
+        enforce_declared_evaluators=False,
         timeout_seconds=max(task.timeout_seconds, 900),
     )
     try:
@@ -4924,7 +4925,9 @@ async def run_minted_agent_account_task(
         f"Open {target_url}. Using the already-created Uber account in this browser profile, "
         "start booking an Uber ride. Confirm the page is signed in with the same agent minted "
         f"identity from the first task. {booking_auth_instruction}"
-        "Use any reasonable pickup and destination if the site requires them. Continue until the "
+        "Set the pickup to 88 Howard Street, San Francisco, CA 94105 and the destination to "
+        "FITNESS SF Transbay, 425 Mission Street, San Francisco, CA 94105. Confirm both map pins "
+        "are at those exact addresses and select UberX, not a premium or shared tier. Continue until the "
             "final action would submit, request, confirm, or pay for the ride; "
             "click that final button so the browser write-lock approval request stops you. Do not bypass "
             "or answer approval."
@@ -4936,6 +4939,7 @@ async def run_minted_agent_account_task(
             prompt=booking_prompt,
             approval_handling="ignore",
             expected_attention_kind="write_lock",
+            expected_attention_kinds=[],
             timeout_seconds=max(task.timeout_seconds, 900),
         )
         previous_write_lock = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
@@ -4988,6 +4992,146 @@ async def run_minted_agent_account_task(
         )
     finally:
         print("    🧹 Preserved AgentIdentity primitive inbox and AgentPhone number")
+
+
+def _declared_evaluator_evidence(data: dict) -> list[dict]:
+    """Build a bounded evidence-only context for a declared LLM judge."""
+    evidence: list[dict] = []
+    for message in (data.get("messages") or [])[-120:]:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").upper()
+        if role in {"USER", "SYSTEM"}:
+            continue
+        text_value = message.get("text", message.get("content", ""))
+        if not isinstance(text_value, str):
+            text_value = json.dumps(text_value, default=str)
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        evidence.append(
+            {
+                "role": role or "UNKNOWN",
+                "text": text_value[:12000],
+                "metadata": {
+                    key: metadata[key]
+                    for key in (
+                        "action_type",
+                        "toolName",
+                        "toolStatus",
+                        "url",
+                        "title",
+                        "browser_session_metadata",
+                    )
+                    if key in metadata
+                },
+            }
+        )
+    evidence.append({"benchmark_state": data.get("_benchmark", {})})
+    return evidence
+
+
+async def _call_declared_llm_judge(
+    task: BenchmarkTask,
+    evaluator: dict,
+    data: dict,
+) -> dict:
+    """Execute one catalog-declared single-turn judge against grounded run evidence."""
+    from helpers.llm import check_progress
+
+    criteria = "\n".join(f"- {criterion}" for criterion in evaluator.get("criteria", []))
+    verifier_prompt = f"""You are a strict benchmark judge for a live ecommerce transaction.
+
+The task prompt and criteria below describe requirements; they are not evidence. Score exactly 1.0 only
+when every criterion is directly grounded in tool/browser output or typed benchmark state. Otherwise score
+0.0 and explain the first missing or contradicted requirement. An attention request proves only its typed
+terminal gate; it does not prove item, price, date, address, quantity, or selection constraints. Unsupported
+assistant claims are not proof. Authentication assistance, login blockers, missing inventory, and unavailable
+eligible orders fail unless a criterion explicitly defines that state as success.
+
+Task requirement: {task.prompt}
+Criteria:
+{criteria}
+Judge-specific instruction: {evaluator.get('judge_prompt', '')}
+"""
+    evidence = _declared_evaluator_evidence(data)
+    return await check_progress(
+        context=[
+            {
+                "role": "USER",
+                "text": "Evaluate the supplied run evidence against the benchmark requirements.",
+            },
+            {
+                "role": "TOOL",
+                "text": json.dumps(evidence, default=str),
+            },
+        ],
+        verifier_system_prompt=verifier_prompt,
+        response_schema=None,
+        call_site="benchmark_declared_evaluator",
+        agent_id=(data.get("agent") or {}).get("agent_id") or (data.get("agent") or {}).get("id"),
+    )
+
+
+def _run_declared_static_check(evaluator: dict, data: dict) -> tuple[bool, str]:
+    """Execute the small fail-closed static-check surface used by enforced tasks."""
+    benchmark_state = data.get("_benchmark", {})
+    for check in evaluator.get("checks", []):
+        check_type = check.get("type")
+        if check_type == "expected_payment_receipt":
+            if benchmark_state.get("expected_payment_receipt_seen") is not True:
+                return False, "Expected validated payment receipt was not observed"
+            continue
+        if check_type == "expected_gate":
+            if benchmark_state.get("expected_gate_seen") is not True:
+                return False, "Expected typed gate was not observed"
+            continue
+        return False, f"Unsupported enforced static check: {check_type}"
+    return True, "All declared static checks passed"
+
+
+async def _run_declared_evaluators(
+    task: BenchmarkTask,
+    data: dict,
+) -> tuple[bool, Optional[str], list[dict]]:
+    """Run required catalog evaluators; unsupported/erroring evaluators fail closed."""
+    if not task.enforce_declared_evaluators:
+        return True, None, []
+
+    results: list[dict] = []
+    for evaluator in task.evaluators:
+        evaluator_id = evaluator.get("id", "unnamed")
+        method = evaluator.get("method")
+        usage = None
+        try:
+            if method == "static_check":
+                passed, reasoning = _run_declared_static_check(evaluator, data)
+                score = 1.0 if passed else 0.0
+            elif method == "single_turn_llm_judge":
+                judged = await _call_declared_llm_judge(task, evaluator, data)
+                score = float(judged.get("score", 0.0))
+                reasoning = str(judged.get("reasoning") or "Judge returned no reasoning")
+                usage = judged.get("usage")
+                passed = score >= float(evaluator.get("pass_threshold", 1.0))
+            else:
+                passed = False
+                score = 0.0
+                reasoning = f"Unsupported enforced evaluator method: {method}"
+        except Exception as exc:
+            passed = False
+            score = 0.0
+            reasoning = f"Declared evaluator execution failed: {exc}"
+        result = {
+            "id": evaluator_id,
+            "method": method,
+            "score": score,
+            "passed": passed,
+            "reasoning": reasoning,
+        }
+        if usage is not None:
+            result["usage"] = usage
+        results.append(result)
+        if not passed:
+            return False, f"Declared evaluator {evaluator_id} failed: {reasoning}", results
+    return True, None, results
 
 
 async def run_single_task(
@@ -5418,9 +5562,25 @@ async def run_single_task(
             warn_count = len(final_violations) - error_count
             print(f"    Context validation: {error_count} errors, {warn_count} warnings")
 
+        declared_evaluator_results: list[dict] = []
+        if task.enforce_declared_evaluators and passed:
+            evaluator_passed, evaluator_reason, declared_evaluator_results = await _run_declared_evaluators(
+                task,
+                data,
+            )
+            data["_benchmark"] = {
+                **data.get("_benchmark", {}),
+                "declared_evaluator_results": declared_evaluator_results,
+            }
+            if not evaluator_passed:
+                passed = False
+                failure_reason = evaluator_reason
+
         # Collect prod logs for diagnostics
         print("    Collecting prod logs...")
         logs = await collect_logs(agent_id, data, start_time)
+        if declared_evaluator_results:
+            logs["declared_evaluators"] = declared_evaluator_results
         # Capture the FULL agent tree's messages (root + every spawned sub-agent) so
         # the archive can render the fan-out, not just the root. Without this a
         # for_each/spawn benchmark opens to a lone root with no visible tree. Only
