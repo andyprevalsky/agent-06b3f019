@@ -24,7 +24,7 @@
  */
 
 import { useMemo, useState } from 'react';
-import { Activity, CircleCheckBig, Loader2, TrendingUp, UserPlus, Users, Zap } from 'lucide-react';
+import { Activity, CircleCheckBig, Loader2, TrendingUp, Users, Zap } from 'lucide-react';
 import {
   Area,
   AreaChart,
@@ -48,6 +48,7 @@ import { MetricChange } from './MetricChange';
 import { MetricSectionHeader } from './MetricHierarchy';
 import PrimaryMetricSection from './PrimaryMetricSection';
 import VelocitySection from './VelocitySection';
+import WaitlistSignupsChart from './WaitlistSignupsChart';
 import { relativeChange, seriesMetricChange } from './metricComparison';
 import type {
   AdminHealthData,
@@ -389,19 +390,7 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
   const newUsers = data.series.at(-1)?.newUsers ?? 0;
   const period = PERIOD_COPY[data.timeSlice];
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-5">
-      <MetricPanel
-        title="Waitlist Signups"
-        value={formatNumber(data.summary.waitlistSignups)}
-        detail="Email and phone entries added this period."
-        icon={<UserPlus className="h-5 w-5" />}
-        change={
-          <MetricChange
-            value={seriesMetricChange(data, 'waitlistSignups')}
-            timeSlice={data.timeSlice}
-          />
-        }
-      />
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
       <MetricPanel
         title="# of Users"
         value={formatNumber(data.summary.userCount)}
@@ -645,6 +634,7 @@ export default function AdminHealth() {
                 title="General Health Metrics"
                 description="Internal execution signals that support product and operational health."
               />
+              <WaitlistSignupsChart data={data} />
               <VelocitySection data={data} />
             </section>
           </div>

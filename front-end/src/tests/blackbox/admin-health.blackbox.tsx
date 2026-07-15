@@ -209,9 +209,11 @@ describe('AdminHealth page', () => {
     expect(screen.getByRole('region', { name: 'General health metrics' })).toBeInTheDocument();
     expect(screen.queryByText('How secondary metrics connect to revenue')).not.toBeInTheDocument();
     expect(screen.getByText('$1,840')).toBeInTheDocument();
+    // Waitlist signups now renders as a chart in General Health Metrics (not a secondary card).
     expect(screen.getByText('Waitlist Signups')).toBeInTheDocument();
-    expect(screen.getAllByText('14').length).toBeGreaterThan(0);
-    expect(screen.getByText('Email and phone entries added this period.')).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.startsWith('Email + phone entries per')),
+    ).toBeInTheDocument();
     expect(screen.getByText('# of Users')).toBeInTheDocument();
     expect(screen.getAllByText('42').length).toBeGreaterThan(0);
     expect(screen.getByText('2 new users this period.')).toBeInTheDocument();

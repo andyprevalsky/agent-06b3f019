@@ -160,13 +160,17 @@ function assertRollingPeriods(
     throw new Error('History range must span every rolling period');
   }
   const generatedAt = new Date(body.generatedAt);
-  const retrievalDayStart = Date.UTC(
+  // The latest period ends at the START OF TOMORROW so the in-progress day is
+  // included dashboard-wide (current bucket = "this period so far").
+  const nextUtcDayStart = Date.UTC(
     generatedAt.getUTCFullYear(),
     generatedAt.getUTCMonth(),
-    generatedAt.getUTCDate()
+    generatedAt.getUTCDate() + 1
   );
-  if (Date.parse(latest.end) !== retrievalDayStart) {
-    throw new Error('Latest rolling period must end at the last complete UTC day');
+  if (Date.parse(latest.end) !== nextUtcDayStart) {
+    throw new Error(
+      'Latest rolling period must end at the start of the next UTC day (includes today)'
+    );
   }
 }
 

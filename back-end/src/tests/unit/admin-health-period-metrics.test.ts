@@ -96,7 +96,8 @@ assert.deepStrictEqual(
 );
 
 const now = new Date('2026-07-12T19:30:00.000Z');
-const retrievalDayStart = '2026-07-12T00:00:00.000Z';
+// The latest period ends at the START OF TOMORROW so the in-progress day is included.
+const latestPeriodEnd = '2026-07-13T00:00:00.000Z';
 const rollingDays = {
   weekly: 7,
   monthly: 30,
@@ -110,8 +111,8 @@ for (const [timeSlice, days] of Object.entries(rollingDays)) {
   assert.ok(latest, `Expected a latest ${timeSlice} period`);
   assert.strictEqual(
     latest.end,
-    retrievalDayStart,
-    `${timeSlice} must end at the last complete UTC day`
+    latestPeriodEnd,
+    `${timeSlice} must end at the start of the next UTC day so today is included`
   );
   assert.strictEqual(
     Date.parse(latest.end) - Date.parse(latest.start),
@@ -136,7 +137,7 @@ for (const [timeSlice, days] of Object.entries(rollingDays)) {
   assert.strictEqual(
     buildPeriods(timeSlice as keyof typeof rollingDays, new Date('2026-07-13T01:00:00.000Z')).at(-1)
       ?.end,
-    '2026-07-13T00:00:00.000Z',
+    '2026-07-14T00:00:00.000Z',
     `${timeSlice} periods must roll over on the next UTC retrieval day`
   );
 }
