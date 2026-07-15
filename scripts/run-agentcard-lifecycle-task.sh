@@ -26,6 +26,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export CONDUCTOR_WORKSPACE_NAME="${CONDUCTOR_WORKSPACE_NAME:-$(basename "$ROOT_DIR")}"
 export TEMPORAL_TASK_QUEUE="navi-agent-tasks-$CONDUCTOR_WORKSPACE_NAME"
 export ALLOW_TEMPORAL_CLEANUP=true
+# Payment lifecycle tasks must run with the fast-mode LLM cache OFF: cached agent
+# decisions from prior runs replay stale patterns (observed: the root agent
+# re-spawns the browser after a successful checkout, looping until timeout). Real
+# uncached decisions complete the checkout once. Mirrors benchmarks/local.py.
+export BENCHMARK_FAST_MODE_CACHE="${BENCHMARK_FAST_MODE_CACHE:-false}"
 
 LOG_FILE="$ROOT_DIR/.context/agentcard-lifecycle-$TASK_NAME.log"
 STACK_PID=""

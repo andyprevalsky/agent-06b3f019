@@ -5378,6 +5378,13 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         result.get("payment_request", {}),
                         workflow_instance.user_id or "",
                     )
+                    # Link the purchase to this agent. main's normalize_payment_payload
+                    # intentionally omits agentId from the fingerprint (user-scoped
+                    # idempotent reuse), but the purchase row still needs the agentId so
+                    # the lifecycle lookup (findLatestPurchaseLifecycleByAgentId) and
+                    # session-end cleanup can find it. Set it after normalize so the
+                    # fingerprint stays user-scoped.
+                    payment_payload["agentId"] = workflow_instance.agent_id
                     logger.info(
                         "Browser payment payload normalized",
                         agent_id=workflow_instance.agent_id,
