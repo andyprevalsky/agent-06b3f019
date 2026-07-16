@@ -1769,21 +1769,21 @@ done
 # the wrapper self-deletes ($REMOTE_TMP_SCRIPT rm -f + exec), so on a box whose
 # driver is already running the wrapper file is gone and the re-launch is a no-op;
 # it only actually re-fires on boxes where the wrapper died before exec'ing.
-# The data-plane status server (python3 -m http.server serving /data, which holds
-# bench.log) lets the controller poll progress over `flyctl proxy` (WireGuard)
-# instead of rate-limited ssh. It is started in the SAME ssh as the driver launch
-# (below) — bundling both into one call halves the launch-phase Machines-API hits,
-# and the launch burst is the remaining saturation source at fleet width. Bound to
+# Start a tiny status HTTP server serving /data (which holds bench.log) so the
+# controller can poll progress over the Fly DATA PLANE via `flyctl proxy`
+# (WireGuard) instead of `flyctl ssh console` (rate-limited Machines API). One
+# idempotent ssh (kill any stale server first) in its OWN call — bundling it into
+# the driver-launch ssh regressed the launch (0/30 drivers progressed past
+# RUNSTAMP), so keep them as the separate calls validated on the smoke. Bound to
 # the box's private 6PN address, reachable only through the authenticated proxy.
 STATUS_PROXY_PID=""
 LOCAL_STATUS_PORT="$(( LOCAL_DASH_PORT + 3 ))"
+FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"pkill -f 'http.server ${REMOTE_STATUS_PORT}' 2>/dev/null; sleep 1; setsid python3 -m http.server ${REMOTE_STATUS_PORT} --directory /data >/dev/null 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
 
 launch_attempts="${CLOUDBENCH_DRIVER_LAUNCH_ATTEMPTS:-4}"
 _ok=0
 for _la in $(seq 1 "$launch_attempts"); do
-    # ONE ssh: (idempotently) start the status server, then launch the detached
-    # driver. Half the ssh calls of starting them separately.
-    FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"pkill -f 'http.server ${REMOTE_STATUS_PORT}' 2>/dev/null; setsid python3 -m http.server ${REMOTE_STATUS_PORT} --directory /data >/dev/null 2>&1 </dev/null & setsid bash '$REMOTE_TMP_SCRIPT' >> '$REMOTE_LOG' 2>&1 </dev/null &\"" >/dev/null 2>&1 || true
+    FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"setsid bash '$REMOTE_TMP_SCRIPT' >> '$REMOTE_LOG' 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
     sleep "${CLOUDBENCH_LAUNCH_SETTLE_SECONDS:-5}"
     # Confirmed = the driver process is alive. A failed/rate-limited probe returns
     # empty (not RUNNING) and simply drives another attempt — never a false OK.
