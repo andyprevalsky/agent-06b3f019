@@ -35,6 +35,15 @@ if [ "${CLOUDBENCH_BOOT:-}" != "1" ]; then
     exec sleep infinity
 fi
 
+# /data (the snapshot-forked volume) can be briefly unwritable right at boot — the
+# mount lands a beat after the command starts. Writing bench.log then silently
+# fails (no set -e here) and the whole run produces an empty log. Wait until /data
+# is actually writable before doing anything that touches it.
+for _w in $(seq 1 120); do
+    if touch /data/.cbwtest 2>/dev/null; then rm -f /data/.cbwtest 2>/dev/null; break; fi
+    sleep 1
+done
+
 # RUNSTAMP first — the controller polls the log for this token to confirm the box
 # actually booted into the driver (replaces the old ssh-written RUNSTAMP).
 printf 'RUNSTAMP-%s\n' "${CLOUDBENCH_RUN_TOKEN:-boot}" > "$LOG"
