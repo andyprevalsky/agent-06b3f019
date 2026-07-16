@@ -1592,6 +1592,9 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "BENCHMARK_VM_USD_PER_HOUR=$VM_USD_PER_HOUR"
     )
     [ "$DASHBOARD" = "1" ] && _envargs+=( --env "BENCHMARK_FRONTEND_URL=http://localhost:$LOCAL_DASH_PORT" )
+    # The boot script lives on the /data volume (staged into the snapshot). flyctl
+    # --command word-splits, so only a simple `bash <path>` works (an inline shell
+    # pipeline is lost) — hence a staged file, not an inline base64 command.
     echo "🚀 boot-launch: setting per-run env + boot command on $mid (no ssh) ..."
     _upd=0
     for _u in $(seq 1 "${CLOUDBENCH_BOOT_UPDATE_ATTEMPTS:-10}"); do
