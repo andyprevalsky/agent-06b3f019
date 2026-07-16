@@ -1005,6 +1005,9 @@ provision_pool() {  # provision_pool <N> — create N stopped clones concurrentl
     for pid in "${pool_pids[@]}"; do
         wait "$pid" || failed=1
     done
+    # Every provision child is reaped. Drop stale numeric PIDs immediately so
+    # a later controller cleanup cannot signal an unrelated PID-reuse occupant.
+    PROVISION_PIDS=()
     echo "✅ pool ready: $(grep -c . "$POOL_IDS_FILE" 2>/dev/null || echo 0) machines → $POOL_IDS_FILE"
     [ "$failed" = "0" ]
 }
@@ -1716,6 +1719,9 @@ for bench in "${BENCHES[@]}"; do
     sleep "${CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS:-0.4}"
 done
 for pp in "${PROVISION_PIDS[@]}"; do wait "$pp" 2>/dev/null || true; done
+# Provision children are fully reaped; retain no stale PIDs across the
+# potentially multi-hour benchmark phase.
+PROVISION_PIDS=()
 
 # ── Phase 2: launch each provisioned bench's isolated run (fast; backgrounded) ─
 i=0

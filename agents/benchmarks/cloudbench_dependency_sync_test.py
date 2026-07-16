@@ -1466,6 +1466,7 @@ def test_pool_provision_fans_out_slots_concurrently() -> None:
     assert 'provision_pool_slot "$i" "$n" &' in pool
     assert 'pool_pids+=("$pid")' in pool
     assert 'for pid in "${pool_pids[@]}"; do' in pool
+    assert pool.index('wait "$pid"') < pool.index("PROVISION_PIDS=()")
     assert "CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS" in pool
     assert 'pool-provision-$i.ids' in slot
     assert 'pool_ledger_record_id "$id"' in slot
@@ -1802,6 +1803,7 @@ def test_fleet_provisions_clones_concurrently() -> None:
     phase2 = fleet.index("# ── Phase 2:")
     # ordering: fan-out → barrier → launch
     assert prov < wait_all < phase2, "phases out of order"
+    assert fleet.index("PROVISION_PIDS=()", wait_all) < phase2
     phase1 = fleet[prov:wait_all]
     # each provision is a backgrounded subshell using its OWN per-bench ledger
     assert 'clone_machine_target "$out/primary.ids"' in phase1
