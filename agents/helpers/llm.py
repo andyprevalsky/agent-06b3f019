@@ -81,6 +81,13 @@ class LLMStructuredOutputError(ValueError):
     """The provider completed, but its structured output violated our contract."""
 
 
+# A malformed / schema-invalid structured output is non-deterministic (the model
+# occasionally emits an incomplete tool call, e.g. {"tool": "think"} with no
+# fields). Re-generate up to this many extra times before surfacing the error — a
+# fresh call almost always parses.
+MAX_STRUCTURED_PARSE_RETRIES = 2
+
+
 class ResponseSchemaPersistenceError(RuntimeError):
     """A generated response schema could not be saved durably."""
 
@@ -2036,6 +2043,7 @@ async def call_llm_structured_streaming(  # noqa: C901
     idle_timeout_s: Optional[float] = None,  # Override Rose idle/inter-chunk timeout (-1 disables)
     _exclude_anthropic_family: bool = False,  # Internal: refusal retry skips Anthropic direct/waterfall routes
     _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
+    _parse_retry_attempt: int = 0,  # Internal: bounds re-generation on a malformed/schema-invalid structured output
 ) -> Tuple[T, Dict, List[tuple]]:
     """
     Call LLM with structured outputs using streaming, emitting partial text via callback.
@@ -2801,6 +2809,56 @@ async def call_llm_structured_streaming(  # noqa: C901
             response = response_model.model_validate(parsed_content)
         except (json.JSONDecodeError, Exception) as e:
             error_message = extract_error_message(e)
+            # A malformed / schema-invalid structured output is non-deterministic,
+            # so re-generate a bounded number of times before surfacing the error —
+            # a fresh call almost always parses. Mirrors the max_tokens escalation
+            # retry above (recursive, capped, time-guarded so we keep deadline
+            # headroom for another streaming call).
+            parse_elapsed = (_safe_time() - request_start_time) if request_start_time else 0
+            if _parse_retry_attempt < MAX_STRUCTURED_PARSE_RETRIES and parse_elapsed < 180:
+                logger.warning(
+                    f"⚠️ [{call_site}] Failed to parse Rose response as "
+                    f"{response_model.__name__} (parse attempt "
+                    f"{_parse_retry_attempt + 1}/{MAX_STRUCTURED_PARSE_RETRIES + 1}); "
+                    f"re-generating. error={error_message}",
+                )
+                return await call_llm_structured_streaming(
+                    messages=messages,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_model=response_model,
+                    on_chunk=on_chunk,
+                    reasoning_max_tokens=reasoning_max_tokens,
+                    model_preference=model_preference,
+                    model_seed=model_seed,
+                    agent_id=agent_id,
+                    on_tool_detected=on_tool_detected,
+                    on_attention_stream=on_attention_stream,
+                    on_raw_progress=on_raw_progress,
+                    claude_token=claude_token,
+                    claude_token_source=claude_token_source,
+                    claude_token_pool_id=claude_token_pool_id,
+                    claude_token_user_id=claude_token_user_id,
+                    gpt_token=gpt_token,
+                    gpt_account_id=gpt_account_id,
+                    gpt_token_source=gpt_token_source,
+                    gpt_token_pool_id=gpt_token_pool_id,
+                    gpt_token_user_id=gpt_token_user_id,
+                    compute_token_lineage_key=compute_token_lineage_key,
+                    compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                    on_model_detected=on_model_detected,
+                    skip_cache_write=skip_cache_write,
+                    call_site=call_site,
+                    thinking=thinking,
+                    effort=effort,
+                    deadline_s=deadline_s,
+                    ttft_timeout_s=ttft_timeout_s,
+                    idle_timeout_s=idle_timeout_s,
+                    _exclude_anthropic_family=_exclude_anthropic_family,
+                    _is_escalation=_is_escalation,
+                    _parse_retry_attempt=_parse_retry_attempt + 1,
+                )
             logger.error(
                 f"Failed to parse streaming Rose response: json={accumulated_json[:500]}",
                 error=error_message,

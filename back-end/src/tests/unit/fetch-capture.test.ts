@@ -66,6 +66,7 @@ async function run(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const oldFakeSurge = process.env.BLACKBOX_TEST_FAKE_SURGE;
   const upstreamCalls: Array<{ url: string; bodyType: string }> = [];
+  let agentCardCalls = 0;
   process.env.BLACKBOX_TEST_FAKE_SURGE = '1';
 
   globalThis.fetch = (async (
@@ -83,6 +84,13 @@ async function run(): Promise<void> {
     });
     if (url.includes('error.e2b.app')) {
       throw new Error('e2b unavailable');
+    }
+    if (url.includes('agentcard.sh')) {
+      agentCardCalls += 1;
+      return new Response(JSON.stringify({ revision: agentCardCalls }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
     }
     return new Response('upstream-ok', {
       status: 201,
@@ -122,8 +130,23 @@ async function run(): Promise<void> {
     const surgeBody = (await surge.json()) as { id?: string };
     assert.strictEqual(surgeBody.id, 'blackbox-surge-message-5');
 
+    const agentCardBody = JSON.stringify({
+      method: 'tools/call',
+      params: { name: 'list_transfers' },
+    });
+    const agentCardResponses: number[] = [];
+    for (let index = 0; index < 2; index += 1) {
+      const response = await fetch('https://api.agentcard.sh/mcp', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer agentcard-secret' },
+        body: agentCardBody,
+      });
+      agentCardResponses.push(((await response.json()) as { revision: number }).revision);
+    }
+    assert.deepStrictEqual(agentCardResponses, [1, 2]);
+
     const all = await readCaptures(baseUrl);
-    assert.strictEqual(all.captures.length, 5);
+    assert.strictEqual(all.captures.length, 7);
     assert.strictEqual(all.captures[0].requestBody, '[non-string body]');
     assert.strictEqual(all.captures[0].responseStatus, 201);
     assert.strictEqual(all.captures[1].url, 'https://sandbox.e2b.app/health');
@@ -136,13 +159,20 @@ async function run(): Promise<void> {
       'Bearer surge-sec...[redacted]'
     );
     assert.strictEqual(all.captures[4].responseBody, '{"id":"blackbox-surge-message-5"}');
+    assert.strictEqual(all.captures[4].cached, false);
+    assert.strictEqual(all.captures[5].cached, false);
+    assert.strictEqual(all.captures[6].cached, false);
+    assert.strictEqual(
+      all.captures[5].requestHeaders.Authorization,
+      'Bearer agentcard...[redacted]'
+    );
     assert.deepStrictEqual(
       upstreamCalls.map((call) => call.bodyType),
-      ['FormData', 'none', 'none', 'none']
+      ['FormData', 'none', 'none', 'none', 'String', 'String']
     );
 
     const afterFirst = await readCaptures(baseUrl, '?after=1');
-    assert.strictEqual(afterFirst.captures.length, 4);
+    assert.strictEqual(afterFirst.captures.length, 6);
 
     const cleared = await fetch(`${baseUrl}/captures`, { method: 'DELETE' });
     assert.strictEqual(cleared.status, 200);

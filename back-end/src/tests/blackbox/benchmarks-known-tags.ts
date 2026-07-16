@@ -63,4 +63,11 @@ export const KNOWN_TAGS = [
   'transportation',
   'rapid-delivery',
   'returns',
+  // AgentCard lifecycle + settlement slices (see tasks.json).
+  'compensation',
+  'agentcard-lifecycle-sandbox',
+  'agentcard-lifecycle-production',
+  'setup',
+  'idempotency',
+  'settlement',
 ];

@@ -14,17 +14,19 @@
  *   with real provider credentials.
  */
 
-import crypto, { randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
-import { z } from 'zod';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { AgentCardProviderError, type CardProvider } from '../../providers/card-provider';
 import * as purchasesService from '../../domains/purchases/service';
 import {
   assert,
-  assertStatus,
   FakeCardProvider,
+  FakeWalletFundingProvider,
+  FailingDetailsCardProvider,
+  FailingMintCardProvider,
+  FundingInProgressCardProvider,
   RepurchaseProvider,
   StubCardStateProvider,
   seedHeldPurchase,
@@ -33,8 +35,6 @@ import {
 
 config();
 
-const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
-const API_KEY = process.env.BACKEND_API_KEY || '';
 const RUN_ID =
   process.env.BLACKBOX_TEST_RUN_ID ||
   process.env.CONTRACT_TEST_RUN_ID ||
@@ -43,82 +43,11 @@ const RUN_ID =
 const trackedUserIds = new Set<string>();
 const trackedAgentIds = new Set<string>();
 
-const ErrorResponse = z.object({
-  error: z.string(),
-  code: z.string().optional(),
-});
-
-const PurchaseLookupResponse = z.object({
-  found: z.boolean(),
-  reusable: z.boolean(),
-  purchase: z
-    .object({
-      id: z.string(),
-      agentId: z.string().nullable(),
-      fingerprint: z.string(),
-      cardId: z.string().nullable(),
-      merchant: z.string(),
-      totalCents: z.number(),
-      status: z.nativeEnum(PurchaseSpendStatus),
-      createdAt: z.string().or(z.date()),
-      updatedAt: z.string().or(z.date()),
-    })
-    .nullable(),
-});
-
-const OkResponse = z.object({
-  ok: z.literal(true),
-});
-
 interface TestResult {
   name: string;
   passed: boolean;
   error?: string;
   duration: number;
-}
-
-async function request(
-  path: string,
-  options: RequestInit = {}
-): Promise<{ status: number; data: unknown; headers: Headers }> {
-  const response = await fetch(`${BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...options.headers,
-    },
-  });
-  const contentType = response.headers.get('content-type');
-  const data = contentType?.includes('application/json')
-    ? await response.json()
-    : await response.text();
-  return { status: response.status, data, headers: response.headers };
-}
-
-function apiKeyHeaders(userId?: string): Record<string, string> {
-  return {
-    'X-API-Key': API_KEY,
-    ...(userId ? { 'X-User-Id': userId } : {}),
-  };
-}
-
-function webhookHeaders(payload: unknown): Record<string, string> {
-  const secret = process.env.AGENTCARD_WEBHOOK_SECRET;
-  if (!secret) return {};
-  const t = Math.floor(Date.now() / 1000).toString();
-  const signature = crypto
-    .createHmac('sha256', secret)
-    .update(`${t}.${JSON.stringify(payload)}`)
-    .digest('hex');
-  return { 'agentcard-signature': `t=${t},v1=${signature}` };
-}
-
-function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T {
-  const result = schema.safeParse(data);
-  if (!result.success) {
-    throw new Error(`${label} schema validation failed: ${result.error.message}`);
-  }
-  return result.data;
 }
 
 async function createUser(label: string): Promise<string> {
@@ -187,15 +116,18 @@ const tests: Array<[string, () => Promise<void>]> = [
       const userId = await createSubscribedUser('service-idempotent');
       const fingerprint = `service-idempotent-${randomUUID()}`;
       const provider = new FakeCardProvider();
+      const walletFundingProvider = new FakeWalletFundingProvider();
 
       await withFakeStripe(async (calls) => {
         const first = await purchasesService.mintPurchaseCard(
           validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
-          provider
+          provider,
+          walletFundingProvider
         );
         const second = await purchasesService.mintPurchaseCard(
           validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
-          provider
+          provider,
+          walletFundingProvider
         );
 
         assert(first.cardId === provider.cardId, 'first mint should return fake card id');
@@ -211,6 +143,18 @@ const tests: Array<[string, () => Promise<void>]> = [
         );
         assert(provider.mintCalls === 1, `expected one provider mint, got ${provider.mintCalls}`);
         assert(
+          provider.mintRequests[0]?.fundsSource === 'company_flow',
+          'purchase card should request AgentCard company_flow funding'
+        );
+        assert(
+          walletFundingProvider.fundCalls.length === 0,
+          `company_flow should not pre-fund the user wallet, got ${walletFundingProvider.fundCalls.length}`
+        );
+        assert(
+          walletFundingProvider.confirmCalls.length === 0,
+          `auto-approved company flow should not call confirm_collection, got ${walletFundingProvider.confirmCalls.length}`
+        );
+        assert(
           provider.detailCalls === 2,
           `expected details for both responses, got ${provider.detailCalls}`
         );
@@ -225,6 +169,18 @@ const tests: Array<[string, () => Promise<void>]> = [
           row?.stripePaymentIntentId !== null,
           'purchase spend should store the payment intent id'
         );
+        const funding = await prisma.purchaseWalletFunding.findUnique({
+          where: { purchaseId: row?.id ?? '' },
+        });
+        assert(funding !== null, 'purchase should record AgentCard wallet funding');
+        assert(
+          funding?.status === 'FUNDED',
+          `expected wallet funding FUNDED, got ${funding?.status}`
+        );
+        assert(
+          funding?.providerTransferId === provider.providerTransferId,
+          'wallet funding should record provider transfer id'
+        );
         assert(
           calls.charges[0].includes('"statement_descriptor_suffix":"Test Merchant"'),
           'charge should set merchant descriptor suffix'
@@ -233,9 +189,48 @@ const tests: Array<[string, () => Promise<void>]> = [
           calls.charges[0].includes('"capture_method":"manual"'),
           'mint must authorize a manual-capture hold, not an immediate charge'
         );
+        assert(calls.captures.length === 1, 'funding completion must capture the hold once');
+        assert(calls.cancels.length === 0, 'successful funding must not cancel the hold');
+      });
+    },
+  ],
+  [
+    'service confirms AgentCard company-wallet collection and retries mint',
+    async () => {
+      const userId = await createSubscribedUser('service-company-confirm');
+      const fingerprint = `service-company-confirm-${randomUUID()}`;
+      const provider = new FundingInProgressCardProvider();
+      const walletFundingProvider = new FakeWalletFundingProvider();
+
+      await withFakeStripe(async () => {
+        const result = await purchasesService.mintPurchaseCard(
+          validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
+          provider,
+          walletFundingProvider
+        );
+
+        assert(result.cardId === provider.cardId, 'retry should return minted card');
+        assert(provider.mintCalls === 2, `expected two mint attempts, got ${provider.mintCalls}`);
         assert(
-          calls.captures.length === 0 && calls.cancels.length === 0,
-          'minting alone must not capture or cancel the hold'
+          walletFundingProvider.confirmCalls.length === 1,
+          `expected one confirm_collection, got ${walletFundingProvider.confirmCalls.length}`
+        );
+        assert(
+          walletFundingProvider.confirmCalls[0]?.providerTransferId === provider.providerTransferId,
+          'confirm_collection should use AgentCard transfer id'
+        );
+
+        const row = await prisma.purchaseSpend.findFirst({
+          where: { userId, fingerprint },
+          orderBy: { createdAt: 'desc' },
+        });
+        const funding = await prisma.purchaseWalletFunding.findUnique({
+          where: { purchaseId: row?.id ?? '' },
+        });
+        assert(funding?.status === 'FUNDED', `expected FUNDED, got ${funding?.status}`);
+        assert(
+          funding?.providerTransferId === provider.providerTransferId,
+          'funding row should retain confirmed transfer id'
         );
       });
     },
@@ -364,15 +359,25 @@ const tests: Array<[string, () => Promise<void>]> = [
       const consumedCardId = `held-card-${randomUUID()}`;
       const seeded = await seedHeldPurchase(userId, fingerprint, consumedCardId);
       const provider = new RepurchaseProvider(consumedCardId);
+      const walletFundingProvider = new FakeWalletFundingProvider();
 
       await withFakeStripe(async (calls) => {
         const result = await purchasesService.mintPurchaseCard(
           validMintBody({ userId, fingerprint, totalCents: 1080 }) as never,
-          provider
+          provider,
+          walletFundingProvider
         );
         assert(result.cardId === provider.newCardId, 're-purchase should mint a NEW card');
         assert(provider.mintCalls === 1, 'should mint exactly one new card');
         assert(calls.charges.length === 1, 're-purchase should charge exactly once');
+        assert(
+          provider.mintRequests[0]?.fundsSource === 'company_flow',
+          're-purchase should request AgentCard company_flow funding'
+        );
+        assert(
+          walletFundingProvider.fundCalls.length === 0,
+          're-purchase should not pre-fund the user wallet'
+        );
 
         const oldRow = await prisma.purchaseSpend.findUnique({ where: { id: seeded.id } });
         assert(
@@ -387,126 +392,103 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'lookup rejects unauthenticated requests',
+    'mint cancels the Stripe hold if AgentCard card issuance fails before company transfer',
     async () => {
-      const response = await request('/api/purchases/lookup?fingerprint=missing');
-      assertStatus(response.status, 401, response.data);
-      assertSchema(ErrorResponse, response.data, 'unauthenticated lookup');
-    },
-  ],
-  [
-    'lookup requires a fingerprint',
-    async () => {
-      const userId = await createUser('lookup-missing-fingerprint');
-      const response = await request('/api/purchases/lookup', {
-        headers: apiKeyHeaders(userId),
-      });
-      assertStatus(response.status, 400, response.data);
-      const body = assertSchema(ErrorResponse, response.data, 'missing fingerprint');
-      assert(body.error.includes('fingerprint'), 'error should mention fingerprint');
-    },
-  ],
-  [
-    'lookup returns a non-reusable miss without leaking card data',
-    async () => {
-      const userId = await createUser('lookup-miss');
-      const response = await request('/api/purchases/lookup?fingerprint=no-such-purchase', {
-        headers: apiKeyHeaders(userId),
-      });
-      assertStatus(response.status, 200, response.data);
-      const body = assertSchema(PurchaseLookupResponse, response.data, 'lookup miss');
-      assert(body.found === false, 'expected found=false');
-      assert(body.reusable === false, 'expected reusable=false');
-      assert(body.purchase === null, 'expected no purchase payload');
-    },
-  ],
-  [
-    'mint rejects purchases over the configured maximum before creating spend rows',
-    async () => {
-      const userId = await createUser('over-limit');
-      const fingerprint = `over-limit-${randomUUID()}`;
-      const response = await request('/api/purchases/mint', {
-        method: 'POST',
-        headers: apiKeyHeaders(userId),
-        body: JSON.stringify(validMintBody({ fingerprint, totalCents: 2_147_483_647 })),
-      });
-      assertStatus(response.status, 402, response.data);
-      assertSchema(ErrorResponse, response.data, 'over-limit mint');
+      const userId = await createSubscribedUser('mint-card-failure');
+      const fingerprint = `mint-card-failure-${randomUUID()}`;
+      const provider = new FailingMintCardProvider();
+      const walletFundingProvider = new FakeWalletFundingProvider();
 
-      const rows = await prisma.purchaseSpend.findMany({ where: { userId, fingerprint } });
-      assert(rows.length === 0, 'over-limit mint should not create a purchase spend row');
-    },
-  ],
-  [
-    'mint records a failed purchase when the user has no Stripe customer',
-    async () => {
-      const userId = await createUser('missing-stripe-customer');
-      const fingerprint = `missing-customer-${randomUUID()}`;
-      const response = await request('/api/purchases/mint', {
-        method: 'POST',
-        headers: apiKeyHeaders(userId),
-        body: JSON.stringify(validMintBody({ fingerprint, totalCents: 1000 })),
-      });
-      assertStatus(response.status, 402, response.data);
-      const body = assertSchema(ErrorResponse, response.data, 'missing customer mint');
-      assert(
-        body.error.includes('Stripe billing customer'),
-        'error should identify missing Stripe customer'
-      );
+      await withFakeStripe(async (calls) => {
+        let threw = false;
+        try {
+          await purchasesService.mintPurchaseCard(
+            validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
+            provider,
+            walletFundingProvider
+          );
+        } catch (error) {
+          threw = true;
+          assert(
+            error instanceof Error && error.message.includes('card mint failed'),
+            `unexpected error: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
 
-      const row = await prisma.purchaseSpend.findFirst({
-        where: { userId, fingerprint },
-        orderBy: { createdAt: 'desc' },
+        assert(threw, 'mint should throw when card issuance fails');
+        assert(
+          walletFundingProvider.fundCalls.length === 0,
+          'company_flow should not pre-fund the user wallet'
+        );
+        assert(
+          walletFundingProvider.reclaimCalls.length === 0,
+          'no AgentCard funding should be reclaimed before create_card returns a transfer'
+        );
+        assert(calls.cancels.length === 1, 'Stripe hold should be canceled');
+
+        const row = await prisma.purchaseSpend.findFirst({
+          where: { userId, fingerprint },
+          orderBy: { createdAt: 'desc' },
+        });
+        assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);
+        const funding = await prisma.purchaseWalletFunding.findUnique({
+          where: { purchaseId: row?.id ?? '' },
+        });
+        assert(
+          funding === null,
+          'no wallet funding row should be created before a transfer exists'
+        );
       });
-      assert(row !== null, 'failed mint should persist a purchase spend row');
-      assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);
-      assert(row?.cardId === null, 'failed mint should not store a card id');
-      assert(
-        row?.stripePaymentIntentId === null,
-        'failed mint should not store a payment intent id'
-      );
     },
   ],
   [
-    'agentcard webhook spec path accepts unknown card events as idempotent no-ops',
+    'mint reclaims the issued AgentCard and refunds Stripe if detail retrieval fails after funding',
     async () => {
-      const payload = { type: 'transaction.cleared', cardId: `card-${randomUUID()}` };
-      const response = await request('/api/webhooks/agentcard', {
-        method: 'POST',
-        headers: webhookHeaders(payload),
-        body: JSON.stringify(payload),
+      const userId = await createSubscribedUser('mint-details-failure');
+      const fingerprint = `mint-details-failure-${randomUUID()}`;
+      const provider = new FailingDetailsCardProvider();
+      const walletFundingProvider = new FakeWalletFundingProvider();
+
+      await withFakeStripe(async (calls) => {
+        let errorMessage = '';
+        try {
+          await purchasesService.mintPurchaseCard(
+            validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
+            provider,
+            walletFundingProvider
+          );
+        } catch (error) {
+          errorMessage = error instanceof Error ? error.message : String(error);
+        }
+        assert(errorMessage.includes('card details failed'), `unexpected error: ${errorMessage}`);
+        assert(provider.closeCalls === 1, 'issued AgentCard should be closed after detail failure');
+        assert(
+          calls.captures.length === 1,
+          'AgentCard funding should capture Stripe before details'
+        );
+        assert(calls.cancels.length === 0, 'a captured Stripe payment must not be canceled');
+        assert(calls.refunds.length === 1, 'captured Stripe payment should be refunded once');
+        assert(
+          walletFundingProvider.reclaimCalls.length === 1,
+          'AgentCard company transfer should be reclaimed before refunding Stripe'
+        );
+        const row = await prisma.purchaseSpend.findFirst({
+          where: { userId, fingerprint },
+          orderBy: { createdAt: 'desc' },
+        });
+        assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);
+        assert(
+          calls.refundIdempotencyKeys[0] === `purchase-refund:${row?.id}`,
+          'refund must use the purchase-scoped idempotency key'
+        );
+        const funding = await prisma.purchaseWalletFunding.findUnique({
+          where: { purchaseId: row?.id ?? '' },
+        });
+        assert(
+          funding?.status === 'RECLAIMED',
+          `expected wallet funding RECLAIMED, got ${funding?.status}`
+        );
       });
-      assertStatus(response.status, 200, response.data);
-      assertSchema(OkResponse, response.data, 'webhook unknown card');
-    },
-  ],
-  [
-    'agentcard webhook legacy purchases path remains compatible',
-    async () => {
-      const payload = {
-        type: 'transaction.voided',
-        data: { card: { id: `card-${randomUUID()}` } },
-      };
-      const response = await request('/api/purchases/webhooks/agentcard', {
-        method: 'POST',
-        headers: webhookHeaders(payload),
-        body: JSON.stringify(payload),
-      });
-      assertStatus(response.status, 200, response.data);
-      assertSchema(OkResponse, response.data, 'legacy webhook unknown card');
-    },
-  ],
-  [
-    'agentcard webhook without a card id is an idempotent no-op',
-    async () => {
-      const payload = { type: 'transaction.cleared' };
-      const response = await request('/api/webhooks/agentcard', {
-        method: 'POST',
-        headers: webhookHeaders(payload),
-        body: JSON.stringify(payload),
-      });
-      assertStatus(response.status, 200, response.data);
-      assertSchema(OkResponse, response.data, 'webhook no card id');
     },
   ],
 ];

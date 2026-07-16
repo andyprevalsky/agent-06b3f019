@@ -1,11 +1,21 @@
 import crypto from 'node:crypto';
 import { createCardProvider, type CardProvider } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
-import { cancelAuthorizedHold, captureAuthorizedHold, stripe } from '../../providers/stripe';
+import { refundCapturedPurchase } from '../../providers/stripe';
+import {
+  isWalletFundingConsumedDuringReclaimError,
+  isWalletFundingReleasePendingError,
+  type WalletFundingProvider,
+} from '../../providers/wallet-funding';
 import { AGENTCARD_WEBHOOK_SECRET } from './config';
 import { PurchaseError } from './errors';
 import * as repo from './repo';
 import { PurchaseSpendStatus, type AgentCardWebhookEvent } from './types';
+import {
+  beginPurchaseWalletReclaim,
+  consumePurchaseWalletFunding,
+  reclaimPurchaseWalletFunding,
+} from './walletFunding';
 
 const log = createLogger('Purchases');
 
@@ -23,15 +33,28 @@ function hasValue(value: string | null | undefined): value is string {
   return value !== null && value !== undefined && value !== '';
 }
 
+async function refundPurchaseOrRecordFailure(purchase: {
+  id: string;
+  stripePaymentIntentId: string | null;
+}): Promise<void> {
+  if (!hasValue(purchase.stripePaymentIntentId)) return;
+  try {
+    await refundCapturedPurchase(purchase.stripePaymentIntentId, purchase.id);
+  } catch (error) {
+    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.REFUND_FAILED);
+    throw error;
+  }
+}
+
 /**
- * Close a minted card and reconcile the ledger. The purchase's Stripe charge is an authorized HOLD,
- * so an un-captured (HELD) purchase is CANCELED, not refunded — no money moved, no fee, no
- * charge/refund churn. A settled (CLEARED) purchase just has its card closed; the captured charge
- * stands. Idempotent on already-reconciled (VOIDED/REFUNDED) rows.
+ * Close a minted card and reconcile the ledger. `HELD` means the AgentCard transfer completed and
+ * the matching Stripe charge was captured, but the merchant has not settled. Abandonment therefore
+ * reclaims the transfer and refunds Stripe. A settled purchase keeps its captured charge.
  */
 export async function closePurchaseCard(
   cardId: string,
-  cardProvider: CardProvider = createCardProvider()
+  cardProvider?: CardProvider,
+  walletFundingProvider?: WalletFundingProvider
 ): Promise<{ ok: true; status: PurchaseSpendStatus }> {
   if (cardId.trim() === '') {
     throw new PurchaseError('cardId is required');
@@ -49,17 +72,44 @@ export async function closePurchaseCard(
     return { ok: true, status: purchase.status };
   }
 
-  // Settled: the card was used and the hold captured — reclaim the card, but the charge stands.
+  const activeCardProvider = cardProvider ?? createCardProvider(purchase.userId);
+
+  // Settled: the card was used and the funding charge captured; close the card but keep the charge.
   if (purchase.status === PurchaseSpendStatus.CLEARED) {
-    await cardProvider.closeCard(cardId);
+    await activeCardProvider.closeCard(cardId);
     return { ok: true, status: PurchaseSpendStatus.CLEARED };
   }
 
-  // Un-captured hold (agent abandoned the purchase): release the hold. No charge, no refund.
-  await cardProvider.closeCard(cardId);
-  if (hasValue(purchase.stripePaymentIntentId)) {
-    await cancelAuthorizedHold(purchase.stripePaymentIntentId);
+  // Funded but unspent card: reclaim AgentCard funds before refunding the user's captured charge.
+  // Claim the reclaim before closing so a concurrent cleanup pass can't read the now not-live card
+  // as merchant-spent while the funding is still FUNDED.
+  await beginPurchaseWalletReclaim(purchase.id);
+  await activeCardProvider.closeCard(cardId);
+  try {
+    await reclaimPurchaseWalletFunding(purchase, 'purchase_card_closed', walletFundingProvider);
+  } catch (error) {
+    if (isWalletFundingConsumedDuringReclaimError(error)) {
+      await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
+      return { ok: true, status: PurchaseSpendStatus.CLEARED };
+    }
+    const releasePending = isWalletFundingReleasePendingError(error);
+    const context = {
+      purchase_id: purchase.id,
+      card_id: cardId,
+      error: error instanceof Error ? error.message : String(error),
+    };
+    if (releasePending) {
+      log.info('Wallet funding release is pending after closing purchase card', context);
+    } else {
+      log.error('Failed to reclaim wallet funding while closing purchase card', context);
+    }
+    if (!releasePending) {
+      await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FUNDING_RECLAIM_FAILED);
+      return { ok: true, status: PurchaseSpendStatus.FUNDING_RECLAIM_FAILED };
+    }
+    return { ok: true, status: purchase.status };
   }
+  await refundPurchaseOrRecordFailure(purchase);
   await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.VOIDED);
   return { ok: true, status: PurchaseSpendStatus.VOIDED };
 }
@@ -112,11 +162,8 @@ export function verifyAgentCardWebhookSignature(rawBody: string, signatureHeader
 
 /**
  * Reconcile a purchase from an AgentCard transaction webhook:
- *  - `transaction.cleared` → the card settled, so CAPTURE the user's hold (→ CLEARED). Capture is
- *    always attempted (even if a prior liveness check already flipped the row to CLEARED without
- *    capturing) and is idempotent, so a lost `cleared` webhook can't leave money uncollected.
- *  - `transaction.voided` → if the hold was already captured (CLEARED), REFUND it (→ REFUNDED);
- *    otherwise CANCEL the un-captured hold (→ VOIDED) — no charge, no refund churn.
+ *  - `transaction.cleared` → consume the already-funded transfer (→ CLEARED).
+ *  - `transaction.voided` → reclaim the transfer and refund the captured funding charge.
  * Already-terminal (VOIDED/REFUNDED) rows are never resurrected by a late/duplicate event.
  */
 export async function handleAgentCardWebhook(event: AgentCardWebhookEvent): Promise<{ ok: true }> {
@@ -140,25 +187,52 @@ export async function handleAgentCardWebhook(event: AgentCardWebhookEvent): Prom
   }
 
   if (event.type === 'transaction.cleared') {
-    if (hasValue(purchase.stripePaymentIntentId)) {
-      await captureAuthorizedHold(purchase.stripePaymentIntentId);
-    }
+    await consumePurchaseWalletFunding(purchase.id);
     await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
   } else if (event.type === 'transaction.voided') {
     if (purchase.status === PurchaseSpendStatus.CLEARED) {
       // The hold was already captured, then the card transaction reversed → refund the charge.
-      if (hasValue(purchase.stripePaymentIntentId)) {
-        await stripe.refunds.create({
-          payment_intent: purchase.stripePaymentIntentId,
-          metadata: { purchaseSpendId: purchase.id, agentcardEventType: event.type },
+      try {
+        await reclaimPurchaseWalletFunding(purchase, 'agentcard_transaction_voided', undefined, {
+          allowConsumed: true,
         });
+      } catch (error) {
+        if (isWalletFundingConsumedDuringReclaimError(error)) {
+          await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
+          return { ok: true };
+        }
+        log.error('Failed to reclaim wallet funding after voided captured transaction', {
+          purchase_id: purchase.id,
+          card_id: cardId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        if (!isWalletFundingReleasePendingError(error)) {
+          await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FUNDING_RECLAIM_FAILED);
+        }
+        return { ok: true };
       }
+      await refundPurchaseOrRecordFailure(purchase);
       await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.REFUNDED);
     } else {
-      // Hold never captured → release it. No money taken.
-      if (hasValue(purchase.stripePaymentIntentId)) {
-        await cancelAuthorizedHold(purchase.stripePaymentIntentId);
+      // HELD is already funded/captured; reclaim the unused transfer, then refund the user.
+      try {
+        await reclaimPurchaseWalletFunding(purchase, 'agentcard_transaction_voided');
+      } catch (error) {
+        if (isWalletFundingConsumedDuringReclaimError(error)) {
+          await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
+          return { ok: true };
+        }
+        log.error('Failed to reclaim wallet funding after voided uncaptured transaction', {
+          purchase_id: purchase.id,
+          card_id: cardId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        if (!isWalletFundingReleasePendingError(error)) {
+          await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FUNDING_RECLAIM_FAILED);
+        }
+        return { ok: true };
       }
+      await refundPurchaseOrRecordFailure(purchase);
       await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.VOIDED);
     }
   }

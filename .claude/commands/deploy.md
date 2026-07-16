@@ -74,6 +74,7 @@ CHANGED_RESEARCH=$(echo "$CHANGED" | grep -E '^research/' || true)
 CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
 CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
 CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS$CHANGED_RESEARCH" ] && echo "yes" || echo "")
+CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
 ```
 
 ## Step 0p: Prompt human-approval guard (no skip — always runs)
@@ -301,7 +302,7 @@ bash scripts/kill-services.sh           # kill the whole tree; preserves DB cont
 
 `scripts/kill-services.sh` is worktree-scoped (uses `$PWD` as the filter), walks descendants via `pgrep -P`, SIGTERMs then SIGKILLs survivors, and deliberately leaves the Postgres container intact. Re-run it any time you need a clean slate — it is idempotent.
 
-Spin up the local stack through `scripts/run.sh --benchmark`. This stack serves blackbox, semantic, AND Pre-Deploy smoke gates — smoke runs locally against this same stack (Step 6), not in cloud-bench. In benchmark mode, `run.sh` starts `back-end`, `front-end`, and `agents`, and skips `mac-app`. When this command is used inside Conductor, `run.sh` derives the backend, frontend, and worker-health ports from `CONDUCTOR_PORT`.
+Spin up the local stack through `scripts/run.sh --benchmark`. This stack serves blackbox and semantic gates; Pre-Deploy smoke runs on its own separate isolated stack via `run-bench --local` (or, opt-in, the cloud fleet). In benchmark mode, `run.sh` starts `back-end`, `front-end`, and `agents`, and skips `mac-app`. When this command is used inside Conductor, `run.sh` derives the backend, frontend, and worker-health ports from `CONDUCTOR_PORT`.
 
 ```bash
 # Conductor provides the base port; run.sh fans out backend/frontend/health/research from it.
@@ -310,8 +311,11 @@ if [ -z "$CONDUCTOR_PORT" ]; then
   exit 1
 fi
 
+export CONDUCTOR_WORKSPACE_NAME="${CONDUCTOR_WORKSPACE_NAME:-$(basename "$(git rev-parse --show-toplevel)")}"
+
 export SMOKE_BASE_URL="http://localhost:$CONDUCTOR_PORT"
 export SMOKE_HEALTH_URL="http://localhost:$((CONDUCTOR_PORT + 2))"
+export SMOKE_FRONTEND_URL="http://localhost:$((CONDUCTOR_PORT + 1))"
 SEMANTIC_QUEUE_WORKSPACE="${CONDUCTOR_WORKSPACE_NAME:-local}"
 export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMANTIC_QUEUE_WORKSPACE}-deploy-$(date -u +%Y%m%d%H%M%S)-$$"
 
@@ -348,11 +352,14 @@ echo "DB pre-started: $DB_CONTAINER on port $LOCAL_DB_PORT"
 
 ```bash
 # Step 2: Launch run.sh using the Bash tool's run_in_background parameter.
+# Keep all service output redirected so the managed session cannot exhaust its output budget.
 # run.sh will detect the DB as already-running and won't stop it on cleanup.
 # Use run_in_background=true for this command:
-DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=1 TRACE_ARCHIVE_ENABLED=0 \
+BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=1 TRACE_ARCHIVE_ENABLED=0 \
   bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1
 ```
+
+Poll the background Bash call at least every 30 seconds while Steps 5-6b run. This keeps the managed process session active without streaming the high-volume service logs; use `.context/deploy-smoke.log` only for targeted diagnosis. `BENCHMARK_BUNDLED_FRONTEND=true` builds and serves the frontend so the browser-agent lifecycle gates have a stable target.
 
 The local latency gate disables trace-archive fixture recording because that
 out-of-band benchmark recorder copies the user's full browser environment and
@@ -369,6 +376,8 @@ for i in $(seq 1 60); do curl -s "$SMOKE_HEALTH_URL/health" > /dev/null 2>&1 && 
 export SMOKE_FRONTEND_URL="http://localhost:$((CONDUCTOR_PORT + 1))"
 for i in $(seq 1 60); do curl -sf "$SMOKE_FRONTEND_URL" > /dev/null 2>&1 && break; sleep 2; done
 ```
+
+`BENCHMARK_BUNDLED_FRONTEND=true` builds and serves the frontend through Vite preview as part of the managed `run.sh` tree. The bundled server is required for browser-agent lifecycle tests; the module-by-module development server is not reliable through the benchmark tunnel.
 
 **Teardown (MANDATORY):** after Step 6b finishes (pass OR fail), and any time you abort the local gates mid-way, you MUST tear the stack down before moving on. Skipping this leaves zombie run.sh + grandchildren that leak ports, RAM, and worker slots across `/deploy` invocations.
 
@@ -441,21 +450,23 @@ When skipping, record it explicitly in the Test Report:
 
 ### Running smoke
 
-**Pre-Deploy smoke runs LOCALLY, not in cloud-bench.** Run the complete Pre-Deploy group through the local isolated benchmark stack (`scripts/run-bench --local`) — the same `run.sh --benchmark` backend + worker + research + Postgres that Step 5 already brought up on this machine. Do NOT use `scripts/run-predeploy-cloud` / the Fly fleet / the Benchmark Hub for the deploy gate; those remain available for scale experiments but are not the pre-deploy path.
+Run the complete Pre-Deploy smoke group on the **LOCAL isolated benchmark stack** (the default). The Step 5 stack stays up for blackbox and semantic tests; `run-bench --local` spins up its OWN per-run isolated stack (separate backend + worker + WMH + Postgres), so the two never collide.
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-# Derive the smoke task set from every catalog entry tagged `smoke`, then run
-# them all on the LOCAL isolated stack (max_concurrency handled by the runner).
-SMOKE_TASKS=$(cd agents && venv/bin/python -c "import json;d=json.load(open('benchmarks/tasks.json'));t=d if isinstance(d,list) else d.get('tasks',d);t=list(t.values()) if isinstance(t,dict) else t;print(' '.join(x['name'] for x in t if 'smoke' in (x.get('tags') or [])))")
-echo "smoke tasks: $SMOKE_TASKS"
-CONDUCTOR_PORT="$CONDUCTOR_PORT" CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
-  bash scripts/run-bench --local $SMOKE_TASKS
+bash scripts/run-predeploy-local
 ```
 
-`scripts/run-bench --local` opts into `benchmarks/local.py`, which runs each task against the local backend/worker/research/Postgres on THIS machine (per-run ports derived from `CONDUCTOR_PORT`). It refreshes compute tokens + browser cookies/passwords from prod at runtime, then runs the tagged smoke tasks in parallel and prints a `RESULTS: N/N passed` line.
+`scripts/run-predeploy-local` derives the task set from every catalog entry tagged `smoke` (identical selection to the cloud path, so they can't drift) and runs them through `scripts/run-bench --local` at max concurrency 5 on this machine. It exits non-zero unless every requested task passes, so the command IS the gate.
 
-The command is the gate: it exits non-zero unless every smoke task is `passed`. The task set must exactly match the catalog's `smoke` group. Record the `RESULTS:` line and the saved `runs/*.json` path in `TEST_REPORT`. (A long-running local run can exceed the ~10-min background-task cap — launch it detached, e.g. `nohup … & disown`, and poll its log.)
+**Why local is the default:** the shared cloud fleet (`run-predeploy-cloud`, app `navi-whisper-lux-bench`) is frequently rate-limited, volume-capacity-starved, and — worst — **leaks paid Fly machines when the controller is killed** (a killed run orphans clones + autoscaler workers that keep billing until manually destroyed). Local has no shared-resource contention and no cross-workspace blast radius. Use the cloud fleet only as an explicit opt-in when local resources are insufficient:
+
+```bash
+# Opt-in cloud alternate (only when local can't run the set — e.g. many heavy browser tasks):
+bash scripts/run-predeploy-cloud   # per-bench Fly fleet via the production Hub; verify the hub-... run in Benchmarks → Runs
+```
+
+If you DO run the cloud path, its gate is stricter surface (Hub dispatch `completed`, task set exactly matches the smoke group, every task `passed`) and you MUST actively monitor it and reap leaked machines on any abort (see rule #1 — never fire-and-forget an async task; `flyctl machines list -a navi-whisper-lux-bench` then `flyctl machine destroy --force` every non-warm/non-controller clone).
 
 ### Active-worktree contract
 
@@ -468,7 +479,7 @@ Timeout history remains catalog-driven on the checked-out ref. Do not fabricate 
 
 ### Monitoring agent progress during smoke tests
 
-**Do NOT fire-and-forget.** Monitor the local run's log (the report card printed by `local.py`, `agents/navi-worker-log.txt`, and `back-end/backend-logs.log`).
+**Do NOT fire-and-forget** (rule #1). Keep `scripts/run-predeploy-local` in the foreground (or, if backgrounded, actively poll it on the cadence below — the wake-up may never come). Monitor its console output and the per-run manifest + result JSON under `.context/benchmarks/<run-id>/`; each task prints an FE link (`http://localhost:<fe-port>/?agent-id=...`) you can open to verify the agent actually ran. (Cloud alternate only: monitor the printed Hub run in **Benchmarks → Runs**, `.context/hub-poller-run-<request-id>.log`, and `.context/fleet/runs/<batch-id>/_batch/report-card.json`, and reap leaked Fly machines on any abort.)
 
 **Universal background-task cadence (applies here AND to every background task in this repo):**
 
@@ -492,7 +503,7 @@ At each poll, check:
 
 ### Pass criteria
 
-**ALL Pre-Deploy smoke benchmarks must pass locally — currently 7/7, with 0 failures.** The local run must print `RESULTS: 7/7 passed` and exit 0. Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
+**ALL Pre-Deploy smoke benchmarks must pass — currently 7/7, with 0 failures.** On the local path, `run-predeploy-local` must exit 0 ("All requested benchmarks passed") and every task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
 
 **Diagnosis process — MUST be delegated to a `general-purpose` sub-agent.**
 
@@ -582,11 +593,15 @@ exact agent_id, scan the result, then hand the agent_id off.
 
 Everything else — crashes, timeouts, stalls, resource contention, infra issues — is your job to fix.
 
-If a benchmark fails due to local infrastructure (stale DB, dead worker, port drift), fix the local stack (re-run `scripts/setup-db.sh`, restart `run.sh --benchmark`) and re-run the smoke group. A partial pass does not satisfy the 7/7 gate.
+If a benchmark fails due to infrastructure (local stack flake, or on the cloud alternate a fleet/Fly issue), fix the runner and re-run the full smoke group. On the local path all tasks must pass in one `run-predeploy-local` invocation; on the cloud alternate a sequential diagnostic run does not satisfy the concurrent gate.
 
 ### Local cleanup
 
-The local smoke stack is the Step 5 `run.sh --benchmark` stack. Tear it down with `scripts/kill-services.sh` (preserves the DB container) after semantic tests finish. Capture any failed agent's logs BEFORE teardown — local `navi-worker-log.txt` / `backend-logs.log` are overwritten on the next run.
+The fleet runner owns its Fly machines and stops/destroys them on every normal or trapped exit. After the command finishes, verify every ID in `.context/cloudbench-pool.ids` is `stopped` and that no fresh clone IDs recorded by the batch remain alive.
+
+Failed benchmark agents are intentionally retained long enough for diagnostics. Do not delete them before collecting the three required diagnostic views. The local Step 5 stack is unrelated to cloud smoke and stays up until the local gates finish.
+
+**Keep the local Step 5 stack running for Steps 6a and 6b. Run the Step 5 teardown only after both gates finish, or immediately when either gate fails.**
 
 ### Diagnosing failures
 
@@ -613,6 +628,39 @@ cd agents && python benchmarks/run_benchmark.py --compare <run_a.json> <run_b.js
 ```
 
 Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree, or `agent_logs.py <agent_id> --tree --source worker|backend|research|messages` for per-source raw events.
+
+## Step 6a: AgentCard sandbox lifecycle gate
+
+Skip only when `$CHANGED_AGENTCARD_PAYMENT` is empty. Otherwise, tear down the shared Step 5 stack, then run each payment lifecycle task in its own bounded stack through the agent benchmark harness. **Execute each command below as a separate foreground Bash call; do not combine them into a loop or one tool call.** The launcher owns startup, bundled frontend readiness, benchmark execution, and teardown, preventing process-session limits or stale workers from interrupting another lifecycle.
+
+```bash
+cd "$(git rev-parse --show-toplevel)"
+bash scripts/kill-services.sh
+```
+
+```bash
+CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
+  bash scripts/run-agentcard-lifecycle-task.sh agent-payment-test-shop --bootstrap
+```
+
+```bash
+CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
+  bash scripts/run-agentcard-lifecycle-task.sh agent-payment-setup-resume
+```
+
+```bash
+CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
+  bash scripts/run-agentcard-lifecycle-task.sh agent-payment-idempotent-abandonment
+```
+
+```bash
+CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
+  bash scripts/run-agentcard-lifecycle-task.sh agent-payment-abandonment
+```
+
+The first bootstrap command must also report an AgentCard sandbox pool of at least $500. This is test-only float provisioned through the authenticated admin session; it does not bypass Organization MCP in the purchase path. All four tasks must pass with their full purchase, Stripe, AgentCard card, organization transfer, attention, and cleanup assertions. A missing lifecycle snapshot, skipped task, unreclaimed abandonment transfer, or unrefunded Stripe capture blocks deploy. Record the four task results and total cost in `TEST_REPORT`.
+
+After all four pass, relaunch the Step 5 stack and readiness checks before Step 6b. Keep that background Bash call actively polled as described in Step 5.
 
 ## Step 6b: Semantic tests + fix
 
@@ -652,6 +700,8 @@ If Chromium is missing, install once: `cd front-end && npx playwright install ch
 3. Fix the root cause in code.
 4. Restart services (Step 5) and re-run the failed semantic test.
 
+After Steps 6a and 6b pass, run the mandatory Step 5 teardown. If either fails, preserve the failed agent long enough to collect diagnostics, complete any payment lifecycle cleanup, then tear down before restarting the Test Loop.
+
 ---
 
 # ╔══════════════════════════════════════════════════════════════════════╗
@@ -686,15 +736,19 @@ If Chromium is missing, install once: `cd front-end && npx playwright install ch
 
 # ║ 6. Smoke benchmarks: complete Pre-Deploy group passes ║
 
-# ║ LOCALLY (currently 7/7), `RESULTS: 7/7 passed` — OR ║
+# ║ (currently 7/7) via run-predeploy-local (default) or the ║
 
-# ║ explicitly skipped per the ║
+# ║ cloud fleet alternate — OR explicitly skipped per the ║
 
 # ║ "When smoke can be skipped" table in Step 6 (diff must be ║
 
 # ║ limited to safe paths; if ANY must-run path is touched, smoke ║
 
 # ║ is required) ║
+
+# ║ 6a. AgentCard sandbox lifecycle: 4/4 pass whenever the payment ║
+
+# ║ lifecycle surface changed ║
 
 # ║ 6b. Semantic tests: 100% pass on every /deploy; never skipped. ║
 
@@ -1207,6 +1261,23 @@ gh run watch "$SEMANTIC_RUN_ID" --exit-status
 ```
 
 This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs, fix the root cause in a new PR, and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
+
+## Step 13c: AgentCard production lifecycle gate
+
+Skip only when `$CHANGED_AGENTCARD_PAYMENT` is empty. Run after both the backend and frontend merged commits are live:
+
+```bash
+cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
+python benchmarks/run_benchmark.py \
+  --task agent-payment-production-abandonment \
+  --prod \
+  --ci \
+  --bootstrap
+```
+
+This production-only task reserves exactly $0.50 from the existing AgentCard organization float, captures the matching live Stripe payment, issues a live AgentCard, and deliberately leaves merchant checkout unsubmitted. The benchmark must then close the card, observe the organization transfer as `reclaimed` with `livemode=true`, refund the Stripe capture, and report no open payment attention request.
+
+The runner performs the abandon/reclaim/refund action idempotently on success, failure, cancellation, and verifier errors before deleting the benchmark agent. Any missing cleanup snapshot or non-terminal lifecycle state fails the command. Do not declare the deploy complete until this task passes; if the process is forcibly killed, recover the printed agent ID through `/api/test-payment/lifecycle/abandon` and verify the same terminal assertions before rerunning.
 
 ## Step 14: New branch
 

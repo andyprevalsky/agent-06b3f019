@@ -299,6 +299,7 @@ async def build_browser_verifier_context(
     action_history: Any,
     config: Any,
     session_id: str,
+    payment_card_evidence: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Assemble the verifier context from final-state browser ground truth.
 
@@ -400,6 +401,9 @@ async def build_browser_verifier_context(
                 "toolStatus": "FINISHED",
             },
         },
+        # Validated last-four digits from the trusted card-issuance boundary are
+        # the only non-browser evidence allowed through; PAN/expiry/CVC excluded.
+        *([payment_card_evidence] if payment_card_evidence else []),
         # Final-state screenshot \u2014 emitted as a multimodal
         # image block by build_verifier_context_messages when
         # screenshot_b64 is set in metadata. Body text stays
@@ -420,6 +424,41 @@ async def build_browser_verifier_context(
             },
         },
     ]
+
+
+def append_completion_evidence(
+    message: str,
+    *,
+    browser_url: str | None = None,
+    structured_response: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Add deterministic final evidence that should not depend on model wording."""
+    extra_parts: List[str] = []
+    structured_response = structured_response or {}
+
+    order_id = structured_response.get("order_confirmation_id")
+    if (
+        browser_url
+        and "/test_payment/confirmation/" in browser_url
+        and order_id
+        and "payment confirmed" not in message.lower()
+    ):
+        extra_parts.append(f"\n**Confirmation**: Payment confirmed\nOrder ID: {order_id}")
+
+    if structured_response:
+        lines = ["\n**Extracted Output:**"]
+        for key, value in structured_response.items():
+            label = str(key).replace("_", " ").title()
+            if isinstance(value, list):
+                display_value = ", ".join(str(item) for item in value)
+            else:
+                display_value = str(value)
+            lines.append(f"- **{label}:** {display_value}")
+        extra_parts.append("\n".join(lines))
+
+    if not extra_parts:
+        return message
+    return f"{message}\n{''.join(extra_parts)}"
 
 
 # ========================================

@@ -19,6 +19,7 @@ import { execFileSync, execSync } from 'child_process';
 import { config } from 'dotenv';
 import * as path from 'path';
 import * as os from 'os';
+import { isIsolatedBenchmarkResource } from '../src/utils/benchmarkResources';
 
 config();
 
@@ -168,6 +169,13 @@ async function terminateStaleWorkflows(
       continue;
     }
 
+    // Isolated benchmarks own their queue and DB lifetime through benchmarks/local.py.
+    // They are intentionally absent from Conductor's workspace registry.
+    if (isIsolatedBenchmarkResource(queue)) {
+      skipped++;
+      continue;
+    }
+
     // Check if queue belongs to an active workspace
     if (queue.startsWith(QUEUE_PREFIX)) {
       const queueWorkspace = queue.slice(QUEUE_PREFIX.length);
@@ -250,6 +258,7 @@ function killOrphanedProcesses(
   try {
     const containers = execSync('docker ps --format "{{.Names}}"', { encoding: 'utf-8' }).trim();
     for (const name of containers.split('\n').filter(Boolean)) {
+      if (isIsolatedBenchmarkResource(name)) continue;
       const containerMatch = name.match(/^victoria-db-(.+)$/);
       if (containerMatch && !activeResourceNames.has(containerMatch[1])) {
         console.log(`  Stopping orphaned container: ${name}`);

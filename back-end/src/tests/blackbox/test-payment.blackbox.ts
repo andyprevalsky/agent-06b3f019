@@ -15,8 +15,10 @@ import { z } from 'zod';
 import {
   confirmPhoneBenchmarkPayment,
   confirmTestPayment,
+  getTestPaymentLifecycle,
   recordPhoneBenchmarkPaymentAudit,
 } from '../../domains/test-payment/service';
+import { prisma } from '../../providers/database';
 import { stripe } from '../../providers/stripe';
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -131,6 +133,167 @@ async function withFakeStripe<T>(
 
 const tests: Array<[string, () => Promise<void>]> = [
   [
+    'benchmark AgentCard setup endpoint persists connect and reset transitions',
+    async () => {
+      const userId = `benchmark-agentcard-setup-${Date.now()}`;
+      try {
+        const connected = await request('/api/test-payment/lifecycle/agentcard-setup', {
+          method: 'POST',
+          body: JSON.stringify({ userId, action: 'complete' }),
+        });
+        assertStatus(connected.status, 200, connected.data);
+        assert(
+          (connected.data as { status?: string }).status === 'connected',
+          'expected connected setup state'
+        );
+        const integration = await prisma.integration.findUnique({
+          where: { userId_name: { userId, name: 'agentcard' } },
+        });
+        assert(integration?.status === 'CONNECTED', 'expected persisted connected integration');
+        assert(integration?.isActive === true, 'expected active connected integration');
+
+        const reset = await request('/api/test-payment/lifecycle/agentcard-setup', {
+          method: 'POST',
+          body: JSON.stringify({ userId, action: 'reset' }),
+        });
+        assertStatus(reset.status, 200, reset.data);
+        assert(
+          (reset.data as { status?: string }).status === 'connect_required',
+          'expected reset setup state'
+        );
+        const removed = await prisma.integration.findUnique({
+          where: { userId_name: { userId, name: 'agentcard' } },
+        });
+        assert(removed === null, 'expected AgentCard integration to be removed');
+      } finally {
+        await prisma.integration.deleteMany({ where: { userId, name: 'agentcard' } });
+      }
+    },
+  ],
+  [
+    'lifecycle requires an agent id at the HTTP boundary',
+    async () => {
+      const response = await request('/api/test-payment/lifecycle');
+      assertStatus(response.status, 400, response.data);
+      const body = assertSchema(ErrorResponse, response.data, 'lifecycle missing agent id');
+      assert(body.error === 'agentId is required', `unexpected error: ${body.error}`);
+    },
+  ],
+  [
+    'benchmark abandonment endpoint is idempotent when no purchase exists',
+    async () => {
+      const response = await request('/api/test-payment/lifecycle/abandon', {
+        method: 'POST',
+        body: JSON.stringify({ agentId: `missing-agent-${Date.now()}` }),
+      });
+      assertStatus(response.status, 200, response.data);
+      assert(
+        (response.data as { purchase?: unknown }).purchase === null,
+        'expected no purchase for missing benchmark agent'
+      );
+    },
+  ],
+  [
+    'lifecycle cross-verifies purchase, hold, card, transfer, and resolved setup',
+    async () => {
+      let transferReads = 0;
+      const result = await getTestPaymentLifecycle('agent-lifecycle-1', {
+        findPurchase: async () =>
+          ({
+            id: 'purchase-1',
+            userId: 'user-1',
+            agentId: 'agent-lifecycle-1',
+            fingerprint: 'fingerprint-1',
+            cardId: 'card-1',
+            merchant: 'Rose Labs Test Payment',
+            lineItemsJson: [],
+            totalCents: 4396,
+            status: 'VOIDED',
+            stripePaymentIntentId: 'pi-hold-1',
+            provider: 'agentcard',
+            createdAt: new Date(),
+            updatedAt: new Date(),
+            walletFunding: {
+              id: 'funding-1',
+              purchaseId: 'purchase-1',
+              userId: 'user-1',
+              agentId: 'agent-lifecycle-1',
+              provider: 'agentcard',
+              amountCents: 4396,
+              currency: 'usd',
+              status: 'RECLAIMED',
+              providerTransferId: 'transfer-1',
+              reclaimProviderTransferId: null,
+              idempotencyKey: 'fund-purchase-1',
+              reclaimIdempotencyKey: null,
+              metadata: null,
+              errorMessage: null,
+              fundedAt: new Date(),
+              consumedAt: null,
+              reclaimedAt: new Date(),
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            },
+          }) as never,
+        findAttentionRequests: async () =>
+          [
+            {
+              id: 'attention-1',
+              userResponse: 'setup_complete',
+              metadata: { attentionKind: 'agentcard_user_cardholder_onboarding_required' },
+            },
+          ] as never,
+        getCardSummary: async () => ({ status: 'CLOSED', balanceCents: 0 }),
+        retrieveStripeHold: async () => ({
+          id: 'pi-hold-1',
+          status: 'succeeded',
+          amount: 4396,
+          amount_capturable: 0,
+          amount_received: 4396,
+        }),
+        listStripeRefunds: async () => ({
+          data: [{ id: 're-1', status: 'succeeded', amount: 4396 }],
+        }),
+        listOrgTransfers: async () => {
+          transferReads += 1;
+          return {
+            structuredContent: {
+              transfers: [
+                {
+                  id: 'transfer-1',
+                  status: transferReads === 1 ? 'consumed' : 'reclaimed',
+                  amount_cents: 4396,
+                  transferred_cents: 4396,
+                  released_cents: transferReads === 1 ? 0 : 4396,
+                  card_id: 'card-1',
+                  livemode: false,
+                },
+              ],
+            },
+          };
+        },
+      });
+
+      assert(result.purchase?.status === 'VOIDED', 'expected voided purchase');
+      assert(result.walletFunding?.status === 'RECLAIMED', 'expected reclaimed funding');
+      assert(result.stripeHold?.amountReceivedCents === 4396, 'expected captured Stripe hold');
+      assert(result.stripeRefund?.status === 'succeeded', 'expected succeeded Stripe refund');
+      assert(result.stripeRefund?.amountCents === 4396, 'expected full Stripe refund amount');
+      assert(result.agentCard?.status === 'CLOSED', 'expected closed one-time card');
+      assert(result.agentCard?.balanceCents === 0, 'expected empty card balance');
+      assert(result.orgTransfer?.status === 'reclaimed', 'expected newest reclaimed org transfer');
+      assert(result.orgTransfer?.releasedCents === 4396, 'expected full released transfer amount');
+      assert(transferReads === 2, 'expected lifecycle transfer cross-check');
+      assert(result.orgTransfer?.livemode === false, 'expected sandbox transfer');
+      assert(result.attention.openKinds.length === 0, 'setup attention should be resolved');
+      assert(
+        result.attention.resolvedKinds.includes('agentcard_user_cardholder_onboarding_required'),
+        'expected resolved setup attention'
+      );
+      assert(!JSON.stringify(result).includes('424242'), 'lifecycle must not expose PAN data');
+    },
+  ],
+  [
     'public URL reports PUBLIC_BASE_URL when configured',
     async () => {
       const expectedUrl = process.env.PUBLIC_BASE_URL;
@@ -195,41 +358,47 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'confirm accepts AgentCard sandbox PAN through Stripe test payment method',
+    'confirm settles an AgentCard sandbox PAN through the AgentCard lifecycle',
     async () => {
       await withFakeStripe(async (calls) => {
-        const result = await confirmTestPayment({
-          items: [
-            { id: 'aurora-notebook', quantity: 1 },
-            { id: 'ceramic-mug', quantity: 1 },
-            { id: 'canvas-tote', quantity: 1 },
-          ],
-          card: {
-            name: 'Rose Labs',
-            number: '4242424242420640',
-            expiry: '06/28',
-            cvv: '497',
-            postalCode: '94105',
+        const settlements: Array<Record<string, unknown>> = [];
+        const result = await confirmTestPayment(
+          {
+            items: [
+              { id: 'aurora-notebook', quantity: 1 },
+              { id: 'ceramic-mug', quantity: 1 },
+              { id: 'canvas-tote', quantity: 1 },
+            ],
+            card: {
+              name: 'Rose Labs',
+              number: '4242424242420640',
+              expiry: '06/28',
+              cvv: '497',
+              postalCode: '94105',
+            },
           },
-        });
+          {
+            settleAgentCardSandboxPayment: async (input) => {
+              settlements.push(input);
+              return {
+                purchaseId: 'purchase-1',
+                cardId: 'card-1',
+                stripePaymentIntentId: 'pi_hold_1',
+              };
+            },
+          }
+        );
 
         assert(result.status === 'succeeded', 'expected payment confirmation to succeed');
+        assert(result.purchaseId === 'purchase-1', 'expected lifecycle purchase id');
+        assert(result.cardId === 'card-1', 'expected lifecycle card id');
+        assert(settlements.length === 1, 'expected one AgentCard settlement');
+        assert(settlements[0]?.amountCents === 4396, 'expected exact card charge amount');
+        assert(settlements[0]?.merchant === 'Rose Labs Test Payment', 'expected merchant');
+        assert(calls.paymentMethods.length === 0, 'AgentCard PAN must not be raw-tokenized');
         assert(
-          calls.paymentMethods.length === 0,
-          'AgentCard sandbox PAN should not be raw-tokenized'
-        );
-        assert(calls.paymentIntents.length === 1, 'expected one Stripe payment intent');
-        const paymentIntent = JSON.parse(calls.paymentIntents[0]) as {
-          payment_method?: string;
-          payment_method_types?: string[];
-        };
-        assert(
-          paymentIntent.payment_method === 'pm_card_visa',
-          `expected pm_card_visa, got ${paymentIntent.payment_method}`
-        );
-        assert(
-          paymentIntent.payment_method_types?.join(',') === 'card',
-          `expected card-only payment method types, got ${paymentIntent.payment_method_types}`
+          calls.paymentIntents.length === 0,
+          'AgentCard PAN must not use a substitute Stripe charge'
         );
       });
     },

@@ -349,6 +349,9 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     throw error;
   }
   if (cerebrasRoute !== null) {
+    // Cerebras low-latency chat with fallover: on a pre-content quota/rate cap
+    // (402/429) it keeps the chat on GLM-4.7 via OpenRouter (unpinned); on a
+    // stall/5xx/empty stream it falls to the generic multi-provider waterfall.
     try {
       yield* runCerebrasChatWithWaterfallFallback({
         cerebrasRoute,

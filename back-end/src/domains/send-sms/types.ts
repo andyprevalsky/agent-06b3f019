@@ -6,6 +6,7 @@ export const notifySchema = z.object({
     'agent_started',
     'planner_message',
     'write_lock',
+    'agentcard_setup',
     'completion',
     'cost_limit',
   ]),

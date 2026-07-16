@@ -346,6 +346,97 @@ async def request_user_approval_direct(
     }
 
 
+async def request_user_attention_direct(
+    workflow_instance: Any,
+    question: str,
+    *,
+    title: str = "User action required",
+    image_url: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    sms_event_type: Optional[str] = None,
+    sms_payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Create a user attention request without waiting for an approval response.
+
+    This is for setup handoffs where the user must open an external link and
+    return later, not answer "yes/no" inside Rose.
+    """
+    info = workflow.info()
+    workflow_id = info.workflow_id
+    user_id = workflow_instance.user_id
+    agent_id = workflow_instance.agent_id
+    tool_call_id = workflow.uuid4()
+
+    request_id = await workflow.execute_activity(
+        create_approval_request_activity,
+        args=[
+            str(user_id) if user_id else "",
+            str(agent_id) if agent_id else "",
+            str(workflow_id) if workflow_id else "",
+            str(question) if question else "",
+            str(image_url) if image_url else "",
+            metadata or None,
+        ],
+        start_to_close_timeout=timedelta(seconds=CREATE_REQUEST_TIMEOUT_SECONDS),
+        retry_policy=RetryPolicy(maximum_attempts=CREATE_REQUEST_MAX_ATTEMPTS),
+    )
+
+    metadata_payload = dict(metadata or {})
+    metadata_payload["attentionRequestId"] = request_id
+    event_metadata = {
+        **metadata_payload,
+        "isUserAttentionMessage": True,
+        "attentionMessage": question,
+    }
+
+    if (
+        sms_event_type
+        and getattr(workflow_instance, "parent_workflow_id", None) is None
+        and getattr(workflow_instance, "agent_source", "WEB") == "SMS"
+    ):
+        try:
+            from helpers.sms_activities import notify_sms_event_activity
+
+            await workflow.execute_activity(
+                notify_sms_event_activity,
+                args=[
+                    user_id,
+                    sms_event_type,
+                    agent_id,
+                    {
+                        "question": question,
+                        "attention_request_id": request_id,
+                        "workflow_id": workflow_id,
+                        **dict(sms_payload or {}),
+                    },
+                ],
+                start_to_close_timeout=timedelta(seconds=SMS_NOTIFY_TIMEOUT_SECONDS),
+                retry_policy=RetryPolicy(maximum_attempts=SMS_NOTIFY_MAX_ATTEMPTS),
+            )
+            logger.info(
+                "Sent user attention SMS notification",
+                request_id=request_id,
+                agent_id=agent_id,
+                event_type=sms_event_type,
+            )
+        except Exception as sms_err:
+            logger.warning(f"Failed to send user attention SMS notification: {sms_err}")
+
+    pre_event = ToolEvent(
+        type=EventType.POST_MESSAGE,
+        title=title,
+        message=question,
+        status=MessageStatus.IN_PROGRESS,
+        metadata=event_metadata,
+    )
+    await workflow_instance._handle_tool_event(pre_event, tool_call_id, TOOL_NAME)
+
+    return {
+        "question": question,
+        "attention_request_id": request_id,
+    }
+
+
 # ========================================
 # SINGLETON
 # ========================================

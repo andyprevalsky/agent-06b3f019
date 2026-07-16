@@ -72,12 +72,38 @@ echo "☁️  Pre-Deploy cloud request: $request_id"
 echo "📊 Benchmarks → Runs: $run_id"
 echo "🧪 Tasks (${#PREDEPLOY_TASKS[@]}): ${PREDEPLOY_TASKS[*]}"
 
+# The hub poller launches the cloud fleet (run-bench-fleet) as a descendant
+# process chain. If THIS controller is interrupted (SIGINT/SIGTERM), the signal
+# does NOT reach the fleet on its own (bash does not forward signals to a
+# foreground child, and macOS has no `setsid` to group them). An un-propagated
+# kill orphans the fleet, so its own cleanup trap never fires and its owned Fly
+# clones (+ autoscaler workers) are left running — bleeding cost until reaped by
+# hand. So run the poller in the background and, on signal, walk the descendant
+# tree with `pgrep -P` to SIGTERM the fleet, letting the fleet's cleanup trap
+# DESTROY its clones; then wait (bounded) for that teardown to drain.
+_kill_descendants() {
+    local pid="$1" child
+    for child in $(pgrep -P "$pid" 2>/dev/null); do _kill_descendants "$child"; done
+    kill -TERM "$pid" 2>/dev/null || true
+}
+POLLER_PID=""
+_teardown_poller() {
+    [ -n "$POLLER_PID" ] || return 0
+    _kill_descendants "$POLLER_PID"
+    for _ in $(seq 1 45); do kill -0 "$POLLER_PID" 2>/dev/null || break; sleep 1; done
+}
+trap '_teardown_poller; exit 130' INT
+trap '_teardown_poller; exit 143' TERM
+
 HUB_URL="$HUB_URL" \
 HUB_USER_ID="$HUB_USER_ID" \
 BACKEND_API_KEY="$BACKEND_API_KEY" \
 HUB_CLAIM_SCOPE="$scope" \
 HUB_SKIP_CATALOG_EXPORT=1 \
-"$HUB_POLLER_BIN" --once
+"$HUB_POLLER_BIN" --once &
+POLLER_PID=$!
+wait "$POLLER_PID"
+trap - INT TERM
 
 final="$(curl -fsS "$HUB_URL/api/benchmarks/runs/$run_id" \
     -H "X-API-Key: $BACKEND_API_KEY" \

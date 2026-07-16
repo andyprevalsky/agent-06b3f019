@@ -1,4 +1,5 @@
 import { exclusiveCerebrasCompletion } from './cerebrasRoute';
+import { RosePaymentRequiredError, RoseRateLimitError } from './errors';
 import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
 import { createLogger } from '../logger';
 import { exclusiveOpenRouterCerebrasCompletion } from './openrouterCerebrasRoute';
@@ -70,6 +71,7 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
     return output;
   };
 
+  let cerebrasFailure: unknown = null;
   try {
     yield* runWithFallThrough({ produce: params.cerebrasRoute.produce, emit });
     if (emittedAny) {
@@ -86,11 +88,61 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
     });
   } catch (error) {
     if (!(error instanceof PreContentFallThroughError)) throw error;
+    cerebrasFailure = error.cause;
     log.warn('cerebras_chat.pre_content_failover_to_waterfall', {
       request_id: params.requestId,
       pool: params.pool,
       error_name: error.cause.name,
     });
+  }
+
+  // Same-model fallover for a rate cap: GLM-4.7 on Cerebras is capped hard at the
+  // org level (5 req/min), so a burst trips a 402 `quota` / 429. Before the
+  // generic waterfall (different models), keep the chat on GLM-4.7 by reaching it
+  // via OpenRouter with the provider UNPINNED — OpenRouter still PREFERS Cerebras
+  // but may spill to another GLM-4.7 host past the cap. This is NOT a
+  // same-provider retry (a different host serves it), so it can't re-hit the cap.
+  // Only for quota/rate causes; stalls, 5xx, and empty streams go straight to the
+  // generic waterfall below.
+  const openrouterKey = process.env.OPENROUTER_API_KEY;
+  if (
+    openrouterKey &&
+    params.options.provider_route !== 'openrouter-cerebras' &&
+    (cerebrasFailure instanceof RosePaymentRequiredError ||
+      cerebrasFailure instanceof RoseRateLimitError)
+  ) {
+    try {
+      yield* runWithFallThrough({
+        produce: () =>
+          exclusiveOpenRouterCerebrasCompletion({
+            options: params.options,
+            openrouterKey,
+            requestId: params.requestId,
+            callSite: params.callSite,
+            allowProviderFallback: true,
+          }),
+        emit,
+      });
+      if (emittedAny) {
+        log.info('cerebras_chat.openrouter_glm_fallover_done', {
+          request_id: params.requestId,
+          pool: params.pool,
+          elapsed_ms: Date.now() - params.startedAt,
+        });
+        return;
+      }
+      log.warn('cerebras_chat.openrouter_glm_fallover_empty', {
+        request_id: params.requestId,
+        pool: params.pool,
+      });
+    } catch (openRouterError) {
+      if (!(openRouterError instanceof PreContentFallThroughError)) throw openRouterError;
+      log.warn('cerebras_chat.openrouter_glm_fallover_failed', {
+        request_id: params.requestId,
+        pool: params.pool,
+        error_name: openRouterError.cause.name,
+      });
+    }
   }
 
   yield* runWithFallThrough({

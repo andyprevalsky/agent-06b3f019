@@ -117,3 +117,21 @@ export async function cancelAuthorizedHold(paymentIntentId: string): Promise<voi
     throw error;
   }
 }
+
+/**
+ * Refund the captured funding charge for a purchase. All compensation paths use the same
+ * purchase-scoped idempotency key and parameters, so cleanup, explicit close, and duplicate
+ * webhooks cannot create multiple refunds when they race.
+ */
+export async function refundCapturedPurchase(
+  paymentIntentId: string,
+  purchaseId: string
+): Promise<void> {
+  await stripe.refunds.create(
+    {
+      payment_intent: paymentIntentId,
+      metadata: { purchaseSpendId: purchaseId },
+    },
+    { idempotencyKey: `purchase-refund:${purchaseId}` }
+  );
+}

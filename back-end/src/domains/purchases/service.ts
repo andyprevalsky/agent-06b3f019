@@ -5,17 +5,19 @@ import {
   type CardProviderDetailsResult,
 } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
-import { cancelAuthorizedHold, stripe } from '../../providers/stripe';
+import { cancelAuthorizedHold } from '../../providers/stripe';
+import { type WalletFundingProvider } from '../../providers/wallet-funding';
 import {
   benchmarkPurchaseKycRequired,
   MAX_PURCHASE_CENTS,
   PURCHASE_APPROVAL_CACHE_HOURS,
+  PURCHASE_STALE_CHARGING_MS,
 } from './config';
 import { PurchaseError } from './errors';
-import { isKycRequiredError, kycRequiredPurchaseError } from './kyc';
-import { getCustomerDefaultPaymentMethodId } from './stripeCustomer';
+import { kycRequiredPurchaseError } from './kyc';
 import * as repo from './repo';
-import { archivePurchaseBoundary } from './archive';
+import { reclaimPurchaseWalletFunding } from './walletFunding';
+import { chargeAndIssueCard } from './charge';
 import {
   PurchaseSpendStatus,
   type MintPurchaseInput,
@@ -37,20 +39,14 @@ const RETRYABLE_PURCHASE_STATUSES = new Set<PurchaseSpendStatus>([
   PurchaseSpendStatus.FAILED,
   PurchaseSpendStatus.REFUNDED,
   PurchaseSpendStatus.VOIDED,
+  PurchaseSpendStatus.CAPTURE_FAILED,
+  PurchaseSpendStatus.FUNDING_RECLAIM_FAILED,
 ]);
 
 function assertPositiveCents(value: number, field: string): void {
   if (!Number.isInteger(value) || value <= 0) {
     throw new PurchaseError(`${field} must be a positive integer`);
   }
-}
-
-function sanitizeDescriptorSuffix(merchant: string): string {
-  const cleaned = merchant
-    .replace(/[^a-zA-Z0-9 ._-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return (cleaned || 'Purchase').slice(0, 22);
 }
 
 function normalizeCurrency(currency: string): string {
@@ -65,17 +61,25 @@ function isReusableStatus(status: PurchaseSpendStatus): boolean {
   return status === PurchaseSpendStatus.HELD;
 }
 
+function isStaleChargingPurchase(purchase: PurchaseSpend): boolean {
+  return (
+    purchase.status === PurchaseSpendStatus.CHARGING &&
+    Date.now() - purchase.updatedAt.getTime() > PURCHASE_STALE_CHARGING_MS
+  );
+}
+
 /**
  * Returns the card details only if the card is still live; `null` if it has been
  * settled/closed/deleted or can't be read. Fail-safe: an unreadable card is treated as consumed
  * so we re-prompt instead of silently re-issuing a dead, already-charged card.
  */
 async function tryGetLiveCardDetails(
+  userId: string,
   cardId: string,
   cardProvider?: CardProvider
 ): Promise<CardProviderDetailsResult | null> {
   try {
-    const details = await (cardProvider ?? createCardProvider()).getDetails(cardId);
+    const details = await (cardProvider ?? createCardProvider(userId)).getDetails(cardId);
     return isCardLive(details) ? details : null;
   } catch (error) {
     log.warn('Reuse liveness check failed; treating card as consumed', {
@@ -110,7 +114,7 @@ export async function lookupPurchase(
   // delivered. If the webhook was delayed or lost, this still forces a fresh approval rather than
   // silently handing back a dead, already-charged card.
   if (reusable && purchase.cardId !== null) {
-    const liveDetails = await tryGetLiveCardDetails(purchase.cardId, cardProvider);
+    const liveDetails = await tryGetLiveCardDetails(userId, purchase.cardId, cardProvider);
     if (!liveDetails) {
       await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
       reusable = false;
@@ -143,8 +147,14 @@ export async function lookupPurchase(
  */
 async function tryReuseExistingPurchase(
   existing: PurchaseSpend,
-  cardProvider?: CardProvider
+  cardProvider?: CardProvider,
+  walletFundingProvider?: WalletFundingProvider
 ): Promise<MintPurchaseResult | null> {
+  if (isStaleChargingPurchase(existing)) {
+    await recoverStaleChargingPurchase(existing, walletFundingProvider);
+    return null;
+  }
+
   // Another mint for this exact cart is mid-flight — don't double-charge.
   if (
     existing.status === PurchaseSpendStatus.CHARGING ||
@@ -156,7 +166,7 @@ async function tryReuseExistingPurchase(
   // Idempotent retry within the reuse window: hand back the held card while it's still live and
   // unspent (e.g. a transient browser-agent error retried the identical cart).
   if (isReusableStatus(existing.status) && existing.cardId !== null) {
-    const liveDetails = await tryGetLiveCardDetails(existing.cardId, cardProvider);
+    const liveDetails = await tryGetLiveCardDetails(existing.userId, existing.cardId, cardProvider);
     if (liveDetails) {
       return {
         purchaseId: existing.id,
@@ -176,7 +186,47 @@ async function tryReuseExistingPurchase(
   return null;
 }
 
-/** Open (or re-open a retryable) PENDING_APPROVAL purchase row for this fingerprint. */
+async function recoverStaleChargingPurchase(
+  purchase: PurchaseSpend,
+  walletFundingProvider?: WalletFundingProvider
+): Promise<void> {
+  log.warn('Recovering stale CHARGING purchase', {
+    purchase_id: purchase.id,
+    user_id: purchase.userId,
+    stripe_payment_intent_id: purchase.stripePaymentIntentId,
+  });
+
+  try {
+    await reclaimPurchaseWalletFunding(
+      purchase,
+      'stale_charging_purchase_recovery',
+      walletFundingProvider
+    );
+  } catch (error) {
+    log.error('Failed to reclaim wallet funding while recovering stale CHARGING purchase', {
+      purchase_id: purchase.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FUNDING_RECLAIM_FAILED);
+    throw new PurchaseError('Purchase wallet funding requires manual reconciliation', 409);
+  }
+
+  if (purchase.stripePaymentIntentId !== null) {
+    await cancelAuthorizedHold(purchase.stripePaymentIntentId).catch((error) => {
+      log.warn('Failed to cancel Stripe hold while recovering stale CHARGING purchase', {
+        purchase_id: purchase.id,
+        stripe_payment_intent_id: purchase.stripePaymentIntentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
+
+  await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FAILED, {
+    stripePaymentIntentId: purchase.stripePaymentIntentId,
+  });
+}
+
+/** Open a PENDING_APPROVAL purchase row for this fingerprint. */
 async function openPendingPurchase(
   input: MintPurchaseInput,
   existing: PurchaseSpend | null
@@ -190,10 +240,13 @@ async function openPendingPurchase(
   };
 
   if (existing && RETRYABLE_PURCHASE_STATUSES.has(existing.status)) {
-    return repo.updatePurchaseStatus(existing.id, PurchaseSpendStatus.PENDING_APPROVAL, {
+    return repo.createPendingPurchase({
+      userId: input.userId,
+      agentId: input.agentId,
+      fingerprint: input.fingerprint,
+      merchant: input.merchant,
       lineItemsJson: receipt,
-      cardId: null,
-      stripePaymentIntentId: null,
+      totalCents: input.totalCents,
     });
   }
   return repo.createPendingPurchase({
@@ -206,95 +259,10 @@ async function openPendingPurchase(
   });
 }
 
-/**
- * Authorize a manual-capture HOLD on the user's saved card off-session (money is NOT taken yet),
- * then mint the order-sized single-use card (→ HELD). The hold is captured only when the card
- * settles (`transaction.cleared` / liveness check), and released (canceled, no refund) if the
- * purchase is abandoned (`transaction.voided`, explicit close, or agent-session cleanup).
- */
-async function chargeAndIssueCard(
-  purchaseId: string,
-  input: MintPurchaseInput,
-  stripeCustomerId: string,
-  cardProvider?: CardProvider
-): Promise<MintPurchaseResult> {
-  let paymentIntentId: string | undefined;
-  try {
-    const paymentMethodId = await getCustomerDefaultPaymentMethodId(stripeCustomerId);
-    const stripeRequest = {
-      amount: input.totalCents,
-      currency: 'usd',
-      customer: stripeCustomerId,
-      payment_method: paymentMethodId,
-      confirm: true,
-      off_session: true,
-      capture_method: 'manual' as const,
-      statement_descriptor_suffix: sanitizeDescriptorSuffix(input.merchant),
-      metadata: {
-        userId: input.userId,
-        agentId: input.agentId ?? '',
-        fingerprint: input.fingerprint,
-        purchaseSpendId: purchaseId,
-      },
-    };
-    const paymentIntent = await stripe.paymentIntents.create(
-      stripeRequest,
-      // Per-row idempotency: a retried mint of the SAME purchase never double-charges Stripe.
-      { idempotencyKey: `purchase-charge:${purchaseId}` }
-    );
-    paymentIntentId = paymentIntent.id;
-    await archivePurchaseBoundary(input.agentId, purchaseId, 'stripe-payment-intent', {
-      request: stripeRequest,
-      response: paymentIntent,
-    });
-
-    const activeCardProvider = cardProvider ?? createCardProvider();
-    const cardRequest = {
-      amountCents: input.totalCents,
-      idempotencyKey: `purchase:${purchaseId}`,
-    };
-    const minted = await activeCardProvider.mintCard(cardRequest);
-    const details = await activeCardProvider.getDetails(minted.cardId);
-    await archivePurchaseBoundary(input.agentId, purchaseId, 'agentcard-mint-and-details', {
-      mint_request: cardRequest,
-      mint_response: minted,
-      details_response: details,
-    });
-
-    await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.HELD, {
-      cardId: minted.cardId,
-      stripePaymentIntentId: paymentIntent.id,
-    });
-
-    return {
-      purchaseId,
-      cardId: minted.cardId,
-      pan: details.pan,
-      cvv: details.cvv,
-      expiry: details.expiry,
-      last4: minted.last4,
-      status: PurchaseSpendStatus.HELD,
-    };
-  } catch (error) {
-    log.error('Failed to mint purchase card', {
-      purchase_id: purchaseId,
-      user_id: input.userId,
-      agent_id: input.agentId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    // Cancel any authorized hold before surfacing a KYC gate so money isn't stranded.
-    const kycRequired = isKycRequiredError(error);
-    if (kycRequired && paymentIntentId !== undefined) await cancelAuthorizedHold(paymentIntentId);
-    await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.FAILED, {
-      stripePaymentIntentId: paymentIntentId ?? null,
-    });
-    throw kycRequired ? kycRequiredPurchaseError() : error;
-  }
-}
-
 export async function mintPurchaseCard(
   input: MintPurchaseInput,
-  cardProvider?: CardProvider
+  cardProvider?: CardProvider,
+  walletFundingProvider?: WalletFundingProvider
 ): Promise<MintPurchaseResult> {
   if (input.userId.trim() === '') throw new PurchaseError('userId is required', 401);
   if (input.fingerprint.trim() === '') throw new PurchaseError('fingerprint is required');
@@ -314,7 +282,7 @@ export async function mintPurchaseCard(
     input.fingerprint
   );
   if (existing) {
-    const reused = await tryReuseExistingPurchase(existing, cardProvider);
+    const reused = await tryReuseExistingPurchase(existing, cardProvider, walletFundingProvider);
     if (reused) return reused;
   }
 
@@ -332,5 +300,5 @@ export async function mintPurchaseCard(
   }
 
   await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
-  return chargeAndIssueCard(purchase.id, input, stripeCustomerId, cardProvider);
+  return chargeAndIssueCard(purchase, input, stripeCustomerId, cardProvider, walletFundingProvider);
 }

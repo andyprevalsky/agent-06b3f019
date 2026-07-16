@@ -8,6 +8,7 @@ import { createLogger } from '../../providers/logger';
 import { resumeAgentWorkflow } from '../../providers/agentResume';
 import { classifyAgentFailureForSurface } from '../../providers/credentialPropagation';
 import { finalizeAgent } from '../../providers/traceArchiveLifecycle';
+import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
 import type { Prisma, UpdateStatusBody } from './types';
 import * as repo from './repo';
 
@@ -243,7 +244,41 @@ interface AgentStatusFields {
   messageCount: number;
 }
 
-export async function updateAgentStatus(agentId: string, body: UpdateStatusBody) {
+interface UpdateAgentStatusDependencies {
+  cleanupPurchaseCards?: (agentId: string) => Promise<void>;
+}
+
+/** Best-effort cleanup fired once a root agent reaches a terminal status. */
+async function runTerminalAgentCleanup(
+  agentId: string,
+  status: string,
+  dependencies: UpdateAgentStatusDependencies
+): Promise<void> {
+  try {
+    await (dependencies.cleanupPurchaseCards ?? cleanupAgentPurchaseCards)(agentId);
+  } catch (error) {
+    log.warn('Terminal purchase-card cleanup unavailable; cron will retry', {
+      agent_id: agentId,
+      status,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  try {
+    await finalizeAgent({ rootAgentId: agentId });
+  } catch (error) {
+    log.warn('Trace archive finalization unavailable', {
+      agent_id: agentId,
+      status,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+export async function updateAgentStatus(
+  agentId: string,
+  body: UpdateStatusBody,
+  dependencies: UpdateAgentStatusDependencies = {}
+) {
   const agent = await repo.findAgentById(agentId);
 
   if (!agent) {
@@ -310,16 +345,12 @@ export async function updateAgentStatus(agentId: string, body: UpdateStatusBody)
   };
 
   await broadcastAgentUpdate(agentId, broadcastPayload);
-  if (TERMINAL_STATUSES.has(fields.status) && agent.parentAgentId === null) {
-    try {
-      await finalizeAgent({ rootAgentId: agentId });
-    } catch (error) {
-      log.warn('Trace archive finalization unavailable', {
-        agent_id: agentId,
-        status: fields.status,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
+  // Fire cleanup only on the FIRST terminal transition (`agent` is the pre-update
+  // row): re-running it on repeated terminal updates could race a second pass
+  // against the same still-HELD purchase (double close/reclaim/refund).
+  const wasAlreadyTerminal = IRREVERSIBLE_STATUSES.has(agent.status);
+  if (TERMINAL_STATUSES.has(fields.status) && agent.parentAgentId === null && !wasAlreadyTerminal) {
+    await runTerminalAgentCleanup(agentId, fields.status, dependencies);
   }
 
   return updated;
