@@ -2091,6 +2091,17 @@ while :; do
             BENCH_EXIT="$(grep -aoE "${DONE_MARKER} exit=[0-9]+" "$SSH_LOG" | tail -1 | grep -oE '[0-9]+$' || echo '')"
             break
         fi
+        # A box waiting AT the synchronized-start barrier legitimately produces NO
+        # output — its driver is blocked on the release file while the controller
+        # waits for the other boxes. Pause the staleness timer during that window
+        # (log shows 'barrier ready' but not yet 'barrier released'), or the stall
+        # exclusion below wrongly kills a perfectly healthy box that just reached
+        # the barrier early — which nuked EVERY ready box to NORESULT when the
+        # barrier took a while to release.
+        if grep -aq 'synchronized start barrier ready' "$SSH_LOG" 2>/dev/null \
+           && ! grep -aq 'synchronized start barrier released' "$SSH_LOG" 2>/dev/null; then
+            last_change="$now"
+        fi
     fi
     # Data-plane STALENESS exclusion: if bench.log has not grown for DRIVER_STALL_
     # SECONDS the box is stuck/dead at bring-up (a healthy box streams stack output

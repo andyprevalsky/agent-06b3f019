@@ -1878,12 +1878,20 @@ release_start_barrier() {
     # keep waiting for the live set, and release the barrier for the survivors.
     # Only fail if EVERY stack dies. The excluded bench's child already exited
     # non-zero and is reported as such in the aggregate.
-    local total="${#CHILD_PIDS[@]}" ready deadline now out p mid j live
+    local total="${#CHILD_PIDS[@]}" ready deadline now out p mid j live barrier_start per_box
     local -a is_ready=() is_dead=()
     for j in "${!CHILD_PIDS[@]}"; do is_ready[$j]=0; is_dead[$j]=0; done
-    deadline=$(( $(date +%s) + START_BARRIER_WAIT_SECONDS ))
+    barrier_start="$(date +%s)"
+    deadline=$(( barrier_start + START_BARRIER_WAIT_SECONDS ))
+    # Per-box ceiling: a single box whose launcher is alive but never reaches the
+    # barrier (e.g. a hung iMessage-relay setup, or a driver dead before the poll
+    # loop where staleness can't see it) otherwise drags the WHOLE barrier until
+    # the global timeout, and every ready box waits idle. Exclude such a holdout
+    # after a generous window (covers the slowest legitimate bring-up).
+    per_box="${CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS:-720}"
     echo "⏸️  waiting for $total isolated stacks at synchronized start barrier..."
     while :; do
+        now="$(date +%s)"
         ready=0; live=0
         for j in "${!CHILD_PIDS[@]}"; do
             [ "${is_dead[$j]}" = "1" ] && continue
@@ -1898,13 +1906,16 @@ release_start_barrier() {
                 # exited before signalling ready → infra failure; exclude it.
                 is_dead[$j]=1
                 echo "⚠️  [${CHILD_BENCH[$j]}] isolated stack failed before the start barrier — excluding it (infra) and continuing with the rest" >&2
+            elif [ $(( now - barrier_start )) -ge "$per_box" ]; then
+                # alive but never reached the barrier within the window → holdout.
+                is_dead[$j]=1
+                echo "⚠️  [${CHILD_BENCH[$j]}] did not reach the start barrier within ${per_box}s — excluding it (infra) and continuing with the rest" >&2
             else
                 live=$((live + 1))
             fi
         done
         [ "$live" -eq 0 ] && { echo "❌ every isolated stack failed before the start barrier" >&2; return 1; }
         [ "$ready" -ge "$live" ] && break
-        now="$(date +%s)"
         if [ "$now" -ge "$deadline" ]; then
             echo "⚠️  start barrier timed out ($ready/$live live ready) — releasing the ready set anyway" >&2
             break

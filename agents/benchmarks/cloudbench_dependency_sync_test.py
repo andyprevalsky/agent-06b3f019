@@ -331,7 +331,7 @@ def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> N
         in fleet
     )
     assert '--timeout "$CHILD_RUN_TIMEOUT"' in fleet
-    assert "deadline=$(( $(date +%s) + START_BARRIER_WAIT_SECONDS ))" in fleet
+    assert "deadline=$(( barrier_start + START_BARRIER_WAIT_SECONDS ))" in fleet
     assert 'CHILD_MACHINE+=("$cid")' in fleet
     # The barrier now tolerates infra failures (see
     # test_start_barrier_tolerates_infra_failures): it releases the ready set and
@@ -2463,3 +2463,19 @@ def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     assert 'remote_log="$(ssh_read "$mid" "cat' not in cloud
     # Proxy is cleaned up on exit.
     assert 'pkill -f "flyctl proxy $LOCAL_STATUS_PORT:$REMOTE_STATUS_PORT -a $APP"' in cloud
+
+
+def test_staleness_pauses_during_barrier_wait_and_per_box_timeout() -> None:
+    """RCA (2026-07-15): the data-plane staleness exclusion wrongly killed boxes
+    that had reached 'barrier ready' and were legitimately BLOCKED on the release
+    file (no bench.log output while waiting) — when the barrier took a while to
+    release, every ready box was excluded → 0/30 NORESULT. Fix: pause the staleness
+    timer while the log shows 'barrier ready' but not yet 'barrier released'. And
+    a per-box barrier ceiling so one holdout (hung relay / driver dead before the
+    poll loop) can't drag the whole barrier to the global timeout."""
+    cloud = CLOUD_SCRIPT.read_text()
+    assert "synchronized start barrier ready" in cloud
+    assert "! grep -aq 'synchronized start barrier released'" in cloud
+    fleet = FLEET_SCRIPT.read_text()
+    assert "CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS" in fleet
+    assert "did not reach the start barrier within" in fleet
