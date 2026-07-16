@@ -1561,6 +1561,66 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# ── Launch the driver: BOOT-LAUNCH (no ssh) or the legacy ssh path ──────────
+# BOOT-LAUNCH removes the per-box launch-ssh burst (start + ssh-ready + clear-stale
+# + stage + launch + confirm ≈ 7 ssh × N) that saturated Fly's Machines-API rate
+# limit at fleet width and killed drivers at launch. Instead the controller sets
+# the per-run params as machine --env and cloudbench-boot.sh as the --command, then
+# starts the box — it AUTO-RUNS the driver on boot with ZERO ssh; progress is polled
+# over the data-plane status proxy. Requires /data/cloudbench-boot.sh in the snapshot.
+LOCAL_STATUS_PORT="$(( LOCAL_DASH_PORT + 3 ))"
+STATUS_PROXY_PID=""
+if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
+    _ghb64="$(printf '%s' "$(gh auth token 2>/dev/null || resolve_github_token)" | base64 | tr -d '\n')"
+    [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
+    _envargs=(
+        --env CLOUDBENCH_BOOT=1
+        --env "CLOUDBENCH_RUN_TOKEN=$RUN_LOG_TOKEN"
+        --env "REF=$BENCH_REF"
+        --env "CLOUDBENCH_GITHUB_TOKEN_B64=$_ghb64"
+        --env "CLOUDBENCH_START_BARRIER=${CLOUDBENCH_START_BARRIER:-}"
+        --env "CLOUDBENCH_START_BARRIER_WAIT_SECONDS=${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}"
+        --env "CLOUDBENCH_STATUS_PORT=$REMOTE_STATUS_PORT"
+        --env "WMH_MODEL_NAME=$WMH_MODEL_NAME"
+        --env "BENCH_TASKS_B64=$TASKS_CSV_B64"
+        --env "BENCH_MAX_CONCURRENCY=$BENCH_MAX_CONCURRENCY"
+        --env "BENCH_SIMULATE=$BENCH_SIMULATE"
+        --env "BENCH_DASHPORT=$REMOTE_DASH_PORT"
+        --env "CONDUCTOR_WORKSPACE_NAME=$RUN_WORKSPACE_NAME"
+        --env "BENCHMARK_FAST_MODE_CACHE=${BENCHMARK_FAST_MODE_CACHE:-}"
+        --env "BENCHMARK_PEAK_FLY_MACHINES=$OBSERVED_PEAK_FLY_MACHINES"
+        --env "BENCHMARK_VM_USD_PER_HOUR=$VM_USD_PER_HOUR"
+    )
+    [ "$DASHBOARD" = "1" ] && _envargs+=( --env "BENCHMARK_FRONTEND_URL=http://localhost:$LOCAL_DASH_PORT" )
+    echo "🚀 boot-launch: setting per-run env + boot command on $mid (no ssh) ..."
+    _upd=0
+    for _u in $(seq 1 "${CLOUDBENCH_BOOT_UPDATE_ATTEMPTS:-10}"); do
+        if FLY machine update "$mid" -a "$APP" "${_envargs[@]}" \
+              --command "bash /data/cloudbench-boot.sh" --skip-health-checks --yes >/dev/null 2>&1; then
+            _upd=1; break
+        fi
+        sleep 8
+    done
+    [ "$_upd" = 1 ] || { echo "❌ boot-launch: could not set machine env/command after retries." >&2; exit 1; }
+    # `machine update` may leave the box stopped; start it (retry storage-provisioning
+    # + eventual-consistency flicker) and wait until Fly reports it started. No ssh.
+    start_ts="$(date +%s)"; READY_TIMEOUT="${CLOUDBENCH_READY_TIMEOUT:-600}"; last_start_ts=0
+    while :; do
+        st="$(machine_state "$mid")"
+        [ "$st" = "started" ] && break
+        now="$(date +%s)"
+        if machine_storage_ready "$mid" && { [ "$last_start_ts" -eq 0 ] || [ $((now - last_start_ts)) -ge 15 ]; }; then
+            request_machine_start "$mid" >/dev/null 2>&1 || true
+            last_start_ts="$now"
+        fi
+        if [ $((now - start_ts)) -ge "$READY_TIMEOUT" ]; then
+            echo "❌ boot-launch: machine $mid did not start within ${READY_TIMEOUT}s (state=$st)." >&2
+            exit 1
+        fi
+        sleep 5
+    done
+    echo "✅ boot-launch: $mid started — booting into the driver (polling over the data plane)."
+else
 # ── 1. Start the warm machine + wait until it is start+ssh-ready ────────────
 # Generous timeout: ~10s warm, minutes on a cold image pull. Gate on BOTH the Fly
 # machine state AND a trivial ssh echo (start != ssh-reachable).
@@ -1795,6 +1855,7 @@ for _la in $(seq 1 "$launch_attempts"); do
     fi
 done
 if [ "$_ok" = 1 ]; then echo "✅ On-box driver launched + confirmed running."; else echo "   ⚠️ driver-running check inconclusive after $launch_attempts attempts; polling anyway (the poll loop will detect a dead driver)."; fi
+fi  # end launch: boot-launch vs legacy ssh path
 
 # Bring up the DATA-PLANE status proxy: one flyctl proxy (WireGuard tunnel) whose
 # ongoing traffic never touches the Machines API. The poll loop reads bench.log

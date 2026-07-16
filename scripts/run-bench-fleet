@@ -1682,6 +1682,7 @@ for bench in "${BENCHES[@]}"; do
         CLOUDBENCH_ENV_VERIFIED=1 \
         CLOUDBENCH_START_BARRIER="$([ "$SYNCHRONIZED_START" = "1" ] && printf '%s' "$RUN_ID")" \
         CLOUDBENCH_START_BARRIER_WAIT_SECONDS="$START_BARRIER_WAIT_SECONDS" \
+        CLOUDBENCH_BOOT_LAUNCH="${CLOUDBENCH_BOOT_LAUNCH:-1}" \
         NO_OPEN=1 \
         bash "$RUN_BENCH_CLOUD_BIN" "$bench" \
             --machine "$cid" \
