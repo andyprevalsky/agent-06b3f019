@@ -2424,16 +2424,15 @@ def test_launcher_detects_dead_onbox_driver() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     # Poll loop probes driver liveness on stall and breaks on death.
     assert "DRIVER_STALL_SECONDS" in cloud
-    assert "on-box driver not alive + no progress" in cloud
-    assert "pgrep -f 'cloudbench-run.sh|/tmp/rb.sh'" in cloud
+    assert "on-box driver made no progress" in cloud  # data-plane staleness, no ssh probe
+    # Stall exclusion is pure data-plane staleness (no ssh pgrep probe in the poll loop).
+    assert "made no progress for ${DRIVER_STALL_SECONDS}s (stuck/dead" in cloud
     # Driver launch is retried until confirmed running (a single rate-limited
     # fire-and-forget launch left boxes dead at RUNSTAMP), and the liveness
     # probe presumes death on repeated non-ALIVE results (DEAD OR unreachable),
     # since the rate-limiting that kills the driver also fails a strict probe.
     assert "CLOUDBENCH_DRIVER_LAUNCH_ATTEMPTS" in cloud
     assert "driver not confirmed running (attempt" in cloud
-    assert "CLOUDBENCH_DRIVER_ABSENT_STRIKES" in cloud
-    assert "consecutive misses" in cloud
     # Launch burst is staggered.
     fleet = FLEET_SCRIPT.read_text()
     assert "CLOUDBENCH_LAUNCH_STAGGER_SECONDS" in fleet

@@ -1769,20 +1769,21 @@ done
 # the wrapper self-deletes ($REMOTE_TMP_SCRIPT rm -f + exec), so on a box whose
 # driver is already running the wrapper file is gone and the re-launch is a no-op;
 # it only actually re-fires on boxes where the wrapper died before exec'ing.
-# Start a tiny status HTTP server serving /data (which holds bench.log) so the
-# controller can poll progress over the Fly DATA PLANE via `flyctl proxy`
-# (WireGuard) instead of `flyctl ssh console` (rate-limited Machines API — the
-# saturation that froze 30-box runs). One idempotent ssh call (kill any stale
-# server first); it survives driver re-launches. Bound to the box's private 6PN
-# address, reachable only through the authenticated proxy.
+# The data-plane status server (python3 -m http.server serving /data, which holds
+# bench.log) lets the controller poll progress over `flyctl proxy` (WireGuard)
+# instead of rate-limited ssh. It is started in the SAME ssh as the driver launch
+# (below) — bundling both into one call halves the launch-phase Machines-API hits,
+# and the launch burst is the remaining saturation source at fleet width. Bound to
+# the box's private 6PN address, reachable only through the authenticated proxy.
 STATUS_PROXY_PID=""
 LOCAL_STATUS_PORT="$(( LOCAL_DASH_PORT + 3 ))"
-FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"pkill -f 'http.server ${REMOTE_STATUS_PORT}' 2>/dev/null; sleep 1; setsid python3 -m http.server ${REMOTE_STATUS_PORT} --directory /data >/dev/null 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
 
 launch_attempts="${CLOUDBENCH_DRIVER_LAUNCH_ATTEMPTS:-4}"
 _ok=0
 for _la in $(seq 1 "$launch_attempts"); do
-    FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"setsid bash '$REMOTE_TMP_SCRIPT' >> '$REMOTE_LOG' 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
+    # ONE ssh: (idempotently) start the status server, then launch the detached
+    # driver. Half the ssh calls of starting them separately.
+    FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"pkill -f 'http.server ${REMOTE_STATUS_PORT}' 2>/dev/null; setsid python3 -m http.server ${REMOTE_STATUS_PORT} --directory /data >/dev/null 2>&1 </dev/null & setsid bash '$REMOTE_TMP_SCRIPT' >> '$REMOTE_LOG' 2>&1 </dev/null &\"" >/dev/null 2>&1 || true
     sleep "${CLOUDBENCH_LAUNCH_SETTLE_SECONDS:-5}"
     # Confirmed = the driver process is alive. A failed/rate-limited probe returns
     # empty (not RUNNING) and simply drives another attempt — never a false OK.
@@ -2066,7 +2067,7 @@ DRIVER_DIED="0"
 # the whole batch for an hour. When the log stops growing, verify the driver
 # process is still alive; if it's gone with no DONE marker, stop promptly and
 # report a bring-up (infra) failure so the fleet controller excludes this box fast.
-DRIVER_STALL_SECONDS="${CLOUDBENCH_DRIVER_STALL_SECONDS:-150}"
+DRIVER_STALL_SECONDS="${CLOUDBENCH_DRIVER_STALL_SECONDS:-210}"
 while :; do
     now="$(date +%s)"
     if [ $((now - poll_start)) -ge "$RUN_TIMEOUT" ]; then
@@ -2091,34 +2092,21 @@ while :; do
             break
         fi
     fi
-    # Liveness probe only after a stall, so a healthy (streaming) run adds no extra
-    # SSH load. Once stalled, probe on a bounded interval and count consecutive
-    # non-ALIVE results. Crucially a DEAD result AND an unreachable/rate-limited
-    # probe (empty) BOTH count — at fleet width the very rate-limiting that kills
-    # the driver also fails the probe, so requiring a literal "DEAD" string left
-    # dead boxes hung. A few consecutive misses (default 3) guard against a single
-    # transient ssh hiccup excluding a healthy box.
-    if [ $((now - last_change)) -ge "$DRIVER_STALL_SECONDS" ] \
-       && [ $((now - last_probe)) -ge "${CLOUDBENCH_DRIVER_PROBE_INTERVAL:-40}" ]; then
-        last_probe="$now"
-        probe="$(ssh_read "$mid" "pgrep -f 'cloudbench-run.sh|/tmp/rb.sh' >/dev/null 2>&1 && echo ALIVE || echo DEAD" 2>/dev/null)"
-        if [ "$probe" = "ALIVE" ]; then
-            driver_absent=0
-        else
-            driver_absent=$((driver_absent + 1))
-            if [ "$driver_absent" -ge "${CLOUDBENCH_DRIVER_ABSENT_STRIKES:-3}" ]; then
-                echo "❌ on-box driver not alive + no progress for ${DRIVER_STALL_SECONDS}s (${driver_absent} consecutive misses, last probe='${probe:-unreachable}') — bring-up (infra) failure; stopping this box so the fleet can proceed."
-                DRIVER_DIED="1"; BENCH_EXIT="1"
-                break
-            fi
-        fi
+    # Data-plane STALENESS exclusion: if bench.log has not grown for DRIVER_STALL_
+    # SECONDS the box is stuck/dead at bring-up (a healthy box streams stack output
+    # constantly -- deps, prisma, seed, WMH). last_change is driven by the proxy
+    # (curl) read above, so this is NEVER blocked or hidden by the Machines-API rate
+    # limit. The old ssh pgrep probe both HUNG the poll loop (3x60s retries under
+    # throttling) AND was defeated by the same throttling that killed the driver, so
+    # stuck boxes were never excluded and the barrier stalled at ~21/30. Pure
+    # staleness needs no ssh; threshold is generous so a slow-but-progressing box
+    # (e.g. a quiet pg_restore) is never falsely excluded.
+    if [ $((now - last_change)) -ge "$DRIVER_STALL_SECONDS" ]; then
+        echo "❌ on-box driver made no progress for ${DRIVER_STALL_SECONDS}s (stuck/dead at bring-up) -- bring-up (infra) failure; stopping this box so the fleet can proceed."
+        DRIVER_DIED="1"; BENCH_EXIT="1"
+        break
     fi
-    # Steady-state SSH load reducer. Each box ssh_read's its remote log every
-    # interval; at fleet width 30 boxes × (1 poll / 10s) + retries + probes
-    # saturates the Fly API rate limit (confirmed: manual `flyctl machines list`
-    # throttled ~1/3 of calls DURING a 30-box run), freezing the whole batch.
-    # A longer, jittered interval cuts that load and de-aligns the 30 pollers.
-    sleep $(( ${CLOUDBENCH_POLL_INTERVAL:-20} + (RANDOM % 6) ))
+    sleep "$(( ${CLOUDBENCH_POLL_INTERVAL:-15} + (RANDOM % 6) ))"
 done
 
 # Preserve the complete remote driver and service logs before the EXIT trap
