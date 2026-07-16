@@ -950,7 +950,7 @@
   {
     "name": "browser-agent-amazon-cookie-payment",
     "title": "Amazon Cookie Auth Payment Write Lock",
-    "description": "Buy a qualifying Amazon beanie through the cart path using live cookie auth and stop at the write lock.",
+    "description": "Buy a qualifying Amazon beanie through the normal cart path and complete the purchase.",
     "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
@@ -960,15 +960,21 @@
     "tags": [
       "browser",
       "auth",
-      "ecommerce"
+      "ecommerce",
+      "antibot"
     ],
     "group": "daily",
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "ignore",
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
     "expected_attention_kind": "write_lock",
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
     "start_phase": "execute",
     "environment": {
       "mode": "live",
@@ -988,22 +994,57 @@
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "Live Amazon via synced-prod cookie auth. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle used to reach the payment write-lock."
+      "context_notes": "Live Amazon via synced-prod cookie auth. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle used to complete one auto-approved cart purchase."
     },
     "evaluators": [
       {
-        "id": "amazon-beanie-checkout",
+        "id": "amazon-beanie-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved write-lock",
+          "The approval request identifies the beanie and its price"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "beanie"
+            ],
+            "require_amount": true
+          }
+        ]
+      },
+      {
+        "id": "amazon-beanie-checkout-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The selected product is one black, well-made beanie priced under $35",
+          "The selected product is one black beanie priced under $35, and grounded rating, review, material, or product-detail evidence supports that it is well-made",
           "The agent uses the normal cart and checkout path rather than Buy Now",
-          "The agent reaches the final purchase write-lock with the qualifying item"
+          "The trajectory shows the qualifying purchase completed after the single approved write boundary"
         ],
-        "judge_prompt": "Pass only when browser/tool evidence grounds the exact product, price, cart path, and terminal write-lock. Authentication assistance is a failure."
+        "judge_prompt": "Pass only when browser/tool evidence grounds the exact product, price, quality basis, normal cart path, and completed purchase. Authentication assistance, unsupported quality claims, or use of Buy Now is a failure."
       }
     ],
     "enforce_declared_evaluators": true,
-    "bench": "pipeline-e2e"
+    "bench": "rose-bench"
   },
   {
     "name": "browser-agent-amazon-passkey",
@@ -1146,7 +1187,7 @@
     "tags": [
       "browser",
       "auth",
-      "bot-challenge",
+      "antibot",
       "ecommerce"
     ],
     "group": "daily",
@@ -1164,6 +1205,31 @@
           "name": "The Rocky Sandwich",
           "quantity": 1
         }
+      ],
+      "requiredFields": [
+        "merchant",
+        "currency",
+        "lineItems",
+        "fees",
+        "subtotalCents",
+        "totalCents",
+        "fingerprint",
+        "userId",
+        "agentId"
+      ],
+      "requiredLineItemFields": [
+        "name",
+        "imageUrl",
+        "productUrl",
+        "rating",
+        "reviewCount",
+        "unitPriceCents",
+        "quantity",
+        "lineTotalCents"
+      ],
+      "requiredFeeFields": [
+        "label",
+        "amountCents"
       ]
     },
     "success_on_payment_card_request": true,
@@ -1173,7 +1239,9 @@
         "id": "toast-payment-receipt",
         "method": "static_check",
         "criteria": [
-          "A validated payment-card request names Nopa Fish on Toast and contains one The Rocky Sandwich line item"
+          "A validated payment-card request names Nopa Fish on Toast and contains one The Rocky Sandwich line item",
+          "The approval contains every required receipt, line-item, fee, identity, and fingerprint field",
+          "The complete receipt satisfies the request_payment_card schema"
         ],
         "checks": [
           {
@@ -1188,8 +1256,8 @@
   {
     "name": "browser-opentable-reservation",
     "title": "OpenTable Restaurant Reservation",
-    "description": "Reserve a flexible Sunday dinner table through OpenTable without choosing a prepaid experience.",
-    "prompt": "Use OpenTable to reserve a table for 2 at Prospect, 300 Spear Street, San Francisco, this Sunday at 7:00 PM. If 7:00 PM is unavailable, choose the closest standard table between 6:00 PM and 8:00 PM. Do not choose or pay for a prepaid experience. Complete the reservation using the saved guest details and stop at the final write-lock approval if the harness requires it.",
+    "description": "Complete a flexible Sunday dinner reservation through OpenTable.",
+    "prompt": "Use OpenTable to reserve a table for 2 at Prospect, 300 Spear Street, San Francisco, this Sunday at 7:00 PM. If 7:00 PM is unavailable, choose the closest standard table between 6:00 PM and 8:00 PM. Complete the reservation using the saved guest details.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1206,10 +1274,15 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "ignore",
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
     "expected_attention_kinds": [
       "write_lock"
     ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
     "start_phase": "execute",
     "status": "ready",
     "runner": "agent",
@@ -1229,18 +1302,53 @@
       "live_targets": [
         "https://www.opentable.com/restaurant/profile/45907/reserve"
       ],
-      "context_notes": "Live OpenTable inventory changes continuously. The task allows a two-hour window while holding restaurant, party size, date, and non-prepaid reservation type fixed."
+      "context_notes": "Live OpenTable inventory changes continuously. The task allows a two-hour window while holding restaurant, party size, and date fixed. The single final reservation write-lock is auto-approved."
     },
     "evaluators": [
       {
-        "id": "opentable-reservation",
+        "id": "opentable-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No browser-agent attempt fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved write-lock",
+          "The approval request includes Prospect and the reservation time"
+        ],
+        "checks": [
+          {
+            "type": "no_browser_agent_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "Prospect"
+            ],
+            "require_time": true
+          }
+        ]
+      },
+      {
+        "id": "opentable-reservation-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The agent reaches the final reservation write-lock or a confirmed reservation",
+          "The trajectory shows the agent completed the reservation and reached a grounded confirmation state",
           "The reservation is for Prospect, two people, this Sunday, between 6:00 PM and 8:00 PM",
-          "The agent does not select a prepaid experience"
+          "The selected time is 7:00 PM when available; otherwise it is the closest evidenced available time to 7:00 PM within the allowed window"
         ],
-        "judge_prompt": "Review the browser transcript and attention requests. Pass only if the exact restaurant, party size, relative date, allowed time window, and non-prepaid constraint are satisfied."
+        "judge_prompt": "Review the full browser/tool trajectory. Pass only if grounded evidence shows a completed Prospect reservation for two on the correct Sunday, with the required time-selection behavior and a final confirmation. Do not treat the task prompt or an approval request alone as proof of completion."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -1251,8 +1359,8 @@
   {
     "name": "browser-instacart-grocery-order",
     "title": "Instacart Grocery Delivery",
-    "description": "Build and check out a small household grocery basket for same-day delivery.",
-    "prompt": "Use Instacart to order one dozen large eggs, one bunch of bananas, and one half-gallon of whole milk from a single San Francisco grocery store for delivery to my saved address. Prefer the least expensive well-rated options, allow only like-for-like substitutions, keep the item subtotal under $35, and choose the earliest available delivery window. Complete checkout and stop at the payment/write-lock approval if the harness requires it.",
+    "description": "Build and check out a complete weekly grocery basket for same-day delivery.",
+    "prompt": "Use Instacart to order my weekly groceries from a single San Francisco grocery store for delivery to my saved address: one standard package of blueberries, one standard package of strawberries, one 16 oz Cocojune yogurt (prefer plain), one standard jar of pickles, one standard package of feta cheese, one standard jar of olives, and one 12-pack of 1 L Essentia ionized alkaline water. Prefer inexpensive, well-rated options and keep the item subtotal at or below $60. Do not substitute Cocojune or Essentia; if either exact brand is unavailable, report the blocker rather than replacing it. Allow only like-for-like substitutions for the other products. Choose the earliest available delivery window. Complete checkout and stop at the payment/write-lock approval if the harness requires it.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1300,11 +1408,13 @@
         "id": "instacart-grocery-checkout",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The cart contains exactly one dozen eggs, bananas, and a half-gallon of whole milk from one store",
-          "The item subtotal is under $35 and substitutions are limited to equivalent products",
-          "The agent reaches the payment/write-lock or completed checkout with the earliest available delivery window"
+          "The cart contains exactly the seven requested weekly grocery products in one standard retail unit each from a single store",
+          "The branded items are one 16 oz Cocojune yogurt and one 12-pack of 1 L Essentia ionized alkaline water, with no brand substitutions",
+          "The remaining items are blueberries, strawberries, one jar of pickles, feta cheese, and one jar of olives, with only like-for-like substitutions",
+          "The item subtotal is at or below $60 and the earliest available delivery window is selected",
+          "The agent reaches the payment/write-lock or completed checkout with the complete basket"
         ],
-        "judge_prompt": "Review the browser transcript, cart evidence, and attention requests. Pass only if the basket, price cap, single-store constraint, substitutions, and delivery window all match."
+        "judge_prompt": "Review the browser trajectory, cart evidence, and attention requests. Pass only if all seven products, quantities, exact Cocojune and Essentia brands, single-store constraint, $60 cap, substitution policy, and earliest available delivery window are grounded. Missing exact-brand inventory is a failure, not a successful substitution."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -1316,7 +1426,7 @@
     "name": "browser-doordash-usb-c-cable",
     "title": "DoorDash USB-C Cable Delivery",
     "description": "Buy a constrained electronics item through rapid local retail delivery.",
-    "prompt": "Use DoorDash to order one USB-C to USB-C charging cable for delivery to my saved address in San Francisco. It must be at least 6 feet long, support at least 60W charging, cost no more than $30 before taxes and fees, and arrive at the earliest available time. Do not buy a USB-A cable, adapter, multi-pack, or cable with a permanently attached wall charger. Complete checkout and stop at the payment/write-lock approval if the harness requires it.",
+    "prompt": "Use DoorDash to order one USB-C to USB-C charging cable for delivery to my saved address in San Francisco. It must be at least 6 feet long, support at least 60W charging, cost no more than $30 before taxes and fees, and arrive at the earliest available time. Do not buy a USB-A cable, adapter, multi-pack, or cable with a permanently attached wall charger. Complete checkout.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1333,11 +1443,16 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "ignore",
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
     "expected_attention_kinds": [
       "payment_approval",
       "write_lock"
     ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
     "start_phase": "execute",
     "status": "ready",
     "runner": "agent",
@@ -1357,11 +1472,38 @@
       "live_targets": [
         "https://www.doordash.com/products/usbc-cable/ugp_c671cf61-ba10-4433-b46a-3cce19227d69"
       ],
-      "context_notes": "Live DoorDash retail inventory, saved address/auth state, product-spec comparison, delivery timing, and checkout write-lock."
+      "context_notes": "Live DoorDash retail inventory, saved address/auth state, product-spec comparison, delivery timing, and one auto-approved checkout boundary."
     },
     "evaluators": [
       {
-        "id": "doordash-usb-c-checkout",
+        "id": "doordash-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved attention request"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          }
+        ]
+      },
+      {
+        "id": "doordash-usb-c-checkout-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
           "The selected item is one USB-C to USB-C cable at least 6 feet long with at least 60W charging support",
@@ -1380,7 +1522,7 @@
     "name": "browser-alchemy-springs-sauna",
     "title": "Alchemy Springs Sauna Session",
     "description": "Book a time-slotted local wellness service with a flexible Sunday window.",
-    "prompt": "Book one standard Sauna Garden session for me at Alchemy Springs, 939 Post Street, San Francisco, this Sunday. Choose the earliest available start time between 10:00 AM and 2:00 PM, use my saved guest details, and do not add classes, treatments, memberships, gift cards, or merchandise. Complete checkout and stop at the payment/write-lock approval if the harness requires it.",
+    "prompt": "Book one standard Sauna Garden session for me at Alchemy Springs, 939 Post Street, San Francisco, this Sunday. Choose the earliest available start time between 10:00 AM and 2:00 PM, use my saved guest details, and do not add classes, treatments, memberships, gift cards, or merchandise. Complete the booking.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1397,11 +1539,15 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "ignore",
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
     "expected_attention_kinds": [
-      "payment_approval",
       "write_lock"
     ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
     "start_phase": "execute",
     "status": "ready",
     "runner": "agent",
@@ -1421,18 +1567,57 @@
       "live_targets": [
         "https://www.alchemysprings.com/visit"
       ],
-      "context_notes": "Live Alchemy Springs Sauna Garden inventory and booking checkout for one person at the official 939 Post Street location."
+      "context_notes": "Live Alchemy Springs Sauna Garden inventory and booking checkout for one person at the official 939 Post Street location, with one auto-approved write boundary and a completed confirmation."
     },
     "evaluators": [
       {
-        "id": "alchemy-sauna-booking",
+        "id": "alchemy-sauna-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved write-lock",
+          "The approval identifies Alchemy Springs, the Sauna Garden service, the calendar date, start time, and payment amount"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "Alchemy Springs",
+              "Sauna Garden"
+            ],
+            "require_date": true,
+            "require_time": true,
+            "require_amount": true
+          }
+        ]
+      },
+      {
+        "id": "alchemy-sauna-booking-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The booking is for one standard Sauna Garden session at Alchemy Springs this Sunday",
-          "The selected start is the earliest available between 10:00 AM and 2:00 PM",
-          "No classes, treatments, memberships, gift cards, or merchandise are added, and the agent reaches payment/write-lock or confirmation"
+          "The completed booking is for one standard Sauna Garden session for one person at Alchemy Springs, 939 Post Street, this Sunday",
+          "Grounded availability evidence shows that the selected start is the earliest available between 10:00 AM and 2:00 PM",
+          "No classes, treatments, memberships, gift cards, or merchandise are added",
+          "The trajectory shows the booking completed after the single approved write boundary and reached a grounded final confirmation; checkout, an approval request, or a write-lock alone is not completion"
         ],
-        "judge_prompt": "Review the booking transcript and attention requests. Pass only if the service, person count, date, earliest allowed time, exclusions, and terminal checkout state all match."
+        "judge_prompt": "Review the full browser/tool trajectory and attention requests. Pass only if grounded evidence proves the exact service, one-person count, correct Sunday, earliest evidenced allowed time, exclusions, single approval, and final confirmed booking. Do not treat the task prompt, checkout page, approval request, or write-lock alone as proof of completion."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -1444,7 +1629,7 @@
     "name": "browser-hotel-booking",
     "title": "Refundable Hotel Booking",
     "description": "Reserve a one-night hotel stay while comparing room price and cancellation terms.",
-    "prompt": "Book a one-night stay for one adult at Hotel Kabuki in San Francisco from this Saturday to Sunday. Choose the lowest-priced non-smoking room with free cancellation, keep the room rate under $400 before taxes and fees, and do not select a nonrefundable rate, package, room upgrade, or add-on. Complete the reservation and stop at the payment/write-lock approval if the harness requires it.",
+    "prompt": "Book a one-night stay for one adult at Hotel Kabuki in San Francisco from this Saturday to Sunday. Choose the lowest-priced non-smoking room with free cancellation, keep the room rate under $400 before taxes and fees, and do not select a nonrefundable rate, package, room upgrade, or add-on. Complete the reservation.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1461,11 +1646,15 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "ignore",
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
     "expected_attention_kinds": [
-      "payment_approval",
       "write_lock"
     ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
     "start_phase": "execute",
     "status": "ready",
     "runner": "agent",
@@ -1485,18 +1674,56 @@
       "live_targets": [
         "https://www.booking.com"
       ],
-      "context_notes": "Live lodging inventory and rate rules. The benchmark fixes hotel, occupancy, relative dates, refundability, smoking preference, and price cap while allowing room inventory to vary."
+      "context_notes": "Live lodging inventory and rate rules. The benchmark fixes hotel, occupancy, relative dates, refundability, smoking preference, and price cap while allowing room inventory to vary, and auto-approves one write boundary to require a confirmed reservation."
     },
     "evaluators": [
       {
-        "id": "refundable-hotel-booking",
+        "id": "refundable-hotel-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved write-lock",
+          "The approval identifies Hotel Kabuki, both stay dates, free cancellation, and the total amount"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "Hotel Kabuki",
+              "free cancellation"
+            ],
+            "minimum_date_count": 2,
+            "require_amount": true
+          }
+        ]
+      },
+      {
+        "id": "refundable-hotel-booking-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The reservation is for Hotel Kabuki, one adult, Saturday to Sunday, in a non-smoking room",
-          "The selected rate is the lowest-priced option with free cancellation and is under $400 before taxes and fees",
-          "No nonrefundable rate, package, upgrade, or add-on is selected, and the agent reaches payment/write-lock or confirmation"
+          "The completed reservation is for Hotel Kabuki, one adult, Saturday to Sunday, in a non-smoking room",
+          "Grounded comparison evidence shows the selected rate is the lowest-priced available option with free cancellation and is under $400 before taxes and fees",
+          "No nonrefundable rate, package, upgrade, or add-on is selected, and the single approval describes the selected room or rate, cancellation terms, both dates, and total amount",
+          "The trajectory reaches a grounded final reservation confirmation after approval; checkout, an approval request, or a write-lock alone is not completion"
         ],
-        "judge_prompt": "Review the room/rate evidence and attention requests. Pass only if the exact hotel, dates, occupancy, refundability, room constraints, price cap, and terminal booking state are grounded."
+        "judge_prompt": "Review the full room/rate comparison, browser trajectory, and attention request. Pass only if grounded evidence proves the exact hotel, dates, occupancy, refundability, room constraints, lowest-price selection, price cap, well-formed approval, and completed reservation confirmation."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -1509,7 +1736,7 @@
     "name": "browser-event-ticket",
     "title": "AMC Movie Ticket with Seat Selection",
     "description": "Buy a time-slotted entertainment ticket that requires format and seat selection.",
-    "prompt": "Buy one adult movie ticket at AMC Metreon 16 in San Francisco for this Friday. Choose the earliest standard-format, non-horror movie starting between 7:00 PM and 9:00 PM, select an available seat closest to the horizontal and vertical center of the auditorium, keep the ticket price under $30 before fees, and add no concessions, memberships, donations, or upgrades. Complete checkout and stop at the payment/write-lock approval if the harness requires it.",
+    "prompt": "Buy one adult movie ticket at AMC Metreon 16 in San Francisco for this Friday. Choose the earliest standard-format, non-horror movie starting between 7:00 PM and 9:00 PM, select an available seat closest to the horizontal and vertical center of the auditorium, keep the ticket price under $30 before fees, and add no concessions, memberships, donations, or upgrades. Complete the ticket purchase.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1526,11 +1753,15 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "ignore",
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
     "expected_attention_kinds": [
-      "payment_approval",
       "write_lock"
     ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
     "start_phase": "execute",
     "status": "ready",
     "runner": "agent",
@@ -1550,18 +1781,57 @@
       "live_targets": [
         "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
       ],
-      "context_notes": "Live movie/showtime/seat inventory. The benchmark fixes venue, date, time window, format, genre exclusion, seating heuristic, price cap, and no-add-on constraints."
+      "context_notes": "Live movie/showtime/seat inventory. The benchmark fixes venue, date, time window, format, genre exclusion, seating heuristic, price cap, and no-add-on constraints, and auto-approves one write boundary to require a confirmed ticket purchase."
     },
     "evaluators": [
       {
-        "id": "movie-ticket-seat-selection",
+        "id": "movie-ticket-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved write-lock",
+          "The approval identifies AMC Metreon 16, the date, showtime, seat assignment, and total amount"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "AMC Metreon 16"
+            ],
+            "require_date": true,
+            "require_time": true,
+            "require_amount": true,
+            "require_seat": true
+          }
+        ]
+      },
+      {
+        "id": "movie-ticket-seat-selection-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The ticket is for one adult at AMC Metreon 16 this Friday for the earliest qualifying non-horror standard-format show between 7:00 PM and 9:00 PM",
-          "The selected available seat is closest to the auditorium center and the ticket price is under $30 before fees",
-          "No concessions, memberships, donations, or upgrades are added, and the agent reaches payment/write-lock or confirmation"
+          "The completed purchase is for one adult at AMC Metreon 16 this Friday for the earliest qualifying non-horror standard-format show between 7:00 PM and 9:00 PM",
+          "Grounded showtime and seat-map evidence shows the selected show is earliest and the selected available seat is closest to the horizontal and vertical center; the ticket price is under $30 before fees",
+          "No concessions, memberships, donations, or upgrades are added, and the single approval identifies the movie, venue, date, showtime, seat, and total amount",
+          "The trajectory reaches a grounded final ticket confirmation or receipt after approval; checkout, an approval request, or a write-lock alone is not completion"
         ],
-        "judge_prompt": "Review showtime, format, genre, seat-map, cart, and attention evidence. Pass only if every selection and exclusion is supported and the terminal checkout state is reached."
+        "judge_prompt": "Review the full showtime, format, genre, seat-map, cart, browser, and attention evidence. Pass only if every selection and exclusion is grounded, the approval is complete, and a final confirmed ticket or receipt is reached after approval."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -1574,7 +1844,7 @@
     "name": "browser-amazon-return",
     "title": "Amazon Return and Refund Initiation",
     "description": "Exercise the post-purchase lifecycle by initiating a return with refund-method and drop-off constraints.",
-    "prompt": "On Amazon, initiate a return for the most recent delivered physical item that is still return-eligible. Choose refund to the original payment method and the nearest free no-box/no-label drop-off option if one is offered. Do not return digital content, groceries, gift cards, or an item marked final sale. Stop at the final write-lock approval before submitting the return if the harness requires it. If no delivered item is eligible, report the exact visible blocker without modifying any order.",
+    "prompt": "On Amazon, initiate a return for the most recent delivered physical item that is still return-eligible. Choose refund to the original payment method and the nearest free no-box/no-label drop-off option if one is offered. Do not return digital content, groceries, gift cards, or an item marked final sale. If no delivered item is eligible, report the exact visible blocker without modifying any order. Otherwise, complete the return.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1591,10 +1861,15 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "ignore",
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
     "expected_attention_kinds": [
       "write_lock"
     ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
     "start_phase": "execute",
     "status": "ready",
     "runner": "agent",
@@ -1617,18 +1892,56 @@
       "live_targets": [
         "https://www.amazon.com/gp/your-account/order-history"
       ],
-      "context_notes": "Live Amazon order history with synced account authentication. A deterministic eligible-order fixture is the main stability risk for this post-purchase flow."
+      "context_notes": "Live Amazon order history with synced account authentication. A deterministic eligible-order fixture is the main stability risk for this post-purchase flow; one write boundary is auto-approved so success requires a completed return confirmation."
     },
     "evaluators": [
       {
-        "id": "amazon-return-initiation",
+        "id": "amazon-return-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved write-lock",
+          "The approval identifies the return, original payment method, selected drop-off, and refund amount"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "return",
+              "original payment method",
+              "drop-off"
+            ],
+            "require_amount": true
+          }
+        ]
+      },
+      {
+        "id": "amazon-return-completion-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
           "The agent chooses the most recent delivered eligible physical item and excludes digital content, groceries, gift cards, and final-sale items",
           "The return uses the original payment method and the nearest free no-box/no-label drop-off when offered",
-          "The agent reaches the final return write-lock without submitting"
+          "The single approval identifies the specific item, refund amount, original payment method, and selected drop-off",
+          "The trajectory shows the return completed after approval and reaches a grounded return confirmation with the applicable drop-off instructions, QR code, or return authorization; a write-lock alone is not completion"
         ],
-        "judge_prompt": "Review order-history, eligibility, refund, drop-off, and attention evidence. Pass only if the agent follows the post-purchase constraints and reaches the correct final write-lock; no eligible order is a benchmark failure."
+        "judge_prompt": "Review the full order-history, eligibility, refund, drop-off, browser, and attention evidence. Pass only if the most recent eligible item and all post-purchase constraints are grounded, the approval is complete, and the return reaches final confirmation after approval. No eligible order is a benchmark failure."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -1639,9 +1952,9 @@
   },
   {
     "name": "minted-agent-accounts-uber",
-    "title": "Minted Agent Accounts Uber",
-    "description": "Create or reuse the benchmark-safe Uber identity, then request an exact UberX route and stop at the final write lock.",
-    "prompt": "Using the stateful minted-account Uber flow, create or sign in to the benchmark rider account and request an UberX ride now from 88 Howard Street, San Francisco, CA 94105 to FITNESS SF Transbay, 425 Mission Street, San Francisco, CA 94105. Confirm both exact map pins, do not select a premium or shared ride, and stop at the final write-lock approval before requesting the driver.",
+    "title": "Uber Ride to FITNESS SF Transbay",
+    "description": "Request an exact UberX route using the live account authentication in the base fixture.",
+    "prompt": "Use Uber to request an UberX ride now from 88 Howard Street, San Francisco, CA 94105 to FITNESS SF Transbay, 425 Mission Street, San Francisco, CA 94105. Confirm both map pins are at those exact addresses and do not select a premium or shared ride. Complete the ride request.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1658,22 +1971,57 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": null,
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
+    "expected_attention_kinds": [
+      "write_lock"
+    ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
     "start_phase": "execute",
     "evaluators": [
       {
-        "id": "uber-ride-request",
+        "id": "uber-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved ride-request write-lock"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          }
+        ]
+      },
+      {
+        "id": "uber-ride-request-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
           "The pickup pin is 88 Howard Street and the destination pin is FITNESS SF Transbay at 425 Mission Street",
           "The selected service is UberX, not a premium or shared tier",
-          "The agent reaches the final ride-request write-lock"
+          "The trajectory shows the ride request completed after the single approved write boundary"
         ],
-        "judge_prompt": "Pass only if browser/tool evidence grounds both exact addresses, both map pins, the UberX tier, and the terminal ride-request write-lock. Authentication assistance or an account blocker is a failure."
+        "judge_prompt": "Pass only if browser/tool evidence grounds both exact addresses, both map pins, the UberX tier, and a completed ride request. Authentication assistance, account creation, or an account blocker is a failure."
       }
     ],
     "enforce_declared_evaluators": true,
-    "bench": "pipeline-e2e"
+    "bench": "rose-bench"
   },
   {
     "name": "minted-agent-accounts-x",
@@ -1985,7 +2333,6 @@
     "tags": [
       "browser",
       "antibot",
-      "bot-challenge",
       "smoke"
     ],
     "price_limit_cents": 120,

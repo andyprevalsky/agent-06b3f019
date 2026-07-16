@@ -116,10 +116,8 @@ _WORLD_MODEL_UPDATE_RESULT: Optional[dict[str, Any]] = None
 CALENDLY_TASK_NAME = "calendly-schedule-meeting"
 BIOMETRICS_WEBDECOY_TASK_NAME = "browser-biometrics-webdecoy"
 AUTH_BUNDLE_BIOMETRICS_GATE_ENV = "BENCHMARK_AUTH_BUNDLE_BIOMETRICS_GATE"
-MINTED_AGENT_ACCOUNT_TASK_NAME = "minted-agent-accounts-uber"
 MINTED_AGENT_ACCOUNT_X_TASK_NAME = "minted-agent-accounts-x"
 MINTED_AGENT_ACCOUNT_TASK_NAMES = {
-    MINTED_AGENT_ACCOUNT_TASK_NAME,
     MINTED_AGENT_ACCOUNT_X_TASK_NAME,
 }
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
@@ -333,6 +331,19 @@ def _attention_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
     return _attention_request_kind(req) == expected_kind
 
 
+def _attention_request_evidence(req: dict) -> dict:
+    """Keep the user-visible approval contract for deterministic post-run checks."""
+    metadata = req.get("metadata") if isinstance(req.get("metadata"), dict) else {}
+    return {
+        "id": req.get("id"),
+        "kind": _attention_request_kind(req),
+        "question": req.get("question"),
+        "message": req.get("message"),
+        "description": req.get("description"),
+        "metadata": metadata,
+    }
+
+
 def _gate_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
     metadata = req.get("metadata") if isinstance(req, dict) else None
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -528,6 +539,54 @@ def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
     receipt = _payment_receipt_from_attention_request(req)
     if not receipt:
         return "missing requestPaymentCard metadata"
+
+    required_fields = expected.get("requiredFields", [])
+    for field in required_fields:
+        if field not in receipt:
+            return f"missing required payment receipt field: {field}"
+        if field != "fees" and receipt.get(field) in (None, "", []):
+            return f"empty required payment receipt field: {field}"
+
+    required_line_item_fields = expected.get("requiredLineItemFields", [])
+    line_items = receipt.get("lineItems")
+    if required_line_item_fields and not isinstance(line_items, list):
+        return "missing required payment receipt field: lineItems"
+    for item_index, item in enumerate(line_items or []):
+        if not isinstance(item, dict):
+            return f"payment receipt lineItems[{item_index}] must be an object"
+        for field in required_line_item_fields:
+            if field not in item:
+                return f"missing required lineItems[{item_index}] field: {field}"
+            if field != "imageUrl" and item.get(field) in (None, "", []):
+                return f"empty required lineItems[{item_index}] field: {field}"
+
+    required_fee_fields = expected.get("requiredFeeFields", [])
+    fees = receipt.get("fees")
+    if required_fee_fields and not isinstance(fees, list):
+        return "missing required payment receipt field: fees"
+    for fee_index, fee in enumerate(fees or []):
+        if not isinstance(fee, dict):
+            return f"payment receipt fees[{fee_index}] must be an object"
+        for field in required_fee_fields:
+            if field not in fee:
+                return f"missing required fees[{fee_index}] field: {field}"
+            if fee.get(field) in (None, ""):
+                return f"empty required fees[{fee_index}] field: {field}"
+
+    if required_fields or required_line_item_fields or required_fee_fields:
+        from browser_tools.schemas import RequestPaymentCardBrowserTool
+
+        try:
+            RequestPaymentCardBrowserTool.model_validate(
+                {"tool": "request_payment_card", **receipt}
+            )
+        except ValueError as exc:
+            return f"malformed complete payment receipt: {exc}"
+        fingerprint = receipt.get("fingerprint")
+        if "fingerprint" in required_fields and (
+            not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+        ):
+            return "malformed complete payment receipt field: fingerprint"
     if "merchant" in expected and receipt.get("merchant") != expected.get("merchant"):
         return f"merchant mismatch: expected {expected.get('merchant')}, got {receipt.get('merchant')}"
     if "currency" in expected and (receipt.get("currency") or "USD") != expected.get("currency", "USD"):
@@ -1837,6 +1896,7 @@ async def poll_agent(
     # Includes the root plus every descendant appearing in the tree endpoint.
     per_agent_state: Dict[str, dict] = {}
     seen_attention_ids: set[str] = set()
+    attention_requests_seen: list[dict] = []
     chat_assistant_seen_at: Optional[float] = None
     task._mid_run_feedback_posted = False
     task._mid_run_feedback_initial_schema = None
@@ -1885,6 +1945,12 @@ async def poll_agent(
         status = agent.get("status", "UNKNOWN")
         messages = data.get("messages", [])
         root_msg_count = len(messages)
+        data["_benchmark"] = {
+            **data.get("_benchmark", {}),
+            "approvals_triggered": approvals_triggered,
+            "approvals_resolved": approvals_resolved,
+            "attention_requests_seen": list(attention_requests_seen),
+        }
 
         exact_count_error = _root_exact_tool_count_exceeded(task, messages)
         if exact_count_error:
@@ -2208,10 +2274,13 @@ async def poll_agent(
                                 return data, approvals_triggered, approvals_resolved, receipt_error
                             approvals_triggered += 1
                             observed_kind = _attention_request_kind(req)
+                            attention_requests_seen.append(_attention_request_evidence(req))
                             data["_benchmark"] = {
                                 **data.get("_benchmark", {}),
                                 "attention_request_kind_seen": observed_kind,
                                 "attention_request_id": req_id,
+                                "approvals_triggered": approvals_triggered,
+                                "attention_requests_seen": list(attention_requests_seen),
                             }
                             if task.expected_attention_kind:
                                 data["_benchmark"] = {
@@ -2704,6 +2773,17 @@ def evaluate_task(
         ):
             return True, None
         return False, "Expected approval requests but none were triggered"
+
+    if (
+        task.approval_handling != "count_only"
+        and task.expected_approval_count is not None
+        and approvals_triggered != task.expected_approval_count
+    ):
+        return (
+            False,
+            f"Expected exactly {task.expected_approval_count} approval request(s), "
+            f"observed {approvals_triggered}",
+        )
 
     # Progress score check (verifier gave a score)
     if progress < 0.5:
@@ -4546,7 +4626,7 @@ def _x_signup_has_account_creation_evidence(signup_text: str) -> bool:
     )
 
 
-def _default_minted_target_url(base_url: str, task_name: str = MINTED_AGENT_ACCOUNT_TASK_NAME) -> str:
+def _default_minted_target_url(base_url: str, task_name: str = MINTED_AGENT_ACCOUNT_X_TASK_NAME) -> str:
     if task_name == MINTED_AGENT_ACCOUNT_X_TASK_NAME:
         return "https://x.com"
     return f"{base_url.rstrip('/')}/api/test/minted-agent-account-fixture?authRealm=m.uber.com"
@@ -5189,6 +5269,87 @@ Judge-specific instruction: {evaluator.get('judge_prompt', '')}
     )
 
 
+def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
+    """Return distinct browser attempts and grounded failed lifecycle events."""
+    browser_call_ids: set[str] = set()
+    browser_session_ids: set[str] = set()
+    failures: list[str] = []
+    for message in data.get("messages", []) or []:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        candidates = [metadata]
+        if isinstance(metadata.get("auxiliary"), dict):
+            candidates.append(metadata["auxiliary"])
+        for candidate in candidates:
+            tool_name = candidate.get("toolName") or candidate.get("tool_name")
+            is_browser = tool_name == "spawn_browser_agent" or (
+                tool_name == "spawn_agent" and candidate.get("agentType") == "browser"
+            )
+            if not is_browser:
+                continue
+            call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
+            if call_id:
+                browser_call_ids.add(str(call_id))
+            session_id = candidate.get("browser_session_id") or candidate.get("browser_url")
+            if session_id:
+                browser_session_ids.add(str(session_id))
+            status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+            event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+            if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
+                failures.append(
+                    f"{tool_name or 'browser agent'} {call_id or session_id or 'unknown'} "
+                    f"status={status or 'unsuccessful'}"
+                )
+    return max(len(browser_call_ids), len(browser_session_ids)), failures
+
+
+def _tool_runtime_failures(data: dict) -> list[str]:
+    """Return grounded failed tool lifecycle events from the root trajectory."""
+    failures: list[str] = []
+    for message in data.get("messages", []) or []:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        candidates = [metadata]
+        if isinstance(metadata.get("auxiliary"), dict):
+            candidates.append(metadata["auxiliary"])
+        for candidate in candidates:
+            tool_name = candidate.get("toolName") or candidate.get("tool_name")
+            if not tool_name:
+                continue
+            status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+            event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+            if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
+                call_id = candidate.get("toolCallId") or candidate.get("tool_call_id") or "unknown"
+                failures.append(f"{tool_name} {call_id} status={status or 'unsuccessful'}")
+    return failures
+
+
+_APPROVAL_CLOCK_RE = re.compile(
+    r"(?:\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\b(?:1[0-2]|[1-9])(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)\b)",
+    re.IGNORECASE,
+)
+_APPROVAL_DATE_RE = re.compile(
+    r"(?:\b\d{4}-\d{1,2}-\d{1,2}\b|"
+    r"\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b|"
+    r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b)",
+    re.IGNORECASE,
+)
+_APPROVAL_AMOUNT_RE = re.compile(
+    r"(?:\$\s*\d+(?:,\d{3})*(?:\.\d{2})?|\bUSD\s*\d+(?:,\d{3})*(?:\.\d{2})?\b|\b\d+(?:\.\d{2})?\s*USD\b)",
+    re.IGNORECASE,
+)
+_APPROVAL_SEAT_RE = re.compile(
+    r"(?:\bseat(?:s)?(?:\s+(?:number|assignment))?\s*[:#-]?\s*[a-z]{1,2}\s*-?\s*\d{1,3}\b|"
+    r"\brow\s+[a-z]{1,2}\s*,?\s+seat\s+\d{1,3}\b|"
+    r'[\"\']seat[\"\']\s*:\s*[\"\']?[a-z]{1,2}\s*-?\s*\d{1,3}\b)',
+    re.IGNORECASE,
+)
+
+
 def _run_declared_static_check(evaluator: dict, data: dict) -> tuple[bool, str]:
     """Execute the small fail-closed static-check surface used by enforced tasks."""
     benchmark_state = data.get("_benchmark", {})
@@ -5201,6 +5362,78 @@ def _run_declared_static_check(evaluator: dict, data: dict) -> tuple[bool, str]:
         if check_type == "expected_gate":
             if benchmark_state.get("expected_gate_seen") is not True:
                 return False, "Expected typed gate was not observed"
+            continue
+        if check_type == "no_browser_agent_failures":
+            _, failures = _browser_agent_runtime_facts(data)
+            if failures:
+                return False, f"Observed browser agent failure: {failures[0]}"
+            continue
+        if check_type == "no_tool_failures":
+            failures = _tool_runtime_failures(data)
+            if failures:
+                return False, f"Observed tool failure: {failures[0]}"
+            continue
+        if check_type == "browser_agent_session_count":
+            session_count, _ = _browser_agent_runtime_facts(data)
+            minimum = int(check.get("min", 0))
+            maximum = int(check.get("max", minimum))
+            if not minimum <= session_count <= maximum:
+                return (
+                    False,
+                    f"Browser agent session count was {session_count}; expected {minimum}..{maximum}",
+                )
+            continue
+        if check_type == "agent_status":
+            expected_status = str(check.get("value") or "COMPLETED").upper()
+            observed_status = str((data.get("agent") or {}).get("status") or "UNKNOWN").upper()
+            if observed_status != expected_status:
+                return False, f"Agent status was {observed_status}; expected {expected_status}"
+            continue
+        if check_type == "approval_request_count":
+            expected_count = int(check.get("value", 0))
+            observed_count = int(benchmark_state.get("approvals_triggered", 0))
+            if observed_count != expected_count:
+                return (
+                    False,
+                    f"Approval request count was {observed_count}; expected exactly {expected_count}",
+                )
+            continue
+        if check_type == "approval_request_details":
+            requests = benchmark_state.get("attention_requests_seen") or []
+            required_strings = check.get("required_strings") or []
+            require_date = check.get("require_date") is True
+            minimum_date_count = int(check.get("minimum_date_count", 1 if require_date else 0))
+            require_time = check.get("require_time") is True
+            require_amount = check.get("require_amount") is True
+            require_seat = check.get("require_seat") is True
+            for request in requests:
+                evidence = json.dumps(request, default=str).lower()
+                if not all(str(value).lower() in evidence for value in required_strings):
+                    continue
+                if len(_APPROVAL_DATE_RE.findall(evidence)) < minimum_date_count:
+                    continue
+                if require_time and not _APPROVAL_CLOCK_RE.search(evidence):
+                    continue
+                if require_amount and not _APPROVAL_AMOUNT_RE.search(evidence):
+                    continue
+                if require_seat and not _APPROVAL_SEAT_RE.search(evidence):
+                    continue
+                break
+            else:
+                missing = ", ".join(str(value) for value in required_strings) or "required details"
+                if minimum_date_count == 1:
+                    date_suffix = " and a calendar date"
+                elif minimum_date_count > 1:
+                    date_suffix = f" and {minimum_date_count} calendar dates"
+                else:
+                    date_suffix = ""
+                time_suffix = " and a reservation time" if require_time else ""
+                amount_suffix = " and a monetary amount" if require_amount else ""
+                seat_suffix = " and a seat assignment" if require_seat else ""
+                return False, (
+                    "Approval request did not include "
+                    f"{missing}{date_suffix}{time_suffix}{amount_suffix}{seat_suffix}"
+                )
             continue
         return False, f"Unsupported enforced static check: {check_type}"
     return True, "All declared static checks passed"
@@ -5993,7 +6226,7 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
             # The anon/cookie split used to live on dedicated tags; the curated
             # tag vocabulary merged them into `auth`, so the split is by name.
             auth_names = (
-                ("browser-agent", "minted-agent-accounts-uber")
+                ("browser-agent",)
                 if getattr(args, "anon", False)
                 else ("browser-agent-amazon-cookie-payment",)
             )
