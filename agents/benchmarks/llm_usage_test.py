@@ -62,4 +62,19 @@ def test_aggregates_calls_tokens_cost_by_provider_and_submodel() -> None:
     merged = merge_usage_breakdowns([first, first])
     assert merged["openrouter_model_1"]["calls"] == 2
     assert merged["openrouter_model_1"]["cost_usd"] == 0.25
+    assert list(merged) == [
+        "codex_token",
+        "claude_oauth_token",
+        "gpt_api_key",
+        "anthropic_api_key",
+        "openrouter_model_1",
+        "openrouter_model_2",
+    ]
+    assert merged["openrouter_model_2"] == {
+        "calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cost_usd": 0.0,
+        "models": {},
+    }
     assert "perplexity" not in merged

@@ -9,6 +9,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+PROVIDER_ORDER = (
+    "codex_token",
+    "claude_oauth_token",
+    "gpt_api_key",
+    "anthropic_api_key",
+    "openrouter_model_1",
+    "openrouter_model_2",
+)
+
+
 def merge_usage_breakdowns(breakdowns) -> dict:
     """Merge already-classified usage without importing the full agents tree.
 
@@ -33,6 +43,16 @@ def merge_usage_breakdowns(breakdowns) -> dict:
                 for field in ("calls", "input_tokens", "output_tokens"):
                     model_total[field] += int(model_usage.get(field) or 0)
                 model_total["cost_usd"] += float(model_usage.get("cost_usd") or 0)
+    for provider in PROVIDER_ORDER:
+        merged.setdefault(
+            provider,
+            {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "models": {}},
+        )
+    merged = {
+        provider: merged[provider]
+        for provider in (*PROVIDER_ORDER, "unclassified")
+        if provider in merged
+    }
     for usage in merged.values():
         usage["cost_usd"] = round(usage["cost_usd"], 8)
         for model_usage in usage["models"].values():

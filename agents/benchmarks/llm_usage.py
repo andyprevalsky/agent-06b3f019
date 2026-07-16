@@ -85,6 +85,12 @@ def merge_usage_breakdowns(
 
 def _round_costs(breakdown: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     ordered: dict[str, dict[str, Any]] = {}
+    # The batch artifact is a fixed report contract: emit every requested auth
+    # path even when it had zero calls, so absence cannot be mistaken for a
+    # collector failure. ``unclassified`` remains conditional and must be empty
+    # in a successful artifact audit.
+    for provider in PROVIDER_ORDER:
+        breakdown.setdefault(provider, {**_empty_metrics(), "models": {}})
     for provider in (*PROVIDER_ORDER, "unclassified"):
         if provider not in breakdown:
             continue
