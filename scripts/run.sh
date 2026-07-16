@@ -25,11 +25,9 @@ fi
 . "$SCRIPT_DIR/lib/workspace-env.sh"
 normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
+. "$SCRIPT_DIR/lib/run-context.sh"
 
-RUN_CONTEXT_DIR="${BENCHMARK_CONTEXT_DIR:-.context}"
-case "$RUN_CONTEXT_DIR" in
-    /.context|/.context/*) RUN_CONTEXT_DIR="${RUN_CONTEXT_DIR#/}" ;;
-esac
+RUN_CONTEXT_DIR="$(normalize_run_context_dir "$PWD" "${BENCHMARK_CONTEXT_DIR:-.context}")"
 BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
 
 # mac-app is Electron + requires nvm/Node 20.10.0; only runs on macOS.

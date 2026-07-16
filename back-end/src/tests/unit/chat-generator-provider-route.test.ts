@@ -105,25 +105,35 @@ async function testPhaseUsesDirectCerebras(): Promise<void> {
   }
 }
 
-async function testDirectFailureSurfacesWithoutFallback(): Promise<void> {
+async function testDirectFailureFallsThroughToWaterfall(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const oldCerebrasKey = process.env.CEREBRAS_API_KEY;
   const oldOpenRouterKey = process.env.OPENROUTER_API_KEY;
   process.env.CEREBRAS_API_KEY = 'direct-cerebras';
-  process.env.OPENROUTER_API_KEY = 'must-not-run';
+  process.env.OPENROUTER_API_KEY = 'openrouter-waterfall';
   const calls: string[] = [];
   globalThis.fetch = (async (input: string | URL | Request) => {
     const url = typeof input === 'string' ? input : input.toString();
     calls.push(url);
-    if (url !== CEREBRAS_API_URL) throw new Error(`Direct route leaked to ${url}`);
-    return new Response('provider unavailable', { status: 503 });
+    // Direct Cerebras attempt fails fast, pre-content...
+    if (url === CEREBRAS_API_URL) return new Response('provider unavailable', { status: 503 });
+    // ...so chat must fall through to the multi-provider OpenRouter waterfall
+    // instead of going silent (reproduces prod agent 6d19b666).
+    if (url === OPENROUTER_API_URL) return sseResponse(GENERATOR_SSE);
+    throw new Error(`Unexpected route ${url}`);
   }) as typeof fetch;
   try {
-    await assert.rejects(
-      async () => collect(await createStreamingCompletion(directGeneratorOptions())),
-      /Cerebras 503/
+    const chunks = await collect(await createStreamingCompletion(directGeneratorOptions()));
+    const text = chunks.map((c) => c.choices?.[0]?.delta?.content ?? '').join('');
+    assert.ok(
+      text.length > 0,
+      'a Cerebras stall must fall through and return content, not silence'
     );
-    assert.deepEqual(calls, [CEREBRAS_API_URL]);
+    assert.ok(calls.includes(CEREBRAS_API_URL), 'the direct Cerebras attempt should run first');
+    assert.ok(
+      calls.includes(OPENROUTER_API_URL),
+      'chat must fall through to the OpenRouter waterfall after Cerebras fails pre-content'
+    );
   } finally {
     globalThis.fetch = originalFetch;
     if (oldCerebrasKey === undefined) delete process.env.CEREBRAS_API_KEY;
@@ -133,35 +143,40 @@ async function testDirectFailureSurfacesWithoutFallback(): Promise<void> {
   }
 }
 
-async function testDirectPreHeaderStallSurfacesPromptlyWithoutFallback(): Promise<void> {
+async function testDirectPreHeaderStallFallsThroughToWaterfall(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const oldCerebrasKey = process.env.CEREBRAS_API_KEY;
   const oldOpenRouterKey = process.env.OPENROUTER_API_KEY;
   const oldIdleTimeout = process.env.CEREBRAS_CHAT_IDLE_TIMEOUT_MS;
   process.env.CEREBRAS_API_KEY = 'direct-cerebras';
-  process.env.OPENROUTER_API_KEY = 'must-not-run';
+  process.env.OPENROUTER_API_KEY = 'openrouter-waterfall';
   process.env.CEREBRAS_CHAT_IDLE_TIMEOUT_MS = '20';
   const calls: string[] = [];
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     calls.push(url);
-    if (url !== CEREBRAS_API_URL) throw new Error(`Direct route leaked to ${url}`);
-    return await new Promise<Response>((_resolve, reject) => {
-      init?.signal?.addEventListener(
-        'abort',
-        () => reject(init.signal?.reason ?? new Error('aborted')),
-        { once: true }
-      );
-    });
+    // Direct Cerebras stalls with no model output before the deadline...
+    if (url === CEREBRAS_API_URL) {
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          'abort',
+          () => reject(init.signal?.reason ?? new Error('aborted')),
+          { once: true }
+        );
+      });
+    }
+    // ...and the waterfall provider serves the response instead of silence.
+    if (url === OPENROUTER_API_URL) return sseResponse(GENERATOR_SSE);
+    throw new Error(`Unexpected route ${url}`);
   }) as typeof fetch;
   try {
     const startedAt = Date.now();
-    await assert.rejects(
-      async () => collect(await createStreamingCompletion(directGeneratorOptions())),
-      /no model output within 20ms/
-    );
-    assert.ok(Date.now() - startedAt < 250, 'pre-header stall must surface promptly');
-    assert.deepEqual(calls, [CEREBRAS_API_URL]);
+    const chunks = await collect(await createStreamingCompletion(directGeneratorOptions()));
+    const text = chunks.map((c) => c.choices?.[0]?.delta?.content ?? '').join('');
+    assert.ok(text.length > 0, 'a pre-header stall must fall through and return content');
+    assert.ok(Date.now() - startedAt < 500, 'the stall must surface and fail over promptly');
+    assert.ok(calls.includes(CEREBRAS_API_URL), 'the direct Cerebras attempt should run first');
+    assert.ok(calls.includes(OPENROUTER_API_URL), 'must fall through to the OpenRouter waterfall');
   } finally {
     globalThis.fetch = originalFetch;
     if (oldCerebrasKey === undefined) delete process.env.CEREBRAS_API_KEY;
@@ -254,10 +269,12 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
 
 async function run(): Promise<void> {
   await testPhaseUsesDirectCerebras();
-  await testDirectFailureSurfacesWithoutFallback();
-  await testDirectPreHeaderStallSurfacesPromptlyWithoutFallback();
+  await testDirectFailureFallsThroughToWaterfall();
+  await testDirectPreHeaderStallFallsThroughToWaterfall();
   await testDirectQuotaFallsOverToOpenRouterGlm();
-  process.stdout.write('PASS Chat Generator provider routes are explicit and fail closed\n');
+  process.stdout.write(
+    'PASS Chat Generator provider routes fall through on Cerebras stalls and rate caps\n'
+  );
 }
 
 void run().catch((error: unknown) => {

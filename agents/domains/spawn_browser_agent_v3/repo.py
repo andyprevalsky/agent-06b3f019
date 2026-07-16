@@ -235,8 +235,13 @@ async def save_browser_credential_ref_message(
     credential_ref: Dict[str, Any],
     role: str = "TOOL",
     tool_name: str = "credential_ref",
-) -> None:
-    """Save a Message row carrying metadata.credential_ref."""
+    browser_url: str = "",
+) -> bool:
+    """Save a Message row carrying metadata.credential_ref.
+
+    Returns whether the backend accepted the message so callers that deduplicate
+    credential outcomes can retry a transient persistence failure.
+    """
     from config import load_config
 
     try:
@@ -245,6 +250,8 @@ async def save_browser_credential_ref_message(
             "subAgentId": task_id,
             "credential_ref": credential_ref,
         }
+        if browser_url:
+            metadata["browser_url"] = browser_url
         if role == "TOOL":
             metadata.update(
                 {
@@ -259,13 +266,21 @@ async def save_browser_credential_ref_message(
             )
 
         async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(
+            response = await client.post(
                 f"{config.backend.api_url}/api/agents/{agent_id}/messages",
                 headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
                 json={"message": message, "role": role, "metadata": metadata},
             )
+            if response.is_error:
+                logger.error(
+                    "Failed to save credential ref message",
+                    status_code=response.status_code,
+                )
+                return False
+        return True
     except Exception as e:
         logger.error("Failed to save credential ref message", error=extract_error_message(e))
+        return False
 
 
 async def propagate_browser_run_credentials(

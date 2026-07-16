@@ -5,6 +5,7 @@ Activities that perform HTTP calls to the backend or LLM providers.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
@@ -22,6 +23,194 @@ logger = structlog.get_logger()
 # messages arriving inside the window are excluded from voice context until
 # the next bucket so the prompt bytes never shift mid-window.
 VOICE_CONTEXT_BUCKET_MINUTES = 15
+IMESSAGE_ACK_POLL_ATTEMPTS = 30
+IMESSAGE_ACK_POLL_INTERVAL_SECONDS = 2
+
+
+@activity.defn
+@traced("queue_imessage_activity")
+async def queue_imessage_activity(
+    user_id: str,
+    agent_id: str,
+    tool_call_id: str,
+    phone_number: str,
+    message: str,
+) -> dict[str, Any]:
+    """Persist an approved iMessage for delivery by the user's Mac app.
+
+    ``tool_call_id`` is forwarded as the idempotency key because Temporal may
+    retry an activity after the backend committed the queue write but before
+    the worker received the response.
+    """
+    from config import load_config
+
+    activity.heartbeat("Queueing approved iMessage")
+    config = load_config()
+    payload = {
+        "user_id": user_id,
+        "agent_id": agent_id,
+        "idempotency_key": tool_call_id,
+        "phone_number": phone_number,
+        "message": message,
+    }
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/imessage/queue",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+
+    try:
+        result = response.json()
+    except ValueError:
+        result = {"error": response.text[:200] or f"Backend error ({response.status_code})"}
+
+    if response.status_code >= 500:
+        response.raise_for_status()
+    if response.status_code != 200:
+        return {
+            "success": False,
+            "error": result.get("message") or result.get("error") or f"Backend error ({response.status_code})",
+        }
+
+    queue_id = result.get("queue_id")
+    if result.get("success") is not True or not isinstance(queue_id, str) or not queue_id:
+        return {"success": False, "error": "Backend did not return an iMessage queue receipt"}
+
+    relay_connected = result.get("relay_connected") is True
+    relay_last_seen_at = result.get("relay_last_seen_at")
+    if not relay_connected:
+        return {
+            "success": True,
+            "queue_id": queue_id,
+            "status": "queued",
+            "relay_connected": False,
+            "relay_last_seen_at": relay_last_seen_at if isinstance(relay_last_seen_at, str) else None,
+        }
+
+    status_url = f"{config.backend.api_url}/api/imessage/queue/{queue_id}/status"
+    status_headers = {
+        "X-API-Key": config.backend.api_key or "",
+        "X-User-Id": user_id,
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        last_transport_status = "queued"
+        for poll_attempt in range(IMESSAGE_ACK_POLL_ATTEMPTS):
+            activity.heartbeat(f"Waiting for Mac send confirmation for {queue_id}")
+            status_response = await client.get(status_url, headers=status_headers)
+            if status_response.status_code >= 500:
+                status_response.raise_for_status()
+            try:
+                status_result = status_response.json()
+            except ValueError:
+                status_result = {"error": status_response.text[:200]}
+            if status_response.status_code != 200:
+                return {
+                    "success": False,
+                    "queue_id": queue_id,
+                    "error": status_result.get("error") or f"Backend error ({status_response.status_code})",
+                }
+
+            delivery_status = status_result.get("status")
+            if isinstance(delivery_status, str):
+                last_transport_status = delivery_status
+            if delivery_status == "sent" and isinstance(status_result.get("sent_at"), str):
+                logger.info(
+                    "iMessage send confirmed",
+                    queue_id=queue_id,
+                    agent_id=agent_id,
+                    phone=phone_number[:4] + "****",
+                )
+                return {
+                    "success": True,
+                    "queue_id": queue_id,
+                    "status": "sent",
+                    "sent_at": status_result["sent_at"],
+                }
+            if delivery_status == "failed":
+                return {
+                    "success": False,
+                    "queue_id": queue_id,
+                    "error": status_result.get("last_error") or "Mac Messages send failed",
+                }
+            if delivery_status == "expired":
+                return {
+                    "success": False,
+                    "queue_id": queue_id,
+                    "error": "The Mac app did not claim the iMessage before its send window expired; it was not sent.",
+                }
+            if delivery_status == "legacy_dispatched":
+                return {
+                    "success": False,
+                    "queue_id": queue_id,
+                    "error": (
+                        "The iMessage was handed to an older Mac app that cannot confirm the send. "
+                        "Update the Mac app to verify that Messages sent it."
+                    ),
+                }
+            if poll_attempt < IMESSAGE_ACK_POLL_ATTEMPTS - 1:
+                await asyncio.sleep(IMESSAGE_ACK_POLL_INTERVAL_SECONDS)
+
+    return {
+        "success": True,
+        "queue_id": queue_id,
+        "status": "queued",
+        "relay_connected": True,
+        "relay_last_seen_at": relay_last_seen_at if isinstance(relay_last_seen_at, str) else None,
+        "last_transport_status": last_transport_status,
+    }
+
+
+@activity.defn
+@traced("send_agent_sms_activity")
+async def send_agent_sms_activity(
+    user_id: str,
+    agent_id: str,
+    tool_call_id: str,
+    phone_number: str,
+    message: str,
+) -> dict[str, Any]:
+    """Send once through the agent-owned AgentPhone number; never enqueue."""
+    from config import load_config
+
+    activity.heartbeat("Sending approved Agent SMS")
+    config = load_config()
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/agentphone/messages/send",
+            headers={
+                "X-API-Key": config.backend.api_key or "",
+                "Content-Type": "application/json",
+            },
+            json={
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "idempotency_key": tool_call_id,
+                "phone_number": phone_number,
+                "message": message,
+            },
+        )
+
+    try:
+        result = response.json()
+    except ValueError:
+        result = {"error": response.text[:200] or f"Backend error ({response.status_code})"}
+    if response.status_code != 200:
+        return {
+            "success": False,
+            "error": result.get("error") or f"Backend error ({response.status_code})",
+        }
+    if (
+        result.get("success") is not True
+        or result.get("status") != "sent"
+        or not isinstance(result.get("message_id"), str)
+    ):
+        return {"success": False, "error": "AgentPhone did not return a sent message receipt"}
+    return result
 
 
 @activity.defn
@@ -56,7 +245,7 @@ async def fetch_recent_messages_activity(
                 error_msg = result.get("error", f"Backend error ({response.status_code})")
             except Exception:
                 error_msg = f"Backend error ({response.status_code}): {response.text[:200]}"
-            raise Exception(error_msg)  # noqa: TRY002
+            raise RuntimeError(error_msg)
 
         data = response.json()
 
@@ -113,7 +302,7 @@ async def generate_message_activity(
 
     activity.heartbeat(f"Generating message for {person_name}")
 
-    channel_label = "iMessage" if channel == "imessage" else "Email"
+    channel_label = {"imessage": "iMessage", "agent_sms": "Agent SMS", "email": "Email"}.get(channel, channel)
 
     # Prompt is structured into FOUR tiers, each with its own cache breakpoint:
     #
@@ -172,9 +361,10 @@ async def generate_message_activity(
         f"{general_messages_context if general_messages_context else 'No recent messages available.'}"
     )
 
-    if channel == "imessage":
+    if channel in ("imessage", "agent_sms"):
         channel_instructions = (
-            "You are writing an iMessage/text message. Keep it casual, conversational, "
+            f"You are writing a {'message from the agent phone' if channel == 'agent_sms' else 'personal iMessage'}. "
+            "Keep it casual, conversational, "
             "and relatively brief (1-3 short paragraphs max). Use a warm, natural texting tone. "
             "Do NOT include a subject line."
         )

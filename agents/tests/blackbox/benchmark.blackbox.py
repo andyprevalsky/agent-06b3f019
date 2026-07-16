@@ -1,10 +1,182 @@
 """Blackbox tests for benchmark helpers."""
 
 import json
+import importlib.util
 import os
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 
 from _test_utils import BlackboxResult
+
+
+def _load_cloudbench_result_module():
+    module_path = Path(__file__).resolve().parents[3] / "scripts" / "cloudbench_result.py"
+    spec = importlib.util.spec_from_file_location("cloudbench_result", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _cloudbench_run(task_name: str, *, passed: bool, timestamp: str) -> dict:
+    return {
+        "timestamp": timestamp,
+        "summary": {
+            "total": 1,
+            "passed": 1 if passed else 0,
+            "failed": 0 if passed else 1,
+            "pass_rate": 1.0 if passed else 0.0,
+        },
+        "tasks": [{"name": task_name, "passed": passed, "agent_id": "agent-fixture"}],
+    }
+
+
+def test_cloudbench_result_rejects_stale_passing_artifact_from_another_task():
+    validator = _load_cloudbench_result_module()
+    stale_wrong_run = _cloudbench_run(
+        "spawn-sub-agents",
+        passed=True,
+        timestamp="2026-07-08T17:49:44+00:00",
+    )
+
+    errors = validator.validate_run_document(
+        stale_wrong_run,
+        ["message-person-agent-sms"],
+        require_pass=True,
+        not_before_epoch=1783828800,
+    )
+
+    assert any("task identity mismatch" in error for error in errors)
+    assert any("predates this invocation" in error for error in errors)
+
+
+def test_cloudbench_result_accepts_only_fresh_exact_passing_task_set():
+    validator = _load_cloudbench_result_module()
+    fresh_run = _cloudbench_run(
+        "message-person-agent-sms",
+        passed=True,
+        timestamp="2026-07-12T04:01:00+00:00",
+    )
+
+    errors = validator.validate_run_document(
+        fresh_run,
+        ["message-person-agent-sms"],
+        require_pass=True,
+        not_before_epoch=1783828800,
+    )
+
+    assert errors == []
+
+
+def test_cloudbench_result_preserves_fresh_failure_but_never_counts_it_as_pass():
+    validator = _load_cloudbench_result_module()
+    failed_run = _cloudbench_run(
+        "message-person-agent-sms",
+        passed=False,
+        timestamp="2026-07-12T04:01:00+00:00",
+    )
+
+    assert validator.validate_run_document(failed_run, ["message-person-agent-sms"]) == []
+    pass_errors = validator.validate_run_document(
+        failed_run,
+        ["message-person-agent-sms"],
+        require_pass=True,
+    )
+    assert any("not all passing" in error for error in pass_errors)
+
+
+def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success():
+    repo_root = Path(__file__).resolve().parents[3]
+    driver = (repo_root / "scripts" / "cloudbench-run.sh").read_text()
+    controller = (repo_root / "scripts" / "run-bench-cloud").read_text()
+    fleet = (repo_root / "scripts" / "run-bench-fleet").read_text()
+
+    assert "CURRENT_RUN_ARTIFACT_SCRIPT" in driver
+    assert "RUN_OUTPUT_MARKER" in driver
+    assert 'git -C "$REPO_DIR" clean -fd' in driver
+    assert driver.index('rm -rf "$CONTEXT_DIR"') < driver.index("applying uploaded local workspace patch")
+    assert "cloudbench-sync-prisma-client.sh" in driver
+    assert 'bash "$SYNC_PRISMA_SCRIPT" "$REPO_DIR" "$APP_USER"' in driver
+    assert "NEEDS_IMESSAGE_RELAY" in controller
+    assert "cloudbench-imessage-relay.ts" in controller
+    assert "bridge heartbeat established" in controller
+    assert "IMESSAGE_RELAY_OK" in controller
+    assert '.vm.${APP}.internal' in controller
+    assert "cat '$REMOTE_REPO/.context/cloudbench/run.json'" in controller
+    assert "BENCH_EXIT:-1" in controller
+    assert 'RUN_PASS_OK" = "1' in controller
+    assert "CHILD_EXIT_CODES" in fleet
+    assert "declare -A" not in fleet
+    assert "scripts/cloudbench_result.py" in fleet
+    assert "create-worktree-patch.sh" in fleet
+    assert "create-worktree-patch.sh" in controller
+    assert "remote-logs/cloudbench-driver.log" in controller
+    assert "logs/worker.log" in controller
+
+
+def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
+    repo_root = Path(__file__).resolve().parents[3]
+    behavioral_suite = repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", str(behavioral_suite), "-k", "prisma_client"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "2 passed" in result.stdout
+
+
+def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
+    repo_root = Path(__file__).resolve().parents[3]
+    patch_script = repo_root / "scripts" / "create-worktree-patch.sh"
+    with tempfile.TemporaryDirectory() as raw_dir:
+        fixture = Path(raw_dir)
+        subprocess.run(["git", "init", "-q", str(fixture)], check=True)
+        subprocess.run(["git", "-C", str(fixture), "config", "user.email", "bench@example.com"], check=True)
+        subprocess.run(["git", "-C", str(fixture), "config", "user.name", "Bench Test"], check=True)
+        tracked = fixture / "tracked.txt"
+        tracked.write_text("before\n")
+        subprocess.run(["git", "-C", str(fixture), "add", "tracked.txt"], check=True)
+        subprocess.run(["git", "-C", str(fixture), "commit", "-qm", "fixture"], check=True)
+
+        tracked.write_text("after\n")
+        staged = fixture / "staged.txt"
+        staged.write_text("staged\n")
+        subprocess.run(["git", "-C", str(fixture), "add", "staged.txt"], check=True)
+        (fixture / "untracked.txt").write_text("new\n")
+        patch = subprocess.run(
+            ["bash", str(patch_script), str(fixture)],
+            check=True,
+            capture_output=True,
+        ).stdout
+
+        subprocess.run(["git", "-C", str(fixture), "reset", "--hard", "-q", "HEAD"], check=True)
+        subprocess.run(["git", "-C", str(fixture), "clean", "-fdq"], check=True)
+        subprocess.run(["git", "-C", str(fixture), "apply", "-"], input=patch, check=True)
+
+        assert tracked.read_text() == "after\n"
+        assert staged.read_text() == "staged\n"
+        assert (fixture / "untracked.txt").read_text() == "new\n"
+
+
+def test_run_context_normalization_keeps_absolute_workspace_path_single_rooted():
+    repo_root = Path(__file__).resolve().parents[3]
+    helper = repo_root / "scripts" / "lib" / "run-context.sh"
+    command = (
+        f"source {helper!s}; "
+        "normalize_run_context_dir /data/repo /data/repo/.context/cloudbench; "
+        "normalize_run_context_dir /data/repo .context/local"
+    )
+
+    output = subprocess.run(["bash", "-c", command], check=True, capture_output=True, text=True).stdout.splitlines()
+
+    assert output == [".context/cloudbench", ".context/local"]
 
 
 def test_extract_worker_pids_from_ps_matches_macos_python_executable():
@@ -182,9 +354,7 @@ def test_mid_run_feedback_schema_evaluator_requires_exact_stability():
     from benchmarks.run_benchmark import _validate_mid_run_feedback_schema
 
     task = get_task_by_name("response-schema-non-goal-feedback")
-    initial_schema = {
-        "fields": [{"name": "city_populations", "type": "list[object]", "required": True}]
-    }
+    initial_schema = {"fields": [{"name": "city_populations", "type": "list[object]", "required": True}]}
     task._mid_run_feedback_posted = True
     task._mid_run_feedback_initial_schema = initial_schema
 
@@ -228,6 +398,83 @@ def test_toast_nopa_benchmark_routes_browser_to_toast_not_generic_search():
     assert task.expected_payment_receipt["merchant"] == "Nopa Fish (Toast - order.toasttab.com)"
     assert task.success_on_payment_card_request is True
     assert task.expected_payment_receipt["lineItems"] == [{"name": "The Rocky Sandwich", "quantity": 1}]
+    assert task.expected_payment_receipt["requiredFields"] == [
+        "merchant",
+        "currency",
+        "lineItems",
+        "fees",
+        "subtotalCents",
+        "totalCents",
+        "fingerprint",
+        "userId",
+        "agentId",
+    ]
+    assert task.expected_payment_receipt["requiredLineItemFields"] == [
+        "name",
+        "imageUrl",
+        "productUrl",
+        "rating",
+        "reviewCount",
+        "unitPriceCents",
+        "quantity",
+        "lineTotalCents",
+    ]
+    assert task.expected_payment_receipt["requiredFeeFields"] == ["label", "amountCents"]
+
+
+def test_toast_payment_approval_requires_every_declared_receipt_field():
+    """Toast cannot pass with a sparse or malformed payment approval payload."""
+    from copy import deepcopy
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = get_task_by_name("browser-toast-nopa-write-lock")
+    payload = {
+        "merchant": "Nopa Fish (Toast - order.toasttab.com)",
+        "currency": "USD",
+        "lineItems": [
+            {
+                "name": "The Rocky Sandwich",
+                "imageUrl": None,
+                "productUrl": "https://toasttab.com/menu/nopafish/the-rocky-sandwich",
+                "rating": "4.8 stars",
+                "reviewCount": "125 reviews",
+                "unitPriceCents": 2100,
+                "quantity": 1,
+                "lineTotalCents": 2100,
+            }
+        ],
+        "fees": [{"label": "Taxes & Fees", "amountCents": 294}],
+        "subtotalCents": 2100,
+        "totalCents": 2394,
+        "fingerprint": "a" * 64,
+        "userId": "user-123",
+        "agentId": "agent-123",
+    }
+
+    def request(value):
+        return {"metadata": {"requestPaymentCard": value}}
+
+    assert _validate_payment_receipt(task, request(payload)) is None
+
+    for field in task.expected_payment_receipt["requiredFields"]:
+        sparse = deepcopy(payload)
+        sparse.pop(field)
+        reason = _validate_payment_receipt(task, request(sparse))
+        assert reason is not None and field in reason
+
+    for field in task.expected_payment_receipt["requiredLineItemFields"]:
+        sparse = deepcopy(payload)
+        sparse["lineItems"][0].pop(field)
+        reason = _validate_payment_receipt(task, request(sparse))
+        assert reason is not None and field in reason
+
+    for field in task.expected_payment_receipt["requiredFeeFields"]:
+        sparse = deepcopy(payload)
+        sparse["fees"][0].pop(field)
+        reason = _validate_payment_receipt(task, request(sparse))
+        assert reason is not None and field in reason
 
 
 def test_payment_benchmark_enables_bundled_frontend_before_stack_start():
@@ -619,6 +866,1044 @@ def test_agentcard_setup_attention_is_not_auto_approved():
     )
 
 
+def _required_ecommerce_judge_task():
+    from benchmarks.benchmark_tasks import BenchmarkTask
+
+    return BenchmarkTask(
+        name="ecommerce-judge-test",
+        title="Ecommerce Judge Test",
+        prompt="Complete the purchase",
+        timeout_seconds=60,
+        is_chat_mode=False,
+        expected_tools=["spawn_agent"],
+        tags=["ecommerce"],
+        price_limit_cents=100,
+        requires_browser_agent=True,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling="ignore",
+        start_phase="execute",
+        expected_attention_kinds=["write_lock", "payment_approval"],
+        enforce_declared_evaluators=True,
+        evaluators=[
+            {
+                "id": "commerce-outcome",
+                "method": "single_turn_llm_judge",
+                "criteria": ["The requested item and terminal checkout state are grounded"],
+                "judge_prompt": "Fail unless the transaction outcome is grounded in tool evidence.",
+                "pass_threshold": 1.0,
+            }
+        ],
+    )
+
+
+def test_ecommerce_attention_kind_rejects_auth_blocker():
+    """A login handoff cannot masquerade as a terminal commerce write lock."""
+    from benchmarks.run_benchmark import _attention_request_matches_task
+
+    task = _required_ecommerce_judge_task()
+    auth_request = {"metadata": {"attentionKind": "auth_assistance"}}
+    write_lock_request = {
+        "metadata": {"requestUserApproval": {"writePermission": True}}
+    }
+
+    assert _attention_request_matches_task(task, auth_request) is False
+    assert _attention_request_matches_task(task, write_lock_request) is True
+
+
+async def test_required_declared_evaluator_controls_pass_fail():
+    """A required declared judge is executed and its score controls the run."""
+    import benchmarks.run_benchmark as bench
+
+    task = _required_ecommerce_judge_task()
+    data = {
+        "agent": {"agent_id": "agent-commerce", "status": "ACTIVE"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Reached checkout",
+                "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+            }
+        ],
+        "_benchmark": {"attention_request_kind_seen": "write_lock"},
+    }
+    scores = iter(
+        [
+            {"score": 0.0, "reasoning": "The requested item is not evidenced."},
+            {"score": 1.0, "reasoning": "Every criterion is grounded."},
+        ]
+    )
+    calls = []
+    original_call = bench._call_declared_llm_judge
+
+    async def fake_call(task_arg, evaluator_arg, data_arg):
+        calls.append((task_arg.name, evaluator_arg["id"], data_arg["agent"]["agent_id"]))
+        return next(scores)
+
+    try:
+        bench._call_declared_llm_judge = fake_call
+        passed, reason, results = await bench._run_declared_evaluators(task, data)
+        assert passed is False
+        assert "requested item is not evidenced" in reason.lower()
+        assert results[0]["passed"] is False
+
+        passed, reason, results = await bench._run_declared_evaluators(task, data)
+        assert passed is True
+        assert reason is None
+        assert results[0]["passed"] is True
+    finally:
+        bench._call_declared_llm_judge = original_call
+
+    assert calls == [
+        ("ecommerce-judge-test", "commerce-outcome", "agent-commerce"),
+        ("ecommerce-judge-test", "commerce-outcome", "agent-commerce"),
+    ]
+
+
+def _opentable_static_evaluator():
+    return {
+        "id": "opentable-runtime-contract",
+        "method": "static_check",
+        "criteria": ["The browser and approval trajectory satisfies the deterministic contract"],
+        "checks": [
+            {"type": "no_browser_agent_failures"},
+            {"type": "browser_agent_session_count", "min": 1, "max": 1},
+            {"type": "agent_status", "value": "COMPLETED"},
+            {"type": "approval_request_count", "value": 1},
+            {
+                "type": "approval_request_details",
+                "required_strings": ["Prospect"],
+                "require_time": True,
+            },
+        ],
+    }
+
+
+def _completed_opentable_evidence():
+    return {
+        "agent": {"status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Browser automation complete",
+                "metadata": {
+                    "toolName": "spawn_agent",
+                    "agentType": "browser",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": "browser-call-1",
+                    "browser_url": "https://steel.example/session/one",
+                },
+            }
+        ],
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "attention_requests_seen": [
+                {
+                    "kind": "write_lock",
+                    "question": "Confirm reservation at Prospect for 7:00 PM?",
+                }
+            ],
+        },
+    }
+
+
+def test_opentable_static_evaluator_checks_full_runtime_contract():
+    """Code checks reject failed/retried browsers, incomplete roots, and weak approvals."""
+    from copy import deepcopy
+
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = _opentable_static_evaluator()
+    good = _completed_opentable_evidence()
+    assert _run_declared_static_check(evaluator, good)[0] is True
+
+    failed_browser = deepcopy(good)
+    failed_browser["messages"].append(
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_agent",
+                "agentType": "browser",
+                "toolStatus": "FAILED",
+                "toolCallId": "browser-call-1",
+            },
+        }
+    )
+    assert "browser agent failure" in _run_declared_static_check(evaluator, failed_browser)[1].lower()
+
+    retried_browser = deepcopy(good)
+    retried_browser["messages"].append(
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_agent",
+                "agentType": "browser",
+                "toolStatus": "FINISHED",
+                "toolCallId": "browser-call-2",
+                "browser_url": "https://steel.example/session/two",
+            },
+        }
+    )
+    assert "browser agent session" in _run_declared_static_check(evaluator, retried_browser)[1].lower()
+
+    incomplete = deepcopy(good)
+    incomplete["agent"]["status"] = "ACTIVE"
+    assert "agent status" in _run_declared_static_check(evaluator, incomplete)[1].lower()
+
+    extra_approval = deepcopy(good)
+    extra_approval["_benchmark"]["approvals_triggered"] = 2
+    assert "approval request" in _run_declared_static_check(evaluator, extra_approval)[1].lower()
+
+    missing_details = deepcopy(good)
+    missing_details["_benchmark"]["attention_requests_seen"][0]["question"] = "Confirm reservation?"
+    assert "prospect" in _run_declared_static_check(evaluator, missing_details)[1].lower()
+
+
+def test_auto_approve_requires_exact_declared_approval_count():
+    """Auto-approval tasks fail if the agent triggers more approvals than declared."""
+    from dataclasses import replace
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = replace(
+        get_task_by_name("browser-opentable-reservation"),
+        expected_tools=[],
+        approval_handling="auto_approve",
+        expected_approval_count=1,
+        expected_tool_counts=None,
+    )
+    data = {"agent": {"status": "COMPLETED", "progress": 1.0}, "messages": []}
+
+    assert evaluate_task(task, data, approvals_triggered=1) == (True, None)
+    passed, reason = evaluate_task(task, data, approvals_triggered=2)
+    assert passed is False
+    assert "expected exactly 1 approval" in reason.lower()
+
+
+def test_opentable_catalog_uses_auto_approved_mixed_evaluators():
+    """The OpenTable task combines trajectory code checks with a semantic judge."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-opentable-reservation")
+    assert "prepaid experience" not in task.prompt.lower()
+    assert "stop at the final write-lock" not in task.prompt.lower()
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert static_types == {
+        "no_browser_agent_failures",
+        "browser_agent_session_count",
+        "agent_status",
+        "approval_request_count",
+        "approval_request_details",
+    }
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    assert "completed" in semantic_criteria
+    assert "closest" in semantic_criteria
+
+
+def test_instacart_catalog_uses_complete_weekly_grocery_basket():
+    """The weekly Instacart task keeps the agreed basket and substitution policy exact."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-instacart-grocery-order")
+    prompt = task.prompt.lower()
+    for product in (
+        "blueberries",
+        "strawberries",
+        "16 oz cocojune yogurt",
+        "pickles",
+        "feta cheese",
+        "olives",
+        "12-pack of 1 l essentia ionized alkaline water",
+    ):
+        assert product in prompt
+    assert prompt.count("pickles") == 1
+    for retired_product in ("large eggs", "bananas", "whole milk"):
+        assert retired_product not in prompt
+    assert "$60" in task.prompt
+    assert "do not substitute cocojune or essentia" in prompt
+
+    evaluator = task.evaluators[0]
+    assert evaluator["method"] == "single_turn_llm_judge"
+    criteria = " ".join(evaluator["criteria"]).lower()
+    for requirement in (
+        "seven",
+        "cocojune",
+        "essentia",
+        "single store",
+        "$60",
+        "earliest available delivery window",
+    ):
+        assert requirement in criteria
+
+
+def test_no_tool_failures_static_check_rejects_any_failed_tool_event():
+    """The reusable trajectory check fails closed on any grounded tool failure."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {
+        "checks": [{"type": "no_tool_failures"}],
+    }
+    good = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_agent",
+                    "toolStatus": "FINISHED",
+                    "data": {"success": True},
+                },
+            }
+        ]
+    }
+    assert _run_declared_static_check(evaluator, good)[0] is True
+
+    for status in ("FAILED", "ERROR", "CANCELLED"):
+        failed = {
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "metadata": {"toolName": "spawn_agent", "toolStatus": status},
+                }
+            ]
+        }
+        passed, reason = _run_declared_static_check(evaluator, failed)
+        assert passed is False
+        assert "tool failure" in reason.lower()
+
+    unsuccessful = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "data": {"success": False},
+                },
+            }
+        ]
+    }
+    assert _run_declared_static_check(evaluator, unsuccessful)[0] is False
+
+
+def test_doordash_catalog_requires_single_clean_completed_browser_run():
+    """DoorDash combines deterministic runtime invariants with product semantics."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-doordash-usb-c-cable")
+    assert "stop at the payment/write-lock" not in task.prompt.lower()
+    assert task.prompt.endswith("Complete checkout.")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert static_types == {
+        "no_tool_failures",
+        "browser_agent_session_count",
+        "agent_status",
+        "approval_request_count",
+    }
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in ("usb-c to usb-c", "6 feet", "60w", "$30", "earliest"):
+        assert requirement in semantic_criteria
+
+
+def test_uber_catalog_is_normal_single_browser_task_not_stateful_minted_flow():
+    """Uber uses base live auth and the same one-agent runtime contract as other commerce tasks."""
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("minted-agent-accounts-uber")
+    assert task.name not in bench.MINTED_AGENT_ACCOUNT_TASK_NAMES
+    assert bench.MINTED_AGENT_ACCOUNT_TASK_NAMES == {bench.MINTED_AGENT_ACCOUNT_X_TASK_NAME}
+    assert "minted" not in task.prompt.lower()
+    assert "stop at the final write-lock" not in task.prompt.lower()
+    assert task.prompt.endswith("Complete the ride request.")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kinds == ["write_lock"]
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert task.bench == "rose-bench"
+    assert task.environment["live_fixtures"] == ["base"]
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert static_types == {
+        "no_tool_failures",
+        "browser_agent_session_count",
+        "agent_status",
+        "approval_request_count",
+    }
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in ("88 howard", "425 mission", "uberx", "completed"):
+        assert requirement in semantic_criteria
+
+
+def test_approval_request_details_can_require_item_name_and_amount():
+    """Commerce approvals must expose what is being purchased and its price."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {
+        "checks": [
+            {
+                "type": "approval_request_details",
+                "required_strings": ["beanie"],
+                "require_amount": True,
+            }
+        ]
+    }
+    good = {
+        "_benchmark": {
+            "attention_requests_seen": [
+                {"question": "Buy the Black Knit Beanie for $19.99?"}
+            ]
+        }
+    }
+    assert _run_declared_static_check(evaluator, good)[0] is True
+
+    missing_amount = {
+        "_benchmark": {
+            "attention_requests_seen": [{"question": "Buy the Black Knit Beanie?"}]
+        }
+    }
+    passed, reason = _run_declared_static_check(evaluator, missing_amount)
+    assert passed is False
+    assert "amount" in reason.lower()
+
+
+def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
+    """Amazon uses the standard completed-commerce runtime and preserves cart-path semantics."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-agent-amazon-cookie-payment")
+    assert task.description.endswith("complete the purchase.")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kind == "write_lock"
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert task.bench == "rose-bench"
+    assert task.environment["live_fixtures"] == ["base", "amazon_auth"]
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert static_types == {
+        "no_tool_failures",
+        "browser_agent_session_count",
+        "agent_status",
+        "approval_request_count",
+        "approval_request_details",
+    }
+    approval_check = next(
+        check
+        for check in task.evaluators[0]["checks"]
+        if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["beanie"]
+    assert approval_check["require_amount"] is True
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in ("black", "under $35", "well-made", "buy now", "completed"):
+        assert requirement in semantic_criteria
+
+
+def test_alchemy_sauna_catalog_requires_single_clean_completed_booking():
+    """Alchemy requires one clean browser run and a fully described booking approval."""
+    from copy import deepcopy
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    task = get_task_by_name("browser-alchemy-springs-sauna")
+    assert "stop at the payment/write-lock" not in task.prompt.lower()
+    assert task.prompt.endswith("Complete the booking.")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kinds == ["write_lock"]
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+
+    static_evaluator = task.evaluators[0]
+    static_types = {check["type"] for check in static_evaluator["checks"]}
+    assert static_types == {
+        "no_tool_failures",
+        "browser_agent_session_count",
+        "agent_status",
+        "approval_request_count",
+        "approval_request_details",
+    }
+    approval_check = next(
+        check
+        for check in static_evaluator["checks"]
+        if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["Alchemy Springs", "Sauna Garden"]
+    assert approval_check["require_date"] is True
+    assert approval_check["require_time"] is True
+    assert approval_check["require_amount"] is True
+
+    good = {
+        "agent": {"status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_agent",
+                    "agentType": "browser",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": "alchemy-browser-1",
+                },
+            }
+        ],
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "attention_requests_seen": [
+                {
+                    "kind": "write_lock",
+                    "question": (
+                        "Approve one Alchemy Springs Sauna Garden session on "
+                        "Sunday, July 19, 2026 at 10:00 AM for $45.00?"
+                    ),
+                }
+            ],
+        },
+    }
+    assert _run_declared_static_check(static_evaluator, good)[0] is True
+
+    missing_date = deepcopy(good)
+    missing_date["_benchmark"]["attention_requests_seen"][0]["question"] = (
+        "Approve one Alchemy Springs Sauna Garden session at 10:00 AM for $45.00?"
+    )
+    passed, reason = _run_declared_static_check(static_evaluator, missing_date)
+    assert passed is False
+    assert "date" in reason.lower()
+
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in ("earliest available", "10:00 am", "2:00 pm", "completed", "confirmation"):
+        assert requirement in semantic_criteria
+
+
+def test_approval_request_details_support_multiple_dates_and_seat():
+    """Booking approvals can require both stay dates and an assigned seat."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    stay_evaluator = {
+        "checks": [
+            {
+                "type": "approval_request_details",
+                "required_strings": ["Hotel Kabuki"],
+                "minimum_date_count": 2,
+            }
+        ]
+    }
+    complete_stay = {
+        "_benchmark": {
+            "attention_requests_seen": [
+                {
+                    "question": "Book Hotel Kabuki?",
+                    "checkIn": "2026-07-18",
+                    "checkOut": "2026-07-19",
+                }
+            ]
+        }
+    }
+    assert _run_declared_static_check(stay_evaluator, complete_stay)[0] is True
+
+    incomplete_stay = {
+        "_benchmark": {
+            "attention_requests_seen": [
+                {"question": "Book Hotel Kabuki?", "checkIn": "2026-07-18"}
+            ]
+        }
+    }
+    passed, reason = _run_declared_static_check(stay_evaluator, incomplete_stay)
+    assert passed is False
+    assert "2 calendar dates" in reason.lower()
+
+    seat_evaluator = {
+        "checks": [
+            {
+                "type": "approval_request_details",
+                "required_strings": ["AMC Metreon 16"],
+                "require_seat": True,
+            }
+        ]
+    }
+    assigned_seat = {
+        "_benchmark": {
+            "attention_requests_seen": [
+                {"question": "Buy one AMC Metreon 16 ticket in seat H10?"}
+            ]
+        }
+    }
+    assert _run_declared_static_check(seat_evaluator, assigned_seat)[0] is True
+
+    missing_seat = {
+        "_benchmark": {
+            "attention_requests_seen": [
+                {"question": "Buy one AMC Metreon 16 ticket?"}
+            ]
+        }
+    }
+    passed, reason = _run_declared_static_check(seat_evaluator, missing_seat)
+    assert passed is False
+    assert "seat" in reason.lower()
+
+
+def test_hotel_catalog_requires_single_clean_completed_reservation():
+    """Hotel booking uses one browser and a complete, grounded approval."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-hotel-booking")
+    assert "stop at the payment/write-lock" not in task.prompt.lower()
+    assert task.prompt.endswith("Complete the reservation.")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kinds == ["write_lock"]
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert static_types == {
+        "no_tool_failures",
+        "browser_agent_session_count",
+        "agent_status",
+        "approval_request_count",
+        "approval_request_details",
+    }
+    approval_check = next(
+        check
+        for check in task.evaluators[0]["checks"]
+        if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["Hotel Kabuki", "free cancellation"]
+    assert approval_check["minimum_date_count"] == 2
+    assert approval_check["require_amount"] is True
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in ("lowest-priced", "free cancellation", "completed", "confirmation"):
+        assert requirement in semantic_criteria
+
+
+def test_event_ticket_catalog_requires_single_clean_completed_purchase():
+    """Movie ticketing requires one browser and a detailed seat approval."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-event-ticket")
+    assert "stop at the payment/write-lock" not in task.prompt.lower()
+    assert task.prompt.endswith("Complete the ticket purchase.")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kinds == ["write_lock"]
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    approval_check = next(
+        check
+        for check in task.evaluators[0]["checks"]
+        if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["AMC Metreon 16"]
+    assert approval_check["require_date"] is True
+    assert approval_check["require_time"] is True
+    assert approval_check["require_amount"] is True
+    assert approval_check["require_seat"] is True
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in ("earliest", "center", "completed", "confirmation"):
+        assert requirement in semantic_criteria
+
+
+def test_amazon_return_catalog_requires_single_clean_completed_return():
+    """Amazon returns complete after one approval instead of stopping at it."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-amazon-return")
+    assert "stop at the final write-lock" not in task.prompt.lower()
+    assert task.prompt.endswith("Otherwise, complete the return.")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kinds == ["write_lock"]
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    approval_check = next(
+        check
+        for check in task.evaluators[0]["checks"]
+        if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == [
+        "return",
+        "original payment method",
+        "drop-off",
+    ]
+    assert approval_check["require_amount"] is True
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in ("most recent", "completed", "confirmation"):
+        assert requirement in semantic_criteria
+
+
+def test_base_live_fixture_fails_when_live_auth_refresh_fails():
+    """A live benchmark never starts with missing/stale browser auth."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    original_compute = bench._sync_compute_tokens
+    original_browser = bench._sync_browser_credentials
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    raised = False
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda: True
+        bench._sync_browser_credentials = lambda: False
+        bench._apply_base_live_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="user-123",
+                auth_realm="amazon.com",
+            )
+        )
+    except RuntimeError as exc:
+        raised = "browser credential" in str(exc).lower()
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_browser_credentials = original_browser
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    assert raised, "base live fixture must fail closed when credential refresh fails"
+
+
+def test_expected_passkey_credential_ref_is_required_even_when_approval_is_terminal():
+    """A passkey benchmark cannot pass from checkout state alone."""
+    from benchmarks.benchmark_tasks import BenchmarkTask
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = BenchmarkTask(
+        name="amazon-passkey-terminal",
+        title="Amazon Passkey Terminal",
+        prompt="",
+        timeout_seconds=1,
+        is_chat_mode=False,
+        expected_tools=[],
+        tags=[],
+        price_limit_cents=100,
+        requires_browser_agent=True,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling="ignore",
+        start_phase="execute",
+        expected_attention_kind="payment_approval",
+        expected_credential_ref_kind="passkey",
+        forbidden_credential_ref_kinds=["password", "email_otp", "sms_otp"],
+        expected_browser_provider="kernel",
+        expected_browser_session_metadata_values={
+            "profile_source": "new_user_persistent",
+            "auth_source": "none",
+            "cookies_injected": False,
+            "cookies_count": 0,
+            "local_storage_origin_count": 0,
+            "indexed_db_origin_count": 0,
+            "permission_grant_count": 0,
+            "cache_storage_origin_count": 0,
+        },
+        expected_pre_credential_message_contains=["Hello, sign in"],
+        expected_post_credential_message_contains=["Hello, Andy"],
+        success_on_browser_auth_evidence=True,
+    )
+    base_data = {
+        "agent": {"status": "ACTIVE", "progress": 0.01},
+        "_benchmark": {"expected_attention_kind_seen": "payment_approval"},
+    }
+    with_passkey = {
+        **base_data,
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "browser_url": "https://kernel.example/live/session-1",
+                    "browser_session_metadata": {
+                        "provider": "kernel",
+                        "profile_source": "new_user_persistent",
+                        "auth_source": "none",
+                        "cookies_injected": False,
+                        "cookies_count": 0,
+                        "local_storage_origin_count": 0,
+                        "indexed_db_origin_count": 0,
+                        "permission_grant_count": 0,
+                        "cache_storage_origin_count": 0,
+                    },
+                },
+            },
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "title": 'Clicking <a "Hello, sign in Account & Lists">',
+                    "toolStatus": "FINISHED",
+                    "action_type": "click",
+                    "browser_url": "https://kernel.example/live/session-1",
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "toolName": "browser_session_auth",
+                    "browser_url": "https://kernel.example/live/session-1",
+                    "credential_ref": {"kind": "passkey", "id": "passkey-row"},
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": "DOM shows Hello, Andy / Account & Lists",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "title": 'Clicking <a "Hello, Andy Account & Lists">',
+                    "toolStatus": "FINISHED",
+                    "action_type": "click",
+                    "browser_url": "https://kernel.example/live/session-1",
+                },
+            },
+        ],
+    }
+    without_passkey = {**base_data, "messages": []}
+
+    assert evaluate_task(task, with_passkey, approvals_triggered=1) == (True, None)
+    passed, reason = evaluate_task(task, without_passkey, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected credential_ref kind passkey but none was observed"
+
+    wrong_provider = {
+        **base_data,
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "credential_ref": {"kind": "passkey", "id": "passkey-row"},
+                    "browser_session_metadata": {"provider": "steel"},
+                },
+            }
+        ],
+    }
+    passed, reason = evaluate_task(task, wrong_provider, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected browser provider kernel but observed: steel"
+
+    split_browser_tasks = {
+        **base_data,
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "subAgentId": "kernel-task",
+                    "browser_url": "https://kernel.example/live/session-a",
+                    "browser_session_metadata": {"provider": "kernel"},
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "subAgentId": "passkey-task",
+                    "browser_url": "https://kernel.example/live/session-b",
+                    "credential_ref": {"kind": "passkey", "id": "passkey-row"},
+                },
+            },
+        ],
+    }
+    passed, reason = evaluate_task(task, split_browser_tasks, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected browser provider kernel and credential_ref kind passkey on the same browser session"
+
+    password_fallback = {
+        **with_passkey,
+        "messages": [
+            *with_passkey["messages"],
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "browser_url": "https://kernel.example/live/session-1",
+                    "credential_ref": {"kind": "password", "id": "password-row"},
+                },
+            },
+        ],
+    }
+    passed, reason = evaluate_task(task, password_fallback, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Observed forbidden credential_ref kind(s): password"
+
+    no_authenticated_page = {
+        **with_passkey,
+        "messages": [
+            with_passkey["messages"][0],
+            with_passkey["messages"][1],
+            with_passkey["messages"][2],
+        ],
+    }
+    passed, reason = evaluate_task(task, no_authenticated_page, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected authenticated page evidence after passkey use was not observed"
+
+    typed_greeting_is_not_page_evidence = {
+        **with_passkey,
+        "messages": [
+            with_passkey["messages"][0],
+            with_passkey["messages"][1],
+            with_passkey["messages"][2],
+            {
+                **with_passkey["messages"][3],
+                "metadata": {
+                    **with_passkey["messages"][3]["metadata"],
+                    "title": "Typed 'Hello, Andy' into Amazon search",
+                    "action_type": "input_text",
+                },
+            },
+        ],
+    }
+    passed, reason = evaluate_task(task, typed_greeting_is_not_page_evidence, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected authenticated page evidence after passkey use was not observed"
+
+    detached_authenticated_result = {
+        **with_passkey,
+        "messages": [
+            with_passkey["messages"][0],
+            with_passkey["messages"][1],
+            {
+                "role": "TOOL",
+                "metadata": with_passkey["messages"][2]["metadata"],
+            },
+            {
+                "role": "TOOL",
+                "text": "DOM shows Hello, Andy / Account & Lists",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "title": 'Clicking <a "Hello, Andy Account & Lists">',
+                    "toolStatus": "FINISHED",
+                    "action_type": "click",
+                    "browser_url": "https://kernel.example/live/session-2",
+                },
+            },
+        ],
+    }
+    passed, reason = evaluate_task(task, detached_authenticated_result, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected authenticated page evidence after passkey use was not observed"
+
+    reused_kernel_profile = {
+        **with_passkey,
+        "messages": [
+            {
+                **with_passkey["messages"][0],
+                "metadata": {
+                    **with_passkey["messages"][0]["metadata"],
+                    "browser_session_metadata": {
+                        **with_passkey["messages"][0]["metadata"]["browser_session_metadata"],
+                        "profile_source": "user_persistent",
+                    },
+                },
+            },
+            with_passkey["messages"][1],
+            with_passkey["messages"][2],
+            with_passkey["messages"][3],
+        ],
+    }
+    passed, reason = evaluate_task(task, reused_kernel_profile, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected isolated browser session metadata was not observed"
+
+    no_signed_out_precondition = {
+        **with_passkey,
+        "messages": [
+            with_passkey["messages"][0],
+            {
+                **with_passkey["messages"][1],
+                "metadata": {
+                    **with_passkey["messages"][1]["metadata"],
+                    "title": "Navigated to Amazon",
+                },
+            },
+            with_passkey["messages"][2],
+            with_passkey["messages"][3],
+        ],
+    }
+    passed, reason = evaluate_task(task, no_signed_out_precondition, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected signed-out evidence before passkey use was not observed"
+
+    instruction_only_precondition = {
+        **with_passkey,
+        "messages": [
+            with_passkey["messages"][0],
+            {
+                **with_passkey["messages"][1],
+                "text": "Task: first confirm Hello, sign in, then authenticate",
+                "metadata": {
+                    **with_passkey["messages"][1]["metadata"],
+                    "title": "Task Started",
+                    "action_type": "task_started",
+                },
+            },
+            with_passkey["messages"][2],
+            with_passkey["messages"][3],
+        ],
+    }
+    passed, reason = evaluate_task(task, instruction_only_precondition, approvals_triggered=1)
+    assert passed is False
+    assert reason == "Expected signed-out evidence before passkey use was not observed"
+
+    fetched_but_unused_otp = {
+        **with_passkey,
+        "messages": [
+            *with_passkey["messages"],
+            {
+                "role": "USER",
+                "metadata": {
+                    "subAgentId": "browser-task-1",
+                    "credential_ref": {"kind": "email_otp", "id": "email-row"},
+                },
+            },
+        ],
+    }
+    assert evaluate_task(task, fetched_but_unused_otp, approvals_triggered=1) == (True, None)
+
+
 def test_cached_sub_agent_child_tool_counts_are_counted_once():
     """Fast Mode sub-agent result replay preserves logical child tool counts."""
     from benchmarks.run_benchmark import _count_logical_tool_calls_from_messages
@@ -865,7 +2150,7 @@ def test_minted_benchmark_seeds_cached_agent_identity_when_missing():
     assert len(queries) == 2
     assert 'INSERT INTO "AgentIdentity"' in queries[1]
     assert "rose.harbor47@mail.roselabs.ai" in queries[1]
-    assert "+18159823405" in queries[1]
+    assert "+19123613984" in queries[1]
     assert '"phoneProvider"' in queries[1]
     assert "agentphone" in queries[1]
 
@@ -891,6 +2176,36 @@ def test_minted_benchmark_does_not_seed_cached_agent_identity_when_present():
 
     assert len(queries) == 1
     assert 'SELECT 1 FROM "AgentIdentity"' in queries[0]
+
+
+def test_agent_sms_benchmark_prepares_phone_only_agentphone_sender():
+    """The real Agent SMS bench replaces stale selectors with its live from_number."""
+    import benchmarks.run_benchmark as bench
+
+    original_seed = bench._seed_local_benchmark_agent_identity_if_missing
+    original_sql = bench._run_local_victoria_sql
+    try:
+        bench._seed_local_benchmark_agent_identity_if_missing = lambda user_id: "rose@example.test"
+        queries = []
+        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "ready"
+        assert bench._prepare_local_agent_sms_sender("user-123") == "rose@example.test"
+        assert len(queries) == 2
+        assert 'phone = \'+19123613984\'' in queries[0]
+        assert '"phoneProviderAgentId" = NULL' in queries[0]
+        assert '"phoneProviderNumberId" = NULL' in queries[0]
+        assert '"userId" = \'user-123\'' in queries[0]
+
+        responses = iter(["1", "invalid"])
+        bench._run_local_victoria_sql = lambda sql: next(responses)
+        try:
+            bench._prepare_local_agent_sms_sender("user-123")
+        except RuntimeError as error:
+            assert "sender selector" in str(error)
+        else:
+            raise AssertionError("missing AgentPhone sender selector was accepted")
+    finally:
+        bench._seed_local_benchmark_agent_identity_if_missing = original_seed
+        bench._run_local_victoria_sql = original_sql
 
 
 def test_minted_x_benchmark_uses_live_x_default_target():
@@ -967,6 +2282,106 @@ def test_browser_agent_cookie_bundle_bootstrap_can_be_skipped_with_env():
             os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] = original_env
 
     assert queries == []
+
+
+def test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile():
+    """The passkey fixture syncs through its boundary and snapshots destructive state."""
+    import benchmarks.run_benchmark as bench
+
+    queries = []
+    sync_calls = []
+    sql_results = iter(
+        [
+            '{"steel_ids": [], "bundle_ids": [], "password_ids": [], "profiles": []}',
+            "1",
+            "10",
+        ]
+    )
+    original_run_sql = bench._run_local_victoria_sql
+    original_sync_passkeys = bench._sync_passkeys
+    original_subprocess_run = bench.subprocess.run
+    try:
+        bench._sync_passkeys = lambda: sync_calls.append("passkeys")
+        bench.subprocess.run = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("fixture bypassed _sync_passkeys")
+        )
+        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or next(sql_results)
+        manifest = bench._apply_amazon_passkey(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="user-123",
+                auth_realm="amazon.com",
+            )
+        )
+    finally:
+        bench._run_local_victoria_sql = original_run_sql
+        bench._sync_passkeys = original_sync_passkeys
+        bench.subprocess.run = original_subprocess_run
+
+    assert manifest == {
+        "fixture": "amazon_passkey",
+        "passkey_count": 1,
+        "cleared": 10,
+        "user_id": "user-123",
+        "auth_realm": "amazon.com",
+        "restore_snapshot": {
+            "steel_ids": [],
+            "bundle_ids": [],
+            "password_ids": [],
+            "profiles": [],
+        },
+    }
+    assert sync_calls == ["passkeys"]
+    assert len(queries) == 3
+    assert 'FROM "SteelSessionAuth"' in queries[0]
+    assert 'FROM "CookieBundle"' in queries[0]
+    assert 'FROM "BrowserPassword"' in queries[0]
+    assert 'FROM "PasskeyCredential"' in queries[1]
+    assert 'UPDATE "PasskeyCredential"' not in queries[1]
+    cleanup_sql = queries[2]
+    assert 'UPDATE "SteelSessionAuth"' in cleanup_sql
+    assert 'UPDATE "CookieBundle"' in cleanup_sql
+    assert 'UPDATE "BrowserPassword"' in cleanup_sql
+    assert 'DELETE FROM "Cookie"' in cleanup_sql
+    assert 'DELETE FROM "LocalStorageOrigin"' in cleanup_sql
+    assert 'DELETE FROM "IndexedDBOrigin"' in cleanup_sql
+    assert 'DELETE FROM "BrowserPermission"' in cleanup_sql
+    assert 'DELETE FROM "CacheStorageOrigin"' in cleanup_sql
+    assert 'DELETE FROM "BrowserProviderProfile"' in cleanup_sql
+    assert "amazon.com" in cleanup_sql
+
+
+def test_amazon_passkey_catalog_requires_live_passkey_kernel_evidence():
+    """The catalog exposes a dedicated live Kernel/passkey Amazon benchmark."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-agent-amazon-passkey")
+
+    assert task.environment["live_fixtures"] == ["compute_tokens", "amazon_passkey"]
+    assert task.expected_browser_provider == "kernel"
+    assert task.expected_credential_ref_kind == "passkey"
+    assert task.expected_browser_session_metadata_values == {
+        "profile_source": "new_user_persistent",
+        "auth_source": "none",
+        "cookies_injected": False,
+        "cookies_count": 0,
+        "local_storage_origin_count": 0,
+        "indexed_db_origin_count": 0,
+        "permission_grant_count": 0,
+        "cache_storage_origin_count": 0,
+    }
+    assert task.expected_pre_credential_message_contains == ["Hello, sign in"]
+    assert task.expected_post_credential_message_contains == ["Hello, Andy"]
+    assert task.success_on_browser_auth_evidence is True
+    assert task.forbidden_credential_ref_kinds == ["password", "email_otp", "sms_otp"]
+    assert task.expected_structured_response_values is None
+    assert task.expected_structured_response_contains is None
+    assert task.required_structured_response_fields == []
+    assert task.evaluators[0]["method"] == "static_check"
+    assert task.expected_attention_kind is None
+    assert task.approval_handling is None
+    assert "password" in task.prompt.lower()
+    assert "otp" in task.prompt.lower()
 
 
 def test_benchmark_agent_source_override_validates_known_sources():
@@ -3277,6 +4692,174 @@ def test_cache_coverage_uses_root_scoped_tool_counts():
     }
 
 
+def test_message_person_benchmark_requires_confirmed_send():
+    """Neither FINISHED nor enqueue alone can satisfy the send benchmark."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_message_person_confirmed_send
+
+    task = get_task_by_name("message-person")
+    assert task.expected_tool_counts == {"message_person": 1}
+    assert task.tool_count_scope == "root"
+
+    false_success = {
+        "messages": [
+            {
+                "metadata": {
+                    "toolName": "message_person",
+                    "toolStatus": "FINISHED",
+                    "title": "iMessage sent",
+                }
+            }
+        ]
+    }
+    assert _validate_message_person_confirmed_send(false_success) is not None
+
+    enqueue_only = {
+        "messages": [
+            {
+                "metadata": {
+                    "toolName": "message_person",
+                    "toolStatus": "FINISHED",
+                    "data": {
+                        "delivery": {
+                            "channel": "imessage",
+                            "queue_id": "imq_receipt_1",
+                        }
+                    },
+                }
+            }
+        ]
+    }
+    assert _validate_message_person_confirmed_send(enqueue_only) is not None
+
+    confirmed_send = {
+        "messages": [
+            {
+                "metadata": {
+                    "toolName": "message_person",
+                    "toolStatus": "FINISHED",
+                    "data": {
+                        "delivery": {
+                            "channel": "imessage",
+                            "queue_id": "imq_receipt_1",
+                            "status": "sent",
+                            "sent_at": "2026-07-11T22:00:00.000Z",
+                        }
+                    },
+                }
+            }
+        ]
+    }
+    assert _validate_message_person_confirmed_send(confirmed_send) is None
+
+
+def test_message_person_agent_sms_benchmark_requires_immediate_provider_receipt():
+    """The Agent SMS bench cannot pass on queue metadata or a label-only FINISHED event."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_message_person_agent_sms_send
+
+    task = get_task_by_name("message-person-agent-sms")
+    assert task.group == "Daily"
+    assert task.expected_tool_counts == {"message_person": 1}
+    assert task.tool_count_scope == "root"
+
+    wrong_transport = {
+        "messages": [
+            {
+                "metadata": {
+                    "toolName": "message_person",
+                    "toolStatus": "FINISHED",
+                    "data": {
+                        "delivery": {
+                            "channel": "imessage",
+                            "status": "queued",
+                            "queue_id": "imq-wrong",
+                        }
+                    },
+                }
+            }
+        ]
+    }
+    assert _validate_message_person_agent_sms_send(wrong_transport) is not None
+
+    provider_send = {
+        "messages": [
+            {
+                "metadata": {
+                    "toolName": "message_person",
+                    "toolStatus": "FINISHED",
+                    "data": {
+                        "delivery": {
+                            "channel": "agent_sms",
+                            "status": "sent",
+                            "provider": "agentphone",
+                            "provider_channel": "sms",
+                            "message_id": "msg-live-receipt",
+                        }
+                    },
+                }
+            }
+        ]
+    }
+    assert _validate_message_person_agent_sms_send(provider_send) is None
+
+
+async def test_message_person_bridge_preflight_requires_fresh_mac():
+    """The live send bench cannot launch against a backend with no active Mac poller."""
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+    payload = {"connected": True, "last_seen_at": "2026-07-11T22:00:00.000Z"}
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        @staticmethod
+        def json():
+            return payload
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, headers):
+            calls.append((url, headers))
+            return FakeResponse()
+
+    async def fake_headers():
+        return {"X-API-Key": "bench-key", "X-User-Id": "bench-user"}
+
+    original_client = bench.httpx.AsyncClient
+    original_headers = bench._api_headers
+    bench.httpx.AsyncClient = FakeClient
+    bench._api_headers = fake_headers
+    try:
+        await bench._preflight_message_person_bridge("https://backend.example")
+        assert calls == [
+            (
+                "https://backend.example/api/imessage/bridge/status",
+                {"X-API-Key": "bench-key", "X-User-Id": "bench-user"},
+            )
+        ]
+
+        payload = {"connected": False, "last_seen_at": None}
+        try:
+            await bench._preflight_message_person_bridge("https://backend.example")
+            raise AssertionError("Disconnected Mac bridge should fail the preflight")
+        except RuntimeError as exc:
+            assert "authenticated Mac app polling this exact backend" in str(exc)
+    finally:
+        bench.httpx.AsyncClient = original_client
+        bench._api_headers = original_headers
+
+
 def test_tool_count_expectations_support_minimums_and_forbidden_tools():
     """Benchmark tasks can require direct tools and reject unintended sub-agents."""
     from benchmarks.run_benchmark import _validate_tool_count_expectations
@@ -3777,6 +5360,63 @@ def test_phone_auto_approval_requires_active_callee_number():
     assert not _phone_approval_matches_callee(task, {"question": "Make a phone call to +1 (650) 555-0123?"})
 
 
+def test_root_exact_tool_count_fails_fast_after_duplicate_call():
+    """An irreversible exact-count violation must fail before the task timeout."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _root_exact_tool_count_exceeded
+
+    task = get_task_by_name("message-person-agent-sms")
+    messages = [
+        {
+            "metadata": {
+                "toolName": "message_person",
+                "toolCallId": "send-1",
+                "toolStatus": "IN_PROGRESS",
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "message_person",
+                "toolCallId": "send-1",
+                "toolStatus": "ERROR",
+            }
+        },
+        {
+            "metadata": {
+                "toolName": "message_person",
+                "toolCallId": "send-2",
+                "toolStatus": "IN_PROGRESS",
+            }
+        },
+    ]
+
+    error = _root_exact_tool_count_exceeded(task, messages)
+    assert error is not None
+    assert "expected 1, got 2" in error
+    assert _root_exact_tool_count_exceeded(task, messages[:2]) is None
+
+
+def test_message_side_effect_benchmarks_force_fast_cache_off():
+    """Cached agent decisions cannot prove a live external side effect."""
+    import os
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _resolved_fast_mode_cache
+
+    previous = os.environ.get("BENCHMARK_FAST_MODE_CACHE")
+    os.environ["BENCHMARK_FAST_MODE_CACHE"] = "true"
+    try:
+        for name in ("message-person", "message-person-agent-sms"):
+            task = get_task_by_name(name)
+            assert task.fast_cache == "off"
+            assert _resolved_fast_mode_cache(task) is False
+    finally:
+        if previous is None:
+            os.environ.pop("BENCHMARK_FAST_MODE_CACHE", None)
+        else:
+            os.environ["BENCHMARK_FAST_MODE_CACHE"] = previous
+
+
 def test_unified_catalog_validates_and_covers_benchmark_tasks():
     """tasks.json is the benchmark catalog: valid contract, ready entries, holding set split."""
     from benchmarks.long_horizon import EVALUATION_METHODS, validate_catalog
@@ -3821,6 +5461,40 @@ def test_unified_catalog_delineates_bench_axes():
     assert live["environment"]["mode"] == "live"
     assert live["environment"]["db_fixtures"] == []
     assert live["environment"]["live_targets"] == ["https://www.amazon.com"]
+
+
+def test_daily_ecommerce_v1_catalog_has_ten_distinct_transaction_flows():
+    """The daily ecommerce slice stays focused, complete, and stable."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.fixtures import DEFAULT_BASE_IMAGE
+    from benchmarks.long_horizon import validate_catalog
+
+    expected_names = {
+        "browser-opentable-reservation",
+        "browser-toast-nopa-write-lock",
+        "browser-instacart-grocery-order",
+        "browser-doordash-usb-c-cable",
+        "minted-agent-accounts-uber",
+        "browser-agent-amazon-cookie-payment",
+        "browser-alchemy-springs-sauna",
+        "browser-hotel-booking",
+        "browser-event-ticket",
+        "browser-amazon-return",
+    }
+    tasks = validate_catalog()
+    ecommerce = [task for task in tasks if "ecommerce" in task.get("tags", [])]
+
+    assert {task["name"] for task in ecommerce} == expected_names
+    assert len(ecommerce) == 10
+    assert all(task.get("group", "").lower() == "daily" for task in ecommerce)
+    assert all(task.get("status", "ready") == "ready" for task in ecommerce)
+    assert all(task.get("enforce_declared_evaluators") is True for task in ecommerce)
+    assert len({task["prompt"] for task in ecommerce}) == len(ecommerce)
+    assert "browser-uber-ride" not in {task["name"] for task in tasks}
+    for name in expected_names:
+        loaded = get_task_by_name(name)
+        assert DEFAULT_BASE_IMAGE in loaded.environment["base_images"]
+        assert loaded.environment["live_fixtures"][0] == "base"
 
 
 def test_browser_search_single_result_tasks_use_browser_only():
@@ -4129,6 +5803,26 @@ def test_tag_slices_still_resolve():
         assert len(get_tasks_by_tag(tag)) >= minimum, f"tag slice '{tag}' collapsed"
 
 
+def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
+    """The curated anti-bot slice uses one canonical tag spelling."""
+    from benchmarks.benchmark_tasks import all_tasks, get_tasks_by_tag
+
+    tasks = get_tasks_by_tag("antibot")
+    by_name = {task.name: task for task in tasks}
+    assert set(by_name) == {
+        "browser-indeed-account-create",
+        "browser-google-search-single-result",
+        "browser-bing-search-single-result",
+        "browser-biometrics-webdecoy",
+        "browser-toast-nopa-write-lock",
+        "browser-agent-amazon-cookie-payment",
+    }
+    assert "ecommerce" in by_name["browser-agent-amazon-cookie-payment"].tags
+    assert all(task.tags.count("antibot") == 1 for task in tasks)
+    all_tags = {tag for task in all_tasks() for tag in task.tags}
+    assert not ({"anti-bot", "anti_bot", "bot-challenge"} & all_tags)
+
+
 def test_history_ledger_task_names_still_exist_in_catalog():
     """History-orphan guard: renaming a catalog task orphans its pass ledger + p99 baselines.
 
@@ -4418,6 +6112,34 @@ def test_checkpoint_validation_mass_agent_sequence_remains_strict():
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    r.record(
+        "cloudbench_rejects_stale_wrong_task",
+        test_cloudbench_result_rejects_stale_passing_artifact_from_another_task,
+    )
+    r.record(
+        "cloudbench_accepts_fresh_exact_pass",
+        test_cloudbench_result_accepts_only_fresh_exact_passing_task_set,
+    )
+    r.record(
+        "cloudbench_preserves_failure_without_passing",
+        test_cloudbench_result_preserves_fresh_failure_but_never_counts_it_as_pass,
+    )
+    r.record(
+        "cloudbench_shell_contract_requires_identity_and_exit",
+        test_cloudbench_shell_controllers_require_fresh_identity_and_child_success,
+    )
+    r.record(
+        "cloudbench_prisma_freshness_permanent_gate",
+        test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate,
+    )
+    r.record(
+        "cloudbench_patch_includes_untracked_files",
+        test_cloudbench_worktree_patch_includes_tracked_and_untracked_files,
+    )
+    r.record(
+        "run_context_absolute_path_single_rooted",
+        test_run_context_normalization_keeps_absolute_workspace_path_single_rooted,
+    )
     r.record("phone_call_tasks_two_sided_verification", test_phone_call_tasks_define_two_sided_verification)
     r.record("phone_callee_end_call_config", test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap)
     r.record("phone_findings_matcher_squashes_separators", test_missing_call_findings_tolerates_spacing_and_punctuation)
@@ -4472,6 +6194,10 @@ async def run_all_tests():
         test_minted_benchmark_does_not_seed_cached_agent_identity_when_present,
     )
     r.record(
+        "agent_sms_benchmark_prepares_phone_sender",
+        test_agent_sms_benchmark_prepares_phone_only_agentphone_sender,
+    )
+    r.record(
         "minted_x_default_target",
         test_minted_x_benchmark_uses_live_x_default_target,
     )
@@ -4486,6 +6212,14 @@ async def run_all_tests():
     r.record(
         "browser_agent_cookie_bundle_bootstrap_skip_env",
         test_browser_agent_cookie_bundle_bootstrap_can_be_skipped_with_env,
+    )
+    r.record(
+        "amazon_passkey_fixture_isolation",
+        test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile,
+    )
+    r.record(
+        "amazon_passkey_catalog_contract",
+        test_amazon_passkey_catalog_requires_live_passkey_kernel_evidence,
     )
     r.record(
         "anon_benchmark_mode_disables_saved_auth",
@@ -4620,6 +6354,20 @@ async def run_all_tests():
         "logical_tool_counts_model_facing_routed_calls",
         test_logical_tool_counts_include_model_facing_routed_calls,
     )
+    r.record("root_exact_tool_count_fail_fast", test_root_exact_tool_count_fails_fast_after_duplicate_call)
+    r.record("message_side_effect_fast_cache_off", test_message_side_effect_benchmarks_force_fast_cache_off)
+    r.record(
+        "message_person_requires_confirmed_send",
+        test_message_person_benchmark_requires_confirmed_send,
+    )
+    r.record(
+        "message_person_agent_sms_requires_provider_receipt",
+        test_message_person_agent_sms_benchmark_requires_immediate_provider_receipt,
+    )
+    await r.record_async(
+        "message_person_requires_fresh_mac_bridge",
+        test_message_person_bridge_preflight_requires_fresh_mac,
+    )
     r.record("tool_count_expectations", test_tool_count_expectations_support_minimums_and_forbidden_tools)
     r.record(
         "user_data_prod_grep_provider_filters",
@@ -4658,6 +6406,10 @@ async def run_all_tests():
         test_agentcard_lifecycle_bootstrap_provisions_sandbox_float,
     )
     r.record(
+        "toast_payment_approval_complete_receipt",
+        test_toast_payment_approval_requires_every_declared_receipt_field,
+    )
+    r.record(
         "success_on_payment_card_request",
         test_success_on_payment_card_request_passes_before_agent_completion,
     )
@@ -4686,6 +6438,78 @@ async def run_all_tests():
         test_agentcard_setup_attention_is_not_auto_approved,
     )
     r.record(
+        "ecommerce_attention_rejects_auth_blocker",
+        test_ecommerce_attention_kind_rejects_auth_blocker,
+    )
+    await r.record_async(
+        "required_declared_evaluator_controls_pass_fail",
+        test_required_declared_evaluator_controls_pass_fail,
+    )
+    r.record(
+        "opentable_static_runtime_contract",
+        test_opentable_static_evaluator_checks_full_runtime_contract,
+    )
+    r.record(
+        "auto_approve_exact_approval_count",
+        test_auto_approve_requires_exact_declared_approval_count,
+    )
+    r.record(
+        "opentable_mixed_evaluator_catalog",
+        test_opentable_catalog_uses_auto_approved_mixed_evaluators,
+    )
+    r.record(
+        "instacart_weekly_grocery_catalog",
+        test_instacart_catalog_uses_complete_weekly_grocery_basket,
+    )
+    r.record(
+        "declared_static_no_tool_failures",
+        test_no_tool_failures_static_check_rejects_any_failed_tool_event,
+    )
+    r.record(
+        "doordash_single_clean_completed_browser_run",
+        test_doordash_catalog_requires_single_clean_completed_browser_run,
+    )
+    r.record(
+        "uber_normal_single_browser_task",
+        test_uber_catalog_is_normal_single_browser_task_not_stateful_minted_flow,
+    )
+    r.record(
+        "approval_details_item_and_amount",
+        test_approval_request_details_can_require_item_name_and_amount,
+    )
+    r.record(
+        "amazon_beanie_clean_completed_purchase",
+        test_amazon_beanie_catalog_requires_clean_completed_cart_purchase,
+    )
+    r.record(
+        "alchemy_sauna_clean_completed_booking",
+        test_alchemy_sauna_catalog_requires_single_clean_completed_booking,
+    )
+    r.record(
+        "approval_details_multiple_dates_and_seat",
+        test_approval_request_details_support_multiple_dates_and_seat,
+    )
+    r.record(
+        "hotel_clean_completed_reservation",
+        test_hotel_catalog_requires_single_clean_completed_reservation,
+    )
+    r.record(
+        "event_ticket_clean_completed_purchase",
+        test_event_ticket_catalog_requires_single_clean_completed_purchase,
+    )
+    r.record(
+        "amazon_return_clean_completed_return",
+        test_amazon_return_catalog_requires_single_clean_completed_return,
+    )
+    r.record(
+        "base_live_fixture_auth_failure_is_fatal",
+        test_base_live_fixture_fails_when_live_auth_refresh_fails,
+    )
+    r.record(
+        "expected_passkey_credential_ref",
+        test_expected_passkey_credential_ref_is_required_even_when_approval_is_terminal,
+    )
+    r.record(
         "cached_sub_agent_child_tool_counts",
         test_cached_sub_agent_child_tool_counts_are_counted_once,
     )
@@ -4695,6 +6519,10 @@ async def run_all_tests():
     r.record(
         "unified_catalog_bench_axes",
         test_unified_catalog_delineates_bench_axes,
+    )
+    r.record(
+        "daily_ecommerce_v1_catalog",
+        test_daily_ecommerce_v1_catalog_has_ten_distinct_transaction_flows,
     )
     r.record(
         "unified_catalog_multiple_evaluators",
@@ -4713,6 +6541,7 @@ async def run_all_tests():
     r.record("live_fixtures_default_to_base", test_live_fixtures_default_to_base_and_synthetic_to_none)
     r.record("live_fixture_validation_guards", test_live_fixture_validation_rejects_unknown_and_synthetic_declarations)
     r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)
+    r.record("antibot_slice_daily_commerce", test_antibot_slice_includes_daily_toast_and_amazon_commerce)
     r.record("history_ledger_no_orphaned_task_names", test_history_ledger_task_names_still_exist_in_catalog)
     r.record("retired_tasks_hidden", test_retired_tasks_hidden_from_suite_and_listing)
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)

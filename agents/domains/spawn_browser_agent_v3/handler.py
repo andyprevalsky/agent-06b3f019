@@ -150,6 +150,65 @@ def _build_payment_card_verifier_evidence(last4: Any) -> Optional[Dict[str, Any]
     }
 
 
+async def record_used_passkey_credentials(
+    *,
+    dom_service: Any,
+    passkey_ref_by_credential_id: Dict[str, Dict[str, str]],
+    recorded_credential_ids: set[str],
+    agent_id: str,
+    task_id: Optional[str],
+    browser_url: str = "",
+) -> int:
+    """Persist references for passkeys whose authenticator counter advanced.
+
+    This is intentionally safe to call after every browser observation. Amazon
+    can invoke WebAuthn automatically, and approval-style tasks may return to
+    the workflow before the browser agent reaches its completion branch.
+    """
+    if not task_id or not passkey_ref_by_credential_id:
+        return 0
+
+    try:
+        used_credential_ids = await dom_service.get_used_passkey_credential_ids()
+    except Exception as exc:
+        logger.warning("Failed to read passkey usage", error=extract_error_message(exc))
+        return 0
+
+    recorded_count = 0
+    for credential_id in used_credential_ids:
+        if credential_id in recorded_credential_ids:
+            continue
+        credential_ref = passkey_ref_by_credential_id.get(credential_id)
+        if not credential_ref:
+            continue
+        saved = await save_browser_credential_ref_message(
+            agent_id=agent_id,
+            task_id=task_id,
+            message="Passkey used for authentication.",
+            role="TOOL",
+            tool_name="browser_session_auth",
+            credential_ref=credential_ref,
+            browser_url=browser_url,
+        )
+        if not saved:
+            continue
+        recorded_credential_ids.add(credential_id)
+        recorded_count += 1
+
+    return recorded_count
+
+
+async def disconnect_browser_after_passkey_capture(
+    dom_service: Any,
+    capture_passkey_usage: Any,
+) -> None:
+    """Capture credential evidence before a terminal browser disconnect."""
+    try:
+        await capture_passkey_usage()
+    finally:
+        await dom_service.disconnect()
+
+
 def _patch_cdp_use_websocket_proxy_default() -> None:
     """Force cdp-use CDP sockets to connect directly under websockets>=15.
 
@@ -2608,6 +2667,25 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     seen_otp_codes: set[str] = set()
     available_file_paths: Dict[str, str] = {}
     passkey_ref_by_credential_id: Dict[str, Dict[str, str]] = {}
+    recorded_passkey_credential_ids: set[str] = {
+        credential_id
+        for credential_id in (write_lock_resume_state or {}).get(
+            "recorded_passkey_credential_ids", []
+        )
+        if isinstance(credential_id, str) and credential_id
+    }
+
+    async def record_passkey_usage_once() -> None:
+        if dom_service is None:
+            return
+        await record_used_passkey_credentials(
+            dom_service=dom_service,
+            passkey_ref_by_credential_id=passkey_ref_by_credential_id,
+            recorded_credential_ids=recorded_passkey_credential_ids,
+            agent_id=agent_id,
+            task_id=task_id,
+            browser_url=browser_url or "",
+        )
 
     try:
         # ===== SETUP TIMING TRACKER =====
@@ -3238,9 +3316,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         ) = data_result
 
         # Cloud-custody passkeys: decrypt the private keys server-side (never to
-        # the LLM) and seed a CDP virtual authenticator on the Steel session.
-        # passkey_ref_by_credential_id lets us record a passkey credential_ref at
-        # session end if the relying party actually exercised the credential.
+        # the LLM) and seed a CDP virtual authenticator on the browser session.
+        # passkey_ref_by_credential_id lets us record a passkey credential_ref
+        # as soon as the relying party actually exercises the credential.
         if session_passkeys and config.payment.decryption_key:
             from cryptography.hazmat.backends import default_backend
             from cryptography.hazmat.primitives import serialization
@@ -3281,34 +3359,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     }
             await dom_service.inject_passkeys(_decrypted_passkeys)
             logger.info(
-                "Injected cloud-custody passkeys into Steel virtual authenticator",
+                "Injected cloud-custody passkeys into browser virtual authenticator",
                 count=len(_decrypted_passkeys),
             )
-
-        _passkey_usage_recorded = {"done": False}
-
-        async def record_passkey_usage_once() -> None:
-            """If the relying party exercised a stored passkey, record a
-            credential_ref so post-run propagation can mark success/failure."""
-            if _passkey_usage_recorded["done"] or not passkey_ref_by_credential_id:
-                return
-            _passkey_usage_recorded["done"] = True
-            try:
-                used = await dom_service.get_used_passkey_credential_ids()
-            except Exception as e:
-                logger.warning("Failed to read passkey usage", error=extract_error_message(e))
-                return
-            for cid in used:
-                ref = passkey_ref_by_credential_id.get(cid)
-                if ref and task_id:
-                    await save_browser_credential_ref_message(
-                        agent_id=agent_id,
-                        task_id=task_id,
-                        message="Passkey used for authentication.",
-                        role="TOOL",
-                        tool_name="browser_session_auth",
-                        credential_ref=ref,
-                    )
 
         # ===== PHASE 3: POST-SETUP =====
         t_post = time.monotonic()
@@ -3559,6 +3612,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 activity.heartbeat(f"Step {iteration} - fetching browser state")
                 browser_state = await dom_service.get_browser_state(include_screenshot=False)
                 current_url = browser_state.get("url", "")
+                await record_passkey_usage_once()
 
                 await action_history.record_action(
                     dom_service=dom_service,
@@ -3616,6 +3670,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     continue
                 raise
             current_url = browser_state.get("url", "")
+            await record_passkey_usage_once()
 
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
                 visited_urls.append(current_url)
@@ -3953,7 +4008,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     tool_call_id=tool_call_id_action,
                 )
 
-                await dom_service.disconnect()
+                await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                 dom_service = None
                 await _stop_playwright_resources(
                     playwright_browser,
@@ -3995,6 +4050,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     "cdp_url": cdp_url,
                     "handoff_mode": "same_steel_session_live_view",
                     "step_count": iteration,
+                    "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
                     "execution_time_ms": execution_time_ms,
                     "usage_items": usage_items,
                 }
@@ -4004,7 +4060,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 reason = unified_action.get("params", {}).get("reason", "other")
 
                 logger.info("Browser agent requested user attention", reason=reason)
-                await dom_service.disconnect()
+                await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                 dom_service = None
 
                 await close_browser_session(config, session_id, pause=True, current_url=current_url)
@@ -4310,8 +4366,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 file_count=len(output_files),
                             )
 
-                        await record_passkey_usage_once()
-                        await dom_service.disconnect()
+                        await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                         dom_service = None
                         await close_browser_session(config, session_id, pause=False)
 
@@ -4668,7 +4723,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
                 if dom_service:
                     try:
-                        await dom_service.disconnect()
+                        await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                         dom_service = None
                     except Exception as e:
                         logger.warning(f"Failed to disconnect browser before write lock return: {e}")
@@ -4693,6 +4748,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     "session_id": session_id,
                     "cdp_url": cdp_url,
                     "task_id": task_id,
+                    "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
                 }
 
             if result.get("status") in {"needs_payment_card_approval", "awaiting_payment_card_approval"}:
@@ -4773,7 +4829,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
                 if dom_service:
                     try:
-                        await dom_service.disconnect()
+                        await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                         dom_service = None
                     except Exception as e:
                         logger.warning(f"Failed to disconnect browser before payment card return: {e}")
@@ -4790,6 +4846,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     "session_id": session_id,
                     "cdp_url": cdp_url,
                     "task_id": task_id,
+                    "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
                 }
 
             if result.get("success", True):
@@ -4880,7 +4937,7 @@ Based on this feedback, I need to continue working on the task and address the i
         # Max iterations reached
         logger.warning(f"Max iterations reached: {MAX_ITERATIONS}")
 
-        await dom_service.disconnect()
+        await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
         dom_service = None
         await close_browser_session(config, session_id, pause=False)
 
@@ -4932,7 +4989,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
         if dom_service:
             with contextlib.suppress(Exception):
-                await dom_service.disconnect()
+                await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                 dom_service = None
 
         if session_id:
@@ -4982,7 +5039,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
         if dom_service:
             with contextlib.suppress(Exception):
-                await dom_service.disconnect()
+                await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                 dom_service = None
 
         if session_id:
@@ -5309,6 +5366,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "session_id": result.get("session_id"),
                             "cdp_url": result.get("cdp_url"),
                             "task_id": result.get("task_id"),
+                            "recorded_passkey_credential_ids": result.get(
+                                "recorded_passkey_credential_ids", []
+                            ),
                         }
 
                         logger.info(
@@ -5732,6 +5792,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "task_id": result.get("task_id"),
                         "payment_card_refs": payment_card_refs,
                         "payment_card_last4": _normalize_payment_card_last4(card.get("last4")),
+                        "recorded_passkey_credential_ids": result.get(
+                            "recorded_passkey_credential_ids", []
+                        ),
                     }
 
                     yield ToolEvent(
@@ -5829,6 +5892,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "handoff_mode": result.get("handoff_mode"),
                         "task_id": result.get("task_id"),
                         "auth_realm": result.get("auth_realm"),
+                        "recorded_passkey_credential_ids": result.get(
+                            "recorded_passkey_credential_ids", []
+                        ),
                     }
 
                     yield ToolEvent(

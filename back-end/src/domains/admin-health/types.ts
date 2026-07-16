@@ -9,6 +9,7 @@ export interface AdminHealthPeriod {
 
 export interface AdminHealthSeriesPoint extends AdminHealthPeriod {
   revenueCents: number | null;
+  waitlistSignups: number;
   userCount: number;
   newUsers: number;
   taskCount: number;
@@ -82,6 +83,7 @@ export interface AdminHealthResponse {
   };
   summary: {
     revenueCents: number | null;
+    waitlistSignups: number;
     userCount: number;
     taskCount: number;
     tasksIssuedPerUser: number;

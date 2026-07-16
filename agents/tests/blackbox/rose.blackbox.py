@@ -2943,6 +2943,88 @@ async def test_client_openai_api_key_failure_falls_through_to_anthropic_before_o
     assert meta is not None and str(meta.data.get("actual_model", "")).endswith("-anthropic")
 
 
+async def test_client_gpt_token_usage_limit_falls_back_to_openai_api_key():
+    """A GPT/Codex compute token that hits `usage_limit_reached` (the exact
+    ChatGPT-plan 429 that blocked the deploy Codex smoke) must fall back to the
+    funded OpenAI API key in `GPT_API_KEY` — not straight to the OpenRouter
+    waterfall. This is the same env-driven path that runs on prod and during a
+    real agent run, so the whole request goes through the real transport stack.
+    """
+    openai_lines = [
+        "event: response.output_text.delta",
+        'data: {"type":"response.output_text.delta","delta":"served by openai key"}',
+        "",
+        "event: response.completed",
+        'data: {"type":"response.completed","response":{"usage":{"input_tokens":6,"output_tokens":4,"total_tokens":10}}}',
+        "",
+        "data: [DONE]",
+    ]
+    openai_sse = "\n".join(openai_lines)
+    # Matches the Codex 429 shape documented in providers/rose/gpt_auth.py.
+    codex_429_body = {
+        "error": {
+            "type": "usage_limit_reached",
+            "plan_type": "pro",
+            "resets_in_seconds": 88465,
+        }
+    }
+    seen = {"codex": 0, "openai": 0, "openrouter": 0}
+    captured: dict[str, object] = {}
+
+    def handler(req):
+        url = str(req.url)
+        if "chatgpt.com/backend-api/codex/responses" in url:
+            seen["codex"] += 1
+            return httpx.Response(429, json=codex_429_body)
+        if url == OPENAI_RESPONSES_API_URL:
+            seen["openai"] += 1
+            captured["authorization"] = req.headers.get("authorization")
+            captured["body"] = json.loads(req.content.decode("utf-8"))
+            return httpx.Response(200, text=openai_sse, headers={"Content-Type": "text/event-stream"})
+        if req.url.host == "openrouter.ai":
+            seen["openrouter"] += 1
+            return httpx.Response(500, text="waterfall should not be reached")
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    prev_gpt = os.environ.get("GPT_API_KEY")
+    os.environ["GPT_API_KEY"] = "sk-proj-test"
+    try:
+        # No-op the 429 backoff so the codex-token retries don't sleep.
+        with patch("providers.rose.gpt_auth.asyncio.sleep", new=AsyncMock(return_value=None)):
+            chunks = await _drain(
+                RoseClient(openrouter_key="ork-x").complete(
+                    pool="rose-1-lite",
+                    messages=[{"role": "user", "content": "hi"}],
+                    gpt_auth=gpt_auth_from_token("exhausted-codex-token", "acct_123"),
+                    call_site="test-gpt-usage-limit-openai-fallback",
+                )
+            )
+    finally:
+        if prev_gpt is None:
+            os.environ.pop("GPT_API_KEY", None)
+        else:
+            os.environ["GPT_API_KEY"] = prev_gpt
+
+    # The exhausted codex token was tried and the funded OpenAI key served the
+    # response; the OpenRouter waterfall was never reached.
+    assert seen["codex"] >= 1
+    assert seen["openai"] == 1
+    assert seen["openrouter"] == 0
+    assert captured["authorization"] == "Bearer sk-proj-test"
+    body = captured["body"]
+    assert isinstance(body, dict)
+    assert body.get("model") == "gpt-5.6-terra"
+
+    content = "".join(c.data.get("text", "") for c in chunks if c.kind == "content")
+    assert content == "served by openai key"
+    meta = next((c for c in chunks if c.kind == "metadata"), None)
+    assert meta is not None
+    assert str(meta.data.get("actual_model", "")).endswith("-openai")
+    # The classified token failure is surfaced so callers can see WHY it fell back.
+    assert meta.data.get("gpt_token_error") == "rate_limit"
+
+
 async def test_client_api_key_tier_402_falls_through_to_waterfall():
     """End-to-end: no compute token → funded api-key tier hit → 402 → backs off
     and falls through to the OpenRouter waterfall (which serves the response)."""
@@ -4757,6 +4839,10 @@ async def run_all_tests():
     await r.record_async(
         "openai_apikey_failure_to_anthropic",
         test_client_openai_api_key_failure_falls_through_to_anthropic_before_openrouter,
+    )
+    await r.record_async(
+        "gpt_token_usage_limit_to_openai_apikey",
+        test_client_gpt_token_usage_limit_falls_back_to_openai_api_key,
     )
     await r.record_async(
         "anthropic_apikey_tier_402_to_waterfall", test_client_api_key_tier_402_falls_through_to_waterfall

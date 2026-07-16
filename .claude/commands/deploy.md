@@ -51,7 +51,7 @@ Build the report as a markdown table:
 | TypeScript | ✅ Pass | 0 errors |
 | Structural Tests | ✅ Pass | All invariants hold |
 | Blackbox API Tests | ✅ Pass | 12/12 tests passed |
-| Smoke Benchmarks | ✅ Pass | 7/7 passed concurrently, Hub run `hub-...` |
+| Smoke Benchmarks | ✅ Pass | 7/7 passed locally, `RESULTS: 7/7 passed`, run `runs/<...>.json` |
 ```
 
 Carry this report forward into Phase 2 for use in the commit message and PR body.
@@ -470,16 +470,12 @@ If you DO run the cloud path, its gate is stricter surface (Hub dispatch `comple
 
 ### Active-worktree contract
 
-The cloud run must test what `/deploy` will ship, not merely `origin/main`:
+The local run tests exactly the working tree on this machine — the checked-out `HEAD` plus any staged/unstaged edits — so there is no fleet checkout or binary-patch step to worry about. Still:
 
 - Step 4d commits all intended new/untracked files before runtime tests.
-- The fleet checks out the exact current `HEAD` SHA.
-- Any later staged or unstaged changes to tracked files are shipped as a binary patch (`git diff HEAD --binary`) on top of that SHA.
-- The on-box runner verifies the checkout SHA and fails closed if it cannot fetch it.
+- Before starting smoke, fail if an intended untracked file remains; commit it and restart the Test Loop. Gitignored `.context/` artifacts do not count.
 
-Before starting smoke, fail if an intended untracked file remains; commit it and restart the Test Loop so the cloud cannot silently omit it. Gitignored `.context/` artifacts do not count.
-
-Timeout history remains catalog-driven on the checked-out ref. Cloud runs do not mutate the controller's tracked history ledger; do not fabricate or manually copy duration rows as part of deploy.
+Timeout history remains catalog-driven on the checked-out ref. Do not fabricate or manually copy duration rows as part of deploy.
 
 ### Monitoring agent progress during smoke tests
 
@@ -489,23 +485,21 @@ Timeout history remains catalog-driven on the checked-out ref. Cloud runs do not
 
 - **First 60 seconds:** poll every **10 seconds** (catches silent early deaths — 0-byte logs, missing-env crashes, queue-routing bugs)
 - **After 60 seconds:** poll every **60 seconds**
-- **Exit the monitor the instant the last task finishes** — do NOT keep sleeping out the interval. As soon as the completion signal is seen (exit code, "RESULTS:" line, PID no longer running), stop polling and move on.
+- **Exit the monitor the instant the last task finishes** — do NOT keep sleeping out the interval. As soon as the completion signal is seen (`LOCAL_SMOKE_EXIT=`, the "RESULTS:" line, PID no longer running), stop polling and move on.
 
 At each poll, check:
 
-- All catalog tasks remain present in the batch (none may disappear while machines boot)
-- Stack/barrier progress for every isolated task
+- All smoke tasks remain present in the run's report card
 - Task status (`queued`, `running`, `passed`, `failed`, `error`)
-- Any infrastructure-fatal lines in each task's `fleet-child.log`
-- The hub poller and fleet controller PIDs remain alive until the final upload
+- Any error/traceback lines in `agents/navi-worker-log.txt` / `back-end/backend-logs.log`
+- The `local.py` / `run_benchmark.py` PID remains alive until `RESULTS:` prints
 
-**If any task shows signs of trouble** (runner exit, infra fatal, task `failed`/`error`, or no progress beyond its derived timeout), immediately:
+**If any task shows signs of trouble** (runner exit, task `failed`/`error`, or no progress beyond its derived timeout), immediately:
 
-1. Preserve the per-task cloud artifacts and agent IDs for diagnosis
-2. Let the fleet teardown stop/destroy its owned machines; if the controller itself died, reconcile only the IDs recorded by that batch/pool
-3. Read the retained cloud/backend/worker logs for the failed agent
-4. Fix the root cause
-5. Restart the Test Loop and re-run the entire synchronized Pre-Deploy group; a sequential pass is diagnostic evidence only and never satisfies this gate
+1. Preserve the run's `runs/*.json` + `runs/*_diagnostics/` and the failed `agent_id`
+2. Read `agents/navi-worker-log.txt` and `back-end/backend-logs.log` for the failed agent BEFORE the stack tears down (local logs are wiped on teardown)
+3. Fix the root cause
+4. Restart the Test Loop and re-run the full Pre-Deploy smoke group locally
 
 ### Pass criteria
 
@@ -527,24 +521,26 @@ Agent({
   description: "Diagnose + fix <task-name> smoke failure",
   subagent_type: "general-purpose",
   prompt: """
-Smoke task <task-name> just failed in /deploy. Agent ID: <agent_id>.
+Smoke task <task-name> just failed in /deploy (LOCAL run). Agent ID: <agent_id>.
 Failure reason from benchmark runner: <reason string from results JSON>.
 
-Repo root: <abs path>. Cloud batch directory: <abs path to .context/fleet/runs/<batch-id>>.
+Repo root: <abs path>. Run record: <abs path to agents/benchmarks/runs/<run>.json> + its `_diagnostics/` dir.
 
 Steps 1–5 — do them all, do not stop early:
 
-1. Read the task's `fleet-child.log`, `cloudbench-run.json`, and retained
-   cloud logs for the failed agent_id (truncate aggressively as you go,
-   keeping only relevant windows).
+1. Read the run's `runs/<run>.json`, its `runs/<run>_diagnostics/` dir, and
+   the local `agents/navi-worker-log.txt` + `back-end/backend-logs.log` for the
+   failed agent_id (truncate aggressively as you go, keeping only relevant
+   windows). NOTE: local logs are wiped on stack teardown — capture them fast.
 
 2. Run BOTH diagnostic summaries IN PARALLEL on the failed agent_id, then
-   fully expand whichever one points at the smoking gun:
-   - `cd agents && source venv/bin/activate && python benchmarks/agent_latency.py <agent_id> --url https://navi-j9a9.onrender.com`
+   fully expand whichever one points at the smoking gun (LOCAL, so no
+   `--prod` / `--url`):
+   - `cd agents && source venv/bin/activate && python benchmarks/agent_latency.py <agent_id>`
      — span-based waterfall: executive summary, top 10 slowest paths,
      slowest LLM calls, slowest backend HTTP, deduped errors. Best for
      "why was this slow/stalled."
-   - `cd agents && source venv/bin/activate && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics --prod`
+   - `cd agents && source venv/bin/activate && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics`
      — event-timeline tree across worker/backend/research/messages. Best
      for raw error context.
    - For full detail when the summary points at a layer:
@@ -577,7 +573,7 @@ Final report (under 200 words):
 ```
 
 When all spawned agents return, **the main loop** re-runs static checks for
-the fix, pushes the updated branch, and re-runs the full cloud smoke group from the top. If the same task fails again with
+the fix, and re-runs the full local smoke group from the top. If the same task fails again with
 a NEW failure mode, spawn a fresh diagnostic agent — never assume a previous
 agent's fix was complete.
 
@@ -599,7 +595,7 @@ Everything else — crashes, timeouts, stalls, resource contention, infra issues
 
 If a benchmark fails due to infrastructure (local stack flake, or on the cloud alternate a fleet/Fly issue), fix the runner and re-run the full smoke group. On the local path all tasks must pass in one `run-predeploy-local` invocation; on the cloud alternate a sequential diagnostic run does not satisfy the concurrent gate.
 
-### Cloud cleanup
+### Local cleanup
 
 The fleet runner owns its Fly machines and stops/destroys them on every normal or trapped exit. After the command finishes, verify every ID in `.context/cloudbench-pool.ids` is `stopped` and that no fresh clone IDs recorded by the batch remain alive.
 
@@ -609,22 +605,23 @@ Failed benchmark agents are intentionally retained long enough for diagnostics. 
 
 ### Diagnosing failures
 
-When any cloud benchmark fails, start with the batch artifacts before making code changes:
+When any local smoke benchmark fails, start with the run artifacts before making code changes:
 
 | Surface | Artifact | What to look for |
 | ------- | -------- | ---------------- |
-| Fleet controller | `.context/hub-poller-run-<request-id>.log` | claim, barrier, aggregation, upload, teardown errors |
-| Isolated task | `.context/fleet/runs/<batch-id>/<task>/fleet-child.log` | exact SHA/dependency validation, stack boot, infra fatals |
-| Result | `.context/fleet/runs/<batch-id>/<task>/cloudbench-run.json` | failed agent ID and evaluator reason |
+| Runner | `local.py` report card / `RESULTS:` line | which task failed + evaluator reason |
+| Result | `agents/benchmarks/runs/<run>.json` + `runs/<run>_diagnostics/` | failed agent ID and failure_reason |
+| Worker | `agents/navi-worker-log.txt` | tracebacks, tool errors, LLM-call failures |
+| Backend | `back-end/backend-logs.log` | 500s, Prisma errors, route failures |
 
-For benchmark-specific diagnostics, run ALL three summaries in parallel — they answer different questions:
+For benchmark-specific diagnostics, run ALL three summaries in parallel — they answer different questions (LOCAL, so no `--prod` / `--url`):
 
 ```bash
 # "Why was this slow/stalled?" — span waterfall + top-10 bad paths
-cd agents && python benchmarks/agent_latency.py <agent_id> --url https://navi-j9a9.onrender.com
+cd agents && python benchmarks/agent_latency.py <agent_id>
 
 # "What errors happened where?" — event-timeline tree
-cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics --prod
+cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 
 # "How much did this cost / cache?" — tree-wide token + cache breakdown
 cd agents && python benchmarks/run_benchmark.py --compare <run_a.json> <run_b.json>

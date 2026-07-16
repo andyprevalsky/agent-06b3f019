@@ -35,6 +35,9 @@ while IFS= read -r task; do
 done < <(read_predeploy_tasks)
 [ "${#PREDEPLOY_TASKS[@]}" -gt 0 ] || { echo "no smoke-tagged benchmark tasks found" >&2; exit 1; }
 
+echo "🧪 Verifying concurrent cloud benchmark workstream isolation..."
+bash "$ROOT_DIR/scripts/tests/cloudbench-multi-workstream.test.sh"
+
 HUB_URL="${HUB_URL:-https://navi-j9a9.onrender.com}"
 HUB_USER_ID="${HUB_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
 HUB_POLLER_BIN="${HUB_POLLER_BIN:-$ROOT_DIR/scripts/run-bench-hub-poller}"

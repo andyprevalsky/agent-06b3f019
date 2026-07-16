@@ -60,7 +60,8 @@ VOLUME_NAME="cloudbench_data"
 # Every run lands in its OWN dir under the runs-root; the central hub (one
 # persistent dashboard on DASH_BASE) scans the runs-root so ALL runs show up and
 # each is clickable at /run/<id>/. Runs never clobber each other.
-RUNS_ROOT="$ROOT_DIR/.context/fleet/runs"
+RUNS_ROOT="${CLOUDBENCH_RUNS_ROOT:-$ROOT_DIR/.context/fleet/runs}"
+case "$RUNS_ROOT" in /*) ;; *) RUNS_ROOT="$ROOT_DIR/$RUNS_ROOT" ;; esac
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 FLEET_DIR="$RUNS_ROOT/$RUN_ID"
 HUB_CTX_DIR="$RUNS_ROOT/_hub"
@@ -82,10 +83,27 @@ AUTOSCALE_POLL="10"     # seconds between desired-count reads off the box /metri
 SYNCHRONIZED_START="${CLOUDBENCH_SYNCHRONIZED_START:-1}"
 CONTROLLER_RETRY_SECONDS="${CLOUDBENCH_CONTROLLER_RETRY_SECONDS:-10}"
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
-POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"   # persistent pool machine ids (one per line)
 GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/.git")"
 case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
+POOL_WORKSPACE_KEY="$(printf '%s' "$(basename "$ROOT_DIR")" | tr -c 'a-zA-Z0-9._-' '-')"
+POOL_IDS_FILE="$GIT_COMMON_DIR/cloudbench-pools/$POOL_WORKSPACE_KEY.ids"
+POOL_IDS_LOCK="$POOL_IDS_FILE.lock"
+LEGACY_POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"
 POOL_CLAIMS_DIR="$GIT_COMMON_DIR/cloudbench-pool-claims"
+# Ephemeral clone ownership must outlive a disposable Conductor workspace and
+# the controller process itself. Each fleet writes one registry under the shared
+# git-common dir; per-clone records are independent files so concurrent
+# autoscalers cannot clobber one another's name→ID handoff.
+FLEET_OWNERSHIP_ROOT="$GIT_COMMON_DIR/cloudbench-fleet-ownership"
+FLEET_OWNER_HOST="$(hostname 2>/dev/null || uname -n)"
+FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+if [ "${CLOUDBENCH_TEST_FLEET_OWNER_TOKEN+x}" = "x" ]; then
+    FLEET_OWNER_TOKEN="$CLOUDBENCH_TEST_FLEET_OWNER_TOKEN"
+else
+    FLEET_OWNER_TOKEN="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+fi
+FLEET_REGISTRY_DIR="$FLEET_OWNERSHIP_ROOT/$FLEET_OWNER_TOKEN"
+FLEET_REGISTRY_PUBLISHED=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --sim-on)         SIM_ON_CSV="${2:-}"; shift 2 ;;
@@ -179,7 +197,7 @@ PY
 # it is on origin (unpushed commits never reach the box), and the uncommitted diff
 # that is shipped as a patch. Also stashed to $UNIFIED_DIR for the dashboard header.
 print_code_provenance() {
-    local branch head_sha head_sub pushed dirtystat
+    local branch head_sha head_sub pushed dirtystat untracked_count
     branch="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
     head_sha="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
     head_sub="$(git -C "$ROOT_DIR" log -1 --pretty=%s 2>/dev/null || echo '')"
@@ -192,14 +210,16 @@ print_code_provenance() {
     echo "  branch : $branch"
     echo "  ref    : $BENCH_REF  ($head_sha $head_sub)"
     echo "  pushed : $pushed"
-    if git -C "$ROOT_DIR" diff HEAD --quiet 2>/dev/null; then
+    untracked_count="$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | wc -l | tr -d ' ')"
+    if git -C "$ROOT_DIR" diff --quiet 2>/dev/null && [ "$untracked_count" = "0" ]; then
         echo "  diff   : clean working tree (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (clean)"
     else
-        dirtystat="$(git -C "$ROOT_DIR" diff HEAD --shortstat 2>/dev/null | sed 's/^ *//')"
-        echo "  diff   : DIRTY — shipped as a patch on top of $head_sha: $dirtystat"
-        git -C "$ROOT_DIR" diff HEAD --stat 2>/dev/null | sed 's/^/           /' | tail -30
-        CODE_SUMMARY="$branch@$head_sha +patch($dirtystat)"
+        dirtystat="$(git -C "$ROOT_DIR" diff --shortstat 2>/dev/null | sed 's/^ *//')"
+        echo "  diff   : DIRTY — shipped as a patch on top of $head_sha: $dirtystat, $untracked_count untracked"
+        git -C "$ROOT_DIR" diff --stat 2>/dev/null | sed 's/^/           /' | tail -30
+        git -C "$ROOT_DIR" ls-files --others --exclude-standard | sed 's/^/           + /' | tail -30
+        CODE_SUMMARY="$branch@$head_sha +patch($dirtystat, $untracked_count untracked)"
     fi
     echo "══════════════════════════════════════════════════════════"
 }
@@ -225,6 +245,307 @@ reap_machine() {  # reap_machine <id> — returns non-zero if the machine surviv
         return 1
     fi
     return 0
+}
+
+registry_meta_value() {  # registry_meta_value <meta-file> <key>
+    local meta="$1" key="$2"
+    sed -n "s/^${key}=//p" "$meta" 2>/dev/null | head -1
+}
+
+fleet_registry_init() {
+    local staging="$FLEET_OWNERSHIP_ROOT/.$FLEET_OWNER_TOKEN.tmp.$$"
+    local tmp_meta="$staging/meta.tmp.$$" meta="$staging/meta"
+    case "$FLEET_OWNER_TOKEN" in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ "${#FLEET_OWNER_TOKEN}" -eq 32 ] || return 1
+    case "$FLEET_OWNER_HOST" in ''|*=*|*$'\n'*) return 1 ;; esac
+    case "$FLEET_OWNER_PID_START" in ''|*=*|*$'\n'*) return 1 ;; esac
+    case "$$" in ''|*[!0-9]*) return 1 ;; esac
+    [ -n "$RUN_ID" ] && [ -n "$APP" ] || return 1
+    mkdir -p "$FLEET_OWNERSHIP_ROOT" || return 1
+    rm -rf "$staging"
+    mkdir -p "$staging/clones" || return 1
+    {
+        printf 'version=1\n'
+        printf 'app=%s\n' "$APP"
+        printf 'host=%s\n' "$FLEET_OWNER_HOST"
+        printf 'pid=%s\n' "$$"
+        printf 'pid_start=%s\n' "$FLEET_OWNER_PID_START"
+        printf 'run_id=%s\n' "$RUN_ID"
+        printf 'cleanup_policy=%s\n' "$([ "$KEEP_CLONES" = "1" ] && printf retain || printf reap)"
+    } > "$tmp_meta" || { rm -rf "$staging"; return 1; }
+    mv "$tmp_meta" "$meta" || { rm -rf "$staging"; return 1; }
+    [ "$(registry_meta_value "$meta" version)" = "1" ] \
+        && [ "$(registry_meta_value "$meta" app)" = "$APP" ] \
+        && [ "$(registry_meta_value "$meta" host)" = "$FLEET_OWNER_HOST" ] \
+        && [ "$(registry_meta_value "$meta" pid)" = "$$" ] \
+        && [ "$(registry_meta_value "$meta" pid_start)" = "$FLEET_OWNER_PID_START" ] \
+        && [ "$(registry_meta_value "$meta" run_id)" = "$RUN_ID" ] \
+        || { rm -rf "$staging"; return 1; }
+    # Hidden staging directories are ignored by recovery scans. Publish the
+    # complete registry in one rename so concurrent controllers never observe
+    # a clones directory without its owner metadata.
+    if [ -e "$FLEET_REGISTRY_DIR" ] || ! mv "$staging" "$FLEET_REGISTRY_DIR"; then
+        rm -rf "$staging"
+        return 1
+    fi
+    if [ -d "$FLEET_REGISTRY_DIR/clones" ] \
+        && [ "$(registry_meta_value "$FLEET_REGISTRY_DIR/meta" pid_start)" = "$FLEET_OWNER_PID_START" ]; then
+        FLEET_REGISTRY_PUBLISHED=1
+        return 0
+    fi
+    return 1
+}
+
+fleet_registry_record_name() {  # fleet_registry_record_name <clone-name>
+    local clone_name="$1" record="$FLEET_REGISTRY_DIR/clones/$1" tmp="$FLEET_REGISTRY_DIR/clones/$1.tmp.$$"
+    case "$clone_name" in cloudbench-[a-zA-Z0-9._-]*) ;; *) return 1 ;; esac
+    [ -d "$FLEET_REGISTRY_DIR/clones" ] || return 1
+    printf 'name=%s\n' "$clone_name" > "$tmp" \
+        && mv "$tmp" "$record" \
+        && [ "$(registry_meta_value "$record" name)" = "$clone_name" ] \
+        || { rm -f "$tmp"; return 1; }
+}
+
+fleet_registry_record_id() {  # fleet_registry_record_id <clone-name> <machine-id>
+    local clone_name="$1" id="$2" record="$FLEET_REGISTRY_DIR/clones/$1" tmp="$FLEET_REGISTRY_DIR/clones/$1.tmp.$$"
+    case "$id" in ''|*[!0-9a-f]*) return 1 ;; esac
+    [ -f "$record" ] || fleet_registry_record_name "$clone_name" || return 1
+    [ "$(registry_meta_value "$record" name)" = "$clone_name" ] || return 1
+    {
+        printf 'name=%s\n' "$clone_name"
+        printf 'id=%s\n' "$id"
+    } > "$tmp" \
+        && mv "$tmp" "$record" \
+        && [ "$(registry_meta_value "$record" name)" = "$clone_name" ] \
+        && [ "$(registry_meta_value "$record" id)" = "$id" ] \
+        || { rm -f "$tmp"; return 1; }
+}
+
+fleet_registry_release_id() {  # fleet_registry_release_id <machine-id>
+    local id="$1" record recorded_id
+    for record in "$FLEET_REGISTRY_DIR"/clones/*; do
+        [ -f "$record" ] || continue
+        recorded_id="$(registry_meta_value "$record" id)"
+        [ "$recorded_id" = "$id" ] && rm -f "$record"
+    done
+}
+
+registry_owner_alive() {  # registry_owner_alive <meta-file>; 0=alive, 1=dead, 2=other host/invalid
+    local meta="$1" host pid expected_start actual_start
+    host="$(registry_meta_value "$meta" host)"
+    pid="$(registry_meta_value "$meta" pid)"
+    expected_start="$(registry_meta_value "$meta" pid_start)"
+    [ -n "$host" ] && [ -n "$pid" ] && [ -n "$expected_start" ] || return 2
+    [ "$host" = "$FLEET_OWNER_HOST" ] || return 2
+    case "$pid" in ''|*[!0-9]*) return 2 ;; esac
+    actual_start="$(ps -p "$pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ -n "$actual_start" ] && [ "$actual_start" = "$expected_start" ]
+}
+
+registry_resolve_name() {  # registry_resolve_name <clone-name>; 0=found, 1=absent, 2=unsafe read
+    local clone_name="$1" deadline result status
+    deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-10}))
+    while :; do
+        result="$(FLY machines list -a "$APP" --json 2>/dev/null \
+            | TARGET_NAME="$clone_name" python3 -c '
+import json, os, sys
+try:
+    machines = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+    raise SystemExit(2)
+matches = [machine.get("id") for machine in machines
+           if machine.get("name") == os.environ["TARGET_NAME"] and machine.get("id")]
+if len(matches) == 1:
+    print(matches[0])
+elif not matches:
+    raise SystemExit(1)
+else:
+    raise SystemExit(2)
+' 2>/dev/null)"
+        status=$?
+        [ "$status" -eq 0 ] && { printf '%s' "$result"; return 0; }
+        [ "$status" -eq 2 ] && return 2
+        [ "$SECONDS" -ge "$deadline" ] && return 1
+        sleep 1
+    done
+}
+
+registry_machine_details() {  # registry_machine_details <id>; 0="state name", 1=absent, 2=unsafe read
+    local id="$1"
+    FLY machines list -a "$APP" --json 2>/dev/null | MACHINE_ID="$id" python3 -c '
+import json, os, sys
+try:
+    machines = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+    raise SystemExit(2)
+matches = [machine for machine in machines if machine.get("id") == os.environ["MACHINE_ID"]]
+if not matches:
+    raise SystemExit(1)
+if len(matches) != 1:
+    raise SystemExit(2)
+state = matches[0].get("state")
+name = matches[0].get("name")
+if not isinstance(state, str) or not state or not isinstance(name, str) or not name:
+    raise SystemExit(2)
+print(state, name)
+'
+}
+
+registry_runner_count() {  # registry_runner_count <started-machine-id>; exact integer or non-zero
+    local id="$1" output count
+    output="$(FLY ssh console -a "$APP" --machine "$id" -q -C \
+        "CLOUDBENCH_OWNER_PROBE=1; n=\$(pgrep -f '/data/[c]loudbench-run.sh|/tmp/[r]b.sh|benchmarks/[r]un_benchmark.py|scripts/[r]un.sh --benchmark|/tmp/[r]bw.sh|/data/[c]loudbench-worker.sh|agents/[w]orker.py' 2>/dev/null | wc -l | tr -d ' '); printf 'CLOUDBENCH_RUNNER_COUNT=%s\\n' \"\$n\"" 2>/dev/null)" || return 1
+    count="$(printf '%s\n' "$output" | sed -n 's/^CLOUDBENCH_RUNNER_COUNT=//p' | tail -1)"
+    case "$count" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s' "$count"
+}
+
+reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale>
+    local registry="${1%/}" root="${FLEET_OWNERSHIP_ROOT%/}" mode="$2" record clone_name id resolved details detail_status state actual_name runner_count
+    [ "$registry" != "$root" ] \
+        && [ "${registry%/*}" = "$root" ] \
+        || { echo "❌ refusing non-child fleet registry cleanup path: $registry" >&2; return 1; }
+    [ -d "$registry/clones" ] || return 0
+    for record in "$registry"/clones/*; do
+        [ -f "$record" ] || continue
+        clone_name="$(registry_meta_value "$record" name)"
+        id="$(registry_meta_value "$record" id)"
+        [ -n "$clone_name" ] || { echo "❌ malformed fleet clone ownership record: $record" >&2; return 1; }
+        if [ -z "$id" ]; then
+            resolved="$(registry_resolve_name "$clone_name")"
+            case $? in
+                0) id="$resolved"; printf 'id=%s\n' "$id" >> "$record" ;;
+                1)
+                    echo "❌ owned clone name '$clone_name' is not provider-visible yet; retaining ownership and refusing to provision" >&2
+                    return 1
+                    ;;
+                *) echo "❌ ambiguous/unreadable stale clone name '$clone_name'; refusing to provision" >&2; return 1 ;;
+            esac
+        fi
+        if [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; then
+            echo "❌ ownership registry points at warm source machine $id; refusing cleanup" >&2
+            return 1
+        fi
+        details="$(registry_machine_details "$id")"
+        detail_status=$?
+        [ "$detail_status" -eq 1 ] && { rm -f "$record"; continue; }
+        [ "$detail_status" -eq 0 ] || { echo "❌ could not verify owned fleet machine $id; refusing to provision" >&2; return 1; }
+        state="$(printf '%s' "$details" | awk '{print $1}')"
+        actual_name="$(printf '%s' "$details" | awk '{print $2}')"
+        if [ "$actual_name" != "$clone_name" ]; then
+            echo "❌ machine identity mismatch for $id ($actual_name != $clone_name); refusing cleanup" >&2
+            return 1
+        fi
+        if [ "$mode" = "stale" ]; then
+            case "$state" in
+                stopped) : ;;
+                started)
+                    runner_count="$(registry_runner_count "$id")" || {
+                        echo "❌ refusing to reap stale fleet machine $id: runner probe unreadable" >&2
+                        return 1
+                    }
+                    if [ "$runner_count" != "0" ]; then
+                        echo "❌ refusing to reap stale fleet machine $id: runner count=$runner_count" >&2
+                        return 1
+                    fi
+                    ;;
+                *)
+                    echo "❌ refusing to reap stale fleet machine $id in transitional/unknown state '$state'" >&2
+                    return 1
+                    ;;
+            esac
+            echo "🧹 reaping stale fleet machine $id (name=$clone_name, state=$state, dead owner proven)"
+        else
+            echo "🧹 destroying fleet-owned clone $id (name=$clone_name)"
+        fi
+        reap_machine "$id" || return 1
+        rm -f "$record"
+    done
+}
+
+fleet_registry_remove_if_empty() {  # fleet_registry_remove_if_empty <registry-dir>
+    local registry="${1%/}" root="${FLEET_OWNERSHIP_ROOT%/}" record
+    [ "$registry" != "$root" ] \
+        && [ "${registry%/*}" = "$root" ] \
+        || { echo "❌ refusing to remove non-child fleet registry path: $registry" >&2; return 1; }
+    [ -d "$registry/clones" ] || { rm -rf "$registry"; return 0; }
+    for record in "$registry"/clones/*; do
+        [ -f "$record" ] && return 0
+    done
+    rm -rf "$registry"
+}
+
+acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-dir>
+    local registry="$1" lock="$1/recovery-lock" tmp
+    for _ in $(seq 1 30); do
+        [ -d "$registry" ] || return 2
+        if mkdir "$lock" 2>/dev/null; then
+            tmp="$lock/meta.tmp.$$"
+            {
+                printf 'host=%s\n' "$FLEET_OWNER_HOST"
+                printf 'pid=%s\n' "$$"
+                printf 'pid_start=%s\n' "$FLEET_OWNER_PID_START"
+            } > "$tmp" && mv "$tmp" "$lock/meta" && return 0
+            # Metadata write/rename failed after mkdir — tear the partial lock
+            # down so we (or a waiter) can retry instead of spinning on a lock
+            # dir with no provable owner.
+            rm -rf "$lock"
+        fi
+        if [ -f "$lock/meta" ]; then
+            registry_owner_alive "$lock/meta"
+            case $? in
+                0) sleep 1; continue ;;
+                1) rm -rf "$lock"; continue ;;
+                *) echo "❌ cannot prove stale recovery lock ownership for $registry" >&2; return 1 ;;
+            esac
+        fi
+        sleep 1
+    done
+    echo "❌ timed out waiting for stale fleet recovery lock: $registry" >&2
+    return 1
+}
+
+reconcile_stale_fleet_registries() {
+    local registry meta version app policy host owner_status recovery_lock_status
+    mkdir -p "$FLEET_OWNERSHIP_ROOT"
+    for registry in "$FLEET_OWNERSHIP_ROOT"/*; do
+        [ -d "$registry" ] || continue
+        [ "$registry" = "$FLEET_REGISTRY_DIR" ] && continue
+        meta="$registry/meta"
+        version="$(registry_meta_value "$meta" version)"
+        app="$(registry_meta_value "$meta" app)"
+        policy="$(registry_meta_value "$meta" cleanup_policy)"
+        host="$(registry_meta_value "$meta" host)"
+        [ "$version" = "1" ] && [ "$app" = "$APP" ] && [ -n "$host" ] || {
+            echo "❌ malformed fleet ownership registry $registry; refusing to provision" >&2
+            return 1
+        }
+        [ "$policy" = "retain" ] && continue
+        [ "$policy" = "reap" ] || { echo "❌ unknown cleanup policy '$policy' in $registry" >&2; return 1; }
+        # A local git-common registry can positively disprove only same-host
+        # process ownership. Other-host records remain untouched and still count
+        # against the app capacity guard.
+        [ "$host" = "$FLEET_OWNER_HOST" ] || continue
+        registry_owner_alive "$meta"
+        owner_status=$?
+        [ "$owner_status" -eq 0 ] && continue
+        [ "$owner_status" -eq 1 ] || { echo "❌ invalid controller identity in $registry" >&2; return 1; }
+        acquire_registry_recovery_lock "$registry"
+        recovery_lock_status=$?
+        [ "$recovery_lock_status" -eq 2 ] && continue
+        [ "$recovery_lock_status" -eq 0 ] || return 1
+        echo "🧭 recovering stale fleet registry $(basename "$registry") (same-host controller identity is dead)"
+        if ! reap_registry_clones "$registry" stale; then
+            rm -rf "$registry/recovery-lock"
+            return 1
+        fi
+        rm -rf "$registry/recovery-lock"
+        fleet_registry_remove_if_empty "$registry"
+    done
 }
 
 # ── Pre-provisioned pool: stopped clones (current image) claimed on demand ───
@@ -271,6 +592,13 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id];
     mkdir -p "$(dirname "$ledger")"
     for attempt in $(seq 1 "$attempts"); do
         target_name="cloudbench-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:24])')"
+        # Record the provider target name outside the disposable workspace BEFORE
+        # asking Fly to allocate. If this process is SIGKILLed at any later point, a
+        # successor can still bind the late-appearing machine to this dead fleet.
+        if ! fleet_registry_record_name "$target_name"; then
+            echo "❌ could not persist durable ownership for clone name '$target_name'; refusing provider allocation" >&2
+            return 1
+        fi
         printf '%s\n' "$target_name" >> "$names_ledger"
         clone_out="$(FLY machine clone "$source_id" -a "$APP" \
             --from-snapshot "$SNAP_ID" --region "$REGION" --name "$target_name" --detach 2>&1)"
@@ -284,6 +612,10 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id];
         deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-10}))
         target_id="$(machine_id_for_clone_name "$target_name" "$deadline")" || target_id=""
         if [ -n "$target_id" ] && [ "$target_id" != "$source_id" ] && [ "$target_id" != "$WARM_ID" ]; then
+            if ! fleet_registry_record_id "$target_name" "$target_id"; then
+                echo "❌ could not persist provider ID $target_id; name ownership remains for teardown" >&2
+                return 1
+            fi
             grep -Fxq "$target_id" "$ledger" 2>/dev/null || printf '%s\n' "$target_id" >> "$ledger"
             grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
             mv "$names_ledger.tmp" "$names_ledger"
@@ -317,24 +649,83 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id];
     return 1
 }
 
+pool_ledger_lock_acquire() {  # serialize read-modify-write of the shared pool ledger
+    # Concurrent provisioners each rewrite POOL_IDS_FILE with tmp+mv; without a
+    # lock the later rename silently drops the earlier appender's ID, releasing
+    # that machine from fleet ownership with no durable ledger entry. mkdir is an
+    # atomic cross-process gate on the shared git-common filesystem.
+    local lock="$POOL_IDS_LOCK" tmp
+    for _ in $(seq 1 100); do
+        if mkdir "$lock" 2>/dev/null; then
+            tmp="$lock/meta.tmp.$$"
+            {
+                printf 'host=%s\n' "$FLEET_OWNER_HOST"
+                printf 'pid=%s\n' "$$"
+                printf 'pid_start=%s\n' "$FLEET_OWNER_PID_START"
+            } > "$tmp" && mv "$tmp" "$lock/meta" && return 0
+            rm -rf "$lock"
+        fi
+        # Break a same-host lock whose owner is provably dead so a crashed
+        # provisioner cannot wedge the ledger forever.
+        if [ -f "$lock/meta" ]; then
+            registry_owner_alive "$lock/meta"
+            [ $? -eq 1 ] && { rm -rf "$lock"; continue; }
+        fi
+        sleep 0.1
+    done
+    echo "❌ timed out acquiring pool ledger lock: $lock" >&2
+    return 1
+}
+
+pool_ledger_lock_release() { rm -rf "$POOL_IDS_LOCK"; }
+
+pool_ledger_record_id() {  # pool_ledger_record_id <machine-id>; atomic + verified + serialized
+    local id="$1" tmp="$POOL_IDS_FILE.tmp.$$" rc=0
+    case "$id" in ''|*[!0-9a-f]*) return 1 ;; esac
+    pool_ledger_lock_acquire || return 1
+    if [ ! -f "$POOL_IDS_FILE" ]; then
+        rc=1
+    elif ! {
+        grep -Fxv "$id" "$POOL_IDS_FILE" 2>/dev/null || true
+        printf '%s\n' "$id"
+    } > "$tmp"; then
+        rm -f "$tmp"
+        rc=1
+    elif ! mv "$tmp" "$POOL_IDS_FILE" \
+        || [ ! -f "$POOL_IDS_FILE" ] \
+        || ! grep -Fxq "$id" "$POOL_IDS_FILE"; then
+        rm -f "$tmp"
+        rc=1
+    fi
+    pool_ledger_lock_release
+    return "$rc"
+}
+
 provision_pool() {  # provision_pool <N> — create N stopped clones, record ids, exit
-    local n="$1" i id ready
-    mkdir -p "$(dirname "$POOL_IDS_FILE")"; : > "$POOL_IDS_FILE"
+    local n="$1" i id ready st failed=0
+    local -a created_ids=()
+    mkdir -p "$(dirname "$POOL_IDS_FILE")" \
+        || { echo "❌ could not initialize durable pool ledger $POOL_IDS_FILE" >&2; return 1; }
+    if [ -e "$POOL_IDS_FILE" ]; then
+        [ -f "$POOL_IDS_FILE" ] \
+            || { echo "❌ durable pool ledger is not a regular file: $POOL_IDS_FILE" >&2; return 1; }
+    else
+        : > "$POOL_IDS_FILE" \
+            || { echo "❌ could not initialize durable pool ledger $POOL_IDS_FILE" >&2; return 1; }
+    fi
     echo "🏊 Provisioning pool of $n stopped machines (image = warm $WARM_ID, snapshot $SNAP_ID, region $REGION)..."
     for i in $(seq 1 "$n"); do
         id="$(clone_machine_target "$OWNED_CLONES_FILE")"
         if [ -n "$id" ]; then
             echo "  [$i/$n] created $id"
-            printf '%s\n' "$id" >> "$POOL_IDS_FILE"
-            grep -Fxv "$id" "$OWNED_CLONES_FILE" > "$OWNED_CLONES_FILE.tmp" 2>/dev/null || true
-            mv "$OWNED_CLONES_FILE.tmp" "$OWNED_CLONES_FILE"
+            created_ids+=("$id")
         else
             echo "  [$i/$n] ⚠ clone failed"
+            failed=1
         fi
     done
     echo "⏳ waiting for volumes to provision, then stopping (pool idles at \$0 compute)..."
-    while read -r id; do
-        [ -n "$id" ] || continue
+    for id in "${created_ids[@]}"; do
         ready=0
         for _ in $(seq 1 90); do
             if FLY machine status "$id" -a "$APP" 2>/dev/null | grep -qiE "State.*(started|stopped)"; then ready=1; break; fi
@@ -343,18 +734,66 @@ provision_pool() {  # provision_pool <N> — create N stopped clones, record ids
             fi
             sleep 5
         done
-        [ "$ready" = 1 ] && { FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true; echo "  ✅ pooled (stopped): $id"; } || echo "  ⚠ $id never became startable"
-    done < "$POOL_IDS_FILE"
+        if [ "$ready" = 1 ]; then
+            FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
+            st=""
+            for _ in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
+                if st="$(pool_machine_state "$id")" && [ "$st" = "stopped" ]; then
+                    break
+                fi
+                sleep 2
+            done
+            if [ "$st" = "stopped" ]; then
+                # Only release ephemeral ownership after the durable pool
+                # ledger has atomically accepted and re-read the exact ID.
+                if pool_ledger_record_id "$id"; then
+                    fleet_registry_release_id "$id"
+                    grep -Fxv "$id" "$OWNED_CLONES_FILE" > "$OWNED_CLONES_FILE.tmp" 2>/dev/null || true
+                    mv "$OWNED_CLONES_FILE.tmp" "$OWNED_CLONES_FILE"
+                    echo "  ✅ pooled (stopped): $id"
+                else
+                    echo "  ⚠ failed to persist $id in durable pool ledger; retaining fleet ownership for teardown" >&2
+                    failed=1
+                fi
+            else
+                echo "  ⚠ $id did not verify stopped; retaining fleet ownership for teardown" >&2
+                failed=1
+            fi
+        else
+            echo "  ⚠ $id never became startable"
+            failed=1
+        fi
+    done
     echo "✅ pool ready: $(grep -c . "$POOL_IDS_FILE" 2>/dev/null || echo 0) machines → $POOL_IDS_FILE"
+    [ "$failed" = "0" ]
 }
 
 CLAIMED_POOL_FILE="$FLEET_DIR/claimed-pool.ids"
 UNAVAILABLE_POOL_IDS=()
-# Self-heal the pool: a killed run can't run its return-to-stopped step, leaving a
-# claimed machine 'started' and un-claimable (claim only takes 'stopped'). At fleet
-# START this workspace's controller lock is held, so any active machine in this
-# workspace's pool ledger is orphaned. Stop and verify it before environment
-# activation (avoids "pool empty" → fresh clone → the 5-min volume-fork slow start).
+# A claim records host + PID birth identity, not PID alone: PID reuse must never
+# authorize stopping a live pool machine or make a dead claim look current.
+write_pool_claim() {  # write_pool_claim <claim-path>; atomic no-clobber
+    local claim_path="$1"
+    (
+        set -C
+        {
+            printf 'host=%s\n' "$FLEET_OWNER_HOST"
+            printf 'pid=%s\n' "$$"
+            printf 'pid_start=%s\n' "$FLEET_OWNER_PID_START"
+        } > "$claim_path"
+    ) 2>/dev/null
+}
+
+pool_claim_owned_by_current() {  # pool_claim_owned_by_current <claim-path>
+    local claim_path="$1"
+    [ "$(registry_meta_value "$claim_path" host)" = "$FLEET_OWNER_HOST" ] \
+        && [ "$(registry_meta_value "$claim_path" pid)" = "$$" ] \
+        && [ "$(registry_meta_value "$claim_path" pid_start)" = "$FLEET_OWNER_PID_START" ]
+}
+
+# Self-heal a same-host dead claim only after proving the remote runner is idle.
+# Live/other-host owners remain unavailable; an unreadable or busy dead claim
+# blocks provisioning rather than risking interruption or compounding spend.
 pool_machine_state() {  # pool_machine_state <id>: prints state; 1=absent, 2=invalid read
     local id="$1" machines
     machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
@@ -377,9 +816,10 @@ print(state)
 }
 
 reconcile_pool() {
-    [ -f "$POOL_IDS_FILE" ] || return 0
-    local id st presence
-    while read -r id; do
+    local pool_file id st presence claim_path claim_host owner_status runner_count
+    for pool_file in "$GIT_COMMON_DIR"/cloudbench-pools/*.ids; do
+      [ -f "$pool_file" ] || continue
+      while read -r id; do
         [ -n "$id" ] || continue
         st="$(pool_machine_state "$id")"
         presence=$?
@@ -388,19 +828,66 @@ reconcile_pool() {
         [ "$st" = "stopped" ] && continue
         case "$st" in
             created|replacing|started|starting|stopping)
+                claim_path="$POOL_CLAIMS_DIR/$id"
+                if [ -f "$claim_path" ]; then
+                    claim_host="$(registry_meta_value "$claim_path" host)"
+                    registry_owner_alive "$claim_path"
+                    owner_status=$?
+                    if [ "$owner_status" -eq 0 ]; then
+                        UNAVAILABLE_POOL_IDS+=("$id")
+                        echo "  ↪️  pool machine $id is $st; leaving live claim owner untouched"
+                        continue
+                    fi
+                    if [ "$owner_status" -eq 2 ]; then
+                        if [ -n "$claim_host" ] && [ "$claim_host" != "$FLEET_OWNER_HOST" ]; then
+                            UNAVAILABLE_POOL_IDS+=("$id")
+                            echo "  ↪️  pool machine $id is $st; leaving other-host claim untouched"
+                            continue
+                        fi
+                        echo "❌ pool machine $id has an invalid same-host claim; refusing to provision" >&2
+                        return 1
+                    fi
+                    [ "$st" = "started" ] || {
+                        echo "❌ dead-claimed pool machine $id is transitional ($st); refusing to provision" >&2
+                        return 1
+                    }
+                    runner_count="$(registry_runner_count "$id")" || {
+                        echo "❌ dead-claimed pool machine $id runner probe unreadable; refusing to provision" >&2
+                        return 1
+                    }
+                    [ "$runner_count" = "0" ] || {
+                        echo "❌ dead-claimed pool machine $id still has runner count=$runner_count; refusing to provision" >&2
+                        return 1
+                    }
+                    echo "↩️  recovering dead-claimed idle pool machine $id (stop)"
+                    FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
+                    for _ in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
+                        if st="$(pool_machine_state "$id")" && [ "$st" = "stopped" ]; then
+                            break
+                        fi
+                        sleep 2
+                    done
+                    [ "$st" = "stopped" ] || {
+                        echo "❌ dead-claimed pool machine $id did not verify stopped" >&2
+                        return 1
+                    }
+                    rm -f "$claim_path"
+                    continue
+                fi
                 UNAVAILABLE_POOL_IDS+=("$id")
-                echo "  ↪️  pool machine $id is $st; leaving concurrent owner untouched"
+                echo "  ↪️  pool machine $id is $st without a verifiable claim; leaving untouched"
                 continue
                 ;;
             *)
             echo "❌ pool machine $id has unsafe pre-refresh state '$st'" >&2
             return 1
         esac
-    done < "$POOL_IDS_FILE"
+      done < "$pool_file"
+    done
 }
 claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none free)
     [ -f "$POOL_IDS_FILE" ] || return 0
-    local id st claim_path owner
+    local id st claim_path owner_status claim_host
     mkdir -p "$POOL_CLAIMS_DIR" "$(dirname "$CLAIMED_POOL_FILE")"
     while read -r id; do
         [ -n "$id" ] || continue
@@ -409,11 +896,16 @@ claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none
         grep -Fxq "$id" "$CLAIMED_POOL_FILE" 2>/dev/null && continue
         claim_path="$POOL_CLAIMS_DIR/$id"
         if [ -f "$claim_path" ]; then
-            owner="$(head -1 "$claim_path" 2>/dev/null || true)"
-            if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+            claim_host="$(registry_meta_value "$claim_path" host)"
+            registry_owner_alive "$claim_path"
+            owner_status=$?
+            [ "$owner_status" -eq 0 ] && continue
+            [ "$owner_status" -eq 1 ] && rm -f "$claim_path"
+            if [ "$owner_status" -eq 2 ]; then
+                # An other-host or malformed claim is not ours to steal.
+                [ -n "$claim_host" ] || echo "  ⚠️  invalid pool claim for $id; leaving unavailable" >&2
                 continue
             fi
-            rm -f "$claim_path"
         fi
         st="$(FLY machine status "$id" -a "$APP" 2>/dev/null | grep -iE '^[[:space:]]*State' | head -1)"
         printf '%s' "$st" | grep -qi "stopped" || continue   # only claim an existing, stopped machine
@@ -423,7 +915,7 @@ claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none
         # cross-workspace ownership source of truth; creation is ATOMIC
         # (noclobber) so concurrent controllers can never claim the same
         # machine — the loser just moves on to the next candidate.
-        ( set -C; printf '%s\n' "$$" > "$claim_path" ) 2>/dev/null || continue
+        write_pool_claim "$claim_path" || continue
         printf '%s\n' "$id" >> "$CLAIMED_POOL_FILE"
         FLY machine start "$id" -a "$APP" >/dev/null 2>&1 || true
         printf '%s' "$id"; return 0
@@ -434,15 +926,16 @@ claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none
 # Deliberately workspace-local: concurrent fleets from OTHER workspaces are
 # supported (each owns only the machines it creates and never mutates shared
 # app state), so no cross-workspace or cross-host lease is taken here.
-if ! cloudbench_controller_lock_acquire "$LOCK_DIR"; then
-    old_pid="$(cat "$LOCK_DIR" 2>/dev/null || true)"
-    echo "❌ Another cloud benchmark controller is already running in this workspace${old_pid:+ (pid $old_pid)}." >&2
+if ! cloudbench_controller_lock_acquire_wait \
+    "$LOCK_DIR" "${CLOUDBENCH_CONTROLLER_RETRY_SECONDS:-10}"; then
+    echo "❌ Cloud benchmark controller lock failed." >&2
     exit 1
 fi
 
 OWNED_CLONES_FILE="$FLEET_DIR/owned-clones.ids"
 AUTOSCALER_PIDS=()
 CHILD_PIDS=()
+CHILD_EXIT_CODES=()
 CHILD_OUT=()
 CHILD_BENCH=()
 CHILD_MODE=()
@@ -450,7 +943,7 @@ CHILD_PORT=()
 CHILD_MACHINE=()
 
 cleanup() {
-    local ec=$? id clone_name name_matches named_id name_deadline failed_names claim_path owner st
+    local ec=$? id claim_path st presence
     # The poller and terminal can deliver TERM to the same process group. Do not
     # let a second signal interrupt teardown after the EXIT trap has begun.
     trap - EXIT
@@ -470,66 +963,63 @@ cleanup() {
             [ -n "$id" ] || continue
             echo "↩️  returning claimed pool machine $id (stop)"
             FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
-            for _ in $(seq 1 30); do
-                st="$(pool_machine_state "$id")"; [ $? -eq 1 ] && break
+            presence=0
+            for _ in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
+                st="$(pool_machine_state "$id")"; presence=$?
+                [ "$presence" -eq 1 ] && break
                 [ "$st" = "stopped" ] && break
                 sleep 2
             done
             claim_path="$POOL_CLAIMS_DIR/$id"
-            owner="$(head -1 "$claim_path" 2>/dev/null || true)"
-            [ "$owner" = "$$" ] && rm -f "$claim_path" || true
+            if { [ "$presence" -eq 1 ] || [ "$st" = "stopped" ]; } \
+                && pool_claim_owned_by_current "$claim_path"; then
+                rm -f "$claim_path"
+            else
+                echo "❌ claimed pool machine $id did not verify stopped; retaining ownership claim" >&2
+                ec=1
+            fi
         done < "$CLAIMED_POOL_FILE"
     fi
-    if [ "$KEEP_CLONES" != "1" ]; then
-        # Autoscaler worker-pool clones (tracked per bench) first, then the primaries.
-        # A failed destroy is a billed-forever zombie: keep it tracked (the
-        # worker-clones.ids files under $FLEET_DIR are left in place) and warn
-        # loudly with the ids so a later sweep can retry.
-        local failed_reaps=""
-        failed_names=""
-        name_deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-10}))
-        for namef in "$FLEET_DIR"/*/worker-clones.names "$FLEET_DIR/owned-clones.names"; do
-            [ -f "$namef" ] || continue
-            while read -r clone_name; do
-                [ -n "$clone_name" ] || continue
-                if ! name_matches="$(machine_id_for_clone_name "$clone_name" "$name_deadline")"; then
-                    failed_names="$failed_names $clone_name"
-                    ec=1
-                    continue
-                fi
-                while read -r named_id; do
-                    [ -n "$named_id" ] || continue
-                    echo "🧹 destroying late-appearing clone $named_id (name=$clone_name)"
-                    reap_machine "$named_id" || failed_reaps="$failed_reaps $named_id"
-                done <<< "$name_matches"
-            done < "$namef"
-        done
-        for idf in "$FLEET_DIR"/*/worker-clones.ids; do
-            [ -f "$idf" ] || continue
-            while read -r wid; do
-                [ -n "$wid" ] || continue
-                echo "🧹 destroying worker clone $wid"
-                reap_machine "$wid" || failed_reaps="$failed_reaps $wid"
-            done < "$idf"
-        done
-        if [ -f "$OWNED_CLONES_FILE" ]; then
-            while read -r id; do
-                [ -n "$id" ] || continue
-                echo "🧹 destroying fresh clone $id"
-                reap_machine "$id" || failed_reaps="$failed_reaps $id"
-            done < "$OWNED_CLONES_FILE"
-        fi
-        if [ -n "$failed_reaps" ]; then
-            echo "⚠️  FAILED to destroy machine(s):$failed_reaps — still alive (and billed) on Fly." >&2
-            echo "    retry: flyctl machine destroy --force <id> -a $APP  (ownership tracked under $FLEET_DIR)" >&2
+    if [ "$FLEET_REGISTRY_PUBLISHED" = "1" ] && [ "$KEEP_CLONES" != "1" ]; then
+        # The durable registry is authoritative for primaries AND autoscaler
+        # workers. Local per-bench ledgers remain useful for live scaling, but a
+        # failed reap stays recoverable even if this workspace is later deleted.
+        if ! reap_registry_clones "$FLEET_REGISTRY_DIR" current; then
+            echo "⚠️  FAILED to destroy all fleet-owned machines; durable ownership remains at $FLEET_REGISTRY_DIR" >&2
             ec=1
         fi
-        if [ -n "$failed_names" ]; then
-            echo "⚠️  UNRESOLVED clone name(s):$failed_names — ownership names remain under $FLEET_DIR." >&2
-            echo "    retry lookup: flyctl machines list -a $APP --json" >&2
+        fleet_registry_remove_if_empty "$FLEET_REGISTRY_DIR" || ec=1
+    elif [ "$FLEET_REGISTRY_PUBLISHED" = "1" ]; then
+        echo "⚠️  --keep-clones: retaining fleet ownership at $FLEET_REGISTRY_DIR"
+    fi
+    # ── Durable orphaned-volume reap (permanent fix for the cloudbench_data leak) ──
+    # reap_machine (and Fly generally) destroys the clone MACHINE but retains its
+    # VOLUME, so every interrupted/failed/crashed run used to leak a 20GB
+    # `cloudbench_data` volume. Left unchecked these accumulate until the region
+    # runs out of volume capacity and `machine clone --from-snapshot` starts
+    # failing with "no capacity available" (observed: ~92 leaked volumes saturating
+    # ord). Sweep every DETACHED cloudbench_data volume on teardown. Attached
+    # volumes — the warm source and any live pool — are never touched, and because
+    # `machine clone --from-snapshot` creates volumes already attached, a detached
+    # cloudbench_data volume is always an orphan (safe under concurrent fleets).
+    if [ "$KEEP_CLONES" != "1" ]; then
+        orphan_vols="$(FLY volumes list -a "$APP" --json 2>/dev/null | python3 -c '
+import sys, json
+try:
+    vols = json.load(sys.stdin) or []
+except Exception:
+    vols = []
+for v in vols:
+    if v.get("name") == "cloudbench_data" and not v.get("attached_machine_id"):
+        print(v["id"])
+' 2>/dev/null || true)"
+        if [ -n "$orphan_vols" ]; then
+            reaped_vols=0
+            for vid in $orphan_vols; do
+                FLY volumes destroy "$vid" -a "$APP" --yes >/dev/null 2>&1 && reaped_vols=$((reaped_vols + 1)) || true
+            done
+            echo "🧹 reaped $reaped_vols orphaned cloudbench_data volume(s)"
         fi
-    else
-        echo "⚠️  --keep-clones: leaving $(grep -c . "$OWNED_CLONES_FILE" 2>/dev/null || echo 0) fresh clone(s) alive"
     fi
     # NOTE: do NOT pkill viewers by "$FLEET_DIR" — the batch resolver (and the
     # archive Vites it spawns for durable /open-agent) carry $FLEET_DIR in their
@@ -545,6 +1035,20 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+mkdir -p "$(dirname "$POOL_IDS_FILE")" "$POOL_CLAIMS_DIR" || {
+    echo "❌ could not initialize durable cloudbench ownership directories under $GIT_COMMON_DIR" >&2
+    exit 1
+}
+if [ ! -f "$POOL_IDS_FILE" ] && [ -f "$LEGACY_POOL_IDS_FILE" ]; then
+    cp "$LEGACY_POOL_IDS_FILE" "$POOL_IDS_FILE" || {
+        echo "❌ could not migrate legacy pool ownership into $POOL_IDS_FILE" >&2
+        exit 1
+    }
+fi
+fleet_registry_init || {
+    echo "❌ could not atomically publish durable fleet ownership under $FLEET_OWNERSHIP_ROOT; refusing provider mutation" >&2
+    exit 1
+}
 reconcile_pool || exit 1   # stop + verify this workspace's pool before machine start
 # READ-ONLY env preflight: the run path never stages/mutates the shared
 # prod-aligned app secrets (that would race concurrent workstreams). It only
@@ -594,28 +1098,53 @@ if [ -z "$SNAP_ID" ]; then
 fi
 echo "🧊 forking clones from complete snapshot: $SNAP_ID"
 
+# Recover only positively owned ephemeral clones whose same-host controller
+# identity is definitively dead. Any active runner, unreadable probe, malformed
+# ownership, or transitional provider state blocks new provisioning.
+reconcile_stale_fleet_registries || exit 1
+# Recovery may have removed active machines. Capacity must classify the
+# post-reconciliation provider state, not the earlier warm-source lookup.
+warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
+    echo "❌ App capacity guard could not refresh machine state after stale-fleet recovery." >&2
+    exit 1
+}
+
 # ── App-wide capacity guard (not a lock) ─────────────────────────────────────
-# Concurrent workstreams multiply machine counts (N fleets × benches ×
-# autoscale). Refuse loudly instead of silently stacking Fly spend; raise via
-# CLOUDBENCH_APP_MAX_MACHINES if a bigger burst is intentional.
+# Concurrent workstreams multiply active compute (N fleets × benches ×
+# autoscale). Stopped warm/pool inventory costs no compute, so it must not
+# consume this burst ceiling. Every unknown or transitioning state remains
+# capacity-consuming (fail closed); raise the ceiling only for an intentional
+# larger active burst.
 MAX_APP_MACHINES="${CLOUDBENCH_APP_MAX_MACHINES:-60}"
 requested_machines="${PROVISION_POOL:-${#BENCHES[@]}}"
-current_machines="$(printf '%s' "$warm_json" | python3 -c '
+capacity_counts="$(printf '%s' "$warm_json" | python3 -c '
 import json, sys
-try: print(len(json.load(sys.stdin) or []))
-except Exception: print("")
+try:
+    machines = json.load(sys.stdin)
+    if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+        raise ValueError("invalid machine list")
+    stopped = sum(machine.get("state") == "stopped" for machine in machines)
+    print(len(machines) - stopped, stopped, len(machines))
+except Exception:
+    print("")
 ' 2>/dev/null || true)"
-if [ -n "$current_machines" ] && [ $((current_machines + requested_machines)) -gt "$MAX_APP_MACHINES" ]; then
-    echo "❌ App capacity guard: $current_machines machines exist and this run adds $requested_machines" >&2
+if [ -z "$capacity_counts" ]; then
+    echo "❌ App capacity guard could not classify current machine states; refusing to provision." >&2
+    exit 1
+fi
+read -r active_machines stopped_machines total_machines <<< "$capacity_counts"
+if [ $((active_machines + requested_machines)) -gt "$MAX_APP_MACHINES" ]; then
+    echo "❌ App active-compute capacity guard: $active_machines active/transitioning machines" >&2
+    echo "   ($stopped_machines stopped; $total_machines total) and this run adds $requested_machines" >&2
     echo "   (ceiling CLOUDBENCH_APP_MAX_MACHINES=$MAX_APP_MACHINES). Another workstream may be running large;" >&2
-    echo "   finish/teardown other runs, sweep zombies (flyctl machines list -a $APP), or raise the ceiling." >&2
+    echo "   finish/teardown other runs or sweep proven active zombies (flyctl machines list -a $APP)." >&2
     exit 1
 fi
 
 # --provision-pool: one-time pre-provision of N stopped clones, then exit.
 if [ -n "$PROVISION_POOL" ]; then
     provision_pool "$PROVISION_POOL"
-    exit 0
+    exit $?
 fi
 
 CODE_SUMMARY=""
@@ -633,8 +1162,10 @@ BOX_HEALTH_PORT="3003"     # cloudbench-run.sh HEALTH_PORT = CONDUCTOR_PORT(3001
 BOX_BACKEND_PORT="3001"
 BOX_WMH_PORT="3007"        # run.sh WMH_PORT = base+6
 FLEET_PATCH_FILE=""
-if ! git -C "$ROOT_DIR" diff HEAD --quiet --binary 2>/dev/null; then
-    FLEET_PATCH_FILE="$(mktemp)"; git -C "$ROOT_DIR" diff HEAD --binary > "$FLEET_PATCH_FILE"
+if ! git -C "$ROOT_DIR" diff --quiet --binary 2>/dev/null \
+    || [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | head -1)" ]; then
+    FLEET_PATCH_FILE="$(mktemp)"
+    bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$FLEET_PATCH_FILE"
 fi
 
 _machine_priv_ip() {  # _machine_priv_ip <machine_id>
@@ -731,6 +1262,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
                     echo "  ⚠️ [$bench] failed to destroy worker $wid — kept in tracking, retrying next tick" >&2
                     break
                 fi
+                fleet_registry_release_id "$wid"
                 sed '$d' "$out/worker-clones.ids" > "$out/worker-clones.ids.tmp" 2>/dev/null && mv "$out/worker-clones.ids.tmp" "$out/worker-clones.ids" || true
             done
         fi
@@ -1003,7 +1535,14 @@ if ! release_start_barrier; then
 fi
 
 # ── Wait for all children, then aggregate ────────────────────────────────────
-for p in "${CHILD_PIDS[@]}"; do wait "$p" 2>/dev/null || true; done
+for j in "${!CHILD_PIDS[@]}"; do
+    p="${CHILD_PIDS[$j]}"
+    if wait "$p" 2>/dev/null; then
+        CHILD_EXIT_CODES[$j]="0"
+    else
+        CHILD_EXIT_CODES[$j]="$?"
+    fi
+done
 # Normal completion has already reaped every child. Clear the ownership list so
 # EXIT cleanup cannot signal a stale PID that the OS may have since reused.
 CHILD_PIDS=()
@@ -1016,16 +1555,26 @@ echo "════════════════════ FLEET SUMMARY
 FLEET_PASS=0; FLEET_TOTAL=0
 for j in "${!CHILD_BENCH[@]}"; do
     bench="${CHILD_BENCH[$j]}"; out="${CHILD_OUT[$j]}"; mode="${CHILD_MODE[$j]}"
-    line="$(RUN_JSON_PATH="$out/cloudbench-run.json" python3 -c '
-import json,os
+    child_rc="${CHILD_EXIT_CODES[$j]:-1}"
+    line="$(RUN_JSON_PATH="$out/cloudbench-run.json" EXPECTED_TASK="$bench" CHILD_RC="$child_rc" python3 -c '
+import json,os,subprocess,sys
 p=os.environ["RUN_JSON_PATH"]
+expected=os.environ["EXPECTED_TASK"]
+child_rc=int(os.environ["CHILD_RC"])
 try:
+    check=subprocess.run(
+        [sys.executable, "scripts/cloudbench_result.py", p, "--expected-task", expected, "--require-pass"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
     r=json.load(open(p)); tasks=r.get("tasks",[])
     t=tasks[0] if tasks else {}
-    passed=bool(t.get("passed"))
+    passed=child_rc == 0 and check.returncode == 0
     aid=t.get("agent_id") or ""
     dur=t.get("duration_seconds")
-    print(("PASS" if passed else "FAIL"), aid, ("" if dur is None else round(float(dur),1)))
+    status="PASS" if passed else ("CHILDFAIL" if child_rc != 0 else "FAIL")
+    print(status, aid, ("" if dur is None else round(float(dur),1)))
 except Exception as e:
     print("NORESULT", "", "")
 ' 2>/dev/null || echo "NORESULT  ")"

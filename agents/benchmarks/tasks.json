@@ -481,13 +481,18 @@
   },
   {
     "name": "message-person",
-    "title": "Send Email + iMessage",
-    "prompt": "Send a friendly hello message to the phone number 972-977-7432 via both email and iMessage. The email should go to test@example.com. Keep both messages short and friendly.",
+    "title": "Send iMessage Through Mac Queue",
+    "description": "Regression bench for approved iMessage send confirmed by the authenticated Mac Messages bridge",
+    "prompt": "Send a short, friendly iMessage to 972-977-7432 saying this is the Rose iMessage send bench. Do not use email.",
     "timeout_seconds": 180,
     "is_chat_mode": false,
     "expected_tools": [
       "message_person"
     ],
+    "expected_tool_counts": {
+      "message_person": 1
+    },
+    "tool_count_scope": "root",
     "tags": [
       "smoke",
       "approval"
@@ -498,7 +503,115 @@
     "attachment": null,
     "approval_handling": "auto_approve",
     "start_phase": "execute",
-    "bench": "pipeline-e2e"
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "message_person",
+        "backend iMessage queue",
+        "macOS Messages bridge"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "Apple Messages via the authenticated Mac app"
+      ],
+      "context_notes": "The runner preflights a fresh heartbeat from an updated, authenticated Mac polling the exact benchmark backend. The evaluator requires FINISHED metadata with queue_id and sent_at written only after AppleScript success. Product behavior keeps an unacknowledged message queued indefinitely, but this online-relay benchmark passes only on a confirmed send."
+    },
+    "evaluators": [
+      {
+        "id": "confirmed_imessage_send",
+        "method": "static_check",
+        "criteria": [
+          "Exactly one message_person call is made",
+          "The approved message is accepted by the backend iMessage queue",
+          "The authenticated Mac runs the Messages AppleScript successfully",
+          "The terminal tool event contains queue_id, status=sent, and sent_at"
+        ],
+        "checks": [
+          {
+            "type": "message_person_confirmed_send"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "regression:5851f75f-9c0b-4287-ba50-5fb0877aac9d",
+      "blackbox:agents/tests/blackbox/message_person.blackbox.py",
+      "blackbox:back-end/src/tests/blackbox/imessage.blackbox.ts",
+      "blackbox:mac-app/tests/blackbox/i-message-queue-service.blackbox.ts",
+      "blackbox:mac-app/tests/blackbox/i-message-sender.blackbox.ts"
+    ],
+    "bench": "pipeline-e2e",
+    "group": "Daily",
+    "fast_cache": "off"
+  },
+  {
+    "name": "message-person-agent-sms",
+    "title": "Send Immediately From Agent Phone",
+    "description": "Live regression bench proving agent_sms sends immediately through AgentPhone and never enters the user's iMessage queue",
+    "prompt": "Send a short, friendly text to 972-977-7432 saying this is the Rose agent SMS send bench. Use the agent_sms channel from your own agent phone. Do not use the user's iMessage relay and do not use email.",
+    "timeout_seconds": 180,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "message_person"
+    ],
+    "expected_tool_counts": {
+      "message_person": 1
+    },
+    "tool_count_scope": "root",
+    "tags": [
+      "approval"
+    ],
+    "price_limit_cents": 50,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "execute",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "message_person",
+        "AgentPhone outbound messages"
+      ],
+      "secrets": [
+        "AGENTPHONE_API_KEY"
+      ],
+      "live_targets": [
+        "AgentPhone POST /v1/messages"
+      ],
+      "context_notes": "The evaluator requires a FINISHED agent_sms receipt with provider=agentphone, provider_channel, and message_id, and rejects any iMessage queue_id. AgentPhone acceptance is immediate but does not guarantee recipient-device delivery."
+    },
+    "evaluators": [
+      {
+        "id": "immediate_agent_sms_send",
+        "method": "static_check",
+        "criteria": [
+          "Exactly one message_person call is made",
+          "The selected transport is agent_sms",
+          "AgentPhone accepts the outbound message immediately",
+          "The terminal tool event contains provider=agentphone, provider_channel, status=sent, and message_id",
+          "No iMessage queue_id is present"
+        ],
+        "checks": [
+          {
+            "type": "message_person_agent_sms_send"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "regression:5851f75f-9c0b-4287-ba50-5fb0877aac9d",
+      "blackbox:agents/tests/blackbox/message_person.blackbox.py",
+      "blackbox:back-end/src/tests/blackbox/agent-phone.blackbox.ts",
+      "unit:back-end/src/tests/unit/agentphone-provider.test.ts"
+    ],
+    "bench": "pipeline-e2e",
+    "group": "Daily",
+    "fast_cache": "off"
   },
   {
     "name": "gate-subscription-free-credit",
@@ -837,6 +950,7 @@
   {
     "name": "browser-agent-amazon-cookie-payment",
     "title": "Amazon Cookie Auth Payment Write Lock",
+    "description": "Buy a qualifying Amazon beanie through the normal cart path and complete the purchase.",
     "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
@@ -845,14 +959,22 @@
     ],
     "tags": [
       "browser",
-      "auth"
+      "auth",
+      "ecommerce",
+      "antibot"
     ],
+    "group": "daily",
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "ignore",
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
     "expected_attention_kind": "write_lock",
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
     "start_phase": "execute",
     "environment": {
       "mode": "live",
@@ -872,9 +994,186 @@
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "Live Amazon via synced-prod cookie auth. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle used to reach the payment write-lock."
+      "context_notes": "Live Amazon via synced-prod cookie auth. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle used to complete one auto-approved cart purchase."
     },
-    "bench": "pipeline-e2e"
+    "evaluators": [
+      {
+        "id": "amazon-beanie-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved write-lock",
+          "The approval request identifies the beanie and its price"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "beanie"
+            ],
+            "require_amount": true
+          }
+        ]
+      },
+      {
+        "id": "amazon-beanie-checkout-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The selected product is one black beanie priced under $35, and grounded rating, review, material, or product-detail evidence supports that it is well-made",
+          "The agent uses the normal cart and checkout path rather than Buy Now",
+          "The trajectory shows the qualifying purchase completed after the single approved write boundary"
+        ],
+        "judge_prompt": "Pass only when browser/tool evidence grounds the exact product, price, quality basis, normal cart path, and completed purchase. Authentication assistance, unsupported quality claims, or use of Buy Now is a failure."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "bench": "rose-bench"
+  },
+  {
+    "name": "browser-agent-amazon-passkey",
+    "title": "Amazon Kernel Passkey Authentication",
+    "description": "Live Amazon sign-in from a fresh Kernel profile using only the synced passkey",
+    "prompt": "Open https://www.amazon.com and first confirm the page visibly shows the signed-out 'Hello, sign in' state. Click that signed-out Account & Lists control, then sign in using the saved Amazon passkey. Do not use a password, OTP, cookie/session authentication, or ask me to sign in. Once Amazon shows 'Hello, Andy', click that authenticated Account & Lists greeting once so the state is recorded, then stop and report success.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth"
+    ],
+    "price_limit_cents": 200,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "expected_credential_ref_kind": "passkey",
+    "forbidden_credential_ref_kinds": [
+      "password",
+      "email_otp",
+      "sms_otp"
+    ],
+    "expected_browser_provider": "kernel",
+    "expected_browser_session_metadata_values": {
+      "profile_source": "new_user_persistent",
+      "auth_source": "none",
+      "cookies_injected": false,
+      "cookies_count": 0,
+      "local_storage_origin_count": 0,
+      "indexed_db_origin_count": 0,
+      "permission_grant_count": 0,
+      "cache_storage_origin_count": 0
+    },
+    "expected_pre_credential_message_contains": [
+      "Hello, sign in"
+    ],
+    "expected_post_credential_message_contains": [
+      "Hello, Andy"
+    ],
+    "success_on_browser_auth_evidence": true,
+    "start_phase": "execute",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "compute_tokens",
+        "amazon_passkey"
+      ],
+      "services": [
+        "amazon.com",
+        "kernel"
+      ],
+      "secrets": [
+        "amazon_passkey"
+      ],
+      "live_targets": [
+        "https://www.amazon.com"
+      ],
+      "context_notes": "compute_tokens refreshes only LLM credentials. amazon_passkey syncs only the live passkey, deletes Amazon cookies and origin storage, disables saved-session/password alternatives, and detaches the local Kernel profile mapping so the run proves CDP passkey injection from a fresh profile."
+    },
+    "evaluators": [
+      {
+        "id": "kernel-passkey-authentication",
+        "method": "static_check",
+        "criteria": [
+          "Browser session metadata identifies Kernel as the provider",
+          "Browser session metadata proves a new profile with zero cookie or origin-state injection",
+          "The transcript shows Amazon signed out before passkey use",
+          "A passkey credential_ref is persisted before task completion",
+          "Amazon shows an authenticated account state",
+          "The transcript uses neither password nor OTP"
+        ],
+        "checks": [
+          {
+            "type": "browser_provider",
+            "value": "kernel"
+          },
+          {
+            "type": "browser_session_metadata_values",
+            "value": {
+              "profile_source": "new_user_persistent",
+              "auth_source": "none",
+              "cookies_injected": false,
+              "cookies_count": 0,
+              "local_storage_origin_count": 0,
+              "indexed_db_origin_count": 0,
+              "permission_grant_count": 0,
+              "cache_storage_origin_count": 0
+            }
+          },
+          {
+            "type": "message_before_credential_contains",
+            "credential_kind": "passkey",
+            "value": [
+              "Hello, sign in"
+            ]
+          },
+          {
+            "type": "credential_ref_kind",
+            "value": "passkey"
+          },
+          {
+            "type": "message_after_credential_contains",
+            "credential_kind": "passkey",
+            "value": [
+              "Hello, Andy"
+            ]
+          },
+          {
+            "type": "forbidden_credential_ref_kinds",
+            "value": [
+              "password",
+              "email_otp",
+              "sms_otp"
+            ]
+          }
+        ]
+      }
+    ],
+    "source": [
+      "commit:8923d6e87",
+      "live-amazon:kernel-passkey"
+    ],
+    "bench": "rose-bench"
   },
   {
     "name": "browser-toast-nopa-write-lock",
@@ -888,8 +1187,10 @@
     "tags": [
       "browser",
       "auth",
-      "bot-challenge"
+      "antibot",
+      "ecommerce"
     ],
+    "group": "daily",
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -904,16 +1205,162 @@
           "name": "The Rocky Sandwich",
           "quantity": 1
         }
+      ],
+      "requiredFields": [
+        "merchant",
+        "currency",
+        "lineItems",
+        "fees",
+        "subtotalCents",
+        "totalCents",
+        "fingerprint",
+        "userId",
+        "agentId"
+      ],
+      "requiredLineItemFields": [
+        "name",
+        "imageUrl",
+        "productUrl",
+        "rating",
+        "reviewCount",
+        "unitPriceCents",
+        "quantity",
+        "lineTotalCents"
+      ],
+      "requiredFeeFields": [
+        "label",
+        "amountCents"
       ]
     },
     "success_on_payment_card_request": true,
     "start_phase": "execute",
+    "evaluators": [
+      {
+        "id": "toast-payment-receipt",
+        "method": "static_check",
+        "criteria": [
+          "A validated payment-card request names Nopa Fish on Toast and contains one The Rocky Sandwich line item",
+          "The approval contains every required receipt, line-item, fee, identity, and fingerprint field",
+          "The complete receipt satisfies the request_payment_card schema"
+        ],
+        "checks": [
+          {
+            "type": "expected_payment_receipt"
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
     "bench": "pipeline-e2e"
   },
   {
-    "name": "minted-agent-accounts-uber",
-    "title": "Minted Agent Accounts Uber",
-    "prompt": "Stateful benchmark implemented by run_benchmark.py: delete local minted accounts for the benchmark user, create an Uber-style rider account with a real AgentMail minted inbox, verify the MintedAccount row, then start a fresh booking task in the same Steel browser profile and stop on write-lock approval before payment/request submission.",
+    "name": "browser-opentable-reservation",
+    "title": "OpenTable Restaurant Reservation",
+    "description": "Complete a flexible Sunday dinner reservation through OpenTable.",
+    "prompt": "Use OpenTable to reserve a table for 2 at Prospect, 300 Spear Street, San Francisco, this Sunday at 7:00 PM. If 7:00 PM is unavailable, choose the closest standard table between 6:00 PM and 8:00 PM. Complete the reservation using the saved guest details.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "reservation"
+    ],
+    "group": "daily",
+    "price_limit_cents": 250,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
+    "expected_attention_kinds": [
+      "write_lock"
+    ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base"
+      ],
+      "services": [
+        "opentable.com",
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.opentable.com/restaurant/profile/45907/reserve"
+      ],
+      "context_notes": "Live OpenTable inventory changes continuously. The task allows a two-hour window while holding restaurant, party size, and date fixed. The single final reservation write-lock is auto-approved."
+    },
+    "evaluators": [
+      {
+        "id": "opentable-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No browser-agent attempt fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved write-lock",
+          "The approval request includes Prospect and the reservation time"
+        ],
+        "checks": [
+          {
+            "type": "no_browser_agent_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "Prospect"
+            ],
+            "require_time": true
+          }
+        ]
+      },
+      {
+        "id": "opentable-reservation-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The trajectory shows the agent completed the reservation and reached a grounded confirmation state",
+          "The reservation is for Prospect, two people, this Sunday, between 6:00 PM and 8:00 PM",
+          "The selected time is 7:00 PM when available; otherwise it is the closest evidenced available time to 7:00 PM within the allowed window"
+        ],
+        "judge_prompt": "Review the full browser/tool trajectory. Pass only if grounded evidence shows a completed Prospect reservation for two on the correct Sunday, with the required time-selection behavior and a final confirmation. Do not treat the task prompt or an approval request alone as proof of completion."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:ecommerce-v1-2026-07-14"
+    ]
+  },
+  {
+    "name": "browser-instacart-grocery-order",
+    "title": "Instacart Grocery Delivery",
+    "description": "Build and check out a complete weekly grocery basket for same-day delivery.",
+    "prompt": "Use Instacart to order my weekly groceries from a single San Francisco grocery store for delivery to my saved address: one standard package of blueberries, one standard package of strawberries, one 16 oz Cocojune yogurt (prefer plain), one standard jar of pickles, one standard package of feta cheese, one standard jar of olives, and one 12-pack of 1 L Essentia ionized alkaline water. Prefer inexpensive, well-rated options and keep the item subtotal at or below $60. Do not substitute Cocojune or Essentia; if either exact brand is unavailable, report the blocker rather than replacing it. Allow only like-for-like substitutions for the other products. Choose the earliest available delivery window. Complete checkout and stop at the payment/write-lock approval if the harness requires it.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -921,15 +1368,660 @@
     ],
     "tags": [
       "browser",
-      "auth"
+      "auth",
+      "ecommerce",
+      "grocery"
     ],
+    "group": "daily",
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_attention_kinds": [
+      "payment_approval",
+      "write_lock"
+    ],
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base"
+      ],
+      "services": [
+        "instacart.com",
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.instacart.com/grocery-delivery/ca/near-me-in-san-francisco-ca"
+      ],
+      "context_notes": "Live Instacart catalog, inventory, pricing, saved delivery address, authentication state, and checkout write-lock."
+    },
+    "evaluators": [
+      {
+        "id": "instacart-grocery-checkout",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The cart contains exactly the seven requested weekly grocery products in one standard retail unit each from a single store",
+          "The branded items are one 16 oz Cocojune yogurt and one 12-pack of 1 L Essentia ionized alkaline water, with no brand substitutions",
+          "The remaining items are blueberries, strawberries, one jar of pickles, feta cheese, and one jar of olives, with only like-for-like substitutions",
+          "The item subtotal is at or below $60 and the earliest available delivery window is selected",
+          "The agent reaches the payment/write-lock or completed checkout with the complete basket"
+        ],
+        "judge_prompt": "Review the browser trajectory, cart evidence, and attention requests. Pass only if all seven products, quantities, exact Cocojune and Essentia brands, single-store constraint, $60 cap, substitution policy, and earliest available delivery window are grounded. Missing exact-brand inventory is a failure, not a successful substitution."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:ecommerce-v1-2026-07-14"
+    ]
+  },
+  {
+    "name": "browser-doordash-usb-c-cable",
+    "title": "DoorDash USB-C Cable Delivery",
+    "description": "Buy a constrained electronics item through rapid local retail delivery.",
+    "prompt": "Use DoorDash to order one USB-C to USB-C charging cable for delivery to my saved address in San Francisco. It must be at least 6 feet long, support at least 60W charging, cost no more than $30 before taxes and fees, and arrive at the earliest available time. Do not buy a USB-A cable, adapter, multi-pack, or cable with a permanently attached wall charger. Complete checkout.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "rapid-delivery"
+    ],
+    "group": "daily",
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
+    "expected_attention_kinds": [
+      "payment_approval",
+      "write_lock"
+    ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base"
+      ],
+      "services": [
+        "doordash.com",
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.doordash.com/products/usbc-cable/ugp_c671cf61-ba10-4433-b46a-3cce19227d69"
+      ],
+      "context_notes": "Live DoorDash retail inventory, saved address/auth state, product-spec comparison, delivery timing, and one auto-approved checkout boundary."
+    },
+    "evaluators": [
+      {
+        "id": "doordash-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved attention request"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          }
+        ]
+      },
+      {
+        "id": "doordash-usb-c-checkout-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The selected item is one USB-C to USB-C cable at least 6 feet long with at least 60W charging support",
+          "The selected item costs no more than $30 before taxes and fees and is not an adapter, multi-pack, USB-A cable, or attached charger",
+          "The agent reaches the payment/write-lock or completed checkout with the earliest available delivery"
+        ],
+        "judge_prompt": "Review product details, cart evidence, and attention requests. Pass only when every connector, length, wattage, quantity, price, exclusion, and delivery constraint is grounded in the transcript."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:ecommerce-v1-2026-07-14"
+    ]
+  },
+  {
+    "name": "browser-alchemy-springs-sauna",
+    "title": "Alchemy Springs Sauna Session",
+    "description": "Book a time-slotted local wellness service with a flexible Sunday window.",
+    "prompt": "Book one standard Sauna Garden session for me at Alchemy Springs, 939 Post Street, San Francisco, this Sunday. Choose the earliest available start time between 10:00 AM and 2:00 PM, use my saved guest details, and do not add classes, treatments, memberships, gift cards, or merchandise. Complete the booking.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "appointment"
+    ],
+    "group": "daily",
+    "price_limit_cents": 300,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
+    "expected_attention_kinds": [
+      "write_lock"
+    ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base"
+      ],
+      "services": [
+        "alchemysprings.com",
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.alchemysprings.com/visit"
+      ],
+      "context_notes": "Live Alchemy Springs Sauna Garden inventory and booking checkout for one person at the official 939 Post Street location, with one auto-approved write boundary and a completed confirmation."
+    },
+    "evaluators": [
+      {
+        "id": "alchemy-sauna-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved write-lock",
+          "The approval identifies Alchemy Springs, the Sauna Garden service, the calendar date, start time, and payment amount"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "Alchemy Springs",
+              "Sauna Garden"
+            ],
+            "require_date": true,
+            "require_time": true,
+            "require_amount": true
+          }
+        ]
+      },
+      {
+        "id": "alchemy-sauna-booking-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The completed booking is for one standard Sauna Garden session for one person at Alchemy Springs, 939 Post Street, this Sunday",
+          "Grounded availability evidence shows that the selected start is the earliest available between 10:00 AM and 2:00 PM",
+          "No classes, treatments, memberships, gift cards, or merchandise are added",
+          "The trajectory shows the booking completed after the single approved write boundary and reached a grounded final confirmation; checkout, an approval request, or a write-lock alone is not completion"
+        ],
+        "judge_prompt": "Review the full browser/tool trajectory and attention requests. Pass only if grounded evidence proves the exact service, one-person count, correct Sunday, earliest evidenced allowed time, exclusions, single approval, and final confirmed booking. Do not treat the task prompt, checkout page, approval request, or write-lock alone as proof of completion."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:ecommerce-v1-2026-07-14"
+    ]
+  },
+  {
+    "name": "browser-hotel-booking",
+    "title": "Refundable Hotel Booking",
+    "description": "Reserve a one-night hotel stay while comparing room price and cancellation terms.",
+    "prompt": "Book a one-night stay for one adult at Hotel Kabuki in San Francisco from this Saturday to Sunday. Choose the lowest-priced non-smoking room with free cancellation, keep the room rate under $400 before taxes and fees, and do not select a nonrefundable rate, package, room upgrade, or add-on. Complete the reservation.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "lodging"
+    ],
+    "group": "daily",
+    "price_limit_cents": 350,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
+    "expected_attention_kinds": [
+      "write_lock"
+    ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base"
+      ],
+      "services": [
+        "booking.com",
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.booking.com"
+      ],
+      "context_notes": "Live lodging inventory and rate rules. The benchmark fixes hotel, occupancy, relative dates, refundability, smoking preference, and price cap while allowing room inventory to vary, and auto-approves one write boundary to require a confirmed reservation."
+    },
+    "evaluators": [
+      {
+        "id": "refundable-hotel-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved write-lock",
+          "The approval identifies Hotel Kabuki, both stay dates, free cancellation, and the total amount"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "Hotel Kabuki",
+              "free cancellation"
+            ],
+            "minimum_date_count": 2,
+            "require_amount": true
+          }
+        ]
+      },
+      {
+        "id": "refundable-hotel-booking-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The completed reservation is for Hotel Kabuki, one adult, Saturday to Sunday, in a non-smoking room",
+          "Grounded comparison evidence shows the selected rate is the lowest-priced available option with free cancellation and is under $400 before taxes and fees",
+          "No nonrefundable rate, package, upgrade, or add-on is selected, and the single approval describes the selected room or rate, cancellation terms, both dates, and total amount",
+          "The trajectory reaches a grounded final reservation confirmation after approval; checkout, an approval request, or a write-lock alone is not completion"
+        ],
+        "judge_prompt": "Review the full room/rate comparison, browser trajectory, and attention request. Pass only if grounded evidence proves the exact hotel, dates, occupancy, refundability, room constraints, lowest-price selection, price cap, well-formed approval, and completed reservation confirmation."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:ecommerce-v1-2026-07-14",
+      "coverage-gap:lodging"
+    ]
+  },
+  {
+    "name": "browser-event-ticket",
+    "title": "AMC Movie Ticket with Seat Selection",
+    "description": "Buy a time-slotted entertainment ticket that requires format and seat selection.",
+    "prompt": "Buy one adult movie ticket at AMC Metreon 16 in San Francisco for this Friday. Choose the earliest standard-format, non-horror movie starting between 7:00 PM and 9:00 PM, select an available seat closest to the horizontal and vertical center of the auditorium, keep the ticket price under $30 before fees, and add no concessions, memberships, donations, or upgrades. Complete the ticket purchase.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "ticketing"
+    ],
+    "group": "daily",
+    "price_limit_cents": 350,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
+    "expected_attention_kinds": [
+      "write_lock"
+    ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base"
+      ],
+      "services": [
+        "amctheatres.com",
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
+      ],
+      "context_notes": "Live movie/showtime/seat inventory. The benchmark fixes venue, date, time window, format, genre exclusion, seating heuristic, price cap, and no-add-on constraints, and auto-approves one write boundary to require a confirmed ticket purchase."
+    },
+    "evaluators": [
+      {
+        "id": "movie-ticket-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved write-lock",
+          "The approval identifies AMC Metreon 16, the date, showtime, seat assignment, and total amount"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "AMC Metreon 16"
+            ],
+            "require_date": true,
+            "require_time": true,
+            "require_amount": true,
+            "require_seat": true
+          }
+        ]
+      },
+      {
+        "id": "movie-ticket-seat-selection-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The completed purchase is for one adult at AMC Metreon 16 this Friday for the earliest qualifying non-horror standard-format show between 7:00 PM and 9:00 PM",
+          "Grounded showtime and seat-map evidence shows the selected show is earliest and the selected available seat is closest to the horizontal and vertical center; the ticket price is under $30 before fees",
+          "No concessions, memberships, donations, or upgrades are added, and the single approval identifies the movie, venue, date, showtime, seat, and total amount",
+          "The trajectory reaches a grounded final ticket confirmation or receipt after approval; checkout, an approval request, or a write-lock alone is not completion"
+        ],
+        "judge_prompt": "Review the full showtime, format, genre, seat-map, cart, browser, and attention evidence. Pass only if every selection and exclusion is grounded, the approval is complete, and a final confirmed ticket or receipt is reached after approval."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:ecommerce-v1-2026-07-14",
+      "coverage-gap:ticketing"
+    ]
+  },
+  {
+    "name": "browser-amazon-return",
+    "title": "Amazon Return and Refund Initiation",
+    "description": "Exercise the post-purchase lifecycle by initiating a return with refund-method and drop-off constraints.",
+    "prompt": "On Amazon, initiate a return for the most recent delivered physical item that is still return-eligible. Choose refund to the original payment method and the nearest free no-box/no-label drop-off option if one is offered. Do not return digital content, groceries, gift cards, or an item marked final sale. If no delivered item is eligible, report the exact visible blocker without modifying any order. Otherwise, complete the return.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "returns"
+    ],
+    "group": "daily",
+    "price_limit_cents": 350,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
+    "expected_attention_kinds": [
+      "write_lock"
+    ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "base",
+        "amazon_auth"
+      ],
+      "services": [
+        "amazon.com",
+        "write_lock"
+      ],
+      "secrets": [
+        "amazon_auth_bundle"
+      ],
+      "live_targets": [
+        "https://www.amazon.com/gp/your-account/order-history"
+      ],
+      "context_notes": "Live Amazon order history with synced account authentication. A deterministic eligible-order fixture is the main stability risk for this post-purchase flow; one write boundary is auto-approved so success requires a completed return confirmation."
+    },
+    "evaluators": [
+      {
+        "id": "amazon-return-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved write-lock",
+          "The approval identifies the return, original payment method, selected drop-off, and refund amount"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "return",
+              "original payment method",
+              "drop-off"
+            ],
+            "require_amount": true
+          }
+        ]
+      },
+      {
+        "id": "amazon-return-completion-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The agent chooses the most recent delivered eligible physical item and excludes digital content, groceries, gift cards, and final-sale items",
+          "The return uses the original payment method and the nearest free no-box/no-label drop-off when offered",
+          "The single approval identifies the specific item, refund amount, original payment method, and selected drop-off",
+          "The trajectory shows the return completed after approval and reaches a grounded return confirmation with the applicable drop-off instructions, QR code, or return authorization; a write-lock alone is not completion"
+        ],
+        "judge_prompt": "Review the full order-history, eligibility, refund, drop-off, browser, and attention evidence. Pass only if the most recent eligible item and all post-purchase constraints are grounded, the approval is complete, and the return reaches final confirmation after approval. No eligible order is a benchmark failure."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:ecommerce-v1-2026-07-14",
+      "coverage-gap:post-purchase"
+    ]
+  },
+  {
+    "name": "minted-agent-accounts-uber",
+    "title": "Uber Ride to FITNESS SF Transbay",
+    "description": "Request an exact UberX route using the live account authentication in the base fixture.",
+    "prompt": "Use Uber to request an UberX ride now from 88 Howard Street, San Francisco, CA 94105 to FITNESS SF Transbay, 425 Mission Street, San Francisco, CA 94105. Confirm both map pins are at those exact addresses and do not select a premium or shared ride. Complete the ride request.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "transportation"
+    ],
+    "group": "daily",
     "price_limit_cents": 400,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": null,
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
+    "expected_attention_kinds": [
+      "write_lock"
+    ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
     "start_phase": "execute",
-    "bench": "pipeline-e2e"
+    "evaluators": [
+      {
+        "id": "uber-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved ride-request write-lock"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          }
+        ]
+      },
+      {
+        "id": "uber-ride-request-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The pickup pin is 88 Howard Street and the destination pin is FITNESS SF Transbay at 425 Mission Street",
+          "The selected service is UberX, not a premium or shared tier",
+          "The trajectory shows the ride request completed after the single approved write boundary"
+        ],
+        "judge_prompt": "Pass only if browser/tool evidence grounds both exact addresses, both map pins, the UberX tier, and a completed ride request. Authentication assistance, account creation, or an account blocker is a failure."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "bench": "rose-bench"
   },
   {
     "name": "minted-agent-accounts-x",
@@ -1708,7 +2800,6 @@
     "tags": [
       "browser",
       "antibot",
-      "bot-challenge",
       "smoke"
     ],
     "price_limit_cents": 120,
@@ -2426,201 +3517,6 @@
     "source": [
       "phone-benchmark:payment",
       "user-label:daily-phone-payment"
-    ]
-  },
-  {
-    "name": "message-person-agent-sms",
-    "tags": [
-      "approval"
-    ],
-    "bench": "pipeline-e2e",
-    "group": "Daily",
-    "title": "Send Immediately From Agent Phone",
-    "prompt": "Send a short, friendly text to 972-977-7432 saying this is the Rose agent SMS send bench. Use the agent_sms channel from your own agent phone. Do not use the user's iMessage relay and do not use email.",
-    "source": [
-      "regression:5851f75f-9c0b-4287-ba50-5fb0877aac9d",
-      "blackbox:agents/tests/blackbox/message_person.blackbox.py",
-      "blackbox:back-end/src/tests/blackbox/agent-phone.blackbox.ts",
-      "unit:back-end/src/tests/unit/agentphone-provider.test.ts"
-    ],
-    "attachment": null,
-    "evaluators": [
-      {
-        "id": "immediate_agent_sms_send",
-        "checks": [
-          {
-            "type": "message_person_agent_sms_send"
-          }
-        ],
-        "method": "static_check",
-        "criteria": [
-          "Exactly one message_person call is made",
-          "The selected transport is agent_sms",
-          "AgentPhone accepts the outbound message immediately",
-          "The terminal tool event contains provider=agentphone, provider_channel, status=sent, and message_id",
-          "No iMessage queue_id is present"
-        ]
-      }
-    ],
-    "description": "Live regression bench proving agent_sms sends immediately through AgentPhone and never enters the user's iMessage queue",
-    "environment": {
-      "mode": "live",
-      "secrets": [
-        "AGENTPHONE_API_KEY"
-      ],
-      "services": [
-        "message_person",
-        "AgentPhone outbound messages"
-      ],
-      "base_images": [],
-      "db_fixtures": [],
-      "live_targets": [
-        "AgentPhone POST /v1/messages"
-      ],
-      "context_notes": "The evaluator requires a FINISHED agent_sms receipt with provider=agentphone, provider_channel, and message_id, and rejects any iMessage queue_id. AgentPhone acceptance is immediate but does not guarantee recipient-device delivery."
-    },
-    "start_phase": "execute",
-    "is_chat_mode": false,
-    "expected_tools": [
-      "message_person"
-    ],
-    "timeout_seconds": 180,
-    "tool_count_scope": "root",
-    "approval_handling": "auto_approve",
-    "price_limit_cents": 50,
-    "expected_tool_counts": {
-      "message_person": 1
-    },
-    "requires_claude_code": false,
-    "requires_browser_agent": false
-  },
-  {
-    "name": "browser-agent-amazon-passkey",
-    "tags": [
-      "browser",
-      "auth"
-    ],
-    "bench": "rose-bench",
-    "title": "Amazon Kernel Passkey Authentication",
-    "prompt": "Open https://www.amazon.com and first confirm the page visibly shows the signed-out 'Hello, sign in' state. Then sign in using the saved Amazon passkey. Do not use a password, OTP, cookie/session authentication, or ask me to sign in. Once Amazon shows an authenticated account state, stop and report success.",
-    "source": [
-      "commit:8923d6e87",
-      "live-amazon:kernel-passkey"
-    ],
-    "attachment": null,
-    "evaluators": [
-      {
-        "id": "kernel-passkey-authentication",
-        "checks": [
-          {
-            "type": "browser_provider",
-            "value": "kernel"
-          },
-          {
-            "type": "browser_session_metadata_values",
-            "value": {
-              "auth_source": "none",
-              "cookies_count": 0,
-              "profile_source": "new_user_persistent",
-              "cookies_injected": false,
-              "permission_grant_count": 0,
-              "indexed_db_origin_count": 0,
-              "cache_storage_origin_count": 0,
-              "local_storage_origin_count": 0
-            }
-          },
-          {
-            "type": "message_before_credential_contains",
-            "value": [
-              "Hello, sign in"
-            ],
-            "credential_kind": "passkey"
-          },
-          {
-            "type": "credential_ref_kind",
-            "value": "passkey"
-          },
-          {
-            "type": "message_after_credential_contains",
-            "value": [
-              "Hello, Andy"
-            ],
-            "credential_kind": "passkey"
-          },
-          {
-            "type": "forbidden_credential_ref_kinds",
-            "value": [
-              "password",
-              "email_otp",
-              "sms_otp"
-            ]
-          }
-        ],
-        "method": "static_check",
-        "criteria": [
-          "Browser session metadata identifies Kernel as the provider",
-          "Browser session metadata proves a new profile with zero cookie or origin-state injection",
-          "The transcript shows Amazon signed out before passkey use",
-          "A passkey credential_ref is persisted before task completion",
-          "Amazon shows an authenticated account state",
-          "The transcript uses neither password nor OTP"
-        ]
-      }
-    ],
-    "description": "Live Amazon sign-in from a fresh Kernel profile using only the synced passkey",
-    "environment": {
-      "mode": "live",
-      "secrets": [
-        "amazon_passkey"
-      ],
-      "services": [
-        "amazon.com",
-        "kernel"
-      ],
-      "base_images": [],
-      "db_fixtures": [],
-      "live_targets": [
-        "https://www.amazon.com"
-      ],
-      "context_notes": "compute_tokens refreshes only LLM credentials. amazon_passkey syncs only the live passkey, deletes Amazon cookies and origin storage, disables saved-session/password alternatives, and detaches the local Kernel profile mapping so the run proves CDP passkey injection from a fresh profile.",
-      "live_fixtures": [
-        "compute_tokens",
-        "amazon_passkey"
-      ]
-    },
-    "start_phase": "execute",
-    "is_chat_mode": false,
-    "expected_tools": [
-      "spawn_agent"
-    ],
-    "timeout_seconds": 300,
-    "approval_handling": null,
-    "price_limit_cents": 200,
-    "requires_claude_code": false,
-    "requires_browser_agent": true,
-    "expected_browser_provider": "kernel",
-    "expected_credential_ref_kind": "passkey",
-    "forbidden_credential_ref_kinds": [
-      "password",
-      "email_otp",
-      "sms_otp"
-    ],
-    "success_on_browser_auth_evidence": true,
-    "expected_browser_session_metadata_values": {
-      "auth_source": "none",
-      "cookies_count": 0,
-      "profile_source": "new_user_persistent",
-      "cookies_injected": false,
-      "permission_grant_count": 0,
-      "indexed_db_origin_count": 0,
-      "cache_storage_origin_count": 0,
-      "local_storage_origin_count": 0
-    },
-    "expected_pre_credential_message_contains": [
-      "Hello, sign in"
-    ],
-    "expected_post_credential_message_contains": [
-      "Hello, Andy"
     ]
   }
 ]

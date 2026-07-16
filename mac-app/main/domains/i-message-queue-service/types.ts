@@ -14,6 +14,7 @@ export interface QueuedMessage {
   message: string;
   agent_id: string;
   created_at: string;
+  claim_token: string;
 }
 
 /**
@@ -41,3 +42,6 @@ export interface Session {
  */
 export type PopOutcome =
   { ok: true; data: PopResponse } | { ok: false; status: number; statusText: string };
+
+export type DeliveryResultOutcome =
+  { ok: true } | { ok: false; status: number; statusText: string };

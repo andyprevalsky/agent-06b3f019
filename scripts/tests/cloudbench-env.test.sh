@@ -144,6 +144,25 @@ cloudbench_controller_lock_acquire "$lock_file"
 if bash -c 'source "$1"; cloudbench_controller_lock_acquire "$2"' _ "$HELPER_SRC" "$lock_file"; then
   fail "a second controller must not acquire an owned lock"
 fi
+
+lock_wait_attempts=0
+lock_wait_sleeps=0
+cloudbench_controller_lock_acquire() {
+  lock_wait_attempts=$((lock_wait_attempts + 1))
+  [ "$lock_wait_attempts" -ge 3 ]
+}
+sleep() {
+  [ "$1" = "7" ] || fail "controller lock wait used the wrong retry interval"
+  lock_wait_sleeps=$((lock_wait_sleeps + 1))
+}
+cloudbench_controller_lock_acquire_wait "$lock_file" 7 ||
+  fail "controller lock wait must continue until its live owner releases"
+[ "$lock_wait_attempts" -eq 3 ] ||
+  fail "controller lock wait must retry owned lock contention"
+[ "$lock_wait_sleeps" -eq 2 ] ||
+  fail "controller lock wait must sleep once per owned lock contention result"
+unset -f cloudbench_controller_lock_acquire sleep
+
 cloudbench_controller_lock_release "$lock_file"
 [ ! -e "$lock_file" ] || fail "controller lock must be removed by its owner"
 
@@ -164,14 +183,20 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'bash scripts/run-bench-cloud --verify-secrets' \
   "fleet controller must read-only verify the environment before cloning"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'cloudbench_controller_lock_acquire "$LOCK_DIR"' \
-  "fleet controllers must hold the workspace-local controller lock"
+  'cloudbench_controller_lock_acquire_wait' \
+  "fleet controllers must wait for the workspace-local controller lock"
+require_text "$ROOT_DIR/scripts/run-predeploy-cloud" \
+  'bash "$ROOT_DIR/scripts/tests/cloudbench-multi-workstream.test.sh"' \
+  "pre-deploy cloud gate must run the permanent concurrency regression"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'CLOUDBENCH_ENV_VERIFIED=1' \
   "fleet children must receive proof that the controller verified the environment"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'set -C; printf '"'"'%s\n'"'"' "$$" > "$claim_path"' \
-  "pool claims must be atomic (noclobber) so concurrent controllers cannot double-claim"
+  'write_pool_claim "$claim_path"' \
+  "pool claims must use the atomic host/PID-birth ownership writer"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'printf '"'"'pid_start=%s\n'"'"' "$FLEET_OWNER_PID_START"' \
+  "pool and fleet ownership must disambiguate PID reuse"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'verify_app_environment' \
   "run-bench-cloud must expose the read-only environment preflight"

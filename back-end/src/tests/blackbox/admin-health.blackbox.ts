@@ -8,7 +8,8 @@
  * Invariants covered:
  *   - auth boundary: no auth returns 401, non-admin JWT returns 403
  *   - authorization: Andy's admin account can read company-health metrics
- *   - response shape: metrics include revenue, users, runs, retention, and velocity
+ *   - response shape: metrics include revenue, waitlist signups, users, runs, retention, and velocity
+ *   - parameter handling: supported time slices are accepted
  *   - periodization: every supported time slice uses contiguous rolling-day buckets
  *   - error-surface: failures return { error: string }
  *
@@ -19,6 +20,9 @@
 import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
+
+import { findWaitlistSignupsBetween } from '../../domains/admin-health/repo';
+import { prisma } from '../../providers/database';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -159,13 +163,17 @@ function assertRollingPeriods(
     throw new Error('History range must span every rolling period');
   }
   const generatedAt = new Date(body.generatedAt);
-  const retrievalDayStart = Date.UTC(
+  // The latest period ends at the START OF TOMORROW so the in-progress day is
+  // included dashboard-wide (current bucket = "this period so far").
+  const nextUtcDayStart = Date.UTC(
     generatedAt.getUTCFullYear(),
     generatedAt.getUTCMonth(),
-    generatedAt.getUTCDate()
+    generatedAt.getUTCDate() + 1
   );
-  if (Date.parse(latest.end) !== retrievalDayStart) {
-    throw new Error('Latest rolling period must end at the last complete UTC day');
+  if (Date.parse(latest.end) !== nextUtcDayStart) {
+    throw new Error(
+      'Latest rolling period must end at the start of the next UTC day (includes today)'
+    );
   }
 }
 
@@ -230,6 +238,24 @@ function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T 
     throw new Error(`${label} schema validation failed: ${result.error.message}`);
   }
   return result.data;
+}
+
+function assertWaitlistMetrics(data: unknown): void {
+  const payload = data as {
+    summary?: { waitlistSignups?: unknown };
+    series?: Array<{ waitlistSignups?: unknown }>;
+  };
+  const summaryCount = payload.summary?.waitlistSignups;
+  const latestCount = payload.series?.at(-1)?.waitlistSignups;
+  if (typeof summaryCount !== 'number') {
+    throw new Error('Summary must include a numeric waitlist signup count');
+  }
+  if (typeof latestCount !== 'number') {
+    throw new Error('Each series must include numeric waitlist signup counts');
+  }
+  if (summaryCount !== latestCount) {
+    throw new Error('Summary waitlist signups must match the current weekly period');
+  }
 }
 
 function assertNoImpossibleConversion(body: z.infer<typeof AdminHealthResponseSchema>): void {
@@ -403,6 +429,7 @@ async function testAdminHappyWeekly() {
     headers: authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
   });
   assertStatus(res.status, 200, res.data);
+  assertWaitlistMetrics(res.data);
   const body = assertSchema(AdminHealthResponseSchema, res.data, 'GET /admin-health weekly');
   if (body.timeSlice !== 'weekly') throw new Error(`Expected weekly, got ${body.timeSlice}`);
   assertRollingPeriods(body, 12, 7);
@@ -564,6 +591,33 @@ async function testAdminHappyYearly() {
   assertNoImpossibleConversion(body);
 }
 
+// Waitlist signups are a phone-verified product signal: entries without a phone
+// number (the legacy email-only waitlist) must be cleared out of the metric.
+async function testWaitlist_excludesPhonelessSignups() {
+  const marker = `blackbox-wl-${Date.now()}`;
+  const start = new Date('2000-01-01T00:00:00.000Z');
+  const end = new Date('2000-01-02T00:00:00.000Z');
+  const at = new Date('2000-01-01T12:00:00.000Z');
+  try {
+    await prisma.waitlist.createMany({
+      data: [
+        { name: marker, phone: `+1999${Date.now() % 10000000}`, createdAt: at },
+        { name: marker, email: `${marker}-a@example.com`, phone: null, createdAt: at },
+        { name: marker, email: `${marker}-b@example.com`, phone: '', createdAt: at },
+      ],
+    });
+    const rows = await findWaitlistSignupsBetween(start, end);
+    if (rows.length !== 1) {
+      throw new Error(
+        `Expected exactly 1 phone-bearing signup in the window, got ${rows.length} ` +
+          `(phone-less rows must be excluded)`
+      );
+    }
+  } finally {
+    await prisma.waitlist.deleteMany({ where: { name: marker } });
+  }
+}
+
 async function main() {
   const tests = [
     { name: 'GET /api/admin-health no auth -> 401', fn: testNoAuth },
@@ -572,6 +626,10 @@ async function main() {
     { name: 'GET /api/admin-health monthly admin -> metrics', fn: testAdminHappyMonthly },
     { name: 'GET /api/admin-health quarterly admin -> metrics', fn: testAdminHappyQuarterly },
     { name: 'GET /api/admin-health yearly admin -> metrics', fn: testAdminHappyYearly },
+    {
+      name: 'waitlist metric excludes phone-less signups',
+      fn: testWaitlist_excludesPhonelessSignups,
+    },
   ];
 
   const results = await runPool(tests, CASE_CONCURRENCY);

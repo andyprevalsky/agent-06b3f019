@@ -70,6 +70,19 @@ class FrontendTunnel:
 
 
 @dataclass(frozen=True)
+class IMessageRelay:
+    process: subprocess.Popen
+
+
+# message-person relay constants — mirror scripts/run-bench-cloud so the local
+# isolated run exercises the same authenticated-Mac path the cloud fleet does.
+IMESSAGE_RELAY_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+IMESSAGE_RELAY_EXPECTED_PHONE = "+19729777432"
+IMESSAGE_RELAY_EXPECTED_MESSAGE = "Hi! This is the Rose iMessage send bench."
+IMESSAGE_RELAY_AUTOLOGIN_OTP = "181818"
+
+
+@dataclass(frozen=True)
 class ServiceStack:
     run_id: str
     context_dir: Path
@@ -329,6 +342,71 @@ def stop_frontend_tunnel(tunnel: FrontendTunnel | None) -> None:
         tunnel.process.wait()
 
 
+def start_imessage_relay(port: int, run_timeout_seconds: int, heartbeat_wait_seconds: int = 240) -> IMessageRelay:
+    """Run the authenticated-Mac iMessage relay against the isolated local backend.
+
+    message-person only passes when a Mac polling this exact backend runs the
+    Messages AppleScript. The cloud fleet (run-bench-cloud) starts this relay;
+    the local isolated stack must do the same or message-person can never pass
+    locally. The relay auto-logs-in the installed Rose app if it has no usable
+    session (dev SMS OTP bypass), so a signed-out app doesn't block the run.
+    """
+    tsx = REPO_ROOT / "mac-app" / "node_modules" / ".bin" / "tsx"
+    entry = REPO_ROOT / "mac-app" / "scripts" / "cloudbench-imessage-relay.ts"
+    if not tsx.exists() or not entry.exists():
+        raise RuntimeError("message-person requires mac-app tsx + cloudbench-imessage-relay.ts")
+    (REPO_ROOT / ".context").mkdir(exist_ok=True)
+    marker = REPO_ROOT / ".context" / f"local-imessage-relay-markers-{port}.json"
+    if marker.exists():
+        marker.unlink()
+    log_path = REPO_ROOT / ".context" / f"local-imessage-relay-{port}.log"
+    log = open(log_path, "w")
+    process = subprocess.Popen(
+        [
+            str(tsx), str(entry),
+            "--base-url", f"http://localhost:{port}",
+            "--expected-user-id", IMESSAGE_RELAY_USER_ID,
+            "--expected-phone", IMESSAGE_RELAY_EXPECTED_PHONE,
+            "--expected-message", IMESSAGE_RELAY_EXPECTED_MESSAGE,
+            "--marker-file", str(marker),
+            "--timeout-seconds", str(run_timeout_seconds),
+            "--auto-login-phone", IMESSAGE_RELAY_EXPECTED_PHONE,
+            "--auto-login-otp", IMESSAGE_RELAY_AUTOLOGIN_OTP,
+        ],
+        cwd=str(REPO_ROOT / "mac-app"),
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    log.close()
+    deadline = time.time() + heartbeat_wait_seconds
+    while time.time() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError(
+                f"iMessage relay exited before its heartbeat (code {process.returncode}); see {log_path}"
+            )
+        try:
+            if "bridge heartbeat established" in log_path.read_text():
+                print("Authenticated Mac iMessage relay is polling this benchmark backend.")
+                return IMessageRelay(process=process)
+        except FileNotFoundError:
+            pass
+        time.sleep(1)
+    process.terminate()
+    raise TimeoutError(f"iMessage relay did not establish a heartbeat in {heartbeat_wait_seconds}s; see {log_path}")
+
+
+def stop_imessage_relay(relay: IMessageRelay | None) -> None:
+    if relay is None or relay.process.poll() is not None:
+        return
+    relay.process.terminate()
+    try:
+        relay.process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        relay.process.kill()
+        relay.process.wait()
+
+
 def _manifest_run_sh_pid(stack: ServiceStack) -> int | None:
     try:
         manifest = load_services_manifest(stack.manifest_path)
@@ -509,6 +587,10 @@ def _kill_scoped_processes_by_run_id(stack: ServiceStack) -> None:
 
 def needs_frontend_tunnel(tasks: Sequence[str]) -> bool:
     return bool(AGENT_PAYMENT_TASK_NAMES & set(tasks)) and not os.environ.get("BENCHMARK_FRONTEND_URL")
+
+
+def needs_imessage_relay(tasks: Sequence[str]) -> bool:
+    return "message-person" in set(tasks) and sys.platform == "darwin"
 
 
 def needs_payment_fixture(tasks: Sequence[str]) -> bool:
@@ -1422,12 +1504,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise ValueError("--checkpoint requires exactly one resolved benchmark task")
     process: subprocess.Popen | None = None
     frontend_tunnel: FrontendTunnel | None = None
+    imessage_relay: IMessageRelay | None = None
     dashboard: DashboardServer | None = None
     result_paths: list[Path] = []
     stack = build_service_stack(args)
 
     def handle_shutdown(signum: int, _frame: object) -> None:
         print(f"\nReceived signal {signum}; tearing down benchmark services...", file=sys.stderr)
+        stop_imessage_relay(imessage_relay)
         stop_frontend_tunnel(frontend_tunnel)
         # The dashboard URL stays valid until the server stops here.
         if dashboard is not None:
@@ -1498,6 +1582,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 os.environ["BENCHMARK_FRONTEND_URL"] = frontend_tunnel.public_url.rstrip("/")
                 print(f"Test payment tunnel (fallback): {frontend_tunnel.public_url}")
         port = int(manifest["ports"]["backend"])
+        if needs_imessage_relay(selected_tasks):
+            # Bridge the isolated local backend to this Mac's Messages app, exactly
+            # like the cloud fleet does. The relay's run deadline spans the whole
+            # invocation so it keeps polling until the agent enqueues its message.
+            imessage_relay = start_imessage_relay(port, run_timeout_seconds=1_200)
         if checkpoint_requested(args):
             return run_checkpoint_invocation(
                 task_name=selected_tasks[0],
@@ -1535,6 +1624,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     finally:
         signal.signal(signal.SIGTERM, previous_sigterm)
         signal.signal(signal.SIGINT, previous_sigint)
+        stop_imessage_relay(imessage_relay)
         stop_frontend_tunnel(frontend_tunnel)
         # Stop the dashboard HTTP server; anyone viewing the URL keeps the
         # final report card remains visible after teardown.

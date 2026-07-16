@@ -20,6 +20,10 @@ export interface UserCreatedRecord {
   createdAt: Date;
 }
 
+export interface WaitlistSignupRecord {
+  createdAt: Date;
+}
+
 export interface SubscriptionUserRecord {
   userId: string;
   stripeCustomerId: string;
@@ -79,6 +83,22 @@ export async function findSubscriptionUsersByCustomerIds(
     where: { stripeCustomerId: { in: stripeCustomerIds } },
     select: { userId: true, stripeCustomerId: true },
   });
+}
+
+export async function findWaitlistSignupsBetween(
+  start: Date,
+  end: Date
+): Promise<WaitlistSignupRecord[]> {
+  // Only phone-bearing signups count. The legacy email waitlist (~3k rows with
+  // no phone) is not a real product signup, so entries without a phone number
+  // are cleared out of this metric.
+  const rows = await prisma.waitlist.findMany({
+    where: { createdAt: { gte: start, lt: end }, phone: { not: null } },
+    select: { createdAt: true, phone: true },
+  });
+  return rows
+    .filter((row) => (row.phone ?? '').trim() !== '')
+    .map(({ createdAt }) => ({ createdAt }));
 }
 
 export async function findRootTasksBetween(start: Date, end: Date): Promise<RootTaskRecord[]> {

@@ -235,6 +235,7 @@ model User {
   phone                       String?
   isAnonymous                 Boolean                     @default(false)
   onboardingCompletedAt       DateTime?
+  imessageBridgeLastSeenAt    DateTime?
   systemName                  String?
   profilePicture              String?
   customSystemPrompt          String?
@@ -920,15 +921,25 @@ model GoalHistory {
 }
 
 model ImessageQueue {
-  id          String   @id @default(uuid())
-  userId      String
-  agentId     String
-  phoneNumber String
-  message     String
-  createdAt   DateTime @default(now())
+  id           String    @id @default(uuid())
+  userId       String
+  agentId      String
+  phoneNumber  String
+  message      String
+  createdAt    DateTime  @default(now())
+  expiresAt    DateTime?
+  claimedAt    DateTime?
+  claimToken   String?
+  dispatchedAt DateTime?
+  sentAt       DateTime?
+  failedAt     DateTime?
+  lastError    String?
+  attempts     Int       @default(0)
+  failures     Int       @default(0)
 
   @@index([userId])
   @@index([agentId])
+  @@index([userId, sentAt, failedAt, dispatchedAt, expiresAt, claimedAt, createdAt], map: "ImessageQueue_send_claim_idx")
 }
 
 model PendingLocalStorageBatch {

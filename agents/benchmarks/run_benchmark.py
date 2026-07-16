@@ -116,10 +116,8 @@ _WORLD_MODEL_UPDATE_RESULT: Optional[dict[str, Any]] = None
 CALENDLY_TASK_NAME = "calendly-schedule-meeting"
 BIOMETRICS_WEBDECOY_TASK_NAME = "browser-biometrics-webdecoy"
 AUTH_BUNDLE_BIOMETRICS_GATE_ENV = "BENCHMARK_AUTH_BUNDLE_BIOMETRICS_GATE"
-MINTED_AGENT_ACCOUNT_TASK_NAME = "minted-agent-accounts-uber"
 MINTED_AGENT_ACCOUNT_X_TASK_NAME = "minted-agent-accounts-x"
 MINTED_AGENT_ACCOUNT_TASK_NAMES = {
-    MINTED_AGENT_ACCOUNT_TASK_NAME,
     MINTED_AGENT_ACCOUNT_X_TASK_NAME,
 }
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
@@ -133,6 +131,8 @@ EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     AMAZON_PASSKEY_TASK_NAME,
 }
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
+MESSAGE_PERSON_TASK_NAME = "message-person"
+MESSAGE_PERSON_AGENT_SMS_TASK_NAME = "message-person-agent-sms"
 USER_DATA_PROD_DOCUMENT_SOURCES = {"chatgpt", "claude", "apple_notes", "obsidian"}
 USER_DATA_PROD_CHECKLIST_KEYS = {"provider_validation_checklist", "provider_verification_checklist"}
 GREP_BASE_SNAPSHOT_ENV = "BENCHMARK_GREP_BASE_SNAPSHOT"
@@ -184,12 +184,10 @@ GATE_FIXTURE_TASK_USER_IDS = {
     SOURCE_CONNECT_GATE_TASK_NAME: SOURCE_CONNECT_GATE_USER_ID,
 }
 DEFAULT_MINTED_BENCHMARK_AGENT_EMAIL = "rose.harbor47@mail.roselabs.ai"
-DEFAULT_MINTED_BENCHMARK_AGENT_PHONE = "+18159823405"
+DEFAULT_MINTED_BENCHMARK_AGENT_PHONE = "+19123613984"
 SMOKE_MEMORY_MAX_GROWTH_MB = float(os.environ.get("BENCHMARK_SMOKE_MEMORY_MAX_GROWTH_MB", "256"))
 SMOKE_MEMORY_MAX_END_MB = float(os.environ.get("BENCHMARK_SMOKE_MEMORY_MAX_END_MB", "1800"))
-SMOKE_MEMORY_MAX_WORKER_MB = float(
-    os.environ.get("BENCHMARK_SMOKE_MEMORY_MAX_WORKER_MB", "220")
-)
+SMOKE_MEMORY_MAX_WORKER_MB = float(os.environ.get("BENCHMARK_SMOKE_MEMORY_MAX_WORKER_MB", "220"))
 SMOKE_MEMORY_FORBID_PLAYWRIGHT_DRIVERS = os.environ.get(
     "BENCHMARK_SMOKE_FORBID_PLAYWRIGHT_DRIVERS", "true"
 ).lower() not in ("0", "false", "no")
@@ -223,6 +221,15 @@ def _benchmark_env_bool(name: str) -> Optional[bool]:
     raise ValueError(f"{name} must be one of true/false/1/0/yes/no/on/off")
 
 
+def _resolved_fast_mode_cache(task: BenchmarkTask) -> Optional[bool]:
+    """Resolve Fast Mode without overriding a task's side-effect safety contract."""
+    if task.fast_cache == "off":
+        return False
+    if task.fast_cache == "on":
+        return True
+    return _benchmark_env_bool("BENCHMARK_FAST_MODE_CACHE")
+
+
 def _apply_benchmark_env_overrides(tasks: List[BenchmarkTask]) -> None:
     """Apply local benchmark-only task overrides from env vars."""
     approval_override = os.environ.get("BENCHMARK_APPROVAL_HANDLING_OVERRIDE")
@@ -235,8 +242,7 @@ def _apply_benchmark_env_overrides(tasks: List[BenchmarkTask]) -> None:
         value = normalized
     else:
         raise ValueError(
-            "BENCHMARK_APPROVAL_HANDLING_OVERRIDE must be one of "
-            "none/auto_approve/ignore/prompt_user/count_only"
+            "BENCHMARK_APPROVAL_HANDLING_OVERRIDE must be one of none/auto_approve/ignore/prompt_user/count_only"
         )
     for task in tasks:
         task.approval_handling = value
@@ -341,6 +347,19 @@ def _should_auto_approve_attention(task: BenchmarkTask, req: dict) -> bool:
         and _attention_request_kind(req)
         == "agentcard_user_cardholder_onboarding_required"
     )
+
+
+def _attention_request_evidence(req: dict) -> dict:
+    """Keep the user-visible approval contract for deterministic post-run checks."""
+    metadata = req.get("metadata") if isinstance(req.get("metadata"), dict) else {}
+    return {
+        "id": req.get("id"),
+        "kind": _attention_request_kind(req),
+        "question": req.get("question"),
+        "message": req.get("message"),
+        "description": req.get("description"),
+        "metadata": metadata,
+    }
 
 
 def _gate_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
@@ -538,6 +557,54 @@ def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
     receipt = _payment_receipt_from_attention_request(req)
     if not receipt:
         return "missing requestPaymentCard metadata"
+
+    required_fields = expected.get("requiredFields", [])
+    for field in required_fields:
+        if field not in receipt:
+            return f"missing required payment receipt field: {field}"
+        if field != "fees" and receipt.get(field) in (None, "", []):
+            return f"empty required payment receipt field: {field}"
+
+    required_line_item_fields = expected.get("requiredLineItemFields", [])
+    line_items = receipt.get("lineItems")
+    if required_line_item_fields and not isinstance(line_items, list):
+        return "missing required payment receipt field: lineItems"
+    for item_index, item in enumerate(line_items or []):
+        if not isinstance(item, dict):
+            return f"payment receipt lineItems[{item_index}] must be an object"
+        for field in required_line_item_fields:
+            if field not in item:
+                return f"missing required lineItems[{item_index}] field: {field}"
+            if field != "imageUrl" and item.get(field) in (None, "", []):
+                return f"empty required lineItems[{item_index}] field: {field}"
+
+    required_fee_fields = expected.get("requiredFeeFields", [])
+    fees = receipt.get("fees")
+    if required_fee_fields and not isinstance(fees, list):
+        return "missing required payment receipt field: fees"
+    for fee_index, fee in enumerate(fees or []):
+        if not isinstance(fee, dict):
+            return f"payment receipt fees[{fee_index}] must be an object"
+        for field in required_fee_fields:
+            if field not in fee:
+                return f"missing required fees[{fee_index}] field: {field}"
+            if fee.get(field) in (None, ""):
+                return f"empty required fees[{fee_index}] field: {field}"
+
+    if required_fields or required_line_item_fields or required_fee_fields:
+        from browser_tools.schemas import RequestPaymentCardBrowserTool
+
+        try:
+            RequestPaymentCardBrowserTool.model_validate(
+                {"tool": "request_payment_card", **receipt}
+            )
+        except ValueError as exc:
+            return f"malformed complete payment receipt: {exc}"
+        fingerprint = receipt.get("fingerprint")
+        if "fingerprint" in required_fields and (
+            not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+        ):
+            return "malformed complete payment receipt field: fingerprint"
     if "merchant" in expected and receipt.get("merchant") != expected.get("merchant"):
         return f"merchant mismatch: expected {expected.get('merchant')}, got {receipt.get('merchant')}"
     if "currency" in expected and (receipt.get("currency") or "USD") != expected.get("currency", "USD"):
@@ -709,7 +776,9 @@ async def _update_world_model_before_simulation(args) -> None:
         print(f"  ❌ World model update failed before simulate run: {exc}")
         raise
     if _WORLD_MODEL_UPDATE_RESULT:
-        os.environ["WMH_MODEL_NAME"] = str(_WORLD_MODEL_UPDATE_RESULT.get("model_name") or os.environ.get("WMH_MODEL_NAME") or "rose-archive")
+        os.environ["WMH_MODEL_NAME"] = str(
+            _WORLD_MODEL_UPDATE_RESULT.get("model_name") or os.environ.get("WMH_MODEL_NAME") or "rose-archive"
+        )
         print(
             "  ✅ World model ready: "
             f"total={_WORLD_MODEL_UPDATE_RESULT.get('total_traces')} "
@@ -838,7 +907,6 @@ async def _api_headers() -> dict:
             "Content-Type": "application/json",
         }
         return dict(_cached_headers)
-
     # If we already know API key is the only option, skip JWT attempts
     if _auth_mode == "api_key":
         _cached_headers_user_id = user_id
@@ -889,13 +957,26 @@ async def _api_headers() -> dict:
         return dict(_cached_headers)
 
 
+async def _preflight_message_person_bridge(base_url: str) -> None:
+    """Fail before agent creation unless a current Mac polls this backend."""
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(f"{base_url}/api/imessage/bridge/status", headers=headers)
+    if response.status_code != 200:
+        raise RuntimeError(f"iMessage bench preflight failed ({response.status_code}): {response.text[:200]}")
+    payload = response.json()
+    if payload.get("connected") is not True:
+        last_seen_at = payload.get("last_seen_at") or "never"
+        raise RuntimeError(
+            "iMessage bench requires an updated, authenticated Mac app polling this exact backend; "
+            f"last seen: {last_seen_at}"
+        )
+
+
 def _benchmark_agent_source_override() -> str:
     source = (os.environ.get("BENCHMARK_AGENT_SOURCE") or "MAC_APP").strip().upper()
     if source not in {"WEB", "MAC_APP", "SMS"}:
-        raise ValueError(
-            "BENCHMARK_AGENT_SOURCE must be one of WEB, MAC_APP, or SMS; "
-            f"got {source!r}"
-        )
+        raise ValueError(f"BENCHMARK_AGENT_SOURCE must be one of WEB, MAC_APP, or SMS; got {source!r}")
     return source
 
 
@@ -943,11 +1024,7 @@ async def create_agent(
 ) -> str:
     """Create a benchmark agent. Returns agent_id."""
     headers = await _api_headers()
-    goal = (
-        os.environ.get("BENCHMARK_GOAL_OVERRIDE")
-        or _prod_user_data_prompt_override(task)
-        or task.prompt
-    )
+    goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or _prod_user_data_prompt_override(task) or task.prompt
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
     goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)
     source_override = _benchmark_agent_source_override()
@@ -969,9 +1046,9 @@ async def create_agent(
     if write_lock_enabled is not None:
         body["write_lock_enabled"] = write_lock_enabled
 
-    # Fast Mode aggressive cache: opt-in via env (mirrors write-lock override). Does
-    # NOT change task definitions — just flips the per-run cache flag for A/B timing.
-    fast_mode_cache = _benchmark_env_bool("BENCHMARK_FAST_MODE_CACHE")
+    # A task-level declaration wins because live side-effect benchmarks must not
+    # replay cached decisions. Tasks without a declaration retain the env A/B toggle.
+    fast_mode_cache = _resolved_fast_mode_cache(task)
     if fast_mode_cache is not None:
         body["fast_mode_cache_enabled"] = fast_mode_cache
 
@@ -1004,8 +1081,7 @@ async def create_agent(
             )
             if patch_resp.status_code != 200:
                 raise Exception(
-                    f"Failed to verify write_lock_enabled override: "
-                    f"{patch_resp.status_code} - {patch_resp.text}"
+                    f"Failed to verify write_lock_enabled override: {patch_resp.status_code} - {patch_resp.text}"
                 )
             patched = patch_resp.json().get("agent", {})
             if patched.get("write_lock_enabled") != write_lock_enabled:
@@ -1335,9 +1411,8 @@ def _logical_tool_count_key(meta: dict) -> Optional[Tuple[str, str]]:
         return tool_name, str(tool_call_id)
 
     if tool_name == "spawn_browser_agent":
-        is_completion = (
-            action_type == "task_complete"
-            or (action_type is None and meta.get("title") == "Browser automation complete")
+        is_completion = action_type == "task_complete" or (
+            action_type is None and meta.get("title") == "Browser automation complete"
         )
         if not is_completion or meta.get("subAgentId"):
             return None
@@ -1390,6 +1465,26 @@ def _count_logical_tool_calls_from_messages(messages: List[dict]) -> Dict[str, i
         tool_name, _ = key
         counts[tool_name] = counts.get(tool_name, 0) + 1
     return counts
+
+
+def _root_exact_tool_count_exceeded(task: BenchmarkTask, messages: List[dict]) -> Optional[str]:
+    """Fail fast once a root-scoped exact tool-count contract cannot recover.
+
+    A later agent state cannot reduce the number of logical calls already made.
+    Waiting for the task timeout only hides the first bad boundary and can repeat
+    external side effects, so exact root-count benchmarks stop immediately.
+    """
+    if task.tool_count_scope != "root" or not task.expected_tool_counts:
+        return None
+    actual_counts = _count_logical_tool_calls_from_messages(messages)
+    for tool_name, expected_count in task.expected_tool_counts.items():
+        actual = actual_counts.get(tool_name, 0)
+        if actual > expected_count:
+            return (
+                f"Tool '{tool_name}' exceeded its exact root call limit during execution: "
+                f"expected {expected_count}, got {actual}. Full counts: {actual_counts}"
+            )
+    return None
 
 
 async def count_tree_tool_calls(base_url: str, root_agent_id: str) -> Dict[str, int]:
@@ -1562,8 +1657,7 @@ def _validate_tool_count_expectations(
         actual = actual_counts.get(tool_name, 0)
         if actual < minimum:
             return (
-                f"Tool '{tool_name}': expected at least {minimum} call(s), "
-                f"got {actual}. Full counts: {actual_counts}"
+                f"Tool '{tool_name}': expected at least {minimum} call(s), got {actual}. Full counts: {actual_counts}"
             )
 
     for tool_name in forbidden_tools:
@@ -1675,9 +1769,7 @@ async def poll_agent_until_message_index(
             print(f"    checkpoint source progress: root_messages={len(messages)}/{required_count}")
             last_count = len(messages)
         boundary_index = (
-            _finished_for_each_checkpoint_index(messages)
-            if checkpoint_source_boundary == "for-each-finished"
-            else None
+            _finished_for_each_checkpoint_index(messages) if checkpoint_source_boundary == "for-each-finished" else None
         )
         if boundary_index is not None:
             if not await pause_agent(base_url, agent_id):
@@ -1986,6 +2078,7 @@ async def poll_agent(
     seen_attention_ids: set[str] = set()
     seen_attention_kinds: List[str] = []
     agentcard_setup_attention_seen = False
+    attention_requests_seen: list[dict] = []
     chat_assistant_seen_at: Optional[float] = None
     payment_card_action_completed = False
     task._mid_run_feedback_posted = False
@@ -2035,6 +2128,21 @@ async def poll_agent(
         status = agent.get("status", "UNKNOWN")
         messages = data.get("messages", [])
         root_msg_count = len(messages)
+        data["_benchmark"] = {
+            **data.get("_benchmark", {}),
+            "approvals_triggered": approvals_triggered,
+            "approvals_resolved": approvals_resolved,
+            "attention_requests_seen": list(attention_requests_seen),
+        }
+
+        exact_count_error = _root_exact_tool_count_exceeded(task, messages)
+        if exact_count_error:
+            data["_benchmark"] = {
+                **data.get("_benchmark", {}),
+                "exact_tool_count_error": exact_count_error,
+            }
+            print(f"    🚨 {exact_count_error}")
+            return data, approvals_triggered, approvals_resolved, exact_count_error
 
         if (
             task.payment_card_request_action == "abandon"
@@ -2126,6 +2234,12 @@ async def poll_agent(
                     chat_assistant_seen_at = time.time()
                 if time.time() - chat_assistant_seen_at >= 10:
                     return data, approvals_triggered, approvals_resolved, None
+
+        if task.success_on_browser_auth_evidence:
+            auth_evidence_passed, _ = evaluate_task(task, data, approvals_triggered)
+            if auth_evidence_passed:
+                print("    ✅ Ordered browser authentication evidence observed")
+                return data, approvals_triggered, approvals_resolved, None
 
         # Agent mode: done on terminal status
         if status in TERMINAL_STATUSES:
@@ -2396,6 +2510,14 @@ async def poll_agent(
                             approvals_triggered += 1
                             observed_kind = _attention_request_kind(req)
                             seen_attention_kinds.append(observed_kind)
+                            attention_requests_seen.append(_attention_request_evidence(req))
+                            data["_benchmark"] = {
+                                **data.get("_benchmark", {}),
+                                "attention_request_kind_seen": observed_kind,
+                                "attention_request_id": req_id,
+                                "approvals_triggered": approvals_triggered,
+                                "attention_requests_seen": list(attention_requests_seen),
+                            }
                             if task.expected_attention_kind:
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
@@ -2441,8 +2563,8 @@ async def poll_agent(
                                 print(f"    ✅ Counted and released approval request {req_id[:8]}")
                             if task.approval_handling == "ignore":
                                 kind_label = (
-                                    f" ({task.expected_attention_kind})"
-                                    if task.expected_attention_kind
+                                    f" ({observed_kind})"
+                                    if task.expected_attention_kind or task.expected_attention_kinds
                                     else ""
                                 )
                                 print(f"    ✅ Approval request observed{kind_label} {req_id[:8]}")
@@ -2553,8 +2675,7 @@ def _validate_mid_run_feedback_schema(task: BenchmarkTask, data: dict) -> Option
     schema_update_messages = [
         message
         for message in data.get("messages", []) or []
-        if isinstance(message.get("metadata"), dict)
-        and message["metadata"].get("isResponseSchemaUpdate") is True
+        if isinstance(message.get("metadata"), dict) and message["metadata"].get("isResponseSchemaUpdate") is True
     ]
     if schema_update_messages:
         return f"Non-goal feedback created {len(schema_update_messages)} hidden response-schema update message(s)"
@@ -2575,6 +2696,245 @@ def evaluate_task(
     messages = data.get("messages", [])
     progress = agent.get("progress", 0)
 
+    observed_providers: set[str] = set()
+    credential_ref_kinds: set[str] = set()
+    provider_scopes: dict[str, set[str]] = {}
+    credential_scopes: dict[str, set[str]] = {}
+    browser_session_metadata_by_scope: dict[str, list[tuple[int, dict]]] = {}
+    credential_indexes_by_scope_kind: dict[tuple[str, str], list[int]] = {}
+    message_evidence_by_scope: dict[str, list[tuple[int, str]]] = {}
+    structured_responses: list[tuple[str, dict]] = []
+    tool_call_scopes: dict[str, set[str]] = {}
+    for message in messages:
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        auxiliary = metadata.get("auxiliary")
+        scope_value = metadata.get("subAgentId") or metadata.get("task_id")
+        if not scope_value and isinstance(auxiliary, dict):
+            scope_value = auxiliary.get("subAgentId") or auxiliary.get("task_id")
+        if not scope_value:
+            continue
+        for candidate in (metadata, auxiliary):
+            if not isinstance(candidate, dict):
+                continue
+            tool_call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
+            if tool_call_id:
+                tool_call_scopes.setdefault(str(tool_call_id), set()).add(str(scope_value))
+
+    for message_index, message in enumerate(messages):
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        auxiliary = metadata.get("auxiliary")
+        scope_value = metadata.get("subAgentId") or metadata.get("task_id")
+        if not scope_value and isinstance(auxiliary, dict):
+            scope_value = auxiliary.get("subAgentId") or auxiliary.get("task_id")
+        if not scope_value:
+            tool_call_id = metadata.get("toolCallId") or metadata.get("tool_call_id")
+            linked_scopes = tool_call_scopes.get(str(tool_call_id), set()) if tool_call_id else set()
+            if len(linked_scopes) == 1:
+                scope_value = next(iter(linked_scopes))
+        task_scope = str(scope_value) if scope_value else f"message:{message_index}"
+        candidates = [metadata]
+        if isinstance(auxiliary, dict):
+            candidates.append(auxiliary)
+        browser_session_value = next(
+            (
+                candidate.get("browser_session_id") or candidate.get("browser_url")
+                for candidate in candidates
+                if candidate.get("browser_session_id") or candidate.get("browser_url")
+            ),
+            None,
+        )
+        scope = (
+            f"{task_scope}|browser_session:{browser_session_value}"
+            if browser_session_value
+            else task_scope
+        )
+
+        # Only completed browser actions are grounded page evidence. Task
+        # prompts, verifier prose, and assistant restatements can contain the
+        # expected text without proving it was ever visible in the browser.
+        action_type = next(
+            (candidate.get("action_type") for candidate in candidates if candidate.get("action_type")),
+            None,
+        )
+        tool_status = next(
+            (candidate.get("toolStatus") for candidate in candidates if candidate.get("toolStatus")),
+            None,
+        )
+        # This auth probe's greeting markers must come from a DOM element the
+        # browser actually clicked. Input/select titles include model-supplied
+        # values and could otherwise manufacture the expected greeting text.
+        grounded_action_types = {"click"}
+        if message.get("role") == "TOOL" and tool_status == "FINISHED" and action_type in grounded_action_types:
+            evidence = "\n".join(
+                candidate["title"]
+                for candidate in candidates
+                if isinstance(candidate.get("title"), str)
+            )
+            if evidence:
+                message_evidence_by_scope.setdefault(scope, []).append((message_index, evidence))
+        for candidate in candidates:
+            session_metadata = candidate.get("browser_session_metadata")
+            if isinstance(session_metadata, dict):
+                browser_session_metadata_by_scope.setdefault(scope, []).append((message_index, session_metadata))
+                if isinstance(session_metadata.get("provider"), str):
+                    provider = session_metadata["provider"]
+                    observed_providers.add(provider)
+                    provider_scopes.setdefault(provider, set()).add(scope)
+            credential_ref = candidate.get("credential_ref") or candidate.get("credentialRef")
+            # USER OTP availability messages mean a code was fetched, not
+            # exercised. TOOL credential refs are the durable usage signal.
+            if (
+                message.get("role") == "TOOL"
+                and isinstance(credential_ref, dict)
+                and isinstance(credential_ref.get("kind"), str)
+            ):
+                kind = credential_ref["kind"]
+                credential_ref_kinds.add(kind)
+                credential_scopes.setdefault(kind, set()).add(scope)
+                credential_indexes_by_scope_kind.setdefault((scope, kind), []).append(message_index)
+            structured_response = candidate.get("structured_response") or candidate.get("structuredResponse")
+            if isinstance(structured_response, dict):
+                structured_responses.append((scope, structured_response))
+
+    if task.expected_credential_ref_kind:
+        expected_kind = task.expected_credential_ref_kind
+        if expected_kind not in credential_ref_kinds:
+            return False, f"Expected credential_ref kind {expected_kind} but none was observed"
+
+    forbidden_kinds = set(task.forbidden_credential_ref_kinds)
+    observed_forbidden_kinds = forbidden_kinds & credential_ref_kinds
+    if observed_forbidden_kinds:
+        observed = ", ".join(sorted(observed_forbidden_kinds))
+        return False, f"Observed forbidden credential_ref kind(s): {observed}"
+
+    if task.expected_browser_provider:
+        expected_provider = task.expected_browser_provider
+        if expected_provider not in observed_providers:
+            observed = ", ".join(sorted(observed_providers)) or "none"
+            return False, f"Expected browser provider {expected_provider} but observed: {observed}"
+        if task.expected_credential_ref_kind:
+            provider_task_scopes = provider_scopes.get(expected_provider, set())
+            credential_task_scopes = credential_scopes.get(task.expected_credential_ref_kind, set())
+            if not provider_task_scopes.intersection(credential_task_scopes):
+                return (
+                    False,
+                    f"Expected browser provider {expected_provider} and credential_ref kind "
+                    f"{task.expected_credential_ref_kind} on the same browser session",
+                )
+
+    matching_session_metadata_scopes: set[str] = set()
+    matching_session_metadata_indexes: dict[str, list[int]] = {}
+    if task.expected_browser_session_metadata_values:
+        expected_metadata = task.expected_browser_session_metadata_values
+        for scope, metadata_items in browser_session_metadata_by_scope.items():
+            first_credential_index = min(
+                credential_indexes_by_scope_kind.get(
+                    (scope, task.expected_credential_ref_kind or ""),
+                    [len(messages)],
+                )
+            )
+            matching_indexes = [
+                message_index
+                for message_index, metadata_item in metadata_items
+                if message_index < first_credential_index
+                and all(metadata_item.get(key) == value for key, value in expected_metadata.items())
+            ]
+            if matching_indexes:
+                matching_session_metadata_scopes.add(scope)
+                matching_session_metadata_indexes[scope] = matching_indexes
+        if not matching_session_metadata_scopes:
+            return False, "Expected isolated browser session metadata was not observed"
+
+    matching_pre_credential_scopes: set[str] = set()
+    if task.expected_pre_credential_message_contains:
+        expected_kind = task.expected_credential_ref_kind
+        if not expected_kind:
+            return False, "Pre-credential evidence requires expected_credential_ref_kind"
+        for scope in credential_scopes.get(expected_kind, set()):
+            first_credential_index = min(credential_indexes_by_scope_kind.get((scope, expected_kind), [len(messages)]))
+            session_metadata_index = min(matching_session_metadata_indexes.get(scope, [-1]))
+            prior_evidence = "\n".join(
+                evidence
+                for message_index, evidence in message_evidence_by_scope.get(scope, [])
+                if session_metadata_index < message_index < first_credential_index
+            ).lower()
+            if all(needle.lower() in prior_evidence for needle in task.expected_pre_credential_message_contains):
+                matching_pre_credential_scopes.add(scope)
+        if not matching_pre_credential_scopes:
+            return False, "Expected signed-out evidence before passkey use was not observed"
+
+    matching_post_credential_scopes: set[str] = set()
+    if task.expected_post_credential_message_contains:
+        expected_kind = task.expected_credential_ref_kind
+        if not expected_kind:
+            return False, "Post-credential evidence requires expected_credential_ref_kind"
+        for scope in credential_scopes.get(expected_kind, set()):
+            first_credential_index = min(credential_indexes_by_scope_kind.get((scope, expected_kind), [len(messages)]))
+            later_evidence = "\n".join(
+                evidence
+                for message_index, evidence in message_evidence_by_scope.get(scope, [])
+                if message_index > first_credential_index
+            ).lower()
+            if all(needle.lower() in later_evidence for needle in task.expected_post_credential_message_contains):
+                matching_post_credential_scopes.add(scope)
+        if not matching_post_credential_scopes:
+            return False, "Expected authenticated page evidence after passkey use was not observed"
+
+    has_structured_response_requirements = bool(
+        task.expected_structured_response_values
+        or task.expected_structured_response_contains
+        or task.required_structured_response_fields
+    )
+    matching_structured_scopes: set[str] = set()
+    if has_structured_response_requirements:
+        expected_values = task.expected_structured_response_values or {}
+        expected_contains = task.expected_structured_response_contains or {}
+
+        def _structured_response_matches(response: dict) -> bool:
+            if not all(response.get(key) == expected for key, expected in expected_values.items()):
+                return False
+            for key, raw_needles in expected_contains.items():
+                value = response.get(key)
+                needles = [raw_needles] if isinstance(raw_needles, str) else raw_needles
+                if not isinstance(value, str) or not isinstance(needles, list):
+                    return False
+                if not all(isinstance(needle, str) and needle.lower() in value.lower() for needle in needles):
+                    return False
+            return all(response.get(key) not in (None, "", [], {}) for key in task.required_structured_response_fields)
+
+        matching_structured_scopes = {
+            scope for scope, response in structured_responses if _structured_response_matches(response)
+        }
+        if not matching_structured_scopes:
+            return False, "Expected authenticated structured browser response evidence was not observed"
+
+    if task.expected_browser_provider and task.expected_credential_ref_kind:
+        provider_task_scopes = provider_scopes.get(task.expected_browser_provider, set())
+        credential_task_scopes = credential_scopes.get(task.expected_credential_ref_kind, set())
+        correlated_scopes = provider_task_scopes.intersection(credential_task_scopes)
+        if task.expected_browser_session_metadata_values:
+            correlated_scopes.intersection_update(matching_session_metadata_scopes)
+        if task.expected_pre_credential_message_contains:
+            correlated_scopes.intersection_update(matching_pre_credential_scopes)
+        if task.expected_post_credential_message_contains:
+            correlated_scopes.intersection_update(matching_post_credential_scopes)
+        if has_structured_response_requirements:
+            correlated_scopes.intersection_update(matching_structured_scopes)
+        if not correlated_scopes:
+            if has_structured_response_requirements:
+                return (
+                    False,
+                    "Expected provider, credential, and authenticated response evidence on the same browser session",
+                )
+            return False, "Expected provider, credential, and authenticated page evidence on the same browser session"
+
+    if task.success_on_browser_auth_evidence:
+        return True, None
+
     # Chat mode: just needs ASSISTANT response
     if task.is_chat_mode:
         assistant_msgs = [m for m in messages if m.get("role") == "ASSISTANT"]
@@ -2586,13 +2946,23 @@ def evaluate_task(
     # that the approval was actually triggered (the agent won't complete).
     if task.approval_handling == "ignore":
         if approvals_triggered == 0:
+            if task.expected_attention_kinds:
+                return False, f"Expected one of {task.expected_attention_kinds} attention requests (to ignore) but none was triggered"
             if task.expected_attention_kind:
-                return False, f"Expected {task.expected_attention_kind} attention request (to ignore) but none was triggered"
+                return (
+                    False,
+                    f"Expected {task.expected_attention_kind} attention request (to ignore) but none was triggered",
+                )
             return False, "Expected approval request (to ignore) but none were triggered"
         if task.expected_attention_kind:
             benchmark_state = data.get("_benchmark", {})
             if benchmark_state.get("expected_attention_kind_seen") != task.expected_attention_kind:
                 return False, f"Expected {task.expected_attention_kind} attention request but it was not observed"
+        if task.expected_attention_kinds:
+            benchmark_state = data.get("_benchmark", {})
+            observed_kind = benchmark_state.get("attention_request_kind_seen")
+            if observed_kind not in task.expected_attention_kinds:
+                return False, f"Expected one of {task.expected_attention_kinds} attention requests, observed {observed_kind}"
         return True, None
 
     if task.name == CALENDLY_TASK_NAME:
@@ -2645,6 +3015,16 @@ def evaluate_task(
         if tool.lower() not in all_metadata:
             return False, f"Expected tool '{tool}' not found in messages"
 
+    if task.name == "message-person":
+        delivery_error = _validate_message_person_confirmed_send(data)
+        if delivery_error:
+            return False, delivery_error
+
+    if task.name == MESSAGE_PERSON_AGENT_SMS_TASK_NAME:
+        delivery_error = _validate_message_person_agent_sms_send(data)
+        if delivery_error:
+            return False, delivery_error
+
     if task.name == BIOMETRICS_WEBDECOY_TASK_NAME:
         passed, reason = _evaluate_webdecoy_biometrics_result(data)
         if not passed:
@@ -2669,11 +3049,74 @@ def evaluate_task(
             return True, None
         return False, "Expected approval requests but none were triggered"
 
+    if (
+        task.approval_handling != "count_only"
+        and task.expected_approval_count is not None
+        and approvals_triggered != task.expected_approval_count
+    ):
+        return (
+            False,
+            f"Expected exactly {task.expected_approval_count} approval request(s), "
+            f"observed {approvals_triggered}",
+        )
+
     # Progress score check (verifier gave a score)
     if progress < 0.5:
         return False, f"Low progress score: {progress:.2f}"
 
     return True, None
+
+
+def _validate_message_person_confirmed_send(data: dict) -> Optional[str]:
+    """Require the Mac sender's durable acknowledgement, not merely enqueue."""
+    for message in data.get("messages", []) or []:
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "message_person" or metadata.get("toolStatus") != "FINISHED":
+            continue
+        event_data = metadata.get("data")
+        if not isinstance(event_data, dict):
+            continue
+        delivery = event_data.get("delivery")
+        if not isinstance(delivery, dict):
+            continue
+        if (
+            delivery.get("channel") == "imessage"
+            and delivery.get("status") == "sent"
+            and isinstance(delivery.get("queue_id"), str)
+            and isinstance(delivery.get("sent_at"), str)
+        ):
+            if delivery["queue_id"] and delivery["sent_at"]:
+                return None
+    return "message_person did not produce a confirmed Mac iMessage send acknowledgement"
+
+
+def _validate_message_person_agent_sms_send(data: dict) -> Optional[str]:
+    """Require an immediate AgentPhone receipt, never an iMessage queue receipt."""
+    for message in data.get("messages", []) or []:
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "message_person" or metadata.get("toolStatus") != "FINISHED":
+            continue
+        event_data = metadata.get("data")
+        if not isinstance(event_data, dict):
+            continue
+        delivery = event_data.get("delivery")
+        if not isinstance(delivery, dict):
+            continue
+        if (
+            delivery.get("channel") == "agent_sms"
+            and delivery.get("status") == "sent"
+            and delivery.get("provider") == "agentphone"
+            and isinstance(delivery.get("provider_channel"), str)
+            and isinstance(delivery.get("message_id"), str)
+            and not delivery.get("queue_id")
+        ):
+            if delivery["provider_channel"] and delivery["message_id"]:
+                return None
+    return "message_person did not produce an immediate AgentPhone send receipt"
 
 
 def evaluate_force_show_passwords_auth_task(
@@ -2839,7 +3282,22 @@ def _run_local_victoria_sql(sql: str) -> str:
     container = _local_victoria_db_container()
     if container:
         result = subprocess.run(
-            ["docker", "exec", container, "psql", "-U", "postgres", "-d", "victoria", "-t", "-A", "-F", "\t", "-c", sql],
+            [
+                "docker",
+                "exec",
+                container,
+                "psql",
+                "-U",
+                "postgres",
+                "-d",
+                "victoria",
+                "-t",
+                "-A",
+                "-F",
+                "\t",
+                "-c",
+                sql,
+            ],
             capture_output=True,
             text=True,
             timeout=15,
@@ -2914,7 +3372,17 @@ def _ensure_grep_frozen_base_snapshot() -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     container = _local_victoria_db_container()
     if container:
-        args = ["pg_dump", "-U", "postgres", "-d", "victoria", "--clean", "--if-exists", "--no-owner", "--no-privileges"]
+        args = [
+            "pg_dump",
+            "-U",
+            "postgres",
+            "-d",
+            "victoria",
+            "--clean",
+            "--if-exists",
+            "--no-owner",
+            "--no-privileges",
+        ]
     else:
         database_url = _local_victoria_database_url()
         if not database_url:
@@ -2994,8 +3462,7 @@ def _run_plaid_transactions_fixture(action: str) -> dict:
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"Plaid transaction benchmark fixture {action} failed: "
-            f"{(result.stderr or result.stdout).strip()}"
+            f"Plaid transaction benchmark fixture {action} failed: {(result.stderr or result.stdout).strip()}"
         )
     manifest = _parse_last_json_line(result.stdout)
     if action == "apply":
@@ -3041,10 +3508,7 @@ def _run_user_data_fixture(action: str) -> dict:
         timeout=240 if action in ("apply", "freeze") else 60,
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"user-data benchmark fixture {action} failed: "
-            f"{(result.stderr or result.stdout).strip()}"
-        )
+        raise RuntimeError(f"user-data benchmark fixture {action} failed: {(result.stderr or result.stdout).strip()}")
     return _parse_last_json_line(result.stdout)
 
 
@@ -3103,16 +3567,17 @@ def _run_gate_fixture(task_name: str, action: str) -> dict:
     return _parse_last_json_line(result.stdout)
 
 
-def _sync_compute_tokens() -> None:
+def _sync_compute_tokens() -> bool:
     """Refresh the compute-token integrations (claude_code / gpt_code + pool)
-    from prod into the isolated benchmark DB. Best-effort but loud: a frozen DB
+    from prod into the isolated benchmark DB. Returns False on any failure so
+    the live-fixture caller can fail closed. A frozen DB
     fixture or whole-DB snapshot restore can leave stale/expired compute tokens,
     which forces the agent's claudeAuth fetch to fail into the paid waterfall.
     Reads the prod source from back-end/.env; writes to the isolated DB."""
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Compute-token sync skipped: local Victoria DB not found")
-        return
+        return False
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
@@ -3127,11 +3592,12 @@ def _sync_compute_tokens() -> None:
         )
     except Exception as exc:
         print(f"    ⚠ Compute-token sync error: {exc}")
-        return
+        return False
     if result.returncode != 0:
         print(f"    ⚠ Compute-token sync failed: {(result.stderr or result.stdout).strip()[:200]}")
-    else:
-        print("    🔑 Refreshed compute tokens from prod")
+        return False
+    print("    🔑 Refreshed compute tokens from prod")
+    return True
 
 
 def _sync_browser_credentials() -> bool:
@@ -3166,6 +3632,36 @@ def _sync_browser_credentials() -> bool:
     return True
 
 
+def _sync_passkeys() -> None:
+    """Refresh only passkeys from prod into the isolated benchmark DB.
+
+    Unlike the broad base fixture, this deliberately excludes cookies, origin
+    storage, browser profiles, and passwords. Failure is fatal because an old
+    or missing passkey would invalidate the benchmark rather than merely make
+    it less convenient.
+    """
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        raise RuntimeError("Local Victoria DB connection not found for passkey-only sync")
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    try:
+        result = subprocess.run(
+            ["npx", "tsx", "scripts/seed-local.ts", "--passkeys-only"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Passkey-only sync failed: {exc}") from exc
+    if result.returncode != 0:
+        raise RuntimeError(f"Passkey-only sync failed: {(result.stderr or result.stdout).strip()[:500]}")
+    print("    🔐 Refreshed passkeys only from prod")
+
+
 @dataclass
 class LiveFixtureContext:
     """Runtime inputs handed to a live-fixture applier."""
@@ -3191,12 +3687,21 @@ def _apply_base_live_fixture(ctx: LiveFixtureContext) -> dict:
     overhead — and on a throttled cloud uplink it blows the 180s sync budget,
     stalling agent creation. Compute tokens are still refreshed because WMH
     inference (RoseWMHProvider) and the agent's own LLM waterfall lease them."""
-    _sync_compute_tokens()
+    if not _sync_compute_tokens():
+        raise RuntimeError("Base live fixture could not refresh compute tokens")
     if _is_simulate_mode():
         print("    🌍 simulate mode — skipping browser cookie/password sync (WMH mocks env tools)")
         return {"fixture": "base", "browser_credentials": False}
-    _sync_browser_credentials()
+    if not _sync_browser_credentials():
+        raise RuntimeError("Base live fixture could not refresh browser credentials/auth state")
     return {"fixture": "base", "browser_credentials": True}
+
+
+def _apply_compute_tokens(ctx: LiveFixtureContext) -> dict:
+    """Refresh compute tokens without importing any browser authentication state."""
+    if not _sync_compute_tokens():
+        raise RuntimeError("Compute-token live fixture could not refresh compute tokens")
+    return {"fixture": "compute_tokens"}
 
 
 def _apply_amazon_auth(ctx: LiveFixtureContext) -> dict:
@@ -3215,30 +3720,8 @@ def _apply_amazon_auth(ctx: LiveFixtureContext) -> dict:
     return {"fixture": "amazon_auth", "bundle_count": bundle_count}
 
 
-def _apply_compute_tokens(_ctx: LiveFixtureContext) -> dict:
-    _sync_compute_tokens()
-    return {"fixture": "compute_tokens"}
-
-
 def _apply_amazon_passkey(ctx: LiveFixtureContext) -> dict:
-    database_url = _local_victoria_database_url()
-    if not database_url:
-        raise RuntimeError("Amazon passkey fixture requires a local Victoria database")
-    env = os.environ.copy()
-    env["DATABASE_URL"] = database_url
-    env["DIRECT_URL"] = database_url
-    result = subprocess.run(
-        ["npx", "tsx", "scripts/seed-local.ts", "--passkeys-only"],
-        cwd=REPO_ROOT / "back-end",
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Amazon passkey sync failed: {(result.stderr or result.stdout).strip()[:300]}"
-        )
+    _sync_passkeys()
 
     user = _sql_literal(ctx.user_id)
     realm = _sql_literal(ctx.auth_realm)
@@ -3352,13 +3835,12 @@ def _restore_amazon_passkey_fixture(manifest: dict) -> None:
 # the assertion below so a fixture can never be declared without an applier.
 LIVE_FIXTURE_APPLIERS = {
     "base": _apply_base_live_fixture,
-    "amazon_auth": _apply_amazon_auth,
     "compute_tokens": _apply_compute_tokens,
+    "amazon_auth": _apply_amazon_auth,
     "amazon_passkey": _apply_amazon_passkey,
 }
 assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
-    f"live-fixture appliers {sorted(LIVE_FIXTURE_APPLIERS)} must match "
-    f"registry {sorted(LIVE_FIXTURE_NAMES)}"
+    f"live-fixture appliers {sorted(LIVE_FIXTURE_APPLIERS)} must match registry {sorted(LIVE_FIXTURE_NAMES)}"
 )
 
 
@@ -3509,9 +3991,7 @@ async def evaluate_grep_explore_stress(
 
     if "1:" in grep_text and "-n: false" in grep_text_lower:
         no_number_blocks = [
-            _message_text(message)
-            for message in grep_messages
-            if "-n: false" in _message_text(message).lower()
+            _message_text(message) for message in grep_messages if "-n: false" in _message_text(message).lower()
         ]
         if any(re.search(r"^\d+:", block, re.MULTILINE) for block in no_number_blocks):
             return False, "-n:false Grep result still included line numbers"
@@ -3543,10 +4023,7 @@ async def evaluate_plaid_transaction_task(
         return False, "Expected grep(source='transactions') evidence in transcript"
 
     if task.name == "plaid-transactions-monthly-spend":
-        expected = str(
-            manifest.get("monthly_spend_sep_2025_usd")
-            or manifest.get("monthly_spend_sep_2023_usd", "")
-        )
+        expected = str(manifest.get("monthly_spend_sep_2025_usd") or manifest.get("monthly_spend_sep_2023_usd", ""))
         if expected and expected not in all_text:
             return False, f"Expected September 2025 spend {expected} in final/evidence text"
         if "2025-09" not in grep_text and "2025-09-01" not in grep_text:
@@ -3563,11 +4040,13 @@ async def evaluate_plaid_transaction_task(
 
     if task.name == "plaid-transactions-dead-subscriptions":
         candidate_text = all_text
-        candidate_matches = list(re.finditer(
-            r"(?:refund_prep_candidates|refund prep candidates|refund targets)(.*?)(?:excluded_subscription_candidates|excluded subscription candidates|excluded candidates|$)",
-            all_text,
-            flags=re.IGNORECASE | re.DOTALL,
-        ))
+        candidate_matches = list(
+            re.finditer(
+                r"(?:refund_prep_candidates|refund prep candidates|refund targets)(.*?)(?:excluded_subscription_candidates|excluded subscription candidates|excluded candidates|$)",
+                all_text,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+        )
         if candidate_matches:
             candidate_match = candidate_matches[-1]
             candidate_text = candidate_match.group(1)
@@ -3576,15 +4055,12 @@ async def evaluate_plaid_transaction_task(
         expected_candidates = [
             str(name)
             for name in (
-                manifest.get("dead_subscription_expected_include")
-                or manifest.get("dead_subscription_candidates", [])
+                manifest.get("dead_subscription_expected_include") or manifest.get("dead_subscription_candidates", [])
             )
             if str(name).strip()
         ]
         excluded_candidates = [
-            str(name)
-            for name in manifest.get("dead_subscription_expected_exclude", ["GitHub"])
-            if str(name).strip()
+            str(name) for name in manifest.get("dead_subscription_expected_exclude", ["GitHub"]) if str(name).strip()
         ]
         missing = [name for name in expected_candidates if name.lower() not in candidate_lower]
         if missing:
@@ -3624,7 +4100,9 @@ async def evaluate_plaid_transaction_task(
                     break
                 start = index + len(needle)
         if bad_exclusions and len(expected_candidates) > 0:
-            return False, "Excluded active/recent/developer subscriptions should not be listed as dead: " + ", ".join(bad_exclusions)
+            return False, "Excluded active/recent/developer subscriptions should not be listed as dead: " + ", ".join(
+                bad_exclusions
+            )
         return True, None
 
     return True, None
@@ -3657,27 +4135,27 @@ def _ensure_local_cookie_bundle_for_realm(user_id: str, auth_realm: str) -> int:
     realm = _sql_literal(auth_realm.lower())
     user = _sql_literal(user_id)
     sql = (
-        'WITH matching_cookies AS ('
+        "WITH matching_cookies AS ("
         'SELECT "browserSource", "browserProfile", MAX(COALESCE("creationUtc", 0)) AS "freshestCookieUtc" '
         'FROM "Cookie" '
         f'WHERE "userId" = {user} '
-        'AND COALESCE("name", \'\') <> \'\' '
-        'AND COALESCE("value", \'\') <> \'\' '
-        f'AND (LOWER(TRIM(LEADING \'.\' FROM "domain")) = {realm} '
-        f'OR LOWER(TRIM(LEADING \'.\' FROM "domain")) LIKE \'%.\' || {realm}) '
+        "AND COALESCE(\"name\", '') <> '' "
+        "AND COALESCE(\"value\", '') <> '' "
+        f"AND (LOWER(TRIM(LEADING '.' FROM \"domain\")) = {realm} "
+        f"OR LOWER(TRIM(LEADING '.' FROM \"domain\")) LIKE '%.' || {realm}) "
         'AND ("expiresUtc" IS NULL OR "expiresUtc" <= 0 '
         'OR (("expiresUtc" / 1000000) - 11644473600) > EXTRACT(EPOCH FROM NOW())) '
         'GROUP BY "browserSource", "browserProfile"'
-        '), upserted AS ('
+        "), upserted AS ("
         'INSERT INTO "CookieBundle" '
         '(id, "userId", "authRealm", "browserSource", "browserProfile", '
         '"createdAt", "updatedAt", "disabledAt", "disabledReason") '
         f'SELECT gen_random_uuid(), {user}, {realm}, "browserSource", "browserProfile", '
-        'NOW(), NOW(), NULL, NULL FROM matching_cookies '
+        "NOW(), NOW(), NULL, NULL FROM matching_cookies "
         'ON CONFLICT ("userId", "authRealm", "browserSource", "browserProfile") DO UPDATE SET '
         '"updatedAt" = NOW(), "disabledAt" = NULL, "disabledReason" = NULL '
-        'RETURNING id'
-        ') SELECT COUNT(*) FROM upserted;'
+        "RETURNING id"
+        ") SELECT COUNT(*) FROM upserted;"
     )
     out = _run_local_victoria_sql(sql)
     try:
@@ -3701,13 +4179,13 @@ def _delete_local_minted_accounts_for_user(user_id: str, *, reset_agent_identity
             f'WHERE "userId" = {_sql_literal(user_id)} RETURNING id), '
             'deleted_identity AS (DELETE FROM "AgentIdentity" '
             f'WHERE "userId" = {_sql_literal(user_id)} RETURNING id) '
-            'SELECT COUNT(*) FROM deleted_minted;'
+            "SELECT COUNT(*) FROM deleted_minted;"
         )
     else:
         sql = (
             'WITH deleted_minted AS (DELETE FROM "MintedAccount" '
             f'WHERE "userId" = {_sql_literal(user_id)} RETURNING id) '
-            'SELECT COUNT(*) FROM deleted_minted;'
+            "SELECT COUNT(*) FROM deleted_minted;"
         )
     out = _run_local_victoria_sql(sql)
     try:
@@ -3737,9 +4215,9 @@ def _disable_local_auth_material_for_realm(user_id: str, auth_realm: str) -> int
         'passwords AS (UPDATE "BrowserPassword" '
         f'SET "disabledAt" = {now}, "disabledReason" = {reason} '
         f'WHERE "userId" = {user} AND "origin" LIKE {like_realm} AND "disabledAt" IS NULL RETURNING id) '
-        'SELECT (SELECT COUNT(*) FROM steel) + '
-        '(SELECT COUNT(*) FROM bundles) + '
-        '(SELECT COUNT(*) FROM passwords);'
+        "SELECT (SELECT COUNT(*) FROM steel) + "
+        "(SELECT COUNT(*) FROM bundles) + "
+        "(SELECT COUNT(*) FROM passwords);"
     )
     out = _run_local_victoria_sql(sql)
     try:
@@ -3761,7 +4239,7 @@ def _disable_local_steel_and_cookie_auth_for_realm(user_id: str, auth_realm: str
         'bundles AS (UPDATE "CookieBundle" '
         f'SET "disabledAt" = {now}, "disabledReason" = {reason} '
         f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id) '
-        'SELECT (SELECT COUNT(*) FROM steel) + (SELECT COUNT(*) FROM bundles);'
+        "SELECT (SELECT COUNT(*) FROM steel) + (SELECT COUNT(*) FROM bundles);"
     )
     out = _run_local_victoria_sql(sql)
     try:
@@ -3846,8 +4324,8 @@ def _seed_local_bad_amazon_auth_fixture(user_id: str, auth_realm: str) -> dict:
         'upsert_bundle AS (INSERT INTO "CookieBundle" '
         '(id, "userId", "authRealm", "browserSource", "browserProfile", "accountLabel", '
         '"disabledAt", "disabledReason", "createdAt", "updatedAt") VALUES '
-        f'({_sql_literal(bundle_id)}, {user}, {realm}, {source}, {profile}, '
-        f'{_sql_literal(BAD_AMAZON_PASSWORD_USERNAME)}, NULL, NULL, NOW(), NOW()) '
+        f"({_sql_literal(bundle_id)}, {user}, {realm}, {source}, {profile}, "
+        f"{_sql_literal(BAD_AMAZON_PASSWORD_USERNAME)}, NULL, NULL, NOW(), NOW()) "
         'ON CONFLICT ("userId", "authRealm", "browserSource", "browserProfile") DO UPDATE SET '
         '"accountLabel" = EXCLUDED."accountLabel", "disabledAt" = NULL, "disabledReason" = NULL, '
         '"updatedAt" = NOW() RETURNING id), '
@@ -3855,16 +4333,16 @@ def _seed_local_bad_amazon_auth_fixture(user_id: str, auth_realm: str) -> dict:
         '(id, "userId", domain, name, path, value, "expiresUtc", "isSecure", "isHttpOnly", '
         '"browserSource", "browserProfile", "creationUtc", "hasExpires", "isPersistent", '
         '"lastAccessUtc", "lastUpdateUtc", priority, "sameSite", "sourcePort", "sourceScheme", "topFrameSiteKey") '
-        'VALUES '
-        f'({_sql_literal(cookie_id)}, {user}, {_sql_literal(".amazon.com")}, '
-        f'{_sql_literal("benchmark_bad_auth")}, {_sql_literal("/")}, {_sql_literal("bad-cookie-" + cookie_id)}, '
-        '((EXTRACT(EPOCH FROM NOW() + INTERVAL \'7 days\') + 11644473600) * 1000000)::bigint, '
-        f'true, true, {source}, {profile}, '
-        '((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, '
-        'true, true, '
-        '((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, '
-        '((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, '
-        f'1, -1, -1, 2, {_sql_literal("")}) '
+        "VALUES "
+        f"({_sql_literal(cookie_id)}, {user}, {_sql_literal('.amazon.com')}, "
+        f"{_sql_literal('benchmark_bad_auth')}, {_sql_literal('/')}, {_sql_literal('bad-cookie-' + cookie_id)}, "
+        "((EXTRACT(EPOCH FROM NOW() + INTERVAL '7 days') + 11644473600) * 1000000)::bigint, "
+        f"true, true, {source}, {profile}, "
+        "((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, "
+        "true, true, "
+        "((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, "
+        "((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, "
+        f"1, -1, -1, 2, {_sql_literal('')}) "
         'ON CONFLICT ("userId", domain, name, path, "topFrameSiteKey", "browserSource", "browserProfile") '
         'DO UPDATE SET value = EXCLUDED.value, "expiresUtc" = EXCLUDED."expiresUtc", '
         '"creationUtc" = EXCLUDED."creationUtc", "lastAccessUtc" = EXCLUDED."lastAccessUtc", '
@@ -3872,10 +4350,10 @@ def _seed_local_bad_amazon_auth_fixture(user_id: str, auth_realm: str) -> dict:
         'upsert_pwd1 AS (INSERT INTO "BrowserPassword" '
         '(id, "userId", origin, username, "encryptedPassword", "dateLastUsed", "dateCreated", '
         '"browserSource", "browserProfile", "disabledAt", "disabledReason") VALUES '
-        f'({password_values[0][0]}, {user}, {password_values[0][1]}, {username}, {password_values[0][2]}, '
-        '((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, '
-        '((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, '
-        f'{source}, {profile}, NULL, NULL) '
+        f"({password_values[0][0]}, {user}, {password_values[0][1]}, {username}, {password_values[0][2]}, "
+        "((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, "
+        "((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, "
+        f"{source}, {profile}, NULL, NULL) "
         'ON CONFLICT ("userId", origin, username) DO UPDATE SET '
         '"encryptedPassword" = EXCLUDED."encryptedPassword", "dateLastUsed" = EXCLUDED."dateLastUsed", '
         '"browserSource" = EXCLUDED."browserSource", "browserProfile" = EXCLUDED."browserProfile", '
@@ -3883,18 +4361,18 @@ def _seed_local_bad_amazon_auth_fixture(user_id: str, auth_realm: str) -> dict:
         'upsert_pwd2 AS (INSERT INTO "BrowserPassword" '
         '(id, "userId", origin, username, "encryptedPassword", "dateLastUsed", "dateCreated", '
         '"browserSource", "browserProfile", "disabledAt", "disabledReason") VALUES '
-        f'({password_values[1][0]}, {user}, {password_values[1][1]}, {username}, {password_values[1][2]}, '
-        '((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, '
-        '((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, '
-        f'{source}, {profile}, NULL, NULL) '
+        f"({password_values[1][0]}, {user}, {password_values[1][1]}, {username}, {password_values[1][2]}, "
+        "((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, "
+        "((EXTRACT(EPOCH FROM NOW()) + 11644473600) * 1000000)::bigint, "
+        f"{source}, {profile}, NULL, NULL) "
         'ON CONFLICT ("userId", origin, username) DO UPDATE SET '
         '"encryptedPassword" = EXCLUDED."encryptedPassword", "dateLastUsed" = EXCLUDED."dateLastUsed", '
         '"browserSource" = EXCLUDED."browserSource", "browserProfile" = EXCLUDED."browserProfile", '
         '"disabledAt" = NULL, "disabledReason" = NULL RETURNING id) '
-        'SELECT '
-        '(SELECT id FROM upsert_bundle), '
-        '(SELECT id FROM upsert_pwd1), '
-        '(SELECT id FROM upsert_pwd2);'
+        "SELECT "
+        "(SELECT id FROM upsert_bundle), "
+        "(SELECT id FROM upsert_pwd1), "
+        "(SELECT id FROM upsert_pwd2);"
     )
     out = _run_local_victoria_sql(sql)
     fields = (out.splitlines()[-1] if out else "").split("\t")
@@ -3916,10 +4394,10 @@ def _validate_bad_amazon_auth_fixture(user_id: str) -> Tuple[bool, Optional[str]
     sql = (
         "SELECT kind, id, disabled FROM ("
         f"SELECT 'cookie_bundle' AS kind, id, (\"disabledAt\" IS NOT NULL) AS disabled "
-        f"FROM \"CookieBundle\" WHERE \"userId\" = {_sql_literal(user_id)} AND id IN ({ids}) "
+        f'FROM "CookieBundle" WHERE "userId" = {_sql_literal(user_id)} AND id IN ({ids}) '
         "UNION ALL "
         f"SELECT 'password' AS kind, id, (\"disabledAt\" IS NOT NULL) AS disabled "
-        f"FROM \"BrowserPassword\" WHERE \"userId\" = {_sql_literal(user_id)} AND id IN ({password_id_list})"
+        f'FROM "BrowserPassword" WHERE "userId" = {_sql_literal(user_id)} AND id IN ({password_id_list})'
         ") rows ORDER BY kind, id;"
     )
     rows = [line.split("\t") for line in _run_local_victoria_sql(sql).splitlines() if line.strip()]
@@ -3933,9 +4411,7 @@ def _validate_bad_amazon_auth_fixture(user_id: str) -> Tuple[bool, Optional[str]
     if missing:
         return False, "seeded credential rows missing after run: " + ", ".join(missing)
     not_disabled = [
-        f"{kind}:{credential_id}"
-        for (kind, credential_id), disabled in disabled_by_key.items()
-        if not disabled
+        f"{kind}:{credential_id}" for (kind, credential_id), disabled in disabled_by_key.items() if not disabled
     ]
     if not_disabled:
         return False, "seeded credentials were not disabled: " + ", ".join(not_disabled)
@@ -3943,18 +4419,12 @@ def _validate_bad_amazon_auth_fixture(user_id: str) -> Tuple[bool, Optional[str]
 
 
 def _local_agent_identity_present_for_user(user_id: str) -> bool:
-    sql = (
-        'SELECT 1 FROM "AgentIdentity" '
-        f'WHERE "userId" = {_sql_literal(user_id)} LIMIT 1;'
-    )
+    sql = f'SELECT 1 FROM "AgentIdentity" WHERE "userId" = {_sql_literal(user_id)} LIMIT 1;'
     return bool(_run_local_victoria_sql(sql).strip())
 
 
 def _local_agent_identity_email_for_user(user_id: str) -> Optional[str]:
-    sql = (
-        'SELECT email FROM "AgentIdentity" '
-        f'WHERE "userId" = {_sql_literal(user_id)} LIMIT 1;'
-    )
+    sql = f'SELECT email FROM "AgentIdentity" WHERE "userId" = {_sql_literal(user_id)} LIMIT 1;'
     out = _run_local_victoria_sql(sql).strip()
     return out.splitlines()[0].strip() if out else None
 
@@ -3968,28 +4438,24 @@ def _seed_local_benchmark_agent_identity_if_missing(user_id: str) -> Optional[st
     if _local_agent_identity_present_for_user(user_id):
         return None
 
-    email = (
-        os.environ.get("BENCHMARK_MINTED_AGENT_EMAIL")
-        or DEFAULT_MINTED_BENCHMARK_AGENT_EMAIL
-    ).strip()
-    phone = (
-        os.environ.get("BENCHMARK_MINTED_AGENT_PHONE")
-        or DEFAULT_MINTED_BENCHMARK_AGENT_PHONE
-    ).strip()
+    email = (os.environ.get("BENCHMARK_MINTED_AGENT_EMAIL") or DEFAULT_MINTED_BENCHMARK_AGENT_EMAIL).strip()
+    phone = (os.environ.get("BENCHMARK_MINTED_AGENT_PHONE") or DEFAULT_MINTED_BENCHMARK_AGENT_PHONE).strip()
     if not email:
         return None
 
-    fields = ['id', '"userId"', 'email', '"createdAt"']
-    values = ['gen_random_uuid()', _sql_literal(user_id), _sql_literal(email), 'NOW()']
-    updates = ['email = EXCLUDED.email']
+    fields = ["id", '"userId"', "email", '"createdAt"']
+    values = ["gen_random_uuid()", _sql_literal(user_id), _sql_literal(email), "NOW()"]
+    updates = ["email = EXCLUDED.email"]
 
     if phone:
-        fields.extend(['phone', '"phoneProvider"'])
+        fields.extend(["phone", '"phoneProvider"'])
         values.extend([_sql_literal(phone), _sql_literal("agentphone")])
-        updates.extend([
-            'phone = EXCLUDED.phone',
-            '"phoneProvider" = EXCLUDED."phoneProvider"',
-        ])
+        updates.extend(
+            [
+                "phone = EXCLUDED.phone",
+                '"phoneProvider" = EXCLUDED."phoneProvider"',
+            ]
+        )
 
     provider_agent_id = os.environ.get("BENCHMARK_MINTED_AGENTPHONE_AGENT_ID", "").strip()
     provider_number_id = os.environ.get("BENCHMARK_MINTED_AGENTPHONE_NUMBER_ID", "").strip()
@@ -4004,13 +4470,44 @@ def _seed_local_benchmark_agent_identity_if_missing(user_id: str) -> Optional[st
 
     sql = (
         'INSERT INTO "AgentIdentity" '
-        f'({", ".join(fields)}) VALUES ({", ".join(values)}) '
+        f"({', '.join(fields)}) VALUES ({', '.join(values)}) "
         'ON CONFLICT ("userId") DO UPDATE SET '
-        f'{", ".join(updates)} '
-        'RETURNING email;'
+        f"{', '.join(updates)} "
+        "RETURNING email;"
     )
     out = _run_local_victoria_sql(sql).strip()
     return out.splitlines()[0].strip() if out else email
+
+
+def _prepare_local_agent_sms_sender(user_id: str) -> Optional[str]:
+    """Ensure the isolated live bench has an AgentPhone sender selector."""
+    seeded_email = _seed_local_benchmark_agent_identity_if_missing(user_id)
+    phone = (os.environ.get("BENCHMARK_MINTED_AGENT_PHONE") or DEFAULT_MINTED_BENCHMARK_AGENT_PHONE).strip()
+    if not phone:
+        raise RuntimeError("Agent SMS benchmark requires a configured AgentPhone sender")
+
+    # The live SMS benchmark owns its isolated database fixture. Pin it to the
+    # campaign-backed sender and clear cached provider IDs so a released number
+    # from an older base image cannot take precedence over `from_number`.
+    _run_local_victoria_sql(
+        'UPDATE "AgentIdentity" SET '
+        f"phone = {_sql_literal(phone)}, "
+        '"phoneProvider" = \'agentphone\', '
+        '"phoneProviderAgentId" = NULL, '
+        '"phoneProviderNumberId" = NULL '
+        f'WHERE "userId" = {_sql_literal(user_id)};'
+    )
+    sql = (
+        "SELECT CASE WHEN \"phoneProvider\" = 'agentphone' AND ("
+        "phone ~ '^\\+[1-9][0-9]{1,14}$' OR "
+        "COALESCE(\"phoneProviderAgentId\", '') <> '' OR "
+        "COALESCE(\"phoneProviderNumberId\", '') <> ''"
+        ") THEN 'ready' ELSE 'invalid' END "
+        f'FROM "AgentIdentity" WHERE "userId" = {_sql_literal(user_id)} LIMIT 1;'
+    )
+    if _run_local_victoria_sql(sql).strip() != "ready":
+        raise RuntimeError("Agent SMS benchmark requires an AgentPhone identity with a sender selector")
+    return seeded_email
 
 
 def _local_minted_account_labels_for_user(user_id: str) -> List[str]:
@@ -4036,10 +4533,7 @@ async def _delete_primitive_emails_by_recipient(recipients: List[str]) -> int:
     if not api_key:
         return 0
 
-    base_url = (
-        load_env_var("PRIMITIVE_BASE_URL", _BACKEND_ENV, _AGENTS_ENV)
-        or "https://api.primitive.dev/v1"
-    )
+    base_url = load_env_var("PRIMITIVE_BASE_URL", _BACKEND_ENV, _AGENTS_ENV) or "https://api.primitive.dev/v1"
     base_url = base_url.rstrip("/")
     recipient_set = {recipient.strip().lower() for recipient in recipients if recipient.strip()}
     if not recipient_set:
@@ -4101,10 +4595,7 @@ async def _primitive_inbox_has_uber_welcome(email: str) -> bool:
     if not api_key or not email.strip():
         return False
 
-    base_url = (
-        load_env_var("PRIMITIVE_BASE_URL", _BACKEND_ENV, _AGENTS_ENV)
-        or "https://api.primitive.dev/v1"
-    )
+    base_url = load_env_var("PRIMITIVE_BASE_URL", _BACKEND_ENV, _AGENTS_ENV) or "https://api.primitive.dev/v1"
     base_url = base_url.rstrip("/")
     headers = {"Authorization": f"Bearer {api_key}"}
     target = email.strip().lower()
@@ -4155,10 +4646,7 @@ def _get_local_minted_account(user_id: str, auth_realm: str) -> Optional[dict]:
 
 
 def _local_agent_phone_message_count_for_user(user_id: str) -> int:
-    sql = (
-        'SELECT COUNT(*) FROM "AgentPhoneMessage" '
-        f'WHERE "userId" = {_sql_literal(user_id)};'
-    )
+    sql = f'SELECT COUNT(*) FROM "AgentPhoneMessage" WHERE "userId" = {_sql_literal(user_id)};'
     out = _run_local_victoria_sql(sql)
     try:
         return int(out.splitlines()[-1].strip() or "0")
@@ -4166,9 +4654,7 @@ def _local_agent_phone_message_count_for_user(user_id: str) -> int:
         return 0
 
 
-async def _agentphone_messages_since_for_user(
-    base_url: str, user_id: str, since: datetime
-) -> List[dict]:
+async def _agentphone_messages_since_for_user(base_url: str, user_id: str, since: datetime) -> List[dict]:
     """Fetch AgentPhone messages through the same provider-polling path agents use."""
     api_key = load_env_var("BACKEND_API_KEY", _AGENTS_ENV, _BACKEND_ENV)
     if not api_key:
@@ -4185,8 +4671,7 @@ async def _agentphone_messages_since_for_user(
         return []
     if response.status_code != 200:
         raise RuntimeError(
-            f"AgentPhone benchmark evidence fetch failed: "
-            f"HTTP {response.status_code} {response.text[:200]}"
+            f"AgentPhone benchmark evidence fetch failed: HTTP {response.status_code} {response.text[:200]}"
         )
 
     data = response.json()
@@ -4416,7 +4901,7 @@ def _x_signup_has_account_creation_evidence(signup_text: str) -> bool:
     )
 
 
-def _default_minted_target_url(base_url: str, task_name: str = MINTED_AGENT_ACCOUNT_TASK_NAME) -> str:
+def _default_minted_target_url(base_url: str, task_name: str = MINTED_AGENT_ACCOUNT_X_TASK_NAME) -> str:
     if task_name == MINTED_AGENT_ACCOUNT_X_TASK_NAME:
         return "https://x.com"
     return f"{base_url.rstrip('/')}/api/test/minted-agent-account-fixture?authRealm=m.uber.com"
@@ -4477,27 +4962,19 @@ async def run_minted_agent_account_task(
     target_url = os.environ.get("BENCHMARK_MINTED_TARGET_URL") or _default_minted_target_url(base_url, task.name)
     target_realm = os.environ.get("BENCHMARK_MINTED_AUTH_REALM") or _auth_realm_from_target_url(target_url)
     site_label = _site_label_from_realm(target_realm)
-    reset_agent_identity = (
-        os.environ.get("BENCHMARK_MINTED_RESET_AGENT_IDENTITY", "").strip().lower()
-        in ("1", "true", "yes", "on")
+    reset_agent_identity = os.environ.get("BENCHMARK_MINTED_RESET_AGENT_IDENTITY", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
     )
     prefer_phone_auth = _benchmark_env_bool("BENCHMARK_MINTED_PREFER_PHONE_AUTH") is True
     clear_existing_auth = _benchmark_env_bool("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH") is True
     phone_evidence_since = datetime.now(timezone.utc)
     identity_was_present = _local_agent_identity_present_for_user(USER_ID)
-    deleted = _delete_local_minted_accounts_for_user(
-        USER_ID, reset_agent_identity=reset_agent_identity
-    )
-    seeded_identity_email = (
-        None
-        if reset_agent_identity
-        else _seed_local_benchmark_agent_identity_if_missing(USER_ID)
-    )
-    disabled_auth = (
-        _disable_local_auth_material_for_realm(USER_ID, target_realm)
-        if clear_existing_auth
-        else 0
-    )
+    deleted = _delete_local_minted_accounts_for_user(USER_ID, reset_agent_identity=reset_agent_identity)
+    seeded_identity_email = None if reset_agent_identity else _seed_local_benchmark_agent_identity_if_missing(USER_ID)
+    disabled_auth = _disable_local_auth_material_for_realm(USER_ID, target_realm) if clear_existing_auth else 0
     print(
         f"    🧹 Deleted {deleted} minted account row(s), "
         f"{'reset' if reset_agent_identity else 'preserved'} cached AgentIdentity "
@@ -4579,11 +5056,7 @@ async def run_minted_agent_account_task(
         return {"auth_bundle_biometrics": auth_bundle_biometrics_result.logs, **logs}
 
     def _with_gate_fast_mode(*results: TaskResult) -> bool:
-        gate_enabled = (
-            auth_bundle_biometrics_result.fast_mode_cache_enabled
-            if auth_bundle_biometrics_result
-            else False
-        )
+        gate_enabled = auth_bundle_biometrics_result.fast_mode_cache_enabled if auth_bundle_biometrics_result else False
         return gate_enabled or any(result.fast_mode_cache_enabled for result in results)
 
     if target_realm == "x.com":
@@ -4613,8 +5086,7 @@ async def run_minted_agent_account_task(
             print(f"    ❌ No minted account persisted for {target_realm}")
         post_text = _task_result_search_text(post_result)
         post_evidence = "hello world" in post_text and any(
-            marker in post_text
-            for marker in ("posted", "post submitted", "post was submitted", "successfully posted")
+            marker in post_text for marker in ("posted", "post submitted", "post was submitted", "successfully posted")
         )
         x_terminal_phone_blocker = _x_signup_has_terminal_phone_blocker(post_text)
         passed = post_result.passed and minted is not None and post_evidence and not x_terminal_phone_blocker
@@ -4692,6 +5164,9 @@ async def run_minted_agent_account_task(
         prompt=signup_prompt,
         approval_handling=None,
         expected_attention_kind=None,
+        expected_attention_kinds=[],
+        evaluators=[],
+        enforce_declared_evaluators=False,
         timeout_seconds=max(task.timeout_seconds, 900),
     )
     try:
@@ -4711,9 +5186,7 @@ async def run_minted_agent_account_task(
             print(f"    ❌ No minted account persisted for {target_realm}")
         signup_account_evidence = False
         if minted and target_realm == "uber.com":
-            signup_account_evidence = await _primitive_inbox_has_uber_welcome(
-                minted["account_label"]
-            )
+            signup_account_evidence = await _primitive_inbox_has_uber_welcome(minted["account_label"])
             if signup_account_evidence:
                 print("    ✅ Uber account creation evidence found in primitive welcome email")
             else:
@@ -4732,7 +5205,9 @@ async def run_minted_agent_account_task(
                 if not x_account_access_proven:
                     failure_parts.append("no grounded evidence that X account creation/sign-in completed")
                 if not signup_result.passed:
-                    failure_parts.append(f"signup/auth probe failed: {signup_result.failure_reason or signup_result.status}")
+                    failure_parts.append(
+                        f"signup/auth probe failed: {signup_result.failure_reason or signup_result.status}"
+                    )
                 return TaskResult(
                     name=task.name,
                     passed=False,
@@ -4844,9 +5319,7 @@ async def run_minted_agent_account_task(
             )
 
         if target_realm != "uber.com":
-            phone_messages = await _agentphone_messages_since_for_user(
-                base_url, USER_ID, phone_evidence_since
-            )
+            phone_messages = await _agentphone_messages_since_for_user(base_url, USER_ID, phone_evidence_since)
             phone_message_delta = len(phone_messages)
             signup_text = _task_result_search_text(signup_result)
             phone_blocked = (
@@ -4874,7 +5347,9 @@ async def run_minted_agent_account_task(
             if not phone_auth_proven:
                 failure_parts.append("no SMS OTP, verification, sign-in, or account-creation evidence observed")
             if not signup_result.passed:
-                failure_parts.append(f"signup/auth probe failed: {signup_result.failure_reason or signup_result.status}")
+                failure_parts.append(
+                    f"signup/auth probe failed: {signup_result.failure_reason or signup_result.status}"
+                )
             if phone_message_delta > 0:
                 print(f"    ✅ AgentPhone received {phone_message_delta} new message(s) during {site_label} auth")
             else:
@@ -4897,31 +5372,35 @@ async def run_minted_agent_account_task(
                 cache_hit_pct=signup_result.cache_hit_pct,
                 fast_mode_cache_enabled=_with_gate_fast_mode(signup_result),
                 context_violations=_with_gate_context_violations(signup_result.context_violations),
-                logs=_with_gate_logs({
-                    "signup": signup_result.logs,
-                    "phone_message_delta": phone_message_delta,
-                    "phone_messages": phone_messages,
-                }),
+                logs=_with_gate_logs(
+                    {
+                        "signup": signup_result.logs,
+                        "phone_message_delta": phone_message_delta,
+                        "phone_messages": phone_messages,
+                    }
+                ),
             )
 
         booking_auth_instruction = (
-        "If Uber asks for login again, use the minted AgentPhone number in the phone/email field. "
-        "Do not switch to the minted email unless Uber accepts the phone number first and then explicitly "
-        "asks for an email address as an additional account field. Clear the phone/email input "
-        "before each attempt. If Uber says the minted phone number is blocked or unsupported, stop "
-        "and report that phone-auth blocker. "
-        if prefer_phone_auth
-        else "If Uber asks for login again, use the minted email in the phone/email field "
-        "when email is accepted; use the minted AgentPhone number only if Uber explicitly requires "
-        "phone/SMS auth. Clear the phone/email input before each attempt. If Uber says the minted "
-        "phone number is blocked, choose another available login option using the minted "
-        "email; stop and report the blocker only if no minted-email path is available. "
+            "If Uber asks for login again, use the minted AgentPhone number in the phone/email field. "
+            "Do not switch to the minted email unless Uber accepts the phone number first and then explicitly "
+            "asks for an email address as an additional account field. Clear the phone/email input "
+            "before each attempt. If Uber says the minted phone number is blocked or unsupported, stop "
+            "and report that phone-auth blocker. "
+            if prefer_phone_auth
+            else "If Uber asks for login again, use the minted email in the phone/email field "
+            "when email is accepted; use the minted AgentPhone number only if Uber explicitly requires "
+            "phone/SMS auth. Clear the phone/email input before each attempt. If Uber says the minted "
+            "phone number is blocked, choose another available login option using the minted "
+            "email; stop and report the blocker only if no minted-email path is available. "
         )
         booking_prompt = (
-        f"Open {target_url}. Using the already-created Uber account in this browser profile, "
-        "start booking an Uber ride. Confirm the page is signed in with the same agent minted "
-        f"identity from the first task. {booking_auth_instruction}"
-        "Use any reasonable pickup and destination if the site requires them. Continue until the "
+            f"Open {target_url}. Using the already-created Uber account in this browser profile, "
+            "start booking an Uber ride. Confirm the page is signed in with the same agent minted "
+            f"identity from the first task. {booking_auth_instruction}"
+            "Set the pickup to 88 Howard Street, San Francisco, CA 94105 and the destination to "
+            "FITNESS SF Transbay, 425 Mission Street, San Francisco, CA 94105. Confirm both map pins "
+            "are at those exact addresses and select UberX, not a premium or shared tier. Continue until the "
             "final action would submit, request, confirm, or pay for the ride; "
             "click that final button so the browser write-lock approval request stops you. Do not bypass "
             "or answer approval."
@@ -4933,6 +5412,7 @@ async def run_minted_agent_account_task(
             prompt=booking_prompt,
             approval_handling="ignore",
             expected_attention_kind="write_lock",
+            expected_attention_kinds=[],
             timeout_seconds=max(task.timeout_seconds, 900),
         )
         previous_write_lock = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
@@ -4987,6 +5467,299 @@ async def run_minted_agent_account_task(
         print("    🧹 Preserved AgentIdentity primitive inbox and AgentPhone number")
 
 
+def _declared_evaluator_evidence(data: dict) -> list[dict]:
+    """Build a bounded evidence-only context for a declared LLM judge."""
+    evidence: list[dict] = []
+    for message in (data.get("messages") or [])[-120:]:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").upper()
+        if role in {"USER", "SYSTEM"}:
+            continue
+        text_value = message.get("text", message.get("content", ""))
+        if not isinstance(text_value, str):
+            text_value = json.dumps(text_value, default=str)
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        evidence.append(
+            {
+                "role": role or "UNKNOWN",
+                "text": text_value[:12000],
+                "metadata": {
+                    key: metadata[key]
+                    for key in (
+                        "action_type",
+                        "toolName",
+                        "toolStatus",
+                        "url",
+                        "title",
+                        "browser_session_metadata",
+                    )
+                    if key in metadata
+                },
+            }
+        )
+    evidence.append({"benchmark_state": data.get("_benchmark", {})})
+    return evidence
+
+
+async def _call_declared_llm_judge(
+    task: BenchmarkTask,
+    evaluator: dict,
+    data: dict,
+) -> dict:
+    """Execute one catalog-declared single-turn judge against grounded run evidence."""
+    from helpers.llm import check_progress
+
+    criteria = "\n".join(f"- {criterion}" for criterion in evaluator.get("criteria", []))
+    verifier_prompt = f"""You are a strict benchmark judge for a live ecommerce transaction.
+
+The task prompt and criteria below describe requirements; they are not evidence. Score exactly 1.0 only
+when every criterion is directly grounded in tool/browser output or typed benchmark state. Otherwise score
+0.0 and explain the first missing or contradicted requirement. An attention request proves only its typed
+terminal gate; it does not prove item, price, date, address, quantity, or selection constraints. Unsupported
+assistant claims are not proof. Authentication assistance, login blockers, missing inventory, and unavailable
+eligible orders fail unless a criterion explicitly defines that state as success.
+
+Task requirement: {task.prompt}
+Criteria:
+{criteria}
+Judge-specific instruction: {evaluator.get('judge_prompt', '')}
+"""
+    evidence = _declared_evaluator_evidence(data)
+    return await check_progress(
+        context=[
+            {
+                "role": "USER",
+                "text": "Evaluate the supplied run evidence against the benchmark requirements.",
+            },
+            {
+                "role": "TOOL",
+                "text": json.dumps(evidence, default=str),
+            },
+        ],
+        verifier_system_prompt=verifier_prompt,
+        response_schema=None,
+        call_site="benchmark_declared_evaluator",
+        agent_id=(data.get("agent") or {}).get("agent_id") or (data.get("agent") or {}).get("id"),
+    )
+
+
+def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
+    """Return distinct browser attempts and grounded failed lifecycle events."""
+    browser_call_ids: set[str] = set()
+    browser_session_ids: set[str] = set()
+    failures: list[str] = []
+    for message in data.get("messages", []) or []:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        candidates = [metadata]
+        if isinstance(metadata.get("auxiliary"), dict):
+            candidates.append(metadata["auxiliary"])
+        for candidate in candidates:
+            tool_name = candidate.get("toolName") or candidate.get("tool_name")
+            is_browser = tool_name == "spawn_browser_agent" or (
+                tool_name == "spawn_agent" and candidate.get("agentType") == "browser"
+            )
+            if not is_browser:
+                continue
+            call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
+            if call_id:
+                browser_call_ids.add(str(call_id))
+            session_id = candidate.get("browser_session_id") or candidate.get("browser_url")
+            if session_id:
+                browser_session_ids.add(str(session_id))
+            status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+            event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+            if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
+                failures.append(
+                    f"{tool_name or 'browser agent'} {call_id or session_id or 'unknown'} "
+                    f"status={status or 'unsuccessful'}"
+                )
+    return max(len(browser_call_ids), len(browser_session_ids)), failures
+
+
+def _tool_runtime_failures(data: dict) -> list[str]:
+    """Return grounded failed tool lifecycle events from the root trajectory."""
+    failures: list[str] = []
+    for message in data.get("messages", []) or []:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        candidates = [metadata]
+        if isinstance(metadata.get("auxiliary"), dict):
+            candidates.append(metadata["auxiliary"])
+        for candidate in candidates:
+            tool_name = candidate.get("toolName") or candidate.get("tool_name")
+            if not tool_name:
+                continue
+            status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+            event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+            if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
+                call_id = candidate.get("toolCallId") or candidate.get("tool_call_id") or "unknown"
+                failures.append(f"{tool_name} {call_id} status={status or 'unsuccessful'}")
+    return failures
+
+
+_APPROVAL_CLOCK_RE = re.compile(
+    r"(?:\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\b(?:1[0-2]|[1-9])(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)\b)",
+    re.IGNORECASE,
+)
+_APPROVAL_DATE_RE = re.compile(
+    r"(?:\b\d{4}-\d{1,2}-\d{1,2}\b|"
+    r"\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b|"
+    r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b)",
+    re.IGNORECASE,
+)
+_APPROVAL_AMOUNT_RE = re.compile(
+    r"(?:\$\s*\d+(?:,\d{3})*(?:\.\d{2})?|\bUSD\s*\d+(?:,\d{3})*(?:\.\d{2})?\b|\b\d+(?:\.\d{2})?\s*USD\b)",
+    re.IGNORECASE,
+)
+_APPROVAL_SEAT_RE = re.compile(
+    r"(?:\bseat(?:s)?(?:\s+(?:number|assignment))?\s*[:#-]?\s*[a-z]{1,2}\s*-?\s*\d{1,3}\b|"
+    r"\brow\s+[a-z]{1,2}\s*,?\s+seat\s+\d{1,3}\b|"
+    r'[\"\']seat[\"\']\s*:\s*[\"\']?[a-z]{1,2}\s*-?\s*\d{1,3}\b)',
+    re.IGNORECASE,
+)
+
+
+def _run_declared_static_check(evaluator: dict, data: dict) -> tuple[bool, str]:
+    """Execute the small fail-closed static-check surface used by enforced tasks."""
+    benchmark_state = data.get("_benchmark", {})
+    for check in evaluator.get("checks", []):
+        check_type = check.get("type")
+        if check_type == "expected_payment_receipt":
+            if benchmark_state.get("expected_payment_receipt_seen") is not True:
+                return False, "Expected validated payment receipt was not observed"
+            continue
+        if check_type == "expected_gate":
+            if benchmark_state.get("expected_gate_seen") is not True:
+                return False, "Expected typed gate was not observed"
+            continue
+        if check_type == "no_browser_agent_failures":
+            _, failures = _browser_agent_runtime_facts(data)
+            if failures:
+                return False, f"Observed browser agent failure: {failures[0]}"
+            continue
+        if check_type == "no_tool_failures":
+            failures = _tool_runtime_failures(data)
+            if failures:
+                return False, f"Observed tool failure: {failures[0]}"
+            continue
+        if check_type == "browser_agent_session_count":
+            session_count, _ = _browser_agent_runtime_facts(data)
+            minimum = int(check.get("min", 0))
+            maximum = int(check.get("max", minimum))
+            if not minimum <= session_count <= maximum:
+                return (
+                    False,
+                    f"Browser agent session count was {session_count}; expected {minimum}..{maximum}",
+                )
+            continue
+        if check_type == "agent_status":
+            expected_status = str(check.get("value") or "COMPLETED").upper()
+            observed_status = str((data.get("agent") or {}).get("status") or "UNKNOWN").upper()
+            if observed_status != expected_status:
+                return False, f"Agent status was {observed_status}; expected {expected_status}"
+            continue
+        if check_type == "approval_request_count":
+            expected_count = int(check.get("value", 0))
+            observed_count = int(benchmark_state.get("approvals_triggered", 0))
+            if observed_count != expected_count:
+                return (
+                    False,
+                    f"Approval request count was {observed_count}; expected exactly {expected_count}",
+                )
+            continue
+        if check_type == "approval_request_details":
+            requests = benchmark_state.get("attention_requests_seen") or []
+            required_strings = check.get("required_strings") or []
+            require_date = check.get("require_date") is True
+            minimum_date_count = int(check.get("minimum_date_count", 1 if require_date else 0))
+            require_time = check.get("require_time") is True
+            require_amount = check.get("require_amount") is True
+            require_seat = check.get("require_seat") is True
+            for request in requests:
+                evidence = json.dumps(request, default=str).lower()
+                if not all(str(value).lower() in evidence for value in required_strings):
+                    continue
+                if len(_APPROVAL_DATE_RE.findall(evidence)) < minimum_date_count:
+                    continue
+                if require_time and not _APPROVAL_CLOCK_RE.search(evidence):
+                    continue
+                if require_amount and not _APPROVAL_AMOUNT_RE.search(evidence):
+                    continue
+                if require_seat and not _APPROVAL_SEAT_RE.search(evidence):
+                    continue
+                break
+            else:
+                missing = ", ".join(str(value) for value in required_strings) or "required details"
+                if minimum_date_count == 1:
+                    date_suffix = " and a calendar date"
+                elif minimum_date_count > 1:
+                    date_suffix = f" and {minimum_date_count} calendar dates"
+                else:
+                    date_suffix = ""
+                time_suffix = " and a reservation time" if require_time else ""
+                amount_suffix = " and a monetary amount" if require_amount else ""
+                seat_suffix = " and a seat assignment" if require_seat else ""
+                return False, (
+                    "Approval request did not include "
+                    f"{missing}{date_suffix}{time_suffix}{amount_suffix}{seat_suffix}"
+                )
+            continue
+        return False, f"Unsupported enforced static check: {check_type}"
+    return True, "All declared static checks passed"
+
+
+async def _run_declared_evaluators(
+    task: BenchmarkTask,
+    data: dict,
+) -> tuple[bool, Optional[str], list[dict]]:
+    """Run required catalog evaluators; unsupported/erroring evaluators fail closed."""
+    if not task.enforce_declared_evaluators:
+        return True, None, []
+
+    results: list[dict] = []
+    for evaluator in task.evaluators:
+        evaluator_id = evaluator.get("id", "unnamed")
+        method = evaluator.get("method")
+        usage = None
+        try:
+            if method == "static_check":
+                passed, reasoning = _run_declared_static_check(evaluator, data)
+                score = 1.0 if passed else 0.0
+            elif method == "single_turn_llm_judge":
+                judged = await _call_declared_llm_judge(task, evaluator, data)
+                score = float(judged.get("score", 0.0))
+                reasoning = str(judged.get("reasoning") or "Judge returned no reasoning")
+                usage = judged.get("usage")
+                passed = score >= float(evaluator.get("pass_threshold", 1.0))
+            else:
+                passed = False
+                score = 0.0
+                reasoning = f"Unsupported enforced evaluator method: {method}"
+        except Exception as exc:
+            passed = False
+            score = 0.0
+            reasoning = f"Declared evaluator execution failed: {exc}"
+        result = {
+            "id": evaluator_id,
+            "method": method,
+            "score": score,
+            "passed": passed,
+            "reasoning": reasoning,
+        }
+        if usage is not None:
+            result["usage"] = usage
+        results.append(result)
+        if not passed:
+            return False, f"Declared evaluator {evaluator_id} failed: {reasoning}", results
+    return True, None, results
+
+
 async def run_single_task(
     base_url: str,
     task: BenchmarkTask,
@@ -5008,11 +5781,7 @@ async def run_single_task(
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
         return await run_minted_agent_account_task(base_url, task, keep_failed_agents)
 
-    if (
-        task.name == AMAZON_AUTH_ASSISTANCE_TASK_NAME
-        and _force_show_passwords_mode()
-        and _is_local_base_url(base_url)
-    ):
+    if task.name == AMAZON_AUTH_ASSISTANCE_TASK_NAME and _force_show_passwords_mode() and _is_local_base_url(base_url):
         auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
         disabled_count = _disable_local_steel_and_cookie_auth_for_realm(USER_ID, auth_realm)
         fixture = _seed_local_bad_amazon_auth_fixture(USER_ID, auth_realm)
@@ -5067,10 +5836,7 @@ async def run_single_task(
         user_data_manifest = _run_user_data_fixture("apply")
         doc_count = user_data_manifest.get("document_count", "?")
         provider_count = user_data_manifest.get("provider_count", "?")
-        print(
-            f"    📄 Seeded frozen user-data fixture: {doc_count} documents "
-            f"across {provider_count} providers"
-        )
+        print(f"    📄 Seeded frozen user-data fixture: {doc_count} documents across {provider_count} providers")
 
     phone_callee: Optional[PhoneCalleeSession] = None
     if task.phone_persona:
@@ -5155,6 +5921,14 @@ async def run_single_task(
             await configure_benchmark_agentcard_setup(base_url, "complete")
             print("    🔐 Seeded connected AgentCard sandbox fixture")
 
+        if task.name == MESSAGE_PERSON_TASK_NAME:
+            await _preflight_message_person_bridge(base_url)
+        if task.name == MESSAGE_PERSON_AGENT_SMS_TASK_NAME and (
+            "localhost" in base_url or "127.0.0.1" in base_url
+        ):
+            seeded_email = _prepare_local_agent_sms_sender(USER_ID)
+            if seeded_email:
+                print(f"    🧪 Seeded AgentPhone sender for live bench: {seeded_email}")
         # Apply live fixtures inside the cleanup boundary. The passkey-only
         # fixture intentionally removes shared browser state and must restore it
         # even when agent creation or evaluation fails.
@@ -5404,9 +6178,7 @@ async def run_single_task(
 
         if task.name == USER_DATA_PROD_GREP_TASK_NAME and passed:
             try:
-                prod_grep_contract_error = await validate_user_data_prod_grep_contract(
-                    base_url, agent_id
-                )
+                prod_grep_contract_error = await validate_user_data_prod_grep_contract(base_url, agent_id)
                 if prod_grep_contract_error:
                     passed = False
                     failure_reason = prod_grep_contract_error
@@ -5452,9 +6224,25 @@ async def run_single_task(
             warn_count = len(final_violations) - error_count
             print(f"    Context validation: {error_count} errors, {warn_count} warnings")
 
+        declared_evaluator_results: list[dict] = []
+        if task.enforce_declared_evaluators and passed:
+            evaluator_passed, evaluator_reason, declared_evaluator_results = await _run_declared_evaluators(
+                task,
+                data,
+            )
+            data["_benchmark"] = {
+                **data.get("_benchmark", {}),
+                "declared_evaluator_results": declared_evaluator_results,
+            }
+            if not evaluator_passed:
+                passed = False
+                failure_reason = evaluator_reason
+
         # Collect prod logs for diagnostics
         print("    Collecting prod logs...")
         logs = await collect_logs(agent_id, data, start_time)
+        if declared_evaluator_results:
+            logs["declared_evaluators"] = declared_evaluator_results
         # Capture the FULL agent tree's messages (root + every spawned sub-agent) so
         # the archive can render the fan-out, not just the root. Without this a
         # for_each/spawn benchmark opens to a lone root with no visible tree. Only
@@ -5463,9 +6251,7 @@ async def run_single_task(
         if tree_agent_count and tree_agent_count > 1:
             try:
                 tree_agents = await get_agent_tree(base_url, agent_id)
-                logs["tree"] = await collect_tree_messages(
-                    agent_id, tree_agents, lambda a: get_agent(base_url, a)
-                )
+                logs["tree"] = await collect_tree_messages(agent_id, tree_agents, lambda a: get_agent(base_url, a))
                 print(f"    Tree messages captured for {len(logs['tree'])} agent(s)")
             except Exception as tree_err:
                 print(f"    ⚠ tree-message capture failed (archive shows root only): {tree_err}")
@@ -5692,10 +6478,7 @@ async def run_single_task(
                 os.unlink(tmp)
             except OSError:
                 pass
-        if (
-            plaid_transactions_fixture_action == "apply"
-            and os.environ.get("BENCHMARK_CLEANUP_PLAID_FIXTURE") == "1"
-        ):
+        if plaid_transactions_fixture_action == "apply" and os.environ.get("BENCHMARK_CLEANUP_PLAID_FIXTURE") == "1":
             try:
                 _run_plaid_transactions_fixture("cleanup")
             except Exception as exc:
@@ -5771,7 +6554,7 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
             # The anon/cookie split used to live on dedicated tags; the curated
             # tag vocabulary merged them into `auth`, so the split is by name.
             auth_names = (
-                ("browser-agent", "minted-agent-accounts-uber")
+                ("browser-agent",)
                 if getattr(args, "anon", False)
                 else ("browser-agent-amazon-cookie-payment",)
             )
@@ -6466,10 +7249,7 @@ async def main_async(args):
             history_timeout = _history_get_timeout(t.name, max_seconds=cap)
         except InsufficientHistoryError as e:
             t._resolved_timeout_seconds = _default_timeout_for_task(t, cap)
-            print(
-                f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s "
-                f"(default; history n={e.have}/{e.need})"
-            )
+            print(f"  ⏱  {t.name} → {t._resolved_timeout_seconds}s (default; history n={e.have}/{e.need})")
         else:
             floor = get_timeout_floor(t.name)
             t._resolved_timeout_seconds = max(history_timeout, floor) if floor else history_timeout
@@ -6510,9 +7290,7 @@ async def main_async(args):
         and not args.prod
         and (base_url.startswith("http://localhost") or base_url.startswith("http://127.0.0.1"))
     )
-    memory_baseline_before = (
-        await _stabilize_local_worker_memory(base_url, "before") if memory_gate_enabled else {}
-    )
+    memory_baseline_before = await _stabilize_local_worker_memory(base_url, "before") if memory_gate_enabled else {}
     memory_before = _sample_local_worker_memory() if memory_gate_enabled else {"available": False, "reason": "disabled"}
     if memory_gate_enabled:
         if memory_before.get("available"):
@@ -6578,9 +7356,7 @@ async def main_async(args):
                     tokens_out=r.tokens_out,
                     world_model_mode=task_world_model_modes.get(r.name),
                     fast_mode=bool(getattr(r, "fast_mode_cache_enabled", False)),
-                    infra_usd=_infra_usd_for_elapsed(r.duration_seconds)
-                    if r.duration_seconds is not None
-                    else None,
+                    infra_usd=_infra_usd_for_elapsed(r.duration_seconds) if r.duration_seconds is not None else None,
                 )
             )
         for name in running_names:
@@ -6605,7 +7381,11 @@ async def main_async(args):
             per_task=per_task,
             # WMH grounding cost + tokens are only known when a WMH is served
             # (simulate/shadow); None for plain real runs so the card renders "—".
-            wmh_grounding_usd=(float(wmh_usage["total_cost_usd"]) if wmh_usage and wmh_usage.get("total_cost_usd") is not None else None),
+            wmh_grounding_usd=(
+                float(wmh_usage["total_cost_usd"])
+                if wmh_usage and wmh_usage.get("total_cost_usd") is not None
+                else None
+            ),
             wmh_tokens_in=(int(wmh_usage.get("input_tokens") or 0) if wmh_usage else None),
             wmh_tokens_out=(int(wmh_usage.get("output_tokens") or 0) if wmh_usage else None),
             # Whole-run infra cost = machine rate × wallclock (per-bench isolated

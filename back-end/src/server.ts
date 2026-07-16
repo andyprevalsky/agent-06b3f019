@@ -106,7 +106,7 @@ app.use(
 );
 app.use(
   '/api/agentphone',
-  express.raw({ type: 'application/json', limit: '1mb' }),
+  express.json({ type: 'application/json', limit: '1mb' }),
   agentPhoneRouter
 );
 

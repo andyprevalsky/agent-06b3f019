@@ -1,10 +1,12 @@
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "cloudbench-sync-deps.sh"
+PRISMA_SYNC_SCRIPT = ROOT / "scripts" / "cloudbench-sync-prisma-client.sh"
 ENV_HELPER_SCRIPT = ROOT / "scripts" / "lib" / "cloudbench-env.sh"
 ARTIFACT_SCRIPT = ROOT / "scripts" / "cloudbench-current-run-artifact.py"
 FETCH_SCRIPT = ROOT / "scripts" / "cloudbench-fetch-ref.sh"
@@ -35,6 +37,92 @@ def _write_manifests(root: Path, *, lock: str = "same", requirements: str = "sam
     req = root / "agents/requirements.txt"
     req.parent.mkdir(parents=True, exist_ok=True)
     req.write_text(requirements)
+
+
+def _write_prisma_fixture(root: Path) -> tuple[Path, Path, dict[str, str]]:
+    repo = root / "repo"
+    schema = repo / "back-end/prisma/schema.prisma"
+    schema.parent.mkdir(parents=True)
+    schema.write_text("model Alpha { id String @id }\n")
+    (repo / "node_modules/.prisma").mkdir(parents=True)
+
+    bin_dir = root / "bin"
+    bin_dir.mkdir()
+    gosu = bin_dir / "gosu"
+    gosu.write_text("#!/usr/bin/env bash\nset -eu\nshift\nexec \"$@\"\n")
+    gosu.chmod(0o755)
+    npx = bin_dir / "npx"
+    npx.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "printf '%s\\n' \"$*\" >> \"$PRISMA_GENERATE_LOG\"\n"
+        "[ \"${PRISMA_GENERATE_FAIL:-0}\" != 1 ]\n"
+    )
+    npx.chmod(0o755)
+
+    generate_log = root / "prisma-generate.log"
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    env["PRISMA_GENERATE_LOG"] = str(generate_log)
+    return repo, generate_log, env
+
+
+def _run_prisma_sync(repo: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["bash", str(PRISMA_SYNC_SCRIPT), str(repo), "rose"],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+    )
+
+
+def test_prisma_client_regenerates_only_when_schema_fingerprint_changes(
+    tmp_path: Path,
+) -> None:
+    repo, generate_log, env = _write_prisma_fixture(tmp_path)
+    marker = repo / "node_modules/.prisma/.rose-schema-fingerprint"
+
+    first = _run_prisma_sync(repo, env)
+    assert first.returncode == 0, first.stderr
+    assert generate_log.read_text().splitlines() == [
+        f"--no-install prisma generate --schema {repo / 'back-end/prisma/schema.prisma'}"
+    ]
+    first_fingerprint = marker.read_text()
+
+    unchanged = _run_prisma_sync(repo, env)
+    assert unchanged.returncode == 0, unchanged.stderr
+    assert len(generate_log.read_text().splitlines()) == 1
+    assert marker.read_text() == first_fingerprint
+
+    (repo / "back-end/prisma/schema.prisma").write_text(
+        "model Alpha { id String @id gateKey String? }\n"
+    )
+    changed = _run_prisma_sync(repo, env)
+    assert changed.returncode == 0, changed.stderr
+    assert len(generate_log.read_text().splitlines()) == 2
+    assert marker.read_text() != first_fingerprint
+
+
+def test_prisma_client_generation_failure_is_fatal_and_keeps_old_fingerprint(
+    tmp_path: Path,
+) -> None:
+    repo, generate_log, env = _write_prisma_fixture(tmp_path)
+    marker = repo / "node_modules/.prisma/.rose-schema-fingerprint"
+    baseline = _run_prisma_sync(repo, env)
+    assert baseline.returncode == 0, baseline.stderr
+    baseline_fingerprint = marker.read_text()
+
+    (repo / "back-end/prisma/schema.prisma").write_text(
+        "model Alpha { id String @id newField Boolean @default(false) }\n"
+    )
+    env["PRISMA_GENERATE_FAIL"] = "1"
+    failed = _run_prisma_sync(repo, env)
+
+    assert failed.returncode != 0
+    assert "Prisma client generation failed" in failed.stderr
+    assert len(generate_log.read_text().splitlines()) == 2
+    assert marker.read_text() == baseline_fingerprint
 
 
 def test_refreshes_stale_volume_dependency_trees(tmp_path: Path) -> None:
@@ -284,12 +372,12 @@ def test_deploy_smoke_gate_uses_the_visible_cloud_runner() -> None:
     assert "git ls-files --others --exclude-standard" in deploy
 
 
-def test_cloud_patch_includes_staged_and_unstaged_tracked_changes() -> None:
+def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()
 
-    assert 'git -C "$ROOT_DIR" diff HEAD --binary' in cloud
-    assert 'git -C "$ROOT_DIR" diff HEAD --binary' in fleet
+    assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in cloud
+    assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in fleet
 
 
 def test_fetch_ref_never_falls_back_to_stale_fetch_head(tmp_path: Path) -> None:
@@ -1042,9 +1130,12 @@ def test_pool_reconcile_leaves_concurrent_owner_untouched(tmp_path: Path) -> Non
     function_end = fleet.index("\n}\n", reconcile_start) + 3
     reconcile_functions = fleet[function_start:function_end]
 
-    pool_file = tmp_path / "pool.ids"
+    git_common = tmp_path / "git-common"
+    pool_file = git_common / "cloudbench-pools" / "workspace.ids"
+    claims_dir = git_common / "cloudbench-pool-claims"
     states_file = tmp_path / "states"
     operations_file = tmp_path / "operations"
+    pool_file.parent.mkdir(parents=True)
     pool_file.write_text("abc123\n")
     states_file.write_text("started\n")
     operations_file.write_text("")
@@ -1055,7 +1146,9 @@ def test_pool_reconcile_leaves_concurrent_owner_untouched(tmp_path: Path) -> Non
             "-c",
             f"""set -uo pipefail
 APP=bench-app
+GIT_COMMON_DIR="$GIT_COMMON"
 POOL_IDS_FILE="$POOL_FILE"
+POOL_CLAIMS_DIR="$CLAIMS_DIR"
 UNAVAILABLE_POOL_IDS=()
 FLY() {{
   if [ "$1 $2" = "machines list" ]; then
@@ -1080,6 +1173,8 @@ printf 'refresh\\n' >> "$OPERATIONS_FILE"
         ],
         env={
             "POOL_FILE": str(pool_file),
+            "GIT_COMMON": str(git_common),
+            "CLAIMS_DIR": str(claims_dir),
             "STATES_FILE": str(states_file),
             "OPERATIONS_FILE": str(operations_file),
             "CLOUDBENCH_POOL_STOP_DELAY": "0",
@@ -1102,6 +1197,9 @@ printf 'refresh\\n' >> "$OPERATIONS_FILE"
 
 def test_pool_claims_survive_command_substitution_and_stay_distinct(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
+    write_start = fleet.index("write_pool_claim() {")
+    write_end = fleet.index("\n}\n", write_start) + 3
+    write_function = fleet[write_start:write_end]
     function_start = fleet.index("claim_pool_machine() {")
     function_end = fleet.index("\n}\n", function_start) + 3
     claim_function = fleet[function_start:function_end]
@@ -1121,12 +1219,15 @@ POOL_IDS_FILE="$POOL_FILE"
 CLAIMED_POOL_FILE="$CLAIMS_FILE"
 POOL_CLAIMS_DIR="$GLOBAL_CLAIMS"
 UNAVAILABLE_POOL_IDS=(abc123)
+FLEET_OWNER_HOST=test-host
+FLEET_OWNER_PID_START='Mon Jan  1 00:00:00 2001'
 machine_storage_ready() {{ return 0; }}
 FLY() {{
   if [ "$1 $2" = "machine status" ]; then printf 'State stopped\\n'; return 0; fi
   if [ "$1 $2" = "machine start" ]; then printf '%s\\n' "$3" >> "$STARTS_FILE"; return 0; fi
   return 2
 }}
+{write_function}
 {claim_function}
 first="$(claim_pool_machine)"
 second="$(claim_pool_machine)"
@@ -1245,6 +1346,8 @@ FLY() {{
   fi
   return 2
 }}
+fleet_registry_record_name() {{ return 0; }}
+fleet_registry_record_id() {{ return 0; }}
 {clone_function}
 clone_machine_target "$LEDGER"
 """,
@@ -1326,11 +1429,13 @@ def test_pool_promotes_only_successful_owned_clone_ids() -> None:
     pool_function = fleet[pool_start:pool_end]
 
     clone_call = 'id="$(clone_machine_target "$OWNED_CLONES_FILE")"'
-    promotion = 'printf \'%s\\n\' "$id" >> "$POOL_IDS_FILE"'
+    promotion = 'if pool_ledger_record_id "$id"; then'
+    registry_release = 'fleet_registry_release_id "$id"'
     release = 'grep -Fxv "$id" "$OWNED_CLONES_FILE"'
     assert clone_call in pool_function
     assert pool_function.index(clone_call) < pool_function.index(promotion)
-    assert pool_function.index(promotion) < pool_function.index(release)
+    assert pool_function.index(promotion) < pool_function.index(registry_release)
+    assert pool_function.index(registry_release) < pool_function.index(release)
     assert 'clone_machine_target "$POOL_IDS_FILE"' not in pool_function
 
 

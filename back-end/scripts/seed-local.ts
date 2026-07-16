@@ -21,6 +21,7 @@ import {
   syncPasskeyCredentials,
   syncRequiredCredentialTable,
 } from './seed-local-credentials';
+import { runSyncStep, syncUserRecord } from './seed-local-helpers';
 
 // Parse .env file directly to get remote DB URL
 // (process.env.DATABASE_URL is already overridden to local by run.sh)
@@ -36,8 +37,9 @@ if (!REMOTE_URL) {
 const DEV_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 // Merge production browser auth state into local by each table's natural
 // identity. Matching rows are refreshed and missing production rows are added;
-// local-only rows are deliberately preserved because this is not an
-// authoritative mirror and must not erase developer-owned credentials.
+// local-only rows are deliberately preserved by normal/full sync. The explicit
+// --passkeys-only benchmark mode is authoritative and removes stale local
+// passkeys so its live-fixture preflight cannot succeed on obsolete material.
 const CREDENTIALS_ONLY = process.argv.includes('--credentials-only');
 const SKIP_BROWSER_AUTH_SYNC =
   process.env.BENCHMARK_SKIP_BROWSER_AUTH_SYNC === '1' ||
@@ -52,16 +54,24 @@ const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
 const PASSKEYS_ONLY = process.argv.includes('--passkeys-only');
 const COMPUTE_TOKEN_SYNC_ATTEMPTS = 5;
 
+const requestedSeedModes = [
+  ['--compute-tokens-only', COMPUTE_TOKENS_ONLY],
+  ['--passkeys-only', PASSKEYS_ONLY],
+  ['--credentials-only', CREDENTIALS_ONLY],
+].filter(([, enabled]) => enabled);
+if (requestedSeedModes.length > 1) {
+  throw new Error(
+    `Seed modes are mutually exclusive; received ${requestedSeedModes
+      .map(([flag]) => flag)
+      .join(', ')}`
+  );
+}
+
 const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
 const local = new PrismaClient(); // uses process.env.DATABASE_URL (local)
 
 async function syncTable(name: string, fn: () => Promise<number>): Promise<void> {
-  try {
-    const count = await fn();
-    console.log(`  ✅ ${name}: ${count} synced`);
-  } catch (err) {
-    console.error(`  ❌ ${name}: ${err instanceof Error ? err.message : err}`);
-  }
+  await runSyncStep(name, fn);
 }
 
 async function syncRequiredTable(
@@ -101,15 +111,7 @@ async function syncIntegrations(): Promise<number> {
   // Pool tokens reference foreign users — ensure those User records exist locally
   const poolUserIds = [...new Set(poolIntegrations.map((i) => i.userId))];
   for (const uid of poolUserIds) {
-    const user = await remote.user.findUnique({ where: { userId: uid } });
-    if (user) {
-      const { id, ...rest } = user;
-      await local.user.upsert({
-        where: { userId: uid },
-        create: user as any,
-        update: rest as any,
-      });
-    }
+    await syncUserRecord(remote.user, local.user, uid);
   }
   // Integrations are unique by (userId, name). A local credential may have a
   // different primary key from its production counterpart, so syncing by id
@@ -283,10 +285,13 @@ async function syncBrowserCredentials(failures?: Error[]): Promise<void> {
     failures
   );
 
-  await syncPasskeys(failures);
+  await syncPasskeysOnly(failures);
 }
 
-async function syncPasskeys(failures?: Error[]): Promise<void> {
+async function syncPasskeysOnly(
+  failures?: Error[],
+  options: { authoritative?: boolean } = {}
+): Promise<void> {
   // ── Passkey Credentials ──
   await syncRequiredTable(
     'Passkey Credentials',
@@ -295,6 +300,34 @@ async function syncPasskeys(failures?: Error[]): Promise<void> {
     },
     failures
   );
+
+  if (options.authoritative) {
+    await syncRequiredTable(
+      'Stale Local Passkeys',
+      async () => {
+        const remoteKeys = await remote.passkeyCredential.findMany({
+          where: { userId: DEV_USER_ID },
+          select: { rpId: true, credentialId: true },
+        });
+        const liveKeys = new Set(
+          remoteKeys.map(({ rpId, credentialId }) => `${rpId}\u0000${credentialId}`)
+        );
+        const localKeys = await local.passkeyCredential.findMany({
+          where: { userId: DEV_USER_ID },
+          select: { id: true, rpId: true, credentialId: true },
+        });
+        const staleIds = localKeys
+          .filter(({ rpId, credentialId }) => !liveKeys.has(`${rpId}\u0000${credentialId}`))
+          .map(({ id }) => id);
+        if (staleIds.length === 0) return 0;
+        const deleted = await local.passkeyCredential.deleteMany({
+          where: { id: { in: staleIds } },
+        });
+        return deleted.count;
+      },
+      failures
+    );
+  }
 }
 
 async function syncBrowserAuthForCurrentMode(failures?: Error[]): Promise<void> {
@@ -333,7 +366,10 @@ async function sync() {
   }
 
   if (PASSKEYS_ONLY) {
-    await syncPasskeys();
+    console.log(
+      '  ℹ️  Syncing authoritative passkeys only; browser state and passwords are excluded'
+    );
+    await syncPasskeysOnly(undefined, { authoritative: true });
     console.log('\n🔄 Passkey sync complete.');
     return;
   }
@@ -360,15 +396,9 @@ async function sync() {
 
   // ── User ──
   await syncTable('User', async () => {
-    const user = await remote.user.findUnique({ where: { userId: DEV_USER_ID } });
-    if (!user) throw new Error(`User ${DEV_USER_ID} not found in remote`);
-    const { id, ...rest } = user;
-    await local.user.upsert({
-      where: { userId: DEV_USER_ID },
-      create: user as any,
-      update: rest as any,
-    });
-    return 1;
+    const count = await syncUserRecord(remote.user, local.user, DEV_USER_ID);
+    if (count === 0) throw new Error(`User ${DEV_USER_ID} not found in remote`);
+    return count;
   });
 
   // ── Credits ──
