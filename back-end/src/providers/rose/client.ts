@@ -30,7 +30,7 @@ import { createLogger } from '../logger';
 import { logJson } from '../../utils/log';
 import { claudeAuthComplete } from './claudeAuth';
 import { isAnthropicApiKeyOnCooldown, markAnthropicApiKeyOnCooldown } from '../computeCredentials';
-import { RoseAuthError, RoseError, RosePaymentRequiredError } from './errors';
+import { RoseAuthError, RoseError, RosePaymentRequiredError, RoseRateLimitError } from './errors';
 import { gptAuthComplete, openAiApiKeyComplete } from './gptAuth';
 import { getPool, poolForModel } from './pools';
 import { buildOpenAiResponseFormat } from './schema';
@@ -345,6 +345,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     throw error;
   }
   if (cerebrasRoute !== null) {
+    let cerebrasQuotaFellThrough = false;
     try {
       yield* runWithFallThrough({ produce: cerebrasRoute.produce, emit: emitChunk });
     } catch (error) {
@@ -363,16 +364,40 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
         yield* directFailover;
         return;
       }
-      finalizeDump(cause);
-      throw cause;
+      // GLM-4.7 on Cerebras (both the direct and OpenRouter-pinned transports hit
+      // Cerebras hardware) is rate-capped hard at the org level (5 requests/minute
+      // across all models). A burst of concurrent chats trips a 402 `quota` /
+      // 429 before any caller-visible content. Rather than sink the whole chat,
+      // fall through to the standard waterfall below (shared GPT / Anthropic /
+      // OpenRouter) — none of which are subject to the Cerebras cap — so the reply
+      // still lands, just on another provider. Only pre-content errors are eligible
+      // (mid-stream we cannot re-issue), and only quota/rate-limit causes (a real
+      // 4xx/5xx from a bad request must still surface).
+      if (
+        error instanceof PreContentFallThroughError &&
+        (cause instanceof RosePaymentRequiredError || cause instanceof RoseRateLimitError)
+      ) {
+        log.warn('cerebras_chat.quota_fallthrough_to_waterfall', {
+          request_id: opts.requestId,
+          pool: opts.pool,
+          reason: cause.name,
+        });
+        cerebrasQuotaFellThrough = true;
+      } else {
+        finalizeDump(cause);
+        throw cause;
+      }
     }
-    log.info(cerebrasRoute.doneEvent, {
-      request_id: opts.requestId,
-      pool: opts.pool,
-      elapsed_ms: Date.now() - startedAt,
-    });
-    finalizeDump();
-    return;
+    if (!cerebrasQuotaFellThrough) {
+      log.info(cerebrasRoute.doneEvent, {
+        request_id: opts.requestId,
+        pool: opts.pool,
+        elapsed_ms: Date.now() - startedAt,
+      });
+      finalizeDump();
+      return;
+    }
+    // else: Cerebras hit its rate cap pre-content — continue into the waterfall.
   }
 
   // Exclusive OpenRouter route used by the synchronous Chat Generator. It preserves

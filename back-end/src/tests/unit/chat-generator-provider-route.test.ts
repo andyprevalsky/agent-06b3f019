@@ -9,7 +9,11 @@ import {
 import { GENERATOR_SYSTEM_PROMPT } from '../../providers/chat/chatPrompts';
 import { selectChatPhaseModels } from '../../providers/chat/phaseModels';
 import { createStreamingCompletion, type CompletionChunk } from '../../providers/rose';
-import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
+import {
+  CEREBRAS_API_URL,
+  OPENAI_RESPONSES_API_URL,
+  OPENROUTER_API_URL,
+} from '../../providers/rose/transport';
 
 const GENERATOR_SSE = [
   'data: {"choices":[{"index":0,"delta":{"content":"{\\"reasoning\\":\\"fast\\",\\"response\\":\\"hello\\"}"}}]}',
@@ -173,10 +177,70 @@ async function testDirectPreHeaderStallSurfacesPromptlyWithoutFallback(): Promis
   }
 }
 
+// Cerebras GLM-4.7 is rate-capped hard at the org level (5 req/min across all
+// models), so a burst of concurrent chats trips a 402 `quota` before any
+// caller-visible content. That must NOT sink the chat: the request falls through
+// to the standard waterfall (here OpenRouter), which is not subject to the cap.
+async function testDirectQuotaFallsThroughToWaterfall(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const saved = {
+    cerebras: process.env.CEREBRAS_API_KEY,
+    openrouter: process.env.OPENROUTER_API_KEY,
+    gpt: process.env.GPT_API_KEY,
+    anthropic: process.env.ANTHROPIC_API_KEY,
+  };
+  process.env.CEREBRAS_API_KEY = 'direct-cerebras';
+  process.env.OPENROUTER_API_KEY = 'openrouter-fallback';
+  // Force the OpenRouter waterfall stage: no user OAuth, no shared GPT/Anthropic keys.
+  delete process.env.GPT_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  const calls: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    calls.push(url);
+    if (url === CEREBRAS_API_URL) {
+      return new Response(
+        JSON.stringify({
+          message: 'Payment required to access this resource. Visit your billing tab.',
+          type: 'payment_required_error',
+          param: 'quota',
+          code: 'payment_required',
+        }),
+        { status: 402, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (url === OPENROUTER_API_URL) return sseResponse(GENERATOR_SSE);
+    // Any pricing / OpenAI probe the waterfall makes returns benign empty JSON.
+    if (url === OPENAI_RESPONSES_API_URL) return new Response('{}', { status: 200 });
+    return new Response('{}', { status: 200 });
+  }) as typeof fetch;
+  try {
+    const chunks = await collect(await createStreamingCompletion(directGeneratorOptions()));
+    assert.equal(calls[0], CEREBRAS_API_URL, 'Cerebras must be attempted first');
+    assert.ok(
+      calls.includes(OPENROUTER_API_URL),
+      'a Cerebras 402 quota must fall through to the OpenRouter waterfall'
+    );
+    assert.ok(chunks.length > 0, 'the fallback provider must still produce a reply');
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [name, value] of [
+      ['CEREBRAS_API_KEY', saved.cerebras],
+      ['OPENROUTER_API_KEY', saved.openrouter],
+      ['GPT_API_KEY', saved.gpt],
+      ['ANTHROPIC_API_KEY', saved.anthropic],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
 async function run(): Promise<void> {
   await testPhaseUsesDirectCerebras();
   await testDirectFailureSurfacesWithoutFallback();
   await testDirectPreHeaderStallSurfacesPromptlyWithoutFallback();
+  await testDirectQuotaFallsThroughToWaterfall();
   process.stdout.write('PASS Chat Generator provider routes are explicit and fail closed\n');
 }
 
