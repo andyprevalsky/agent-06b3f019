@@ -575,7 +575,21 @@ else
 fi
 if [ "$USER_EXISTS" = "0" ]; then
     echo "🌱 Syncing production data to local database (first run)..."
-    (cd back-end && npx tsx scripts/seed-local.ts)
+    # Retry the seed on a transient crash. At cloud fleet width this tsx/node
+    # process intermittently SIGSEGVs a few seconds in (observed rc=139 ~11s after
+    # stack launch — not deterministic, or every box would fail), and under
+    # `set -eo pipefail` a single crash killed the ENTIRE stack → "stack process
+    # exited before becoming healthy" → the box dropped from the batch (an infra
+    # loss, not a benchmark verdict). Retry a few times before giving up so a
+    # one-off native crash doesn't cost a whole box.
+    _seed_ok=0
+    for _seed_try in 1 2 3; do
+        if (cd back-end && npx tsx scripts/seed-local.ts); then _seed_ok=1; break; fi
+        _seed_rc=$?
+        echo "   ⚠️ first-run seed attempt ${_seed_try}/3 failed (rc=${_seed_rc}$([ "$_seed_rc" = 139 ] && echo ' = SIGSEGV')) — retrying..."
+        sleep $(( _seed_try * 3 ))
+    done
+    [ "$_seed_ok" = 1 ] || { echo "❌ first-run seed failed after 3 attempts — aborting stack"; exit 1; }
 elif [ "${BENCHMARK_WORLD_MODEL_MODE:-}" = "simulate" ]; then
     # Simulate mode: the World Model Harness intercepts every environment-boundary
     # tool, so real browser cookies/passwords are never exercised. Re-syncing all
@@ -585,7 +599,15 @@ elif [ "${BENCHMARK_WORLD_MODEL_MODE:-}" = "simulate" ]; then
     echo "🌍 simulate mode — skipping startup browser credential sync (WMH mocks env tools)"
 else
     echo "🌱 Local database already seeded; syncing browser credentials..."
-    (cd back-end && npx tsx scripts/seed-local.ts --credentials-only)
+    # Same transient-SIGSEGV resilience as the first-run seed above.
+    _cred_ok=0
+    for _cred_try in 1 2 3; do
+        if (cd back-end && npx tsx scripts/seed-local.ts --credentials-only); then _cred_ok=1; break; fi
+        _cred_rc=$?
+        echo "   ⚠️ credential sync attempt ${_cred_try}/3 failed (rc=${_cred_rc}$([ "$_cred_rc" = 139 ] && echo ' = SIGSEGV')) — retrying..."
+        sleep $(( _cred_try * 3 ))
+    done
+    [ "$_cred_ok" = 1 ] || { echo "❌ credential sync failed after 3 attempts — aborting stack"; exit 1; }
 fi
 
 # Persist a dump on /data so the NEXT claim of this machine restores in seconds
