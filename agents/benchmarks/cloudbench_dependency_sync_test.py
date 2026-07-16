@@ -635,9 +635,10 @@ def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
         'request_machine_start "$mid"'
     )
     assert 'MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"' in fleet
-    assert (
-        'if machine_storage_ready "$id"; then\n'
-        '                FLY machine start "$id"' in fleet
+    pool_slot = _extract_fleet_function(fleet, "provision_pool_slot() {")
+    assert 'if machine_storage_ready "$id"; then' in pool_slot
+    assert pool_slot.index('if machine_storage_ready "$id"; then') < pool_slot.index(
+        'FLY machine start "$id"'
     )
     claim_start = fleet.index("claim_pool_machine() {")
     claim_end = fleet.index("\n}\n", claim_start)
@@ -1443,19 +1444,33 @@ clone_machine_target "$LEDGER"
 
 def test_pool_promotes_only_successful_owned_clone_ids() -> None:
     fleet = FLEET_SCRIPT.read_text()
-    pool_start = fleet.index("provision_pool() {")
-    pool_end = fleet.index("\n}\n", pool_start) + 3
-    pool_function = fleet[pool_start:pool_end]
+    pool_function = _extract_fleet_function(fleet, "provision_pool_slot() {")
 
-    clone_call = 'id="$(clone_machine_target "$OWNED_CLONES_FILE")"'
-    promotion = 'if pool_ledger_record_id "$id"; then'
+    clone_call = 'id="$(clone_machine_target "$slot_ledger")"'
+    promotion = 'if ! pool_ledger_record_id "$id"; then'
     registry_release = 'fleet_registry_release_id "$id"'
-    release = 'grep -Fxv "$id" "$OWNED_CLONES_FILE"'
     assert clone_call in pool_function
     assert pool_function.index(clone_call) < pool_function.index(promotion)
     assert pool_function.index(promotion) < pool_function.index(registry_release)
-    assert pool_function.index(registry_release) < pool_function.index(release)
     assert 'clone_machine_target "$POOL_IDS_FILE"' not in pool_function
+
+
+def test_pool_provision_fans_out_slots_concurrently() -> None:
+    """A 30-machine warm pool must take roughly one clone's wall clock, not
+    thirty. Each concurrent slot owns a separate ephemeral ledger; only the
+    stopped-id promotion is serialized by the durable pool ledger lock."""
+    fleet = FLEET_SCRIPT.read_text()
+    pool = _extract_fleet_function(fleet, "provision_pool() {")
+    slot = _extract_fleet_function(fleet, "provision_pool_slot() {")
+
+    assert 'provision_pool_slot "$i" "$n" &' in pool
+    assert 'pool_pids+=("$pid")' in pool
+    assert 'for pid in "${pool_pids[@]}"; do' in pool
+    assert "CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS" in pool
+    assert 'pool-provision-$i.ids' in slot
+    assert 'pool_ledger_record_id "$id"' in slot
+    cleanup = _extract_fleet_function(fleet, "cleanup() {")
+    assert '"${PROVISION_PIDS[@]:-}"' in cleanup
 
 
 def test_unresolved_clone_name_fails_loudly_without_polling_past_deadline() -> None:
@@ -1782,7 +1797,7 @@ def test_fleet_provisions_clones_concurrently() -> None:
     ledger; a barrier waits for all before Phase 2 launches any child."""
     fleet = FLEET_SCRIPT.read_text()
     assert "concurrently (claim-or-clone)" in fleet
-    prov = fleet.index("PROVISION_PIDS=()")
+    prov = fleet.index("# ── Phase 1:")
     wait_all = fleet.index('for pp in "${PROVISION_PIDS[@]}"; do wait')
     phase2 = fleet.index("# ── Phase 2:")
     # ordering: fan-out → barrier → launch

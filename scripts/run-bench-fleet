@@ -936,9 +936,54 @@ pool_ledger_record_id() {  # pool_ledger_record_id <machine-id>; atomic + verifi
     return "$rc"
 }
 
-provision_pool() {  # provision_pool <N> — create N stopped clones, record ids, exit
-    local n="$1" i id ready st failed=0
-    local -a created_ids=()
+provision_pool_slot() {  # provision_pool_slot <slot> <total>
+    local i="$1" n="$2" id ready=0 st="" slot_ledger
+    slot_ledger="$FLEET_DIR/pool-provision-$i.ids"
+    if ! id="$(clone_machine_target "$slot_ledger")" || [ -z "$id" ]; then
+        echo "  [$i/$n] ⚠ clone failed"
+        return 1
+    fi
+    echo "  [$i/$n] created $id"
+    for _ in $(seq 1 90); do
+        if FLY machine status "$id" -a "$APP" 2>/dev/null | grep -qiE "State.*(started|stopped)"; then
+            ready=1
+            break
+        fi
+        if machine_storage_ready "$id"; then
+            FLY machine start "$id" -a "$APP" >/dev/null 2>&1 || true
+        fi
+        sleep 5
+    done
+    if [ "$ready" != "1" ]; then
+        echo "  ⚠ $id never became startable"
+        return 1
+    fi
+    FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
+    for _ in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
+        if st="$(pool_machine_state "$id")" && [ "$st" = "stopped" ]; then
+            break
+        fi
+        sleep 2
+    done
+    if [ "$st" != "stopped" ]; then
+        echo "  ⚠ $id did not verify stopped; retaining fleet ownership for teardown" >&2
+        return 1
+    fi
+    # Serialize only the tiny durable-ledger promotion. Clone/start/stop remain
+    # fully concurrent, while cleanup retains authoritative ownership until the
+    # exact stopped id is committed and re-read from the shared pool ledger.
+    if ! pool_ledger_record_id "$id"; then
+        echo "  ⚠ failed to persist $id in durable pool ledger; retaining fleet ownership for teardown" >&2
+        return 1
+    fi
+    fleet_registry_release_id "$id"
+    rm -f "$slot_ledger" "${slot_ledger%.ids}.names"
+    echo "  ✅ pooled (stopped): $id"
+}
+
+provision_pool() {  # provision_pool <N> — create N stopped clones concurrently
+    local n="$1" i pid failed=0
+    local -a pool_pids=()
     mkdir -p "$(dirname "$POOL_IDS_FILE")" \
         || { echo "❌ could not initialize durable pool ledger $POOL_IDS_FILE" >&2; return 1; }
     if [ -e "$POOL_IDS_FILE" ]; then
@@ -949,55 +994,16 @@ provision_pool() {  # provision_pool <N> — create N stopped clones, record ids
             || { echo "❌ could not initialize durable pool ledger $POOL_IDS_FILE" >&2; return 1; }
     fi
     echo "🏊 Provisioning pool of $n stopped machines (image = warm $WARM_ID, snapshot $SNAP_ID, region $REGION)..."
+    echo "⏳ cloning, provisioning, and stopping all pool slots concurrently..."
     for i in $(seq 1 "$n"); do
-        id="$(clone_machine_target "$OWNED_CLONES_FILE")"
-        if [ -n "$id" ]; then
-            echo "  [$i/$n] created $id"
-            created_ids+=("$id")
-        else
-            echo "  [$i/$n] ⚠ clone failed"
-            failed=1
-        fi
+        provision_pool_slot "$i" "$n" &
+        pid=$!
+        pool_pids+=("$pid")
+        PROVISION_PIDS+=("$pid")
+        sleep "${CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS:-0.4}"
     done
-    echo "⏳ waiting for volumes to provision, then stopping (pool idles at \$0 compute)..."
-    for id in "${created_ids[@]}"; do
-        ready=0
-        for _ in $(seq 1 90); do
-            if FLY machine status "$id" -a "$APP" 2>/dev/null | grep -qiE "State.*(started|stopped)"; then ready=1; break; fi
-            if machine_storage_ready "$id"; then
-                FLY machine start "$id" -a "$APP" >/dev/null 2>&1 || true
-            fi
-            sleep 5
-        done
-        if [ "$ready" = 1 ]; then
-            FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
-            st=""
-            for _ in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
-                if st="$(pool_machine_state "$id")" && [ "$st" = "stopped" ]; then
-                    break
-                fi
-                sleep 2
-            done
-            if [ "$st" = "stopped" ]; then
-                # Only release ephemeral ownership after the durable pool
-                # ledger has atomically accepted and re-read the exact ID.
-                if pool_ledger_record_id "$id"; then
-                    fleet_registry_release_id "$id"
-                    grep -Fxv "$id" "$OWNED_CLONES_FILE" > "$OWNED_CLONES_FILE.tmp" 2>/dev/null || true
-                    mv "$OWNED_CLONES_FILE.tmp" "$OWNED_CLONES_FILE"
-                    echo "  ✅ pooled (stopped): $id"
-                else
-                    echo "  ⚠ failed to persist $id in durable pool ledger; retaining fleet ownership for teardown" >&2
-                    failed=1
-                fi
-            else
-                echo "  ⚠ $id did not verify stopped; retaining fleet ownership for teardown" >&2
-                failed=1
-            fi
-        else
-            echo "  ⚠ $id never became startable"
-            failed=1
-        fi
+    for pid in "${pool_pids[@]}"; do
+        wait "$pid" || failed=1
     done
     echo "✅ pool ready: $(grep -c . "$POOL_IDS_FILE" 2>/dev/null || echo 0) machines → $POOL_IDS_FILE"
     [ "$failed" = "0" ]
@@ -1211,6 +1217,7 @@ start_central_hub
 
 OWNED_CLONES_FILE="$FLEET_DIR/owned-clones.ids"
 AUTOSCALER_PIDS=()
+PROVISION_PIDS=()
 CHILD_PIDS=()
 CHILD_EXIT_CODES=()
 CHILD_OUT=()
@@ -1233,6 +1240,7 @@ cleanup() {
     # "open agent" from local run data long after teardown. The next fleet run
     # REUSES it (never rebinds/kills it), so exactly one hub ever runs.
     cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${AUTOSCALER_PIDS[@]:-}"
+    cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${PROVISION_PIDS[@]:-}"
     cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${CHILD_PIDS[@]:-}"
     # Return only machines this fleet actually claimed. The pool ledger can be
     # shared by sibling workspaces, so stopping every listed ID would interrupt
@@ -1684,7 +1692,8 @@ echo "═══ run-bench-fleet — ${#BENCHES[@]} bench(es), one isolated machi
 echo ""
 write_startup_card "provisioning ${#BENCHES[@]} isolated machines"
 echo "⏳ provisioning ${#BENCHES[@]} isolated machine(s) concurrently (claim-or-clone) ..."
-PROVISION_PIDS=()
+# Reuse the controller-wide provision PID registry so cleanup can terminate
+# precisely these children if the controller is signalled mid-provision.
 for bench in "${BENCHES[@]}"; do
     out="$FLEET_DIR/$bench"
     rm -rf "$out" 2>/dev/null || true; mkdir -p "$out"
