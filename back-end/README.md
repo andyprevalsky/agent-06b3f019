@@ -261,6 +261,75 @@ Format an LLM judge prompt using GPT-4.
 }
 ```
 
+## AgentCard "for companies" (OAuth 2.1 + PKCE + MCP)
+
+Lets the app issue and manage AgentCard virtual cards **on behalf of each end
+user**. Every user authenticates once ("Connect with AgentCard"), and we then
+call the AgentCard MCP server with that user's bearer token. Cards are isolated
+per `(client, user)` — an empty `list_cards` on a freshly-connected user is
+correct, not a bug. Code lives in `src/domains/agentcard/`.
+
+The purchases flow uses this same per-user MCP path through
+`src/providers/card-provider/`; there is no server-side AgentCard API fallback.
+
+### Client modes
+
+- **Confidential** (this app): pinned `AGENTCARD_OAUTH_CLIENT_ID` +
+  `AGENTCARD_OAUTH_CLIENT_SECRET`. The secret is read from `process.env` and sent
+  on **both** the token exchange and the refresh. PKCE (S256) is always enforced.
+- **Public** (DCR, no secret): not used here; the client is pre-provisioned.
+
+### Env vars
+
+| Var | Purpose |
+| --- | --- |
+| `AGENTCARD_OAUTH_CLIENT_ID` | OAuth client id (required) |
+| `AGENTCARD_OAUTH_CLIENT_SECRET` | Confidential client secret (sent on exchange + refresh) |
+| `AGENTCARD_PUBLIC_URL` | Public base URL of this backend (ngrok in dev). `redirect_uri = ${AGENTCARD_PUBLIC_URL}/api/agentcard/callback` and must match the client's registered redirect exactly |
+| `AGENTCARD_MCP_URL` | *(optional)* MCP resource, default `https://mcp.agentcard.sh/mcp` — the mandatory `resource` param on `/authorize` and `/token` |
+| `AGENTCARD_AUTH_SERVER_URL` | *(optional)* OAuth issuer base, default `https://mcp.agentcard.sh` |
+
+### Routes
+
+| Route | Auth | Purpose |
+| --- | --- | --- |
+| `GET /api/agentcard/connect?user=<id>` | public | Mints PKCE + state, 302 → AgentCard `/authorize` |
+| `GET /api/agentcard/callback` | public | Exchanges the code (with `resource` + `client_secret`), persists the per-user token |
+| `GET /api/agentcard/status` | API key / JWT | `{ connected, expiresAt }` |
+| `GET /api/agentcard/tools` | API key / JWT | The **full live toolset** (`tools/list`), or `{ connected:false, connectUrl }` |
+| `POST /api/agentcard/tools/call` | API key / JWT | Runs any advertised tool: `{ name, arguments }` |
+
+The toolset is **dynamic**: `tools/list` is called at runtime and every advertised
+tool is forwarded verbatim (name + description + `inputSchema`). Nothing is
+hardcoded or curated, so tools AgentCard adds later work with zero code change.
+Tokens refresh proactively on near-expiry and reactively on 401 (the rotated
+refresh token is persisted each time). Per-user tokens are stored in the existing
+`Integration` row (`name = "agentcard"`), keyed by the stable Supabase `userId`.
+
+### Wiring into the agent brain
+
+`GET /api/agentcard/tools` is the brain-facing seam: the agent looks up the user's
+token; if none, it hands the user the returned `connectUrl`; if present it receives
+the live toolset and calls tools via `POST /api/agentcard/tools/call` in a loop.
+`create_card` / `get_card_details` may return `approval_required` + `approval_id`;
+resolve by calling the advertised `approve_request` tool.
+
+### Verifying against sandbox
+
+```bash
+# 1. Offline unit tests (PKCE, token exchange/refresh, dynamic toolset, approval path)
+npx tsx src/tests/unit/agentcard-oauth.test.ts
+npx tsx src/tests/unit/agentcard-mcp-runtime.test.ts
+
+# 2. User connects (magic-link sign-in happens in the browser):
+open "$AGENTCARD_PUBLIC_URL/api/agentcard/connect?user=<userId>"
+
+# 3. Independently verify via a direct MCP call (lists live tools + list_cards;
+#    add --create to issue ONE sandbox card, handling the approval gate). Never
+#    prints PAN/CVV.
+npx tsx scripts/agentcard-verify.ts <userId> --create
+```
+
 ## WebSocket API
 
 Connect to `ws://localhost:3001/ws` for real-time updates.
@@ -471,4 +540,3 @@ supabase
 ## License
 
 MIT
-

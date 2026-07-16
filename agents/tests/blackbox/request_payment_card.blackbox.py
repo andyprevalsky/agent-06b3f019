@@ -422,9 +422,107 @@ async def test_payment_helper_import_is_workflow_sandbox_safe():
     assert result["same_fingerprint"] is True
 
 
+async def test_mint_purchase_card_activity_returns_agentcard_setup_state():
+    setup_mock(
+        {
+            "/api/purchases/mint": {
+                "status": 409,
+                "json": {
+                    "error": "User has not connected AgentCard",
+                    "code": "agentcard_setup_required",
+                    "agentcardStatus": "connect_required",
+                    "setupAction": "connect_agentcard",
+                    "connectUrl": "https://rose.test/api/agentcard/connect?user=user-123",
+                    "setupUrl": "https://agentcard.test/setup",
+                    "setupTool": "start_kyc",
+                },
+            }
+        }
+    )
+
+    from domains.request_payment_card.service import normalize_payment_payload
+    from tools.request_payment_card import mint_purchase_card_activity
+
+    payload = normalize_payment_payload(_sample_tool_call(), "user-123")
+    result = await mint_purchase_card_activity("user-123", payload)
+
+    assert result["status"] == "agentcard_setup_required"
+    assert result["code"] == "agentcard_setup_required"
+    assert result["setupAction"] == "connect_agentcard"
+    assert result["connectUrl"].endswith("/api/agentcard/connect?user=user-123")
+    assert result["setupUrl"] == "https://agentcard.test/setup"
+    assert result["setupTool"] == "start_kyc"
+
+
+async def test_agentcard_status_activity_boundary():
+    setup_mock(
+        {
+            "/api/agentcard/status": {
+                "status": 200,
+                "json": {
+                    "connected": True,
+                    "expiresAt": "2026-07-04T06:46:35.925Z",
+                    "expired": False,
+                },
+            }
+        }
+    )
+
+    from tools.request_payment_card import agentcard_status_activity
+
+    result = await agentcard_status_activity("user-123")
+
+    assert result["connected"] is True
+    assert result["expired"] is False
+    call = assert_captured_call(url_contains="/api/agentcard/status", method="GET")
+    assert "x-api-key" in {k.lower() for k in call["requestHeaders"]}
+    assert call["requestHeaders"]["x-user-id"] == "user-123"
+
+
+def test_domain_config_and_types_module_constants():
+    from domains.request_payment_card import config, types
+
+    assert config.DEFAULT_CURRENCY == "USD"
+    assert config.LOOKUP_TIMEOUT_SECONDS == 30.0
+    assert config.MINT_TIMEOUT_SECONDS == 60.0
+    assert set(config.__all__) == {
+        "DEFAULT_CURRENCY",
+        "LOOKUP_TIMEOUT_SECONDS",
+        "MINT_TIMEOUT_SECONDS",
+    }
+
+    # TypeAliases are concrete Dict aliases and exported.
+    assert types.PaymentPayload is not None
+    assert types.PaymentToolCall is not None
+    assert set(types.__all__) == {"PaymentPayload", "PaymentToolCall"}
+
+
+def test_domain_package_eager_and_lazy_exports():
+    import domains.request_payment_card as pkg
+
+    # Eager helper exports resolve directly.
+    assert callable(pkg.normalize_payment_payload)
+    assert callable(pkg.build_payment_question)
+    assert callable(pkg.build_payment_fingerprint)
+
+    # Lazy __getattr__ resolves the repo activities on demand.
+    assert callable(pkg.lookup_purchase_activity)
+    assert callable(pkg.mint_purchase_card_activity)
+
+    # Unknown attributes still raise AttributeError.
+    raised = False
+    try:
+        _ = pkg.definitely_not_an_export
+    except AttributeError:
+        raised = True
+    assert raised
+
+
 async def run_all_tests():
     print("request-payment-card blackbox tests:")
     result = BlackboxResult()
+    result.record("domain_config_and_types", test_domain_config_and_types_module_constants)
+    result.record("domain_package_exports", test_domain_package_eager_and_lazy_exports)
     result.record("normalize_payload", test_normalize_payload_builds_receipt_metadata_and_fingerprint)
     result.record("required_product_reviews", test_payment_line_item_requires_reviews_and_a_product_detail_url)
     result.record("camel_case_transport", test_payment_tool_accepts_camel_case_transport_fields)
@@ -438,6 +536,11 @@ async def run_all_tests():
     await result.record_async("mint_boundary", test_mint_purchase_card_activity_boundary)
     await result.record_async("mint_maps_kyc_required", test_mint_purchase_card_activity_maps_kyc_required)
     await result.record_async("workflow_sandbox_import", test_payment_helper_import_is_workflow_sandbox_safe)
+    await result.record_async(
+        "mint_agentcard_setup_state",
+        test_mint_purchase_card_activity_returns_agentcard_setup_state,
+    )
+    await result.record_async("agentcard_status_boundary", test_agentcard_status_activity_boundary)
     teardown_mock()
     return result.all_passed
 

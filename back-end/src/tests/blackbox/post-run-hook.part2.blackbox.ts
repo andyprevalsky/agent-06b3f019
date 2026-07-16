@@ -253,6 +253,40 @@ test('root terminal status update no longer triggers credential propagation', as
   }
 });
 
+test('root terminal status immediately cleans up unspent purchase cards', async () => {
+  const userId = await createUser();
+  try {
+    const agentId = await createAgent({ userId, status: 'ACTIVE' });
+    const cleanedAgentIds: string[] = [];
+
+    await updateAgentStatus(
+      agentId,
+      {
+        status: 'COMPLETED',
+        statusMessage: 'Done',
+        progress: 1,
+        tokenCount: 0,
+        tokensIn: 0,
+        tokensOut: 0,
+        contextSize: 0,
+        messageCount: 1,
+      },
+      {
+        cleanupPurchaseCards: async (terminalAgentId) => {
+          cleanedAgentIds.push(terminalAgentId);
+        },
+      }
+    );
+
+    assert(
+      cleanedAgentIds.length === 1 && cleanedAgentIds[0] === agentId,
+      `expected terminal purchase cleanup for ${agentId}, got ${cleanedAgentIds.join(',')}`
+    );
+  } finally {
+    await cleanup(userId);
+  }
+});
+
 test('auth failure disables referenced password and records raw error', async () => {
   const userId = await createUser();
   try {

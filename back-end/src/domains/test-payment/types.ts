@@ -6,6 +6,12 @@ export interface TestPaymentItem {
   description: string;
   imageUrl: string;
   priceCents: number;
+  /** Relative product-page path, e.g. `/p/aurora-notebook`. Exposed to the storefront page for receipt grounding. */
+  productUrl: string;
+  /** Human-readable rating containing a 0-5 numeric score, e.g. `4.8 stars`. */
+  rating: string;
+  /** Human-readable review count, e.g. `1,284 reviews`. */
+  reviewCount: string;
 }
 
 export interface TestPaymentLineItem {
@@ -46,9 +52,59 @@ export interface TestPaymentConfirmation {
   orderId: string;
   status: string;
   paymentIntentId: string;
+  purchaseId?: string;
+  cardId?: string;
   receipt: {
     lineItems: TestPaymentReceiptLine[];
     totals: TestPaymentTotals;
+  };
+}
+
+export interface TestPaymentLifecycle {
+  agentId: string;
+  purchase: null | {
+    id: string;
+    status: string;
+    merchant: string;
+    totalCents: number;
+    cardId: string | null;
+    stripePaymentIntentId: string | null;
+  };
+  walletFunding: null | {
+    status: string;
+    amountCents: number;
+    providerTransferId: string | null;
+    reclaimProviderTransferId: string | null;
+  };
+  stripeHold: null | {
+    id: string;
+    status: string;
+    amountCents: number;
+    amountCapturableCents: number;
+    amountReceivedCents: number;
+  };
+  stripeRefund: null | {
+    id: string;
+    status: string;
+    amountCents: number;
+  };
+  agentCard: null | {
+    id: string;
+    status: string;
+    balanceCents: number;
+  };
+  orgTransfer: null | {
+    id: string;
+    status: string;
+    amountCents: number;
+    transferredCents: number;
+    releasedCents: number;
+    cardId: string | null;
+    livemode: boolean;
+  };
+  attention: {
+    openKinds: string[];
+    resolvedKinds: string[];
   };
 }
 

@@ -33,6 +33,7 @@ class TaskResult:
     context_violations: List[dict] = field(default_factory=list)  # [{rule, severity, message}]
     logs: Optional[dict] = None  # {messages, backend_logs, worker_logs, research_logs}
     archive_manifest_ref: Optional[str] = None
+    payment_lifecycle: Optional[dict] = None
     world_model_fidelity: Optional[dict] = None
     world_model_mode: Optional[str] = None
 

@@ -41,7 +41,7 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import httpx
@@ -152,6 +152,7 @@ MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
 )
 AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
+AGENT_PAYMENT_PRODUCTION_TASK_NAME = "agent-payment-production-abandonment"
 # Cookie-bundle bootstrap for these tasks is now declared as the `amazon_auth`
 # live fixture in tasks.json (see live_fixtures.py), not a task-name branch.
 BENCHMARK_FORCE_SHOW_PASSWORDS_ENV = "BENCHMARK_FORCE_SHOW_PASSWORDS"
@@ -320,15 +321,32 @@ def _attention_request_kind(req: dict) -> str:
     return "unknown"
 
 
-def _attention_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
+def _expected_attention_kind(task: BenchmarkTask, observed_count: int) -> Optional[str]:
+    sequence = task.expected_attention_kinds
+    if sequence:
+        return sequence[observed_count] if observed_count < len(sequence) else None
+    return task.expected_attention_kind
+
+
+def _attention_request_matches_task(
+    task: BenchmarkTask,
+    req: dict,
+    observed_count: int = 0,
+) -> bool:
     if task.expected_gate:
         return _gate_request_matches_task(task, req)
-    if task.expected_attention_kinds:
-        return _attention_request_kind(req) in task.expected_attention_kinds
-    expected_kind = task.expected_attention_kind
+    expected_kind = _expected_attention_kind(task, observed_count)
     if not expected_kind:
         return True
     return _attention_request_kind(req) == expected_kind
+
+
+def _should_auto_approve_attention(task: BenchmarkTask, req: dict) -> bool:
+    return not (
+        task.agentcard_setup_action == "complete"
+        and _attention_request_kind(req)
+        == "agentcard_user_cardholder_onboarding_required"
+    )
 
 
 def _attention_request_evidence(req: dict) -> dict:
@@ -621,12 +639,46 @@ def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
     actual_fees = _normalize_receipt_fees(receipt)
     for expected_fee in expected.get("fees", []):
         label = expected_fee.get("label", "").lower()
-        if actual_fees.get(label) != expected_fee.get("amountCents"):
+        actual_fee = actual_fees.get(label)
+        if actual_fee is None and label == "tax":
+            actual_fee = next(
+                (amount for actual_label, amount in actual_fees.items() if actual_label.startswith("tax (")),
+                None,
+            )
+        if actual_fee != expected_fee.get("amountCents"):
             return (
                 f"{expected_fee.get('label')} fee mismatch: "
-                f"expected {expected_fee.get('amountCents')}, got {actual_fees.get(label)}"
+                f"expected {expected_fee.get('amountCents')}, got {actual_fee}"
             )
     return None
+
+
+def _validate_payment_lifecycle(task: BenchmarkTask, data: dict) -> Optional[str]:
+    expected = task.expected_payment_lifecycle
+    if not expected:
+        return None
+    benchmark_state = data.get("_benchmark", {})
+    actual = benchmark_state.get("payment_lifecycle")
+    if not isinstance(actual, dict):
+        detail = benchmark_state.get("payment_lifecycle_error")
+        return f"missing payment lifecycle snapshot{f': {detail}' if detail else ''}"
+
+    def compare(expected_value, actual_value, path: str) -> Optional[str]:
+        if isinstance(expected_value, dict):
+            if not isinstance(actual_value, dict):
+                return f"{path} mismatch: expected object, got {actual_value!r}"
+            for key, nested_expected in expected_value.items():
+                if key not in actual_value:
+                    return f"{path}.{key} missing from payment lifecycle"
+                error = compare(nested_expected, actual_value[key], f"{path}.{key}")
+                if error:
+                    return error
+            return None
+        if expected_value != actual_value:
+            return f"{path} mismatch: expected {expected_value!r}, got {actual_value!r}"
+        return None
+
+    return compare(expected, actual, "payment_lifecycle")
 
 
 def _ci_should_fail(summary: dict) -> bool:
@@ -1002,6 +1054,8 @@ async def create_agent(
 
     if task.start_phase:
         body["start_phase"] = task.start_phase
+    if task.response_schema:
+        body["response_schema"] = task.response_schema
 
     async with httpx.AsyncClient(timeout=90) as client:
         resp = await client.post(f"{base_url}/api/agents", headers=headers, json=body)
@@ -1167,6 +1221,114 @@ async def get_tool_usage(base_url: str, agent_id: str) -> dict:
         return {}
 
 
+async def get_test_payment_lifecycle(base_url: str, agent_id: str) -> dict:
+    """Read the sanitized cross-provider lifecycle snapshot for a benchmark agent."""
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            f"{base_url}/api/test-payment/lifecycle",
+            headers=headers,
+            params={"agentId": agent_id},
+        )
+        if resp.status_code != 200:
+            raise Exception(
+                f"Failed to get payment lifecycle: {resp.status_code} {resp.text[:300]}"
+            )
+        return resp.json()
+
+
+async def _wait_for_expected_payment_lifecycle(
+    base_url: str,
+    agent_id: str,
+    task: BenchmarkTask,
+    initial_lifecycle: dict,
+    *,
+    timeout_seconds: float = 420,
+    poll_interval_seconds: float = 10,
+    fetch_lifecycle: Callable[[str, str], Awaitable[dict]] = get_test_payment_lifecycle,
+    recover_lifecycle: Optional[Callable[[str, str], Awaitable[dict]]] = None,
+) -> dict:
+    """Observe durable recovery while AgentCard asynchronously releases a closed-card hold."""
+    lifecycle = initial_lifecycle
+    deadline = time.monotonic() + timeout_seconds
+    retryable_statuses = {"FUNDING_RECLAIM_FAILED", "REFUND_FAILED"}
+    while True:
+        error = _validate_payment_lifecycle(
+            task,
+            {"_benchmark": {"payment_lifecycle": lifecycle}},
+        )
+        if error is None:
+            return lifecycle
+        purchase = lifecycle.get("purchase") if isinstance(lifecycle, dict) else None
+        status = purchase.get("status") if isinstance(purchase, dict) else None
+        wallet_funding = lifecycle.get("walletFunding") if isinstance(lifecycle, dict) else None
+        release_pending = (
+            status == "HELD"
+            and isinstance(wallet_funding, dict)
+            and wallet_funding.get("status") == "RECLAIMING"
+        )
+        if (status not in retryable_statuses and not release_pending) or time.monotonic() >= deadline:
+            return lifecycle
+        await asyncio.sleep(poll_interval_seconds)
+        lifecycle = await (recover_lifecycle or fetch_lifecycle)(base_url, agent_id)
+
+
+async def abandon_test_payment(base_url: str, agent_id: str) -> dict:
+    """Close/reclaim/refund a benchmark card after issuance but before merchant submission."""
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=180) as client:
+        resp = await client.post(
+            f"{base_url}/api/test-payment/lifecycle/abandon",
+            headers=headers,
+            json={"agentId": agent_id},
+        )
+        if resp.status_code != 200:
+            raise Exception(
+                f"Failed to abandon test payment: {resp.status_code} {resp.text[:300]}"
+            )
+        return resp.json()
+
+
+async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dict:
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{base_url}/api/test-payment/lifecycle/agentcard-setup",
+            headers=headers,
+            json={"userId": USER_ID, "action": action},
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Failed to {action} benchmark AgentCard setup: "
+                f"{resp.status_code} {resp.text[:300]}"
+            )
+        return resp.json()
+
+
+async def ensure_payment_lifecycle_cleanup(
+    base_url: str,
+    agent_id: str,
+    task: BenchmarkTask,
+) -> Optional[dict]:
+    """Idempotently compensate issued benchmark cards before agent deletion."""
+    if not agent_id or task.payment_card_request_action != "abandon":
+        return None
+    try:
+        lifecycle = await abandon_test_payment(base_url, agent_id)
+        lifecycle = await _wait_for_expected_payment_lifecycle(
+            base_url,
+            agent_id,
+            task,
+            lifecycle,
+            recover_lifecycle=abandon_test_payment,
+        )
+        print("    🧹 Confirmed payment-card transfer reclaim and Stripe refund")
+        return lifecycle
+    except Exception as exc:
+        print(f"    ⚠ Payment lifecycle cleanup failed for {agent_id[:12]}: {exc}")
+        return None
+
+
 async def get_attention_requests(base_url: str) -> list:
     """GET /api/attention-requests — returns pending requests for current user."""
     headers = await _api_headers()
@@ -1231,6 +1393,9 @@ def _logical_tool_count_key(meta: dict) -> Optional[Tuple[str, str]]:
     if status != "FINISHED":
         return None
 
+    if action_type == "request_payment_card" and tool_call_id:
+        return "request_payment_card", str(tool_call_id)
+
     if tool_name == "spawn_agent":
         if meta.get("agentType") == "browser" and tool_call_id:
             return "spawn_browser_agent", str(tool_call_id)
@@ -1272,6 +1437,21 @@ def _count_logical_tool_calls_from_messages(messages: List[dict]) -> Dict[str, i
     counts: Dict[str, int] = {}
     for msg in messages:
         meta = msg.get("metadata") or {}
+        if msg.get("role") == "ASSISTANT":
+            requested_calls = meta.get("tool_calls")
+            if isinstance(requested_calls, list):
+                for call in requested_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    tool_name = call.get("tool")
+                    tool_call_id = call.get("tool_call_id")
+                    if not isinstance(tool_name, str) or not tool_name or not tool_call_id:
+                        continue
+                    requested_key = (tool_name, str(tool_call_id))
+                    if requested_key in seen:
+                        continue
+                    seen.add(requested_key)
+                    counts[tool_name] = counts.get(tool_name, 0) + 1
         if meta.get("fromFastCache") and meta.get("toolStatus") == "FINISHED":
             child_counts = meta.get("childToolCounts")
             if isinstance(child_counts, dict):
@@ -1896,8 +2076,11 @@ async def poll_agent(
     # Includes the root plus every descendant appearing in the tree endpoint.
     per_agent_state: Dict[str, dict] = {}
     seen_attention_ids: set[str] = set()
+    seen_attention_kinds: List[str] = []
+    agentcard_setup_attention_seen = False
     attention_requests_seen: list[dict] = []
     chat_assistant_seen_at: Optional[float] = None
+    payment_card_action_completed = False
     task._mid_run_feedback_posted = False
     task._mid_run_feedback_initial_schema = None
 
@@ -1960,6 +2143,35 @@ async def poll_agent(
             }
             print(f"    🚨 {exact_count_error}")
             return data, approvals_triggered, approvals_resolved, exact_count_error
+
+        if (
+            task.payment_card_request_action == "abandon"
+            and not payment_card_action_completed
+            and any(
+                isinstance(message.get("metadata"), dict)
+                and message["metadata"].get("title") == "Payment card ready"
+                for message in messages
+            )
+        ):
+            lifecycle = await abandon_test_payment(base_url, agent_id)
+            lifecycle = await _wait_for_expected_payment_lifecycle(
+                base_url,
+                agent_id,
+                task,
+                lifecycle,
+            )
+            payment_card_action_completed = True
+            data["_benchmark"] = {
+                **data.get("_benchmark", {}),
+                "payment_card_request_action": "abandon",
+                "payment_lifecycle": lifecycle,
+                "expected_payment_receipt_seen": bool(
+                    task.expected_payment_receipt and approvals_triggered > 0
+                ),
+                "expected_attention_kind_seen": task.expected_attention_kind,
+            }
+            print("    ✅ Abandoned issued payment card and reconciled funding")
+            return data, approvals_triggered, approvals_resolved, None
 
         if realtime_monitor and realtime_monitor.failure_reason:
             realtime_failure = realtime_monitor.reconcile_snapshot(messages)
@@ -2031,6 +2243,29 @@ async def poll_agent(
 
         # Agent mode: done on terminal status
         if status in TERMINAL_STATUSES:
+            if task.agentcard_setup_action == "complete":
+                setup_kind = "agentcard_user_cardholder_onboarding_required"
+                setup_still_open = any(
+                    _attention_request_is_open(req)
+                    and _attention_request_kind(req) == setup_kind
+                    for req in _pending_attention
+                )
+                data["_benchmark"] = {
+                    **data.get("_benchmark", {}),
+                    "expected_attention_kinds_seen": list(seen_attention_kinds),
+                    "agentcard_setup_attention_seen": agentcard_setup_attention_seen,
+                    "agentcard_setup_attention_auto_resolved": (
+                        agentcard_setup_attention_seen and not setup_still_open
+                    ),
+                }
+                if not agentcard_setup_attention_seen:
+                    return data, approvals_triggered, approvals_resolved, (
+                        "Expected agentcard_user_cardholder_onboarding_required attention request was not observed"
+                    )
+                if setup_still_open:
+                    return data, approvals_triggered, approvals_resolved, (
+                        "AgentCard setup attention request remained open after agent completion"
+                    )
             return data, approvals_triggered, approvals_resolved, None
 
         # ── Tree-level stall detection ──────────────────────────────
@@ -2231,7 +2466,8 @@ async def poll_agent(
                         req_id = req.get("id")
                         if req_id and req_id not in seen_attention_ids:
                             seen_attention_ids.add(req_id)
-                            if not _attention_request_matches_task(task, req):
+                            expected_kind = _expected_attention_kind(task, approvals_triggered)
+                            if not _attention_request_matches_task(task, req, approvals_triggered):
                                 observed_kind = _attention_request_kind(req)
                                 if (
                                     task.expected_gate
@@ -2244,7 +2480,6 @@ async def poll_agent(
                                         f"    ✅ Auto-approved payment-card prerequisite {req_id[:8]}"
                                     )
                                     continue
-                                expected_kind = task.expected_attention_kind or task.expected_attention_kinds
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
                                     "unexpected_attention_kind": observed_kind,
@@ -2274,6 +2509,7 @@ async def poll_agent(
                                 return data, approvals_triggered, approvals_resolved, receipt_error
                             approvals_triggered += 1
                             observed_kind = _attention_request_kind(req)
+                            seen_attention_kinds.append(observed_kind)
                             attention_requests_seen.append(_attention_request_evidence(req))
                             data["_benchmark"] = {
                                 **data.get("_benchmark", {}),
@@ -2288,6 +2524,11 @@ async def poll_agent(
                                     "expected_attention_kind_seen": task.expected_attention_kind,
                                     "expected_attention_request_id": req_id,
                                 }
+                            if task.expected_attention_kinds:
+                                data["_benchmark"] = {
+                                    **data.get("_benchmark", {}),
+                                    "expected_attention_kinds_seen": list(seen_attention_kinds),
+                                }
                             if task.expected_gate:
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
@@ -2301,7 +2542,10 @@ async def poll_agent(
                                     "expected_payment_receipt_seen": True,
                                     "expected_payment_receipt_request_id": req_id,
                                 }
-                            if task.success_on_payment_card_request:
+                            if (
+                                task.success_on_payment_card_request
+                                and task.payment_card_request_action is None
+                            ):
                                 if task.approval_handling == "count_only":
                                     await respond_to_attention_request(base_url, req_id, _count_only_release_response())
                                     approvals_resolved += 1
@@ -2325,6 +2569,16 @@ async def poll_agent(
                                 )
                                 print(f"    ✅ Approval request observed{kind_label} {req_id[:8]}")
                                 return data, approvals_triggered, approvals_resolved, None
+                            if (
+                                task.agentcard_setup_action == "complete"
+                                and observed_kind == "agentcard_user_cardholder_onboarding_required"
+                            ):
+                                await configure_benchmark_agentcard_setup(base_url, "complete")
+                                agentcard_setup_attention_seen = True
+                                print(
+                                    f"    ✅ Completed one-time AgentCard setup for attention {req_id[:8]}"
+                                )
+                                continue
                         if task.name == CALENDLY_TASK_NAME and _contains_calendly_link(req):
                             data["_benchmark"] = {"calendly_link_approval_seen": True}
                             print("    ✅ Calendly link approval request observed")
@@ -2340,7 +2594,10 @@ async def poll_agent(
                                 f"({approvals_triggered}/{task.expected_approval_count})"
                             )
                             return data, approvals_triggered, approvals_resolved, None
-                        if task.approval_handling == "auto_approve":
+                        if (
+                            task.approval_handling == "auto_approve"
+                            and _should_auto_approve_attention(task, req)
+                        ):
                             if req_id:
                                 if not _phone_approval_matches_callee(task, req):
                                     await respond_to_attention_request(base_url, req_id, "denied")
@@ -2726,12 +2983,26 @@ def evaluate_task(
     if task.success_on_payment_card_request:
         benchmark_state = data.get("_benchmark", {})
         if benchmark_state.get("expected_payment_receipt_seen"):
+            lifecycle_error = _validate_payment_lifecycle(task, data)
+            if lifecycle_error:
+                return False, lifecycle_error
             return True, None
         return False, "Expected validated payment-card request but none was observed"
 
     # Agent mode: must complete
     if status != "COMPLETED":
         return False, f"Agent status: {status} (expected COMPLETED)"
+
+    if task.agentcard_setup_action == "complete":
+        benchmark_state = data.get("_benchmark", {})
+        if benchmark_state.get("expected_attention_kinds_seen") != task.expected_attention_kinds:
+            return False, (
+                "AgentCard setup attention sequence mismatch: "
+                f"expected {task.expected_attention_kinds}, got "
+                f"{benchmark_state.get('expected_attention_kinds_seen')}"
+            )
+        if benchmark_state.get("agentcard_setup_attention_auto_resolved") is not True:
+            return False, "AgentCard setup attention did not auto-resolve"
 
     mid_run_schema_failure = _validate_mid_run_feedback_schema(task, data)
     if mid_run_schema_failure:
@@ -2763,6 +3034,10 @@ def evaluate_task(
         passed, reason = _evaluate_agent_payment_result(data)
         if not passed:
             return False, reason
+    if task.expected_payment_lifecycle:
+        lifecycle_error = _validate_payment_lifecycle(task, data)
+        if lifecycle_error:
+            return False, lifecycle_error
     if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
         return True, None
 
@@ -5496,6 +5771,7 @@ async def run_single_task(
     on_agent_created: Optional[Callable[[str, str], None]] = None,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
+    _validate_task_target(task, base_url)
     previous_benchmark_user_id = os.environ.get("BENCHMARK_RUN_USER_ID")
     if task.name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
         os.environ["BENCHMARK_RUN_USER_ID"] = _free_credit_subscription_gate_user_id()
@@ -5637,6 +5913,14 @@ async def run_single_task(
         print(f"    🔌 Realtime monitor subscribed to agent:{agent_id[:12]}")
 
     try:
+        setup_fixture_action = _agentcard_setup_fixture_action(task, base_url)
+        if setup_fixture_action == "reset":
+            await configure_benchmark_agentcard_setup(base_url, "reset")
+            print("    🔐 Reset AgentCard setup fixture to connect_required")
+        elif setup_fixture_action == "complete":
+            await configure_benchmark_agentcard_setup(base_url, "complete")
+            print("    🔐 Seeded connected AgentCard sandbox fixture")
+
         if task.name == MESSAGE_PERSON_TASK_NAME:
             await _preflight_message_person_bridge(base_url)
         if task.name == MESSAGE_PERSON_AGENT_SMS_TASK_NAME and (
@@ -5772,6 +6056,19 @@ async def run_single_task(
             # Fallback to agent-level cost fields
             cost_cents = agent.get("tree_cost_cents", 0) or agent.get("tool_cost_cents", 0)
 
+        if task.expected_payment_lifecycle:
+            try:
+                payment_lifecycle = await get_test_payment_lifecycle(base_url, agent_id)
+                data["_benchmark"] = {
+                    **data.get("_benchmark", {}),
+                    "payment_lifecycle": payment_lifecycle,
+                }
+            except Exception as e:
+                data["_benchmark"] = {
+                    **data.get("_benchmark", {}),
+                    "payment_lifecycle_error": str(e),
+                }
+
         tree_stats = await _fetch_tree_stats(base_url, agent_id)
         tree_agent_count = max(tree_agent_count, int(tree_stats.get("agent_count") or 0))
         tree_tokens_in = max(
@@ -5889,6 +6186,21 @@ async def run_single_task(
                 passed = False
                 failure_reason = f"User-data prod grep contract check failed: {e}"
 
+        cleanup_lifecycle = await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
+        if cleanup_lifecycle is not None:
+            data["_benchmark"] = {
+                **data.get("_benchmark", {}),
+                "payment_card_request_action": "abandon",
+                "payment_lifecycle": cleanup_lifecycle,
+            }
+            cleanup_error = _validate_payment_lifecycle(task, data)
+            if cleanup_error is not None:
+                passed = False
+                failure_reason = cleanup_error
+        elif task.payment_card_request_action == "abandon":
+            passed = False
+            failure_reason = failure_reason or "payment lifecycle cleanup did not complete"
+
         # Final context well-formedness check
         approval_mode_blocked_on_approval = _approval_mode_allows_open_tool_context(
             task,
@@ -6000,6 +6312,7 @@ async def run_single_task(
             context_violations=context_violation_dicts,
             logs=logs,
             archive_manifest_ref=archive_manifest_ref,
+            payment_lifecycle=(data.get("_benchmark") or {}).get("payment_lifecycle"),
             world_model_fidelity=world_model_fidelity,
             world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
         )
@@ -6074,6 +6387,7 @@ async def run_single_task(
                 benchmark_status="CANCELLED",
                 failure_reason="Benchmark interrupted; prod logs were collected before shutdown",
             )
+            await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
             try:
                 if not keep_failed_agents:
                     await delete_agent(base_url, agent_id)
@@ -6123,6 +6437,7 @@ async def run_single_task(
                 benchmark_status="ERROR",
                 failure_reason=str(e),
             )
+            await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
             try:
                 if not keep_failed_agents:
                     await delete_agent(base_url, agent_id)
@@ -6182,6 +6497,19 @@ async def run_single_task(
             os.environ.pop("BENCHMARK_RUN_USER_ID", None)
         else:
             os.environ["BENCHMARK_RUN_USER_ID"] = previous_benchmark_user_id
+
+
+def _validate_task_target(task: BenchmarkTask, base_url: str) -> None:
+    if task.production_only and _is_local_base_url(base_url):
+        raise RuntimeError(f"{task.name} is production-only; rerun with --prod")
+
+
+def _agentcard_setup_fixture_action(task: BenchmarkTask, base_url: str) -> Optional[str]:
+    if task.agentcard_setup_action == "complete":
+        return "reset"
+    if task.expected_payment_lifecycle and _is_local_base_url(base_url):
+        return "complete"
+    return None
 
 
 # ============================================================
@@ -6245,6 +6573,8 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
         # entries (missing fixtures/judges) are skipped; explicit --task still targets
         # incomplete agent evals for dev iteration.
         tasks = [t for t in tasks if t.runner == "agent" and t.status == "ready"]
+        if not getattr(args, "prod", False):
+            tasks = [t for t in tasks if not t.production_only]
 
     excluded_names: set[str] = set()
     for value in getattr(args, "exclude_task", []) or []:
@@ -6261,22 +6591,16 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
 
 
 async def _warmup_edge_functions(base_url: str):
-    """Send a small completion request to warm up the local Supabase edge function.
+    """Warm an explicitly configured legacy research edge function.
 
-    The Deno runtime in local Supabase needs to resolve external DNS (OpenRouter,
-    Anthropic, etc.) on the first request. This often fails with 503 "name resolution
-    failed" for the first few seconds. A warmup ensures DNS is cached before
-    benchmarks start — particularly important for chat-mode which has no Temporal
-    activity retries.
+    Research is retired in the standard local stack, where backend port + 3 is now
+    the mac app. Only environments that still configure RESEARCH_PORT have an edge
+    function to warm.
     """
-    # Derive research port from backend port (CONDUCTOR_PORT + 3)
     research_port = os.environ.get("RESEARCH_PORT")
     if not research_port:
-        try:
-            backend_port = int(base_url.rsplit(":", 1)[1].split("/")[0])
-            research_port = str(backend_port + 3)
-        except (ValueError, IndexError):
-            return
+        print("  ⚠ Skipping edge function warmup (RESEARCH_PORT is not configured)")
+        return
 
     completions_url = f"http://localhost:{research_port}/functions/v1/completions"
     anon_key = os.environ.get("SUPABASE_ANON_KEY", os.environ.get("VITE_SUPABASE_ANON_KEY", ""))

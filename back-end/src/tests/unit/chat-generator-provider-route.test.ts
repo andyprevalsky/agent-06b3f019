@@ -188,12 +188,92 @@ async function testDirectPreHeaderStallFallsThroughToWaterfall(): Promise<void> 
   }
 }
 
+// Cerebras GLM-4.7 is rate-capped hard at the org level (5 req/min across all
+// models), so a burst of concurrent chats trips a 402 `quota` before any
+// caller-visible content. That must NOT sink the chat AND must NOT drop to a
+// generic model: the request falls over to the SAME model (GLM-4.7) via
+// OpenRouter with the provider unpinned — OpenRouter still prefers Cerebras but
+// may spill to another GLM-4.7 host past the cap.
+async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const saved = {
+    cerebras: process.env.CEREBRAS_API_KEY,
+    openrouter: process.env.OPENROUTER_API_KEY,
+    gpt: process.env.GPT_API_KEY,
+    anthropic: process.env.ANTHROPIC_API_KEY,
+  };
+  process.env.CEREBRAS_API_KEY = 'direct-cerebras';
+  process.env.OPENROUTER_API_KEY = 'openrouter-fallback';
+  // No user OAuth / shared GPT / Anthropic keys — so if the code wrongly dropped
+  // to the generic waterfall it would hit an unexpected URL and fail loudly.
+  delete process.env.GPT_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  const calls: string[] = [];
+  let openRouterBody: Record<string, unknown> = {};
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    calls.push(url);
+    if (url === CEREBRAS_API_URL) {
+      return new Response(
+        JSON.stringify({
+          message: 'Payment required to access this resource. Visit your billing tab.',
+          type: 'payment_required_error',
+          param: 'quota',
+          code: 'payment_required',
+        }),
+        { status: 402, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
+    if (url === OPENROUTER_API_URL) {
+      openRouterBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return sseResponse(GENERATOR_SSE);
+    }
+    throw new Error(`Fallover left GLM-4.7-via-OpenRouter and hit a generic provider: ${url}`);
+  }) as typeof fetch;
+  try {
+    const chunks = await collect(await createStreamingCompletion(directGeneratorOptions()));
+    assert.equal(calls[0], CEREBRAS_API_URL, 'Cerebras must be attempted first');
+    assert.ok(
+      calls.includes(OPENROUTER_API_URL),
+      'a Cerebras 402 quota must fall over to OpenRouter'
+    );
+    // Same model — never a generic one.
+    assert.equal(openRouterBody.model, 'z-ai/glm-4.7', 'fallover must stay on GLM-4.7');
+    // Provider unpinned: still prefer Cerebras, but allowed to spill past the cap.
+    const provider = openRouterBody.provider as {
+      order?: string[];
+      allow_fallbacks?: boolean;
+      only?: string[];
+    };
+    assert.deepEqual(provider.order, ['cerebras'], 'fallover should still prefer Cerebras');
+    assert.equal(
+      provider.allow_fallbacks,
+      true,
+      'fallover must allow spill to another GLM-4.7 host'
+    );
+    assert.equal(provider.only, undefined, 'fallover must not be pinned to Cerebras only');
+    assert.ok(chunks.length > 0, 'the fallover must still produce a reply');
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [name, value] of [
+      ['CEREBRAS_API_KEY', saved.cerebras],
+      ['OPENROUTER_API_KEY', saved.openrouter],
+      ['GPT_API_KEY', saved.gpt],
+      ['ANTHROPIC_API_KEY', saved.anthropic],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
 async function run(): Promise<void> {
   await testPhaseUsesDirectCerebras();
   await testDirectFailureFallsThroughToWaterfall();
   await testDirectPreHeaderStallFallsThroughToWaterfall();
+  await testDirectQuotaFallsOverToOpenRouterGlm();
   process.stdout.write(
-    'PASS Chat Generator provider routes are explicit and fall through on Cerebras stalls\n'
+    'PASS Chat Generator provider routes fall through on Cerebras stalls and rate caps\n'
   );
 }
 

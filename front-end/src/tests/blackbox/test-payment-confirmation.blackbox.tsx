@@ -6,9 +6,13 @@
  * (it docked the score for "no itemized list on the confirmation page"). The
  * screen now renders the full receipt returned by the backend.
  */
-import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
-import { Confirmation } from '@/features/test-payment/components/TestPaymentPage';
+import { afterEach, describe, expect, it } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
+import TestPaymentPage, {
+  Confirmation,
+  ReceiptSummary,
+} from '@/features/test-payment/components/TestPaymentPage';
+import { LIVE_LIFECYCLE_ITEM } from '@/features/test-payment/config';
 import type { TestPaymentConfirmation } from '@/features/test-payment/types';
 
 const CONFIRMATION: TestPaymentConfirmation = {
@@ -52,6 +56,60 @@ const CONFIRMATION: TestPaymentConfirmation = {
 };
 
 describe('test-payment Confirmation receipt', () => {
+  afterEach(() => {
+    window.history.replaceState({}, '', '/');
+  });
+
+  it('shows a stable pre-submit checkout reference', () => {
+    render(
+      <ReceiptSummary
+        items={CONFIRMATION.receipt.lineItems.map((line) => ({
+          id: line.id,
+          name: line.name,
+          description: `${line.name} description`,
+          imageUrl: line.imageUrl,
+          priceCents: line.unitPriceCents,
+        }))}
+        selectedIds={CONFIRMATION.receipt.lineItems.map((line) => line.id)}
+      />,
+    );
+    expect(screen.getByTestId('test-payment-checkout-reference')).toHaveTextContent('TP-CART-4396');
+  });
+
+  it('renders the bounded live lifecycle fixture without tax or shipping', () => {
+    render(
+      <ReceiptSummary
+        items={[LIVE_LIFECYCLE_ITEM]}
+        selectedIds={[LIVE_LIFECYCLE_ITEM.id]}
+        includeFees={false}
+      />,
+    );
+    expect(screen.getByText('Agent Card Lifecycle Probe x1')).toBeInTheDocument();
+    expect(screen.getByTestId('test-payment-checkout-reference')).toHaveTextContent('TP-CART-50');
+    expect(screen.queryByText('Tax')).not.toBeInTheDocument();
+    expect(screen.queryByText('Shipping')).not.toBeInTheDocument();
+  });
+
+  it('opens the bounded lifecycle checkout through the production benchmark query', () => {
+    window.history.replaceState({}, '', '/test_payment?benchmark=agentcard-live-lifecycle');
+    render(<TestPaymentPage />);
+
+    expect(screen.getByRole('heading', { name: 'Test Payment' })).toBeInTheDocument();
+    expect(screen.getByText('Agent Card Lifecycle Probe')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Place order $0.50' })).toBeEnabled();
+  });
+
+  it('issues cards without allowing merchant submission in the abandonment fixture', async () => {
+    window.history.replaceState({}, '', '/test_payment?benchmark=agentcard-abandonment');
+    render(<TestPaymentPage />);
+
+    const payButton = await screen.findByRole('button', { name: 'Pay $43.96' });
+    expect(payButton).toBeEnabled();
+    fireEvent.click(payButton);
+    expect(screen.getByText('This checkout is unavailable')).toBeInTheDocument();
+    expect(screen.queryByTestId('payment-confirmation')).not.toBeInTheDocument();
+  });
+
   it('shows the order id and total charged', () => {
     render(<Confirmation confirmation={CONFIRMATION} />);
     expect(screen.getByText(/Order tp_abc12345 was paid successfully/)).toBeInTheDocument();

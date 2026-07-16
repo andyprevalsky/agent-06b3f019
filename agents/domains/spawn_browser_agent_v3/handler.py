@@ -92,6 +92,7 @@ from .repo import (
 )
 from .service import (
     AuthRuntimeState,
+    append_completion_evidence,
     build_action_titles,
     build_auth_assistance_resume_user_message,
     build_browser_dynamic_system_context,
@@ -106,6 +107,7 @@ from .service_actions import (
     execute_action,
     get_domain_from_url,
     get_element_description,
+    wait_for_navigation_ready,
 )
 from .service_crypto import (
     ExtractedOTP,
@@ -125,6 +127,27 @@ from .types import ClaudeTokenState
 logger = structlog.get_logger()
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 _background_browser_cleanup_tasks: set[asyncio.Task] = set()
+
+
+def _normalize_payment_card_last4(value: Any) -> Optional[str]:
+    if isinstance(value, str) and re.fullmatch(r"\d{4}", value):
+        return value
+    return None
+
+
+def _build_payment_card_verifier_evidence(last4: Any) -> Optional[Dict[str, Any]]:
+    safe_last4 = _normalize_payment_card_last4(last4)
+    if safe_last4 is None:
+        return None
+    return {
+        "role": "TOOL",
+        "text": f"Approved one-time payment card last four: {safe_last4}",
+        "metadata": {
+            "toolName": "payment_card_ready",
+            "toolStatus": "FINISHED",
+            "paymentCardLast4": safe_last4,
+        },
+    }
 
 
 async def record_used_passkey_credentials(
@@ -1470,7 +1493,7 @@ async def _perform_generic_browser_recovery(
             current_url = getattr(input_page, "url", "") or ""
             if current_url.startswith(("http://", "https://")):
                 await asyncio.wait_for(
-                    input_page.reload(wait_until="domcontentloaded", timeout=int(timeout_s * 1000)),
+                    input_page.reload(),
                     timeout=timeout_s + 2,
                 )
                 actions.append("reload")
@@ -2578,6 +2601,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     resume_step_count: int = 0
     auth_assistance_resume_mode: Optional[str] = None
     resume_user_messages: List[Dict[str, str]] = []
+    payment_card_last4: Optional[str] = None
     if write_lock_resume_state:
         pending_write_lock_action = write_lock_resume_state.get("pending_action")
         write_lock_approvals = write_lock_resume_state.get("write_lock_approvals", {})
@@ -2585,6 +2609,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         session_id = write_lock_resume_state.get("session_id") or session_id
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
         auth_realm = write_lock_resume_state.get("auth_realm") or auth_realm
+        payment_card_last4 = _normalize_payment_card_last4(
+            write_lock_resume_state.get("payment_card_last4")
+        )
         if write_lock_resume_state.get("approval_type") == "auth_assistance":
             resume_user_messages.append(
                 build_auth_assistance_resume_user_message(
@@ -3434,8 +3461,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 if browser_recorder:
                     await browser_recorder.mark(f"Navigated -> {nav_url[:80]}", action="goto")
 
+            async def _wait_for_start_url_ready():
+                t = time.monotonic()
+                await wait_for_navigation_ready(dom_service, url=nav_url)
+                _record_timing("navigation.wait_ready", t)
+
             await asyncio.gather(
                 _inject_start_url_local_storage(),
+                _wait_for_start_url_ready(),
                 save_browser_action_message(
                     agent_id=agent_id,
                     title=f"Navigated \u2192 {nav_url[:50]}",
@@ -4123,9 +4156,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     #
                     # Browser-sourced ground truth lives in the user prompt, not
                     # a TOOL message. LLM-generated tool results (e.g. `extract`)
-                    # are reward-hackable; the DOM tree comes straight from
-                    # DOMService and is the only safe substrate for verifying a
-                    # claimed answer.
+                    # are reward-hackable. The only non-browser evidence below is
+                    # the validated last four digits supplied by the trusted card
+                    # issuance boundary; PAN, expiry, and CVC remain excluded.
                     dom_tree = browser_state.get("dom_tree", "") or ""
                     final_screenshot_b64 = browser_state.get("screenshot")
                     session_files = await list_session_files(config, session_id)
@@ -4176,6 +4209,15 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 "toolStatus": "FINISHED",
                             },
                         },
+                        *(
+                            [payment_card_evidence]
+                            if (
+                                payment_card_evidence := _build_payment_card_verifier_evidence(
+                                    payment_card_last4
+                                )
+                            )
+                            else []
+                        ),
                         # Final-state screenshot — emitted as a multimodal
                         # image block by build_verifier_context_messages when
                         # screenshot_b64 is set in metadata. Body text stays
@@ -4334,6 +4376,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             visited_urls=visited_urls,
                             reasoning_messages=reasoning_messages,
                             action_summary=action_summary,
+                        )
+                        context_message = append_completion_evidence(
+                            context_message,
+                            browser_url=current_url,
+                            structured_response=structured_response,
                         )
 
                         await save_browser_action_message(
@@ -5374,7 +5421,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         build_payment_question,
                         normalize_payment_payload,
                     )
-                    from tools.request_user_approval import request_user_approval_direct
+                    from tools.request_user_approval import (
+                        request_user_approval_direct,
+                        request_user_attention_direct,
+                    )
 
                     logger.info(
                         "Browser payment approval started",
@@ -5388,6 +5438,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         result.get("payment_request", {}),
                         workflow_instance.user_id or "",
                     )
+                    # Link the purchase to this agent. main's normalize_payment_payload
+                    # intentionally omits agentId from the fingerprint (user-scoped
+                    # idempotent reuse), but the purchase row still needs the agentId so
+                    # the lifecycle lookup (findLatestPurchaseLifecycleByAgentId) and
+                    # session-end cleanup can find it. Set it after normalize so the
+                    # fingerprint stays user-scoped.
                     payment_payload["agentId"] = workflow_instance.agent_id
                     logger.info(
                         "Browser payment payload normalized",
@@ -5431,12 +5487,182 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             attention_request_id=approval_response.get("attention_request_id"),
                         )
 
-                    card = await workflow.execute_activity(
-                        "mint_purchase_card_activity",
-                        args=[workflow_instance.user_id or "", payment_payload],
-                        start_to_close_timeout=timedelta(seconds=90),
-                        retry_policy=RetryPolicy(maximum_attempts=1),
-                    )
+                    async def mint_payment_card() -> Dict[str, Any]:
+                        return await workflow.execute_activity(
+                            "mint_purchase_card_activity",
+                            args=[workflow_instance.user_id or "", payment_payload],
+                            start_to_close_timeout=timedelta(seconds=90),
+                            retry_policy=RetryPolicy(maximum_attempts=1),
+                        )
+
+                    async def create_agentcard_setup_attention(
+                        setup_card: Dict[str, Any],
+                    ) -> Dict[str, Any]:
+                        setup_action = setup_card.get("setupAction") or "connect_agentcard"
+                        connect_url = setup_card.get("connectUrl") or ""
+                        agentcard_status = setup_card.get("agentcardStatus") or "setup_required"
+                        setup_url = setup_card.get("setupUrl") or setup_card.get("checkoutUrl") or ""
+                        primary_setup_url = setup_url or connect_url
+                        setup_title = "One Time Agent Payment Setup"
+                        setup_question = (
+                            "One Time Agent Payment Setup is required before I can issue "
+                            "the one-time payment card for your approved purchase."
+                        )
+                        if primary_setup_url:
+                            setup_question = (
+                                f"{setup_question}\n\nOpen this setup link:\n{primary_setup_url}"
+                            )
+                        setup_question = (
+                            f"{setup_question}\n\nAfter setup is complete, return to Rose "
+                            "and I will retry the payment automatically."
+                        )
+                        setup_attention = await request_user_attention_direct(
+                            workflow_instance,
+                            question=setup_question,
+                            title=setup_title,
+                            metadata={
+                                "attentionKind": f"agentcard_user_{agentcard_status}",
+                                "toolName": "spawn_browser_agent",
+                                "task_id": result.get("task_id"),
+                                "action_type": f"agentcard_user_{agentcard_status}",
+                                "agentCardSetup": {
+                                    "status": agentcard_status,
+                                    "setupAction": setup_action,
+                                    "connectUrl": connect_url,
+                                    "setupUrl": primary_setup_url,
+                                    "setupTool": setup_card.get("setupTool"),
+                                    "setupStatus": setup_card.get("setupStatus"),
+                                    "setupSessionId": setup_card.get("setupSessionId"),
+                                    "title": setup_title,
+                                },
+                                "requestPaymentCard": payment_payload,
+                                "previousPaymentApprovalAttentionRequestId": approval_response.get(
+                                    "attention_request_id"
+                                ),
+                            },
+                            sms_event_type="agentcard_setup",
+                            sms_payload={
+                                "setup_url": primary_setup_url,
+                                "agentcard_status": agentcard_status,
+                            },
+                        )
+                        return {
+                            "setup_action": setup_action,
+                            "connect_url": connect_url,
+                            "agentcard_status": agentcard_status,
+                            "primary_setup_url": primary_setup_url,
+                            "setup_title": setup_title,
+                            "setup_question": setup_question,
+                            "setup_attention": setup_attention,
+                            "setup_card": setup_card,
+                        }
+
+                    card = await mint_payment_card()
+                    waited_for_agentcard_setup = False
+                    while card.get("status") == "agentcard_setup_required":
+                        setup_info = await create_agentcard_setup_attention(card)
+                        logger.info(
+                            "Created AgentCard setup attention request",
+                            agentcard_status=setup_info["agentcard_status"],
+                            setup_action=setup_info["setup_action"],
+                            attention_request_id=setup_info["setup_attention"].get(
+                                "attention_request_id"
+                            ),
+                        )
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title=setup_info["setup_title"],
+                            message=setup_info["setup_question"],
+                            status=MessageStatus.FINISHED,
+                            metadata={
+                                "toolName": "spawn_browser_agent",
+                                "task_id": result.get("task_id"),
+                                "action_type": f"agentcard_user_{setup_info['agentcard_status']}",
+                                "agentCardSetup": {
+                                    "status": setup_info["agentcard_status"],
+                                    "setupAction": setup_info["setup_action"],
+                                    "connectUrl": setup_info["connect_url"],
+                                    "setupUrl": setup_info["primary_setup_url"],
+                                    "setupTool": card.get("setupTool"),
+                                    "setupStatus": card.get("setupStatus"),
+                                    "setupSessionId": card.get("setupSessionId"),
+                                },
+                                "agentCardSetupAttentionRequestId": setup_info[
+                                    "setup_attention"
+                                ].get("attention_request_id"),
+                                "previousPaymentApprovalAttentionRequestId": approval_response.get(
+                                    "attention_request_id"
+                                ),
+                            },
+                        )
+
+                        if waited_for_agentcard_setup:
+                            return
+
+                        waited_for_agentcard_setup = True
+                        connect_deadline = workflow.now() + timedelta(minutes=10)
+                        agentcard_status_result: Dict[str, Any] = {"connected": False}
+                        while workflow.now() < connect_deadline:
+                            agentcard_status_result = await workflow.execute_activity(
+                                "agentcard_status_activity",
+                                args=[workflow_instance.user_id or ""],
+                                start_to_close_timeout=timedelta(seconds=30),
+                                retry_policy=RetryPolicy(maximum_attempts=3),
+                            )
+                            if agentcard_status_result.get("connected"):
+                                break
+                            await workflow.sleep(5)
+
+                        if not agentcard_status_result.get("connected"):
+                            logger.info(
+                                "Timed out waiting for AgentCard setup",
+                                agentcard_status=setup_info["agentcard_status"],
+                                attention_request_id=setup_info["setup_attention"].get(
+                                    "attention_request_id"
+                                ),
+                            )
+                            return
+
+                        logger.info(
+                            "AgentCard setup completed; retrying card mint",
+                            attention_request_id=setup_info["setup_attention"].get(
+                                "attention_request_id"
+                            ),
+                        )
+                        setup_attention_id = setup_info["setup_attention"].get(
+                            "attention_request_id"
+                        )
+                        if setup_attention_id:
+                            await workflow.execute_activity(
+                                "resolve_attention_request_activity",
+                                args=[
+                                    workflow_instance.user_id or "",
+                                    setup_attention_id,
+                                    "AgentCard setup completed.",
+                                ],
+                                start_to_close_timeout=timedelta(seconds=30),
+                                retry_policy=RetryPolicy(maximum_attempts=3),
+                            )
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title="Agent payment setup complete",
+                            message="Agent payment setup is complete. Retrying the one-time payment card.",
+                            status=MessageStatus.FINISHED,
+                            metadata={
+                                "toolName": "spawn_browser_agent",
+                                "task_id": result.get("task_id"),
+                                "action_type": "agentcard_user_setup_completed",
+                                "agentCardSetup": {
+                                    "status": "connected",
+                                    "previousStatus": setup_info["agentcard_status"],
+                                },
+                                "agentCardSetupAttentionRequestId": setup_attention_id,
+                                "previousPaymentApprovalAttentionRequestId": approval_response.get(
+                                    "attention_request_id"
+                                ),
+                            },
+                        )
+                        card = await mint_payment_card()
 
                     # Subscription gate: minting real money requires an active
                     # plan. If the backend says so, raise a subscription gate
@@ -5475,12 +5701,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             return
 
                         # Resolved — retry the mint now that the user has subscribed.
-                        card = await workflow.execute_activity(
-                            "mint_purchase_card_activity",
-                            args=[workflow_instance.user_id or "", payment_payload],
-                            start_to_close_timeout=timedelta(seconds=90),
-                            retry_policy=RetryPolicy(maximum_attempts=1),
-                        )
+                        card = await mint_payment_card()
                         if card.get("status") == "subscription_required":
                             yield ToolEvent(
                                 type=EventType.POST_MESSAGE,
@@ -5524,12 +5745,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             )
                             return
 
-                        card = await workflow.execute_activity(
-                            "mint_purchase_card_activity",
-                            args=[workflow_instance.user_id or "", payment_payload],
-                            start_to_close_timeout=timedelta(seconds=90),
-                            retry_policy=RetryPolicy(maximum_attempts=1),
-                        )
+                        card = await mint_payment_card()
                         if card.get("status") == "kyc_required":
                             yield ToolEvent(
                                 type=EventType.POST_MESSAGE,
@@ -5575,6 +5791,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "cdp_url": result.get("cdp_url"),
                         "task_id": result.get("task_id"),
                         "payment_card_refs": payment_card_refs,
+                        "payment_card_last4": _normalize_payment_card_last4(card.get("last4")),
                         "recorded_passkey_credential_ids": result.get(
                             "recorded_passkey_credential_ids", []
                         ),

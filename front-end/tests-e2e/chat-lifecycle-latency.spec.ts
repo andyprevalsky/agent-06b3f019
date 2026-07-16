@@ -236,7 +236,13 @@ test.describe('chat full-lifecycle latency', () => {
       if (HAS_INJECTED_SESSION) await expectInjectedSessionRecognized(page);
       else await expectDevAuthenticated(page, recorder);
 
-      for (let sample = 1; sample <= SAMPLE_COUNT; sample += 1) {
+      // Sample 0 is a discarded WARMUP. A fresh CI stack cold-starts the backend
+      // JIT, the Cerebras connection, and the prompt cache, so the very first
+      // request per path runs several seconds slower than steady state (observed
+      // ~8s vs ~1s warm). Prod is never cold per-request, so the cold-start is a
+      // fresh-stack artifact — not a user-visible latency. Samples 1..SAMPLE_COUNT
+      // are the measured, warm ones the 5s SLA actually targets.
+      for (let sample = 0; sample <= SAMPLE_COUNT; sample += 1) {
         await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
 
         const marker = `CHAT${path.id.replaceAll('_', '').toUpperCase()}${sample}${randomUUID().replaceAll('-', '').slice(0, 8)}`;
@@ -289,18 +295,24 @@ test.describe('chat full-lifecycle latency', () => {
             if (unexpectedRouteCount > 0) failures.push('direct answer used another router path');
           }
 
-          results.push({
-            sample,
-            screenMs,
-            userMessageMs,
-            firstResponseMs,
-            routeMs,
-            lifecycleMs,
-            failures,
-          });
-          console.log(
-            `${path.id} sample ${sample}/${SAMPLE_COUNT}: screen=${screenMs}ms user=${userMessageMs}ms first-response=${firstResponseMs}ms route=${routeMs}ms lifecycle=${lifecycleMs}ms${failures.length > 0 ? ` failures=${JSON.stringify(failures)}` : ''}`,
-          );
+          if (sample === 0) {
+            console.log(
+              `${path.id} warmup: first-response=${firstResponseMs}ms lifecycle=${lifecycleMs}ms (discarded cold-start)`,
+            );
+          } else {
+            results.push({
+              sample,
+              screenMs,
+              userMessageMs,
+              firstResponseMs,
+              routeMs,
+              lifecycleMs,
+              failures,
+            });
+            console.log(
+              `${path.id} sample ${sample}/${SAMPLE_COUNT}: screen=${screenMs}ms user=${userMessageMs}ms first-response=${firstResponseMs}ms route=${routeMs}ms lifecycle=${lifecycleMs}ms${failures.length > 0 ? ` failures=${JSON.stringify(failures)}` : ''}`,
+            );
+          }
         } finally {
           agentId ??= new URL(page.url()).searchParams.get('agent-id');
           if (agentId) {

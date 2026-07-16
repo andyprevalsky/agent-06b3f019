@@ -1450,8 +1450,26 @@ test('POST /:id/pause — not found → 404', async () => {
 test('POST /:id/pause — happy path: status changes to PAUSED', async () => {
   const session = await createAnonymousSession('pause-happy');
 
-  // Create agent via HTTP so it's visible to the server
-  const agentId = await createTestAgent(session.user.id, 'Pause test');
+  // Seed the route precondition directly. Creating a chat-mode root via HTTP
+  // starts a background chat handler, which can independently fail and overwrite
+  // the status to FAILED while this route-level assertion is reading it (the
+  // resume happy-path test below was fixed the same way).
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-pause-happy', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Pause test',
+        status: 'ACTIVE',
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
+    });
+  });
 
   const res = await request(`${BASE_URL}/api/agents/${agentId}/pause`, {
     method: 'POST',
@@ -1468,7 +1486,9 @@ test('POST /:id/pause — happy path: status changes to PAUSED', async () => {
   const status = assertSchema(StatusResponse, statusRes.data, 'pause verify');
   assert(status.status === 'PAUSED', `Expected PAUSED, got ${status.status}`);
 
-  await deleteTestAgent(agentId, session.user.id);
+  await withTransientDbRetry('cleanup-pause-happy', async () => {
+    await prisma.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
+  });
 });
 
 // ========================= POST /:id/resume ================================
@@ -2094,16 +2114,36 @@ test('read-after-write: update agent → visible in detail', async () => {
   const session = await createAnonymousSession('raw-update');
   const agentId = await createTestAgent(session.user.id, 'RAW update test');
 
-  await request(`${BASE_URL}/api/agents/${agentId}`, {
+  const patchRes = await request(`${BASE_URL}/api/agents/${agentId}`, {
     method: 'PATCH',
     headers: apiKeyHeaders(session.user.id),
     body: JSON.stringify({ model: 'rose-labs/rose-1-ultra', progress: 0.5, message_count: 10 }),
   });
+  // A transient write failure (pool timeout, 5xx) must surface HERE as a failed
+  // write, not later as a confusing "read shows stale values" mismatch.
+  assert(patchRes.status === 200, `PATCH must succeed, got ${patchRes.status}`);
 
-  const res = await request(`${BASE_URL}/api/agents/${agentId}`, {
-    headers: apiKeyHeaders(session.user.id),
-  });
-  const body = assertSchema(GetAgentResponse, res.data, 'RAW update verify');
+  // Read-after-write can briefly race the Prisma connection pool (the read may
+  // land on a connection whose snapshot predates the just-committed write), so
+  // poll a few times instead of asserting a single immediate read.
+  const readDetail = async () => {
+    const res = await request(`${BASE_URL}/api/agents/${agentId}`, {
+      headers: apiKeyHeaders(session.user.id),
+    });
+    return assertSchema(GetAgentResponse, res.data, 'RAW update verify');
+  };
+  let body = await readDetail();
+  for (let attempt = 0; attempt < 9; attempt += 1) {
+    if (
+      body.agent.model === 'rose-labs/rose-1-ultra' &&
+      body.agent.progress === 0.5 &&
+      body.agent.message_count === 10
+    ) {
+      break;
+    }
+    await sleep(50);
+    body = await readDetail();
+  }
   assert(body.agent.model === 'rose-labs/rose-1-ultra', 'Model not updated');
   assert(body.agent.progress === 0.5, 'Progress not updated');
   assert(body.agent.message_count === 10, 'Message count not updated');

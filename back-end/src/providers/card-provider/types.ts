@@ -1,6 +1,7 @@
 export interface CardProviderMintRequest {
   amountCents: number;
   idempotencyKey?: string;
+  fundsSource?: 'onramp_flow' | 'company_flow';
 }
 
 export interface CardProviderMintResult {
@@ -9,6 +10,8 @@ export interface CardProviderMintResult {
   expiry: string;
   spendLimitCents: number;
   status: string;
+  providerTransferId?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface CardProviderDetailsResult {
