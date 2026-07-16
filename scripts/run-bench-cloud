@@ -1989,6 +1989,17 @@ SSH_LOG="$(mktemp)"
 FINISHED="0"; BENCH_EXIT=""; TIMED_OUT="0"
 poll_start="$(date +%s)"
 last_size="0"
+last_change="$poll_start"
+DRIVER_DIED="0"
+# The detached on-box driver occasionally dies at launch (an early kill/crash
+# before its first STEP — seen at fleet width when the Fly API is rate-limited).
+# It then never writes the DONE marker, so a poll loop that only watches for DONE
+# or the hard timeout would spin the FULL RUN_TIMEOUT (up to 60 min) while the
+# fleet's synchronized-start barrier waits on this box — one flaky launch stalling
+# the whole batch for an hour. When the log stops growing, verify the driver
+# process is still alive; if it's gone with no DONE marker, stop promptly and
+# report a bring-up (infra) failure so the fleet controller excludes this box fast.
+DRIVER_STALL_SECONDS="${CLOUDBENCH_DRIVER_STALL_SECONDS:-150}"
 while :; do
     now="$(date +%s)"
     if [ $((now - poll_start)) -ge "$RUN_TIMEOUT" ]; then
@@ -2004,12 +2015,23 @@ while :; do
             # Show only the newest progress lines to keep the console readable.
             tail -3 "$SSH_LOG" 2>/dev/null | sed 's/^/   │ /' || true
             last_size="$cur_size"
+            last_change="$now"
         fi
         if grep -aq "$DONE_MARKER" "$SSH_LOG" 2>/dev/null; then
             FINISHED="1"
             BENCH_EXIT="$(grep -aoE "${DONE_MARKER} exit=[0-9]+" "$SSH_LOG" | tail -1 | grep -oE '[0-9]+$' || echo '')"
             break
         fi
+    fi
+    # Liveness probe only after a stall, so a healthy (streaming) run adds no extra
+    # SSH load. pgrep matches the driver OR its wrapper; re-arm after each probe.
+    if [ $((now - last_change)) -ge "$DRIVER_STALL_SECONDS" ]; then
+        if [ "$(ssh_read "$mid" "pgrep -f 'cloudbench-run.sh|/tmp/rb.sh' >/dev/null 2>&1 && echo ALIVE || echo DEAD" 2>/dev/null)" = "DEAD" ]; then
+            echo "❌ on-box driver exited with no DONE marker after ${DRIVER_STALL_SECONDS}s of no progress — bring-up (infra) failure; stopping this box so the fleet can proceed."
+            DRIVER_DIED="1"; BENCH_EXIT="1"
+            break
+        fi
+        last_change="$now"
     fi
     sleep "${CLOUDBENCH_POLL_INTERVAL:-10}"
 done

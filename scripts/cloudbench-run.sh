@@ -491,8 +491,18 @@ STATUS="none"
 STACK_WAIT_SECONDS="${CLOUDBENCH_STACK_WAIT_SECONDS:-900}"
 for i in $(seq 1 "$STACK_WAIT_SECONDS"); do
     if ! kill -0 "$STACK_PID" 2>/dev/null; then
-        log "FATAL: stack process exited before becoming healthy (see stack log above)"
-        wait "$STACK_PID" 2>/dev/null
+        # Capture the ACTUAL death cause. "see stack log above" was a dead end at
+        # fleet width: the stack log truncated mid-startup with no error, leaving
+        # the failure unclassifiable (OOM? sync error? signal?). Record the exit
+        # code (rc=137 ⇒ SIGKILL/OOM), the stack-log tail, and a dmesg OOM probe
+        # so a sporadic bring-up death is diagnosable from the pulled-back logs.
+        wait "$STACK_PID" 2>/dev/null; stack_rc=$?
+        log "FATAL: stack process exited (rc=$stack_rc) before becoming healthy after ${i}s"
+        log "───── last 40 lines of stack log ($STACK_LOG) ─────"
+        tail -40 "$STACK_LOG" 2>/dev/null | while IFS= read -r _line; do log "  | $_line"; done
+        if [ "$stack_rc" = 137 ] || dmesg 2>/dev/null | grep -qiE 'out of memory|oom-kill'; then
+            log "  ⚠️ rc=137/OOM signature — stack was SIGKILLed (likely out-of-memory); check machine RAM vs concurrent service footprint"
+        fi
         finish 1
     fi
     if [ -f "$MANIFEST" ]; then

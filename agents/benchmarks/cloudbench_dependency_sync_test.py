@@ -333,7 +333,10 @@ def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> N
     assert '--timeout "$CHILD_RUN_TIMEOUT"' in fleet
     assert "deadline=$(( $(date +%s) + START_BARRIER_WAIT_SECONDS ))" in fleet
     assert 'CHILD_MACHINE+=("$cid")' in fleet
-    assert "isolated stacks reached the synchronized start barrier" in fleet
+    # The barrier now tolerates infra failures (see
+    # test_start_barrier_tolerates_infra_failures): it releases the ready set and
+    # only the LIVE stacks gate the release, rather than aborting on any one exit.
+    assert "isolated stacks reached the barrier" in fleet
     assert "releasing synchronized start barrier" in fleet
     assert "returning claimed pool machine" in fleet
 
@@ -2405,3 +2408,28 @@ def test_clone_burst_is_rate_limit_resilient() -> None:
     assert "RANDOM % 5" in clone_fn
     # The old fixed-delay retry (`sleep "$retry_delay"` unconditionally) is gone.
     assert 'sleep "$retry_delay"\n' not in clone_fn
+
+
+def test_launcher_detects_dead_onbox_driver() -> None:
+    """RCA (2026-07-15): at fleet width the detached on-box driver sometimes dies
+    at launch (an early kill/crash before its first STEP — Fly API rate-limited).
+    It then never writes the DONE marker, so the launcher's poll loop — which only
+    watched for DONE or the 3600s hard timeout — spun the FULL run timeout while
+    the fleet's synchronized-start barrier waited on that box, stalling the whole
+    batch for up to an hour on ONE flaky launch. The launcher must probe driver
+    liveness after a stall and stop promptly when it's gone with no DONE marker,
+    so the controller excludes the box fast; launches are staggered to reduce the
+    burst that triggers the death; and the health-wait FATAL must capture the exit
+    code + stack-log tail so a bring-up death is diagnosable."""
+    cloud = CLOUD_SCRIPT.read_text()
+    # Poll loop probes driver liveness on stall and breaks on death.
+    assert "DRIVER_STALL_SECONDS" in cloud
+    assert "on-box driver exited with no DONE marker" in cloud
+    assert "pgrep -f 'cloudbench-run.sh|/tmp/rb.sh'" in cloud
+    # Launch burst is staggered.
+    fleet = FLEET_SCRIPT.read_text()
+    assert "CLOUDBENCH_LAUNCH_STAGGER_SECONDS" in fleet
+    # Stack-health FATAL captures the actual death cause (exit code + tail + OOM).
+    run = (CLOUD_SCRIPT.parent / "cloudbench-run.sh").read_text()
+    assert "stack process exited (rc=$stack_rc)" in run
+    assert "last 40 lines of stack log" in run
