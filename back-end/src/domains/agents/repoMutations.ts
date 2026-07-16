@@ -2,7 +2,7 @@
  * Agents domain repo mutations — create, update, delete operations.
  */
 
-import type { Prisma, AgentSource, VerifierType } from '@prisma/client';
+import type { Prisma, AgentSource, AgentStatus, VerifierType } from '@prisma/client';
 import { prisma } from '../../providers/database';
 
 // ---------------------------------------------------------------------------
@@ -233,6 +233,25 @@ export async function failAgentIfStillActive(agentId: string, statusMessage: str
       status: { in: ['STARTING_UP', 'ACTIVE'] },
     },
     data: { status: 'FAILED', statusMessage },
+  });
+}
+
+/** Reactivate a terminal agent for chat by clearing its ended workflow — but ONLY
+ *  if the row is still in the exact observed terminal status AND workflow id. If a
+ *  concurrent reactivation already changed either, 0 rows update and the caller
+ *  reloads instead of clobbering the newer workflow. Returns the update count. */
+export async function clearWorkflowForTerminalAgent(
+  agentId: string,
+  observedStatus: AgentStatus,
+  observedWorkflowId: string
+) {
+  return prisma.agent.updateMany({
+    where: {
+      id: agentId,
+      status: observedStatus,
+      temporalWorkflowId: observedWorkflowId,
+    },
+    data: { temporalWorkflowId: null, status: 'ACTIVE' },
   });
 }
 

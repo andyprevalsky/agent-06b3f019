@@ -30,5 +30,7 @@ export function exclusiveOpenRouterWaterfall(params: {
     callSite: params.callSite,
     providerFastMode: params.options.provider_fast_mode,
     abortSignal: params.options.abort_signal,
+    tools: params.options.tools,
+    toolChoice: params.options.tool_choice,
   });
 }

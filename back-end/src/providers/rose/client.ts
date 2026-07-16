@@ -39,8 +39,10 @@ import { waterfallComplete } from './waterfall';
 import { dumpLlmContext, updateLlmDump } from '../llmDump';
 import { exclusiveOpenRouterWaterfall } from './openrouterRoute';
 import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
-import { selectExclusiveCerebrasChatRoute } from './exclusiveCerebrasChatRoute';
-import { selectDirectCerebrasFailover } from './directCerebrasFailover';
+import {
+  runCerebrasChatWithWaterfallFallback,
+  selectExclusiveCerebrasChatRoute,
+} from './exclusiveCerebrasChatRoute';
 
 const log = createLogger('Rose');
 
@@ -330,9 +332,11 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
     });
   };
 
-  // Both Chat routes stay pinned to GLM-4.7 on Cerebras. OpenRouter is the
-  // preferred transport; a failure before caller-visible content may use the
-  // funded direct Cerebras key without changing model or provider.
+  // Chat prefers low-latency GLM-4.7 on Cerebras. If that route produces no
+  // caller-visible content before its deadline, we fall through to the REAL
+  // multi-provider OpenRouter waterfall (different models) rather than retrying
+  // the same model on the same provider — so a slow/empty Cerebras can never
+  // silence the whole chat turn.
   let cerebrasRoute;
   try {
     cerebrasRoute = selectExclusiveCerebrasChatRoute({
@@ -346,31 +350,21 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
   }
   if (cerebrasRoute !== null) {
     try {
-      yield* runWithFallThrough({ produce: cerebrasRoute.produce, emit: emitChunk });
-    } catch (error) {
-      const cause = error instanceof PreContentFallThroughError ? error.cause : error;
-      const directFailover = selectDirectCerebrasFailover({
-        error,
+      yield* runCerebrasChatWithWaterfallFallback({
+        cerebrasRoute,
+        poolSpec,
         options: opts.options,
         requestId: opts.requestId,
-        callSite: opts.callSite,
         pool: opts.pool,
+        callSite: opts.callSite,
         startedAt,
         emit: emitChunk,
-        finalize: finalizeDump,
       });
-      if (directFailover) {
-        yield* directFailover;
-        return;
-      }
+    } catch (error) {
+      const cause = error instanceof PreContentFallThroughError ? error.cause : error;
       finalizeDump(cause);
       throw cause;
     }
-    log.info(cerebrasRoute.doneEvent, {
-      request_id: opts.requestId,
-      pool: opts.pool,
-      elapsed_ms: Date.now() - startedAt,
-    });
     finalizeDump();
     return;
   }
