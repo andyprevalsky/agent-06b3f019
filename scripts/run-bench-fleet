@@ -315,6 +315,25 @@ machine_storage_ready() {  # machine_storage_ready <id>
         <(printf '%s' "$machines") <(printf '%s' "$volumes") >/dev/null
 }
 
+snapshot_machine_state() {  # snapshot_machine_state <id>; 0=state, 1=absent, 2=unsafe
+    local id="$1"
+    fleet_machines_json | MACHINE_ID="$id" python3 -c '
+import json, os, sys
+try:
+    machines = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+    raise SystemExit(2)
+matches = [machine for machine in machines if machine.get("id") == os.environ["MACHINE_ID"]]
+if not matches:
+    raise SystemExit(1)
+if len(matches) != 1 or not isinstance(matches[0].get("state"), str):
+    raise SystemExit(2)
+print(matches[0]["state"])
+'
+}
+
 is_sim_on() { case ",$SIM_ON_CSV," in *",$1,"*) return 0 ;; esac; return 1; }
 
 # Per-bench world-model mode from tasks.json (the catalog is the source of truth):
@@ -945,7 +964,8 @@ provision_pool_slot() {  # provision_pool_slot <slot> <total>
     fi
     echo "  [$i/$n] created $id"
     for _ in $(seq 1 90); do
-        if FLY machine status "$id" -a "$APP" 2>/dev/null | grep -qiE "State.*(started|stopped)"; then
+        st="$(snapshot_machine_state "$id")" || st=""
+        if printf '%s' "$st" | grep -qiE '^(started|stopped)$'; then
             ready=1
             break
         fi
@@ -960,7 +980,7 @@ provision_pool_slot() {  # provision_pool_slot <slot> <total>
     fi
     FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
     for _ in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
-        if st="$(pool_machine_state "$id")" && [ "$st" = "stopped" ]; then
+        if st="$(snapshot_machine_state "$id")" && [ "$st" = "stopped" ]; then
             break
         fi
         sleep 2
@@ -1551,6 +1571,19 @@ fi
 
 # --provision-pool: one-time pre-provision of N stopped clones, then exit.
 if [ -n "$PROVISION_POOL" ]; then
+    # Pool slots all observe ONE controller-owned inventory stream. Without it,
+    # 30 readiness loops each issued machine+volume list calls every five
+    # seconds (90 API reads/cycle), recreating resource_exhausted before the
+    # benchmark even started.
+    machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!
+    for _ in $(seq 1 30); do
+        [ -s "$MACHINES_SNAPSHOT" ] && [ -s "$VOLUMES_SNAPSHOT" ] && break
+        sleep 0.2
+    done
+    [ -s "$MACHINES_SNAPSHOT" ] && [ -s "$VOLUMES_SNAPSHOT" ] || {
+        echo "❌ shared inventory snapshots did not initialize for pool provisioning" >&2
+        exit 1
+    }
     provision_pool "$PROVISION_POOL"
     exit $?
 fi

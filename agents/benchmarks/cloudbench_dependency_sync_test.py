@@ -1471,8 +1471,16 @@ def test_pool_provision_fans_out_slots_concurrently() -> None:
     assert "CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS" in pool
     assert 'pool-provision-$i.ids' in slot
     assert 'pool_ledger_record_id "$id"' in slot
+    assert "snapshot_machine_state" in slot
+    assert "FLY machine status" not in slot
+    assert "pool_machine_state" not in slot
     cleanup = _extract_fleet_function(fleet, "cleanup() {")
     assert '"${PROVISION_PIDS[@]:-}"' in cleanup
+
+    pool_branch = fleet[fleet.index('if [ -n "$PROVISION_POOL" ]; then'):]
+    assert pool_branch.index("machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!") < pool_branch.index(
+        'provision_pool "$PROVISION_POOL"'
+    )
 
 
 def test_unresolved_clone_name_fails_loudly_without_polling_past_deadline() -> None:
