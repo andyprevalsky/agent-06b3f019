@@ -364,7 +364,7 @@ async def build_browser_verifier_context(
         f"Goal: {goal}\n\n"
         "## Browser Ground Truth (FINAL STATE)\n"
         "Read the DOM independently and decide whether the goal is satisfied. "
-        "Do NOT rely on what the agent reported \u2014 only on what the page actually shows. "
+        "Do NOT rely on what the agent reported - only on what the page actually shows. "
         "The action_history below shows the URL transitions taken to reach this final state.\n\n"
         f"URL: {current_url}\n"
         f"Title: {browser_state.get('title', 'Unknown')}\n"
@@ -386,7 +386,7 @@ async def build_browser_verifier_context(
         {"role": "USER", "text": user_prompt},
         {
             "role": "TOOL",
-            "text": f"Browser Agent Execution Log ({len(action_entries)} actions shown \u2014 URL transitions, tool inputs/outputs):\n\n{actions_text}",
+            "text": f"Browser Agent Execution Log ({len(action_entries)} actions shown - URL transitions, tool inputs/outputs):\n\n{actions_text}",
             "metadata": {
                 "toolName": "action_history",
                 "toolStatus": "FINISHED",
