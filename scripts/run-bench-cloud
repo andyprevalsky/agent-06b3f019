@@ -1617,11 +1617,16 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         [ $(( $(date +%s) - _sr_ts )) -ge "${CLOUDBENCH_READY_TIMEOUT:-600}" ] && { echo "❌ boot-launch: $mid storage not mountable in time" >&2; exit 1; }
         sleep 5
     done
-    echo "🚀 boot-launch: setting per-run env + boot command on $mid (no ssh) ..."
+    # Inject the boot script into the box via the machine config (--file-local) so
+    # it needs NO snapshot/image staging — deterministic on every fresh clone and
+    # always the CURRENT script — then run it as the --command. Written to a rootfs
+    # path (not the /data volume, whose mount can race the config write).
+    echo "🚀 boot-launch: injecting boot script + setting env/command on $mid (no ssh) ..."
     _upd=0
     for _u in $(seq 1 "${CLOUDBENCH_BOOT_UPDATE_ATTEMPTS:-10}"); do
         if FLY machine update "$mid" -a "$APP" "${_envargs[@]}" \
-              --command "bash /data/cloudbench-boot.sh" --skip-health-checks --yes >/dev/null 2>&1; then
+              --file-local "/cloudbench-boot.sh=$ROOT_DIR/scripts/cloudbench-boot.sh" \
+              --command "bash /cloudbench-boot.sh" --skip-health-checks --yes >/dev/null 2>&1; then
             _upd=1; break
         fi
         sleep 8
