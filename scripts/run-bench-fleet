@@ -1356,7 +1356,16 @@ for v in d:
     if v.get("name")==vn and v.get("id"): print(v["id"]); break
 ' 2>/dev/null || true)"
 [ -n "$VOL_ID" ] || { echo "❌ Could not find warm volume '$VOLUME_NAME' in $APP" >&2; exit 1; }
+# CLOUDBENCH_SNAPSHOT_ID pins a specific snapshot (Fly can't delete snapshots, so
+# when the auto-selected newest one is stale — e.g. missing the dep-fingerprint
+# marker → cloudbench-sync-deps.sh FATAL — pin a known-good one until a fresh
+# warm image/snapshot is baked).
+if [ -n "${CLOUDBENCH_SNAPSHOT_ID:-}" ]; then
+    SNAP_ID="$CLOUDBENCH_SNAPSHOT_ID"
+    echo "📌 pinned snapshot (CLOUDBENCH_SNAPSHOT_ID): $SNAP_ID"
+else
 SNAP_ID="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | python3 "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" 2>/dev/null || true)"
+fi
 if [ -z "$SNAP_ID" ]; then
     echo "❌ No complete snapshot for warm volume $VOL_ID. Create one and wait for it to finish:" >&2
     echo "   flyctl volume snapshots create $VOL_ID -a $APP   # then wait until STORED SIZE ≈ VOL SIZE" >&2
