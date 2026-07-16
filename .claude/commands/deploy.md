@@ -302,7 +302,7 @@ bash scripts/kill-services.sh           # kill the whole tree; preserves DB cont
 
 `scripts/kill-services.sh` is worktree-scoped (uses `$PWD` as the filter), walks descendants via `pgrep -P`, SIGTERMs then SIGKILLs survivors, and deliberately leaves the Postgres container intact. Re-run it any time you need a clean slate — it is idempotent.
 
-Spin up the local stack through `scripts/run.sh --benchmark`. This stack serves blackbox and semantic gates; Pre-Deploy smoke runs separately in the cloud. In benchmark mode, `run.sh` starts `back-end`, `front-end`, and `agents`, and skips `mac-app`. When this command is used inside Conductor, `run.sh` derives the backend, frontend, and worker-health ports from `CONDUCTOR_PORT`.
+Spin up the local stack through `scripts/run.sh --benchmark`. This stack serves blackbox and semantic gates; Pre-Deploy smoke runs on its own separate isolated stack via `run-bench --local` (or, opt-in, the cloud fleet). In benchmark mode, `run.sh` starts `back-end`, `front-end`, and `agents`, and skips `mac-app`. When this command is used inside Conductor, `run.sh` derives the backend, frontend, and worker-health ports from `CONDUCTOR_PORT`.
 
 ```bash
 # Conductor provides the base port; run.sh fans out backend/frontend/health/research from it.
@@ -450,16 +450,23 @@ When skipping, record it explicitly in the Test Report:
 
 ### Running smoke
 
-Run the complete Pre-Deploy group through the production Benchmark Hub and the default isolated cloud fleet. The local stack from Step 5 remains available for blackbox and semantic tests, but smoke must not use it.
+Run the complete Pre-Deploy smoke group on the **LOCAL isolated benchmark stack** (the default). The Step 5 stack stays up for blackbox and semantic tests; `run-bench --local` spins up its OWN per-run isolated stack (separate backend + worker + WMH + Postgres), so the two never collide.
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-bash scripts/run-predeploy-cloud
+bash scripts/run-predeploy-local
 ```
 
-`scripts/run-predeploy-cloud` derives the task set from every catalog entry tagged `smoke`, creates a visible Hub request, and invokes `scripts/run-bench` through the hub poller. Each task receives its own Fly machine, backend, Postgres database, and Temporal queue. The fleet waits for every isolated stack at the synchronized start barrier and then releases every benchmark together.
+`scripts/run-predeploy-local` derives the task set from every catalog entry tagged `smoke` (identical selection to the cloud path, so they can't drift) and runs them through `scripts/run-bench --local` at max concurrency 5 on this machine. It exits non-zero unless every requested task passes, so the command IS the gate.
 
-The command is the gate: it exits non-zero unless the Hub dispatch is `completed`, the final task set exactly matches the catalog's smoke group, and every task is `passed`. It prints the `hub-...` run ID; verify that exact run in **Benchmarks → Runs** and include it in `TEST_REPORT`.
+**Why local is the default:** the shared cloud fleet (`run-predeploy-cloud`, app `navi-whisper-lux-bench`) is frequently rate-limited, volume-capacity-starved, and — worst — **leaks paid Fly machines when the controller is killed** (a killed run orphans clones + autoscaler workers that keep billing until manually destroyed). Local has no shared-resource contention and no cross-workspace blast radius. Use the cloud fleet only as an explicit opt-in when local resources are insufficient:
+
+```bash
+# Opt-in cloud alternate (only when local can't run the set — e.g. many heavy browser tasks):
+bash scripts/run-predeploy-cloud   # per-bench Fly fleet via the production Hub; verify the hub-... run in Benchmarks → Runs
+```
+
+If you DO run the cloud path, its gate is stricter surface (Hub dispatch `completed`, task set exactly matches the smoke group, every task `passed`) and you MUST actively monitor it and reap leaked machines on any abort (see rule #1 — never fire-and-forget an async task; `flyctl machines list -a navi-whisper-lux-bench` then `flyctl machine destroy --force` every non-warm/non-controller clone).
 
 ### Active-worktree contract
 
@@ -476,7 +483,7 @@ Timeout history remains catalog-driven on the checked-out ref. Cloud runs do not
 
 ### Monitoring agent progress during smoke tests
 
-**Do NOT fire-and-forget.** Keep `scripts/run-predeploy-cloud` in the foreground. Monitor the printed Hub run in **Benchmarks → Runs**, the current `.context/hub-poller-run-<request-id>.log`, and the matching `.context/fleet/runs/<batch-id>/_batch/report-card.json`.
+**Do NOT fire-and-forget** (rule #1). Keep `scripts/run-predeploy-local` in the foreground (or, if backgrounded, actively poll it on the cadence below — the wake-up may never come). Monitor its console output and the per-run manifest + result JSON under `.context/benchmarks/<run-id>/`; each task prints an FE link (`http://localhost:<fe-port>/?agent-id=...`) you can open to verify the agent actually ran. (Cloud alternate only: monitor the printed Hub run in **Benchmarks → Runs**, `.context/hub-poller-run-<request-id>.log`, and `.context/fleet/runs/<batch-id>/_batch/report-card.json`, and reap leaked Fly machines on any abort.)
 
 **Universal background-task cadence (applies here AND to every background task in this repo):**
 
@@ -502,7 +509,7 @@ At each poll, check:
 
 ### Pass criteria
 
-**ALL Pre-Deploy smoke benchmarks must pass concurrently — currently 7/7, with 0 failures.** The Hub run must be final (`live=false`, dispatch `completed`) and visible in Benchmarks → Runs. Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
+**ALL Pre-Deploy smoke benchmarks must pass — currently 7/7, with 0 failures.** On the local path, `run-predeploy-local` must exit 0 ("All requested benchmarks passed") and every task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
 
 **Diagnosis process — MUST be delegated to a `general-purpose` sub-agent.**
 
@@ -590,7 +597,7 @@ exact agent_id, scan the result, then hand the agent_id off.
 
 Everything else — crashes, timeouts, stalls, resource contention, infra issues — is your job to fix.
 
-If a benchmark fails due to cloud infrastructure, fix the fleet runner and re-run the synchronized group. A sequential diagnostic run does not satisfy the concurrent 7/7 gate.
+If a benchmark fails due to infrastructure (local stack flake, or on the cloud alternate a fleet/Fly issue), fix the runner and re-run the full smoke group. On the local path all tasks must pass in one `run-predeploy-local` invocation; on the cloud alternate a sequential diagnostic run does not satisfy the concurrent gate.
 
 ### Cloud cleanup
 
@@ -730,11 +737,11 @@ After Steps 6a and 6b pass, run the mandatory Step 5 teardown. If either fails, 
 
 # ║ 5. Blackbox API tests: 100% pass (ALL domains) ║
 
-# ║ 6. Smoke benchmarks: complete synchronized Pre-Deploy group ║
+# ║ 6. Smoke benchmarks: complete Pre-Deploy group passes ║
 
-# ║ passes concurrently (currently 7/7), with final Hub run — OR ║
+# ║ (currently 7/7) via run-predeploy-local (default) or the ║
 
-# ║ explicitly skipped per the ║
+# ║ cloud fleet alternate — OR explicitly skipped per the ║
 
 # ║ "When smoke can be skipped" table in Step 6 (diff must be ║
 
