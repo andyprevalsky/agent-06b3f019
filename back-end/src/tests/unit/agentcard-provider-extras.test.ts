@@ -271,6 +271,63 @@ async function main(): Promise<void> {
     assert.equal(funding?.status, PurchaseWalletFundingStatus.CONSUMED);
   });
 
+  await test('settleAgentCardSandboxPayment never overwrites already-reclaimed funding', async () => {
+    const userId = await seedUser();
+    const purchase = await prisma.purchaseSpend.create({
+      data: {
+        userId,
+        fingerprint: `fp-${randomUUID()}`,
+        merchant: 'Rose Labs Test Payment',
+        lineItemsJson: { totalCents: 4396 },
+        totalCents: 4396,
+        status: PurchaseSpendStatus.HELD,
+        cardId: `card-${randomUUID()}`,
+        stripePaymentIntentId: `pi_${randomUUID()}`,
+      },
+    });
+    // A concurrent abandonment cleanup already reclaimed the org-wallet transfer.
+    await prisma.purchaseWalletFunding.create({
+      data: {
+        purchaseId: purchase.id,
+        userId,
+        amountCents: 4396,
+        currency: 'usd',
+        status: PurchaseWalletFundingStatus.RECLAIMED,
+        providerTransferId: `owt_${randomUUID()}`,
+        idempotencyKey: `purchase-wallet-fund:${purchase.id}`,
+        reclaimedAt: new Date(),
+      },
+    });
+    await assert.rejects(
+      () =>
+        settleAgentCardSandboxPayment(
+          { cardNumber: '4242424242420640', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+          {
+            findHeldPurchasesByTotal: async () => [
+              {
+                id: purchase.id,
+                userId,
+                cardId: purchase.cardId,
+                stripePaymentIntentId: purchase.stripePaymentIntentId,
+              },
+            ],
+            getCardPan: async () => '4242 4242 4242 0640',
+            testCharge: async () => ({}),
+            // Real claim + markPurchaseCleared to exercise the DB guard.
+          }
+        ),
+      /already reclaimed or is missing/
+    );
+    // The reclaimed funding must be untouched (float not double-counted), and the purchase must NOT
+    // be marked CLEARED.
+    const funding = await prisma.purchaseWalletFunding.findUnique({
+      where: { purchaseId: purchase.id },
+    });
+    assert.equal(funding?.status, PurchaseWalletFundingStatus.RECLAIMED);
+    const settled = await prisma.purchaseSpend.findUnique({ where: { id: purchase.id } });
+    assert.notEqual(settled?.status, PurchaseSpendStatus.CLEARED);
+  });
+
   await test('settleAgentCardSandboxPayment rejects a matched purchase with no Stripe hold', async () => {
     const userId = await seedUser();
     await assert.rejects(

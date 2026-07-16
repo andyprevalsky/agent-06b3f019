@@ -7,6 +7,7 @@ import {
   configureBenchmarkAgentCardSetup,
   confirmPhoneBenchmarkPayment,
   confirmTestPayment,
+  findAgentOwnerId,
   getTestPaymentCatalog,
   getTestPaymentLifecycle,
   recordPhoneBenchmarkPaymentAudit,
@@ -16,6 +17,27 @@ import {
 
 const router = Router();
 
+/**
+ * Caller authorization scope for the benchmark lifecycle routes.
+ *  - `privileged`: internal API-key callers (the benchmark harness) and every
+ *    non-production request (the dev-only fixture). They may target any
+ *    userId/agentId.
+ *  - a specific `userId`: a JWT-authenticated end user (the production benchmark
+ *    account). They may only read/mutate their OWN user and agents.
+ */
+interface BenchmarkCaller {
+  privileged: boolean;
+  userId?: string;
+}
+
+function benchmarkCaller(req: Request): BenchmarkCaller {
+  const authRequest = req as AuthRequest;
+  if (!isProductionEnv() || authRequest.isInternal === true) {
+    return { privileged: true };
+  }
+  return { privileged: false, userId: authRequest.user?.id };
+}
+
 function requireProductionBenchmarkAccess(req: Request, res: Response, next: NextFunction): void {
   if (!isProductionEnv()) {
     next();
@@ -23,12 +45,40 @@ function requireProductionBenchmarkAccess(req: Request, res: Response, next: Nex
   }
   authenticate(req as AuthRequest, res, () => {
     const authRequest = req as AuthRequest;
-    if (authRequest.isInternal === true || authRequest.user?.id === PRODUCTION_BENCHMARK_USER_ID) {
+    const benchmarkUserId = PRODUCTION_BENCHMARK_USER_ID;
+    if (
+      authRequest.isInternal === true ||
+      (benchmarkUserId !== '' && authRequest.user?.id === benchmarkUserId)
+    ) {
       next();
       return;
     }
     res.status(403).json({ error: 'Production payment benchmark access denied' });
   });
+}
+
+/**
+ * Confirms an agent belongs to the caller before its lifecycle may be read or
+ * mutated. Privileged callers bypass the check; a scoped caller (JWT user) is
+ * limited to agents they own. A missing agent yields no purchase (handled
+ * downstream), so it is treated as authorized to preserve idempotent behavior.
+ */
+async function authorizeAgentForCaller(
+  caller: BenchmarkCaller,
+  agentId: string,
+  res: Response
+): Promise<boolean> {
+  if (caller.privileged) return true;
+  if (caller.userId === undefined || caller.userId === '') {
+    res.status(403).json({ error: 'Payment benchmark access denied' });
+    return false;
+  }
+  const ownerId = await findAgentOwnerId(agentId);
+  if (ownerId !== null && ownerId !== caller.userId) {
+    res.status(403).json({ error: 'Payment benchmark access denied for this agent' });
+    return false;
+  }
+  return true;
 }
 
 function rejectWhenDisabled(
@@ -101,7 +151,17 @@ router.post(
   asyncHandler(async (req, res) => {
     if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
     try {
-      res.json(await configureBenchmarkAgentCardSetup(req.body as Record<string, unknown>));
+      const caller = benchmarkCaller(req);
+      const body = { ...(req.body as Record<string, unknown>) };
+      // A scoped (non-privileged) caller may only configure their OWN setup.
+      if (!caller.privileged) {
+        if (caller.userId === undefined || caller.userId === '') {
+          res.status(403).json({ error: 'Payment benchmark access denied' });
+          return;
+        }
+        body.userId = caller.userId;
+      }
+      res.json(await configureBenchmarkAgentCardSetup(body));
     } catch (error) {
       if (error instanceof TestPaymentError) {
         res.status(error.statusCode).json({ error: error.message });
@@ -119,7 +179,9 @@ router.post(
     if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
     try {
       const body = req.body as Record<string, unknown>;
-      const result = await abandonTestPayment(typeof body.agentId === 'string' ? body.agentId : '');
+      const agentId = typeof body.agentId === 'string' ? body.agentId : '';
+      if (!(await authorizeAgentForCaller(benchmarkCaller(req), agentId, res))) return;
+      const result = await abandonTestPayment(agentId);
       res.json(result);
     } catch (error) {
       if (error instanceof TestPaymentError) {
@@ -147,9 +209,9 @@ router.get(
   asyncHandler(async (req, res) => {
     if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
     try {
-      const result = await getTestPaymentLifecycle(
-        typeof req.query.agentId === 'string' ? req.query.agentId : ''
-      );
+      const agentId = typeof req.query.agentId === 'string' ? req.query.agentId : '';
+      if (!(await authorizeAgentForCaller(benchmarkCaller(req), agentId, res))) return;
+      const result = await getTestPaymentLifecycle(agentId);
       res.json(result);
     } catch (error) {
       if (error instanceof TestPaymentError) {

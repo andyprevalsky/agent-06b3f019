@@ -30,7 +30,9 @@ export ALLOW_TEMPORAL_CLEANUP=true
 # decisions from prior runs replay stale patterns (observed: the root agent
 # re-spawns the browser after a successful checkout, looping until timeout). Real
 # uncached decisions complete the checkout once. Mirrors benchmarks/local.py.
-export BENCHMARK_FAST_MODE_CACHE="${BENCHMARK_FAST_MODE_CACHE:-false}"
+# Force it off unconditionally — a pre-set BENCHMARK_FAST_MODE_CACHE=true would
+# otherwise reintroduce the stale-replay loop.
+export BENCHMARK_FAST_MODE_CACHE=false
 
 LOG_FILE="$ROOT_DIR/.context/agentcard-lifecycle-$TASK_NAME.log"
 STACK_PID=""
@@ -73,6 +75,12 @@ for settle_attempt in $(seq 1 30); do
   fi
   sleep 1
 done
+if [ -n "$ports_busy" ]; then
+  # Teardown never released the ports within the window. Launching run.sh now
+  # would just hit a bind failure/collision, so fail loudly instead.
+  echo "Prior stack still owns required ports after teardown wait: $ports_busy" >&2
+  exit 1
+fi
 # Small extra settle so any child-process SIGKILL sweep fully drains after the
 # listeners close.
 sleep 2

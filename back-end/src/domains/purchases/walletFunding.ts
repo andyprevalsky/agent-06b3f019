@@ -1,4 +1,5 @@
 export {
+  beginPurchaseWalletReclaim,
   confirmPurchaseWalletCollection,
   consumePurchaseWalletFunding,
   fundPurchaseWallet,

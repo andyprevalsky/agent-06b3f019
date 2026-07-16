@@ -345,7 +345,11 @@ export async function updateAgentStatus(
   };
 
   await broadcastAgentUpdate(agentId, broadcastPayload);
-  if (TERMINAL_STATUSES.has(fields.status) && agent.parentAgentId === null) {
+  // Fire cleanup only on the FIRST terminal transition (`agent` is the pre-update
+  // row): re-running it on repeated terminal updates could race a second pass
+  // against the same still-HELD purchase (double close/reclaim/refund).
+  const wasAlreadyTerminal = IRREVERSIBLE_STATUSES.has(agent.status);
+  if (TERMINAL_STATUSES.has(fields.status) && agent.parentAgentId === null && !wasAlreadyTerminal) {
     await runTerminalAgentCleanup(agentId, fields.status, dependencies);
   }
 

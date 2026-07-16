@@ -18,13 +18,17 @@ import {
 } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import {
+  beginPurchaseWalletReclaim,
   confirmPurchaseWalletCollection,
   consumePurchaseWalletFunding,
   fundPurchaseWallet,
   reclaimPurchaseWalletFunding,
   recordPurchaseWalletFunding,
 } from '../../providers/purchase-wallet-funding';
-import { findWalletFundingByPurchaseId } from '../../providers/purchase-wallet-funding-repo';
+import {
+  findWalletFundingByPurchaseId,
+  markWalletFundingFailed,
+} from '../../providers/purchase-wallet-funding-repo';
 import {
   WalletFundingProviderError,
   type WalletFundingCollectionRequest,
@@ -337,6 +341,52 @@ async function main(): Promise<void> {
       funding?.status,
       PurchaseWalletFundingStatus.RECLAIMING,
       'release-pending leaves the row RECLAIMING for a retry'
+    );
+  });
+
+  await test('beginPurchaseWalletReclaim claims only a FUNDED transfer', async () => {
+    const userId = await seedUser();
+    const purchase = await seedPurchase(userId);
+    await recordPurchaseWalletFunding(purchase, 'usd', 'owt_begin', {});
+    await beginPurchaseWalletReclaim(purchase.id);
+    let funding = await findWalletFundingByPurchaseId(purchase.id);
+    assert.equal(
+      funding?.status,
+      PurchaseWalletFundingStatus.RECLAIMING,
+      'a FUNDED transfer is claimed RECLAIMING before its card is closed'
+    );
+    // Non-FUNDED rows are left untouched (idempotent no-op).
+    await setFundingStatus(purchase.id, PurchaseWalletFundingStatus.CONSUMED);
+    await beginPurchaseWalletReclaim(purchase.id);
+    funding = await findWalletFundingByPurchaseId(purchase.id);
+    assert.equal(funding?.status, PurchaseWalletFundingStatus.CONSUMED);
+  });
+
+  await test('recordPurchaseWalletFunding never resurrects a reclaimed transfer', async () => {
+    const userId = await seedUser();
+    const purchase = await seedPurchase(userId);
+    await recordPurchaseWalletFunding(purchase, 'usd', 'owt_reclaimed_row', {});
+    await setFundingStatus(purchase.id, PurchaseWalletFundingStatus.RECLAIMED);
+    const funding = await recordPurchaseWalletFunding(purchase, 'usd', 'owt_late_record', {});
+    assert.equal(
+      funding.status,
+      PurchaseWalletFundingStatus.RECLAIMED,
+      'a late funding callback must not overwrite a RECLAIMED row back to FUNDED'
+    );
+  });
+
+  await test('markWalletFundingFailed never downgrades a FUNDED transfer', async () => {
+    const userId = await seedUser();
+    const purchase = await seedPurchase(userId);
+    await recordPurchaseWalletFunding(purchase, 'usd', 'owt_funded_row', {});
+    const funded = await findWalletFundingByPurchaseId(purchase.id);
+    assert.ok(funded);
+    assert.equal(funded.status, PurchaseWalletFundingStatus.FUNDED);
+    const result = await markWalletFundingFailed(funded.id, 'late failure');
+    assert.equal(
+      result.status,
+      PurchaseWalletFundingStatus.FUNDED,
+      'a concurrent failed attempt must not downgrade FUNDED to FAILED'
     );
   });
 

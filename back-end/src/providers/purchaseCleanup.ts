@@ -14,6 +14,7 @@ import {
   type WalletFundingProvider,
 } from './wallet-funding';
 import {
+  beginPurchaseWalletReclaim,
   consumePurchaseWalletFunding,
   reclaimPurchaseWalletFunding,
 } from './purchase-wallet-funding';
@@ -141,6 +142,9 @@ export async function cleanupAgentPurchaseCards(
           data: { status: PurchaseSpendStatus.CLEARED },
         });
       } else {
+        // Claim the reclaim before closing the card so a concurrent pass can't read the now
+        // not-live card as merchant-spent while the funding is still FUNDED.
+        await beginPurchaseWalletReclaim(purchase.id);
         await activeCardProvider.closeCard(cardId);
         try {
           await reclaimPurchaseWalletFunding(
@@ -383,6 +387,9 @@ export async function reconcileDissolvedPurchaseHolds(
       continue;
     }
 
+    // Claim the reclaim before closing the card so a concurrent pass can't read the now not-live
+    // card as merchant-spent while the funding is still FUNDED.
+    await beginPurchaseWalletReclaim(purchase.id);
     await activeCardProvider.closeCard(cardId);
     try {
       await reclaimPurchaseWalletFunding(

@@ -185,6 +185,34 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    'connect rejects a user id without a valid signature',
+    async () => {
+      // An attacker cannot initiate account linking for an arbitrary user by
+      // passing a bare (unsigned) user id — the signed token is mandatory.
+      const res = await request(`/api/agentcard/connect?user=victim-${randomUUID()}`);
+      assertStatus(res.status, 400, res.data);
+      assert(
+        String(JSON.stringify(res.data)).includes('Invalid or expired connection link'),
+        'unsigned connect attempt should be rejected'
+      );
+    },
+  ],
+  [
+    'connect rejects a forged signature token',
+    async () => {
+      const res = await request(
+        `/api/agentcard/connect?user=victim-${randomUUID()}&t=${encodeURIComponent(
+          `${Date.now() + 60_000}.forged-signature`
+        )}`
+      );
+      assertStatus(res.status, 400, res.data);
+      assert(
+        String(JSON.stringify(res.data)).includes('Invalid or expired connection link'),
+        'forged connect token should be rejected'
+      );
+    },
+  ],
+  [
     'callback renders an error page when the provider reports an error',
     async () => {
       const res = await request('/api/agentcard/callback?error=access_denied');

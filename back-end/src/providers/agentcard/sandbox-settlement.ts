@@ -25,6 +25,7 @@ interface HeldPurchase {
 interface AgentCardSandboxSettlementDependencies {
   findHeldPurchasesByTotal?: (amountCents: number) => Promise<HeldPurchase[]>;
   getCardPan?: (userId: string, cardId: string) => Promise<string>;
+  claimHeldPurchaseForCharge?: (purchaseId: string) => Promise<boolean>;
   testCharge?: (input: {
     cardId: string;
     amountCents: number;
@@ -80,10 +81,36 @@ async function testCharge(input: {
   };
 }
 
+/**
+ * Atomically reserve a HELD purchase for settlement by flipping it to CHARGING. Returns whether this
+ * caller won the reservation. Two concurrent settlement requests that select the same HELD purchase
+ * cannot both win — the loser gets `false` and must not issue the non-idempotent charge.
+ */
+async function claimHeldPurchaseForCharge(purchaseId: string): Promise<boolean> {
+  const claimed = await prisma.purchaseSpend.updateMany({
+    where: { id: purchaseId, status: PurchaseSpendStatus.HELD },
+    data: { status: PurchaseSpendStatus.CHARGING },
+  });
+  return claimed.count === 1;
+}
+
+/**
+ * Funding states from which a settlement may legitimately mark the transfer CONSUMED. RECLAIMED is
+ * intentionally excluded: a concurrent abandonment cleanup that already reclaimed the org-wallet
+ * transfer must NOT be overwritten back to CONSUMED, or the reclaimed float is double-counted and
+ * permanently drained.
+ */
+const CONSUMABLE_FUNDING_SOURCE_STATUSES = [
+  PurchaseWalletFundingStatus.FUNDED,
+  PurchaseWalletFundingStatus.CONSUMED,
+  PurchaseWalletFundingStatus.RECLAIMING,
+  PurchaseWalletFundingStatus.RECLAIM_FAILED,
+];
+
 async function markPurchaseCleared(purchaseId: string): Promise<void> {
   await prisma.$transaction(async (tx) => {
     const updated = await tx.purchaseSpend.updateMany({
-      where: { id: purchaseId, status: PurchaseSpendStatus.HELD },
+      where: { id: purchaseId, status: PurchaseSpendStatus.CHARGING },
       data: { status: PurchaseSpendStatus.CLEARED },
     });
     if (updated.count !== 1) {
@@ -92,14 +119,23 @@ async function markPurchaseCleared(purchaseId: string): Promise<void> {
         502
       );
     }
-    await tx.purchaseWalletFunding.updateMany({
-      where: { purchaseId },
+    const consumed = await tx.purchaseWalletFunding.updateMany({
+      where: {
+        purchaseId,
+        status: { in: CONSUMABLE_FUNDING_SOURCE_STATUSES },
+      },
       data: {
         status: PurchaseWalletFundingStatus.CONSUMED,
         consumedAt: new Date(),
         errorMessage: null,
       },
     });
+    if (consumed.count !== 1) {
+      throw new AgentCardSandboxSettlementError(
+        'AgentCard sandbox funding was already reclaimed or is missing',
+        409
+      );
+    }
   });
 }
 
@@ -109,6 +145,7 @@ export async function settleAgentCardSandboxPayment(
 ): Promise<AgentCardSandboxSettlementResult> {
   const findPurchases = dependencies.findHeldPurchasesByTotal ?? findHeldPurchasesByTotal;
   const readPan = dependencies.getCardPan ?? getCardPan;
+  const claimForCharge = dependencies.claimHeldPurchaseForCharge ?? claimHeldPurchaseForCharge;
   const charge = dependencies.testCharge ?? testCharge;
   const markCleared = dependencies.markPurchaseCleared ?? markPurchaseCleared;
   const candidates = await findPurchases(input.amountCents);
@@ -117,6 +154,17 @@ export async function settleAgentCardSandboxPayment(
     if (purchase.cardId === null) continue;
     const pan = await readPan(purchase.userId, purchase.cardId);
     if (pan.replace(/\s+/g, '') !== input.cardNumber) continue;
+
+    // Validate the actual Stripe hold BEFORE charging so we never move funds against a purchase we
+    // cannot later capture.
+    if (purchase.stripePaymentIntentId === null) {
+      throw new AgentCardSandboxSettlementError('Cleared purchase is missing its Stripe hold', 502);
+    }
+
+    // Atomically reserve the purchase before the non-idempotent charge. If another concurrent
+    // settlement already claimed it, skip to the next candidate rather than double-charge.
+    const claimed = await claimForCharge(purchase.id);
+    if (!claimed) continue;
 
     const result = await charge({
       cardId: purchase.cardId,
@@ -128,9 +176,6 @@ export async function settleAgentCardSandboxPayment(
         `AgentCard sandbox charge failed: ${result.message ?? ''}`,
         402
       );
-    }
-    if (purchase.stripePaymentIntentId === null) {
-      throw new AgentCardSandboxSettlementError('Cleared purchase is missing its Stripe hold', 502);
     }
     await markCleared(purchase.id);
     return {

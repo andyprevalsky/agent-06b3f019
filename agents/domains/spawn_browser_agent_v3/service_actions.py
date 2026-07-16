@@ -9,7 +9,6 @@ import asyncio
 import base64
 import inspect
 import json
-from io import BytesIO
 import time as time_module
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -824,20 +823,9 @@ async def _resolve_payment_ref_coordinates(session: Any, ref_name: str) -> Optio
                         }
                         const wrappingLabel = el.closest('label');
                         if (wrappingLabel) addText(parts, wrappingLabel.innerText || wrappingLabel.textContent);
-                        let node = el.previousElementSibling;
-                        let hops = 0;
-                        while (node && hops < 2) {
-                            addText(parts, node.innerText || node.textContent);
-                            node = node.previousElementSibling;
-                            hops += 1;
-                        }
-                        let parent = el.parentElement;
-                        hops = 0;
-                        while (parent && hops < 2) {
-                            addText(parts, parent.innerText || parent.textContent);
-                            parent = parent.parentElement;
-                            hops += 1;
-                        }
+                        // Deliberately excludes sibling/ancestor text: shared form
+                        // text makes every card input score identically, so ties
+                        // collapse all refs onto the first field.
                         return parts.join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
                     };
                     const patterns = patternsByRef[refName] || [];
@@ -964,20 +952,9 @@ async def _fill_payment_ref_directly(session: Any, ref_name: str, value: str) ->
                 }
                 const wrappingLabel = el.closest('label');
                 if (wrappingLabel) addText(parts, wrappingLabel.innerText || wrappingLabel.textContent);
-                let node = el.previousElementSibling;
-                let hops = 0;
-                while (node && hops < 2) {
-                    addText(parts, node.innerText || node.textContent);
-                    node = node.previousElementSibling;
-                    hops += 1;
-                }
-                let parent = el.parentElement;
-                hops = 0;
-                while (parent && hops < 2) {
-                    addText(parts, parent.innerText || parent.textContent);
-                    parent = parent.parentElement;
-                    hops += 1;
-                }
+                // Deliberately excludes sibling/ancestor text: shared form text
+                // makes every card input score identically, so ties collapse all
+                // refs onto the first field.
                 return parts.join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
             };
             const findField = () => {

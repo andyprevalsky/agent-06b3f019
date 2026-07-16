@@ -19,7 +19,11 @@ import { Router, type Request, type Response } from 'express';
 import { hybridAuth, type HybridAuthRequest } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { AgentCardOAuthError, connectUrlForUser } from '../../providers/agentcard/config';
+import {
+  AgentCardOAuthError,
+  connectUrlForUser,
+  verifyConnectToken,
+} from '../../providers/agentcard/config';
 import {
   AgentCardNotConnectedError,
   callUserTool,
@@ -58,13 +62,21 @@ function resultPage(res: Response, opts: { success: boolean; message: string }):
 </html>`);
 }
 
-// GET /connect?user=<id>
+// GET /connect?user=<id>&t=<signed-token>
 router.get(
   '/connect',
   asyncHandler(async (req: Request, res: Response) => {
     const userId = typeof req.query.user === 'string' ? req.query.user.trim() : '';
+    const token = typeof req.query.t === 'string' ? req.query.t.trim() : '';
     if (userId === '') {
       res.status(400).json({ error: 'Missing required query param: user' });
+      return;
+    }
+    // The user param is untrusted on this unauthenticated GET, so require the
+    // short-lived signature we minted in `connectUrlForUser`. This blocks
+    // linking a financial account to an arbitrary user id.
+    if (token === '' || !verifyConnectToken(userId, token)) {
+      res.status(400).json({ error: 'Invalid or expired connection link' });
       return;
     }
     const { authUrl } = service.startConnect(userId);

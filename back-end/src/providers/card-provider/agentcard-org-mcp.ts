@@ -171,7 +171,7 @@ function throwForGate(record: Record<string, unknown>, result: unknown): void {
   }
   if ((result as McpResult).isError === true) {
     throw new AgentCardProviderError(
-      optionalString(record, ['message', 'error']) ?? text ?? 'AgentCard Organization MCP failed'
+      optionalString(record, ['message', 'error']) ?? (text || 'AgentCard Organization MCP failed')
     );
   }
 }
@@ -190,13 +190,14 @@ export class AgentCardOrgMcpProvider implements CardProvider {
     if (!Number.isInteger(request.amountCents) || request.amountCents <= 0) {
       throw new AgentCardProviderError('amountCents must be a positive integer');
     }
-    if (request.fundsSource === 'company_flow' && !request.idempotencyKey) {
+    const fundsSource = request.fundsSource ?? 'company_flow';
+    if (fundsSource === 'company_flow' && !request.idempotencyKey) {
       throw new AgentCardProviderError('idempotencyKey is required for AgentCard company_flow');
     }
     const args = {
       cardholder_id: this.cardholderId,
       amount_cents: request.amountCents,
-      funds_source: request.fundsSource ?? 'company_flow',
+      funds_source: fundsSource,
       ...(request.idempotencyKey ? { idempotency_key: request.idempotencyKey } : {}),
     };
     log.info('Creating card through AgentCard Organization MCP', {
@@ -237,7 +238,7 @@ export class AgentCardOrgMcpProvider implements CardProvider {
     const cardId = requiredString(field(record, ['card_id', 'cardId', 'id']), 'card_id');
     const details = await this.getDetails(cardId);
     let transferId = optionalString(record, ['transfer_id', 'transferId']);
-    if (request.fundsSource === 'company_flow' && transferId === undefined) {
+    if (fundsSource === 'company_flow' && transferId === undefined) {
       transferId = await this.findCompanyTransferId(cardId);
       if (transferId === undefined) {
         await this.closeCard(cardId);

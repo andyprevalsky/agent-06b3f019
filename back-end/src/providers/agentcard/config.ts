@@ -12,6 +12,8 @@
  * and are overridable via env so they can move without a code change.
  */
 
+import crypto from 'node:crypto';
+
 function trimTrailingSlash(value: string): string {
   return value.replace(/\/+$/, '');
 }
@@ -81,10 +83,62 @@ export function loadOAuthConfig(): AgentCardOAuthConfig {
   };
 }
 
+/**
+ * The `/connect` route is a browser-tappable GET with no session, so the `user`
+ * query param alone is untrusted — anyone could initiate account linking for an
+ * arbitrary userId. We therefore bind each connect link to a short-lived HMAC
+ * signature over the userId: only the backend (holding the secret) can mint a
+ * valid link, and `/connect` rejects any user/signature it did not issue.
+ */
+const CONNECT_TOKEN_TTL_MS = 15 * 60 * 1000;
+
+function connectSigningSecret(): string {
+  const secret =
+    process.env.AGENTCARD_CONNECT_SECRET?.trim() || process.env.SUPABASE_JWT_SECRET?.trim();
+  if (secret === undefined || secret === '') {
+    throw new AgentCardOAuthError(
+      'Missing AGENTCARD_CONNECT_SECRET or SUPABASE_JWT_SECRET for connect-link signing'
+    );
+  }
+  return secret;
+}
+
+function connectSignature(userId: string, expiresAt: number): string {
+  return crypto
+    .createHmac('sha256', connectSigningSecret())
+    .update(`${userId}.${expiresAt}`)
+    .digest('base64url');
+}
+
+/** Mint a short-lived signed connection token bound to `userId`. */
+export function signConnectToken(userId: string, now: number = Date.now()): string {
+  const expiresAt = now + CONNECT_TOKEN_TTL_MS;
+  return `${expiresAt}.${connectSignature(userId, expiresAt)}`;
+}
+
+/** Verify a connection token was issued by us for `userId` and has not expired. */
+export function verifyConnectToken(
+  userId: string,
+  token: string,
+  now: number = Date.now()
+): boolean {
+  const separator = token.indexOf('.');
+  if (separator <= 0) return false;
+  const expiresAt = Number(token.slice(0, separator));
+  const signature = token.slice(separator + 1);
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) return false;
+  const expected = connectSignature(userId, expiresAt);
+  const provided = Buffer.from(signature);
+  const expectedBuffer = Buffer.from(expected);
+  if (provided.length !== expectedBuffer.length) return false;
+  return crypto.timingSafeEqual(provided, expectedBuffer);
+}
+
 /** Public, browser-tappable "Connect with AgentCard" link the app hands to a user. */
 export function connectUrlForUser(userId: string): string {
   const publicUrl = trimTrailingSlash(
     requiredEnv('AGENTCARD_PUBLIC_URL', process.env.AGENTCARD_PUBLIC_URL)
   );
-  return `${publicUrl}/api/agentcard/connect?user=${encodeURIComponent(userId)}`;
+  const token = signConnectToken(userId);
+  return `${publicUrl}/api/agentcard/connect?user=${encodeURIComponent(userId)}&t=${encodeURIComponent(token)}`;
 }

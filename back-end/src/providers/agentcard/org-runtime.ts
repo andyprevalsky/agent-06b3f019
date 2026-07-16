@@ -1,6 +1,15 @@
+import { AGENTCARD_MCP_RESOURCE } from './config';
 import { mcpCallTool } from './runtime';
 
 const DEFAULT_ORG_TOKEN_ENDPOINT = 'https://api.agentcard.sh/api/v1/oauth/token';
+const DEFAULT_ORG_TOKEN_TIMEOUT_MS = 15_000;
+
+function orgTokenTimeoutMs(): number {
+  const raw = process.env.AGENTCARD_ORG_TOKEN_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_ORG_TOKEN_TIMEOUT_MS;
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : DEFAULT_ORG_TOKEN_TIMEOUT_MS;
+}
 
 type FetchLike = typeof fetch;
 type TokenMcpToolCaller = (
@@ -91,24 +100,43 @@ export class AgentCardOrgRuntime {
       return this.cachedToken.accessToken;
     }
 
-    const response = await this.fetchImpl(
-      process.env.AGENTCARD_ORG_TOKEN_ENDPOINT?.trim() || DEFAULT_ORG_TOKEN_ENDPOINT,
-      {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/x-www-form-urlencoded',
-          accept: 'application/json',
-        },
-        body: new URLSearchParams({
-          grant_type: 'client_credentials',
-          client_id: requiredEnv('AGENTCARD_ORG_OAUTH_CLIENT_ID', 'AGENTCARD_OAUTH_CLIENT_ID'),
-          client_secret: requiredEnv(
-            'AGENTCARD_ORG_OAUTH_CLIENT_SECRET',
-            'AGENTCARD_OAUTH_CLIENT_SECRET'
-          ),
-        }),
-      }
-    );
+    let response: Awaited<ReturnType<FetchLike>>;
+    try {
+      response = await this.fetchImpl(
+        process.env.AGENTCARD_ORG_TOKEN_ENDPOINT?.trim() || DEFAULT_ORG_TOKEN_ENDPOINT,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/x-www-form-urlencoded',
+            accept: 'application/json',
+          },
+          body: new URLSearchParams({
+            grant_type: 'client_credentials',
+            client_id: requiredEnv('AGENTCARD_ORG_OAUTH_CLIENT_ID', 'AGENTCARD_OAUTH_CLIENT_ID'),
+            client_secret: requiredEnv(
+              'AGENTCARD_ORG_OAUTH_CLIENT_SECRET',
+              'AGENTCARD_OAUTH_CLIENT_SECRET'
+            ),
+            // Bind the token to the MCP audience (RFC 8707), matching the per-user OAuth flow.
+            resource: AGENTCARD_MCP_RESOURCE,
+          }),
+          // Fail fast instead of hanging wallet funding/monitoring/reconciliation if the token
+          // endpoint stalls.
+          signal: AbortSignal.timeout(orgTokenTimeoutMs()),
+        }
+      );
+    } catch (error) {
+      if (error instanceof AgentCardOrgRuntimeError) throw error;
+      const timedOut = error instanceof Error && error.name === 'TimeoutError';
+      throw new AgentCardOrgRuntimeError(
+        timedOut
+          ? 'Timed out acquiring an AgentCard Organization MCP access token'
+          : 'Could not reach the AgentCard Organization MCP token endpoint',
+        timedOut ? 504 : 502,
+        'agentcard_org_token_unavailable',
+        { error: error instanceof Error ? error.message : String(error) }
+      );
+    }
     const bodyText = await response.text();
     let body: Record<string, unknown>;
     try {

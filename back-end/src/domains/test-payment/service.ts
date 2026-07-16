@@ -38,6 +38,7 @@ export { TEST_PAYMENT_ITEMS, getTestPaymentCatalog } from './catalog';
 export { TestPaymentError } from './errors';
 export { getTestPaymentLifecycle } from './lifecycle';
 export type { TestPaymentLifecycleDependencies } from './lifecycle';
+export { findAgentOwnerId } from './repo';
 
 const PHONE_BENCHMARK_DEFAULT_AMOUNT_CENTS = 3420;
 const PHONE_BENCHMARK_DEFAULT_ITEM = 'Dozen red roses with delivery';

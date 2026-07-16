@@ -175,6 +175,24 @@ async function main(): Promise<void> {
     );
   });
 
+  await test('token request timeouts surface as an AgentCardOAuthError', async () => {
+    const timingOutFetch = (async () => {
+      const timeout = new Error('The operation was aborted due to timeout');
+      timeout.name = 'TimeoutError';
+      throw timeout;
+    }) as unknown as typeof fetch;
+    await assert.rejects(
+      () =>
+        refreshAccessToken({
+          refreshToken: 'rt',
+          clientId: 'c',
+          clientSecret: 'x',
+          fetchImpl: timingOutFetch,
+        }),
+      /token request timed out/i
+    );
+  });
+
   await test('isExpired honors the skew window', () => {
     assert.strictEqual(isExpired({ expiresAt: Date.now() + 5 * 60_000 }), false);
     assert.strictEqual(isExpired({ expiresAt: Date.now() + 30_000 }), true); // within 60s skew

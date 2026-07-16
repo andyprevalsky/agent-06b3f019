@@ -96,29 +96,48 @@ export async function startOrgCardholderOnboarding(userId: string): Promise<OrgO
   return onboarding;
 }
 
-export async function refreshOrgCardholderStatus(userId: string): Promise<OrgCardholderStatus> {
-  const cardholderId = await getOrgManagedCardholderId(userId);
+export interface OrgOnboardingDependencies {
+  callOrgTool: typeof callOrgTool;
+  getOrgManagedCardholderId: typeof getOrgManagedCardholderId;
+  getOrgOnboardingConfig: typeof getOrgOnboardingConfig;
+  saveOrgCardholderId: typeof saveOrgCardholderId;
+}
+
+const defaultOnboardingDependencies: OrgOnboardingDependencies = {
+  callOrgTool,
+  getOrgManagedCardholderId,
+  getOrgOnboardingConfig,
+  saveOrgCardholderId,
+};
+
+export async function refreshOrgCardholderStatus(
+  userId: string,
+  dependencies: Partial<OrgOnboardingDependencies> = {}
+): Promise<OrgCardholderStatus> {
+  const deps = { ...defaultOnboardingDependencies, ...dependencies };
+  const cardholderId = await deps.getOrgManagedCardholderId(userId);
   if (cardholderId !== undefined) {
     const result = resultRecord(
-      await callOrgTool('get_cardholder_kyc_status', { cardholder_id: cardholderId })
+      await deps.callOrgTool('get_cardholder_kyc_status', { cardholder_id: cardholderId })
     );
     const status = stringField(result, ['status', 'kyc_status', 'kycStatus']);
     return {
-      connected: status === 'verified',
+      // `mintCard()` accepts both terminal KYC states, so report both as connected.
+      connected: status === 'verified' || status === 'approved',
       cardholderId,
       status: status ?? 'unknown',
     };
   }
 
-  const onboarding = await getOrgOnboardingConfig(userId);
+  const onboarding = await deps.getOrgOnboardingConfig(userId);
   if (onboarding === undefined) return { connected: false };
   const result = resultRecord(
-    await callOrgTool('get_onboarding_session', { session_id: onboarding.sessionId })
+    await deps.callOrgTool('get_onboarding_session', { session_id: onboarding.sessionId })
   );
   const status = stringField(result, ['status']) ?? 'pending';
   const completedCardholderId = stringField(result, ['cardholder_id', 'cardholderId']);
   if (status === 'completed' && completedCardholderId !== undefined) {
-    await saveOrgCardholderId(userId, completedCardholderId);
+    await deps.saveOrgCardholderId(userId, completedCardholderId);
     return { connected: true, cardholderId: completedCardholderId, status };
   }
   return {
@@ -131,10 +150,18 @@ export async function refreshOrgCardholderStatus(userId: string): Promise<OrgCar
 
 export async function completeOrgCardholderOnboarding(
   userId: string,
-  sessionId: string
+  sessionId: string,
+  dependencies: Partial<OrgOnboardingDependencies> = {}
 ): Promise<string> {
+  const deps = { ...defaultOnboardingDependencies, ...dependencies };
+  // Bind the callback to the session THIS user actually started. Without this, any completed session
+  // whose response omits `external_user_id` could be bound to the current user.
+  const persisted = await deps.getOrgOnboardingConfig(userId);
+  if (persisted === undefined || persisted.sessionId !== sessionId) {
+    throw new Error('AgentCard onboarding session does not belong to this user');
+  }
   const result = resultRecord(
-    await callOrgTool('get_onboarding_session', { session_id: sessionId })
+    await deps.callOrgTool('get_onboarding_session', { session_id: sessionId })
   );
   const externalUserId = stringField(result, ['external_user_id', 'externalUserId']);
   if (externalUserId !== undefined && externalUserId !== userId) {
@@ -145,6 +172,6 @@ export async function completeOrgCardholderOnboarding(
   if (status !== 'completed' || cardholderId === undefined) {
     throw new Error(`AgentCard onboarding session is not complete (${status ?? 'unknown'})`);
   }
-  await saveOrgCardholderId(userId, cardholderId);
+  await deps.saveOrgCardholderId(userId, cardholderId);
   return cardholderId;
 }

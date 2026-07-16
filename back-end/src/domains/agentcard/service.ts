@@ -70,24 +70,31 @@ export interface AgentCardStatus {
 }
 
 export async function getStatus(userId: string): Promise<AgentCardStatus> {
-  const orgStatus = await refreshOrgCardholderStatus(userId);
-  if (orgStatus.connected || orgStatus.status !== undefined || orgStatus.setupUrl !== undefined) {
+  const [orgStatus, token] = await Promise.all([
+    refreshOrgCardholderStatus(userId),
+    getUserToken(userId),
+  ]);
+  const orgFields = {
+    ...(orgStatus.status !== undefined ? { status: orgStatus.status } : {}),
+    ...(orgStatus.setupUrl !== undefined ? { setupUrl: orgStatus.setupUrl } : {}),
+    ...(orgStatus.setupSessionId !== undefined ? { setupSessionId: orgStatus.setupSessionId } : {}),
+  };
+  // A valid per-user OAuth token is a usable connection the routing provider can
+  // still use, even while org onboarding is pending. Don't let a pending
+  // organization status mask it — surface the token connection and merge the
+  // organization onboarding fields alongside it.
+  if (token !== undefined) {
     return {
-      connected: orgStatus.connected,
-      ...(orgStatus.status !== undefined ? { status: orgStatus.status } : {}),
-      ...(orgStatus.setupUrl !== undefined ? { setupUrl: orgStatus.setupUrl } : {}),
-      ...(orgStatus.setupSessionId !== undefined
-        ? { setupSessionId: orgStatus.setupSessionId }
-        : {}),
+      connected: true,
+      expiresAt: new Date(token.expiresAt).toISOString(),
+      expired: isExpired(token, 0),
+      ...orgFields,
     };
   }
-  const token = await getUserToken(userId);
-  if (token === undefined) return { connected: false };
-  return {
-    connected: true,
-    expiresAt: new Date(token.expiresAt).toISOString(),
-    expired: isExpired(token, 0),
-  };
+  if (orgStatus.connected || orgStatus.status !== undefined || orgStatus.setupUrl !== undefined) {
+    return { connected: orgStatus.connected, ...orgFields };
+  }
+  return { connected: false };
 }
 
 export async function handleOnboardingCallback(

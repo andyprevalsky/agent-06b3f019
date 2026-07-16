@@ -63,12 +63,35 @@ interface RawTokenResponse {
   error_description?: unknown;
 }
 
+const DEFAULT_TOKEN_TIMEOUT_MS = 15_000;
+
+function tokenTimeoutMs(): number {
+  const raw = process.env.AGENTCARD_TOKEN_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_TOKEN_TIMEOUT_MS;
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : DEFAULT_TOKEN_TIMEOUT_MS;
+}
+
 async function postToken(body: URLSearchParams, fetchImpl: FetchLike): Promise<TokenSet> {
-  const response = await fetchImpl(AGENTCARD_TOKEN_ENDPOINT, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-    body,
-  });
+  let response: Awaited<ReturnType<FetchLike>>;
+  try {
+    response = await fetchImpl(AGENTCARD_TOKEN_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+      body,
+      // Fail fast so OAuth callbacks and token refreshes never hang on a stalled endpoint.
+      signal: AbortSignal.timeout(tokenTimeoutMs()),
+    });
+  } catch (error) {
+    if (error instanceof AgentCardOAuthError) throw error;
+    const timedOut = error instanceof Error && error.name === 'TimeoutError';
+    throw new AgentCardOAuthError(
+      timedOut
+        ? 'AgentCard token request timed out'
+        : `AgentCard token request failed: ${error instanceof Error ? error.message : String(error)}`,
+      timedOut ? 504 : undefined
+    );
+  }
 
   const json = (await response.json().catch(() => ({}))) as RawTokenResponse;
 

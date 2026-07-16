@@ -142,6 +142,25 @@ export async function consumePurchaseWalletFunding(purchaseId: string): Promise<
   await repo.markWalletFundingConsumed(purchaseId);
 }
 
+/**
+ * Atomically claim a FUNDED transfer as RECLAIMING *before* its card is closed. Closing the card
+ * makes it read as not-live; without this pre-claim a concurrent cleanup pass would observe the
+ * not-live card while the funding is still FUNDED, misclassify it as merchant-spent, and consume
+ * the transfer — permanently draining the company float. Marking RECLAIMING first makes that pass
+ * defer to the in-flight reclaim instead. No-op for any non-FUNDED row (already reclaiming,
+ * consumed, terminal, or not yet funded); the subsequent `reclaimPurchaseWalletFunding` handles it.
+ */
+export async function beginPurchaseWalletReclaim(purchaseId: string): Promise<void> {
+  const funding = await repo.findWalletFundingByPurchaseId(purchaseId);
+  if (funding === null || funding.status !== PurchaseWalletFundingStatus.FUNDED) return;
+  const reclaimIdempotencyKey =
+    funding.reclaimIdempotencyKey ?? `purchase-wallet-reclaim:${purchaseId}`;
+  await repo.markWalletFundingReclaiming(funding.id, {
+    reclaimIdempotencyKey,
+    allowConsumed: false,
+  });
+}
+
 export async function reclaimPurchaseWalletFunding(
   purchase: Pick<PurchaseSpend, 'id' | 'userId' | 'agentId' | 'totalCents'> & {
     cardId?: string | null;

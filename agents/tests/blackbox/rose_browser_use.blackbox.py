@@ -311,6 +311,23 @@ def test_write_lock_notification_tool_is_stable_internal_action_schema():
     assert call.media[0].kind == "rendered_summary"
 
 
+def test_autocomplete_indicates_payment_matches_tokens_not_exact_string():
+    from browser_tools.write_lock import autocomplete_indicates_payment
+
+    # Bare payment tokens still match.
+    assert autocomplete_indicates_payment("cc-number") is True
+    assert autocomplete_indicates_payment("cc-csc") is True
+    # HTML autocomplete is a space-separated token list; a payment token inside
+    # a multi-token value must still be detected so the field cannot evade the
+    # write lock.
+    assert autocomplete_indicates_payment("section-checkout billing cc-number") is True
+    assert autocomplete_indicates_payment("shipping cc-exp") is True
+    # Non-payment autocomplete values must not match.
+    assert autocomplete_indicates_payment("email") is False
+    assert autocomplete_indicates_payment("shipping street-address") is False
+    assert autocomplete_indicates_payment("") is False
+
+
 def test_write_lock_notification_schema_normalizes_provider_aliases():
     from browser_tools.schemas import GenerateWriteLockNotificationTool
 
@@ -1531,6 +1548,10 @@ async def run_all_tests():
     r.record("native_tool_schemas_preserve_catalog", test_build_browser_use_tools_preserves_catalog_descriptions)
     r.record("native_tool_schemas_valid_required_keywords", test_build_browser_use_tools_emits_valid_required_keywords)
     r.record("write_lock_notification_schema", test_write_lock_notification_tool_is_stable_internal_action_schema)
+    r.record(
+        "autocomplete_indicates_payment_token_match",
+        test_autocomplete_indicates_payment_matches_tokens_not_exact_string,
+    )
     r.record(
         "write_lock_notification_alias_schema",
         test_write_lock_notification_schema_normalizes_provider_aliases,

@@ -11,7 +11,11 @@ import { AGENTCARD_WEBHOOK_SECRET } from './config';
 import { PurchaseError } from './errors';
 import * as repo from './repo';
 import { PurchaseSpendStatus, type AgentCardWebhookEvent } from './types';
-import { consumePurchaseWalletFunding, reclaimPurchaseWalletFunding } from './walletFunding';
+import {
+  beginPurchaseWalletReclaim,
+  consumePurchaseWalletFunding,
+  reclaimPurchaseWalletFunding,
+} from './walletFunding';
 
 const log = createLogger('Purchases');
 
@@ -77,6 +81,9 @@ export async function closePurchaseCard(
   }
 
   // Funded but unspent card: reclaim AgentCard funds before refunding the user's captured charge.
+  // Claim the reclaim before closing so a concurrent cleanup pass can't read the now not-live card
+  // as merchant-spent while the funding is still FUNDED.
+  await beginPurchaseWalletReclaim(purchase.id);
   await activeCardProvider.closeCard(cardId);
   try {
     await reclaimPurchaseWalletFunding(purchase, 'purchase_card_closed', walletFundingProvider);

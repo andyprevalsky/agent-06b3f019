@@ -108,6 +108,12 @@ async function mintCaptureAndIssue(
   );
   const transferId = minted.providerTransferId ?? providerTransferId;
   state.issuedCardId = minted.cardId;
+  // Persist the issued card id immediately, before capture or any later failure point. A crash
+  // between minting and the HELD write would otherwise orphan the funded card with no durable
+  // pointer for reconcilers to close it and reclaim its funding.
+  await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.CHARGING, {
+    cardId: minted.cardId,
+  });
   if (transferId === undefined || transferId.trim() === '') {
     throw new PurchaseError(
       'AgentCard issued a card without a company transfer id',
@@ -123,7 +129,11 @@ async function mintCaptureAndIssue(
   await archivePurchaseBoundary(input.agentId, purchaseId, 'agentcard-mint-and-details', {
     mint_request: cardRequest,
     mint_response: minted,
-    details_response: details,
+    // Never archive the PAN/CVV that `getDetails` returns; persist only non-sensitive evidence.
+    details_response: {
+      cardId: minted.cardId,
+      last4: minted.last4,
+    },
   });
 
   await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.HELD, {

@@ -56,7 +56,14 @@ export async function mintCompanyFlowCard(
         });
       }
 
-      if (Date.now() >= deadline) {
+      // Honor a provider-requested retry-after as the MINIMUM delay (never shorten it below the
+      // default interval, which would hammer/throttle AgentCard). If we cannot wait that long
+      // within the remaining deadline, give up now with the typed 409 instead of over-sleeping.
+      const retryMs =
+        funding.retryAfterSeconds !== undefined
+          ? Math.max(AGENTCARD_COMPANY_FLOW_RETRY_MS, funding.retryAfterSeconds * 1000)
+          : AGENTCARD_COMPANY_FLOW_RETRY_MS;
+      if (Date.now() + retryMs >= deadline) {
         throw new PurchaseError(
           'AgentCard company funding is still in progress; retry this purchase shortly',
           409,
@@ -64,14 +71,6 @@ export async function mintCompanyFlowCard(
           { transferId: funding.transferId }
         );
       }
-
-      const retryMs =
-        funding.retryAfterSeconds !== undefined
-          ? Math.max(
-              250,
-              Math.min(funding.retryAfterSeconds * 1000, AGENTCARD_COMPANY_FLOW_RETRY_MS)
-            )
-          : AGENTCARD_COMPANY_FLOW_RETRY_MS;
       await sleep(retryMs);
     }
   }

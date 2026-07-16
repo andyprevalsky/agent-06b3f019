@@ -28,6 +28,15 @@ export async function findWalletFundingByPurchaseId(purchaseId: string) {
   return prisma.purchaseWalletFunding.findUnique({ where: { purchaseId } });
 }
 
+// Only a funding attempt that is still in flight (PENDING) or previously FAILED may transition to
+// FUNDED/FAILED. Guarding the source status as a compare-and-set stops a late/duplicate funding
+// callback from resurrecting a RECLAIMING/RECLAIMED/CONSUMED row back to FUNDED, and stops a
+// concurrent failed attempt from downgrading an already-FUNDED transfer to FAILED.
+const FUNDING_IN_FLIGHT_STATUSES = [
+  PurchaseWalletFundingStatus.PENDING,
+  PurchaseWalletFundingStatus.FAILED,
+];
+
 export async function markWalletFundingFunded(
   id: string,
   data: {
@@ -35,8 +44,8 @@ export async function markWalletFundingFunded(
     metadata?: Record<string, unknown>;
   }
 ) {
-  return prisma.purchaseWalletFunding.update({
-    where: { id },
+  await prisma.purchaseWalletFunding.updateMany({
+    where: { id, status: { in: FUNDING_IN_FLIGHT_STATUSES } },
     data: {
       status: PurchaseWalletFundingStatus.FUNDED,
       providerTransferId: data.providerTransferId,
@@ -45,16 +54,20 @@ export async function markWalletFundingFunded(
       fundedAt: new Date(),
     },
   });
+  // Return the current row regardless: a no-op update means the funding already advanced past the
+  // in-flight window (e.g. a concurrent reclaim), and callers must observe that real state.
+  return prisma.purchaseWalletFunding.findUniqueOrThrow({ where: { id } });
 }
 
 export async function markWalletFundingFailed(id: string, error: string) {
-  return prisma.purchaseWalletFunding.update({
-    where: { id },
+  await prisma.purchaseWalletFunding.updateMany({
+    where: { id, status: { in: FUNDING_IN_FLIGHT_STATUSES } },
     data: {
       status: PurchaseWalletFundingStatus.FAILED,
       errorMessage: error,
     },
   });
+  return prisma.purchaseWalletFunding.findUniqueOrThrow({ where: { id } });
 }
 
 export async function markWalletFundingConsumed(purchaseId: string) {

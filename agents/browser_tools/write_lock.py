@@ -10,8 +10,8 @@ When write lock is enabled and a high-risk action is detected,
 the agent must request user approval before proceeding.
 """
 
-import re
 import logging
+import re
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -105,6 +105,20 @@ PAYMENT_AUTOCOMPLETE_VALUES = [
     "cc-family-name",
     "cc-type",
 ]
+
+PAYMENT_AUTOCOMPLETE_TOKENS = frozenset(PAYMENT_AUTOCOMPLETE_VALUES)
+
+
+def autocomplete_indicates_payment(autocomplete: str) -> bool:
+    """Return True if any whitespace-separated autocomplete token is a payment token.
+
+    The HTML ``autocomplete`` attribute is a space-separated token list (e.g.
+    ``"section-checkout billing cc-number"``), so exact-string equality misses
+    valid payment fields and lets them evade the write lock. Match on tokens.
+    """
+    if not autocomplete:
+        return False
+    return any(token in PAYMENT_AUTOCOMPLETE_TOKENS for token in autocomplete.split())
 
 # Submit button text patterns (case-insensitive contains)
 SUBMIT_BUTTON_PATTERNS = [
@@ -294,7 +308,7 @@ async def is_payment_field(
             attrs = {str(k).lower(): str(v).lower() for k, v in element_attrs.items() if v is not None}
 
             autocomplete = attrs.get("autocomplete", "")
-            if autocomplete in PAYMENT_AUTOCOMPLETE_VALUES:
+            if autocomplete_indicates_payment(autocomplete):
                 logger.info(f"Payment field detected: autocomplete='{autocomplete}'")
                 return True
 
@@ -334,9 +348,9 @@ async def is_payment_field(
                 if i + 1 < len(attributes):
                     attrs[attributes[i].lower()] = attributes[i + 1].lower()
 
-            # Check autocomplete attribute (exact match)
+            # Check autocomplete attribute (token-based match)
             autocomplete = attrs.get("autocomplete", "")
-            if autocomplete in PAYMENT_AUTOCOMPLETE_VALUES:
+            if autocomplete_indicates_payment(autocomplete):
                 logger.info(f"Payment field detected: autocomplete='{autocomplete}'")
                 return True
 

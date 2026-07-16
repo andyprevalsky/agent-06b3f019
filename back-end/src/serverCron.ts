@@ -63,6 +63,17 @@ function schedulePurchaseHoldReconcile(): void {
   }
   const cronLog = createLogger('Cron');
   let purchaseReconcileRunning = false;
+  // Run the reconcilers SEQUENTIALLY. They can otherwise select the same purchase
+  // concurrently, and with Promise.all the first rejection would clear the guard
+  // while siblings keep running. Each job is isolated so one failure never aborts
+  // the rest, and the guard stays held until every job settles.
+  const reconcilers: Array<[string, () => Promise<void>]> = [
+    ['reconcileDissolvedPurchaseHolds', reconcileDissolvedPurchaseHolds],
+    ['reconcileStaleChargingPurchases', reconcileStaleChargingPurchases],
+    ['reconcileFailedPurchaseRefunds', reconcileFailedPurchaseRefunds],
+    ['reconcileFailedPurchaseFundingReclaims', reconcileFailedPurchaseFundingReclaims],
+    ['reconcileTerminalAgentPurchaseCards', reconcileTerminalAgentPurchaseCards],
+  ];
   const runPurchaseHoldReconcile = () => {
     if (purchaseReconcileRunning) {
       cronLog.info('Purchase hold reconciliation already running; skipping overlapping tick');
@@ -70,21 +81,22 @@ function schedulePurchaseHoldReconcile(): void {
     }
     purchaseReconcileRunning = true;
     cronLog.info('Running purchase hold reconciliation job...');
-    Promise.all([
-      reconcileDissolvedPurchaseHolds(),
-      reconcileStaleChargingPurchases(),
-      reconcileFailedPurchaseRefunds(),
-      reconcileFailedPurchaseFundingReclaims(),
-      reconcileTerminalAgentPurchaseCards(),
-    ])
-      .catch((err) => {
-        cronLog.error('Purchase hold reconciliation job error', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      })
-      .finally(() => {
+    void (async () => {
+      try {
+        for (const [name, reconcile] of reconcilers) {
+          try {
+            await reconcile();
+          } catch (err) {
+            cronLog.error('Purchase hold reconciliation job error', {
+              job: name,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      } finally {
         purchaseReconcileRunning = false;
-      });
+      }
+    })();
   };
   cron.schedule('* * * * *', runPurchaseHoldReconcile);
   cronLog.info('Purchase hold reconciliation scheduled (every minute)');

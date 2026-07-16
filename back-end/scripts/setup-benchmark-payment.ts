@@ -34,7 +34,9 @@ async function seedAgentCardConnection(prisma: PrismaClient, userId: string): Pr
       lastUsedAt: new Date(),
     },
   });
-  console.log(`Seeded AgentCard org cardholder fixture ${cardholderId} for benchmark user ${userId}`);
+  console.log(
+    `Seeded AgentCard org cardholder fixture ${cardholderId} for benchmark user ${userId}`
+  );
 }
 
 function argValue(name: string): string | undefined {
@@ -44,6 +46,25 @@ function argValue(name: string): string | undefined {
   const index = process.argv.indexOf(name);
   if (index >= 0) return process.argv[index + 1];
   return undefined;
+}
+
+/**
+ * The benchmark organization and its cardholder are two halves of one wallet
+ * fixture. Overriding only one (e.g. funding a custom org while the integration
+ * keeps the default cardholder) prepares the wrong wallet and silently breaks
+ * the lifecycle fixture. Require the pair to move together.
+ */
+function assertBenchmarkOrgCardholderPair(): void {
+  const orgId = process.env.BENCHMARK_AGENTCARD_ORG_ID?.trim();
+  const cardholderId = process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID?.trim();
+  const orgSet = orgId !== undefined && orgId !== '';
+  const cardholderSet = cardholderId !== undefined && cardholderId !== '';
+  if (orgSet !== cardholderSet) {
+    throw new Error(
+      'BENCHMARK_AGENTCARD_ORG_ID and BENCHMARK_AGENTCARD_CARDHOLDER_ID must be set together ' +
+        '(a custom organization with the default cardholder funds the wrong wallet).'
+    );
+  }
 }
 
 function requireStripeTestKey(): string {
@@ -61,6 +82,7 @@ function requireStripeTestKey(): string {
 }
 
 async function main(): Promise<void> {
+  assertBenchmarkOrgCardholderPair();
   const userId =
     argValue('--user-id') ?? process.env.BENCHMARK_USER_ID ?? DEFAULT_BENCHMARK_USER_ID;
   const stripe = new Stripe(requireStripeTestKey(), { apiVersion: STRIPE_API_VERSION });
@@ -128,9 +150,7 @@ async function main(): Promise<void> {
       await loadAgentCardBenchmarkAdmin(),
       process.env.BENCHMARK_AGENTCARD_ORG_ID?.trim() || DEFAULT_AGENTCARD_ORG_ID
     );
-    console.log(
-      `AgentCard sandbox pool ready at $${(sandboxFloat.balanceCents / 100).toFixed(2)}`
-    );
+    console.log(`AgentCard sandbox pool ready at $${(sandboxFloat.balanceCents / 100).toFixed(2)}`);
 
     console.log(`Seeded Stripe and AgentCard payment fixtures for benchmark user ${userId}`);
   } finally {

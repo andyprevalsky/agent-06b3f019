@@ -53,7 +53,14 @@ function mcpResultRecord(result: unknown): Record<string, unknown> {
     .filter(Boolean)
     .join('\n');
   if (text !== '') {
-    const parsed = asRecord(JSON.parse(text));
+    let parsedText: unknown;
+    try {
+      parsedText = JSON.parse(text);
+    } catch {
+      // Malformed provider JSON is a bad-gateway condition, not a raw SyntaxError.
+      throw new TestPaymentError('AgentCard transfer lifecycle response was invalid', 502);
+    }
+    const parsed = asRecord(parsedText);
     if (parsed !== undefined) return parsed;
   }
   throw new TestPaymentError('AgentCard transfer lifecycle response was invalid', 502);
@@ -147,7 +154,11 @@ function mapStripeHold(hold: StripeHold | null): TestPaymentLifecycle['stripeHol
 }
 
 function mapStripeRefund(refunds: StripeRefundList): TestPaymentLifecycle['stripeRefund'] {
-  const refund = refunds.data.find((entry) => entry.status === 'succeeded') ?? null;
+  // Prefer a succeeded refund (the happy path), but still surface a failed or
+  // pending refund when that is all that exists — reporting `null` there would
+  // make a broken refund indistinguishable from no refund at all.
+  const refund =
+    refunds.data.find((entry) => entry.status === 'succeeded') ?? refunds.data[0] ?? null;
   if (refund === null) return null;
   return {
     id: refund.id,
@@ -178,6 +189,28 @@ function mapAgentCard(
   };
 }
 
+function transferReleasedCents(transfer: Record<string, unknown> | undefined): number {
+  return typeof transfer?.released_cents === 'number' ? transfer.released_cents : 0;
+}
+
+/** Higher rank = a more terminal/settled transfer state, used as a stable tie-breaker. */
+function transferStatusRank(transfer: Record<string, unknown> | undefined): number {
+  switch (transfer?.status) {
+    case 'consumed':
+      return 3;
+    case 'reclaimed':
+      return 2;
+    case 'released':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+function transferId(transfer: Record<string, unknown> | undefined): string {
+  return typeof transfer?.id === 'string' ? transfer.id : '';
+}
+
 function mapOrgTransfer(
   purchase: LoadedPurchase,
   transferResults: unknown[]
@@ -190,11 +223,12 @@ function mapOrgTransfer(
     .map((value) => asRecord(value))
     .filter((value) => value?.card_id === purchase.cardId)
     .sort((left, right) => {
-      const releasedDifference =
-        (typeof right?.released_cents === 'number' ? right.released_cents : 0) -
-        (typeof left?.released_cents === 'number' ? left.released_cents : 0);
+      const releasedDifference = transferReleasedCents(right) - transferReleasedCents(left);
       if (releasedDifference !== 0) return releasedDifference;
-      return right?.status === 'reclaimed' || right?.status === 'released' ? 1 : -1;
+      const rankDifference = transferStatusRank(right) - transferStatusRank(left);
+      if (rankDifference !== 0) return rankDifference;
+      // Stable ID tie-breaker keeps the selection independent of input ordering.
+      return transferId(left).localeCompare(transferId(right));
     })[0];
   if (transfer === undefined) return null;
   return {

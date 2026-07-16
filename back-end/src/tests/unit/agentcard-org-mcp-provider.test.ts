@@ -191,6 +191,36 @@ async function main(): Promise<void> {
       error.details.setupSessionId === 'cos-123'
   );
 
+  // An omitted fundsSource defaults to company_flow, so it must still require an idempotency key
+  // (retries otherwise mint duplicate cards + transfers).
+  const defaultingProvider = new AgentCardOrgMcpProvider('cardholder-123', async () => {
+    throw new Error('create_card must not be called without an idempotency key');
+  });
+  await assert.rejects(
+    () => defaultingProvider.mintCard({ amountCents: 4396 }),
+    (error: unknown) =>
+      error instanceof Error && error.message.includes('idempotencyKey is required')
+  );
+
+  // An MCP error with no textual content must still surface the fallback message rather than an
+  // empty string.
+  const emptyErrorProvider = new AgentCardOrgMcpProvider('cardholder-123', async (name) => {
+    if (name === 'create_card') {
+      return { isError: true, structuredContent: {}, content: [] };
+    }
+    throw new Error(`unexpected tool ${name}`);
+  });
+  await assert.rejects(
+    () =>
+      emptyErrorProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:empty-error',
+      }),
+    (error: unknown) =>
+      error instanceof Error && error.message === 'AgentCard Organization MCP failed'
+  );
+
   console.log('AgentCard organization MCP provider tests passed');
 }
 

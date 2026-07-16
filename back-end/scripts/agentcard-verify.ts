@@ -43,13 +43,25 @@ function unwrap(result: unknown): Record<string, unknown> {
   return { _text: text };
 }
 
-/** Redact anything that looks like a card number / CVV before logging. */
-function safe(obj: Record<string, unknown>): Record<string, unknown> {
-  const clone: Record<string, unknown> = { ...obj };
-  for (const k of Object.keys(clone)) {
-    if (/pan|card_number|cardnumber|number|cvv|cvc|security_code/i.test(k)) clone[k] = '***';
+const SENSITIVE_KEY = /pan|card_number|cardnumber|number|cvv|cvc|security_code/i;
+
+/**
+ * Redact anything that looks like a card number / CVV before logging. Recurses
+ * through nested objects and arrays, and redacts the `_text` unstructured
+ * fallback so raw MCP text (which may embed a PAN/CVV) is never printed.
+ */
+function safe(value: unknown, key = ''): unknown {
+  if (key === '_text' || SENSITIVE_KEY.test(key)) return '***';
+  if (Array.isArray(value)) return value.map((item) => safe(item));
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([childKey, childValue]) => [
+        childKey,
+        safe(childValue, childKey),
+      ])
+    );
   }
-  return clone;
+  return value;
 }
 
 async function main(): Promise<void> {

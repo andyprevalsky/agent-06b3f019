@@ -4324,7 +4324,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         )
                         context_message = append_completion_evidence(
                             context_message,
-                            browser_url=browser_url,
+                            browser_url=current_url,
                             structured_response=structured_response,
                         )
 
@@ -5362,8 +5362,8 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         normalize_payment_payload,
                     )
                     from tools.request_user_approval import (
-                        request_user_attention_direct,
                         request_user_approval_direct,
+                        request_user_attention_direct,
                     )
 
                     logger.info(
@@ -5609,10 +5609,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     # ORGANICALLY (not injected) and retry once it's resolved.
                     if card.get("status") == "subscription_required":
                         from tools.gate import (
+                            GateRejectedError,
                             build_subscription_gate,
                             mint_subscription_checkout_activity,
                             raise_gate_direct,
-                            GateRejectedError,
                         )
 
                         try:
@@ -5661,9 +5661,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     # resolves it.
                     if card.get("status") == "kyc_required":
                         from tools.gate import (
+                            GateRejectedError,
                             build_kyc_gate,
                             raise_gate_direct,
-                            GateRejectedError,
                         )
 
                         try:

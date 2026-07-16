@@ -2,7 +2,11 @@
 /* eslint-disable no-console */
 
 import assert from 'node:assert/strict';
-import { AgentCardOrgRuntime } from '../../providers/agentcard/org-runtime';
+import { AGENTCARD_MCP_RESOURCE } from '../../providers/agentcard/config';
+import {
+  AgentCardOrgRuntime,
+  AgentCardOrgRuntimeError,
+} from '../../providers/agentcard/org-runtime';
 
 const ENV_NAMES = [
   'AGENTCARD_ORG_MCP_ACCESS_TOKEN',
@@ -36,6 +40,7 @@ async function main(): Promise<void> {
         assert.equal(form.get('grant_type'), 'client_credentials');
         assert.equal(form.get('client_id'), 'wizard-client');
         assert.equal(form.get('client_secret'), 'wizard-secret');
+        assert.equal(form.get('resource'), AGENTCARD_MCP_RESOURCE);
         return new Response(JSON.stringify({ access_token: 'fresh-org-token', expires_in: 3600 }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
@@ -68,6 +73,26 @@ async function main(): Promise<void> {
     await retryingRuntime.callTool('list_transfers', { limit: 100 });
     assert.equal(retryTokenRequests, 2, 'an MCP auth rejection must refresh once');
     assert.equal(toolCalls, 2, 'an MCP auth rejection must retry the tool once');
+
+    // A stalled/aborted token endpoint surfaces as an AgentCardOrgRuntimeError, not a raw hang.
+    const timingOutRuntime = new AgentCardOrgRuntime(
+      async () => {
+        throw new Error('tool must not run when the token cannot be acquired');
+      },
+      async () => {
+        const timeout = new Error('The operation was aborted due to timeout');
+        timeout.name = 'TimeoutError';
+        throw timeout;
+      }
+    );
+    await assert.rejects(
+      () => timingOutRuntime.callTool('list_transfers', { limit: 100 }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.status === 504 &&
+        error.code === 'agentcard_org_token_unavailable'
+    );
+
     console.log('AgentCard org runtime tests passed');
   } finally {
     for (const name of ENV_NAMES) {
