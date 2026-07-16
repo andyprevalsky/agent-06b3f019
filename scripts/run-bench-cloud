@@ -1595,6 +1595,18 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     # The boot script lives on the /data volume (staged into the snapshot). flyctl
     # --command word-splits, so only a simple `bash <path>` works (an inline shell
     # pipeline is lost) — hence a staged file, not an inline base64 command.
+    #
+    # CRITICAL: wait for the clone's snapshot volume to be MOUNTABLE before the
+    # update. `machine update --command` restarts the machine to apply config; if
+    # /data is not yet mounted (snapshot still restoring) the boot script's first
+    # write to /data/bench.log fails and it exits 1 (observed: fleet clones cycled
+    # boot→exit1 with an empty log while a settled box worked). Pure storage-ready
+    # poll — no ssh.
+    _sr_ts="$(date +%s)"
+    while ! machine_storage_ready "$mid"; do
+        [ $(( $(date +%s) - _sr_ts )) -ge "${CLOUDBENCH_READY_TIMEOUT:-600}" ] && { echo "❌ boot-launch: $mid storage not mountable in time" >&2; exit 1; }
+        sleep 5
+    done
     echo "🚀 boot-launch: setting per-run env + boot command on $mid (no ssh) ..."
     _upd=0
     for _u in $(seq 1 "${CLOUDBENCH_BOOT_UPDATE_ATTEMPTS:-10}"); do
