@@ -2383,3 +2383,25 @@ def test_start_barrier_tolerates_infra_failures() -> None:
     assert "a start-barrier release RPC failed" in fn
     # Timeout releases the ready set instead of aborting.
     assert "releasing the ready set anyway" in fn
+
+
+def test_clone_burst_is_rate_limit_resilient() -> None:
+    """RCA (2026-07-15): a 30-wide daily fleet fired all clones in the SAME
+    instant, saturating Fly's Machines API — `resource_exhausted: rate limit
+    exceeded` on clone/create-volume. The fixed-8s/3-attempt retry landed every
+    retry back inside the same saturation window, so 3 clones exhausted their
+    attempts and dropped from the batch (silent coverage loss, an infra failure).
+    Fix: stagger the launch burst + exponential backoff with jitter + more
+    attempts, so a rate-limited clone outlasts the burst instead of giving up."""
+    fleet = FLEET_SCRIPT.read_text()
+    # More attempts (was 3).
+    assert 'CLOUDBENCH_CLONE_MAX_ATTEMPTS:-5}' in fleet
+    # Launch burst is staggered, not simultaneous.
+    assert 'CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS' in fleet
+    # Exponential backoff (bit-shift by attempt) with a cap and jitter.
+    clone_fn = _extract_fleet_function(fleet, "clone_machine_target() {")
+    assert "1 << (attempt - 1)" in clone_fn
+    assert "CLOUDBENCH_CLONE_RETRY_MAX_SECONDS" in clone_fn
+    assert "RANDOM % 5" in clone_fn
+    # The old fixed-delay retry (`sleep "$retry_delay"` unconditionally) is gone.
+    assert 'sleep "$retry_delay"\n' not in clone_fn

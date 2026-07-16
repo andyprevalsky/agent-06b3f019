@@ -761,7 +761,7 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id];
     # 28-wide barrier if a single clone aborts the batch. Retry with backoff
     # (fresh name per attempt; the names-ledger keeps every attempted name so
     # teardown reaps any machine that did materialize — no new leak path).
-    max_attempts="${CLOUDBENCH_CLONE_MAX_ATTEMPTS:-3}"
+    max_attempts="${CLOUDBENCH_CLONE_MAX_ATTEMPTS:-5}"
     retry_delay="${CLOUDBENCH_CLONE_RETRY_SECONDS:-8}"
     # Bound each clone so a hung Fly API call can't freeze the whole loop. A real
     # clone-from-snapshot + --detach returns well under this; 25min+ = hung.
@@ -811,8 +811,19 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id];
             printf '%s\n' "$clone_out" | sed 's/^/   /' >&2
             return 1
         fi
-        echo "⏳ transient clone failure (attempt $attempt/$max_attempts, status=$clone_status); retrying in ${retry_delay}s ..." >&2
-        sleep "$retry_delay"
+        # Exponential backoff + jitter. Fly returns `resource_exhausted: rate limit
+        # exceeded` on clone/create-volume when the fleet fires N clones at once; a
+        # FIXED short delay makes every retry land back inside the SAME saturation
+        # window, so a few clones exhaust their attempts and drop out of the batch
+        # (an infra loss, not a benchmark verdict — it silently shrinks coverage).
+        # Backing off exponentially with jitter lets a rate-limited clone outlast
+        # the burst instead of giving up.
+        local this_delay cap="${CLOUDBENCH_CLONE_RETRY_MAX_SECONDS:-90}"
+        this_delay=$(( retry_delay * (1 << (attempt - 1)) ))
+        [ "$this_delay" -gt "$cap" ] && this_delay="$cap"
+        this_delay=$(( this_delay + (RANDOM % 5) ))
+        echo "⏳ transient clone failure (attempt $attempt/$max_attempts, status=$clone_status); retrying in ${this_delay}s ..." >&2
+        sleep "$this_delay"
         attempt=$((attempt + 1))
     done
 }
@@ -1623,6 +1634,12 @@ for bench in "${BENCHES[@]}"; do
         fi
     ) &
     PROVISION_PIDS+=("$!")
+    # Stagger the clone starts so N benches don't hammer the Fly Machines API in
+    # the same instant (the direct cause of `resource_exhausted: rate limit
+    # exceeded` → clones that exhaust their retries and drop from the batch).
+    # Still fully concurrent — every clone stays in flight together — the burst is
+    # just spread across a few seconds instead of fired simultaneously.
+    sleep "${CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS:-0.4}"
 done
 for pp in "${PROVISION_PIDS[@]}"; do wait "$pp" 2>/dev/null || true; done
 
