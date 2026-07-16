@@ -527,6 +527,24 @@ fleet_registry_release_id() {  # fleet_registry_release_id <machine-id>
     done
 }
 
+fleet_registry_release_name() {  # fleet_registry_release_name <clone-name>
+    local clone_name="$1" record="$FLEET_REGISTRY_DIR/clones/$1"
+    [ -f "$record" ] || return 0
+    [ "$(registry_meta_value "$record" name)" = "$clone_name" ] || return 1
+    rm -f "$record"
+}
+
+clone_failure_definitively_unallocated() {  # stdin/arg: fly clone stderr
+    # These Fly errors occur before a Machine exists. A forked volume may exist
+    # for the launch-capacity case, but cleanup's detached-volume sweep owns it.
+    # All other errors remain ambiguous and retain durable name ownership.
+    case "$1" in
+        *"failed to create volume:"*) return 0 ;;
+        *"failed to launch VM: insufficient resources to create new machine with existing volume"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 registry_owner_alive() {  # registry_owner_alive <meta-file>; 0=alive, 1=dead, 2=other host/invalid
     local meta="$1" host pid expected_start actual_start
     host="$(registry_meta_value "$meta" host)"
@@ -865,6 +883,16 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id];
         if [ -z "$target_id" ]; then
             deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-20}))
             target_id="$(machine_id_for_clone_name "$target_name" "$deadline")" || target_id=""
+        fi
+        if [ "$clone_status" -ne 0 ] && [ -z "$target_id" ] \
+            && clone_failure_definitively_unallocated "$clone_out"; then
+            # The provider explicitly rejected this attempt before allocating a
+            # Machine, and the bounded name lookup also found none. Release only
+            # this attempt's name record so a later successful retry does not
+            # leave a phantom registry that blocks every future controller.
+            fleet_registry_release_name "$target_name" || return 1
+            grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
+            mv "$names_ledger.tmp" "$names_ledger"
         fi
         if [ -n "$target_id" ] && [ "$target_id" != "$source_id" ] && [ "$target_id" != "$WARM_ID" ]; then
             if ! fleet_registry_record_id "$target_name" "$target_id"; then

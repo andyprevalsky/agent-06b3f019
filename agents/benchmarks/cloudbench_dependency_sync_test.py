@@ -1443,6 +1443,32 @@ clone_machine_target "$LEDGER"
     assert "\\b[0-9a-f]{14}\\b" not in fleet
 
 
+def test_clone_releases_only_definitive_preallocation_failures() -> None:
+    """A rate-limited/CPU-rejected clone creates no Machine. After the bounded
+    name lookup confirms absence, its attempt record must be released so a
+    later successful retry does not leave a phantom stale registry. Ambiguous
+    launch errors retain ownership fail-closed."""
+    fleet = FLEET_SCRIPT.read_text()
+    classifier = _extract_fleet_function(fleet, "clone_failure_definitively_unallocated() {")
+    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    script = f"""{classifier}
+for message in \
+  'Error: failed to create volume: resource_exhausted: rate limit exceeded' \
+  'Error: failed to create volume: machine capacity hold failed' \
+  \"Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_x'\"; do
+  clone_failure_definitively_unallocated "$message" || exit 1
+done
+clone_failure_definitively_unallocated 'Error: failed to launch VM: volume not found' && exit 2
+exit 0
+"""
+    result = subprocess.run(["bash", "-c", script], check=False)
+    assert result.returncode == 0
+    assert 'fleet_registry_release_name "$target_name"' in cloner
+    assert cloner.index('clone_failure_definitively_unallocated "$clone_out"') < cloner.index(
+        'fleet_registry_release_name "$target_name"'
+    )
+
+
 def test_pool_promotes_only_successful_owned_clone_ids() -> None:
     fleet = FLEET_SCRIPT.read_text()
     pool_function = _extract_fleet_function(fleet, "provision_pool_slot() {")
