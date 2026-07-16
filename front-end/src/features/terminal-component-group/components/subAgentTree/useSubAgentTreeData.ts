@@ -73,9 +73,9 @@ export function useSubAgentTreeData(busId: string, subAgentIds: string[]) {
   );
 
   return {
-    // Placeholders aren't in relevantNodes, so floor the count at the number of
-    // roots actually rendered to avoid showing "0 agents" over a visible tree.
-    totalAgents: Math.max(relevantNodes.size, rootNodes.length),
+    // Loaded nodes (roots + descendants) plus each still-pending root that has
+    // no node data yet, so a mixed loaded/pending tree isn't undercounted.
+    totalAgents: relevantNodes.size + subAgentIds.filter((id) => !relevantNodes.has(id)).length,
     rootNodes,
     maxDepth,
     leafNodes,

@@ -60,14 +60,30 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
   startedAt: number;
   emit: (chunk: RoseStreamChunk) => CompletionChunk | null;
 }): AsyncIterable<CompletionChunk> {
+  // Track caller-visible output so a Cerebras stream that ends CLEANLY without
+  // emitting anything (not just one that throws) still falls through instead of
+  // returning silence.
+  let emittedAny = false;
+  const emit = (chunk: RoseStreamChunk): CompletionChunk | null => {
+    const output = params.emit(chunk);
+    if (output !== null) emittedAny = true;
+    return output;
+  };
+
   try {
-    yield* runWithFallThrough({ produce: params.cerebrasRoute.produce, emit: params.emit });
-    log.info(params.cerebrasRoute.doneEvent, {
+    yield* runWithFallThrough({ produce: params.cerebrasRoute.produce, emit });
+    if (emittedAny) {
+      log.info(params.cerebrasRoute.doneEvent, {
+        request_id: params.requestId,
+        pool: params.pool,
+        elapsed_ms: Date.now() - params.startedAt,
+      });
+      return;
+    }
+    log.warn('cerebras_chat.empty_stream_failover_to_waterfall', {
       request_id: params.requestId,
       pool: params.pool,
-      elapsed_ms: Date.now() - params.startedAt,
     });
-    return;
   } catch (error) {
     if (!(error instanceof PreContentFallThroughError)) throw error;
     log.warn('cerebras_chat.pre_content_failover_to_waterfall', {
@@ -85,7 +101,7 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
         requestId: params.requestId,
         callSite: params.callSite,
       }),
-    emit: params.emit,
+    emit,
   });
   log.info('cerebras_chat.waterfall_failover.done', {
     request_id: params.requestId,

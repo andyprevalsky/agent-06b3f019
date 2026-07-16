@@ -176,7 +176,80 @@ async function run(): Promise<void> {
   process.stdout.write('PASS chat falls through to a different provider when Cerebras stalls\n');
 }
 
-void run().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
-  process.exit(1);
-});
+// A stream that ends CLEANLY (a finish chunk + [DONE]) without ever emitting a
+// caller-visible content chunk. The openrouter-cerebras route does not throw on
+// this, so the fallback must detect the empty output and still fall through
+// rather than return silence.
+const EMPTY_SSE = [
+  'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":0,"total_tokens":8}}',
+  '',
+  'data: [DONE]',
+  '',
+];
+
+async function runEmptyCerebrasStream(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const oldOpenRouterKey = process.env.OPENROUTER_API_KEY;
+  const oldCerebrasKey = process.env.CEREBRAS_API_KEY;
+  process.env.OPENROUTER_API_KEY = 'blackbox-openrouter-key';
+  process.env.CEREBRAS_API_KEY = 'blackbox-cerebras-key';
+
+  const openRouterModels: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (url === OPENROUTER_API_URL) {
+      const model = requestedModel(init);
+      openRouterModels.push(model);
+      // Cerebras returns a clean, empty stream; the waterfall model serves content.
+      return sseResponse(model === OPENROUTER_CEREBRAS_MODEL ? EMPTY_SSE : FALLBACK_SSE);
+    }
+    return originalFetch(input, init);
+  }) as typeof fetch;
+
+  const content: string[] = [];
+  let thrown: unknown = null;
+  try {
+    const stream = await createStreamingCompletion({
+      model: 'rose-labs/rose-1-lite',
+      messages: [
+        { role: 'system', content: 'You are Rose.' },
+        { role: 'user', content: 'follow-up after an empty Cerebras stream' },
+      ],
+      temperature: 0.7,
+      provider_route: 'openrouter-cerebras',
+    });
+    for await (const chunk of stream as AsyncIterable<CompletionChunk>) {
+      const text = chunk.choices?.[0]?.delta?.content;
+      if (text) content.push(text);
+    }
+  } catch (error) {
+    thrown = error;
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (oldOpenRouterKey === undefined) delete process.env.OPENROUTER_API_KEY;
+    else process.env.OPENROUTER_API_KEY = oldOpenRouterKey;
+    if (oldCerebrasKey === undefined) delete process.env.CEREBRAS_API_KEY;
+    else process.env.CEREBRAS_API_KEY = oldCerebrasKey;
+  }
+
+  assert.ok(
+    thrown === null,
+    `a clean empty Cerebras stream should fall through, not throw: ${String(thrown)}`
+  );
+  assert.ok(
+    openRouterModels.some((model) => model !== OPENROUTER_CEREBRAS_MODEL && model.length > 0),
+    'a Cerebras stream that ends cleanly with no content must fall through to a waterfall model'
+  );
+  assert.ok(
+    content.join('').trim().length > 0,
+    'expected fallback content after an empty Cerebras stream; got silence'
+  );
+  process.stdout.write('PASS chat falls through when Cerebras ends cleanly with no output\n');
+}
+
+void run()
+  .then(runEmptyCerebrasStream)
+  .catch((error) => {
+    process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+    process.exit(1);
+  });

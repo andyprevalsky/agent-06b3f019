@@ -1186,3 +1186,4 @@
 {"task": "browser-smoke", "duration_seconds": 57.4, "cost_cents": 5.0, "timestamp": "2026-07-11T02:29:41.169292+00:00", "agent_id": "f25a8d04-e9cd-4920-aaf5-5395baef6338"}
 {"task": "browser-biometrics-webdecoy", "duration_seconds": 354.8, "cost_cents": 7.0, "timestamp": "2026-07-11T02:29:41.169292+00:00", "agent_id": "f1ee0557-fb2d-46c4-b164-83541b8f1f39"}
 {"task": "parallel-tool-calls", "duration_seconds": 97.4, "cost_cents": 15.0, "timestamp": "2026-07-12T01:03:02.082955+00:00", "agent_id": "84d37f2b-6e4f-407f-a78e-25bc926d233e"}
+{"task": "message-person", "duration_seconds": 135.2, "cost_cents": 0.0, "timestamp": "2026-07-16T05:30:46.979731+00:00", "agent_id": "4b2520c3-d03e-4e86-8341-4b88b4e6bb89"}

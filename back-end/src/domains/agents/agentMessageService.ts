@@ -73,14 +73,29 @@ async function routeUserMessage(agentId: string, messageText: string): Promise<v
 
   // If the agent's workflow has already ended (any terminal status), clear the
   // dead workflow id so this message falls through to chat mode instead of
-  // signaling a closed/paused workflow that will never wake.
+  // signaling a closed/paused workflow that will never wake. Use a compare-and-set
+  // on the observed status + workflow id so a concurrent reactivation (a newer
+  // workflow) isn't clobbered — if 0 rows update, reload and act on fresh state.
   if (
     agentForChat?.temporalWorkflowId !== undefined &&
     agentForChat?.temporalWorkflowId !== null &&
     TERMINAL_STATUSES.includes(agentForChat.status)
   ) {
-    await repo.updateAgent(agentId, { temporalWorkflowId: null, status: 'ACTIVE' });
-    agentForChat.temporalWorkflowId = null;
+    const { count } = await repo.clearWorkflowForTerminalAgent(
+      agentId,
+      agentForChat.status,
+      agentForChat.temporalWorkflowId
+    );
+    if (count > 0) {
+      agentForChat.temporalWorkflowId = null;
+      agentForChat.status = 'ACTIVE';
+    } else {
+      const fresh = await repo.findAgentUnique(agentId);
+      if (fresh !== null) {
+        agentForChat.temporalWorkflowId = fresh.temporalWorkflowId;
+        agentForChat.status = fresh.status;
+      }
+    }
   }
 
   if (agentForChat?.temporalWorkflowId !== undefined && agentForChat?.temporalWorkflowId !== null) {
