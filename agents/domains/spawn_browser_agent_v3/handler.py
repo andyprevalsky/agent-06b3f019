@@ -81,7 +81,6 @@ from .repo import (
     fetch_session_info,
     init_browser_session,
     inject_local_storage,
-    list_session_files,
     propagate_browser_run_credentials,
     report_claude_token_rate_limited,
     resume_browser_session,
@@ -94,8 +93,10 @@ from .service import (
     AuthRuntimeState,
     build_action_titles,
     build_auth_assistance_resume_user_message,
+    build_best_effort_response,
     build_browser_dynamic_system_context,
     build_browser_task_prompt,
+    build_browser_verifier_context,
     build_context_summary,
     build_usage_items,
     extract_session_files,
@@ -2109,6 +2110,52 @@ async def _install_fast_mode_network_cache(
     context.on("response", lambda r: asyncio.ensure_future(_record(r)))
 
 
+async def _finalize_kernel_replay_for_fe(
+    *,
+    browser_recorder: BrowserAgentRecorder,
+    agent_id: str,
+    task_id: str,
+    browser_url: Optional[str],
+    browser_session_metadata: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Stop Kernel's native replay and write the FE-visible recording message.
+
+    System context:
+    Kernel replay (start at session setup) -> stop + hosted view URL -> DB tool
+    message -> BrowserAgentChip Recording tab. No screenshot frames, no Supabase
+    upload: the video is stored by Kernel and the FE iframes `recording_view_url`.
+    """
+    view_url = await browser_recorder.stop_kernel_replay()
+    if not view_url:
+        logger.warning(
+            "Kernel replay finalized without a view URL; no recording message",
+            agent_id=agent_id,
+            task_id=task_id,
+        )
+        return None
+    await save_browser_action_message(
+        agent_id=agent_id,
+        title="Browser recording saved",
+        task_id=task_id,
+        message="Browser session replay recorded (Kernel).",
+        status=MessageStatus.FINISHED,
+        browser_url=browser_url or "",
+        action_type="recording",
+        tool_call_id=str(uuid_module.uuid4()),
+        extra_metadata={
+            "recording_view_url": view_url,
+            "browser_session_metadata": browser_session_metadata,
+        },
+    )
+    logger.info(
+        "Kernel replay recording message saved",
+        agent_id=agent_id,
+        task_id=task_id,
+        has_view_url=bool(view_url),
+    )
+    return {"recording_view_url": view_url}
+
+
 async def _finalize_browser_recording_for_fe(
     *,
     browser_recorder: BrowserAgentRecorder,
@@ -2128,6 +2175,18 @@ async def _finalize_browser_recording_for_fe(
     """
     if not task_id:
         return None
+
+    # Kernel-native replay: reuse Kernel's stored video replay + hosted view URL
+    # instead of uploading a self-contained HTML player to (flaky) Supabase. The
+    # FE iframes `recording_view_url` directly (see BrowserAgentChip).
+    if getattr(browser_recorder, "uses_kernel_replay", False):
+        return await _finalize_kernel_replay_for_fe(
+            browser_recorder=browser_recorder,
+            agent_id=agent_id,
+            task_id=task_id,
+            browser_url=browser_url,
+            browser_session_metadata=browser_session_metadata,
+        )
 
     cleanup_local_artifacts = False
     try:
@@ -2642,9 +2701,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     passkey_ref_by_credential_id: Dict[str, Dict[str, str]] = {}
     recorded_passkey_credential_ids: set[str] = {
         credential_id
-        for credential_id in (write_lock_resume_state or {}).get(
-            "recorded_passkey_credential_ids", []
-        )
+        for credential_id in (write_lock_resume_state or {}).get("recorded_passkey_credential_ids", [])
         if isinstance(credential_id, str) and credential_id
     }
 
@@ -4082,120 +4139,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         tool_call_id=verifier_call_id,
                     )
 
-                    action_entries = action_history.get_entries()[-30:]
-                    action_details_lines = []
-                    for entry in action_entries:
-                        step = entry.get("step", "?")
-                        ea = entry.get("action", "unknown")
-                        er = entry.get("result", {})
-                        esuccess = er.get("success", False)
-                        estatus = "\u2705 Success" if esuccess else f"\u274c Failed: {er.get('error', 'unknown')}"
-
-                        line = f"Step {step}: {ea} - {estatus}"
-                        if ea == "screenshot" and esuccess:
-                            line += " (visible viewport capture)"
-                        eparams = entry.get("params", {})
-                        if eparams:
-                            display_params = {k: v for k, v in eparams.items() if k not in ["screenshot", "dom_tree"]}
-                            if display_params:
-                                line += f"\n  Params: {display_params}"
-                        display_result = {
-                            k: v for k, v in er.items() if k not in ["success", "error", "screenshot", "dom_tree"]
-                        }
-                        if display_result:
-                            line += f"\n  Result: {display_result}"
-                        action_details_lines.append(line)
-
-                    actions_text = "\n\n".join(action_details_lines)
-
-                    page_stats = browser_state.get("page_stats", {})
-                    scroll_pos = browser_state.get("scroll_position", {})
-                    pages_above = scroll_pos.get("pages_above", 0)
-                    total_pages = scroll_pos.get("total_pages", 1)
-
-                    # C10: Browser verifier infers from action_history + final-state
-                    # ground truth. Multi-step browser tasks would balloon if we
-                    # stuffed every step's DOM into the verifier prompt; instead
-                    # we pass the action history (which logs URL transitions and
-                    # tool inputs/outputs), the final-state DOM, and the final-state
-                    # screenshot reference. The verifier reconstructs the journey
-                    # from action_history and grounds the answer in the FINAL state.
-                    #
-                    # Browser-sourced ground truth lives in the user prompt, not
-                    # a TOOL message. LLM-generated tool results (e.g. `extract`)
-                    # are reward-hackable; the DOM tree comes straight from
-                    # DOMService and is the only safe substrate for verifying a
-                    # claimed answer.
-                    dom_tree = browser_state.get("dom_tree", "") or ""
-                    final_screenshot_b64 = browser_state.get("screenshot")
-                    session_files = await list_session_files(config, session_id)
-                    files_text = "Downloaded Files in Session:\n"
-                    if session_files:
-                        for f in session_files:
-                            files_text += f"  - {f.get('path', 'unknown')} ({f.get('size', 0)} bytes)\n"
-                    else:
-                        files_text += "  (no files downloaded)\n"
-
-                    user_prompt = (
-                        f"Goal: {goal}\n\n"
-                        "## Browser Ground Truth (FINAL STATE)\n"
-                        "Read the DOM independently and decide whether the goal is satisfied. "
-                        "Do NOT rely on what the agent reported — only on what the page actually shows. "
-                        "The action_history below shows the URL transitions taken to reach this final state.\n\n"
-                        f"URL: {current_url}\n"
-                        f"Title: {browser_state.get('title', 'Unknown')}\n"
-                        f"Interactive Elements: {page_stats.get('interactive', 0)}\n"
-                        f"Scroll Position: Page {pages_above + 1} of {total_pages}\n\n"
-                        "### DOM Tree (browser-extracted final-state page content)\n"
-                        f"{dom_tree}"
+                    verifier_context = await build_browser_verifier_context(
+                        goal=goal,
+                        current_url=current_url,
+                        browser_state=browser_state,
+                        action_history=action_history,
+                        config=config,
+                        session_id=session_id,
                     )
-
-                    # C11: the final-state screenshot rides through to the
-                    # verifier as a multimodal image content block. The DOM
-                    # tree (in user_prompt above) remains the source of truth;
-                    # the image is supplementary. Wiring lives in
-                    # helpers/llm.py:build_verifier_context_messages — when
-                    # `metadata.screenshot_b64` is present on a TOOL message,
-                    # it's flushed as `{type: image, source: {type: base64,
-                    # media_type, data}}` instead of being inlined as text.
-                    verifier_context = [
-                        {"role": "USER", "text": user_prompt},
-                        {
-                            "role": "TOOL",
-                            "text": f"Browser Agent Execution Log ({len(action_entries)} actions shown — URL transitions, tool inputs/outputs):\n\n{actions_text}",
-                            "metadata": {
-                                "toolName": "action_history",
-                                "toolStatus": "FINISHED",
-                            },
-                        },
-                        {
-                            "role": "TOOL",
-                            "text": files_text,
-                            "metadata": {
-                                "toolName": "session_files",
-                                "toolStatus": "FINISHED",
-                            },
-                        },
-                        # Final-state screenshot — emitted as a multimodal
-                        # image block by build_verifier_context_messages when
-                        # screenshot_b64 is set in metadata. Body text stays
-                        # short (no b64 inlining).
-                        {
-                            "role": "TOOL",
-                            "text": (
-                                "Final-state screenshot attached (b64-encoded PNG of "
-                                "the entire scrollable page). Treat the DOM tree above as "
-                                "ground truth; the screenshot is supplementary."
-                                if final_screenshot_b64
-                                else "No final-state screenshot included; DOM tree is the verifier ground truth."
-                            ),
-                            "metadata": {
-                                "toolName": "final_screenshot",
-                                "toolStatus": "FINISHED",
-                                "screenshot_b64": final_screenshot_b64 or "",
-                            },
-                        },
-                    ]
 
                     verifier_prompt = build_verifier_prompt(
                         response_schema=transform_schema_for_remote_session(response_schema)
@@ -4890,6 +4841,75 @@ Based on this feedback, I need to continue working on the task and address the i
         # Max iterations reached
         logger.warning(f"Max iterations reached: {MAX_ITERATIONS}")
 
+        # Final synthesis pass — mirror run_agent's max-iterations handling
+        # (loop/run_agent.py:1889). A browser sub-agent that exhausts its step
+        # budget without ever calling attempt_completion would otherwise hand
+        # the parent structured_response=None. Run the verifier one last time
+        # against final-state ground truth to salvage partial structured data,
+        # so the parent receives best-effort output instead of an empty payload.
+        # Must run BEFORE the session is closed (verifier reads session files).
+        # Guarded: any failure leaves structured_response unchanged (no worse
+        # than before) and never blocks the terminal return.
+        if latest_structured_response is None and response_schema and browser_state:
+            try:
+                final_verifier_context = await build_browser_verifier_context(
+                    goal=goal,
+                    current_url=current_url,
+                    browser_state=browser_state,
+                    action_history=action_history,
+                    config=config,
+                    session_id=session_id,
+                )
+                final_verifier_prompt = build_verifier_prompt(
+                    response_schema=transform_schema_for_remote_session(response_schema)
+                )
+                final_progress = await call_temporal_activity_from_activity(
+                    check_progress,
+                    args=[
+                        final_verifier_context,
+                        final_verifier_prompt,
+                        VERIFIER_ULTRA_MODEL,
+                        transform_schema_for_remote_session(response_schema),
+                        token_state.access_token,
+                        "verifier_browser_max_steps",
+                        agent_id,
+                        None,
+                        None,
+                        user_id,
+                        gpt_token,
+                        gpt_account_id,
+                        gpt_token_source,
+                        gpt_token_pool_id,
+                        user_id,
+                        None,
+                        None,
+                        (
+                            {
+                                "browser_recording_manifest_path": str(browser_recorder.output_dir / "manifest.json"),
+                                "browser_recording_path": str(browser_recorder.output_dir / "index.html"),
+                                "browser_recording_task_id": browser_recorder.task_id,
+                                "browser_session_metadata": browser_session_metadata,
+                            }
+                            if browser_recorder
+                            else None
+                        ),
+                    ],
+                    start_to_close_timeout=timedelta(seconds=VERIFIER_ULTRA_TIMEOUT_SECONDS),
+                )
+                fv_usage = final_progress.get("usage", {})
+                fv_model = fv_usage.get("actual_model", "")
+                if not (str(fv_model).endswith("-claude") or str(fv_model).endswith("-gpt")):
+                    total_input_tokens += fv_usage.get("prompt_tokens", 0)
+                    total_output_tokens += fv_usage.get("completion_tokens", 0)
+                if final_progress.get("structured_response") is not None:
+                    latest_structured_response = final_progress["structured_response"]
+            except Exception as final_verifier_error:
+                logger.warning(
+                    "[BrowserAgent] Final max-steps verifier pass failed; returning best-effort text only",
+                    agent_id=agent_id,
+                    error=extract_error_message(final_verifier_error),
+                )
+
         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
         dom_service = None
         await close_browser_session(config, session_id, pause=False)
@@ -4927,6 +4947,16 @@ Based on this feedback, I need to continue working on the task and address the i
             message=context_message,
         )
 
+        # Best-effort answer — mirror run_agent's best_effort_response
+        # (loop/run_agent.py). Surfaces the agent's last synthesized reasoning
+        # as usable output so a runaway that never called attempt_completion
+        # still returns something the parent can act on, not an empty payload.
+        best_effort_response = build_best_effort_response(
+            reasoning_messages=reasoning_messages,
+            action_summary=action_summary,
+            visited_urls=visited_urls,
+        )
+
         return {
             "status": "max_iterations",
             "success": False,
@@ -4935,6 +4965,7 @@ Based on this feedback, I need to continue working on the task and address the i
             "usage_items": usage_items,
             "execution_time_ms": execution_time_ms,
             "structured_response": latest_structured_response,
+            "best_effort_response": best_effort_response,
         }
 
     except asyncio.CancelledError:
@@ -5319,9 +5350,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "session_id": result.get("session_id"),
                             "cdp_url": result.get("cdp_url"),
                             "task_id": result.get("task_id"),
-                            "recorded_passkey_credential_ids": result.get(
-                                "recorded_passkey_credential_ids", []
-                            ),
+                            "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                         }
 
                         logger.info(
@@ -5575,9 +5604,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "cdp_url": result.get("cdp_url"),
                         "task_id": result.get("task_id"),
                         "payment_card_refs": payment_card_refs,
-                        "recorded_passkey_credential_ids": result.get(
-                            "recorded_passkey_credential_ids", []
-                        ),
+                        "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
 
                     yield ToolEvent(
@@ -5675,9 +5702,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "handoff_mode": result.get("handoff_mode"),
                         "task_id": result.get("task_id"),
                         "auth_realm": result.get("auth_realm"),
-                        "recorded_passkey_credential_ids": result.get(
-                            "recorded_passkey_credential_ids", []
-                        ),
+                        "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
 
                     yield ToolEvent(

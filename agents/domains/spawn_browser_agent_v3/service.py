@@ -260,6 +260,168 @@ def build_context_summary(
     return "\n".join(summary_parts)
 
 
+def build_best_effort_response(
+    reasoning_messages: list,
+    action_summary: list,
+    visited_urls: list,
+) -> str:
+    """Best-effort answer surfaced when the browser agent terminates WITHOUT a
+    clean ``attempt_completion`` (e.g. it exhausts its step budget).
+
+    Mirrors ``run_agent``'s ``best_effort_response`` (loop/run_agent.py): a
+    browser sub-agent that loops to its ceiling without ever completing must
+    still hand the parent usable output instead of an empty payload, so the
+    parent can act on the partial evidence rather than hallucinate or re-spawn.
+
+    Preference order: the agent's most recent synthesized reasoning (its last
+    "thinking" \u2014 the closest thing to a final synthesized answer), then the
+    tail of the action trail, then the last URL reached. Returns ``""`` only
+    when no evidence was accumulated at all.
+    """
+    for reasoning in reversed(reasoning_messages or []):
+        if reasoning and str(reasoning).strip():
+            return str(reasoning).strip()
+
+    if action_summary:
+        tail = "; ".join(str(a) for a in action_summary[-5:])
+        return f"No summary was produced before the step budget ran out. Last actions: {tail}"
+
+    if visited_urls:
+        return f"No summary was produced before the step budget ran out. Last URL reached: {visited_urls[-1]}"
+
+    return ""
+
+
+async def build_browser_verifier_context(
+    goal: str,
+    current_url: str,
+    browser_state: dict,
+    action_history: Any,
+    config: Any,
+    session_id: str,
+) -> List[Dict[str, Any]]:
+    """Assemble the verifier context from final-state browser ground truth.
+
+    Shared by the ``attempt_completion`` path (grade a claimed completion) and
+    the max-steps terminal path (final synthesis pass to salvage partial
+    structured data, mirroring ``run_agent``'s final verifier run). Pure data
+    assembly plus one ``list_session_files`` read \u2014 no LLM call, no side
+    effects on the caller.
+    """
+    action_entries = action_history.get_entries()[-30:]
+    action_details_lines = []
+    for entry in action_entries:
+        step = entry.get("step", "?")
+        ea = entry.get("action", "unknown")
+        er = entry.get("result", {})
+        esuccess = er.get("success", False)
+        estatus = "\u2705 Success" if esuccess else f"\u274c Failed: {er.get('error', 'unknown')}"
+
+        line = f"Step {step}: {ea} - {estatus}"
+        if ea == "screenshot" and esuccess:
+            line += " (visible viewport capture)"
+        eparams = entry.get("params", {})
+        if eparams:
+            display_params = {k: v for k, v in eparams.items() if k not in ["screenshot", "dom_tree"]}
+            if display_params:
+                line += f"\n  Params: {display_params}"
+        display_result = {k: v for k, v in er.items() if k not in ["success", "error", "screenshot", "dom_tree"]}
+        if display_result:
+            line += f"\n  Result: {display_result}"
+        action_details_lines.append(line)
+
+    actions_text = "\n\n".join(action_details_lines)
+
+    page_stats = browser_state.get("page_stats", {})
+    scroll_pos = browser_state.get("scroll_position", {})
+    pages_above = scroll_pos.get("pages_above", 0)
+    total_pages = scroll_pos.get("total_pages", 1)
+
+    # C10: Browser verifier infers from action_history + final-state
+    # ground truth. Multi-step browser tasks would balloon if we
+    # stuffed every step's DOM into the verifier prompt; instead
+    # we pass the action history (which logs URL transitions and
+    # tool inputs/outputs), the final-state DOM, and the final-state
+    # screenshot reference. The verifier reconstructs the journey
+    # from action_history and grounds the answer in the FINAL state.
+    #
+    # Browser-sourced ground truth lives in the user prompt, not
+    # a TOOL message. LLM-generated tool results (e.g. `extract`)
+    # are reward-hackable; the DOM tree comes straight from
+    # DOMService and is the only safe substrate for verifying a
+    # claimed answer.
+    dom_tree = browser_state.get("dom_tree", "") or ""
+    final_screenshot_b64 = browser_state.get("screenshot")
+    session_files = await list_session_files(config, session_id)
+    files_text = "Downloaded Files in Session:\n"
+    if session_files:
+        for f in session_files:
+            files_text += f"  - {f.get('path', 'unknown')} ({f.get('size', 0)} bytes)\n"
+    else:
+        files_text += "  (no files downloaded)\n"
+
+    user_prompt = (
+        f"Goal: {goal}\n\n"
+        "## Browser Ground Truth (FINAL STATE)\n"
+        "Read the DOM independently and decide whether the goal is satisfied. "
+        "Do NOT rely on what the agent reported \u2014 only on what the page actually shows. "
+        "The action_history below shows the URL transitions taken to reach this final state.\n\n"
+        f"URL: {current_url}\n"
+        f"Title: {browser_state.get('title', 'Unknown')}\n"
+        f"Interactive Elements: {page_stats.get('interactive', 0)}\n"
+        f"Scroll Position: Page {pages_above + 1} of {total_pages}\n\n"
+        "### DOM Tree (browser-extracted final-state page content)\n"
+        f"{dom_tree}"
+    )
+
+    # C11: the final-state screenshot rides through to the
+    # verifier as a multimodal image content block. The DOM
+    # tree (in user_prompt above) remains the source of truth;
+    # the image is supplementary. Wiring lives in
+    # helpers/llm.py:build_verifier_context_messages \u2014 when
+    # `metadata.screenshot_b64` is present on a TOOL message,
+    # it's flushed as `{type: image, source: {type: base64,
+    # media_type, data}}` instead of being inlined as text.
+    return [
+        {"role": "USER", "text": user_prompt},
+        {
+            "role": "TOOL",
+            "text": f"Browser Agent Execution Log ({len(action_entries)} actions shown \u2014 URL transitions, tool inputs/outputs):\n\n{actions_text}",
+            "metadata": {
+                "toolName": "action_history",
+                "toolStatus": "FINISHED",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": files_text,
+            "metadata": {
+                "toolName": "session_files",
+                "toolStatus": "FINISHED",
+            },
+        },
+        # Final-state screenshot \u2014 emitted as a multimodal
+        # image block by build_verifier_context_messages when
+        # screenshot_b64 is set in metadata. Body text stays
+        # short (no b64 inlining).
+        {
+            "role": "TOOL",
+            "text": (
+                "Final-state screenshot attached (b64-encoded PNG of "
+                "the entire scrollable page). Treat the DOM tree above as "
+                "ground truth; the screenshot is supplementary."
+                if final_screenshot_b64
+                else "No final-state screenshot included; DOM tree is the verifier ground truth."
+            ),
+            "metadata": {
+                "toolName": "final_screenshot",
+                "toolStatus": "FINISHED",
+                "screenshot_b64": final_screenshot_b64 or "",
+            },
+        },
+    ]
+
+
 # ========================================
 # SESSION FILE EXTRACTION
 # ========================================

@@ -52,6 +52,31 @@ def browser_recordings_enabled() -> bool:
     return "localhost" in api_url or "127.0.0.1" in api_url
 
 
+def kernel_replay_enabled() -> bool:
+    """Reuse Kernel's native session-replay recording instead of our screenshot
+    capture. Defaults on wherever screenshot recordings run today (dev/benchmark/
+    archive); an explicit env flag can force it (e.g. to enable in prod, where the
+    replay is cheap: start/stop API + a hosted view URL, no per-frame screenshots
+    and no Supabase upload)."""
+    value = os.getenv("BROWSER_AGENT_KERNEL_REPLAY", "").strip().lower()
+    if value in TRUE_VALUES:
+        return True
+    if value in FALSE_VALUES:
+        return False
+    return browser_recordings_enabled()
+
+
+def _kernel_api_base() -> str:
+    return (os.getenv("KERNEL_API_BASE_URL") or "https://api.onkernel.com").rstrip("/")
+
+
+def _kernel_replay_headers() -> Optional[Dict[str, str]]:
+    api_key = os.getenv("KERNEL_API_KEY", "").strip()
+    if not api_key:
+        return None
+    return {"Authorization": f"Bearer {api_key}"}
+
+
 def _is_production_runtime() -> bool:
     return os.getenv("FLY_APP_NAME") is not None or os.getenv("ENVIRONMENT") == "production"
 
@@ -169,6 +194,19 @@ class BrowserAgentRecorder:
         self.session_id = session_id
         self.browser_url = browser_url
         self.session_metadata = session_metadata or {}
+        # Kernel-native replay: when the session runs on Kernel we reuse its built-in
+        # video replay (start/stop API -> hosted view URL) instead of screenshotting
+        # every ~2s and uploading a self-contained HTML player to Supabase. In this
+        # mode the screenshot/observation capture is a no-op and the FE renders the
+        # `recording_view_url` directly (see _finalize_kernel_replay_for_fe).
+        self.uses_kernel_replay = (
+            self.session_metadata.get("provider") == "kernel"
+            and bool(session_id)
+            and kernel_replay_enabled()
+            and _kernel_replay_headers() is not None
+        )
+        self._kernel_replay_id: Optional[str] = None
+        self.recording_view_url: Optional[str] = None
         self.output_dir = browser_recording_output_dir(agent_id, task_id)
         self.frames_dir = self.output_dir / "frames"
         self.media_dir = self.output_dir / "media"
@@ -192,6 +230,8 @@ class BrowserAgentRecorder:
 
     def set_cursor(self, x: int, y: int) -> None:
         """Update replay cursor position without forcing a screenshot capture."""
+        if self.uses_kernel_replay:
+            return
         cursor = {"x": int(x), "y": int(y)}
         self._cursor = cursor
         self.cursor_events.append(
@@ -213,9 +253,17 @@ class BrowserAgentRecorder:
         browser_url: Optional[str],
         session_metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional["BrowserAgentRecorder"]:
-        if not browser_recordings_enabled() or not task_id or not session_id:
+        if not task_id or not session_id:
             return None
-        if not hasattr(page, "screenshot"):
+        replay_possible = (
+            (session_metadata or {}).get("provider") == "kernel"
+            and kernel_replay_enabled()
+            and _kernel_replay_headers() is not None
+        )
+        if not browser_recordings_enabled() and not replay_possible:
+            return None
+        # Screenshot mode needs a screenshot-capable page; replay mode doesn't.
+        if not hasattr(page, "screenshot") and not replay_possible:
             return None
         recorder = cls(
             page=page,
@@ -240,6 +288,9 @@ class BrowserAgentRecorder:
         return recorder
 
     async def start(self) -> None:
+        if self.uses_kernel_replay:
+            await self._start_kernel_replay()
+            return
         self.frames_dir.mkdir(parents=True, exist_ok=True)
         await self.capture("recording started", action="start", force=True)
         self._loop_task = asyncio.create_task(self._capture_loop())
@@ -249,6 +300,98 @@ class BrowserAgentRecorder:
             task_id=self.task_id,
             output_dir=str(self.output_dir),
         )
+
+    async def _start_kernel_replay(self) -> None:
+        """Start Kernel's native session replay. On any failure we clear
+        uses_kernel_replay so finalization simply emits no recording (we do NOT
+        fall back to the screenshot+Supabase path this change intentionally drops)."""
+        headers = _kernel_replay_headers()
+        if headers is None:
+            self.uses_kernel_replay = False
+            return
+        framerate = max(1, int(os.getenv("BROWSER_AGENT_KERNEL_REPLAY_FRAMERATE", "10")))
+        url = f"{_kernel_api_base()}/browsers/{self.session_id}/replays"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(url, headers=headers, json={"framerate": framerate})
+                response.raise_for_status()
+                data = response.json()
+            self._kernel_replay_id = data.get("replay_id")
+            self.recording_view_url = data.get("replay_view_url")
+            logger.info(
+                "Kernel replay recording started",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                session_id=self.session_id,
+                replay_id=self._kernel_replay_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — recording must never fail the run
+            logger.warning(
+                "Kernel replay start failed; run will have no recording",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                session_id=self.session_id,
+                error=str(exc)[:300],
+            )
+            self.uses_kernel_replay = False
+            self._kernel_replay_id = None
+            self.recording_view_url = None
+
+    async def stop_kernel_replay(self) -> Optional[str]:
+        """Stop the Kernel replay and return the (finalized) hosted view URL.
+
+        Tolerant of the browser session already being torn down: the persisted
+        replay survives session deletion, so we stop best-effort, then re-read the
+        view URL from list(); on any failure we fall back to the start-time URL
+        (which is valid even pre-stop)."""
+        if self._closed:
+            return self.recording_view_url
+        self._closed = True
+        headers = _kernel_replay_headers()
+        if headers is None or not self.session_id:
+            return self.recording_view_url
+        base = _kernel_api_base()
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                if self._kernel_replay_id:
+                    try:
+                        await client.post(
+                            f"{base}/browsers/{self.session_id}/replays/{self._kernel_replay_id}/stop",
+                            headers=headers,
+                        )
+                    except Exception as exc:  # noqa: BLE001 — best-effort stop
+                        logger.warning(
+                            "Kernel replay stop failed; reading persisted replay anyway",
+                            agent_id=self.agent_id,
+                            task_id=self.task_id,
+                            error=str(exc)[:300],
+                        )
+                response = await client.get(
+                    f"{base}/browsers/{self.session_id}/replays", headers=headers
+                )
+                response.raise_for_status()
+                replays = response.json() or []
+            match = next(
+                (item for item in replays if item.get("replay_id") == self._kernel_replay_id),
+                None,
+            ) or (replays[0] if replays else None)
+            if match and match.get("replay_view_url"):
+                self.recording_view_url = match["replay_view_url"]
+        except Exception as exc:  # noqa: BLE001 — fall back to start-time view URL
+            logger.warning(
+                "Kernel replay list failed; using start-time view URL",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                error=str(exc)[:300],
+            )
+        logger.info(
+            "Kernel replay recording stopped",
+            agent_id=self.agent_id,
+            task_id=self.task_id,
+            replay_id=self._kernel_replay_id,
+            has_view_url=bool(self.recording_view_url),
+        )
+        return self.recording_view_url
 
     async def _active_page(self):
         """Return the foreground/active tab so the recording FOLLOWS tab switches
@@ -329,7 +472,7 @@ class BrowserAgentRecorder:
         metadata: Optional[Dict[str, Any]] = None,
         force: bool = False,
     ) -> None:
-        if self._closed or len(self.frames) >= self.max_frames:
+        if self.uses_kernel_replay or self._closed or len(self.frames) >= self.max_frames:
             return
         async with self._capture_lock:
             if self._closed or len(self.frames) >= self.max_frames:
@@ -373,7 +516,7 @@ class BrowserAgentRecorder:
         browser_state: Dict[str, Any],
         action_entries: List[Dict[str, Any]],
     ) -> Optional[Path]:
-        if self._closed:
+        if self.uses_kernel_replay or self._closed:
             return None
         self.observations_dir.mkdir(parents=True, exist_ok=True)
         filename = f"iteration_{int(iteration):04d}.json"
@@ -389,7 +532,7 @@ class BrowserAgentRecorder:
         return path
 
     async def write_final_screenshot(self, screenshot_b64: str) -> Optional[Path]:
-        if self._closed or not screenshot_b64:
+        if self.uses_kernel_replay or self._closed or not screenshot_b64:
             return None
         try:
             data = screenshot_b64.split(",", 1)[1] if "," in screenshot_b64[:80] else screenshot_b64
@@ -408,6 +551,12 @@ class BrowserAgentRecorder:
             return None
 
     async def close(self, *, include_steel_media: bool = True) -> Optional[Path]:
+        # Kernel replay mode never produces a local HTML player; finalization goes
+        # through stop_kernel_replay() + recording_view_url instead. Guard here so a
+        # generic close() caller can't trigger screenshot/Steel finalization.
+        if self.uses_kernel_replay:
+            await self.stop_kernel_replay()
+            return None
         if self._closed:
             existing_path = self.output_dir / "index.html"
             return existing_path if existing_path.exists() else None

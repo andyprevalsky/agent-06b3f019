@@ -12,9 +12,10 @@
  *   [RESULT] <-> [TRAJECTORY] <-> [RECORDING]   (default RESULT)
  *
  * RECORDING URL (lazy, only when RECORDING tab first opened):
- *   [IDLE] --open recording tab--> [LOADING] --ok--> [READY]
- *                                            \--err-> [ERROR]
- *   (no recording_file_pointer => [UNAVAILABLE])
+ *   recording_view_url (Kernel replay): [IDLE] --open--> [READY] (iframe URL directly)
+ *   recording_file_pointer (Supabase):  [IDLE] --open--> [LOADING] --ok--> [READY]
+ *                                                                  \--err-> [ERROR]
+ *   (neither present => [UNAVAILABLE])
  *
  * Derives result/trajectory/recording from all messages sharing this message's
  * metadata.task_id (each browser step is its own message).
@@ -114,6 +115,18 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     return null;
   }, [taskMessages]);
 
+  // Kernel-native replay: a hosted video-player URL we iframe directly (no
+  // Supabase fetch). Preferred over the FilePointer when both are present.
+  const recordingViewUrl = useMemo<string | null>(() => {
+    for (let i = taskMessages.length - 1; i >= 0; i--) {
+      const url = taskMessages[i].metadata?.recording_view_url as string | null | undefined;
+      if (url) return url;
+    }
+    return null;
+  }, [taskMessages]);
+
+  const hasRecording = !!recordingViewUrl || !!recordingPointer;
+
   const trajectory = useMemo(
     () =>
       taskMessages
@@ -131,7 +144,14 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
 
   async function openRecording() {
     setTab('recording');
-    if (recordingState !== 'idle' || !recordingPointer || !selectedAgentId) return;
+    if (recordingState !== 'idle') return;
+    // Kernel replay: the view URL is a ready-to-iframe hosted player — no fetch.
+    if (recordingViewUrl) {
+      setRecordingUrl(recordingViewUrl);
+      setRecordingState('ready');
+      return;
+    }
+    if (!recordingPointer || !selectedAgentId) return;
     setRecordingState('loading');
     try {
       const url = await getAttachmentUrl(
@@ -238,18 +258,18 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
 
             {tab === 'recording' && (
               <div>
-                {!recordingPointer && (
+                {!hasRecording && (
                   <p className="text-xs text-muted-foreground">
                     Recording unavailable for this run.
                   </p>
                 )}
-                {recordingPointer && recordingState === 'loading' && (
+                {hasRecording && recordingState === 'loading' && (
                   <p className="text-xs text-muted-foreground">Loading recording…</p>
                 )}
-                {recordingPointer && recordingState === 'error' && (
+                {hasRecording && recordingState === 'error' && (
                   <p className="text-xs text-red-500">Failed to load recording.</p>
                 )}
-                {recordingPointer && recordingState === 'ready' && recordingUrl && (
+                {hasRecording && recordingState === 'ready' && recordingUrl && (
                   <iframe
                     title="Browser recording"
                     src={recordingUrl}
