@@ -62,6 +62,14 @@ setsid python3 -m http.server "$STATUS_PORT" --directory /data >/dev/null 2>&1 <
 # stable across refs, so the snapshot's copy safely checks out the ref, after
 # which the driver = the REF's cloudbench-run.sh. The driver re-runs git_sync too.
 export CLOUDBENCH_APP_USER="${CLOUDBENCH_APP_USER:-rose}"
+# Clear stale git locks the snapshot may carry. The ssh-launch path did this in its
+# "clear-stale" step; boot-launch has no ssh, so do it here — a leftover
+# .git/index.lock or cloudbench-fetch.lock (from a checkout that was in flight when
+# the snapshot was taken) otherwise HANGS `git checkout`/`reset` indefinitely and
+# every box stalls right after the fetch. Also kill any leftover driver/http.server.
+pkill -TERM -f 'cloudbench-run.sh|run_benchmark.py|scripts/run.sh --benchmark' 2>/dev/null || true
+rm -f "$REPO/.git/index.lock" "$REPO/.git/"*.lock "$REPO/.git/refs/heads/"*.lock \
+      "$REPO/.git/cloudbench-fetch.lock" 2>/dev/null || true
 {
     echo "[boot $(date -u +%H:%M:%S)] bootstrap-checkout ${REF:-<none>}"
     git config --global --add safe.directory "$REPO" 2>/dev/null || true
