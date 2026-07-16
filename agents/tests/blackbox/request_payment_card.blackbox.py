@@ -479,9 +479,50 @@ async def test_agentcard_status_activity_boundary():
     assert call["requestHeaders"]["x-user-id"] == "user-123"
 
 
+def test_domain_config_and_types_module_constants():
+    from domains.request_payment_card import config, types
+
+    assert config.DEFAULT_CURRENCY == "USD"
+    assert config.LOOKUP_TIMEOUT_SECONDS == 30.0
+    assert config.MINT_TIMEOUT_SECONDS == 60.0
+    assert set(config.__all__) == {
+        "DEFAULT_CURRENCY",
+        "LOOKUP_TIMEOUT_SECONDS",
+        "MINT_TIMEOUT_SECONDS",
+    }
+
+    # TypeAliases are concrete Dict aliases and exported.
+    assert types.PaymentPayload is not None
+    assert types.PaymentToolCall is not None
+    assert set(types.__all__) == {"PaymentPayload", "PaymentToolCall"}
+
+
+def test_domain_package_eager_and_lazy_exports():
+    import domains.request_payment_card as pkg
+
+    # Eager helper exports resolve directly.
+    assert callable(pkg.normalize_payment_payload)
+    assert callable(pkg.build_payment_question)
+    assert callable(pkg.build_payment_fingerprint)
+
+    # Lazy __getattr__ resolves the repo activities on demand.
+    assert callable(pkg.lookup_purchase_activity)
+    assert callable(pkg.mint_purchase_card_activity)
+
+    # Unknown attributes still raise AttributeError.
+    raised = False
+    try:
+        _ = pkg.definitely_not_an_export
+    except AttributeError:
+        raised = True
+    assert raised
+
+
 async def run_all_tests():
     print("request-payment-card blackbox tests:")
     result = BlackboxResult()
+    result.record("domain_config_and_types", test_domain_config_and_types_module_constants)
+    result.record("domain_package_exports", test_domain_package_eager_and_lazy_exports)
     result.record("normalize_payload", test_normalize_payload_builds_receipt_metadata_and_fingerprint)
     result.record("required_product_reviews", test_payment_line_item_requires_reviews_and_a_product_detail_url)
     result.record("camel_case_transport", test_payment_tool_accepts_camel_case_transport_fields)

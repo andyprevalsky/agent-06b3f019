@@ -9724,6 +9724,230 @@ def test_payment_card_verifier_evidence_exposes_only_valid_last_four():
     assert _build_payment_card_verifier_evidence(None) is None
 
 
+class _FakePaymentGateHandle:
+    """Awaitable activity handle returning a fixed result (matches manager fake)."""
+
+    def __init__(self, result):
+        self._result = result
+
+    def done(self):
+        return True
+
+    def cancel(self):
+        raise AssertionError("done activity should not be cancelled")
+
+    def __await__(self):
+        async def _result():
+            return self._result
+
+        return _result().__await__()
+
+
+async def _drive_payment_card_gate(*, mint_results, reject_gate=False, agentcard_connected=True):
+    """Drive execute_tool through the payment-card gate branch.
+
+    Returns (events, activity_calls, gate_keys). ``mint_results`` is a list
+    of dicts returned by successive ``mint_purchase_card_activity`` calls
+    (the last value repeats once exhausted).
+    """
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+    from tools.gate import GateRejectedError
+
+    activity_calls = []
+    gate_keys = []
+    mint_iter = iter(mint_results)
+    last_mint = {}
+
+    def _next_mint():
+        nonlocal last_mint
+        try:
+            last_mint = next(mint_iter)
+        except StopIteration:
+            pass
+        return last_mint
+
+    first = _FakePaymentGateHandle(
+        {
+            "status": "awaiting_payment_card_approval",
+            "payment_request": {
+                "merchant": "Blick Art Materials",
+                "line_items": [
+                    {
+                        "name": "Brush",
+                        "product_url": "https://www.dickblick.com/products/brush/",
+                        "rating": "4.7 stars",
+                        "review_count": "84 reviews",
+                        "quantity": 1,
+                        "line_total_cents": 636,
+                    }
+                ],
+                "subtotal_cents": 636,
+                "total_cents": 636,
+            },
+            "current_url": "https://www.dickblick.com/checkout/",
+            "write_lock_approvals": {},
+            "step_count": 3,
+            "session_id": "session-1",
+            "cdp_url": "wss://connect.steel.dev/session-1",
+            "task_id": "task-1",
+        }
+    )
+    resume = _FakePaymentGateHandle({"success": True, "message": "done", "output_files": []})
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+    )
+
+    async def fake_execute_activity(activity_name, *args, **kwargs):
+        activity_calls.append(
+            activity_name if isinstance(activity_name, str) else getattr(activity_name, "__name__", "callable")
+        )
+        if activity_name == "lookup_purchase_activity":
+            return {"found": False, "reusable": False, "purchase": None}
+        if activity_name == "mint_purchase_card_activity":
+            return _next_mint()
+        if activity_name == "agentcard_status_activity":
+            return {"connected": agentcard_connected}
+        if activity_name == "resolve_attention_request_activity":
+            return {}
+        if not isinstance(activity_name, str):  # mint_subscription_checkout_activity
+            return "https://checkout.example/subscribe"
+        raise AssertionError(f"unexpected activity: {activity_name}")
+
+    async def fake_request_user_approval_direct(*_args, **_kwargs):
+        return {"attention_request_id": "approval-1"}
+
+    async def fake_request_user_attention_direct(*_args, **_kwargs):
+        return {"attention_request_id": "setup-1"}
+
+    async def fake_raise_gate_direct(_wf, _gate, *, gate_key):
+        gate_keys.append(gate_key)
+        if reject_gate:
+            raise GateRejectedError(gate_key)
+        return {"resolved": True}
+
+    start_calls = []
+
+    def fake_start_activity(*args, **kwargs):
+        start_calls.append((args, kwargs))
+        return first if len(start_calls) == 1 else resume
+
+    # Advancing clock so the AgentCard connect-wait deadline is reachable
+    # (a constant clock would spin forever when the wallet never connects).
+    base_time = datetime(2026, 7, 9, 23, 50, 0, tzinfo=timezone.utc)
+    clock = {"n": 0}
+
+    def fake_now():
+        value = base_time + timedelta(minutes=6 * clock["n"])
+        clock["n"] += 1
+        return value
+
+    manager = SpawnBrowserAgentManagerV3()
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.workflow.start_activity", side_effect=fake_start_activity),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", AsyncMock(return_value=None)),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.execute_activity", side_effect=fake_execute_activity),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.now", side_effect=fake_now),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.sleep", AsyncMock(return_value=None)),
+        patch("tools.request_user_approval.request_user_approval_direct", side_effect=fake_request_user_approval_direct),
+        patch(
+            "tools.request_user_approval.request_user_attention_direct",
+            side_effect=fake_request_user_attention_direct,
+        ),
+        patch("tools.gate.raise_gate_direct", side_effect=fake_raise_gate_direct),
+    ):
+        events = []
+        async for event in manager.execute_tool(
+            workflow_instance,
+            {"goal": "Buy one brush", "output_schema": {"fields": [{"name": "ok", "type": "bool"}]}},
+            "tool-1",
+        ):
+            events.append(event)
+    return events, activity_calls, gate_keys
+
+
+async def test_manager_payment_gate_agentcard_setup_required_prompts_and_retries():
+    events, activity_calls, _ = await _drive_payment_card_gate(
+        mint_results=[
+            {"status": "agentcard_setup_required", "setupAction": "connect_agentcard", "connectUrl": "https://x/connect"},
+            {"status": "agentcard_setup_required", "connectUrl": "https://x/connect"},
+        ],
+        agentcard_connected=True,
+    )
+    # First mint gate → setup attention, connect polled, attention resolved, re-mint.
+    assert activity_calls == [
+        "lookup_purchase_activity",
+        "mint_purchase_card_activity",
+        "agentcard_status_activity",
+        "resolve_attention_request_activity",
+        "mint_purchase_card_activity",
+    ]
+    setup_titles = [getattr(e, "title", "") for e in events]
+    assert "One Time Agent Payment Setup" in setup_titles
+    assert "Agent payment setup complete" in setup_titles
+    # Second mint still setup_required → prompt once more and stop (no card issued).
+    assert not any(getattr(e, "title", "") == "Payment card ready" for e in events)
+
+
+async def test_manager_payment_gate_agentcard_setup_times_out_when_never_connected():
+    events, activity_calls, _ = await _drive_payment_card_gate(
+        mint_results=[{"status": "agentcard_setup_required", "connectUrl": "https://x/connect"}],
+        agentcard_connected=False,
+    )
+    # Setup prompted, connect polled once, then deadline reached → return without card.
+    assert "agentcard_status_activity" in activity_calls
+    assert "resolve_attention_request_activity" not in activity_calls
+    assert any(getattr(e, "title", "") == "One Time Agent Payment Setup" for e in events)
+    assert not any(getattr(e, "title", "") == "Payment card ready" for e in events)
+
+
+async def test_manager_payment_gate_subscription_rejected_cancels_purchase():
+    events, activity_calls, gate_keys = await _drive_payment_card_gate(
+        mint_results=[{"status": "subscription_required"}],
+        reject_gate=True,
+    )
+    assert gate_keys == ["subscription"]
+    cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
+    assert cancelled.metadata["action_type"] == "purchase_cancelled"
+    assert activity_calls.count("mint_purchase_card_activity") == 1
+
+
+async def test_manager_payment_gate_subscription_still_inactive_after_retry_blocks():
+    events, activity_calls, gate_keys = await _drive_payment_card_gate(
+        mint_results=[{"status": "subscription_required"}, {"status": "subscription_required"}],
+        reject_gate=False,
+    )
+    assert gate_keys == ["subscription"]
+    blocked = next(e for e in events if getattr(e, "title", "") == "Subscription still inactive")
+    assert blocked.metadata["action_type"] == "purchase_blocked"
+    assert activity_calls.count("mint_purchase_card_activity") == 2
+
+
+async def test_manager_payment_gate_kyc_rejected_cancels_purchase():
+    events, _, gate_keys = await _drive_payment_card_gate(
+        mint_results=[{"status": "kyc_required"}],
+        reject_gate=True,
+    )
+    assert gate_keys == ["kyc"]
+    cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
+    assert cancelled.metadata["action_type"] == "purchase_cancelled"
+
+
+async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
+    events, activity_calls, gate_keys = await _drive_payment_card_gate(
+        mint_results=[{"status": "kyc_required"}, {"status": "kyc_required"}],
+        reject_gate=False,
+    )
+    assert gate_keys == ["kyc"]
+    blocked = next(e for e in events if getattr(e, "title", "") == "Identity verification still incomplete")
+    assert blocked.metadata["action_type"] == "purchase_blocked"
+    assert activity_calls.count("mint_purchase_card_activity") == 2
+
+
 # ========================================
 # Runner
 # ========================================
@@ -10690,6 +10914,30 @@ async def run_all_tests():
     await r.record_async(
         "manager_payment_card_approval_activity_names",
         test_manager_payment_card_approval_uses_registered_activity_names_and_resumes,
+    )
+    await r.record_async(
+        "manager_payment_gate_agentcard_setup_required",
+        test_manager_payment_gate_agentcard_setup_required_prompts_and_retries,
+    )
+    await r.record_async(
+        "manager_payment_gate_agentcard_setup_timeout",
+        test_manager_payment_gate_agentcard_setup_times_out_when_never_connected,
+    )
+    await r.record_async(
+        "manager_payment_gate_subscription_rejected",
+        test_manager_payment_gate_subscription_rejected_cancels_purchase,
+    )
+    await r.record_async(
+        "manager_payment_gate_subscription_still_inactive",
+        test_manager_payment_gate_subscription_still_inactive_after_retry_blocks,
+    )
+    await r.record_async(
+        "manager_payment_gate_kyc_rejected",
+        test_manager_payment_gate_kyc_rejected_cancels_purchase,
+    )
+    await r.record_async(
+        "manager_payment_gate_kyc_still_incomplete",
+        test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks,
     )
 
     teardown_mock()

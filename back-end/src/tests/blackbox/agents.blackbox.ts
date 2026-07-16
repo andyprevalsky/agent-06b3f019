@@ -1450,8 +1450,26 @@ test('POST /:id/pause — not found → 404', async () => {
 test('POST /:id/pause — happy path: status changes to PAUSED', async () => {
   const session = await createAnonymousSession('pause-happy');
 
-  // Create agent via HTTP so it's visible to the server
-  const agentId = await createTestAgent(session.user.id, 'Pause test');
+  // Seed the route precondition directly. Creating a chat-mode root via HTTP
+  // starts a background chat handler, which can independently fail and overwrite
+  // the status to FAILED while this route-level assertion is reading it (the
+  // resume happy-path test below was fixed the same way).
+  const agentId = randomUUID();
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry('create-pause-happy', async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId: session.user.id,
+        goal: 'Pause test',
+        status: 'ACTIVE',
+        busId: agentId,
+      },
+    });
+    await prisma.verifier.create({
+      data: { agentId, type: 'FLOAT_LLM_JUDGE' },
+    });
+  });
 
   const res = await request(`${BASE_URL}/api/agents/${agentId}/pause`, {
     method: 'POST',
@@ -1468,7 +1486,9 @@ test('POST /:id/pause — happy path: status changes to PAUSED', async () => {
   const status = assertSchema(StatusResponse, statusRes.data, 'pause verify');
   assert(status.status === 'PAUSED', `Expected PAUSED, got ${status.status}`);
 
-  await deleteTestAgent(agentId, session.user.id);
+  await withTransientDbRetry('cleanup-pause-happy', async () => {
+    await prisma.agent.update({ where: { id: agentId }, data: { deletedAt: new Date() } });
+  });
 });
 
 // ========================= POST /:id/resume ================================
