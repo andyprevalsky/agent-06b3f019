@@ -16,6 +16,7 @@
 import { selectDirectCerebrasFailover } from './directCerebrasFailover';
 import { RosePaymentRequiredError, RoseRateLimitError } from './errors';
 import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
+import { exclusiveOpenRouterCerebrasCompletion } from './openrouterCerebrasRoute';
 import { createLogger } from '../logger';
 import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './types';
 
@@ -45,6 +46,8 @@ export async function* runExclusiveCerebrasChatRoute(params: {
     yield* runWithFallThrough({ produce: params.route.produce, emit: params.emit });
   } catch (error) {
     const cause = error instanceof PreContentFallThroughError ? error.cause : error;
+
+    // Same-model transport failover (openrouter-cerebras -> direct-cerebras).
     const directFailover = selectDirectCerebrasFailover({
       error,
       options: params.options,
@@ -59,19 +62,66 @@ export async function* runExclusiveCerebrasChatRoute(params: {
       yield* directFailover;
       return true;
     }
-    if (
+
+    // Only a PRE-CONTENT quota/rate-limit is eligible for fallback — a real
+    // 4xx/5xx bad request, or any mid-stream error, still surfaces (fails closed).
+    const eligibleForFallback =
       error instanceof PreContentFallThroughError &&
-      (cause instanceof RosePaymentRequiredError || cause instanceof RoseRateLimitError)
-    ) {
-      log.warn('cerebras_chat.quota_fallthrough_to_waterfall', {
+      (cause instanceof RosePaymentRequiredError || cause instanceof RoseRateLimitError);
+    if (!eligibleForFallback) {
+      params.finalize(cause);
+      throw cause;
+    }
+
+    // Same-model fallover: keep the chat on GLM-4.7 but reach it via OpenRouter
+    // with the provider UNPINNED — OpenRouter still PREFERS Cerebras (`order`)
+    // yet may spill to another GLM-4.7 host past the 5-req/min org cap. Preferred
+    // over the generic waterfall; only skipped without an OpenRouter key or when
+    // the route already IS openrouter-cerebras (avoid a same-transport loop).
+    const openrouterKey = process.env.OPENROUTER_API_KEY;
+    if (openrouterKey && params.options.provider_route !== 'openrouter-cerebras') {
+      log.warn('cerebras_chat.quota_fallover_to_openrouter_glm', {
         request_id: params.requestId,
         pool: params.pool,
         reason: cause.name,
       });
-      return false;
+      try {
+        yield* runWithFallThrough({
+          produce: () =>
+            exclusiveOpenRouterCerebrasCompletion({
+              options: params.options,
+              openrouterKey,
+              requestId: params.requestId,
+              callSite: params.callSite,
+              allowProviderFallback: true,
+            }),
+          emit: params.emit,
+        });
+        log.info('cerebras_chat.openrouter_glm_fallover_done', {
+          request_id: params.requestId,
+          pool: params.pool,
+        });
+        params.finalize();
+        return true;
+      } catch (openRouterError) {
+        // A mid-stream failure cannot be re-issued — surface it (fail closed).
+        if (!(openRouterError instanceof PreContentFallThroughError)) {
+          params.finalize(openRouterError);
+          throw openRouterError;
+        }
+        // GLM-4.7 on OpenRouter also failed pre-content — fall through to the
+        // generic waterfall as an absolute last resort (keeps the chat up).
+        log.warn('cerebras_chat.openrouter_glm_fallover_failed', {
+          request_id: params.requestId,
+          pool: params.pool,
+          reason: openRouterError.cause.name,
+        });
+      }
     }
-    params.finalize(cause);
-    throw cause;
+
+    // Last resort: caller continues into the shared GPT / Anthropic / OpenRouter
+    // generic waterfall.
+    return false;
   }
   log.info(params.route.doneEvent, {
     request_id: params.requestId,

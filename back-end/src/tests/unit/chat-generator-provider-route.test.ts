@@ -9,11 +9,7 @@ import {
 import { GENERATOR_SYSTEM_PROMPT } from '../../providers/chat/chatPrompts';
 import { selectChatPhaseModels } from '../../providers/chat/phaseModels';
 import { createStreamingCompletion, type CompletionChunk } from '../../providers/rose';
-import {
-  CEREBRAS_API_URL,
-  OPENAI_RESPONSES_API_URL,
-  OPENROUTER_API_URL,
-} from '../../providers/rose/transport';
+import { CEREBRAS_API_URL, OPENROUTER_API_URL } from '../../providers/rose/transport';
 
 const GENERATOR_SSE = [
   'data: {"choices":[{"index":0,"delta":{"content":"{\\"reasoning\\":\\"fast\\",\\"response\\":\\"hello\\"}"}}]}',
@@ -179,9 +175,11 @@ async function testDirectPreHeaderStallSurfacesPromptlyWithoutFallback(): Promis
 
 // Cerebras GLM-4.7 is rate-capped hard at the org level (5 req/min across all
 // models), so a burst of concurrent chats trips a 402 `quota` before any
-// caller-visible content. That must NOT sink the chat: the request falls through
-// to the standard waterfall (here OpenRouter), which is not subject to the cap.
-async function testDirectQuotaFallsThroughToWaterfall(): Promise<void> {
+// caller-visible content. That must NOT sink the chat AND must NOT drop to a
+// generic model: the request falls over to the SAME model (GLM-4.7) via
+// OpenRouter with the provider unpinned — OpenRouter still prefers Cerebras but
+// may spill to another GLM-4.7 host past the cap.
+async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const saved = {
     cerebras: process.env.CEREBRAS_API_KEY,
@@ -191,11 +189,13 @@ async function testDirectQuotaFallsThroughToWaterfall(): Promise<void> {
   };
   process.env.CEREBRAS_API_KEY = 'direct-cerebras';
   process.env.OPENROUTER_API_KEY = 'openrouter-fallback';
-  // Force the OpenRouter waterfall stage: no user OAuth, no shared GPT/Anthropic keys.
+  // No user OAuth / shared GPT / Anthropic keys — so if the code wrongly dropped
+  // to the generic waterfall it would hit an unexpected URL and fail loudly.
   delete process.env.GPT_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
   const calls: string[] = [];
-  globalThis.fetch = (async (input: string | URL | Request) => {
+  let openRouterBody: Record<string, unknown> = {};
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     calls.push(url);
     if (url === CEREBRAS_API_URL) {
@@ -209,19 +209,35 @@ async function testDirectQuotaFallsThroughToWaterfall(): Promise<void> {
         { status: 402, headers: { 'Content-Type': 'application/json' } }
       );
     }
-    if (url === OPENROUTER_API_URL) return sseResponse(GENERATOR_SSE);
-    // Any pricing / OpenAI probe the waterfall makes returns benign empty JSON.
-    if (url === OPENAI_RESPONSES_API_URL) return new Response('{}', { status: 200 });
-    return new Response('{}', { status: 200 });
+    if (url === OPENROUTER_API_URL) {
+      openRouterBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return sseResponse(GENERATOR_SSE);
+    }
+    throw new Error(`Fallover left GLM-4.7-via-OpenRouter and hit a generic provider: ${url}`);
   }) as typeof fetch;
   try {
     const chunks = await collect(await createStreamingCompletion(directGeneratorOptions()));
     assert.equal(calls[0], CEREBRAS_API_URL, 'Cerebras must be attempted first');
     assert.ok(
       calls.includes(OPENROUTER_API_URL),
-      'a Cerebras 402 quota must fall through to the OpenRouter waterfall'
+      'a Cerebras 402 quota must fall over to OpenRouter'
     );
-    assert.ok(chunks.length > 0, 'the fallback provider must still produce a reply');
+    // Same model — never a generic one.
+    assert.equal(openRouterBody.model, 'z-ai/glm-4.7', 'fallover must stay on GLM-4.7');
+    // Provider unpinned: still prefer Cerebras, but allowed to spill past the cap.
+    const provider = openRouterBody.provider as {
+      order?: string[];
+      allow_fallbacks?: boolean;
+      only?: string[];
+    };
+    assert.deepEqual(provider.order, ['cerebras'], 'fallover should still prefer Cerebras');
+    assert.equal(
+      provider.allow_fallbacks,
+      true,
+      'fallover must allow spill to another GLM-4.7 host'
+    );
+    assert.equal(provider.only, undefined, 'fallover must not be pinned to Cerebras only');
+    assert.ok(chunks.length > 0, 'the fallover must still produce a reply');
   } finally {
     globalThis.fetch = originalFetch;
     for (const [name, value] of [
@@ -240,7 +256,7 @@ async function run(): Promise<void> {
   await testPhaseUsesDirectCerebras();
   await testDirectFailureSurfacesWithoutFallback();
   await testDirectPreHeaderStallSurfacesPromptlyWithoutFallback();
-  await testDirectQuotaFallsThroughToWaterfall();
+  await testDirectQuotaFallsOverToOpenRouterGlm();
   process.stdout.write('PASS Chat Generator provider routes are explicit and fail closed\n');
 }
 
