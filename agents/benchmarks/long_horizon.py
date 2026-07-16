@@ -12,10 +12,10 @@ System context:
     run_eval_suite.py / run_benchmark.py    future /eval-from-trace promotions
 
 The catalog is data-first: `run_benchmark.py` executes benchmark-agent entries
-today via its built-in evaluation (expected tools, receipts, approvals), while
-`evaluators[]` declares the target contract for the judge harness. `status`
-tracks whether an entry is runnable end-to-end (`ready`) or still missing
-fixtures/services/judges (`incomplete`).
+via built-in checks (expected tools, receipts, approvals). Entries with
+`enforce_declared_evaluators=true` also execute supported `evaluators[]` methods
+and require them to pass. `status` tracks whether an entry is runnable end-to-end
+(`ready`) or still missing fixtures/services/judges (`incomplete`).
 
 Hard constraint: task `name` is the primary key across the history stores
 (`history/task_durations.jsonl` success ledger, `history/span_durations.jsonl`
@@ -34,6 +34,17 @@ from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES
 
 CATALOG_VERSION = "0.1"
 EVALUATION_METHODS = {"static_check", "single_turn_llm_judge", "agentic_llm_judge"}
+RUNTIME_EVALUATION_METHODS = {"static_check", "single_turn_llm_judge"}
+RUNTIME_STATIC_CHECK_TYPES = {
+    "agent_status",
+    "approval_request_count",
+    "approval_request_details",
+    "browser_agent_session_count",
+    "expected_gate",
+    "expected_payment_receipt",
+    "no_browser_agent_failures",
+    "no_tool_failures",
+}
 ENVIRONMENT_MODES = {"synthetic", "live", "hybrid"}
 # "retired" = kept for ledger/history integrity (names are cross-store primary
 # keys) but hidden from every surface: eval suite, hub catalog, query-box picker.
@@ -139,6 +150,13 @@ def _validate_evaluator(evaluator: dict[str, Any], item_id: str, index: int) -> 
                 raise ValueError(f"{item_id}: evaluators[{index}].checks[{check_index}].type must be a string")
     if method in {"single_turn_llm_judge", "agentic_llm_judge"} and not evaluator.get("judge_prompt"):
         raise ValueError(f"{item_id}: LLM judges must include judge_prompt")
+    pass_threshold = evaluator.get("pass_threshold")
+    if pass_threshold is not None and (
+        not isinstance(pass_threshold, (int, float))
+        or isinstance(pass_threshold, bool)
+        or not 0 <= pass_threshold <= 1
+    ):
+        raise ValueError(f"{item_id}: evaluators[{index}].pass_threshold must be between 0 and 1")
     return evaluator
 
 
@@ -167,6 +185,13 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
         raise ValueError(f"{item_id}: runner must be one of {sorted(TASK_RUNNERS)}")
     if raw.get("bench") not in TASK_BENCHES:
         raise ValueError(f"{item_id}: bench must be declared explicitly, one of {sorted(TASK_BENCHES)}")
+    expected_attention_kinds = raw.get("expected_attention_kinds")
+    if expected_attention_kinds is not None:
+        _require_string_list(raw, "expected_attention_kinds", item_id)
+        if raw.get("expected_attention_kind"):
+            raise ValueError(
+                f"{item_id}: use expected_attention_kind or expected_attention_kinds, not both"
+            )
     world_model_mode = raw.get("world_model_mode")
     if world_model_mode is not None and world_model_mode not in WORLD_MODEL_MODES:
         raise ValueError(f"{item_id}: world_model_mode must be one of {sorted(WORLD_MODEL_MODES)}")
@@ -198,6 +223,34 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     evaluators = raw.get("evaluators")
     if evaluators:
         _validate_evaluators(evaluators, item_id)
+    enforce_declared_evaluators = raw.get("enforce_declared_evaluators", False)
+    if not isinstance(enforce_declared_evaluators, bool):
+        raise ValueError(f"{item_id}: enforce_declared_evaluators must be a boolean")
+    if enforce_declared_evaluators:
+        if not evaluators:
+            raise ValueError(f"{item_id}: enforced declared evaluators must be non-empty")
+        unsupported = {
+            evaluator["method"]
+            for evaluator in evaluators
+            if evaluator["method"] not in RUNTIME_EVALUATION_METHODS
+        }
+        if unsupported:
+            raise ValueError(
+                f"{item_id}: enforced evaluator methods are not executable: {sorted(unsupported)}; "
+                f"supported: {sorted(RUNTIME_EVALUATION_METHODS)}"
+            )
+        unsupported_static_checks = {
+            check["type"]
+            for evaluator in evaluators
+            if evaluator["method"] == "static_check"
+            for check in evaluator["checks"]
+            if check["type"] not in RUNTIME_STATIC_CHECK_TYPES
+        }
+        if unsupported_static_checks:
+            raise ValueError(
+                f"{item_id}: enforced static checks are not executable: "
+                f"{sorted(unsupported_static_checks)}; supported: {sorted(RUNTIME_STATIC_CHECK_TYPES)}"
+            )
 
 
 def load_raw_catalog(path: Path = DEFAULT_CATALOG) -> list[dict[str, Any]]:

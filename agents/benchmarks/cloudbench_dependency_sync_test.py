@@ -86,7 +86,7 @@ def test_prisma_client_regenerates_only_when_schema_fingerprint_changes(
     first = _run_prisma_sync(repo, env)
     assert first.returncode == 0, first.stderr
     assert generate_log.read_text().splitlines() == [
-        f"prisma generate --schema {repo / 'back-end/prisma/schema.prisma'}"
+        f"--no-install prisma generate --schema {repo / 'back-end/prisma/schema.prisma'}"
     ]
     first_fingerprint = marker.read_text()
 
