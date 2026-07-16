@@ -24,6 +24,8 @@ import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 
 import QueryInput from '@/features/terminal-component-group/components/QueryInput';
+import { OpeningMessageDisplay } from '@/features/terminal/components/OpeningMessageDisplay';
+import { OPENING_MESSAGES } from '@/features/terminal/config';
 import AttentionInbox from '@/features/terminal-component-group/components/AttentionInbox';
 import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
 import BrowserViewPanel from '@/features/terminal-component-group/components/BrowserViewPanel';
@@ -2127,5 +2129,50 @@ describe('BrowserViewPanel (blackbox)', () => {
       expect(screen.getByText('Browser Session Disconnected')).toBeInTheDocument();
     });
     expect(screen.getByText('Take Control')).toBeInTheDocument();
+  });
+});
+
+// ─── OpeningMessageDisplay (blackbox) ────────────────────────────────────
+describe('OpeningMessageDisplay (blackbox)', () => {
+  const LAST_INDEX = OPENING_MESSAGES.length - 1;
+
+  it('renders caption text for non-final messages', () => {
+    renderWithProviders(
+      <OpeningMessageDisplay
+        currentMessageIndex={0}
+        animationPhase="revealing"
+        revealProgress={50}
+        onJoinWaitlist={() => {}}
+      />,
+    );
+
+    expect(screen.getByText(OPENING_MESSAGES[0][0])).toBeInTheDocument();
+    expect(screen.queryByTestId('opening-join-waitlist')).toBeNull();
+  });
+
+  it('renders the Join Waitlist button on the final line and opens the modal on click', () => {
+    const onJoinWaitlist = vi.fn();
+    renderWithProviders(
+      <OpeningMessageDisplay
+        currentMessageIndex={LAST_INDEX}
+        animationPhase="revealing"
+        revealProgress={100}
+        onJoinWaitlist={onJoinWaitlist}
+      />,
+    );
+
+    const button = screen.getByTestId('opening-join-waitlist');
+    expect(button).toHaveTextContent('Join Waitlist');
+    // A button that opens the login modal — no site redirect.
+    expect(button.tagName).toBe('BUTTON');
+    expect(button).not.toHaveAttribute('href');
+    fireEvent.click(button);
+    expect(onJoinWaitlist).toHaveBeenCalledTimes(1);
+    // navi-black background, shadow, and clickable despite the loader's pointer-events-none wrapper.
+    expect(button.className).toContain('bg-navi-black');
+    expect(button.className).toContain('shadow-lg');
+    expect(button.className).toContain('pointer-events-auto');
+    // The final line is the CTA button, not the raw caption text.
+    expect(screen.queryByText(OPENING_MESSAGES[LAST_INDEX][0])).toBeNull();
   });
 });

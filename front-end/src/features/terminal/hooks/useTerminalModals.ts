@@ -11,6 +11,9 @@ import { useState } from 'react';
 export function useTerminalModals() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [loginModalOpen, setLoginModalOpen] = useState(false);
+  // Optional heading shown atop the phone-auth modal. Undefined => the modal's
+  // default "Start Building." copy; set to override (e.g. waitlist CTA).
+  const [loginModalTitle, setLoginModalTitle] = useState<string | undefined>(undefined);
   const [showCreditModal, setShowCreditModal] = useState(false);
   const [showCostLimitModal, setShowCostLimitModal] = useState(false);
 
@@ -19,6 +22,8 @@ export function useTerminalModals() {
     setCreateModalOpen,
     loginModalOpen,
     setLoginModalOpen,
+    loginModalTitle,
+    setLoginModalTitle,
     showCreditModal,
     setShowCreditModal,
     showCostLimitModal,

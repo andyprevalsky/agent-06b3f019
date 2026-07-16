@@ -133,6 +133,10 @@ type BuildArgs = {
 
 function buildReturn(a: BuildArgs) {
   const handleLoginClick = () => a.modals.setLoginModalOpen(true);
+  const handleJoinWaitlist = () => {
+    a.modals.setLoginModalTitle('Join the Waitlist');
+    a.modals.setLoginModalOpen(true);
+  };
   const handleCreateNewAgent = () => {
     a.cleanupAgentState();
     a.resetAnimationState();
@@ -177,6 +181,8 @@ function buildReturn(a: BuildArgs) {
     setCreateModalOpen: a.modals.setCreateModalOpen,
     loginModalOpen: a.modals.loginModalOpen,
     setLoginModalOpen: a.modals.setLoginModalOpen,
+    loginModalTitle: a.modals.loginModalTitle,
+    setLoginModalTitle: a.modals.setLoginModalTitle,
     showCreditModal: a.modals.showCreditModal,
     setShowCreditModal: a.modals.setShowCreditModal,
     showCostLimitModal: a.modals.showCostLimitModal,
@@ -194,6 +200,7 @@ function buildReturn(a: BuildArgs) {
     handleSendMessage: a.messaging.handleSendMessage,
     handleLogout: a.handleLogout,
     handleLoginClick,
+    handleJoinWaitlist,
     handleCreateNewAgent,
     handleSubmitFeedback: a.actions.handleSubmitFeedback,
     resetAnimationState: a.resetAnimationState,
