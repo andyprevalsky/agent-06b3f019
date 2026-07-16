@@ -1700,10 +1700,13 @@ for bench in "${BENCHES[@]}"; do
     CHILD_PORT+=("$port")
     CHILD_MACHINE+=("$cid")
     # Stagger the driver launches for the same reason as the clone burst: each
-    # launch fires several Fly ssh/API calls (start machine, detach driver, probe),
-    # and N of them at once rate-limits the API — which is the leading suspect for
-    # the on-box driver dying at launch before its first step. Spread the burst.
-    sleep "${CLOUDBENCH_LAUNCH_STAGGER_SECONDS:-0.5}"
+    # launch fires SEVERAL Fly ssh/API calls (start machine, ssh-ready, clear stale
+    # driver, launch driver, confirm), and N of them at once rate-limits the API —
+    # the leading cause of the on-box driver dying at launch before its first step
+    # (observed 16/30 boxes idle at RUNSTAMP). A 0.5s stagger was too tight for a
+    # multi-ssh launch; 2.5s spreads 30 launches over ~75s so the API stays under
+    # its limit. Bring-up still overlaps, so wall-clock is barely affected.
+    sleep "${CLOUDBENCH_LAUNCH_STAGGER_SECONDS:-2.5}"
 
     if [ "$AUTOSCALE" = "1" ]; then
         local_sim=0; [ "$mode_label" = "SIM" ] && local_sim=1

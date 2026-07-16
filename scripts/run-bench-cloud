@@ -1749,12 +1749,30 @@ done
     tail -80 "$stage_err" 2>/dev/null | sed 's/^/   /' || true
     exit 1
 }
-FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"setsid bash '$REMOTE_TMP_SCRIPT' >> '$REMOTE_LOG' 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
-sleep "${CLOUDBENCH_LAUNCH_SETTLE_SECONDS:-5}"
-o="$(ssh_read "$mid" "pgrep -f cloudbench-run.sh >/dev/null 2>&1 && echo RUNNING")"
+# Launch the detached driver, and VERIFY it actually took — retry if not. At
+# fleet width the launch ssh sometimes lands during a Fly API rate-limit window
+# and the driver dies right after the launcher's RUNSTAMP marker, before its first
+# step (observed: 16/30 boxes idle with only RUNSTAMP in the log). A single
+# fire-and-forget launch (|| true) with a one-shot pgrep that only warned left
+# those boxes hung until the barrier's hour-long timeout. Re-launching is SAFE:
+# the wrapper self-deletes ($REMOTE_TMP_SCRIPT rm -f + exec), so on a box whose
+# driver is already running the wrapper file is gone and the re-launch is a no-op;
+# it only actually re-fires on boxes where the wrapper died before exec'ing.
+launch_attempts="${CLOUDBENCH_DRIVER_LAUNCH_ATTEMPTS:-4}"
 _ok=0
-printf '%s' "$o" | grep -q RUNNING && _ok=1
-if [ "$_ok" = 1 ]; then echo "✅ On-box driver launched + confirmed running."; else echo "   ⚠️ driver-running check inconclusive; polling anyway."; fi
+for _la in $(seq 1 "$launch_attempts"); do
+    FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"setsid bash '$REMOTE_TMP_SCRIPT' >> '$REMOTE_LOG' 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
+    sleep "${CLOUDBENCH_LAUNCH_SETTLE_SECONDS:-5}"
+    # Confirmed = the driver process is alive. A failed/rate-limited probe returns
+    # empty (not RUNNING) and simply drives another attempt — never a false OK.
+    o="$(ssh_read "$mid" "pgrep -f 'cloudbench-run.sh|/tmp/rb.sh' >/dev/null 2>&1 && echo RUNNING" 2>/dev/null)"
+    if printf '%s' "$o" | grep -q RUNNING; then _ok=1; break; fi
+    if [ "$_la" -lt "$launch_attempts" ]; then
+        echo "   ⚠️ driver not confirmed running (attempt $_la/$launch_attempts) — re-launching after backoff..."
+        sleep $(( _la * 4 + (RANDOM % 4) ))
+    fi
+done
+if [ "$_ok" = 1 ]; then echo "✅ On-box driver launched + confirmed running."; else echo "   ⚠️ driver-running check inconclusive after $launch_attempts attempts; polling anyway (the poll loop will detect a dead driver)."; fi
 
 # ── 3a. Proxy the box BACKEND to the Mac so running rows open a live view ────
 # The local archive frontend renders benchmark agents by reading a local archive
@@ -1990,6 +2008,8 @@ FINISHED="0"; BENCH_EXIT=""; TIMED_OUT="0"
 poll_start="$(date +%s)"
 last_size="0"
 last_change="$poll_start"
+last_probe="$poll_start"
+driver_absent=0
 DRIVER_DIED="0"
 # The detached on-box driver occasionally dies at launch (an early kill/crash
 # before its first STEP — seen at fleet width when the Fly API is rate-limited).
@@ -2024,14 +2044,26 @@ while :; do
         fi
     fi
     # Liveness probe only after a stall, so a healthy (streaming) run adds no extra
-    # SSH load. pgrep matches the driver OR its wrapper; re-arm after each probe.
-    if [ $((now - last_change)) -ge "$DRIVER_STALL_SECONDS" ]; then
-        if [ "$(ssh_read "$mid" "pgrep -f 'cloudbench-run.sh|/tmp/rb.sh' >/dev/null 2>&1 && echo ALIVE || echo DEAD" 2>/dev/null)" = "DEAD" ]; then
-            echo "❌ on-box driver exited with no DONE marker after ${DRIVER_STALL_SECONDS}s of no progress — bring-up (infra) failure; stopping this box so the fleet can proceed."
-            DRIVER_DIED="1"; BENCH_EXIT="1"
-            break
+    # SSH load. Once stalled, probe on a bounded interval and count consecutive
+    # non-ALIVE results. Crucially a DEAD result AND an unreachable/rate-limited
+    # probe (empty) BOTH count — at fleet width the very rate-limiting that kills
+    # the driver also fails the probe, so requiring a literal "DEAD" string left
+    # dead boxes hung. A few consecutive misses (default 3) guard against a single
+    # transient ssh hiccup excluding a healthy box.
+    if [ $((now - last_change)) -ge "$DRIVER_STALL_SECONDS" ] \
+       && [ $((now - last_probe)) -ge "${CLOUDBENCH_DRIVER_PROBE_INTERVAL:-40}" ]; then
+        last_probe="$now"
+        probe="$(ssh_read "$mid" "pgrep -f 'cloudbench-run.sh|/tmp/rb.sh' >/dev/null 2>&1 && echo ALIVE || echo DEAD" 2>/dev/null)"
+        if [ "$probe" = "ALIVE" ]; then
+            driver_absent=0
+        else
+            driver_absent=$((driver_absent + 1))
+            if [ "$driver_absent" -ge "${CLOUDBENCH_DRIVER_ABSENT_STRIKES:-3}" ]; then
+                echo "❌ on-box driver not alive + no progress for ${DRIVER_STALL_SECONDS}s (${driver_absent} consecutive misses, last probe='${probe:-unreachable}') — bring-up (infra) failure; stopping this box so the fleet can proceed."
+                DRIVER_DIED="1"; BENCH_EXIT="1"
+                break
+            fi
         fi
-        last_change="$now"
     fi
     sleep "${CLOUDBENCH_POLL_INTERVAL:-10}"
 done
