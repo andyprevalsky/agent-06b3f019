@@ -48,6 +48,17 @@ done < <(read_predeploy_tasks)
 
 echo "🧪 Pre-Deploy smoke (LOCAL isolated stack) — ${#PREDEPLOY_TASKS[@]} tasks: ${PREDEPLOY_TASKS[*]}"
 
-# `run-bench --local` spins up the per-run isolated stack, runs the tasks with
-# max concurrency 5, and exits non-zero unless ALL requested tasks pass.
-exec bash "$ROOT_DIR/scripts/run-bench" --local "${PREDEPLOY_TASKS[@]}"
+# `run-bench --local` spins up the per-run isolated stack, runs the tasks, and
+# exits non-zero unless ALL requested tasks pass.
+#
+# Concurrency: the per-task timeouts in tasks.json are calibrated against the
+# CLOUD fleet, where every bench gets its OWN machine (one agent per box). The
+# local path runs every bench on ONE machine, so at the default concurrency of 5
+# the agents (including two headless-browser tasks) starve each other's CPU and
+# whichever bench is slowest-under-contention overruns its cloud-calibrated
+# timeout — a different bench each run. Capping local concurrency at 2 restores a
+# resource profile close to the calibration (still parallel, ~1 browser task at a
+# time) so the timeouts hold. Override with PREDEPLOY_LOCAL_CONCURRENCY.
+LOCAL_CONCURRENCY="${PREDEPLOY_LOCAL_CONCURRENCY:-2}"
+exec bash "$ROOT_DIR/scripts/run-bench" --local "${PREDEPLOY_TASKS[@]}" \
+    --max-concurrency "$LOCAL_CONCURRENCY"
