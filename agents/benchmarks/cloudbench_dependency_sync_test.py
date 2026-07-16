@@ -1990,11 +1990,18 @@ def test_read_pollers_share_one_machines_snapshot(tmp_path: Path) -> None:
     loop = _extract_fleet_function(fleet, "machines_snapshot_loop() {")
     assert "backoff" in loop
 
-    # read-only pollers consume the shared snapshot
+    # read-only pollers consume the shared snapshot. The exceptional post-clone
+    # resolver requests a coalesced fresh snapshot before reading it, so 30
+    # fallback resolvers do not each hammer the Machines API or read stale data.
     for fn_sig in ("machine_id_for_clone_name() {", "_machine_priv_ip() {", "machine_storage_ready() {"):
         body = _extract_fleet_function(fleet, fn_sig)
         assert "FLY machines list" not in body, f"{fn_sig} must read the shared snapshot"
         assert "fleet_machines_json" in body
+    resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
+    assert "refresh_machines_snapshot_after" in resolver
+    refresh = _extract_fleet_function(fleet, "refresh_machines_snapshot_after() {")
+    assert "FLY machines list" in refresh
+    assert "machines-refresh.lock" in refresh
     ready = _extract_fleet_function(fleet, "machine_storage_ready() {")
     assert "FLY volumes list" not in ready and "fleet_volumes_json" in ready
     # the autoscaler liveness check reads the snapshot, not machine status
@@ -2293,15 +2300,11 @@ def test_controller_names_the_signal_that_killed_it() -> None:
         assert f"controller received {sig}" in fleet, f"unannounced {sig} trap"
 
 
-def test_stale_registry_reaps_absent_clone_and_does_not_block(tmp_path: Path) -> None:
-    """RCA (2026-07-15): a dead run's durable registry can hold a clone recorded
-    by NAME whose machine no longer exists on Fly (never materialized, or was
-    destroyed). When a new controller recovers that stale registry,
-    reap_registry_clones treated the absent machine as 'not provider-visible
-    yet' and refused to provision — permanently blocking every future run.
-    registry_resolve_name already waits CLOUDBENCH_CLONE_LOOKUP_SECONDS then
-    reports absence definitively, so an absent clone in a STALE (dead-owner)
-    registry is safely gone and its record must be reaped, not fatal."""
+def test_stale_name_only_registry_survives_provider_visibility_gap(tmp_path: Path) -> None:
+    """A successful Fly clone can become list-visible after the controller's
+    lookup deadline. The name-only record is the sole durable ownership proof
+    during that gap, so stale recovery must retain it and fail closed rather
+    than orphaning a late machine while provisioning a replacement fleet."""
     fleet = FLEET_SCRIPT.read_text()
     helpers = "".join(
         _extract_fleet_function(fleet, sig)
@@ -2334,10 +2337,9 @@ echo "reap_exit=$?"
         env={"ROOT": str(root), "REG": str(reg), "PATH": os.environ["PATH"]},
         text=True, capture_output=True, check=False,
     )
-    # must NOT refuse; must reap the absent clone's record and succeed
-    assert "refusing to provision" not in result.stderr, result.stderr
-    assert "reap_exit=0" in result.stdout, f"{result.stdout}\n{result.stderr}"
-    assert not (reg / "clones" / "cloudbench-gone").exists(), "absent clone record must be reaped"
+    assert "retaining ownership and refusing to provision" in result.stderr
+    assert "reap_exit=1" in result.stdout, f"{result.stdout}\n{result.stderr}"
+    assert (reg / "clones" / "cloudbench-gone").exists(), "uncertain clone ownership must survive"
 
 
 def test_fleet_dedupes_duplicate_bench_names() -> None:

@@ -8,9 +8,36 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agents"))
 
-from benchmarks.llm_usage import merge_usage_breakdowns
+def merge_usage_breakdowns(breakdowns) -> dict:
+    """Merge already-classified usage without importing the full agents tree.
+
+    This script is copied into the fleet's minimal immutable script snapshot,
+    where the ``benchmarks`` package is intentionally unavailable.
+    """
+    merged: dict[str, dict] = {}
+    for breakdown in breakdowns:
+        for provider, usage in breakdown.items():
+            provider_total = merged.setdefault(
+                provider,
+                {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "models": {}},
+            )
+            for field in ("calls", "input_tokens", "output_tokens"):
+                provider_total[field] += int(usage.get(field) or 0)
+            provider_total["cost_usd"] += float(usage.get("cost_usd") or 0)
+            for model, model_usage in (usage.get("models") or {}).items():
+                model_total = provider_total["models"].setdefault(
+                    model,
+                    {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0},
+                )
+                for field in ("calls", "input_tokens", "output_tokens"):
+                    model_total[field] += int(model_usage.get(field) or 0)
+                model_total["cost_usd"] += float(model_usage.get("cost_usd") or 0)
+    for usage in merged.values():
+        usage["cost_usd"] = round(usage["cost_usd"], 8)
+        for model_usage in usage["models"].values():
+            model_usage["cost_usd"] = round(model_usage["cost_usd"], 8)
+    return merged
 
 
 def aggregate(fleet_dir: Path) -> dict:
