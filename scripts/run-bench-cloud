@@ -100,6 +100,9 @@ REMOTE_RUN_SCRIPT="scripts/cloudbench-run.sh"
 REMOTE_LOG="/data/bench.log"      # detached on-box driver logs here; we poll it.
 REMOTE_TMP_SCRIPT="/tmp/rb.sh"    # the base64'd on-box invocation lands here.
 REMOTE_DASH_PORT="8009"           # on-box static dashboard http.server port.
+REMOTE_STATUS_PORT="8011"         # on-box http.server serving /data (bench.log) —
+                                  # polled over the Fly DATA PLANE (flyctl proxy)
+                                  # instead of ssh (rate-limited Machines API).
 REMOTE_BACKEND_PORT="3001"        # scripts/run.sh backend port for CONDUCTOR_PORT=3001.
 # The runner user that owns every benchmark agent (matches run_benchmark.py USER_ID).
 # The archive API proxies live reads to the box backend with this + the API key,
@@ -1316,6 +1319,14 @@ stop_proxy() {
     if [ -n "${LIVE_BACKEND_PORT:-}" ]; then
         pkill -f "flyctl proxy $LIVE_BACKEND_PORT:$REMOTE_BACKEND_PORT -a $APP" 2>/dev/null || true
     fi
+    if [ -n "${STATUS_PROXY_PID:-}" ]; then
+        pkill -P "$STATUS_PROXY_PID" 2>/dev/null || true
+        kill "$STATUS_PROXY_PID" 2>/dev/null || true
+    fi
+    if [ -n "${LOCAL_STATUS_PORT:-}" ]; then
+        pkill -f "flyctl proxy $LOCAL_STATUS_PORT:$REMOTE_STATUS_PORT -a $APP" 2>/dev/null || true
+    fi
+    STATUS_PROXY_PID=""
     [ -n "$DASHBOARD_MIRROR_PID" ] && kill "$DASHBOARD_MIRROR_PID" 2>/dev/null || true
     if [ -n "$IMESSAGE_RELAY_PID" ]; then
         pkill -P "$IMESSAGE_RELAY_PID" 2>/dev/null || true
@@ -1758,6 +1769,16 @@ done
 # the wrapper self-deletes ($REMOTE_TMP_SCRIPT rm -f + exec), so on a box whose
 # driver is already running the wrapper file is gone and the re-launch is a no-op;
 # it only actually re-fires on boxes where the wrapper died before exec'ing.
+# Start a tiny status HTTP server serving /data (which holds bench.log) so the
+# controller can poll progress over the Fly DATA PLANE via `flyctl proxy`
+# (WireGuard) instead of `flyctl ssh console` (rate-limited Machines API — the
+# saturation that froze 30-box runs). One idempotent ssh call (kill any stale
+# server first); it survives driver re-launches. Bound to the box's private 6PN
+# address, reachable only through the authenticated proxy.
+STATUS_PROXY_PID=""
+LOCAL_STATUS_PORT="$(( LOCAL_DASH_PORT + 3 ))"
+FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"pkill -f 'http.server ${REMOTE_STATUS_PORT}' 2>/dev/null; sleep 1; setsid python3 -m http.server ${REMOTE_STATUS_PORT} --directory /data >/dev/null 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
+
 launch_attempts="${CLOUDBENCH_DRIVER_LAUNCH_ATTEMPTS:-4}"
 _ok=0
 for _la in $(seq 1 "$launch_attempts"); do
@@ -1773,6 +1794,16 @@ for _la in $(seq 1 "$launch_attempts"); do
     fi
 done
 if [ "$_ok" = 1 ]; then echo "✅ On-box driver launched + confirmed running."; else echo "   ⚠️ driver-running check inconclusive after $launch_attempts attempts; polling anyway (the poll loop will detect a dead driver)."; fi
+
+# Bring up the DATA-PLANE status proxy: one flyctl proxy (WireGuard tunnel) whose
+# ongoing traffic never touches the Machines API. The poll loop reads bench.log
+# over http://127.0.0.1:$LOCAL_STATUS_PORT through it, so 30 boxes polling every
+# few seconds no longer saturate Fly's control-plane rate limit.
+REMOTE_STATUS_HOST="${mid}.vm.${APP}.internal"
+FLY proxy "$LOCAL_STATUS_PORT:$REMOTE_STATUS_PORT" "$REMOTE_STATUS_HOST" -a "$APP" --bind-addr 127.0.0.1 -q \
+    > "$OUT_DIR/cloudbench-status-proxy.log" 2>&1 &
+STATUS_PROXY_PID=$!
+echo "🛰️  status proxy: 127.0.0.1:$LOCAL_STATUS_PORT → fly:$REMOTE_STATUS_PORT (data plane; no Machines-API polling)"
 
 # ── 3a. Proxy the box BACKEND to the Mac so running rows open a live view ────
 # The local archive frontend renders benchmark agents by reading a local archive
@@ -2005,6 +2036,22 @@ echo ""
 echo "⏳ Polling $REMOTE_LOG for $DONE_MARKER (hard timeout ${RUN_TIMEOUT}s)..."
 SSH_LOG="$(mktemp)"
 FINISHED="0"; BENCH_EXIT=""; TIMED_OUT="0"
+# Read the on-box bench.log. Prefer the DATA-PLANE status proxy (HTTP over the
+# WireGuard tunnel — zero Machines-API cost, so 30 boxes polling can't saturate
+# the rate limit). Fall back to control-plane ssh only when the proxy path is down
+# so a proxy hiccup never blinds the poll.
+STATUS_PROXY_MISSES=0
+read_bench_log() {
+    local out
+    if [ -n "$STATUS_PROXY_PID" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
+        if out="$(curl -fsS --max-time 6 "http://127.0.0.1:$LOCAL_STATUS_PORT/bench.log" 2>/dev/null)"; then
+            STATUS_PROXY_MISSES=0
+            printf '%s' "$out"; return 0
+        fi
+        STATUS_PROXY_MISSES=$((STATUS_PROXY_MISSES + 1))
+    fi
+    ssh_read "$mid" "cat '$REMOTE_LOG' 2>/dev/null"
+}
 poll_start="$(date +%s)"
 last_size="0"
 last_change="$poll_start"
@@ -2028,7 +2075,8 @@ while :; do
         break
     fi
     # Pull the full log each poll (it stays small: driver + stack progress lines).
-    if remote_log="$(ssh_read "$mid" "cat '$REMOTE_LOG' 2>/dev/null" 2>/dev/null)"; then
+    # Data-plane proxy first (no Machines-API cost), ssh fallback if the proxy dies.
+    if remote_log="$(read_bench_log 2>/dev/null)"; then
         printf '%s' "$remote_log" > "$SSH_LOG"
         cur_size="$(wc -c < "$SSH_LOG" | tr -d ' ')"
         if [ "$cur_size" != "$last_size" ]; then

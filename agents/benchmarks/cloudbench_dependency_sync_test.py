@@ -2441,3 +2441,26 @@ def test_launcher_detects_dead_onbox_driver() -> None:
     run = (CLOUD_SCRIPT.parent / "cloudbench-run.sh").read_text()
     assert "stack process exited (rc=$stack_rc)" in run
     assert "last 40 lines of stack log" in run
+
+
+def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
+    """RCA (2026-07-15): the fleet's SSH-pull design (each of 30 boxes ssh_read-
+    polling /data/bench.log every few seconds) saturates Fly's Machines-API rate
+    limit — confirmed by manual 'flyctl machines list' being throttled ~1/3 of
+    calls during a live 30-box run, which froze the batch. Fix: serve bench.log
+    from a tiny on-box http.server and poll it over a `flyctl proxy` (WireGuard
+    DATA plane — zero Machines-API cost) instead of ssh. ssh remains a fallback
+    only when the proxy path is down, so a hiccup never blinds the poll."""
+    cloud = CLOUD_SCRIPT.read_text()
+    # On-box status server over /data, and a data-plane proxy to it.
+    assert "REMOTE_STATUS_PORT" in cloud
+    assert "http.server ${REMOTE_STATUS_PORT} --directory /data" in cloud
+    assert 'FLY proxy "$LOCAL_STATUS_PORT:$REMOTE_STATUS_PORT"' in cloud
+    # The poll reads over the proxy first (curl), ssh only as fallback.
+    assert "read_bench_log()" in cloud
+    assert 'curl -fsS --max-time 6 "http://127.0.0.1:$LOCAL_STATUS_PORT/bench.log"' in cloud
+    assert 'if remote_log="$(read_bench_log' in cloud
+    # The poll loop no longer ssh_reads the full log every iteration.
+    assert 'remote_log="$(ssh_read "$mid" "cat' not in cloud
+    # Proxy is cleaned up on exit.
+    assert 'pkill -f "flyctl proxy $LOCAL_STATUS_PORT:$REMOTE_STATUS_PORT -a $APP"' in cloud
