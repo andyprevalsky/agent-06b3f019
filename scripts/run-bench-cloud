@@ -1570,6 +1570,16 @@ trap 'exit 143' TERM
 # over the data-plane status proxy. Requires /data/cloudbench-boot.sh in the snapshot.
 LOCAL_STATUS_PORT="$(( LOCAL_DASH_PORT + 3 ))"
 STATUS_PROXY_PID=""
+# Shared setup used by BOTH launch paths AND the post-launch proxy/relay code —
+# must be set before the branch, or boot-launch trips `set -u` at the backend proxy.
+LIVE_BACKEND_PORT=""
+LIVE_BACKEND_URL=""
+if [ "$DASHBOARD" = "1" ] || [ "$NEEDS_IMESSAGE_RELAY" = "1" ]; then
+    LIVE_BACKEND_PORT="$(choose_free_local_port "$((LOCAL_DASH_PORT + 1))")"
+    [ -n "$LIVE_BACKEND_PORT" ] && LIVE_BACKEND_URL="http://localhost:$LIVE_BACKEND_PORT" \
+        || echo "   ⚠️ could not find a free local port for the live backend proxy"
+fi
+CLOUDBENCH_API_KEY="$( { grep -h '^BACKEND_API_KEY' "$ROOT_DIR/back-end/.env" "$ROOT_DIR/agents/.env" 2>/dev/null | head -1; } | sed -E 's/^BACKEND_API_KEY=//; s/^"//; s/"$//' )"
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     _ghb64="$(printf '%s' "$(gh auth token 2>/dev/null || resolve_github_token)" | base64 | tr -d '\n')"
     [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
@@ -1728,23 +1738,8 @@ fi
 # talks to a local archive API which proxies live agent reads here with the
 # benchmark API key — RLS-free, single-origin, no CORS. (flyctl proxy of the box
 # frontend was fragile AND RLS-blocked; see agent_link_server.py.)
-LIVE_BACKEND_PORT=""
-LIVE_BACKEND_URL=""
-if [ "$DASHBOARD" = "1" ] || [ "$NEEDS_IMESSAGE_RELAY" = "1" ]; then
-    LIVE_BACKEND_PORT="$(choose_free_local_port "$((LOCAL_DASH_PORT + 1))")"
-    if [ -n "$LIVE_BACKEND_PORT" ]; then
-        LIVE_BACKEND_URL="http://localhost:$LIVE_BACKEND_PORT"
-    else
-        echo "   ⚠️ could not find a free local port for the live backend proxy"
-    fi
-fi
-
-# The API key the box backend validates (its .env is the base64 of these local
-# .env files, so the local key matches). Used by the archive API upstream proxy.
-CLOUDBENCH_API_KEY="$(
-    { grep -h '^BACKEND_API_KEY' "$ROOT_DIR/back-end/.env" "$ROOT_DIR/agents/.env" 2>/dev/null | head -1; } \
-        | sed -E 's/^BACKEND_API_KEY=//; s/^"//; s/"$//'
-)"
+# LIVE_BACKEND_PORT/URL + CLOUDBENCH_API_KEY are now set once before the launch
+# branch (shared by boot-launch + the post-launch proxy code).
 CONTROLLER_GITHUB_TOKEN="$(gh auth token 2>/dev/null || resolve_github_token)"
 [ -n "$CONTROLLER_GITHUB_TOKEN" ] || { echo "❌ No current controller GitHub token available." >&2; exit 1; }
 CONTROLLER_GITHUB_TOKEN_B64="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN" | base64 | tr -d '\n')"
