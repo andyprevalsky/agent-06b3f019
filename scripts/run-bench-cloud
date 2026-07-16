@@ -779,12 +779,27 @@ ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
 # the session ends and can transiently fail (network blip, machine mid-start), so
 # every poll read is retried a few times. Returns the remote stdout on stdout;
 # returns non-zero only if every attempt failed. $1=machine id, $2=remote command.
-# Hard timeout wrapper (macOS has no `timeout`): perl alarm → SIGALRM kills the
-# exec'd child if it overruns. Without this a hung `flyctl ssh console` (a reused
-# box whose SSH stalls) never returns, so ssh_read's retry never fires and the
-# whole run wedges — the "clearing stale driver" hang we saw on pool machines.
+# Hard timeout wrapper (macOS has no `timeout`). Own the child process explicitly:
+# SIGALRM is not a reliable contract across exec (a stopped-machine flyctl SSH
+# ignored it for 2h22m), which prevented the outer run deadline from being read.
 _with_timeout() {  # _with_timeout <secs> <cmd> [args...]
-    perl -e 'my $s=shift; alarm $s; exec @ARGV or exit 127' "$@"
+    python3 -c '
+import subprocess, sys
+
+timeout = float(sys.argv[1])
+proc = subprocess.Popen(sys.argv[2:])
+try:
+    rc = proc.wait(timeout=timeout)
+except subprocess.TimeoutExpired:
+    proc.terminate()
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    raise SystemExit(124)
+raise SystemExit(rc if rc >= 0 else 128 - rc)
+' "$@"
 }
 
 ssh_read() {  # ssh_read <machine_id> <remote-shell-command>
@@ -2149,21 +2164,16 @@ echo ""
 echo "⏳ Polling $REMOTE_LOG for $DONE_MARKER (hard timeout ${RUN_TIMEOUT}s)..."
 SSH_LOG="$(mktemp)"
 FINISHED="0"; BENCH_EXIT=""; TIMED_OUT="0"
-# Read the on-box bench.log. Prefer the DATA-PLANE status proxy (HTTP over the
-# WireGuard tunnel — zero Machines-API cost, so 30 boxes polling can't saturate
-# the rate limit). Fall back to control-plane ssh only when the proxy path is down
-# so a proxy hiccup never blinds the poll.
-STATUS_PROXY_MISSES=0
+# Read the on-box bench.log only over the DATA-PLANE status proxy (HTTP over the
+# WireGuard tunnel — zero Machines-API cost). Never fall back to SSH from inside
+# this hard-deadline loop: a stopped box left flyctl SSH hung for hours, and 30
+# simultaneous fallbacks recreate the exact API burst this path eliminated.
 read_bench_log() {
-    local out
     if [ -n "$STATUS_PROXY_PID" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
-        if out="$(curl -fsS --max-time 6 "http://127.0.0.1:$LOCAL_STATUS_PORT/bench.log" 2>/dev/null)"; then
-            STATUS_PROXY_MISSES=0
-            printf '%s' "$out"; return 0
-        fi
-        STATUS_PROXY_MISSES=$((STATUS_PROXY_MISSES + 1))
+        curl -fsS --max-time 6 "http://127.0.0.1:$LOCAL_STATUS_PORT/bench.log" 2>/dev/null
+        return $?
     fi
-    ssh_read "$mid" "cat '$REMOTE_LOG' 2>/dev/null"
+    return 1
 }
 probe_driver_health() {
     local health_code
@@ -2172,6 +2182,27 @@ probe_driver_health() {
     case "$health_code" in
         204) return 0 ;;
         410) return 10 ;;
+        *) return 20 ;;
+    esac
+}
+probe_machine_liveness() {  # 0=started, 10=explicitly not running, 20=unknown
+    local machines state
+    machines="$(_with_timeout 10 flyctl machines list -a "$APP" --json 2>/dev/null)" || return 20
+    state="$(printf '%s' "$machines" | MACHINE_ID="$mid" python3 -c '
+import json, os, sys
+try:
+    machines = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(2)
+matches = [item for item in machines if item.get("id") == os.environ["MACHINE_ID"]]
+if len(matches) != 1:
+    print("absent" if not matches else "ambiguous")
+else:
+    print(matches[0].get("state") or "unknown")
+' 2>/dev/null)" || return 20
+    case "$state" in
+        started) return 0 ;;
+        stopped|stopping|destroyed|destroying|absent) return 10 ;;
         *) return 20 ;;
     esac
 }
@@ -2197,8 +2228,8 @@ while :; do
         TIMED_OUT="1"
         break
     fi
-    # Pull the full log each poll (it stays small: driver + stack progress lines).
-    # Data-plane proxy first (no Machines-API cost), ssh fallback if the proxy dies.
+    # Pull the full log each poll over the data plane (it stays small: driver +
+    # stack progress lines). This loop performs no control-plane SSH calls.
     if remote_log="$(read_bench_log 2>/dev/null)"; then
         printf '%s' "$remote_log" > "$SSH_LOG"
         cur_size="$(wc -c < "$SSH_LOG" | tr -d ' ')"
@@ -2240,6 +2271,14 @@ while :; do
             done
             if [ "$driver_health" = "dead" ]; then
                 echo "❌ on-box driver confirmed dead after ${DRIVER_STALL_SECONDS}s without progress -- bring-up (infra) failure; stopping this box so the fleet can proceed."
+                DRIVER_DIED="1"; BENCH_EXIT="1"
+                break
+            fi
+        fi
+        if [ "$driver_health" = "unknown" ]; then
+            probe_machine_liveness; machine_rc=$?
+            if [ "$machine_rc" = "10" ]; then
+                echo "❌ Fly machine is explicitly no longer running after ${DRIVER_STALL_SECONDS}s without progress -- infrastructure failure; stopping this box so the fleet can abort promptly."
                 DRIVER_DIED="1"; BENCH_EXIT="1"
                 break
             fi

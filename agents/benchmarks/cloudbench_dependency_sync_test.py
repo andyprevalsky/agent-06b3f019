@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import signal
 import shlex
 import subprocess
 import time
@@ -2703,6 +2704,8 @@ def test_launcher_detects_dead_onbox_driver() -> None:
     assert "DRIVER_STALL_SECONDS" in cloud
     assert "/driver-health" in cloud
     assert "confirmed dead after" in cloud
+    assert "probe_machine_liveness()" in cloud
+    assert "explicitly no longer running" in cloud
     # Stall exclusion uses the data-plane liveness contract, never an ssh pgrep.
     assert "driver-health" in STATUS_SERVER_SCRIPT.read_text()
     # Driver launch is retried until confirmed running (a single rate-limited
@@ -2725,23 +2728,52 @@ def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     polling /data/bench.log every few seconds) saturates Fly's Machines-API rate
     limit — confirmed by manual 'flyctl machines list' being throttled ~1/3 of
     calls during a live 30-box run, which froze the batch. Fix: serve bench.log
-    from a tiny on-box http.server and poll it over a `flyctl proxy` (WireGuard
-    DATA plane — zero Machines-API cost) instead of ssh. ssh remains a fallback
-    only when the proxy path is down, so a hiccup never blinds the poll."""
+    from a tiny on-box HTTP server and poll it over a `flyctl proxy` (WireGuard
+    DATA plane — zero Machines-API cost). Never fall back to SSH inside the hard-
+    timeout loop: a stopped box left flyctl SSH hung for 2h22m beyond its 7200s
+    ceiling, and 30 simultaneous fallbacks recreate the control-plane burst."""
     cloud = CLOUD_SCRIPT.read_text()
     # On-box status server over /data, and a data-plane proxy to it.
     assert "REMOTE_STATUS_PORT" in cloud
     assert "http.server ${REMOTE_STATUS_PORT} --directory /data" in cloud
     assert 'FLY proxy "$LOCAL_STATUS_PORT:$REMOTE_STATUS_PORT"' in cloud
-    # The poll reads over the proxy first (curl), ssh only as fallback.
+    # The poll reads only over the bounded data-plane proxy.
     assert "read_bench_log()" in cloud
     assert 'curl -fsS --max-time 6 "http://127.0.0.1:$LOCAL_STATUS_PORT/bench.log"' in cloud
     assert 'if remote_log="$(read_bench_log' in cloud
-    # The poll loop no longer ssh_reads the full log every iteration.
-    assert 'remote_log="$(ssh_read "$mid" "cat' not in cloud
+    read_log = _extract_fleet_function(cloud, "read_bench_log() {")
+    assert "ssh_read" not in read_log
     # Proxy cleanup is PID-owned; no cross-run pattern kill is allowed.
     assert 'kill "$STATUS_PROXY_PID"' in cloud
     assert 'pkill -f "flyctl proxy $LOCAL_STATUS_PORT' not in cloud
+
+
+def test_cloud_timeout_kills_a_command_that_ignores_sigalrm() -> None:
+    """RCA (2026-07-16): the perl-alarm wrapper exec'd flyctl and relied on
+    SIGALRM surviving exec. A stopped-machine SSH ignored that contract and ran
+    for 2h22m, preventing the outer 7200s loop deadline from being checked.
+    The wrapper must own, terminate, and wait for the child process itself."""
+    cloud = CLOUD_SCRIPT.read_text()
+    timeout_fn = _extract_fleet_function(cloud, "_with_timeout() {")
+    script = f"""{timeout_fn}
+_with_timeout 1 python3 -c 'import signal,time; signal.signal(signal.SIGALRM, signal.SIG_IGN); time.sleep(30)'
+"""
+    started = time.monotonic()
+    proc = subprocess.Popen(
+        ["bash", "-c", script],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=4)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        raise AssertionError("timeout wrapper left its signal-ignoring child hung")
+    assert proc.returncode != 0, (stdout, stderr)
+    assert time.monotonic() - started < 4
 
 
 def test_staleness_pauses_during_barrier_wait_and_per_box_timeout() -> None:
