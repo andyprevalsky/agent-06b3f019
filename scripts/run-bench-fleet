@@ -295,13 +295,18 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id];
             return 0
         fi
 
-        # Retry only recoverable throttles; leave the final-attempt failure to the
-        # error path below. Any late-appearing machine under this attempt's name
-        # is reaped by the caller's ownership-ledger teardown.
+        # Retry recoverable transient failures; leave the final-attempt failure to
+        # the error path below. Any late-appearing machine under this attempt's name
+        # is reaped by the caller's ownership-ledger teardown. Two transient classes:
+        #   * Fly API throttle (`rate limit exceeded`/`resource_exhausted`/429)
+        #   * Fly volume-creation capacity (`failed to launch VM: volume not found`) —
+        #     the snapshot-backed volume isn't ready in-region yet; a fresh clone
+        #     name on retry usually lands. Without this, one flaky clone leaves the
+        #     synchronized barrier short a stack (N-1/N) and fails the whole gate.
         if [ "$attempt" -lt "$attempts" ] \
-            && printf '%s' "$clone_out" | grep -qiE 'rate limit exceeded|resource_exhausted|429|too many requests'; then
+            && printf '%s' "$clone_out" | grep -qiE 'rate limit exceeded|resource_exhausted|429|too many requests|volume not found|failed to launch vm'; then
             backoff=$((attempt * attempt * 3))   # 3s, 12s, 27s, 48s — spread past Fly's window
-            echo "   ⏳ Fly API throttled cloning $source_id (attempt $attempt/$attempts); backing off ${backoff}s" >&2
+            echo "   ⏳ Transient Fly clone failure for $source_id (attempt $attempt/$attempts); backing off ${backoff}s" >&2
             sleep "$backoff"
             continue
         fi
