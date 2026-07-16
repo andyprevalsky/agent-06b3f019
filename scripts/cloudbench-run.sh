@@ -61,6 +61,7 @@ SYNC_DEPS_SCRIPT="${CLOUDBENCH_SYNC_DEPS_SCRIPT:-$REPO_DIR/scripts/cloudbench-sy
 SYNC_PRISMA_SCRIPT="${CLOUDBENCH_SYNC_PRISMA_SCRIPT:-$REPO_DIR/scripts/cloudbench-sync-prisma-client.sh}"
 CURRENT_RUN_ARTIFACT_SCRIPT="${CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT:-$REPO_DIR/scripts/cloudbench-current-run-artifact.py}"
 PREPARE_PATCH_SCRIPT="${CLOUDBENCH_PREPARE_PATCH_SCRIPT:-$REPO_DIR/scripts/cloudbench-prepare-patch.sh}"
+STATUS_SERVER_SCRIPT="${CLOUDBENCH_STATUS_SERVER_SCRIPT:-$REPO_DIR/scripts/cloudbench-status-server.py}"
 
 # ── Inputs (env) ────────────────────────────────────────────────────────────
 REF="${REF:-}"
@@ -79,6 +80,8 @@ BENCHMARK_PEAK_FLY_MACHINES="${BENCHMARK_PEAK_FLY_MACHINES:-}"
 BENCHMARK_VM_USD_PER_HOUR="${BENCHMARK_VM_USD_PER_HOUR:-}"
 BENCHMARK_FRONTEND_URL="${BENCHMARK_FRONTEND_URL:-}"
 CLOUDBENCH_START_BARRIER="${CLOUDBENCH_START_BARRIER:-}"
+CLOUDBENCH_BARRIER_TOKEN="${CLOUDBENCH_BARRIER_TOKEN:-}"
+CLOUDBENCH_STATUS_PORT="${CLOUDBENCH_STATUS_PORT:-8011}"
 CLOUDBENCH_RUN_TOKEN="${CLOUDBENCH_RUN_TOKEN:-}"
 
 if [ -n "$CLOUDBENCH_RUN_TOKEN" ]; then
@@ -103,6 +106,21 @@ log() { echo "[cloudbench $(date -u +%H:%M:%S)] $*"; }
 # Step markers: STEP <name> lines are machine-parseable timing boundaries for
 # scripts/cloudbench-bring-up-report.py — isolate each bring-up step's cost.
 step() { log "STEP $*"; }
+
+run_with_heartbeat() {
+    local label="$1" command_pid interval
+    shift
+    interval="${CLOUDBENCH_HEARTBEAT_SECONDS:-30}"
+    "$@" &
+    command_pid=$!
+    while kill -0 "$command_pid" 2>/dev/null; do
+        sleep "$interval"
+        if kill -0 "$command_pid" 2>/dev/null; then
+            log "$label heartbeat (pid=$command_pid)"
+        fi
+    done
+    wait "$command_pid"
+}
 
 # ── Normalize the task list (comma OR space separated) into an array ────────
 # The controller may pass "a,b,c" or "a b c"; accept both.
@@ -141,10 +159,17 @@ emit_report_and_result() {
 
 # Best-effort teardown of the static dashboard server started in step 5.
 DASH_PID=""
+STATUS_PID=""
 stop_dashboard() {
     [ -n "$DASH_PID" ] || return 0
     kill "$DASH_PID" 2>/dev/null || true
     DASH_PID=""
+}
+
+stop_status_server() {
+    [ -n "$STATUS_PID" ] || return 0
+    kill "$STATUS_PID" 2>/dev/null || true
+    STATUS_PID=""
 }
 
 finish() {
@@ -178,6 +203,7 @@ rm -rf "$CONTEXT_DIR"
 mkdir -p "$CONTEXT_DIR"
 chown -R "$APP_USER:$APP_USER" "$REPO_DIR/.context"
 touch "$RUN_OUTPUT_MARKER"
+printf '%s\n' "$$" > /data/cloudbench-driver.pid
 if [ -n "$CLOUDBENCH_START_BARRIER" ]; then
     rm -f "/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.ready" \
         "/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.release"
@@ -229,6 +255,22 @@ elif [ -n "${LOCAL_PATCH_B64:-}" ]; then
         fi
     fi
 fi
+
+# Replace the bootstrap read-only http.server with the ref's authenticated
+# data-plane server. The same WireGuard proxy keeps serving bench.log, while the
+# controller can now release the synchronized barrier without an SSH/API burst.
+pkill -f "http.server $CLOUDBENCH_STATUS_PORT" 2>/dev/null || true
+pkill -f "cloudbench-status-server.py.*--port $CLOUDBENCH_STATUS_PORT" 2>/dev/null || true
+if [ ! -f "$STATUS_SERVER_SCRIPT" ]; then
+    log "FATAL: missing $STATUS_SERVER_SCRIPT"
+    finish 1
+fi
+setsid python3 "$STATUS_SERVER_SCRIPT" \
+    --directory /data \
+    --port "$CLOUDBENCH_STATUS_PORT" \
+    --barrier "$CLOUDBENCH_START_BARRIER" \
+    >/dev/null 2>&1 </dev/null &
+STATUS_PID=$!
 
 # ── 2. Decode injected secrets into the repo .env files the stack reads ─────
 step env_decode
@@ -591,7 +633,7 @@ set +e
 # Export the workspace/queue env explicitly INSIDE the shell (not just an `env`
 # prefix) so run_benchmark's _verify_worker_queue_alignment() reliably sees
 # CONDUCTOR_WORKSPACE_NAME, and echo it so the log proves what the process got.
-gosu "$APP_USER" bash -c "
+run_with_heartbeat "benchmark" gosu "$APP_USER" bash -c "
 export HOME='/home/$APP_USER'
 export BENCHMARK_CONTEXT_DIR='$CONTEXT_DIR'
 export BENCHMARK_ISOLATED_RUN=true

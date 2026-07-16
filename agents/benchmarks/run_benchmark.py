@@ -79,6 +79,7 @@ from benchmarks.phone_callee import (
 )
 from benchmarks.realtime_monitor import SupabaseRealtimeSmokeMonitor
 from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
+from benchmarks.llm_usage import aggregate_usage_items
 from benchmarks.timeout_history import (
     InsufficientHistoryError,
 )
@@ -1104,6 +1105,37 @@ async def get_tool_usage(base_url: str, agent_id: str) -> dict:
         if resp.status_code == 200:
             return resp.json()
         return {}
+
+
+async def get_agent_tool_usage(base_url: str, agent_id: str) -> dict:
+    """GET raw per-agent usage items for provider/model attribution."""
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(f"{base_url}/api/tool-usage/{agent_id}", headers=headers)
+        if resp.status_code == 200:
+            return resp.json()
+        return {}
+
+
+async def get_llm_usage_breakdown(base_url: str, root_agent_id: str, tree_stats: dict) -> dict:
+    """Aggregate raw LLM calls across every agent in a tree by auth path/model."""
+    agent_ids = {
+        str(agent.get("agent_id") or agent.get("id") or "")
+        for agent in tree_stats.get("all_agents", [])
+        if isinstance(agent, dict)
+    }
+    agent_ids.discard("")
+    agent_ids.add(root_agent_id)
+    payloads = await asyncio.gather(
+        *(get_agent_tool_usage(base_url, agent_id) for agent_id in sorted(agent_ids))
+    )
+    items: list[dict] = []
+    for payload in payloads:
+        for usage in payload.get("usages", []):
+            usage_items = usage.get("usage_items") if isinstance(usage, dict) else None
+            if isinstance(usage_items, list):
+                items.extend(item for item in usage_items if isinstance(item, dict))
+    return aggregate_usage_items(items)
 
 
 async def get_attention_requests(base_url: str) -> list:
@@ -5394,6 +5426,7 @@ async def run_single_task(
             cost_cents = agent.get("tree_cost_cents", 0) or agent.get("tool_cost_cents", 0)
 
         tree_stats = await _fetch_tree_stats(base_url, agent_id)
+        llm_usage_by_provider = await get_llm_usage_breakdown(base_url, agent_id, tree_stats)
         tree_agent_count = max(tree_agent_count, int(tree_stats.get("agent_count") or 0))
         tree_tokens_in = max(
             _as_nonnegative_int(tree_stats.get("tree_tokens_in")),
@@ -5591,6 +5624,7 @@ async def run_single_task(
             tree_agent_count=tree_agent_count,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            llm_usage_by_provider=llm_usage_by_provider,
             stop_metadata={
                 "llm_call_count": llm_call_count,
                 "tree_agent_count": tree_agent_count,

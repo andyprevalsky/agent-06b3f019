@@ -119,6 +119,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -191,7 +192,7 @@ def rb_export(rb_text, key):
 
 def run_fake_driver(mdir):
     """Emulate the on-box driver contract: barrier-ready → wait for the fleet's
-    ssh release-touch → write report-card.json/run.json → DONE marker. The PASS
+    data-plane release POST → write report-card.json/run.json → DONE marker. The PASS
     therefore requires the real controller loop to complete every leg."""
     rb_text = open(os.path.join(mdir, "tmp", "rb.sh")).read()
     token = rb_export(rb_text, "CLOUDBENCH_RUN_TOKEN")
@@ -343,11 +344,42 @@ elif args[:2] == ["machine", "status"]:
     if found is None:
         sys.exit(1)
     print(f"  State: {found['state']}")
-elif args[:2] == ["machine", "start"]:
+elif args[:2] == ["machine", "update"]:
+    machine_id = args[2]
+    boot_env = {}
+    for index, value in enumerate(args):
+        if value == "--env" and index + 1 < len(args) and "=" in args[index + 1]:
+            key, env_value = args[index + 1].split("=", 1)
+            boot_env[key] = env_value
     with locked_state() as state:
-        found = find_machine(state, args[2])
+        found = find_machine(state, machine_id)
+        if found is None:
+            sys.exit(1)
+        found["boot_env"] = boot_env
+        found["state"] = "stopped"
+    mdir = machine_dir(machine_id)
+    rb_path = os.path.join(mdir, "tmp", "rb.sh")
+    os.makedirs(os.path.dirname(rb_path), exist_ok=True)
+    with open(rb_path, "w") as fh:
+        for key, value in boot_env.items():
+            fh.write(f"export {key}={shlex.quote(value)}\n")
+elif args[:2] == ["machine", "start"]:
+    machine_id = args[2]
+    with locked_state() as state:
+        found = find_machine(state, machine_id)
         if found:
             found["state"] = "started"
+            boot_env = found.get("boot_env") or {}
+        else:
+            boot_env = {}
+    mdir = machine_dir(machine_id)
+    if boot_env and not os.path.exists(os.path.join(mdir, "driver.started")):
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "__fake_driver__", mdir],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        open(os.path.join(mdir, "driver.started"), "w").close()
 elif args[:2] == ["machine", "stop"]:
     with locked_state() as state:
         found = find_machine(state, args[2])
@@ -420,7 +452,47 @@ elif args[:2] == ["ssh", "console"]:
 elif args[:2] == ["tokens", "create"]:
     print(json.dumps({"token": "fake-deploy-token"}))
 elif args[:1] == ["proxy"]:
-    time.sleep(3600)
+    import http.server
+    local_port = int(args[1].split(":", 1)[0])
+    remote_host = args[2]
+    machine_id = remote_host.split(".vm.", 1)[0]
+    mdir = machine_dir(machine_id)
+
+    class ProxyHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/driver-health":
+                code = 204 if os.path.exists(os.path.join(mdir, "driver.started")) else 410
+                self.send_response(code)
+                self.end_headers()
+                return
+            if self.path != "/bench.log":
+                self.send_error(404)
+                return
+            path = os.path.join(mdir, "data", "bench.log")
+            try:
+                body = open(path, "rb").read()
+            except OSError:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            if self.path != "/release":
+                self.send_error(404)
+                return
+            rb_path = os.path.join(mdir, "tmp", "rb.sh")
+            barrier = rb_export(open(rb_path).read(), "CLOUDBENCH_START_BARRIER")
+            open(os.path.join(mdir, "data", f"cloudbench-start-{barrier}.release"), "w").close()
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, *unused):
+            pass
+
+    http.server.ThreadingHTTPServer(("127.0.0.1", local_port), ProxyHandler).serve_forever()
 else:
     print(f"FATAL: fake flyctl has no handler for: {' '.join(args)}", file=sys.stderr)
     sys.exit(1)

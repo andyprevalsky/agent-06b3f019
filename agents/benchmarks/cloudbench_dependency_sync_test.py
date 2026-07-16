@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ ARTIFACT_SCRIPT = ROOT / "scripts" / "cloudbench-current-run-artifact.py"
 FETCH_SCRIPT = ROOT / "scripts" / "cloudbench-fetch-ref.sh"
 SNAPSHOT_SCRIPT = ROOT / "scripts" / "cloudbench-select-snapshot.py"
 MACHINE_READINESS_SCRIPT = ROOT / "scripts" / "cloudbench-machine-readiness.py"
+STATUS_SERVER_SCRIPT = ROOT / "scripts" / "cloudbench-status-server.py"
 AGGREGATE_SCRIPT = ROOT / "scripts" / "cloudbench-aggregate-runs.py"
 DRIVER_SCRIPT = ROOT / "scripts" / "cloudbench-run.sh"
 FLEET_SCRIPT = ROOT / "scripts" / "run-bench-fleet"
@@ -1533,6 +1535,22 @@ def test_fleet_aggregate_contains_every_isolated_task(tmp_path: Path) -> None:
                             "passed": passed,
                             "duration_seconds": 10 if name == "one" else 20,
                             "cost_cents": 1,
+                            "llm_usage_by_provider": {
+                                "codex_token": {
+                                    "calls": 1,
+                                    "input_tokens": 10,
+                                    "output_tokens": 2,
+                                    "cost_usd": 0,
+                                    "models": {
+                                        "gpt-5.6-sol": {
+                                            "calls": 1,
+                                            "input_tokens": 10,
+                                            "output_tokens": 2,
+                                            "cost_usd": 0,
+                                        }
+                                    },
+                                }
+                            },
                         }
                     ]
                 }
@@ -1554,6 +1572,10 @@ def test_fleet_aggregate_contains_every_isolated_task(tmp_path: Path) -> None:
     assert aggregated["summary"]["passed"] == 1
     assert aggregated["summary"]["failed"] == 1
     assert aggregated["summary"]["total_duration_seconds"] == 30
+    usage = json.loads((batch / "llm-usage.json").read_text())
+    assert usage["run_id"] == "run-1"
+    assert usage["providers"]["codex_token"]["calls"] == 2
+    assert usage["providers"]["codex_token"]["models"]["gpt-5.6-sol"]["input_tokens"] == 20
 
 
 def _extract_fleet_function(source: str, signature: str) -> str:
@@ -2380,12 +2402,248 @@ def test_start_barrier_tolerates_infra_failures() -> None:
     assert "excluding it (infra)" in fn
     # It only fails when the whole live set is gone.
     assert 'live" -eq 0 ]' in fn and "every isolated stack failed" in fn
-    # Release only targets the ready machines, and a single release RPC failing
-    # does not abort the batch.
+    # Release only targets the ready machines. A release failure must stop the
+    # invalid run immediately; silently proceeding strands that task at the
+    # barrier and guarantees a missing verdict.
     assert 'is_ready[$j]}" = "1" ] || continue' in fn
-    assert "a start-barrier release RPC failed" in fn
+    assert "could not release synchronized start barrier" in fn
     # Timeout releases the ready set instead of aborting.
     assert "releasing the ready set anyway" in fn
+
+
+def test_start_barrier_release_uses_authenticated_data_plane(tmp_path: Path) -> None:
+    """RCA (2026-07-16): boot launch removed the N-wide SSH launch burst and
+    status polling moved to the WireGuard data plane, but synchronized release
+    still fired one `flyctl ssh console ... touch` per ready box. In a live
+    30-wide run, one release RPC failed and released boxes subsequently stopped
+    without DONE markers. Release must use the already-established status proxy,
+    authenticate the request, and fail the controller if any ready box cannot be
+    released instead of silently waiting for that box's barrier timeout.
+    """
+    import socket
+    import urllib.error
+    import urllib.request
+
+    fleet = FLEET_SCRIPT.read_text()
+    fn = _extract_fleet_function(fleet, "release_start_barrier() {")
+    assert "FLY ssh console" not in fn
+    assert "CLOUDBENCH_BARRIER_TOKEN" in fleet
+    assert "http://127.0.0.1:" in fn and "/release" in fn
+    assert "could not release synchronized start barrier" in fn
+
+    assert STATUS_SERVER_SCRIPT.exists(), "data-plane release server is missing"
+    barrier = "run-123"
+    token = "release-secret"
+    (tmp_path / "bench.log").write_text("ready\n")
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    env = os.environ.copy()
+    env["CLOUDBENCH_BARRIER_TOKEN"] = token
+    server = subprocess.Popen(
+        [
+            "python3",
+            str(STATUS_SERVER_SCRIPT),
+            "--directory",
+            str(tmp_path),
+            "--port",
+            str(port),
+            "--barrier",
+            barrier,
+            "--bind",
+            "127.0.0.1",
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        base = f"http://127.0.0.1:{port}"
+        deadline = time.time() + 5
+        while True:
+            try:
+                with urllib.request.urlopen(f"{base}/bench.log", timeout=0.5) as response:
+                    assert response.read() == b"ready\n"
+                break
+            except (OSError, urllib.error.URLError):
+                if time.time() >= deadline:
+                    raise
+                time.sleep(0.05)
+
+        release = tmp_path / f"cloudbench-start-{barrier}.release"
+        denied = urllib.request.Request(
+            f"{base}/release",
+            data=b"",
+            method="POST",
+            headers={"Authorization": "Bearer wrong"},
+        )
+        try:
+            urllib.request.urlopen(denied, timeout=1)
+            raise AssertionError("wrong barrier token unexpectedly succeeded")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+        assert not release.exists()
+
+        allowed = urllib.request.Request(
+            f"{base}/release",
+            data=b"",
+            method="POST",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with urllib.request.urlopen(allowed, timeout=1) as response:
+            assert response.status == 204
+        assert release.exists()
+
+        pid_file = tmp_path / "cloudbench-driver.pid"
+        pid_file.write_text(f"{os.getpid()}\n")
+        with urllib.request.urlopen(f"{base}/driver-health", timeout=1) as response:
+            assert response.status == 204
+        health_probe = _extract_fleet_function(
+            CLOUD_SCRIPT.read_text(), "probe_driver_health() {"
+        )
+
+        def probe(probe_port: int) -> int:
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'{health_probe}\nLOCAL_STATUS_PORT="$1"\nprobe_driver_health',
+                    "probe",
+                    str(probe_port),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            return result.returncode
+
+        assert probe(port) == 0
+        pid_file.write_text("99999999\n")
+        try:
+            urllib.request.urlopen(f"{base}/driver-health", timeout=1)
+            raise AssertionError("dead driver unexpectedly reported healthy")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 410
+        assert probe(port) == 10
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            unused_port = sock.getsockname()[1]
+        assert probe(unused_port) == 20
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
+def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
+    """All 30 ready boxes release concurrently over their existing data-plane
+    proxies; one unavailable endpoint makes the run fail immediately and visibly.
+    """
+    import socket
+    import urllib.error
+    import urllib.request
+
+    barrier = "fleet-30"
+    token = "fleet-release-token"
+    servers: list[subprocess.Popen[str]] = []
+    roots: list[Path] = []
+    ports: list[int] = []
+    env = os.environ.copy()
+    env["CLOUDBENCH_BARRIER_TOKEN"] = token
+    try:
+        for index in range(30):
+            root = tmp_path / str(index)
+            root.mkdir()
+            (root / "bench.log").write_text(
+                f"synchronized start barrier ready: {barrier}\n"
+            )
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+            server = subprocess.Popen(
+                [
+                    "python3",
+                    str(STATUS_SERVER_SCRIPT),
+                    "--directory",
+                    str(root),
+                    "--port",
+                    str(port),
+                    "--barrier",
+                    barrier,
+                    "--bind",
+                    "127.0.0.1",
+                ],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            servers.append(server)
+            roots.append(root)
+            ports.append(port)
+
+        deadline = time.time() + 5
+        while True:
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{ports[-1]}/bench.log", timeout=0.2
+                ):
+                    break
+            except (OSError, urllib.error.URLError):
+                if time.time() >= deadline:
+                    raise
+                time.sleep(0.05)
+
+        for root, port in zip(roots, ports, strict=True):
+            (root / "fleet-child.log").write_text(
+                f"status proxy: 127.0.0.1:{port} -> fly:8011\n"
+                f"synchronized start barrier ready: {barrier}\n"
+            )
+
+        release_fn = _extract_fleet_function(
+            FLEET_SCRIPT.read_text(), "release_start_barrier() {"
+        )
+        quoted_roots = " ".join(shlex.quote(str(root)) for root in roots)
+        script = f"""set +e
+SYNCHRONIZED_START=1
+RUN_ID={barrier}
+START_BARRIER_WAIT_SECONDS=2
+CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS=2
+CLOUDBENCH_BARRIER_TOKEN={token}
+CLOUDBENCH_BARRIER_RELEASE_ATTEMPTS=2
+CHILD_PIDS=({' '.join([str(os.getpid())] * 30)})
+CHILD_OUT=({quoted_roots})
+CHILD_BENCH=({' '.join(f'task-{i}' for i in range(30))})
+CHILD_MACHINE=({' '.join(f'machine-{i}' for i in range(30))})
+{release_fn}
+release_start_barrier
+"""
+        success = subprocess.run(
+            ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=8
+        )
+        assert success.returncode == 0, success.stderr
+        assert all(
+            (root / f"cloudbench-start-{barrier}.release").exists() for root in roots
+        )
+
+        for root in roots:
+            (root / f"cloudbench-start-{barrier}.release").unlink()
+        servers[-1].terminate()
+        servers[-1].wait(timeout=5)
+        failed = subprocess.run(
+            ["bash", "-c", script.replace("ATTEMPTS=2", "ATTEMPTS=1")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=8,
+        )
+        assert failed.returncode == 1
+        assert "could not release synchronized start barrier" in failed.stderr
+    finally:
+        for server in servers:
+            if server.poll() is None:
+                server.terminate()
+                server.wait(timeout=5)
 
 
 def test_clone_burst_is_rate_limit_resilient() -> None:
@@ -2422,11 +2680,12 @@ def test_launcher_detects_dead_onbox_driver() -> None:
     burst that triggers the death; and the health-wait FATAL must capture the exit
     code + stack-log tail so a bring-up death is diagnosable."""
     cloud = CLOUD_SCRIPT.read_text()
-    # Poll loop probes driver liveness on stall and breaks on death.
+    # Poll loop probes driver liveness over the data plane on stall and breaks on death.
     assert "DRIVER_STALL_SECONDS" in cloud
-    assert "on-box driver made no progress" in cloud  # data-plane staleness, no ssh probe
-    # Stall exclusion is pure data-plane staleness (no ssh pgrep probe in the poll loop).
-    assert "made no progress for ${DRIVER_STALL_SECONDS}s (stuck/dead" in cloud
+    assert "/driver-health" in cloud
+    assert "confirmed dead after" in cloud
+    # Stall exclusion uses the data-plane liveness contract, never an ssh pgrep.
+    assert "driver-health" in STATUS_SERVER_SCRIPT.read_text()
     # Driver launch is retried until confirmed running (a single rate-limited
     # fire-and-forget launch left boxes dead at RUNSTAMP), and the liveness
     # probe presumes death on repeated non-ALIVE results (DEAD OR unreachable),
@@ -2461,8 +2720,9 @@ def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     assert 'if remote_log="$(read_bench_log' in cloud
     # The poll loop no longer ssh_reads the full log every iteration.
     assert 'remote_log="$(ssh_read "$mid" "cat' not in cloud
-    # Proxy is cleaned up on exit.
-    assert 'pkill -f "flyctl proxy $LOCAL_STATUS_PORT:$REMOTE_STATUS_PORT -a $APP"' in cloud
+    # Proxy cleanup is PID-owned; no cross-run pattern kill is allowed.
+    assert 'kill "$STATUS_PROXY_PID"' in cloud
+    assert 'pkill -f "flyctl proxy $LOCAL_STATUS_PORT' not in cloud
 
 
 def test_staleness_pauses_during_barrier_wait_and_per_box_timeout() -> None:
@@ -2479,3 +2739,90 @@ def test_staleness_pauses_during_barrier_wait_and_per_box_timeout() -> None:
     fleet = FLEET_SCRIPT.read_text()
     assert "CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS" in fleet
     assert "did not reach the start barrier within" in fleet
+
+
+def test_quiet_benchmark_emits_driver_heartbeats() -> None:
+    """RCA (2026-07-16): the 210-second no-log watchdog was described as a
+    bring-up detector but remained active after barrier release. Multiple real
+    benchmarks ran quietly for 210 seconds, were killed as alleged bring-up
+    failures, and became missing verdicts. The driver must heartbeat while the
+    benchmark subprocess is alive so true driver death still becomes stale while
+    quiet, healthy benchmark execution does not.
+    """
+    driver = DRIVER_SCRIPT.read_text()
+    heartbeat = _extract_fleet_function(driver, "run_with_heartbeat() {")
+    assert "CLOUDBENCH_HEARTBEAT_SECONDS" in heartbeat
+    assert 'log "$label heartbeat' in heartbeat
+    assert 'run_with_heartbeat "benchmark"' in driver
+
+    script = f"""set +e
+log() {{ echo "$*"; }}
+{heartbeat}
+CLOUDBENCH_HEARTBEAT_SECONDS=1 run_with_heartbeat benchmark bash -c 'sleep 2; exit 7'
+rc=$?
+echo rc=$rc
+exit 0
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=6
+    )
+    assert "benchmark heartbeat" in result.stdout
+    assert "rc=7" in result.stdout
+
+
+def test_cloud_runner_avoids_live_run_port_collisions() -> None:
+    """RCA (2026-07-16): concurrent runs in one workspace reused the same fixed
+    per-task ports. Live evidence showed status proxies exiting with `bind:
+    address already in use`, which blinded liveness/release and caused infra
+    exclusions. Every locally bound per-task endpoint must resolve a free port,
+    and the fleet must discover the selected status port from the child rather
+    than reconstructing the preferred value.
+    """
+    cloud = CLOUD_SCRIPT.read_text()
+    assert 'claim_local_port "$LOCAL_DASH_PORT" LOCAL_DASH_PORT' in cloud
+    assert 'claim_local_port "$(( LOCAL_DASH_PORT + 3 ))" LOCAL_STATUS_PORT' in cloud
+    assert 'claim_local_port "$((LOCAL_DASH_PORT + 1))" LIVE_BACKEND_PORT' in cloud
+    assert 'pkill -f "flyctl proxy $LOCAL_STATUS_PORT' not in cloud
+    assert 'pkill -f "flyctl proxy $LIVE_BACKEND_PORT' not in cloud
+    fleet = FLEET_SCRIPT.read_text()
+    barrier = _extract_fleet_function(fleet, "release_start_barrier() {")
+    assert "status proxy: 127\\.0\\.0\\.1:" in barrier
+    assert "fleet-child.log" in barrier
+    assert "CHILD_PORT[j] + 3" not in barrier
+
+    bindable = _extract_fleet_function(cloud, "local_port_is_bindable() {")
+    claim = _extract_fleet_function(cloud, "claim_local_port() {")
+    release = _extract_fleet_function(cloud, "release_local_port_leases() {")
+    lease_root = ROOT / ".context" / f"port-lease-test-{os.getpid()}"
+    lease_root.mkdir(parents=True, exist_ok=True)
+    script = f"""set -eu
+PORT_LEASE_ROOT="$1"
+PORT_LEASE_NONCE="$$-$RANDOM"
+PORT_LEASES=()
+{bindable}
+{claim}
+{release}
+trap release_local_port_leases EXIT
+claim_local_port "$2" CLAIMED_PORT
+echo "$CLAIMED_PORT"
+sleep 1
+"""
+    first = subprocess.Popen(
+        ["bash", "-c", script, "lease", str(lease_root), "42000"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    second = subprocess.Popen(
+        ["bash", "-c", script, "lease", str(lease_root), "42000"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    first_out, first_err = first.communicate(timeout=5)
+    second_out, second_err = second.communicate(timeout=5)
+    assert first.returncode == 0, first_err
+    assert second.returncode == 0, second_err
+    assert first_out.strip() != second_out.strip()
+    assert not any(lease_root.iterdir())
+    lease_root.rmdir()

@@ -1316,15 +1316,9 @@ stop_proxy() {
         pkill -P "$PROXY_PID" 2>/dev/null || true
         kill "$PROXY_PID" 2>/dev/null || true
     fi
-    if [ -n "${LIVE_BACKEND_PORT:-}" ]; then
-        pkill -f "flyctl proxy $LIVE_BACKEND_PORT:$REMOTE_BACKEND_PORT -a $APP" 2>/dev/null || true
-    fi
     if [ -n "${STATUS_PROXY_PID:-}" ]; then
         pkill -P "$STATUS_PROXY_PID" 2>/dev/null || true
         kill "$STATUS_PROXY_PID" 2>/dev/null || true
-    fi
-    if [ -n "${LOCAL_STATUS_PORT:-}" ]; then
-        pkill -f "flyctl proxy $LOCAL_STATUS_PORT:$REMOTE_STATUS_PORT -a $APP" 2>/dev/null || true
     fi
     STATUS_PROXY_PID=""
     [ -n "$DASHBOARD_MIRROR_PID" ] && kill "$DASHBOARD_MIRROR_PID" 2>/dev/null || true
@@ -1371,23 +1365,56 @@ stop_all_local_viewers() {
     rm -f "$OUT_DIR/archive-frontend.json" 2>/dev/null || true
 }
 
-choose_free_local_port() {  # choose_free_local_port <preferred>
+PORT_LEASE_ROOT="${TMPDIR:-/tmp}/rose-cloudbench-port-leases"
+PORT_LEASE_NONCE="$RUN_LOG_TOKEN"
+PORT_LEASES=()
+
+local_port_is_bindable() {
     python3 - "$1" <<'PY'
 import socket
 import sys
 
-preferred = int(sys.argv[1])
-for port in [preferred] + list(range(preferred + 1, preferred + 100)):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.bind(("127.0.0.1", port))
-    except OSError:
-        sock.close()
-        continue
+sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+try:
+    sock.bind(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    raise SystemExit(1)
+finally:
     sock.close()
-    print(port)
-    break
 PY
+}
+
+claim_local_port() {  # claim_local_port <preferred> <output-variable>
+    local preferred="$1" output_var="$2" port lease owner owner_pid
+    mkdir -p "$PORT_LEASE_ROOT"
+    for port in $(seq "$preferred" $(( preferred + 99 ))); do
+        lease="$PORT_LEASE_ROOT/$port"
+        if mkdir "$lease" 2>/dev/null; then
+            if local_port_is_bindable "$port"; then
+                printf '%s %s\n' "$$" "$PORT_LEASE_NONCE" > "$lease/owner"
+                PORT_LEASES+=("$lease")
+                printf -v "$output_var" '%s' "$port"
+                return 0
+            fi
+            rmdir "$lease" 2>/dev/null || true
+            continue
+        fi
+        owner="$(cat "$lease/owner" 2>/dev/null || true)"
+        owner_pid="${owner%% *}"
+        if [ -n "$owner_pid" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+            rm -rf "$lease" 2>/dev/null || true
+        fi
+    done
+    return 1
+}
+
+release_local_port_leases() {
+    local lease owner
+    for lease in "${PORT_LEASES[@]:-}"; do
+        owner="$(cat "$lease/owner" 2>/dev/null || true)"
+        [ "$owner" = "$$ $PORT_LEASE_NONCE" ] && rm -rf "$lease" 2>/dev/null || true
+    done
+    PORT_LEASES=()
 }
 
 start_local_archive_frontend() {
@@ -1403,6 +1430,7 @@ start_local_archive_frontend() {
     # archive viewer (upstream = the now-dead backend proxy) is reaped here; the
     # static archive launched below is the durable post-run viewer.
     stop_proxy
+    release_local_port_leases
     stop_live_archive_frontend
 
     local ports archive_api_port archive_fe_port
@@ -1568,14 +1596,20 @@ trap 'exit 143' TERM
 # the per-run params as machine --env and cloudbench-boot.sh as the --command, then
 # starts the box — it AUTO-RUNS the driver on boot with ZERO ssh; progress is polled
 # over the data-plane status proxy. Requires /data/cloudbench-boot.sh in the snapshot.
-LOCAL_STATUS_PORT="$(( LOCAL_DASH_PORT + 3 ))"
+# A prior or concurrent run may still own this run's preferred block. Atomically
+# lease every listener port for this process; bind-check-close alone is TOCTOU
+# racy when two controllers start together.
+claim_local_port "$LOCAL_DASH_PORT" LOCAL_DASH_PORT \
+    || { echo "❌ could not lease a local dashboard port" >&2; exit 1; }
+claim_local_port "$(( LOCAL_DASH_PORT + 3 ))" LOCAL_STATUS_PORT \
+    || { echo "❌ could not lease a local status-proxy port" >&2; exit 1; }
 STATUS_PROXY_PID=""
 # Shared setup used by BOTH launch paths AND the post-launch proxy/relay code —
 # must be set before the branch, or boot-launch trips `set -u` at the backend proxy.
 LIVE_BACKEND_PORT=""
 LIVE_BACKEND_URL=""
 if [ "$DASHBOARD" = "1" ] || [ "$NEEDS_IMESSAGE_RELAY" = "1" ]; then
-    LIVE_BACKEND_PORT="$(choose_free_local_port "$((LOCAL_DASH_PORT + 1))")"
+    claim_local_port "$((LOCAL_DASH_PORT + 1))" LIVE_BACKEND_PORT || LIVE_BACKEND_PORT=""
     [ -n "$LIVE_BACKEND_PORT" ] && LIVE_BACKEND_URL="http://localhost:$LIVE_BACKEND_PORT" \
         || echo "   ⚠️ could not find a free local port for the live backend proxy"
 fi
@@ -1589,6 +1623,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "REF=$BENCH_REF"
         --env "CLOUDBENCH_GITHUB_TOKEN_B64=$_ghb64"
         --env "CLOUDBENCH_START_BARRIER=${CLOUDBENCH_START_BARRIER:-}"
+        --env "CLOUDBENCH_BARRIER_TOKEN=${CLOUDBENCH_BARRIER_TOKEN:-}"
         --env "CLOUDBENCH_START_BARRIER_WAIT_SECONDS=${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}"
         --env "CLOUDBENCH_STATUS_PORT=$REMOTE_STATUS_PORT"
         --env "WMH_MODEL_NAME=$WMH_MODEL_NAME"
@@ -1761,6 +1796,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT=/data/cloudbench-current-run-artifact.py"
     echo "export CLOUDBENCH_RUN_TOKEN=$(printf '%q' "$RUN_LOG_TOKEN")"
     echo "export CLOUDBENCH_START_BARRIER=$(printf '%q' "${CLOUDBENCH_START_BARRIER:-}")"
+    echo "export CLOUDBENCH_BARRIER_TOKEN=$(printf '%q' "${CLOUDBENCH_BARRIER_TOKEN:-}")"
     echo "export CLOUDBENCH_START_BARRIER_WAIT_SECONDS=$(printf '%q' "${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}")"
     echo "export WMH_MODEL_NAME=$(printf '%q' "$WMH_MODEL_NAME")"
     echo "export BENCH_TASKS_B64=$(printf '%q' "$TASKS_CSV_B64")"
@@ -1852,7 +1888,7 @@ done
 # RUNSTAMP), so keep them as the separate calls validated on the smoke. Bound to
 # the box's private 6PN address, reachable only through the authenticated proxy.
 STATUS_PROXY_PID=""
-LOCAL_STATUS_PORT="$(( LOCAL_DASH_PORT + 3 ))"
+# LOCAL_STATUS_PORT was selected once above and is shared by both launch paths.
 FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"pkill -f 'http.server ${REMOTE_STATUS_PORT}' 2>/dev/null; sleep 1; setsid python3 -m http.server ${REMOTE_STATUS_PORT} --directory /data >/dev/null 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
 
 launch_attempts="${CLOUDBENCH_DRIVER_LAUNCH_ATTEMPTS:-4}"
@@ -2129,6 +2165,16 @@ read_bench_log() {
     fi
     ssh_read "$mid" "cat '$REMOTE_LOG' 2>/dev/null"
 }
+probe_driver_health() {
+    local health_code
+    health_code="$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' \
+        "http://127.0.0.1:$LOCAL_STATUS_PORT/driver-health" 2>/dev/null || true)"
+    case "$health_code" in
+        204) return 0 ;;
+        410) return 10 ;;
+        *) return 20 ;;
+    esac
+}
 poll_start="$(date +%s)"
 last_size="0"
 last_change="$poll_start"
@@ -2179,19 +2225,28 @@ while :; do
             last_change="$now"
         fi
     fi
-    # Data-plane STALENESS exclusion: if bench.log has not grown for DRIVER_STALL_
-    # SECONDS the box is stuck/dead at bring-up (a healthy box streams stack output
-    # constantly -- deps, prisma, seed, WMH). last_change is driven by the proxy
-    # (curl) read above, so this is NEVER blocked or hidden by the Machines-API rate
-    # limit. The old ssh pgrep probe both HUNG the poll loop (3x60s retries under
-    # throttling) AND was defeated by the same throttling that killed the driver, so
-    # stuck boxes were never excluded and the barrier stalled at ~21/30. Pure
-    # staleness needs no ssh; threshold is generous so a slow-but-progressing box
-    # (e.g. a quiet pg_restore) is never falsely excluded.
+    # A quiet log is not proof of death: npm, pg_restore, stack startup, and a real
+    # benchmark can all run silently for minutes. Once the quiet threshold is hit,
+    # ask the authenticated data-plane status service whether the driver PID still
+    # exists. This keeps dead-driver detection fast without killing valid quiet work.
     if [ $((now - last_change)) -ge "$DRIVER_STALL_SECONDS" ]; then
-        echo "❌ on-box driver made no progress for ${DRIVER_STALL_SECONDS}s (stuck/dead at bring-up) -- bring-up (infra) failure; stopping this box so the fleet can proceed."
-        DRIVER_DIED="1"; BENCH_EXIT="1"
-        break
+        driver_health="unknown"
+        if [ -n "$STATUS_PROXY_PID" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
+            for _health_attempt in $(seq 1 5); do
+                probe_driver_health; health_rc=$?
+                [ "$health_rc" = "0" ] && { driver_health="alive"; break; }
+                [ "$health_rc" = "10" ] && { driver_health="dead"; break; }
+                sleep 1
+            done
+            if [ "$driver_health" = "dead" ]; then
+                echo "❌ on-box driver confirmed dead after ${DRIVER_STALL_SECONDS}s without progress -- bring-up (infra) failure; stopping this box so the fleet can proceed."
+                DRIVER_DIED="1"; BENCH_EXIT="1"
+                break
+            fi
+        fi
+        # Transport errors and non-contract HTTP statuses are UNKNOWN, not proof
+        # of death. The per-box barrier/run timeout remains the bounded detector.
+        last_change="$now"
     fi
     sleep "$(( ${CLOUDBENCH_POLL_INTERVAL:-15} + (RANDOM % 6) ))"
 done

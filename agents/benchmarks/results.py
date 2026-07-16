@@ -28,6 +28,7 @@ class TaskResult:
     tree_agent_count: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
+    llm_usage_by_provider: dict = field(default_factory=dict)
     stop_metadata: Optional[dict] = None
     fast_mode_cache_enabled: bool = False
     context_violations: List[dict] = field(default_factory=list)  # [{rule, severity, message}]
@@ -77,6 +78,11 @@ class BenchmarkRun:
             "cache_creation_input_tokens": agg_cache_write,
             "cache_hit_pct": agg_cache_hit_pct,
         }
+        from benchmarks.llm_usage import merge_usage_breakdowns
+
+        result["llm_usage_by_provider"] = merge_usage_breakdowns(
+            r.llm_usage_by_provider for r in self.task_results
+        )
         if scored_world_model:
             result["wmh_scored_tasks"] = len(scored_world_model)
             result["wmh_prediction_accuracy"] = round(

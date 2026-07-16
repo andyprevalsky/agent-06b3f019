@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""Serve cloudbench artifacts and accept an authenticated barrier release."""
+
+from __future__ import annotations
+
+import argparse
+import hmac
+import os
+import re
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+
+SAFE_BARRIER = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--directory", required=True)
+    parser.add_argument("--port", required=True, type=int)
+    parser.add_argument("--bind", default="0.0.0.0")
+    parser.add_argument("--barrier", default="")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    root = Path(args.directory).resolve()
+    barrier = args.barrier
+    token = os.environ.get("CLOUDBENCH_BARRIER_TOKEN", "")
+    if barrier and SAFE_BARRIER.fullmatch(barrier) is None:
+        raise SystemExit("invalid barrier identifier")
+
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *handler_args: object, **handler_kwargs: object) -> None:
+            super().__init__(*handler_args, directory=str(root), **handler_kwargs)
+
+        def do_POST(self) -> None:
+            if self.path != "/release":
+                self.send_error(404)
+                return
+            if not barrier or not token:
+                self.send_error(409, "barrier release is not configured")
+                return
+            supplied = self.headers.get("Authorization", "")
+            expected = f"Bearer {token}"
+            if not hmac.compare_digest(supplied, expected):
+                self.send_error(403)
+                return
+            length = int(self.headers.get("Content-Length", "0") or 0)
+            if length:
+                self.rfile.read(min(length, 1024))
+            (root / f"cloudbench-start-{barrier}.release").touch(exist_ok=True)
+            self.send_response(204)
+            self.end_headers()
+
+        def do_GET(self) -> None:
+            if self.path != "/driver-health":
+                super().do_GET()
+                return
+            try:
+                pid = int((root / "cloudbench-driver.pid").read_text().strip())
+                os.kill(pid, 0)
+            except (OSError, ValueError):
+                self.send_error(410, "driver is not running")
+                return
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, _format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer((args.bind, args.port), Handler)
+    server.serve_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
