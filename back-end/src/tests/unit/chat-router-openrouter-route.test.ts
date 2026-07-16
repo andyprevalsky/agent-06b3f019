@@ -113,21 +113,25 @@ async function run(): Promise<void> {
     assert.notEqual(ANTHROPIC_API_URL, CEREBRAS_API_URL);
 
     calls.length = 0;
-    let directBody: Record<string, unknown> = {};
-    let directHeaders: Record<string, string> = {};
+    const openRouterModels: string[] = [];
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.toString();
       calls.push(url);
       if (url === OPENROUTER_API_URL) {
-        return new Response('{"error":{"message":"Cerebras rate limited"}}', {
-          status: 429,
-          headers: { 'Content-Type': 'application/json' },
-        });
+        const model = (JSON.parse(String(init?.body)) as { model?: string }).model ?? '';
+        openRouterModels.push(model);
+        if (model === 'z-ai/glm-4.7') {
+          // The Cerebras-pinned attempt is rate limited pre-content...
+          return new Response('{"error":{"message":"Cerebras rate limited"}}', {
+            status: 429,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+        // ...so chat falls through to a DIFFERENT multi-provider waterfall model
+        // instead of retrying the same model on the same provider.
+        return sseResponse(RESPONSES_OK_SSE);
       }
-      if (url !== CEREBRAS_API_URL) throw new Error(`Failover leaked to ${url}`);
-      directBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-      directHeaders = init?.headers as Record<string, string>;
-      return sseResponse(RESPONSES_OK_SSE);
+      throw new Error(`Failover leaked to ${url}`);
     }) as typeof fetch;
 
     const failoverChunks = await collect(
@@ -140,13 +144,24 @@ async function run(): Promise<void> {
         provider_route: 'openrouter-cerebras',
       })
     );
-    assert.deepEqual(calls, [OPENROUTER_API_URL, CEREBRAS_API_URL]);
-    assert.equal(directBody.model, 'zai-glm-4.7');
-    assert.equal(directBody.clear_thinking, true);
-    assert.equal(directBody.reasoning_effort, 'none');
-    assert.equal(directHeaders.Authorization, 'Bearer direct-cerebras-failover');
-    assert.equal(failoverChunks[0]?.actual_model, 'zai-glm-4.7');
-    assert.equal(failoverChunks[0]?.pool_name, 'cerebras-direct');
+    const failoverText = failoverChunks.map((c) => c.choices?.[0]?.delta?.content ?? '').join('');
+    assert.ok(
+      failoverText.length > 0,
+      'a rate-limited Cerebras attempt must fall through, not go silent'
+    );
+    assert.equal(
+      calls.includes(CEREBRAS_API_URL),
+      false,
+      'the fallback must leave Cerebras, not retry the same provider'
+    );
+    assert.ok(
+      openRouterModels.includes('z-ai/glm-4.7'),
+      'the Cerebras-pinned attempt should run first'
+    );
+    assert.ok(
+      openRouterModels.some((model) => model !== 'z-ai/glm-4.7' && model.length > 0),
+      'must fall through to a different waterfall model'
+    );
   } finally {
     globalThis.fetch = originalFetch;
     if (oldGptKey === undefined) delete process.env.GPT_API_KEY;
@@ -160,7 +175,7 @@ async function run(): Promise<void> {
   }
 
   process.stdout.write(
-    'PASS Chat uses OpenRouter pinned to Cerebras with direct same-model pre-content failover\n'
+    'PASS Chat uses OpenRouter pinned to Cerebras with multi-provider waterfall fall-through\n'
   );
 }
 

@@ -5,6 +5,7 @@ import {
   getIntermediaryNodes,
   getTreeDepth,
   extractEmoji,
+  makePendingNode,
 } from '../subAgentTree.helpers';
 
 const GOAL_MAX_CHARS = 80;
@@ -35,11 +36,11 @@ export function useSubAgentTreeData(busId: string, subAgentIds: string[]) {
     [relevantNodes],
   );
 
+  // Drive roots off the known subAgentIds, not off whichever nodes have arrived.
+  // Any id without real node data yet renders as a pending placeholder so the
+  // spawn tree is visible immediately; bus/REST data replaces it by agentId.
   const rootNodes = useMemo(
-    () =>
-      subAgentIds
-        .map((id) => relevantNodes.get(id))
-        .filter((node): node is TreeNode => node !== undefined),
+    () => subAgentIds.map((id) => relevantNodes.get(id) ?? makePendingNode(id)),
     [relevantNodes, subAgentIds],
   );
 
@@ -72,7 +73,9 @@ export function useSubAgentTreeData(busId: string, subAgentIds: string[]) {
   );
 
   return {
-    totalAgents: relevantNodes.size,
+    // Placeholders aren't in relevantNodes, so floor the count at the number of
+    // roots actually rendered to avoid showing "0 agents" over a visible tree.
+    totalAgents: Math.max(relevantNodes.size, rootNodes.length),
     rootNodes,
     maxDepth,
     leafNodes,

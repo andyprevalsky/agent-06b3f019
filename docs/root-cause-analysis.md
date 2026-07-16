@@ -228,6 +228,39 @@ Prefer fixes that:
 - Don't add new code paths that aren't tested
 - Follow existing patterns in the codebase for similar problems
 
+### Step 6a: Prefer the fix that shrinks the subsystem
+
+Before writing the fix, ask explicitly: **can I resolve this bug by reducing the
+complexity of the whole subsystem I'm touching, rather than by adding another
+branch, guard, flag, or special case to it?**
+
+Repeated RCAs are the primary way a codebase rots. Each one adds a targeted patch;
+left unchecked, the subsystem accretes conditionals, dead branches, decoupled
+streams that must agree, and order-dependent merges until it is unmanageable and
+disorganized — which is itself the soil that grows the next class of bug. A bug is
+frequently *evidence that the subsystem is over-complex*, not just that one line is
+wrong. When many of your RCAs keep landing in the same subsystem, treat that as a
+signal the subsystem needs simplification, not more patches.
+
+For every fix, evaluate in this order and prefer the earliest that fully kills the
+class of bug:
+
+1. **Delete** — is there redundant state, a duplicated code path, a decoupled second
+   source of truth, or an order-dependent step whose *removal* makes the bug
+   impossible? (e.g. collapse two streams that must agree into one; derive a value
+   instead of accumulating it; remove a cache/dedup pre-pass that fights a later
+   pass.) Deleting the failure surface is strictly better than guarding it.
+2. **Unify** — can the fix consolidate scattered logic to one source of truth so this
+   and its sibling failures all disappear? (This is the Step 6 generalizable fix.)
+3. **Guard** — only if delete/unify genuinely don't apply, add the narrowest correct
+   check.
+
+A fix that adds net complexity to a subsystem that is already generating repeat RCAs
+must be justified: state in the RCA why simplification was not possible. "It was
+faster to add a branch" is not a justification. Since this repo is pre-launch with no
+backwards-compatibility obligations, prefer the invasive simplification over the
+compatible patch whenever the simplification removes the bug class outright.
+
 ## Step 7: Adversarial RCA review
 
 Before handing any RCA diagnosis back to the user, fire a sub-agent to

@@ -21,6 +21,17 @@ import * as repo from './repo';
 
 const log = createLogger('Agents');
 
+/**
+ * Agent statuses whose Temporal workflow has already ended. A follow-up message
+ * to any of these must resume chat mode, not signal a dead/paused workflow.
+ */
+const TERMINAL_STATUSES: ReadonlyArray<string> = [
+  'COMPLETED',
+  'FAILED',
+  'OUT_OF_CREDITS',
+  'COST_LIMIT_REACHED',
+];
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -60,11 +71,13 @@ export function buildUserMessageSignalValue(
 async function routeUserMessage(agentId: string, messageText: string): Promise<void> {
   const agentForChat = await repo.findAgentUnique(agentId);
 
-  // If agent is COMPLETED/FAILED, clear the dead workflow so it falls through to chat mode
+  // If the agent's workflow has already ended (any terminal status), clear the
+  // dead workflow id so this message falls through to chat mode instead of
+  // signaling a closed/paused workflow that will never wake.
   if (
     agentForChat?.temporalWorkflowId !== undefined &&
     agentForChat?.temporalWorkflowId !== null &&
-    (agentForChat.status === 'COMPLETED' || agentForChat.status === 'FAILED')
+    TERMINAL_STATUSES.includes(agentForChat.status)
   ) {
     await repo.updateAgent(agentId, { temporalWorkflowId: null, status: 'ACTIVE' });
     agentForChat.temporalWorkflowId = null;
@@ -88,11 +101,27 @@ async function routeUserMessage(agentId: string, messageText: string): Promise<v
       agentId,
       userId: agentForChat.userId,
       model: agentForChat.model,
-    }).catch((err: unknown) => {
+    }).catch(async (err: unknown) => {
       log.error('Chat handler error in message route', {
         agent_id: agentId,
         error: err instanceof Error ? err.message : String(err),
       });
+      // Fail loud, not silent: without this the user gets a 201 and then nothing
+      // (the prod symptom). Surface an assistant message so the UI shows the
+      // failure instead of an unresponsive chat.
+      try {
+        await createMessage({
+          agentId,
+          role: 'ASSISTANT',
+          text: "Sorry — I couldn't generate a response just now. Please try again.",
+          metadata: { error: true, source: 'chat_handler_failure' },
+        });
+      } catch (persistErr) {
+        log.error('Failed to persist chat-failure notice', {
+          agent_id: agentId,
+          error: persistErr instanceof Error ? persistErr.message : String(persistErr),
+        });
+      }
     });
   }
 }

@@ -133,3 +133,25 @@ export function extractEmoji(text: string): { emoji: string; text: string } {
 export function isTerminalNode(node: TreeNode): boolean {
   return node.status === 'COMPLETED' || node.status === 'FAILED';
 }
+
+/**
+ * Synthesize a pending placeholder node for a spawned sub-agent whose real node
+ * data has not yet arrived via the REST snapshot or the realtime bus.
+ *
+ * The tree is driven by the known `subAgentIds` from the spawn message, so it
+ * stays visible ("spinning up...") the instant a spawn happens instead of being
+ * invisible-until-refresh when the two decoupled node streams haven't populated
+ * yet. Real bus/REST data enriches (replaces) this node by `agentId`.
+ */
+export function makePendingNode(agentId: string): TreeNode {
+  return {
+    agentId,
+    parentAgentId: null,
+    goal: '',
+    status: 'STARTING_UP',
+    progress: 0,
+    toolsInUse: [],
+    messageCount: 0,
+    costCents: 0,
+  };
+}
