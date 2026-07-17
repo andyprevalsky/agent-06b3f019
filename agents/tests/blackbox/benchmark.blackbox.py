@@ -184,6 +184,7 @@ def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success()
     assert 'bash "$SYNC_PRISMA_SCRIPT" "$REPO_DIR" "$APP_USER"' in driver
     assert "NEEDS_IMESSAGE_RELAY" in controller
     assert "cloudbench-imessage-relay.ts" in controller
+    assert 'BENCHMARK_IMESSAGE_API_KEY="$CLOUDBENCH_API_KEY"' in controller
     assert "bridge heartbeat established" in controller
     assert "IMESSAGE_RELAY_OK" in controller
     assert '.vm.${APP}.internal' in controller

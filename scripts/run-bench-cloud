@@ -2264,6 +2264,7 @@ if [ "$NEEDS_IMESSAGE_RELAY" = "1" ]; then
     IMESSAGE_RELAY_AUTOLOGIN_OTP="${CLOUDBENCH_IMESSAGE_AUTOLOGIN_OTP:-181818}"
     (
         cd "$ROOT_DIR/mac-app" || exit 1
+        BENCHMARK_IMESSAGE_API_KEY="$CLOUDBENCH_API_KEY" \
         "$RELAY_TSX" "$RELAY_ENTRY" \
             --base-url "$LIVE_BACKEND_URL" \
             --expected-user-id "$CLOUDBENCH_RUNNER_USER_ID" \

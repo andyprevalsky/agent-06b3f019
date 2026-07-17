@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   isUsableSession,
+  relayAuthHeaders,
+  resolveRelaySession,
   runRelay,
   sessionExpiresAtMs,
   type RelayDependencies,
@@ -13,6 +15,13 @@ const USER = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const farFuture = () => Math.floor(Date.now() / 1000) + 3600;
 
 describe('installed-session usability (drives relay auto-login)', () => {
+  it('uses an explicitly scoped internal identity for cloud benchmark relays', () => {
+    expect(relayAuthHeaders(USER, 'benchmark-api-key')).toEqual({
+      'X-API-Key': 'benchmark-api-key',
+      'X-User-Id': USER,
+      'X-CloudBench-iMessage-Relay': 'v1',
+    });
+  });
   it('accepts a fresh session for the expected user', () => {
     expect(
       isUsableSession({ access_token: 'a', expires_at: farFuture(), user: { id: USER } }, USER)
@@ -49,6 +58,28 @@ describe('installed-session usability (drives relay auto-login)', () => {
     expect(sessionExpiresAtMs({ expires_at: secs })).toBe(secs * 1000);
     expect(sessionExpiresAtMs({ expires_at: secs * 1000 })).toBe(secs * 1000);
     expect(sessionExpiresAtMs(undefined)).toBe(0);
+  });
+
+  it('uses benchmark auto-login without overwriting an unreadable installed store', async () => {
+    const minted = {
+      access_token: 'benchmark-token',
+      expires_at: farFuture(),
+      user: { id: USER },
+    };
+    const persist = vi.fn();
+
+    await expect(
+      resolveRelaySession(
+        USER,
+        { phone: '+19729777432', otp: '181818' },
+        () => {
+          throw new SyntaxError('encrypted store cannot be decoded');
+        },
+        async () => minted,
+        persist
+      )
+    ).resolves.toEqual(minted);
+    expect(persist).not.toHaveBeenCalled();
   });
 });
 

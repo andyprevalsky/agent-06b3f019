@@ -70,6 +70,15 @@ export function apiKeyHeaders(): Record<string, string> {
   return { 'X-API-Key': API_KEY };
 }
 
+export function internalRelayHeaders(): Record<string, string> {
+  return {
+    ...apiKeyHeaders(),
+    'X-User-Id': ctx.userId!,
+    'X-CloudBench-iMessage-Relay': 'v1',
+    'X-iMessage-Delivery-Results': 'v1',
+  };
+}
+
 export async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
   const start = Date.now();
   try {
