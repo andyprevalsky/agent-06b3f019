@@ -65,7 +65,14 @@ function applyAgentBackfill(
   setMessages((prev) => {
     const apiIds = new Set(data.messages.map((m) => m.message_id));
     const realtimeOnly = prev.filter((m) => !apiIds.has(m.message_id));
-    return [...data.messages, ...realtimeOnly];
+    // Order by timestamp rather than blindly appending realtime-only messages
+    // after the API set — a realtime message that arrived out of band can be
+    // chronologically older than the API tail, and appending it would render it
+    // below newer messages. localeCompare on the ISO timestamps keeps the merged
+    // thread in true chronological order.
+    return [...data.messages, ...realtimeOnly].sort((a, b) =>
+      (a.timestamp ?? '').localeCompare(b.timestamp ?? ''),
+    );
   });
   setAgent(data.agent);
   setIsChatMode(!data.agent.temporal_workflow_id);
@@ -285,8 +292,12 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
   useEffect(() => {
     if (!selectedAgentId || !canSubscribe) return;
     let cancelled = false;
+    // Serialize fetches: skip a tick while one is in flight so a slow response
+    // from an earlier tick can never resolve after (and overwrite) a fresher one.
+    let inFlight = false;
     const interval = window.setInterval(() => {
-      if (cancelled || channelRef.current) return;
+      if (cancelled || channelRef.current || inFlight) return;
+      inFlight = true;
       void (async () => {
         try {
           const data = await fetchAgentDetail(selectedAgentId);
@@ -294,6 +305,8 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
           applyAgentBackfill(data, setMessages, setAgent, setIsChatMode);
         } catch (error) {
           console.error('Disconnected backfill poll failed:', error);
+        } finally {
+          inFlight = false;
         }
       })();
     }, DISCONNECTED_BACKFILL_POLL_MS);
