@@ -2133,7 +2133,11 @@ test('read-after-write: update agent → visible in detail', async () => {
     return assertSchema(GetAgentResponse, res.data, 'RAW update verify');
   };
   let body = await readDetail();
-  for (let attempt = 0; attempt < 9; attempt += 1) {
+  // Poll budget is generous (up to ~4s) so the read-after-write pool-snapshot
+  // race resolves even against the c8-instrumented coverage backend, which runs
+  // ~2-3x slower than the bare stack and can otherwise briefly serve a
+  // pre-commit snapshot past a tighter budget.
+  for (let attempt = 0; attempt < 40; attempt += 1) {
     if (
       body.agent.model === 'rose-labs/rose-1-ultra' &&
       body.agent.progress === 0.5 &&
@@ -2141,7 +2145,7 @@ test('read-after-write: update agent → visible in detail', async () => {
     ) {
       break;
     }
-    await sleep(50);
+    await sleep(100);
     body = await readDetail();
   }
   assert(body.agent.model === 'rose-labs/rose-1-ultra', 'Model not updated');

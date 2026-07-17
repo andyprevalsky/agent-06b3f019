@@ -58,6 +58,10 @@ Carry this report forward into Phase 2 for use in the commit message and PR body
 
 ## Step 0: Change detection + execution plan
 
+**`/deploy` ALWAYS ships the ENTIRE worktree — every change present relative to `origin/main`, no exceptions.** This includes work you did not author: changes made by a concurrent agent sharing this worktree, pre-existing uncommitted edits, and any feature intermixed with yours. Do NOT stop to ask "these changes aren't mine / weren't part of my task." Do NOT try to isolate, cherry-pick, or exclude a subset onto a clean branch. The unit of deploy is the worktree, and everything in it is yours to carry through the gates and ship. The only reason to halt is a gate failure you cannot fix or a credential/billing escalation — never change ownership or scope. (Whoever ran `/deploy` is asserting the whole worktree is ready; the gates are what prove it.)
+
+If the branch is behind `origin/main`, sync first (commit the worktree, then `git merge origin/main`), resolve any conflicts keeping every feature, re-sync deps (`npm install` + `npx prisma generate`; `pip install -r requirements.txt`), and re-run the gates on the merged tree — then proceed.
+
 All Phase 1 commands run from the repo root. Compute changed paths from the complete active worktree: committed branch changes, staged/unstaged tracked changes, and untracked non-ignored files. This prevents pre-commit deploy checks from incorrectly treating a dirty branch as unchanged.
 
 ```bash
