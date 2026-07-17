@@ -2455,7 +2455,9 @@ def test_refresh_deps_is_a_validated_maintenance_transaction() -> None:
     assert 'create_volume_snapshot_exact "$VOL_ID" || exit 1' in refresh
     assert 'volumes snapshots create "$vol" -a "$APP" --json' in snapshot_helper
     assert 'CREATED_SNAPSHOT_ID=' in snapshot_helper
-    assert 'SNAP_ID="$CREATED_SNAPSHOT_ID"' in snapshot_helper
+    assert 'BEFORE_IDS="$before_ids"' in snapshot_helper
+    assert "authoritative pre-snapshot inventory" in snapshot_helper
+    assert "multiple new snapshots appeared" in snapshot_helper
     assert "snap-unrelated" not in snapshot_helper
     assert "central dep refresh failed; refusing to provision" in fleet
     assert "clones will pay the per-box rsync" not in fleet
@@ -2509,36 +2511,55 @@ fi
 
 
 def test_refresh_deps_tracks_exact_created_snapshot(tmp_path: Path) -> None:
-    """A concurrent newer snapshot can never be mistaken for this transaction's."""
+    """Fly's empty create response is bound by a strict before/after ID diff."""
     cloud = CLOUD_SCRIPT.read_text()
     create_snapshot = _extract_fleet_function(cloud, "create_volume_snapshot_exact() {")
     calls = tmp_path / "calls"
     calls.write_text("")
+    created = tmp_path / "created"
     script = f"""set -uo pipefail
 APP=bench-app
 CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS=2
 FLY() {{
   echo "$*" >> "$CALLS"
   if [ "$1 $2 $3" = "volumes snapshots create" ]; then
-    echo '{{"id":"snap-owned"}}'
+    touch "$CREATED"
+    return 0
+  elif [ -f "$CREATED" ]; then
+    echo '[{{"id":"snap-unrelated-older","status":"created","size":99}},{{"id":"snap-owned","status":"created","size":10}}]'
   else
-    echo '[{{"id":"snap-unrelated-newer","status":"created","size":99}},{{"id":"snap-owned","status":"created","size":10}}]'
+    echo '[{{"id":"snap-unrelated-older","status":"created","size":99}}]'
   fi
 }}
 sleep() {{ :; }}
 {create_snapshot}
-create_volume_snapshot_exact vol-1
+create_volume_snapshot_exact vol-1 || exit $?
 echo "EXACT=$CREATED_SNAPSHOT_ID"
 """
     result = subprocess.run(
         ["bash", "-c", script],
-        env={"CALLS": str(calls), "PATH": os.environ["PATH"]},
+        env={"CALLS": str(calls), "CREATED": str(created), "PATH": os.environ["PATH"]},
         text=True, capture_output=True, check=False,
     )
 
     assert result.returncode == 0, result.stderr
     assert "EXACT=snap-owned" in result.stdout
-    assert "snap-unrelated-newer" not in result.stdout
+    assert "snap-unrelated-older" not in result.stdout
+
+    created.unlink()
+    ambiguous_script = script.replace(
+        '{"id":"snap-owned","status":"created","size":10}]',
+        '{"id":"snap-owned","status":"created","size":10},'
+        '{"id":"snap-racing","status":"running","size":0}]',
+    )
+    ambiguous = subprocess.run(
+        ["bash", "-c", ambiguous_script],
+        env={"CALLS": str(calls), "CREATED": str(created), "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+    assert ambiguous.returncode != 0
+    assert "multiple new snapshots appeared" in ambiguous.stderr
+    assert "EXACT=" not in ambiguous.stdout
 
 
 def test_refresh_deps_rejects_invalid_ref_before_fly(tmp_path: Path) -> None:

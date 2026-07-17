@@ -892,41 +892,62 @@ stop_machine_strict() {  # stop_machine_strict <id>
 # that never carried the dependency trees this transaction just verified.
 CREATED_SNAPSHOT_ID=""
 create_volume_snapshot_exact() {  # create_volume_snapshot_exact <volume-id>
-    local vol="$1" create_json="" state=""
+    local vol="$1" before_ids="" create_output="" snapshots_json=""
+    local candidate="" state=""
     CREATED_SNAPSHOT_ID=""
+    if ! before_ids="$(FLY volume snapshots list "$vol" -a "$APP" --json 2>/dev/null | python3 -c '
+import json, sys
+snapshots = json.load(sys.stdin)
+if not isinstance(snapshots, list): raise SystemExit(1)
+for snapshot in snapshots:
+    if isinstance(snapshot, dict) and snapshot.get("id"): print(snapshot["id"])
+')"; then
+        echo "❌ could not capture the authoritative pre-snapshot inventory" >&2
+        return 1
+    fi
     echo "🧊 cutting a fresh snapshot of $vol ..."
-    if ! create_json="$(FLY volumes snapshots create "$vol" -a "$APP" --json 2>/dev/null)"; then
+    if ! create_output="$(FLY volumes snapshots create "$vol" -a "$APP" --json 2>&1)"; then
+        [ -z "$create_output" ] || printf '%s\n' "$create_output" | sed 's/^/   /' >&2
         echo "❌ snapshot creation request failed" >&2
         return 1
     fi
-    CREATED_SNAPSHOT_ID="$(printf '%s' "$create_json" | python3 -c '
-import json, sys
-try: data = json.load(sys.stdin)
-except Exception: data = {}
-if isinstance(data, list): data = data[0] if data else {}
-print(data.get("id") or data.get("snapshot_id") or "") if isinstance(data, dict) else print("")
-' 2>/dev/null || true)"
-    if [ -z "$CREATED_SNAPSHOT_ID" ]; then
-        echo "❌ snapshot creation returned no authoritative id" >&2
-        return 1
-    fi
-    echo "   requested snapshot: $CREATED_SNAPSHOT_ID"
+    [ -z "$create_output" ] || printf '%s\n' "$create_output" | sed 's/^/   /'
     for _ in $(seq 1 "${CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS:-90}"); do
-        state="$(FLY volume snapshots list "$vol" -a "$APP" --json 2>/dev/null | \
-            SNAP_ID="$CREATED_SNAPSHOT_ID" python3 -c '
+        if ! snapshots_json="$(FLY volume snapshots list "$vol" -a "$APP" --json 2>/dev/null)"; then
+            echo "❌ could not verify snapshot inventory" >&2
+            return 1
+        fi
+        read -r candidate state <<< "$(printf '%s' "$snapshots_json" | BEFORE_IDS="$before_ids" python3 -c '
 import json, os, sys
-try: snaps = json.load(sys.stdin) or []
-except Exception: print("unreadable"); raise SystemExit
-match = next((s for s in snaps if s.get("id") == os.environ["SNAP_ID"]), None)
-if not match: print("missing")
-elif str(match.get("status") or "").lower() in {"created", "complete", "completed", "ready"} and int(match.get("size") or 0) > 0: print("complete")
-else: print("pending")
-' 2>/dev/null || echo unreadable)"
+snapshots = json.load(sys.stdin)
+if not isinstance(snapshots, list): raise SystemExit(1)
+before = set(os.environ.get("BEFORE_IDS", "").splitlines())
+new = [s for s in snapshots if isinstance(s, dict) and s.get("id") not in before]
+if len(new) > 1: print("ambiguous ambiguous")
+elif not new: print("missing missing")
+else:
+    snapshot = new[0]
+    ready = str(snapshot.get("status") or "").lower() in {"created", "complete", "completed", "ready"} and int(snapshot.get("size") or 0) > 0
+    print(snapshot["id"], "complete" if ready else "pending")
+' 2>/dev/null || echo unreadable unreadable)"
+        [ "$candidate" = "ambiguous" ] && {
+            echo "❌ multiple new snapshots appeared; refusing to guess transaction ownership" >&2
+            return 1
+        }
+        [ "$candidate" = "unreadable" ] && { echo "❌ could not parse snapshot inventory" >&2; return 1; }
+        if [ "$candidate" != "missing" ]; then
+            if [ -z "$CREATED_SNAPSHOT_ID" ]; then
+                CREATED_SNAPSHOT_ID="$candidate"
+                echo "   transaction snapshot: $CREATED_SNAPSHOT_ID"
+            elif [ "$candidate" != "$CREATED_SNAPSHOT_ID" ]; then
+                echo "❌ snapshot transaction identity changed during polling" >&2
+                return 1
+            fi
+        fi
         [ "$state" = "complete" ] && return 0
-        [ "$state" = "unreadable" ] && { echo "❌ could not verify snapshot inventory" >&2; return 1; }
         sleep 10
     done
-    echo "❌ exact snapshot $CREATED_SNAPSHOT_ID did not complete in time (state=${state:-unknown})" >&2
+    echo "❌ exact snapshot ${CREATED_SNAPSHOT_ID:-<missing>} did not complete in time (state=${state:-unknown})" >&2
     return 1
 }
 
