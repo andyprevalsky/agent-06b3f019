@@ -120,6 +120,8 @@ BENCH_REF=""
 WMH_MODEL_NAME="rose-r2-archive-anthropic"
 VM_SIZE="shared-cpu-4x"
 VM_MEMORY="8192"
+WARM_PARKED_VM_SIZE="${CLOUDBENCH_WARM_PARKED_VM_SIZE:-shared-cpu-1x}"
+WARM_PARKED_VM_MEMORY="${CLOUDBENCH_WARM_PARKED_VM_MEMORY:-2048}"
 VOLUME_SIZE="20"
 RUN_TIMEOUT="3600"      # 60 min per-run ceiling (warm: no WMH build; serve-only).
 DASHBOARD="1"           # proxy + open the live dashboard (auto-off under CI).
@@ -887,6 +889,26 @@ stop_machine_strict() {  # stop_machine_strict <id>
     return 1
 }
 
+resize_stopped_warm_source() {  # resize_stopped_warm_source <id> <size> <memory> <purpose>
+    local id="$1" size="$2" memory="$3" purpose="$4" state
+    [ -n "$id" ] || return 0
+    state="$(machine_state "$id")"
+    if [ "$state" != "stopped" ]; then
+        stop_machine_strict "$id" || return 1
+    fi
+    echo "🧮 sizing warm source for $purpose: $size/${memory}MB"
+    FLY machine update "$id" -a "$APP" --vm-size "$size" --vm-memory "$memory" \
+        --skip-start --yes >/dev/null
+}
+
+prepare_warm_source() {
+    resize_stopped_warm_source "$1" "$VM_SIZE" "$VM_MEMORY" maintenance
+}
+
+park_warm_source() {
+    resize_stopped_warm_source "$1" "$WARM_PARKED_VM_SIZE" "$WARM_PARKED_VM_MEMORY" idle-capacity
+}
+
 # Bind the maintenance transaction to Fly's authoritative snapshot id. A time
 # window or "newest" selector can adopt a concurrent manual/workspace snapshot
 # that never carried the dependency trees this transaction just verified.
@@ -1097,6 +1119,7 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     fi
     write_state "$mid"
 
+    prepare_warm_source "$mid" || exit 1
     start_machine "$mid"
     wait_for_ssh "$mid"
 
@@ -1136,7 +1159,7 @@ echo 'clone/fetch complete'"
     fi
     printf '%s\n' "$clone_output" | grep -av '^Connecting to' | sed 's/^/   /'
 
-    stop_machine "$mid"
+    park_warm_source "$mid" || exit 1
     echo ""
     echo "✅ Setup complete."
     echo "   Next (one-time, builds the cached WMH model):  bash scripts/run-bench-cloud --refresh-wmh"
@@ -1165,7 +1188,7 @@ if [ "$MODE" = "refresh-deps" ]; then
     echo "═══ run-bench-cloud --refresh-deps (ref $BENCH_REF) ═══"
     ensure_app
     cleanup_refresh_deps() {
-        stop_machine "${mid:-}"
+        park_warm_source "${mid:-${maintenance_mid:-}}" || true
         release_app_environment_lock
     }
     trap cleanup_refresh_deps EXIT
@@ -1178,6 +1201,8 @@ if [ "$MODE" = "refresh-deps" ]; then
     [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }
     write_state "$mid"
 
+    maintenance_mid="$mid"
+    prepare_warm_source "$mid" || exit 1
     start_machine "$mid"
     wait_for_ssh "$mid"
 
@@ -1279,7 +1304,7 @@ if [ "$MODE" = "refresh-wmh" ]; then
     echo ""
     ensure_app
     cleanup_refresh_wmh() {
-        stop_machine "${mid:-}"
+        park_warm_source "${mid:-${maintenance_mid:-}}" || true
         release_app_environment_lock
     }
     trap cleanup_refresh_wmh EXIT
@@ -1292,6 +1317,8 @@ if [ "$MODE" = "refresh-wmh" ]; then
     [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }
     write_state "$mid"
 
+    maintenance_mid="$mid"
+    prepare_warm_source "$mid" || exit 1
     start_machine "$mid"
     wait_for_ssh "$mid"
 

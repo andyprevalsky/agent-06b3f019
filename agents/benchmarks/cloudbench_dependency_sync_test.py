@@ -2874,6 +2874,20 @@ if require_central_hub_visibility; then exit 99; fi
     assert "refusing to continue invisibly" in visibility.stderr
 
 
+def test_warm_source_parks_between_maintenance_and_fleet_runs() -> None:
+    """The stopped donor must not consume the config transaction's CPU margin."""
+    fleet = FLEET_SCRIPT.read_text()
+    cloud = CLOUD_SCRIPT.read_text()
+    park_at = fleet.index('parking warm source at $WARM_PARKED_VM_SIZE')
+    fanout_at = fleet.index("# ── Phase 1:")
+    assert park_at < fanout_at
+    assert 'WARM_PARKED_VM_SIZE="${CLOUDBENCH_WARM_PARKED_VM_SIZE:-shared-cpu-1x}"' in fleet
+    assert 'WARM_PARKED_VM_MEMORY="${CLOUDBENCH_WARM_PARKED_VM_MEMORY:-2048}"' in fleet
+    assert 'prepare_warm_source "$mid" || exit 1' in cloud
+    assert 'park_warm_source "${mid:-${maintenance_mid:-}}" || true' in cloud
+    assert cloud.count('park_warm_source "${mid:-${maintenance_mid:-}}" || true') == 2
+
+
 def test_controller_names_the_signal_that_killed_it() -> None:
     """Silent teardowns (children mass-TERM'd, no error, no barrier release)
     repeatedly masqueraded as infra failures when the controller was signalled
