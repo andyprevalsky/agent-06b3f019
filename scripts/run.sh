@@ -1116,8 +1116,21 @@ if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
 else
     start_public_tunnel
 fi
-export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
-export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
+# Fast-mode proxy routes sandbox code-agent (claude-code / codex) LLM calls
+# through the local proxy for cache capture. Locally this pins those calls to a
+# priority tier that can have 0 credits (e.g. Opus 4.8), which fails the
+# claude-code-agent smoke with an auth/credit error unrelated to E2B or tokens.
+# DISABLE_FAST_MODE_PROXY=1 empties both URLs so the sandbox falls back to the
+# direct claudeAuth path (codeAgentFastModeEnv treats "" as "no proxy"). This is
+# a local-only convenience — prod code agents never route through this proxy.
+if [ "${DISABLE_FAST_MODE_PROXY:-}" = "1" ]; then
+    export FAST_MODE_ANTHROPIC_PROXY_URL=""
+    export FAST_MODE_CODEX_PROXY_URL=""
+    echo "⚡ DISABLE_FAST_MODE_PROXY=1 — fast-mode proxy off; sandbox code agents use the direct claudeAuth path"
+else
+    export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
+    export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
+fi
 export BACKEND_LOG_FILE="${BACKEND_LOG_FILE:-$PWD/back-end/backend-logs.log}"
 export FRONTEND_LOG_FILE="${FRONTEND_LOG_FILE:-$PWD/front-end/frontend-logs.log}"
 export NAVI_WORKER_LOG_FILE="${NAVI_WORKER_LOG_FILE:-$PWD/agents/navi-worker-log.txt}"
