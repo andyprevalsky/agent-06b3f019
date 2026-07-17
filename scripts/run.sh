@@ -517,6 +517,18 @@ fi
 # Fast Mode cache is intentionally shared across local/dev/prod so recorded runs
 # survive local DB resets. Capture the prod DB URL from back-end/.env before this
 # script overwrites DATABASE_URL with the local app database below.
+#
+# FAST_MODE_CACHE_USE_LOCAL=1 routes the fast-cache at the isolated LOCAL DB
+# instead of the shared prod Supabase pooler. The shared pooler has a fixed
+# connection ceiling; when many local stacks (or a cloud fleet) run at once it
+# saturates, and the boot-time "Ensuring Fast Mode cache schema" step fails with
+# EMAXCONN / pool-timeout — blocking the stack from ever starting. For a smoke
+# gate that only needs a working runtime (not prod cache sharing), point the
+# cache at the local DB so startup can't be held hostage by pooler contention.
+if [ "${FAST_MODE_CACHE_USE_LOCAL:-}" = "1" ] && [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
+    export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"
+    echo "🧠 FAST_MODE_CACHE_USE_LOCAL=1 — routing Fast Mode cache at the isolated local DB (decoupled from the shared prod pooler)"
+fi
 if [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ] && [ -f "back-end/.env" ]; then
     PROD_CACHE_DATABASE_URL=$(python3 - <<'PY'
 from pathlib import Path
