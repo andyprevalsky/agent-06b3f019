@@ -315,7 +315,10 @@ async def build_browser_verifier_context(
         step = entry.get("step", "?")
         ea = entry.get("action", "unknown")
         er = entry.get("result", {})
-        esuccess = er.get("success", False)
+        # Match the runtime's convention (handler treats a missing `success` as
+        # success): defaulting to False here would mislabel completed steps as
+        # failed in the verifier's action log and corrupt the salvaged verdict.
+        esuccess = er.get("success", True)
         estatus = "\u2705 Success" if esuccess else f"\u274c Failed: {er.get('error', 'unknown')}"
 
         line = f"Step {step}: {ea} - {estatus}"

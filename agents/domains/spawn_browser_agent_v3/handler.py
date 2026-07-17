@@ -4889,8 +4889,22 @@ Based on this feedback, I need to continue working on the task and address the i
         # Must run BEFORE the session is closed (verifier reads session files).
         # Guarded: any failure leaves structured_response unchanged (no worse
         # than before) and never blocks the terminal return.
-        if latest_structured_response is None and response_schema and browser_state:
+        if latest_structured_response is None and response_schema and dom_service:
             try:
+                # Re-read the FINAL-state DOM before grading: browser_state was
+                # captured before the last action, so verifying against it evaluates
+                # stale ground truth and can misreport a last-step completion. Fall
+                # back to the last-known state if the refresh fails.
+                try:
+                    browser_state = await asyncio.wait_for(
+                        dom_service.get_browser_state(include_screenshot=False),
+                        timeout=10,
+                    )
+                    current_url = browser_state.get("url", current_url) or current_url
+                except Exception:
+                    pass
+                if not browser_state:
+                    raise RuntimeError("no browser_state available for final verifier pass")
                 final_verifier_context = await build_browser_verifier_context(
                     goal=goal,
                     current_url=current_url,
@@ -5977,10 +5991,25 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     "taskId": result.get("task_id"),
                     "resumeMode": result.get("auth_assistance_resume_mode"),
                 }
+            # Surface the max-steps best-effort salvage to the parent. Without this
+            # the activity's best_effort_response is dropped at the manager boundary
+            # and a runaway that never called attempt_completion returns only the
+            # generic "max steps" notice. Fold it into the message when there's no
+            # clean structured completion; always expose it in metadata.
+            final_message = result.get("message", "")
+            best_effort_response = result.get("best_effort_response")
+            if best_effort_response:
+                final_metadata["best_effort_response"] = best_effort_response
+                if result.get("structured_response") is None:
+                    final_message = (
+                        f"{final_message}\n\n{best_effort_response}"
+                        if final_message
+                        else best_effort_response
+                    )
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Browser automation complete",
-                message=result.get("message", ""),
+                message=final_message,
                 status=final_status,
                 metadata=final_metadata,
                 data={"usage": tool_usage},

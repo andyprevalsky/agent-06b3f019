@@ -302,13 +302,14 @@ class BrowserAgentRecorder:
         )
 
     async def _start_kernel_replay(self) -> None:
-        """Start Kernel's native session replay. On any failure we clear
-        uses_kernel_replay so finalization simply emits no recording (we do NOT
-        fall back to the screenshot+Supabase path this change intentionally drops)."""
+        """Start Kernel's native session replay. On any failure we raise so
+        ``create()`` returns None and emits no recording — we do NOT fall back to
+        the half-initialized screenshot+Supabase path this change intentionally
+        drops (finalization would otherwise try to write frames to a directory
+        that was never created)."""
         headers = _kernel_replay_headers()
         if headers is None:
-            self.uses_kernel_replay = False
-            return
+            raise RuntimeError("Kernel replay requested but KERNEL_API_KEY is unavailable")
         framerate = max(1, int(os.getenv("BROWSER_AGENT_KERNEL_REPLAY_FRAMERATE", "10")))
         url = f"{_kernel_api_base()}/browsers/{self.session_id}/replays"
         try:
@@ -325,7 +326,7 @@ class BrowserAgentRecorder:
                 session_id=self.session_id,
                 replay_id=self._kernel_replay_id,
             )
-        except Exception as exc:  # noqa: BLE001 — recording must never fail the run
+        except Exception as exc:  # noqa: BLE001 — surface to create(), which returns None
             logger.warning(
                 "Kernel replay start failed; run will have no recording",
                 agent_id=self.agent_id,
@@ -336,6 +337,7 @@ class BrowserAgentRecorder:
             self.uses_kernel_replay = False
             self._kernel_replay_id = None
             self.recording_view_url = None
+            raise
 
     async def stop_kernel_replay(self) -> Optional[str]:
         """Stop the Kernel replay and return the (finalized) hosted view URL.
@@ -355,10 +357,11 @@ class BrowserAgentRecorder:
             async with httpx.AsyncClient(timeout=20.0) as client:
                 if self._kernel_replay_id:
                     try:
-                        await client.post(
+                        stop_response = await client.post(
                             f"{base}/browsers/{self.session_id}/replays/{self._kernel_replay_id}/stop",
                             headers=headers,
                         )
+                        stop_response.raise_for_status()
                     except Exception as exc:  # noqa: BLE001 — best-effort stop
                         logger.warning(
                             "Kernel replay stop failed; reading persisted replay anyway",
@@ -371,10 +374,13 @@ class BrowserAgentRecorder:
                 )
                 response.raise_for_status()
                 replays = response.json() or []
+            # Match ONLY this run's replay by id — never substitute replays[0], which
+            # could publish an unrelated (older session) replay's JWT URL as ours. If
+            # our id isn't in the list, keep the start-time view URL (valid pre-stop).
             match = next(
                 (item for item in replays if item.get("replay_id") == self._kernel_replay_id),
                 None,
-            ) or (replays[0] if replays else None)
+            )
             if match and match.get("replay_view_url"):
                 self.recording_view_url = match["replay_view_url"]
         except Exception as exc:  # noqa: BLE001 — fall back to start-time view URL

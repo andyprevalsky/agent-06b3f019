@@ -781,11 +781,11 @@ async def test_browser_agent_kernel_replay_start_failure_yields_no_recording():
                 browser_url="",
                 session_metadata={"provider": "kernel"},
             )
-            assert recorder is not None
-            # Best-effort: replay mode is disabled and no view URL is captured, so
-            # finalization skips the kernel path and no recording message is written.
-            assert recorder.uses_kernel_replay is False
-            assert recorder.recording_view_url is None
+            # Kernel replay start failed → create() returns None: no recorder, no
+            # recording. We intentionally do NOT leave a half-initialized screenshot
+            # recorder (frames dir never created), whose finalization would then try
+            # to write the final frame to a nonexistent directory.
+            assert recorder is None
     finally:
         restore()
 

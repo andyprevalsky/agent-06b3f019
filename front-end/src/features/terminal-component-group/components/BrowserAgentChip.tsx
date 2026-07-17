@@ -20,7 +20,7 @@
  * Derives result/trajectory/recording from all messages sharing this message's
  * metadata.task_id (each browser step is its own message).
  */
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ChevronDown, Clapperboard, ListOrdered, FileText, Globe } from 'lucide-react';
 import { getAttachmentUrl } from '@/lib/api/messages';
 import { useAgentContext } from '../hooks';
@@ -106,26 +106,35 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
 
   // Prefer the LAST session's recording: a tool call may retry across several
   // browser sessions, and earlier ones are often the frozen/splash attempts —
-  // the final session is the one that actually reached page content.
-  const recordingPointer = useMemo<FilePointer | null>(() => {
+  // the final session is the one that actually reached page content. A single
+  // reverse scan returns whichever source the LATEST recording message carries
+  // (Kernel view URL OR Supabase pointer) — scanning the two independently could
+  // surface an older session's view URL over the latest retry's pointer.
+  const recordingSource = useMemo<
+    { kind: 'view'; url: string } | { kind: 'pointer'; pointer: FilePointer } | null
+  >(() => {
     for (let i = taskMessages.length - 1; i >= 0; i--) {
-      const fp = taskMessages[i].metadata?.recording_file_pointer as FilePointer | null | undefined;
-      if (fp?.storage_path) return fp;
+      const md = taskMessages[i].metadata;
+      const url = md?.recording_view_url as string | null | undefined;
+      if (url) return { kind: 'view', url };
+      const fp = md?.recording_file_pointer as FilePointer | null | undefined;
+      if (fp?.storage_path) return { kind: 'pointer', pointer: fp };
     }
     return null;
   }, [taskMessages]);
 
-  // Kernel-native replay: a hosted video-player URL we iframe directly (no
-  // Supabase fetch). Preferred over the FilePointer when both are present.
-  const recordingViewUrl = useMemo<string | null>(() => {
-    for (let i = taskMessages.length - 1; i >= 0; i--) {
-      const url = taskMessages[i].metadata?.recording_view_url as string | null | undefined;
-      if (url) return url;
-    }
-    return null;
-  }, [taskMessages]);
-
-  const hasRecording = !!recordingViewUrl || !!recordingPointer;
+  const hasRecording = recordingSource !== null;
+  // Stable identity of the selected recording; when a newer session's recording
+  // arrives asynchronously, reset the loader so the chip re-resolves it instead
+  // of pinning the stale URL/state.
+  const recordingKey =
+    recordingSource?.kind === 'view'
+      ? recordingSource.url
+      : (recordingSource?.pointer.storage_path ?? null);
+  useEffect(() => {
+    setRecordingState('idle');
+    setRecordingUrl(null);
+  }, [recordingKey]);
 
   const trajectory = useMemo(
     () =>
@@ -144,21 +153,18 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
 
   async function openRecording() {
     setTab('recording');
-    if (recordingState !== 'idle') return;
+    if (recordingState !== 'idle' || !recordingSource) return;
     // Kernel replay: the view URL is a ready-to-iframe hosted player — no fetch.
-    if (recordingViewUrl) {
-      setRecordingUrl(recordingViewUrl);
+    if (recordingSource.kind === 'view') {
+      setRecordingUrl(recordingSource.url);
       setRecordingState('ready');
       return;
     }
-    if (!recordingPointer || !selectedAgentId) return;
+    if (!selectedAgentId) return;
+    const { pointer } = recordingSource;
     setRecordingState('loading');
     try {
-      const url = await getAttachmentUrl(
-        selectedAgentId,
-        recordingPointer.id,
-        recordingPointer.storage_path,
-      );
+      const url = await getAttachmentUrl(selectedAgentId, pointer.id, pointer.storage_path);
       // Supabase serves stored files as text/plain + nosniff (XSS safety), so an
       // <iframe src> would show raw HTML. Fetch the bytes and load them via a
       // text/html Blob URL so the recording actually renders.
