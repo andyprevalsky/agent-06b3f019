@@ -2360,13 +2360,15 @@ done
 # these artifacts are the authoritative failure evidence.
 mkdir -p "$OUT_DIR/remote-logs"
 cp -f "$SSH_LOG" "$OUT_DIR/remote-logs/cloudbench-driver.log" 2>/dev/null || true
-for remote_log_name in stack.log services.json logs/backend.log logs/worker.log logs/research.log; do
-    local_log_name="$(printf '%s' "$remote_log_name" | tr '/' '-')"
-    ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/$remote_log_name' 2>/dev/null" \
-        > "$OUT_DIR/remote-logs/$local_log_name" 2>/dev/null || true
-    [ -s "$OUT_DIR/remote-logs/$local_log_name" ] \
-        || rm -f "$OUT_DIR/remote-logs/$local_log_name" 2>/dev/null || true
-done
+if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" != "1" ]; then
+    for remote_log_name in stack.log services.json logs/backend.log logs/worker.log logs/research.log; do
+        local_log_name="$(printf '%s' "$remote_log_name" | tr '/' '-')"
+        ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/$remote_log_name' 2>/dev/null" \
+            > "$OUT_DIR/remote-logs/$local_log_name" 2>/dev/null || true
+        [ -s "$OUT_DIR/remote-logs/$local_log_name" ] \
+            || rm -f "$OUT_DIR/remote-logs/$local_log_name" 2>/dev/null || true
+    done
+fi
 
 # ── 5. Retrieve report-card.json + newest runs/*.json directly from the box ──
 # The bench.log already contains the report card / run record between markers as
@@ -2381,14 +2383,21 @@ if [ "$NEEDS_IMESSAGE_RELAY" = "1" ] && [ -f "$IMESSAGE_RELAY_LOG" ]; then
     cp -f "$IMESSAGE_RELAY_LOG" "$RUN_CONTEXT_DIR/imessage-relay.log" 2>/dev/null || true
 fi
 
-CARD_JSON="$(ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/report-card.json' 2>/dev/null" 2>/dev/null || true)"
-if [ -z "$CARD_JSON" ]; then
-    # Fallback: extract from the polled log between markers.
+if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
+    # Boot-launch's authoritative log already carries both artifacts between
+    # run-scoped markers. Never re-enter Machines-API SSH after DONE: seven
+    # sequential 3x60s reads left a passed box/controller hanging for minutes.
     CARD_JSON="$(awk "/$REPORT_BEGIN/{f=1;next} /$REPORT_END/{f=0} f" "$SSH_LOG" 2>/dev/null)"
-fi
-RUN_JSON="$(ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/run.json' 2>/dev/null" 2>/dev/null || true)"
-if [ -z "$RUN_JSON" ]; then
     RUN_JSON="$(awk "/$RESULT_BEGIN/{f=1;next} /$RESULT_END/{f=0} f" "$SSH_LOG" 2>/dev/null | grep -av '^run_file:')"
+else
+    CARD_JSON="$(ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/report-card.json' 2>/dev/null" 2>/dev/null || true)"
+    if [ -z "$CARD_JSON" ]; then
+        CARD_JSON="$(awk "/$REPORT_BEGIN/{f=1;next} /$REPORT_END/{f=0} f" "$SSH_LOG" 2>/dev/null)"
+    fi
+    RUN_JSON="$(ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/run.json' 2>/dev/null" 2>/dev/null || true)"
+    if [ -z "$RUN_JSON" ]; then
+        RUN_JSON="$(awk "/$RESULT_BEGIN/{f=1;next} /$RESULT_END/{f=0} f" "$SSH_LOG" 2>/dev/null | grep -av '^run_file:')"
+    fi
 fi
 
 RUN_IDENTITY_OK="0"

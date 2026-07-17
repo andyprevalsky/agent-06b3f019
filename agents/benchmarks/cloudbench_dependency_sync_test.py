@@ -2897,6 +2897,21 @@ def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     assert 'pkill -f "flyctl proxy $LOCAL_STATUS_PORT' not in cloud
 
 
+def test_boot_launch_collects_terminal_artifacts_without_post_done_ssh() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    collection = cloud[
+        cloud.index("# Preserve the complete remote driver") : cloud.index(
+            "RUN_IDENTITY_OK=", cloud.index("# Preserve the complete remote driver")
+        )
+    ]
+
+    assert 'if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" != "1" ]; then' in collection
+    assert 'if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then' in collection
+    assert 'CARD_JSON="$(awk' in collection
+    assert 'RUN_JSON="$(awk' in collection
+    assert "Never re-enter Machines-API SSH after DONE" in collection
+
+
 def test_cloud_timeout_kills_a_command_that_ignores_sigalrm() -> None:
     """RCA (2026-07-16): the perl-alarm wrapper exec'd flyctl and relied on
     SIGALRM surviving exec. A stopped-machine SSH ignored that contract and ran

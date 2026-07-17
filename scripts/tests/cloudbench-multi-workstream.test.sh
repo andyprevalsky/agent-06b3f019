@@ -247,25 +247,33 @@ def run_fake_driver(mdir):
             "duration_seconds": 1.0, "cost_cents": 0,
             "world_model_mode": "real", "code_ref": ref,
         }
+        card = {
+            "run_id": "fake", "elapsed_s": 1.0, "world_model_mode": "real",
+            "cost": {"agents_llm_usd": 0, "wmh_grounding_usd": 0,
+                     "infra_usd": 0, "total_usd": 0},
+            "metadata": {"tokens_in": 0, "tokens_out": 0},
+            "per_task": [{"name": bench, "status": "passed",
+                          "duration_s": 1.0, "cost_usd": 0,
+                          "tokens_in": 0, "tokens_out": 0,
+                          "world_model_mode": "real", "agent_url": None}],
+        }
+        run = {
+            "summary": {"total": 1, "passed": 1, "failed": 0, "skipped": 0,
+                        "pass_rate": 1.0, "total_duration_seconds": 1.0,
+                        "total_cost_cents": 0},
+            "tasks": [task],
+            "code_ref": ref,
+        }
         with open(os.path.join(context, "report-card.json"), "w") as fh:
-            json.dump({
-                "run_id": "fake", "elapsed_s": 1.0, "world_model_mode": "real",
-                "cost": {"agents_llm_usd": 0, "wmh_grounding_usd": 0,
-                         "infra_usd": 0, "total_usd": 0},
-                "metadata": {"tokens_in": 0, "tokens_out": 0},
-                "per_task": [{"name": bench, "status": "passed",
-                              "duration_s": 1.0, "cost_usd": 0,
-                              "tokens_in": 0, "tokens_out": 0,
-                              "world_model_mode": "real", "agent_url": None}],
-            }, fh)
+            json.dump(card, fh)
         with open(os.path.join(context, "run.json"), "w") as fh:
-            json.dump({
-                "summary": {"total": 1, "passed": 1, "failed": 0, "skipped": 0,
-                            "pass_rate": 1.0, "total_duration_seconds": 1.0,
-                            "total_cost_cents": 0},
-                "tasks": [task],
-                "code_ref": ref,
-            }, fh)
+            json.dump(run, fh)
+        log(f"::CLOUDBENCH-REPORT-CARD-BEGIN:: token={token}")
+        log(json.dumps(card, separators=(",", ":")))
+        log(f"::CLOUDBENCH-REPORT-CARD-END:: token={token}")
+        log(f"::CLOUDBENCH-RESULT-BEGIN:: token={token}")
+        log(json.dumps(run, separators=(",", ":")))
+        log(f"::CLOUDBENCH-RESULT-END:: token={token}")
         log("benchmark complete")
     log(f"::CLOUDBENCH-DONE:: token={token} exit={exit_code}")
 
