@@ -2541,6 +2541,36 @@ echo "EXACT=$CREATED_SNAPSHOT_ID"
     assert "snap-unrelated-newer" not in result.stdout
 
 
+def test_refresh_deps_rejects_invalid_ref_before_fly(tmp_path: Path) -> None:
+    """An unresolved ref is input failure and must cause zero Fly API calls."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "fly-calls"
+    calls.write_text("")
+    fake_fly = bin_dir / "flyctl"
+    fake_fly.write_text(
+        '#!/usr/bin/env bash\n'
+        'printf "%s\\n" "$*" >> "$FLY_CALLS"\n'
+        'echo "[]"\n'
+    )
+    fake_fly.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(CLOUD_SCRIPT), "--refresh-deps", "--ref", "definitely-not-a-commit"],
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "FLY_BENCH_API_TOKEN": "test-token",
+            "FLY_CALLS": str(calls),
+        },
+        text=True, capture_output=True, check=False, timeout=20,
+    )
+
+    assert result.returncode != 0
+    assert calls.read_text() == ""
+    assert "invalid benchmark ref" in result.stdout + result.stderr
+
+
 def test_refresh_deps_mode_contract() -> None:
     """--refresh-deps must sync the ref, run the marker-gated dep sync, STOP the
         machine before snapshotting (quiesced snapshot), wait boundedly for the

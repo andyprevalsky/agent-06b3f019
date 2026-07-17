@@ -153,7 +153,7 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "8 passed" in result.stdout
+    assert "9 passed" in result.stdout
 
 
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():

@@ -1131,6 +1131,16 @@ fi
 # cost). Refresh centrally ONCE here instead; clones then no-op their dep sync.
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "$MODE" = "refresh-deps" ]; then
+    if ! EXPECTED_REF="$(git -C "$ROOT_DIR" rev-parse --verify "${BENCH_REF}^{commit}" 2>/dev/null)"; then
+        echo "❌ invalid benchmark ref: $BENCH_REF is not a local commit" >&2
+        exit 1
+    fi
+    EXPECTED_NODE_FP="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")"
+    EXPECTED_PY_FP="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")"
+    [ -n "$EXPECTED_NODE_FP" ] && [ -n "$EXPECTED_PY_FP" ] || {
+        echo "❌ could not resolve the local dependency fingerprints" >&2
+        exit 1
+    }
     echo "═══ run-bench-cloud --refresh-deps (ref $BENCH_REF) ═══"
     ensure_app
     cleanup_refresh_deps() {
@@ -1146,14 +1156,6 @@ if [ "$MODE" = "refresh-deps" ]; then
     mid="$(resolve_machine_id)"
     [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }
     write_state "$mid"
-
-    EXPECTED_REF="$(git -C "$ROOT_DIR" rev-parse "${BENCH_REF}^{commit}" 2>/dev/null || true)"
-    EXPECTED_NODE_FP="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")"
-    EXPECTED_PY_FP="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")"
-    [ -n "$EXPECTED_REF" ] && [ -n "$EXPECTED_NODE_FP" ] && [ -n "$EXPECTED_PY_FP" ] || {
-        echo "❌ could not resolve the exact local ref/dependency fingerprints" >&2
-        exit 1
-    }
 
     start_machine "$mid"
     wait_for_ssh "$mid"
