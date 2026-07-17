@@ -696,6 +696,21 @@ def test_autoscaler_metrics_poll_over_data_plane_without_ssh() -> None:
     assert "autoscaler metrics via data plane" in autoscaler
 
 
+def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    starter = _extract_fleet_function(cloud, "start_data_plane_proxy() {")
+    ensure = _extract_fleet_function(cloud, "ensure_status_proxy() {")
+
+    assert "CLOUDBENCH_DATA_PROXY_READY_TIMEOUT" in starter
+    assert 'FLY proxy "$local_port:$remote_port" "$host"' in starter
+    assert 'kill -0 "$pid"' in starter
+    assert "host was not found in DNS" in starter
+    assert 'start_data_plane_proxy "$LOCAL_STATUS_PORT"' in cloud
+    assert 'start_data_plane_proxy "$LIVE_BACKEND_PORT"' in cloud
+    assert "start_data_plane_proxy" in ensure
+    assert "ensure_status_proxy >/dev/null 2>&1 || true" in cloud
+
+
 def test_fleet_children_cannot_replace_persistent_warm_state() -> None:
     cloud = CLOUD_SCRIPT.read_text()
 
@@ -2828,7 +2843,7 @@ def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     # On-box status server over /data, and a data-plane proxy to it.
     assert "REMOTE_STATUS_PORT" in cloud
     assert "http.server ${REMOTE_STATUS_PORT} --directory /data" in cloud
-    assert 'FLY proxy "$LOCAL_STATUS_PORT:$REMOTE_STATUS_PORT"' in cloud
+    assert 'start_data_plane_proxy "$LOCAL_STATUS_PORT" "$REMOTE_STATUS_PORT"' in cloud
     # The poll reads only over the bounded data-plane proxy.
     assert "read_bench_log()" in cloud
     assert 'curl -fsS --max-time 6 "http://127.0.0.1:$LOCAL_STATUS_PORT/bench.log"' in cloud

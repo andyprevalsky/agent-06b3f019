@@ -1751,6 +1751,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
 bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim01> <out> <local-port-base>
     local bench="$1" cid="$2" ws="$3" sim="$4" out="$5" port_base="$6"
     local pip="" metrics_proxy_pid="" metrics_port="" metrics_url="" offset
+    local metrics_started_at candidate
     : > "$out/worker-clones.ids"
     cleanup_metrics_proxy() {
         [ -n "$metrics_proxy_pid" ] && kill "$metrics_proxy_pid" 2>/dev/null || true
@@ -1763,16 +1764,30 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     # One persistent WireGuard tunnel replaces one `flyctl ssh` metrics read per
     # task every poll interval. At daily width that removes 180 Machines-API SSH
     # sessions/minute and the rate-limit/launch interference they caused.
-    for offset in $(seq 10 18); do
-        metrics_port=$((port_base + offset))
+    metrics_started_at="$(date +%s)"
+    : > "$out/autoscaler-metrics-proxy.log"
+    while [ $(( $(date +%s) - metrics_started_at )) -lt "${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}" ]; do
+        metrics_port=""
+        for offset in $(seq 10 18); do
+            candidate=$((port_base + offset))
+            if ! lsof -tiTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1; then
+                metrics_port="$candidate"
+                break
+            fi
+        done
+        [ -n "$metrics_port" ] || { sleep 2; continue; }
         FLY proxy "$metrics_port:$BOX_HEALTH_PORT" "${cid}.vm.${APP}.internal" \
             -a "$APP" --bind-addr 127.0.0.1 -q \
-            > "$out/autoscaler-metrics-proxy.log" 2>&1 &
+            >> "$out/autoscaler-metrics-proxy.log" 2>&1 &
         metrics_proxy_pid=$!
-        sleep 0.3
+        # A just-started machine may not yet have a resolvable 6PN DNS record.
+        # flyctl exits immediately in that case; retry until the same bounded
+        # data-plane readiness ceiling used by the status/backend tunnels.
+        sleep 1
         kill -0 "$metrics_proxy_pid" 2>/dev/null && break
         wait "$metrics_proxy_pid" 2>/dev/null || true
         metrics_proxy_pid=""
+        sleep 2
     done
     [ -n "$metrics_proxy_pid" ] || {
         echo "  ⚠️ [$bench] autoscaler: could not bind a data-plane metrics proxy; disabled" >&2

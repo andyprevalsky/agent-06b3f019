@@ -1953,10 +1953,40 @@ fi  # end launch: boot-launch vs legacy ssh path
 # ongoing traffic never touches the Machines API. The poll loop reads bench.log
 # over http://127.0.0.1:$LOCAL_STATUS_PORT through it, so 30 boxes polling every
 # few seconds no longer saturate Fly's control-plane rate limit.
+start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log> <pid-var> <label> [timeout]
+    local local_port="$1" remote_port="$2" host="$3" log_file="$4"
+    local pid_var="$5" label="$6" timeout="${7:-${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}}"
+    local started_at pid attempt=0
+    started_at="$(date +%s)"
+    : > "$log_file"
+    while [ $(( $(date +%s) - started_at )) -lt "$timeout" ]; do
+        attempt=$((attempt + 1))
+        printf '[%s] %s proxy attempt %s: localhost:%s -> %s:%s\n' \
+            "$(date -u +%H:%M:%S)" "$label" "$attempt" "$local_port" "$host" "$remote_port" \
+            >> "$log_file"
+        FLY proxy "$local_port:$remote_port" "$host" -a "$APP" --bind-addr 127.0.0.1 -q \
+            >> "$log_file" 2>&1 &
+        pid=$!
+        # A machine's 6PN DNS record can lag a successful start. In that case
+        # flyctl exits immediately with "host was not found in DNS"; retry the
+        # data plane instead of leaving a dead PID that stalls the whole barrier.
+        sleep 1
+        if kill -0 "$pid" 2>/dev/null; then
+            printf -v "$pid_var" '%s' "$pid"
+            return 0
+        fi
+        wait "$pid" 2>/dev/null || true
+        sleep 2
+    done
+    printf -v "$pid_var" '%s' ""
+    echo "❌ $label data-plane proxy did not stay alive within ${timeout}s" >&2
+    tail -20 "$log_file" 2>/dev/null | sed 's/^/   /' >&2 || true
+    return 1
+}
+
 REMOTE_STATUS_HOST="${mid}.vm.${APP}.internal"
-FLY proxy "$LOCAL_STATUS_PORT:$REMOTE_STATUS_PORT" "$REMOTE_STATUS_HOST" -a "$APP" --bind-addr 127.0.0.1 -q \
-    > "$OUT_DIR/cloudbench-status-proxy.log" 2>&1 &
-STATUS_PROXY_PID=$!
+start_data_plane_proxy "$LOCAL_STATUS_PORT" "$REMOTE_STATUS_PORT" "$REMOTE_STATUS_HOST" \
+    "$OUT_DIR/cloudbench-status-proxy.log" STATUS_PROXY_PID status || exit 1
 echo "🛰️  status proxy: 127.0.0.1:$LOCAL_STATUS_PORT → fly:$REMOTE_STATUS_PORT (data plane; no Machines-API polling)"
 
 # ── 3a. Proxy the box BACKEND to the Mac so running rows open a live view ────
@@ -1964,9 +1994,8 @@ echo "🛰️  status proxy: 127.0.0.1:$LOCAL_STATUS_PORT → fly:$REMOTE_STATUS
 # API that proxies live GETs here with the benchmark API key (bypassing RLS).
 if { [ "$DASHBOARD" = "1" ] || [ "$NEEDS_IMESSAGE_RELAY" = "1" ]; } && [ -n "$LIVE_BACKEND_PORT" ]; then
         REMOTE_BACKEND_HOST="${mid}.vm.${APP}.internal"
-        FLY proxy "$LIVE_BACKEND_PORT:$REMOTE_BACKEND_PORT" "$REMOTE_BACKEND_HOST" -a "$APP" --bind-addr 127.0.0.1 -q \
-            > "$OUT_DIR/cloudbench-backend-proxy.log" 2>&1 &
-        PROXY_PID=$!
+        start_data_plane_proxy "$LIVE_BACKEND_PORT" "$REMOTE_BACKEND_PORT" "$REMOTE_BACKEND_HOST" \
+            "$OUT_DIR/cloudbench-backend-proxy.log" PROXY_PID backend || exit 1
         echo "🌐 Live backend proxy: $LIVE_BACKEND_URL → fly:$REMOTE_BACKEND_PORT"
         # Publish the live upstream so the DURABLE batch dashboard resolver can
         # serve THIS bench's agents mid-run (before run.json is saved locally).
@@ -2195,11 +2224,14 @@ FINISHED="0"; BENCH_EXIT=""; TIMED_OUT="0"
 # this hard-deadline loop: a stopped box left flyctl SSH hung for hours, and 30
 # simultaneous fallbacks recreate the exact API burst this path eliminated.
 read_bench_log() {
-    if [ -n "$STATUS_PROXY_PID" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
-        curl -fsS --max-time 6 "http://127.0.0.1:$LOCAL_STATUS_PORT/bench.log" 2>/dev/null
-        return $?
+    [ -n "$STATUS_PROXY_PID" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null || return 1
+    curl -fsS --max-time 6 "http://127.0.0.1:$LOCAL_STATUS_PORT/bench.log" 2>/dev/null
+}
+ensure_status_proxy() {
+    if [ -z "$STATUS_PROXY_PID" ] || ! kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
+        start_data_plane_proxy "$LOCAL_STATUS_PORT" "$REMOTE_STATUS_PORT" "$REMOTE_STATUS_HOST" \
+            "$OUT_DIR/cloudbench-status-proxy.log" STATUS_PROXY_PID status 30
     fi
-    return 1
 }
 probe_driver_health() {
     local health_code
@@ -2256,6 +2288,9 @@ while :; do
     fi
     # Pull the full log each poll over the data plane (it stays small: driver +
     # stack progress lines). This loop performs no control-plane SSH calls.
+    # Restart a tunnel that dies after startup in the parent shell, so the new
+    # PID remains owned and reapable (read_bench_log runs in command substitution).
+    ensure_status_proxy >/dev/null 2>&1 || true
     if remote_log="$(read_bench_log 2>/dev/null)"; then
         printf '%s' "$remote_log" > "$SSH_LOG"
         cur_size="$(wc -c < "$SSH_LOG" | tr -d ' ')"
