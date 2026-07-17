@@ -7,6 +7,7 @@ import argparse
 import hmac
 import os
 import re
+import socket
 import tempfile
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,7 +20,10 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--directory", required=True)
     parser.add_argument("--port", required=True, type=int)
-    parser.add_argument("--bind", default="0.0.0.0")
+    # Fly machine-pinned *.internal names are 6PN IPv6 addresses. Binding only
+    # IPv4 (0.0.0.0) leaves flyctl proxy connected to the VM but every HTTP
+    # request resets because nothing listens on the IPv6 status port.
+    parser.add_argument("--bind", default="::")
     parser.add_argument("--barrier", default="")
     parser.add_argument("--ready-file", default="")
     return parser.parse_args()
@@ -72,7 +76,22 @@ def main() -> int:
         def log_message(self, _format: str, *args: object) -> None:
             return
 
-    server = ThreadingHTTPServer((args.bind, args.port), Handler)
+    server_class = ThreadingHTTPServer
+    if ":" in args.bind:
+        class IPv6ThreadingHTTPServer(ThreadingHTTPServer):
+            address_family = socket.AF_INET6
+
+            def server_bind(self) -> None:
+                # Accept IPv4-mapped clients too when the host supports dual
+                # stack; Fly itself connects over the machine's private IPv6.
+                try:
+                    self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                except OSError:
+                    pass
+                super().server_bind()
+
+        server_class = IPv6ThreadingHTTPServer
+    server = server_class((args.bind, args.port), Handler)
     if args.ready_file:
         ready_file = Path(args.ready_file)
         ready_file.parent.mkdir(parents=True, exist_ok=True)

@@ -2657,6 +2657,45 @@ def test_start_barrier_release_uses_authenticated_data_plane(tmp_path: Path) -> 
         server.wait(timeout=5)
 
 
+def test_status_server_defaults_to_fly_6pn_ipv6(tmp_path: Path) -> None:
+    import urllib.request
+
+    if not socket.has_ipv6:
+        return
+    (tmp_path / "bench.log").write_text("ipv6-ready\n")
+    ready_file = tmp_path / "server.port"
+    server = subprocess.Popen(
+        [
+            "python3",
+            str(STATUS_SERVER_SCRIPT),
+            "--directory",
+            str(tmp_path),
+            "--port",
+            "0",
+            "--ready-file",
+            str(ready_file),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.time() + 5
+        while not ready_file.is_file():
+            if server.poll() is not None:
+                raise AssertionError(server.stderr.read())
+            if time.time() >= deadline:
+                raise AssertionError("IPv6 status server did not publish its port")
+            time.sleep(0.02)
+        port = int(ready_file.read_text().strip())
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://[::1]:{port}/bench.log", timeout=2) as response:
+            assert response.read() == b"ipv6-ready\n"
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
 def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
     """All 30 ready boxes release concurrently over their existing data-plane
     proxies; one unavailable endpoint makes the run fail immediately and visibly.
