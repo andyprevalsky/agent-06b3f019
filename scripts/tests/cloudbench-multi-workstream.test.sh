@@ -59,9 +59,26 @@ SANDBOX="$TMP_ROOT/repo"
 mkdir -p "$SANDBOX"
 cp -R "$ROOT_DIR/scripts" "$SANDBOX/scripts"
 cp -R "$ROOT_DIR/agents/benchmarks/fleet_startup_phase.py" "$SANDBOX/scripts/" 2>/dev/null || true
+# Keep the synthetic worktrees dependency-fingerprintable. Pool compatibility is
+# now a fail-closed production contract, so an intentionally minimal fake repo
+# still needs real (minimal) manifests rather than relying on an absent proof.
+mkdir -p "$SANDBOX/back-end" "$SANDBOX/front-end" "$SANDBOX/agents"
+printf '{}\n' > "$SANDBOX/package.json"
+printf '{}\n' > "$SANDBOX/back-end/package.json"
+printf '{}\n' > "$SANDBOX/front-end/package.json"
+printf '{}\n' > "$SANDBOX/back-end/package-lock.json"
+: > "$SANDBOX/agents/requirements.txt"
 git -C "$SANDBOX" init -q
 git -C "$SANDBOX" -c user.email=test@test -c user.name=test add -A
 git -C "$SANDBOX" -c user.email=test@test -c user.name=test commit -qm "snapshot" >/dev/null
+# The fake provider exposes snap_0001 as the warm snapshot. Tie the manifest
+# proof to that exact ID, mirroring --refresh-deps without a live donor image.
+(
+    source "$SANDBOX/scripts/lib/cloudbench-env.sh"
+    node_fp="$(cloudbench_node_dependency_fingerprint "$SANDBOX")"
+    py_fp="$(cloudbench_manifest_fingerprint "$SANDBOX" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")"
+    printf '%s %s 0 snap_0001\n' "$node_fp" "$py_fp" > "$SANDBOX/.git/cloudbench-warm-deps.fp"
+)
 WS_A="$TMP_ROOT/ws-a"
 WS_B="$TMP_ROOT/ws-b"
 git -C "$SANDBOX" worktree add -q -b ws-a "$WS_A" >/dev/null
@@ -1172,6 +1189,7 @@ echo "PASS: scenario 8 — pool handoff and deleted-workspace claim recover dura
 # Make WS_B own the existing stopped pool, then force Fly's cleanup stop to be a
 # no-op. The controller may fail, but it must leave an auditable claim behind.
 cp "$POOL_A" "$POOL_B"
+cp "$POOL_A.deps" "$POOL_B.deps"
 FAKE_STATE="$FAKE_DIR/state.json" POOL_ID="$pool_id" python3 - <<'PY'
 import json
 import os

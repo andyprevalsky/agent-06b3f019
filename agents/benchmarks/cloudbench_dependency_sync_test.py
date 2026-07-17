@@ -664,13 +664,23 @@ def test_pool_boot_update_is_bounded_and_skips_redundant_inventory_polling() -> 
     claim_start = fleet.index("claim_pool_machine() {")
     claim_end = fleet.index("\n}\n", claim_start)
     claim = fleet[claim_start:claim_end]
-    assert claim.index('machine_storage_ready "$id" || continue') < claim.index(
-        'FLY machine start "$id"'
-    )
+    assert "machine_storage_ready" not in claim
+    assert "FLY machine status" not in claim
+    assert "FLY machine start" not in claim
+    assert 'write_pool_claim "$claim_path"' in claim
     assert (
         'if machine_storage_ready "$wid"; then\n'
         '            FLY machine start "$wid"' in fleet
     )
+
+
+def test_snapshot_and_pool_dependency_proofs_are_exact() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+
+    assert '[ "$_rest" = "$SNAP_ID" ]' in fleet
+    assert 'POOL_META_FILE="$POOL_IDS_FILE.deps"' in fleet
+    assert 'printf \'%s %s %s\\n\' "$CURRENT_NODE_FP" "$CURRENT_PY_FP" "$SNAP_ID"' in fleet
+    assert 'pooled machines were built from unproven/stale dependency trees' in fleet
 
 
 def test_fleet_children_cannot_replace_persistent_warm_state() -> None:
@@ -1159,7 +1169,7 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
 
 def test_pool_reconcile_leaves_concurrent_owner_untouched(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    function_start = fleet.index("pool_machine_state() {")
+    function_start = fleet.index("pool_machine_state_from_json() {")
     reconcile_start = fleet.index("reconcile_pool() {", function_start)
     function_end = fleet.index("\n}\n", reconcile_start) + 3
     reconcile_functions = fleet[function_start:function_end]
@@ -1282,12 +1292,12 @@ printf '%s\\n%s\\n' "$first" "$second"
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == ["def456", "fed789"]
     assert claims_file.read_text().splitlines() == ["def456", "fed789"]
-    assert starts_file.read_text().splitlines() == ["def456", "fed789"]
+    assert not starts_file.exists()
 
 
 def test_pool_reconcile_fails_closed_on_falsy_non_list_machine_json(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    function_start = fleet.index("pool_machine_state() {")
+    function_start = fleet.index("pool_machine_state_from_json() {")
     reconcile_start = fleet.index("reconcile_pool() {", function_start)
     function_end = fleet.index("\n}\n", reconcile_start) + 3
     reconcile_functions = fleet[function_start:function_end]

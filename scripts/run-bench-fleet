@@ -106,6 +106,7 @@ GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/
 case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
 POOL_WORKSPACE_KEY="$(printf '%s' "$(basename "$ROOT_DIR")" | tr -c 'a-zA-Z0-9._-' '-')"
 POOL_IDS_FILE="$GIT_COMMON_DIR/cloudbench-pools/$POOL_WORKSPACE_KEY.ids"
+POOL_META_FILE="$POOL_IDS_FILE.deps"
 POOL_IDS_LOCK="$POOL_IDS_FILE.lock"
 LEGACY_POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"
 POOL_CLAIMS_DIR="$GIT_COMMON_DIR/cloudbench-pool-claims"
@@ -1056,6 +1057,16 @@ provision_pool() {  # provision_pool <N> — create N stopped clones concurrentl
     # Every provision child is reaped. Drop stale numeric PIDs immediately so
     # a later controller cleanup cannot signal an unrelated PID-reuse occupant.
     PROVISION_PIDS=()
+    if [ "$failed" = "0" ]; then
+        # A pool volume is immutable with respect to its baked dependency trees.
+        # Record the fingerprints proven for the exact snapshot used here; a
+        # later ref with changed manifests must never claim these machines and
+        # discover the mismatch only after all boxes have booted.
+        printf '%s %s %s\n' "$CURRENT_NODE_FP" "$CURRENT_PY_FP" "$SNAP_ID" \
+            > "$POOL_META_FILE.tmp.$$" \
+            && mv "$POOL_META_FILE.tmp.$$" "$POOL_META_FILE" \
+            || failed=1
+    fi
     echo "✅ pool ready: $(grep -c . "$POOL_IDS_FILE" 2>/dev/null || echo 0) machines → $POOL_IDS_FILE"
     [ "$failed" = "0" ]
 }
@@ -1086,10 +1097,9 @@ pool_claim_owned_by_current() {  # pool_claim_owned_by_current <claim-path>
 # Self-heal a same-host dead claim only after proving the remote runner is idle.
 # Live/other-host owners remain unavailable; an unreadable or busy dead claim
 # blocks provisioning rather than risking interruption or compounding spend.
-pool_machine_state() {  # pool_machine_state <id>: prints state; 1=absent, 2=invalid read
-    local id="$1" machines
-    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
-    printf '%s' "$machines" | MACHINE_ID="$id" python3 -c '
+pool_machine_state_from_json() {  # pool_machine_state_from_json <id>; JSON on stdin
+    local id="$1"
+    MACHINE_ID="$id" python3 -c '
 import json, os, sys
 try:
     machines = json.load(sys.stdin)
@@ -1106,14 +1116,26 @@ if not isinstance(state, str) or not state:
 print(state)
 '
 }
+pool_machine_state() {  # pool_machine_state <id>: prints state; 1=absent, 2=invalid read
+    local id="$1" machines
+    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
+    printf '%s' "$machines" | pool_machine_state_from_json "$id"
+}
 
 reconcile_pool() {
-    local pool_file id st presence claim_path claim_host owner_status runner_count
+    local pool_file id st presence claim_path claim_host owner_status runner_count machines
+    # Normal reconciliation is one shared inventory read, not one Machines-API
+    # list per pooled box. Only the rare stop-and-recover branch re-reads live
+    # state for the single machine being changed.
+    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
+        echo "❌ could not read pool inventory before refresh" >&2
+        return 1
+    }
     for pool_file in "$GIT_COMMON_DIR"/cloudbench-pools/*.ids; do
       [ -f "$pool_file" ] || continue
       while read -r id; do
         [ -n "$id" ] || continue
-        st="$(pool_machine_state "$id")"
+        st="$(printf '%s' "$machines" | pool_machine_state_from_json "$id")"
         presence=$?
         [ "$presence" -eq 1 ] && continue
         [ "$presence" -eq 0 ] || { echo "❌ could not read pool machine $id before refresh" >&2; return 1; }
@@ -1177,9 +1199,9 @@ reconcile_pool() {
       done < "$pool_file"
     done
 }
-claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none free)
+claim_pool_machine() {  # echo a claimed stopped pool machine id (or '' if none free)
     [ -f "$POOL_IDS_FILE" ] || return 0
-    local id st claim_path owner_status claim_host
+    local id claim_path owner_status claim_host
     mkdir -p "$POOL_CLAIMS_DIR" "$(dirname "$CLAIMED_POOL_FILE")"
     while read -r id; do
         [ -n "$id" ] || continue
@@ -1199,9 +1221,11 @@ claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none
                 continue
             fi
         fi
-        st="$(FLY machine status "$id" -a "$APP" 2>/dev/null | grep -iE '^[[:space:]]*State' | head -1)"
-        printf '%s' "$st" | grep -qi "stopped" || continue   # only claim an existing, stopped machine
-        machine_storage_ready "$id" || continue
+        # reconcile_pool already proved every eligible ledger machine stopped,
+        # and pool creation proved its snapshot volume startable. Re-reading
+        # machine+volume state for every one of 30 claims recreates the API burst
+        # pooling is meant to eliminate. The atomic claim file is the only state
+        # transition here; run-bench-cloud's update/start activates the box once.
         # claim_pool_machine is called through command substitution, so shell
         # arrays mutate in a subshell. Claim files are the cross-subshell and
         # cross-workspace ownership source of truth; creation is ATOMIC
@@ -1209,7 +1233,6 @@ claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none
         # machine — the loser just moves on to the next candidate.
         write_pool_claim "$claim_path" || continue
         printf '%s\n' "$id" >> "$CLAIMED_POOL_FILE"
-        FLY machine start "$id" -a "$APP" >/dev/null 2>&1 || true
         printf '%s' "$id"; return 0
     done < "$POOL_IDS_FILE"
 }
@@ -1507,11 +1530,15 @@ for s in snaps:
         break
 ' 2>/dev/null || true
 }
+CURRENT_NODE_FP=""
+CURRENT_PY_FP=""
 warm_deps_preflight() {
     local state="$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
     local node_fp py_fp snap_epoch s_node s_py s_epoch _rest new_snap
     node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR" 2>/dev/null || true)"
     py_fp="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}" 2>/dev/null || true)"
+    CURRENT_NODE_FP="$node_fp"
+    CURRENT_PY_FP="$py_fp"
     if [ -z "$node_fp" ] || [ -z "$py_fp" ]; then
         echo "⚠️  could not fingerprint dep manifests — skipping warm-deps preflight" >&2
         return 0
@@ -1520,6 +1547,7 @@ warm_deps_preflight() {
         read -r s_node s_py s_epoch _rest < "$state" || true
         snap_epoch="$(snapshot_created_epoch "$SNAP_ID")"
         if [ "$s_node" = "$node_fp" ] && [ "$s_py" = "$py_fp" ] && \
+           [ "$_rest" = "$SNAP_ID" ] && \
            [ "${snap_epoch:-0}" -ge $(( ${s_epoch:-0} - 60 )) ]; then
             echo "✅ warm snapshot dep trees match the current ref (fast bring-up)"
             return 0
@@ -1553,6 +1581,23 @@ warm_deps_preflight() {
 }
 warm_deps_preflight
 echo "🧊 forking clones from complete snapshot: $SNAP_ID"
+
+# A newer snapshot is not proof that it contains the dependency state recorded
+# for an older snapshot: the mutable warm checkout can subsequently move to an
+# older ref. Likewise, an existing pool must carry the manifest fingerprints
+# current code expects. Fail before claiming or starting a single task box.
+if [ -s "$POOL_IDS_FILE" ]; then
+    pool_node=""; pool_py=""; pool_snap=""
+    [ -f "$POOL_META_FILE" ] && read -r pool_node pool_py pool_snap < "$POOL_META_FILE" || true
+    if [ -z "$CURRENT_NODE_FP" ] || [ -z "$CURRENT_PY_FP" ] \
+        || [ "$pool_node" != "$CURRENT_NODE_FP" ] \
+        || [ "$pool_py" != "$CURRENT_PY_FP" ]; then
+        echo "❌ pooled machines were built from unproven/stale dependency trees; refusing to start them" >&2
+        echo "   retire this workspace's stopped pool first; then rebuild with: bash scripts/run-bench-fleet --provision-pool ${PROVISION_POOL:-${#BENCHES[@]}}" >&2
+        exit 1
+    fi
+    echo "✅ pooled dependency trees match the current ref (${pool_snap:-unknown snapshot})"
+fi
 
 # Recover only positively owned ephemeral clones whose same-host controller
 # identity is definitively dead. Any active runner, unreadable probe, malformed
