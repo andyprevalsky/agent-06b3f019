@@ -40,6 +40,7 @@
 
 import { config } from 'dotenv';
 import { z } from 'zod';
+import { KNOWN_TAGS } from './benchmarks-known-tags';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -180,12 +181,6 @@ const KNOWN_TASK_NAMES = [
   'gate-kyc-card-mint',
   'gate-source-connect-gmail',
 ];
-
-// Space-split to keep this list compact (one logical line) — tags never contain spaces.
-const KNOWN_TAGS =
-  'basic chat smoke approval browser claude-code attachment for-each outreach job-applications cache load-test mass-agent research baseline single-arm scale batch needs-auth auth auth-anon auth-cookie biometrics local-only minted social grep payment phone plaid transactions bot-challenge antibot documents prod-data external voice wait-for eval real-llm gate subscription kyc source response-schema regression compensation agentcard-lifecycle-sandbox agentcard-lifecycle-production setup idempotency settlement'.split(
-    ' '
-  );
 
 // ==================== GET /api/benchmarks — CONTRACT TESTS ====================
 

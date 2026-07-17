@@ -78,6 +78,11 @@ export interface SpawnBrowserAgentMetadata extends BaseToolMetadata {
    * message. The front-end resolves this FilePointer to a signed URL and iframes
    * it so the recording is viewable after the run (the live debugUrl is gone). */
   recording_file_pointer?: FilePointer | null;
+  /** Kernel-native session replay: a hosted, self-contained video player URL
+   * (JWT baked in, iframe-embeddable). When present the front-end iframes it
+   * directly, skipping the Supabase FilePointer fetch. Preferred over
+   * `recording_file_pointer` when both exist. */
+  recording_view_url?: string | null;
   /** Browser provider and proxy metadata captured for this browser session. */
   browser_session_metadata?: {
     provider?: string;

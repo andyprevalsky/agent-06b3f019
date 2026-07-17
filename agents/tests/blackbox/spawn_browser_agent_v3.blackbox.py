@@ -195,6 +195,147 @@ def test_verifier_activity_timeout_allows_llm_call():
     assert VERIFIER_ULTRA_TIMEOUT_SECONDS == STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
 
+# ============================================================================
+# RCA repro — browser agent returns BEST-EFFORT results at max steps
+# ----------------------------------------------------------------------------
+# Bug (before): when the browser sub-agent exhausted its step budget WITHOUT
+# ever calling attempt_completion, handler.py's max_iterations exit returned
+# `structured_response=None` and had no best-effort field at all — the parent
+# got an empty payload, unlike run_agent (loop/run_agent.py) and the explore
+# agent, which both surface a last-synthesized answer + a final verifier pass.
+#
+# Fix (after): the max_iterations exit now (1) runs a final verifier pass
+# (reusing build_browser_verifier_context) to salvage partial structured data
+# into structured_response, and (2) returns build_best_effort_response(...) as
+# `best_effort_response`, mirroring run_agent's best_effort_response.
+#
+# These tests are the regression guard: on the pre-fix code the two helpers
+# don't exist (ImportError) and the guarantees below don't hold.
+# ============================================================================
+
+
+def test_max_steps_best_effort_prefers_last_reasoning():
+    """Best-effort answer = the agent's most recent synthesized reasoning.
+
+    Mirrors run_agent's best_effort_response (last ASSISTANT text). Without
+    this, a runaway that never called attempt_completion returns nothing usable.
+    """
+    from domains.spawn_browser_agent_v3.service import build_best_effort_response
+
+    out = build_best_effort_response(
+        reasoning_messages=["Opened the site", "Found the item; it costs $42.00"],
+        action_summary=["navigate", "click"],
+        visited_urls=["https://shop.example/item"],
+    )
+    assert out == "Found the item; it costs $42.00"
+
+
+def test_max_steps_best_effort_skips_blank_reasoning():
+    """Blank/whitespace-only trailing reasoning is skipped for the last real one."""
+    from domains.spawn_browser_agent_v3.service import build_best_effort_response
+
+    out = build_best_effort_response(
+        reasoning_messages=["Real synthesized answer", "   ", ""],
+        action_summary=[],
+        visited_urls=[],
+    )
+    assert out == "Real synthesized answer"
+
+
+def test_max_steps_best_effort_falls_back_to_actions_then_url():
+    """With no reasoning captured, fall back to the action trail, then the URL —
+    never an empty payload while ANY evidence exists."""
+    from domains.spawn_browser_agent_v3.service import build_best_effort_response
+
+    from_actions = build_best_effort_response(
+        reasoning_messages=[],
+        action_summary=["navigate to shop", "click add-to-cart"],
+        visited_urls=["https://shop.example/cart"],
+    )
+    assert "click add-to-cart" in from_actions
+    assert from_actions.strip() != ""
+
+    from_url = build_best_effort_response(
+        reasoning_messages=[],
+        action_summary=[],
+        visited_urls=["https://shop.example/checkout"],
+    )
+    assert "https://shop.example/checkout" in from_url
+
+
+def test_max_steps_best_effort_empty_only_when_no_evidence():
+    """Empty string only when the agent accumulated zero evidence at all."""
+    from domains.spawn_browser_agent_v3.service import build_best_effort_response
+
+    assert build_best_effort_response([], [], []) == ""
+    assert build_best_effort_response(None, None, None) == ""
+
+
+async def test_browser_verifier_context_grounds_in_final_state():
+    """The extracted verifier-context builder (shared by attempt_completion AND
+    the new max-steps final synthesis pass) grounds in final-state DOM +
+    screenshot + action history, so the salvage verifier gets real evidence."""
+    from domains.spawn_browser_agent_v3 import service as bsvc
+
+    class _FakeHistory:
+        def get_entries(self):
+            return [
+                {"step": 1, "action": "navigate", "result": {"success": True}},
+                {"step": 2, "action": "extract", "result": {"success": True, "value": "$42.00"}},
+            ]
+
+    browser_state = {
+        "dom_tree": "<html>Price: $42.00</html>",
+        "screenshot": "ZmFrZS1iNjQ=",
+        "title": "Item Page",
+        "page_stats": {"interactive": 3},
+        "scroll_position": {"pages_above": 0, "total_pages": 1},
+    }
+
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        ctx = await bsvc.build_browser_verifier_context(
+            goal="find the item price",
+            current_url="https://shop.example/item",
+            browser_state=browser_state,
+            action_history=_FakeHistory(),
+            config=SimpleNamespace(),
+            session_id="sess-1",
+        )
+
+    roles = [m["role"] for m in ctx]
+    assert roles[0] == "USER"
+    tool_names = [m["metadata"]["toolName"] for m in ctx if m["role"] == "TOOL"]
+    assert tool_names == ["action_history", "session_files", "final_screenshot"]
+    # Ground truth (DOM) lives in the USER message, not an LLM-generated TOOL result.
+    assert "$42.00" in ctx[0]["text"]
+    assert "FINAL STATE" in ctx[0]["text"]
+    # Final-state screenshot rides through as a multimodal image reference.
+    screenshot_msg = next(m for m in ctx if m.get("metadata", {}).get("toolName") == "final_screenshot")
+    assert screenshot_msg["metadata"]["screenshot_b64"] == "ZmFrZS1iNjQ="
+
+
+def test_max_steps_return_declares_best_effort_and_final_verifier():
+    """The max_iterations exit must wire the best-effort field AND run the final
+    verifier salvage — guards against a silent revert of the RCA fix. Asserts on
+    the compiled source of the exact terminal branch (no live browser needed)."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    src = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    # Locate the max_iterations terminal return block.
+    marker = 'logger.warning(f"Max iterations reached: {MAX_ITERATIONS}")'
+    assert marker in src
+    tail = src[src.index(marker) :]
+    tail = tail[: tail.index('"status": "max_iterations"') + 400]
+    # (1) final synthesis pass reusing the shared verifier context builder
+    assert "build_browser_verifier_context" in tail
+    assert "check_progress" in tail
+    # (2) best-effort payload surfaced on the terminal return
+    assert "build_best_effort_response" in tail
+    assert '"best_effort_response": best_effort_response' in tail
+
+
 def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
     """Outer watchdogs must not cancel queued browser-use EventBus requests."""
     from domains.spawn_browser_agent_v3.config import (
@@ -503,6 +644,150 @@ async def test_browser_agent_recording_start_failure_is_best_effort():
             os.environ.pop("BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL", None)
         else:
             os.environ["BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL"] = previous_cleanup
+
+
+class _FakeReplayResponse:
+    def __init__(self, json_data, status=200):
+        self._json = json_data
+        self.status_code = status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self._json
+
+
+class _FakeReplayClient:
+    """Stands in for Kernel's replay REST API (POST start / POST stop / GET list)."""
+
+    def __init__(self, calls, *, fail_start=False):
+        self._calls = calls
+        self._fail_start = fail_start
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, headers=None, json=None):
+        self._calls.append(("POST", url))
+        if url.endswith("/stop"):
+            return _FakeReplayResponse({})
+        # start (POST /browsers/{id}/replays)
+        if self._fail_start:
+            raise RuntimeError("kernel replay start unavailable")
+        return _FakeReplayResponse(
+            {"replay_id": "rep-1", "replay_view_url": "https://kernel.example/replays?jwt=START"}
+        )
+
+    async def get(self, url, headers=None):
+        self._calls.append(("GET", url))
+        return _FakeReplayResponse(
+            [{"replay_id": "rep-1", "replay_view_url": "https://kernel.example/replays?jwt=FINAL"}]
+        )
+
+
+def _kernel_replay_env():
+    """Set env for kernel-replay mode; returns a restore() to reset it."""
+    keys = ["BROWSER_AGENT_KERNEL_REPLAY", "KERNEL_API_KEY", "KERNEL_API_BASE_URL"]
+    previous = {k: os.environ.get(k) for k in keys}
+    os.environ["BROWSER_AGENT_KERNEL_REPLAY"] = "1"
+    os.environ["KERNEL_API_KEY"] = "test-kernel-key"
+    os.environ["KERNEL_API_BASE_URL"] = "https://kernel.example"
+
+    def restore():
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    return restore
+
+
+async def test_browser_agent_kernel_replay_uses_native_recording():
+    """Kernel sessions reuse Kernel's native replay: start/stop the replay via
+    REST, surface a hosted recording_view_url, and DON'T screenshot every frame."""
+    from unittest import mock
+
+    from domains.spawn_browser_agent_v3 import recording as recording_module
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    restore = _kernel_replay_env()
+    calls: list = []
+    try:
+        with mock.patch.object(
+            recording_module.httpx,
+            "AsyncClient",
+            lambda *a, **k: _FakeReplayClient(calls),
+        ):
+            recorder = await BrowserAgentRecorder.create(
+                page=object(),  # replay mode needs no screenshot-capable page
+                agent_id="agent-1",
+                task_id="task-1",
+                session_id="kernel-session-1",
+                browser_url="https://kernel.example/live/xyz",
+                session_metadata={"provider": "kernel"},
+            )
+            assert recorder is not None
+            assert recorder.uses_kernel_replay is True
+            assert recorder._kernel_replay_id == "rep-1"
+            assert recorder.recording_view_url == "https://kernel.example/replays?jwt=START"
+            assert ("POST", "https://kernel.example/browsers/kernel-session-1/replays") in calls
+
+            # Screenshot/observation capture is a no-op in replay mode.
+            recorder.set_cursor(10, 20)
+            await recorder.mark("clicked", action="click", metadata={"step": 1})
+            await recorder.capture("idle", action="idle")
+            assert recorder.frames == []
+            assert recorder.cursor_events == []
+
+            view_url = await recorder.stop_kernel_replay()
+            assert view_url == "https://kernel.example/replays?jwt=FINAL"
+            assert recorder.recording_view_url == "https://kernel.example/replays?jwt=FINAL"
+            assert (
+                "POST",
+                "https://kernel.example/browsers/kernel-session-1/replays/rep-1/stop",
+            ) in calls
+            assert ("GET", "https://kernel.example/browsers/kernel-session-1/replays") in calls
+    finally:
+        restore()
+
+
+async def test_browser_agent_kernel_replay_start_failure_yields_no_recording():
+    """If starting the Kernel replay fails, the run proceeds with no recording
+    (we intentionally do NOT fall back to the dropped screenshot+Supabase path)."""
+    from unittest import mock
+
+    from domains.spawn_browser_agent_v3 import recording as recording_module
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    restore = _kernel_replay_env()
+    calls: list = []
+    try:
+        with mock.patch.object(
+            recording_module.httpx,
+            "AsyncClient",
+            lambda *a, **k: _FakeReplayClient(calls, fail_start=True),
+        ):
+            recorder = await BrowserAgentRecorder.create(
+                page=object(),
+                agent_id="agent-1",
+                task_id="task-1",
+                session_id="kernel-session-1",
+                browser_url="",
+                session_metadata={"provider": "kernel"},
+            )
+            # Kernel replay start failed → create() returns None: no recorder, no
+            # recording. We intentionally do NOT leave a half-initialized screenshot
+            # recorder (frames dir never created), whose finalization would then try
+            # to write the final frame to a nonexistent directory.
+            assert recorder is None
+    finally:
+        restore()
 
 
 def test_browser_agent_recording_prod_default_uses_writable_temp_root():
@@ -5856,9 +6141,7 @@ async def test_passkey_usage_is_recorded_once_before_browser_task_completion():
     """A sign-counter advance must be durable before approvals pause the browser task."""
     from domains.spawn_browser_agent_v3 import handler
 
-    dom_service = SimpleNamespace(
-        get_used_passkey_credential_ids=AsyncMock(return_value=["amazon-credential"])
-    )
+    dom_service = SimpleNamespace(get_used_passkey_credential_ids=AsyncMock(return_value=["amazon-credential"]))
     recorded_credential_ids: set[str] = set()
 
     with patch.object(
@@ -5868,9 +6151,7 @@ async def test_passkey_usage_is_recorded_once_before_browser_task_completion():
     ) as save_ref:
         first = await handler.record_used_passkey_credentials(
             dom_service=dom_service,
-            passkey_ref_by_credential_id={
-                "amazon-credential": {"kind": "passkey", "id": "passkey-row"}
-            },
+            passkey_ref_by_credential_id={"amazon-credential": {"kind": "passkey", "id": "passkey-row"}},
             recorded_credential_ids=recorded_credential_ids,
             agent_id="agent-1",
             task_id="task-1",
@@ -5878,9 +6159,7 @@ async def test_passkey_usage_is_recorded_once_before_browser_task_completion():
         )
         second = await handler.record_used_passkey_credentials(
             dom_service=dom_service,
-            passkey_ref_by_credential_id={
-                "amazon-credential": {"kind": "passkey", "id": "passkey-row"}
-            },
+            passkey_ref_by_credential_id={"amazon-credential": {"kind": "passkey", "id": "passkey-row"}},
             recorded_credential_ids=recorded_credential_ids,
             agent_id="agent-1",
             task_id="task-1",
@@ -5905,9 +6184,7 @@ async def test_passkey_usage_retries_after_credential_ref_write_failure():
     """A failed outcome write must not suppress the next observation's retry."""
     from domains.spawn_browser_agent_v3 import handler
 
-    dom_service = SimpleNamespace(
-        get_used_passkey_credential_ids=AsyncMock(return_value=["amazon-credential"])
-    )
+    dom_service = SimpleNamespace(get_used_passkey_credential_ids=AsyncMock(return_value=["amazon-credential"]))
     recorded_credential_ids: set[str] = set()
 
     with patch.object(
@@ -5917,9 +6194,7 @@ async def test_passkey_usage_retries_after_credential_ref_write_failure():
     ) as save_ref:
         first = await handler.record_used_passkey_credentials(
             dom_service=dom_service,
-            passkey_ref_by_credential_id={
-                "amazon-credential": {"kind": "passkey", "id": "passkey-row"}
-            },
+            passkey_ref_by_credential_id={"amazon-credential": {"kind": "passkey", "id": "passkey-row"}},
             recorded_credential_ids=recorded_credential_ids,
             agent_id="agent-1",
             task_id="task-1",
@@ -5927,9 +6202,7 @@ async def test_passkey_usage_retries_after_credential_ref_write_failure():
         )
         second = await handler.record_used_passkey_credentials(
             dom_service=dom_service,
-            passkey_ref_by_credential_id={
-                "amazon-credential": {"kind": "passkey", "id": "passkey-row"}
-            },
+            passkey_ref_by_credential_id={"amazon-credential": {"kind": "passkey", "id": "passkey-row"}},
             recorded_credential_ids=recorded_credential_ids,
             agent_id="agent-1",
             task_id="task-1",
@@ -5967,9 +6240,7 @@ def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
     post_injection = source.split("# ===== PHASE 3: POST-SETUP =====", maxsplit=1)[1]
     lines = post_injection.splitlines()
-    capture_disconnects = [
-        line for line in lines if "await disconnect_browser_after_passkey_capture(" in line
-    ]
+    capture_disconnects = [line for line in lines if "await disconnect_browser_after_passkey_capture(" in line]
 
     assert len(capture_disconnects) == 8
     assert not any("await dom_service.disconnect()" in line for line in lines)
@@ -5984,13 +6255,9 @@ def test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary():
     activity_source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
     manager_source = inspect.getsource(handler.SpawnBrowserAgentManagerV3.execute_tool)
 
-    assert activity_source.count(
-        '"recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids)'
-    ) == 3
-    assert manager_source.count(
-        '"recorded_passkey_credential_ids": result.get('
-    ) == 3
-    assert '(write_lock_resume_state or {}).get(' in activity_source
+    assert activity_source.count('"recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids)') == 3
+    assert manager_source.count('"recorded_passkey_credential_ids": result.get(') == 3
+    assert "(write_lock_resume_state or {}).get(" in activity_source
     assert '"recorded_passkey_credential_ids", []' in activity_source
 
 
@@ -10149,6 +10416,18 @@ async def run_all_tests():
     )
     r.record("browser_progress_title", test_browser_progress_title_describes_active_agent)
     r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
+    r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
+    r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)
+    r.record("max_steps_best_effort_falls_back", test_max_steps_best_effort_falls_back_to_actions_then_url)
+    r.record(
+        "max_steps_best_effort_empty_only_when_no_evidence", test_max_steps_best_effort_empty_only_when_no_evidence
+    )
+    await r.record_async(
+        "browser_verifier_context_grounds_final_state", test_browser_verifier_context_grounds_in_final_state
+    )
+    r.record(
+        "max_steps_return_wires_best_effort_and_verifier", test_max_steps_return_declares_best_effort_and_final_verifier
+    )
     r.record(
         "browser_supervisor_timeout_ordering",
         test_browser_supervisor_does_not_preempt_browser_use_event_timeouts,
@@ -10810,6 +11089,14 @@ async def run_all_tests():
     await r.record_async(
         "browser_agent_recording_start_failure_best_effort",
         test_browser_agent_recording_start_failure_is_best_effort,
+    )
+    await r.record_async(
+        "browser_agent_kernel_replay_uses_native_recording",
+        test_browser_agent_kernel_replay_uses_native_recording,
+    )
+    await r.record_async(
+        "browser_agent_kernel_replay_start_failure_yields_no_recording",
+        test_browser_agent_kernel_replay_start_failure_yields_no_recording,
     )
     r.record(
         "browser_agent_recording_prod_temp_root",
