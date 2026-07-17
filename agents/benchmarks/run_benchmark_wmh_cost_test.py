@@ -137,6 +137,25 @@ def test_base_live_fixture_reuses_fresh_isolated_seed_dump(monkeypatch, tmp_path
     assert manifest == {"fixture": "base", "browser_credentials": True}
 
 
+def test_base_live_fixture_refreshes_browser_creds_after_daily_dump_ttl(monkeypatch, tmp_path):
+    seed_dump = tmp_path / "victoria-seed.dump"
+    seed_dump.write_bytes(b"expired isolated database")
+    schema_hash = tmp_path / "victoria-seed.dump.schemahash"
+    schema_hash.write_text("schema-hash")
+    expired = rb.time.time() - 86401
+    rb.os.utime(seed_dump, (expired, expired))
+    rb.os.utime(schema_hash, (expired, expired))
+    monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "real")
+    monkeypatch.setenv("BENCHMARK_SEED_DUMP", str(seed_dump))
+    calls = []
+    monkeypatch.setattr(rb, "_sync_compute_tokens", lambda: calls.append("compute") or True)
+    monkeypatch.setattr(rb, "_sync_browser_credentials", lambda: calls.append("browser") or True)
+
+    rb._apply_base_live_fixture(_fixture_ctx())
+
+    assert calls == ["compute", "browser"]
+
+
 def test_is_simulate_mode_reads_env(monkeypatch):
     monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "simulate")
     assert rb._is_simulate_mode() is True

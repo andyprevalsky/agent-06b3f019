@@ -3721,7 +3721,7 @@ def _has_fresh_seeded_browser_credentials() -> bool:
     if not dump_value:
         return False
     try:
-        max_age = int(os.environ.get("BENCHMARK_BROWSER_SEED_MAX_AGE_SECONDS", "21600"))
+        max_age = int(os.environ.get("BENCHMARK_BROWSER_SEED_MAX_AGE_SECONDS", "86400"))
     except ValueError:
         return False
     if max_age <= 0:
