@@ -3,6 +3,7 @@ import json
 import os
 import signal
 import shlex
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -636,11 +637,30 @@ def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
         'request_machine_start "$mid"'
     )
     assert 'MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"' in fleet
+    assert 'CLOUDBENCH_STORAGE_READY="$([ "$src" = "pool" ] && printf 1 || printf 0)"' in fleet
+    storage = _extract_fleet_function(cloud, "machine_storage_ready() {")
+    assert 'CLOUDBENCH_STORAGE_READY:-0' in storage
     pool_slot = _extract_fleet_function(fleet, "provision_pool_slot() {")
     assert 'if machine_storage_ready "$id"; then' in pool_slot
     assert pool_slot.index('if machine_storage_ready "$id"; then') < pool_slot.index(
         'FLY machine start "$id"'
     )
+
+
+def test_pool_boot_update_is_bounded_and_skips_redundant_inventory_polling() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    fleet = FLEET_SCRIPT.read_text()
+    branch = cloud[cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then'):]
+    assert 'CLOUDBENCH_BOOT_UPDATE_TIMEOUT' in branch
+    assert '_with_timeout "${CLOUDBENCH_BOOT_UPDATE_TIMEOUT:-90}"' in branch
+    assert "final Fly update error" in branch
+    pool_fast_path = branch[branch.index('if [ "${CLOUDBENCH_STORAGE_READY:-0}" = "1" ]; then'):]
+    pool_fast_path = pool_fast_path[: pool_fast_path.index("else")]
+    assert "machine_state" not in pool_fast_path
+    assert "machine_storage_ready" not in pool_fast_path
+    assert "request_machine_start" not in pool_fast_path
+    assert 'CLOUDBENCH_BOOT_START_TIMEOUT' in pool_fast_path
+    assert 'flyctl machine start "$mid"' in pool_fast_path
     claim_start = fleet.index("claim_pool_machine() {")
     claim_end = fleet.index("\n}\n", claim_start)
     claim = fleet[claim_start:claim_end]
@@ -2474,7 +2494,6 @@ def test_start_barrier_release_uses_authenticated_data_plane(tmp_path: Path) -> 
     authenticate the request, and fail the controller if any ready box cannot be
     released instead of silently waiting for that box's barrier timeout.
     """
-    import socket
     import urllib.error
     import urllib.request
 
@@ -2489,9 +2508,7 @@ def test_start_barrier_release_uses_authenticated_data_plane(tmp_path: Path) -> 
     barrier = "run-123"
     token = "release-secret"
     (tmp_path / "bench.log").write_text("ready\n")
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port = sock.getsockname()[1]
+    ready_file = tmp_path / "server.port"
     env = os.environ.copy()
     env["CLOUDBENCH_BARRIER_TOKEN"] = token
     server = subprocess.Popen(
@@ -2501,11 +2518,13 @@ def test_start_barrier_release_uses_authenticated_data_plane(tmp_path: Path) -> 
             "--directory",
             str(tmp_path),
             "--port",
-            str(port),
+            "0",
             "--barrier",
             barrier,
             "--bind",
             "127.0.0.1",
+            "--ready-file",
+            str(ready_file),
         ],
         env=env,
         stdout=subprocess.PIPE,
@@ -2513,11 +2532,19 @@ def test_start_barrier_release_uses_authenticated_data_plane(tmp_path: Path) -> 
         text=True,
     )
     try:
-        base = f"http://127.0.0.1:{port}"
         deadline = time.time() + 5
+        while not ready_file.is_file():
+            if server.poll() is not None:
+                raise AssertionError("status server exited before binding")
+            if time.time() >= deadline:
+                raise AssertionError("status server did not publish its port")
+            time.sleep(0.02)
+        port = int(ready_file.read_text().strip())
+        base = f"http://127.0.0.1:{port}"
+        local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         while True:
             try:
-                with urllib.request.urlopen(f"{base}/bench.log", timeout=0.5) as response:
+                with local_opener.open(f"{base}/bench.log", timeout=0.5) as response:
                     assert response.read() == b"ready\n"
                 break
             except (OSError, urllib.error.URLError):
@@ -2533,7 +2560,7 @@ def test_start_barrier_release_uses_authenticated_data_plane(tmp_path: Path) -> 
             headers={"Authorization": "Bearer wrong"},
         )
         try:
-            urllib.request.urlopen(denied, timeout=1)
+            local_opener.open(denied, timeout=1)
             raise AssertionError("wrong barrier token unexpectedly succeeded")
         except urllib.error.HTTPError as exc:
             assert exc.code == 403
@@ -2545,13 +2572,13 @@ def test_start_barrier_release_uses_authenticated_data_plane(tmp_path: Path) -> 
             method="POST",
             headers={"Authorization": f"Bearer {token}"},
         )
-        with urllib.request.urlopen(allowed, timeout=1) as response:
+        with local_opener.open(allowed, timeout=1) as response:
             assert response.status == 204
         assert release.exists()
 
         pid_file = tmp_path / "cloudbench-driver.pid"
         pid_file.write_text(f"{os.getpid()}\n")
-        with urllib.request.urlopen(f"{base}/driver-health", timeout=1) as response:
+        with local_opener.open(f"{base}/driver-health", timeout=1) as response:
             assert response.status == 204
         health_probe = _extract_fleet_function(
             CLOUD_SCRIPT.read_text(), "probe_driver_health() {"
@@ -2575,7 +2602,7 @@ def test_start_barrier_release_uses_authenticated_data_plane(tmp_path: Path) -> 
         assert probe(port) == 0
         pid_file.write_text("99999999\n")
         try:
-            urllib.request.urlopen(f"{base}/driver-health", timeout=1)
+            local_opener.open(f"{base}/driver-health", timeout=1)
             raise AssertionError("dead driver unexpectedly reported healthy")
         except urllib.error.HTTPError as exc:
             assert exc.code == 410
@@ -2611,9 +2638,7 @@ def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
             (root / "bench.log").write_text(
                 f"synchronized start barrier ready: {barrier}\n"
             )
-            with socket.socket() as sock:
-                sock.bind(("127.0.0.1", 0))
-                port = sock.getsockname()[1]
+            ready_file = root / "server.port"
             server = subprocess.Popen(
                 [
                     "python3",
@@ -2621,11 +2646,13 @@ def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
                     "--directory",
                     str(root),
                     "--port",
-                    str(port),
+                    "0",
                     "--barrier",
                     barrier,
                     "--bind",
                     "127.0.0.1",
+                    "--ready-file",
+                    str(ready_file),
                 ],
                 env=env,
                 stdout=subprocess.DEVNULL,
@@ -2634,12 +2661,20 @@ def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
             )
             servers.append(server)
             roots.append(root)
-            ports.append(port)
+            ready_deadline = time.time() + 5
+            while not ready_file.is_file():
+                if server.poll() is not None:
+                    raise AssertionError(f"status server {index} exited before binding")
+                if time.time() >= ready_deadline:
+                    raise AssertionError(f"status server {index} did not publish its port")
+                time.sleep(0.02)
+            ports.append(int(ready_file.read_text().strip()))
 
         deadline = time.time() + 5
+        local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         while True:
             try:
-                with urllib.request.urlopen(
+                with local_opener.open(
                     f"http://127.0.0.1:{ports[-1]}/bench.log", timeout=0.2
                 ):
                     break

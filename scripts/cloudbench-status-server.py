@@ -7,6 +7,7 @@ import argparse
 import hmac
 import os
 import re
+import tempfile
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -20,6 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", required=True, type=int)
     parser.add_argument("--bind", default="0.0.0.0")
     parser.add_argument("--barrier", default="")
+    parser.add_argument("--ready-file", default="")
     return parser.parse_args()
 
 
@@ -71,6 +73,15 @@ def main() -> int:
             return
 
     server = ThreadingHTTPServer((args.bind, args.port), Handler)
+    if args.ready_file:
+        ready_file = Path(args.ready_file)
+        ready_file.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=ready_file.parent, prefix=f".{ready_file.name}.", delete=False
+        ) as handle:
+            handle.write(f"{server.server_port}\n")
+            temporary = Path(handle.name)
+        temporary.replace(ready_file)
     server.serve_forever()
     return 0
 

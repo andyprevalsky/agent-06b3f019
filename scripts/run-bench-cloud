@@ -311,6 +311,11 @@ print("gone")
 # not a startability signal: require every configured volume to reach a state
 # Fly documents as mountable before requesting the machine transition.
 machine_storage_ready() {  # machine_storage_ready <id>
+    # A durable pool slot was already held until both its machine and snapshot
+    # volume were mountable, then verified stopped before ledger promotion.
+    # Re-reading Machines+Volumes from every one of 30 children recreates the
+    # control-plane burst pooling is meant to eliminate.
+    [ "${CLOUDBENCH_STORAGE_READY:-0}" = "1" ] && return 0
     local id="$1" machines volumes
     machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
     volumes="$(FLY volumes list -a "$APP" --json 2>/dev/null)" || return 1
@@ -1673,33 +1678,54 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     # path (not the /data volume, whose mount can race the config write).
     echo "🚀 boot-launch: injecting boot script + setting env/command on $mid (no ssh) ..."
     _upd=0
+    _update_log="$OUT_DIR/cloudbench-boot-update.log"
+    : > "$_update_log"
     for _u in $(seq 1 "${CLOUDBENCH_BOOT_UPDATE_ATTEMPTS:-10}"); do
-        if FLY machine update "$mid" -a "$APP" "${_envargs[@]}" \
+        if _with_timeout "${CLOUDBENCH_BOOT_UPDATE_TIMEOUT:-90}" \
+              flyctl machine update "$mid" -a "$APP" "${_envargs[@]}" \
               --file-local "/cloudbench-boot.sh=$ROOT_DIR/scripts/cloudbench-boot.sh" \
-              --command "bash /cloudbench-boot.sh" --skip-health-checks --yes >/dev/null 2>&1; then
+              --command "bash /cloudbench-boot.sh" --skip-health-checks --yes \
+              > "$_update_log" 2>&1; then
             _upd=1; break
         fi
         sleep 8
     done
-    [ "$_upd" = 1 ] || { echo "❌ boot-launch: could not set machine env/command after retries." >&2; exit 1; }
+    [ "$_upd" = 1 ] || {
+        echo "❌ boot-launch: could not set machine env/command after retries." >&2
+        echo "─── final Fly update error ───" >&2
+        tail -30 "$_update_log" 2>/dev/null | sed 's/^/   /' >&2 || true
+        exit 1
+    }
+    rm -f "$_update_log"
     # `machine update` may leave the box stopped; start it (retry storage-provisioning
     # + eventual-consistency flicker) and wait until Fly reports it started. No ssh.
-    start_ts="$(date +%s)"; READY_TIMEOUT="${CLOUDBENCH_READY_TIMEOUT:-600}"; last_start_ts=0
-    while :; do
-        st="$(machine_state "$mid")"
-        [ "$st" = "started" ] && break
-        now="$(date +%s)"
-        if machine_storage_ready "$mid" && { [ "$last_start_ts" -eq 0 ] || [ $((now - last_start_ts)) -ge 15 ]; }; then
-            request_machine_start "$mid" >/dev/null 2>&1 || true
-            last_start_ts="$now"
-        fi
-        if [ $((now - start_ts)) -ge "$READY_TIMEOUT" ]; then
-            echo "❌ boot-launch: machine $mid did not start within ${READY_TIMEOUT}s (state=$st)." >&2
-            exit 1
-        fi
-        sleep 5
-    done
-    echo "✅ boot-launch: $mid started — booting into the driver (polling over the data plane)."
+    if [ "${CLOUDBENCH_STORAGE_READY:-0}" = "1" ]; then
+        # Pool update is the sole required mutation and normally restarts the
+        # stopped machine, but Fly may leave it stopped. Submit one bounded,
+        # idempotent start request; do not follow it with 30 independent state/
+        # storage polling loops. The data-plane status poll is the proof that
+        # boot actually ran.
+        _with_timeout "${CLOUDBENCH_BOOT_START_TIMEOUT:-60}" \
+            flyctl machine start "$mid" -a "$APP" >/dev/null 2>&1 || true
+        echo "✅ boot-launch: $mid update/start accepted — booting into the driver (polling over the data plane)."
+    else
+        start_ts="$(date +%s)"; READY_TIMEOUT="${CLOUDBENCH_READY_TIMEOUT:-600}"; last_start_ts=0
+        while :; do
+            st="$(machine_state "$mid")"
+            [ "$st" = "started" ] && break
+            now="$(date +%s)"
+            if machine_storage_ready "$mid" && { [ "$last_start_ts" -eq 0 ] || [ $((now - last_start_ts)) -ge 15 ]; }; then
+                request_machine_start "$mid" >/dev/null 2>&1 || true
+                last_start_ts="$now"
+            fi
+            if [ $((now - start_ts)) -ge "$READY_TIMEOUT" ]; then
+                echo "❌ boot-launch: machine $mid did not start within ${READY_TIMEOUT}s (state=$st)." >&2
+                exit 1
+            fi
+            sleep 5
+        done
+        echo "✅ boot-launch: $mid started — booting into the driver (polling over the data plane)."
+    fi
 else
 # ── 1. Start the warm machine + wait until it is start+ssh-ready ────────────
 # Generous timeout: ~10s warm, minutes on a cold image pull. Gate on BOTH the Fly
