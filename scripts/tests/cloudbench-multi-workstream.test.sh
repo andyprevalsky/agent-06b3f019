@@ -330,12 +330,19 @@ elif args[:3] == ["volume", "snapshots", "list"]:
 elif args[:2] == ["machine", "clone"]:
     name = flag_value("--name")
     machine_id = uuid.uuid4().hex[:14]
+    vm_size = flag_value("--vm-size") or "shared-cpu-4x"
+    vm_memory = int(flag_value("--vm-memory") or "8192")
+    cpu_match = re.search(r"(\d+)x$", vm_size)
+    vm_cpus = int(cpu_match.group(1)) if cpu_match else 1
+    cpu_kind = "performance" if vm_size.startswith("performance-") else "shared"
     with locked_state() as state:
         volume_id = "vol_" + uuid.uuid4().hex[:8]
         state["machines"].append({
             "id": machine_id, "name": name, "state": "stopped",
             "region": flag_value("--region") or "iad", "private_ip": "",
-            "config": {"mounts": [{"volume": volume_id}]},
+            "config": {"mounts": [{"volume": volume_id}],
+                       "guest": {"cpu_kind": cpu_kind, "cpus": vm_cpus,
+                                 "memory_mb": vm_memory}},
         })
         state["volumes"].append(
             {"id": volume_id, "name": "cloudbench_data_fork", "state": "created"})
@@ -382,6 +389,19 @@ elif args[:2] == ["machine", "update"]:
             sys.exit(1)
         found["boot_env"] = boot_env
         found["state"] = "stopped"
+        if flag_value("--vm-size"):
+            vm_size = flag_value("--vm-size")
+            cpu_match = re.search(r"(\d+)x$", vm_size)
+            found.setdefault("config", {}).setdefault("guest", {})["cpus"] = (
+                int(cpu_match.group(1)) if cpu_match else 1
+            )
+            found["config"]["guest"]["cpu_kind"] = (
+                "performance" if vm_size.startswith("performance-") else "shared"
+            )
+        if flag_value("--vm-memory"):
+            found.setdefault("config", {}).setdefault("guest", {})["memory_mb"] = int(
+                flag_value("--vm-memory")
+            )
     mdir = machine_dir(machine_id)
     rb_path = os.path.join(mdir, "tmp", "rb.sh")
     os.makedirs(os.path.dirname(rb_path), exist_ok=True)

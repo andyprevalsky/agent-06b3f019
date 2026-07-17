@@ -163,6 +163,77 @@ unset -f flyctl curl start_data_plane_proxy start_leased_data_plane_proxy \
   release_local_port_leases publish_status_proxy_port production_function
 unset CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS
 
+# Production replay for Fly's cpu_overcommit_exceeded governor response. The
+# provider rejected the 37th inherited shared-cpu-4x primary when prod already
+# held 16 CPU units: 16 + (37 * 4) = 164, beyond the observed 160-unit ceiling.
+# Exercise the real clone command builder and require an explicit capacity-safe
+# primary shape rather than inheriting the oversized warm maintenance machine.
+clone_function_source="$(awk '
+  /^clone_machine_target\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-fleet")"
+[ -n "$clone_function_source" ] || fail "could not load production clone command builder"
+eval "$clone_function_source"
+WARM_ID="warm-source"
+SNAP_ID="snapshot-1"
+REGION="iad"
+APP="navi-whisper-lux-bench"
+FLEET_PRIMARY_VM_SIZE="shared-cpu-2x"
+FLEET_PRIMARY_VM_MEMORY="8192"
+clone_args="$TMP_ROOT/primary-clone.args"
+fleet_registry_record_name() { return 0; }
+fleet_registry_record_id() { return 0; }
+fleet_registry_release_name() { return 0; }
+fly_with_timeout() {
+  shift
+  printf '%s\n' "$*" > "$clone_args"
+  echo "Machine abcdef12345678 has been created..."
+}
+primary_id="$(clone_machine_target "$TMP_ROOT/primary.ids")" ||
+  fail "production clone command builder failed in the capacity replay"
+[ "$primary_id" = "abcdef12345678" ] || fail "capacity replay did not resolve the fake clone"
+require_text "$clone_args" "--vm-size shared-cpu-2x" \
+  "primary clone must set the capacity-safe VM size instead of inheriting warm 4x"
+require_text "$clone_args" "--vm-memory 8192" \
+  "primary clone must preserve the isolated stack's 8GB memory contract"
+primary_cpus="$(sed -nE 's/.*--vm-size [^ ]*-cpu-([0-9]+)x.*/\1/p' "$clone_args")"
+[ -n "$primary_cpus" ] || fail "capacity replay could not parse primary CPU allocation"
+[ $((16 + 37 * primary_cpus)) -le 160 ] ||
+  fail "daily fleet primary shape exceeds the observed Fly CPU governor ceiling"
+unset -f clone_machine_target fleet_registry_record_name fleet_registry_record_id \
+  fleet_registry_release_name fly_with_timeout
+
+shape_function_source="$(awk '
+  /^pool_machine_shape_from_json\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-fleet")"
+normalize_function_source="$(awk '
+  /^normalize_current_pool_shape\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-fleet")"
+[ -n "$shape_function_source" ] && [ -n "$normalize_function_source" ] ||
+  fail "could not load production pool shape normalizer"
+eval "$shape_function_source"
+eval "$normalize_function_source"
+POOL_IDS_FILE="$TMP_ROOT/shape-pool.ids"
+printf 'old-shape\ncorrect-shape\n' > "$POOL_IDS_FILE"
+FLEET_DIR="$TMP_ROOT/shape-run"
+FLEET_PRIMARY_VM_SIZE="shared-cpu-2x"
+FLEET_PRIMARY_VM_MEMORY="8192"
+POOL_INVENTORY_JSON='[{"id":"old-shape","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":4,"memory_mb":8192}}},{"id":"correct-shape","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":2,"memory_mb":8192}}}]'
+shape_after='[{"id":"old-shape","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":2,"memory_mb":8192}}},{"id":"correct-shape","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":2,"memory_mb":8192}}}]'
+resize_calls="$TMP_ROOT/shape-resizes"
+resize_marker="$TMP_ROOT/shape-resized"
+resize_pool_machine() { printf '%s\n' "$1" >> "$resize_calls"; touch "$resize_marker"; }
+FLY() { [ -f "$resize_marker" ] && printf '%s\n' "$shape_after" || printf '%s\n' "$POOL_INVENTORY_JSON"; }
+normalize_current_pool_shape || fail "existing stopped pool shape did not normalize"
+[ "$(cat "$resize_calls")" = "old-shape" ] ||
+  fail "pool normalizer must mutate only the mismatched stopped machine"
+unset -f pool_machine_shape_from_json normalize_current_pool_shape resize_pool_machine FLY
+
 machine_states="$TMP_ROOT/machine-states"
 printf 'created\ncreated\nstopped\n' > "$machine_states"
 read_machine_state() {
