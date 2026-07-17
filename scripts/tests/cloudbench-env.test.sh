@@ -208,6 +208,35 @@ primary_cpus="$(sed -nE 's/.*--vm-size ([^ ]+).*/\1/p' "$clone_args" | sed -nE '
 unset -f clone_machine_target fleet_registry_record_name fleet_registry_record_id \
   fleet_registry_release_name fly_with_timeout
 
+resize_function_source="$(awk '
+  /^resize_pool_machine\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-fleet")"
+[ -n "$resize_function_source" ] || fail "could not load production pool resizer"
+eval "$resize_function_source"
+FLEET_DIR="$TMP_ROOT/bridge-resize"
+mkdir -p "$FLEET_DIR"
+FLEET_PRIMARY_VM_SIZE="shared-cpu-2x"
+FLEET_PRIMARY_VM_MEMORY="4096"
+APP="navi-whisper-lux-bench"
+CLOUDBENCH_POOL_RESIZE_ATTEMPTS=1
+resize_calls="$TMP_ROOT/resize.calls"
+fly_with_timeout() {
+  shift
+  printf '%s\n' "$*" >> "$resize_calls"
+  return 0
+}
+sleep() { :; }
+resize_pool_machine saturated-shared-machine ||
+  fail "pool resizer must execute under nounset and apply the configured target shape"
+[ "$(wc -l < "$resize_calls" | tr -d ' ')" = "1" ] ||
+  fail "pool resizer must perform one provider update after an immediate success"
+require_text "$resize_calls" "--vm-size shared-cpu-2x" \
+  "pool resizer must apply the configured capacity-safe target"
+unset -f resize_pool_machine fly_with_timeout sleep
+unset CLOUDBENCH_POOL_RESIZE_ATTEMPTS
+
 shape_function_source="$(awk '
   /^pool_machine_shape_from_json\(\)/ { capture = 1 }
   capture { print }

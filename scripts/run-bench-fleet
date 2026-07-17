@@ -1232,7 +1232,8 @@ print(machine.get("state") or "", guest.get("cpu_kind") or "", guest.get("cpus")
 }
 
 resize_pool_machine() {  # resize_pool_machine <id>
-    local id="$1" attempt log="$FLEET_DIR/pool-resize-$id.log"
+    local id="$1" attempt log
+    log="$FLEET_DIR/pool-resize-$id.log"
     for attempt in $(seq 1 "${CLOUDBENCH_POOL_RESIZE_ATTEMPTS:-5}"); do
         if fly_with_timeout "${CLOUDBENCH_POOL_RESIZE_TIMEOUT_SECONDS:-90}" \
             machine update "$id" -a "$APP" --vm-size "$FLEET_PRIMARY_VM_SIZE" \
