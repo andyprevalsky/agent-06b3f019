@@ -41,6 +41,24 @@ def classify_model(model: str) -> tuple[str, str]:
     return "unclassified", model or "unknown"
 
 
+def classify_usage_item(item: dict[str, Any]) -> tuple[str, str]:
+    """Classify usage records whose transport model was not serialized.
+
+    Verifier telemetry records the forced Rose Ultra pool alias even though
+    ``check_progress`` supplies the Claude OAuth token, and browser-use telemetry
+    can omit ``model`` while naming the Rose Browser Use provider. Both pools'
+    direct Claude-auth submodel is Fable 5. Preserve that credential/submodel
+    attribution instead of leaking otherwise-known calls into ``unclassified``.
+    """
+    model = str(item.get("model") or "")
+    provider = str(item.get("provider") or "")
+    if model == "rose-labs/rose-1-ultra" and provider.startswith("Verifier ("):
+        return "claude_oauth_token", POOL_REGISTRY["rose-1-ultra"].claude_auth_model
+    if not model and provider == "Rose 1 Browser Use":
+        return "claude_oauth_token", POOL_REGISTRY["rose-1-browser-use"].claude_auth_model
+    return classify_model(model)
+
+
 def _empty_metrics() -> dict[str, int | float]:
     return {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
 
@@ -50,7 +68,7 @@ def aggregate_usage_items(items: Iterable[dict[str, Any]]) -> dict[str, dict[str
     for item in items:
         if item.get("type") != "llm":
             continue
-        provider, sub_model = classify_model(str(item.get("model") or ""))
+        provider, sub_model = classify_usage_item(item)
         provider_row = breakdown.setdefault(provider, {**_empty_metrics(), "models": {}})
         model_row = provider_row["models"].setdefault(sub_model, _empty_metrics())
         input_tokens = sum(

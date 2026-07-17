@@ -1,4 +1,9 @@
-from benchmarks.llm_usage import aggregate_usage_items, classify_model, merge_usage_breakdowns
+from benchmarks.llm_usage import (
+    aggregate_usage_items,
+    classify_model,
+    classify_usage_item,
+    merge_usage_breakdowns,
+)
 
 
 def test_classifies_every_required_auth_path_and_openrouter_slot() -> None:
@@ -14,6 +19,16 @@ def test_classifies_every_required_auth_path_and_openrouter_slot() -> None:
     )
     assert classify_model("anthropic/claude-opus-4.8")[0] == "openrouter_model_1"
     assert classify_model("google/gemini-3.1-pro-preview")[0] == "openrouter_model_2"
+    assert classify_usage_item(
+        {
+            "model": "rose-labs/rose-1-ultra",
+            "provider": "Verifier (rose-labs/rose-1-ultra)",
+        }
+    ) == ("claude_oauth_token", "claude-fable-5")
+    assert classify_usage_item({"model": None, "provider": "Rose 1 Browser Use"}) == (
+        "claude_oauth_token",
+        "claude-fable-5",
+    )
 
 
 def test_aggregates_calls_tokens_cost_by_provider_and_submodel() -> None:
