@@ -1613,6 +1613,17 @@ for s in snaps:
         break
 ' 2>/dev/null || true
 }
+snapshot_is_complete_exact() {  # snapshot_is_complete_exact <snap_id>
+    FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | SNAP_ID="$1" python3 -c '
+import json, os, sys
+try: snaps = json.load(sys.stdin) or []
+except Exception: raise SystemExit(1)
+match = next((s for s in snaps if s.get("id") == os.environ["SNAP_ID"]), None)
+valid = {"created", "complete", "completed", "ready"}
+raise SystemExit(0 if match and str(match.get("status") or "").lower() in valid
+                 and int(match.get("size") or 0) > 0 else 1)
+' 2>/dev/null
+}
 CURRENT_NODE_FP=""
 CURRENT_PY_FP=""
 warm_deps_preflight() {
@@ -1637,32 +1648,38 @@ warm_deps_preflight() {
         fi
     fi
     # Uncommitted manifest edits can't be healed centrally (--refresh-deps syncs
-    # the committed ref) — warn and let the per-box sync pay the refresh.
+    # the committed ref), and the task-box path intentionally refuses to install
+    # from the network. Fail before provisioning instead of advertising an
+    # impossible per-box fallback.
     if ! git -C "$ROOT_DIR" diff --quiet HEAD -- agents/requirements.txt \
         '*package.json' '*package-lock.json' 2>/dev/null; then
-        echo "⚠️  dep manifests are DIRTY vs HEAD — clones will pay a per-box dep rsync (commit deps to heal centrally)" >&2
-        return 0
+        echo "❌ dep manifests are DIRTY vs HEAD — commit them before the central dependency rebuild" >&2
+        return 1
     fi
     if [ "${CLOUDBENCH_WARM_DEPS_AUTOREFRESH:-1}" != "1" ]; then
-        echo "⚠️  warm snapshot dep trees are STALE vs the current ref — every clone pays the node_modules+venv rsync." >&2
+        echo "❌ warm snapshot dep trees are STALE vs the current ref and automatic maintenance is disabled." >&2
         echo "    heal centrally: bash scripts/run-bench-cloud --refresh-deps --ref $BENCH_REF" >&2
-        return 0
+        return 1
     fi
     write_startup_card "healing warm snapshot (dep trees)"
     echo "♻️  warm snapshot dep trees unproven/stale → central refresh ONCE (instead of ×${#BENCHES[@]} per-clone rsyncs) ..."
     if bash "$RUN_BENCH_CLOUD_BIN" --refresh-deps --ref "$BENCH_REF" 2>&1 | while IFS= read -r _l; do printf '   %s\n' "$_l"; done; then
-        new_snap="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | \
-            python3 "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" 2>/dev/null || true)"
-        if [ -n "$new_snap" ]; then
+        s_node=""; s_py=""; s_epoch=""; new_snap=""
+        [ -f "$state" ] && read -r s_node s_py s_epoch new_snap < "$state" || true
+        snap_epoch="$(snapshot_created_epoch "$new_snap")"
+        if [ "$s_node" = "$node_fp" ] && [ "$s_py" = "$py_fp" ] \
+            && [ -n "$new_snap" ] && snapshot_is_complete_exact "$new_snap" \
+            && [ "${snap_epoch:-0}" -ge $(( ${s_epoch:-0} - 60 )) ]; then
             SNAP_ID="$new_snap"
-            echo "✅ central refresh done — forking from fresh snapshot $SNAP_ID"
+            echo "✅ central refresh done — forking from its exact proven snapshot $SNAP_ID"
             return 0
         fi
+        echo "❌ central refresh returned without a matching exact snapshot proof" >&2
     fi
-    echo "⚠️  central dep refresh failed — continuing; clones will pay the per-box rsync" >&2
-    return 0
+    echo "❌ central dep refresh failed; refusing to provision task machines" >&2
+    return 1
 }
-warm_deps_preflight
+warm_deps_preflight || exit 1
 echo "🧊 forking clones from complete snapshot: $SNAP_ID"
 
 # A newer snapshot is not proof that it contains the dependency state recorded

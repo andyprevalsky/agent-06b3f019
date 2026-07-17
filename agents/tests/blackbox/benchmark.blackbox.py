@@ -132,6 +132,30 @@ def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
     assert "2 passed" in result.stdout
 
 
+def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
+    repo_root = Path(__file__).resolve().parents[3]
+    behavioral_suite = repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            str(behavioral_suite),
+            "-k",
+            "central_refresh_ or refresh_deps_ or warm_deps_preflight",
+        ],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "8 passed" in result.stdout
+
+
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
     repo_root = Path(__file__).resolve().parents[3]
     patch_script = repo_root / "scripts" / "create-worktree-patch.sh"
@@ -4759,7 +4783,7 @@ def test_message_person_agent_sms_benchmark_requires_immediate_provider_receipt(
     from benchmarks.run_benchmark import _validate_message_person_agent_sms_send
 
     task = get_task_by_name("message-person-agent-sms")
-    assert task.group == "Daily"
+    assert task.group == "daily"
     assert task.expected_tool_counts == {"message_person": 1}
     assert task.tool_count_scope == "root"
 
@@ -6413,6 +6437,10 @@ async def run_all_tests():
     r.record(
         "cloudbench_prisma_freshness_permanent_gate",
         test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate,
+    )
+    r.record(
+        "cloudbench_dependency_rebuild_permanent_gate",
+        test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate,
     )
     r.record(
         "cloudbench_patch_includes_untracked_files",

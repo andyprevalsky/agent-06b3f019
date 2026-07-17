@@ -5,6 +5,7 @@ import signal
 import shlex
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -246,6 +247,143 @@ def test_rejects_branch_whose_manifests_do_not_match_donor_image(tmp_path: Path)
 
     assert result.returncode == 1
     assert "warm image/volume JavaScript dependencies do not match" in result.stderr
+
+
+def test_central_refresh_installs_changed_manifest_dependencies(tmp_path: Path) -> None:
+    """The explicit central refresh may rebuild the warm volume from manifests.
+
+    Ordinary per-box sync remains fail-closed when the immutable image donor is
+    stale; the fleet's one-time refresh path opts into installation so a synced
+    main dependency change does not permanently strand every stopped pool box.
+    """
+    donor = tmp_path / "donor"
+    repo = tmp_path / "repo"
+    bin_dir = tmp_path / "bin"
+    install_log = tmp_path / "install.log"
+    _write_manifests(donor, lock="image-lock")
+    _write_manifests(repo, lock="branch-lock")
+    (donor / "node_modules/image-package").mkdir(parents=True)
+    (donor / "agents/venv/bin").mkdir(parents=True)
+    (donor / "agents/venv/bin/python").write_text("current")
+    bin_dir.mkdir()
+    npm = bin_dir / "npm"
+    npm.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "printf 'npm cwd=%s args=%s\\n' \"$PWD\" \"$*\" >> \"$INSTALL_LOG\"\n"
+        "mkdir -p node_modules\n"
+        "touch node_modules/installed-from-manifests\n"
+    )
+    npm.chmod(0o755)
+    npx = bin_dir / "npx"
+    npx.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "printf 'npx cwd=%s args=%s\\n' \"$PWD\" \"$*\" >> \"$INSTALL_LOG\"\n"
+    )
+    npx.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), str(donor), str(repo)],
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "INSTALL_LOG": str(install_log),
+            "CLOUDBENCH_REBUILD_DEPS": "1",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (repo / "node_modules/installed-from-manifests").is_file()
+    assert not (repo / "node_modules/image-package").exists()
+    assert (repo / "node_modules/.cloudbench-deps-fingerprint").read_text().strip()
+    calls = install_log.read_text()
+    assert "npm cwd=" in calls and "args=install --no-audit --no-fund" in calls
+    assert "npx cwd=" in calls and "args=prisma generate" in calls
+
+
+def _write_fake_python_with_venv(path: Path, *, fail_pip: bool) -> None:
+    pip_script = (
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "printf 'pip cwd=%s args=%s\\n' \"$PWD\" \"$*\" >> \"$INSTALL_LOG\"\n"
+        + ("exit 9\n" if fail_pip else "touch \"$(dirname \"$0\")/../installed-from-manifests\"\n")
+    )
+    real_python = sys.executable
+    path.write_text(
+        f"#!{real_python}\n"
+        "import os, pathlib, sys\n"
+        f"real_python = {real_python!r}\n"
+        "if sys.argv[1:3] == ['-m', 'venv']:\n"
+        "    target = pathlib.Path(sys.argv[3])\n"
+        "    (target / 'bin').mkdir(parents=True)\n"
+        f"    pip = target / 'bin/pip'; pip.write_text({pip_script!r}); pip.chmod(0o755)\n"
+        "    raise SystemExit(0)\n"
+        "os.execv(real_python, [real_python, *sys.argv[1:]])\n"
+    )
+    path.chmod(0o755)
+
+
+def _python_rebuild_fixture(tmp_path: Path, *, fail_pip: bool) -> tuple[Path, Path, dict[str, str]]:
+    donor = tmp_path / "donor"
+    repo = tmp_path / "repo"
+    bin_dir = tmp_path / "bin"
+    install_log = tmp_path / "install.log"
+    _write_manifests(donor, lock="same", requirements="image-requirement")
+    _write_manifests(repo, lock="same", requirements="branch-requirement")
+    (donor / "node_modules/current-package").mkdir(parents=True)
+    (donor / "agents/venv/bin").mkdir(parents=True)
+    (donor / "agents/venv/bin/python").write_text("image-python")
+    old_venv = repo / "agents/venv"
+    old_venv.mkdir(parents=True)
+    (old_venv / "old-only").write_text("preserve-until-commit")
+    (old_venv / ".cloudbench-deps-fingerprint").write_text("old-fingerprint\n")
+    bin_dir.mkdir()
+    _write_fake_python_with_venv(bin_dir / "python3", fail_pip=fail_pip)
+    return donor, repo, {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "INSTALL_LOG": str(install_log),
+        "CLOUDBENCH_REBUILD_DEPS": "1",
+    }
+
+
+def test_central_refresh_replaces_python_venv_from_changed_requirements(tmp_path: Path) -> None:
+    donor, repo, env = _python_rebuild_fixture(tmp_path, fail_pip=False)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), str(donor), str(repo)],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (repo / "agents/venv/old-only").exists()
+    assert (repo / "agents/venv/installed-from-manifests").is_file()
+    assert (repo / "agents/venv/.cloudbench-deps-fingerprint").read_text().strip()
+    assert "install -r agents/requirements.txt" in Path(env["INSTALL_LOG"]).read_text()
+
+
+def test_central_refresh_does_not_publish_failed_python_rebuild(tmp_path: Path) -> None:
+    donor, repo, env = _python_rebuild_fixture(tmp_path, fail_pip=True)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), str(donor), str(repo)],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert (repo / "agents/venv/old-only").is_file()
+    assert (repo / "agents/venv/.cloudbench-deps-fingerprint").read_text() == "old-fingerprint\n"
+    assert not list((repo / "agents").glob(".venv-cloudbench-new.*"))
 
 
 def test_accepts_fingerprinted_volume_when_image_donor_is_older(tmp_path: Path) -> None:
@@ -2185,17 +2323,27 @@ fleet_machines_json
 
 
 def _preflight_harness(tmp_path: Path, *, state_line: str | None, dirty: bool,
-                       autorefresh: str, snap_epoch: int) -> tuple:
+                       autorefresh: str, snap_epoch: int, refresh_status: int = 0,
+                       refreshed_snapshot: str = "snap-transaction") -> tuple:
     """Run warm_deps_preflight with stubbed FLY/git/refresh; returns (result, calls)."""
     fleet = FLEET_SCRIPT.read_text()
     helpers = "".join(
         _extract_fleet_function(fleet, sig)
-        for sig in ("snapshot_created_epoch() {", "warm_deps_preflight() {")
+        for sig in (
+            "snapshot_created_epoch() {",
+            "snapshot_is_complete_exact() {",
+            "warm_deps_preflight() {",
+        )
     )
     root = tmp_path / "root"
     (root / "scripts").mkdir(parents=True)
     fake_cloud = root / "scripts" / "run-bench-cloud"
-    fake_cloud.write_text('#!/usr/bin/env bash\necho "refresh-deps $*" >> "$CALLS_FILE"\nexit 0\n')
+    fake_cloud.write_text(
+        '#!/usr/bin/env bash\n'
+        'echo "refresh-deps $*" >> "$CALLS_FILE"\n'
+        f'printf "NODEFP PYFP 2000 {refreshed_snapshot}\\n" > "$COMMON/cloudbench-warm-deps.fp"\n'
+        f'exit {refresh_status}\n'
+    )
     fake_cloud.chmod(0o755)
     (root / "scripts" / "cloudbench-select-snapshot.py").write_text('print("snap-new")\n')
     common = tmp_path / "common"
@@ -2217,14 +2365,14 @@ GIT_COMMON_DIR="$COMMON"
 CLOUDBENCH_WARM_DEPS_AUTOREFRESH={autorefresh}
 export CALLS_FILE="$CALLS_FILE"
 FLY() {{
-  echo '[{{"id":"snap-current","created_at":"{__import__("datetime").datetime.fromtimestamp(snap_epoch, __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}","status":"created","size":9}}]'
+  echo '[{{"id":"snap-current","created_at":"{__import__("datetime").datetime.fromtimestamp(snap_epoch, __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}","status":"created","size":9}},{{"id":"{refreshed_snapshot}","created_at":"2026-07-17T00:00:00Z","status":"created","size":9}},{{"id":"snap-unrelated-newer","created_at":"2026-07-17T00:01:00Z","status":"created","size":9}}]'
 }}
 cloudbench_node_dependency_fingerprint() {{ echo NODEFP; }}
 cloudbench_manifest_fingerprint() {{ echo PYFP; }}
 CLOUDBENCH_PYTHON_MANIFESTS=(agents/requirements.txt)
 git() {{ [ "{int(dirty)}" = "1" ] && return 1 || return 0; }}
 {helpers}
-warm_deps_preflight
+warm_deps_preflight || exit $?
 echo "SNAP_AFTER=$SNAP_ID"
 """
     result = subprocess.run(
@@ -2252,42 +2400,162 @@ def test_warm_deps_preflight_fast_path_and_central_heal(tmp_path: Path) -> None:
     assert calls.read_text() == ""
     assert "SNAP_AFTER=snap-current" in result.stdout
 
-    # (b) no state → central heal once, snapshot re-selected
+    # (b) no state → central heal once, then adopt only the exact snapshot
+    # the refresh transaction published (never a newer unrelated snapshot).
     result, calls = _preflight_harness(
         tmp_path / "b", state_line=None, dirty=False, autorefresh="1", snap_epoch=2000)
     assert result.returncode == 0, result.stderr
     assert "refresh-deps --refresh-deps --ref abc123" in calls.read_text()
-    assert "SNAP_AFTER=snap-new" in result.stdout
+    assert "SNAP_AFTER=snap-transaction" in result.stdout
 
-    # (c) dirty manifests → warn, no heal, run continues
+    # (c) dirty manifests cannot be fetched/rebuilt centrally and must fail
+    # before provisioning; the old advertised per-box fallback hits the same
+    # immutable donor mismatch and cannot work.
     result, calls = _preflight_harness(
         tmp_path / "c", state_line=None, dirty=True, autorefresh="1", snap_epoch=2000)
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
     assert "DIRTY" in result.stdout + result.stderr
     assert calls.read_text() == ""
 
-    # (d) autorefresh off → actionable warning, no heal
+    # (d) a failed central transaction aborts immediately instead of launching
+    # clones that are already known to fail the copy-only dependency gate.
     result, calls = _preflight_harness(
-        tmp_path / "d", state_line=None, dirty=False, autorefresh="0", snap_epoch=2000)
-    assert result.returncode == 0, result.stderr
+        tmp_path / "d", state_line=None, dirty=False, autorefresh="1",
+        snap_epoch=2000, refresh_status=1)
+    assert result.returncode != 0
+    assert "refresh-deps --refresh-deps --ref abc123" in calls.read_text()
+    assert "refusing to provision" in result.stdout + result.stderr
+
+    # (e) disabling required maintenance also fails before provisioning and
+    # prints the explicit manual repair command.
+    result, calls = _preflight_harness(
+        tmp_path / "e", state_line=None, dirty=False, autorefresh="0", snap_epoch=2000)
+    assert result.returncode != 0
     assert "--refresh-deps" in result.stdout + result.stderr
     assert calls.read_text() == ""
 
 
+def test_refresh_deps_is_a_validated_maintenance_transaction() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    fleet = FLEET_SCRIPT.read_text()
+    driver = DRIVER_SCRIPT.read_text()
+    refresh = cloud[
+        cloud.index('if [ "$MODE" = "refresh-deps" ]; then'):
+        cloud.index('# MODE: --refresh-wmh')
+    ]
+    snapshot_helper = _extract_fleet_function(cloud, "create_volume_snapshot_exact() {")
+
+    assert "CLOUDBENCH_REBUILD_DEPS=1" in refresh
+    assert "CLOUDBENCH_REBUILD_DEPS=1" not in driver
+    assert "EXPECTED_REF=" in refresh
+    assert "REMOTE_REF=" in refresh
+    assert "REMOTE_NODE_FP=" in refresh
+    assert "REMOTE_PY_FP=" in refresh
+    assert "remote dependency state did not match" in refresh
+    assert 'create_volume_snapshot_exact "$VOL_ID" || exit 1' in refresh
+    assert 'volumes snapshots create "$vol" -a "$APP" --json' in snapshot_helper
+    assert 'CREATED_SNAPSHOT_ID=' in snapshot_helper
+    assert 'SNAP_ID="$CREATED_SNAPSHOT_ID"' in snapshot_helper
+    assert "snap-unrelated" not in snapshot_helper
+    assert "central dep refresh failed; refusing to provision" in fleet
+    assert "clones will pay the per-box rsync" not in fleet
+    assert "warm_deps_preflight || exit 1" in fleet
+
+
+def test_refresh_deps_requires_confirmed_stop_before_snapshot(tmp_path: Path) -> None:
+    """A failed/slow stop must prevent both snapshot creation and publication."""
+    cloud = CLOUD_SCRIPT.read_text()
+    strict_stop = _extract_fleet_function(cloud, "stop_machine_strict() {")
+    calls = tmp_path / "calls"
+    calls.write_text("")
+    script = f"""set -uo pipefail
+APP=bench-app
+CLOUDBENCH_MAINTENANCE_STOP_ATTEMPTS=2
+FLY() {{ echo "$*" >> "$CALLS"; [ "$1 $2" != "machine stop" ]; }}
+machine_state() {{ echo started; }}
+sleep() {{ :; }}
+{strict_stop}
+if stop_machine_strict warm-1; then
+  FLY volumes snapshots create vol-1 -a "$APP" --json
+  echo PUBLISHED
+fi
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"CALLS": str(calls), "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "machine stop warm-1" in calls.read_text()
+    assert "snapshots create" not in calls.read_text()
+    assert "PUBLISHED" not in result.stdout
+
+    # A stop request that succeeds but never reaches provider state=stopped is
+    # equally unsafe and must have the same fail-before-snapshot outcome.
+    calls.write_text("")
+    slow_script = script.replace(
+        'FLY() { echo "$*" >> "$CALLS"; [ "$1 $2" != "machine stop" ]; }',
+        'FLY() { echo "$*" >> "$CALLS"; return 0; }',
+    )
+    slow = subprocess.run(
+        ["bash", "-c", slow_script],
+        env={"CALLS": str(calls), "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+    assert slow.returncode == 0, slow.stderr
+    assert "snapshots create" not in calls.read_text()
+    assert "PUBLISHED" not in slow.stdout
+
+
+def test_refresh_deps_tracks_exact_created_snapshot(tmp_path: Path) -> None:
+    """A concurrent newer snapshot can never be mistaken for this transaction's."""
+    cloud = CLOUD_SCRIPT.read_text()
+    create_snapshot = _extract_fleet_function(cloud, "create_volume_snapshot_exact() {")
+    calls = tmp_path / "calls"
+    calls.write_text("")
+    script = f"""set -uo pipefail
+APP=bench-app
+CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS=2
+FLY() {{
+  echo "$*" >> "$CALLS"
+  if [ "$1 $2 $3" = "volumes snapshots create" ]; then
+    echo '{{"id":"snap-owned"}}'
+  else
+    echo '[{{"id":"snap-unrelated-newer","status":"created","size":99}},{{"id":"snap-owned","status":"created","size":10}}]'
+  fi
+}}
+sleep() {{ :; }}
+{create_snapshot}
+create_volume_snapshot_exact vol-1
+echo "EXACT=$CREATED_SNAPSHOT_ID"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"CALLS": str(calls), "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "EXACT=snap-owned" in result.stdout
+    assert "snap-unrelated-newer" not in result.stdout
+
+
 def test_refresh_deps_mode_contract() -> None:
     """--refresh-deps must sync the ref, run the marker-gated dep sync, STOP the
-    machine before snapshotting (quiesced snapshot), wait boundedly for a fresh
-    complete snapshot, and record the shared freshness state file."""
+        machine before snapshotting (quiesced snapshot), wait boundedly for the
+        exact created snapshot, and record the shared freshness state file."""
     cloud = CLOUD_SCRIPT.read_text()
     start = cloud.index('if [ "$MODE" = "refresh-deps" ]; then')
     end = cloud.index('# MODE: --refresh-wmh', start)
     mode = cloud[start:end]
+    snapshot_helper = _extract_fleet_function(cloud, "create_volume_snapshot_exact() {")
     assert "cloudbench-sync-deps.sh' /app" in mode
     assert "::DEPS-REFRESH-DONE::" in mode
     # stop precedes the snapshot cut
-    assert mode.index('stop_machine "$mid"') < mode.index("volumes snapshots create")
+    assert mode.index('stop_machine_strict "$mid"') < mode.index('create_volume_snapshot_exact "$VOL_ID"')
     # bounded wait for a COMPLETE fresh snapshot
-    assert "for _ in $(seq 1 90)" in mode
+    assert 'CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS:-90' in snapshot_helper
     # shared freshness state recorded for fleet preflights
     assert 'cloudbench-warm-deps.fp' in mode
     assert "cloudbench_node_dependency_fingerprint" in mode
@@ -2296,7 +2564,7 @@ def test_refresh_deps_mode_contract() -> None:
     assert '--refresh-deps)   MODE="refresh-deps"' in cloud
     # the fleet preflight exists and runs before cloning begins
     fleet = FLEET_SCRIPT.read_text()
-    assert fleet.index("warm_deps_preflight\n") < fleet.index("# ── Phase 1:")
+    assert fleet.index("warm_deps_preflight || exit 1\n") < fleet.index("# ── Phase 1:")
 
 
 def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:

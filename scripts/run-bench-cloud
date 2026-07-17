@@ -867,6 +867,69 @@ stop_machine() {  # stop_machine <id>
     FLY machine stop "$id" -a "$APP" 2>&1 | sed 's/^/   /' || true
 }
 
+# Snapshot maintenance is different from best-effort exit cleanup: the volume
+# must be proven quiescent before it can be published as a dependency source.
+stop_machine_strict() {  # stop_machine_strict <id>
+    local id="$1" st=""
+    [ -n "$id" ] || { echo "❌ cannot strictly stop an empty machine id" >&2; return 1; }
+    echo "⏹️  Stopping machine $id and proving the volume is quiescent ..."
+    if ! FLY machine stop "$id" -a "$APP" 2>&1 | sed 's/^/   /'; then
+        echo "❌ stop request failed for maintenance machine $id" >&2
+        return 1
+    fi
+    for _ in $(seq 1 "${CLOUDBENCH_MAINTENANCE_STOP_ATTEMPTS:-60}"); do
+        st="$(machine_state "$id")"
+        [ "$st" = "stopped" ] && { echo "✅ Machine stopped (snapshot-safe)"; return 0; }
+        [ "$st" = "gone" ] && { echo "❌ maintenance machine $id disappeared while stopping" >&2; return 1; }
+        sleep 2
+    done
+    echo "❌ maintenance machine $id did not reach stopped state (state=${st:-unknown})" >&2
+    return 1
+}
+
+# Bind the maintenance transaction to Fly's authoritative snapshot id. A time
+# window or "newest" selector can adopt a concurrent manual/workspace snapshot
+# that never carried the dependency trees this transaction just verified.
+CREATED_SNAPSHOT_ID=""
+create_volume_snapshot_exact() {  # create_volume_snapshot_exact <volume-id>
+    local vol="$1" create_json="" state=""
+    CREATED_SNAPSHOT_ID=""
+    echo "🧊 cutting a fresh snapshot of $vol ..."
+    if ! create_json="$(FLY volumes snapshots create "$vol" -a "$APP" --json 2>/dev/null)"; then
+        echo "❌ snapshot creation request failed" >&2
+        return 1
+    fi
+    CREATED_SNAPSHOT_ID="$(printf '%s' "$create_json" | python3 -c '
+import json, sys
+try: data = json.load(sys.stdin)
+except Exception: data = {}
+if isinstance(data, list): data = data[0] if data else {}
+print(data.get("id") or data.get("snapshot_id") or "") if isinstance(data, dict) else print("")
+' 2>/dev/null || true)"
+    if [ -z "$CREATED_SNAPSHOT_ID" ]; then
+        echo "❌ snapshot creation returned no authoritative id" >&2
+        return 1
+    fi
+    echo "   requested snapshot: $CREATED_SNAPSHOT_ID"
+    for _ in $(seq 1 "${CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS:-90}"); do
+        state="$(FLY volume snapshots list "$vol" -a "$APP" --json 2>/dev/null | \
+            SNAP_ID="$CREATED_SNAPSHOT_ID" python3 -c '
+import json, os, sys
+try: snaps = json.load(sys.stdin) or []
+except Exception: print("unreadable"); raise SystemExit
+match = next((s for s in snaps if s.get("id") == os.environ["SNAP_ID"]), None)
+if not match: print("missing")
+elif str(match.get("status") or "").lower() in {"created", "complete", "completed", "ready"} and int(match.get("size") or 0) > 0: print("complete")
+else: print("pending")
+' 2>/dev/null || echo unreadable)"
+        [ "$state" = "complete" ] && return 0
+        [ "$state" = "unreadable" ] && { echo "❌ could not verify snapshot inventory" >&2; return 1; }
+        sleep 10
+    done
+    echo "❌ exact snapshot $CREATED_SNAPSHOT_ID did not complete in time (state=${state:-unknown})" >&2
+    return 1
+}
+
 # Wait for SSH to answer on the machine (post-start it can take a few seconds).
 wait_for_ssh() {  # wait_for_ssh <id>
     local id="$1"
@@ -1084,6 +1147,14 @@ if [ "$MODE" = "refresh-deps" ]; then
     [ -z "$mid" ] && { echo "❌ No persistent machine — run 'run-bench-cloud --setup' first."; exit 1; }
     write_state "$mid"
 
+    EXPECTED_REF="$(git -C "$ROOT_DIR" rev-parse "${BENCH_REF}^{commit}" 2>/dev/null || true)"
+    EXPECTED_NODE_FP="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")"
+    EXPECTED_PY_FP="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")"
+    [ -n "$EXPECTED_REF" ] && [ -n "$EXPECTED_NODE_FP" ] && [ -n "$EXPECTED_PY_FP" ] || {
+        echo "❌ could not resolve the exact local ref/dependency fingerprints" >&2
+        exit 1
+    }
+
     start_machine "$mid"
     wait_for_ssh "$mid"
 
@@ -1093,17 +1164,38 @@ if [ "$MODE" = "refresh-deps" ]; then
     SYNC_CMD="set -e
 AUTH_HDR=''
 [ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$BENCH_REF' || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$BENCH_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
+git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$EXPECTED_REF'
+git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$EXPECTED_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' reset --hard
 chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
-echo checkout \$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse --short HEAD)"
-    ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | sed 's/^/   /' || true
+REMOTE_REF=\$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse HEAD)
+echo checkout \$(printf '%s' \"\$REMOTE_REF\" | cut -c1-8)
+echo \"::CLOUDBENCH-REF::\$REMOTE_REF\""
+    SYNC_LOG="$(mktemp)"
+    if ! ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | tee "$SYNC_LOG" | sed 's/^/   /'; then
+        rm -f "$SYNC_LOG"
+        echo "❌ exact remote checkout failed" >&2
+        exit 1
+    fi
+    REMOTE_REF="$(sed -n 's/^::CLOUDBENCH-REF:://p' "$SYNC_LOG" | tail -1)"
+    rm -f "$SYNC_LOG"
+    if [ "$REMOTE_REF" != "$EXPECTED_REF" ]; then
+        echo "❌ remote checkout mismatch: expected $EXPECTED_REF, got ${REMOTE_REF:-<missing>}" >&2
+        exit 1
+    fi
 
-    echo "📦 syncing baked dependency trees /app → $REMOTE_REPO (marker-gated) ..."
+    echo "📦 rebuilding/syncing warm dependency trees for the exact checked-out ref ..."
     DEPS_CMD="set -e
-bash '$REMOTE_REPO/scripts/cloudbench-sync-deps.sh' /app '$REMOTE_REPO'
-chown -R rose:rose '$REMOTE_REPO/node_modules' '$REMOTE_REPO/back-end/node_modules' '$REMOTE_REPO/agents/venv' 2>/dev/null || true
+chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
+gosu rose env HOME=/home/rose CLOUDBENCH_REBUILD_DEPS=1 \
+  bash '$REMOTE_REPO/scripts/cloudbench-sync-deps.sh' /app '$REMOTE_REPO'
+source '$REMOTE_REPO/scripts/lib/cloudbench-env.sh'
+REMOTE_REF=\$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse HEAD)
+REMOTE_NODE_FP=\$(cloudbench_node_dependency_fingerprint '$REMOTE_REPO')
+REMOTE_PY_FP=\$(cloudbench_manifest_fingerprint '$REMOTE_REPO' \"\${CLOUDBENCH_PYTHON_MANIFESTS[@]}\")
+echo \"::DEPS-REMOTE-REF::\$REMOTE_REF\"
+echo \"::DEPS-REMOTE-NODE::\$REMOTE_NODE_FP\"
+echo \"::DEPS-REMOTE-PY::\$REMOTE_PY_FP\"
 echo '::DEPS-REFRESH-DONE::'"
     DEPS_LOG="$(mktemp)"
     ssh_exec "$mid" "$DEPS_CMD" 2>&1 | grep -av '^Connecting to' | tee "$DEPS_LOG" | sed 's/^/   /'
@@ -1112,10 +1204,22 @@ echo '::DEPS-REFRESH-DONE::'"
         echo "❌ dependency refresh did not report completion (see output above)."
         exit 1
     fi
+    REMOTE_REF="$(sed -n 's/^::DEPS-REMOTE-REF:://p' "$DEPS_LOG" | tail -1)"
+    REMOTE_NODE_FP="$(sed -n 's/^::DEPS-REMOTE-NODE:://p' "$DEPS_LOG" | tail -1)"
+    REMOTE_PY_FP="$(sed -n 's/^::DEPS-REMOTE-PY:://p' "$DEPS_LOG" | tail -1)"
     rm -f "$DEPS_LOG"
+    if [ "$REMOTE_REF" != "$EXPECTED_REF" ] \
+        || [ "$REMOTE_NODE_FP" != "$EXPECTED_NODE_FP" ] \
+        || [ "$REMOTE_PY_FP" != "$EXPECTED_PY_FP" ]; then
+        echo "❌ remote dependency state did not match the exact local ref/fingerprints" >&2
+        echo "   ref expected=$EXPECTED_REF remote=${REMOTE_REF:-<missing>}" >&2
+        echo "   node expected=$EXPECTED_NODE_FP remote=${REMOTE_NODE_FP:-<missing>}" >&2
+        echo "   python expected=$EXPECTED_PY_FP remote=${REMOTE_PY_FP:-<missing>}" >&2
+        exit 1
+    fi
 
-    # Stop before snapshotting so the snapshot is a quiesced, consistent image.
-    stop_machine "$mid"
+    # Stop and verify before snapshotting so the volume is provably quiescent.
+    stop_machine_strict "$mid" || exit 1
     mid=""
 
     VOL_ID="$(FLY machines list -a "$APP" --json 2>/dev/null | MN="$MACHINE_NAME" python3 -c '
@@ -1129,37 +1233,13 @@ for m in json.load(sys.stdin) or []:
     [ -n "$VOL_ID" ] || { echo "❌ could not resolve the warm volume id"; exit 1; }
 
     SNAP_START_EPOCH="$(date +%s)"
-    echo "🧊 cutting a fresh snapshot of $VOL_ID (clones fork the newest complete snapshot) ..."
-    FLY volumes snapshots create "$VOL_ID" -a "$APP" 2>&1 | sed 's/^/   /' || true
-    NEW_SNAP=""
-    for _ in $(seq 1 90); do
-        NEW_SNAP="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | \
-            SINCE="$SNAP_START_EPOCH" python3 -c '
-import json, os, sys
-from datetime import datetime, timezone
-try: snaps = json.load(sys.stdin) or []
-except Exception: snaps = []
-since = int(os.environ["SINCE"])
-def epoch(s):
-    try: return int(datetime.fromisoformat(str(s.get("created_at","")).replace("Z","+00:00")).timestamp())
-    except ValueError: return 0
-fresh = [s for s in snaps
-         if str(s.get("status") or "").lower() in {"created","complete","completed","ready"}
-         and int(s.get("size") or 0) > 0 and s.get("id") and epoch(s) >= since - 60]
-fresh.sort(key=epoch, reverse=True)
-print(fresh[0]["id"] if fresh else "")
-' 2>/dev/null || true)"
-        [ -n "$NEW_SNAP" ] && break
-        sleep 10
-    done
-    [ -n "$NEW_SNAP" ] || { echo "❌ fresh snapshot did not complete in time"; exit 1; }
+    create_volume_snapshot_exact "$VOL_ID" || exit 1
+    NEW_SNAP="$CREATED_SNAPSHOT_ID"
 
     # Record what the snapshot now carries so fleet preflights can prove
     # freshness without mounting anything. Shared across sibling workspaces
     # via the git-common dir (same pattern as pool claims).
-    NODE_FP="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR")"
-    PY_FP="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")"
-    printf '%s %s %s %s\n' "$NODE_FP" "$PY_FP" "$SNAP_START_EPOCH" "$NEW_SNAP" \
+    printf '%s %s %s %s\n' "$EXPECTED_NODE_FP" "$EXPECTED_PY_FP" "$SNAP_START_EPOCH" "$NEW_SNAP" \
         > "$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
     echo "✅ warm volume deps refreshed; fresh snapshot: $NEW_SNAP"
     echo "   state: $GIT_COMMON_DIR/cloudbench-warm-deps.fp"
