@@ -1711,8 +1711,40 @@ if [ "$SKIP_CONTROLLER_LOCK" != "1" ]; then
 fi
 
 STOP_DONE="0"
+BOOT_CONFIG_UPDATE_SLOT=""
+acquire_boot_config_update_slot() {
+    local barrier="${CLOUDBENCH_BOOT_CONFIG_BARRIER:-}" max_in_flight
+    local wait_seconds deadline slots_dir slot
+    [ -n "$barrier" ] || return 0
+    max_in_flight="${CLOUDBENCH_BOOT_CONFIG_MAX_IN_FLIGHT:-4}"
+    wait_seconds="${CLOUDBENCH_BOOT_CONFIG_SLOT_WAIT_SECONDS:-300}"
+    case "$max_in_flight:$wait_seconds" in
+        *[!0-9:]*|0:*|*:0) echo "❌ invalid boot config update concurrency/wait contract" >&2; return 1 ;;
+    esac
+    slots_dir="$barrier/update-slots"
+    mkdir -p "$slots_dir" || return 1
+    deadline=$((SECONDS + wait_seconds))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        for slot in $(seq 1 "$max_in_flight"); do
+            if mkdir "$slots_dir/$slot" 2>/dev/null; then
+                BOOT_CONFIG_UPDATE_SLOT="$slots_dir/$slot"
+                return 0
+            fi
+        done
+        sleep 0.2
+    done
+    echo "❌ timed out waiting for a boot config update slot" >&2
+    return 1
+}
+release_boot_config_update_slot() {
+    if [ -n "${BOOT_CONFIG_UPDATE_SLOT:-}" ]; then
+        rmdir "$BOOT_CONFIG_UPDATE_SLOT" 2>/dev/null || true
+        BOOT_CONFIG_UPDATE_SLOT=""
+    fi
+}
 stop_on_exit() {
     local ec=$?
+    release_boot_config_update_slot
     if declare -F cleanup_staged_local_files >/dev/null 2>&1; then
         cleanup_staged_local_files
     fi
@@ -1804,6 +1836,10 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     _upd=0
     _update_log="$OUT_DIR/cloudbench-boot-update.log"
     : > "$_update_log"
+    # Fly reserves replacement CPU even for a config-only update on a stopped
+    # Machine. Bound those provider mutations across the fleet; the separate
+    # boot-config barrier still releases all guest starts together afterward.
+    acquire_boot_config_update_slot || exit 1
     for _u in $(seq 1 "${CLOUDBENCH_BOOT_UPDATE_ATTEMPTS:-10}"); do
         if _with_timeout "${CLOUDBENCH_BOOT_UPDATE_TIMEOUT:-90}" \
               flyctl machine update "$mid" -a "$APP" "${_envargs[@]}" \
@@ -1814,6 +1850,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         fi
         sleep 8
     done
+    release_boot_config_update_slot
     [ "$_upd" = 1 ] || {
         echo "❌ boot-launch: could not set machine env/command after retries." >&2
         echo "─── final Fly update error ───" >&2

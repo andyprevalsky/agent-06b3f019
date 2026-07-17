@@ -3492,6 +3492,56 @@ test -f {shlex.quote(str(restarted))}
     assert result.returncode == 0, result.stderr
 
 
+def test_boot_config_updates_bound_provider_cpu_reservations(tmp_path: Path) -> None:
+    """RCA (2026-07-17): the stopped-fleet barrier prevented guest starts but
+    still submitted all 37 ``machine update`` operations concurrently. Fly
+    temporarily reserves replacement CPU for those config updates, and one
+    child exhausted all retries at ``cpu_overcommit_exceeded`` before any
+    benchmark reached the synchronized start barrier.
+
+    The shared config phase must cap provider mutations independently of the
+    later full-width guest start.
+    """
+    cloud = CLOUD_SCRIPT.read_text()
+    acquire = (
+        _extract_fleet_function(cloud, "acquire_boot_config_update_slot() {")
+        if "acquire_boot_config_update_slot() {" in cloud
+        else ""
+    )
+    release = (
+        _extract_fleet_function(cloud, "release_boot_config_update_slot() {")
+        if "release_boot_config_update_slot() {" in cloud
+        else ""
+    )
+    barrier = tmp_path / "config-barrier"
+    observed = tmp_path / "observed"
+    script = f"""set -eu
+CLOUDBENCH_BOOT_CONFIG_BARRIER={shlex.quote(str(barrier))}
+CLOUDBENCH_BOOT_CONFIG_MAX_IN_FLIGHT=4
+CLOUDBENCH_BOOT_CONFIG_SLOT_WAIT_SECONDS=5
+BOOT_CONFIG_UPDATE_SLOT=""
+{acquire}
+{release}
+mkdir -p "$CLOUDBENCH_BOOT_CONFIG_BARRIER"
+for _worker in $(seq 1 12); do
+  (
+    BOOT_CONFIG_UPDATE_SLOT=""
+    acquire_boot_config_update_slot
+    find "$CLOUDBENCH_BOOT_CONFIG_BARRIER/update-slots" -mindepth 1 -maxdepth 1 -type d | wc -l >> {shlex.quote(str(observed))}
+    sleep 0.1
+    release_boot_config_update_slot
+  ) &
+done
+wait
+test "$(wc -l < {shlex.quote(str(observed))} | tr -d ' ')" = 12
+test "$(sort -nr {shlex.quote(str(observed))} | head -1 | tr -d ' ')" -le 4
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_boot_launch_collects_terminal_artifacts_without_post_done_ssh() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     collection = cloud[
