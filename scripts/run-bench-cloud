@@ -2431,8 +2431,24 @@ read_bench_log() {
     [ -n "$STATUS_PROXY_PID" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null || return 1
     curl -fsS --max-time 6 "http://127.0.0.1:$LOCAL_STATUS_PORT/bench.log" 2>/dev/null
 }
+status_proxy_transport_healthy() {
+    local health_code
+    [ -n "$STATUS_PROXY_PID" ] && kill -0 "$STATUS_PROXY_PID" 2>/dev/null || return 1
+    # flyctl proxy can survive while its lazy DNS/GraphQL setup is wedged. PID
+    # liveness alone is therefore not a transport contract. Both 204 (driver
+    # alive) and 410 (server reachable, driver not yet/already gone) prove that
+    # the tunnel reaches the authenticated on-box status service.
+    health_code="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
+        "http://127.0.0.1:$LOCAL_STATUS_PORT/driver-health" 2>/dev/null || true)"
+    case "$health_code" in
+        204|410) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 ensure_status_proxy() {
-    if [ -z "$STATUS_PROXY_PID" ] || ! kill -0 "$STATUS_PROXY_PID" 2>/dev/null; then
+    if ! status_proxy_transport_healthy; then
+        cloudbench_terminate_and_wait 5 "${STATUS_PROXY_PID:-}"
+        STATUS_PROXY_PID=""
         release_local_port_lease "$LOCAL_STATUS_PORT"
         start_leased_data_plane_proxy "$LOCAL_STATUS_PORT" LOCAL_STATUS_PORT \
             "$REMOTE_STATUS_PORT" "$REMOTE_STATUS_HOST" "$OUT_DIR/cloudbench-status-proxy.log" \

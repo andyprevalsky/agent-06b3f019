@@ -3,12 +3,95 @@
 import json
 import importlib.util
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 
 from _test_utils import BlackboxResult
+
+
+def test_every_benchmark_run_registers_in_app_hub_before_execution():
+    """The Mac-app Hub is a fail-closed launch invariant, not best-effort save telemetry."""
+    from benchmarks.hub_upload import HubVisibilityError, require_run_visible
+
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            requests.append(("POST", self.path, body))
+            payload = json.dumps({"run": {"run_id": body["run_id"]}}).encode()
+            self.send_response(201)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            requests.append(("GET", self.path, None))
+            run_id = self.path.rsplit("/", 1)[-1]
+            payload = json.dumps({"run": {"run_id": run_id, "live": True}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    prior = {
+        name: os.environ.get(name)
+        for name in ("BENCHMARK_HUB_UPLOAD_URL", "BENCHMARK_HUB_API_KEY")
+    }
+    try:
+        os.environ["BENCHMARK_HUB_UPLOAD_URL"] = (
+            f"http://127.0.0.1:{server.server_address[1]}"
+        )
+        os.environ["BENCHMARK_HUB_API_KEY"] = "blackbox-key"
+        bundle = {
+            "run_id": "blackbox-visible-run",
+            "suite": "blackbox",
+            "tasks": [{"name": "task-a", "status": "starting"}],
+        }
+        require_run_visible(bundle, timeout=1)
+        assert requests[0][0:2] == ("POST", "/api/benchmarks/runs?live=1")
+        assert requests[1][0:2] == (
+            "GET",
+            "/api/benchmarks/runs/blackbox-visible-run",
+        )
+
+        os.environ["BENCHMARK_HUB_UPLOAD_URL"] = "http://127.0.0.1:1"
+        try:
+            require_run_visible(bundle, timeout=0.1)
+            raise AssertionError("an invisible run was allowed to execute")
+        except HubVisibilityError:
+            pass
+    finally:
+        server.shutdown()
+        server.server_close()
+        for name, value in prior.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    repo_root = Path(__file__).resolve().parents[3]
+    runner = (repo_root / "agents/benchmarks/run_benchmark.py").read_text()
+    fleet = (repo_root / "scripts/run-bench-fleet").read_text()
+    poller = (repo_root / "scripts/run-bench-hub-poller").read_text()
+    assert "require_run_visible" in runner
+    assert "BENCHMARK_HUB_PARENT_RUN_ID" in runner
+    assert "--require-visible" in fleet
+    assert "BENCHMARK_HUB_PARENT_RUN_ID" in fleet
+    assert 'BENCHMARK_HUB_PARENT_RUN_ID="$hub_run_id"' in poller
 
 
 def _load_cloudbench_result_module():
@@ -5292,6 +5375,7 @@ async def test_phone_callee_activation_cancellation_deletes_owned_number():
     client = Client()
     session = PhoneCalleeSession("phone-a", {"system_prompt": "persona"}, api_key="test")
     with (
+        patch("benchmarks.phone_callee._configured_number_id_for_task", return_value=""),
         patch("benchmarks.phone_callee.httpx.AsyncClient", return_value=client),
         patch("benchmarks.phone_callee.asyncio.sleep", AsyncMock(side_effect=asyncio.CancelledError)),
     ):
@@ -5308,6 +5392,7 @@ async def test_phone_callee_activation_cancellation_deletes_owned_number():
 async def test_phone_callee_sessions_isolate_distributed_phone_number_resources():
     """Independent benchmark processes must not attach personas to one shared number."""
     import asyncio
+    from unittest.mock import patch
 
     from benchmarks.phone_callee import CALLEE_NUMBER_NAME, PhoneCalleeSession
 
@@ -5359,10 +5444,11 @@ async def test_phone_callee_sessions_isolate_distributed_phone_number_resources(
     second = PhoneCalleeSession("phone-b", {"system_prompt": "persona b"}, api_key="test")
     first_client = Client("1")
     second_client = Client("2")
-    await asyncio.gather(
-        first._ensure_phone_number(first_client),
-        second._ensure_phone_number(second_client),
-    )
+    with patch("benchmarks.phone_callee._configured_number_id_for_task", return_value=""):
+        await asyncio.gather(
+            first._ensure_phone_number(first_client),
+            second._ensure_phone_number(second_client),
+        )
 
     assert first.phone_number_id != second.phone_number_id, (
         f"distributed sessions shared phone number {first.phone_number_id}"
@@ -6418,6 +6504,10 @@ def test_checkpoint_validation_mass_agent_sequence_remains_strict():
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
+    r.record(
+        "every_benchmark_run_registers_in_app_hub",
+        test_every_benchmark_run_registers_in_app_hub_before_execution,
+    )
     r.record(
         "cloudbench_rejects_stale_wrong_task",
         test_cloudbench_result_rejects_stale_passing_artifact_from_another_task,

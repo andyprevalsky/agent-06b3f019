@@ -62,7 +62,8 @@ cp -R "$ROOT_DIR/agents/benchmarks/fleet_startup_phase.py" "$SANDBOX/scripts/" 2
 # Keep the synthetic worktrees dependency-fingerprintable. Pool compatibility is
 # now a fail-closed production contract, so an intentionally minimal fake repo
 # still needs real (minimal) manifests rather than relying on an absent proof.
-mkdir -p "$SANDBOX/back-end" "$SANDBOX/front-end" "$SANDBOX/agents"
+mkdir -p "$SANDBOX/back-end" "$SANDBOX/front-end" "$SANDBOX/agents/benchmarks"
+cp "$ROOT_DIR/agents/benchmarks/hub_upload.py" "$SANDBOX/agents/benchmarks/hub_upload.py"
 printf '{}\n' > "$SANDBOX/package.json"
 printf '{}\n' > "$SANDBOX/back-end/package.json"
 printf '{}\n' > "$SANDBOX/front-end/package.json"
@@ -566,6 +567,8 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
     env PATH="$FAKE_BIN:$PATH" \
         FLY_BENCH_API_TOKEN="fake-token" \
         CONDUCTOR_PORT="$port" \
+        BENCHMARK_HUB_UPLOAD_URL="http://127.0.0.1:$((port + 5764))" \
+        BENCHMARK_HUB_API_KEY="test-key" \
         CI=1 \
         CLOUDBENCH_FAKE_DIR="$FAKE_DIR" \
         CLOUDBENCH_FAKE_BREAK_REGISTRY_ROOT="${CLOUDBENCH_FAKE_BREAK_REGISTRY_ROOT:-}" \
@@ -694,10 +697,27 @@ rm -f "$POOL_A" "$POOL_B"
 # NON-COLLIDING hub ports.
 hub_stub() {  # hub_stub <port> <runs-root>
     python3 - "$1" "$2" <<'PY' &
-import http.server, pathlib, sys
+import http.server, json, pathlib, sys
+from urllib.parse import urlparse
+
 runs_root = pathlib.Path(sys.argv[2])
+registered = {}
+
 class Hub(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
+        path = urlparse(self.path).path
+        if path.startswith("/api/benchmarks/runs/"):
+            run_id = path.rsplit("/", 1)[-1]
+            if run_id not in registered:
+                self.send_error(404)
+                return
+            body = json.dumps({"run": registered[run_id]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         run_ids = " ".join(
             path.name for path in runs_root.iterdir()
             if path.is_dir() and not path.name.startswith("_")
@@ -707,6 +727,25 @@ class Hub(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_POST(self):
+        if urlparse(self.path).path != "/api/benchmarks/runs":
+            self.send_error(404)
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        run_id = payload.get("run_id")
+        if not run_id:
+            self.send_error(400)
+            return
+        registered[run_id] = payload
+        body = json.dumps({"run": payload}).encode()
+        self.send_response(201)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *a):
         pass
 http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Hub).serve_forever()

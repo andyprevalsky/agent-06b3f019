@@ -7349,6 +7349,30 @@ async def main_async(args):
 
     # Run tasks — finally block ensures flyctl cleanup + results are always saved
     run = BenchmarkRun(suite=suite_name, base_url=base_url)
+    parent_hub_run_id = os.environ.get("BENCHMARK_HUB_PARENT_RUN_ID", "").strip()
+    if parent_hub_run_id:
+        print(f"  📊 In-app Benchmark Hub: managed by parent run {parent_hub_run_id}")
+    else:
+        # Registration is a launch invariant: a benchmark agent must never be
+        # created unless the Mac app's persisted Hub can already resolve this
+        # run. Final save uses the same required contract below via results.py.
+        from benchmarks.hub_upload import DEFAULT_HUB_URL, require_run_visible
+
+        os.environ.setdefault("BENCHMARK_HUB_UPLOAD_URL", DEFAULT_HUB_URL)
+        os.environ.setdefault("BENCHMARK_HUB_API_KEY", API_KEY)
+        os.environ["BENCHMARK_HUB_REQUIRED"] = "1"
+        require_run_visible(
+            {
+                "run_id": run.run_id,
+                "timestamp": run.timestamp,
+                "suite": run.suite,
+                "source": "benchmark-runner",
+                "tasks": [
+                    {"name": task.name, "status": "starting"}
+                    for task in [*tasks, *skipped_claude_tasks]
+                ],
+            }
+        )
     checkpoint_source_mode = args.checkpoint_source_index is not None
     memory_gate_enabled = (
         suite_name == "smoke"

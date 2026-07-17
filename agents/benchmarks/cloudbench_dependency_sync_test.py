@@ -3182,7 +3182,15 @@ def test_status_server_defaults_to_fly_6pn_ipv6(tmp_path: Path) -> None:
 
 def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
     """All 30 ready boxes release concurrently over their existing data-plane
-    proxies; one unavailable endpoint makes the run fail immediately and visibly.
+    proxies; readiness comes from the authoritative marker, not streamed logs,
+    and one unavailable endpoint makes the run fail immediately and visibly.
+
+    RCA (2026-07-17): two healthy Fly stacks wrote their ``.ready`` marker in
+    74 seconds, but their lossy ``fleet-child.log`` streams omitted the READY
+    line. The controller grepped those streams, falsely excluded both stacks at
+    720 seconds, and reset the clean-run streak. The status server exposes the
+    persisted marker over the same data plane used for release, so the barrier
+    must observe that artifact directly.
     """
     import socket
     import urllib.error
@@ -3248,9 +3256,11 @@ def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
                 time.sleep(0.05)
 
         for root, port in zip(roots, ports, strict=True):
+            # Mirror the production failure: the on-box marker exists while
+            # the controller's streamed log never received the READY line.
+            (root / f"cloudbench-start-{barrier}.ready").touch()
             (root / "fleet-child.log").write_text(
                 f"status proxy: 127.0.0.1:{port} -> fly:8011\n"
-                f"synchronized start barrier ready: {barrier}\n"
             )
             (root / "status-proxy.port").write_text(f"{port}\n")
 
@@ -3282,6 +3292,13 @@ release_start_barrier
 
         for root in roots:
             (root / f"cloudbench-start-{barrier}.release").unlink()
+        # The second half isolates release failure (not readiness discovery):
+        # retain the compatibility READY signal after taking its server down so
+        # the controller must attempt, and fail, the release POST.
+        (roots[-1] / "fleet-child.log").write_text(
+            f"status proxy: 127.0.0.1:{ports[-1]} -> fly:8011\n"
+            f"synchronized start barrier ready: {barrier}\n"
+        )
         servers[-1].terminate()
         servers[-1].wait(timeout=5)
         failed = subprocess.run(
@@ -3397,6 +3414,48 @@ def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     assert 'flyctl proxy "$metrics_port:$BOX_HEALTH_PORT"' in fleet
     assert 'FLY proxy "$metrics_port:$BOX_HEALTH_PORT"' not in fleet
     assert 'cloudbench_terminate_and_wait 5 "${metrics_proxy_pid:-}"' in fleet
+
+
+def test_live_but_unreachable_status_tunnel_is_replaced(tmp_path: Path) -> None:
+    """RCA (2026-07-17): a Fly status-proxy process survived while its lazy
+    GraphQL/DNS setup was wedged, so ``kill -0`` reported healthy even though
+    every HTTP read failed. The launcher then remained blind to a healthy
+    on-box driver and the fleet falsely excluded the task at the barrier.
+
+    Reproduce that exact boundary with a live PID plus an unreachable HTTP
+    contract. ``ensure_status_proxy`` must terminate/release/restart the tunnel,
+    not accept process survival as transport health.
+    """
+    cloud = CLOUD_SCRIPT.read_text()
+    ensure = _extract_fleet_function(cloud, "ensure_status_proxy() {")
+    transport = (
+        _extract_fleet_function(cloud, "status_proxy_transport_healthy() {")
+        if "status_proxy_transport_healthy() {" in cloud
+        else ""
+    )
+    restarted = tmp_path / "restarted"
+    script = f"""set -eu
+STATUS_PROXY_PID=$$
+LOCAL_STATUS_PORT=61945
+REMOTE_STATUS_PORT=8011
+REMOTE_STATUS_HOST=machine.internal
+OUT_DIR={shlex.quote(str(tmp_path))}
+curl() {{ printf 000; return 0; }}
+cloudbench_terminate_and_wait() {{ :; }}
+release_local_port_lease() {{ :; }}
+start_leased_data_plane_proxy() {{
+  touch {shlex.quote(str(restarted))}
+  printf -v "$6" '%s' "$$"
+}}
+{transport}
+{ensure}
+ensure_status_proxy
+test -f {shlex.quote(str(restarted))}
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=5
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_boot_launch_collects_terminal_artifacts_without_post_done_ssh() -> None:

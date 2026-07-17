@@ -100,6 +100,9 @@ export CLOUDBENCH_BARRIER_TOKEN="$BARRIER_RELEASE_TOKEN"
 FLEET_DIR="$RUNS_ROOT/$RUN_ID"
 HUB_CTX_DIR="$RUNS_ROOT/_hub"
 LOCK_DIR="$ROOT_DIR/.context/cloudbench-controller.lock"
+HUB_UPLOAD_HELPER="$ROOT_DIR/agents/benchmarks/hub_upload.py"
+INHERITED_HUB_RUN_ID="${BENCHMARK_HUB_PARENT_RUN_ID:-}"
+SELF_MANAGED_HUB_RUN="0"
 
 # ── Args ─────────────────────────────────────────────────────────────────────
 BENCHES=()
@@ -1380,7 +1383,7 @@ start_central_hub() {
             > "$HUB_CTX_DIR/hub.log" 2>&1 & UNIFIED_DASH_PID=$!
         printf '%s\n' "$UNIFIED_DASH_PID" > "$HUB_CTX_DIR/agent-link-server.pid"
     fi
-    echo "📊 central hub: http://localhost:$DASH_BASE/ (in-app: Benchmarks tab) — run visible as STARTING"
+    echo "🖥️  local benchmark diagnostics: http://localhost:$DASH_BASE/ — run visible as STARTING"
 }
 require_central_hub_visibility() {
     local attempt page
@@ -1398,11 +1401,40 @@ require_central_hub_visibility() {
     echo "❌ benchmark run is not visible in the central hub; refusing to continue invisibly (run=$RUN_ID, hub=http://127.0.0.1:$DASH_BASE/)" >&2
     return 1
 }
+require_in_app_hub_visibility() {
+    local hub_url hub_api_key active_run_id
+    hub_url="${BENCHMARK_HUB_UPLOAD_URL:-https://navi-j9a9.onrender.com}"
+    hub_api_key="${BENCHMARK_HUB_API_KEY:-${BACKEND_API_KEY:-}}"
+    if [ -z "$hub_api_key" ]; then
+        hub_api_key="$(grep -E '^BACKEND_API_KEY=' "$ROOT_DIR/back-end/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')"
+    fi
+    [ -n "$hub_api_key" ] || {
+        echo "❌ BACKEND_API_KEY is required to register benchmark runs in the in-app Hub" >&2
+        return 1
+    }
+    export BENCHMARK_HUB_UPLOAD_URL="$hub_url"
+    export BENCHMARK_HUB_API_KEY="$hub_api_key"
+    if [ -n "$INHERITED_HUB_RUN_ID" ]; then
+        active_run_id="$INHERITED_HUB_RUN_ID"
+        python3 "$HUB_UPLOAD_HELPER" --verify-visible "$active_run_id" || return 1
+    else
+        active_run_id="$RUN_ID"
+        python3 "$HUB_UPLOAD_HELPER" \
+            --require-visible "$FLEET_DIR/_batch/report-card.json" \
+            --run-id "$active_run_id" --source direct-cloud-fleet || return 1
+        SELF_MANAGED_HUB_RUN="1"
+    fi
+    # Every per-machine run belongs to this already-visible aggregate. Child
+    # run_benchmark.py processes must not create duplicate one-task Hub rows.
+    export BENCHMARK_HUB_PARENT_RUN_ID="$active_run_id"
+    echo "📊 Mac app Benchmark Hub: run=$active_run_id"
+}
 if [ -z "$PROVISION_POOL" ]; then
     mkdir -p "$FLEET_DIR"
     write_startup_card "controller starting"
     start_central_hub
     require_central_hub_visibility || exit 1
+    require_in_app_hub_visibility || exit 1
 fi
 
 OWNED_CLONES_FILE="$FLEET_DIR/owned-clones.ids"
@@ -2394,6 +2426,7 @@ release_start_barrier() {
     # Only fail if EVERY stack dies. The excluded bench's child already exited
     # non-zero and is reported as such in the aggregate.
     local total="${#CHILD_PIDS[@]}" ready deadline now out p j live barrier_start per_box
+    local status_port ready_marker_url
     local -a is_ready=() is_dead=()
     for j in "${!CHILD_PIDS[@]}"; do is_ready[$j]=0; is_dead[$j]=0; done
     barrier_start="$(date +%s)"
@@ -2411,9 +2444,30 @@ release_start_barrier() {
         for j in "${!CHILD_PIDS[@]}"; do
             [ "${is_dead[$j]}" = "1" ] && continue
             out="${CHILD_OUT[$j]}"; p="${CHILD_PIDS[$j]}"
-            if [ "${is_ready[$j]}" = "0" ] && \
-               grep -aFq "synchronized start barrier ready: $RUN_ID" "$out/fleet-child.log" 2>/dev/null; then
-                is_ready[$j]=1
+            if [ "${is_ready[$j]}" = "0" ]; then
+                # The on-box marker is the readiness source of truth. Console
+                # streaming intentionally tails only a few changed lines, so a
+                # healthy box can write this marker while fleet-child.log omits
+                # the READY line. Observe the durable artifact through the same
+                # data-plane tunnel used for authenticated barrier release.
+                status_port="$(cat "$out/status-proxy.port" 2>/dev/null || true)"
+                case "$status_port" in
+                    ''|*[!0-9]*) ;;
+                    *)
+                        ready_marker_url="http://127.0.0.1:$status_port/cloudbench-start-$RUN_ID.ready"
+                        if curl --noproxy '*' -fsS --max-time 1 -o /dev/null \
+                            "$ready_marker_url" 2>/dev/null; then
+                            is_ready[$j]=1
+                        fi
+                        ;;
+                esac
+                # Retain the emitted line as a compatibility signal for a
+                # tunnel rotating at this instant; it is written only after
+                # the same marker and cannot create an early release.
+                if [ "${is_ready[$j]}" = "0" ] && \
+                   grep -aFq "synchronized start barrier ready: $RUN_ID" "$out/fleet-child.log" 2>/dev/null; then
+                    is_ready[$j]=1
+                fi
             fi
             if [ "${is_ready[$j]}" = "1" ]; then
                 ready=$((ready + 1)); live=$((live + 1))
@@ -2485,6 +2539,10 @@ CHILD_PIDS=()
 # One final merge so the batch dashboard reflects terminal results, then stop the aggregator.
 kill "$UNIFIED_AGG_PID" 2>/dev/null || true
 python3 "$ROOT_DIR/scripts/cloudbench-aggregate-runs.py" "$FLEET_DIR" "$UNIFIED_DIR/run.json"
+if [ "$SELF_MANAGED_HUB_RUN" = "1" ]; then
+    python3 "$HUB_UPLOAD_HELPER" --upload-final "$UNIFIED_DIR/run.json" \
+        --run-id "$BENCHMARK_HUB_PARENT_RUN_ID" --source direct-cloud-fleet
+fi
 
 echo ""
 echo "════════════════════ FLEET SUMMARY ════════════════════"

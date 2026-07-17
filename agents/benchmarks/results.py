@@ -123,20 +123,25 @@ class BenchmarkRun:
         return path
 
     def _upload_to_hub(self) -> None:
-        """Best-effort push of the bundle to the in-app Benchmark Hub.
+        """Push the terminal bundle to the in-app Benchmark Hub.
 
-        Env-gated (BENCHMARK_HUB_UPLOAD_URL) so manual local runs and on-box
-        cloud drivers appear in the hub without the dispatch poller. Must never
-        fail save() — hub_upload swallows every error.
+        CLI benchmark runs set BENCHMARK_HUB_REQUIRED after their fail-closed
+        startup registration. Fleet children carry BENCHMARK_HUB_PARENT_RUN_ID
+        and leave aggregation/upload to that already-visible parent run.
         """
+        if os.getenv("BENCHMARK_HUB_PARENT_RUN_ID"):
+            return
+        required = os.getenv("BENCHMARK_HUB_REQUIRED") == "1"
         try:
             from benchmarks.hub_upload import hub_upload_enabled, upload_run_bundle
         except Exception as e:
+            if required:
+                raise
             print(f"⚠️  hub upload import failed (non-fatal): {e}")
             return
-        if not hub_upload_enabled():
+        if not required and not hub_upload_enabled():
             return
-        upload_run_bundle(self.to_dict())
+        upload_run_bundle(self.to_dict(), required=required)
 
     def _record_history(self) -> None:
         """Record run stats for every completed task, plus pass-only corpora.
