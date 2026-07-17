@@ -1974,7 +1974,12 @@ start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log> <pid-var> 
         sleep 0.5
         curl --noproxy '*' -sS --max-time 2 -o /dev/null \
             "http://127.0.0.1:$local_port/driver-health" 2>/dev/null || true
-        sleep 0.5
+        # A lazy-DNS failure is asynchronous: flyctl can still be alive at the
+        # first PID check, then print "host was not found in DNS" and exit a few
+        # milliseconds later. That stranded message-person before its relay
+        # heartbeat and held the entire 30-box barrier. Require a short
+        # post-probe survival window before publishing this proxy as ready.
+        sleep "${CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS:-3}"
         if kill -0 "$pid" 2>/dev/null; then
             printf -v "$pid_var" '%s' "$pid"
             return 0

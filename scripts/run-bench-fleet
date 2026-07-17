@@ -1301,7 +1301,12 @@ CHILD_PORT=()
 CHILD_MACHINE=()
 
 cleanup() {
-    local ec=$? id claim_path st presence
+    local ec=$? id claim_path st presence machines round stop_pid
+    local -a claimed_pool_ids pending_pool_ids next_pending_pool_ids stop_pids
+    claimed_pool_ids=()
+    pending_pool_ids=()
+    next_pending_pool_ids=()
+    stop_pids=()
     # The poller and terminal can deliver TERM to the same process group. Do not
     # let a second signal interrupt teardown after the EXIT trap has begun.
     trap - EXIT
@@ -1318,19 +1323,75 @@ cleanup() {
     cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${CHILD_PIDS[@]:-}"
     # Return only machines this fleet actually claimed. The pool ledger can be
     # shared by sibling workspaces, so stopping every listed ID would interrupt
-    # their active runs. Keep the global lease until the machine is stopped.
-    if [ -f "$CLAIMED_POOL_FILE" ]; then
+    # their active runs. Stop this run's machines concurrently: serial stop +
+    # per-machine inventory polling added N teardown latency after an otherwise
+    # perfectly parallel batch. Keep every global lease until a shared inventory
+    # read proves its machine stopped (or absent).
+    if [ -s "$CLAIMED_POOL_FILE" ]; then
         while read -r id; do
             [ -n "$id" ] || continue
             echo "↩️  returning claimed pool machine $id (stop)"
-            FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
-            presence=0
-            for _ in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
-                st="$(pool_machine_state "$id")"; presence=$?
-                [ "$presence" -eq 1 ] && break
-                [ "$st" = "stopped" ] && break
-                sleep 2
+            claimed_pool_ids+=("$id")
+        done < "$CLAIMED_POOL_FILE"
+
+        pending_pool_ids=("${claimed_pool_ids[@]}")
+        # A bounded retry handles an instantaneous control-plane throttle while
+        # preserving parallel teardown. Each round uses one shared inventory
+        # read, never one Machines-API list call per box.
+        for round in $(seq 1 "${CLOUDBENCH_POOL_STOP_REQUEST_ATTEMPTS:-3}"); do
+            stop_pids=()
+            for id in "${pending_pool_ids[@]}"; do
+                fly_with_timeout "${CLOUDBENCH_POOL_STOP_REQUEST_TIMEOUT:-20}" \
+                    machine stop "$id" -a "$APP" >/dev/null 2>&1 &
+                stop_pids+=("$!")
             done
+            for stop_pid in "${stop_pids[@]}"; do
+                wait "$stop_pid" 2>/dev/null || true
+            done
+            machines="$(FLY machines list -a "$APP" --json 2>/dev/null || true)"
+            next_pending_pool_ids=()
+            for id in "${pending_pool_ids[@]}"; do
+                st="$(printf '%s' "$machines" | pool_machine_state_from_json "$id" 2>/dev/null)"
+                presence=$?
+                if [ "$presence" -ne 1 ] && [ "$st" != "stopped" ]; then
+                    next_pending_pool_ids+=("$id")
+                fi
+            done
+            if [ "${next_pending_pool_ids[0]+set}" = "set" ]; then
+                pending_pool_ids=("${next_pending_pool_ids[@]}")
+            else
+                pending_pool_ids=()
+                break
+            fi
+            sleep "$round"
+        done
+
+        # Stop commands normally wait for the transition. Retain a bounded
+        # shared-inventory poll for Fly transitions that outlive the request.
+        for _ in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
+            [ "${pending_pool_ids[0]+set}" = "set" ] || break
+            machines="$(FLY machines list -a "$APP" --json 2>/dev/null || true)"
+            next_pending_pool_ids=()
+            for id in "${pending_pool_ids[@]}"; do
+                st="$(printf '%s' "$machines" | pool_machine_state_from_json "$id" 2>/dev/null)"
+                presence=$?
+                if [ "$presence" -ne 1 ] && [ "$st" != "stopped" ]; then
+                    next_pending_pool_ids+=("$id")
+                fi
+            done
+            if [ "${next_pending_pool_ids[0]+set}" = "set" ]; then
+                pending_pool_ids=("${next_pending_pool_ids[@]}")
+                sleep 2
+            else
+                pending_pool_ids=()
+                break
+            fi
+        done
+
+        machines="$(FLY machines list -a "$APP" --json 2>/dev/null || true)"
+        for id in "${claimed_pool_ids[@]}"; do
+            st="$(printf '%s' "$machines" | pool_machine_state_from_json "$id" 2>/dev/null)"
+            presence=$?
             claim_path="$POOL_CLAIMS_DIR/$id"
             if { [ "$presence" -eq 1 ] || [ "$st" = "stopped" ]; } \
                 && pool_claim_owned_by_current "$claim_path"; then
@@ -1339,7 +1400,7 @@ cleanup() {
                 echo "❌ claimed pool machine $id did not verify stopped; retaining ownership claim" >&2
                 ec=1
             fi
-        done < "$CLAIMED_POOL_FILE"
+        done
     fi
     if [ "$FLEET_REGISTRY_PUBLISHED" = "1" ] && [ "$KEEP_CLONES" != "1" ]; then
         # The durable registry is authoritative for primaries AND autoscaler

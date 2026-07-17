@@ -708,6 +708,8 @@ def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost() -> None:
     assert 'kill -0 "$pid"' in starter
     assert '"http://127.0.0.1:$local_port/driver-health"' in starter
     assert "resolves the remote host lazily" in starter
+    assert "CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS" in starter
+    assert "post-probe survival window" in starter
     assert 'start_data_plane_proxy "$LOCAL_STATUS_PORT"' in cloud
     assert 'start_data_plane_proxy "$LIVE_BACKEND_PORT"' in cloud
     assert "start_data_plane_proxy" in ensure
@@ -2941,6 +2943,25 @@ def test_boot_supervisor_keeps_data_plane_alive_after_done() -> None:
     assert 'exec bash "$REPO/scripts/cloudbench-run.sh"' not in boot
     assert "holding for controller collection" in boot
     assert boot.rstrip().endswith("exec sleep infinity")
+
+
+def test_claimed_pool_teardown_is_parallel_with_shared_inventory() -> None:
+    """Thirty serial stop-and-list loops add N teardown latency and API load."""
+    fleet = FLEET_SCRIPT.read_text()
+    cleanup = _extract_fleet_function(fleet, "cleanup() {")
+    claimed = cleanup[
+        cleanup.index("pending_pool_ids=") : cleanup.index(
+            'if [ "$FLEET_REGISTRY_PUBLISHED"'
+        )
+    ]
+
+    assert 'machine stop "$id"' in claimed
+    assert "CLOUDBENCH_POOL_STOP_REQUEST_TIMEOUT" in claimed
+    assert 'stop_pids+=("$!")' in claimed
+    assert 'FLY machines list -a "$APP" --json' in claimed
+    assert 'pool_machine_state "$id"' not in claimed
+    assert "CLOUDBENCH_POOL_STOP_REQUEST_ATTEMPTS" in claimed
+    assert "shared inventory" in claimed
 
 
 def test_cloud_timeout_kills_a_command_that_ignores_sigalrm() -> None:
