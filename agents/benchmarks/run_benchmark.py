@@ -3709,6 +3709,34 @@ def _is_simulate_mode() -> bool:
     return os.environ.get("BENCHMARK_WORLD_MODEL_MODE") == "simulate"
 
 
+def _has_fresh_seeded_browser_credentials() -> bool:
+    """A restored isolated DB dump already carries browser auth from prod.
+
+    Fleet width must not turn fixture freshness into 37 simultaneous full
+    23k-cookie exports. The schema-hash sidecar proves this is the same guarded
+    dump that run.sh accepted, and the bounded age keeps live auth reasonably
+    current while consecutive benchmark batches reuse the local snapshot.
+    """
+    dump_value = os.environ.get("BENCHMARK_SEED_DUMP", "").strip()
+    if not dump_value:
+        return False
+    try:
+        max_age = int(os.environ.get("BENCHMARK_BROWSER_SEED_MAX_AGE_SECONDS", "21600"))
+    except ValueError:
+        return False
+    if max_age <= 0:
+        return False
+    dump = Path(dump_value)
+    schema_hash = Path(f"{dump_value}.schemahash")
+    try:
+        if dump.stat().st_size <= 0 or schema_hash.stat().st_size <= 0:
+            return False
+        age = time.time() - min(dump.stat().st_mtime, schema_hash.stat().st_mtime)
+    except OSError:
+        return False
+    return 0 <= age <= max_age
+
+
 def _apply_base_live_fixture(ctx: LiveFixtureContext) -> dict:
     """The default live fixture every live task inherits: current compute tokens
     + browser cookies/passwords, pulled fresh from prod into the isolated DB.
@@ -3724,6 +3752,9 @@ def _apply_base_live_fixture(ctx: LiveFixtureContext) -> dict:
     if _is_simulate_mode():
         print("    🌍 simulate mode — skipping browser cookie/password sync (WMH mocks env tools)")
         return {"fixture": "base", "browser_credentials": False}
+    if _has_fresh_seeded_browser_credentials():
+        print("    🍪 Reusing fresh browser credentials from the isolated seed dump")
+        return {"fixture": "base", "browser_credentials": True}
     if not _sync_browser_credentials():
         raise RuntimeError("Base live fixture could not refresh browser credentials/auth state")
     return {"fixture": "base", "browser_credentials": True}

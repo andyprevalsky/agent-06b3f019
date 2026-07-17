@@ -51,6 +51,7 @@ VAPI_BASE_URL = "https://api.vapi.ai"
 CALLEE_NUMBER_NAME = "rose-benchmark-callee"
 CALLEE_SESSION_NUMBER_PREFIX = f"{CALLEE_NUMBER_NAME}-session-"
 CALLEE_NUMBER_ID_ENV = "BENCHMARK_CALLEE_PHONE_NUMBER_ID"
+CALLEE_NUMBER_IDS_ENV = "BENCHMARK_CALLEE_PHONE_NUMBER_IDS"
 CALLEE_SESSION_NUMBER_TTL = timedelta(hours=2)
 # Vapi documents a "couple of minutes" before free numbers become functional;
 # keep a small propagation margin so benchmark calls never race that boundary.
@@ -82,6 +83,30 @@ _CALLEE_ASSISTANT_BASE = {
 
 def vapi_private_key() -> str:
     return load_env_var("VAPI_PRIVATE_KEY", _BACKEND_ENV)
+
+
+def _configured_number_id_for_task(task_name: str) -> str:
+    """Resolve a stable per-task Vapi number from ``task=id`` assignments.
+
+    Vapi free-number inventory can be empty for every area code. Distributed
+    phone tasks also cannot share one mutable number-to-assistant attachment,
+    so the fleet needs distinct pre-provisioned numbers rather than a racing
+    best-effort create call.
+    """
+    raw = load_env_var(CALLEE_NUMBER_IDS_ENV, _BACKEND_ENV).strip()
+    if not raw:
+        return ""
+    assignments: dict[str, str] = {}
+    for entry in raw.split(","):
+        name, separator, number_id = entry.strip().partition("=")
+        if not separator or not name or not number_id:
+            raise RuntimeError(f"Invalid {CALLEE_NUMBER_IDS_ENV} entry: {entry!r}")
+        if name in assignments:
+            raise RuntimeError(f"Duplicate {CALLEE_NUMBER_IDS_ENV} task assignment: {name}")
+        assignments[name] = number_id
+    if task_name not in assignments:
+        raise RuntimeError(f"{CALLEE_NUMBER_IDS_ENV} has no assignment for {task_name}")
+    return assignments[task_name]
 
 
 def _session_phone_number_name() -> str:
@@ -293,6 +318,7 @@ class PhoneCalleeSession:
         self.phone_number_id: str = ""
         self.phone_number_name = _session_phone_number_name()
         self._owns_phone_number = False
+        self._prior_assistant_id: Optional[str] = None
         self.assistant_id: str = ""
         self.tool_ids: List[str] = []
         self.started_at: Optional[datetime] = None
@@ -316,7 +342,9 @@ class PhoneCalleeSession:
         resp = await client.get("/phone-number")
         resp.raise_for_status()
         numbers = resp.json() or []
-        override_id = load_env_var(CALLEE_NUMBER_ID_ENV, _BACKEND_ENV)
+        override_id = load_env_var(CALLEE_NUMBER_ID_ENV, _BACKEND_ENV) or _configured_number_id_for_task(
+            self.task_name
+        )
         chosen = next((entry for entry in numbers if override_id and entry.get("id") == override_id), None)
         if override_id:
             if chosen is None:
@@ -327,6 +355,7 @@ class PhoneCalleeSession:
             self._owns_phone_number = True
         self.phone_number_id = chosen["id"]
         self.phone_number = chosen.get("number") or ""
+        self._prior_assistant_id = chosen.get("assistantId")
         if not self.phone_number:
             raise RuntimeError(f"Benchmark callee number {self.phone_number_id} has no E.164 number assigned yet")
         if self._owns_phone_number:
@@ -546,7 +575,7 @@ class PhoneCalleeSession:
                     print(f"    ⚠ Failed to end active callee calls: {exc}")
                 if self.phone_number_id and self.assistant_id:
                     try:
-                        await self._attach_assistant(client, None)
+                        await self._attach_assistant(client, self._prior_assistant_id)
                     except Exception as exc:
                         print(f"    ⚠ Failed to detach callee assistant: {exc}")
                 if self.assistant_id:
