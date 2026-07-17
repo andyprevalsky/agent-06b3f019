@@ -249,12 +249,14 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
         // stalls on "Thinking". Gating this to reconnections missed exactly that
         // cold-start case. The merge is idempotent, so double-fetching alongside
         // the initial load is harmless. Marks initialLoadDoneRef so downstream
-        // effects know this agent has been reconciled at least once.
-        initialLoadDoneRef.current = selectedAgentId;
+        // effects know this agent has been reconciled at least once — but only
+        // AFTER the backfill actually succeeds, so a failed fetch can't falsely
+        // mark the agent reconciled (the next resubscribe must retry it).
         try {
           const data = await fetchAgentDetail(selectedAgentId);
           if (cancelled) return;
           applyAgentBackfill(data, setMessages, setAgent, setIsChatMode);
+          initialLoadDoneRef.current = selectedAgentId;
         } catch (error) {
           console.error('Failed to backfill after subscribe:', error);
         }

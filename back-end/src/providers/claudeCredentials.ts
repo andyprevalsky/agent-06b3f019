@@ -81,11 +81,11 @@ export function verifyCredentialEnvelopeDecryptable(
   const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
   if (!decryptionKey) return { ok: true };
   const decrypted = decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
-  if (decrypted === null) {
+  if (decrypted === null || decrypted.trim() === '') {
     return {
       ok: false,
       reason:
-        'credential envelope does not decrypt with the server key (mismatched keypair or malformed envelope)',
+        'credential envelope does not decrypt to a non-empty payload with the server key (mismatched keypair or malformed envelope)',
     };
   }
   return { ok: true };
