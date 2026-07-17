@@ -54,7 +54,11 @@ def classify_usage_item(item: dict[str, Any]) -> tuple[str, str]:
     provider = str(item.get("provider") or "")
     if model == "rose-labs/rose-1-ultra" and provider.startswith("Verifier ("):
         return "claude_oauth_token", POOL_REGISTRY["rose-1-ultra"].claude_auth_model
-    if not model and provider == "Rose 1 Browser Use":
+    # Browser telemetry is created without a transport model, then
+    # AgentWorkflow._track_usage may persist the parent agent's pool alias in
+    # that field. The provider label survives both paths and is the reliable
+    # credential identity.
+    if provider == "Rose 1 Browser Use":
         return "claude_oauth_token", POOL_REGISTRY["rose-1-browser-use"].claude_auth_model
     return classify_model(model)
 

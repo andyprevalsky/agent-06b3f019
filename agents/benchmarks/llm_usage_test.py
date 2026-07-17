@@ -29,6 +29,15 @@ def test_classifies_every_required_auth_path_and_openrouter_slot() -> None:
         "claude_oauth_token",
         "claude-fable-5",
     )
+    # AgentWorkflow._track_usage fills a browser usage item's absent transport
+    # model from the parent agent alias before persisting it. Provider identity
+    # remains authoritative for the browser pool in this production shape.
+    assert classify_usage_item(
+        {
+            "model": "rose-labs/rose-1-ultra",
+            "provider": "Rose 1 Browser Use",
+        }
+    ) == ("claude_oauth_token", "claude-fable-5")
 
 
 def test_aggregates_calls_tokens_cost_by_provider_and_submodel() -> None:
