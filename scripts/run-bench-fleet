@@ -1837,8 +1837,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     local metrics_started_at candidate
     : > "$out/worker-clones.ids"
     cleanup_metrics_proxy() {
-        [ -n "$metrics_proxy_pid" ] && kill "$metrics_proxy_pid" 2>/dev/null || true
-        [ -n "$metrics_proxy_pid" ] && wait "$metrics_proxy_pid" 2>/dev/null || true
+        cloudbench_terminate_and_wait 5 "${metrics_proxy_pid:-}"
     }
     trap cleanup_metrics_proxy EXIT
     trap 'exit 129' HUP
@@ -1861,7 +1860,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
                 fi
             done
             [ -n "$metrics_port" ] || { sleep 2; continue; }
-            FLY proxy "$metrics_port:$BOX_HEALTH_PORT" "${cid}.vm.${APP}.internal" \
+            flyctl proxy "$metrics_port:$BOX_HEALTH_PORT" "${cid}.vm.${APP}.internal" \
                 -a "$APP" --bind-addr 127.0.0.1 -q \
                 >> "$out/autoscaler-metrics-proxy.log" 2>&1 &
             metrics_proxy_pid=$!

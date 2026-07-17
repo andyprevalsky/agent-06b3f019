@@ -180,7 +180,7 @@ if grep -Fq -- 'run-bench-cloud --refresh-secrets;' "$ROOT_DIR/scripts/run-bench
   fail "the fleet run path must not refresh (mutate) the shared environment — verify only"
 fi
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'bash scripts/run-bench-cloud --verify-secrets' \
+  'bash "$RUN_BENCH_CLOUD_BIN" --verify-secrets' \
   "fleet controller must read-only verify the environment before cloning"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'cloudbench_controller_lock_acquire_wait' \

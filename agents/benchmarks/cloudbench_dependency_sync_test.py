@@ -694,7 +694,7 @@ def test_autoscaler_metrics_poll_over_data_plane_without_ssh() -> None:
 
     assert "FLY ssh" not in desired
     assert "curl --noproxy '*'" in desired
-    assert "FLY proxy" in autoscaler
+    assert "flyctl proxy" in autoscaler
     assert '"${cid}.vm.${APP}.internal"' in autoscaler
     assert "seq 10 18" in autoscaler
     assert '"http://127.0.0.1:$metrics_port/metrics"' in autoscaler
@@ -708,7 +708,7 @@ def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost() -> None:
     ensure = _extract_fleet_function(cloud, "ensure_status_proxy() {")
 
     assert "CLOUDBENCH_DATA_PROXY_READY_TIMEOUT" in starter
-    assert 'FLY proxy "$local_port:$remote_port" "$host"' in starter
+    assert 'flyctl proxy "$local_port:$remote_port" "$host"' in starter
     assert 'kill -0 "$pid"' in starter
     assert '"http://127.0.0.1:$local_port/driver-health"' in starter
     assert "resolves the remote host lazily" in starter
@@ -2902,8 +2902,18 @@ def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     read_log = _extract_fleet_function(cloud, "read_bench_log() {")
     assert "ssh_read" not in read_log
     # Proxy cleanup is PID-owned; no cross-run pattern kill is allowed.
-    assert 'kill "$STATUS_PROXY_PID"' in cloud
+    assert 'cloudbench_terminate_and_wait 5 "${PROXY_PID:-}" "${STATUS_PROXY_PID:-}"' in cloud
+    assert 'flyctl proxy "$local_port:$remote_port"' in cloud
+    assert 'FLY proxy "$local_port:$remote_port"' not in cloud
     assert 'pkill -f "flyctl proxy $LOCAL_STATUS_PORT' not in cloud
+
+    # Backgrounding the FLY() shell function records a wrapper-subshell PID and
+    # can orphan its flyctl child. Autoscaler metrics tunnels must also record
+    # and reap the executable PID directly.
+    fleet = FLEET_SCRIPT.read_text()
+    assert 'flyctl proxy "$metrics_port:$BOX_HEALTH_PORT"' in fleet
+    assert 'FLY proxy "$metrics_port:$BOX_HEALTH_PORT"' not in fleet
+    assert 'cloudbench_terminate_and_wait 5 "${metrics_proxy_pid:-}"' in fleet
 
 
 def test_boot_launch_collects_terminal_artifacts_without_post_done_ssh() -> None:

@@ -1328,18 +1328,11 @@ DASHBOARD_PID=""
 DASHBOARD_MIRROR_PID=""
 IMESSAGE_RELAY_PID=""
 stop_proxy() {
-    # `FLY proxy … &` backgrounds the FLY() shell function, so $PROXY_PID is the
-    # subshell — the actual `flyctl proxy` runs as its child and would orphan
-    # (a lingering zombie) if we only killed the subshell. Kill the child too, and
-    # belt-and-suspenders pkill the exact `flyctl proxy <port>:<port> -a <app>`.
-    if [ -n "$PROXY_PID" ]; then
-        pkill -P "$PROXY_PID" 2>/dev/null || true
-        kill "$PROXY_PID" 2>/dev/null || true
-    fi
-    if [ -n "${STATUS_PROXY_PID:-}" ]; then
-        pkill -P "$STATUS_PROXY_PID" 2>/dev/null || true
-        kill "$STATUS_PROXY_PID" 2>/dev/null || true
-    fi
+    # Proxy launch sites invoke the flyctl executable directly, so these are the
+    # tunnel PIDs (not backgrounded FLY() wrapper subshells). Terminate and reap
+    # them before releasing their port leases; otherwise an orphaned listener can
+    # poison a later fleet with an address-in-use failure.
+    cloudbench_terminate_and_wait 5 "${PROXY_PID:-}" "${STATUS_PROXY_PID:-}"
     STATUS_PROXY_PID=""
     [ -n "$DASHBOARD_MIRROR_PID" ] && kill "$DASHBOARD_MIRROR_PID" 2>/dev/null || true
     if [ -n "$IMESSAGE_RELAY_PID" ]; then
@@ -1964,7 +1957,7 @@ start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log> <pid-var> 
         printf '[%s] %s proxy attempt %s: localhost:%s -> %s:%s\n' \
             "$(date -u +%H:%M:%S)" "$label" "$attempt" "$local_port" "$host" "$remote_port" \
             >> "$log_file"
-        FLY proxy "$local_port:$remote_port" "$host" -a "$APP" --bind-addr 127.0.0.1 -q \
+        flyctl proxy "$local_port:$remote_port" "$host" -a "$APP" --bind-addr 127.0.0.1 -q \
             >> "$log_file" 2>&1 &
         pid=$!
         # flyctl resolves the remote host lazily on the first client connection.
