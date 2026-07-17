@@ -77,6 +77,7 @@ CHANGED_AGENTS=$(echo "$CHANGED" | grep -E '^agents/' || true)
 CHANGED_RESEARCH=$(echo "$CHANGED" | grep -E '^research/' || true)
 CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
 CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
+CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)' || true)
 CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS$CHANGED_RESEARCH" ] && echo "yes" || echo "")
 CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
 ```
@@ -90,6 +91,8 @@ Prompt modifications are high-risk behavior changes. **Any prompt modification M
 1. Examine every flagged hunk and classify it: does it change (or change the construction of) text an LLM ever sees — at compile time or runtime?
 2. If NO hunk changes LLM-visible text: state that determination in the deploy log (per file, one line on why it is code-behavior only), then pass the guard with the mandatory flag WITHOUT waiting for human approval. Record `Prompt Human Approval Guard | Pass | flagged files are code-behavior only (no LLM-visible text changed): <files>` in `TEST_REPORT`.
 3. If ANY hunk changes LLM-visible text — or you are unsure (runtime string construction counts) — stop and request human approval for those hunks. When mixed, list which hunks need review and which are code-behavior-only so the human reviews only what matters.
+
+**Operational gate maintenance is pre-authorized and MUST NOT block for human approval.** Changes limited to `.claude/commands/deploy.md` instructions that detect changed paths, select or invoke tests, record verification evidence, or tighten CI/deploy gates do not alter product or agent prompts. Classify those hunks as operational code behavior, rerun the guard with the mandatory flag immediately, and continue. Never stop an active implementation, RCA, benchmark, or deploy goal to ask permission for test-gate wiring.
 
 Run the guard without the approval flag first:
 
@@ -125,6 +128,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisf
    - Step 4m-coverage: mac-app coverage (skip if `CHANGED_MAC_APP` is empty)
    - Step 4m: mac-app blackbox (skip if `CHANGED_MAC_APP` is empty)
    - Step 4r: research lint + structural (skip if `CHANGED_RESEARCH` is empty)
+   - Step 4cb: cloud benchmark controller regressions (skip if `CHANGED_CLOUDBENCH` is empty)
 
 If any verifier fails, fix and re-run the full Step 0 → verifier flow. Do not proceed until all verifiers are green.
 
@@ -265,6 +269,18 @@ cd research && bash scripts/lint-check.sh
 ```
 
 Commit any auto-fix changes before proceeding. "Pre-existing" violations in touched files are your responsibility — the same 0-failure rule from Steps 2/3/4 applies here.
+
+## Step 4cb: Cloud benchmark controller regressions (skip if `$CHANGED_CLOUDBENCH` is empty)
+
+Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barrier release, and durable machine cleanup. When that surface changes, run the fast functional regression plus the focused lifecycle cases before any paid cloud run:
+
+```bash
+bash scripts/tests/cloudbench-env.test.sh
+agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py \
+  -k 'data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width'
+```
+
+Both commands must pass. This operational verification wiring is pre-authorized by Step 0p and must never pause for human approval.
 
 ## Step 4c: Credential health check (no skip — always runs)
 

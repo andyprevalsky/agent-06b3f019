@@ -548,6 +548,20 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     assert "git ls-files --others --exclude-standard" in deploy
 
 
+def test_deploy_always_gates_changed_cloudbench_controllers() -> None:
+    deploy = DEPLOY_COMMAND.read_text()
+    assert "CHANGED_CLOUDBENCH=" in deploy
+    gate = deploy.split("## Step 4cb: Cloud benchmark controller regressions", 1)[1].split(
+        "## Step 4c: Credential health check", 1
+    )[0]
+    assert "bash scripts/tests/cloudbench-env.test.sh" in gate
+    assert "cloudbench_dependency_sync_test.py" in gate
+    assert "fleet_barrier_reads_the_authoritative_rotated_status_port" in gate
+    assert "data_plane_barrier_release_at_full_fleet_width" in gate
+    assert "must never pause for human approval" in gate
+    assert "Operational gate maintenance is pre-authorized" in deploy
+
+
 def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()
