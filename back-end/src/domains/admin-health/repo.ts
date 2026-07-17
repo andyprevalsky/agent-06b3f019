@@ -101,6 +101,89 @@ export async function findWaitlistSignupsBetween(
     .map(({ createdAt }) => ({ createdAt }));
 }
 
+export interface WaitlistPersonRow {
+  id: string;
+  name: string;
+  phone: string;
+  variant: string | null;
+  createdAt: Date;
+  invitedAt: Date | null;
+}
+
+/**
+ * All actionable waitlist people — the same phone-bearing population the
+ * signup metric counts. Newest first. Email-only legacy rows (no phone) are
+ * excluded because they can't be texted.
+ */
+export async function findWaitlistPeople(): Promise<WaitlistPersonRow[]> {
+  const rows = await prisma.waitlist.findMany({
+    where: { phone: { not: null } },
+    select: {
+      id: true,
+      name: true,
+      phone: true,
+      variant: true,
+      createdAt: true,
+      invitedAt: true,
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+  return rows
+    .filter((row) => (row.phone ?? '').trim() !== '')
+    .map((row) => ({
+      id: row.id,
+      name: row.name,
+      phone: row.phone as string,
+      variant: row.variant,
+      createdAt: row.createdAt,
+      invitedAt: row.invitedAt,
+    }));
+}
+
+export async function findWaitlistPersonById(id: string): Promise<WaitlistPersonRow | null> {
+  const row = await prisma.waitlist.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      name: true,
+      phone: true,
+      variant: true,
+      createdAt: true,
+      invitedAt: true,
+    },
+  });
+  if (row === null || (row.phone ?? '').trim() === '') return null;
+  return {
+    id: row.id,
+    name: row.name,
+    phone: row.phone as string,
+    variant: row.variant,
+    createdAt: row.createdAt,
+    invitedAt: row.invitedAt,
+  };
+}
+
+export interface AccountGateRecord {
+  phone: string;
+  usedInviteCode: number | null;
+}
+
+/** Accounts matching any of the given E.164 phone numbers, with gate state. */
+export async function findAccountsByPhones(phones: string[]): Promise<AccountGateRecord[]> {
+  if (phones.length === 0) return [];
+  const users = await prisma.user.findMany({
+    where: { phone: { in: phones } },
+    select: { phone: true, usedInviteCode: true },
+  });
+  return users
+    .filter((user) => (user.phone ?? '').trim() !== '')
+    .map((user) => ({ phone: user.phone as string, usedInviteCode: user.usedInviteCode }));
+}
+
+export async function markWaitlistInvited(id: string, invitedAt: Date): Promise<void> {
+  await prisma.waitlist.update({ where: { id }, data: { invitedAt } });
+}
+
 export async function findRootTasksBetween(start: Date, end: Date): Promise<RootTaskRecord[]> {
   const [liveTasks, archivedTasks] = await Promise.all([
     prisma.agent.findMany({

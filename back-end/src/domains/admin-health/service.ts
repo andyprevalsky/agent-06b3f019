@@ -1,10 +1,17 @@
+import { createLogger } from '../../providers/logger';
+import { markOffWaitlistByPhone } from '../../providers/inviteGate';
+import { sendSms } from '../../providers/smsQueue';
 import { fetchAmplitudeFunnel } from './amplitude';
 import {
   ADMIN_PHONE_DIGITS,
   ADMIN_USER_IDS,
   AMPLITUDE_API_KEY,
   AMPLITUDE_SECRET_KEY,
+  IS_PRODUCTION,
+  WAITLIST_INVITE_SMS,
 } from './config';
+
+const log = createLogger('AdminHealth');
 import {
   buildFunnelSteps,
   buildRetentionCohorts,
@@ -15,7 +22,13 @@ import {
 import * as repo from './repo';
 import { fetchStripeSubscribersByPeriod } from './stripeSubscribers';
 import { buildPeriods, startOfNextUtcDay, startOfWeek, utcDayKey } from './time';
-import type { AdminHealthPeriod, AdminHealthResponse, AdminHealthTimeSlice } from './types';
+import type {
+  AdminHealthPeriod,
+  AdminHealthResponse,
+  AdminHealthTimeSlice,
+  AdminWaitlistInviteResponse,
+  AdminWaitlistPeopleResponse,
+} from './types';
 import { fetchVelocityByPeriod } from './velocity';
 
 const responseCache = new Map<string, { expiresAt: number; value: Promise<AdminHealthResponse> }>();
@@ -37,6 +50,91 @@ export async function assertCanViewAdminHealth(userId: string, jwtPhone?: string
   const user = await repo.findUserForAdminCheck(userId);
   if (user !== null && ADMIN_PHONE_DIGITS.has(normalizePhoneDigits(user.phone))) return;
   throw new AdminHealthForbiddenError();
+}
+
+export class WaitlistPersonNotFoundError extends Error {
+  constructor() {
+    super('Waitlist person not found');
+    this.name = 'WaitlistPersonNotFoundError';
+  }
+}
+
+export class WaitlistInviteSmsError extends Error {
+  constructor(detail: string) {
+    super(`Failed to send invite SMS: ${detail}`);
+    this.name = 'WaitlistInviteSmsError';
+  }
+}
+
+/**
+ * The actionable waitlist: every phone-bearing signup (the same population the
+ * signup metric counts), newest first, each annotated with whether a matching
+ * account exists and whether that account is still gated.
+ */
+export async function getWaitlistPeople(): Promise<AdminWaitlistPeopleResponse> {
+  const rows = await repo.findWaitlistPeople();
+  const accounts = await repo.findAccountsByPhones(rows.map((row) => row.phone));
+  const usedCodeByDigits = new Map<string, number | null>();
+  for (const account of accounts) {
+    usedCodeByDigits.set(normalizePhoneDigits(account.phone), account.usedInviteCode);
+  }
+  const people = rows.map((row) => {
+    const digits = normalizePhoneDigits(row.phone);
+    const hasAccount = usedCodeByDigits.has(digits);
+    const usedCode = hasAccount ? (usedCodeByDigits.get(digits) ?? null) : null;
+    return {
+      id: row.id,
+      name: row.name,
+      phone: row.phone,
+      variant: row.variant,
+      joinedAt: row.createdAt.toISOString(),
+      invitedAt: row.invitedAt === null ? null : row.invitedAt.toISOString(),
+      hasAccount,
+      isGated: hasAccount && usedCode === null,
+    };
+  });
+  return { people, total: people.length };
+}
+
+/**
+ * Invite a waitlist person off the waitlist and text them the download link.
+ * Flags their account (idempotent) so onboarding shows the subscription view
+ * instead of the waitlist view — they still need a subscription (or invite
+ * code) to actually get in. Sends the download SMS, and only stamps invitedAt
+ * once the SMS is accepted so a send failure stays retryable.
+ */
+export async function inviteWaitlistPerson(id: string): Promise<AdminWaitlistInviteResponse> {
+  const person = await repo.findWaitlistPersonById(id);
+  if (person === null) throw new WaitlistPersonNotFoundError();
+
+  const offWaitlist = await markOffWaitlistByPhone(person.phone);
+
+  // Guard against texting real strangers from a dev machine: the local DB is
+  // seeded with real phone-bearing waitlist rows, so only production sends.
+  let smsSent = false;
+  if (IS_PRODUCTION) {
+    const sms = await sendSms(person.phone, WAITLIST_INVITE_SMS, {
+      archiveContext: { source: 'admin-health-waitlist-invite', waitlist_id: id },
+    });
+    if (!sms.success) {
+      throw new WaitlistInviteSmsError(sms.error ?? 'unknown error');
+    }
+    smsSent = true;
+  } else {
+    log.info('Skipping waitlist invite SMS outside production', { waitlistId: id });
+  }
+
+  const invitedAt = new Date();
+  await repo.markWaitlistInvited(id, invitedAt);
+
+  return {
+    id,
+    invitedAt: invitedAt.toISOString(),
+    smsSent,
+    flagged: offWaitlist.flagged,
+    alreadyOffWaitlist: offWaitlist.alreadyOffWaitlist,
+    hasAccount: offWaitlist.userId !== null,
+  };
 }
 
 export function parseTimeSlice(value: unknown): AdminHealthTimeSlice {

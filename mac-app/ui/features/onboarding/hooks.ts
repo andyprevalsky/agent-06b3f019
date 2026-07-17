@@ -4,7 +4,8 @@ import { isSubmittablePhone } from '@/lib/phone';
 import { getErrorMessageOrFallback } from '../../../shared/utils/error';
 import {
   createPlaidLinkToken,
-  checkNeedsInviteCode,
+  checkWaitlistStatus,
+  createSubscriptionCheckoutUrl,
   exchangePlaidPublicToken,
   fetchCustomPreviewUrl,
   fetchCustomization,
@@ -47,9 +48,10 @@ const ONBOARDING_DATA_API: {
 };
 
 const ONBOARDING_WAITLIST_API: {
-  checkNeedsInviteCode: typeof checkNeedsInviteCode;
+  checkWaitlistStatus: typeof checkWaitlistStatus;
   redeemInviteCode: typeof redeemInviteCode;
-} = { checkNeedsInviteCode, redeemInviteCode };
+  createSubscriptionCheckoutUrl: typeof createSubscriptionCheckoutUrl;
+} = { checkWaitlistStatus, redeemInviteCode, createSubscriptionCheckoutUrl };
 
 export const useOnboardingCustomizationApi = (): typeof ONBOARDING_CUSTOMIZATION_API =>
   ONBOARDING_CUSTOMIZATION_API;

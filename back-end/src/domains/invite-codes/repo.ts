@@ -133,32 +133,40 @@ export async function useInviteCodeTransaction(inviteCode: number, userId: strin
  */
 export async function findOrCreateUser(
   userId: string
-): Promise<{ usedInviteCode: number | null; isNew: boolean }> {
+): Promise<{ usedInviteCode: number | null; offWaitlistAt: Date | null; isNew: boolean }> {
   const user = await prisma.user.findUnique({
     where: { userId },
-    select: { usedInviteCode: true },
+    select: { usedInviteCode: true, offWaitlistAt: true },
   });
 
   if (user) {
-    return { usedInviteCode: user.usedInviteCode, isNew: false };
+    return { usedInviteCode: user.usedInviteCode, offWaitlistAt: user.offWaitlistAt, isNew: false };
   }
 
   try {
     const created = await prisma.user.create({
       data: { userId },
-      select: { usedInviteCode: true },
+      select: { usedInviteCode: true, offWaitlistAt: true },
     });
     log.info('Created user record', { userId });
-    return { usedInviteCode: created.usedInviteCode, isNew: true };
+    return {
+      usedInviteCode: created.usedInviteCode,
+      offWaitlistAt: created.offWaitlistAt,
+      isNew: true,
+    };
   } catch (error) {
     // Handle race condition: another request created the user between findUnique and create
     if (error instanceof Error && 'code' in error && (error as { code: string }).code === 'P2002') {
       const existing = await prisma.user.findUnique({
         where: { userId },
-        select: { usedInviteCode: true },
+        select: { usedInviteCode: true, offWaitlistAt: true },
       });
       if (existing) {
-        return { usedInviteCode: existing.usedInviteCode, isNew: false };
+        return {
+          usedInviteCode: existing.usedInviteCode,
+          offWaitlistAt: existing.offWaitlistAt,
+          isNew: false,
+        };
       }
     }
     throw error;
