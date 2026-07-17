@@ -17,6 +17,9 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IMessageSender } from '../main/services/iMessageSender';
 
+/** Hard cap on the pre-runRelay auto-login fetch so a stalled backend can't eat the relay's heartbeat window. */
+const AUTO_LOGIN_FETCH_TIMEOUT_MS = 15_000;
+
 export interface RelayQueueMessage {
   id: string;
   phone_number: string;
@@ -215,10 +218,14 @@ export async function mintSessionViaBackendOtp(
   baseUrl: string,
   credentials: AutoLoginCredentials
 ): Promise<StoredSession> {
+  // Bound the auto-login fetch so a hung/slow backend (or DNS stall) fails fast
+  // instead of eating the relay's whole heartbeat window and delaying benchmark
+  // startup. This runs before runRelay, so there's no other timeout guarding it.
   const response = await fetch(`${baseUrl}/api/auth/verify-otp`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ phone: credentials.phone, token: credentials.otp }),
+    signal: AbortSignal.timeout(AUTO_LOGIN_FETCH_TIMEOUT_MS),
   });
   if (!response.ok) {
     const detail = await response.text().catch(() => '');

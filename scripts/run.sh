@@ -526,6 +526,13 @@ fi
 # gate that only needs a working runtime (not prod cache sharing), point the
 # cache at the local DB so startup can't be held hostage by pooler contention.
 if [ "${FAST_MODE_CACHE_USE_LOCAL:-}" = "1" ] && [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
+    # Fail closed: without a real LOCAL_DB_URL, exporting an empty value would let
+    # the block below silently re-derive the prod pooler URL — defeating the whole
+    # point of the flag. Require it explicitly.
+    if [ -z "${LOCAL_DB_URL:-}" ]; then
+        echo "❌ FAST_MODE_CACHE_USE_LOCAL=1 requires LOCAL_DB_URL (isolated local DB) to be set" >&2
+        exit 1
+    fi
     export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"
     echo "🧠 FAST_MODE_CACHE_USE_LOCAL=1 — routing Fast Mode cache at the isolated local DB (decoupled from the shared prod pooler)"
 fi
