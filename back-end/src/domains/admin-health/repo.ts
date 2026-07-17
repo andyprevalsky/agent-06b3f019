@@ -166,18 +166,50 @@ export async function findWaitlistPersonById(id: string): Promise<WaitlistPerson
 export interface AccountGateRecord {
   phone: string;
   usedInviteCode: number | null;
+  hasActiveSubscription: boolean;
 }
 
-/** Accounts matching any of the given E.164 phone numbers, with gate state. */
+function phoneDigits(phone: string | null | undefined): string {
+  return (phone ?? '').replace(/\D/g, '');
+}
+
+/**
+ * Accounts matching any of the given phone numbers, with gate state. Matches on
+ * canonical digits ('+digits' or bare 'digits') so a differently-formatted
+ * User.phone still resolves, and reports whether each holds an active
+ * subscription (which clears the invite gate).
+ */
 export async function findAccountsByPhones(phones: string[]): Promise<AccountGateRecord[]> {
-  if (phones.length === 0) return [];
+  const candidates = new Set<string>();
+  for (const phone of phones) {
+    const digits = phoneDigits(phone);
+    if (digits === '') continue;
+    candidates.add('+' + digits);
+    candidates.add(digits);
+  }
+  if (candidates.size === 0) return [];
+
   const users = await prisma.user.findMany({
-    where: { phone: { in: phones } },
-    select: { phone: true, usedInviteCode: true },
+    where: { phone: { in: Array.from(candidates) } },
+    select: { userId: true, phone: true, usedInviteCode: true },
   });
+  const userIds = users.map((user) => user.userId);
+  const activeSubs =
+    userIds.length === 0
+      ? []
+      : await prisma.subscription.findMany({
+          where: { userId: { in: userIds }, currentPeriodEnd: { gt: new Date() } },
+          select: { userId: true },
+        });
+  const activeSubUserIds = new Set(activeSubs.map((sub) => sub.userId));
+
   return users
     .filter((user) => (user.phone ?? '').trim() !== '')
-    .map((user) => ({ phone: user.phone as string, usedInviteCode: user.usedInviteCode }));
+    .map((user) => ({
+      phone: user.phone as string,
+      usedInviteCode: user.usedInviteCode,
+      hasActiveSubscription: activeSubUserIds.has(user.userId),
+    }));
 }
 
 export async function markWaitlistInvited(id: string, invitedAt: Date): Promise<void> {

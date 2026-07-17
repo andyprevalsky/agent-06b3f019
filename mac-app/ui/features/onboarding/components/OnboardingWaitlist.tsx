@@ -17,7 +17,7 @@
  * the same terminal view until they subscribe or redeem a code.
  */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { getErrorMessageOrFallback } from '../../../../shared/utils/error';
 import { useOnboardingWaitlistApi } from '../hooks';
@@ -31,12 +31,20 @@ interface OnboardingWaitlistProps {
   onComplete: () => void;
 }
 
-/** Open a URL in the system browser (Electron intercepts window.open). */
-const openExternal = (url: string): void => {
+/**
+ * Open a URL in the system browser (Electron intercepts window.open). Falls back
+ * to window.open if the Electron bridge is absent OR rejects, so checkout never
+ * silently fails.
+ */
+const openExternal = async (url: string): Promise<void> => {
   const api = window.api as { openExternal?: (url: string) => Promise<void> } | undefined;
   if (api?.openExternal !== undefined) {
-    void api.openExternal(url);
-    return;
+    try {
+      await api.openExternal(url);
+      return;
+    } catch {
+      // Bridge rejected — fall through to window.open below.
+    }
   }
   window.open(url, '_blank', 'noopener,noreferrer');
 };
@@ -134,31 +142,54 @@ const WaitlistBody = ({ form }: { form: InviteCodeFormProps }): JSX.Element => (
   </>
 );
 
-const OnboardingWaitlist = ({ onComplete }: OnboardingWaitlistProps): JSX.Element => {
-  const { checkWaitlistStatus, redeemInviteCode, createSubscriptionCheckoutUrl } =
-    useOnboardingWaitlistApi();
+/**
+ * Resolves the terminal onboarding screen from the server gate and re-checks it
+ * when the window regains focus on the subscribe screen — so a user who
+ * subscribed in the external browser is let through on return instead of being
+ * stuck until relaunch.
+ */
+const useWaitlistGate = (onComplete: () => void): WaitlistScreen => {
+  const { checkWaitlistStatus } = useOnboardingWaitlistApi();
   const [screen, setScreen] = useState<WaitlistScreen>('checking');
+  const mounted = useRef(true);
+
+  const resolve = useCallback(async (): Promise<void> => {
+    try {
+      const status = await checkWaitlistStatus();
+      if (!mounted.current) return;
+      if (!status.needsInviteCode) onComplete();
+      else setScreen(status.offWaitlist ? 'subscribe' : 'waitlist');
+    } catch {
+      // Fail closed: show the waitlist view; a valid code still lets the user in.
+      if (mounted.current) setScreen('waitlist');
+    }
+  }, [checkWaitlistStatus, onComplete]);
+
+  useEffect(() => {
+    mounted.current = true;
+    void resolve();
+    return () => {
+      mounted.current = false;
+    };
+  }, [resolve]);
+
+  useEffect(() => {
+    if (screen !== 'subscribe') return undefined;
+    const onFocus = (): void => void resolve();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [screen, resolve]);
+
+  return screen;
+};
+
+const OnboardingWaitlist = ({ onComplete }: OnboardingWaitlistProps): JSX.Element => {
+  const { redeemInviteCode, createSubscriptionCheckoutUrl } = useOnboardingWaitlistApi();
+  const screen = useWaitlistGate(onComplete);
   const [code, setCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [subscribing, setSubscribing] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    void checkWaitlistStatus()
-      .then((status) => {
-        if (cancelled) return;
-        if (!status.needsInviteCode) onComplete();
-        else setScreen(status.offWaitlist ? 'subscribe' : 'waitlist');
-      })
-      .catch(() => {
-        // Fail closed: show the waitlist view; a valid code still lets the user through.
-        if (!cancelled) setScreen('waitlist');
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [onComplete]);
 
   const handleSubmit = (e: React.FormEvent): void => {
     e.preventDefault();

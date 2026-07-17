@@ -526,7 +526,7 @@ async function sync() {
   await syncTable('Waitlist', async () => {
     // Explicit select (omits invitedAt): prod may not have that column yet the
     // first time this ships, and local invitedAt should start null anyway.
-    const rows = await remote.waitlist.findMany({
+    const rawRows = await remote.waitlist.findMany({
       where: { phone: { not: null } },
       select: {
         id: true,
@@ -538,15 +538,21 @@ async function sync() {
         createdAt: true,
       },
     });
+    // Drop empty-string phones: they can't be texted and would reach the admin
+    // invite flow with a blank SMS destination.
+    const rows = rawRows.filter((r) => (r.phone ?? '').trim() !== '');
     const synced = await upsertById(local.waitlist, rows);
 
     // Also pull the accounts these phones belong to, so the "Waitlist People"
-    // panel renders truthful account/gate status locally (On waitlist vs. In
-    // app) instead of "No account yet" for everyone. Small: only phone-bearing
-    // waitlist entries, which are a handful.
-    const phones = rows.map((r) => r.phone).filter((p): p is string => p !== null && p !== '');
+    // panel renders truthful account/gate status locally instead of "No account
+    // yet" for everyone. Minimal projection only — never copy sensitive columns
+    // (e.g. encryptedPaymentInformation) or offWaitlistAt (may be absent in prod).
+    const phones = rows.map((r) => r.phone).filter((p): p is string => p !== null);
     if (phones.length > 0) {
-      const accounts = await remote.user.findMany({ where: { phone: { in: phones } } });
+      const accounts = await remote.user.findMany({
+        where: { phone: { in: phones } },
+        select: { id: true, userId: true, phone: true, usedInviteCode: true },
+      });
       await upsertById(local.user, accounts);
     }
     return synced;

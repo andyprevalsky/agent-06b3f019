@@ -10,8 +10,6 @@ import {
   IS_PRODUCTION,
   WAITLIST_INVITE_SMS,
 } from './config';
-
-const log = createLogger('AdminHealth');
 import {
   buildFunnelSteps,
   buildRetentionCohorts,
@@ -30,6 +28,8 @@ import type {
   AdminWaitlistPeopleResponse,
 } from './types';
 import { fetchVelocityByPeriod } from './velocity';
+
+const log = createLogger('AdminHealth');
 
 const responseCache = new Map<string, { expiresAt: number; value: Promise<AdminHealthResponse> }>();
 
@@ -74,14 +74,16 @@ export class WaitlistInviteSmsError extends Error {
 export async function getWaitlistPeople(): Promise<AdminWaitlistPeopleResponse> {
   const rows = await repo.findWaitlistPeople();
   const accounts = await repo.findAccountsByPhones(rows.map((row) => row.phone));
-  const usedCodeByDigits = new Map<string, number | null>();
+  const accountByDigits = new Map<string, repo.AccountGateRecord>();
   for (const account of accounts) {
-    usedCodeByDigits.set(normalizePhoneDigits(account.phone), account.usedInviteCode);
+    accountByDigits.set(normalizePhoneDigits(account.phone), account);
   }
   const people = rows.map((row) => {
-    const digits = normalizePhoneDigits(row.phone);
-    const hasAccount = usedCodeByDigits.has(digits);
-    const usedCode = hasAccount ? (usedCodeByDigits.get(digits) ?? null) : null;
+    const account = accountByDigits.get(normalizePhoneDigits(row.phone));
+    const hasAccount = account !== undefined;
+    // Matches the real gate: a redeemed invite code OR an active subscription
+    // clears it (offWaitlistAt alone does not).
+    const isGated = hasAccount && account.usedInviteCode === null && !account.hasActiveSubscription;
     return {
       id: row.id,
       name: row.name,
@@ -90,7 +92,7 @@ export async function getWaitlistPeople(): Promise<AdminWaitlistPeopleResponse> 
       joinedAt: row.createdAt.toISOString(),
       invitedAt: row.invitedAt === null ? null : row.invitedAt.toISOString(),
       hasAccount,
-      isGated: hasAccount && usedCode === null,
+      isGated,
     };
   });
   return { people, total: people.length };

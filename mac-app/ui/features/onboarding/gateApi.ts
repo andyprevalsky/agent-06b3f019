@@ -32,11 +32,14 @@ export const checkWaitlistStatus = async (): Promise<WaitlistStatus> => {
   if (!response.ok) {
     throw new Error('Failed to check invite code status');
   }
-  const payload = (await response.json()) as { needsInviteCode?: boolean; offWaitlist?: boolean };
-  return {
-    needsInviteCode: payload.needsInviteCode === true,
-    offWaitlist: payload.offWaitlist === true,
-  };
+  const payload = (await response.json()) as { needsInviteCode?: unknown; offWaitlist?: unknown };
+  // Fail closed: a malformed response must not coerce needsInviteCode to false
+  // and let a gated user straight into the app. Throw so the caller's catch
+  // path shows the waitlist view.
+  if (typeof payload.needsInviteCode !== 'boolean' || typeof payload.offWaitlist !== 'boolean') {
+    throw new Error('Malformed invite-code check response');
+  }
+  return { needsInviteCode: payload.needsInviteCode, offWaitlist: payload.offWaitlist };
 };
 
 /** Mint a Stripe subscription checkout URL for the onboarding subscribe view. */

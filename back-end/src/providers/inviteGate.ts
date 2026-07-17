@@ -50,22 +50,31 @@ export async function markOffWaitlistByPhone(phone: string): Promise<OffWaitlist
   const digits = phoneDigits(phone);
   if (digits === '') return { flagged: false, userId: null, alreadyOffWaitlist: false };
 
-  const user = await prisma.user.findFirst({
+  // User.phone is not unique and may be stored as '+digits' or bare 'digits'.
+  const candidates = await prisma.user.findMany({
     where: { phone: { in: ['+' + digits, digits] } },
     select: { userId: true, offWaitlistAt: true },
   });
-  if (user === null) return { flagged: false, userId: null, alreadyOffWaitlist: false };
+  if (candidates.length === 0) return { flagged: false, userId: null, alreadyOffWaitlist: false };
 
-  if (user.offWaitlistAt !== null) {
-    return { flagged: false, userId: user.userId, alreadyOffWaitlist: true };
+  // Prefer a not-yet-flagged account so a re-send doesn't report already-off
+  // when another account for the same number is still gated.
+  const target = candidates.find((user) => user.offWaitlistAt === null) ?? candidates[0];
+  if (target.offWaitlistAt !== null) {
+    return { flagged: false, userId: target.userId, alreadyOffWaitlist: true };
   }
 
-  await prisma.user.update({
-    where: { userId: user.userId },
+  // Conditional update: only stamps when still null, so two concurrent admin
+  // requests can't both report a fresh flag (the loser sees count 0).
+  const updated = await prisma.user.updateMany({
+    where: { userId: target.userId, offWaitlistAt: null },
     data: { offWaitlistAt: new Date() },
   });
-  log.info('Flagged user off waitlist (subscribe at onboarding end)', { userId: user.userId });
-  return { flagged: true, userId: user.userId, alreadyOffWaitlist: false };
+  if (updated.count === 0) {
+    return { flagged: false, userId: target.userId, alreadyOffWaitlist: true };
+  }
+  log.info('Flagged user off waitlist (subscribe at onboarding end)', { userId: target.userId });
+  return { flagged: true, userId: target.userId, alreadyOffWaitlist: false };
 }
 
 /**

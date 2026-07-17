@@ -90,8 +90,10 @@ export default function WaitlistPeopleSection() {
     invite(person.id)
       .then((result) => {
         toast({
-          title: 'Invite sent',
-          description: `Texted ${person.phone}${result.hasAccount ? ' · flagged to subscribe' : ''}`,
+          title: result.smsSent ? 'Invite sent' : 'Invite recorded',
+          description: result.smsSent
+            ? `Texted ${person.phone} · flagged to subscribe`
+            : `Flagged to subscribe · SMS skipped (non-production)`,
         });
       })
       .catch((err: unknown) => {

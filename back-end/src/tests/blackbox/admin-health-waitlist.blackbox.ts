@@ -303,6 +303,35 @@ async function testGetWaitlistPeople_derivesAccountStatus() {
   }
 }
 
+// The panel's isGated matches the real gate: an active subscription clears it
+// even without a redeemed invite code.
+async function testGetWaitlistPeople_subscriptionClearsGated() {
+  const marker = `blackbox-wlsub-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const phone = uniquePhone();
+  try {
+    await prisma.user.create({ data: { userId: marker, phone, usedInviteCode: null } });
+    await prisma.waitlist.create({ data: { name: marker, phone, variant: 'gated-login' } });
+    await prisma.subscription.create({
+      data: {
+        userId: marker,
+        subscriptionTier: 20,
+        stripeSubscriptionId: `sub_blackbox_${marker}`,
+        stripeCustomerId: `cus_blackbox_${marker}`,
+        currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      },
+    });
+    const person = (await getWaitlistPeople()).people.find((p) => p.phone === phone);
+    if (!person || !person.hasAccount) throw new Error('Seeded subscribed person missing');
+    if (person.isGated) {
+      throw new Error(`Active subscription must clear isGated, got ${JSON.stringify(person)}`);
+    }
+  } finally {
+    await prisma.subscription.deleteMany({ where: { userId: marker } });
+    await prisma.waitlist.deleteMany({ where: { name: marker } });
+    await prisma.user.deleteMany({ where: { userId: marker } });
+  }
+}
+
 // checkInviteCode surfaces the off-waitlist flag so onboarding can show the
 // subscription view; the flag alone does NOT clear the gate.
 async function testCheckInviteCode_reflectsOffWaitlistFlag() {
@@ -413,6 +442,10 @@ async function main() {
     {
       name: 'getWaitlistPeople derives account + gate status',
       fn: testGetWaitlistPeople_derivesAccountStatus,
+    },
+    {
+      name: 'getWaitlistPeople: active subscription clears isGated',
+      fn: testGetWaitlistPeople_subscriptionClearsGated,
     },
     {
       name: 'checkInviteCode reflects the off-waitlist flag',
