@@ -12,6 +12,14 @@ export const IS_DEV = process.env.NODE_ENV === 'development' || process.env.NODE
 /** Whether running inside the blackbox test harness (tests need real Twilio calls) */
 export const IS_BLACKBOX_TEST = process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1';
 
+/**
+ * Benchmark-only override: re-enable the dev-phone OTP login bypass even when
+ * capture-outbound (IS_BLACKBOX_TEST) is on, so the message-person iMessage relay
+ * can auto-login the benchmark user. Still IS_DEV-gated downstream, so it can
+ * never bypass auth in production.
+ */
+export const BENCHMARK_ALLOW_DEV_OTP_LOGIN = process.env.BENCHMARK_ALLOW_DEV_OTP_LOGIN === '1';
+
 /** Access token expiry: 90 days in seconds */
 export const SESSION_EXPIRES_IN = 7776000;
 
