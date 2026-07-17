@@ -1693,9 +1693,9 @@ for m in d:
 ' 2>/dev/null || true
 }
 
-_box_desired() {  # _box_desired <machine_id> → desired_machine_count or empty
-    FLY ssh console -a "$APP" --machine "$1" -q \
-        -C "bash -c \"curl -s localhost:$BOX_HEALTH_PORT/metrics 2>/dev/null | grep -E '^desired_machine_count ' | awk '{print \\\$2}'\"" 2>/dev/null \
+_box_desired() {  # _box_desired <local-metrics-url> → desired_machine_count or empty
+    curl --noproxy '*' -fsS --max-time 3 "$1/metrics" 2>/dev/null \
+        | awk '/^desired_machine_count / {print $2; exit}' \
         | tr -dc '0-9'
 }
 
@@ -1748,14 +1748,43 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     return 0
 }
 
-bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim01> <out>
-    local bench="$1" cid="$2" ws="$3" sim="$4" out="$5"
-    local pip=""; : > "$out/worker-clones.ids"
+bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim01> <out> <local-port-base>
+    local bench="$1" cid="$2" ws="$3" sim="$4" out="$5" port_base="$6"
+    local pip="" metrics_proxy_pid="" metrics_port="" metrics_url="" offset
+    : > "$out/worker-clones.ids"
+    cleanup_metrics_proxy() {
+        [ -n "$metrics_proxy_pid" ] && kill "$metrics_proxy_pid" 2>/dev/null || true
+        [ -n "$metrics_proxy_pid" ] && wait "$metrics_proxy_pid" 2>/dev/null || true
+    }
+    trap cleanup_metrics_proxy EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    # One persistent WireGuard tunnel replaces one `flyctl ssh` metrics read per
+    # task every poll interval. At daily width that removes 180 Machines-API SSH
+    # sessions/minute and the rate-limit/launch interference they caused.
+    for offset in $(seq 10 18); do
+        metrics_port=$((port_base + offset))
+        FLY proxy "$metrics_port:$BOX_HEALTH_PORT" "${cid}.vm.${APP}.internal" \
+            -a "$APP" --bind-addr 127.0.0.1 -q \
+            > "$out/autoscaler-metrics-proxy.log" 2>&1 &
+        metrics_proxy_pid=$!
+        sleep 0.3
+        kill -0 "$metrics_proxy_pid" 2>/dev/null && break
+        wait "$metrics_proxy_pid" 2>/dev/null || true
+        metrics_proxy_pid=""
+    done
+    [ -n "$metrics_proxy_pid" ] || {
+        echo "  ⚠️ [$bench] autoscaler: could not bind a data-plane metrics proxy; disabled" >&2
+        return 0
+    }
+    metrics_url="http://127.0.0.1:$metrics_port"
+    echo "  🛰️ [$bench] autoscaler metrics via data plane :$metrics_port → fly:$BOX_HEALTH_PORT"
     # Wait for the box /metrics to answer (stack up) before scaling.
     for _ in $(seq 1 60); do pip="$(_machine_priv_ip "$cid")"; [ -n "$pip" ] && break; sleep 5; done
     [ -n "$pip" ] || { echo "  ⚠️ [$bench] autoscaler: no primary IP; disabled" >&2; return 0; }
     while fleet_machines_json | grep -q "\"$cid\""; do
-        local desired want cur; desired="$(_box_desired "$cid")"; [ -z "$desired" ] && { sleep "$AUTOSCALE_POLL"; continue; }
+        local desired want cur; desired="$(_box_desired "$metrics_url")"; [ -z "$desired" ] && { sleep "$AUTOSCALE_POLL"; continue; }
         want=$((desired - 1)); [ "$want" -lt 0 ] && want=0
         [ "$want" -gt $((AUTOSCALE_MAX - 1)) ] && want=$((AUTOSCALE_MAX - 1))
         cur="$(_pool_ids "$out")"
@@ -1900,7 +1929,7 @@ for bench in "${BENCHES[@]}"; do
     if [ "$AUTOSCALE" = "1" ]; then
         local_sim=0; [ "$mode_label" = "SIM" ] && local_sim=1
         echo "   ⚖️  [$bench] per-bench autoscaler ON (prod params, max=$AUTOSCALE_MAX, queue=navi-agent-tasks-$local_ws)"
-        ( bench_autoscaler "$bench" "$cid" "$local_ws" "$local_sim" "$out" ) >> "$out/autoscaler.log" 2>&1 &
+        ( bench_autoscaler "$bench" "$cid" "$local_ws" "$local_sim" "$out" "$port" ) >> "$out/autoscaler.log" 2>&1 &
         AUTOSCALER_PIDS+=("$!")
     fi
     i=$((i + 1))

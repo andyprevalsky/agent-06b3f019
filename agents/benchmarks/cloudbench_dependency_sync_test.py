@@ -683,6 +683,19 @@ def test_snapshot_and_pool_dependency_proofs_are_exact() -> None:
     assert 'pooled machines were built from unproven/stale dependency trees' in fleet
 
 
+def test_autoscaler_metrics_poll_over_data_plane_without_ssh() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    desired = _extract_fleet_function(fleet, "_box_desired() {")
+    autoscaler = _extract_fleet_function(fleet, "bench_autoscaler() {")
+
+    assert "FLY ssh" not in desired
+    assert "curl --noproxy '*'" in desired
+    assert "FLY proxy" in autoscaler
+    assert '"${cid}.vm.${APP}.internal"' in autoscaler
+    assert "seq 10 18" in autoscaler
+    assert "autoscaler metrics via data plane" in autoscaler
+
+
 def test_fleet_children_cannot_replace_persistent_warm_state() -> None:
     cloud = CLOUD_SCRIPT.read_text()
 
