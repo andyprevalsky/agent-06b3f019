@@ -678,6 +678,10 @@ def test_snapshot_and_pool_dependency_proofs_are_exact() -> None:
     fleet = FLEET_SCRIPT.read_text()
 
     assert '[ "$_rest" = "$SNAP_ID" ]' in fleet
+    assert 'RECORDED_SNAP_ID="$(awk' in fleet
+    assert 'SNAP_ID="$RECORDED_SNAP_ID"' in fleet
+    assert "using recorded proven snapshot" in fleet
+    assert "an interrupted refresh" in fleet
     assert 'POOL_META_FILE="$POOL_IDS_FILE.deps"' in fleet
     assert 'printf \'%s %s %s\\n\' "$CURRENT_NODE_FP" "$CURRENT_PY_FP" "$SNAP_ID"' in fleet
     assert 'pooled machines were built from unproven/stale dependency trees' in fleet

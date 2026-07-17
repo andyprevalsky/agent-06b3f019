@@ -1563,7 +1563,29 @@ if [ -n "${CLOUDBENCH_SNAPSHOT_ID:-}" ]; then
     SNAP_ID="$CLOUDBENCH_SNAPSHOT_ID"
     echo "📌 pinned snapshot (CLOUDBENCH_SNAPSHOT_ID): $SNAP_ID"
 else
-SNAP_ID="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | python3 "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" 2>/dev/null || true)"
+    SNAPSHOTS_JSON="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null || echo '[]')"
+    RECORDED_SNAP_ID="$(awk 'NF >= 4 {print $4; exit}' "$GIT_COMMON_DIR/cloudbench-warm-deps.fp" 2>/dev/null || true)"
+    # The newest snapshot is not necessarily proven: an interrupted refresh can
+    # leave a newer complete snapshot without ever publishing its dependency
+    # proof. Prefer the exact recorded snapshot while it still exists and is
+    # complete; warm_deps_preflight below independently verifies its fingerprints
+    # and creation epoch. This prevents an orphan snapshot from invalidating a
+    # perfectly warm 30-Machine pool and triggering another multi-minute cut.
+    if [ -n "$RECORDED_SNAP_ID" ] && printf '%s' "$SNAPSHOTS_JSON" | \
+        SID="$RECORDED_SNAP_ID" python3 -c '
+import json, os, sys
+try: snapshots = json.load(sys.stdin) or []
+except Exception: snapshots = []
+valid = {"created", "complete", "completed", "ready"}
+match = next((s for s in snapshots if s.get("id") == os.environ["SID"]), None)
+raise SystemExit(0 if match and str(match.get("status") or "").lower() in valid
+                 and int(match.get("size") or 0) > 0 and match.get("created_at") else 1)
+' 2>/dev/null; then
+        SNAP_ID="$RECORDED_SNAP_ID"
+        echo "🧾 using recorded proven snapshot: $SNAP_ID"
+    else
+        SNAP_ID="$(printf '%s' "$SNAPSHOTS_JSON" | python3 "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" 2>/dev/null || true)"
+    fi
 fi
 if [ -z "$SNAP_ID" ]; then
     echo "❌ No complete snapshot for warm volume $VOL_ID. Create one and wait for it to finish:" >&2
