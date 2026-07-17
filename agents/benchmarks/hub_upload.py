@@ -18,7 +18,9 @@ import argparse
 import json
 import os
 from pathlib import Path
+import time
 from urllib.parse import quote
+import urllib.error
 import urllib.request
 
 DEFAULT_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
@@ -79,17 +81,33 @@ def upload_run_bundle(
     # Localhost hub URLs must never route through an ambient HTTP proxy
     # (e.g. the fast-mode proxy) — same trap as archive_api's _direct_opener.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(request, timeout=timeout) as response:
-            ok = 200 <= response.status < 300
-            if ok:
-                print(f"📤 uploaded run bundle to hub: {body.get('run_id')}")
-            return ok
-    except Exception as exc:
-        if required:
-            raise HubVisibilityError(f"benchmark Hub upload failed: {exc}") from exc
-        print(f"⚠️  hub upload failed (non-fatal): {exc}")
-        return False
+    max_attempts = 4 if required else 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                ok = 200 <= response.status < 300
+                if ok:
+                    print(f"📤 uploaded run bundle to hub: {body.get('run_id')}")
+                return ok
+        except Exception as exc:
+            retryable = not isinstance(exc, urllib.error.HTTPError) or exc.code in {
+                408,
+                425,
+                429,
+            } or exc.code >= 500
+            if required and retryable and attempt < max_attempts:
+                delay = min(2 ** (attempt - 1), 4)
+                print(
+                    f"⚠️  benchmark Hub upload attempt {attempt}/{max_attempts} "
+                    f"failed transiently; retrying in {delay}s: {exc}"
+                )
+                time.sleep(delay)
+                continue
+            if required:
+                raise HubVisibilityError(f"benchmark Hub upload failed: {exc}") from exc
+            print(f"⚠️  hub upload failed (non-fatal): {exc}")
+            return False
+    raise AssertionError("unreachable")
 
 
 def verify_run_visible(run_id: str, *, timeout: float = 30.0) -> None:
