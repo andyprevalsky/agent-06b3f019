@@ -2274,15 +2274,15 @@ release_start_barrier() {
     done
     echo "✅ $ready/$total isolated stacks reached the barrier ($(( total - ready )) excluded as infra failures)"
     echo "🚦 releasing synchronized start barrier on the ready machines..."
-    local release_pids=() release_failed=0
+    local release_pids=() release_failed=0 release_port_file
     for j in "${!CHILD_MACHINE[@]}"; do
         [ "${is_ready[$j]}" = "1" ] || continue
-        release_log="${CHILD_OUT[$j]}/fleet-child.log"
+        release_port_file="${CHILD_OUT[$j]}/status-proxy.port"
         (
-            status_port="$(sed -nE 's/.*status proxy: 127\.0\.0\.1:([0-9]+).*/\1/p' "$release_log" | tail -1)"
-            [ -n "$status_port" ] || exit 1
             released=0
             for _release_attempt in $(seq 1 "${CLOUDBENCH_BARRIER_RELEASE_ATTEMPTS:-10}"); do
+                status_port="$(cat "$release_port_file" 2>/dev/null || true)"
+                case "$status_port" in ''|*[!0-9]*) sleep 1; continue ;; esac
                 status_code="$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' \
                     -X POST -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
                     "http://127.0.0.1:$status_port/release" 2>/dev/null || true)"

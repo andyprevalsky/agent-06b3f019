@@ -86,6 +86,83 @@ termination_elapsed=$((SECONDS - termination_start))
 [ "$termination_elapsed" -lt 2 ] ||
   fail "an empty PID list must return immediately (elapsed=${termination_elapsed}s)"
 
+# A local bind collision is not a remote/DNS readiness failure. The proxy
+# launcher must classify it immediately so its caller can abandon the poisoned
+# lease and choose another port instead of retrying that port until the barrier
+# timeout. Exercise the production function body, not a test-only copy.
+proxy_function_source="$(awk '
+  /^start_data_plane_proxy\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud")"
+[ -n "$proxy_function_source" ] || fail "could not load the production data-plane proxy function"
+eval "$proxy_function_source"
+APP="cloudbench-proxy-regression"
+CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0
+flyctl() {
+  echo "Error: listen tcp 127.0.0.1:61944: bind: address already in use" >&2
+  return 1
+}
+curl() { return 1; }
+proxy_log="$TMP_ROOT/proxy-bind-collision.log"
+proxy_pid=""
+proxy_started="$SECONDS"
+proxy_status=0
+start_data_plane_proxy 61944 3001 occupied.local "$proxy_log" proxy_pid backend 3 \
+  || proxy_status=$?
+proxy_elapsed=$((SECONDS - proxy_started))
+[ "$proxy_status" -eq 98 ] ||
+  fail "a bind collision must return the reallocate signal (exit=$proxy_status)"
+[ "$proxy_elapsed" -lt 2 ] ||
+  fail "a bind collision must fail fast enough to reallocate (elapsed=${proxy_elapsed}s)"
+
+production_function() {
+  awk -v function_name="$1" '
+    $0 ~ "^" function_name "\\(\\)" { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud"
+}
+for function_name in local_port_is_bindable claim_local_port release_local_port_lease \
+    release_local_port_leases publish_status_proxy_port start_leased_data_plane_proxy; do
+  function_source="$(production_function "$function_name")"
+  [ -n "$function_source" ] || fail "could not load production function $function_name"
+  eval "$function_source"
+done
+PORT_LEASE_ROOT="$TMP_ROOT/proxy-port-leases"
+PORT_LEASE_NONCE="proxy-regression-$$"
+PORT_LEASES=()
+OUT_DIR="$TMP_ROOT/proxy-output"
+mkdir -p "$OUT_DIR"
+flyctl() {
+  case "$2" in
+    61944:*)
+      echo "Error: listen tcp 127.0.0.1:61944: bind: address already in use" >&2
+      return 1
+      ;;
+    *)
+      while :; do command sleep 1; done
+      ;;
+  esac
+}
+rotated_port=""
+rotated_pid=""
+start_leased_data_plane_proxy 61944 rotated_port 3001 occupied.local \
+  "$TMP_ROOT/proxy-bind-rotation.log" rotated_pid status 3 ||
+  fail "the proxy launcher must recover from a bind collision"
+[ "$rotated_port" != "61944" ] || fail "the proxy launcher retried the poisoned port"
+[ "$(cat "$OUT_DIR/status-proxy.port" 2>/dev/null || true)" = "$rotated_port" ] ||
+  fail "status proxy rotation was not published atomically for the fleet barrier"
+[ -n "$rotated_pid" ] && kill -0 "$rotated_pid" 2>/dev/null ||
+  fail "the proxy launcher did not preserve the replacement tunnel"
+cloudbench_terminate_and_wait 2 "$rotated_pid"
+release_local_port_leases
+[ ! -d "$PORT_LEASE_ROOT/$rotated_port" ] || fail "replacement proxy lease survived cleanup"
+unset -f flyctl curl start_data_plane_proxy start_leased_data_plane_proxy \
+  local_port_is_bindable claim_local_port release_local_port_lease \
+  release_local_port_leases publish_status_proxy_port production_function
+unset CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS
+
 machine_states="$TMP_ROOT/machine-states"
 printf 'created\ncreated\nstopped\n' > "$machine_states"
 read_machine_state() {

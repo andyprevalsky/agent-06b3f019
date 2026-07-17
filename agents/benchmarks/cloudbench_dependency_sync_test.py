@@ -877,9 +877,9 @@ def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost() -> None:
     assert "resolves the remote host lazily" in starter
     assert "CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS" in starter
     assert "post-probe survival window" in starter
-    assert 'start_data_plane_proxy "$LOCAL_STATUS_PORT"' in cloud
-    assert 'start_data_plane_proxy "$LIVE_BACKEND_PORT"' in cloud
-    assert "start_data_plane_proxy" in ensure
+    assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 3))"' in cloud
+    assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 1))"' in cloud
+    assert "start_leased_data_plane_proxy" in ensure
     assert "ensure_status_proxy >/dev/null 2>&1 || true" in cloud
 
 
@@ -3193,6 +3193,7 @@ def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
                 f"status proxy: 127.0.0.1:{port} -> fly:8011\n"
                 f"synchronized start barrier ready: {barrier}\n"
             )
+            (root / "status-proxy.port").write_text(f"{port}\n")
 
         release_fn = _extract_fleet_function(
             FLEET_SCRIPT.read_text(), "release_start_barrier() {"
@@ -3316,7 +3317,8 @@ def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     # On-box status server over /data, and a data-plane proxy to it.
     assert "REMOTE_STATUS_PORT" in cloud
     assert "http.server ${REMOTE_STATUS_PORT} --directory /data" in cloud
-    assert 'start_data_plane_proxy "$LOCAL_STATUS_PORT" "$REMOTE_STATUS_PORT"' in cloud
+    assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 3))" LOCAL_STATUS_PORT' in cloud
+    assert 'publish_status_proxy_port "$port"' in cloud
     # The poll reads only over the bounded data-plane proxy.
     assert "read_bench_log()" in cloud
     assert 'curl -fsS --max-time 6 "http://127.0.0.1:$LOCAL_STATUS_PORT/bench.log"' in cloud
@@ -3483,14 +3485,20 @@ def test_cloud_runner_avoids_live_run_port_collisions() -> None:
     """
     cloud = CLOUD_SCRIPT.read_text()
     assert 'claim_local_port "$LOCAL_DASH_PORT" LOCAL_DASH_PORT' in cloud
-    assert 'claim_local_port "$(( LOCAL_DASH_PORT + 3 ))" LOCAL_STATUS_PORT' in cloud
-    assert 'claim_local_port "$((LOCAL_DASH_PORT + 1))" LIVE_BACKEND_PORT' in cloud
+    assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 3))" LOCAL_STATUS_PORT' in cloud
+    assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 1))" LIVE_BACKEND_PORT' in cloud
+    assert "return 98" in _extract_fleet_function(cloud, "start_data_plane_proxy() {")
+    assert "release_local_port_lease" in _extract_fleet_function(
+        cloud, "start_leased_data_plane_proxy() {"
+    )
+    assert "release_local_port_leases" in _extract_fleet_function(cloud, "stop_on_exit() {")
     assert 'pkill -f "flyctl proxy $LOCAL_STATUS_PORT' not in cloud
     assert 'pkill -f "flyctl proxy $LIVE_BACKEND_PORT' not in cloud
     fleet = FLEET_SCRIPT.read_text()
     barrier = _extract_fleet_function(fleet, "release_start_barrier() {")
-    assert "status proxy: 127\\.0\\.0\\.1:" in barrier
-    assert "fleet-child.log" in barrier
+    assert "status-proxy.port" in barrier
+    assert 'status_port="$(cat "$release_port_file"' in barrier
+    assert "sed -nE 's/.*status proxy:" not in barrier
     assert "CHILD_PORT[j] + 3" not in barrier
 
     bindable = _extract_fleet_function(cloud, "local_port_is_bindable() {")
@@ -3529,3 +3537,46 @@ sleep 1
     assert first_out.strip() != second_out.strip()
     assert not any(lease_root.iterdir())
     lease_root.rmdir()
+
+
+def test_fleet_barrier_reads_the_authoritative_rotated_status_port(tmp_path: Path) -> None:
+    """A recovered status tunnel may rotate after its first published log line.
+
+    Barrier release must read the atomic port handoff, not stale console output.
+    """
+    fleet = FLEET_SCRIPT.read_text()
+    release = _extract_fleet_function(fleet, "release_start_barrier() {")
+    child_out = tmp_path / "child"
+    child_out.mkdir()
+    (child_out / "fleet-child.log").write_text(
+        "status proxy: 127.0.0.1:60944 -> fly:8011\n"
+        "synchronized start barrier ready: rotation-test\n"
+    )
+    (child_out / "status-proxy.port").write_text("61945\n")
+    observed_url = tmp_path / "release-url"
+    script = f"""set -e
+SYNCHRONIZED_START=1
+RUN_ID=rotation-test
+START_BARRIER_WAIT_SECONDS=5
+CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS=5
+CLOUDBENCH_BARRIER_RELEASE_ATTEMPTS=1
+CLOUDBENCH_BARRIER_TOKEN=test-token
+CHILD_PIDS=("$$")
+CHILD_OUT=({shlex.quote(str(child_out))})
+CHILD_MACHINE=(machine-1)
+CHILD_BENCH=(bench-1)
+curl() {{
+  for arg in "$@"; do
+    case "$arg" in http://*) printf '%s\n' "$arg" > {shlex.quote(str(observed_url))} ;; esac
+  done
+  printf 204
+}}
+sleep() {{ :; }}
+{release}
+release_start_barrier
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=5
+    )
+    assert result.returncode == 0, result.stderr
+    assert observed_url.read_text().strip() == "http://127.0.0.1:61945/release"
