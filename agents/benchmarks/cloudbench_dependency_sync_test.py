@@ -1913,6 +1913,48 @@ test "$(registry_runner_count machine-1)" = 0
     assert result.returncode == 0, result.stderr
 
 
+def test_fleet_canonicalizes_short_ref_before_remote_handoff(tmp_path: Path) -> None:
+    """RCA (2026-07-17): ``--ref 0ec3f5d65`` resolved in the controller
+    checkout but was handed to fresh Fly clones verbatim. Git servers do not
+    advertise abbreviated object IDs, so every clone failed ``git fetch``
+    before its status server or synchronized-ready marker could start.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.name", "Test"], check=True
+    )
+    (tmp_path / "tracked").write_text("content\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "fixture"], check=True)
+    full_ref = subprocess.check_output(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True
+    ).strip()
+    short_ref = full_ref[:9]
+    fleet = FLEET_SCRIPT.read_text()
+    canonicalize = (
+        _extract_fleet_function(fleet, "canonicalize_bench_ref() {")
+        if "canonicalize_bench_ref() {" in fleet
+        else ""
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"{canonicalize}\ncanonicalize_bench_ref {shlex.quote(short_ref)}",
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == full_ref
+
+
 def test_clone_retries_transient_volume_not_found(tmp_path: Path) -> None:
     """A single Fly clone-from-snapshot volume race must not abort the batch:
     clone_machine_target retries with a fresh name and returns the id once the

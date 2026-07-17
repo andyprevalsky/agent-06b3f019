@@ -183,6 +183,18 @@ fi
 [ -n "$PROVISION_POOL" ] || true
 [ -n "$PROVISION_POOL" ] || [ "${#BENCHES[@]}" -ge 1 ] || { echo "usage: run-bench-fleet <bench> [<bench>...] [--sim-on a,b] [--ref X]  |  --provision-pool N" >&2; exit 2; }
 [ -z "$BENCH_REF" ] && BENCH_REF="$(git rev-parse HEAD 2>/dev/null || echo '')"
+canonicalize_bench_ref() {
+    local requested="$1" resolved
+    # A fresh remote clone cannot fetch an abbreviated object ID because Git
+    # servers advertise refs, not arbitrary short SHAs. Canonicalize every ref
+    # the controller can resolve locally; preserve remote-only branch/tag names.
+    if resolved="$(git rev-parse --verify "${requested}^{commit}" 2>/dev/null)"; then
+        printf '%s' "$resolved"
+    else
+        printf '%s' "$requested"
+    fi
+}
+BENCH_REF="$(canonicalize_bench_ref "$BENCH_REF")"
 
 # --detach: re-exec THIS invocation in its own session before acquiring any
 # lock or machine, so the controller (and its cleanup traps) survive the
