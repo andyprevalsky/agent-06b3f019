@@ -2863,9 +2863,12 @@ def test_launcher_detects_dead_onbox_driver() -> None:
     # since the rate-limiting that kills the driver also fails a strict probe.
     assert "CLOUDBENCH_DRIVER_LAUNCH_ATTEMPTS" in cloud
     assert "driver not confirmed running (attempt" in cloud
-    # Launch burst is staggered.
+    # Boot launches are minimally staggered (30 submissions in ~7.5s), while
+    # the legacy multi-SSH path retains its conservative throttle.
     fleet = FLEET_SCRIPT.read_text()
     assert "CLOUDBENCH_LAUNCH_STAGGER_SECONDS" in fleet
+    assert 'CLOUDBENCH_LAUNCH_STAGGER_SECONDS:-0.25}' in fleet
+    assert 'CLOUDBENCH_LAUNCH_STAGGER_SECONDS:-3.5}' in fleet
     # Stack-health FATAL captures the actual death cause (exit code + tail + OOM).
     run = (CLOUD_SCRIPT.parent / "cloudbench-run.sh").read_text()
     assert "stack process exited (rc=$stack_rc)" in run
