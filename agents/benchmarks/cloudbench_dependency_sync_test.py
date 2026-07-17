@@ -2929,6 +2929,17 @@ def test_boot_launch_dashboard_card_mirror_uses_data_plane() -> None:
     assert "30 control-plane sessions/second" in mirror
 
 
+def test_boot_supervisor_keeps_data_plane_alive_after_done() -> None:
+    """A Fly Machine must not stop between the on-box DONE write and the
+    controller's next data-plane poll, or a real verdict becomes NORESULT."""
+    boot = (CLOUD_SCRIPT.parent / "cloudbench-boot.sh").read_text()
+
+    assert 'bash "$REPO/scripts/cloudbench-run.sh" >> "$LOG" 2>&1' in boot
+    assert 'exec bash "$REPO/scripts/cloudbench-run.sh"' not in boot
+    assert "holding for controller collection" in boot
+    assert boot.rstrip().endswith("exec sleep infinity")
+
+
 def test_cloud_timeout_kills_a_command_that_ignores_sigalrm() -> None:
     """RCA (2026-07-16): the perl-alarm wrapper exec'd flyctl and relied on
     SIGALRM surviving exec. A stopped-machine SSH ignored that contract and ran

@@ -79,5 +79,14 @@ rm -f "$REPO/.git/index.lock" "$REPO/.git/"*.lock "$REPO/.git/refs/heads/"*.lock
     fi
 } >> "$LOG" 2>&1
 
-# Exec the ref's driver. Its stdout IS the log the controller polls over the proxy.
-exec bash "$REPO/scripts/cloudbench-run.sh" >> "$LOG" 2>&1
+# Run the ref's driver, but keep the Machine alive after it emits DONE. The
+# controller polls every 15-20 seconds; exiting PID 1 immediately after DONE can
+# stop Fly's data plane before the next poll, turning a genuine verdict into
+# NORESULT. The controller persists the run-scoped marker payloads first and
+# then explicitly stops/returns this Machine to the pool. If the driver crashes
+# before DONE, /driver-health still reports it dead while this supervisor lives.
+bash "$REPO/scripts/cloudbench-run.sh" >> "$LOG" 2>&1
+driver_rc=$?
+printf '[boot %s] driver exited rc=%s; holding for controller collection\n' \
+    "$(date -u +%H:%M:%S)" "$driver_rc" >> "$LOG"
+exec sleep infinity
