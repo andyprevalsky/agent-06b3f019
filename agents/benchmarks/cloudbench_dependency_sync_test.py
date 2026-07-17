@@ -25,6 +25,7 @@ CLOUD_SCRIPT = ROOT / "scripts" / "run-bench-cloud"
 PREDEPLOY_SCRIPT = ROOT / "scripts" / "run-predeploy-cloud"
 PREDEPLOY_LOCAL_SCRIPT = ROOT / "scripts" / "run-predeploy-local"
 RUN_BENCH_SCRIPT = ROOT / "scripts" / "run-bench"
+STACK_SCRIPT = ROOT / "scripts" / "run.sh"
 LOCAL_RUNNER = ROOT / "agents" / "benchmarks" / "local.py"
 DEPLOY_COMMAND = ROOT / ".claude" / "commands" / "deploy.md"
 
@@ -2590,6 +2591,81 @@ def test_refresh_deps_rejects_invalid_ref_before_fly(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert calls.read_text() == ""
     assert "invalid benchmark ref" in result.stdout + result.stderr
+
+
+def test_isolated_backend_startup_retries_one_hung_process(tmp_path: Path) -> None:
+    """A live-but-never-listening first backend cannot abort the whole fleet slot."""
+    stack = STACK_SCRIPT.read_text()
+    helpers = "".join(
+        _extract_fleet_function(stack, signature)
+        for signature in (
+            "terminate_backend_group() {",
+            "restart_backend_service() {",
+            "wait_for_isolated_backend_ready() {",
+        )
+    )
+    launcher = tmp_path / "backend_tree.py"
+    launcher.write_text(
+        "import os, pathlib, signal, subprocess, sys, time\n"
+        "os.setsid()\n"
+        "child = subprocess.Popen([sys.executable, '-c', "
+        "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
+        "time.sleep(30)\n"
+    )
+    launches = tmp_path / "launches"
+    launches.write_text("0\n")
+    child_dir = tmp_path / "children"
+    child_dir.mkdir()
+    script = f"""set -uo pipefail
+BACKEND_PORT=3001
+BACKEND_LOG_FILE=/dev/null
+FAIL_DIR="$CHILD_DIR/fail"
+mkdir -p "$FAIL_DIR"
+CLOUDBENCH_BACKEND_START_READY_ATTEMPTS=2
+BACKEND_INDEX=0
+PIDS=("")
+launch_backend_service() {{
+  count=$(cat "$LAUNCHES"); count=$((count + 1)); echo "$count" > "$LAUNCHES"
+  python3 "$LAUNCHER" "$CHILD_DIR/child-$count" &
+  BACKEND_PID=$!
+  BACKEND_PGID=$BACKEND_PID
+  PIDS[$BACKEND_INDEX]="$BACKEND_PID"
+  echo "$BACKEND_PID" > "$CHILD_DIR/root-$count"
+  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$CHILD_DIR/child-$count" ] && break; sleep 0.1; done
+}}
+curl() {{ [ "$(cat "$LAUNCHES")" -ge 2 ]; }}
+{helpers}
+launch_backend_service
+wait_for_isolated_backend_ready
+rc=$?
+old_child=$(cat "$CHILD_DIR/child-1")
+if kill -0 "$old_child" 2>/dev/null; then echo OLD_SURVIVED; rc=1; else echo OLD_GONE; fi
+new_root=$(cat "$CHILD_DIR/root-2")
+[ "${{PIDS[0]}}" = "$new_root" ] || {{ echo SLOT_STALE; rc=1; }}
+terminate_backend_group || rc=1
+kill -0 "$new_root" 2>/dev/null && {{ echo NEW_SURVIVED; rc=1; }}
+exit "$rc"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            "LAUNCHER": str(launcher),
+            "LAUNCHES": str(launches),
+            "CHILD_DIR": str(child_dir),
+            "PATH": os.environ["PATH"],
+        },
+        text=True, capture_output=True, check=False, timeout=25,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert launches.read_text().strip() == "2"
+    assert "backend startup attempt 1/2 did not become healthy" in result.stdout + result.stderr
+    assert "backend became healthy after restart" in result.stdout
+    assert "OLD_GONE" in result.stdout
+    assert "OLD_SURVIVED" not in result.stdout
+    assert "SLOT_STALE" not in result.stdout
+    assert "NEW_SURVIVED" not in result.stdout
 
 
 def test_refresh_deps_mode_contract() -> None:

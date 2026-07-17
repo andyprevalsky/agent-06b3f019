@@ -144,7 +144,7 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
             "-q",
             str(behavioral_suite),
             "-k",
-            "central_refresh_ or refresh_deps_ or warm_deps_preflight",
+            "central_refresh_ or refresh_deps_ or warm_deps_preflight or isolated_backend_startup",
         ],
         cwd=repo_root,
         text=True,
@@ -153,7 +153,7 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "9 passed" in result.stdout
+    assert "10 passed" in result.stdout
 
 
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():

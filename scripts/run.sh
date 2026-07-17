@@ -1135,7 +1135,12 @@ cleanup() {
     echo "🛑 Stopping all services... (triggered by: $(caller 0 2>/dev/null || echo 'EXIT trap'), DB_OWNED_BY_US=$DB_OWNED_BY_US)"
     # Kill only the process trees we spawned (SIGTERM then SIGKILL)
     for pid in "${PIDS[@]}"; do
-        kill_tree_hard "$pid"
+        if [ -n "${BACKEND_PID:-}" ] && [ "$pid" = "$BACKEND_PID" ] \
+            && [ -n "${BACKEND_PGID:-}" ]; then
+            terminate_backend_group || true
+        else
+            kill_tree_hard "$pid"
+        fi
     done
     # Sweep by manifest, cwd, and service ports in case a wrapper exited before
     # its child, or a descendant reparented during a cascade shutdown. Isolated
@@ -1215,6 +1220,101 @@ if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
     export NAVI_WORKER_LOG_STREAM=false
 fi
 
+# A few fleet-width cold starts have left `tsx src/server.ts` alive but stuck
+# during module loading (backend log contains only the first Supabase warning).
+# The public-tunnel smoke used to discover that indirectly after 60 blank curls
+# and abort the slot. Own backend startup here: one clean process-tree restart
+# is allowed before the normal stack-level readiness owner decides the box is
+# unhealthy. This is startup supervision, not a benchmark/task retry.
+BACKEND_INDEX=${#PIDS[@]}
+PIDS+=("")
+NAMES+=("back-end")
+BACKEND_PID=""
+BACKEND_PGID=""
+launch_backend_service() {
+    if $BENCHMARK_MODE; then
+        if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+            # Give the backend its own process group. A hung import can leave a
+            # TERM-ignoring descendant; group ownership lets restart/cleanup
+            # prove every descendant is gone before a replacement can bind.
+            FAIL_DIR="$FAIL_DIR" BACKEND_LOG_FILE="$BACKEND_LOG_FILE" BACKEND_PORT="$BACKEND_PORT" \
+                setsid bash -c '
+                    set +e
+                    cd back-end || exit 1
+                    rm -f "$BACKEND_LOG_FILE"
+                    PORT="$BACKEND_PORT" npx tsx src/server.ts > "$BACKEND_LOG_FILE" 2>&1
+                    code=$?
+                    if [ "$code" -ne 0 ]; then
+                        printf "%s\n" back-end > "$FAIL_DIR/failed"
+                        printf "%s\n" "$code" > "$FAIL_DIR/exit_code"
+                    fi
+                    exit "$code"
+                ' &
+            BACKEND_PID=$!
+            BACKEND_PGID="$BACKEND_PID"
+        else
+            run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
+            BACKEND_PID=$!
+            BACKEND_PGID=""
+        fi
+    else
+        run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx watch src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
+        BACKEND_PID=$!
+        BACKEND_PGID=""
+    fi
+    PIDS[$BACKEND_INDEX]="$BACKEND_PID"
+}
+terminate_backend_group() {
+    local pgid="${BACKEND_PGID:-}" root="${BACKEND_PID:-}" still_alive=0
+    [ -n "$pgid" ] || { [ -z "$root" ] || kill_tree_hard "$root"; return; }
+    kill -TERM -- "-$pgid" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+        if ! kill -0 -- "-$pgid" 2>/dev/null; then still_alive=0; break; fi
+        still_alive=1
+        sleep 1
+    done
+    [ "$still_alive" = 0 ] || kill -KILL -- "-$pgid" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+        kill -0 -- "-$pgid" 2>/dev/null || { still_alive=0; break; }
+        still_alive=1
+        sleep 0.2
+    done
+    wait "$root" 2>/dev/null || true
+    if [ "$still_alive" != 0 ] || kill -0 -- "-$pgid" 2>/dev/null; then
+        echo "❌ backend process group $pgid survived termination" >&2
+        return 1
+    fi
+    BACKEND_PID=""
+    BACKEND_PGID=""
+}
+restart_backend_service() {
+    echo "♻️  restarting hung backend process tree (pid=$BACKEND_PID)"
+    terminate_backend_group || return 1
+    rm -f "$FAIL_DIR/failed" "$FAIL_DIR/exit_code"
+    launch_backend_service
+}
+wait_for_isolated_backend_ready() {
+    local launch_attempt probe_attempt
+    local attempts="${CLOUDBENCH_BACKEND_START_READY_ATTEMPTS:-60}"
+    for launch_attempt in 1 2; do
+        for probe_attempt in $(seq 1 "$attempts"); do
+            if curl -fsS "http://localhost:$BACKEND_PORT/health" >/dev/null 2>&1; then
+                [ "$launch_attempt" = 1 ] \
+                    && echo "✅ isolated backend healthy on first launch" \
+                    || echo "✅ backend became healthy after restart"
+                return 0
+            fi
+            kill -0 "$BACKEND_PID" 2>/dev/null || break
+            sleep 1
+        done
+        echo "⚠️  backend startup attempt $launch_attempt/2 did not become healthy" >&2
+        tail -40 "$BACKEND_LOG_FILE" 2>/dev/null | sed 's/^/   | /' >&2 || true
+        [ "$launch_attempt" = 1 ] || return 1
+        restart_backend_service
+    done
+    return 1
+}
+
 # Launch each service
 if $BENCHMARK_MODE; then
     export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
@@ -1228,16 +1328,8 @@ if $BENCHMARK_MODE; then
     export VITE_DEV_AUTO_LOGIN_PHONE="${VITE_DEV_AUTO_LOGIN_PHONE:-+15555550123}"
     export VITE_DEV_AUTO_LOGIN_OTP="${VITE_DEV_AUTO_LOGIN_OTP:-191919}"
 
-    # In benchmark mode, use plain tsx (no watch) to prevent file-change restarts from killing the backend mid-run
-    if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
-        run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx src/server.ts > "$BACKEND_LOG_FILE" 2>&1' &
-    else
-        run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
-    fi
-else
-    run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx watch src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
 fi
-PIDS+=($!); NAMES+=("back-end")
+launch_backend_service
 
 # Front-end is always launched. Public payment benchmarks use a production bundle
 # so the cloud browser does not fetch the Vite development module graph over ngrok.
@@ -1276,6 +1368,13 @@ fi
 # trace corpus and serves on WMH_PORT; sets WMH_BASE_URL/WMH_MODEL_NAME + manifest
 # fields when it comes up. A no-op on plain (non-benchmark) run.sh.
 start_world_model_harness
+
+if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+    wait_for_isolated_backend_ready || {
+        echo "❌ isolated backend failed both supervised startup attempts" >&2
+        exit 1
+    }
+fi
 
 SERVICE_STATUS=running
 write_services_manifest
