@@ -1879,6 +1879,40 @@ def _extract_fleet_function(source: str, signature: str) -> str:
     return source[start:end]
 
 
+def test_runner_ownership_probe_executes_through_remote_shell() -> None:
+    """RCA (2026-07-17): flyctl v0.4.70 executes ``ssh -C`` arguments
+    directly. A probe beginning with an environment assignment was interpreted
+    as an executable name, so stale idle pool claims became permanently
+    unreadable and every successor fleet failed before provisioning.
+
+    Model flyctl's direct-exec boundary: only an explicit remote shell may
+    interpret the assignment, pipeline, command substitution, and printf.
+    """
+    probe = _extract_fleet_function(
+        FLEET_SCRIPT.read_text(), "registry_runner_count() {"
+    )
+    script = f"""set -u
+APP=test-app
+FLY() {{
+  local remote=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-C" ]; then shift; remote="${{1:-}}"; break; fi
+    shift
+  done
+  case "$remote" in
+    'bash -c '*|'bash -lc '*) printf 'CLOUDBENCH_RUNNER_COUNT=0\\n' ;;
+    *) printf 'exec: ownership assignment is not an executable\\n' >&2; return 1 ;;
+  esac
+}}
+{probe}
+test "$(registry_runner_count machine-1)" = 0
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=5
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_clone_retries_transient_volume_not_found(tmp_path: Path) -> None:
     """A single Fly clone-from-snapshot volume race must not abort the batch:
     clone_machine_target retries with a fresh name and returns the id once the

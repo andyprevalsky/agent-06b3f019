@@ -630,9 +630,15 @@ print(state, name)
 }
 
 registry_runner_count() {  # registry_runner_count <started-machine-id>; exact integer or non-zero
-    local id="$1" output count
+    local id="$1" output count remote_command escaped_command
+    # flyctl executes the -C payload directly rather than through a shell. The
+    # owner probe uses an assignment, command substitution, a pipeline, and a
+    # printf, so make the interpreter boundary explicit and pass one safely
+    # escaped script argument to bash -c.
+    remote_command="CLOUDBENCH_OWNER_PROBE=1; n=\$(pgrep -f '/data/[c]loudbench-run.sh|/tmp/[r]b.sh|benchmarks/[r]un_benchmark.py|scripts/[r]un.sh --benchmark|/tmp/[r]bw.sh|/data/[c]loudbench-worker.sh|agents/[w]orker.py' 2>/dev/null | wc -l | tr -d ' '); printf 'CLOUDBENCH_RUNNER_COUNT=%s\\n' \"\$n\""
+    printf -v escaped_command '%q' "$remote_command"
     output="$(FLY ssh console -a "$APP" --machine "$id" -q -C \
-        "CLOUDBENCH_OWNER_PROBE=1; n=\$(pgrep -f '/data/[c]loudbench-run.sh|/tmp/[r]b.sh|benchmarks/[r]un_benchmark.py|scripts/[r]un.sh --benchmark|/tmp/[r]bw.sh|/data/[c]loudbench-worker.sh|agents/[w]orker.py' 2>/dev/null | wc -l | tr -d ' '); printf 'CLOUDBENCH_RUNNER_COUNT=%s\\n' \"\$n\"" 2>/dev/null)" || return 1
+        "bash -c $escaped_command" 2>/dev/null)" || return 1
     count="$(printf '%s\n' "$output" | sed -n 's/^CLOUDBENCH_RUNNER_COUNT=//p' | tail -1)"
     case "$count" in ''|*[!0-9]*) return 1 ;; esac
     printf '%s' "$count"
