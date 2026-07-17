@@ -835,6 +835,20 @@ CLOUDBENCH_TEST_BARRIER_MIN=1 \
     fail "stopped inventory must not block a seven-benchmark active fleet (exit=$capacity_status)"
 grep -qF "7/7 passed" "$TMP_ROOT/controller-capacity.log" ||
     fail "capacity replay fleet summary must report 7/7 passed"
+JOURNAL="$FAKE_DIR/journal.log" python3 - <<'PY' ||
+import os
+
+calls = open(os.environ["JOURNAL"]).read().splitlines()
+updates = [index for index, call in enumerate(calls) if call.startswith("machine update ")]
+starts = [index for index, call in enumerate(calls) if call.startswith("machine start ")]
+if len(updates) < 7 or len(starts) < 7:
+    raise SystemExit(f"expected seven update/start calls, got updates={len(updates)} starts={len(starts)}")
+if max(updates[:7]) >= min(starts[:7]):
+    raise SystemExit("a fleet machine started before every boot config update completed")
+if any("--skip-start" not in calls[index] for index in updates[:7]):
+    raise SystemExit("boot config updates must explicitly keep every machine stopped")
+PY
+    fail "capacity replay must configure the entire stopped fleet before any machine starts"
 
 capacity_counts="$(FAKE_STATE="$FAKE_DIR/state.json" python3 - <<'PY'
 import json

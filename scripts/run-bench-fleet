@@ -2085,6 +2085,9 @@ for pp in "${PROVISION_PIDS[@]}"; do wait "$pp" 2>/dev/null || true; done
 PROVISION_PIDS=()
 
 # ── Phase 2: launch each provisioned bench's isolated run (fast; backgrounded) ─
+BOOT_CONFIG_BARRIER="$FLEET_DIR/.boot-config-barrier"
+rm -rf "$BOOT_CONFIG_BARRIER" 2>/dev/null || true
+mkdir -p "$BOOT_CONFIG_BARRIER/ready"
 i=0
 for bench in "${BENCHES[@]}"; do
     # Default from the catalog's world_model_mode; --sim-on is an explicit override.
@@ -2126,6 +2129,7 @@ for bench in "${BENCHES[@]}"; do
         CLOUDBENCH_BARRIER_TOKEN="$BARRIER_RELEASE_TOKEN" \
         CLOUDBENCH_START_BARRIER_WAIT_SECONDS="$START_BARRIER_WAIT_SECONDS" \
         CLOUDBENCH_BOOT_LAUNCH="${CLOUDBENCH_BOOT_LAUNCH:-1}" \
+        CLOUDBENCH_BOOT_CONFIG_BARRIER="$BOOT_CONFIG_BARRIER" \
         NO_OPEN=1 \
         bash "$RUN_BENCH_CLOUD_BIN" "$bench" \
             --machine "$cid" \
@@ -2164,6 +2168,26 @@ for bench in "${BENCHES[@]}"; do
 done
 
 [ "${#CHILD_PIDS[@]}" -ge 1 ] || { echo "❌ no benches launched (all clones failed)." >&2; exit 1; }
+
+# Configure the entire stopped fleet before starting any guest. Fly can reserve
+# replacement CPU while applying a machine update; interleaving update/start at
+# width made later config-only updates hit cpu_overcommit_exceeded even though
+# the final 37-machine shape fit. Each child publishes its completed update and
+# waits here; one release then lets every explicit start proceed concurrently.
+if [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" = "1" ]; then
+    boot_config_deadline=$((SECONDS + ${CLOUDBENCH_BOOT_CONFIG_BARRIER_WAIT_SECONDS:-300}))
+    while :; do
+        boot_config_ready="$(find "$BOOT_CONFIG_BARRIER/ready" -type f 2>/dev/null | wc -l | tr -d ' ')"
+        [ "$boot_config_ready" = "${#CHILD_PIDS[@]}" ] && break
+        if [ "$SECONDS" -ge "$boot_config_deadline" ]; then
+            echo "❌ boot config barrier timed out: ${boot_config_ready:-0}/${#CHILD_PIDS[@]} updates ready" >&2
+            exit 1
+        fi
+        sleep 0.2
+    done
+    : > "$BOOT_CONFIG_BARRIER/release"
+    echo "⚙️  ${#CHILD_PIDS[@]}/${#CHILD_PIDS[@]} boot configs applied while stopped; releasing concurrent starts"
+fi
 
 echo ""
 echo "⏳ ${#CHILD_PIDS[@]} isolated bench machine(s) running."

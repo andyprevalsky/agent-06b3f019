@@ -1781,7 +1781,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         if _with_timeout "${CLOUDBENCH_BOOT_UPDATE_TIMEOUT:-90}" \
               flyctl machine update "$mid" -a "$APP" "${_envargs[@]}" \
               --file-local "/cloudbench-boot.sh=$ROOT_DIR/scripts/cloudbench-boot.sh" \
-              --command "bash /cloudbench-boot.sh" --skip-health-checks --yes \
+              --command "bash /cloudbench-boot.sh" --skip-health-checks --skip-start --yes \
               > "$_update_log" 2>&1; then
             _upd=1; break
         fi
@@ -1794,6 +1794,18 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         exit 1
     }
     rm -f "$_update_log"
+    if [ -n "${CLOUDBENCH_BOOT_CONFIG_BARRIER:-}" ]; then
+        mkdir -p "$CLOUDBENCH_BOOT_CONFIG_BARRIER/ready"
+        : > "$CLOUDBENCH_BOOT_CONFIG_BARRIER/ready/$mid"
+        _config_barrier_deadline=$((SECONDS + ${CLOUDBENCH_BOOT_CONFIG_BARRIER_WAIT_SECONDS:-300}))
+        while [ ! -f "$CLOUDBENCH_BOOT_CONFIG_BARRIER/release" ]; do
+            if [ "$SECONDS" -ge "$_config_barrier_deadline" ]; then
+                echo "❌ boot config barrier release timed out for $mid" >&2
+                exit 1
+            fi
+            sleep 0.2
+        done
+    fi
     # `machine update` may leave the box stopped; start it (retry storage-provisioning
     # + eventual-consistency flicker) and wait until Fly reports it started. No ssh.
     if [ "${CLOUDBENCH_STORAGE_READY:-0}" = "1" ]; then
