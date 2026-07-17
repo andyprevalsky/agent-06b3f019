@@ -240,15 +240,23 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
         reconnectAttemptRef.current = 0;
         isReconnectingRef.current = false;
 
-        const isReconnection = initialLoadDoneRef.current === selectedAgentId;
-        if (isReconnection && forceResubscribeCounter > 0) {
-          try {
-            const data = await fetchAgentDetail(selectedAgentId);
-            if (cancelled) return;
-            applyAgentBackfill(data, setMessages, setAgent, setIsChatMode);
-          } catch (error) {
-            console.error('Failed to refetch after reconnection:', error);
-          }
+        // One-shot reconcile immediately after EVERY successful (re)subscribe —
+        // cold-start included. During the subscribe/auth-race window (a fresh
+        // context's first agent:<id> join races "Unauthorized" for ~1-2s right
+        // after agent creation) the backend may already have streamed the answer
+        // and persisted its messages; realtime NEVER replays them, so a brand-new
+        // agent's first answer would otherwise sit stranded in the DB while the UI
+        // stalls on "Thinking". Gating this to reconnections missed exactly that
+        // cold-start case. The merge is idempotent, so double-fetching alongside
+        // the initial load is harmless. Marks initialLoadDoneRef so downstream
+        // effects know this agent has been reconciled at least once.
+        initialLoadDoneRef.current = selectedAgentId;
+        try {
+          const data = await fetchAgentDetail(selectedAgentId);
+          if (cancelled) return;
+          applyAgentBackfill(data, setMessages, setAgent, setIsChatMode);
+        } catch (error) {
+          console.error('Failed to backfill after subscribe:', error);
         }
       } catch (error) {
         console.error('Failed to subscribe:', error);
