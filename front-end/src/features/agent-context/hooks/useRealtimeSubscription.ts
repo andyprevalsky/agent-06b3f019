@@ -13,7 +13,12 @@ import {
 import type { AgentDetail, Message } from '@/lib/api';
 
 import type { StreamingBubble, StreamingPlan, StreamingAttention, StreamingTool } from '../types';
-import { MAX_RECONNECT_DELAY_MS, DISCONNECTED_BACKFILL_POLL_MS } from '../config';
+import {
+  MAX_RECONNECT_DELAY_MS,
+  DISCONNECTED_BACKFILL_POLL_MS,
+  BACKFILL_MAX_ATTEMPTS,
+  BACKFILL_RETRY_BASE_MS,
+} from '../config';
 import { fetchAgentDetail } from '../api';
 import {
   handleInsertMessage,
@@ -252,13 +257,33 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
         // effects know this agent has been reconciled at least once — but only
         // AFTER the backfill actually succeeds, so a failed fetch can't falsely
         // mark the agent reconciled (the next resubscribe must retry it).
-        try {
-          const data = await fetchAgentDetail(selectedAgentId);
-          if (cancelled) return;
-          applyAgentBackfill(data, setMessages, setAgent, setIsChatMode);
-          initialLoadDoneRef.current = selectedAgentId;
-        } catch (error) {
-          console.error('Failed to backfill after subscribe:', error);
+        //
+        // Retry with bounded backoff on failure: the channel is already live at
+        // this point, so the disconnected fallback poll (below) skips every tick
+        // (it only runs while channelRef.current is null). A single transient
+        // fetchAgentDetail failure would therefore strand the auth-race messages
+        // this reconcile exists to recover until an unrelated resubscribe fires.
+        // `cancelled` is set on agent change, unmount, or resubscribe, so every
+        // attempt (and the delay between them) short-circuits to a no-op once
+        // this subscription is torn down — no timer outlives the effect.
+        for (let attempt = 0; attempt < BACKFILL_MAX_ATTEMPTS; attempt += 1) {
+          try {
+            const data = await fetchAgentDetail(selectedAgentId);
+            if (cancelled) return;
+            applyAgentBackfill(data, setMessages, setAgent, setIsChatMode);
+            initialLoadDoneRef.current = selectedAgentId;
+            break;
+          } catch (error) {
+            if (cancelled) return;
+            console.error(
+              `Failed to backfill after subscribe (attempt ${attempt + 1}/${BACKFILL_MAX_ATTEMPTS}):`,
+              error,
+            );
+            if (attempt === BACKFILL_MAX_ATTEMPTS - 1) break;
+            const delay = Math.min(BACKFILL_RETRY_BASE_MS * 2 ** attempt, MAX_RECONNECT_DELAY_MS);
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            if (cancelled) return;
+          }
         }
       } catch (error) {
         console.error('Failed to subscribe:', error);

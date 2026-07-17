@@ -384,4 +384,38 @@ describe('useRealtimeSubscription', () => {
     expect(deps.setMessages).toHaveBeenCalled();
     expect(deps.setAgent).toHaveBeenCalled();
   });
+
+  // Regression (CodeRabbit PR #783): once the channel is live, channelRef.current
+  // is set, so the disconnected fallback poll skips every tick. A SINGLE transient
+  // failure of the post-subscribe reconcile fetch would therefore strand the
+  // auth-race messages until an unrelated resubscribe. The bounded retry must
+  // recover: fetchAgentDetail 500s once, then succeeds, and the backfill lands
+  // (setMessages called + agent marked reconciled) without any resubscribe.
+  it('retries a transiently failing post-subscribe backfill while the channel is live', async () => {
+    let calls = 0;
+    server.use(
+      http.get(`${API_BASE}/agents/agent-1`, () => {
+        calls += 1;
+        if (calls === 1) return new HttpResponse(null, { status: 500 });
+        return HttpResponse.json(
+          agentDetailJson([
+            { message_id: 'answer', timestamp: 't', text: 'RECOVERED', role: 'ASSISTANT' },
+          ]),
+        );
+      }),
+    );
+    // Channel joins successfully → channelRef is set → the disconnected poll is a
+    // no-op, so ONLY the post-subscribe retry loop can recover the first 500.
+    vi.mocked(RealtimeMod.subscribeToAgent).mockResolvedValue(fakeChannel());
+    mockSession();
+    const deps = makeDeps({
+      forceResubscribeCounter: 0,
+      initialLoadDoneRef: { current: null as string | null },
+    });
+    renderHook(() => useRealtimeSubscription(deps as never));
+    await waitFor(() => expect(deps.setMessages).toHaveBeenCalled(), { timeout: 3000 });
+    expect(calls).toBeGreaterThanOrEqual(2);
+    // Reconciled flag only flips AFTER a successful backfill, never on the 500.
+    expect(deps.initialLoadDoneRef.current).toBe('agent-1');
+  });
 });
