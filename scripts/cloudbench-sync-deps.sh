@@ -61,6 +61,66 @@ print(f"[cloudbench] relocated {rewritten} Python venv path(s) to {root}")
 PY
 }
 
+python_venv_healthy() {
+    local tree="$1"
+    [ -x "$tree/bin/python" ] \
+        && "$tree/bin/python" -c 'import pip, temporalio, traceback' >/dev/null 2>&1
+}
+
+refresh_python_dependencies_from_donor() {
+    local expected="$1" donor="$2"
+    local target="$REPO_DIR/agents/venv"
+    local fresh="$REPO_DIR/agents/.venv-cloudbench-refresh.$$"
+    local backup="$REPO_DIR/agents/.venv-cloudbench-unhealthy.$$"
+    local attempt
+    echo "[cloudbench] refreshing unreadable Python venv from the immutable donor"
+    for attempt in 1 2 3; do
+        rm -rf "$fresh"
+        if [ -e "$backup" ]; then
+            if [ -e "$target" ] || ! mv "$backup" "$target"; then
+                echo "[cloudbench] FATAL: could not restore cached Python venv backup" >&2
+                return 1
+            fi
+        fi
+        mkdir -p "$fresh"
+        if ! rsync -a --delete "$donor/" "$fresh/"; then
+            rm -rf "$fresh"
+            sleep "$attempt"
+            continue
+        fi
+        if [ -e "$target" ] && ! mv "$target" "$backup"; then
+            rm -rf "$fresh"
+            sleep "$attempt"
+            continue
+        fi
+        if ! mv "$fresh" "$target"; then
+            if [ -e "$backup" ] && ! mv "$backup" "$target"; then
+                echo "[cloudbench] FATAL: could not restore cached Python venv backup" >&2
+                return 1
+            fi
+            sleep "$attempt"
+            continue
+        fi
+        if relocate_venv "$donor" "$target" && python_venv_healthy "$target"; then
+            rm -rf "$backup"
+            printf '%s\n' "$expected" > "$target/.cloudbench-deps-fingerprint"
+            return 0
+        fi
+        rm -rf "$target"
+        if [ -e "$backup" ] && ! mv "$backup" "$target"; then
+            echo "[cloudbench] FATAL: could not restore cached Python venv backup" >&2
+            return 1
+        fi
+        sleep "$attempt"
+    done
+    rm -rf "$fresh"
+    if [ -e "$backup" ] && [ ! -e "$target" ]; then
+        mv "$backup" "$target" || true
+    fi
+    echo "[cloudbench] FATAL: cached Python venv is unreadable and donor refresh failed" >&2
+    return 1
+}
+
 rebuild_node_dependencies() {
     local expected="$1" marker="$REPO_DIR/node_modules/.cloudbench-deps-fingerprint"
     echo "[cloudbench] rebuilding JavaScript dependencies from checked-out manifests"
@@ -151,6 +211,11 @@ if [ "$installed_python" != "$repo_python" ]; then
             printf '%s\n' "$repo_python" > "$python_marker"
         fi
     fi
+fi
+if [ "$installed_python" = "$repo_python" ] \
+    && ! python_venv_healthy "$REPO_DIR/agents/venv"; then
+    refresh_python_dependencies_from_donor \
+        "$repo_python" "$DEPS_DIR/agents/venv"
 fi
 
 # npm workspaces hoist runtime packages to the root. These marker directories

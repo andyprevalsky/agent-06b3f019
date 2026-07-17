@@ -179,6 +179,48 @@ def test_refreshes_stale_volume_dependency_trees(tmp_path: Path) -> None:
     assert (repo / "agents/venv/.cloudbench-deps-fingerprint").is_file()
 
 
+def test_refreshes_fingerprinted_venv_when_runtime_files_are_unreadable(
+    tmp_path: Path,
+) -> None:
+    donor = tmp_path / "donor"
+    repo = tmp_path / "repo"
+    _write_manifests(donor)
+    _write_manifests(repo)
+    (donor / "node_modules/current-package").mkdir(parents=True)
+    donor_python = donor / "agents/venv/bin/python"
+    donor_python.parent.mkdir(parents=True)
+    donor_python.write_text("#!/usr/bin/env bash\nexit 0\n")
+    donor_python.chmod(0o755)
+
+    first = subprocess.run(
+        ["bash", str(SCRIPT), str(donor), str(repo)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert first.returncode == 0, first.stderr
+
+    cached_python = repo / "agents/venv/bin/python"
+    cached_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'OSError: [Errno 5] Input/output error' >&2\n"
+        "exit 5\n"
+    )
+    cached_python.chmod(0o755)
+    marker_before = (repo / "agents/venv/.cloudbench-deps-fingerprint").read_text()
+
+    repaired = subprocess.run(
+        ["bash", str(SCRIPT), str(donor), str(repo)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert repaired.returncode == 0, repaired.stderr
+    assert cached_python.read_text() == donor_python.read_text()
+    assert (repo / "agents/venv/.cloudbench-deps-fingerprint").read_text() == marker_before
+
+
 def test_relocates_donor_virtualenv_text_prefixes_after_sync(tmp_path: Path) -> None:
     donor = tmp_path / "donor"
     repo = tmp_path / "repo"
@@ -411,7 +453,9 @@ def test_accepts_fingerprinted_volume_when_image_donor_is_older(tmp_path: Path) 
     _write_manifests(repo, lock="current")
     (donor / "node_modules/current-package").mkdir(parents=True)
     (donor / "agents/venv/bin").mkdir(parents=True)
-    (donor / "agents/venv/bin/python").write_text("current")
+    donor_python = donor / "agents/venv/bin/python"
+    donor_python.write_text("#!/usr/bin/env bash\nexit 0\n")
+    donor_python.chmod(0o755)
     first = subprocess.run(
         ["bash", str(SCRIPT), str(donor), str(repo)],
         text=True,
