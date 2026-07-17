@@ -21,7 +21,7 @@ import {
   syncPasskeyCredentials,
   syncRequiredCredentialTable,
 } from './seed-local-credentials';
-import { runSyncStep, syncUserRecord } from './seed-local-helpers';
+import { runSyncStep, syncRowsWithConcurrency, syncUserRecord } from './seed-local-helpers';
 
 // Parse .env file directly to get remote DB URL
 // (process.env.DATABASE_URL is already overridden to local by run.sh)
@@ -456,24 +456,28 @@ async function sync() {
       take: MESSAGE_LIMIT,
     });
 
-    // Batch in groups of 500 for large datasets
-    for (let i = 0; i < messages.length; i += 500) {
-      const batch = messages.slice(i, i + 500);
-      await Promise.all(
-        batch.map((m) => {
-          const { id, ...rest } = m;
-          return local.messageRecord.upsert({
-            where: { id },
-            create: m as any,
-            update: rest as any,
-          });
-        })
-      );
-      if (messages.length > 500 && i + 500 < messages.length) {
-        process.stdout.write(`     ${Math.min(i + 500, messages.length)}/${messages.length}...\r`);
+    // The local benchmark DB runs beside the entire agent stack. Launching 500
+    // Prisma upserts at once repeatedly killed Postgres on 4GB Fly primaries,
+    // leaving every seed retry to fail with P1001. Stay below the configured
+    // 50-connection pool so cold pool replacements can seed without an infra
+    // loss; normal benchmark claims restore the resulting persistent dump.
+    return syncRowsWithConcurrency(
+      messages,
+      25,
+      (m) => {
+        const { id, ...rest } = m;
+        return local.messageRecord.upsert({
+          where: { id },
+          create: m as any,
+          update: rest as any,
+        });
+      },
+      (completed, total) => {
+        if (total > 25 && completed < total) {
+          process.stdout.write(`     ${completed}/${total}...\r`);
+        }
       }
-    }
-    return messages.length;
+    );
   });
 
   // ── Rose API Keys ──
