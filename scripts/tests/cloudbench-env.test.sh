@@ -169,8 +169,9 @@ unset CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS
 # Exercise the real clone command builder and require an explicit capacity-safe
 # primary shape rather than inheriting the oversized warm maintenance machine.
 primary_default_line="$(grep '^FLEET_PRIMARY_VM_SIZE=' "$ROOT_DIR/scripts/run-bench-fleet")"
-[[ "$primary_default_line" = *"performance-1x"* ]] ||
-  fail "fleet default must pair the isolated stack's 8GB contract with a Fly-valid capacity-safe size"
+primary_memory_line="$(grep '^FLEET_PRIMARY_VM_MEMORY=' "$ROOT_DIR/scripts/run-bench-fleet")"
+[[ "$primary_default_line" = *"shared-cpu-2x"* && "$primary_memory_line" = *"4096"* ]] ||
+  fail "fleet default must fit both Fly's shared-memory matrix and performance-CPU reservation ceiling"
 clone_function_source="$(awk '
   /^clone_machine_target\(\)/ { capture = 1 }
   capture { print }
@@ -182,8 +183,8 @@ WARM_ID="warm-source"
 SNAP_ID="snapshot-1"
 REGION="iad"
 APP="navi-whisper-lux-bench"
-FLEET_PRIMARY_VM_SIZE="performance-1x"
-FLEET_PRIMARY_VM_MEMORY="8192"
+FLEET_PRIMARY_VM_SIZE="shared-cpu-2x"
+FLEET_PRIMARY_VM_MEMORY="4096"
 clone_args="$TMP_ROOT/primary-clone.args"
 fleet_registry_record_name() { return 0; }
 fleet_registry_record_id() { return 0; }
@@ -196,10 +197,10 @@ fly_with_timeout() {
 primary_id="$(clone_machine_target "$TMP_ROOT/primary.ids")" ||
   fail "production clone command builder failed in the capacity replay"
 [ "$primary_id" = "abcdef12345678" ] || fail "capacity replay did not resolve the fake clone"
-require_text "$clone_args" "--vm-size performance-1x" \
-  "primary clone must use a Fly-valid 8GB capacity-safe VM size instead of inheriting warm 4x"
-require_text "$clone_args" "--vm-memory 8192" \
-  "primary clone must preserve the isolated stack's 8GB memory contract"
+require_text "$clone_args" "--vm-size shared-cpu-2x" \
+  "primary clone must avoid both the running CPU ceiling and performance reservation ceiling"
+require_text "$clone_args" "--vm-memory 4096" \
+  "primary clone memory must fit Fly's shared-cpu-2x memory ceiling"
 primary_cpus="$(sed -nE 's/.*--vm-size ([^ ]+).*/\1/p' "$clone_args" | sed -nE 's/.*-([0-9]+)x$/\1/p')"
 [ -n "$primary_cpus" ] || fail "capacity replay could not parse primary CPU allocation"
 [ $((16 + 37 * primary_cpus)) -le 160 ] ||
@@ -224,10 +225,10 @@ eval "$normalize_function_source"
 POOL_IDS_FILE="$TMP_ROOT/shape-pool.ids"
 printf 'old-shape\ncorrect-shape\n' > "$POOL_IDS_FILE"
 FLEET_DIR="$TMP_ROOT/shape-run"
-FLEET_PRIMARY_VM_SIZE="performance-1x"
-FLEET_PRIMARY_VM_MEMORY="8192"
-POOL_INVENTORY_JSON='[{"id":"old-shape","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":4,"memory_mb":8192}}},{"id":"correct-shape","state":"stopped","config":{"guest":{"cpu_kind":"performance","cpus":1,"memory_mb":8192}}}]'
-shape_after='[{"id":"old-shape","state":"stopped","config":{"guest":{"cpu_kind":"performance","cpus":1,"memory_mb":8192}}},{"id":"correct-shape","state":"stopped","config":{"guest":{"cpu_kind":"performance","cpus":1,"memory_mb":8192}}}]'
+FLEET_PRIMARY_VM_SIZE="shared-cpu-2x"
+FLEET_PRIMARY_VM_MEMORY="4096"
+POOL_INVENTORY_JSON='[{"id":"old-shape","state":"stopped","config":{"guest":{"cpu_kind":"performance","cpus":1,"memory_mb":8192}}},{"id":"correct-shape","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":2,"memory_mb":4096}}}]'
+shape_after='[{"id":"old-shape","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":2,"memory_mb":4096}}},{"id":"correct-shape","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":2,"memory_mb":4096}}}]'
 resize_calls="$TMP_ROOT/shape-resizes"
 resize_marker="$TMP_ROOT/shape-resized"
 resize_pool_machine() { printf '%s\n' "$1" >> "$resize_calls"; touch "$resize_marker"; }

@@ -77,12 +77,14 @@ VOLUME_NAME="cloudbench_data"
 # The warm maintenance source is intentionally roomy (shared-cpu-4x/8GB), but
 # inheriting that shape across 37 primaries consumed 148 CPU units. With prod's
 # observed 16 active units, Fly rejected the 37th at its 160-unit overcommit
-# governor. Primaries need 8GB for the isolated full stack. Fly caps
-# shared-cpu-2x at 4GB, so performance-1x is the smallest valid 8GB shape and
-# also lowers the 37-primary allocation to 37 CPU units. Worker-only clones
-# mirror prod's performance-1x/2GB shape.
-FLEET_PRIMARY_VM_SIZE="${CLOUDBENCH_FLEET_PRIMARY_VM_SIZE:-performance-1x}"
-FLEET_PRIMARY_VM_MEMORY="${CLOUDBENCH_FLEET_PRIMARY_VM_MEMORY:-8192}"
+# governor. Fly caps shared-cpu-2x at 4GB, while converting the entire stopped
+# pool to performance-1x/8GB exhausts the org's performance-CPU reservation
+# before all 37 machines are configured. The valid fleet-wide shape is
+# shared-cpu-2x/4GB: 74 running CPU units at full concurrency, below the
+# observed ceiling, with no performance reservation dependency. Worker-only
+# clones mirror prod's performance-1x/2GB shape.
+FLEET_PRIMARY_VM_SIZE="${CLOUDBENCH_FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}"
+FLEET_PRIMARY_VM_MEMORY="${CLOUDBENCH_FLEET_PRIMARY_VM_MEMORY:-4096}"
 FLEET_WORKER_VM_SIZE="${CLOUDBENCH_FLEET_WORKER_VM_SIZE:-performance-1x}"
 FLEET_WORKER_VM_MEMORY="${CLOUDBENCH_FLEET_WORKER_VM_MEMORY:-2048}"
 # Every run lands in its OWN dir under the runs-root; the central hub (one
@@ -850,7 +852,7 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
 
 clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] [vm-size] [memory-mb]
     local ledger="$1" source_id="${2:-$WARM_ID}"
-    local vm_size="${3:-${FLEET_PRIMARY_VM_SIZE:-performance-1x}}" vm_memory="${4:-${FLEET_PRIMARY_VM_MEMORY:-8192}}"
+    local vm_size="${3:-${FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}}" vm_memory="${4:-${FLEET_PRIMARY_VM_MEMORY:-4096}}"
     local clone_out clone_status target_id target_name diagnostic_log names_ledger deadline
     local attempt max_attempts retry_delay clone_timeout
     # Fly API throttles (resource_exhausted/429) and clone-from-snapshot can lose a create-volume→launch-VM race
