@@ -135,6 +135,23 @@ def test_prisma_client_generation_failure_is_fatal_and_keeps_old_fingerprint(
     assert marker.read_text() == baseline_fingerprint
 
 
+def test_boot_launch_propagates_parent_hub_identity_to_remote_benchmark() -> None:
+    """Fleet children must never register duplicate one-task Hub runs.
+
+    The parent controller is already fail-closed on its visible aggregate row.
+    Dropping this identity at the Fly Machine boundary makes every child perform
+    its own required Hub upload concurrently, so transient upload saturation
+    turns otherwise valid tasks into NORESULT before benchmark execution.
+    """
+    cloud_script = CLOUD_SCRIPT.read_text()
+    env_args = cloud_script.split("_envargs=(", 1)[1].split("    )", 1)[0]
+
+    assert (
+        '--env "BENCHMARK_HUB_PARENT_RUN_ID=${BENCHMARK_HUB_PARENT_RUN_ID:-}"'
+        in env_args
+    )
+
+
 def test_refreshes_stale_volume_dependency_trees(tmp_path: Path) -> None:
     donor = tmp_path / "donor"
     repo = tmp_path / "repo"
