@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   isUsableSession,
+  mintSessionViaBackendOtp,
   runRelay,
   sessionExpiresAtMs,
   type RelayDependencies,
@@ -11,6 +12,58 @@ import {
 
 const USER = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const farFuture = () => Math.floor(Date.now() / 1000) + 3600;
+
+// Regression (PR #783): the relay's auto-login must mint through the BACKEND's
+// /api/auth/verify-otp (which honors the 181818 dev-OTP bypass), NOT Supabase
+// directly. A direct Supabase verifyOtp(181818) is rejected ("Token expired or
+// invalid") because 181818 is a backend-level bypass Supabase never sees, which
+// deterministically crashed the message-person smoke relay.
+describe('auto-login mints via backend verify-otp (honors dev OTP bypass)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('POSTs phone+otp to the backend and returns a StoredSession for the user', async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toBe('http://localhost:5599/api/auth/verify-otp');
+      expect(init?.method).toBe('POST');
+      expect(JSON.parse(String(init?.body))).toEqual({ phone: '+19729777432', token: '181818' });
+      return new Response(
+        JSON.stringify({
+          success: true,
+          user: { id: USER, phone: '+19729777432', is_anonymous: false },
+          session: {
+            access_token: 'be-signed-jwt',
+            refresh_token: 'be-refresh',
+            expires_at: farFuture(),
+            token_type: 'bearer',
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } }
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const minted = await mintSessionViaBackendOtp('http://localhost:5599', {
+      phone: '+19729777432',
+      otp: '181818',
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(minted.access_token).toBe('be-signed-jwt');
+    expect(minted.user?.id).toBe(USER);
+    // The minted session must satisfy the relay's own usability gate.
+    expect(isUsableSession(minted, USER)).toBe(true);
+  });
+
+  it('throws with the backend status/detail when verify-otp rejects the OTP', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ error: 'Invalid OTP' }), { status: 400 }))
+    );
+    await expect(
+      mintSessionViaBackendOtp('http://localhost:5599', { phone: '+19729777432', otp: '000000' })
+    ).rejects.toThrow(/verify-otp 400/);
+  });
+});
 
 describe('installed-session usability (drives relay auto-login)', () => {
   it('accepts a fresh session for the expected user', () => {
