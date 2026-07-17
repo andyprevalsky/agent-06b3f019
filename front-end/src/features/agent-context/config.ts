@@ -21,3 +21,15 @@ export const FOCUS_RECONNECT_DELAY_MS = 500;
  * channel is live. Skipped as a no-op whenever the channel is connected.
  */
 export const DISCONNECTED_BACKFILL_POLL_MS = 2000;
+
+/**
+ * Max attempts for the one-shot post-subscribe reconcile (cold-start backfill).
+ * Once the channel is live the disconnected fallback poll is a no-op, so a
+ * transient fetchAgentDetail failure would otherwise strand the auth-race
+ * messages until an unrelated resubscribe. Retry a bounded number of times
+ * while the channel remains live.
+ */
+export const BACKFILL_MAX_ATTEMPTS = 4;
+
+/** Base back-off (ms) between post-subscribe backfill retries; doubles each attempt, capped at MAX_RECONNECT_DELAY_MS. */
+export const BACKFILL_RETRY_BASE_MS = 500;

@@ -2037,8 +2037,12 @@ async function testClaudeCodeUpload_missingFields() {
 }
 
 async function testClaudeCodeUpload_happyPath() {
-  const payload = { encryptedCredentials: 'test_encrypted_credentials_data' };
-  const encrypted = encryptPayload(payload);
+  // A real envelope that round-trips with the server key — the upload path now
+  // rejects anything it cannot decrypt (see testClaudeCodeUpload_rejectsUndecryptable).
+  const encryptedCredentials = buildCredentialPayload(
+    `sk-ant-oat-happy-${crypto.randomBytes(8).toString('hex')}`
+  );
+  const encrypted = encryptPayload({ encryptedCredentials });
   const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/upload`, {
     method: 'POST',
     headers: authHeaders(ctx.accessToken1!),
@@ -2046,6 +2050,22 @@ async function testClaudeCodeUpload_happyPath() {
   });
   assertStatus(res.status, 200, res.data);
   assertSchema(ClaudeCodeUploadResponse, res.data, 'claude-code happy');
+}
+
+// Regression (RCA 2026-07-17): the upload path stored client ciphertext WITHOUT
+// verifying it decrypts, so a mismatched-keypair client silently inserted garbage
+// that later flooded oaep/parse errors and degraded chat to the paid waterfall.
+// An undecryptable envelope must be rejected at the write boundary (400), never stored.
+async function testClaudeCodeUpload_rejectsUndecryptable() {
+  const { accessToken } = await createAnonSession();
+  const encrypted = encryptPayload({ encryptedCredentials: 'not-a-valid-envelope-' + Date.now() });
+  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/upload`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+    body: JSON.stringify(encrypted),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'claude-code rejects undecryptable envelope');
 }
 
 async function testClaudeCodeToken_notFound() {
@@ -3134,8 +3154,10 @@ async function testPasswordsRequest_basic() {
 
 // 16. Claude Code credentials upload: with encrypted payload
 async function testClaudeCodeCredentials_upload() {
-  const payload = { encryptedCredentials: 'test_encrypted_cred_' + Date.now() };
-  const encrypted = encryptPayload(payload);
+  const encryptedCredentials = buildCredentialPayload(
+    `sk-ant-oat-upload-${crypto.randomBytes(8).toString('hex')}`
+  );
+  const encrypted = encryptPayload({ encryptedCredentials });
   const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/upload`, {
     method: 'POST',
     headers: authHeaders(ctx.accessToken1!),
@@ -5419,6 +5441,10 @@ async function runAll() {
       fn: testClaudeCodeUpload_missingFields,
     },
     { name: 'POST /claude-code/credentials/upload happy path', fn: testClaudeCodeUpload_happyPath },
+    {
+      name: 'POST /claude-code/credentials/upload rejects undecryptable envelope -> 400',
+      fn: testClaudeCodeUpload_rejectsUndecryptable,
+    },
     {
       name: 'GET /claude-code/credentials/token not found -> 404',
       fn: testClaudeCodeToken_notFound,

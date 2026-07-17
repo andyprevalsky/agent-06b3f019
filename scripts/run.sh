@@ -517,6 +517,25 @@ fi
 # Fast Mode cache is intentionally shared across local/dev/prod so recorded runs
 # survive local DB resets. Capture the prod DB URL from back-end/.env before this
 # script overwrites DATABASE_URL with the local app database below.
+#
+# FAST_MODE_CACHE_USE_LOCAL=1 routes the fast-cache at the isolated LOCAL DB
+# instead of the shared prod Supabase pooler. The shared pooler has a fixed
+# connection ceiling; when many local stacks (or a cloud fleet) run at once it
+# saturates, and the boot-time "Ensuring Fast Mode cache schema" step fails with
+# EMAXCONN / pool-timeout — blocking the stack from ever starting. For a smoke
+# gate that only needs a working runtime (not prod cache sharing), point the
+# cache at the local DB so startup can't be held hostage by pooler contention.
+if [ "${FAST_MODE_CACHE_USE_LOCAL:-}" = "1" ] && [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
+    # Fail closed: without a real LOCAL_DB_URL, exporting an empty value would let
+    # the block below silently re-derive the prod pooler URL — defeating the whole
+    # point of the flag. Require it explicitly.
+    if [ -z "${LOCAL_DB_URL:-}" ]; then
+        echo "❌ FAST_MODE_CACHE_USE_LOCAL=1 requires LOCAL_DB_URL (isolated local DB) to be set" >&2
+        exit 1
+    fi
+    export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"
+    echo "🧠 FAST_MODE_CACHE_USE_LOCAL=1 — routing Fast Mode cache at the isolated local DB (decoupled from the shared prod pooler)"
+fi
 if [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ] && [ -f "back-end/.env" ]; then
     PROD_CACHE_DATABASE_URL=$(python3 - <<'PY'
 from pathlib import Path
@@ -1116,8 +1135,21 @@ if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
 else
     start_public_tunnel
 fi
-export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
-export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
+# Fast-mode proxy routes sandbox code-agent (claude-code / codex) LLM calls
+# through the local proxy for cache capture. Locally this pins those calls to a
+# priority tier that can have 0 credits (e.g. Opus 4.8), which fails the
+# claude-code-agent smoke with an auth/credit error unrelated to E2B or tokens.
+# DISABLE_FAST_MODE_PROXY=1 empties both URLs so the sandbox falls back to the
+# direct claudeAuth path (codeAgentFastModeEnv treats "" as "no proxy"). This is
+# a local-only convenience — prod code agents never route through this proxy.
+if [ "${DISABLE_FAST_MODE_PROXY:-}" = "1" ]; then
+    export FAST_MODE_ANTHROPIC_PROXY_URL=""
+    export FAST_MODE_CODEX_PROXY_URL=""
+    echo "⚡ DISABLE_FAST_MODE_PROXY=1 — fast-mode proxy off; sandbox code agents use the direct claudeAuth path"
+else
+    export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
+    export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
+fi
 export BACKEND_LOG_FILE="${BACKEND_LOG_FILE:-$PWD/back-end/backend-logs.log}"
 export FRONTEND_LOG_FILE="${FRONTEND_LOG_FILE:-$PWD/front-end/frontend-logs.log}"
 export NAVI_WORKER_LOG_FILE="${NAVI_WORKER_LOG_FILE:-$PWD/agents/navi-worker-log.txt}"
@@ -1145,6 +1177,11 @@ if $BENCHMARK_MODE; then
     export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$PWD/.context}"
     export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
     export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+    # Capture-outbound flips IS_BLACKBOX_TEST, which would disable the dev-phone
+    # OTP login bypass — but the message-person iMessage relay needs it to
+    # auto-login the benchmark user. Re-enable the login bypass here (still
+    # IS_DEV-gated, so prod is unaffected) while outbound SMS capture stays on.
+    export BENCHMARK_ALLOW_DEV_OTP_LOGIN="${BENCHMARK_ALLOW_DEV_OTP_LOGIN:-1}"
     export SURGE_API_KEY="${SURGE_API_KEY:-blackbox-surge-key}"
     export SURGE_ACCOUNT_ID="${SURGE_ACCOUNT_ID:-blackbox-surge-account}"
     export VITE_DEV_AUTO_LOGIN_PHONE="${VITE_DEV_AUTO_LOGIN_PHONE:-+15555550123}"

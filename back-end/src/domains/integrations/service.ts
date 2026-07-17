@@ -12,6 +12,7 @@ import {
   fetchPoolToken,
   markPoolTokenRateLimited,
   markUserTokenRateLimited,
+  verifyCredentialEnvelopeDecryptable,
 } from '../../providers/claudeCredentials';
 import {
   fetchComputeTokenForUser,
@@ -446,7 +447,14 @@ export async function sendPasswordRequest(userId: string, request: string) {
   });
 }
 
+export class CredentialEnvelopeError extends Error {}
+
 export async function uploadClaudeCodeCredentials(userId: string, encryptedCredentials: string) {
+  const check = verifyCredentialEnvelopeDecryptable(encryptedCredentials);
+  if (!check.ok) {
+    log.error('Rejecting undecryptable Claude Code credentials', { userId, reason: check.reason });
+    throw new CredentialEnvelopeError(check.reason);
+  }
   log.info('Storing Claude Code credentials', { userId });
   await repo.upsertIntegrationRaw({
     userId,
@@ -463,6 +471,11 @@ export async function uploadClaudeCodeCredentials(userId: string, encryptedCrede
 }
 
 export async function uploadGptCodeCredentials(userId: string, encryptedCredentials: string) {
+  const check = verifyCredentialEnvelopeDecryptable(encryptedCredentials);
+  if (!check.ok) {
+    log.error('Rejecting undecryptable GPT Code credentials', { userId, reason: check.reason });
+    throw new CredentialEnvelopeError(check.reason);
+  }
   log.info('Storing GPT Code credentials', { userId });
   await repo.upsertIntegrationRaw({
     userId,

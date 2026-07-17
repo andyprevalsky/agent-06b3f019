@@ -47,7 +47,14 @@ router.post(
       return res.status(400).json({ error: 'Invalid payload: missing encryptedCredentials' });
     }
 
-    await service.uploadClaudeCodeCredentials(userId, payload.encryptedCredentials);
+    try {
+      await service.uploadClaudeCodeCredentials(userId, payload.encryptedCredentials);
+    } catch (error: unknown) {
+      if (error instanceof service.CredentialEnvelopeError) {
+        return res.status(400).json({ error: `Invalid credential envelope: ${error.message}` });
+      }
+      throw error;
+    }
     return res.json({ message: 'Claude Code credentials uploaded successfully' });
   })
 );
@@ -92,7 +99,14 @@ router.post(
       return res.status(400).json({ error: 'Invalid payload: missing encryptedCredentials' });
     }
 
-    await service.uploadGptCodeCredentials(userId, payload.encryptedCredentials);
+    try {
+      await service.uploadGptCodeCredentials(userId, payload.encryptedCredentials);
+    } catch (error: unknown) {
+      if (error instanceof service.CredentialEnvelopeError) {
+        return res.status(400).json({ error: `Invalid credential envelope: ${error.message}` });
+      }
+      throw error;
+    }
     return res.json({ message: 'GPT Code credentials uploaded successfully' });
   })
 );
