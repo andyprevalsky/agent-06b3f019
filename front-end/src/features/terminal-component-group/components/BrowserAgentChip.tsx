@@ -20,7 +20,7 @@
  * Derives result/trajectory/recording from all messages sharing this message's
  * metadata.task_id (each browser step is its own message).
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, Clapperboard, ListOrdered, FileText, Globe } from 'lucide-react';
 import { getAttachmentUrl } from '@/lib/api/messages';
 import { useAgentContext } from '../hooks';
@@ -131,7 +131,12 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     recordingSource?.kind === 'view'
       ? recordingSource.url
       : (recordingSource?.pointer.storage_path ?? null);
+  // Monotonic generation of the selected recording. Bumping it on every source
+  // change invalidates any in-flight async load so a stale fetch can't overwrite
+  // the newly selected recording (and leak its Blob URL).
+  const recordingLoadGeneration = useRef(0);
   useEffect(() => {
+    recordingLoadGeneration.current += 1;
     setRecordingState('idle');
     setRecordingUrl(null);
   }, [recordingKey]);
@@ -162,6 +167,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     }
     if (!selectedAgentId) return;
     const { pointer } = recordingSource;
+    const loadGeneration = recordingLoadGeneration.current;
     setRecordingState('loading');
     try {
       const url = await getAttachmentUrl(selectedAgentId, pointer.id, pointer.storage_path);
@@ -172,10 +178,18 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
       if (!res.ok) throw new Error(`recording fetch ${res.status}`);
       const html = await res.text();
       const blobUrl = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+      // A newer recording was selected while this load was in flight — discard
+      // this result (and its Blob URL) instead of clobbering the current one.
+      if (loadGeneration !== recordingLoadGeneration.current) {
+        URL.revokeObjectURL(blobUrl);
+        return;
+      }
       setRecordingUrl(blobUrl);
       setRecordingState('ready');
     } catch {
-      setRecordingState('error');
+      if (loadGeneration === recordingLoadGeneration.current) {
+        setRecordingState('error');
+      }
     }
   }
 
