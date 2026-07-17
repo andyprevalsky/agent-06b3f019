@@ -17,7 +17,42 @@ import {
   useRealtimeSubscription,
   type RealtimeSubscriptionDeps,
 } from '@/features/agent-context/hooks/useRealtimeSubscription';
+import { DISCONNECTED_BACKFILL_POLL_MS } from '@/features/agent-context/config';
 import * as RealtimeMod from '@/lib/realtime';
+
+/** Minimal ACTIVE agent-detail payload for MSW agent-detail responses. */
+function agentDetailJson(messages: Array<Record<string, unknown>>) {
+  return {
+    agent: {
+      agent_id: 'agent-1',
+      goal: 'g',
+      model: 'm',
+      source: 'WEB',
+      reasoning_effort: 'off',
+      progress: 0.5,
+      status: 'ACTIVE',
+      status_message: null,
+      temporal_workflow_id: null,
+      token_count: 0,
+      tokens_in: 0,
+      tokens_out: 0,
+      tool_tokens_in: 0,
+      tool_tokens_out: 0,
+      tool_cost_cents: 0,
+      context_size: 0,
+      message_count: messages.length,
+      price_limit_cents: 100,
+      tree_cost_cents: 0,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      write_lock_enabled: false,
+      verifier: null,
+      tools: [],
+    },
+    messages,
+    pagination: { has_more: false, oldest_timestamp: null },
+  };
+}
 
 const API_BASE = 'http://localhost:3001/api';
 type AgentHandlers = Parameters<typeof RealtimeMod.subscribeToAgent>[1];
@@ -258,6 +293,41 @@ describe('useRealtimeSubscription', () => {
     renderHook(() => useRealtimeSubscription(deps as never));
     await waitFor(() => expect(deps.setMessages).toHaveBeenCalled());
     // Re-fetch also triggers agent setter
+    expect(deps.setAgent).toHaveBeenCalled();
+  });
+
+  // Regression: prod chat stalled on "Thinking" because the agent:<id> private
+  // channel join was rejected Unauthorized for ~43s (auth race right after
+  // creation) and realtime never replays missed broadcasts. The disconnected
+  // backfill poll must reconcile from the API so the answer surfaces even though
+  // the channel never connects. Before the fix (no poll) setMessages was never
+  // called while the channel stayed down, and the message never appeared.
+  it('backfills via API poll while the agent channel never connects (auth race)', async () => {
+    server.use(
+      http.get(`${API_BASE}/agents/agent-1`, () =>
+        HttpResponse.json(
+          agentDetailJson([
+            { message_id: 'answer-from-api', timestamp: 't', text: 'BROWSERPROBE7', role: 'TOOL' },
+          ]),
+        ),
+      ),
+    );
+    // The private-channel join is rejected (Unauthorized) and never connects, so
+    // channelRef stays null and realtime delivers nothing.
+    vi.mocked(RealtimeMod.subscribeToAgent).mockRejectedValue(
+      new Error('Channel error for agent:agent-1: Unauthorized'),
+    );
+    mockSession();
+    const deps = makeDeps();
+    vi.useFakeTimers();
+    try {
+      renderHook(() => useRealtimeSubscription(deps as never));
+      await vi.advanceTimersByTimeAsync(DISCONNECTED_BACKFILL_POLL_MS + 250);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(deps.channelRef.current).toBeNull();
+    expect(deps.setMessages).toHaveBeenCalled();
     expect(deps.setAgent).toHaveBeenCalled();
   });
 });
