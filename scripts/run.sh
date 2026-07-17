@@ -1170,6 +1170,11 @@ if $BENCHMARK_MODE; then
     export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$PWD/.context}"
     export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
     export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+    # Capture-outbound flips IS_BLACKBOX_TEST, which would disable the dev-phone
+    # OTP login bypass — but the message-person iMessage relay needs it to
+    # auto-login the benchmark user. Re-enable the login bypass here (still
+    # IS_DEV-gated, so prod is unaffected) while outbound SMS capture stays on.
+    export BENCHMARK_ALLOW_DEV_OTP_LOGIN="${BENCHMARK_ALLOW_DEV_OTP_LOGIN:-1}"
     export SURGE_API_KEY="${SURGE_API_KEY:-blackbox-surge-key}"
     export SURGE_ACCOUNT_ID="${SURGE_ACCOUNT_ID:-blackbox-surge-account}"
     export VITE_DEV_AUTO_LOGIN_PHONE="${VITE_DEV_AUTO_LOGIN_PHONE:-+15555550123}"

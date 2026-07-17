@@ -274,13 +274,20 @@ export async function loadInstalledRoseSession(
   }
 
   const { default: Store } = await import('electron-store');
+  // clearInvalidConfig: true — if the on-disk navi-auth store can't be decrypted
+  // with the installed app's key (stale/rotated key, or a store written by a
+  // differently-keyed build), electron-store would otherwise THROW on
+  // construction ("Unexpected token '<binary>' ... is not valid JSON") and crash
+  // the relay before auto-login can run. Clearing the invalid config instead
+  // lets us fall through to auto-login, which re-mints a session and persists it
+  // encrypted with the current key — self-healing the corrupt store.
   const store = new Store({
     name: 'navi-auth',
     cwd:
       process.env.ROSE_USER_DATA_DIR ||
       path.join(os.homedir(), 'Library', 'Application Support', 'Rose'),
     encryptionKey,
-    clearInvalidConfig: false,
+    clearInvalidConfig: true,
   });
   const session = store.get('session') as StoredSession | undefined;
   if (isUsableSession(session, expectedUserId)) {

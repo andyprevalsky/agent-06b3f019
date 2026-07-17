@@ -8,6 +8,7 @@ import {
   SUPABASE_SERVICE_ROLE_KEY,
   IS_DEV,
   IS_BLACKBOX_TEST,
+  BENCHMARK_ALLOW_DEV_OTP_LOGIN,
 } from './config';
 import type { TwilioVerifyResponse, SupabaseAdminUserResponse } from './types';
 
@@ -22,8 +23,32 @@ const DEV_TEST_OTP = '181818';
 const BROWSER_REVIEW_TEST_PHONE = '+15555550123';
 const BROWSER_REVIEW_TEST_OTP = '191919';
 
+/**
+ * Whether the dev test-phone OTP bypass applies. Pure + exported for unit tests.
+ *
+ * The `isDev` gate makes this impossible in production (NODE_ENV=production →
+ * IS_DEV=false), so it can never weaken real auth. Benchmark stacks set
+ * BLACKBOX_TEST_CAPTURE_OUTBOUND=1 to capture the agent's outbound SMS, which
+ * flips `isBlackboxTest` and would otherwise disable the bypass — but the
+ * message-person benchmark's iMessage relay needs it to auto-login the benchmark
+ * user. `benchmarkAllowDevOtpLogin` (run.sh's BENCHMARK_ALLOW_DEV_OTP_LOGIN=1)
+ * re-enables the login bypass while capture stays on. Normal blackbox runs don't
+ * set that flag, so their real-Twilio expectation is unchanged.
+ */
+export function devTestPhoneBypassApplies(
+  phone: string,
+  opts: { isDev: boolean; isBlackboxTest: boolean; benchmarkAllowDevOtpLogin: boolean }
+): boolean {
+  const blockedByBlackbox = opts.isBlackboxTest && !opts.benchmarkAllowDevOtpLogin;
+  return opts.isDev && !blockedByBlackbox && DEV_TEST_PHONES.includes(phone);
+}
+
 function isDevTestPhone(phone: string): boolean {
-  return IS_DEV && !IS_BLACKBOX_TEST && DEV_TEST_PHONES.includes(phone);
+  return devTestPhoneBypassApplies(phone, {
+    isDev: IS_DEV,
+    isBlackboxTest: IS_BLACKBOX_TEST,
+    benchmarkAllowDevOtpLogin: BENCHMARK_ALLOW_DEV_OTP_LOGIN,
+  });
 }
 
 function shouldBypassOtpSend(phone: string): boolean {
