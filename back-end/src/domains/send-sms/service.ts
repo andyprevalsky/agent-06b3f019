@@ -6,6 +6,7 @@ import {
   notifyAgentStarted,
   notifyPlannerMessage,
   notifyWriteLock,
+  notifyAgentCardSetup,
   notifyCompletion,
   notifyCostLimit,
 } from '../../providers/smsSupervisor/outboundEvents';
@@ -202,6 +203,21 @@ async function dispatchByEventType(
         payload.metadata
       );
       break;
+
+    case 'agentcard_setup': {
+      // Validate the runtime type: the cast above does not guarantee a string, and a
+      // missing/blank/non-string value would produce an unusable SMS or crash the
+      // notifier's `.trim()`. Skip malformed events instead of dispatching.
+      const setupUrl = payload.setup_url;
+      if (typeof setupUrl !== 'string' || setupUrl.trim() === '') {
+        log.warn('agentcard_setup event missing a valid setup_url, skipping', {
+          agentId: data.agent_id,
+        });
+        break;
+      }
+      await notifyAgentCardSetup(data.user_id, { id: data.agent_id }, setupUrl);
+      break;
+    }
 
     case 'completion':
       await notifyCompletion(

@@ -41,7 +41,7 @@ import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
 import httpx
@@ -117,10 +117,8 @@ _WORLD_MODEL_UPDATE_RESULT: Optional[dict[str, Any]] = None
 CALENDLY_TASK_NAME = "calendly-schedule-meeting"
 BIOMETRICS_WEBDECOY_TASK_NAME = "browser-biometrics-webdecoy"
 AUTH_BUNDLE_BIOMETRICS_GATE_ENV = "BENCHMARK_AUTH_BUNDLE_BIOMETRICS_GATE"
-MINTED_AGENT_ACCOUNT_TASK_NAME = "minted-agent-accounts-uber"
 MINTED_AGENT_ACCOUNT_X_TASK_NAME = "minted-agent-accounts-x"
 MINTED_AGENT_ACCOUNT_TASK_NAMES = {
-    MINTED_AGENT_ACCOUNT_TASK_NAME,
     MINTED_AGENT_ACCOUNT_X_TASK_NAME,
 }
 MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
@@ -155,6 +153,7 @@ MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
 )
 AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
+AGENT_PAYMENT_PRODUCTION_TASK_NAME = "agent-payment-production-abandonment"
 # Cookie-bundle bootstrap for these tasks is now declared as the `amazon_auth`
 # live fixture in tasks.json (see live_fixtures.py), not a task-name branch.
 BENCHMARK_FORCE_SHOW_PASSWORDS_ENV = "BENCHMARK_FORCE_SHOW_PASSWORDS"
@@ -323,13 +322,45 @@ def _attention_request_kind(req: dict) -> str:
     return "unknown"
 
 
-def _attention_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
+def _expected_attention_kind(task: BenchmarkTask, observed_count: int) -> Optional[str]:
+    sequence = task.expected_attention_kinds
+    if sequence:
+        return sequence[observed_count] if observed_count < len(sequence) else None
+    return task.expected_attention_kind
+
+
+def _attention_request_matches_task(
+    task: BenchmarkTask,
+    req: dict,
+    observed_count: int = 0,
+) -> bool:
     if task.expected_gate:
         return _gate_request_matches_task(task, req)
-    expected_kind = task.expected_attention_kind
+    expected_kind = _expected_attention_kind(task, observed_count)
     if not expected_kind:
         return True
     return _attention_request_kind(req) == expected_kind
+
+
+def _should_auto_approve_attention(task: BenchmarkTask, req: dict) -> bool:
+    return not (
+        task.agentcard_setup_action == "complete"
+        and _attention_request_kind(req)
+        == "agentcard_user_cardholder_onboarding_required"
+    )
+
+
+def _attention_request_evidence(req: dict) -> dict:
+    """Keep the user-visible approval contract for deterministic post-run checks."""
+    metadata = req.get("metadata") if isinstance(req.get("metadata"), dict) else {}
+    return {
+        "id": req.get("id"),
+        "kind": _attention_request_kind(req),
+        "question": req.get("question"),
+        "message": req.get("message"),
+        "description": req.get("description"),
+        "metadata": metadata,
+    }
 
 
 def _gate_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
@@ -527,6 +558,54 @@ def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
     receipt = _payment_receipt_from_attention_request(req)
     if not receipt:
         return "missing requestPaymentCard metadata"
+
+    required_fields = expected.get("requiredFields", [])
+    for field in required_fields:
+        if field not in receipt:
+            return f"missing required payment receipt field: {field}"
+        if field != "fees" and receipt.get(field) in (None, "", []):
+            return f"empty required payment receipt field: {field}"
+
+    required_line_item_fields = expected.get("requiredLineItemFields", [])
+    line_items = receipt.get("lineItems")
+    if required_line_item_fields and not isinstance(line_items, list):
+        return "missing required payment receipt field: lineItems"
+    for item_index, item in enumerate(line_items or []):
+        if not isinstance(item, dict):
+            return f"payment receipt lineItems[{item_index}] must be an object"
+        for field in required_line_item_fields:
+            if field not in item:
+                return f"missing required lineItems[{item_index}] field: {field}"
+            if field != "imageUrl" and item.get(field) in (None, "", []):
+                return f"empty required lineItems[{item_index}] field: {field}"
+
+    required_fee_fields = expected.get("requiredFeeFields", [])
+    fees = receipt.get("fees")
+    if required_fee_fields and not isinstance(fees, list):
+        return "missing required payment receipt field: fees"
+    for fee_index, fee in enumerate(fees or []):
+        if not isinstance(fee, dict):
+            return f"payment receipt fees[{fee_index}] must be an object"
+        for field in required_fee_fields:
+            if field not in fee:
+                return f"missing required fees[{fee_index}] field: {field}"
+            if fee.get(field) in (None, ""):
+                return f"empty required fees[{fee_index}] field: {field}"
+
+    if required_fields or required_line_item_fields or required_fee_fields:
+        from browser_tools.schemas import RequestPaymentCardBrowserTool
+
+        try:
+            RequestPaymentCardBrowserTool.model_validate(
+                {"tool": "request_payment_card", **receipt}
+            )
+        except ValueError as exc:
+            return f"malformed complete payment receipt: {exc}"
+        fingerprint = receipt.get("fingerprint")
+        if "fingerprint" in required_fields and (
+            not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+        ):
+            return "malformed complete payment receipt field: fingerprint"
     if "merchant" in expected and receipt.get("merchant") != expected.get("merchant"):
         return f"merchant mismatch: expected {expected.get('merchant')}, got {receipt.get('merchant')}"
     if "currency" in expected and (receipt.get("currency") or "USD") != expected.get("currency", "USD"):
@@ -561,12 +640,46 @@ def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
     actual_fees = _normalize_receipt_fees(receipt)
     for expected_fee in expected.get("fees", []):
         label = expected_fee.get("label", "").lower()
-        if actual_fees.get(label) != expected_fee.get("amountCents"):
+        actual_fee = actual_fees.get(label)
+        if actual_fee is None and label == "tax":
+            actual_fee = next(
+                (amount for actual_label, amount in actual_fees.items() if actual_label.startswith("tax (")),
+                None,
+            )
+        if actual_fee != expected_fee.get("amountCents"):
             return (
                 f"{expected_fee.get('label')} fee mismatch: "
-                f"expected {expected_fee.get('amountCents')}, got {actual_fees.get(label)}"
+                f"expected {expected_fee.get('amountCents')}, got {actual_fee}"
             )
     return None
+
+
+def _validate_payment_lifecycle(task: BenchmarkTask, data: dict) -> Optional[str]:
+    expected = task.expected_payment_lifecycle
+    if not expected:
+        return None
+    benchmark_state = data.get("_benchmark", {})
+    actual = benchmark_state.get("payment_lifecycle")
+    if not isinstance(actual, dict):
+        detail = benchmark_state.get("payment_lifecycle_error")
+        return f"missing payment lifecycle snapshot{f': {detail}' if detail else ''}"
+
+    def compare(expected_value, actual_value, path: str) -> Optional[str]:
+        if isinstance(expected_value, dict):
+            if not isinstance(actual_value, dict):
+                return f"{path} mismatch: expected object, got {actual_value!r}"
+            for key, nested_expected in expected_value.items():
+                if key not in actual_value:
+                    return f"{path}.{key} missing from payment lifecycle"
+                error = compare(nested_expected, actual_value[key], f"{path}.{key}")
+                if error:
+                    return error
+            return None
+        if expected_value != actual_value:
+            return f"{path} mismatch: expected {expected_value!r}, got {actual_value!r}"
+        return None
+
+    return compare(expected, actual, "payment_lifecycle")
 
 
 def _ci_should_fail(summary: dict) -> bool:
@@ -942,6 +1055,8 @@ async def create_agent(
 
     if task.start_phase:
         body["start_phase"] = task.start_phase
+    if task.response_schema:
+        body["response_schema"] = task.response_schema
 
     async with httpx.AsyncClient(timeout=90) as client:
         resp = await client.post(f"{base_url}/api/agents", headers=headers, json=body)
@@ -1138,6 +1253,114 @@ async def get_llm_usage_breakdown(base_url: str, root_agent_id: str, tree_stats:
     return aggregate_usage_items(items)
 
 
+async def get_test_payment_lifecycle(base_url: str, agent_id: str) -> dict:
+    """Read the sanitized cross-provider lifecycle snapshot for a benchmark agent."""
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            f"{base_url}/api/test-payment/lifecycle",
+            headers=headers,
+            params={"agentId": agent_id},
+        )
+        if resp.status_code != 200:
+            raise Exception(
+                f"Failed to get payment lifecycle: {resp.status_code} {resp.text[:300]}"
+            )
+        return resp.json()
+
+
+async def _wait_for_expected_payment_lifecycle(
+    base_url: str,
+    agent_id: str,
+    task: BenchmarkTask,
+    initial_lifecycle: dict,
+    *,
+    timeout_seconds: float = 420,
+    poll_interval_seconds: float = 10,
+    fetch_lifecycle: Callable[[str, str], Awaitable[dict]] = get_test_payment_lifecycle,
+    recover_lifecycle: Optional[Callable[[str, str], Awaitable[dict]]] = None,
+) -> dict:
+    """Observe durable recovery while AgentCard asynchronously releases a closed-card hold."""
+    lifecycle = initial_lifecycle
+    deadline = time.monotonic() + timeout_seconds
+    retryable_statuses = {"FUNDING_RECLAIM_FAILED", "REFUND_FAILED"}
+    while True:
+        error = _validate_payment_lifecycle(
+            task,
+            {"_benchmark": {"payment_lifecycle": lifecycle}},
+        )
+        if error is None:
+            return lifecycle
+        purchase = lifecycle.get("purchase") if isinstance(lifecycle, dict) else None
+        status = purchase.get("status") if isinstance(purchase, dict) else None
+        wallet_funding = lifecycle.get("walletFunding") if isinstance(lifecycle, dict) else None
+        release_pending = (
+            status == "HELD"
+            and isinstance(wallet_funding, dict)
+            and wallet_funding.get("status") == "RECLAIMING"
+        )
+        if (status not in retryable_statuses and not release_pending) or time.monotonic() >= deadline:
+            return lifecycle
+        await asyncio.sleep(poll_interval_seconds)
+        lifecycle = await (recover_lifecycle or fetch_lifecycle)(base_url, agent_id)
+
+
+async def abandon_test_payment(base_url: str, agent_id: str) -> dict:
+    """Close/reclaim/refund a benchmark card after issuance but before merchant submission."""
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=180) as client:
+        resp = await client.post(
+            f"{base_url}/api/test-payment/lifecycle/abandon",
+            headers=headers,
+            json={"agentId": agent_id},
+        )
+        if resp.status_code != 200:
+            raise Exception(
+                f"Failed to abandon test payment: {resp.status_code} {resp.text[:300]}"
+            )
+        return resp.json()
+
+
+async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dict:
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{base_url}/api/test-payment/lifecycle/agentcard-setup",
+            headers=headers,
+            json={"userId": USER_ID, "action": action},
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"Failed to {action} benchmark AgentCard setup: "
+                f"{resp.status_code} {resp.text[:300]}"
+            )
+        return resp.json()
+
+
+async def ensure_payment_lifecycle_cleanup(
+    base_url: str,
+    agent_id: str,
+    task: BenchmarkTask,
+) -> Optional[dict]:
+    """Idempotently compensate issued benchmark cards before agent deletion."""
+    if not agent_id or task.payment_card_request_action != "abandon":
+        return None
+    try:
+        lifecycle = await abandon_test_payment(base_url, agent_id)
+        lifecycle = await _wait_for_expected_payment_lifecycle(
+            base_url,
+            agent_id,
+            task,
+            lifecycle,
+            recover_lifecycle=abandon_test_payment,
+        )
+        print("    🧹 Confirmed payment-card transfer reclaim and Stripe refund")
+        return lifecycle
+    except Exception as exc:
+        print(f"    ⚠ Payment lifecycle cleanup failed for {agent_id[:12]}: {exc}")
+        return None
+
+
 async def get_attention_requests(base_url: str) -> list:
     """GET /api/attention-requests — returns pending requests for current user."""
     headers = await _api_headers()
@@ -1202,6 +1425,9 @@ def _logical_tool_count_key(meta: dict) -> Optional[Tuple[str, str]]:
     if status != "FINISHED":
         return None
 
+    if action_type == "request_payment_card" and tool_call_id:
+        return "request_payment_card", str(tool_call_id)
+
     if tool_name == "spawn_agent":
         if meta.get("agentType") == "browser" and tool_call_id:
             return "spawn_browser_agent", str(tool_call_id)
@@ -1243,6 +1469,21 @@ def _count_logical_tool_calls_from_messages(messages: List[dict]) -> Dict[str, i
     counts: Dict[str, int] = {}
     for msg in messages:
         meta = msg.get("metadata") or {}
+        if msg.get("role") == "ASSISTANT":
+            requested_calls = meta.get("tool_calls")
+            if isinstance(requested_calls, list):
+                for call in requested_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    tool_name = call.get("tool")
+                    tool_call_id = call.get("tool_call_id")
+                    if not isinstance(tool_name, str) or not tool_name or not tool_call_id:
+                        continue
+                    requested_key = (tool_name, str(tool_call_id))
+                    if requested_key in seen:
+                        continue
+                    seen.add(requested_key)
+                    counts[tool_name] = counts.get(tool_name, 0) + 1
         if meta.get("fromFastCache") and meta.get("toolStatus") == "FINISHED":
             child_counts = meta.get("childToolCounts")
             if isinstance(child_counts, dict):
@@ -1867,7 +2108,11 @@ async def poll_agent(
     # Includes the root plus every descendant appearing in the tree endpoint.
     per_agent_state: Dict[str, dict] = {}
     seen_attention_ids: set[str] = set()
+    seen_attention_kinds: List[str] = []
+    agentcard_setup_attention_seen = False
+    attention_requests_seen: list[dict] = []
     chat_assistant_seen_at: Optional[float] = None
+    payment_card_action_completed = False
     task._mid_run_feedback_posted = False
     task._mid_run_feedback_initial_schema = None
 
@@ -1915,6 +2160,12 @@ async def poll_agent(
         status = agent.get("status", "UNKNOWN")
         messages = data.get("messages", [])
         root_msg_count = len(messages)
+        data["_benchmark"] = {
+            **data.get("_benchmark", {}),
+            "approvals_triggered": approvals_triggered,
+            "approvals_resolved": approvals_resolved,
+            "attention_requests_seen": list(attention_requests_seen),
+        }
 
         exact_count_error = _root_exact_tool_count_exceeded(task, messages)
         if exact_count_error:
@@ -1924,6 +2175,35 @@ async def poll_agent(
             }
             print(f"    🚨 {exact_count_error}")
             return data, approvals_triggered, approvals_resolved, exact_count_error
+
+        if (
+            task.payment_card_request_action == "abandon"
+            and not payment_card_action_completed
+            and any(
+                isinstance(message.get("metadata"), dict)
+                and message["metadata"].get("title") == "Payment card ready"
+                for message in messages
+            )
+        ):
+            lifecycle = await abandon_test_payment(base_url, agent_id)
+            lifecycle = await _wait_for_expected_payment_lifecycle(
+                base_url,
+                agent_id,
+                task,
+                lifecycle,
+            )
+            payment_card_action_completed = True
+            data["_benchmark"] = {
+                **data.get("_benchmark", {}),
+                "payment_card_request_action": "abandon",
+                "payment_lifecycle": lifecycle,
+                "expected_payment_receipt_seen": bool(
+                    task.expected_payment_receipt and approvals_triggered > 0
+                ),
+                "expected_attention_kind_seen": task.expected_attention_kind,
+            }
+            print("    ✅ Abandoned issued payment card and reconciled funding")
+            return data, approvals_triggered, approvals_resolved, None
 
         if realtime_monitor and realtime_monitor.failure_reason:
             realtime_failure = realtime_monitor.reconcile_snapshot(messages)
@@ -1995,6 +2275,29 @@ async def poll_agent(
 
         # Agent mode: done on terminal status
         if status in TERMINAL_STATUSES:
+            if task.agentcard_setup_action == "complete":
+                setup_kind = "agentcard_user_cardholder_onboarding_required"
+                setup_still_open = any(
+                    _attention_request_is_open(req)
+                    and _attention_request_kind(req) == setup_kind
+                    for req in _pending_attention
+                )
+                data["_benchmark"] = {
+                    **data.get("_benchmark", {}),
+                    "expected_attention_kinds_seen": list(seen_attention_kinds),
+                    "agentcard_setup_attention_seen": agentcard_setup_attention_seen,
+                    "agentcard_setup_attention_auto_resolved": (
+                        agentcard_setup_attention_seen and not setup_still_open
+                    ),
+                }
+                if not agentcard_setup_attention_seen:
+                    return data, approvals_triggered, approvals_resolved, (
+                        "Expected agentcard_user_cardholder_onboarding_required attention request was not observed"
+                    )
+                if setup_still_open:
+                    return data, approvals_triggered, approvals_resolved, (
+                        "AgentCard setup attention request remained open after agent completion"
+                    )
             return data, approvals_triggered, approvals_resolved, None
 
         # ── Tree-level stall detection ──────────────────────────────
@@ -2195,7 +2498,8 @@ async def poll_agent(
                         req_id = req.get("id")
                         if req_id and req_id not in seen_attention_ids:
                             seen_attention_ids.add(req_id)
-                            if not _attention_request_matches_task(task, req):
+                            expected_kind = _expected_attention_kind(task, approvals_triggered)
+                            if not _attention_request_matches_task(task, req, approvals_triggered):
                                 observed_kind = _attention_request_kind(req)
                                 if (
                                     task.expected_gate
@@ -2208,7 +2512,6 @@ async def poll_agent(
                                         f"    ✅ Auto-approved payment-card prerequisite {req_id[:8]}"
                                     )
                                     continue
-                                expected_kind = task.expected_attention_kind
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
                                     "unexpected_attention_kind": observed_kind,
@@ -2237,11 +2540,26 @@ async def poll_agent(
                                 }
                                 return data, approvals_triggered, approvals_resolved, receipt_error
                             approvals_triggered += 1
+                            observed_kind = _attention_request_kind(req)
+                            seen_attention_kinds.append(observed_kind)
+                            attention_requests_seen.append(_attention_request_evidence(req))
+                            data["_benchmark"] = {
+                                **data.get("_benchmark", {}),
+                                "attention_request_kind_seen": observed_kind,
+                                "attention_request_id": req_id,
+                                "approvals_triggered": approvals_triggered,
+                                "attention_requests_seen": list(attention_requests_seen),
+                            }
                             if task.expected_attention_kind:
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
                                     "expected_attention_kind_seen": task.expected_attention_kind,
                                     "expected_attention_request_id": req_id,
+                                }
+                            if task.expected_attention_kinds:
+                                data["_benchmark"] = {
+                                    **data.get("_benchmark", {}),
+                                    "expected_attention_kinds_seen": list(seen_attention_kinds),
                                 }
                             if task.expected_gate:
                                 data["_benchmark"] = {
@@ -2256,7 +2574,10 @@ async def poll_agent(
                                     "expected_payment_receipt_seen": True,
                                     "expected_payment_receipt_request_id": req_id,
                                 }
-                            if task.success_on_payment_card_request:
+                            if (
+                                task.success_on_payment_card_request
+                                and task.payment_card_request_action is None
+                            ):
                                 if task.approval_handling == "count_only":
                                     await respond_to_attention_request(base_url, req_id, _count_only_release_response())
                                     approvals_resolved += 1
@@ -2274,10 +2595,22 @@ async def poll_agent(
                                 print(f"    ✅ Counted and released approval request {req_id[:8]}")
                             if task.approval_handling == "ignore":
                                 kind_label = (
-                                    f" ({task.expected_attention_kind})" if task.expected_attention_kind else ""
+                                    f" ({observed_kind})"
+                                    if task.expected_attention_kind or task.expected_attention_kinds
+                                    else ""
                                 )
                                 print(f"    ✅ Approval request observed{kind_label} {req_id[:8]}")
                                 return data, approvals_triggered, approvals_resolved, None
+                            if (
+                                task.agentcard_setup_action == "complete"
+                                and observed_kind == "agentcard_user_cardholder_onboarding_required"
+                            ):
+                                await configure_benchmark_agentcard_setup(base_url, "complete")
+                                agentcard_setup_attention_seen = True
+                                print(
+                                    f"    ✅ Completed one-time AgentCard setup for attention {req_id[:8]}"
+                                )
+                                continue
                         if task.name == CALENDLY_TASK_NAME and _contains_calendly_link(req):
                             data["_benchmark"] = {"calendly_link_approval_seen": True}
                             print("    ✅ Calendly link approval request observed")
@@ -2293,7 +2626,10 @@ async def poll_agent(
                                 f"({approvals_triggered}/{task.expected_approval_count})"
                             )
                             return data, approvals_triggered, approvals_resolved, None
-                        if task.approval_handling == "auto_approve":
+                        if (
+                            task.approval_handling == "auto_approve"
+                            and _should_auto_approve_attention(task, req)
+                        ):
                             if req_id:
                                 if not _phone_approval_matches_callee(task, req):
                                     await respond_to_attention_request(base_url, req_id, "denied")
@@ -2642,6 +2978,8 @@ def evaluate_task(
     # that the approval was actually triggered (the agent won't complete).
     if task.approval_handling == "ignore":
         if approvals_triggered == 0:
+            if task.expected_attention_kinds:
+                return False, f"Expected one of {task.expected_attention_kinds} attention requests (to ignore) but none was triggered"
             if task.expected_attention_kind:
                 return (
                     False,
@@ -2652,6 +2990,11 @@ def evaluate_task(
             benchmark_state = data.get("_benchmark", {})
             if benchmark_state.get("expected_attention_kind_seen") != task.expected_attention_kind:
                 return False, f"Expected {task.expected_attention_kind} attention request but it was not observed"
+        if task.expected_attention_kinds:
+            benchmark_state = data.get("_benchmark", {})
+            observed_kind = benchmark_state.get("attention_request_kind_seen")
+            if observed_kind not in task.expected_attention_kinds:
+                return False, f"Expected one of {task.expected_attention_kinds} attention requests, observed {observed_kind}"
         return True, None
 
     if task.name == CALENDLY_TASK_NAME:
@@ -2672,12 +3015,26 @@ def evaluate_task(
     if task.success_on_payment_card_request:
         benchmark_state = data.get("_benchmark", {})
         if benchmark_state.get("expected_payment_receipt_seen"):
+            lifecycle_error = _validate_payment_lifecycle(task, data)
+            if lifecycle_error:
+                return False, lifecycle_error
             return True, None
         return False, "Expected validated payment-card request but none was observed"
 
     # Agent mode: must complete
     if status != "COMPLETED":
         return False, f"Agent status: {status} (expected COMPLETED)"
+
+    if task.agentcard_setup_action == "complete":
+        benchmark_state = data.get("_benchmark", {})
+        if benchmark_state.get("expected_attention_kinds_seen") != task.expected_attention_kinds:
+            return False, (
+                "AgentCard setup attention sequence mismatch: "
+                f"expected {task.expected_attention_kinds}, got "
+                f"{benchmark_state.get('expected_attention_kinds_seen')}"
+            )
+        if benchmark_state.get("agentcard_setup_attention_auto_resolved") is not True:
+            return False, "AgentCard setup attention did not auto-resolve"
 
     mid_run_schema_failure = _validate_mid_run_feedback_schema(task, data)
     if mid_run_schema_failure:
@@ -2709,6 +3066,10 @@ def evaluate_task(
         passed, reason = _evaluate_agent_payment_result(data)
         if not passed:
             return False, reason
+    if task.expected_payment_lifecycle:
+        lifecycle_error = _validate_payment_lifecycle(task, data)
+        if lifecycle_error:
+            return False, lifecycle_error
     if task.name == GREP_EXPLORE_STRESS_TASK_NAME:
         return True, None
 
@@ -2719,6 +3080,17 @@ def evaluate_task(
         ):
             return True, None
         return False, "Expected approval requests but none were triggered"
+
+    if (
+        task.approval_handling != "count_only"
+        and task.expected_approval_count is not None
+        and approvals_triggered != task.expected_approval_count
+    ):
+        return (
+            False,
+            f"Expected exactly {task.expected_approval_count} approval request(s), "
+            f"observed {approvals_triggered}",
+        )
 
     # Progress score check (verifier gave a score)
     if progress < 0.5:
@@ -3227,16 +3599,17 @@ def _run_gate_fixture(task_name: str, action: str) -> dict:
     return _parse_last_json_line(result.stdout)
 
 
-def _sync_compute_tokens() -> None:
+def _sync_compute_tokens() -> bool:
     """Refresh the compute-token integrations (claude_code / gpt_code + pool)
-    from prod into the isolated benchmark DB. Best-effort but loud: a frozen DB
+    from prod into the isolated benchmark DB. Returns False on any failure so
+    the live-fixture caller can fail closed. A frozen DB
     fixture or whole-DB snapshot restore can leave stale/expired compute tokens,
     which forces the agent's claudeAuth fetch to fail into the paid waterfall.
     Reads the prod source from back-end/.env; writes to the isolated DB."""
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Compute-token sync skipped: local Victoria DB not found")
-        return
+        return False
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
@@ -3251,11 +3624,12 @@ def _sync_compute_tokens() -> None:
         )
     except Exception as exc:
         print(f"    ⚠ Compute-token sync error: {exc}")
-        return
+        return False
     if result.returncode != 0:
         print(f"    ⚠ Compute-token sync failed: {(result.stderr or result.stdout).strip()[:200]}")
-    else:
-        print("    🔑 Refreshed compute tokens from prod")
+        return False
+    print("    🔑 Refreshed compute tokens from prod")
+    return True
 
 
 def _sync_browser_credentials() -> bool:
@@ -3345,17 +3719,20 @@ def _apply_base_live_fixture(ctx: LiveFixtureContext) -> dict:
     overhead — and on a throttled cloud uplink it blows the 180s sync budget,
     stalling agent creation. Compute tokens are still refreshed because WMH
     inference (RoseWMHProvider) and the agent's own LLM waterfall lease them."""
-    _sync_compute_tokens()
+    if not _sync_compute_tokens():
+        raise RuntimeError("Base live fixture could not refresh compute tokens")
     if _is_simulate_mode():
         print("    🌍 simulate mode — skipping browser cookie/password sync (WMH mocks env tools)")
         return {"fixture": "base", "browser_credentials": False}
-    _sync_browser_credentials()
+    if not _sync_browser_credentials():
+        raise RuntimeError("Base live fixture could not refresh browser credentials/auth state")
     return {"fixture": "base", "browser_credentials": True}
 
 
 def _apply_compute_tokens(ctx: LiveFixtureContext) -> dict:
     """Refresh compute tokens without importing any browser authentication state."""
-    _sync_compute_tokens()
+    if not _sync_compute_tokens():
+        raise RuntimeError("Compute-token live fixture could not refresh compute tokens")
     return {"fixture": "compute_tokens"}
 
 
@@ -3375,30 +3752,8 @@ def _apply_amazon_auth(ctx: LiveFixtureContext) -> dict:
     return {"fixture": "amazon_auth", "bundle_count": bundle_count}
 
 
-def _apply_compute_tokens(_ctx: LiveFixtureContext) -> dict:
-    _sync_compute_tokens()
-    return {"fixture": "compute_tokens"}
-
-
 def _apply_amazon_passkey(ctx: LiveFixtureContext) -> dict:
-    database_url = _local_victoria_database_url()
-    if not database_url:
-        raise RuntimeError("Amazon passkey fixture requires a local Victoria database")
-    env = os.environ.copy()
-    env["DATABASE_URL"] = database_url
-    env["DIRECT_URL"] = database_url
-    result = subprocess.run(
-        ["npx", "tsx", "scripts/seed-local.ts", "--passkeys-only"],
-        cwd=REPO_ROOT / "back-end",
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Amazon passkey sync failed: {(result.stderr or result.stdout).strip()[:300]}"
-        )
+    _sync_passkeys()
 
     user = _sql_literal(ctx.user_id)
     realm = _sql_literal(ctx.auth_realm)
@@ -4578,7 +4933,7 @@ def _x_signup_has_account_creation_evidence(signup_text: str) -> bool:
     )
 
 
-def _default_minted_target_url(base_url: str, task_name: str = MINTED_AGENT_ACCOUNT_TASK_NAME) -> str:
+def _default_minted_target_url(base_url: str, task_name: str = MINTED_AGENT_ACCOUNT_X_TASK_NAME) -> str:
     if task_name == MINTED_AGENT_ACCOUNT_X_TASK_NAME:
         return "https://x.com"
     return f"{base_url.rstrip('/')}/api/test/minted-agent-account-fixture?authRealm=m.uber.com"
@@ -4841,6 +5196,9 @@ async def run_minted_agent_account_task(
         prompt=signup_prompt,
         approval_handling=None,
         expected_attention_kind=None,
+        expected_attention_kinds=[],
+        evaluators=[],
+        enforce_declared_evaluators=False,
         timeout_seconds=max(task.timeout_seconds, 900),
     )
     try:
@@ -5072,7 +5430,9 @@ async def run_minted_agent_account_task(
             f"Open {target_url}. Using the already-created Uber account in this browser profile, "
             "start booking an Uber ride. Confirm the page is signed in with the same agent minted "
             f"identity from the first task. {booking_auth_instruction}"
-            "Use any reasonable pickup and destination if the site requires them. Continue until the "
+            "Set the pickup to 88 Howard Street, San Francisco, CA 94105 and the destination to "
+            "FITNESS SF Transbay, 425 Mission Street, San Francisco, CA 94105. Confirm both map pins "
+            "are at those exact addresses and select UberX, not a premium or shared tier. Continue until the "
             "final action would submit, request, confirm, or pay for the ride; "
             "click that final button so the browser write-lock approval request stops you. Do not bypass "
             "or answer approval."
@@ -5084,6 +5444,7 @@ async def run_minted_agent_account_task(
             prompt=booking_prompt,
             approval_handling="ignore",
             expected_attention_kind="write_lock",
+            expected_attention_kinds=[],
             timeout_seconds=max(task.timeout_seconds, 900),
         )
         previous_write_lock = os.environ.get("BENCHMARK_WRITE_LOCK_ENABLED")
@@ -5138,6 +5499,299 @@ async def run_minted_agent_account_task(
         print("    🧹 Preserved AgentIdentity primitive inbox and AgentPhone number")
 
 
+def _declared_evaluator_evidence(data: dict) -> list[dict]:
+    """Build a bounded evidence-only context for a declared LLM judge."""
+    evidence: list[dict] = []
+    for message in (data.get("messages") or [])[-120:]:
+        if not isinstance(message, dict):
+            continue
+        role = str(message.get("role") or "").upper()
+        if role in {"USER", "SYSTEM"}:
+            continue
+        text_value = message.get("text", message.get("content", ""))
+        if not isinstance(text_value, str):
+            text_value = json.dumps(text_value, default=str)
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        evidence.append(
+            {
+                "role": role or "UNKNOWN",
+                "text": text_value[:12000],
+                "metadata": {
+                    key: metadata[key]
+                    for key in (
+                        "action_type",
+                        "toolName",
+                        "toolStatus",
+                        "url",
+                        "title",
+                        "browser_session_metadata",
+                    )
+                    if key in metadata
+                },
+            }
+        )
+    evidence.append({"benchmark_state": data.get("_benchmark", {})})
+    return evidence
+
+
+async def _call_declared_llm_judge(
+    task: BenchmarkTask,
+    evaluator: dict,
+    data: dict,
+) -> dict:
+    """Execute one catalog-declared single-turn judge against grounded run evidence."""
+    from helpers.llm import check_progress
+
+    criteria = "\n".join(f"- {criterion}" for criterion in evaluator.get("criteria", []))
+    verifier_prompt = f"""You are a strict benchmark judge for a live ecommerce transaction.
+
+The task prompt and criteria below describe requirements; they are not evidence. Score exactly 1.0 only
+when every criterion is directly grounded in tool/browser output or typed benchmark state. Otherwise score
+0.0 and explain the first missing or contradicted requirement. An attention request proves only its typed
+terminal gate; it does not prove item, price, date, address, quantity, or selection constraints. Unsupported
+assistant claims are not proof. Authentication assistance, login blockers, missing inventory, and unavailable
+eligible orders fail unless a criterion explicitly defines that state as success.
+
+Task requirement: {task.prompt}
+Criteria:
+{criteria}
+Judge-specific instruction: {evaluator.get('judge_prompt', '')}
+"""
+    evidence = _declared_evaluator_evidence(data)
+    return await check_progress(
+        context=[
+            {
+                "role": "USER",
+                "text": "Evaluate the supplied run evidence against the benchmark requirements.",
+            },
+            {
+                "role": "TOOL",
+                "text": json.dumps(evidence, default=str),
+            },
+        ],
+        verifier_system_prompt=verifier_prompt,
+        response_schema=None,
+        call_site="benchmark_declared_evaluator",
+        agent_id=(data.get("agent") or {}).get("agent_id") or (data.get("agent") or {}).get("id"),
+    )
+
+
+def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
+    """Return distinct browser attempts and grounded failed lifecycle events."""
+    browser_call_ids: set[str] = set()
+    browser_session_ids: set[str] = set()
+    failures: list[str] = []
+    for message in data.get("messages", []) or []:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        candidates = [metadata]
+        if isinstance(metadata.get("auxiliary"), dict):
+            candidates.append(metadata["auxiliary"])
+        for candidate in candidates:
+            tool_name = candidate.get("toolName") or candidate.get("tool_name")
+            is_browser = tool_name == "spawn_browser_agent" or (
+                tool_name == "spawn_agent" and candidate.get("agentType") == "browser"
+            )
+            if not is_browser:
+                continue
+            call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
+            if call_id:
+                browser_call_ids.add(str(call_id))
+            session_id = candidate.get("browser_session_id") or candidate.get("browser_url")
+            if session_id:
+                browser_session_ids.add(str(session_id))
+            status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+            event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+            if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
+                failures.append(
+                    f"{tool_name or 'browser agent'} {call_id or session_id or 'unknown'} "
+                    f"status={status or 'unsuccessful'}"
+                )
+    return max(len(browser_call_ids), len(browser_session_ids)), failures
+
+
+def _tool_runtime_failures(data: dict) -> list[str]:
+    """Return grounded failed tool lifecycle events from the root trajectory."""
+    failures: list[str] = []
+    for message in data.get("messages", []) or []:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        candidates = [metadata]
+        if isinstance(metadata.get("auxiliary"), dict):
+            candidates.append(metadata["auxiliary"])
+        for candidate in candidates:
+            tool_name = candidate.get("toolName") or candidate.get("tool_name")
+            if not tool_name:
+                continue
+            status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
+            event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+            if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
+                call_id = candidate.get("toolCallId") or candidate.get("tool_call_id") or "unknown"
+                failures.append(f"{tool_name} {call_id} status={status or 'unsuccessful'}")
+    return failures
+
+
+_APPROVAL_CLOCK_RE = re.compile(
+    r"(?:\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\b(?:1[0-2]|[1-9])(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)\b)",
+    re.IGNORECASE,
+)
+_APPROVAL_DATE_RE = re.compile(
+    r"(?:\b\d{4}-\d{1,2}-\d{1,2}\b|"
+    r"\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b|"
+    r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)\s+\d{1,2}(?:st|nd|rd|th)?(?:,?\s+\d{4})?\b)",
+    re.IGNORECASE,
+)
+_APPROVAL_AMOUNT_RE = re.compile(
+    r"(?:\$\s*\d+(?:,\d{3})*(?:\.\d{2})?|\bUSD\s*\d+(?:,\d{3})*(?:\.\d{2})?\b|\b\d+(?:\.\d{2})?\s*USD\b)",
+    re.IGNORECASE,
+)
+_APPROVAL_SEAT_RE = re.compile(
+    r"(?:\bseat(?:s)?(?:\s+(?:number|assignment))?\s*[:#-]?\s*[a-z]{1,2}\s*-?\s*\d{1,3}\b|"
+    r"\brow\s+[a-z]{1,2}\s*,?\s+seat\s+\d{1,3}\b|"
+    r'[\"\']seat[\"\']\s*:\s*[\"\']?[a-z]{1,2}\s*-?\s*\d{1,3}\b)',
+    re.IGNORECASE,
+)
+
+
+def _run_declared_static_check(evaluator: dict, data: dict) -> tuple[bool, str]:
+    """Execute the small fail-closed static-check surface used by enforced tasks."""
+    benchmark_state = data.get("_benchmark", {})
+    for check in evaluator.get("checks", []):
+        check_type = check.get("type")
+        if check_type == "expected_payment_receipt":
+            if benchmark_state.get("expected_payment_receipt_seen") is not True:
+                return False, "Expected validated payment receipt was not observed"
+            continue
+        if check_type == "expected_gate":
+            if benchmark_state.get("expected_gate_seen") is not True:
+                return False, "Expected typed gate was not observed"
+            continue
+        if check_type == "no_browser_agent_failures":
+            _, failures = _browser_agent_runtime_facts(data)
+            if failures:
+                return False, f"Observed browser agent failure: {failures[0]}"
+            continue
+        if check_type == "no_tool_failures":
+            failures = _tool_runtime_failures(data)
+            if failures:
+                return False, f"Observed tool failure: {failures[0]}"
+            continue
+        if check_type == "browser_agent_session_count":
+            session_count, _ = _browser_agent_runtime_facts(data)
+            minimum = int(check.get("min", 0))
+            maximum = int(check.get("max", minimum))
+            if not minimum <= session_count <= maximum:
+                return (
+                    False,
+                    f"Browser agent session count was {session_count}; expected {minimum}..{maximum}",
+                )
+            continue
+        if check_type == "agent_status":
+            expected_status = str(check.get("value") or "COMPLETED").upper()
+            observed_status = str((data.get("agent") or {}).get("status") or "UNKNOWN").upper()
+            if observed_status != expected_status:
+                return False, f"Agent status was {observed_status}; expected {expected_status}"
+            continue
+        if check_type == "approval_request_count":
+            expected_count = int(check.get("value", 0))
+            observed_count = int(benchmark_state.get("approvals_triggered", 0))
+            if observed_count != expected_count:
+                return (
+                    False,
+                    f"Approval request count was {observed_count}; expected exactly {expected_count}",
+                )
+            continue
+        if check_type == "approval_request_details":
+            requests = benchmark_state.get("attention_requests_seen") or []
+            required_strings = check.get("required_strings") or []
+            require_date = check.get("require_date") is True
+            minimum_date_count = int(check.get("minimum_date_count", 1 if require_date else 0))
+            require_time = check.get("require_time") is True
+            require_amount = check.get("require_amount") is True
+            require_seat = check.get("require_seat") is True
+            for request in requests:
+                evidence = json.dumps(request, default=str).lower()
+                if not all(str(value).lower() in evidence for value in required_strings):
+                    continue
+                if len(_APPROVAL_DATE_RE.findall(evidence)) < minimum_date_count:
+                    continue
+                if require_time and not _APPROVAL_CLOCK_RE.search(evidence):
+                    continue
+                if require_amount and not _APPROVAL_AMOUNT_RE.search(evidence):
+                    continue
+                if require_seat and not _APPROVAL_SEAT_RE.search(evidence):
+                    continue
+                break
+            else:
+                missing = ", ".join(str(value) for value in required_strings) or "required details"
+                if minimum_date_count == 1:
+                    date_suffix = " and a calendar date"
+                elif minimum_date_count > 1:
+                    date_suffix = f" and {minimum_date_count} calendar dates"
+                else:
+                    date_suffix = ""
+                time_suffix = " and a reservation time" if require_time else ""
+                amount_suffix = " and a monetary amount" if require_amount else ""
+                seat_suffix = " and a seat assignment" if require_seat else ""
+                return False, (
+                    "Approval request did not include "
+                    f"{missing}{date_suffix}{time_suffix}{amount_suffix}{seat_suffix}"
+                )
+            continue
+        return False, f"Unsupported enforced static check: {check_type}"
+    return True, "All declared static checks passed"
+
+
+async def _run_declared_evaluators(
+    task: BenchmarkTask,
+    data: dict,
+) -> tuple[bool, Optional[str], list[dict]]:
+    """Run required catalog evaluators; unsupported/erroring evaluators fail closed."""
+    if not task.enforce_declared_evaluators:
+        return True, None, []
+
+    results: list[dict] = []
+    for evaluator in task.evaluators:
+        evaluator_id = evaluator.get("id", "unnamed")
+        method = evaluator.get("method")
+        usage = None
+        try:
+            if method == "static_check":
+                passed, reasoning = _run_declared_static_check(evaluator, data)
+                score = 1.0 if passed else 0.0
+            elif method == "single_turn_llm_judge":
+                judged = await _call_declared_llm_judge(task, evaluator, data)
+                score = float(judged.get("score", 0.0))
+                reasoning = str(judged.get("reasoning") or "Judge returned no reasoning")
+                usage = judged.get("usage")
+                passed = score >= float(evaluator.get("pass_threshold", 1.0))
+            else:
+                passed = False
+                score = 0.0
+                reasoning = f"Unsupported enforced evaluator method: {method}"
+        except Exception as exc:
+            passed = False
+            score = 0.0
+            reasoning = f"Declared evaluator execution failed: {exc}"
+        result = {
+            "id": evaluator_id,
+            "method": method,
+            "score": score,
+            "passed": passed,
+            "reasoning": reasoning,
+        }
+        if usage is not None:
+            result["usage"] = usage
+        results.append(result)
+        if not passed:
+            return False, f"Declared evaluator {evaluator_id} failed: {reasoning}", results
+    return True, None, results
+
+
 async def run_single_task(
     base_url: str,
     task: BenchmarkTask,
@@ -5149,6 +5803,7 @@ async def run_single_task(
     on_agent_created: Optional[Callable[[str, str], None]] = None,
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
+    _validate_task_target(task, base_url)
     previous_benchmark_user_id = os.environ.get("BENCHMARK_RUN_USER_ID")
     if task.name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
         os.environ["BENCHMARK_RUN_USER_ID"] = _free_credit_subscription_gate_user_id()
@@ -5290,6 +5945,14 @@ async def run_single_task(
         print(f"    🔌 Realtime monitor subscribed to agent:{agent_id[:12]}")
 
     try:
+        setup_fixture_action = _agentcard_setup_fixture_action(task, base_url)
+        if setup_fixture_action == "reset":
+            await configure_benchmark_agentcard_setup(base_url, "reset")
+            print("    🔐 Reset AgentCard setup fixture to connect_required")
+        elif setup_fixture_action == "complete":
+            await configure_benchmark_agentcard_setup(base_url, "complete")
+            print("    🔐 Seeded connected AgentCard sandbox fixture")
+
         if task.name == MESSAGE_PERSON_TASK_NAME:
             await _preflight_message_person_bridge(base_url)
         if task.name == MESSAGE_PERSON_AGENT_SMS_TASK_NAME and (
@@ -5425,6 +6088,19 @@ async def run_single_task(
             # Fallback to agent-level cost fields
             cost_cents = agent.get("tree_cost_cents", 0) or agent.get("tool_cost_cents", 0)
 
+        if task.expected_payment_lifecycle:
+            try:
+                payment_lifecycle = await get_test_payment_lifecycle(base_url, agent_id)
+                data["_benchmark"] = {
+                    **data.get("_benchmark", {}),
+                    "payment_lifecycle": payment_lifecycle,
+                }
+            except Exception as e:
+                data["_benchmark"] = {
+                    **data.get("_benchmark", {}),
+                    "payment_lifecycle_error": str(e),
+                }
+
         tree_stats = await _fetch_tree_stats(base_url, agent_id)
         llm_usage_by_provider = await get_llm_usage_breakdown(base_url, agent_id, tree_stats)
         tree_agent_count = max(tree_agent_count, int(tree_stats.get("agent_count") or 0))
@@ -5543,6 +6219,21 @@ async def run_single_task(
                 passed = False
                 failure_reason = f"User-data prod grep contract check failed: {e}"
 
+        cleanup_lifecycle = await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
+        if cleanup_lifecycle is not None:
+            data["_benchmark"] = {
+                **data.get("_benchmark", {}),
+                "payment_card_request_action": "abandon",
+                "payment_lifecycle": cleanup_lifecycle,
+            }
+            cleanup_error = _validate_payment_lifecycle(task, data)
+            if cleanup_error is not None:
+                passed = False
+                failure_reason = cleanup_error
+        elif task.payment_card_request_action == "abandon":
+            passed = False
+            failure_reason = failure_reason or "payment lifecycle cleanup did not complete"
+
         # Final context well-formedness check
         approval_mode_blocked_on_approval = _approval_mode_allows_open_tool_context(
             task,
@@ -5566,9 +6257,25 @@ async def run_single_task(
             warn_count = len(final_violations) - error_count
             print(f"    Context validation: {error_count} errors, {warn_count} warnings")
 
+        declared_evaluator_results: list[dict] = []
+        if task.enforce_declared_evaluators and passed:
+            evaluator_passed, evaluator_reason, declared_evaluator_results = await _run_declared_evaluators(
+                task,
+                data,
+            )
+            data["_benchmark"] = {
+                **data.get("_benchmark", {}),
+                "declared_evaluator_results": declared_evaluator_results,
+            }
+            if not evaluator_passed:
+                passed = False
+                failure_reason = evaluator_reason
+
         # Collect prod logs for diagnostics
         print("    Collecting prod logs...")
         logs = await collect_logs(agent_id, data, start_time)
+        if declared_evaluator_results:
+            logs["declared_evaluators"] = declared_evaluator_results
         # Capture the FULL agent tree's messages (root + every spawned sub-agent) so
         # the archive can render the fan-out, not just the root. Without this a
         # for_each/spawn benchmark opens to a lone root with no visible tree. Only
@@ -5639,6 +6346,7 @@ async def run_single_task(
             context_violations=context_violation_dicts,
             logs=logs,
             archive_manifest_ref=archive_manifest_ref,
+            payment_lifecycle=(data.get("_benchmark") or {}).get("payment_lifecycle"),
             world_model_fidelity=world_model_fidelity,
             world_model_mode=os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real"),
         )
@@ -5713,6 +6421,7 @@ async def run_single_task(
                 benchmark_status="CANCELLED",
                 failure_reason="Benchmark interrupted; prod logs were collected before shutdown",
             )
+            await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
             try:
                 if not keep_failed_agents:
                     await delete_agent(base_url, agent_id)
@@ -5762,6 +6471,7 @@ async def run_single_task(
                 benchmark_status="ERROR",
                 failure_reason=str(e),
             )
+            await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
             try:
                 if not keep_failed_agents:
                     await delete_agent(base_url, agent_id)
@@ -5823,6 +6533,19 @@ async def run_single_task(
             os.environ["BENCHMARK_RUN_USER_ID"] = previous_benchmark_user_id
 
 
+def _validate_task_target(task: BenchmarkTask, base_url: str) -> None:
+    if task.production_only and _is_local_base_url(base_url):
+        raise RuntimeError(f"{task.name} is production-only; rerun with --prod")
+
+
+def _agentcard_setup_fixture_action(task: BenchmarkTask, base_url: str) -> Optional[str]:
+    if task.agentcard_setup_action == "complete":
+        return "reset"
+    if task.expected_payment_lifecycle and _is_local_base_url(base_url):
+        return "complete"
+    return None
+
+
 # ============================================================
 # Main
 # ============================================================
@@ -5865,7 +6588,7 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
             # The anon/cookie split used to live on dedicated tags; the curated
             # tag vocabulary merged them into `auth`, so the split is by name.
             auth_names = (
-                ("browser-agent", "minted-agent-accounts-uber")
+                ("browser-agent",)
                 if getattr(args, "anon", False)
                 else ("browser-agent-amazon-cookie-payment",)
             )
@@ -5884,6 +6607,8 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
         # entries (missing fixtures/judges) are skipped; explicit --task still targets
         # incomplete agent evals for dev iteration.
         tasks = [t for t in tasks if t.runner == "agent" and t.status == "ready"]
+        if not getattr(args, "prod", False):
+            tasks = [t for t in tasks if not t.production_only]
 
     excluded_names: set[str] = set()
     for value in getattr(args, "exclude_task", []) or []:
@@ -5900,22 +6625,16 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
 
 
 async def _warmup_edge_functions(base_url: str):
-    """Send a small completion request to warm up the local Supabase edge function.
+    """Warm an explicitly configured legacy research edge function.
 
-    The Deno runtime in local Supabase needs to resolve external DNS (OpenRouter,
-    Anthropic, etc.) on the first request. This often fails with 503 "name resolution
-    failed" for the first few seconds. A warmup ensures DNS is cached before
-    benchmarks start — particularly important for chat-mode which has no Temporal
-    activity retries.
+    Research is retired in the standard local stack, where backend port + 3 is now
+    the mac app. Only environments that still configure RESEARCH_PORT have an edge
+    function to warm.
     """
-    # Derive research port from backend port (CONDUCTOR_PORT + 3)
     research_port = os.environ.get("RESEARCH_PORT")
     if not research_port:
-        try:
-            backend_port = int(base_url.rsplit(":", 1)[1].split("/")[0])
-            research_port = str(backend_port + 3)
-        except (ValueError, IndexError):
-            return
+        print("  ⚠ Skipping edge function warmup (RESEARCH_PORT is not configured)")
+        return
 
     completions_url = f"http://localhost:{research_port}/functions/v1/completions"
     anon_key = os.environ.get("SUPABASE_ANON_KEY", os.environ.get("VITE_SUPABASE_ANON_KEY", ""))

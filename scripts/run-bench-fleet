@@ -840,13 +840,13 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
 clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id]; echo target id
     local ledger="$1" source_id="${2:-$WARM_ID}" clone_out clone_status target_id target_name diagnostic_log names_ledger deadline
     local attempt max_attempts retry_delay clone_timeout
-    # Fly clone-from-snapshot occasionally loses a create-volume→launch-VM race
+    # Fly API throttles (resource_exhausted/429) and clone-from-snapshot can lose a create-volume→launch-VM race
     # ("failed to launch VM: volume not found") or leaves the new machine
     # momentarily unlistable — both transient, both fatal to a synchronized
     # 28-wide barrier if a single clone aborts the batch. Retry with backoff
     # (fresh name per attempt; the names-ledger keeps every attempted name so
     # teardown reaps any machine that did materialize — no new leak path).
-    max_attempts="${CLOUDBENCH_CLONE_MAX_ATTEMPTS:-5}"
+    max_attempts="${CLOUDBENCH_CLONE_MAX_ATTEMPTS:-${CLOUDBENCH_CLONE_ATTEMPTS:-5}}"
     retry_delay="${CLOUDBENCH_CLONE_RETRY_SECONDS:-8}"
     # Bound each clone so a hung Fly API call can't freeze the whole loop. A real
     # clone-from-snapshot + --detach returns well under this; 25min+ = hung.

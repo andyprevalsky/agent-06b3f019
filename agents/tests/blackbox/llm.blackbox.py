@@ -1991,6 +1991,56 @@ async def test_call_llm_structured_streaming_happy_path():
     assert detected == []
 
 
+async def test_call_llm_structured_streaming_retries_malformed_output():
+    """A malformed/schema-invalid structured output is re-generated (bounded)."""
+    import httpx
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    def _payload(content: str) -> dict:
+        return {
+            "actual_model": "claude-sonnet-4-6",
+            "pool_name": "test-pool",
+            "pool_size": 1,
+            "choices": [{"delta": {"content": content}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    # First generation is schema-invalid (tool_calls must be a list); the retry
+    # re-generates and parses cleanly.
+    malformed_body = _sse_body([_payload('{"response": "x", "tool_calls": "not-a-list"}')])
+    valid_body = _sse_body([_payload('{"response": "recovered", "tool_calls": []}')])
+
+    call_count = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        body = malformed_body if call_count["n"] == 1 else valid_body
+        return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+
+    AgentAction = create_agent_action_model([])
+
+    async def on_chunk(text: str, tokens: int):
+        pass
+
+    response, _usage, _detected = await call_llm_structured_streaming(
+        messages=[{"role": "user", "content": "hi"}],
+        model="rose-labs/rose-1-lite",
+        temperature=0.7,
+        max_tokens=512,
+        response_model=AgentAction,
+        on_chunk=on_chunk,
+        call_site="test",
+    )
+
+    # Exactly one retry: the malformed first generation re-generated once and parsed.
+    assert call_count["n"] == 2, f"expected one re-generation (2 calls), got {call_count['n']}"
+    assert response.response == "recovered"
+
+
 async def test_call_llm_structured_streaming_model_detected_callback():
     """on_model_detected fires with the actual_model from the first chunk."""
     import httpx
@@ -2907,7 +2957,10 @@ async def test_call_llm_activity_happy_path_with_messages_list():
 
 
 async def test_call_llm_activity_marks_structured_contract_failures_non_retryable():
-    """Malformed structured output must not be multiplied by Temporal retries."""
+    """A malformed structured output is re-generated a bounded number of times
+    in-activity (non-deterministic — a fresh call usually parses); if it still
+    fails, the error is surfaced NON-retryable so Temporal does not additionally
+    multiply it."""
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import call_llm_activity
@@ -2966,7 +3019,9 @@ async def test_call_llm_activity_marks_structured_contract_failures_non_retryabl
     assert error is not None
     assert error.non_retryable is True
     assert error.type == "LLMStructuredOutputError"
-    assert completion_calls == 1
+    # Bounded in-activity re-generation (1 initial + MAX_STRUCTURED_PARSE_RETRIES),
+    # then surfaced non-retryable — so it is not multiplied further by Temporal.
+    assert completion_calls == 3
 
 
 async def test_call_llm_activity_with_agent_id_reads_shared_context():
@@ -5738,6 +5793,10 @@ async def run_all_tests():
         test_build_llm_messages_strips_cloud_agent_lifecycle_tools,
     )
     await r.record_async("call_llm_structured_streaming_happy_path", test_call_llm_structured_streaming_happy_path)
+    await r.record_async(
+        "call_llm_structured_streaming_retries_malformed_output",
+        test_call_llm_structured_streaming_retries_malformed_output,
+    )
     await r.record_async(
         "call_llm_structured_streaming_model_detected_callback",
         test_call_llm_structured_streaming_model_detected_callback,

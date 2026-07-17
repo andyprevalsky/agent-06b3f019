@@ -18,6 +18,8 @@ interface TerminalModalsProps {
     setCreateModalOpen: (v: boolean) => void;
     loginModalOpen: boolean;
     setLoginModalOpen: (v: boolean) => void;
+    loginModalTitle?: string;
+    setLoginModalTitle: (v: string | undefined) => void;
     showCreditModal: boolean;
     setShowCreditModal: (v: boolean) => void;
     showCostLimitModal: boolean;
@@ -46,11 +48,17 @@ export function TerminalModals({ agents }: TerminalModalsProps) {
 
       <PhoneAuthModal
         open={agents.loginModalOpen}
-        onOpenChange={agents.setLoginModalOpen}
+        onOpenChange={(open) => {
+          agents.setLoginModalOpen(open);
+          // Clear any CTA-specific heading (e.g. waitlist) once the modal closes
+          // so the next open falls back to the default copy.
+          if (!open) agents.setLoginModalTitle(undefined);
+        }}
         onAuthComplete={() => {
           void agents.refreshAuthState('phone-auth-modal');
         }}
         anonymousUserId={agents.isAnonymous ? agents.authUser?.id : undefined}
+        title={agents.loginModalTitle}
       />
 
       <SubscriptionModal

@@ -1,4 +1,4 @@
-import { AgentCardProvider } from './agentcard';
+import { AgentCardRoutingProvider } from './agentcard-routing';
 import type { CardProvider, CardProviderDetailsResult } from './types';
 
 export type {
@@ -7,10 +7,13 @@ export type {
   CardProviderMintRequest,
   CardProviderMintResult,
 } from './types';
-export { AgentCardProvider, AgentCardProviderError } from './agentcard';
+export { AgentCardProviderError } from './errors';
+export { AgentCardOrgMcpProvider } from './agentcard-org-mcp';
+export { AgentCardRoutingProvider } from './agentcard-routing';
+export { AgentCardUserMcpProvider } from './agentcard-user-mcp';
 
-export function createCardProvider(): CardProvider {
-  return new AgentCardProvider();
+export function createCardProvider(userId: string): CardProvider {
+  return new AgentCardRoutingProvider(userId);
 }
 
 /** Card statuses (from the provider) where the card is still live and can be reused. */

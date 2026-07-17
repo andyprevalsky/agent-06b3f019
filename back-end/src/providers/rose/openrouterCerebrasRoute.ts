@@ -21,18 +21,24 @@ import type { CompletionOptions, RoseStreamChunk } from './types';
 export const OPENROUTER_CEREBRAS_MODEL = 'z-ai/glm-4.7';
 export const OPENROUTER_CEREBRAS_POOL = 'openrouter-cerebras';
 
-export function buildOpenRouterCerebrasBody(options: CompletionOptions): Record<string, unknown> {
+export function buildOpenRouterCerebrasBody(
+  options: CompletionOptions,
+  opts: { allowProviderFallback?: boolean } = {}
+): Record<string, unknown> {
   return {
     model: OPENROUTER_CEREBRAS_MODEL,
     messages: options.messages,
     stream: true,
     stream_options: { include_usage: true },
     reasoning: { effort: 'none', exclude: true },
-    provider: {
-      only: ['cerebras'],
-      allow_fallbacks: false,
-      require_parameters: true,
-    },
+    // Default (exclusive route): pin to Cerebras — OpenRouter must not silently
+    // serve GLM-4.7 from another host. Fallback mode (`allowProviderFallback`):
+    // still PREFER Cerebras (`order`), but let OpenRouter spill to another
+    // GLM-4.7 provider when Cerebras hits its 5-req/min org cap. Same model,
+    // just not stuck on the capped provider — never a generic model.
+    provider: opts.allowProviderFallback
+      ? { order: ['cerebras'], allow_fallbacks: true, require_parameters: true }
+      : { only: ['cerebras'], allow_fallbacks: false, require_parameters: true },
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.max_tokens !== undefined ? { max_tokens: options.max_tokens } : {}),
     ...(options.response_format ? { response_format: options.response_format } : {}),
@@ -55,9 +61,12 @@ export async function* exclusiveOpenRouterCerebrasCompletion(params: {
   openrouterKey: string;
   requestId: string;
   callSite?: string;
+  allowProviderFallback?: boolean;
 }): AsyncIterable<RoseStreamChunk> {
   const response = await postOpenRouterStream({
-    body: buildOpenRouterCerebrasBody(params.options),
+    body: buildOpenRouterCerebrasBody(params.options, {
+      allowProviderFallback: params.allowProviderFallback,
+    }),
     openrouterKey: params.openrouterKey,
     requestId: params.requestId,
     callSite: params.callSite,

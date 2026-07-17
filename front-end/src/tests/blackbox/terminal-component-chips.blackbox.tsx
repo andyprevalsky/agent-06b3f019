@@ -473,11 +473,14 @@ describe('SubAgentTree', () => {
     treeRef.current = new Map();
   });
 
-  it('returns null when tree has no matching root', () => {
+  // A known sub-agent id with no node data yet (REST snapshot + bus not populated)
+  // stays VISIBLE ("spinning up...") instead of vanishing until refresh.
+  it('shows a pending placeholder for a known sub-agent id with no node data yet', () => {
     const { container } = renderWithProviders(
       <SubAgentTree busId="bus-1" subAgentIds={['missing']} title="t" onNavigate={vi.fn()} />,
     );
-    expect(container.firstChild).toBeNull();
+    expect(container.firstChild).not.toBeNull();
+    expect(container.textContent).toContain('spinning up...');
   });
 
   it('renders a single-depth tree with goal and cost', () => {

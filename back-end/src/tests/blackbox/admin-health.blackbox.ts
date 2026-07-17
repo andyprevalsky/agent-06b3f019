@@ -22,6 +22,7 @@ import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 
 import { findWaitlistSignupsBetween } from '../../domains/admin-health/repo';
+import { isCacheableAdminHealthResponse } from '../../domains/admin-health/service';
 import { prisma } from '../../providers/database';
 config();
 
@@ -442,7 +443,13 @@ async function testAdminHappyWeekly() {
     cachedRes.data,
     'GET /admin-health weekly cached'
   );
-  if (cachedBody.generatedAt !== body.generatedAt) {
+  // The backend only day-caches a fully-ready response (isCacheableAdminHealthResponse):
+  // when a velocity source errors (e.g. no valid GITHUB_TOKEN locally) or revenue is
+  // null, it deliberately evicts the entry so the next request retries the degraded
+  // source. Only assert cache reuse when the response is actually cacheable — in CI
+  // (valid tokens + Stripe) it always is, so this preserves the invariant there while
+  // tolerating a token-degraded local/instrumented backend.
+  if (isCacheableAdminHealthResponse(body) && cachedBody.generatedAt !== body.generatedAt) {
     throw new Error('Same-day weekly requests must reuse the backend day cache');
   }
   const latest = body.series.at(-1);

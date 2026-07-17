@@ -37,10 +37,9 @@ import apiKeysRouter from './domains/api-keys/routes';
 import smsWebhookRouter from './domains/sms-webhook/routes';
 import credentialPropagationRouter from './domains/credential-propagation/routes';
 import purchasesRouter, { agentCardWebhookHandler } from './domains/purchases/routes';
+import agentcardRouter from './domains/agentcard/routes';
 import testPaymentRouter from './domains/test-payment/routes';
 import {
-  PROACTIVE_SMS_CRON_EXPRESSION,
-  PROACTIVE_SMS_TIME_ZONE,
   setSupervisorFixtureOverride,
   clearSupervisorFixtureOverride,
   runProactiveSmsOutreachJob,
@@ -65,11 +64,9 @@ import { tracingMiddleware } from './providers/tracing';
 import { getTemporalClient } from './providers/temporal';
 import { isCorsOriginAllowed, resolveAllowedOrigins } from './providers/corsConfig';
 import { BAZAAR_DESCRIPTION } from './providers/bazaarDescription';
-import cron from 'node-cron';
-import { runGmailSyncJob } from './services/integrations/gmailSync';
-import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaidTransactions';
 import { grep as userDataGrep } from './domains/data/service';
 import { registerUserDataGrep } from './providers/userDataSearch';
+import { registerCronJobs } from './serverCron';
 // x402 payment middleware
 import { paymentMiddleware } from 'x402-express';
 import { facilitator } from '@coinbase/x402';
@@ -505,6 +502,9 @@ app.use('/api/feedback', feedbackRouter);
 app.use('/api/admin-health', adminHealthRouter);
 app.use('/api/data', dataRouter);
 app.use('/api/purchases', purchasesRouter);
+// AgentCard "for companies": org-managed cardholder onboarding plus the optional
+// per-user MCP tool surface. Browser callbacks are public; status/tools require auth.
+app.use('/api/agentcard', agentcardRouter);
 app.use('/api/test-payment', testPaymentRouter);
 app.use('/api/fast-cache', fastCacheRouter); // Fast Mode aggressive cache get/set/purge
 app.use('/api/archive', archiveRouter); // Encrypted trace archive + scoped DB fixtures
@@ -573,69 +573,9 @@ app.listen(PORT, () => {
       error: err instanceof Error ? err.message : String(err),
     });
   });
-  // Contract-test backends should not run unrelated background jobs.
-  if (process.env.DISABLE_GMAIL_SYNC === '1') {
-    createLogger('Cron').info('Gmail sync disabled by DISABLE_GMAIL_SYNC');
-  } else {
-    // Start Gmail sync cron job (every 5 minutes, plus immediate run on startup)
-    const cronLog = createLogger('Cron');
-    const runSync = () => {
-      cronLog.info('Running Gmail sync job...');
-      runGmailSyncJob().catch((err) => {
-        cronLog.error('Gmail sync job error', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-    };
-    runSync();
-    cron.schedule('*/5 * * * *', runSync);
-    cronLog.info('Gmail sync scheduled (every 5 minutes)');
-  }
-
-  if (process.env.DISABLE_PLAID_SYNC === '1') {
-    createLogger('Cron').info('Plaid sync disabled by DISABLE_PLAID_SYNC');
-  } else {
-    const cronLog = createLogger('Cron');
-    const runPlaidSync = () => {
-      cronLog.info('Running Plaid transaction sync job...');
-      runPlaidTransactionSyncJob().catch((err) => {
-        cronLog.error('Plaid transaction sync job error', {
-          error: err instanceof Error ? err.message : String(err),
-        });
-      });
-    };
-    cron.schedule('*/5 * * * *', runPlaidSync);
-    cronLog.info('Plaid transaction sync scheduled (every 5 minutes)');
-  }
-
-  if (!isProduction || process.env.DISABLE_PROACTIVE_SMS === '1') {
-    createLogger('Cron').info('Proactive SMS outreach disabled', {
-      reason: !isProduction ? 'non-production' : 'DISABLE_PROACTIVE_SMS',
-    });
-  } else {
-    const cronLog = createLogger('Cron');
-    const runProactiveOutreach = () => {
-      cronLog.info('Running proactive SMS outreach job...');
-      runProactiveSmsOutreachJobWithLease()
-        .then((result) => {
-          if (!result.acquired) {
-            cronLog.info('Proactive SMS outreach skipped; another replica owns the lease');
-          }
-        })
-        .catch((err) => {
-          cronLog.error('Proactive SMS outreach job error', {
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
-    };
-    cron.schedule(PROACTIVE_SMS_CRON_EXPRESSION, runProactiveOutreach, {
-      timezone: PROACTIVE_SMS_TIME_ZONE,
-    });
-    cronLog.info('Proactive SMS outreach scheduled', {
-      cron: PROACTIVE_SMS_CRON_EXPRESSION,
-      timezone: PROACTIVE_SMS_TIME_ZONE,
-    });
-  }
+  // Contract-test backends should not run unrelated background jobs; each job
+  // self-gates on its DISABLE_* env flag inside registerCronJobs.
+  registerCronJobs(isProduction);
 });
 
 // Graceful shutdown

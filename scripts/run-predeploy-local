@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# Run the catalog's Pre-Deploy/smoke group on the LOCAL isolated benchmark stack
+# (per-run backend + worker + WMH + Postgres on this machine, concurrency 5) and
+# require every task to pass. This is the DEFAULT pre-deploy smoke path: the shared
+# cloud fleet (`run-predeploy-cloud`) leaks paid Fly machines when killed and is
+# frequently rate-limited / volume-capacity-starved, so local is the reliable gate.
+#
+# Smoke task set is derived from `agents/benchmarks/tasks.json` entries tagged
+# `smoke` — identical selection to `run-predeploy-cloud`, so the two paths can
+# never drift. `run-bench --local` exits non-zero unless every requested task
+# passes, so this script IS the gate.
+#
+# Usage:
+#   scripts/run-predeploy-local            # run the smoke group locally
+#   scripts/run-predeploy-local --list     # print the smoke task set and exit
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+read_predeploy_tasks() {
+    python3 - "$ROOT_DIR/agents/benchmarks/tasks.json" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as handle:
+    tasks = json.load(handle)
+for task in tasks:
+    if "smoke" in (task.get("tags") or []):
+        print(task["name"])
+PY
+}
+
+if [ "${1:-}" = "--list" ]; then
+    read_predeploy_tasks
+    exit 0
+fi
+if [ "$#" -ne 0 ]; then
+    echo "usage: scripts/run-predeploy-local [--list]" >&2
+    exit 2
+fi
+
+PREDEPLOY_TASKS=()
+while IFS= read -r task; do
+    [ -n "$task" ] && PREDEPLOY_TASKS+=("$task")
+done < <(read_predeploy_tasks)
+[ "${#PREDEPLOY_TASKS[@]}" -gt 0 ] || { echo "no smoke-tagged benchmark tasks found" >&2; exit 1; }
+
+echo "🧪 Pre-Deploy smoke (LOCAL isolated stack) — ${#PREDEPLOY_TASKS[@]} tasks: ${PREDEPLOY_TASKS[*]}"
+
+# `run-bench --local` spins up the per-run isolated stack, runs the tasks, and
+# exits non-zero unless ALL requested tasks pass.
+#
+# Concurrency: the per-task timeouts in tasks.json are calibrated against the
+# CLOUD fleet, where every bench gets its OWN machine (one agent per box). The
+# local path runs every bench on ONE machine, so at the default concurrency of 5
+# the agents (including two headless-browser tasks) starve each other's CPU and
+# whichever bench is slowest-under-contention overruns its cloud-calibrated
+# timeout — a different bench each run. Capping local concurrency at 2 restores a
+# resource profile close to the calibration (still parallel, ~1 browser task at a
+# time) so the timeouts hold. Override with PREDEPLOY_LOCAL_CONCURRENCY.
+LOCAL_CONCURRENCY="${PREDEPLOY_LOCAL_CONCURRENCY:-2}"
+exec bash "$ROOT_DIR/scripts/run-bench" --local "${PREDEPLOY_TASKS[@]}" \
+    --max-concurrency "$LOCAL_CONCURRENCY"

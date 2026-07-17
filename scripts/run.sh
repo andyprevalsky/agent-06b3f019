@@ -384,8 +384,14 @@ DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
 DB_OWNED_BY_US=false  # Track whether this run started/created the DB.
 DB_OWNED_CONTAINER_ID=""
 USE_SYSTEM_PG=false
+SYSTEM_DB_OWNED_BY_US=false
+LOCAL_DB_NAME="victoria"
+LOCAL_DB_ACTUAL_PORT="$LOCAL_DB_PORT"
+if [ "${ROSE_USE_SYSTEM_PG:-false}" = "true" ]; then
+    USE_SYSTEM_PG=true
+fi
 
-if $DOCKER_OK; then
+if $DOCKER_OK && ! $USE_SYSTEM_PG; then
     # ── Docker path (macOS / Linux with working Docker) ──
     if ! docker ps &>/dev/null 2>&1; then
         if [ -d "/Applications/Docker.app" ]; then
@@ -465,7 +471,12 @@ else
     # ── System Postgres fallback (no Docker) ──
     USE_SYSTEM_PG=true
     SYSTEM_PG_PORT=5432
-    LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$SYSTEM_PG_PORT/victoria"
+    LOCAL_DB_ACTUAL_PORT="$SYSTEM_PG_PORT"
+    if [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && [ -n "${BENCHMARK_RUN_ID:-}" ]; then
+        SAFE_BENCHMARK_RUN_ID=$(printf '%s' "$BENCHMARK_RUN_ID" | tr -c '[:alnum:]' '_')
+        LOCAL_DB_NAME="victoria_bench_${SAFE_BENCHMARK_RUN_ID}"
+    fi
+    LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$SYSTEM_PG_PORT/$LOCAL_DB_NAME"
 
     if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
         echo "🐘 System Postgres already running on port $SYSTEM_PG_PORT"
@@ -492,9 +503,16 @@ else
             sleep 1
         done
     fi
-    # Ensure victoria DB exists (idempotent)
-    PGPASSWORD=postgres psql -h localhost -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='victoria'" 2>/dev/null \
-        | grep -q 1 || PGPASSWORD=postgres createdb -h localhost -U postgres victoria 2>/dev/null || true
+    if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+        PGPASSWORD=postgres dropdb -h localhost -U postgres --if-exists "$LOCAL_DB_NAME" >/dev/null 2>&1 || true
+        PGPASSWORD=postgres createdb -h localhost -U postgres "$LOCAL_DB_NAME"
+        SYSTEM_DB_OWNED_BY_US=true
+        DB_OWNED_BY_US=true
+        echo "🐘 Created isolated system database $LOCAL_DB_NAME"
+    else
+        PGPASSWORD=postgres psql -h localhost -U postgres -tc "SELECT 1 FROM pg_database WHERE datname='$LOCAL_DB_NAME'" 2>/dev/null \
+            | grep -q 1 || PGPASSWORD=postgres createdb -h localhost -U postgres "$LOCAL_DB_NAME" 2>/dev/null || true
+    fi
 fi
 
 # Fast Mode cache is intentionally shared across local/dev/prod so recorded runs
@@ -567,10 +585,10 @@ echo "🔎 Ensuring agent-network grep indexes..."
 
 # Seed local DB if dev user doesn't exist yet (full prod sync in scripts/setup-db.sh)
 if $DOCKER_OK && ! $USE_SYSTEM_PG; then
-    USER_EXISTS=$(docker exec "$DB_CONTAINER" psql -U postgres -d victoria -tAc \
+    USER_EXISTS=$(docker exec "$DB_CONTAINER" psql -U postgres -d "$LOCAL_DB_NAME" -tAc \
       "SELECT COUNT(*) FROM \"User\" WHERE \"userId\" = '1f85ff25-6e29-4c1b-8739-f917bd101a30'" 2>/dev/null | tr -d ' ' || echo "0")
 else
-    USER_EXISTS=$(PGPASSWORD=postgres psql -h localhost -U postgres -d victoria -tAc \
+    USER_EXISTS=$(PGPASSWORD=postgres psql -h localhost -U postgres -d "$LOCAL_DB_NAME" -tAc \
       "SELECT COUNT(*) FROM \"User\" WHERE \"userId\" = '1f85ff25-6e29-4c1b-8739-f917bd101a30'" 2>/dev/null | tr -d ' ' || echo "0")
 fi
 if [ "$USER_EXISTS" = "0" ]; then
@@ -864,6 +882,7 @@ write_services_manifest() {
     SERVICE_NAMES="$names_csv" SERVICE_PIDS="$pids_csv" SERVICE_STATUS="$SERVICE_STATUS" \
         BENCHMARK_MODE="$BENCHMARK_MODE" DB_CONTAINER="$DB_CONTAINER" \
         DB_VOLUME="$DB_VOLUME" DB_OWNED_BY_US="$DB_OWNED_BY_US" USE_SYSTEM_PG="$USE_SYSTEM_PG" \
+        LOCAL_DB_NAME="$LOCAL_DB_NAME" LOCAL_DB_ACTUAL_PORT="$LOCAL_DB_ACTUAL_PORT" \
         WMH_MANIFEST_PORT="${WMH_MANIFEST_PORT:-0}" WMH_MANIFEST_URL="${WMH_MANIFEST_URL:-}" \
         WMH_MANIFEST_MODEL_NAME="${WMH_MANIFEST_MODEL_NAME:-}" \
         RUN_SH_PID="$$" RUN_CONTEXT_DIR="$RUN_CONTEXT_DIR" python3 - <<'PY'
@@ -928,6 +947,8 @@ data = {
             "volume": os.environ.get("DB_VOLUME", ""),
             "owned_by_run_sh": os.environ.get("DB_OWNED_BY_US", "false").lower() == "true",
             "use_system_postgres": os.environ.get("USE_SYSTEM_PG", "false").lower() == "true",
+            "name": os.environ.get("LOCAL_DB_NAME", "victoria"),
+            "port": env_int("LOCAL_DB_ACTUAL_PORT"),
             "runtime_port": 5432
             if os.environ.get("USE_SYSTEM_PG", "false").lower() == "true"
             else env_int("LOCAL_DB_PORT"),
@@ -1127,6 +1148,9 @@ cleanup() {
         run_cleanup_owned_db_container \
             "$DB_OWNED_CONTAINER_ID" "$DB_CONTAINER" "$DB_VOLUME" "$BENCHMARK_ISOLATED_RUN"
     fi
+    if $USE_SYSTEM_PG && $SYSTEM_DB_OWNED_BY_US; then
+        PGPASSWORD=postgres dropdb -h localhost -U postgres --if-exists "$LOCAL_DB_NAME" >/dev/null 2>&1 || true
+    fi
     SERVICE_STATUS=stopped
     write_services_manifest || true
     [ -n "$NGROK_CONFIG_FILE" ] && rm -f "$NGROK_CONFIG_FILE"
@@ -1171,6 +1195,9 @@ else
 fi
 export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
 export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
+export BACKEND_LOG_FILE="${BACKEND_LOG_FILE:-$PWD/back-end/backend-logs.log}"
+export FRONTEND_LOG_FILE="${FRONTEND_LOG_FILE:-$PWD/front-end/frontend-logs.log}"
+export NAVI_WORKER_LOG_FILE="${NAVI_WORKER_LOG_FILE:-$PWD/agents/navi-worker-log.txt}"
 
 export BACKEND_LOG_FILE="${BACKEND_LOG_FILE:-$PWD/back-end/backend-logs.log}"
 export FRONTEND_LOG_FILE="${FRONTEND_LOG_FILE:-$PWD/front-end/frontend-logs.log}"
@@ -1212,9 +1239,11 @@ else
 fi
 PIDS+=($!); NAMES+=("back-end")
 
-# Front-end is always launched — benchmark mode needs it for semantic tests
-# (Chrome CDP drives a real browser against the dev server in parallel with smoke).
-if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+# Front-end is always launched. Public payment benchmarks use a production bundle
+# so the cloud browser does not fetch the Vite development module graph over ngrok.
+if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
+    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_BACKEND_API_URL=$PUBLIC_BASE_URL npx vite build > "$FRONTEND_LOG_FILE" 2>&1 && npx vite preview --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE" 2>&1' &
+elif [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
     run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_DEV_PORT=$FRONTEND_PORT npx vite > "$FRONTEND_LOG_FILE" 2>&1' &
 else
     run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee "$FRONTEND_LOG_FILE"' &

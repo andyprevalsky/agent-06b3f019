@@ -11,6 +11,7 @@ export {
   createAgentBatchTransaction,
   updateAgent,
   failAgentIfStillActive,
+  clearWorkflowForTerminalAgent,
   softDeleteAgent,
   deleteAttentionRequests,
   createGithubRepoAccess,

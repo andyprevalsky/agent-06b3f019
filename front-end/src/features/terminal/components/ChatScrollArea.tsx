@@ -76,6 +76,7 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
                     currentMessageIndex={opening.currentMessageIndex}
                     animationPhase={opening.animationPhase}
                     revealProgress={opening.revealProgress}
+                    onJoinWaitlist={a.handleJoinWaitlist}
                   />
                 )
               ) : null}

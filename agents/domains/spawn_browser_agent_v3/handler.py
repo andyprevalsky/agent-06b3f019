@@ -81,7 +81,6 @@ from .repo import (
     fetch_session_info,
     init_browser_session,
     inject_local_storage,
-    list_session_files,
     propagate_browser_run_credentials,
     report_claude_token_rate_limited,
     resume_browser_session,
@@ -92,10 +91,13 @@ from .repo import (
 )
 from .service import (
     AuthRuntimeState,
+    append_completion_evidence,
     build_action_titles,
     build_auth_assistance_resume_user_message,
+    build_best_effort_response,
     build_browser_dynamic_system_context,
     build_browser_task_prompt,
+    build_browser_verifier_context,
     build_context_summary,
     build_usage_items,
     extract_session_files,
@@ -106,6 +108,7 @@ from .service_actions import (
     execute_action,
     get_domain_from_url,
     get_element_description,
+    wait_for_navigation_ready,
 )
 from .service_crypto import (
     ExtractedOTP,
@@ -125,6 +128,27 @@ from .types import ClaudeTokenState
 logger = structlog.get_logger()
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 _background_browser_cleanup_tasks: set[asyncio.Task] = set()
+
+
+def _normalize_payment_card_last4(value: Any) -> Optional[str]:
+    if isinstance(value, str) and re.fullmatch(r"\d{4}", value):
+        return value
+    return None
+
+
+def _build_payment_card_verifier_evidence(last4: Any) -> Optional[Dict[str, Any]]:
+    safe_last4 = _normalize_payment_card_last4(last4)
+    if safe_last4 is None:
+        return None
+    return {
+        "role": "TOOL",
+        "text": f"Approved one-time payment card last four: {safe_last4}",
+        "metadata": {
+            "toolName": "payment_card_ready",
+            "toolStatus": "FINISHED",
+            "paymentCardLast4": safe_last4,
+        },
+    }
 
 
 async def record_used_passkey_credentials(
@@ -1470,7 +1494,7 @@ async def _perform_generic_browser_recovery(
             current_url = getattr(input_page, "url", "") or ""
             if current_url.startswith(("http://", "https://")):
                 await asyncio.wait_for(
-                    input_page.reload(wait_until="domcontentloaded", timeout=int(timeout_s * 1000)),
+                    input_page.reload(),
                     timeout=timeout_s + 2,
                 )
                 actions.append("reload")
@@ -2109,6 +2133,52 @@ async def _install_fast_mode_network_cache(
     context.on("response", lambda r: asyncio.ensure_future(_record(r)))
 
 
+async def _finalize_kernel_replay_for_fe(
+    *,
+    browser_recorder: BrowserAgentRecorder,
+    agent_id: str,
+    task_id: str,
+    browser_url: Optional[str],
+    browser_session_metadata: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    """Stop Kernel's native replay and write the FE-visible recording message.
+
+    System context:
+    Kernel replay (start at session setup) -> stop + hosted view URL -> DB tool
+    message -> BrowserAgentChip Recording tab. No screenshot frames, no Supabase
+    upload: the video is stored by Kernel and the FE iframes `recording_view_url`.
+    """
+    view_url = await browser_recorder.stop_kernel_replay()
+    if not view_url:
+        logger.warning(
+            "Kernel replay finalized without a view URL; no recording message",
+            agent_id=agent_id,
+            task_id=task_id,
+        )
+        return None
+    await save_browser_action_message(
+        agent_id=agent_id,
+        title="Browser recording saved",
+        task_id=task_id,
+        message="Browser session replay recorded (Kernel).",
+        status=MessageStatus.FINISHED,
+        browser_url=browser_url or "",
+        action_type="recording",
+        tool_call_id=str(uuid_module.uuid4()),
+        extra_metadata={
+            "recording_view_url": view_url,
+            "browser_session_metadata": browser_session_metadata,
+        },
+    )
+    logger.info(
+        "Kernel replay recording message saved",
+        agent_id=agent_id,
+        task_id=task_id,
+        has_view_url=bool(view_url),
+    )
+    return {"recording_view_url": view_url}
+
+
 async def _finalize_browser_recording_for_fe(
     *,
     browser_recorder: BrowserAgentRecorder,
@@ -2128,6 +2198,18 @@ async def _finalize_browser_recording_for_fe(
     """
     if not task_id:
         return None
+
+    # Kernel-native replay: reuse Kernel's stored video replay + hosted view URL
+    # instead of uploading a self-contained HTML player to (flaky) Supabase. The
+    # FE iframes `recording_view_url` directly (see BrowserAgentChip).
+    if getattr(browser_recorder, "uses_kernel_replay", False):
+        return await _finalize_kernel_replay_for_fe(
+            browser_recorder=browser_recorder,
+            agent_id=agent_id,
+            task_id=task_id,
+            browser_url=browser_url,
+            browser_session_metadata=browser_session_metadata,
+        )
 
     cleanup_local_artifacts = False
     try:
@@ -2578,6 +2660,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     resume_step_count: int = 0
     auth_assistance_resume_mode: Optional[str] = None
     resume_user_messages: List[Dict[str, str]] = []
+    payment_card_last4: Optional[str] = None
     if write_lock_resume_state:
         pending_write_lock_action = write_lock_resume_state.get("pending_action")
         write_lock_approvals = write_lock_resume_state.get("write_lock_approvals", {})
@@ -2585,6 +2668,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         session_id = write_lock_resume_state.get("session_id") or session_id
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
         auth_realm = write_lock_resume_state.get("auth_realm") or auth_realm
+        payment_card_last4 = _normalize_payment_card_last4(
+            write_lock_resume_state.get("payment_card_last4")
+        )
         if write_lock_resume_state.get("approval_type") == "auth_assistance":
             resume_user_messages.append(
                 build_auth_assistance_resume_user_message(
@@ -2642,9 +2728,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     passkey_ref_by_credential_id: Dict[str, Dict[str, str]] = {}
     recorded_passkey_credential_ids: set[str] = {
         credential_id
-        for credential_id in (write_lock_resume_state or {}).get(
-            "recorded_passkey_credential_ids", []
-        )
+        for credential_id in (write_lock_resume_state or {}).get("recorded_passkey_credential_ids", [])
         if isinstance(credential_id, str) and credential_id
     }
 
@@ -3434,8 +3518,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 if browser_recorder:
                     await browser_recorder.mark(f"Navigated -> {nav_url[:80]}", action="goto")
 
+            async def _wait_for_start_url_ready():
+                t = time.monotonic()
+                await wait_for_navigation_ready(dom_service, url=nav_url)
+                _record_timing("navigation.wait_ready", t)
+
             await asyncio.gather(
                 _inject_start_url_local_storage(),
+                _wait_for_start_url_ready(),
                 save_browser_action_message(
                     agent_id=agent_id,
                     title=f"Navigated \u2192 {nav_url[:50]}",
@@ -4082,120 +4172,15 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         tool_call_id=verifier_call_id,
                     )
 
-                    action_entries = action_history.get_entries()[-30:]
-                    action_details_lines = []
-                    for entry in action_entries:
-                        step = entry.get("step", "?")
-                        ea = entry.get("action", "unknown")
-                        er = entry.get("result", {})
-                        esuccess = er.get("success", False)
-                        estatus = "\u2705 Success" if esuccess else f"\u274c Failed: {er.get('error', 'unknown')}"
-
-                        line = f"Step {step}: {ea} - {estatus}"
-                        if ea == "screenshot" and esuccess:
-                            line += " (visible viewport capture)"
-                        eparams = entry.get("params", {})
-                        if eparams:
-                            display_params = {k: v for k, v in eparams.items() if k not in ["screenshot", "dom_tree"]}
-                            if display_params:
-                                line += f"\n  Params: {display_params}"
-                        display_result = {
-                            k: v for k, v in er.items() if k not in ["success", "error", "screenshot", "dom_tree"]
-                        }
-                        if display_result:
-                            line += f"\n  Result: {display_result}"
-                        action_details_lines.append(line)
-
-                    actions_text = "\n\n".join(action_details_lines)
-
-                    page_stats = browser_state.get("page_stats", {})
-                    scroll_pos = browser_state.get("scroll_position", {})
-                    pages_above = scroll_pos.get("pages_above", 0)
-                    total_pages = scroll_pos.get("total_pages", 1)
-
-                    # C10: Browser verifier infers from action_history + final-state
-                    # ground truth. Multi-step browser tasks would balloon if we
-                    # stuffed every step's DOM into the verifier prompt; instead
-                    # we pass the action history (which logs URL transitions and
-                    # tool inputs/outputs), the final-state DOM, and the final-state
-                    # screenshot reference. The verifier reconstructs the journey
-                    # from action_history and grounds the answer in the FINAL state.
-                    #
-                    # Browser-sourced ground truth lives in the user prompt, not
-                    # a TOOL message. LLM-generated tool results (e.g. `extract`)
-                    # are reward-hackable; the DOM tree comes straight from
-                    # DOMService and is the only safe substrate for verifying a
-                    # claimed answer.
-                    dom_tree = browser_state.get("dom_tree", "") or ""
-                    final_screenshot_b64 = browser_state.get("screenshot")
-                    session_files = await list_session_files(config, session_id)
-                    files_text = "Downloaded Files in Session:\n"
-                    if session_files:
-                        for f in session_files:
-                            files_text += f"  - {f.get('path', 'unknown')} ({f.get('size', 0)} bytes)\n"
-                    else:
-                        files_text += "  (no files downloaded)\n"
-
-                    user_prompt = (
-                        f"Goal: {goal}\n\n"
-                        "## Browser Ground Truth (FINAL STATE)\n"
-                        "Read the DOM independently and decide whether the goal is satisfied. "
-                        "Do NOT rely on what the agent reported — only on what the page actually shows. "
-                        "The action_history below shows the URL transitions taken to reach this final state.\n\n"
-                        f"URL: {current_url}\n"
-                        f"Title: {browser_state.get('title', 'Unknown')}\n"
-                        f"Interactive Elements: {page_stats.get('interactive', 0)}\n"
-                        f"Scroll Position: Page {pages_above + 1} of {total_pages}\n\n"
-                        "### DOM Tree (browser-extracted final-state page content)\n"
-                        f"{dom_tree}"
+                    verifier_context = await build_browser_verifier_context(
+                        goal=goal,
+                        current_url=current_url,
+                        browser_state=browser_state,
+                        action_history=action_history,
+                        config=config,
+                        session_id=session_id,
+                        payment_card_evidence=_build_payment_card_verifier_evidence(payment_card_last4),
                     )
-
-                    # C11: the final-state screenshot rides through to the
-                    # verifier as a multimodal image content block. The DOM
-                    # tree (in user_prompt above) remains the source of truth;
-                    # the image is supplementary. Wiring lives in
-                    # helpers/llm.py:build_verifier_context_messages — when
-                    # `metadata.screenshot_b64` is present on a TOOL message,
-                    # it's flushed as `{type: image, source: {type: base64,
-                    # media_type, data}}` instead of being inlined as text.
-                    verifier_context = [
-                        {"role": "USER", "text": user_prompt},
-                        {
-                            "role": "TOOL",
-                            "text": f"Browser Agent Execution Log ({len(action_entries)} actions shown — URL transitions, tool inputs/outputs):\n\n{actions_text}",
-                            "metadata": {
-                                "toolName": "action_history",
-                                "toolStatus": "FINISHED",
-                            },
-                        },
-                        {
-                            "role": "TOOL",
-                            "text": files_text,
-                            "metadata": {
-                                "toolName": "session_files",
-                                "toolStatus": "FINISHED",
-                            },
-                        },
-                        # Final-state screenshot — emitted as a multimodal
-                        # image block by build_verifier_context_messages when
-                        # screenshot_b64 is set in metadata. Body text stays
-                        # short (no b64 inlining).
-                        {
-                            "role": "TOOL",
-                            "text": (
-                                "Final-state screenshot attached (b64-encoded PNG of "
-                                "the entire scrollable page). Treat the DOM tree above as "
-                                "ground truth; the screenshot is supplementary."
-                                if final_screenshot_b64
-                                else "No final-state screenshot included; DOM tree is the verifier ground truth."
-                            ),
-                            "metadata": {
-                                "toolName": "final_screenshot",
-                                "toolStatus": "FINISHED",
-                                "screenshot_b64": final_screenshot_b64 or "",
-                            },
-                        },
-                    ]
 
                     verifier_prompt = build_verifier_prompt(
                         response_schema=transform_schema_for_remote_session(response_schema)
@@ -4334,6 +4319,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             visited_urls=visited_urls,
                             reasoning_messages=reasoning_messages,
                             action_summary=action_summary,
+                        )
+                        context_message = append_completion_evidence(
+                            context_message,
+                            browser_url=current_url,
+                            structured_response=structured_response,
                         )
 
                         await save_browser_action_message(
@@ -4890,6 +4880,89 @@ Based on this feedback, I need to continue working on the task and address the i
         # Max iterations reached
         logger.warning(f"Max iterations reached: {MAX_ITERATIONS}")
 
+        # Final synthesis pass — mirror run_agent's max-iterations handling
+        # (loop/run_agent.py:1889). A browser sub-agent that exhausts its step
+        # budget without ever calling attempt_completion would otherwise hand
+        # the parent structured_response=None. Run the verifier one last time
+        # against final-state ground truth to salvage partial structured data,
+        # so the parent receives best-effort output instead of an empty payload.
+        # Must run BEFORE the session is closed (verifier reads session files).
+        # Guarded: any failure leaves structured_response unchanged (no worse
+        # than before) and never blocks the terminal return.
+        if latest_structured_response is None and response_schema and dom_service:
+            try:
+                # Re-read the FINAL-state DOM before grading: browser_state was
+                # captured before the last action, so verifying against it evaluates
+                # stale ground truth and can misreport a last-step completion. Fall
+                # back to the last-known state if the refresh fails.
+                try:
+                    browser_state = await asyncio.wait_for(
+                        dom_service.get_browser_state(include_screenshot=False),
+                        timeout=10,
+                    )
+                    current_url = browser_state.get("url", current_url) or current_url
+                except Exception:
+                    pass
+                if not browser_state:
+                    raise RuntimeError("no browser_state available for final verifier pass")
+                final_verifier_context = await build_browser_verifier_context(
+                    goal=goal,
+                    current_url=current_url,
+                    browser_state=browser_state,
+                    action_history=action_history,
+                    config=config,
+                    session_id=session_id,
+                )
+                final_verifier_prompt = build_verifier_prompt(
+                    response_schema=transform_schema_for_remote_session(response_schema)
+                )
+                final_progress = await call_temporal_activity_from_activity(
+                    check_progress,
+                    args=[
+                        final_verifier_context,
+                        final_verifier_prompt,
+                        VERIFIER_ULTRA_MODEL,
+                        transform_schema_for_remote_session(response_schema),
+                        token_state.access_token,
+                        "verifier_browser_max_steps",
+                        agent_id,
+                        None,
+                        None,
+                        user_id,
+                        gpt_token,
+                        gpt_account_id,
+                        gpt_token_source,
+                        gpt_token_pool_id,
+                        user_id,
+                        None,
+                        None,
+                        (
+                            {
+                                "browser_recording_manifest_path": str(browser_recorder.output_dir / "manifest.json"),
+                                "browser_recording_path": str(browser_recorder.output_dir / "index.html"),
+                                "browser_recording_task_id": browser_recorder.task_id,
+                                "browser_session_metadata": browser_session_metadata,
+                            }
+                            if browser_recorder
+                            else None
+                        ),
+                    ],
+                    start_to_close_timeout=timedelta(seconds=VERIFIER_ULTRA_TIMEOUT_SECONDS),
+                )
+                fv_usage = final_progress.get("usage", {})
+                fv_model = fv_usage.get("actual_model", "")
+                if not (str(fv_model).endswith("-claude") or str(fv_model).endswith("-gpt")):
+                    total_input_tokens += fv_usage.get("prompt_tokens", 0)
+                    total_output_tokens += fv_usage.get("completion_tokens", 0)
+                if final_progress.get("structured_response") is not None:
+                    latest_structured_response = final_progress["structured_response"]
+            except Exception as final_verifier_error:
+                logger.warning(
+                    "[BrowserAgent] Final max-steps verifier pass failed; returning best-effort text only",
+                    agent_id=agent_id,
+                    error=extract_error_message(final_verifier_error),
+                )
+
         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
         dom_service = None
         await close_browser_session(config, session_id, pause=False)
@@ -4927,6 +5000,16 @@ Based on this feedback, I need to continue working on the task and address the i
             message=context_message,
         )
 
+        # Best-effort answer — mirror run_agent's best_effort_response
+        # (loop/run_agent.py). Surfaces the agent's last synthesized reasoning
+        # as usable output so a runaway that never called attempt_completion
+        # still returns something the parent can act on, not an empty payload.
+        best_effort_response = build_best_effort_response(
+            reasoning_messages=reasoning_messages,
+            action_summary=action_summary,
+            visited_urls=visited_urls,
+        )
+
         return {
             "status": "max_iterations",
             "success": False,
@@ -4935,6 +5018,7 @@ Based on this feedback, I need to continue working on the task and address the i
             "usage_items": usage_items,
             "execution_time_ms": execution_time_ms,
             "structured_response": latest_structured_response,
+            "best_effort_response": best_effort_response,
         }
 
     except asyncio.CancelledError:
@@ -5319,9 +5403,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "session_id": result.get("session_id"),
                             "cdp_url": result.get("cdp_url"),
                             "task_id": result.get("task_id"),
-                            "recorded_passkey_credential_ids": result.get(
-                                "recorded_passkey_credential_ids", []
-                            ),
+                            "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                         }
 
                         logger.info(
@@ -5374,7 +5456,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         build_payment_question,
                         normalize_payment_payload,
                     )
-                    from tools.request_user_approval import request_user_approval_direct
+                    from tools.request_user_approval import (
+                        request_user_approval_direct,
+                        request_user_attention_direct,
+                    )
 
                     logger.info(
                         "Browser payment approval started",
@@ -5388,6 +5473,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         result.get("payment_request", {}),
                         workflow_instance.user_id or "",
                     )
+                    # Link the purchase to this agent. main's normalize_payment_payload
+                    # intentionally omits agentId from the fingerprint (user-scoped
+                    # idempotent reuse), but the purchase row still needs the agentId so
+                    # the lifecycle lookup (findLatestPurchaseLifecycleByAgentId) and
+                    # session-end cleanup can find it. Set it after normalize so the
+                    # fingerprint stays user-scoped.
                     payment_payload["agentId"] = workflow_instance.agent_id
                     logger.info(
                         "Browser payment payload normalized",
@@ -5431,12 +5522,182 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             attention_request_id=approval_response.get("attention_request_id"),
                         )
 
-                    card = await workflow.execute_activity(
-                        "mint_purchase_card_activity",
-                        args=[workflow_instance.user_id or "", payment_payload],
-                        start_to_close_timeout=timedelta(seconds=90),
-                        retry_policy=RetryPolicy(maximum_attempts=1),
-                    )
+                    async def mint_payment_card() -> Dict[str, Any]:
+                        return await workflow.execute_activity(
+                            "mint_purchase_card_activity",
+                            args=[workflow_instance.user_id or "", payment_payload],
+                            start_to_close_timeout=timedelta(seconds=90),
+                            retry_policy=RetryPolicy(maximum_attempts=1),
+                        )
+
+                    async def create_agentcard_setup_attention(
+                        setup_card: Dict[str, Any],
+                    ) -> Dict[str, Any]:
+                        setup_action = setup_card.get("setupAction") or "connect_agentcard"
+                        connect_url = setup_card.get("connectUrl") or ""
+                        agentcard_status = setup_card.get("agentcardStatus") or "setup_required"
+                        setup_url = setup_card.get("setupUrl") or setup_card.get("checkoutUrl") or ""
+                        primary_setup_url = setup_url or connect_url
+                        setup_title = "One Time Agent Payment Setup"
+                        setup_question = (
+                            "One Time Agent Payment Setup is required before I can issue "
+                            "the one-time payment card for your approved purchase."
+                        )
+                        if primary_setup_url:
+                            setup_question = (
+                                f"{setup_question}\n\nOpen this setup link:\n{primary_setup_url}"
+                            )
+                        setup_question = (
+                            f"{setup_question}\n\nAfter setup is complete, return to Rose "
+                            "and I will retry the payment automatically."
+                        )
+                        setup_attention = await request_user_attention_direct(
+                            workflow_instance,
+                            question=setup_question,
+                            title=setup_title,
+                            metadata={
+                                "attentionKind": f"agentcard_user_{agentcard_status}",
+                                "toolName": "spawn_browser_agent",
+                                "task_id": result.get("task_id"),
+                                "action_type": f"agentcard_user_{agentcard_status}",
+                                "agentCardSetup": {
+                                    "status": agentcard_status,
+                                    "setupAction": setup_action,
+                                    "connectUrl": connect_url,
+                                    "setupUrl": primary_setup_url,
+                                    "setupTool": setup_card.get("setupTool"),
+                                    "setupStatus": setup_card.get("setupStatus"),
+                                    "setupSessionId": setup_card.get("setupSessionId"),
+                                    "title": setup_title,
+                                },
+                                "requestPaymentCard": payment_payload,
+                                "previousPaymentApprovalAttentionRequestId": approval_response.get(
+                                    "attention_request_id"
+                                ),
+                            },
+                            sms_event_type="agentcard_setup",
+                            sms_payload={
+                                "setup_url": primary_setup_url,
+                                "agentcard_status": agentcard_status,
+                            },
+                        )
+                        return {
+                            "setup_action": setup_action,
+                            "connect_url": connect_url,
+                            "agentcard_status": agentcard_status,
+                            "primary_setup_url": primary_setup_url,
+                            "setup_title": setup_title,
+                            "setup_question": setup_question,
+                            "setup_attention": setup_attention,
+                            "setup_card": setup_card,
+                        }
+
+                    card = await mint_payment_card()
+                    waited_for_agentcard_setup = False
+                    while card.get("status") == "agentcard_setup_required":
+                        setup_info = await create_agentcard_setup_attention(card)
+                        logger.info(
+                            "Created AgentCard setup attention request",
+                            agentcard_status=setup_info["agentcard_status"],
+                            setup_action=setup_info["setup_action"],
+                            attention_request_id=setup_info["setup_attention"].get(
+                                "attention_request_id"
+                            ),
+                        )
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title=setup_info["setup_title"],
+                            message=setup_info["setup_question"],
+                            status=MessageStatus.FINISHED,
+                            metadata={
+                                "toolName": "spawn_browser_agent",
+                                "task_id": result.get("task_id"),
+                                "action_type": f"agentcard_user_{setup_info['agentcard_status']}",
+                                "agentCardSetup": {
+                                    "status": setup_info["agentcard_status"],
+                                    "setupAction": setup_info["setup_action"],
+                                    "connectUrl": setup_info["connect_url"],
+                                    "setupUrl": setup_info["primary_setup_url"],
+                                    "setupTool": card.get("setupTool"),
+                                    "setupStatus": card.get("setupStatus"),
+                                    "setupSessionId": card.get("setupSessionId"),
+                                },
+                                "agentCardSetupAttentionRequestId": setup_info[
+                                    "setup_attention"
+                                ].get("attention_request_id"),
+                                "previousPaymentApprovalAttentionRequestId": approval_response.get(
+                                    "attention_request_id"
+                                ),
+                            },
+                        )
+
+                        if waited_for_agentcard_setup:
+                            return
+
+                        waited_for_agentcard_setup = True
+                        connect_deadline = workflow.now() + timedelta(minutes=10)
+                        agentcard_status_result: Dict[str, Any] = {"connected": False}
+                        while workflow.now() < connect_deadline:
+                            agentcard_status_result = await workflow.execute_activity(
+                                "agentcard_status_activity",
+                                args=[workflow_instance.user_id or ""],
+                                start_to_close_timeout=timedelta(seconds=30),
+                                retry_policy=RetryPolicy(maximum_attempts=3),
+                            )
+                            if agentcard_status_result.get("connected"):
+                                break
+                            await workflow.sleep(5)
+
+                        if not agentcard_status_result.get("connected"):
+                            logger.info(
+                                "Timed out waiting for AgentCard setup",
+                                agentcard_status=setup_info["agentcard_status"],
+                                attention_request_id=setup_info["setup_attention"].get(
+                                    "attention_request_id"
+                                ),
+                            )
+                            return
+
+                        logger.info(
+                            "AgentCard setup completed; retrying card mint",
+                            attention_request_id=setup_info["setup_attention"].get(
+                                "attention_request_id"
+                            ),
+                        )
+                        setup_attention_id = setup_info["setup_attention"].get(
+                            "attention_request_id"
+                        )
+                        if setup_attention_id:
+                            await workflow.execute_activity(
+                                "resolve_attention_request_activity",
+                                args=[
+                                    workflow_instance.user_id or "",
+                                    setup_attention_id,
+                                    "AgentCard setup completed.",
+                                ],
+                                start_to_close_timeout=timedelta(seconds=30),
+                                retry_policy=RetryPolicy(maximum_attempts=3),
+                            )
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title="Agent payment setup complete",
+                            message="Agent payment setup is complete. Retrying the one-time payment card.",
+                            status=MessageStatus.FINISHED,
+                            metadata={
+                                "toolName": "spawn_browser_agent",
+                                "task_id": result.get("task_id"),
+                                "action_type": "agentcard_user_setup_completed",
+                                "agentCardSetup": {
+                                    "status": "connected",
+                                    "previousStatus": setup_info["agentcard_status"],
+                                },
+                                "agentCardSetupAttentionRequestId": setup_attention_id,
+                                "previousPaymentApprovalAttentionRequestId": approval_response.get(
+                                    "attention_request_id"
+                                ),
+                            },
+                        )
+                        card = await mint_payment_card()
 
                     # Subscription gate: minting real money requires an active
                     # plan. If the backend says so, raise a subscription gate
@@ -5475,12 +5736,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             return
 
                         # Resolved — retry the mint now that the user has subscribed.
-                        card = await workflow.execute_activity(
-                            "mint_purchase_card_activity",
-                            args=[workflow_instance.user_id or "", payment_payload],
-                            start_to_close_timeout=timedelta(seconds=90),
-                            retry_policy=RetryPolicy(maximum_attempts=1),
-                        )
+                        card = await mint_payment_card()
                         if card.get("status") == "subscription_required":
                             yield ToolEvent(
                                 type=EventType.POST_MESSAGE,
@@ -5524,12 +5780,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             )
                             return
 
-                        card = await workflow.execute_activity(
-                            "mint_purchase_card_activity",
-                            args=[workflow_instance.user_id or "", payment_payload],
-                            start_to_close_timeout=timedelta(seconds=90),
-                            retry_policy=RetryPolicy(maximum_attempts=1),
-                        )
+                        card = await mint_payment_card()
                         if card.get("status") == "kyc_required":
                             yield ToolEvent(
                                 type=EventType.POST_MESSAGE,
@@ -5575,6 +5826,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "cdp_url": result.get("cdp_url"),
                         "task_id": result.get("task_id"),
                         "payment_card_refs": payment_card_refs,
+                        "payment_card_last4": _normalize_payment_card_last4(card.get("last4")),
                         "recorded_passkey_credential_ids": result.get(
                             "recorded_passkey_credential_ids", []
                         ),
@@ -5675,9 +5927,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "handoff_mode": result.get("handoff_mode"),
                         "task_id": result.get("task_id"),
                         "auth_realm": result.get("auth_realm"),
-                        "recorded_passkey_credential_ids": result.get(
-                            "recorded_passkey_credential_ids", []
-                        ),
+                        "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
 
                     yield ToolEvent(
@@ -5741,10 +5991,25 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     "taskId": result.get("task_id"),
                     "resumeMode": result.get("auth_assistance_resume_mode"),
                 }
+            # Surface the max-steps best-effort salvage to the parent. Without this
+            # the activity's best_effort_response is dropped at the manager boundary
+            # and a runaway that never called attempt_completion returns only the
+            # generic "max steps" notice. Fold it into the message when there's no
+            # clean structured completion; always expose it in metadata.
+            final_message = result.get("message", "")
+            best_effort_response = result.get("best_effort_response")
+            if best_effort_response:
+                final_metadata["best_effort_response"] = best_effort_response
+                if result.get("structured_response") is None:
+                    final_message = (
+                        f"{final_message}\n\n{best_effort_response}"
+                        if final_message
+                        else best_effort_response
+                    )
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="Browser automation complete",
-                message=result.get("message", ""),
+                message=final_message,
                 status=final_status,
                 metadata=final_metadata,
                 data={"usage": tool_usage},

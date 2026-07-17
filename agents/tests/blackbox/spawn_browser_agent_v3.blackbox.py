@@ -195,6 +195,147 @@ def test_verifier_activity_timeout_allows_llm_call():
     assert VERIFIER_ULTRA_TIMEOUT_SECONDS == STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
 
+# ============================================================================
+# RCA repro — browser agent returns BEST-EFFORT results at max steps
+# ----------------------------------------------------------------------------
+# Bug (before): when the browser sub-agent exhausted its step budget WITHOUT
+# ever calling attempt_completion, handler.py's max_iterations exit returned
+# `structured_response=None` and had no best-effort field at all — the parent
+# got an empty payload, unlike run_agent (loop/run_agent.py) and the explore
+# agent, which both surface a last-synthesized answer + a final verifier pass.
+#
+# Fix (after): the max_iterations exit now (1) runs a final verifier pass
+# (reusing build_browser_verifier_context) to salvage partial structured data
+# into structured_response, and (2) returns build_best_effort_response(...) as
+# `best_effort_response`, mirroring run_agent's best_effort_response.
+#
+# These tests are the regression guard: on the pre-fix code the two helpers
+# don't exist (ImportError) and the guarantees below don't hold.
+# ============================================================================
+
+
+def test_max_steps_best_effort_prefers_last_reasoning():
+    """Best-effort answer = the agent's most recent synthesized reasoning.
+
+    Mirrors run_agent's best_effort_response (last ASSISTANT text). Without
+    this, a runaway that never called attempt_completion returns nothing usable.
+    """
+    from domains.spawn_browser_agent_v3.service import build_best_effort_response
+
+    out = build_best_effort_response(
+        reasoning_messages=["Opened the site", "Found the item; it costs $42.00"],
+        action_summary=["navigate", "click"],
+        visited_urls=["https://shop.example/item"],
+    )
+    assert out == "Found the item; it costs $42.00"
+
+
+def test_max_steps_best_effort_skips_blank_reasoning():
+    """Blank/whitespace-only trailing reasoning is skipped for the last real one."""
+    from domains.spawn_browser_agent_v3.service import build_best_effort_response
+
+    out = build_best_effort_response(
+        reasoning_messages=["Real synthesized answer", "   ", ""],
+        action_summary=[],
+        visited_urls=[],
+    )
+    assert out == "Real synthesized answer"
+
+
+def test_max_steps_best_effort_falls_back_to_actions_then_url():
+    """With no reasoning captured, fall back to the action trail, then the URL —
+    never an empty payload while ANY evidence exists."""
+    from domains.spawn_browser_agent_v3.service import build_best_effort_response
+
+    from_actions = build_best_effort_response(
+        reasoning_messages=[],
+        action_summary=["navigate to shop", "click add-to-cart"],
+        visited_urls=["https://shop.example/cart"],
+    )
+    assert "click add-to-cart" in from_actions
+    assert from_actions.strip() != ""
+
+    from_url = build_best_effort_response(
+        reasoning_messages=[],
+        action_summary=[],
+        visited_urls=["https://shop.example/checkout"],
+    )
+    assert "https://shop.example/checkout" in from_url
+
+
+def test_max_steps_best_effort_empty_only_when_no_evidence():
+    """Empty string only when the agent accumulated zero evidence at all."""
+    from domains.spawn_browser_agent_v3.service import build_best_effort_response
+
+    assert build_best_effort_response([], [], []) == ""
+    assert build_best_effort_response(None, None, None) == ""
+
+
+async def test_browser_verifier_context_grounds_in_final_state():
+    """The extracted verifier-context builder (shared by attempt_completion AND
+    the new max-steps final synthesis pass) grounds in final-state DOM +
+    screenshot + action history, so the salvage verifier gets real evidence."""
+    from domains.spawn_browser_agent_v3 import service as bsvc
+
+    class _FakeHistory:
+        def get_entries(self):
+            return [
+                {"step": 1, "action": "navigate", "result": {"success": True}},
+                {"step": 2, "action": "extract", "result": {"success": True, "value": "$42.00"}},
+            ]
+
+    browser_state = {
+        "dom_tree": "<html>Price: $42.00</html>",
+        "screenshot": "ZmFrZS1iNjQ=",
+        "title": "Item Page",
+        "page_stats": {"interactive": 3},
+        "scroll_position": {"pages_above": 0, "total_pages": 1},
+    }
+
+    with patch.object(bsvc, "list_session_files", AsyncMock(return_value=[])):
+        ctx = await bsvc.build_browser_verifier_context(
+            goal="find the item price",
+            current_url="https://shop.example/item",
+            browser_state=browser_state,
+            action_history=_FakeHistory(),
+            config=SimpleNamespace(),
+            session_id="sess-1",
+        )
+
+    roles = [m["role"] for m in ctx]
+    assert roles[0] == "USER"
+    tool_names = [m["metadata"]["toolName"] for m in ctx if m["role"] == "TOOL"]
+    assert tool_names == ["action_history", "session_files", "final_screenshot"]
+    # Ground truth (DOM) lives in the USER message, not an LLM-generated TOOL result.
+    assert "$42.00" in ctx[0]["text"]
+    assert "FINAL STATE" in ctx[0]["text"]
+    # Final-state screenshot rides through as a multimodal image reference.
+    screenshot_msg = next(m for m in ctx if m.get("metadata", {}).get("toolName") == "final_screenshot")
+    assert screenshot_msg["metadata"]["screenshot_b64"] == "ZmFrZS1iNjQ="
+
+
+def test_max_steps_return_declares_best_effort_and_final_verifier():
+    """The max_iterations exit must wire the best-effort field AND run the final
+    verifier salvage — guards against a silent revert of the RCA fix. Asserts on
+    the compiled source of the exact terminal branch (no live browser needed)."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    src = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    # Locate the max_iterations terminal return block.
+    marker = 'logger.warning(f"Max iterations reached: {MAX_ITERATIONS}")'
+    assert marker in src
+    tail = src[src.index(marker) :]
+    tail = tail[: tail.index('"status": "max_iterations"') + 400]
+    # (1) final synthesis pass reusing the shared verifier context builder
+    assert "build_browser_verifier_context" in tail
+    assert "check_progress" in tail
+    # (2) best-effort payload surfaced on the terminal return
+    assert "build_best_effort_response" in tail
+    assert '"best_effort_response": best_effort_response' in tail
+
+
 def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
     """Outer watchdogs must not cancel queued browser-use EventBus requests."""
     from domains.spawn_browser_agent_v3.config import (
@@ -210,6 +351,7 @@ def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
 
 def test_browser_task_prompt_does_not_duplicate_system_prompt():
     from domains.spawn_browser_agent_v3.service import (
+        append_completion_evidence,
         build_browser_dynamic_system_context,
         build_browser_task_prompt,
     )
@@ -248,6 +390,18 @@ def test_browser_task_prompt_does_not_duplicate_system_prompt():
     assert "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__" in messages[0]["content"]
     assert "# Dynamic Context" not in messages[0]["content"]
     assert "Use saved auth if available" in messages[0]["content"]
+
+    payment_summary = append_completion_evidence(
+        "**Status**: SUCCESS",
+        browser_url="https://rose-guangzhou.ngrok.app/test_payment/confirmation/tp_123",
+        structured_response={
+            "order_confirmation_id": "tp_123",
+            "purchased_product_names": ["Aurora Notebook", "Ceramic Mug", "Canvas Tote"],
+        },
+    )
+    assert "Payment confirmed" in payment_summary
+    assert "Order ID: tp_123" in payment_summary
+    assert "Aurora Notebook, Ceramic Mug, Canvas Tote" in payment_summary
 
 
 async def test_browser_agent_recording_writes_local_html_replay():
@@ -490,6 +644,150 @@ async def test_browser_agent_recording_start_failure_is_best_effort():
             os.environ.pop("BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL", None)
         else:
             os.environ["BROWSER_AGENT_RECORDINGS_CLEANUP_LOCAL"] = previous_cleanup
+
+
+class _FakeReplayResponse:
+    def __init__(self, json_data, status=200):
+        self._json = json_data
+        self.status_code = status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+    def json(self):
+        return self._json
+
+
+class _FakeReplayClient:
+    """Stands in for Kernel's replay REST API (POST start / POST stop / GET list)."""
+
+    def __init__(self, calls, *, fail_start=False):
+        self._calls = calls
+        self._fail_start = fail_start
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, headers=None, json=None):
+        self._calls.append(("POST", url))
+        if url.endswith("/stop"):
+            return _FakeReplayResponse({})
+        # start (POST /browsers/{id}/replays)
+        if self._fail_start:
+            raise RuntimeError("kernel replay start unavailable")
+        return _FakeReplayResponse(
+            {"replay_id": "rep-1", "replay_view_url": "https://kernel.example/replays?jwt=START"}
+        )
+
+    async def get(self, url, headers=None):
+        self._calls.append(("GET", url))
+        return _FakeReplayResponse(
+            [{"replay_id": "rep-1", "replay_view_url": "https://kernel.example/replays?jwt=FINAL"}]
+        )
+
+
+def _kernel_replay_env():
+    """Set env for kernel-replay mode; returns a restore() to reset it."""
+    keys = ["BROWSER_AGENT_KERNEL_REPLAY", "KERNEL_API_KEY", "KERNEL_API_BASE_URL"]
+    previous = {k: os.environ.get(k) for k in keys}
+    os.environ["BROWSER_AGENT_KERNEL_REPLAY"] = "1"
+    os.environ["KERNEL_API_KEY"] = "test-kernel-key"
+    os.environ["KERNEL_API_BASE_URL"] = "https://kernel.example"
+
+    def restore():
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    return restore
+
+
+async def test_browser_agent_kernel_replay_uses_native_recording():
+    """Kernel sessions reuse Kernel's native replay: start/stop the replay via
+    REST, surface a hosted recording_view_url, and DON'T screenshot every frame."""
+    from unittest import mock
+
+    from domains.spawn_browser_agent_v3 import recording as recording_module
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    restore = _kernel_replay_env()
+    calls: list = []
+    try:
+        with mock.patch.object(
+            recording_module.httpx,
+            "AsyncClient",
+            lambda *a, **k: _FakeReplayClient(calls),
+        ):
+            recorder = await BrowserAgentRecorder.create(
+                page=object(),  # replay mode needs no screenshot-capable page
+                agent_id="agent-1",
+                task_id="task-1",
+                session_id="kernel-session-1",
+                browser_url="https://kernel.example/live/xyz",
+                session_metadata={"provider": "kernel"},
+            )
+            assert recorder is not None
+            assert recorder.uses_kernel_replay is True
+            assert recorder._kernel_replay_id == "rep-1"
+            assert recorder.recording_view_url == "https://kernel.example/replays?jwt=START"
+            assert ("POST", "https://kernel.example/browsers/kernel-session-1/replays") in calls
+
+            # Screenshot/observation capture is a no-op in replay mode.
+            recorder.set_cursor(10, 20)
+            await recorder.mark("clicked", action="click", metadata={"step": 1})
+            await recorder.capture("idle", action="idle")
+            assert recorder.frames == []
+            assert recorder.cursor_events == []
+
+            view_url = await recorder.stop_kernel_replay()
+            assert view_url == "https://kernel.example/replays?jwt=FINAL"
+            assert recorder.recording_view_url == "https://kernel.example/replays?jwt=FINAL"
+            assert (
+                "POST",
+                "https://kernel.example/browsers/kernel-session-1/replays/rep-1/stop",
+            ) in calls
+            assert ("GET", "https://kernel.example/browsers/kernel-session-1/replays") in calls
+    finally:
+        restore()
+
+
+async def test_browser_agent_kernel_replay_start_failure_yields_no_recording():
+    """If starting the Kernel replay fails, the run proceeds with no recording
+    (we intentionally do NOT fall back to the dropped screenshot+Supabase path)."""
+    from unittest import mock
+
+    from domains.spawn_browser_agent_v3 import recording as recording_module
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    restore = _kernel_replay_env()
+    calls: list = []
+    try:
+        with mock.patch.object(
+            recording_module.httpx,
+            "AsyncClient",
+            lambda *a, **k: _FakeReplayClient(calls, fail_start=True),
+        ):
+            recorder = await BrowserAgentRecorder.create(
+                page=object(),
+                agent_id="agent-1",
+                task_id="task-1",
+                session_id="kernel-session-1",
+                browser_url="",
+                session_metadata={"provider": "kernel"},
+            )
+            # Kernel replay start failed → create() returns None: no recorder, no
+            # recording. We intentionally do NOT leave a half-initialized screenshot
+            # recorder (frames dir never created), whose finalization would then try
+            # to write the final frame to a nonexistent directory.
+            assert recorder is None
+    finally:
+        restore()
 
 
 def test_browser_agent_recording_prod_default_uses_writable_temp_root():
@@ -5843,9 +6141,7 @@ async def test_passkey_usage_is_recorded_once_before_browser_task_completion():
     """A sign-counter advance must be durable before approvals pause the browser task."""
     from domains.spawn_browser_agent_v3 import handler
 
-    dom_service = SimpleNamespace(
-        get_used_passkey_credential_ids=AsyncMock(return_value=["amazon-credential"])
-    )
+    dom_service = SimpleNamespace(get_used_passkey_credential_ids=AsyncMock(return_value=["amazon-credential"]))
     recorded_credential_ids: set[str] = set()
 
     with patch.object(
@@ -5855,9 +6151,7 @@ async def test_passkey_usage_is_recorded_once_before_browser_task_completion():
     ) as save_ref:
         first = await handler.record_used_passkey_credentials(
             dom_service=dom_service,
-            passkey_ref_by_credential_id={
-                "amazon-credential": {"kind": "passkey", "id": "passkey-row"}
-            },
+            passkey_ref_by_credential_id={"amazon-credential": {"kind": "passkey", "id": "passkey-row"}},
             recorded_credential_ids=recorded_credential_ids,
             agent_id="agent-1",
             task_id="task-1",
@@ -5865,9 +6159,7 @@ async def test_passkey_usage_is_recorded_once_before_browser_task_completion():
         )
         second = await handler.record_used_passkey_credentials(
             dom_service=dom_service,
-            passkey_ref_by_credential_id={
-                "amazon-credential": {"kind": "passkey", "id": "passkey-row"}
-            },
+            passkey_ref_by_credential_id={"amazon-credential": {"kind": "passkey", "id": "passkey-row"}},
             recorded_credential_ids=recorded_credential_ids,
             agent_id="agent-1",
             task_id="task-1",
@@ -5892,9 +6184,7 @@ async def test_passkey_usage_retries_after_credential_ref_write_failure():
     """A failed outcome write must not suppress the next observation's retry."""
     from domains.spawn_browser_agent_v3 import handler
 
-    dom_service = SimpleNamespace(
-        get_used_passkey_credential_ids=AsyncMock(return_value=["amazon-credential"])
-    )
+    dom_service = SimpleNamespace(get_used_passkey_credential_ids=AsyncMock(return_value=["amazon-credential"]))
     recorded_credential_ids: set[str] = set()
 
     with patch.object(
@@ -5904,9 +6194,7 @@ async def test_passkey_usage_retries_after_credential_ref_write_failure():
     ) as save_ref:
         first = await handler.record_used_passkey_credentials(
             dom_service=dom_service,
-            passkey_ref_by_credential_id={
-                "amazon-credential": {"kind": "passkey", "id": "passkey-row"}
-            },
+            passkey_ref_by_credential_id={"amazon-credential": {"kind": "passkey", "id": "passkey-row"}},
             recorded_credential_ids=recorded_credential_ids,
             agent_id="agent-1",
             task_id="task-1",
@@ -5914,9 +6202,7 @@ async def test_passkey_usage_retries_after_credential_ref_write_failure():
         )
         second = await handler.record_used_passkey_credentials(
             dom_service=dom_service,
-            passkey_ref_by_credential_id={
-                "amazon-credential": {"kind": "passkey", "id": "passkey-row"}
-            },
+            passkey_ref_by_credential_id={"amazon-credential": {"kind": "passkey", "id": "passkey-row"}},
             recorded_credential_ids=recorded_credential_ids,
             agent_id="agent-1",
             task_id="task-1",
@@ -5954,9 +6240,7 @@ def test_passkey_usage_is_sampled_before_every_terminal_browser_disconnect():
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
     post_injection = source.split("# ===== PHASE 3: POST-SETUP =====", maxsplit=1)[1]
     lines = post_injection.splitlines()
-    capture_disconnects = [
-        line for line in lines if "await disconnect_browser_after_passkey_capture(" in line
-    ]
+    capture_disconnects = [line for line in lines if "await disconnect_browser_after_passkey_capture(" in line]
 
     assert len(capture_disconnects) == 8
     assert not any("await dom_service.disconnect()" in line for line in lines)
@@ -5971,13 +6255,9 @@ def test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary():
     activity_source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
     manager_source = inspect.getsource(handler.SpawnBrowserAgentManagerV3.execute_tool)
 
-    assert activity_source.count(
-        '"recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids)'
-    ) == 3
-    assert manager_source.count(
-        '"recorded_passkey_credential_ids": result.get('
-    ) == 3
-    assert '(write_lock_resume_state or {}).get(' in activity_source
+    assert activity_source.count('"recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids)') == 3
+    assert manager_source.count('"recorded_passkey_credential_ids": result.get(') == 3
+    assert "(write_lock_resume_state or {}).get(" in activity_source
     assert '"recorded_passkey_credential_ids", []' in activity_source
 
 
@@ -6022,6 +6302,7 @@ async def test_execute_click_with_element_humanizer_missing_coords_refuses_fallb
     session.highlight_interaction_element = AsyncMock()
     dom = MagicMock()
     dom.get_element_coordinates = AsyncMock(return_value=None)
+    dom.get_browser_state = AsyncMock()
     element = MagicMock()
     element.get_all_children_text = MagicMock(return_value="hi")
     ah = MagicMock()
@@ -6048,6 +6329,41 @@ async def test_execute_click_with_element_humanizer_missing_coords_refuses_fallb
     assert "Cannot humanize click" in out["error"]
     hu.click_at_coords.assert_not_called()
     session.event_bus.dispatch.assert_not_called()
+
+
+async def test_execute_click_with_element_humanizer_refreshes_stale_coordinates():
+    from domains.spawn_browser_agent_v3.service_actions import _execute_click
+
+    session = MagicMock()
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_element_coordinates = AsyncMock(side_effect=[None, (44, 55)])
+    dom.get_browser_state = AsyncMock()
+    element = MagicMock()
+    element.get_all_children_text = MagicMock(return_value="Pay $43.96")
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+
+    out = await _execute_click(
+        session=session,
+        dom_service=dom,
+        action_history=ah,
+        element=element,
+        index=21,
+        coords=None,
+        thinking=None,
+        humanizer=hu,
+        write_lock_enabled=False,
+        write_lock_approvals=None,
+        current_url="https://example.com/test_payment",
+        system_name="Rose",
+    )
+
+    assert out == {"success": True, "message": ""}
+    dom.get_browser_state.assert_awaited_once_with(include_screenshot=False)
+    hu.click_at_coords.assert_awaited_once_with(44, 55)
 
 
 async def test_execute_click_with_coords_no_humanizer():
@@ -6429,6 +6745,65 @@ async def test_execute_input_text_element_with_humanizer():
     hu.type_text.assert_awaited_once_with("hello")
 
 
+async def test_is_payment_field_uses_dom_attributes_without_get_page():
+    from browser_tools.write_lock import is_payment_field
+
+    session = SimpleNamespace()
+    element = SimpleNamespace(
+        attributes={
+            "id": "card-expiry",
+            "autocomplete": "cc-exp",
+            "placeholder": "MM/YY",
+        }
+    )
+
+    assert await is_payment_field(session, element, 1) is True
+
+
+async def test_execute_input_text_element_humanizer_refreshes_dom_when_coords_missing():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_browser_state = AsyncMock(return_value={})
+    dom.get_element_coordinates = AsyncMock(side_effect=[None, (7, 8)])
+    element = MagicMock()
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+
+    with patch(
+        "browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)
+    ):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=1,
+            coords=None,
+            params={"text": "hello"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs=None,
+            password_origins=None,
+            current_url="https://x.com",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    dom.get_browser_state.assert_awaited_once_with(include_screenshot=False)
+    assert dom.get_element_coordinates.await_count == 2
+    hu.click_at_coords.assert_awaited_once_with(7, 8)
+    hu.type_text.assert_awaited_once_with("hello")
+
+
 async def test_execute_input_text_element_humanizer_missing_coords_refuses_typetext_fallback():
     from domains.spawn_browser_agent_v3 import service_actions
 
@@ -6468,6 +6843,347 @@ async def test_execute_input_text_element_humanizer_missing_coords_refuses_typet
     hu.click_at_coords.assert_not_called()
     hu.type_text.assert_not_called()
     session.event_bus.dispatch.assert_not_called()
+
+
+async def test_execute_input_text_payment_secret_ref_bypasses_payment_warning():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_element_coordinates = AsyncMock(return_value=(11, 12))
+    element = MagicMock()
+    element.tag_name = "input"
+    element.attributes = {"autocomplete": "cc-number"}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+
+    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=8,
+            coords=None,
+            params={"text": "card_number"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={
+                "card_number": "4111111111111111",
+                "card_name": "Rose Labs",
+                "card_expiry": "12/30",
+                "card_cvv": "123",
+            },
+            password_origins=None,
+            current_url="https://checkout.example.com/pay",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    assert out["typed_text"] == "[encrypted_data]"
+    hu.click_at_coords.assert_awaited_once_with(11, 12)
+    hu.type_text.assert_awaited_once_with("4111111111111111")
+
+
+async def test_execute_input_text_payment_secret_ref_direct_fill_sets_exact_value():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    page = MagicMock()
+    page.evaluate = AsyncMock(
+        return_value={
+            "filled": True,
+            "x": 222,
+            "y": 333,
+            "selector": 'input[autocomplete="cc-number"]',
+            "valueLength": 16,
+        }
+    )
+    session = _fake_session_with_event_bus()
+    session.get_page = AsyncMock(return_value=page)
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_element_coordinates = AsyncMock(return_value=(11, 12))
+    element = MagicMock()
+    element.tag_name = "input"
+    element.attributes = {"autocomplete": "cc-number"}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+
+    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=8,
+            coords=None,
+            params={"text": "card_number"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={
+                "card_number": "4111111111111111",
+                "card_name": "Rose Labs",
+                "card_expiry": "12/30",
+                "card_cvv": "123",
+            },
+            password_origins=None,
+            current_url="https://checkout.example.com/pay",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    assert out["typed_text"] == "[encrypted_data]"
+    assert out["payment_ref_direct_fill"] is True
+    assert out["payment_refs_filled"] == ["card_number", "card_name", "card_expiry", "card_cvv"]
+    assert page.evaluate.await_count == 4
+    payloads = [call.args[1] for call in page.evaluate.await_args_list]
+    assert payloads == [
+        {"refName": "card_number", "value": "4111111111111111"},
+        {"refName": "card_name", "value": "Rose Labs"},
+        {"refName": "card_expiry", "value": "12/30"},
+        {"refName": "card_cvv", "value": "123"},
+    ]
+    hu.click_at_coords.assert_not_called()
+    hu.press_key.assert_not_called()
+    hu.type_text.assert_not_called()
+    ah.record_action.assert_awaited_once()
+    recorded = ah.record_action.await_args.kwargs
+    assert recorded["coordinates"] == {"x": 222, "y": 333}
+    assert recorded["result"]["payment_ref_direct_fill"] is True
+    assert recorded["result"]["payment_refs_filled"] == [
+        "card_number",
+        "card_name",
+        "card_expiry",
+        "card_cvv",
+    ]
+
+
+async def test_execute_input_text_payment_secret_ref_waits_for_page_ready_before_retry():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    page = MagicMock()
+    page.evaluate = AsyncMock(
+        side_effect=[
+            {"filled": False, "reason": "field_not_found"},
+            {
+                "filled": True,
+                "x": 222,
+                "y": 333,
+                "selector": 'input[autocomplete="cc-number"]',
+                "valueLength": 16,
+            },
+            {"filled": True, "x": 223, "y": 334, "selector": "input#card-name"},
+            {"filled": True, "x": 224, "y": 335, "selector": "input#card-expiry"},
+            {"filled": True, "x": 225, "y": 336, "selector": "input#card-cvv"},
+        ]
+    )
+    session = _fake_session_with_event_bus()
+    session.get_page = AsyncMock(return_value=page)
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_element_coordinates = AsyncMock(return_value=None)
+    element = MagicMock()
+    element.tag_name = "input"
+    element.attributes = {"autocomplete": "cc-number"}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+
+    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)), patch.object(
+        service_actions,
+        "wait_for_navigation_ready",
+        AsyncMock(return_value={"ready": True, "reason": "content_present"}),
+    ) as wait_ready:
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=8,
+            coords=None,
+            params={"text": "card_number"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={
+                "card_number": "4111111111111111",
+                "card_name": "Rose Labs",
+                "card_expiry": "12/30",
+                "card_cvv": "123",
+            },
+            password_origins=None,
+            current_url="https://checkout.example.com/pay",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    assert out["payment_ref_direct_fill"] is True
+    assert out["payment_refs_filled"] == ["card_number", "card_name", "card_expiry", "card_cvv"]
+    wait_ready.assert_awaited_once_with(
+        dom,
+        url="https://checkout.example.com/pay",
+        timeout_seconds=3.0,
+        reload_blank_spa_once=True,
+    )
+    assert page.evaluate.await_count == 5
+    hu.click_at_coords.assert_not_called()
+    hu.type_text.assert_not_called()
+
+
+async def test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_without_page():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    cdp_client = MagicMock()
+    cdp_client.send.Runtime.evaluate = AsyncMock(
+        return_value={
+            "result": {
+                "value": {
+                    "filled": True,
+                    "x": 444,
+                    "y": 555,
+                    "selector": 'input#card-name',
+                    "valueLength": 9,
+                }
+            }
+        }
+    )
+    cdp_session = SimpleNamespace(cdp_client=cdp_client, session_id="cdp-1")
+    session = _fake_session_with_event_bus()
+    session.get_or_create_cdp_session = AsyncMock(return_value=cdp_session)
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_element_coordinates = AsyncMock(return_value=None)
+    element = MagicMock()
+    element.tag_name = "input"
+    element.attributes = {"id": "card-name"}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+
+    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=7,
+            coords=None,
+            params={"text": "card_name"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={
+                "card_number": "4111111111111111",
+                "card_name": "Rose Labs",
+                "card_expiry": "12/30",
+                "card_cvv": "123",
+            },
+            password_origins=None,
+            current_url="https://checkout.example.com/pay",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    assert out["payment_ref_direct_fill"] is True
+    assert out["payment_refs_filled"] == ["card_name", "card_number", "card_expiry", "card_cvv"]
+    assert session.get_or_create_cdp_session.await_count == 4
+    for call in session.get_or_create_cdp_session.await_args_list:
+        assert call.kwargs == {"focus": True}
+    assert cdp_client.send.Runtime.evaluate.await_count == 4
+    evaluate_kwargs = cdp_client.send.Runtime.evaluate.await_args_list[0].kwargs
+    assert evaluate_kwargs["session_id"] == "cdp-1"
+    assert '"refName": "card_name"' in evaluate_kwargs["params"]["expression"]
+    assert '"value": "Rose Labs"' in evaluate_kwargs["params"]["expression"]
+    expressions = [
+        call.kwargs["params"]["expression"]
+        for call in cdp_client.send.Runtime.evaluate.await_args_list
+    ]
+    assert any('"refName": "card_number"' in expression for expression in expressions)
+    assert any('"refName": "card_expiry"' in expression for expression in expressions)
+    assert any('"refName": "card_cvv"' in expression for expression in expressions)
+    hu.click_at_coords.assert_not_called()
+    hu.type_text.assert_not_called()
+    recorded = ah.record_action.await_args.kwargs
+    assert recorded["coordinates"] == {"x": 444, "y": 555}
+
+
+async def test_execute_input_text_payment_secret_ref_recovers_dead_backend_node_with_selector():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    page = MagicMock()
+    page.evaluate = AsyncMock(
+        side_effect=[
+            {"filled": False, "reason": "field_not_found"},
+            {"filled": False, "reason": "field_not_found"},
+            {"x": 222, "y": 333, "selector": 'input[autocomplete="cc-number"]'},
+        ]
+    )
+    session = _fake_session_with_event_bus()
+    session.get_page = AsyncMock(return_value=page)
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_element_coordinates = AsyncMock(return_value=None)
+    dom.get_browser_state = AsyncMock()
+    element = MagicMock()
+    element.tag_name = "input"
+    element.attributes = {"autocomplete": "cc-number"}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+
+    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=8,
+            coords=None,
+            params={"text": "card_number"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={
+                "card_number": "4111111111111111",
+                "card_name": "Rose Labs",
+                "card_expiry": "12/30",
+                "card_cvv": "123",
+            },
+            password_origins=None,
+            current_url="https://checkout.example.com/pay",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    dom.get_browser_state.assert_awaited_once_with(include_screenshot=False)
+    assert page.evaluate.await_count == 3
+    hu.click_at_coords.assert_awaited_once_with(222, 333)
+    hu.type_text.assert_awaited_once_with("4111111111111111")
 
 
 async def test_execute_input_text_secret_redacts():
@@ -6753,6 +7469,114 @@ async def test_execute_goto_injects_local_storage_swallows_error():
             config=_fake_config(),
         )
     assert out["success"] is True
+
+
+async def test_wait_for_navigation_ready_reloads_blank_spa_shell_once():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    class FakePage:
+        def __init__(self):
+            self.reloads = 0
+            self.evaluations = 0
+
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        async def evaluate(self, _code):
+            self.evaluations += 1
+            if self.reloads == 0:
+                return json.dumps({
+                    "hasAppRoot": True,
+                    "appRootReady": False,
+                    "plainPageReady": False,
+                    "bodyTextLength": 677,
+                    "rootChildren": 0,
+                    "blankSpaShell": True,
+                })
+            return {
+                "hasAppRoot": True,
+                "appRootReady": True,
+                "plainPageReady": False,
+                "bodyTextLength": 12,
+                "rootChildren": 1,
+                "blankSpaShell": False,
+            }
+
+        async def reload(self):
+            self.reloads += 1
+            return None
+
+    page = FakePage()
+    session = _fake_session_with_event_bus()
+    session.get_current_page = AsyncMock(return_value=page)
+    dom = MagicMock()
+    dom.session = session
+
+    with patch.object(service_actions.asyncio, "sleep", AsyncMock()):
+        out = await service_actions.wait_for_navigation_ready(
+            dom_service=dom,
+            url="https://x.com/app",
+            timeout_seconds=0.001,
+        )
+
+    assert out["ready"] is True
+    assert page.reloads == 1
+    assert page.evaluations >= 2
+
+
+async def test_wait_for_navigation_ready_regotos_stuck_loading_document_once():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    class FakePage:
+        def __init__(self):
+            self.gotos = []
+            self.evaluations = 0
+
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        async def evaluate(self, _code):
+            self.evaluations += 1
+            if not self.gotos:
+                return {
+                    "readyState": "loading",
+                    "hasAppRoot": False,
+                    "appRootReady": False,
+                    "plainPageReady": False,
+                    "bodyTextLength": 0,
+                    "bodyChildren": 0,
+                    "blankSpaShell": False,
+                }
+            return {
+                "readyState": "complete",
+                "hasAppRoot": True,
+                "appRootReady": True,
+                "plainPageReady": False,
+                "bodyTextLength": 12,
+                "rootChildren": 1,
+                "blankSpaShell": False,
+            }
+
+        async def goto(self, url, **_kwargs):
+            self.gotos.append(url)
+            return None
+
+    page = FakePage()
+    session = _fake_session_with_event_bus()
+    session.get_current_page = AsyncMock(return_value=page)
+    dom = MagicMock()
+    dom.session = session
+
+    with patch.object(service_actions.asyncio, "sleep", AsyncMock()):
+        out = await service_actions.wait_for_navigation_ready(
+            dom_service=dom,
+            url="https://x.com/app",
+            timeout_seconds=0.001,
+        )
+
+    assert out["ready"] is True
+    assert page.gotos == ["https://x.com/app"]
+    assert page.evaluations >= 2
 
 
 # ── _execute_extract ─────────────────────────────────────────────────
@@ -9301,12 +10125,255 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
         "card_expiry": "12/30",
         "card_cvv": "123",
     }
+    assert resume_state["payment_card_last4"] == "4242"
 
     payment_ready = next(event for event in events if getattr(event, "title", "") == "Payment card ready")
     assert payment_ready.status == MessageStatus.FINISHED
     final_event = events[-1]
     assert final_event.status == MessageStatus.FINISHED
     assert final_event.metadata["structured_response"] == {"purchase_complete": True}
+
+
+def test_payment_card_verifier_evidence_exposes_only_valid_last_four():
+    from domains.spawn_browser_agent_v3.handler import _build_payment_card_verifier_evidence
+
+    evidence = _build_payment_card_verifier_evidence("4242")
+    assert evidence == {
+        "role": "TOOL",
+        "text": "Approved one-time payment card last four: 4242",
+        "metadata": {
+            "toolName": "payment_card_ready",
+            "toolStatus": "FINISHED",
+            "paymentCardLast4": "4242",
+        },
+    }
+    assert _build_payment_card_verifier_evidence("4242424242424242") is None
+    assert _build_payment_card_verifier_evidence("42x2") is None
+    assert _build_payment_card_verifier_evidence(None) is None
+
+
+class _FakePaymentGateHandle:
+    """Awaitable activity handle returning a fixed result (matches manager fake)."""
+
+    def __init__(self, result):
+        self._result = result
+
+    def done(self):
+        return True
+
+    def cancel(self):
+        raise AssertionError("done activity should not be cancelled")
+
+    def __await__(self):
+        async def _result():
+            return self._result
+
+        return _result().__await__()
+
+
+async def _drive_payment_card_gate(*, mint_results, reject_gate=False, agentcard_connected=True):
+    """Drive execute_tool through the payment-card gate branch.
+
+    Returns (events, activity_calls, gate_keys). ``mint_results`` is a list
+    of dicts returned by successive ``mint_purchase_card_activity`` calls
+    (the last value repeats once exhausted).
+    """
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+    from tools.gate import GateRejectedError
+
+    activity_calls = []
+    gate_keys = []
+    mint_iter = iter(mint_results)
+    last_mint = {}
+
+    def _next_mint():
+        nonlocal last_mint
+        try:
+            last_mint = next(mint_iter)
+        except StopIteration:
+            pass
+        return last_mint
+
+    first = _FakePaymentGateHandle(
+        {
+            "status": "awaiting_payment_card_approval",
+            "payment_request": {
+                "merchant": "Blick Art Materials",
+                "line_items": [
+                    {
+                        "name": "Brush",
+                        "product_url": "https://www.dickblick.com/products/brush/",
+                        "rating": "4.7 stars",
+                        "review_count": "84 reviews",
+                        "quantity": 1,
+                        "line_total_cents": 636,
+                    }
+                ],
+                "subtotal_cents": 636,
+                "total_cents": 636,
+            },
+            "current_url": "https://www.dickblick.com/checkout/",
+            "write_lock_approvals": {},
+            "step_count": 3,
+            "session_id": "session-1",
+            "cdp_url": "wss://connect.steel.dev/session-1",
+            "task_id": "task-1",
+        }
+    )
+    resume = _FakePaymentGateHandle({"success": True, "message": "done", "output_files": []})
+
+    workflow_instance = SimpleNamespace(
+        user_id="user-1",
+        agent_id="agent-1",
+        is_paused=False,
+        write_lock_enabled=True,
+        system_name="Rose",
+    )
+
+    async def fake_execute_activity(activity_name, *args, **kwargs):
+        activity_calls.append(
+            activity_name if isinstance(activity_name, str) else getattr(activity_name, "__name__", "callable")
+        )
+        if activity_name == "lookup_purchase_activity":
+            return {"found": False, "reusable": False, "purchase": None}
+        if activity_name == "mint_purchase_card_activity":
+            return _next_mint()
+        if activity_name == "agentcard_status_activity":
+            return {"connected": agentcard_connected}
+        if activity_name == "resolve_attention_request_activity":
+            return {}
+        if not isinstance(activity_name, str):  # mint_subscription_checkout_activity
+            return "https://checkout.example/subscribe"
+        raise AssertionError(f"unexpected activity: {activity_name}")
+
+    async def fake_request_user_approval_direct(*_args, **_kwargs):
+        return {"attention_request_id": "approval-1"}
+
+    async def fake_request_user_attention_direct(*_args, **_kwargs):
+        return {"attention_request_id": "setup-1"}
+
+    async def fake_raise_gate_direct(_wf, _gate, *, gate_key):
+        gate_keys.append(gate_key)
+        if reject_gate:
+            raise GateRejectedError(gate_key)
+        return {"resolved": True}
+
+    start_calls = []
+
+    def fake_start_activity(*args, **kwargs):
+        start_calls.append((args, kwargs))
+        return first if len(start_calls) == 1 else resume
+
+    # Advancing clock so the AgentCard connect-wait deadline is reachable
+    # (a constant clock would spin forever when the wallet never connects).
+    base_time = datetime(2026, 7, 9, 23, 50, 0, tzinfo=timezone.utc)
+    clock = {"n": 0}
+
+    def fake_now():
+        value = base_time + timedelta(minutes=6 * clock["n"])
+        clock["n"] += 1
+        return value
+
+    manager = SpawnBrowserAgentManagerV3()
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.workflow.start_activity", side_effect=fake_start_activity),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.wait_condition", AsyncMock(return_value=None)),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.execute_activity", side_effect=fake_execute_activity),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.now", side_effect=fake_now),
+        patch("domains.spawn_browser_agent_v3.handler.workflow.sleep", AsyncMock(return_value=None)),
+        patch("tools.request_user_approval.request_user_approval_direct", side_effect=fake_request_user_approval_direct),
+        patch(
+            "tools.request_user_approval.request_user_attention_direct",
+            side_effect=fake_request_user_attention_direct,
+        ),
+        patch("tools.gate.raise_gate_direct", side_effect=fake_raise_gate_direct),
+    ):
+        events = []
+        async for event in manager.execute_tool(
+            workflow_instance,
+            {"goal": "Buy one brush", "output_schema": {"fields": [{"name": "ok", "type": "bool"}]}},
+            "tool-1",
+        ):
+            events.append(event)
+    return events, activity_calls, gate_keys
+
+
+async def test_manager_payment_gate_agentcard_setup_required_prompts_and_retries():
+    events, activity_calls, _ = await _drive_payment_card_gate(
+        mint_results=[
+            {"status": "agentcard_setup_required", "setupAction": "connect_agentcard", "connectUrl": "https://x/connect"},
+            {"status": "agentcard_setup_required", "connectUrl": "https://x/connect"},
+        ],
+        agentcard_connected=True,
+    )
+    # First mint gate → setup attention, connect polled, attention resolved, re-mint.
+    assert activity_calls == [
+        "lookup_purchase_activity",
+        "mint_purchase_card_activity",
+        "agentcard_status_activity",
+        "resolve_attention_request_activity",
+        "mint_purchase_card_activity",
+    ]
+    setup_titles = [getattr(e, "title", "") for e in events]
+    assert "One Time Agent Payment Setup" in setup_titles
+    assert "Agent payment setup complete" in setup_titles
+    # Second mint still setup_required → prompt once more and stop (no card issued).
+    assert not any(getattr(e, "title", "") == "Payment card ready" for e in events)
+
+
+async def test_manager_payment_gate_agentcard_setup_times_out_when_never_connected():
+    events, activity_calls, _ = await _drive_payment_card_gate(
+        mint_results=[{"status": "agentcard_setup_required", "connectUrl": "https://x/connect"}],
+        agentcard_connected=False,
+    )
+    # Setup prompted, connect polled once, then deadline reached → return without card.
+    assert "agentcard_status_activity" in activity_calls
+    assert "resolve_attention_request_activity" not in activity_calls
+    assert any(getattr(e, "title", "") == "One Time Agent Payment Setup" for e in events)
+    assert not any(getattr(e, "title", "") == "Payment card ready" for e in events)
+
+
+async def test_manager_payment_gate_subscription_rejected_cancels_purchase():
+    events, activity_calls, gate_keys = await _drive_payment_card_gate(
+        mint_results=[{"status": "subscription_required"}],
+        reject_gate=True,
+    )
+    assert gate_keys == ["subscription"]
+    cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
+    assert cancelled.metadata["action_type"] == "purchase_cancelled"
+    assert activity_calls.count("mint_purchase_card_activity") == 1
+
+
+async def test_manager_payment_gate_subscription_still_inactive_after_retry_blocks():
+    events, activity_calls, gate_keys = await _drive_payment_card_gate(
+        mint_results=[{"status": "subscription_required"}, {"status": "subscription_required"}],
+        reject_gate=False,
+    )
+    assert gate_keys == ["subscription"]
+    blocked = next(e for e in events if getattr(e, "title", "") == "Subscription still inactive")
+    assert blocked.metadata["action_type"] == "purchase_blocked"
+    assert activity_calls.count("mint_purchase_card_activity") == 2
+
+
+async def test_manager_payment_gate_kyc_rejected_cancels_purchase():
+    events, _, gate_keys = await _drive_payment_card_gate(
+        mint_results=[{"status": "kyc_required"}],
+        reject_gate=True,
+    )
+    assert gate_keys == ["kyc"]
+    cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
+    assert cancelled.metadata["action_type"] == "purchase_cancelled"
+
+
+async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
+    events, activity_calls, gate_keys = await _drive_payment_card_gate(
+        mint_results=[{"status": "kyc_required"}, {"status": "kyc_required"}],
+        reject_gate=False,
+    )
+    assert gate_keys == ["kyc"]
+    blocked = next(e for e in events if getattr(e, "title", "") == "Identity verification still incomplete")
+    assert blocked.metadata["action_type"] == "purchase_blocked"
+    assert activity_calls.count("mint_purchase_card_activity") == 2
 
 
 # ========================================
@@ -9317,6 +10384,11 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
+
+    r.record(
+        "payment_card_verifier_evidence_only_last_four",
+        test_payment_card_verifier_evidence_exposes_only_valid_last_four,
+    )
 
     await r.record_async("cdp_use_websocket_direct", test_cdp_use_websocket_patch_disables_proxy_discovery)
     await r.record_async(
@@ -9344,6 +10416,18 @@ async def run_all_tests():
     )
     r.record("browser_progress_title", test_browser_progress_title_describes_active_agent)
     r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
+    r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
+    r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)
+    r.record("max_steps_best_effort_falls_back", test_max_steps_best_effort_falls_back_to_actions_then_url)
+    r.record(
+        "max_steps_best_effort_empty_only_when_no_evidence", test_max_steps_best_effort_empty_only_when_no_evidence
+    )
+    await r.record_async(
+        "browser_verifier_context_grounds_final_state", test_browser_verifier_context_grounds_in_final_state
+    )
+    r.record(
+        "max_steps_return_wires_best_effort_and_verifier", test_max_steps_return_declares_best_effort_and_final_verifier
+    )
     r.record(
         "browser_supervisor_timeout_ordering",
         test_browser_supervisor_does_not_preempt_browser_use_event_timeouts,
@@ -9841,8 +10925,16 @@ async def run_all_tests():
         "execute_click_element_humanizer_missing_coords",
         test_execute_click_with_element_humanizer_missing_coords_refuses_fallback,
     )
-    await r.record_async("execute_click_coords_no_humanizer", test_execute_click_with_coords_no_humanizer)
-    await r.record_async("execute_click_no_target", test_execute_click_no_element_no_coords)
+    await r.record_async(
+        "execute_click_element_humanizer_refreshes_stale_coordinates",
+        test_execute_click_with_element_humanizer_refreshes_stale_coordinates,
+    )
+    await r.record_async(
+        "execute_click_coords_no_humanizer", test_execute_click_with_coords_no_humanizer
+    )
+    await r.record_async(
+        "execute_click_no_target", test_execute_click_no_element_no_coords
+    )
     await r.record_async(
         "execute_click_write_lock_purchase",
         test_execute_click_write_lock_purchase_triggers_approval,
@@ -9894,10 +10986,40 @@ async def run_all_tests():
         test_execute_input_text_element_with_humanizer,
     )
     await r.record_async(
+        "is_payment_field_dom_attributes_without_get_page",
+        test_is_payment_field_uses_dom_attributes_without_get_page,
+    )
+    await r.record_async(
+        "execute_input_text_el_humanizer_refreshes_dom",
+        test_execute_input_text_element_humanizer_refreshes_dom_when_coords_missing,
+    )
+    await r.record_async(
         "execute_input_text_el_humanizer_missing_coords",
         test_execute_input_text_element_humanizer_missing_coords_refuses_typetext_fallback,
     )
-    await r.record_async("execute_input_text_secret_redacts", test_execute_input_text_secret_redacts)
+    await r.record_async(
+        "execute_input_text_payment_secret_ref_bypasses_warning",
+        test_execute_input_text_payment_secret_ref_bypasses_payment_warning,
+    )
+    await r.record_async(
+        "execute_input_text_payment_secret_ref_direct_fill",
+        test_execute_input_text_payment_secret_ref_direct_fill_sets_exact_value,
+    )
+    await r.record_async(
+        "execute_input_text_payment_secret_ref_direct_fill_waits_for_ready",
+        test_execute_input_text_payment_secret_ref_waits_for_page_ready_before_retry,
+    )
+    await r.record_async(
+        "execute_input_text_payment_secret_ref_direct_fill_cdp",
+        test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_without_page,
+    )
+    await r.record_async(
+        "execute_input_text_payment_secret_ref_selector_recovery",
+        test_execute_input_text_payment_secret_ref_recovers_dead_backend_node_with_selector,
+    )
+    await r.record_async(
+        "execute_input_text_secret_redacts", test_execute_input_text_secret_redacts
+    )
     await r.record_async(
         "execute_input_text_credential_ref",
         test_execute_input_text_secret_returns_credential_ref,
@@ -9921,6 +11043,14 @@ async def run_all_tests():
     await r.record_async(
         "execute_goto_injects_ls_error",
         test_execute_goto_injects_local_storage_swallows_error,
+    )
+    await r.record_async(
+        "navigation_ready_reloads_blank_spa",
+        test_wait_for_navigation_ready_reloads_blank_spa_shell_once,
+    )
+    await r.record_async(
+        "navigation_ready_regotos_loading_doc",
+        test_wait_for_navigation_ready_regotos_stuck_loading_document_once,
     )
 
     await r.record_async("execute_extract_disabled", test_execute_extract_disabled)
@@ -9959,6 +11089,14 @@ async def run_all_tests():
     await r.record_async(
         "browser_agent_recording_start_failure_best_effort",
         test_browser_agent_recording_start_failure_is_best_effort,
+    )
+    await r.record_async(
+        "browser_agent_kernel_replay_uses_native_recording",
+        test_browser_agent_kernel_replay_uses_native_recording,
+    )
+    await r.record_async(
+        "browser_agent_kernel_replay_start_failure_yields_no_recording",
+        test_browser_agent_kernel_replay_start_failure_yields_no_recording,
     )
     r.record(
         "browser_agent_recording_prod_temp_root",
@@ -10248,6 +11386,30 @@ async def run_all_tests():
     await r.record_async(
         "manager_payment_card_approval_activity_names",
         test_manager_payment_card_approval_uses_registered_activity_names_and_resumes,
+    )
+    await r.record_async(
+        "manager_payment_gate_agentcard_setup_required",
+        test_manager_payment_gate_agentcard_setup_required_prompts_and_retries,
+    )
+    await r.record_async(
+        "manager_payment_gate_agentcard_setup_timeout",
+        test_manager_payment_gate_agentcard_setup_times_out_when_never_connected,
+    )
+    await r.record_async(
+        "manager_payment_gate_subscription_rejected",
+        test_manager_payment_gate_subscription_rejected_cancels_purchase,
+    )
+    await r.record_async(
+        "manager_payment_gate_subscription_still_inactive",
+        test_manager_payment_gate_subscription_still_inactive_after_retry_blocks,
+    )
+    await r.record_async(
+        "manager_payment_gate_kyc_rejected",
+        test_manager_payment_gate_kyc_rejected_cancels_purchase,
+    )
+    await r.record_async(
+        "manager_payment_gate_kyc_still_incomplete",
+        test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks,
     )
 
     teardown_mock()

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor, cleanup, fireEvent, within } from '@testing-library/react';
+import { screen, waitFor, cleanup, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { Routes, Route } from 'react-router-dom';
 import { renderWithProviders } from './test-wrapper';
 import { capturedRequests, clearCaptures } from './msw/capture';
@@ -99,6 +100,7 @@ describe('App wiring', () => {
     });
 
     it('"/waitlist" renders the main Terminal and automatically opens the phone login modal', async () => {
+      const user = userEvent.setup();
       renderWithProviders(<AppRoutes />, { route: '/waitlist' });
 
       await waitFor(() => {
@@ -112,7 +114,12 @@ describe('App wiring', () => {
       expect(screen.getByLabelText('Phone Number')).toBeInTheDocument();
       expect(screen.getByTestId('terminal-input-area')).toBeInTheDocument();
 
-      fireEvent.keyDown(document, { key: 'Escape' });
+      // Press Escape the way a real user would: userEvent flushes pending React
+      // renders (via act) before dispatching, so Radix's DismissableLayer has
+      // recomputed its layer index and its document-level Escape handler
+      // dismisses the modal. A bare fireEvent.keyDown fires in the same tick the
+      // dialog mounts, before the layer registers, so the handler no-ops.
+      await user.keyboard('{Escape}');
       await waitFor(() => {
         expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
       });

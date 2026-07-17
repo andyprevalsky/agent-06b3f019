@@ -1,24 +1,98 @@
-import { PurchaseSpendStatus } from '@prisma/client';
-import { createCardProvider, isCardLive, type CardProvider } from './card-provider';
+import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
+import {
+  createCardProvider,
+  isCardLive,
+  type CardProvider,
+  type CardProviderDetailsResult,
+} from './card-provider';
 import { prisma } from './database';
 import { createLogger } from './logger';
-import { cancelAuthorizedHold, captureAuthorizedHold } from './stripe';
+import { cancelAuthorizedHold, refundCapturedPurchase, stripe } from './stripe';
+import {
+  isWalletFundingConsumedDuringReclaimError,
+  isWalletFundingReleasePendingError,
+  type WalletFundingProvider,
+} from './wallet-funding';
+import {
+  beginPurchaseWalletReclaim,
+  consumePurchaseWalletFunding,
+  reclaimPurchaseWalletFunding,
+} from './purchase-wallet-funding';
+import { findWalletFundingByPurchaseId } from './purchase-wallet-funding-repo';
 
 const log = createLogger('PurchaseCleanup');
+const STALE_CHARGING_MS = Number(process.env.PURCHASE_STALE_CHARGING_MS ?? 15 * 60 * 1000);
+
+/**
+ * Funding states that mean *we already closed this card to reclaim it* (or finished doing so). Once
+ * a reclaim is underway, the card reads as not-live because Rose closed it, NOT because a merchant
+ * settled a charge — so `!isCardLive` must not be treated as "the card was spent".
+ */
+const RECLAIM_IN_PROGRESS_FUNDING_STATUSES = new Set<PurchaseWalletFundingStatus>([
+  PurchaseWalletFundingStatus.RECLAIMING,
+  PurchaseWalletFundingStatus.RECLAIMED,
+  PurchaseWalletFundingStatus.RECLAIM_FAILED,
+]);
+
+/**
+ * Whether a purchase's single-use card was actually spent by a merchant (vs. closed by Rose during
+ * an abandonment/reclaim). A live card is never spent. A not-live card is only "spent" when no
+ * reclaim is already recorded for it; otherwise the card is not-live because a prior/concurrent
+ * cleanup pass already closed it to release the AgentCard transfer, and reclassifying it as "used"
+ * would consume the org-wallet funding and permanently drain the float. In that case we defer to the
+ * in-flight reclaim / release-pending retry instead of marking the purchase settled.
+ */
+async function purchaseCardWasSpent(
+  purchaseId: string,
+  details: CardProviderDetailsResult
+): Promise<boolean> {
+  if (isCardLive(details)) return false;
+  const funding = await findWalletFundingByPurchaseId(purchaseId);
+  if (funding !== null && RECLAIM_IN_PROGRESS_FUNDING_STATUSES.has(funding.status)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Optional narrowing for the cron reconcilers. Production callers omit it so each reconciler scans
+ * every stuck purchase (the correct cron behavior). Blackbox tests share a single Postgres database
+ * and run domains concurrently, so they pass `{ userId }` to keep each test's global-scan reconciler
+ * from picking up rows another concurrently-running purchase test created.
+ */
+export type PurchaseReconcileScope = { userId?: string };
+
+function reconcileUserFilter(scope?: PurchaseReconcileScope): { userId?: string } {
+  return scope?.userId !== undefined ? { userId: scope.userId } : {};
+}
+
+function hasDissolvedHold(paymentIntent: unknown): boolean {
+  const candidate = paymentIntent as {
+    status?: unknown;
+    amount_capturable?: unknown;
+  };
+  if (candidate.status === 'canceled') return true;
+  if (
+    candidate.status !== 'requires_capture' &&
+    candidate.status !== 'succeeded' &&
+    candidate.amount_capturable === 0
+  ) {
+    return true;
+  }
+  return false;
+}
 
 /**
  * Reconcile a HELD agent's purchase cards at session end — the primary "cancel on fail" hook (no
  * cron needed). For each still-HELD card we ask the card itself whether it was used:
- *   - still live (unspent) → the agent abandoned the buy → close the card + CANCEL the hold (VOIDED).
- *     No money moved, no refund churn.
- *   - already settled → the card WAS used but the `transaction.cleared` webhook hasn't landed yet →
- *     CAPTURE the hold so we actually collect (CLEARED), instead of canceling and eating the cost.
- *   - unreadable → fail safe: leave the hold for the webhook / Stripe's ~7-day auto-release.
- * All Stripe hold ops are idempotent, so racing with the webhook is safe.
+ *   - still live (unspent) → close/reclaim the card, then refund the captured funding charge.
+ *   - already settled → consume the transfer and mark CLEARED; funding was captured at issuance.
+ *   - unreadable → fail safe: leave the purchase for its transaction webhook.
  */
 export async function cleanupAgentPurchaseCards(
   agentId: string,
-  cardProvider?: CardProvider
+  cardProvider?: CardProvider,
+  walletFundingProvider?: WalletFundingProvider
 ): Promise<void> {
   const openPurchases = await prisma.purchaseSpend.findMany({
     where: {
@@ -28,7 +102,10 @@ export async function cleanupAgentPurchaseCards(
     },
     select: {
       id: true,
+      userId: true,
+      agentId: true,
       cardId: true,
+      totalCents: true,
       stripePaymentIntentId: true,
     },
   });
@@ -37,15 +114,15 @@ export async function cleanupAgentPurchaseCards(
     log.info(`Reconciling ${openPurchases.length} held purchase card(s) for agent ${agentId}`);
   }
 
-  const activeCardProvider = cardProvider ?? createCardProvider();
   for (const purchase of openPurchases) {
     const cardId = purchase.cardId;
     if (cardId === null) continue;
+    const activeCardProvider = cardProvider ?? createCardProvider(purchase.userId);
     try {
       let cardWasUsed: boolean;
       try {
         const details = await activeCardProvider.getDetails(cardId);
-        cardWasUsed = !isCardLive(details);
+        cardWasUsed = await purchaseCardWasSpent(purchase.id, details);
       } catch (readError) {
         // Can't confirm whether the card was used — don't guess with the user's money. Leave the
         // hold for the transaction webhook / Stripe auto-release.
@@ -59,17 +136,54 @@ export async function cleanupAgentPurchaseCards(
       }
 
       if (cardWasUsed) {
-        if (purchase.stripePaymentIntentId) {
-          await captureAuthorizedHold(purchase.stripePaymentIntentId);
-        }
+        await consumePurchaseWalletFunding(purchase.id);
         await prisma.purchaseSpend.update({
           where: { id: purchase.id },
           data: { status: PurchaseSpendStatus.CLEARED },
         });
       } else {
+        // Claim the reclaim before closing the card so a concurrent pass can't read the now
+        // not-live card as merchant-spent while the funding is still FUNDED.
+        await beginPurchaseWalletReclaim(purchase.id);
         await activeCardProvider.closeCard(cardId);
+        try {
+          await reclaimPurchaseWalletFunding(
+            purchase,
+            'agent_cleanup_unspent_card',
+            walletFundingProvider
+          );
+        } catch (reclaimError) {
+          if (isWalletFundingConsumedDuringReclaimError(reclaimError)) {
+            await prisma.purchaseSpend.update({
+              where: { id: purchase.id },
+              data: { status: PurchaseSpendStatus.CLEARED },
+            });
+            continue;
+          }
+          log.error('Cleanup could not reclaim wallet funding; leaving Stripe hold in place', {
+            agent_id: agentId,
+            purchase_id: purchase.id,
+            card_id: cardId,
+            error: reclaimError instanceof Error ? reclaimError.message : String(reclaimError),
+          });
+          if (!isWalletFundingReleasePendingError(reclaimError)) {
+            await prisma.purchaseSpend.update({
+              where: { id: purchase.id },
+              data: { status: PurchaseSpendStatus.FUNDING_RECLAIM_FAILED },
+            });
+          }
+          continue;
+        }
         if (purchase.stripePaymentIntentId) {
-          await cancelAuthorizedHold(purchase.stripePaymentIntentId);
+          try {
+            await refundCapturedPurchase(purchase.stripePaymentIntentId, purchase.id);
+          } catch (refundError) {
+            await prisma.purchaseSpend.update({
+              where: { id: purchase.id },
+              data: { status: PurchaseSpendStatus.REFUND_FAILED },
+            });
+            throw refundError;
+          }
         }
         await prisma.purchaseSpend.update({
           where: { id: purchase.id },
@@ -84,5 +198,294 @@ export async function cleanupAgentPurchaseCards(
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  }
+}
+
+/** Retry captured funding charges whose AgentCard transfer was already reclaimed. */
+export async function reconcileFailedPurchaseRefunds(
+  scope?: PurchaseReconcileScope
+): Promise<void> {
+  const failedRefunds = await prisma.purchaseSpend.findMany({
+    where: {
+      ...reconcileUserFilter(scope),
+      status: PurchaseSpendStatus.REFUND_FAILED,
+      stripePaymentIntentId: { not: null },
+    },
+    select: { id: true, stripePaymentIntentId: true },
+  });
+
+  for (const purchase of failedRefunds) {
+    if (purchase.stripePaymentIntentId === null) continue;
+    try {
+      await refundCapturedPurchase(purchase.stripePaymentIntentId, purchase.id);
+      await prisma.purchaseSpend.update({
+        where: { id: purchase.id },
+        data: { status: PurchaseSpendStatus.REFUNDED },
+      });
+    } catch (error) {
+      log.warn('Failed to retry captured purchase refund', {
+        purchase_id: purchase.id,
+        stripe_payment_intent_id: purchase.stripePaymentIntentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
+/** Retry company-transfer release failures; refund only after MCP confirms released funds. */
+export async function reconcileFailedPurchaseFundingReclaims(
+  walletFundingProvider?: WalletFundingProvider,
+  scope?: PurchaseReconcileScope
+): Promise<void> {
+  const purchases = await prisma.purchaseSpend.findMany({
+    where: {
+      ...reconcileUserFilter(scope),
+      OR: [
+        { status: PurchaseSpendStatus.FUNDING_RECLAIM_FAILED },
+        {
+          status: PurchaseSpendStatus.HELD,
+          walletFunding: { is: { status: 'RECLAIMING' } },
+        },
+      ],
+      stripePaymentIntentId: { not: null },
+    },
+    select: {
+      id: true,
+      userId: true,
+      agentId: true,
+      cardId: true,
+      totalCents: true,
+      stripePaymentIntentId: true,
+    },
+  });
+
+  for (const purchase of purchases) {
+    try {
+      await reclaimPurchaseWalletFunding(
+        purchase,
+        'failed_company_transfer_release_retry',
+        walletFundingProvider
+      );
+      if (purchase.stripePaymentIntentId !== null) {
+        await refundCapturedPurchase(purchase.stripePaymentIntentId, purchase.id);
+      }
+      await prisma.purchaseSpend.update({
+        where: { id: purchase.id },
+        data: { status: PurchaseSpendStatus.VOIDED },
+      });
+    } catch (error) {
+      if (isWalletFundingConsumedDuringReclaimError(error)) {
+        await prisma.purchaseSpend.update({
+          where: { id: purchase.id },
+          data: { status: PurchaseSpendStatus.CLEARED },
+        });
+        continue;
+      }
+      log.warn('Failed to retry purchase funding reclaim', {
+        purchase_id: purchase.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+}
+
+/** Backstop for terminal status updates whose immediate purchase cleanup could not complete. */
+export async function reconcileTerminalAgentPurchaseCards(
+  cardProvider?: CardProvider,
+  walletFundingProvider?: WalletFundingProvider,
+  scope?: PurchaseReconcileScope
+): Promise<void> {
+  const purchases = await prisma.purchaseSpend.findMany({
+    where: {
+      ...reconcileUserFilter(scope),
+      status: PurchaseSpendStatus.HELD,
+      agentId: { not: null },
+      agent: {
+        status: { in: ['COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED'] },
+      },
+    },
+    select: { agentId: true },
+    distinct: ['agentId'],
+  });
+
+  for (const purchase of purchases) {
+    if (purchase.agentId === null) continue;
+    await cleanupAgentPurchaseCards(purchase.agentId, cardProvider, walletFundingProvider);
+  }
+}
+
+/**
+ * Backstop for holds that dissolved outside the normal agent cleanup/webhook paths. If the card is
+ * still live, close it and reclaim the wallet funding. If the card was spent but Stripe can no
+ * longer be captured, record `CAPTURE_FAILED` so finance can reconcile the org-wallet loss.
+ */
+export async function reconcileDissolvedPurchaseHolds(
+  cardProvider?: CardProvider,
+  walletFundingProvider?: WalletFundingProvider,
+  scope?: PurchaseReconcileScope
+): Promise<void> {
+  const heldPurchases = await prisma.purchaseSpend.findMany({
+    where: {
+      ...reconcileUserFilter(scope),
+      status: PurchaseSpendStatus.HELD,
+      cardId: { not: null },
+      stripePaymentIntentId: { not: null },
+    },
+    select: {
+      id: true,
+      userId: true,
+      agentId: true,
+      cardId: true,
+      totalCents: true,
+      stripePaymentIntentId: true,
+    },
+  });
+
+  for (const purchase of heldPurchases) {
+    const cardId = purchase.cardId;
+    const paymentIntentId = purchase.stripePaymentIntentId;
+    if (cardId === null || paymentIntentId === null) continue;
+
+    let paymentIntent: unknown;
+    try {
+      paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    } catch (error) {
+      log.warn('Could not retrieve Stripe hold while reconciling dissolved purchase hold', {
+        purchase_id: purchase.id,
+        stripe_payment_intent_id: paymentIntentId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
+    if (!hasDissolvedHold(paymentIntent)) continue;
+
+    const activeCardProvider = cardProvider ?? createCardProvider(purchase.userId);
+    let cardWasUsed: boolean;
+    try {
+      const details = await activeCardProvider.getDetails(cardId);
+      cardWasUsed = await purchaseCardWasSpent(purchase.id, details);
+    } catch (error) {
+      log.warn('Could not read card after Stripe hold dissolved', {
+        purchase_id: purchase.id,
+        card_id: cardId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
+
+    if (cardWasUsed) {
+      await consumePurchaseWalletFunding(purchase.id);
+      await prisma.purchaseSpend.update({
+        where: { id: purchase.id },
+        data: { status: PurchaseSpendStatus.CAPTURE_FAILED },
+      });
+      log.error('Stripe hold dissolved after AgentCard card was spent', {
+        purchase_id: purchase.id,
+        card_id: cardId,
+        stripe_payment_intent_id: paymentIntentId,
+      });
+      continue;
+    }
+
+    // Claim the reclaim before closing the card so a concurrent pass can't read the now not-live
+    // card as merchant-spent while the funding is still FUNDED.
+    await beginPurchaseWalletReclaim(purchase.id);
+    await activeCardProvider.closeCard(cardId);
+    try {
+      await reclaimPurchaseWalletFunding(
+        purchase,
+        'stripe_hold_dissolved_unspent_card',
+        walletFundingProvider
+      );
+    } catch (error) {
+      if (isWalletFundingConsumedDuringReclaimError(error)) {
+        await prisma.purchaseSpend.update({
+          where: { id: purchase.id },
+          data: { status: PurchaseSpendStatus.CAPTURE_FAILED },
+        });
+        continue;
+      }
+      log.error('Failed to reclaim wallet funding after Stripe hold dissolved', {
+        purchase_id: purchase.id,
+        card_id: cardId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (!isWalletFundingReleasePendingError(error)) {
+        await prisma.purchaseSpend.update({
+          where: { id: purchase.id },
+          data: { status: PurchaseSpendStatus.FUNDING_RECLAIM_FAILED },
+        });
+      }
+      continue;
+    }
+    await prisma.purchaseSpend.update({
+      where: { id: purchase.id },
+      data: { status: PurchaseSpendStatus.VOIDED },
+    });
+  }
+}
+
+export async function reconcileStaleChargingPurchases(
+  walletFundingProvider?: WalletFundingProvider,
+  scope?: PurchaseReconcileScope
+): Promise<void> {
+  const staleBefore = new Date(Date.now() - STALE_CHARGING_MS);
+  const stalePurchases = await prisma.purchaseSpend.findMany({
+    where: {
+      ...reconcileUserFilter(scope),
+      status: PurchaseSpendStatus.CHARGING,
+      updatedAt: { lt: staleBefore },
+    },
+    select: {
+      id: true,
+      userId: true,
+      agentId: true,
+      totalCents: true,
+      stripePaymentIntentId: true,
+    },
+  });
+
+  for (const purchase of stalePurchases) {
+    try {
+      await reclaimPurchaseWalletFunding(
+        purchase,
+        'stale_charging_purchase_reconciler',
+        walletFundingProvider
+      );
+    } catch (error) {
+      if (isWalletFundingConsumedDuringReclaimError(error)) {
+        await prisma.purchaseSpend.update({
+          where: { id: purchase.id },
+          data: { status: PurchaseSpendStatus.CAPTURE_FAILED },
+        });
+        continue;
+      }
+      log.error('Failed to reclaim wallet funding for stale CHARGING purchase', {
+        purchase_id: purchase.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (!isWalletFundingReleasePendingError(error)) {
+        await prisma.purchaseSpend.update({
+          where: { id: purchase.id },
+          data: { status: PurchaseSpendStatus.FUNDING_RECLAIM_FAILED },
+        });
+      }
+      continue;
+    }
+
+    if (purchase.stripePaymentIntentId !== null) {
+      await cancelAuthorizedHold(purchase.stripePaymentIntentId).catch((error) => {
+        log.warn('Failed to cancel Stripe hold for stale CHARGING purchase', {
+          purchase_id: purchase.id,
+          stripe_payment_intent_id: purchase.stripePaymentIntentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
+    }
+
+    await prisma.purchaseSpend.update({
+      where: { id: purchase.id },
+      data: { status: PurchaseSpendStatus.FAILED },
+    });
   }
 }

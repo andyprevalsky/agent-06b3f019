@@ -1,10 +1,43 @@
 import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
-import { PrismaClient } from '@prisma/client';
+import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client';
 import Stripe from 'stripe';
+import {
+  ensureAgentCardSandboxFloat,
+  loadAgentCardBenchmarkAdmin,
+} from '../src/providers/agentcard/benchmark-float';
 
 const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
 const DEFAULT_BENCHMARK_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+const DEFAULT_SANDBOX_CARDHOLDER_ID = 'cmrfpz6d1000bl804w1gggfto';
+const DEFAULT_AGENTCARD_ORG_ID = 'cmqr3fk330005l704hlvyiu0z';
+
+async function seedAgentCardConnection(prisma: PrismaClient, userId: string): Promise<void> {
+  const cardholderId =
+    process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID?.trim() || DEFAULT_SANDBOX_CARDHOLDER_ID;
+  const config = { orgManaged: true, cardholderId };
+  await prisma.integration.upsert({
+    where: { userId_name: { userId, name: 'agentcard' } },
+    create: {
+      userId,
+      name: 'agentcard',
+      type: IntegrationType.TOOL_SETUP,
+      status: IntegrationStatus.CONNECTED,
+      isActive: true,
+      config,
+    },
+    update: {
+      type: IntegrationType.TOOL_SETUP,
+      status: IntegrationStatus.CONNECTED,
+      isActive: true,
+      config,
+      lastUsedAt: new Date(),
+    },
+  });
+  console.log(
+    `Seeded AgentCard org cardholder fixture ${cardholderId} for benchmark user ${userId}`
+  );
+}
 
 function argValue(name: string): string | undefined {
   const prefix = `${name}=`;
@@ -13,6 +46,25 @@ function argValue(name: string): string | undefined {
   const index = process.argv.indexOf(name);
   if (index >= 0) return process.argv[index + 1];
   return undefined;
+}
+
+/**
+ * The benchmark organization and its cardholder are two halves of one wallet
+ * fixture. Overriding only one (e.g. funding a custom org while the integration
+ * keeps the default cardholder) prepares the wrong wallet and silently breaks
+ * the lifecycle fixture. Require the pair to move together.
+ */
+function assertBenchmarkOrgCardholderPair(): void {
+  const orgId = process.env.BENCHMARK_AGENTCARD_ORG_ID?.trim();
+  const cardholderId = process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID?.trim();
+  const orgSet = orgId !== undefined && orgId !== '';
+  const cardholderSet = cardholderId !== undefined && cardholderId !== '';
+  if (orgSet !== cardholderSet) {
+    throw new Error(
+      'BENCHMARK_AGENTCARD_ORG_ID and BENCHMARK_AGENTCARD_CARDHOLDER_ID must be set together ' +
+        '(a custom organization with the default cardholder funds the wrong wallet).'
+    );
+  }
 }
 
 function requireStripeTestKey(): string {
@@ -30,7 +82,9 @@ function requireStripeTestKey(): string {
 }
 
 async function main(): Promise<void> {
-  const userId = argValue('--user-id') ?? process.env.BENCHMARK_USER_ID ?? DEFAULT_BENCHMARK_USER_ID;
+  assertBenchmarkOrgCardholderPair();
+  const userId =
+    argValue('--user-id') ?? process.env.BENCHMARK_USER_ID ?? DEFAULT_BENCHMARK_USER_ID;
   const stripe = new Stripe(requireStripeTestKey(), { apiVersion: STRIPE_API_VERSION });
   const prisma = new PrismaClient();
 
@@ -90,7 +144,15 @@ async function main(): Promise<void> {
       },
     });
 
-    console.log(`Seeded Stripe test billing fixture for benchmark user ${userId}`);
+    await seedAgentCardConnection(prisma, userId);
+
+    const sandboxFloat = await ensureAgentCardSandboxFloat(
+      await loadAgentCardBenchmarkAdmin(),
+      process.env.BENCHMARK_AGENTCARD_ORG_ID?.trim() || DEFAULT_AGENTCARD_ORG_ID
+    );
+    console.log(`AgentCard sandbox pool ready at $${(sandboxFloat.balanceCents / 100).toFixed(2)}`);
+
+    console.log(`Seeded Stripe and AgentCard payment fixtures for benchmark user ${userId}`);
   } finally {
     await prisma.$disconnect();
   }

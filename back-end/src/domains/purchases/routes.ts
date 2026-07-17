@@ -73,6 +73,7 @@ router.post(
         res.status(error.statusCode).json({
           error: error.message,
           ...(error.code !== undefined ? { code: error.code } : {}),
+          ...error.details,
         });
         return;
       }

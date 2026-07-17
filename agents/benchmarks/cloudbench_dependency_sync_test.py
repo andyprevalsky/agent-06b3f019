@@ -22,6 +22,9 @@ DRIVER_SCRIPT = ROOT / "scripts" / "cloudbench-run.sh"
 FLEET_SCRIPT = ROOT / "scripts" / "run-bench-fleet"
 CLOUD_SCRIPT = ROOT / "scripts" / "run-bench-cloud"
 PREDEPLOY_SCRIPT = ROOT / "scripts" / "run-predeploy-cloud"
+PREDEPLOY_LOCAL_SCRIPT = ROOT / "scripts" / "run-predeploy-local"
+RUN_BENCH_SCRIPT = ROOT / "scripts" / "run-bench"
+LOCAL_RUNNER = ROOT / "agents" / "benchmarks" / "local.py"
 DEPLOY_COMMAND = ROOT / ".claude" / "commands" / "deploy.md"
 
 
@@ -366,21 +369,42 @@ def test_predeploy_cloud_runner_selects_the_catalog_smoke_group() -> None:
     ]
 
 
-def test_deploy_smoke_gate_uses_the_local_isolated_runner() -> None:
-    # The deploy Step 6 smoke gate runs the Pre-Deploy group through the LOCAL
-    # isolated stack (run-bench --local / run.sh --benchmark), not the cloud
-    # fleet — deploy.md is the committed source of truth for this policy.
+def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
+    # The policy, shell entrypoints, and Python owner form one executable chain.
+    # Assert every hop so documentation can delegate without duplicating a
+    # transitive implementation string, while a shared-stack regression cannot
+    # hide behind otherwise-correct source routing.
     deploy = DEPLOY_COMMAND.read_text()
     step = deploy.split("## Step 6: Smoke benchmarks + fix", 1)[1].split(
         "## Step 6b: Semantic tests + fix", 1
     )[0]
 
-    assert "run-bench --local" in step
-    assert "run.sh --benchmark" in step
-    assert "local isolated" in step
-    assert "Do NOT use" in step  # the cloud fleet is explicitly excluded from the gate
+    assert "bash scripts/run-predeploy-local" in step
+    assert "LOCAL isolated benchmark stack" in step
+    assert "Use the cloud fleet only as an explicit opt-in" in step
     assert "7/7" in step
     assert "run_benchmark.py --suite smoke" not in step
+
+    predeploy_local = PREDEPLOY_LOCAL_SCRIPT.read_text()
+    assert 'exec bash "$ROOT_DIR/scripts/run-bench" --local' in predeploy_local
+    run_bench = RUN_BENCH_SCRIPT.read_text()
+    local_branch = run_bench.split('if [[ "${1:-}" == "--local" ]]', 1)[1].split(
+        'if [[ "${1:-}" == "--single-box" ]]', 1
+    )[0]
+    assert 'exec "$PY" -u benchmarks/local.py "$@"' in local_branch
+
+    from benchmarks import local as local_runner
+
+    monkeypatch.setattr(local_runner, "allocate_port_range", lambda _preferred: 62000)
+    args = local_runner.parse_args(
+        ["single-creator-arm", "--run-id", "predeploy-contract", "--base-port", "62000"]
+    )
+    stack = local_runner.build_service_stack(args)
+    assert stack.isolated is True
+    assert stack.workspace_name is not None
+    assert stack.base_port == 62000
+    assert '["bash", "scripts/run.sh", "--benchmark"]' in LOCAL_RUNNER.read_text()
+
     assert "git diff --name-only HEAD" in deploy
     assert "git ls-files --others --exclude-standard" in deploy
 
@@ -2831,7 +2855,10 @@ def test_clone_burst_is_rate_limit_resilient() -> None:
     attempts, so a rate-limited clone outlasts the burst instead of giving up."""
     fleet = FLEET_SCRIPT.read_text()
     # More attempts (was 3).
-    assert 'CLOUDBENCH_CLONE_MAX_ATTEMPTS:-5}' in fleet
+    assert (
+        'max_attempts="${CLOUDBENCH_CLONE_MAX_ATTEMPTS:-'
+        '${CLOUDBENCH_CLONE_ATTEMPTS:-5}}"' in fleet
+    )
     # Launch burst is staggered, not simultaneous.
     assert 'CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS' in fleet
     # Exponential backoff (bit-shift by attempt) with a cap and jitter.

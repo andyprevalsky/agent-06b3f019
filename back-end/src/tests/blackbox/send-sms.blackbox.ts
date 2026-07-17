@@ -533,6 +533,10 @@ async function testNotify_allValidEventTypes() {
         workflow_id: 'test-wf',
       },
     },
+    {
+      type: 'agentcard_setup',
+      payload: { setup_url: 'https://rose.test/api/agentcard/connect?user=user-123' },
+    },
     { type: 'completion', payload: { summary: 'test summary' } },
     {
       type: 'cost_limit',
@@ -1104,6 +1108,48 @@ async function testBoundary_notifyWriteLockNaturalLanguageOnly() {
   }
 }
 
+async function testBoundary_notifyAgentCardSetupIncludesSetupLink() {
+  const token = captureToken('notify-agentcard-setup');
+  const agent = await createNotifyAgent('boundary agentcard setup agent');
+  const setupUrl = 'https://rose.test/api/agentcard/connect?user=user-123';
+  try {
+    const res = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        event_type: 'agentcard_setup',
+        agent_id: agent.id,
+        payload: {
+          setup_url: setupUrl,
+          attention_request_id: `attn-bb-${crypto.randomUUID()}`,
+          workflow_id: 'wf-agentcard-setup',
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const calls = await readCapturesForToken(token);
+    const surgeCalls = filterSurgeCalls(calls, 'One Time Agent Payment Setup');
+    if (surgeCalls.length === 0) {
+      console.log('    [skipped] No Surge calls -- Surge may not be configured');
+      return;
+    }
+    assert(surgeCalls.length === 1, `Expected 1 Surge call, got ${surgeCalls.length}`);
+    const call = surgeCalls[0];
+    assert(call.requestBody !== null, 'Expected non-null request body');
+    const body = JSON.parse(call.requestBody!);
+    assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
+    assert(
+      body.body.includes('One Time Agent Payment Setup'),
+      `Expected setup label, got: ${body.body}`
+    );
+    assert(body.body.includes(setupUrl), `Expected setup link in SMS, got: ${body.body}`);
+    assertNoInternalRoutingTokens(body.body, agent.id);
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
 async function testBoundary_notifyWriteLockStructuredMms() {
   const token = captureToken('notify-write-lock-mms');
   const agent = await createNotifyAgent('boundary write lock mms agent');
@@ -1492,6 +1538,10 @@ async function runAll() {
         {
           name: 'notify write_lock uses natural language only',
           fn: testBoundary_notifyWriteLockNaturalLanguageOnly,
+        },
+        {
+          name: 'notify agentcard_setup includes setup link',
+          fn: testBoundary_notifyAgentCardSetupIncludesSetupLink,
         },
         {
           name: 'notify write_lock sends structured MMS with image',

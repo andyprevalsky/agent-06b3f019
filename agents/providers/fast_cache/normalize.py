@@ -124,6 +124,7 @@ _VOLATILE_OBJECT_FIELDS = {
     "browser_recording_path",
     "browser_recording_manifest_path",
     "browser_recording_task_id",
+    "recording_view_url",
     "cost_dollars",
     "costdollars",
     "duration_seconds",

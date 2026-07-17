@@ -398,6 +398,128 @@ def test_toast_nopa_benchmark_routes_browser_to_toast_not_generic_search():
     assert task.expected_payment_receipt["merchant"] == "Nopa Fish (Toast - order.toasttab.com)"
     assert task.success_on_payment_card_request is True
     assert task.expected_payment_receipt["lineItems"] == [{"name": "The Rocky Sandwich", "quantity": 1}]
+    assert task.expected_payment_receipt["requiredFields"] == [
+        "merchant",
+        "currency",
+        "lineItems",
+        "fees",
+        "subtotalCents",
+        "totalCents",
+        "fingerprint",
+        "userId",
+        "agentId",
+    ]
+    assert task.expected_payment_receipt["requiredLineItemFields"] == [
+        "name",
+        "imageUrl",
+        "productUrl",
+        "rating",
+        "reviewCount",
+        "unitPriceCents",
+        "quantity",
+        "lineTotalCents",
+    ]
+    assert task.expected_payment_receipt["requiredFeeFields"] == ["label", "amountCents"]
+
+
+def test_toast_payment_approval_requires_every_declared_receipt_field():
+    """Toast cannot pass with a sparse or malformed payment approval payload."""
+    from copy import deepcopy
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = get_task_by_name("browser-toast-nopa-write-lock")
+    payload = {
+        "merchant": "Nopa Fish (Toast - order.toasttab.com)",
+        "currency": "USD",
+        "lineItems": [
+            {
+                "name": "The Rocky Sandwich",
+                "imageUrl": None,
+                "productUrl": "https://toasttab.com/menu/nopafish/the-rocky-sandwich",
+                "rating": "4.8 stars",
+                "reviewCount": "125 reviews",
+                "unitPriceCents": 2100,
+                "quantity": 1,
+                "lineTotalCents": 2100,
+            }
+        ],
+        "fees": [{"label": "Taxes & Fees", "amountCents": 294}],
+        "subtotalCents": 2100,
+        "totalCents": 2394,
+        "fingerprint": "a" * 64,
+        "userId": "user-123",
+        "agentId": "agent-123",
+    }
+
+    def request(value):
+        return {"metadata": {"requestPaymentCard": value}}
+
+    assert _validate_payment_receipt(task, request(payload)) is None
+
+    for field in task.expected_payment_receipt["requiredFields"]:
+        sparse = deepcopy(payload)
+        sparse.pop(field)
+        reason = _validate_payment_receipt(task, request(sparse))
+        assert reason is not None and field in reason
+
+    for field in task.expected_payment_receipt["requiredLineItemFields"]:
+        sparse = deepcopy(payload)
+        sparse["lineItems"][0].pop(field)
+        reason = _validate_payment_receipt(task, request(sparse))
+        assert reason is not None and field in reason
+
+    for field in task.expected_payment_receipt["requiredFeeFields"]:
+        sparse = deepcopy(payload)
+        sparse["fees"][0].pop(field)
+        reason = _validate_payment_receipt(task, request(sparse))
+        assert reason is not None and field in reason
+
+
+def test_payment_benchmark_enables_bundled_frontend_before_stack_start():
+    """The ngrok payment surface must serve a bundle, not Vite's module graph."""
+    import os
+    from unittest.mock import patch
+
+    from benchmarks import local
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        local.configure_task_environment(["agent-payment-idempotent-abandonment"])
+        assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
+
+
+async def test_edge_warmup_requires_explicit_research_port():
+    """Retired research ports must not add a failing warmup to every local benchmark."""
+    import os
+
+    from benchmarks import run_benchmark as bench
+
+    class UnexpectedClient:
+        def __init__(self, *_args, **_kwargs):
+            raise AssertionError("edge warmup must not derive the retired research port")
+
+    previous_port = os.environ.pop("RESEARCH_PORT", None)
+    original_client = bench.httpx.AsyncClient
+    try:
+        bench.httpx.AsyncClient = UnexpectedClient
+        await bench._warmup_edge_functions("http://localhost:55100")
+    finally:
+        bench.httpx.AsyncClient = original_client
+        if previous_port is not None:
+            os.environ["RESEARCH_PORT"] = previous_port
+
+
+def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
+    """The deploy lifecycle helper must provision its declared sandbox float gate."""
+    helper = (
+        Path(__file__).resolve().parents[3] / "scripts" / "run-agentcard-lifecycle-task.sh"
+    ).read_text()
+
+    assert 'if [ "$BOOTSTRAP_FLAG" = "--bootstrap" ]' in helper
+    assert "scripts/setup-benchmark-payment.ts" in helper
+    assert "DATABASE_URL=" in helper
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():
@@ -481,6 +603,1006 @@ def test_success_on_payment_card_request_passes_before_agent_completion():
     }
 
     assert evaluate_task(task, data, approvals_triggered=1) == (True, None)
+
+
+def test_payment_receipt_tax_rate_qualifier_preserves_exact_amount():
+    """A displayed tax-rate qualifier is equivalent only when its amount is exact."""
+    from benchmarks.benchmark_tasks import BenchmarkTask
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = BenchmarkTask(
+        name="tax-qualified-receipt",
+        title="Tax Qualified Receipt",
+        prompt="",
+        timeout_seconds=1,
+        is_chat_mode=False,
+        expected_tools=[],
+        tags=[],
+        price_limit_cents=100,
+        requires_browser_agent=False,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling="auto_approve",
+        start_phase="execute",
+        expected_payment_receipt={"fees": [{"label": "Tax", "amountCents": 297}]},
+    )
+    request = {
+        "metadata": {
+            "requestPaymentCard": {
+                "fees": [{"label": "Tax (8.25%)", "amountCents": 297}]
+            }
+        }
+    }
+
+    assert _validate_payment_receipt(task, request) is None
+    request["metadata"]["requestPaymentCard"]["fees"][0]["amountCents"] = 298
+    assert "expected 297, got 298" in _validate_payment_receipt(task, request)
+
+
+def test_payment_lifecycle_validation_cross_checks_nested_provider_state():
+    """Payment benchmarks fail when any cross-provider terminal state disagrees."""
+    from benchmarks.benchmark_tasks import BenchmarkTask
+    from benchmarks.run_benchmark import _validate_payment_lifecycle
+
+    task = BenchmarkTask(
+        name="payment-lifecycle",
+        title="Payment Lifecycle",
+        prompt="",
+        timeout_seconds=1,
+        is_chat_mode=False,
+        expected_tools=[],
+        tags=[],
+        price_limit_cents=100,
+        requires_browser_agent=False,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling="auto_approve",
+        start_phase="execute",
+        expected_payment_lifecycle={
+            "purchase": {"status": "CLEARED"},
+            "stripeHold": {"status": "succeeded", "amountReceivedCents": 4396},
+            "orgTransfer": {"status": "consumed", "releasedCents": 0},
+            "attention": {"openKinds": []},
+        },
+    )
+    lifecycle = {
+        "purchase": {"status": "CLEARED", "id": "purchase-1"},
+        "stripeHold": {"status": "succeeded", "amountReceivedCents": 4396},
+        "orgTransfer": {"status": "consumed", "releasedCents": 0},
+        "attention": {"openKinds": [], "resolvedKinds": []},
+    }
+
+    assert _validate_payment_lifecycle(
+        task, {"_benchmark": {"payment_lifecycle": lifecycle}}
+    ) is None
+    lifecycle["orgTransfer"]["releasedCents"] = 4396
+    assert _validate_payment_lifecycle(
+        task, {"_benchmark": {"payment_lifecycle": lifecycle}}
+    ) == "payment_lifecycle.orgTransfer.releasedCents mismatch: expected 0, got 4396"
+
+
+async def test_abandonment_waits_for_cron_reconciliation():
+    """A delayed AgentCard release is observed through the same lifecycle endpoint cron updates."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    lifecycles = [
+        {
+            "purchase": {"status": "FUNDING_RECLAIM_FAILED"},
+            "walletFunding": {"status": "RECLAIM_FAILED"},
+        },
+        {
+            "purchase": {"status": "FUNDING_RECLAIM_FAILED"},
+            "walletFunding": {"status": "RECLAIM_FAILED"},
+        },
+        get_task_by_name("agent-payment-abandonment").expected_payment_lifecycle,
+    ]
+    reads = 0
+
+    async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal reads
+        reads += 1
+        return lifecycles.pop(0)
+
+    result = await _wait_for_expected_payment_lifecycle(
+        "http://localhost:55120",
+        "agent-123",
+        get_task_by_name("agent-payment-abandonment"),
+        lifecycles.pop(0),
+        timeout_seconds=1,
+        poll_interval_seconds=0,
+        fetch_lifecycle=fetch_lifecycle,
+    )
+
+    assert result["purchase"]["status"] == "VOIDED"
+    assert reads == 2
+
+
+async def test_abandonment_retries_a_pending_company_release():
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    task = get_task_by_name("agent-payment-abandonment")
+    recoveries = 0
+
+    async def recover_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal recoveries
+        recoveries += 1
+        return task.expected_payment_lifecycle
+
+    result = await _wait_for_expected_payment_lifecycle(
+        "http://localhost:55120",
+        "agent-123",
+        task,
+        {
+            "purchase": {"status": "HELD"},
+            "walletFunding": {"status": "RECLAIMING"},
+        },
+        timeout_seconds=1,
+        poll_interval_seconds=0,
+        recover_lifecycle=recover_lifecycle,
+    )
+
+    assert result["purchase"]["status"] == "VOIDED"
+    assert recoveries == 1
+
+
+def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
+    """Checkout text alone cannot pass the AgentCard lifecycle benchmark."""
+    from benchmarks.benchmark_tasks import get_task_by_name, get_tasks_by_tag, suite_tasks
+    from benchmarks.run_benchmark import _validate_payment_lifecycle
+
+    task = get_task_by_name("agent-payment-test-shop")
+
+    assert "visible Rose Labs Test Payment checkout" in task.prompt
+    assert "do not navigate to source files or API endpoints" in task.prompt
+    assert "preserve the merchant" not in task.prompt.lower()
+    assert task.expected_payment_lifecycle["purchase"]["status"] == "CLEARED"
+    assert task.expected_payment_lifecycle["walletFunding"]["status"] == "CONSUMED"
+    assert task.expected_payment_lifecycle["orgTransfer"]["livemode"] is False
+    assert _validate_payment_lifecycle(task, {"_benchmark": {}}) == (
+        "missing payment lifecycle snapshot"
+    )
+
+    idempotency = get_task_by_name("agent-payment-idempotent-abandonment")
+    assert idempotency.expected_tools == ["spawn_browser_agent"]
+    assert idempotency.expected_tool_counts["spawn_browser_agent"] == 2
+    assert idempotency.min_tool_counts["request_payment_card"] == 2
+    assert "invoke spawn_browser_agent exactly twice" in idempotency.prompt
+    assert idempotency.expected_payment_lifecycle["purchase"]["status"] == "CLEARED"
+    abandonment = get_task_by_name("agent-payment-abandonment")
+    assert abandonment.payment_card_request_action == "abandon"
+    assert abandonment.expected_payment_lifecycle["purchase"]["status"] == "VOIDED"
+    assert abandonment.expected_payment_lifecycle["walletFunding"]["status"] == "RECLAIMED"
+    assert abandonment.expected_payment_lifecycle["stripeRefund"]["status"] == "succeeded"
+
+    setup = get_task_by_name("agent-payment-setup-resume")
+    assert setup.expected_attention_kinds == [
+        "payment_approval",
+        "agentcard_user_cardholder_onboarding_required",
+    ]
+    assert setup.agentcard_setup_action == "complete"
+    assert setup.expected_payment_lifecycle["purchase"]["status"] == "CLEARED"
+
+    production = get_task_by_name("agent-payment-production-abandonment")
+    assert production.production_only is True
+    assert production.payment_card_request_action == "abandon"
+    assert production.expected_payment_receipt["totalCents"] == 50
+    assert production.expected_payment_lifecycle["purchase"]["status"] == "VOIDED"
+    assert production.expected_payment_lifecycle["stripeRefund"]["amountCents"] == 50
+    assert production.expected_payment_lifecycle["orgTransfer"]["livemode"] is True
+    assert production.name not in {task.name for task in suite_tasks()}
+
+    assert [
+        task.name for task in get_tasks_by_tag("agentcard-lifecycle-sandbox")
+    ] == [
+        "agent-payment-test-shop",
+        "agent-payment-setup-resume",
+        "agent-payment-idempotent-abandonment",
+        "agent-payment-abandonment",
+    ]
+    assert "?benchmark=agentcard-abandonment" in abandonment.prompt
+
+
+def test_production_payment_lifecycle_refuses_sandbox_target():
+    import pytest
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_task_target
+
+    task = get_task_by_name("agent-payment-production-abandonment")
+    with pytest.raises(RuntimeError, match="production-only"):
+        _validate_task_target(task, "http://localhost:55120")
+    _validate_task_target(task, "https://api.roselabs.ai")
+
+
+def test_agentcard_setup_fixture_is_seeded_only_for_local_non_setup_tasks():
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _agentcard_setup_fixture_action
+
+    standard = get_task_by_name("agent-payment-test-shop")
+    setup = get_task_by_name("agent-payment-setup-resume")
+    production = get_task_by_name("agent-payment-production-abandonment")
+
+    assert _agentcard_setup_fixture_action(standard, "http://localhost:55120") == "complete"
+    assert _agentcard_setup_fixture_action(setup, "http://localhost:55120") == "reset"
+    assert _agentcard_setup_fixture_action(production, "https://api.roselabs.ai") is None
+
+
+def test_expected_attention_kind_uses_ordered_sequence():
+    from types import SimpleNamespace
+
+    from benchmarks.run_benchmark import _expected_attention_kind
+
+    task = SimpleNamespace(
+        expected_attention_kind=None,
+        expected_attention_kinds=[
+            "payment_approval",
+            "agentcard_user_cardholder_onboarding_required",
+        ],
+    )
+    assert _expected_attention_kind(task, 0) == "payment_approval"
+    assert _expected_attention_kind(task, 1) == "agentcard_user_cardholder_onboarding_required"
+    assert _expected_attention_kind(task, 2) is None
+
+
+def test_agentcard_setup_attention_is_not_auto_approved():
+    from types import SimpleNamespace
+
+    from benchmarks.run_benchmark import _should_auto_approve_attention
+
+    task = SimpleNamespace(agentcard_setup_action="complete")
+    assert _should_auto_approve_attention(
+        task,
+        {"metadata": {"attentionKind": "payment_approval"}},
+    )
+    assert not _should_auto_approve_attention(
+        task,
+        {
+            "metadata": {
+                "attentionKind": "agentcard_user_cardholder_onboarding_required"
+            }
+        },
+    )
+
+
+def _required_ecommerce_judge_task():
+    from benchmarks.benchmark_tasks import BenchmarkTask
+
+    return BenchmarkTask(
+        name="ecommerce-judge-test",
+        title="Ecommerce Judge Test",
+        prompt="Complete the purchase",
+        timeout_seconds=60,
+        is_chat_mode=False,
+        expected_tools=["spawn_agent"],
+        tags=["ecommerce"],
+        price_limit_cents=100,
+        requires_browser_agent=True,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling="ignore",
+        start_phase="execute",
+        expected_attention_kinds=["write_lock", "payment_approval"],
+        enforce_declared_evaluators=True,
+        evaluators=[
+            {
+                "id": "commerce-outcome",
+                "method": "single_turn_llm_judge",
+                "criteria": ["The requested item and terminal checkout state are grounded"],
+                "judge_prompt": "Fail unless the transaction outcome is grounded in tool evidence.",
+                "pass_threshold": 1.0,
+            }
+        ],
+    )
+
+
+def test_ecommerce_attention_kind_rejects_auth_blocker():
+    """A login handoff cannot masquerade as a terminal commerce write lock."""
+    from benchmarks.run_benchmark import _attention_request_matches_task
+
+    task = _required_ecommerce_judge_task()
+    auth_request = {"metadata": {"attentionKind": "auth_assistance"}}
+    write_lock_request = {
+        "metadata": {"requestUserApproval": {"writePermission": True}}
+    }
+
+    assert _attention_request_matches_task(task, auth_request) is False
+    assert _attention_request_matches_task(task, write_lock_request) is True
+
+
+async def test_required_declared_evaluator_controls_pass_fail():
+    """A required declared judge is executed and its score controls the run."""
+    import benchmarks.run_benchmark as bench
+
+    task = _required_ecommerce_judge_task()
+    data = {
+        "agent": {"agent_id": "agent-commerce", "status": "ACTIVE"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Reached checkout",
+                "metadata": {"toolName": "spawn_agent", "toolStatus": "FINISHED"},
+            }
+        ],
+        "_benchmark": {"attention_request_kind_seen": "write_lock"},
+    }
+    scores = iter(
+        [
+            {"score": 0.0, "reasoning": "The requested item is not evidenced."},
+            {"score": 1.0, "reasoning": "Every criterion is grounded."},
+        ]
+    )
+    calls = []
+    original_call = bench._call_declared_llm_judge
+
+    async def fake_call(task_arg, evaluator_arg, data_arg):
+        calls.append((task_arg.name, evaluator_arg["id"], data_arg["agent"]["agent_id"]))
+        return next(scores)
+
+    try:
+        bench._call_declared_llm_judge = fake_call
+        passed, reason, results = await bench._run_declared_evaluators(task, data)
+        assert passed is False
+        assert "requested item is not evidenced" in reason.lower()
+        assert results[0]["passed"] is False
+
+        passed, reason, results = await bench._run_declared_evaluators(task, data)
+        assert passed is True
+        assert reason is None
+        assert results[0]["passed"] is True
+    finally:
+        bench._call_declared_llm_judge = original_call
+
+    assert calls == [
+        ("ecommerce-judge-test", "commerce-outcome", "agent-commerce"),
+        ("ecommerce-judge-test", "commerce-outcome", "agent-commerce"),
+    ]
+
+
+def _opentable_static_evaluator():
+    return {
+        "id": "opentable-runtime-contract",
+        "method": "static_check",
+        "criteria": ["The browser and approval trajectory satisfies the deterministic contract"],
+        "checks": [
+            {"type": "no_browser_agent_failures"},
+            {"type": "browser_agent_session_count", "min": 1, "max": 1},
+            {"type": "agent_status", "value": "COMPLETED"},
+            {"type": "approval_request_count", "value": 1},
+            {
+                "type": "approval_request_details",
+                "required_strings": ["Prospect"],
+                "require_time": True,
+            },
+        ],
+    }
+
+
+def _completed_opentable_evidence():
+    return {
+        "agent": {"status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Browser automation complete",
+                "metadata": {
+                    "toolName": "spawn_agent",
+                    "agentType": "browser",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": "browser-call-1",
+                    "browser_url": "https://steel.example/session/one",
+                },
+            }
+        ],
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "attention_requests_seen": [
+                {
+                    "kind": "write_lock",
+                    "question": "Confirm reservation at Prospect for 7:00 PM?",
+                }
+            ],
+        },
+    }
+
+
+def test_opentable_static_evaluator_checks_full_runtime_contract():
+    """Code checks reject failed/retried browsers, incomplete roots, and weak approvals."""
+    from copy import deepcopy
+
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = _opentable_static_evaluator()
+    good = _completed_opentable_evidence()
+    assert _run_declared_static_check(evaluator, good)[0] is True
+
+    failed_browser = deepcopy(good)
+    failed_browser["messages"].append(
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_agent",
+                "agentType": "browser",
+                "toolStatus": "FAILED",
+                "toolCallId": "browser-call-1",
+            },
+        }
+    )
+    assert "browser agent failure" in _run_declared_static_check(evaluator, failed_browser)[1].lower()
+
+    retried_browser = deepcopy(good)
+    retried_browser["messages"].append(
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_agent",
+                "agentType": "browser",
+                "toolStatus": "FINISHED",
+                "toolCallId": "browser-call-2",
+                "browser_url": "https://steel.example/session/two",
+            },
+        }
+    )
+    assert "browser agent session" in _run_declared_static_check(evaluator, retried_browser)[1].lower()
+
+    incomplete = deepcopy(good)
+    incomplete["agent"]["status"] = "ACTIVE"
+    assert "agent status" in _run_declared_static_check(evaluator, incomplete)[1].lower()
+
+    extra_approval = deepcopy(good)
+    extra_approval["_benchmark"]["approvals_triggered"] = 2
+    assert "approval request" in _run_declared_static_check(evaluator, extra_approval)[1].lower()
+
+    missing_details = deepcopy(good)
+    missing_details["_benchmark"]["attention_requests_seen"][0]["question"] = "Confirm reservation?"
+    assert "prospect" in _run_declared_static_check(evaluator, missing_details)[1].lower()
+
+
+def test_auto_approve_requires_exact_declared_approval_count():
+    """Auto-approval tasks fail if the agent triggers more approvals than declared."""
+    from dataclasses import replace
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    task = replace(
+        get_task_by_name("browser-opentable-reservation"),
+        expected_tools=[],
+        approval_handling="auto_approve",
+        expected_approval_count=1,
+        expected_tool_counts=None,
+    )
+    data = {"agent": {"status": "COMPLETED", "progress": 1.0}, "messages": []}
+
+    assert evaluate_task(task, data, approvals_triggered=1) == (True, None)
+    passed, reason = evaluate_task(task, data, approvals_triggered=2)
+    assert passed is False
+    assert "expected exactly 1 approval" in reason.lower()
+
+
+def test_opentable_catalog_uses_auto_approved_mixed_evaluators():
+    """The OpenTable task combines trajectory code checks with a semantic judge."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-opentable-reservation")
+    assert "prepaid experience" not in task.prompt.lower()
+    assert "stop at the final write-lock" not in task.prompt.lower()
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert static_types == {
+        "no_browser_agent_failures",
+        "browser_agent_session_count",
+        "agent_status",
+        "approval_request_count",
+        "approval_request_details",
+    }
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    assert "completed" in semantic_criteria
+    assert "closest" in semantic_criteria
+
+
+def test_instacart_catalog_uses_complete_weekly_grocery_basket():
+    """The weekly Instacart task keeps the agreed basket and substitution policy exact."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-instacart-grocery-order")
+    prompt = task.prompt.lower()
+    for product in (
+        "blueberries",
+        "strawberries",
+        "16 oz cocojune yogurt",
+        "pickles",
+        "feta cheese",
+        "olives",
+        "12-pack of 1 l essentia ionized alkaline water",
+    ):
+        assert product in prompt
+    assert prompt.count("pickles") == 1
+    for retired_product in ("large eggs", "bananas", "whole milk"):
+        assert retired_product not in prompt
+    assert "$60" in task.prompt
+    assert "do not substitute cocojune or essentia" in prompt
+
+    evaluator = task.evaluators[0]
+    assert evaluator["method"] == "single_turn_llm_judge"
+    criteria = " ".join(evaluator["criteria"]).lower()
+    for requirement in (
+        "seven",
+        "cocojune",
+        "essentia",
+        "single store",
+        "$60",
+        "earliest available delivery window",
+    ):
+        assert requirement in criteria
+
+
+def test_no_tool_failures_static_check_rejects_any_failed_tool_event():
+    """The reusable trajectory check fails closed on any grounded tool failure."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {
+        "checks": [{"type": "no_tool_failures"}],
+    }
+    good = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_agent",
+                    "toolStatus": "FINISHED",
+                    "data": {"success": True},
+                },
+            }
+        ]
+    }
+    assert _run_declared_static_check(evaluator, good)[0] is True
+
+    for status in ("FAILED", "ERROR", "CANCELLED"):
+        failed = {
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "metadata": {"toolName": "spawn_agent", "toolStatus": status},
+                }
+            ]
+        }
+        passed, reason = _run_declared_static_check(evaluator, failed)
+        assert passed is False
+        assert "tool failure" in reason.lower()
+
+    unsuccessful = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "data": {"success": False},
+                },
+            }
+        ]
+    }
+    assert _run_declared_static_check(evaluator, unsuccessful)[0] is False
+
+
+def test_doordash_catalog_requires_single_clean_completed_browser_run():
+    """DoorDash combines deterministic runtime invariants with product semantics."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-doordash-usb-c-cable")
+    assert "stop at the payment/write-lock" not in task.prompt.lower()
+    assert task.prompt.endswith("Complete checkout.")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert static_types == {
+        "no_tool_failures",
+        "browser_agent_session_count",
+        "agent_status",
+        "approval_request_count",
+    }
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in ("usb-c to usb-c", "6 feet", "60w", "$30", "earliest"):
+        assert requirement in semantic_criteria
+
+
+def test_uber_catalog_is_normal_single_browser_task_not_stateful_minted_flow():
+    """Uber uses base live auth and the same one-agent runtime contract as other commerce tasks."""
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("minted-agent-accounts-uber")
+    assert task.name not in bench.MINTED_AGENT_ACCOUNT_TASK_NAMES
+    assert bench.MINTED_AGENT_ACCOUNT_TASK_NAMES == {bench.MINTED_AGENT_ACCOUNT_X_TASK_NAME}
+    assert "minted" not in task.prompt.lower()
+    assert "stop at the final write-lock" not in task.prompt.lower()
+    assert task.prompt.endswith("Complete the ride request.")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kinds == ["write_lock"]
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert task.bench == "rose-bench"
+    assert task.environment["live_fixtures"] == ["base"]
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert static_types == {
+        "no_tool_failures",
+        "browser_agent_session_count",
+        "agent_status",
+        "approval_request_count",
+    }
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in ("88 howard", "425 mission", "uberx", "completed"):
+        assert requirement in semantic_criteria
+
+
+def test_approval_request_details_can_require_item_name_and_amount():
+    """Commerce approvals must expose what is being purchased and its price."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    evaluator = {
+        "checks": [
+            {
+                "type": "approval_request_details",
+                "required_strings": ["beanie"],
+                "require_amount": True,
+            }
+        ]
+    }
+    good = {
+        "_benchmark": {
+            "attention_requests_seen": [
+                {"question": "Buy the Black Knit Beanie for $19.99?"}
+            ]
+        }
+    }
+    assert _run_declared_static_check(evaluator, good)[0] is True
+
+    missing_amount = {
+        "_benchmark": {
+            "attention_requests_seen": [{"question": "Buy the Black Knit Beanie?"}]
+        }
+    }
+    passed, reason = _run_declared_static_check(evaluator, missing_amount)
+    assert passed is False
+    assert "amount" in reason.lower()
+
+
+def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
+    """Amazon uses the standard completed-commerce runtime and preserves cart-path semantics."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-agent-amazon-cookie-payment")
+    assert task.description.endswith("complete the purchase.")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kind == "write_lock"
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert task.bench == "rose-bench"
+    assert task.environment["live_fixtures"] == ["base", "amazon_auth"]
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert static_types == {
+        "no_tool_failures",
+        "browser_agent_session_count",
+        "agent_status",
+        "approval_request_count",
+        "approval_request_details",
+    }
+    approval_check = next(
+        check
+        for check in task.evaluators[0]["checks"]
+        if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["beanie"]
+    assert approval_check["require_amount"] is True
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in ("black", "under $35", "well-made", "buy now", "completed"):
+        assert requirement in semantic_criteria
+
+
+def test_alchemy_sauna_catalog_requires_single_clean_completed_booking():
+    """Alchemy requires one clean browser run and a fully described booking approval."""
+    from copy import deepcopy
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    task = get_task_by_name("browser-alchemy-springs-sauna")
+    assert "stop at the payment/write-lock" not in task.prompt.lower()
+    assert task.prompt.endswith("Complete the booking.")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kinds == ["write_lock"]
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+
+    static_evaluator = task.evaluators[0]
+    static_types = {check["type"] for check in static_evaluator["checks"]}
+    assert static_types == {
+        "no_tool_failures",
+        "browser_agent_session_count",
+        "agent_status",
+        "approval_request_count",
+        "approval_request_details",
+    }
+    approval_check = next(
+        check
+        for check in static_evaluator["checks"]
+        if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["Alchemy Springs", "Sauna Garden"]
+    assert approval_check["require_date"] is True
+    assert approval_check["require_time"] is True
+    assert approval_check["require_amount"] is True
+
+    good = {
+        "agent": {"status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_agent",
+                    "agentType": "browser",
+                    "toolStatus": "FINISHED",
+                    "toolCallId": "alchemy-browser-1",
+                },
+            }
+        ],
+        "_benchmark": {
+            "approvals_triggered": 1,
+            "attention_requests_seen": [
+                {
+                    "kind": "write_lock",
+                    "question": (
+                        "Approve one Alchemy Springs Sauna Garden session on "
+                        "Sunday, July 19, 2026 at 10:00 AM for $45.00?"
+                    ),
+                }
+            ],
+        },
+    }
+    assert _run_declared_static_check(static_evaluator, good)[0] is True
+
+    missing_date = deepcopy(good)
+    missing_date["_benchmark"]["attention_requests_seen"][0]["question"] = (
+        "Approve one Alchemy Springs Sauna Garden session at 10:00 AM for $45.00?"
+    )
+    passed, reason = _run_declared_static_check(static_evaluator, missing_date)
+    assert passed is False
+    assert "date" in reason.lower()
+
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in ("earliest available", "10:00 am", "2:00 pm", "completed", "confirmation"):
+        assert requirement in semantic_criteria
+
+
+def test_approval_request_details_support_multiple_dates_and_seat():
+    """Booking approvals can require both stay dates and an assigned seat."""
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    stay_evaluator = {
+        "checks": [
+            {
+                "type": "approval_request_details",
+                "required_strings": ["Hotel Kabuki"],
+                "minimum_date_count": 2,
+            }
+        ]
+    }
+    complete_stay = {
+        "_benchmark": {
+            "attention_requests_seen": [
+                {
+                    "question": "Book Hotel Kabuki?",
+                    "checkIn": "2026-07-18",
+                    "checkOut": "2026-07-19",
+                }
+            ]
+        }
+    }
+    assert _run_declared_static_check(stay_evaluator, complete_stay)[0] is True
+
+    incomplete_stay = {
+        "_benchmark": {
+            "attention_requests_seen": [
+                {"question": "Book Hotel Kabuki?", "checkIn": "2026-07-18"}
+            ]
+        }
+    }
+    passed, reason = _run_declared_static_check(stay_evaluator, incomplete_stay)
+    assert passed is False
+    assert "2 calendar dates" in reason.lower()
+
+    seat_evaluator = {
+        "checks": [
+            {
+                "type": "approval_request_details",
+                "required_strings": ["AMC Metreon 16"],
+                "require_seat": True,
+            }
+        ]
+    }
+    assigned_seat = {
+        "_benchmark": {
+            "attention_requests_seen": [
+                {"question": "Buy one AMC Metreon 16 ticket in seat H10?"}
+            ]
+        }
+    }
+    assert _run_declared_static_check(seat_evaluator, assigned_seat)[0] is True
+
+    missing_seat = {
+        "_benchmark": {
+            "attention_requests_seen": [
+                {"question": "Buy one AMC Metreon 16 ticket?"}
+            ]
+        }
+    }
+    passed, reason = _run_declared_static_check(seat_evaluator, missing_seat)
+    assert passed is False
+    assert "seat" in reason.lower()
+
+
+def test_hotel_catalog_requires_single_clean_completed_reservation():
+    """Hotel booking uses one browser and a complete, grounded approval."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-hotel-booking")
+    assert "stop at the payment/write-lock" not in task.prompt.lower()
+    assert task.prompt.endswith("Complete the reservation.")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kinds == ["write_lock"]
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert static_types == {
+        "no_tool_failures",
+        "browser_agent_session_count",
+        "agent_status",
+        "approval_request_count",
+        "approval_request_details",
+    }
+    approval_check = next(
+        check
+        for check in task.evaluators[0]["checks"]
+        if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["Hotel Kabuki", "free cancellation"]
+    assert approval_check["minimum_date_count"] == 2
+    assert approval_check["require_amount"] is True
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in ("lowest-priced", "free cancellation", "completed", "confirmation"):
+        assert requirement in semantic_criteria
+
+
+def test_event_ticket_catalog_requires_single_clean_completed_purchase():
+    """Movie ticketing requires one browser and a detailed seat approval."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-event-ticket")
+    assert "stop at the payment/write-lock" not in task.prompt.lower()
+    assert task.prompt.endswith("Complete the ticket purchase.")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kinds == ["write_lock"]
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    approval_check = next(
+        check
+        for check in task.evaluators[0]["checks"]
+        if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == ["AMC Metreon 16"]
+    assert approval_check["require_date"] is True
+    assert approval_check["require_time"] is True
+    assert approval_check["require_amount"] is True
+    assert approval_check["require_seat"] is True
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in ("earliest", "center", "completed", "confirmation"):
+        assert requirement in semantic_criteria
+
+
+def test_amazon_return_catalog_requires_single_clean_completed_return():
+    """Amazon returns complete after one approval instead of stopping at it."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-amazon-return")
+    assert "stop at the final write-lock" not in task.prompt.lower()
+    assert task.prompt.endswith("Otherwise, complete the return.")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kinds == ["write_lock"]
+    assert task.expected_approval_count == 1
+    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    assert [evaluator["method"] for evaluator in task.evaluators] == [
+        "static_check",
+        "single_turn_llm_judge",
+    ]
+    approval_check = next(
+        check
+        for check in task.evaluators[0]["checks"]
+        if check["type"] == "approval_request_details"
+    )
+    assert approval_check["required_strings"] == [
+        "return",
+        "original payment method",
+        "drop-off",
+    ]
+    assert approval_check["require_amount"] is True
+    semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    for requirement in ("most recent", "completed", "confirmation"):
+        assert requirement in semantic_criteria
+
+
+def test_base_live_fixture_fails_when_live_auth_refresh_fails():
+    """A live benchmark never starts with missing/stale browser auth."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    original_compute = bench._sync_compute_tokens
+    original_browser = bench._sync_browser_credentials
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    raised = False
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda: True
+        bench._sync_browser_credentials = lambda: False
+        bench._apply_base_live_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="user-123",
+                auth_realm="amazon.com",
+            )
+        )
+    except RuntimeError as exc:
+        raised = "browser credential" in str(exc).lower()
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_browser_credentials = original_browser
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    assert raised, "base live fixture must fail closed when credential refresh fails"
 
 
 def test_expected_passkey_credential_ref_is_required_even_when_approval_is_terminal():
@@ -943,6 +2065,10 @@ def test_benchmark_run_serializes_world_model_fidelity_and_ignores_unknown_task_
                 "dimensions": {"schema_validity": 1.0},
             },
             world_model_mode="simulate",
+            payment_lifecycle={
+                "purchase": {"status": "VOIDED"},
+                "orgTransfer": {"status": "reclaimed", "releasedCents": 4396},
+            },
         )
     )
     with tempfile.TemporaryDirectory() as tmp:
@@ -957,6 +2083,8 @@ def test_benchmark_run_serializes_world_model_fidelity_and_ignores_unknown_task_
     assert loaded.task_results[0].world_model_fidelity["mean_score"] == 0.9
     assert loaded.task_results[0].world_model_mode == "simulate"
     assert loaded.task_results[0].archive_manifest_ref.endswith("manifest.json.gz.enc")
+    assert loaded.task_results[0].payment_lifecycle["purchase"]["status"] == "VOIDED"
+    assert loaded.task_results[0].payment_lifecycle["orgTransfer"]["releasedCents"] == 4396
 
 
 def test_minted_benchmark_cleanup_preserves_cached_agent_identity_by_default():
@@ -1157,15 +2285,27 @@ def test_browser_agent_cookie_bundle_bootstrap_can_be_skipped_with_env():
 
 
 def test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile():
-    """The passkey live fixture must remove every alternative Amazon auth path."""
+    """The passkey fixture syncs through its boundary and snapshots destructive state."""
     import benchmarks.run_benchmark as bench
 
     queries = []
+    sync_calls = []
+    sql_results = iter(
+        [
+            '{"steel_ids": [], "bundle_ids": [], "password_ids": [], "profiles": []}',
+            "1",
+            "10",
+        ]
+    )
     original_run_sql = bench._run_local_victoria_sql
     original_sync_passkeys = bench._sync_passkeys
+    original_subprocess_run = bench.subprocess.run
     try:
-        bench._sync_passkeys = lambda: None
-        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "1\t4\t5\t1"
+        bench._sync_passkeys = lambda: sync_calls.append("passkeys")
+        bench.subprocess.run = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("fixture bypassed _sync_passkeys")
+        )
+        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or next(sql_results)
         manifest = bench._apply_amazon_passkey(
             bench.LiveFixtureContext(
                 base_url="http://localhost:54121",
@@ -1176,31 +2316,39 @@ def test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile():
     finally:
         bench._run_local_victoria_sql = original_run_sql
         bench._sync_passkeys = original_sync_passkeys
+        bench.subprocess.run = original_subprocess_run
 
     assert manifest == {
         "fixture": "amazon_passkey",
         "passkey_count": 1,
-        "alternative_auth_disabled_count": 4,
-        "browser_state_deleted_count": 5,
-        "kernel_profiles_detached_count": 1,
+        "cleared": 10,
+        "user_id": "user-123",
+        "auth_realm": "amazon.com",
+        "restore_snapshot": {
+            "steel_ids": [],
+            "bundle_ids": [],
+            "password_ids": [],
+            "profiles": [],
+        },
     }
-    assert len(queries) == 1
-    sql = queries[0]
-    assert 'FROM "PasskeyCredential"' in sql
-    assert 'UPDATE "PasskeyCredential"' not in sql
-    assert '"authRealm" = \'amazon.com\'' in sql
-    assert 'LOWER("rpId")' not in sql
-    assert 'UPDATE "SteelSessionAuth"' in sql
-    assert 'UPDATE "CookieBundle"' in sql
-    assert 'UPDATE "BrowserPassword"' in sql
-    assert 'DELETE FROM "Cookie"' in sql
-    assert 'DELETE FROM "LocalStorageOrigin"' in sql
-    assert 'DELETE FROM "IndexedDBOrigin"' in sql
-    assert 'DELETE FROM "BrowserPermission"' in sql
-    assert 'DELETE FROM "CacheStorageOrigin"' in sql
-    assert 'DELETE FROM "BrowserProviderProfile"' in sql
-    assert 'profiles."provider" = \'kernel\'' in sql
-    assert "amazon.com" in sql
+    assert sync_calls == ["passkeys"]
+    assert len(queries) == 3
+    assert 'FROM "SteelSessionAuth"' in queries[0]
+    assert 'FROM "CookieBundle"' in queries[0]
+    assert 'FROM "BrowserPassword"' in queries[0]
+    assert 'FROM "PasskeyCredential"' in queries[1]
+    assert 'UPDATE "PasskeyCredential"' not in queries[1]
+    cleanup_sql = queries[2]
+    assert 'UPDATE "SteelSessionAuth"' in cleanup_sql
+    assert 'UPDATE "CookieBundle"' in cleanup_sql
+    assert 'UPDATE "BrowserPassword"' in cleanup_sql
+    assert 'DELETE FROM "Cookie"' in cleanup_sql
+    assert 'DELETE FROM "LocalStorageOrigin"' in cleanup_sql
+    assert 'DELETE FROM "IndexedDBOrigin"' in cleanup_sql
+    assert 'DELETE FROM "BrowserPermission"' in cleanup_sql
+    assert 'DELETE FROM "CacheStorageOrigin"' in cleanup_sql
+    assert 'DELETE FROM "BrowserProviderProfile"' in cleanup_sql
+    assert "amazon.com" in cleanup_sql
 
 
 def test_amazon_passkey_catalog_requires_live_passkey_kernel_evidence():
@@ -2557,6 +3705,57 @@ async def test_create_agent_uses_goal_override_when_env_set():
     assert "model" not in bodies[0]
 
 
+async def test_create_agent_sends_task_response_schema():
+    """Lifecycle tasks can prevent an inferred verifier schema from contradicting the prompt."""
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    bodies = []
+
+    class FakeResponse:
+        status_code = 201
+        text = ""
+
+        def json(self):
+            return {"agent_id": "agent-123"}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, _url, *, headers, json):
+            bodies.append(json)
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+        task = get_task_by_name("agent-payment-abandonment")
+        await bench.create_agent("http://localhost:55120", task)
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+
+    fields = bodies[0]["response_schema"]["fields"]
+    assert [field["name"] for field in fields] == [
+        "selected_product_names",
+        "one_time_payment_card_number",
+        "order_not_placed",
+    ]
+    assert all(field["required"] is True for field in fields)
+
+
 def test_keep_failed_agents_only_preserves_failures():
     """The diagnostic flag preserves failed agents but still cleans up passes."""
     import os
@@ -2911,6 +4110,25 @@ def test_local_services_manifest_reports_anon_capability():
     )
     assert not services_manifest_anon_enabled({"env": {"benchmark_anon_steel_profile": True}})
     assert not services_manifest_anon_enabled({"ports": {"backend": 55120}})
+
+
+def test_local_manifest_uses_isolated_system_database_identity():
+    """System-Postgres benchmark fixtures must not share the blackbox `victoria` database."""
+    from benchmarks.local import manifest_database_url
+
+    manifest = {
+        "ports": {"local_db": 60245},
+        "database": {
+            "use_system_postgres": True,
+            "port": 5432,
+            "name": "victoria_bench_1783809252_85375_82461",
+        },
+    }
+
+    assert manifest_database_url(manifest) == (
+        "postgresql://postgres:postgres@localhost:5432/"
+        "victoria_bench_1783809252_85375_82461"
+    )
 
 
 def test_local_extract_results_path_and_diagnostic_commands():
@@ -3367,6 +4585,75 @@ def test_logical_tool_counts_ignore_progress_messages():
         "spawn_browser_agent": 3,
         "spawn_claude_code_agent": 1,
         "message_person": 1,
+    }
+
+
+def test_logical_tool_counts_include_model_facing_routed_calls():
+    """A model-facing spawn_agent call remains observable after browser routing."""
+    from benchmarks.run_benchmark import _count_logical_tool_calls_from_messages
+
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "type": "browser",
+                        "tool_call_id": "browser-1",
+                    },
+                    {
+                        "tool": "spawn_agent",
+                        "type": "browser",
+                        "tool_call_id": "browser-2",
+                    },
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "payment-request-1",
+                "action_type": "request_payment_card",
+                "subAgentId": "browser-task-1",
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "payment-request-2",
+                "action_type": "request_payment_card",
+                "subAgentId": "browser-task-2",
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "browser-1",
+                "title": "Browser automation complete",
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "browser-2",
+                "title": "Browser automation complete",
+            },
+        },
+    ]
+
+    assert _count_logical_tool_calls_from_messages(messages) == {
+        "spawn_agent": 2,
+        "spawn_browser_agent": 2,
+        "request_payment_card": 2,
     }
 
 
@@ -4458,6 +5745,40 @@ def test_unified_catalog_delineates_bench_axes():
     assert live["environment"]["live_targets"] == ["https://www.amazon.com"]
 
 
+def test_daily_ecommerce_v1_catalog_has_ten_distinct_transaction_flows():
+    """The daily ecommerce slice stays focused, complete, and stable."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.fixtures import DEFAULT_BASE_IMAGE
+    from benchmarks.long_horizon import validate_catalog
+
+    expected_names = {
+        "browser-opentable-reservation",
+        "browser-toast-nopa-write-lock",
+        "browser-instacart-grocery-order",
+        "browser-doordash-usb-c-cable",
+        "minted-agent-accounts-uber",
+        "browser-agent-amazon-cookie-payment",
+        "browser-alchemy-springs-sauna",
+        "browser-hotel-booking",
+        "browser-event-ticket",
+        "browser-amazon-return",
+    }
+    tasks = validate_catalog()
+    ecommerce = [task for task in tasks if "ecommerce" in task.get("tags", [])]
+
+    assert {task["name"] for task in ecommerce} == expected_names
+    assert len(ecommerce) == 10
+    assert all(task.get("group", "").lower() == "daily" for task in ecommerce)
+    assert all(task.get("status", "ready") == "ready" for task in ecommerce)
+    assert all(task.get("enforce_declared_evaluators") is True for task in ecommerce)
+    assert len({task["prompt"] for task in ecommerce}) == len(ecommerce)
+    assert "browser-uber-ride" not in {task["name"] for task in tasks}
+    for name in expected_names:
+        loaded = get_task_by_name(name)
+        assert DEFAULT_BASE_IMAGE in loaded.environment["base_images"]
+        assert loaded.environment["live_fixtures"][0] == "base"
+
+
 def test_browser_search_single_result_tasks_use_browser_only():
     """Google/Bing search benchmarks exercise browser search, not web_search."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -4575,7 +5896,9 @@ def test_suite_selection_excludes_incomplete_entries():
         "gate-kyc-card-mint",
         "gate-source-connect-gmail",
     } <= suite_names
-    assert len(suite_names) == len([t for t in all_tasks() if t.status == "ready"])
+    assert len(suite_names) == len(
+        [t for t in all_tasks() if t.status == "ready" and not t.production_only]
+    )
 
 
 def test_every_task_has_base_image_fixture_by_default():
@@ -4760,6 +6083,26 @@ def test_tag_slices_still_resolve():
         "plaid": 2,
     }.items():
         assert len(get_tasks_by_tag(tag)) >= minimum, f"tag slice '{tag}' collapsed"
+
+
+def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
+    """The curated anti-bot slice uses one canonical tag spelling."""
+    from benchmarks.benchmark_tasks import all_tasks, get_tasks_by_tag
+
+    tasks = get_tasks_by_tag("antibot")
+    by_name = {task.name: task for task in tasks}
+    assert set(by_name) == {
+        "browser-indeed-account-create",
+        "browser-google-search-single-result",
+        "browser-bing-search-single-result",
+        "browser-biometrics-webdecoy",
+        "browser-toast-nopa-write-lock",
+        "browser-agent-amazon-cookie-payment",
+    }
+    assert "ecommerce" in by_name["browser-agent-amazon-cookie-payment"].tags
+    assert all(task.tags.count("antibot") == 1 for task in tasks)
+    all_tags = {tag for task in all_tasks() for tag in task.tags}
+    assert not ({"anti-bot", "anti_bot", "bot-challenge"} & all_tags)
 
 
 def test_history_ledger_task_names_still_exist_in_catalog():
@@ -5257,6 +6600,7 @@ async def run_all_tests():
     r.record("benchmark_env_disable_approval", test_benchmark_env_override_can_disable_approval_handling)
     await r.record_async("create_agent_write_lock_override", test_create_agent_sends_write_lock_override_when_env_set)
     await r.record_async("create_agent_goal_override", test_create_agent_uses_goal_override_when_env_set)
+    await r.record_async("create_agent_response_schema", test_create_agent_sends_task_response_schema)
     r.record("keep_failed_agents_cleanup_policy", test_keep_failed_agents_only_preserves_failures)
     r.record("keep_agents_cleanup_policy", test_keep_agents_preserves_passed_and_failed_runs)
     r.record("local_plan_batches_together", test_local_plan_batches_selected_benchmarks_together)
@@ -5266,6 +6610,10 @@ async def run_all_tests():
     r.record("local_args_single_task", test_local_benchmark_args_for_single_task_not_parallel)
     r.record("local_failed_tasks_from_run", test_local_failed_tasks_from_run_reads_result_json)
     r.record("local_services_manifest_validation", test_local_services_manifest_validation_requires_ports)
+    r.record(
+        "local_manifest_system_database_identity",
+        test_local_manifest_uses_isolated_system_database_identity,
+    )
     r.record("run_sh_manifest_publishes_wmh", test_run_sh_manifest_writer_publishes_wmh_when_served)
     r.record("apply_manifest_env_injects_wmh", test_apply_manifest_environment_injects_wmh_base_url_and_model)
     r.record("local_results_and_diagnostics", test_local_extract_results_path_and_diagnostic_commands)
@@ -5312,6 +6660,10 @@ async def run_all_tests():
     r.record("local_worker_health_url_derived", test_local_worker_health_url_derives_from_backend_port)
     r.record("benchmark_memory_baseline_guarded", test_benchmark_memory_baseline_endpoint_is_guarded)
     r.record("logical_tool_counts_ignore_progress", test_logical_tool_counts_ignore_progress_messages)
+    r.record(
+        "logical_tool_counts_model_facing_routed_calls",
+        test_logical_tool_counts_include_model_facing_routed_calls,
+    )
     r.record("root_exact_tool_count_fail_fast", test_root_exact_tool_count_fails_fast_after_duplicate_call)
     r.record("message_side_effect_fast_cache_off", test_message_side_effect_benchmarks_force_fast_cache_off)
     r.record(
@@ -5352,8 +6704,116 @@ async def run_all_tests():
         test_toast_nopa_benchmark_routes_browser_to_toast_not_generic_search,
     )
     r.record(
+        "payment_benchmark_bundled_frontend",
+        test_payment_benchmark_enables_bundled_frontend_before_stack_start,
+    )
+    await r.record_async(
+        "edge_warmup_explicit_research_port",
+        test_edge_warmup_requires_explicit_research_port,
+    )
+    r.record(
+        "agentcard_lifecycle_bootstrap_float",
+        test_agentcard_lifecycle_bootstrap_provisions_sandbox_float,
+    )
+    r.record(
+        "toast_payment_approval_complete_receipt",
+        test_toast_payment_approval_requires_every_declared_receipt_field,
+    )
+    r.record(
         "success_on_payment_card_request",
         test_success_on_payment_card_request_passes_before_agent_completion,
+    )
+    r.record(
+        "payment_receipt_tax_rate_qualifier",
+        test_payment_receipt_tax_rate_qualifier_preserves_exact_amount,
+    )
+    r.record(
+        "payment_lifecycle_cross_provider_state",
+        test_payment_lifecycle_validation_cross_checks_nested_provider_state,
+    )
+    await r.record_async(
+        "abandonment_waits_for_cron_reconciliation",
+        test_abandonment_waits_for_cron_reconciliation,
+    )
+    r.record(
+        "agent_payment_requires_lifecycle_evidence",
+        test_agent_payment_catalog_requires_terminal_lifecycle_evidence,
+    )
+    r.record(
+        "ordered_attention_kind_sequence",
+        test_expected_attention_kind_uses_ordered_sequence,
+    )
+    r.record(
+        "agentcard_setup_attention_not_auto_approved",
+        test_agentcard_setup_attention_is_not_auto_approved,
+    )
+    r.record(
+        "ecommerce_attention_rejects_auth_blocker",
+        test_ecommerce_attention_kind_rejects_auth_blocker,
+    )
+    await r.record_async(
+        "required_declared_evaluator_controls_pass_fail",
+        test_required_declared_evaluator_controls_pass_fail,
+    )
+    r.record(
+        "opentable_static_runtime_contract",
+        test_opentable_static_evaluator_checks_full_runtime_contract,
+    )
+    r.record(
+        "auto_approve_exact_approval_count",
+        test_auto_approve_requires_exact_declared_approval_count,
+    )
+    r.record(
+        "opentable_mixed_evaluator_catalog",
+        test_opentable_catalog_uses_auto_approved_mixed_evaluators,
+    )
+    r.record(
+        "instacart_weekly_grocery_catalog",
+        test_instacart_catalog_uses_complete_weekly_grocery_basket,
+    )
+    r.record(
+        "declared_static_no_tool_failures",
+        test_no_tool_failures_static_check_rejects_any_failed_tool_event,
+    )
+    r.record(
+        "doordash_single_clean_completed_browser_run",
+        test_doordash_catalog_requires_single_clean_completed_browser_run,
+    )
+    r.record(
+        "uber_normal_single_browser_task",
+        test_uber_catalog_is_normal_single_browser_task_not_stateful_minted_flow,
+    )
+    r.record(
+        "approval_details_item_and_amount",
+        test_approval_request_details_can_require_item_name_and_amount,
+    )
+    r.record(
+        "amazon_beanie_clean_completed_purchase",
+        test_amazon_beanie_catalog_requires_clean_completed_cart_purchase,
+    )
+    r.record(
+        "alchemy_sauna_clean_completed_booking",
+        test_alchemy_sauna_catalog_requires_single_clean_completed_booking,
+    )
+    r.record(
+        "approval_details_multiple_dates_and_seat",
+        test_approval_request_details_support_multiple_dates_and_seat,
+    )
+    r.record(
+        "hotel_clean_completed_reservation",
+        test_hotel_catalog_requires_single_clean_completed_reservation,
+    )
+    r.record(
+        "event_ticket_clean_completed_purchase",
+        test_event_ticket_catalog_requires_single_clean_completed_purchase,
+    )
+    r.record(
+        "amazon_return_clean_completed_return",
+        test_amazon_return_catalog_requires_single_clean_completed_return,
+    )
+    r.record(
+        "base_live_fixture_auth_failure_is_fatal",
+        test_base_live_fixture_fails_when_live_auth_refresh_fails,
     )
     r.record(
         "expected_passkey_credential_ref",
@@ -5369,6 +6829,10 @@ async def run_all_tests():
     r.record(
         "unified_catalog_bench_axes",
         test_unified_catalog_delineates_bench_axes,
+    )
+    r.record(
+        "daily_ecommerce_v1_catalog",
+        test_daily_ecommerce_v1_catalog_has_ten_distinct_transaction_flows,
     )
     r.record(
         "unified_catalog_multiple_evaluators",
@@ -5387,6 +6851,7 @@ async def run_all_tests():
     r.record("live_fixtures_default_to_base", test_live_fixtures_default_to_base_and_synthetic_to_none)
     r.record("live_fixture_validation_guards", test_live_fixture_validation_rejects_unknown_and_synthetic_declarations)
     r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)
+    r.record("antibot_slice_daily_commerce", test_antibot_slice_includes_daily_toast_and_amazon_commerce)
     r.record("history_ledger_no_orphaned_task_names", test_history_ledger_task_names_still_exist_in_catalog)
     r.record("retired_tasks_hidden", test_retired_tasks_hidden_from_suite_and_listing)
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)
