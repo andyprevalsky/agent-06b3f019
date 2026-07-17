@@ -2912,6 +2912,23 @@ def test_boot_launch_collects_terminal_artifacts_without_post_done_ssh() -> None
     assert "Never re-enter Machines-API SSH after DONE" in collection
 
 
+def test_boot_launch_dashboard_card_mirror_uses_data_plane() -> None:
+    """The live dashboard must not create one Machines-API SSH session per
+    second per box; at daily width that exhausted Fly and left an SSH child
+    alive after the real verdict and DONE marker."""
+    cloud = CLOUD_SCRIPT.read_text()
+    mirror = cloud[
+        cloud.index("expected_total=\"${#BENCH_TASKS[@]}\"") : cloud.index(
+            "DASHBOARD_MIRROR_PID=$!"
+        )
+    ]
+
+    assert 'if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then' in mirror
+    assert "/repo/.context/cloudbench/report-card.json" in mirror
+    assert "curl -fsS --max-time 6" in mirror
+    assert "30 control-plane sessions/second" in mirror
+
+
 def test_cloud_timeout_kills_a_command_that_ignores_sigalrm() -> None:
     """RCA (2026-07-16): the perl-alarm wrapper exec'd flyctl and relied on
     SIGALRM surviving exec. A stopped-machine SSH ignored that contract and ran

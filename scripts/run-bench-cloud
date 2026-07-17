@@ -2156,7 +2156,18 @@ PY
         expected_names_b64="$(printf '%s\n' "${BENCH_TASKS[@]}" | base64 | tr -d '\n')"
         while :; do
             tmp="$(mktemp)"
-            if ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/report-card.json' 2>/dev/null" > "$tmp" 2>/dev/null \
+            # Boot-launch already has a machine-pinned data-plane proxy. Reuse
+            # it for the live card too: an SSH read every second per bench was
+            # 30 control-plane sessions/second at daily width and the final one
+            # could remain hung after DONE while the controller tried to exit.
+            if {
+                if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
+                    curl -fsS --max-time 6 \
+                        "http://127.0.0.1:$LOCAL_STATUS_PORT/repo/.context/cloudbench/report-card.json"
+                else
+                    ssh_read "$mid" "cat '$REMOTE_REPO/.context/cloudbench/report-card.json' 2>/dev/null"
+                fi
+            } > "$tmp" 2>/dev/null \
                 && python3 -m json.tool "$tmp" >/dev/null 2>&1 \
                 && python3 - "$tmp" "$expected_total" "$LOCAL_DASH_PORT" "$expected_names_b64" <<'PY' >/dev/null 2>&1
 import base64
