@@ -13,7 +13,7 @@ import {
 import type { AgentDetail, Message } from '@/lib/api';
 
 import type { StreamingBubble, StreamingPlan, StreamingAttention, StreamingTool } from '../types';
-import { MAX_RECONNECT_DELAY_MS } from '../config';
+import { MAX_RECONNECT_DELAY_MS, DISCONNECTED_BACKFILL_POLL_MS } from '../config';
 import { fetchAgentDetail } from '../api';
 import {
   handleInsertMessage,
@@ -48,6 +48,27 @@ export interface RealtimeSubscriptionDeps {
   setForceResubscribeCounter: React.Dispatch<React.SetStateAction<number>>;
   dispatchMessage: (message: Message) => void;
   onLoadAgents?: () => void;
+}
+
+/**
+ * Reconcile local state from an authoritative agent-detail fetch: API messages
+ * are the source of truth, with any realtime-only messages (not yet in the API
+ * response) preserved. Shared by the reconnect backfill and the disconnected
+ * poll so both agree on one merge rule.
+ */
+function applyAgentBackfill(
+  data: AgentDetail,
+  setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
+  setAgent: React.Dispatch<React.SetStateAction<AgentDetail | null>>,
+  setIsChatMode: React.Dispatch<React.SetStateAction<boolean>>,
+): void {
+  setMessages((prev) => {
+    const apiIds = new Set(data.messages.map((m) => m.message_id));
+    const realtimeOnly = prev.filter((m) => !apiIds.has(m.message_id));
+    return [...data.messages, ...realtimeOnly];
+  });
+  setAgent(data.agent);
+  setIsChatMode(!data.agent.temporal_workflow_id);
 }
 
 function startsCloudAgentMode(data: InsertMessagePayload, selectedAgentId: string): boolean {
@@ -217,13 +238,7 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
           try {
             const data = await fetchAgentDetail(selectedAgentId);
             if (cancelled) return;
-            setMessages((prev) => {
-              const apiIds = new Set(data.messages.map((m) => m.message_id));
-              const realtimeOnly = prev.filter((m) => !apiIds.has(m.message_id));
-              return [...data.messages, ...realtimeOnly];
-            });
-            setAgent(data.agent);
-            setIsChatMode(!data.agent.temporal_workflow_id);
+            applyAgentBackfill(data, setMessages, setAgent, setIsChatMode);
           } catch (error) {
             console.error('Failed to refetch after reconnection:', error);
           }
@@ -259,4 +274,32 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
     setIsChatMode,
     setForceResubscribeCounter,
   ]);
+
+  // API backfill fallback while the realtime channel is NOT connected. A rejected
+  // or racing agent:<id> private-channel join (e.g. "Unauthorized" right after
+  // agent creation) delivers nothing and never replays, so the UI would stall on
+  // "Thinking". Poll the authoritative agent detail on a fixed cadence and
+  // reconcile, so messages surface within one interval regardless of the realtime
+  // auth race. Ticks are a no-op while the channel is live (channelRef set), so
+  // the healthy path pays nothing and the reconnect path owns later recovery.
+  useEffect(() => {
+    if (!selectedAgentId || !canSubscribe) return;
+    let cancelled = false;
+    const interval = window.setInterval(() => {
+      if (cancelled || channelRef.current) return;
+      void (async () => {
+        try {
+          const data = await fetchAgentDetail(selectedAgentId);
+          if (cancelled || channelRef.current) return;
+          applyAgentBackfill(data, setMessages, setAgent, setIsChatMode);
+        } catch (error) {
+          console.error('Disconnected backfill poll failed:', error);
+        }
+      })();
+    }, DISCONNECTED_BACKFILL_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [selectedAgentId, canSubscribe, channelRef, setMessages, setAgent, setIsChatMode]);
 }

@@ -1,4 +1,4 @@
-import { supabase, getSession, isRealtimeReady } from './supabase';
+import { supabase, getSession, ensureFreshRealtimeAuth } from './supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
 
 // Import and re-export all types from realtime-types.ts
@@ -134,20 +134,15 @@ export async function subscribeToChannel(
   // private-channel join payload carries it (see RealtimeChannel._rejoin, which
   // only attaches access_token when socket.accessTokenValue is populated).
   //
-  // In the normal app flow useAuth's setRealtimeAuth() has ALREADY bound the
-  // token — canSubscribe/realtimeReady gate every app subscription behind that.
-  // In that case a per-channel setAuth() is a redundant no-op (RealtimeClient
-  // ._performAuth early-returns when the token is unchanged), and re-entering
-  // setAuth() while the shared socket is mid-connect only adds churn. So we only
-  // set it here as a fallback for callers that may subscribe before
-  // setRealtimeAuth() has run (isRealtimeReady() === false).
-  // See: https://github.com/supabase/realtime-js/pull/126
-  if (!isRealtimeReady()) {
-    console.log(
-      `[Realtime] subscribeToChannel(${channelName}) - binding auth token (realtime not yet initialized)`,
-    );
-    await supabase.realtime.setAuth(session.access_token);
-  }
+  // useAuth's setRealtimeAuth() binds the token on sign-in, but autoRefreshToken
+  // is off, so a token rotation between then and now would leave the socket
+  // signing joins with a STALE token — the private-channel join for agent:<id>
+  // (which the server authorizes against the current JWT) then fails Unauthorized
+  // and doesn't recover until the next auth event. ensureFreshRealtimeAuth()
+  // re-binds only when the current session token differs from what's bound, so a
+  // pre-subscribe rebind is a no-op in the common case yet guarantees the join
+  // signs with a live token. See: https://github.com/supabase/realtime-js/pull/126
+  await ensureFreshRealtimeAuth();
 
   // Private channels in production (RLS checks Supabase managed DB).
   // In dev, use public channels since agents live in a local DB.
