@@ -281,6 +281,12 @@ export async function signOut(): Promise<void> {
 // =============================================================================
 
 let realtimeInitialized = false;
+// The exact token last bound onto the realtime socket. autoRefreshToken is off
+// (line above), so the socket keeps whatever token setRealtimeAuth last pinned;
+// if the persisted session rotated since then, a private-channel join (agent:<id>)
+// signs with a STALE token and the server rejects it as Unauthorized. We track the
+// bound token so subscribers can re-bind the current session token before joining.
+let lastBoundRealtimeToken: string | null = null;
 
 /**
  * Helper to identify token type for logging
@@ -326,10 +332,26 @@ export async function setRealtimeAuth(accessToken: string | null): Promise<void>
   if (accessToken) {
     await supabase.realtime.setAuth(accessToken);
     realtimeInitialized = true;
+    lastBoundRealtimeToken = accessToken;
     console.log(`[Supabase] ✅ Realtime auth set to: ${tokenType}`);
   } else {
     console.log('[Supabase] Clearing realtime auth (no token)');
     realtimeInitialized = false;
+    lastBoundRealtimeToken = null;
+  }
+}
+
+/**
+ * Ensure the realtime socket is signing joins with the CURRENT session token.
+ * Rebinds only when the persisted session token differs from what was last bound
+ * (or nothing is bound yet), so private-channel joins never sign with a stale
+ * token — the root cause of intermittent `agent:<id>` "Unauthorized" rejections —
+ * while a no-op re-bind of the same token is skipped to avoid socket churn.
+ */
+export async function ensureFreshRealtimeAuth(): Promise<void> {
+  const token = getSession()?.access_token ?? null;
+  if (token && token !== lastBoundRealtimeToken) {
+    await setRealtimeAuth(token);
   }
 }
 
