@@ -2809,10 +2809,12 @@ def test_run_is_visible_in_hub_from_fire_time(tmp_path: Path) -> None:
     lock_at = fleet.index('if ! cloudbench_controller_lock_acquire_wait')
     card_at = fleet.index('write_startup_card "controller starting"')
     hub_at = fleet.index("start_central_hub\n")
+    require_hub_at = fleet.index("require_central_hub_visibility || exit 1")
     verify_at = fleet.index('Verifying the shared benchmark app environment')
     fanout_at = fleet.index("# ── Phase 1:")
     assert lock_at < card_at < verify_at, "startup card must precede preflight"
     assert lock_at < hub_at < verify_at, "hub must serve before preflight"
+    assert hub_at < require_hub_at < verify_at, "hub visibility must be proven before preflight"
     assert card_at < fanout_at and hub_at < fanout_at
     # phase updates at each controller stage
     for phase in ("verifying environment", "healing warm snapshot", "provisioning"):
@@ -2841,6 +2843,35 @@ write_startup_card "healing warm snapshot (dep trees)"
     assert card["summary"]["total"] == 2
     assert [t["name"] for t in card["tasks"]] == ["alpha", "beta"]
     assert all(t["status"] == "starting" for t in card["tasks"])
+    assert [t["name"] for t in card["per_task"]] == ["alpha", "beta"]
+    assert all(t["status"] == "starting" for t in card["per_task"])
+
+    visibility_start = fleet.index("require_central_hub_visibility() {")
+    visibility_fn = fleet[visibility_start : fleet.index("\n}\n", visibility_start) + 3]
+    visibility = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'''set -uo pipefail
+RUN_ID=visible-run
+DASH_BASE=8765
+UNIFIED_DASH_PID=
+{visibility_fn}
+curl() {{ printf '<html>visible-run</html>'; }}
+require_central_hub_visibility
+curl() {{ return 1; }}
+sleep() {{ :; }}
+CLOUDBENCH_HUB_VISIBILITY_ATTEMPTS=1
+if require_central_hub_visibility; then exit 99; fi
+''',
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert visibility.returncode == 0, visibility.stderr
+    assert "central hub registration verified" in visibility.stdout
+    assert "refusing to continue invisibly" in visibility.stderr
 
 
 def test_controller_names_the_signal_that_killed_it() -> None:

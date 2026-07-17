@@ -1360,12 +1360,11 @@ card = {
     "summary": {"total": len(benches), "passed": 0, "failed": 0,
                 "status": f"starting: {phase}"},
     "tasks": [{"name": b, "status": "starting", "phase": phase} for b in benches],
+    "per_task": [{"name": b, "status": "starting", "phase": phase} for b in benches],
 }
 json.dump(card, open(sys.argv[1], "w"), indent=1)
 PY
 }
-mkdir -p "$FLEET_DIR"
-write_startup_card "controller starting"
 start_central_hub() {
     mkdir -p "$HUB_CTX_DIR"
     if lsof -tiTCP:"$DASH_BASE" -sTCP:LISTEN >/dev/null 2>&1; then
@@ -1381,7 +1380,28 @@ start_central_hub() {
     fi
     echo "📊 central hub: http://localhost:$DASH_BASE/ (in-app: Benchmarks tab) — run visible as STARTING"
 }
-start_central_hub
+require_central_hub_visibility() {
+    local attempt page
+    for attempt in $(seq 1 "${CLOUDBENCH_HUB_VISIBILITY_ATTEMPTS:-30}"); do
+        page="$(curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:$DASH_BASE/" 2>/dev/null || true)"
+        if printf '%s' "$page" | grep -Fq "$RUN_ID"; then
+            echo "✅ central hub registration verified: run=$RUN_ID"
+            return 0
+        fi
+        if [ -n "${UNIFIED_DASH_PID:-}" ] && ! kill -0 "$UNIFIED_DASH_PID" 2>/dev/null; then
+            break
+        fi
+        sleep 0.2
+    done
+    echo "❌ benchmark run is not visible in the central hub; refusing to continue invisibly (run=$RUN_ID, hub=http://127.0.0.1:$DASH_BASE/)" >&2
+    return 1
+}
+if [ -z "$PROVISION_POOL" ]; then
+    mkdir -p "$FLEET_DIR"
+    write_startup_card "controller starting"
+    start_central_hub
+    require_central_hub_visibility || exit 1
+fi
 
 OWNED_CLONES_FILE="$FLEET_DIR/owned-clones.ids"
 AUTOSCALER_PIDS=()

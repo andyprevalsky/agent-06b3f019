@@ -692,12 +692,17 @@ rm -f "$POOL_A" "$POOL_B"
 # Pre-serve each workspace's central hub on its DERIVED port (CONDUCTOR_PORT +
 # 5764) so the fleet adopts it — and so the test proves two workspaces get
 # NON-COLLIDING hub ports.
-hub_stub() {  # hub_stub <port>
-    python3 - "$1" <<'PY' &
-import http.server, sys
+hub_stub() {  # hub_stub <port> <runs-root>
+    python3 - "$1" "$2" <<'PY' &
+import http.server, pathlib, sys
+runs_root = pathlib.Path(sys.argv[2])
 class Hub(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        body = b"Benchmark runs (test hub stub)"
+        run_ids = " ".join(
+            path.name for path in runs_root.iterdir()
+            if path.is_dir() and not path.name.startswith("_")
+        ) if runs_root.is_dir() else ""
+        body = f"Benchmark runs (test hub stub) {run_ids}".encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -709,8 +714,8 @@ PY
     PIDS+=("$!")
     HUB_PIDS+=("$!")
 }
-hub_stub "$HUB_PORT_A"
-hub_stub "$HUB_PORT_B"
+hub_stub "$HUB_PORT_A" "$WS_A/.context/fleet/runs"
+hub_stub "$HUB_PORT_B" "$WS_B/.context/fleet/runs"
 for port in "$HUB_PORT_A" "$HUB_PORT_B"; do
     for _ in $(seq 1 50); do
         curl -fsS "http://127.0.0.1:$port/" 2>/dev/null | grep -q "Benchmark runs" && break
