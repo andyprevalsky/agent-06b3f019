@@ -1764,41 +1764,57 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     # One persistent WireGuard tunnel replaces one `flyctl ssh` metrics read per
     # task every poll interval. At daily width that removes 180 Machines-API SSH
     # sessions/minute and the rate-limit/launch interference they caused.
-    metrics_started_at="$(date +%s)"
     : > "$out/autoscaler-metrics-proxy.log"
-    while [ $(( $(date +%s) - metrics_started_at )) -lt "${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}" ]; do
-        metrics_port=""
-        for offset in $(seq 10 18); do
-            candidate=$((port_base + offset))
-            if ! lsof -tiTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1; then
-                metrics_port="$candidate"
-                break
+    start_metrics_proxy() {  # start_metrics_proxy [timeout-seconds]
+        local timeout="${1:-${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}}"
+        metrics_started_at="$(date +%s)"
+        while [ $(( $(date +%s) - metrics_started_at )) -lt "$timeout" ]; do
+            metrics_port=""
+            for offset in $(seq 10 18); do
+                candidate=$((port_base + offset))
+                if ! lsof -tiTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1; then
+                    metrics_port="$candidate"
+                    break
+                fi
+            done
+            [ -n "$metrics_port" ] || { sleep 2; continue; }
+            FLY proxy "$metrics_port:$BOX_HEALTH_PORT" "${cid}.vm.${APP}.internal" \
+                -a "$APP" --bind-addr 127.0.0.1 -q \
+                >> "$out/autoscaler-metrics-proxy.log" 2>&1 &
+            metrics_proxy_pid=$!
+            # Force flyctl's lazy DNS resolution, then accept the tunnel only if
+            # the process survives that first real data-plane connection.
+            sleep 0.5
+            curl --noproxy '*' -sS --max-time 2 -o /dev/null \
+                "http://127.0.0.1:$metrics_port/metrics" 2>/dev/null || true
+            sleep 0.5
+            if kill -0 "$metrics_proxy_pid" 2>/dev/null; then
+                metrics_url="http://127.0.0.1:$metrics_port"
+                return 0
             fi
+            wait "$metrics_proxy_pid" 2>/dev/null || true
+            metrics_proxy_pid=""
+            sleep 2
         done
-        [ -n "$metrics_port" ] || { sleep 2; continue; }
-        FLY proxy "$metrics_port:$BOX_HEALTH_PORT" "${cid}.vm.${APP}.internal" \
-            -a "$APP" --bind-addr 127.0.0.1 -q \
-            >> "$out/autoscaler-metrics-proxy.log" 2>&1 &
-        metrics_proxy_pid=$!
-        # A just-started machine may not yet have a resolvable 6PN DNS record.
-        # flyctl exits immediately in that case; retry until the same bounded
-        # data-plane readiness ceiling used by the status/backend tunnels.
-        sleep 1
-        kill -0 "$metrics_proxy_pid" 2>/dev/null && break
-        wait "$metrics_proxy_pid" 2>/dev/null || true
-        metrics_proxy_pid=""
-        sleep 2
-    done
-    [ -n "$metrics_proxy_pid" ] || {
+        return 1
+    }
+    start_metrics_proxy || {
         echo "  ⚠️ [$bench] autoscaler: could not bind a data-plane metrics proxy; disabled" >&2
         return 0
     }
-    metrics_url="http://127.0.0.1:$metrics_port"
     echo "  🛰️ [$bench] autoscaler metrics via data plane :$metrics_port → fly:$BOX_HEALTH_PORT"
     # Wait for the box /metrics to answer (stack up) before scaling.
     for _ in $(seq 1 60); do pip="$(_machine_priv_ip "$cid")"; [ -n "$pip" ] && break; sleep 5; done
     [ -n "$pip" ] || { echo "  ⚠️ [$bench] autoscaler: no primary IP; disabled" >&2; return 0; }
     while fleet_machines_json | grep -q "\"$cid\""; do
+        if [ -z "$metrics_proxy_pid" ] || ! kill -0 "$metrics_proxy_pid" 2>/dev/null; then
+            metrics_proxy_pid=""
+            start_metrics_proxy 30 || {
+                echo "  ⚠️ [$bench] autoscaler metrics proxy died and did not recover; disabled" >&2
+                return 0
+            }
+            echo "  🛰️ [$bench] autoscaler metrics proxy recovered on :$metrics_port"
+        fi
         local desired want cur; desired="$(_box_desired "$metrics_url")"; [ -z "$desired" ] && { sleep "$AUTOSCALE_POLL"; continue; }
         want=$((desired - 1)); [ "$want" -lt 0 ] && want=0
         [ "$want" -gt $((AUTOSCALE_MAX - 1)) ] && want=$((AUTOSCALE_MAX - 1))

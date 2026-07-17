@@ -1967,10 +1967,14 @@ start_data_plane_proxy() {  # <local-port> <remote-port> <host> <log> <pid-var> 
         FLY proxy "$local_port:$remote_port" "$host" -a "$APP" --bind-addr 127.0.0.1 -q \
             >> "$log_file" 2>&1 &
         pid=$!
-        # A machine's 6PN DNS record can lag a successful start. In that case
-        # flyctl exits immediately with "host was not found in DNS"; retry the
-        # data plane instead of leaving a dead PID that stalls the whole barrier.
-        sleep 1
+        # flyctl resolves the remote host lazily on the first client connection.
+        # Actively traverse the tunnel before accepting its PID; a listener-only
+        # check falsely passed, then the first real poll triggered "host was not
+        # found in DNS" and killed the proxy underneath the whole barrier.
+        sleep 0.5
+        curl --noproxy '*' -sS --max-time 2 -o /dev/null \
+            "http://127.0.0.1:$local_port/driver-health" 2>/dev/null || true
+        sleep 0.5
         if kill -0 "$pid" 2>/dev/null; then
             printf -v "$pid_var" '%s' "$pid"
             return 0
