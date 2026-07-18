@@ -28,7 +28,6 @@ import {
   type SteelSessionAuth,
 } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
-import { runSyncStep, syncUserRecord } from '../../../scripts/seed-local-helpers';
 
 type TestFn = () => Promise<void>;
 const tests: Array<{ name: string; fn: TestFn }> = [];

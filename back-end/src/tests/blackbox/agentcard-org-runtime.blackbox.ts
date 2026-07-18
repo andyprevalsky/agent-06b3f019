@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 
 import assert from 'node:assert/strict';
 import { AgentCardOrgRuntime } from '../../providers/agentcard/org-runtime';
