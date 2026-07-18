@@ -60,13 +60,33 @@ Carry this report forward into Phase 2 for use in the commit message and PR body
 
 **`/deploy` ALWAYS ships the ENTIRE worktree — every change present relative to `origin/main`, no exceptions.** This includes work you did not author: changes made by a concurrent agent sharing this worktree, pre-existing uncommitted edits, and any feature intermixed with yours. Do NOT stop to ask "these changes aren't mine / weren't part of my task." Do NOT try to isolate, cherry-pick, or exclude a subset onto a clean branch. The unit of deploy is the worktree, and everything in it is yours to carry through the gates and ship. The only reason to halt is a gate failure you cannot fix or a credential/billing escalation — never change ownership or scope. (Whoever ran `/deploy` is asserting the whole worktree is ready; the gates are what prove it.)
 
-If the branch is behind `origin/main`, sync first (commit the worktree, then `git merge origin/main`), resolve any conflicts keeping every feature, re-sync deps (`npm install` + `npx prisma generate`; `pip install -r requirements.txt`), and re-run the gates on the merged tree — then proceed.
+If the branch is behind `origin/main`, sync first (commit the worktree, then
+`git merge origin/main`). Resolve conflicts keeping every feature, re-sync deps
+(`npm install` + `npx prisma generate`; `pip install -r requirements.txt`), and
+re-run the gates on the merged tree — then proceed. Step 0 derives the latest
+main-sync delta from merge history so shared type changes introduced by either
+this merge or an earlier `/sync` remain lint seeds.
 
 All Phase 1 commands run from the repo root. Compute changed paths from the complete active worktree: committed branch changes, staged/unstaged tracked changes, and untracked non-ignored files. This prevents pre-commit deploy checks from incorrectly treating a dirty branch as unchanged.
 
 ```bash
 BASE_REF="${DEPLOY_BASE_REF:-origin/main}"
+SYNC_MERGE=$(
+  for merge_commit in $(git rev-list --first-parent --merges "$BASE_REF"..HEAD); do
+    second_parent=$(git rev-parse "$merge_commit^2")
+    if git merge-base --is-ancestor "$second_parent" "$BASE_REF"; then
+      echo "$merge_commit"
+      break
+    fi
+  done
+)
+SYNC_CHANGED=$(
+  if [ -n "$SYNC_MERGE" ]; then
+    git diff --name-only "$SYNC_MERGE^1" "$SYNC_MERGE"
+  fi
+)
 CHANGED=$({
+  printf '%s\n' "$SYNC_CHANGED"
   git diff --name-only "$BASE_REF"...HEAD
   git diff --name-only HEAD
   git ls-files --others --exclude-standard
@@ -149,23 +169,26 @@ git commit -m "style: auto-format and lint fixes"
 
 ## Step 2: ESLint fix + verify
 
-Using the same `$CHANGED_TS` from Step 1 (skip if empty):
+If `$CHANGED_TS` is non-empty, lint the changed back-end files and every
+transitive reverse importer. Shared middleware, types, and configuration can
+invalidate consumers that are not in the diff, so changed-file-only linting is
+not a sufficient deploy gate.
 
 **Step 2a (mutator — runs before the parallel verifier batch):**
 
 ```bash
-cd back-end && npx eslint --fix $CHANGED_TS
+cd back-end && node scripts/lint-affected.mjs --fix $CHANGED_TS
 ```
 
 **Step 2b (verifier — runs in parallel with Steps 3, 4, 4a):**
 
 ```bash
-cd back-end && npx eslint $CHANGED_TS
+cd back-end && node scripts/lint-affected.mjs $CHANGED_TS
 ```
 
-If there are remaining errors, fix them manually. Loop until `npx eslint` reports 0 errors.
+If there are remaining errors, fix them manually. Loop until the affected-file lint reports 0 errors.
 
-**CRITICAL: You must reach 0 errors across ALL files in `$CHANGED_TS`. "Pre-existing" or "this error was already on main" is NOT an excuse to skip it.** If a file is in the diff, you own every error in it. This includes `no-console`, `no-explicit-any`, `strict-boolean-expressions`, `max-lines`, and any other rule. Fix them all.
+**CRITICAL: You must reach 0 errors across every affected file. "Pre-existing" or "this error was already on main" is NOT an excuse to skip it.** This includes `no-console`, `no-explicit-any`, `strict-boolean-expressions`, `max-lines`, and any other rule. Fix them all.
 
 If any files were modified by this step, stage and commit them (can combine with Step 1's commit if both ran together).
 

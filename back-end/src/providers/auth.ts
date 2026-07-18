@@ -22,7 +22,7 @@ export interface AuthRequest extends Request {
   isInternal?: boolean;
 }
 
-export async function authenticate(
+async function authenticateRequest(
   req: AuthRequest,
   res: Response,
   next: NextFunction
@@ -73,4 +73,9 @@ export async function authenticate(
     });
     res.status(500).json({ error: 'Internal server error' });
   }
+}
+
+/** Express middleware must return void; contain async token verification here. */
+export function authenticate(req: AuthRequest, res: Response, next: NextFunction): void {
+  void authenticateRequest(req, res, next);
 }

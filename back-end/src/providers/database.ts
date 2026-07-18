@@ -181,7 +181,10 @@ export function computeProdConnectionLimit(opts?: {
     deployOverlap,
     fastCachePool,
   })) {
-    if (!Number.isFinite(value) || (value <= 0 && name !== 'reserved' && name !== 'fastCachePool')) {
+    if (
+      !Number.isFinite(value) ||
+      (value <= 0 && name !== 'reserved' && name !== 'fastCachePool')
+    ) {
       throw new Error(`DB pool config: ${name} must be a finite positive number, got ${value}`);
     }
     if (value < 0) {
