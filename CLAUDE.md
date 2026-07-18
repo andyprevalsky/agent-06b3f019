@@ -389,6 +389,21 @@ Env vars are in `back-end/.env`:
 - `RENDER_SERVICE_ID` - `srv-d3jga77diees73cgrvk0`
 - `RENDER_OWNER_ID` - `tea-csppgi56l47c73djvpig`
 
+### Prod health / latency dashboard (golden signals)
+
+**"Is the backend slow right now?"** → one call: `cd back-end && npx tsx scripts/prod-health.ts`. It pulls Render request logs for a window and prints the four golden signals in a single view: **latency** (per-endpoint p50/p90/p99/max, routes templatized so `/api/agents/<uuid>` aggregates), **traffic** (req counts), **errors** (4xx/5xx per route + total), and **saturation** (slowest Prisma ops + a `EMAXCONN`/max-connection banner and deploy/instance state). Each endpoint's p90 is diffed against a rolling historical baseline the script persists to `scripts/.prod-health-history.jsonl` (gitignored) and appends to on every run — so `▲ +180%` flags a real regression vs. normal.
+
+```bash
+npx tsx scripts/prod-health.ts               # last 30m vs history
+npx tsx scripts/prod-health.ts --window 2h   # wider window
+npx tsx scripts/prod-health.ts --top 30      # more routes
+npx tsx scripts/prod-health.ts --json        # machine-readable (for scripting/alerts)
+npx tsx scripts/prod-health.ts --history     # inspect the stored baseline
+npx tsx scripts/prod-health.ts --no-record   # don't append this run to history
+```
+
+Reads `RENDER_*` from `back-end/.env`; backs off on Render's log-API 429s. Typical culprit for a p99 spike with a pool-saturation banner: a Render deploy cutover (old+new instance Prisma pools exceed the Supabase pooler client cap → queries queue to Prisma's ~30s pool-acquisition timeout → `EMAXCONN`). Guarded since 2026-07: `providers/database.ts` derives `connection_limit` from the pooler budget (`POOLER_MAX_CLIENT_CONN`, set to 1000 on Render for the XL compute tier; code default 400) minus the fast-cache pool (`FAST_CACHE_DB_POOL`), cemented by `src/tests/structural/db-pool-invariant.test.ts`. DB is Supabase XL (4 dedicated cores, 16GB, `max_connections=240`, Supavisor `pool_size=60`).
+
 ## Production Env Vars
 
 **You (Claude) own env-key management:** when you mint or rotate a credential, store it in every correct location — the relevant local `.env`, the matching prod surface(s) below, AND the Codex-cloud `rose` environment — never leave a key only in chat.

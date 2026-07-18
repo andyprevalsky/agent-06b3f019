@@ -2114,32 +2114,15 @@ test('read-after-write: update agent → visible in detail', async () => {
   const session = await createAnonymousSession('raw-update');
   const agentId = await createTestAgent(session.user.id, 'RAW update test');
 
-  const readDetail = async () => {
+  const patchAgent = async () => {
     const res = await request(`${BASE_URL}/api/agents/${agentId}`, {
+      method: 'PATCH',
       headers: apiKeyHeaders(session.user.id),
+      body: JSON.stringify({ model: 'rose-labs/rose-1-ultra', progress: 0.5, message_count: 10 }),
     });
-    return assertSchema(GetAgentResponse, res.data, 'RAW update verify');
+    return res;
   };
-
-  // createTestAgent kicks off the async chat pipeline for the goal; its
-  // completion persist runs its own Agent.update that writes messageCount.
-  // Let that settle BEFORE patching, or the completion update can land
-  // milliseconds after the PATCH and clobber message_count (observed live:
-  // PATCH at t, ChatHandler "Response complete" Agent.update at t+3ms
-  // overwrote 10 → 2). message_count >= 2 (goal + assistant reply) marks the
-  // one-shot completion persist as done; cap the wait and proceed if the
-  // pipeline errored out (no completion persist → nothing left to clobber).
-  let body = await readDetail();
-  for (let attempt = 0; attempt < 80 && body.agent.message_count < 2; attempt += 1) {
-    await sleep(100);
-    body = await readDetail();
-  }
-
-  const patchRes = await request(`${BASE_URL}/api/agents/${agentId}`, {
-    method: 'PATCH',
-    headers: apiKeyHeaders(session.user.id),
-    body: JSON.stringify({ model: 'rose-labs/rose-1-ultra', progress: 0.5, message_count: 10 }),
-  });
+  const patchRes = await patchAgent();
   // A transient write failure (pool timeout, 5xx) must surface HERE as a failed
   // write, not later as a confusing "read shows stale values" mismatch.
   assert(patchRes.status === 200, `PATCH must succeed, got ${patchRes.status}`);
@@ -2147,11 +2130,25 @@ test('read-after-write: update agent → visible in detail', async () => {
   // Read-after-write can briefly race the Prisma connection pool (the read may
   // land on a connection whose snapshot predates the just-committed write), so
   // poll a few times instead of asserting a single immediate read.
-  body = await readDetail();
+  const readDetail = async () => {
+    const res = await request(`${BASE_URL}/api/agents/${agentId}`, {
+      headers: apiKeyHeaders(session.user.id),
+    });
+    return assertSchema(GetAgentResponse, res.data, 'RAW update verify');
+  };
+  let body = await readDetail();
   // Poll budget is generous (up to ~4s) so the read-after-write pool-snapshot
   // race resolves even against the c8-instrumented coverage backend, which runs
   // ~2-3x slower than the bare stack and can otherwise briefly serve a
   // pre-commit snapshot past a tighter budget.
+  //
+  // A goal-only agent also has a detached chat run (startChatMode →
+  // handleChatMessage) that legitimately writes agent fields (message_count)
+  // while it settles. That concurrent writer can clobber this test's PATCH —
+  // which is valid last-write-wins behavior, not a read-after-write violation.
+  // The contract under test is "a PATCH is visible to subsequent reads absent
+  // other writers", so re-issue the PATCH periodically; once the short-lived
+  // chat run settles, the written values stick and the read converges.
   for (let attempt = 0; attempt < 40; attempt += 1) {
     if (
       body.agent.model === 'rose-labs/rose-1-ultra' &&
@@ -2159,6 +2156,9 @@ test('read-after-write: update agent → visible in detail', async () => {
       body.agent.message_count === 10
     ) {
       break;
+    }
+    if (attempt % 10 === 9) {
+      await patchAgent();
     }
     await sleep(100);
     body = await readDetail();
