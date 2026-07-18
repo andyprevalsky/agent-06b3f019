@@ -90,8 +90,20 @@ CHANGED=$({
   git diff --name-only HEAD
   git ls-files --others --exclude-standard
 } | sort -u)
-CHANGED_TS=$(echo "$CHANGED" | grep -E '^back-end/src/.*\.ts$' | sed 's|^back-end/||' || true)
+CHANGED_TS=$(
+  echo "$CHANGED" | grep -E '^back-end/src/.*\.tsx?$' | sed 's|^back-end/||' |
+    while IFS= read -r file; do
+      [ -f "back-end/$file" ] && echo "$file"
+    done || true
+)
 CHANGED_BACKEND=$(echo "$CHANGED" | grep -E '^back-end/' || true)
+CHANGED_BACKEND_LINT_INPUTS=$(echo "$CHANGED" | grep -E \
+  '^back-end/(package(-lock)?\.json|tsconfig[^/]*\.json|eslint\.config\.(mjs|js|cjs|ts))$' || true)
+LINT_TS="$CHANGED_TS"
+if [ -n "$CHANGED_BACKEND_LINT_INPUTS" ]; then
+  LINT_TS=$(find back-end/src -type f \( -name '*.ts' -o -name '*.tsx' \) -print |
+    sed 's|^back-end/||' | sort)
+fi
 CHANGED_AGENTS=$(echo "$CHANGED" | grep -E '^agents/' || true)
 CHANGED_RESEARCH=$(echo "$CHANGED" | grep -E '^research/' || true)
 CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
@@ -168,21 +180,23 @@ git commit -m "style: auto-format and lint fixes"
 
 ## Step 2: ESLint fix + verify
 
-If `$CHANGED_TS` is non-empty, lint the changed back-end files and every
+If `$LINT_TS` is non-empty, lint the changed back-end files and every
 transitive reverse importer. Shared middleware, types, and configuration can
 invalidate consumers that are not in the diff, so changed-file-only linting is
-not a sufficient deploy gate.
+not a sufficient deploy gate. Changes to package manifests, TypeScript config,
+or ESLint config set `$LINT_TS` to the entire source tree because those inputs
+can change the meaning of every unchanged file.
 
 **Step 2a (mutator — runs before the parallel verifier batch):**
 
 ```bash
-cd back-end && node scripts/lint-affected.mjs --fix $CHANGED_TS
+cd back-end && node scripts/lint-affected.mjs --fix $LINT_TS
 ```
 
 **Step 2b (verifier — runs in parallel with Steps 3, 4, 4a):**
 
 ```bash
-cd back-end && node scripts/lint-affected.mjs $CHANGED_TS
+cd back-end && node scripts/lint-affected.mjs $LINT_TS
 ```
 
 If there are remaining errors, fix them manually. Loop until the affected-file lint reports 0 errors.
