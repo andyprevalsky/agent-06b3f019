@@ -3412,7 +3412,7 @@ def test_refresh_wmh_bounds_the_archive_scan_by_default() -> None:
         cloud.index('# MODE: run (default)')
     ]
 
-    assert 'WMH_REFRESH_MAX_BUNDLES="${WMH_REFRESH_MAX_BUNDLES:-200}"' in refresh
+    assert 'WMH_REFRESH_MAX_BUNDLES="${WMH_REFRESH_MAX_BUNDLES:-20}"' in refresh
     assert "WMH_REFRESH_MAX_BUNDLES must be a non-negative integer" in refresh
     assert "WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES'" in refresh
 
