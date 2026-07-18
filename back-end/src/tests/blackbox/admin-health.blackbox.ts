@@ -12,9 +12,6 @@
  *   - parameter handling: supported time slices are accepted
  *   - periodization: every supported time slice uses contiguous rolling-day buckets
  *   - error-surface: failures return { error: string }
- *
- * Usage:
- *   npx tsx src/tests/blackbox/admin-health.blackbox.ts
  */
 
 import { config } from 'dotenv';
@@ -286,11 +283,9 @@ function assertNoImpossibleConversion(body: z.infer<typeof AdminHealthResponseSc
   }
 }
 
-
 async function expectedAdminHealthUserIds(): Promise<Set<string>> {
   const { ADMIN_HEALTH_ADDITIONAL_USER_IDS, ADMIN_HEALTH_EXCLUDED_USER_IDS } =
     await import('../../domains/admin-health/config');
-  const { prisma } = await import('../../providers/database');
   const { getVerifiedStripeMetricsClient } = await import('../../providers/stripe');
   const stripe = await getVerifiedStripeMetricsClient();
   const customerIds = new Set<string>();

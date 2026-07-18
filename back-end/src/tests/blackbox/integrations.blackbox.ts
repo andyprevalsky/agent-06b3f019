@@ -71,6 +71,7 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { prisma } from '../../providers/database';
+import { withComputePoolLock } from './compute-pool-lock.testkit';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -3727,9 +3728,14 @@ async function completeOnboarding(userId: string): Promise<void> {
   });
 }
 
+// Snapshot EVERY claude_code/gpt_code row id — not just currently pool-eligible
+// ones. A row that is EXPIRED / poolingEnabled=false at snapshot time can be
+// flipped back to CONNECTED+pooled by a concurrent writer mid-test; excluding
+// all ids up front makes the forced-pool LRU selection deterministic over OUR
+// seeded fixtures regardless of what state pre-existing rows transition to.
 async function existingPoolIds(): Promise<string[]> {
   const rows = await prisma.integration.findMany({
-    where: { name: 'claude_code', poolingEnabled: true, status: 'CONNECTED' },
+    where: { name: 'claude_code' },
     select: { id: true },
   });
   return rows.map((r) => r.id);
@@ -3737,11 +3743,16 @@ async function existingPoolIds(): Promise<string[]> {
 
 async function existingComputePoolIds(): Promise<string[]> {
   const rows = await prisma.integration.findMany({
-    where: { name: { in: ['claude_code', 'gpt_code'] }, poolingEnabled: true, status: 'CONNECTED' },
+    where: { name: { in: ['claude_code', 'gpt_code'] } },
     select: { id: true },
   });
   return rows.map((r) => r.id);
 }
+
+// Cross-process compute-pool mutex: the rotation/lineage/affinity block below
+// seeds pool fixtures and asserts EXACT LRU token selection, which a second
+// suite process sharing this Postgres can otherwise perturb mid-test (see
+// compute-pool-lock.testkit.ts for the full failure analysis).
 
 async function cleanupIntegrations(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
@@ -5682,6 +5693,13 @@ async function runAll() {
       name: 'anthropic api-key cooldown -- mark then on-cooldown',
       fn: testAnthropicApiKeyCooldown_markThenOnCooldown,
     },
+  ];
+
+  // Pool-mutating sequential tests: seed/select/disable rows in the SHARED
+  // compute-token pool and assert exact LRU selection. Run under the
+  // cross-process advisory lock (see withComputePoolLock) so a concurrent
+  // suite instance sharing this database cannot perturb pool state mid-test.
+  const pooledSequentialTests: { name: string; fn: () => Promise<void> }[] = [
     {
       name: 'rotation -- user rate-limited falls back to pool',
       fn: testRotation_userRateLimitedFallsBackToPool,
@@ -5750,8 +5768,9 @@ async function runAll() {
     },
   ];
 
+  const boundarySequentialTests: { name: string; fn: () => Promise<void> }[] = [];
   if (ctx.captureAvailable) {
-    sequentialTests.push(
+    boundarySequentialTests.push(
       { name: 'boundary -- create makes no outbound calls', fn: testBoundary_createNoOutbound },
       {
         name: 'boundary -- email/start makes no outbound calls',
@@ -5777,16 +5796,23 @@ async function runAll() {
     );
   }
 
-  console.log(`\nRunning ${sequentialTests.length} sequential tests...`);
+  const totalSequential =
+    sequentialTests.length + pooledSequentialTests.length + boundarySequentialTests.length;
+  console.log(`\nRunning ${totalSequential} sequential tests...`);
   const sequentialResults: TestResult[] = [];
-  for (const test of sequentialTests) {
-    const result = await runTest(test.name, test.fn);
-    sequentialResults.push(result);
-    const icon = result.passed ? '  PASS' : '  FAIL';
-    console.log(
-      `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
-    );
-  }
+  const runSequentialGroup = async (tests: { name: string; fn: () => Promise<void> }[]) => {
+    for (const test of tests) {
+      const result = await runTest(test.name, test.fn);
+      sequentialResults.push(result);
+      const icon = result.passed ? '  PASS' : '  FAIL';
+      console.log(
+        `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
+      );
+    }
+  };
+  await runSequentialGroup(sequentialTests);
+  await withComputePoolLock(() => runSequentialGroup(pooledSequentialTests));
+  await runSequentialGroup(boundarySequentialTests);
 
   // Summary
   const allResults = [...parallelResults, ...sequentialResults];

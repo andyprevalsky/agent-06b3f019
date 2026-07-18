@@ -12,12 +12,14 @@ interface SignupFormProps {
   firstName: string;
   lastName: string;
   phone: string;
+  email: string;
   loading: boolean;
   error: string | null;
   isFormValid: boolean;
   onFirstNameChange: (value: string) => void;
   onLastNameChange: (value: string) => void;
   onPhoneChange: (value: string) => void;
+  onEmailChange: (value: string) => void;
   onSubmit: (e: React.FormEvent) => void;
 }
 
@@ -25,12 +27,14 @@ export const SignupForm = ({
   firstName,
   lastName,
   phone,
+  email,
   loading,
   error,
   isFormValid,
   onFirstNameChange,
   onLastNameChange,
   onPhoneChange,
+  onEmailChange,
   onSubmit,
 }: SignupFormProps): JSX.Element => (
   <div className="flex-1 flex items-center justify-center px-8">
@@ -67,6 +71,15 @@ export const SignupForm = ({
           disabled={loading}
           inputClassName={PHONE_FIELD_CLASS}
           triggerClassName={PHONE_TRIGGER_CLASS}
+        />
+        <input
+          type="email"
+          autoComplete="email"
+          placeholder="Email"
+          value={email}
+          onChange={(e) => onEmailChange(e.target.value)}
+          className="w-full px-3 py-3 bg-muted/30 border border-border rounded-xl text-foreground text-sm placeholder-muted-foreground/50 focus:outline-none focus:border-foreground/20 transition-all"
+          disabled={loading}
         />
         <button
           type="submit"

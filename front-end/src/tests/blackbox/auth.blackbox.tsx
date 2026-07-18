@@ -344,8 +344,10 @@ describe('PhoneAuthModal', () => {
       <PhoneAuthModal open={true} onOpenChange={onOpenChange} onAuthComplete={onAuthComplete} />,
     );
 
-    // Phone step
+    // Phone step — the optional email is captured alongside phone (empty email
+    // does not block Continue; a provided value flows through to verify-otp).
     await user.type(screen.getByLabelText('Phone Number'), '9729777432');
+    await user.type(screen.getByLabelText('Email'), 'person@example.com');
     await user.click(screen.getByRole('button', { name: /continue/i }));
 
     // OTP step
@@ -364,6 +366,7 @@ describe('PhoneAuthModal', () => {
       const body = verifyReq!.body as Record<string, unknown>;
       expect(body.phone).toBe('+19729777432');
       expect(body.token).toBe('181818');
+      expect(body.email).toBe('person@example.com');
     });
   });
 

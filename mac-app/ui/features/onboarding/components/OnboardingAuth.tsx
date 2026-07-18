@@ -15,12 +15,14 @@ const OnboardingAuth = ({ onComplete }: OnboardingAuthProps): JSX.Element => {
         firstName={auth.firstName}
         lastName={auth.lastName}
         phone={auth.phone}
+        email={auth.email}
         loading={auth.loading}
         error={auth.error}
         isFormValid={auth.isFormValid}
         onFirstNameChange={auth.setFirstName}
         onLastNameChange={auth.setLastName}
         onPhoneChange={auth.setPhone}
+        onEmailChange={auth.setEmail}
         onSubmit={auth.handleSignupSubmit}
       />
     );
