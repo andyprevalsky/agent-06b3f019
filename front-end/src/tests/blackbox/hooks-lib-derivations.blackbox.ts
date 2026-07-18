@@ -10,6 +10,11 @@ import {
   sortAgents,
 } from '@/features/terminal/hooks/derivations';
 import { deduplicateToolMessages as deduplicateComponentToolMessages } from '@/features/terminal-component-group/hooks/deduplicateToolMessages';
+import prodChipLeakTranscriptJson from './browser-chip-leak-prod-85530622.fixture.json';
+
+const prodChipLeakTranscript = prodChipLeakTranscriptJson as Parameters<
+  typeof computeActiveBrowserPanels
+>[0];
 
 describe('derivations.ts', () => {
   describe('getModelContextWindow', () => {
@@ -430,6 +435,210 @@ describe('derivations.ts', () => {
     });
     it('returns empty when no browser messages', () => {
       expect(computeActiveBrowserPanels([])).toEqual([]);
+    });
+
+    // Regression: prod agent 85530622-66ed-4a88-8c51-bd50370bcd8e (2026-07-18).
+    // The spawn_browser_agent tool call failed with an HTTPStatusError raised
+    // outside the browser task loop, so the terminal ERROR message was posted
+    // at tool-call scope (toolCallId only — no task_id, no action_type). Four
+    // browser chips stayed visible forever because terminal detection only
+    // scanned task-scoped messages. Chip count must equal active browser
+    // agents: zero once every tool call has reached a terminal state.
+    it('hides all chips for the captured prod transcript where every browser tool call ended', () => {
+      expect(computeActiveBrowserPanels(prodChipLeakTranscript)).toEqual([]);
+    });
+
+    it('excludes tasks whose owning tool call errored at tool-call scope (no task_id)', () => {
+      const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
+        {
+          message_id: 'init',
+          timestamp: '2026-01-01T00:00:01.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 't1',
+            toolCallId: 'call-1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'browser',
+            browser_url: 'x',
+            toolStatus: 'IN_PROGRESS',
+          },
+        },
+        {
+          message_id: 'tool-error',
+          timestamp: '2026-01-01T00:00:02.000Z',
+          text: "HTTPStatusError: Server error '500 Internal Server Error'",
+          role: 'TOOL',
+          metadata: {
+            toolCallId: 'call-1',
+            toolName: 'spawn_browser_agent',
+            toolStatus: 'ERROR',
+            error: true,
+          },
+        },
+      ];
+      expect(computeActiveBrowserPanels(msgs)).toEqual([]);
+    });
+
+    it('keeps a retry task alive when an earlier sibling task completed under the same tool call', () => {
+      // Same tool call spawns task A, A completes with a task-scoped
+      // task_complete, then the call retries with task B. B's chip must stay
+      // visible — a task-scoped terminal for A is not a tool-call terminal.
+      const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
+        {
+          message_id: 'init-a',
+          timestamp: '2026-01-01T00:00:01.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 'task-a',
+            toolCallId: 'call-1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'browser',
+            browser_url: 'a',
+            toolStatus: 'IN_PROGRESS',
+          },
+        },
+        {
+          message_id: 'done-a',
+          timestamp: '2026-01-01T00:00:02.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 'task-a',
+            toolCallId: 'call-1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'task_complete',
+            toolStatus: 'ERROR',
+          },
+        },
+        {
+          message_id: 'init-b',
+          timestamp: '2026-01-01T00:00:03.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 'task-b',
+            toolCallId: 'call-1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'browser',
+            browser_url: 'b',
+            toolStatus: 'IN_PROGRESS',
+          },
+        },
+      ];
+      expect(computeActiveBrowserPanels(msgs)).toEqual([{ taskId: 'task-b', browserUrl: 'b' }]);
+    });
+
+    it('excludes tasks whose owning tool call finished at tool-call scope without task_complete', () => {
+      const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
+        {
+          message_id: 'init',
+          timestamp: '2026-01-01T00:00:01.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 't1',
+            toolCallId: 'call-1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'browser',
+            browser_url: 'x',
+            toolStatus: 'IN_PROGRESS',
+          },
+        },
+        {
+          message_id: 'tool-finished',
+          timestamp: '2026-01-01T00:00:02.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            toolCallId: 'call-1',
+            toolName: 'spawn_browser_agent',
+            toolStatus: 'FINISHED',
+          },
+        },
+      ];
+      expect(computeActiveBrowserPanels(msgs)).toEqual([]);
+    });
+
+    it('keeps a sibling task alive when another task pauses with a task-scoped session_paused', () => {
+      // session_paused with task_id is task-scoped like task_complete: it must
+      // not close a sibling retry task under the same tool call. Only a
+      // tool-call-scoped session_paused (no task_id) ends the whole call.
+      const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
+        {
+          message_id: 'init-a',
+          timestamp: '2026-01-01T00:00:01.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 'task-a',
+            toolCallId: 'call-1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'browser',
+            browser_url: 'a',
+            toolStatus: 'IN_PROGRESS',
+          },
+        },
+        {
+          message_id: 'paused-a',
+          timestamp: '2026-01-01T00:00:02.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 'task-a',
+            toolCallId: 'call-1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'session_paused',
+          },
+        },
+        {
+          message_id: 'init-b',
+          timestamp: '2026-01-01T00:00:03.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 'task-b',
+            toolCallId: 'call-1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'browser',
+            browser_url: 'b',
+            toolStatus: 'IN_PROGRESS',
+          },
+        },
+      ];
+      expect(computeActiveBrowserPanels(msgs)).toEqual([{ taskId: 'task-b', browserUrl: 'b' }]);
+    });
+
+    it('does not close a task when a different tool call errors', () => {
+      const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
+        {
+          message_id: 'init',
+          timestamp: '2026-01-01T00:00:01.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            task_id: 't1',
+            toolCallId: 'call-1',
+            toolName: 'spawn_browser_agent',
+            action_type: 'browser',
+            browser_url: 'x',
+            toolStatus: 'IN_PROGRESS',
+          },
+        },
+        {
+          message_id: 'other-error',
+          timestamp: '2026-01-01T00:00:02.000Z',
+          text: '',
+          role: 'TOOL',
+          metadata: {
+            toolCallId: 'call-2',
+            toolName: 'spawn_browser_agent',
+            toolStatus: 'ERROR',
+          },
+        },
+      ];
+      expect(computeActiveBrowserPanels(msgs)).toEqual([{ taskId: 't1', browserUrl: 'x' }]);
     });
   });
 

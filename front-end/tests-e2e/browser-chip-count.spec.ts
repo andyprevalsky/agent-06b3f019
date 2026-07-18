@@ -1,0 +1,143 @@
+/**
+ * Semantic Test: Browser chip count == active browser agents.
+ *
+ * Regression for prod agent 85530622-66ed-4a88-8c51-bd50370bcd8e (2026-07-18):
+ * four browser status chips stayed visible after every browser agent had
+ * finished, because the worker's generic tool-error path posts the terminal
+ * ERROR at tool-call scope (toolCallId only — no task_id/action_type) and the
+ * panel derivation only recognized task-scoped terminal messages.
+ *
+ * Seeds real spawn_browser_agent TOOL messages through the same backend
+ * endpoint the worker uses (POST /api/agents/:id/messages) and asserts the
+ * rendered chip count tracks the number of active browser agents at every
+ * lifecycle step:
+ *   2 active tasks -> 2 chips
+ *   task-scoped task_complete for A -> 1 chip
+ *   tool-call-scoped ERROR for B (the prod failure shape) -> 0 chips
+ */
+import { expect, test, type Page } from '@playwright/test';
+
+import {
+  BACKEND_URL,
+  FRONTEND_URL,
+  HAS_INJECTED_SESSION,
+  TEST_API_KEY,
+  attachRecorder,
+  createAgent,
+  deleteAgent,
+  expectDevAuthenticated,
+  expectInjectedSessionRecognized,
+  hasUncaughtErrors,
+  injectSemanticSession,
+} from './helpers';
+
+const LIVE_VIEW_URL = 'https://example.com/semantic-browser-live-view';
+
+async function postToolMessage(
+  agentId: string,
+  text: string,
+  metadata: Record<string, unknown>,
+): Promise<void> {
+  const res = await fetch(`${BACKEND_URL}/api/agents/${agentId}/messages`, {
+    method: 'POST',
+    headers: { 'X-API-Key': TEST_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message: text, role: 'TOOL', metadata }),
+  });
+  if (!res.ok) {
+    throw new Error(`postToolMessage failed: ${res.status} ${(await res.text()).slice(0, 300)}`);
+  }
+}
+
+/**
+ * Chip count must SETTLE at `expected` — poll until it reaches the value,
+ * then hold through a grace period so late realtime events can't sneak a
+ * phantom chip back in.
+ */
+async function expectChipCount(page: Page, expected: number, step: string): Promise<void> {
+  const chips = page.locator('[data-testid="browser-status-chip"]');
+  await expect
+    .poll(() => chips.count(), {
+      timeout: 30_000,
+      message: `${step}: browser chip count never reached ${expected}`,
+    })
+    .toBe(expected);
+  await page.waitForTimeout(2_000);
+  expect(await chips.count(), `${step}: chip count did not hold at ${expected}`).toBe(expected);
+}
+
+test.describe('browser-chip-count', () => {
+  test('visible browser chips always equal active browser agents', async ({ page }) => {
+    const rec = attachRecorder(page);
+    const agentId = await createAgent(
+      'Semantic test: browser chip count invariant (no real work).',
+    );
+
+    try {
+      if (HAS_INJECTED_SESSION) {
+        await injectSemanticSession(page);
+      }
+      await page.goto(`${FRONTEND_URL}/?agent-id=${agentId}`, {
+        waitUntil: 'domcontentloaded',
+      });
+      if (HAS_INJECTED_SESSION) {
+        await expectInjectedSessionRecognized(page);
+      } else {
+        await expectDevAuthenticated(page, rec);
+      }
+
+      // ── Step 0: no browser agents -> no chips ─────────────────────────
+      await expectChipCount(page, 0, 'before any browser task');
+
+      // ── Step 1: two browser tasks start -> two chips ──────────────────
+      await postToolMessage(agentId, '', {
+        toolCallId: 'call-chip-a',
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'IN_PROGRESS',
+        action_type: 'browser',
+        task_id: 'chip-task-a',
+        browser_url: `${LIVE_VIEW_URL}/a`,
+      });
+      await postToolMessage(agentId, '', {
+        toolCallId: 'call-chip-b',
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'IN_PROGRESS',
+        action_type: 'browser',
+        task_id: 'chip-task-b',
+        browser_url: `${LIVE_VIEW_URL}/b`,
+      });
+      await expectChipCount(page, 2, 'two active browser tasks');
+
+      // ── Step 2: task A completes (task-scoped terminal) -> one chip ───
+      await postToolMessage(agentId, '**Status**: ✅ COMPLETE', {
+        toolCallId: 'call-chip-a',
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'FINISHED',
+        action_type: 'task_complete',
+        task_id: 'chip-task-a',
+      });
+      await expectChipCount(page, 1, 'task A completed');
+
+      // ── Step 3: task B's tool call fails at tool-call scope -> zero ───
+      // Exact shape of the worker's generic tool-error message from the prod
+      // incident: toolCallId only, no task_id, no action_type.
+      await postToolMessage(agentId, "HTTPStatusError: Server error '500 Internal Server Error'", {
+        toolCallId: 'call-chip-b',
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'ERROR',
+        title: 'spawn_browser_agent failed',
+        error: true,
+      });
+      await expectChipCount(page, 0, 'task B failed via tool-call-scoped error');
+
+      // ── Invariant: reload agrees with realtime ────────────────────────
+      // The chip count must be derived purely from persisted messages, so a
+      // fresh hydration renders the same zero-chip state.
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await expectChipCount(page, 0, 'after reload');
+
+      expect(hasUncaughtErrors(rec), 'Uncaught errors during chip-count flow').toEqual([]);
+    } finally {
+      await deleteAgent(agentId);
+    }
+  });
+});
