@@ -99,6 +99,22 @@ TEST_USER_ID=$(printf '%s' "$SEMANTIC_SESSION" | node -e \
 export TEST_USER_ID
 echo "  Session generated for test user $TEST_USER_ID"
 
+# Ensure the test account is off the waitlist. A freshly-provisioned account
+# (e.g. the prod chat-lifecycle ratchet) has usedInviteCode=null, so the app
+# renders WaitlistGate instead of the chat — the agent then produces 0 realtime
+# bubbles and every lifecycle assertion fails. A real user isn't gated, so the
+# auto-login must land the account in the same state: redeem the master invite
+# code (181818) once. Idempotent — an already-redeemed account is a no-op.
+SEMANTIC_ACCESS_TOKEN=$(printf '%s' "$SEMANTIC_SESSION" | node -e \
+  'let input=""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input).access_token || ""));')
+if [[ -n "$SEMANTIC_ACCESS_TOKEN" ]]; then
+  INVITE_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BACKEND_URL/api/invite-codes/use" \
+    -H "Authorization: Bearer $SEMANTIC_ACCESS_TOKEN" \
+    -H 'Content-Type: application/json' \
+    -d '{"inviteCode":181818}' || echo "000")
+  echo "  Waitlist bypass (invite 181818) -> HTTP $INVITE_STATUS"
+fi
+
 SEMANTIC_WORKERS="${SEMANTIC_WORKERS:-1}"
 if ! [[ "$SEMANTIC_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
   echo "FAIL: SEMANTIC_WORKERS must be a positive integer, got $SEMANTIC_WORKERS" >&2
