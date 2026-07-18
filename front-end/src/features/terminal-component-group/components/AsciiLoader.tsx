@@ -13,8 +13,13 @@
  *   A pill-shaped window over the animation. Inside the pill the SAME frame is
  *   re-rendered (chars align 1:1 with the animation beneath), rose-tinted via
  *   background-clip:text, with the frame's whitespace filled by shimmering
- *   glyphs so the pill is fully packed. A transparent, borderless button with
- *   the label sits on top, centered on the animation (CTA_PILL.shiftY offsets).
+ *   glyphs so the pill is fully packed. A transparent button with a 1px rose
+ *   border sits on top, centered on the animation (CTA_PILL.shiftY offsets).
+ *   The button reveals its label on hover via a pure-CSS vertical roll: at rest
+ *   an arrow glyph shows; on hover the arrow rolls up out of the capsule while
+ *   the label rolls up into place (group-hover), the border warms, and a scrim
+ *   fades in so the label reads over the bright glyphs. No React state — the
+ *   whole reveal is CSS group-hover, so it doesn't touch the ANIMATING machine.
  */
 
 import { useEffect, useState } from 'react';
@@ -127,18 +132,16 @@ const CTA_SHADOW_STYLE: React.CSSProperties = {
   opacity: 0.7,
 };
 
-// Glossy chrome label — the same beveled metallic gradient as the send
-// button's chrome ring (liquid-white-button), clipped into the text. Fill is
-// transparent, so depth comes from a drop-shadow (a text-shadow would show
-// through the glyphs).
-const CTA_LABEL_STYLE: React.CSSProperties = {
-  backgroundImage:
-    'linear-gradient(180deg, #f0f0f0 0%, #888 25%, #333 50%, #888 75%, #f0f0f0 100%)',
-  WebkitBackgroundClip: 'text',
-  WebkitTextFillColor: 'transparent',
-  backgroundClip: 'text',
-  filter: 'drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35))',
+// Both the rest-state arrow and the revealed label are plain white glyphs — a
+// solid text-shadow keeps them legible over the bright rose pill without the
+// chrome gradient competing with the animation behind them.
+const CTA_GLYPH_STYLE: React.CSSProperties = {
+  color: '#ffffff',
+  textShadow: '0 1px 5px rgba(0, 0, 0, 0.9), 0 0 1px rgba(0, 0, 0, 0.9)',
 };
+
+// Ease + timing shared by the arrow/label roll so they move as one unit.
+const CTA_ROLL = 'transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]';
 
 function AsciiCtaOverlay({
   frame,
@@ -175,14 +178,39 @@ function AsciiCtaOverlay({
         type="button"
         onClick={cta.onClick}
         data-testid="opening-join-waitlist"
-        className="pointer-events-auto absolute left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-[#E062CC]/60 bg-transparent text-sm font-bold tracking-wide"
+        aria-label={cta.label}
+        className="group pointer-events-auto absolute left-1/2 -translate-x-1/2 -translate-y-1/2 grid place-items-center overflow-hidden rounded-full border border-[#E062CC]/60 bg-transparent transition-colors duration-200 hover:border-[#FF4069]/90 focus-visible:border-[#FF4069]/90"
         style={{
           top: `calc(50% + ${CTA_PILL.shiftY}px)`,
           width: CTA_PILL.width,
           height: CTA_PILL.height,
         }}
       >
-        <span data-testid="opening-join-label" style={CTA_LABEL_STYLE}>
+        {/* Legibility scrim — darkens the pill center on hover so the white
+            label reads over the bright rose glyphs. */}
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-0 rounded-full opacity-0 transition-opacity duration-300 group-hover:opacity-100 group-focus-visible:opacity-100"
+          style={{
+            background:
+              'radial-gradient(ellipse 72% 92% at 50% 50%, rgba(0,0,0,0.55), rgba(0,0,0,0) 74%)',
+          }}
+        />
+        {/* Rest state: arrow rolls up and out on hover. */}
+        <span
+          aria-hidden
+          data-testid="opening-join-icon"
+          className={`[grid-area:1/1] text-base font-semibold ${CTA_ROLL} group-hover:-translate-y-[150%] group-hover:opacity-0 group-focus-visible:-translate-y-[150%] group-focus-visible:opacity-0`}
+          style={CTA_GLYPH_STYLE}
+        >
+          →
+        </span>
+        {/* Hover state: label rolls up into place. */}
+        <span
+          data-testid="opening-join-label"
+          className={`[grid-area:1/1] translate-y-[150%] whitespace-nowrap text-sm font-bold tracking-wide opacity-0 ${CTA_ROLL} group-hover:translate-y-0 group-hover:opacity-100 group-focus-visible:translate-y-0 group-focus-visible:opacity-100`}
+          style={CTA_GLYPH_STYLE}
+        >
           {cta.label}
         </span>
       </button>

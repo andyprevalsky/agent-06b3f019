@@ -340,6 +340,42 @@ async function syncBrowserAuthForCurrentMode(failures?: Error[]): Promise<void> 
   await syncBrowserCredentials(failures);
 }
 
+// Benchmark live fixtures shell out to `--credentials-only` while the isolated
+// bench stack is under load (concurrent agents, cascade deletes of finished
+// agent trees). A single transient local-DB failure (pool timeout, connection
+// churn, upsert race) would otherwise fail the whole benchmark task before an
+// agent even exists — observed 2026-07-18 (claude-code-agent smoke: one
+// `localCookie.upsert()` invocation failed; the identical sync succeeded
+// seconds later). Every sync step is an idempotent upsert, so bounded retries
+// are safe. Mirrors syncComputeTokensWithRetries above.
+const BROWSER_AUTH_SYNC_ATTEMPTS = 3;
+
+async function syncBrowserAuthWithRetries(): Promise<void> {
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= BROWSER_AUTH_SYNC_ATTEMPTS; attempt++) {
+    try {
+      await syncBrowserAuthForCurrentMode();
+      return;
+    } catch (err) {
+      lastError = err;
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(
+        `  ❌ Browser auth sync: attempt ${attempt}/${BROWSER_AUTH_SYNC_ATTEMPTS} failed: ${message}`
+      );
+      if (attempt < BROWSER_AUTH_SYNC_ATTEMPTS) {
+        await sleep(500 * 2 ** (attempt - 1));
+      }
+    }
+  }
+
+  throw new Error(
+    `Browser auth sync failed after ${BROWSER_AUTH_SYNC_ATTEMPTS} attempts: ${
+      lastError instanceof Error ? lastError.message : String(lastError)
+    }`
+  );
+}
+
 function throwBrowserAuthSyncFailures(failures: Error[]): void {
   if (failures.length === 0) return;
   if (failures.length === 1) throw failures[0];
@@ -376,7 +412,7 @@ async function sync() {
 
   if (CREDENTIALS_ONLY) {
     console.log('  ℹ️  Browser auth merge refreshes production rows and preserves local-only rows');
-    await syncBrowserAuthForCurrentMode();
+    await syncBrowserAuthWithRetries();
     console.log('\n🔄 Credential sync complete.');
     return;
   }

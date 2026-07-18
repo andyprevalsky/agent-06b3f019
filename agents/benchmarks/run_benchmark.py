@@ -344,8 +344,7 @@ def _attention_request_matches_task(
 def _should_auto_approve_attention(task: BenchmarkTask, req: dict) -> bool:
     return not (
         task.agentcard_setup_action == "complete"
-        and _attention_request_kind(req)
-        == "agentcard_user_cardholder_onboarding_required"
+        and _attention_request_kind(req) == "agentcard_user_cardholder_onboarding_required"
     )
 
 
@@ -595,9 +594,7 @@ def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
         from browser_tools.schemas import RequestPaymentCardBrowserTool
 
         try:
-            RequestPaymentCardBrowserTool.model_validate(
-                {"tool": "request_payment_card", **receipt}
-            )
+            RequestPaymentCardBrowserTool.model_validate({"tool": "request_payment_card", **receipt})
         except ValueError as exc:
             return f"malformed complete payment receipt: {exc}"
         fingerprint = receipt.get("fingerprint")
@@ -983,7 +980,7 @@ def _benchmark_agent_source_override() -> str:
 def _apply_local_agent_source_override(agent_id: str, source: str) -> None:
     _run_local_victoria_sql(
         'UPDATE "Agent" '
-        f'SET source = {_sql_literal(source)} '
+        f"SET source = {_sql_literal(source)} "
         f'WHERE id = {_sql_literal(agent_id)} AND "userId" = {_sql_literal(_current_benchmark_user_id())};'
     )
 
@@ -1231,9 +1228,7 @@ async def get_test_payment_lifecycle(base_url: str, agent_id: str) -> dict:
             params={"agentId": agent_id},
         )
         if resp.status_code != 200:
-            raise Exception(
-                f"Failed to get payment lifecycle: {resp.status_code} {resp.text[:300]}"
-            )
+            raise Exception(f"Failed to get payment lifecycle: {resp.status_code} {resp.text[:300]}")
         return resp.json()
 
 
@@ -1263,9 +1258,7 @@ async def _wait_for_expected_payment_lifecycle(
         status = purchase.get("status") if isinstance(purchase, dict) else None
         wallet_funding = lifecycle.get("walletFunding") if isinstance(lifecycle, dict) else None
         release_pending = (
-            status == "HELD"
-            and isinstance(wallet_funding, dict)
-            and wallet_funding.get("status") == "RECLAIMING"
+            status == "HELD" and isinstance(wallet_funding, dict) and wallet_funding.get("status") == "RECLAIMING"
         )
         if (status not in retryable_statuses and not release_pending) or time.monotonic() >= deadline:
             return lifecycle
@@ -1283,9 +1276,7 @@ async def abandon_test_payment(base_url: str, agent_id: str) -> dict:
             json={"agentId": agent_id},
         )
         if resp.status_code != 200:
-            raise Exception(
-                f"Failed to abandon test payment: {resp.status_code} {resp.text[:300]}"
-            )
+            raise Exception(f"Failed to abandon test payment: {resp.status_code} {resp.text[:300]}")
         return resp.json()
 
 
@@ -1298,10 +1289,7 @@ async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dic
             json={"userId": USER_ID, "action": action},
         )
         if resp.status_code != 200:
-            raise RuntimeError(
-                f"Failed to {action} benchmark AgentCard setup: "
-                f"{resp.status_code} {resp.text[:300]}"
-            )
+            raise RuntimeError(f"Failed to {action} benchmark AgentCard setup: {resp.status_code} {resp.text[:300]}")
         return resp.json()
 
 
@@ -2148,8 +2136,7 @@ async def poll_agent(
             task.payment_card_request_action == "abandon"
             and not payment_card_action_completed
             and any(
-                isinstance(message.get("metadata"), dict)
-                and message["metadata"].get("title") == "Payment card ready"
+                isinstance(message.get("metadata"), dict) and message["metadata"].get("title") == "Payment card ready"
                 for message in messages
             )
         ):
@@ -2165,9 +2152,7 @@ async def poll_agent(
                 **data.get("_benchmark", {}),
                 "payment_card_request_action": "abandon",
                 "payment_lifecycle": lifecycle,
-                "expected_payment_receipt_seen": bool(
-                    task.expected_payment_receipt and approvals_triggered > 0
-                ),
+                "expected_payment_receipt_seen": bool(task.expected_payment_receipt and approvals_triggered > 0),
                 "expected_attention_kind_seen": task.expected_attention_kind,
             }
             print("    ✅ Abandoned issued payment card and reconciled funding")
@@ -2246,8 +2231,7 @@ async def poll_agent(
             if task.agentcard_setup_action == "complete":
                 setup_kind = "agentcard_user_cardholder_onboarding_required"
                 setup_still_open = any(
-                    _attention_request_is_open(req)
-                    and _attention_request_kind(req) == setup_kind
+                    _attention_request_is_open(req) and _attention_request_kind(req) == setup_kind
                     for req in _pending_attention
                 )
                 data["_benchmark"] = {
@@ -2259,12 +2243,18 @@ async def poll_agent(
                     ),
                 }
                 if not agentcard_setup_attention_seen:
-                    return data, approvals_triggered, approvals_resolved, (
-                        "Expected agentcard_user_cardholder_onboarding_required attention request was not observed"
+                    return (
+                        data,
+                        approvals_triggered,
+                        approvals_resolved,
+                        ("Expected agentcard_user_cardholder_onboarding_required attention request was not observed"),
                     )
                 if setup_still_open:
-                    return data, approvals_triggered, approvals_resolved, (
-                        "AgentCard setup attention request remained open after agent completion"
+                    return (
+                        data,
+                        approvals_triggered,
+                        approvals_resolved,
+                        ("AgentCard setup attention request remained open after agent completion"),
                     )
             return data, approvals_triggered, approvals_resolved, None
 
@@ -2476,9 +2466,7 @@ async def poll_agent(
                                 ):
                                     await respond_to_attention_request(base_url, req_id, "approved")
                                     approvals_resolved += 1
-                                    print(
-                                        f"    ✅ Auto-approved payment-card prerequisite {req_id[:8]}"
-                                    )
+                                    print(f"    ✅ Auto-approved payment-card prerequisite {req_id[:8]}")
                                     continue
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
@@ -2542,10 +2530,7 @@ async def poll_agent(
                                     "expected_payment_receipt_seen": True,
                                     "expected_payment_receipt_request_id": req_id,
                                 }
-                            if (
-                                task.success_on_payment_card_request
-                                and task.payment_card_request_action is None
-                            ):
+                            if task.success_on_payment_card_request and task.payment_card_request_action is None:
                                 if task.approval_handling == "count_only":
                                     await respond_to_attention_request(base_url, req_id, _count_only_release_response())
                                     approvals_resolved += 1
@@ -2575,9 +2560,7 @@ async def poll_agent(
                             ):
                                 await configure_benchmark_agentcard_setup(base_url, "complete")
                                 agentcard_setup_attention_seen = True
-                                print(
-                                    f"    ✅ Completed one-time AgentCard setup for attention {req_id[:8]}"
-                                )
+                                print(f"    ✅ Completed one-time AgentCard setup for attention {req_id[:8]}")
                                 continue
                         if task.name == CALENDLY_TASK_NAME and _contains_calendly_link(req):
                             data["_benchmark"] = {"calendly_link_approval_seen": True}
@@ -2594,10 +2577,7 @@ async def poll_agent(
                                 f"({approvals_triggered}/{task.expected_approval_count})"
                             )
                             return data, approvals_triggered, approvals_resolved, None
-                        if (
-                            task.approval_handling == "auto_approve"
-                            and _should_auto_approve_attention(task, req)
-                        ):
+                        if task.approval_handling == "auto_approve" and _should_auto_approve_attention(task, req):
                             if req_id:
                                 if not _phone_approval_matches_callee(task, req):
                                     await respond_to_attention_request(base_url, req_id, "denied")
@@ -2747,11 +2727,7 @@ def evaluate_task(
             ),
             None,
         )
-        scope = (
-            f"{task_scope}|browser_session:{browser_session_value}"
-            if browser_session_value
-            else task_scope
-        )
+        scope = f"{task_scope}|browser_session:{browser_session_value}" if browser_session_value else task_scope
 
         # Only completed browser actions are grounded page evidence. Task
         # prompts, verifier prose, and assistant restatements can contain the
@@ -2770,9 +2746,7 @@ def evaluate_task(
         grounded_action_types = {"click"}
         if message.get("role") == "TOOL" and tool_status == "FINISHED" and action_type in grounded_action_types:
             evidence = "\n".join(
-                candidate["title"]
-                for candidate in candidates
-                if isinstance(candidate.get("title"), str)
+                candidate["title"] for candidate in candidates if isinstance(candidate.get("title"), str)
             )
             if evidence:
                 message_evidence_by_scope.setdefault(scope, []).append((message_index, evidence))
@@ -2947,7 +2921,10 @@ def evaluate_task(
     if task.approval_handling == "ignore":
         if approvals_triggered == 0:
             if task.expected_attention_kinds:
-                return False, f"Expected one of {task.expected_attention_kinds} attention requests (to ignore) but none was triggered"
+                return (
+                    False,
+                    f"Expected one of {task.expected_attention_kinds} attention requests (to ignore) but none was triggered",
+                )
             if task.expected_attention_kind:
                 return (
                     False,
@@ -2962,7 +2939,10 @@ def evaluate_task(
             benchmark_state = data.get("_benchmark", {})
             observed_kind = benchmark_state.get("attention_request_kind_seen")
             if observed_kind not in task.expected_attention_kinds:
-                return False, f"Expected one of {task.expected_attention_kinds} attention requests, observed {observed_kind}"
+                return (
+                    False,
+                    f"Expected one of {task.expected_attention_kinds} attention requests, observed {observed_kind}",
+                )
         return True, None
 
     if task.name == CALENDLY_TASK_NAME:
@@ -3056,8 +3036,7 @@ def evaluate_task(
     ):
         return (
             False,
-            f"Expected exactly {task.expected_approval_count} approval request(s), "
-            f"observed {approvals_triggered}",
+            f"Expected exactly {task.expected_approval_count} approval request(s), observed {approvals_triggered}",
         )
 
     # Progress score check (verifier gave a score)
@@ -3533,8 +3512,7 @@ def _run_free_credit_subscription_fixture(action: str) -> dict:
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"free-credit subscription benchmark fixture {action} failed: "
-            f"{(result.stderr or result.stdout).strip()}"
+            f"free-credit subscription benchmark fixture {action} failed: {(result.stderr or result.stdout).strip()}"
         )
     return _parse_last_json_line(result.stdout)
 
@@ -3561,10 +3539,22 @@ def _run_gate_fixture(task_name: str, action: str) -> dict:
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"gate benchmark fixture {action} failed for {task_name}: "
-            f"{(result.stderr or result.stdout).strip()}"
+            f"gate benchmark fixture {action} failed for {task_name}: {(result.stderr or result.stdout).strip()}"
         )
     return _parse_last_json_line(result.stdout)
+
+
+def _seed_sync_error_detail(result: "subprocess.CompletedProcess[str]") -> str:
+    """Render a failed seed-local subprocess's output without destroying the
+    diagnosis. Prisma errors put the actual reason (error code / constraint /
+    timeout) at the END of the message, after the invocation header — a naive
+    head truncation reduced the 2026-07-18 claude-code-agent smoke failure to
+    an unusable 'Invalid `localCookie.upsert()` invocation in <file>' stub.
+    Keep the head for context and the tail for the root cause."""
+    detail = (result.stderr or result.stdout or "").strip()
+    if len(detail) <= 1200:
+        return detail
+    return f"{detail[:300]}\n    … [{len(detail) - 1100} chars elided] …\n    {detail[-800:]}"
 
 
 def _sync_compute_tokens() -> bool:
@@ -3594,7 +3584,7 @@ def _sync_compute_tokens() -> bool:
         print(f"    ⚠ Compute-token sync error: {exc}")
         return False
     if result.returncode != 0:
-        print(f"    ⚠ Compute-token sync failed: {(result.stderr or result.stdout).strip()[:200]}")
+        print(f"    ⚠ Compute-token sync failed: {_seed_sync_error_detail(result)}")
         return False
     print("    🔑 Refreshed compute tokens from prod")
     return True
@@ -3620,13 +3610,16 @@ def _sync_browser_credentials() -> bool:
             env=env,
             capture_output=True,
             text=True,
-            timeout=180,
+            # A healthy sync takes ~60-90s; seed-local retries transient DB
+            # failures up to 3x internally (BROWSER_AUTH_SYNC_ATTEMPTS), so the
+            # outer budget must cover multiple attempts, not just one.
+            timeout=420,
         )
     except Exception as exc:
         print(f"    ⚠ Credential sync error: {exc}")
         return False
     if result.returncode != 0:
-        print(f"    ⚠ Credential sync failed: {(result.stderr or result.stdout).strip()[:200]}")
+        print(f"    ⚠ Credential sync failed: {_seed_sync_error_detail(result)}")
         return False
     print("    🍪 Refreshed browser cookies + passwords from prod")
     return True
@@ -3658,7 +3651,7 @@ def _sync_passkeys() -> None:
     except Exception as exc:
         raise RuntimeError(f"Passkey-only sync failed: {exc}") from exc
     if result.returncode != 0:
-        raise RuntimeError(f"Passkey-only sync failed: {(result.stderr or result.stdout).strip()[:500]}")
+        raise RuntimeError(f"Passkey-only sync failed: {_seed_sync_error_detail(result)}")
     print("    🔐 Refreshed passkeys only from prod")
 
 
@@ -3728,11 +3721,11 @@ def _apply_amazon_passkey(ctx: LiveFixtureContext) -> dict:
     snapshot_sql = (
         "SELECT json_build_object("
         "'steel_ids', COALESCE((SELECT json_agg(id) FROM \"SteelSessionAuth\" "
-        f"WHERE \"userId\" = {user} AND \"authRealm\" = {realm} AND \"disabledAt\" IS NULL), '[]'::json), "
+        f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL), \'[]\'::json), '
         "'bundle_ids', COALESCE((SELECT json_agg(id) FROM \"CookieBundle\" "
-        f"WHERE \"userId\" = {user} AND \"authRealm\" = {realm} AND \"disabledAt\" IS NULL), '[]'::json), "
+        f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL), \'[]\'::json), '
         "'password_ids', COALESCE((SELECT json_agg(id) FROM \"BrowserPassword\" "
-        f"WHERE \"userId\" = {user} AND \"disabledAt\" IS NULL), '[]'::json), "
+        f'WHERE "userId" = {user} AND "disabledAt" IS NULL), \'[]\'::json), '
         "'profiles', COALESCE((SELECT json_agg(row_to_json(profile)) "
         'FROM "BrowserProviderProfile" profile JOIN "BrowserContext" context '
         'ON context.id = profile."contextId" '
@@ -3808,14 +3801,13 @@ def _restore_amazon_passkey_fixture(manifest: dict) -> None:
         identifiers = ids_sql(key)
         if identifiers:
             statements.append(
-                f'UPDATE "{table}" SET "disabledAt" = NULL, "disabledReason" = NULL '
-                f"WHERE id IN ({identifiers})"
+                f'UPDATE "{table}" SET "disabledAt" = NULL, "disabledReason" = NULL WHERE id IN ({identifiers})'
             )
 
     statements.append(
         'DELETE FROM "BrowserProviderProfile" profile USING "BrowserContext" context '
         'WHERE profile."contextId" = context.id '
-        f'AND context."userId" = {user} AND profile.provider = \'kernel\''
+        f"AND context.\"userId\" = {user} AND profile.provider = 'kernel'"
     )
     profiles = snapshot.get("profiles")
     if not isinstance(profiles, list):
@@ -4492,7 +4484,7 @@ def _prepare_local_agent_sms_sender(user_id: str) -> Optional[str]:
     _run_local_victoria_sql(
         'UPDATE "AgentIdentity" SET '
         f"phone = {_sql_literal(phone)}, "
-        '"phoneProvider" = \'agentphone\', '
+        "\"phoneProvider\" = 'agentphone', "
         '"phoneProviderAgentId" = NULL, '
         '"phoneProviderNumberId" = NULL '
         f'WHERE "userId" = {_sql_literal(user_id)};'
@@ -5523,7 +5515,7 @@ eligible orders fail unless a criterion explicitly defines that state as success
 Task requirement: {task.prompt}
 Criteria:
 {criteria}
-Judge-specific instruction: {evaluator.get('judge_prompt', '')}
+Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 """
     evidence = _declared_evaluator_evidence(data)
     return await check_progress(
@@ -5620,7 +5612,7 @@ _APPROVAL_AMOUNT_RE = re.compile(
 _APPROVAL_SEAT_RE = re.compile(
     r"(?:\bseat(?:s)?(?:\s+(?:number|assignment))?\s*[:#-]?\s*[a-z]{1,2}\s*-?\s*\d{1,3}\b|"
     r"\brow\s+[a-z]{1,2}\s*,?\s+seat\s+\d{1,3}\b|"
-    r'[\"\']seat[\"\']\s*:\s*[\"\']?[a-z]{1,2}\s*-?\s*\d{1,3}\b)',
+    r"[\"\']seat[\"\']\s*:\s*[\"\']?[a-z]{1,2}\s*-?\s*\d{1,3}\b)",
     re.IGNORECASE,
 )
 
@@ -5706,8 +5698,7 @@ def _run_declared_static_check(evaluator: dict, data: dict) -> tuple[bool, str]:
                 amount_suffix = " and a monetary amount" if require_amount else ""
                 seat_suffix = " and a seat assignment" if require_seat else ""
                 return False, (
-                    "Approval request did not include "
-                    f"{missing}{date_suffix}{time_suffix}{amount_suffix}{seat_suffix}"
+                    f"Approval request did not include {missing}{date_suffix}{time_suffix}{amount_suffix}{seat_suffix}"
                 )
             continue
         return False, f"Unsupported enforced static check: {check_type}"
@@ -5923,9 +5914,7 @@ async def run_single_task(
 
         if task.name == MESSAGE_PERSON_TASK_NAME:
             await _preflight_message_person_bridge(base_url)
-        if task.name == MESSAGE_PERSON_AGENT_SMS_TASK_NAME and (
-            "localhost" in base_url or "127.0.0.1" in base_url
-        ):
+        if task.name == MESSAGE_PERSON_AGENT_SMS_TASK_NAME and ("localhost" in base_url or "127.0.0.1" in base_url):
             seeded_email = _prepare_local_agent_sms_sender(USER_ID)
             if seeded_email:
                 print(f"    🧪 Seeded AgentPhone sender for live bench: {seeded_email}")
@@ -6484,11 +6473,7 @@ async def run_single_task(
             except Exception as exc:
                 print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
         passkey_manifest = next(
-            (
-                manifest
-                for manifest in live_fixture_manifests
-                if manifest.get("fixture") == "amazon_passkey"
-            ),
+            (manifest for manifest in live_fixture_manifests if manifest.get("fixture") == "amazon_passkey"),
             None,
         )
         if passkey_manifest is not None:
@@ -6554,9 +6539,7 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
             # The anon/cookie split used to live on dedicated tags; the curated
             # tag vocabulary merged them into `auth`, so the split is by name.
             auth_names = (
-                ("browser-agent",)
-                if getattr(args, "anon", False)
-                else ("browser-agent-amazon-cookie-payment",)
+                ("browser-agent",) if getattr(args, "anon", False) else ("browser-agent-amazon-cookie-payment",)
             )
             tasks = [get_task_by_name(name) for name in auth_names]
         elif args.suite in ("rose-bench", "pipeline-e2e"):
@@ -7447,8 +7430,7 @@ async def main_async(args):
             if exclusive_db_tasks:
                 names = ", ".join(t.name for t in exclusive_db_tasks)
                 print(
-                    f"\n  Deferring {len(exclusive_db_tasks)} destructive DB fixture task(s) "
-                    f"to a serial phase: {names}"
+                    f"\n  Deferring {len(exclusive_db_tasks)} destructive DB fixture task(s) to a serial phase: {names}"
                 )
 
             if max_concurrency is None or max_concurrency >= len(parallel_batch):
