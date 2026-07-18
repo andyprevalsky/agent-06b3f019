@@ -477,6 +477,15 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     explicit = os.environ.get("BENCHMARK_FRONTEND_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
+    # Production runs (--prod) target the public prod frontend, never a local
+    # run.sh ngrok tunnel. base_url is the prod backend here, so short-circuit to
+    # roselabs.ai BEFORE consulting any local-stack signal (PUBLIC_BASE_URL /
+    # services.json), which can carry a stale ngrok public URL left over from a
+    # concurrent local stack and would otherwise hijack a live prod run to an
+    # unreachable tunnel.
+    prod_backend_hosts = {"navi-j9a9.onrender.com", "api.roselabs.ai"}
+    if urlparse(base_url).hostname in prod_backend_hosts:
+        return "https://roselabs.ai"
     # Stable public URL assigned by run.sh at startup (reserved ngrok domain → frontend port).
     # This is the only URL the cloud browser agent can actually reach, so prefer it over any
     # localhost fallback. run.sh exports PUBLIC_BASE_URL and records it in services.json.
