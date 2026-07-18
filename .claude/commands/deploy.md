@@ -98,7 +98,7 @@ CHANGED_TS=$(
 )
 CHANGED_BACKEND=$(echo "$CHANGED" | grep -E '^back-end/' || true)
 CHANGED_BACKEND_LINT_INPUTS=$(echo "$CHANGED" | grep -E \
-  '^back-end/(package(-lock)?\.json|tsconfig[^/]*\.json|eslint\.config\.(mjs|js|cjs|ts))$' || true)
+  '^(package(-lock)?\.json|back-end/(package(-lock)?\.json|tsconfig[^/]*\.json|eslint\.config\.(mjs|js|cjs|ts)))$' || true)
 LINT_TS="$CHANGED_TS"
 if [ -n "$CHANGED_BACKEND_LINT_INPUTS" ]; then
   LINT_TS=$(find back-end/src -type f \( -name '*.ts' -o -name '*.tsx' \) -print |
