@@ -1276,7 +1276,7 @@ launch_backend_service() {
             # TERM-ignoring descendant; group ownership lets restart/cleanup
             # prove every descendant is gone before a replacement can bind.
             FAIL_DIR="$FAIL_DIR" BACKEND_LOG_FILE="$BACKEND_LOG_FILE" BACKEND_PORT="$BACKEND_PORT" \
-                python3 "$ROOT_DIR/scripts/run-in-new-session.py" bash -c '
+                python3 "$SCRIPT_DIR/run-in-new-session.py" bash -c '
                     set +e
                     cd back-end || exit 1
                     rm -f "$BACKEND_LOG_FILE"

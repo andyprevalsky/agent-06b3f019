@@ -2910,8 +2910,10 @@ def test_isolated_backend_startup_retries_one_hung_process(tmp_path: Path) -> No
     helpers = "".join(
         _extract_fleet_function(stack, signature)
         for signature in (
+            "launch_backend_service() {",
             "terminate_backend_group() {",
             "restart_backend_service() {",
+            "isolated_backend_ready_attempts() {",
             "wait_for_isolated_backend_ready() {",
         )
     )
@@ -2927,45 +2929,71 @@ def test_isolated_backend_startup_retries_one_hung_process(tmp_path: Path) -> No
     launches.write_text("0\n")
     child_dir = tmp_path / "children"
     child_dir.mkdir()
-    script = f"""set -uo pipefail
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_npx = bin_dir / "npx"
+    fake_npx.write_text(
+        "#!/usr/bin/env bash\n"
+        'count=$(cat "$LAUNCHES")\n'
+        'count=$((count + 1))\n'
+        'echo "$count" > "$LAUNCHES"\n'
+        'exec python3 "$LAUNCHER" "$CHILD_DIR/child-$count"\n'
+    )
+    fake_npx.chmod(0o755)
+    script = f"""set -eo pipefail
 BACKEND_PORT=3001
-BACKEND_LOG_FILE=/dev/null
+BACKEND_LOG_FILE="$CHILD_DIR/backend.log"
 FAIL_DIR="$CHILD_DIR/fail"
 mkdir -p "$FAIL_DIR"
 CLOUDBENCH_BACKEND_START_READY_ATTEMPTS=2
 BACKEND_INDEX=0
 PIDS=("")
-launch_backend_service() {{
-  count=$(cat "$LAUNCHES"); count=$((count + 1)); echo "$count" > "$LAUNCHES"
-  python3 "$SESSION_LAUNCHER" python3 "$LAUNCHER" "$CHILD_DIR/child-$count" &
-  BACKEND_PID=$!
-  BACKEND_PGID=$BACKEND_PID
-  PIDS[$BACKEND_INDEX]="$BACKEND_PID"
-  echo "$BACKEND_PID" > "$CHILD_DIR/root-$count"
-  for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$CHILD_DIR/child-$count" ] && break; sleep 0.1; done
-}}
+NAMES=()
+BENCHMARK_MODE=true
+BENCHMARK_ISOLATED_RUN=true
+SCRIPT_DIR="$SCRIPT_DIR"
 curl() {{ [ "$(cat "$LAUNCHES")" -ge 2 ]; }}
 {helpers}
 launch_backend_service
+echo "$BACKEND_PID" > "$CHILD_DIR/root-1"
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$CHILD_DIR/child-1" ] && break; sleep 0.1; done
 wait_for_isolated_backend_ready
 rc=$?
 old_child=$(cat "$CHILD_DIR/child-1")
 if kill -0 "$old_child" 2>/dev/null; then echo OLD_SURVIVED; rc=1; else echo OLD_GONE; fi
-new_root=$(cat "$CHILD_DIR/root-2")
+new_root="$BACKEND_PID"
 [ "${{PIDS[0]}}" = "$new_root" ] || {{ echo SLOT_STALE; rc=1; }}
 terminate_backend_group || rc=1
 kill -0 "$new_root" 2>/dev/null && {{ echo NEW_SURVIVED; rc=1; }}
 exit "$rc"
 """
+    harness_env = {
+        "LAUNCHER": str(launcher),
+        "LAUNCHES": str(launches),
+        "CHILD_DIR": str(child_dir),
+        "SCRIPT_DIR": str(ROOT / "scripts"),
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+    }
+    # Preserve the exact smoke failure as a negative control: production does
+    # not enable nounset, so an invented empty ROOT_DIR resolves to /scripts.
+    broken_script = script.replace(
+        'python3 "$SCRIPT_DIR/run-in-new-session.py"',
+        'python3 "$ROOT_DIR/scripts/run-in-new-session.py"',
+    )
+    broken = subprocess.run(
+        ["bash", "-c", broken_script],
+        env=harness_env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert broken.returncode != 0
+    assert "can't open file '/scripts/run-in-new-session.py'" in broken.stderr
+
     result = subprocess.run(
         ["bash", "-c", script],
-        env={
-            "LAUNCHER": str(launcher),
-            "SESSION_LAUNCHER": str(ROOT / "scripts" / "run-in-new-session.py"),
-            "LAUNCHES": str(launches),
-            "CHILD_DIR": str(child_dir),
-            "PATH": os.environ["PATH"],
-        },
+        env=harness_env,
         text=True, capture_output=True, check=False, timeout=25,
     )
 
@@ -2983,7 +3011,8 @@ def test_isolated_backend_session_launcher_is_macos_portable(tmp_path: Path) -> 
     """The local smoke path must not require GNU setsid(1), absent on macOS."""
     stack = STACK_SCRIPT.read_text()
     session_launcher = ROOT / "scripts" / "run-in-new-session.py"
-    assert 'python3 "$ROOT_DIR/scripts/run-in-new-session.py" bash -c' in stack
+    assert 'python3 "$SCRIPT_DIR/run-in-new-session.py" bash -c' in stack
+    assert "$ROOT_DIR/scripts/run-in-new-session.py" not in stack
     assert "setsid bash" not in stack
 
     ready = tmp_path / "ready"
