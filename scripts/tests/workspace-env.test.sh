@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HELPER_SRC="$ROOT_DIR/scripts/lib/workspace-env.sh"
 DEPLOY_HELPER_SRC="$ROOT_DIR/scripts/lib/deploy-local-env.sh"
+RUN_CONTEXT_SRC="$ROOT_DIR/scripts/lib/run-context.sh"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
@@ -86,5 +87,23 @@ case "$deploy_queue" in
 esac
 expect_eq "$deploy_backend_url" "http://localhost:55190" "deploy backend URL uses assigned port"
 expect_eq "$deploy_db_port" "55195" "deploy DB port uses assigned range"
+
+run_context="$workspace/.context/benchmarks/example-run"
+mkdir -p "$workspace/agents" "$run_context"
+resolved_wmh_log="$(
+  cd "$workspace"
+  bash -c ". '$RUN_CONTEXT_SRC'; resolve_run_context_file '$workspace' '.context/benchmarks/example-run' 'wmh-serve-log.txt'"
+)"
+(
+  cd "$workspace/agents"
+  printf 'wmh build output\n' >>"$resolved_wmh_log"
+)
+expect_eq "$resolved_wmh_log" "$run_context/wmh-serve-log.txt" "run-context files remain absolute after service subshell cd"
+expect_eq "$(cat "$resolved_wmh_log")" "wmh build output" "service subshell writes to the workspace run context"
+
+resolved_absolute_wmh_log="$(
+  bash -c ". '$RUN_CONTEXT_SRC'; resolve_run_context_file '$workspace' '$run_context' 'absolute-wmh-serve-log.txt'"
+)"
+expect_eq "$resolved_absolute_wmh_log" "$run_context/absolute-wmh-serve-log.txt" "absolute run-context paths remain unchanged"
 
 echo "All workspace env tests passed."

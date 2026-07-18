@@ -963,7 +963,8 @@ start_world_model_harness() {
     should_serve_world_model || return 0
 
     mkdir -p "$RUN_CONTEXT_DIR"
-    local wmh_log="$RUN_CONTEXT_DIR/wmh-serve-log.txt"
+    local wmh_log
+    wmh_log="$(resolve_run_context_file "$PWD" "$RUN_CONTEXT_DIR" "wmh-serve-log.txt")"
 
     # Shared, persistent build root so the model is built ONCE and reused across
     # every run — NOT the per-run context dir (that would rebuild each time).
