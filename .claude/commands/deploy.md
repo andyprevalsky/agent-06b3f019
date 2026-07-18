@@ -71,19 +71,18 @@ All Phase 1 commands run from the repo root. Compute changed paths from the comp
 
 ```bash
 BASE_REF="${DEPLOY_BASE_REF:-origin/main}"
-SYNC_MERGE=$(
+SYNC_MERGES=$(
   for merge_commit in $(git rev-list --first-parent --merges "$BASE_REF"..HEAD); do
     second_parent=$(git rev-parse "$merge_commit^2")
     if git merge-base --is-ancestor "$second_parent" "$BASE_REF"; then
       echo "$merge_commit"
-      break
     fi
   done
 )
 SYNC_CHANGED=$(
-  if [ -n "$SYNC_MERGE" ]; then
-    git diff --name-only "$SYNC_MERGE^1" "$SYNC_MERGE"
-  fi
+  for merge_commit in $SYNC_MERGES; do
+    git diff --name-only "$merge_commit^1" "$merge_commit"
+  done
 )
 CHANGED=$({
   printf '%s\n' "$SYNC_CHANGED"
