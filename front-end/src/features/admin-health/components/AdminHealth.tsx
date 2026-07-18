@@ -48,6 +48,7 @@ import { MetricChange } from './MetricChange';
 import { MetricSectionHeader } from './MetricHierarchy';
 import PrimaryMetricSection from './PrimaryMetricSection';
 import VelocitySection from './VelocitySection';
+import WaitlistPeopleSection from './WaitlistPeopleSection';
 import WaitlistSignupsChart from './WaitlistSignupsChart';
 import { relativeChange, seriesMetricChange } from './metricComparison';
 import type {
@@ -635,6 +636,7 @@ export default function AdminHealth() {
                 description="Internal execution signals that support product and operational health."
               />
               <WaitlistSignupsChart data={data} />
+              <WaitlistPeopleSection />
               <VelocitySection data={data} />
             </section>
           </div>

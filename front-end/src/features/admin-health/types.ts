@@ -51,6 +51,31 @@ export interface AdminHealthFunnelStep {
   detail?: string;
 }
 
+export interface AdminWaitlistPerson {
+  id: string;
+  name: string;
+  phone: string;
+  variant: string | null;
+  joinedAt: string;
+  invitedAt: string | null;
+  hasAccount: boolean;
+  isGated: boolean;
+}
+
+export interface AdminWaitlistPeopleResponse {
+  people: AdminWaitlistPerson[];
+  total: number;
+}
+
+export interface AdminWaitlistInviteResponse {
+  id: string;
+  invitedAt: string;
+  smsSent: boolean;
+  flagged: boolean;
+  alreadyOffWaitlist: boolean;
+  hasAccount: boolean;
+}
+
 export interface AdminHealthData {
   timeSlice: AdminHealthTimeSlice;
   generatedAt: string;

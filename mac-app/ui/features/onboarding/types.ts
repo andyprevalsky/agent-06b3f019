@@ -2,6 +2,13 @@ import type { BrowserInfo, BrowserType } from '../../../shared/types/ipc';
 
 export type { BrowserInfo, BrowserType };
 
+export interface WaitlistStatus {
+  /** True while the user still needs to get in (no invite code + no active subscription). */
+  needsInviteCode: boolean;
+  /** True when an admin invited them off the waitlist → show the subscribe view. */
+  offWaitlist: boolean;
+}
+
 export type OnboardingStep =
   'auth' | 'customization' | 'data' | 'shortcut' | 'welcome' | 'waitlist';
 

@@ -32,6 +32,7 @@ export const UseCodeResponse = z.object({
 
 export const CheckResponse = z.object({
   needsInviteCode: z.boolean(),
+  offWaitlist: z.boolean(),
 });
 
 export const AnonymousResponse = z.object({
