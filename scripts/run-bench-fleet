@@ -399,7 +399,10 @@ print_code_provenance() {
     echo "  ref    : $BENCH_REF  ($head_sha $head_sub)"
     echo "  pushed : $pushed"
     untracked_count="$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | wc -l | tr -d ' ')"
-    if git -C "$ROOT_DIR" diff --quiet 2>/dev/null && [ "$untracked_count" = "0" ]; then
+    if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" = "1" ]; then
+        echo "  diff   : local changes intentionally excluded (running committed $head_sha exactly)"
+        CODE_SUMMARY="$branch@$head_sha (pinned; local patch excluded)"
+    elif git -C "$ROOT_DIR" diff --quiet 2>/dev/null && [ "$untracked_count" = "0" ]; then
         echo "  diff   : clean working tree (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (clean)"
     else
@@ -1966,8 +1969,9 @@ BOX_HEALTH_PORT="3003"     # cloudbench-run.sh HEALTH_PORT = CONDUCTOR_PORT(3001
 BOX_BACKEND_PORT="3001"
 BOX_WMH_PORT="3007"        # run.sh WMH_PORT = base+6
 FLEET_PATCH_FILE=""
-if ! git -C "$ROOT_DIR" diff --quiet --binary 2>/dev/null \
-    || [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | head -1)" ]; then
+if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
+   && { ! git -C "$ROOT_DIR" diff --quiet --binary 2>/dev/null \
+        || [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | head -1)" ]; }; then
     FLEET_PATCH_FILE="$(mktemp)"
     bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$FLEET_PATCH_FILE"
 fi

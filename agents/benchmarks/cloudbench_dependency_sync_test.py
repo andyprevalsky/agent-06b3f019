@@ -641,6 +641,15 @@ def test_cloud_patch_can_be_disabled_for_a_pinned_committed_ref() -> None:
     assert 'CLOUDBENCH_SKIP_LOCAL_PATCH:-0' in patch_block
     assert '!= "1"' in patch_block
     assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in patch_block
+    fleet = FLEET_SCRIPT.read_text()
+    fleet_patch_block = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split(
+        "_machine_priv_ip()", 1
+    )[0]
+    assert 'CLOUDBENCH_SKIP_LOCAL_PATCH:-0' in fleet_patch_block
+    assert '!= "1"' in fleet_patch_block
+    provenance = _extract_fleet_function(fleet, "print_code_provenance() {")
+    assert 'CLOUDBENCH_SKIP_LOCAL_PATCH:-0' in provenance
+    assert "local changes intentionally excluded" in provenance
 
 
 def test_fetch_ref_never_falls_back_to_stale_fetch_head(tmp_path: Path) -> None:
