@@ -1982,8 +1982,9 @@ cleanup_staged_local_files() {
 }
 
 LOCAL_PATCH_FILE=""
-if ! git -C "$ROOT_DIR" diff --quiet --binary \
-    || [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | head -1)" ]; then
+if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
+   && { ! git -C "$ROOT_DIR" diff --quiet --binary \
+        || [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | head -1)" ]; }; then
     LOCAL_PATCH_FILE="$(mktemp)"
     STAGED_LOCAL_FILES+=("$LOCAL_PATCH_FILE")
     bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$LOCAL_PATCH_FILE"

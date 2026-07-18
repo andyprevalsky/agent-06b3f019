@@ -631,6 +631,18 @@ def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
     assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in fleet
 
 
+def test_cloud_patch_can_be_disabled_for_a_pinned_committed_ref() -> None:
+    """A controller validating a committed ref must be able to ignore unrelated
+    concurrent workspace edits without stashing, reverting, or shipping them."""
+    cloud = CLOUD_SCRIPT.read_text()
+    patch_block = cloud.split('LOCAL_PATCH_FILE=""', 1)[1].split(
+        "# Proxy the box BACKEND", 1
+    )[0]
+    assert 'CLOUDBENCH_SKIP_LOCAL_PATCH:-0' in patch_block
+    assert '!= "1"' in patch_block
+    assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in patch_block
+
+
 def test_fetch_ref_never_falls_back_to_stale_fetch_head(tmp_path: Path) -> None:
     origin = tmp_path / "origin.git"
     author = tmp_path / "author"
