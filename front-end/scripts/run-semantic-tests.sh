@@ -107,8 +107,11 @@ echo "  Session generated for test user $TEST_USER_ID"
 # code (181818) once. Idempotent — an already-redeemed account is a no-op.
 SEMANTIC_ACCESS_TOKEN=$(printf '%s' "$SEMANTIC_SESSION" | node -e \
   'let input=""; process.stdin.on("data", chunk => input += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(input).access_token || ""));')
+# Prod mode sets BACKEND_URL; local mode only sets BACKEND_PORT. Default-expand
+# so `set -u` doesn't trip when BACKEND_URL is unset (local).
+INVITE_BACKEND_URL="${BACKEND_URL:-http://localhost:${BACKEND_PORT:-3001}}"
 if [[ -n "$SEMANTIC_ACCESS_TOKEN" ]]; then
-  INVITE_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BACKEND_URL/api/invite-codes/use" \
+  INVITE_STATUS=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$INVITE_BACKEND_URL/api/invite-codes/use" \
     -H "Authorization: Bearer $SEMANTIC_ACCESS_TOKEN" \
     -H 'Content-Type: application/json' \
     -d '{"inviteCode":181818}' || echo "000")
