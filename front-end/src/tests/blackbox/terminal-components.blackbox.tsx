@@ -2195,22 +2195,15 @@ describe('AsciiLoader CTA overlay (blackbox)', () => {
     // Clickable despite the loader overlay's pointer-events-none wrapper.
     expect(button.className).toContain('pointer-events-auto');
 
-    // Hover reveal via pure-CSS vertical roll: an arrow shows at rest and rolls
-    // up out of the capsule (group-hover), while the label rolls up into place.
-    // overflow-hidden clips the roll to the pill.
-    expect(button.className).toContain('group');
-    expect(button.className).toContain('overflow-hidden');
-    const icon = within(button).getByTestId('opening-join-icon') as HTMLElement;
-    expect(icon).toHaveAttribute('aria-hidden');
-    expect(icon.textContent).toBe('→');
-    expect(icon.className).toContain('group-hover:-translate-y-[150%]');
+    // The primary action stays readable without hover/focus, including on
+    // touch devices: no arrow-only rest state or hidden label animation.
+    expect(within(button).queryByTestId('opening-join-icon')).toBeNull();
     const label = within(button).getByTestId('opening-join-label') as HTMLElement;
     expect(label).toHaveTextContent('Join Waitlist');
-    // Label starts rolled-down + hidden, rolls to center + visible on hover.
-    expect(label.className).toContain('translate-y-[150%]');
-    expect(label.className).toContain('opacity-0');
-    expect(label.className).toContain('group-hover:translate-y-0');
-    expect(label.className).toContain('group-hover:opacity-100');
+    expect(label.className).not.toContain('translate-y-[150%]');
+    expect(label.className).not.toContain('opacity-0');
+    expect(label.className).not.toContain('group-hover:translate-y-0');
+    expect(label.className).not.toContain('group-hover:opacity-100');
     // Plain white glyphs (no chrome gradient) so they don't fight the animation.
     expect(label.style.color).toMatch(/#ffffff|rgb\(255,\s*255,\s*255\)|white/);
 
