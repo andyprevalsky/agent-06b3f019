@@ -154,8 +154,6 @@ MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
 AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 AGENT_PAYMENT_PRODUCTION_TASK_NAME = "agent-payment-production-abandonment"
-# Cookie-bundle bootstrap for these tasks is now declared as the `amazon_auth`
-# live fixture in tasks.json (see live_fixtures.py), not a task-name branch.
 BENCHMARK_FORCE_SHOW_PASSWORDS_ENV = "BENCHMARK_FORCE_SHOW_PASSWORDS"
 BAD_AMAZON_PASSWORD_USERNAME = "andyprevalsky@yahoo.com"
 BAD_AMAZON_COOKIE_SOURCE = "benchmark_bad_auth"
@@ -3192,7 +3190,7 @@ def evaluate_force_show_passwords_auth_task(
         return False, f"expected agent to fail after empty auth assistance approval, got {status}"
     if "max" not in str(status_message).lower() and "iteration" not in str(status_message).lower():
         return False, f"expected max-turn/max-iteration failure after resume, got: {status_message or '(empty)'}"
-    rows_ok, rows_reason = _validate_bad_amazon_auth_fixture(USER_ID)
+    rows_ok, rows_reason = _validate_bad_amazon_auth_scenario(USER_ID)
     if not rows_ok:
         return False, rows_reason
     return True, None
@@ -3654,10 +3652,11 @@ def _sync_compute_tokens() -> bool:
 
 
 def _sync_browser_credentials() -> bool:
-    """Refresh live browser auth state (cookies + browser context/storage +
-    passwords/passkeys) from prod into the isolated benchmark DB. Same pattern as
+    """Refresh the complete live browser auth graph (context/provider profiles,
+    cookies/storage, CookieBundles, Steel sessions, passwords, and passkeys) from
+    prod into the isolated benchmark DB. Same pattern as
     _sync_compute_tokens: a one-time setup-db sync goes stale as cookies expire,
-    so the `base` live fixture re-pulls them right before the agent starts.
+    so the live fixture re-pulls them right before the agent starts.
     Best-effort but loud. Reads the prod source from back-end/.env."""
     database_url = _local_victoria_database_url()
     if not database_url:
@@ -3681,7 +3680,7 @@ def _sync_browser_credentials() -> bool:
     if result.returncode != 0:
         print(f"    ⚠ Credential sync failed: {(result.stderr or result.stdout).strip()[:200]}")
         return False
-    print("    🍪 Refreshed browser cookies + passwords from prod")
+    print("    🍪 Refreshed complete browser auth state from prod")
     return True
 
 
@@ -3730,81 +3729,44 @@ def _is_simulate_mode() -> bool:
     return os.environ.get("BENCHMARK_WORLD_MODEL_MODE") == "simulate"
 
 
-def _has_fresh_seeded_browser_credentials() -> bool:
-    """A restored isolated DB dump already carries browser auth from prod.
+def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
+    """Apply the one complete, current production-credential overlay.
 
-    Fleet width must not turn fixture freshness into 37 simultaneous full
-    23k-cookie exports. The schema-hash sidecar proves this is the same guarded
-    dump that run.sh accepted, and the bounded age keeps live auth reasonably
-    current while consecutive benchmark batches reuse the local snapshot.
+    Simulation skips the overlay as a unit. Applying only compute tokens while
+    omitting browser auth made the old ``base`` fixture neither reproducible nor
+    truthful, and allowed later site-specific fixtures to fail before an agent
+    was created.
     """
-    dump_value = os.environ.get("BENCHMARK_SEED_DUMP", "").strip()
-    if not dump_value:
-        return False
-    try:
-        max_age = int(os.environ.get("BENCHMARK_BROWSER_SEED_MAX_AGE_SECONDS", "86400"))
-    except ValueError:
-        return False
-    if max_age <= 0:
-        return False
-    dump = Path(dump_value)
-    schema_hash = Path(f"{dump_value}.schemahash")
-    try:
-        if dump.stat().st_size <= 0 or schema_hash.stat().st_size <= 0:
-            return False
-        age = time.time() - min(dump.stat().st_mtime, schema_hash.stat().st_mtime)
-    except OSError:
-        return False
-    return 0 <= age <= max_age
-
-
-def _apply_base_live_fixture(ctx: LiveFixtureContext) -> dict:
-    """The default live fixture every live task inherits: current compute tokens
-    + browser cookies/passwords, pulled fresh from prod into the isolated DB.
-
-    In simulate mode the World Model Harness intercepts every environment-boundary
-    tool (browser, purchases, messaging), so real browser cookies/passwords are
-    never exercised. Re-syncing all 21k+ cookie/password rows per task is then pure
-    overhead — and on a throttled cloud uplink it blows the 180s sync budget,
-    stalling agent creation. Compute tokens are still refreshed because WMH
-    inference (RoseWMHProvider) and the agent's own LLM waterfall lease them."""
-    if not _sync_compute_tokens():
-        raise RuntimeError("Base live fixture could not refresh compute tokens")
     if _is_simulate_mode():
-        print("    🌍 simulate mode — skipping browser cookie/password sync (WMH mocks env tools)")
-        return {"fixture": "base", "browser_credentials": False}
-    if _has_fresh_seeded_browser_credentials():
-        print("    🍪 Reusing fresh browser credentials from the isolated seed dump")
-        return {"fixture": "base", "browser_credentials": True}
-    if not _sync_browser_credentials():
-        raise RuntimeError("Base live fixture could not refresh browser credentials/auth state")
-    return {"fixture": "base", "browser_credentials": True}
-
-
-def _apply_compute_tokens(ctx: LiveFixtureContext) -> dict:
-    """Refresh compute tokens without importing any browser authentication state."""
+        print("    🌍 simulate mode — skipping the live credential overlay")
+        return {"fixture": "live", "skipped": True, "reason": "simulate"}
     if not _sync_compute_tokens():
-        raise RuntimeError("Compute-token live fixture could not refresh compute tokens")
-    return {"fixture": "compute_tokens"}
+        raise RuntimeError("Live fixture could not refresh compute tokens")
+    if not _sync_browser_credentials():
+        raise RuntimeError("Live fixture could not refresh complete browser auth state")
+    return {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
 
 
-def _apply_amazon_auth(ctx: LiveFixtureContext) -> dict:
-    """Build active CookieBundle rows for the amazon auth realm from synced
-    prod cookies so the browser agent starts logged in."""
-    if _skip_cookie_bundle_bootstrap():
-        print(f"    🍪 Skipping local CookieBundle bootstrap for {ctx.auth_realm}")
-        return {"fixture": "amazon_auth", "bundle_count": 0, "skipped": True}
-    bundle_count = _ensure_local_cookie_bundle_for_realm(ctx.user_id, ctx.auth_realm)
-    if bundle_count <= 0:
-        raise RuntimeError(
-            f"No usable local cookies found for {ctx.auth_realm}; cannot bootstrap an "
-            f"active CookieBundle. Refresh prod cookies (the `base` live fixture) first."
-        )
-    print(f"    🍪 Ensured {bundle_count} active local CookieBundle row(s) for {ctx.auth_realm}")
-    return {"fixture": "amazon_auth", "bundle_count": bundle_count}
+def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
+    """Refresh agent-infrastructure compute credentials once before local tasks.
+
+    This is required even when no task opts into browser credential state. It is
+    deliberately separate from ``environment.live_fixtures`` so simulated and
+    synthetic runs can still create and drive agents to completion.
+    """
+    if not _is_local_base_url(base_url):
+        return
+    if not _sync_compute_tokens():
+        raise RuntimeError("Benchmark run could not refresh local compute tokens")
 
 
-def _apply_amazon_passkey(ctx: LiveFixtureContext) -> dict:
+def _apply_amazon_passkey_scenario(ctx: LiveFixtureContext) -> dict:
+    """Apply the task-specific destructive isolation for the passkey probe.
+
+    This is scenario setup, not a reusable live fixture: the generic ``live``
+    overlay first refreshes every credential class, then this one benchmark
+    removes competing auth paths so it can prove passkey injection.
+    """
     _sync_passkeys()
 
     user = _sql_literal(ctx.user_id)
@@ -3832,7 +3794,7 @@ def _apply_amazon_passkey(ctx: LiveFixtureContext) -> dict:
     if passkey_count <= 0:
         raise RuntimeError(f"No enabled passkey found for {ctx.auth_realm}")
 
-    disabled_reason = _sql_literal("disabled by passkey-only benchmark fixture")
+    disabled_reason = _sql_literal("disabled by passkey-only benchmark scenario")
     cleanup_sql = (
         'WITH steel AS (UPDATE "SteelSessionAuth" SET "disabledAt" = NOW(), '
         f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
@@ -3858,7 +3820,7 @@ def _apply_amazon_passkey(ctx: LiveFixtureContext) -> dict:
     cleared = int(_run_local_victoria_sql(cleanup_sql).splitlines()[-1].strip() or "0")
     print(f"    🔐 Prepared {passkey_count} Amazon passkey(s); cleared {cleared} saved-state row(s)")
     return {
-        "fixture": "amazon_passkey",
+        "scenario": "amazon_passkey",
         "passkey_count": passkey_count,
         "cleared": cleared,
         "user_id": ctx.user_id,
@@ -3867,13 +3829,13 @@ def _apply_amazon_passkey(ctx: LiveFixtureContext) -> dict:
     }
 
 
-def _restore_amazon_passkey_fixture(manifest: dict) -> None:
+def _restore_amazon_passkey_scenario(manifest: dict) -> None:
     """Restore shared browser auth after the destructive passkey-only run."""
     snapshot = manifest.get("restore_snapshot")
     if not isinstance(snapshot, dict):
-        raise RuntimeError("Amazon passkey fixture did not capture a restore snapshot")
+        raise RuntimeError("Amazon passkey scenario did not capture a restore snapshot")
     if not _sync_browser_credentials():
-        raise RuntimeError("Amazon passkey fixture could not restore live browser credentials")
+        raise RuntimeError("Amazon passkey scenario could not restore live browser credentials")
 
     user = _sql_literal(str(manifest["user_id"]))
 
@@ -3912,16 +3874,11 @@ def _restore_amazon_passkey_fixture(manifest: dict) -> None:
             f"{profiles_json}::json)"
         )
     _run_local_victoria_sql("; ".join(statements) + ";")
-    print("    🧹 Restored shared browser auth after Amazon passkey fixture")
+    print("    🧹 Restored shared browser auth after Amazon passkey scenario")
 
 
-# Runtime bindings for the metadata registry in live_fixtures.py. Kept in sync by
-# the assertion below so a fixture can never be declared without an applier.
 LIVE_FIXTURE_APPLIERS = {
-    "base": _apply_base_live_fixture,
-    "compute_tokens": _apply_compute_tokens,
-    "amazon_auth": _apply_amazon_auth,
-    "amazon_passkey": _apply_amazon_passkey,
+    "live": _apply_live_fixture,
 }
 assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
     f"live-fixture appliers {sorted(LIVE_FIXTURE_APPLIERS)} must match registry {sorted(LIVE_FIXTURE_NAMES)}"
@@ -3931,10 +3888,8 @@ assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
 def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
     """Apply every live fixture the task's environment resolves to, in order.
 
-    Replaces the old per-task-name credential/cookie branches: compute-token sync
-    and amazon cookie bootstrap are now declared as live_fixtures in tasks.json
-    (the `base` fixture is inherited by every live task). Live fixtures only apply
-    against the local benchmark stack.
+    Live fixtures only apply against the local benchmark stack. Scenario-specific
+    mutations remain explicit task setup and are not added to the fixture registry.
     """
     fixtures = resolve_live_fixtures(task.environment)
     if not fixtures:
@@ -3950,6 +3905,8 @@ def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
         if applier is None:
             raise RuntimeError(f"{task.name}: unknown live_fixture '{name}'")
         manifests.append(applier(ctx))
+    if task.name == AMAZON_PASSKEY_TASK_NAME and not _is_simulate_mode():
+        manifests.append(_apply_amazon_passkey_scenario(ctx))
     return manifests
 
 
@@ -4192,17 +4149,12 @@ async def evaluate_plaid_transaction_task(
     return True, None
 
 
-def _skip_cookie_bundle_bootstrap() -> bool:
-    return os.environ.get("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP", "").lower() in {"1", "true", "yes"}
-
-
 def _force_show_passwords_mode() -> bool:
     return os.environ.get(BENCHMARK_FORCE_SHOW_PASSWORDS_ENV, "").lower() in {"1", "true", "yes"}
 
 
 def _apply_anon_benchmark_mode(*, force_show_passwords: bool = False) -> None:
     """Force auth benchmarks to exercise freshly minted credentials."""
-    os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] = "true"
     os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] = "true"
     os.environ["BENCHMARK_ANON_STEEL_PROFILE"] = "true"
     if force_show_passwords:
@@ -4210,42 +4162,6 @@ def _apply_anon_benchmark_mode(*, force_show_passwords: bool = False) -> None:
         os.environ.pop("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", None)
     else:
         os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = "true"
-
-
-def _ensure_local_cookie_bundle_for_realm(user_id: str, auth_realm: str) -> int:
-    """Upsert active CookieBundle rows for an auth realm from existing local cookies."""
-    if _skip_cookie_bundle_bootstrap():
-        return 0
-    realm = _sql_literal(auth_realm.lower())
-    user = _sql_literal(user_id)
-    sql = (
-        "WITH matching_cookies AS ("
-        'SELECT "browserSource", "browserProfile", MAX(COALESCE("creationUtc", 0)) AS "freshestCookieUtc" '
-        'FROM "Cookie" '
-        f'WHERE "userId" = {user} '
-        "AND COALESCE(\"name\", '') <> '' "
-        "AND COALESCE(\"value\", '') <> '' "
-        f"AND (LOWER(TRIM(LEADING '.' FROM \"domain\")) = {realm} "
-        f"OR LOWER(TRIM(LEADING '.' FROM \"domain\")) LIKE '%.' || {realm}) "
-        'AND ("expiresUtc" IS NULL OR "expiresUtc" <= 0 '
-        'OR (("expiresUtc" / 1000000) - 11644473600) > EXTRACT(EPOCH FROM NOW())) '
-        'GROUP BY "browserSource", "browserProfile"'
-        "), upserted AS ("
-        'INSERT INTO "CookieBundle" '
-        '(id, "userId", "authRealm", "browserSource", "browserProfile", '
-        '"createdAt", "updatedAt", "disabledAt", "disabledReason") '
-        f'SELECT gen_random_uuid(), {user}, {realm}, "browserSource", "browserProfile", '
-        "NOW(), NOW(), NULL, NULL FROM matching_cookies "
-        'ON CONFLICT ("userId", "authRealm", "browserSource", "browserProfile") DO UPDATE SET '
-        '"updatedAt" = NOW(), "disabledAt" = NULL, "disabledReason" = NULL '
-        "RETURNING id"
-        ") SELECT COUNT(*) FROM upserted;"
-    )
-    out = _run_local_victoria_sql(sql)
-    try:
-        return int(out.splitlines()[-1].strip() or "0")
-    except Exception:
-        return 0
 
 
 def _delete_local_minted_accounts_for_user(user_id: str, *, reset_agent_identity: bool = False) -> int:
@@ -4368,7 +4284,7 @@ EwIDAQAB
     return base64.b64encode(json.dumps(envelope).encode("utf-8")).decode("utf-8")
 
 
-def _seed_local_bad_amazon_auth_fixture(user_id: str, auth_realm: str) -> dict:
+def _seed_local_bad_amazon_auth_scenario(user_id: str, auth_realm: str) -> dict:
     """Seed one bad CookieBundle and two bad Amazon password rows for auth e2e coverage."""
     if auth_realm != "amazon.com":
         raise RuntimeError("--force-show-passwords currently only supports the amazon.com auth benchmark.")
@@ -4468,7 +4384,7 @@ def _seed_local_bad_amazon_auth_fixture(user_id: str, auth_realm: str) -> dict:
     return fixture
 
 
-def _validate_bad_amazon_auth_fixture(user_id: str) -> Tuple[bool, Optional[str]]:
+def _validate_bad_amazon_auth_scenario(user_id: str) -> Tuple[bool, Optional[str]]:
     cookie_bundle_id = os.environ.get("BENCHMARK_BAD_AUTH_COOKIE_BUNDLE_ID", "")
     password_ids = [value for value in os.environ.get("BENCHMARK_BAD_AUTH_PASSWORD_IDS", "").split(",") if value]
     if not cookie_bundle_id or not password_ids:
@@ -5868,7 +5784,7 @@ async def run_single_task(
     if task.name == AMAZON_AUTH_ASSISTANCE_TASK_NAME and _force_show_passwords_mode() and _is_local_base_url(base_url):
         auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
         disabled_count = _disable_local_steel_and_cookie_auth_for_realm(USER_ID, auth_realm)
-        fixture = _seed_local_bad_amazon_auth_fixture(USER_ID, auth_realm)
+        fixture = _seed_local_bad_amazon_auth_scenario(USER_ID, auth_realm)
         print(
             f"    🔐 Force-show-passwords fixture: disabled {disabled_count} Steel/Cookie auth row(s), "
             f"seeded CookieBundle {fixture['cookie_bundle_id'][:8]} and "
@@ -6013,8 +5929,8 @@ async def run_single_task(
             seeded_email = _prepare_local_agent_sms_sender(USER_ID)
             if seeded_email:
                 print(f"    🧪 Seeded AgentPhone sender for live bench: {seeded_email}")
-        # Apply live fixtures inside the cleanup boundary. The passkey-only
-        # fixture intentionally removes shared browser state and must restore it
+        # Apply the live overlay inside the cleanup boundary. The passkey-only
+        # scenario intentionally removes shared browser state and must restore it
         # even when agent creation or evaluation fails.
         live_fixture_manifests = _apply_live_fixtures(task, base_url)
 
@@ -6595,12 +6511,12 @@ async def run_single_task(
             (
                 manifest
                 for manifest in live_fixture_manifests
-                if manifest.get("fixture") == "amazon_passkey"
+                if manifest.get("scenario") == "amazon_passkey"
             ),
             None,
         )
         if passkey_manifest is not None:
-            _restore_amazon_passkey_fixture(passkey_manifest)
+            _restore_amazon_passkey_scenario(passkey_manifest)
         if previous_benchmark_user_id is None:
             os.environ.pop("BENCHMARK_RUN_USER_ID", None)
         else:
@@ -7370,6 +7286,7 @@ async def main_async(args):
                 print("  ⚠ Temporal stale-workflow cleanup timed out after 30s; continuing")
             await _fail_stale_active_agents()
         await _warmup_edge_functions(base_url)
+        _refresh_local_compute_tokens_for_run(base_url)
 
     # Pre-flight: check provider-typed compute credentials for code-agent tests.
     skipped_claude_tasks: List[BenchmarkTask] = []
@@ -7952,8 +7869,8 @@ def main():
     parser.add_argument(
         "--anon",
         action="store_true",
-        help="For minted-auth benchmarks, start without saved auth: skip cookie-bundle bootstrap "
-        "and disable existing SteelSessionAuth/CookieBundle rows for the target realm.",
+        help="For minted-auth benchmarks, start without saved auth by disabling existing "
+        "SteelSessionAuth/CookieBundle rows for the target realm.",
     )
     parser.add_argument(
         "--force-show-passwords",

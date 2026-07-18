@@ -634,7 +634,7 @@ elif [ "${BENCHMARK_WORLD_MODEL_MODE:-}" = "simulate" ]; then
     # tool, so real browser cookies/passwords are never exercised. Re-syncing all
     # 21k+ cookie rows on every stack start is pure overhead (and stalls on a
     # throttled cloud uplink). Compute tokens stay fresh via run_benchmark's
-    # per-task base fixture (_sync_compute_tokens), so skip the cred sync here.
+    # run-level infrastructure preflight, so skip browser auth sync here.
     echo "🌍 simulate mode — skipping startup browser credential sync (WMH mocks env tools)"
 else
     echo "🌱 Local database already seeded; syncing browser credentials..."

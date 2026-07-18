@@ -1330,7 +1330,7 @@ def test_doordash_catalog_requires_single_clean_completed_browser_run():
 
 
 def test_uber_catalog_is_normal_single_browser_task_not_stateful_minted_flow():
-    """Uber uses base live auth and the same one-agent runtime contract as other commerce tasks."""
+    """Uber uses live auth and the same one-agent runtime contract as other commerce tasks."""
     import benchmarks.run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
 
@@ -1346,7 +1346,7 @@ def test_uber_catalog_is_normal_single_browser_task_not_stateful_minted_flow():
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
     assert task.bench == "rose-bench"
-    assert task.environment["live_fixtures"] == ["base"]
+    assert task.environment["live_fixtures"] == ["live"]
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
         "single_turn_llm_judge",
@@ -1407,7 +1407,7 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
     assert task.bench == "rose-bench"
-    assert task.environment["live_fixtures"] == ["base", "amazon_auth"]
+    assert task.environment["live_fixtures"] == ["live"]
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
         "single_turn_llm_judge",
@@ -1679,7 +1679,7 @@ def test_amazon_return_catalog_requires_single_clean_completed_return():
         assert requirement in semantic_criteria
 
 
-def test_base_live_fixture_fails_when_live_auth_refresh_fails():
+def test_live_fixture_fails_when_live_auth_refresh_fails():
     """A live benchmark never starts with missing/stale browser auth."""
     import os
 
@@ -1693,7 +1693,7 @@ def test_base_live_fixture_fails_when_live_auth_refresh_fails():
         os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
         bench._sync_compute_tokens = lambda: True
         bench._sync_browser_credentials = lambda: False
-        bench._apply_base_live_fixture(
+        bench._apply_live_fixture(
             bench.LiveFixtureContext(
                 base_url="http://localhost:54121",
                 user_id="user-123",
@@ -1701,7 +1701,7 @@ def test_base_live_fixture_fails_when_live_auth_refresh_fails():
             )
         )
     except RuntimeError as exc:
-        raised = "browser credential" in str(exc).lower()
+        raised = "browser auth" in str(exc).lower()
     finally:
         bench._sync_compute_tokens = original_compute
         bench._sync_browser_credentials = original_browser
@@ -1710,7 +1710,7 @@ def test_base_live_fixture_fails_when_live_auth_refresh_fails():
         else:
             os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
 
-    assert raised, "base live fixture must fail closed when credential refresh fails"
+    assert raised, "live fixture must fail closed when credential refresh fails"
 
 
 def test_expected_passkey_credential_ref_is_required_even_when_approval_is_terminal():
@@ -2344,56 +2344,8 @@ def test_minted_x_signup_evidence_rejects_terminal_phone_blocker():
     assert bench._x_signup_has_account_creation_evidence(success) is True
 
 
-def test_browser_agent_cookie_bundle_bootstrap_upserts_active_bundle_from_cookies():
-    """Amazon auth-assistance bench activates CookieBundle rows from existing local cookies."""
-    import benchmarks.run_benchmark as bench
-
-    queries = []
-    original_run_sql = bench._run_local_victoria_sql
-
-    try:
-        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "1"
-
-        assert bench._ensure_local_cookie_bundle_for_realm("user-123", "amazon.com") == 1
-    finally:
-        bench._run_local_victoria_sql = original_run_sql
-
-    assert len(queries) == 1
-    assert 'FROM "Cookie"' in queries[0]
-    assert 'INSERT INTO "CookieBundle"' in queries[0]
-    assert 'ON CONFLICT ("userId", "authRealm", "browserSource", "browserProfile") DO UPDATE' in queries[0]
-    assert '"disabledAt" = NULL' in queries[0]
-    assert '"disabledReason" = NULL' in queries[0]
-    assert "amazon.com" in queries[0]
-
-
-def test_browser_agent_cookie_bundle_bootstrap_can_be_skipped_with_env():
-    """Local auth-assistance reruns can intentionally exercise password auth without cookies."""
-    import os
-
-    import benchmarks.run_benchmark as bench
-
-    queries = []
-    original_run_sql = bench._run_local_victoria_sql
-    original_env = os.environ.get("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP")
-
-    try:
-        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "1"
-        os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] = "true"
-
-        assert bench._ensure_local_cookie_bundle_for_realm("user-123", "amazon.com") == 0
-    finally:
-        bench._run_local_victoria_sql = original_run_sql
-        if original_env is None:
-            os.environ.pop("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP", None)
-        else:
-            os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] = original_env
-
-    assert queries == []
-
-
-def test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile():
-    """The passkey fixture syncs through its boundary and snapshots destructive state."""
+def test_amazon_passkey_scenario_isolates_passkey_and_fresh_kernel_profile():
+    """Passkey scenario setup syncs its key and snapshots destructive state."""
     import benchmarks.run_benchmark as bench
 
     queries = []
@@ -2414,7 +2366,7 @@ def test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile():
             AssertionError("fixture bypassed _sync_passkeys")
         )
         bench._run_local_victoria_sql = lambda sql: queries.append(sql) or next(sql_results)
-        manifest = bench._apply_amazon_passkey(
+        manifest = bench._apply_amazon_passkey_scenario(
             bench.LiveFixtureContext(
                 base_url="http://localhost:54121",
                 user_id="user-123",
@@ -2427,7 +2379,7 @@ def test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile():
         bench.subprocess.run = original_subprocess_run
 
     assert manifest == {
-        "fixture": "amazon_passkey",
+        "scenario": "amazon_passkey",
         "passkey_count": 1,
         "cleared": 10,
         "user_id": "user-123",
@@ -2465,7 +2417,7 @@ def test_amazon_passkey_catalog_requires_live_passkey_kernel_evidence():
 
     task = get_task_by_name("browser-agent-amazon-passkey")
 
-    assert task.environment["live_fixtures"] == ["compute_tokens", "amazon_passkey"]
+    assert task.environment["live_fixtures"] == ["live"]
     assert task.expected_browser_provider == "kernel"
     assert task.expected_credential_ref_kind == "passkey"
     assert task.expected_browser_session_metadata_values == {
@@ -2579,27 +2531,20 @@ def test_anon_benchmark_mode_disables_saved_auth_material():
 
     import benchmarks.run_benchmark as bench
 
-    previous_skip = os.environ.get("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP")
     previous_clear = os.environ.get("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH")
     previous_steel_profile = os.environ.get("BENCHMARK_ANON_STEEL_PROFILE")
     previous_disable_saved_auth = os.environ.get("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH")
     try:
-        os.environ.pop("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP", None)
         os.environ.pop("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH", None)
         os.environ.pop("BENCHMARK_ANON_STEEL_PROFILE", None)
         os.environ.pop("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", None)
 
         bench._apply_anon_benchmark_mode()
 
-        assert os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] == "true"
         assert os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] == "true"
         assert os.environ["BENCHMARK_ANON_STEEL_PROFILE"] == "true"
         assert os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] == "true"
     finally:
-        if previous_skip is None:
-            os.environ.pop("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP", None)
-        else:
-            os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] = previous_skip
         if previous_clear is None:
             os.environ.pop("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH", None)
         else:
@@ -5887,7 +5832,7 @@ def test_daily_ecommerce_v1_catalog_has_ten_distinct_transaction_flows():
     for name in expected_names:
         loaded = get_task_by_name(name)
         assert DEFAULT_BASE_IMAGE in loaded.environment["base_images"]
-        assert loaded.environment["live_fixtures"][0] == "base"
+        assert loaded.environment["live_fixtures"] == ["live"]
 
 
 def test_browser_search_single_result_tasks_use_browser_only():
@@ -6039,11 +5984,10 @@ def test_live_fixture_registry_appliers_stay_in_sync():
     from benchmarks.run_benchmark import LIVE_FIXTURE_APPLIERS
 
     assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES)
-    assert "base" in LIVE_FIXTURE_NAMES  # the default every live task inherits
-    assert {"compute_tokens", "amazon_passkey"} <= LIVE_FIXTURE_NAMES
+    assert LIVE_FIXTURE_NAMES == {"live"}
 
 
-def test_amazon_passkey_fixture_is_exclusive_and_restorable():
+def test_amazon_passkey_scenario_is_exclusive_and_restorable():
     """Passkey-only state cannot race siblings and its shared mutations are undone."""
     import benchmarks.run_benchmark as bench
 
@@ -6055,9 +5999,9 @@ def test_amazon_passkey_fixture_is_exclusive_and_restorable():
     try:
         bench._sync_browser_credentials = lambda: True
         bench._run_local_victoria_sql = lambda sql: sql_calls.append(sql) or ""
-        bench._restore_amazon_passkey_fixture(
+        bench._restore_amazon_passkey_scenario(
             {
-                "fixture": "amazon_passkey",
+                "scenario": "amazon_passkey",
                 "user_id": "user-1",
                 "auth_realm": "amazon.com",
                 "restore_snapshot": {
@@ -6090,52 +6034,39 @@ def test_amazon_passkey_fixture_is_exclusive_and_restorable():
     assert 'INSERT INTO "BrowserProviderProfile"' in restore_sql
 
 
-def test_live_fixtures_default_to_base_and_synthetic_to_none():
-    """Live/hybrid tasks inherit ["base"]; synthetic tasks resolve to []."""
+def test_live_fixture_is_single_and_explicit():
+    """Only credential-dependent tasks opt into the single live overlay."""
     from benchmarks.benchmark_tasks import all_tasks
     from benchmarks.live_fixtures import resolve_live_fixtures
 
     # Pure resolver contract
-    assert resolve_live_fixtures(None) == ["base"]
-    assert resolve_live_fixtures({"mode": "live"}) == ["base"]
-    assert resolve_live_fixtures({"mode": "hybrid"}) == ["base"]
+    assert resolve_live_fixtures(None) == []
+    assert resolve_live_fixtures({"mode": "live"}) == []
+    assert resolve_live_fixtures({"mode": "hybrid"}) == []
     assert resolve_live_fixtures({"mode": "synthetic"}) == []
     assert resolve_live_fixtures({"mode": "live", "live_fixtures": []}) == []  # explicit wins
-    assert resolve_live_fixtures({"mode": "live", "live_fixtures": ["base", "amazon_auth"]}) == [
-        "base",
-        "amazon_auth",
-    ]
+    assert resolve_live_fixtures({"mode": "live", "live_fixtures": ["live"]}) == ["live"]
 
     # Loaded catalog: every task has effective live_fixtures matching its mode
     for t in all_tasks():
         env = t.environment
         assert env is not None and "live_fixtures" in env, f"{t.name}: no effective live_fixtures"
+        assert set(env["live_fixtures"]) <= {"live"}, f"{t.name}: noncanonical live fixture"
         if env.get("mode") == "synthetic":
             assert env["live_fixtures"] == [], f"{t.name}: synthetic must not carry live fixtures"
-        else:
-            assert env["live_fixtures"], f"{t.name}: live/hybrid must inherit a live fixture"
 
     by_name = {t.name: t for t in all_tasks()}
-    # Amazon tasks compose amazon_auth onto the base fixture
-    assert by_name["browser-agent"].environment["live_fixtures"] == ["base", "amazon_auth"]
-    assert by_name["browser-agent-amazon-cookie-payment"].environment["live_fixtures"] == [
-        "base",
-        "amazon_auth",
-    ]
-    # Passkey auth must refresh compute separately and start from passkey-only
-    # browser state; inheriting base would silently restore cookies/passwords.
-    assert by_name["browser-agent-amazon-passkey"].environment["live_fixtures"] == [
-        "compute_tokens",
-        "amazon_passkey",
-    ]
+    assert by_name["browser-agent"].environment["live_fixtures"] == ["live"]
+    assert by_name["browser-agent-amazon-cookie-payment"].environment["live_fixtures"] == ["live"]
+    assert by_name["browser-agent-amazon-passkey"].environment["live_fixtures"] == ["live"]
     assert by_name["browser-agent-amazon-passkey"].expected_credential_ref_kind == "passkey"
     assert by_name["browser-agent-amazon-passkey"].forbidden_credential_ref_kinds == [
         "password",
         "email_otp",
         "sms_otp",
     ]
-    # An undeclared-environment task inherits ["base"]
-    assert by_name["chat-mode"].environment["live_fixtures"] == ["base"]
+    # An undeclared-environment task does not import expiring credentials.
+    assert by_name["chat-mode"].environment["live_fixtures"] == []
 
 
 def test_live_fixture_validation_rejects_unknown_and_synthetic_declarations():
@@ -6162,7 +6093,7 @@ def test_live_fixture_validation_rejects_unknown_and_synthetic_declarations():
     assert raised, "unknown live_fixture must fail validation"
 
     # Synthetic task declaring live fixtures fails
-    syn = {**base_env, "mode": "synthetic", "live_fixtures": ["base"]}
+    syn = {**base_env, "mode": "synthetic", "live_fixtures": ["live"]}
     raised = False
     try:
         _validate_environment(syn, "t-synthetic")
@@ -6171,8 +6102,8 @@ def test_live_fixture_validation_rejects_unknown_and_synthetic_declarations():
     assert raised, "synthetic + live_fixtures must fail validation"
 
     # A valid declaration passes
-    ok = {**base_env, "live_fixtures": ["base", "amazon_auth"]}
-    assert _validate_environment(ok, "t-ok")["live_fixtures"] == ["base", "amazon_auth"]
+    ok = {**base_env, "live_fixtures": ["live"]}
+    assert _validate_environment(ok, "t-ok")["live_fixtures"] == ["live"]
 
 
 def test_tag_slices_still_resolve():
@@ -6635,16 +6566,8 @@ async def run_all_tests():
         test_minted_x_signup_evidence_rejects_terminal_phone_blocker,
     )
     r.record(
-        "browser_agent_cookie_bundle_bootstrap_upserts",
-        test_browser_agent_cookie_bundle_bootstrap_upserts_active_bundle_from_cookies,
-    )
-    r.record(
-        "browser_agent_cookie_bundle_bootstrap_skip_env",
-        test_browser_agent_cookie_bundle_bootstrap_can_be_skipped_with_env,
-    )
-    r.record(
-        "amazon_passkey_fixture_isolation",
-        test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile,
+        "amazon_passkey_scenario_isolation",
+        test_amazon_passkey_scenario_isolates_passkey_and_fresh_kernel_profile,
     )
     r.record(
         "amazon_passkey_catalog_contract",
@@ -6931,8 +6854,8 @@ async def run_all_tests():
         test_amazon_return_catalog_requires_single_clean_completed_return,
     )
     r.record(
-        "base_live_fixture_auth_failure_is_fatal",
-        test_base_live_fixture_fails_when_live_auth_refresh_fails,
+        "live_fixture_auth_failure_is_fatal",
+        test_live_fixture_fails_when_live_auth_refresh_fails,
     )
     r.record(
         "expected_passkey_credential_ref",
@@ -6964,10 +6887,10 @@ async def run_all_tests():
     r.record("every_task_has_base_image_fixture", test_every_task_has_base_image_fixture_by_default)
     r.record("live_fixture_registry_appliers_in_sync", test_live_fixture_registry_appliers_stay_in_sync)
     r.record(
-        "amazon_passkey_fixture_is_exclusive_and_restorable",
-        test_amazon_passkey_fixture_is_exclusive_and_restorable,
+        "amazon_passkey_scenario_is_exclusive_and_restorable",
+        test_amazon_passkey_scenario_is_exclusive_and_restorable,
     )
-    r.record("live_fixtures_default_to_base", test_live_fixtures_default_to_base_and_synthetic_to_none)
+    r.record("live_fixture_is_single_and_explicit", test_live_fixture_is_single_and_explicit)
     r.record("live_fixture_validation_guards", test_live_fixture_validation_rejects_unknown_and_synthetic_declarations)
     r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)
     r.record("antibot_slice_daily_commerce", test_antibot_slice_includes_daily_toast_and_amazon_commerce)

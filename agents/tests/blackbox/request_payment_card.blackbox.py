@@ -236,6 +236,60 @@ def test_fingerprint_is_stable_and_user_scoped():
     assert base["fingerprint"] != other_user["fingerprint"]
 
 
+def test_fingerprint_ignores_display_only_review_formatting():
+    """The same priced order must reuse its card when browser prose formatting drifts."""
+    from domains.request_payment_card.service import normalize_payment_payload
+
+    first_call = _sample_tool_call()
+    first_call["line_items"][0]["review_count"] = "1,284 reviews"
+    second_call = _sample_tool_call()
+    second_call["line_items"][0]["review_count"] = "1284 reviews"
+
+    first = normalize_payment_payload(first_call, "user-123")
+    second = normalize_payment_payload(second_call, "user-123")
+
+    assert first["lineItems"][0]["reviewCount"] == "1,284 reviews"
+    assert second["lineItems"][0]["reviewCount"] == "1284 reviews"
+    assert first["fingerprint"] == second["fingerprint"]
+
+    localized_first = _sample_tool_call()
+    localized_first["line_items"][0]["review_count"] = "١,٢٨٤ reviews"
+    localized_second = _sample_tool_call()
+    localized_second["line_items"][0]["review_count"] = "١٢٨٤ reviews"
+    assert normalize_payment_payload(
+        localized_first, "user-123"
+    )["fingerprint"] == normalize_payment_payload(localized_second, "user-123")["fingerprint"]
+
+
+def test_fingerprint_keeps_material_receipt_changes_distinct():
+    from domains.request_payment_card.service import normalize_payment_payload
+
+    base = normalize_payment_payload(_sample_tool_call(), "user-123")["fingerprint"]
+    variants = []
+
+    for field, value in (
+        ("product_url", "https://example.com/products/other-lamp"),
+        ("rating", "1.0 stars"),
+        ("review_count", "10 reviews"),
+        ("unit_price_cents", 1399),
+        ("quantity", 3),
+        ("line_total_cents", 3897),
+    ):
+        changed = _sample_tool_call()
+        changed["line_items"][0][field] = value
+        variants.append(changed)
+
+    changed_fee = _sample_tool_call()
+    changed_fee["fees"][0]["amount_cents"] = 211
+    variants.append(changed_fee)
+    changed_total = _sample_tool_call()
+    changed_total["total_cents"] = 2809
+    variants.append(changed_total)
+
+    for changed in variants:
+        assert normalize_payment_payload(changed, "user-123")["fingerprint"] != base
+
+
 def test_question_contains_receipt_but_no_card_secrets():
     from domains.request_payment_card.service import (
         build_payment_question,
@@ -527,6 +581,14 @@ async def run_all_tests():
     result.record("required_product_reviews", test_payment_line_item_requires_reviews_and_a_product_detail_url)
     result.record("camel_case_transport", test_payment_tool_accepts_camel_case_transport_fields)
     result.record("fingerprint_stability", test_fingerprint_is_stable_and_user_scoped)
+    result.record(
+        "fingerprint_display_metadata_stability",
+        test_fingerprint_ignores_display_only_review_formatting,
+    )
+    result.record(
+        "fingerprint_material_changes_distinct",
+        test_fingerprint_keeps_material_receipt_changes_distinct,
+    )
     result.record("question_no_secrets", test_question_contains_receipt_but_no_card_secrets)
     result.record(
         "question_sanitizes_merchant_content",

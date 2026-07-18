@@ -151,6 +151,23 @@ def _build_payment_card_verifier_evidence(last4: Any) -> Optional[Dict[str, Any]
     }
 
 
+async def _lookup_payment_purchase(
+    user_id: str,
+    payment_payload: Dict[str, Any],
+) -> tuple[Dict[str, Any], str]:
+    """Look up the canonical key and retain a matched pre-canonicalization key for mint."""
+    fingerprint = str(payment_payload.get("fingerprint") or "")
+    result = await workflow.execute_activity(
+        "lookup_purchase_activity",
+        args=[user_id, fingerprint],
+        start_to_close_timeout=timedelta(seconds=30),
+        retry_policy=RetryPolicy(maximum_attempts=3),
+    )
+    purchase = result.get("purchase")
+    matched = purchase.get("fingerprint") if isinstance(purchase, dict) else None
+    return result, str(matched or fingerprint)
+
+
 async def record_used_passkey_credentials(
     *,
     dom_service: Any,
@@ -5487,12 +5504,14 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         fingerprint=payment_payload.get("fingerprint"),
                         payment_request_summary=_summarize_payment_request_for_log(payment_payload),
                     )
-                    lookup_result = await workflow.execute_activity(
-                        "lookup_purchase_activity",
-                        args=[workflow_instance.user_id or "", payment_payload["fingerprint"]],
-                        start_to_close_timeout=timedelta(seconds=30),
-                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    lookup_result, matched_fingerprint = await _lookup_payment_purchase(
+                        workflow_instance.user_id or "",
+                        payment_payload,
                     )
+                    # Mint uses the same fingerprint as lookup. When a held
+                    # purchase was created before canonicalization shipped,
+                    # retain its legacy key so the backend returns that card.
+                    payment_payload["fingerprint"] = matched_fingerprint
                     logger.info(
                         "Browser payment purchase lookup finished",
                         agent_id=workflow_instance.agent_id,

@@ -105,8 +105,7 @@ def _validate_environment(env: dict[str, Any], item_id: str) -> dict[str, Any]:
         raise ValueError(f"{item_id}: environment.context_notes must be a non-empty string")
     if mode == "live" and env.get("db_fixtures"):
         raise ValueError(f"{item_id}: live evals must not declare db_fixtures")
-    # live_fixtures is optional in the raw catalog (tasks omitting it inherit
-    # ["base"] at load time); validate only when explicitly declared.
+    # live_fixtures is optional and opt-in; omitted declarations resolve to [].
     live_fixtures = env.get("live_fixtures")
     if live_fixtures is not None:
         _require_string_list(env, "live_fixtures", item_id, allow_empty=True)

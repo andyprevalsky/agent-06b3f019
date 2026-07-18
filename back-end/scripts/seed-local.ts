@@ -15,11 +15,13 @@ import dotenv from 'dotenv';
 import {
   syncBrowserPasswordCredentials,
   syncBrowserPermissionCredentials,
+  syncCookieBundleCredentials,
   syncCookieCredentials,
   syncIntegrationCredentials,
   syncOriginCredentials,
   syncPasskeyCredentials,
   syncRequiredCredentialTable,
+  syncSteelSessionAuthCredentials,
 } from './seed-local-credentials';
 import { runSyncStep, syncRowsWithConcurrency, syncUserRecord } from './seed-local-helpers';
 
@@ -131,8 +133,9 @@ async function syncIntegrations(): Promise<number> {
   return syncedIds.length;
 }
 
-// Browser auth merge shared by full sync and --credentials-only. Production
-// identities refresh or add rows, while local-only identities are preserved.
+// Browser auth sync shared by full sync and --credentials-only. Natural-keyed
+// credentials merge production rows; provider-profile mappings are replaced so
+// their BrowserContext foreign key always points at the local context row.
 async function syncBrowserState(failures?: Error[]): Promise<void> {
   // ── Browser Context ──
   await syncRequiredTable(
@@ -151,6 +154,41 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
     failures
   );
 
+  // ── Browser Provider Profiles ──
+  // BrowserProviderProfile.contextId is a foreign key to BrowserContext.id.
+  // The local context may intentionally retain a different primary key than
+  // production, so replace the local mappings with rows remapped to that id.
+  await syncRequiredTable(
+    'Browser Provider Profiles',
+    async () => {
+      const remoteContext = await remote.browserContext.findUnique({
+        where: { userId: DEV_USER_ID },
+        select: { id: true },
+      });
+      const localContext = await local.browserContext.findUnique({
+        where: { userId: DEV_USER_ID },
+        select: { id: true },
+      });
+      if (!remoteContext || !localContext) return 0;
+      const profiles = await remote.browserProviderProfile.findMany({
+        where: { contextId: remoteContext.id },
+      });
+      await local.$transaction(async (tx) => {
+        await tx.browserProviderProfile.deleteMany({ where: { contextId: localContext.id } });
+        for (const profile of profiles) {
+          const { id, contextId, ...data } = profile;
+          void id;
+          void contextId;
+          await tx.browserProviderProfile.create({
+            data: { ...data, contextId: localContext.id },
+          });
+        }
+      });
+      return profiles.length;
+    },
+    failures
+  );
+
   // ── Cookies ──
   await syncRequiredTable(
     'Cookies',
@@ -165,6 +203,25 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
         }
       }
       return cookies.length;
+    },
+    failures
+  );
+
+  // ── Durable browser-auth references ──
+  await syncRequiredTable(
+    'Cookie Bundles',
+    async () => {
+      const bundles = await remote.cookieBundle.findMany({ where: { userId: DEV_USER_ID } });
+      return syncCookieBundleCredentials(local.cookieBundle, bundles);
+    },
+    failures
+  );
+
+  await syncRequiredTable(
+    'Steel Session Auth',
+    async () => {
+      const sessions = await remote.steelSessionAuth.findMany({ where: { userId: DEV_USER_ID } });
+      return syncSteelSessionAuthCredentials(local.steelSessionAuth, sessions);
     },
     failures
   );
@@ -375,7 +432,7 @@ async function sync() {
   }
 
   if (CREDENTIALS_ONLY) {
-    console.log('  ℹ️  Browser auth merge refreshes production rows and preserves local-only rows');
+    console.log('  ℹ️  Refreshing the complete production browser-auth graph');
     await syncBrowserAuthForCurrentMode();
     console.log('\n🔄 Credential sync complete.');
     return;
@@ -486,7 +543,7 @@ async function sync() {
     return upsertById(local.roseApiKey, keys);
   });
 
-  // ── Browser auth state (context, cookies, storage) + credentials ──
+  // ── Complete browser auth graph + credentials ──
   const browserAuthSyncFailures: Error[] = [];
   await syncBrowserAuthForCurrentMode(browserAuthSyncFailures);
 

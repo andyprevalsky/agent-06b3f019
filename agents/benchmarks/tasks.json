@@ -928,20 +928,19 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base",
-        "amazon_auth"
+        "live"
       ],
       "services": [
         "amazon.com",
         "write_lock"
       ],
       "secrets": [
-        "amazon_auth_bundle"
+        "live_browser_auth"
       ],
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie)."
+      "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. The live fixture refreshes compute tokens and the complete browser-auth graph from prod, including CookieBundles. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie)."
     },
     "evaluators": [
       {
@@ -996,20 +995,19 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base",
-        "amazon_auth"
+        "live"
       ],
       "services": [
         "amazon.com",
         "write_lock"
       ],
       "secrets": [
-        "amazon_auth_bundle"
+        "live_browser_auth"
       ],
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "Live Amazon via synced-prod cookie auth. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle used to complete one auto-approved cart purchase."
+      "context_notes": "Live Amazon via synced-prod browser auth. The live fixture refreshes compute tokens and the complete browser-auth graph, including the CookieBundle used to complete one auto-approved cart purchase."
     },
     "evaluators": [
       {
@@ -1110,8 +1108,7 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "compute_tokens",
-        "amazon_passkey"
+        "live"
       ],
       "services": [
         "amazon.com",
@@ -1123,7 +1120,7 @@
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "compute_tokens refreshes only LLM credentials. amazon_passkey syncs only the live passkey, deletes Amazon cookies and origin storage, disables saved-session/password alternatives, and detaches the local Kernel profile mapping so the run proves CDP passkey injection from a fresh profile."
+      "context_notes": "The live fixture refreshes all current credentials. Task-specific passkey isolation then deletes Amazon cookies and origin storage, disables saved-session/password alternatives, and detaches the local Kernel profile mapping so the run proves CDP passkey injection from a fresh profile."
     },
     "evaluators": [
       {
@@ -1250,6 +1247,25 @@
     },
     "success_on_payment_card_request": true,
     "start_phase": "execute",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "order.toasttab.com",
+        "payment_approval"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://order.toasttab.com/online/nopafish"
+      ],
+      "context_notes": "Live Toast menu and checkout flow. The live fixture explicitly refreshes compute credentials and the complete browser-auth graph before the payment-card approval probe."
+    },
     "evaluators": [
       {
         "id": "toast-payment-receipt",
@@ -1308,7 +1324,7 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base"
+        "live"
       ],
       "services": [
         "opentable.com",
@@ -1407,7 +1423,7 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base"
+        "live"
       ],
       "services": [
         "instacart.com",
@@ -1478,7 +1494,7 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base"
+        "live"
       ],
       "services": [
         "doordash.com",
@@ -1573,7 +1589,7 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base"
+        "live"
       ],
       "services": [
         "alchemysprings.com",
@@ -1680,7 +1696,7 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base"
+        "live"
       ],
       "services": [
         "booking.com",
@@ -1787,7 +1803,7 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base"
+        "live"
       ],
       "services": [
         "amctheatres.com",
@@ -1895,15 +1911,14 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base",
-        "amazon_auth"
+        "live"
       ],
       "services": [
         "amazon.com",
         "write_lock"
       ],
       "secrets": [
-        "amazon_auth_bundle"
+        "live_browser_auth"
       ],
       "live_targets": [
         "https://www.amazon.com/gp/your-account/order-history"
@@ -1969,7 +1984,7 @@
   {
     "name": "minted-agent-accounts-uber",
     "title": "Uber Ride to FITNESS SF Transbay",
-    "description": "Request an exact UberX route using the live account authentication in the base fixture.",
+    "description": "Request an exact UberX route using the explicit live authentication overlay.",
     "prompt": "Use Uber to request an UberX ride now from 88 Howard Street, San Francisco, CA 94105 to FITNESS SF Transbay, 425 Mission Street, San Francisco, CA 94105. Confirm both map pins are at those exact addresses and do not select a premium or shared ride. Complete the ride request.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
@@ -1997,6 +2012,25 @@
     },
     "tool_count_scope": "root",
     "start_phase": "execute",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "uber.com",
+        "write_lock"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://m.uber.com"
+      ],
+      "context_notes": "Live Uber route, pricing, and checkout state with current account authentication supplied by the single live credential overlay."
+    },
     "evaluators": [
       {
         "id": "uber-runtime-contract",

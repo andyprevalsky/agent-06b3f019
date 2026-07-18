@@ -441,7 +441,7 @@ const LIVE_RUN_NO_AGENT = {
           name: 'chat-mode',
           passed: null,
           status: 'running',
-          agent_id: null, // live snapshot before the agent exists
+          agent_id: '   ', // cloud runner emitted whitespace before the agent existed
           duration_seconds: null,
           cost_cents: null,
           world_model_mode: null,
@@ -570,13 +570,17 @@ describe('BenchmarksView edge states', () => {
     expect(screen.queryByTestId('request-row-req-cancelled')).not.toBeInTheDocument();
   });
 
-  it('disables Open agent when the live task has no agent yet (D8)', async () => {
+  it('disables Open agent when the live task has a blank agent id (D8)', async () => {
     mockWith({ runs: LIVE_RUN_NO_AGENT });
     renderWithProviders(<BenchmarksView />);
     await waitFor(() => expect(screen.getByTestId('run-row-run-live')).toBeInTheDocument());
     fireEvent.click(screen.getByTestId('run-row-run-live'));
     await waitFor(() => expect(screen.getByTestId('run-view-open-chat-mode')).toBeInTheDocument());
     expect(screen.getByTestId('run-view-open-chat-mode')).toBeDisabled();
+    expect(screen.getByTestId('run-view-open-chat-mode')).toHaveAttribute(
+      'title',
+      'Agent has not been created yet',
+    );
     // live run → dispatch timeline with the fleet startup-bar essence
     const timeline = screen.getByTestId('dispatch-timeline').textContent ?? '';
     expect(timeline).toContain('Queued');

@@ -83,7 +83,7 @@ def normalize_payment_payload(tool_call: Dict[str, Any], user_id: str) -> Dict[s
     return payload
 
 
-def build_payment_fingerprint(payload: Dict[str, Any]) -> str:
+def _hash_payment_identity(payload: Dict[str, Any]) -> str:
     stable = {
         "userId": payload.get("userId"),
         "merchant": str(payload.get("merchant") or "").strip().lower(),
@@ -94,6 +94,35 @@ def build_payment_fingerprint(payload: Dict[str, Any]) -> str:
     }
     encoded = json.dumps(stable, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _canonicalize_review_count(value: str) -> str:
+    return re.sub(r"(?<=\d),(?=\d)", "", value)
+
+
+def _payment_payload_with_review_counts(
+    payload: Dict[str, Any],
+    transform: Any,
+) -> Dict[str, Any]:
+    candidate = {**payload, "lineItems": []}
+    for raw_item in payload.get("lineItems") or []:
+        if not isinstance(raw_item, dict):
+            continue
+        item = dict(raw_item)
+        review_count = item.get("reviewCount")
+        if isinstance(review_count, str):
+            item["reviewCount"] = transform(review_count)
+        candidate["lineItems"].append(item)
+    return candidate
+
+
+def build_payment_fingerprint(payload: Dict[str, Any]) -> str:
+    """Hash purchase identity while canonicalizing equivalent review-count punctuation."""
+    # Browser extraction may preserve or omit thousands separators for the
+    # same visible count. Only punctuation between digits is removed;
+    # materially different review text remains distinct.
+    canonical = _payment_payload_with_review_counts(payload, _canonicalize_review_count)
+    return _hash_payment_identity(canonical)
 
 
 def _approval_plain_text(value: Any) -> str:
