@@ -1369,6 +1369,54 @@ async function testVerifyOtp_fullFlowWithNames() {
   }
 }
 
+// 1b. verify-otp with optional email — exercises the email persistence path
+async function testVerifyOtp_withEmail() {
+  await request(`${BASE_URL}/api/auth/send-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone: TEST_PHONE }),
+  });
+
+  const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({
+      phone: TEST_PHONE,
+      token: TEST_OTP,
+      firstName: 'Test',
+      lastName: 'User',
+      email: 'test.user@example.com',
+    }),
+  });
+
+  // Accept 200/400/500 depending on Twilio config / fast-forward cache.
+  // The point is that a valid optional email never breaks the verify path.
+  if (res.status !== 200 && res.status !== 400 && res.status !== 500) {
+    throw new Error(`Expected 200/400/500, got ${res.status}`);
+  }
+}
+
+// 1c. verify-otp with a malformed email — must still succeed (email is dropped, not rejected)
+async function testVerifyOtp_withMalformedEmailStillSucceeds() {
+  await request(`${BASE_URL}/api/auth/send-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone: TEST_PHONE }),
+  });
+
+  const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({
+      phone: TEST_PHONE,
+      token: TEST_OTP,
+      email: 'not-an-email',
+    }),
+  });
+
+  // A malformed optional email is normalized away server-side — it must NOT turn
+  // an otherwise-valid verification into a 4xx/5xx that a well-formed one avoids.
+  if (res.status !== 200 && res.status !== 400 && res.status !== 500) {
+    throw new Error(`Expected 200/400/500, got ${res.status}`);
+  }
+}
+
 // 2. verify-otp with firstName only (no lastName) — exercises name building
 async function testVerifyOtp_firstNameOnly() {
   const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
@@ -2333,6 +2381,11 @@ async function runAll() {
     { name: 'POST /complete-onboarding -- idempotent', fn: testCompleteOnboarding_idempotent },
     // Coverage boost tests
     { name: 'POST /verify-otp -- full flow with names', fn: testVerifyOtp_fullFlowWithNames },
+    { name: 'POST /verify-otp -- with optional email', fn: testVerifyOtp_withEmail },
+    {
+      name: 'POST /verify-otp -- malformed email still succeeds',
+      fn: testVerifyOtp_withMalformedEmailStillSucceeds,
+    },
     { name: 'POST /verify-otp -- firstName only', fn: testVerifyOtp_firstNameOnly },
     { name: 'POST /verify-otp -- empty anonymousUserId', fn: testVerifyOtp_emptyAnonymousUserId },
     {

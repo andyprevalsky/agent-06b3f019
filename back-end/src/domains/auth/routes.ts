@@ -78,6 +78,7 @@ router.post(
       const anonymousUserId = req.body.anonymousUserId as string | undefined;
       const firstName = req.body.firstName as string | undefined;
       const lastName = req.body.lastName as string | undefined;
+      const email = req.body.email as string | undefined;
 
       if (phone === undefined || phone === '' || token === undefined || token === '') {
         res.status(400).json({ error: 'Phone and OTP token are required' });
@@ -90,6 +91,7 @@ router.post(
         anonymousUserId,
         firstName,
         lastName,
+        email,
       });
 
       if (!result.success) {

@@ -35,7 +35,7 @@ export async function verifyOTP(
   phone: string,
   token: string,
   anonymousUserId?: string,
-  userInfo?: { firstName?: string; lastName?: string },
+  userInfo?: { firstName?: string; lastName?: string; email?: string },
 ): Promise<{ user: User; session: Session }> {
   const response = await fetch(`${AUTH_API_BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
@@ -46,6 +46,7 @@ export async function verifyOTP(
       anonymousUserId,
       firstName: userInfo?.firstName,
       lastName: userInfo?.lastName,
+      email: userInfo?.email,
     }),
   });
 

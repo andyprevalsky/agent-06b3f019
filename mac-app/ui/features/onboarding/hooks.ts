@@ -108,6 +108,7 @@ export const useOnboardingAuth = (onComplete: () => void): UseOnboardingAuthResu
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [phone, setPhone] = useState('');
+  const [email, setEmail] = useState('');
   const [otp, setOtp] = useState('');
   const [smsAuthorized, setSmsAuthorized] = useState(false);
   const [resendCountdown, setResendCountdown] = useState(0);
@@ -156,7 +157,7 @@ export const useOnboardingAuth = (onComplete: () => void): UseOnboardingAuthResu
     if (!smsAuthorized) return;
     setLoading(true);
     setError(null);
-    void verifyOTP(phone, otp, undefined, { firstName, lastName })
+    void verifyOTP(phone, otp, undefined, { firstName, lastName, email })
       .then(() => onComplete())
       .catch((err: unknown) => {
         setError(getErrorMessageOrFallback(err, 'Invalid verification code'));
@@ -172,5 +173,5 @@ export const useOnboardingAuth = (onComplete: () => void): UseOnboardingAuthResu
   };
 
   // prettier-ignore
-  return { step, loading, error, firstName, lastName, phone, otp, smsAuthorized, resendCountdown, isFormValid, setFirstName, setLastName, setPhone, setOtp, setSmsAuthorized, handleSignupSubmit, handleOtpSubmit, handleResendOTP, handleBackToSignup };
+  return { step, loading, error, firstName, lastName, phone, email, otp, smsAuthorized, resendCountdown, isFormValid, setFirstName, setLastName, setPhone, setEmail, setOtp, setSmsAuthorized, handleSignupSubmit, handleOtpSubmit, handleResendOTP, handleBackToSignup };
 };

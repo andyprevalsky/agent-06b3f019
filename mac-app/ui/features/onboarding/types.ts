@@ -40,6 +40,7 @@ export interface UseOnboardingAuthResult {
   firstName: string;
   lastName: string;
   phone: string;
+  email: string;
   otp: string;
   smsAuthorized: boolean;
   resendCountdown: number;
@@ -47,6 +48,7 @@ export interface UseOnboardingAuthResult {
   setFirstName: (v: string) => void;
   setLastName: (v: string) => void;
   setPhone: (v: string) => void;
+  setEmail: (v: string) => void;
   setOtp: (v: string) => void;
   setSmsAuthorized: (v: boolean) => void;
   handleSignupSubmit: (e: React.FormEvent) => void;

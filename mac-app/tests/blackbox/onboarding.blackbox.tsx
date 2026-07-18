@@ -69,11 +69,12 @@ describe('OnboardingAuth — empty / initial state', () => {
     expect(screen.getByPlaceholderText('First name')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Last name')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('Phone number')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Email')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /continue/i })).toBeInTheDocument();
     expect(screen.getByText('Sign up or log in to continue')).toBeInTheDocument();
   });
 
-  it('disables Continue until first name, last name, and an 11-digit phone are entered', async () => {
+  it('disables Continue until first name, last name, and an 11-digit phone are entered (email stays optional)', async () => {
     const user = userEvent.setup();
     renderWithProviders(<OnboardingAuth onComplete={() => {}} />);
 
@@ -347,6 +348,35 @@ describe('OnboardingAuth — API boundary capture', () => {
     expect(body.token).toBe('181818');
     expect(body.firstName).toBe('Andy');
     expect(body.lastName).toBe('Prevalsky');
+  });
+
+  it('POSTs the optional email in /api/auth/verify-otp when the user provides one', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(<OnboardingAuth onComplete={() => {}} />);
+
+    await user.type(screen.getByPlaceholderText('First name'), 'Andy');
+    await user.type(screen.getByPlaceholderText('Last name'), 'Prevalsky');
+    await user.type(screen.getByPlaceholderText('Phone number'), '9729777432');
+    await user.type(screen.getByPlaceholderText('Email'), 'andy@example.com');
+    await user.click(screen.getByRole('button', { name: /continue/i }));
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText('000000')).toBeInTheDocument();
+    });
+
+    clearCaptures();
+    await user.type(screen.getByPlaceholderText('000000'), '181818');
+    await user.click(screen.getByRole('checkbox'));
+    await user.click(screen.getByRole('button', { name: /continue/i }));
+
+    await waitFor(() => {
+      const verifyReq = capturedRequests.find((r) => r.url.includes('/api/auth/verify-otp'));
+      expect(verifyReq).toBeDefined();
+    });
+
+    const verifyReq = capturedRequests.find((r) => r.url.includes('/api/auth/verify-otp'))!;
+    const body = parseBody(verifyReq.body);
+    expect(body.email).toBe('andy@example.com');
   });
 
   it('sends exactly one send-otp call per Continue click (no duplicates while in-flight)', async () => {

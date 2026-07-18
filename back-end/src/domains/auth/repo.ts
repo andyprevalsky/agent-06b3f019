@@ -37,6 +37,7 @@ export async function createUser(data: {
   userId: string;
   phone?: string;
   name?: string | null;
+  email?: string | null;
   isAnonymous: boolean;
 }) {
   return prisma.user.create({ data });
@@ -47,7 +48,13 @@ export async function createUser(data: {
  */
 export async function updateUser(
   userId: string,
-  data: { phone?: string; name?: string; isAnonymous?: boolean; onboardingCompletedAt?: Date }
+  data: {
+    phone?: string;
+    name?: string;
+    email?: string;
+    isAnonymous?: boolean;
+    onboardingCompletedAt?: Date;
+  }
 ) {
   return prisma.user.update({
     where: { userId },

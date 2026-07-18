@@ -27,6 +27,7 @@
  * States:
  * - step: 'phone' | 'otp'
  * - phone: string (E.164, e.g. +5215512345678 — set by PhoneInput's country selector)
+ * - email: string (optional; collected on the phone step, sent with verify-otp)
  * - otp: string (6-digit code)
  * - loading: boolean
  */
@@ -68,6 +69,8 @@ const PhoneAuthModal = ({
           <PhoneStep
             phone={auth.phone}
             onPhoneChange={auth.setPhone}
+            email={auth.email}
+            onEmailChange={auth.setEmail}
             loading={auth.loading}
             onSubmit={auth.handleSendOTP}
             onClose={auth.handleClose}

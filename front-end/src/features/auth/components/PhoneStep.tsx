@@ -23,6 +23,8 @@ import PhoneInput from './PhoneInput';
 function PhoneStep({
   phone,
   onPhoneChange,
+  email,
+  onEmailChange,
   loading,
   onSubmit,
   onClose,
@@ -54,10 +56,13 @@ function PhoneStep({
 
       <div className="space-y-4">
         <div>
-          <label htmlFor="phone" className="block text-sm text-gray-500 mb-1">
+          {/* sr-only: placeholder text makes visible labels redundant, but
+              screen readers + getByLabelText still need the association */}
+          <label htmlFor="phone" className="sr-only">
             Phone Number
           </label>
           <PhoneInput id="phone" value={phone} onChange={onPhoneChange} disabled={loading} />
+          <EmailField value={email} onChange={onEmailChange} disabled={loading} />
           <p className="text-xs text-gray-500 mt-2">
             By submitting, you authorize Rose Labs to send an automated text message containing a
             one-time password (OTP) to the number you provided. Message/data rates may apply. See{' '}
@@ -91,6 +96,34 @@ function PhoneStep({
         </button>
       </div>
     </form>
+  );
+}
+
+function EmailField({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="mt-3">
+      <label htmlFor="email" className="sr-only">
+        Email
+      </label>
+      <input
+        id="email"
+        type="email"
+        autoComplete="email"
+        placeholder="you@example.com"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        disabled={disabled}
+        className="w-full px-3 py-2 bg-[#EEEFF2] border border-gray-300 rounded-lg text-navi-black text-sm placeholder-navi-black/30 focus:outline-none focus:border-gray-400"
+      />
+    </div>
   );
 }
 
