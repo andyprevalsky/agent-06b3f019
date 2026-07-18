@@ -11,9 +11,8 @@ export async function computeExpectedActivationCounts(
   body: ActivationCheckBody
 ): Promise<number[]> {
   const { ADMIN_USER_IDS } = await import('../../domains/admin-health/config');
-  const { findRootTasksBetween, findVerifiedUsersCreatedBefore } = await import(
-    '../../domains/admin-health/repo'
-  );
+  const { findRootTasksBetween, findVerifiedUsersCreatedBefore } =
+    await import('../../domains/admin-health/repo');
   const users = await findVerifiedUsersCreatedBefore(
     new Date(body.range.end),
     Array.from(ADMIN_USER_IDS)

@@ -283,7 +283,6 @@ function assertNoImpossibleConversion(body: z.infer<typeof AdminHealthResponseSc
   }
 }
 
-
 async function expectedAdminHealthUserIds(): Promise<Set<string>> {
   const { ADMIN_HEALTH_ADDITIONAL_USER_IDS, ADMIN_HEALTH_EXCLUDED_USER_IDS } =
     await import('../../domains/admin-health/config');
