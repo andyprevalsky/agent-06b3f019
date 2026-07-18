@@ -78,11 +78,21 @@ router.post(
       const anonymousUserId = req.body.anonymousUserId as string | undefined;
       const firstName = req.body.firstName as string | undefined;
       const lastName = req.body.lastName as string | undefined;
+      const rawEmail: unknown = req.body.email;
 
       if (phone === undefined || phone === '' || token === undefined || token === '') {
         res.status(400).json({ error: 'Phone and OTP token are required' });
         return;
       }
+
+      // The cast pattern above is compile-time only; email reaches .trim() in
+      // normalizeEmail, so a null/number/object payload would 500 after the
+      // OTP verification already succeeded. Reject non-strings up front.
+      if (rawEmail !== undefined && rawEmail !== null && typeof rawEmail !== 'string') {
+        res.status(400).json({ error: 'email must be a string' });
+        return;
+      }
+      const email = rawEmail === null ? undefined : rawEmail;
 
       const result = await service.verifyOtpAndInitUser({
         phone,
@@ -90,6 +100,7 @@ router.post(
         anonymousUserId,
         firstName,
         lastName,
+        email,
       });
 
       if (!result.success) {
@@ -117,7 +128,7 @@ router.post(
  */
 router.post(
   '/complete-onboarding',
-  authenticate,
+  asyncHandler(authenticate),
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const userId = req.user?.id;

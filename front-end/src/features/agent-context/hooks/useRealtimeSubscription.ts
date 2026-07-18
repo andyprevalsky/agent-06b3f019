@@ -13,7 +13,12 @@ import {
 import type { AgentDetail, Message } from '@/lib/api';
 
 import type { StreamingBubble, StreamingPlan, StreamingAttention, StreamingTool } from '../types';
-import { MAX_RECONNECT_DELAY_MS, DISCONNECTED_BACKFILL_POLL_MS } from '../config';
+import {
+  MAX_RECONNECT_DELAY_MS,
+  DISCONNECTED_BACKFILL_POLL_MS,
+  BACKFILL_MAX_ATTEMPTS,
+  BACKFILL_RETRY_BASE_MS,
+} from '../config';
 import { fetchAgentDetail } from '../api';
 import {
   handleInsertMessage,
@@ -240,14 +245,44 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
         reconnectAttemptRef.current = 0;
         isReconnectingRef.current = false;
 
-        const isReconnection = initialLoadDoneRef.current === selectedAgentId;
-        if (isReconnection && forceResubscribeCounter > 0) {
+        // One-shot reconcile immediately after EVERY successful (re)subscribe —
+        // cold-start included. During the subscribe/auth-race window (a fresh
+        // context's first agent:<id> join races "Unauthorized" for ~1-2s right
+        // after agent creation) the backend may already have streamed the answer
+        // and persisted its messages; realtime NEVER replays them, so a brand-new
+        // agent's first answer would otherwise sit stranded in the DB while the UI
+        // stalls on "Thinking". Gating this to reconnections missed exactly that
+        // cold-start case. The merge is idempotent, so double-fetching alongside
+        // the initial load is harmless. Marks initialLoadDoneRef so downstream
+        // effects know this agent has been reconciled at least once — but only
+        // AFTER the backfill actually succeeds, so a failed fetch can't falsely
+        // mark the agent reconciled (the next resubscribe must retry it).
+        //
+        // Retry with bounded backoff on failure: the channel is already live at
+        // this point, so the disconnected fallback poll (below) skips every tick
+        // (it only runs while channelRef.current is null). A single transient
+        // fetchAgentDetail failure would therefore strand the auth-race messages
+        // this reconcile exists to recover until an unrelated resubscribe fires.
+        // `cancelled` is set on agent change, unmount, or resubscribe, so every
+        // attempt (and the delay between them) short-circuits to a no-op once
+        // this subscription is torn down — no timer outlives the effect.
+        for (let attempt = 0; attempt < BACKFILL_MAX_ATTEMPTS; attempt += 1) {
           try {
             const data = await fetchAgentDetail(selectedAgentId);
             if (cancelled) return;
             applyAgentBackfill(data, setMessages, setAgent, setIsChatMode);
+            initialLoadDoneRef.current = selectedAgentId;
+            break;
           } catch (error) {
-            console.error('Failed to refetch after reconnection:', error);
+            if (cancelled) return;
+            console.error(
+              `Failed to backfill after subscribe (attempt ${attempt + 1}/${BACKFILL_MAX_ATTEMPTS}):`,
+              error,
+            );
+            if (attempt === BACKFILL_MAX_ATTEMPTS - 1) break;
+            const delay = Math.min(BACKFILL_RETRY_BASE_MS * 2 ** attempt, MAX_RECONNECT_DELAY_MS);
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            if (cancelled) return;
           }
         }
       } catch (error) {

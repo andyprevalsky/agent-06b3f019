@@ -2,6 +2,13 @@ import type { BrowserInfo, BrowserType } from '../../../shared/types/ipc';
 
 export type { BrowserInfo, BrowserType };
 
+export interface WaitlistStatus {
+  /** True while the user still needs to get in (no invite code + no active subscription). */
+  needsInviteCode: boolean;
+  /** True when an admin invited them off the waitlist → show the subscribe view. */
+  offWaitlist: boolean;
+}
+
 export type OnboardingStep =
   'auth' | 'customization' | 'data' | 'shortcut' | 'welcome' | 'waitlist';
 
@@ -40,6 +47,7 @@ export interface UseOnboardingAuthResult {
   firstName: string;
   lastName: string;
   phone: string;
+  email: string;
   otp: string;
   smsAuthorized: boolean;
   resendCountdown: number;
@@ -47,6 +55,7 @@ export interface UseOnboardingAuthResult {
   setFirstName: (v: string) => void;
   setLastName: (v: string) => void;
   setPhone: (v: string) => void;
+  setEmail: (v: string) => void;
   setOtp: (v: string) => void;
   setSmsAuthorized: (v: boolean) => void;
   handleSignupSubmit: (e: React.FormEvent) => void;

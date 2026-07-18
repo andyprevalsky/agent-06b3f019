@@ -49,12 +49,14 @@ function toastError(
 function useAuthFormState() {
   const [step, setStep] = useState<AuthStep>('phone');
   const [phone, setPhone] = useState('');
+  const [email, setEmail] = useState('');
   const [otp, setOtp] = useState('');
   const [loading, setLoading] = useState(false);
   const [smsAuthorized, setSmsAuthorized] = useState(false);
   const resetForm = useCallback(() => {
     setStep('phone');
     setPhone('');
+    setEmail('');
     setOtp('');
     setSmsAuthorized(false);
   }, []);
@@ -63,6 +65,8 @@ function useAuthFormState() {
     setStep,
     phone,
     setPhone,
+    email,
+    setEmail,
     otp,
     setOtp,
     loading,
@@ -114,7 +118,7 @@ export function usePhoneAuth(
       e.preventDefault();
       form.setLoading(true);
       try {
-        await verifyOTP(form.phone, form.otp, anonymousUserId);
+        await verifyOTP(form.phone, form.otp, anonymousUserId, { email: form.email });
         analytics.track('otp_code_submitted');
         analytics.setUserId(form.phone);
         completeAuth();
@@ -130,6 +134,8 @@ export function usePhoneAuth(
     step: form.step,
     phone: form.phone,
     setPhone: form.setPhone,
+    email: form.email,
+    setEmail: form.setEmail,
     otp: form.otp,
     setOtp: form.setOtp,
     loading: form.loading,

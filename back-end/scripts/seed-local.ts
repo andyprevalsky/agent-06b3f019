@@ -521,6 +521,47 @@ async function sync() {
     return upsertById(local.feedback, feedback);
   });
 
+  // ── Waitlist (global, phone-bearing only) ──
+  // Not user-scoped: these are the actionable signups the admin-health
+  // "Waitlist People" panel lists + texts off the waitlist. Legacy email-only
+  // rows are skipped (the panel filters them out anyway), so the local copy
+  // stays tiny. The invite SMS only fires in production, so seeding real
+  // numbers here is safe for local dev.
+  await syncTable('Waitlist', async () => {
+    // Explicit select (omits invitedAt): prod may not have that column yet the
+    // first time this ships, and local invitedAt should start null anyway.
+    const rawRows = await remote.waitlist.findMany({
+      where: { phone: { not: null } },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        variant: true,
+        referralCode: true,
+        createdAt: true,
+      },
+    });
+    // Drop empty-string phones: they can't be texted and would reach the admin
+    // invite flow with a blank SMS destination.
+    const rows = rawRows.filter((r) => (r.phone ?? '').trim() !== '');
+    const synced = await upsertById(local.waitlist, rows);
+
+    // Also pull the accounts these phones belong to, so the "Waitlist People"
+    // panel renders truthful account/gate status locally instead of "No account
+    // yet" for everyone. Minimal projection only — never copy sensitive columns
+    // (e.g. encryptedPaymentInformation) or offWaitlistAt (may be absent in prod).
+    const phones = rows.map((r) => r.phone).filter((p): p is string => p !== null);
+    if (phones.length > 0) {
+      const accounts = await remote.user.findMany({
+        where: { phone: { in: phones } },
+        select: { id: true, userId: true, phone: true, usedInviteCode: true },
+      });
+      await upsertById(local.user, accounts);
+    }
+    return synced;
+  });
+
   throwBrowserAuthSyncFailures(browserAuthSyncFailures);
 
   console.log('\n🔄 Sync complete.');

@@ -64,6 +64,7 @@ import { execFileSync } from 'child_process';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../../providers/database';
 import { resolveClaudeCodeAuthEnvs } from '../../providers/e2b';
+import { withComputePoolLock } from './compute-pool-lock.testkit';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -841,7 +842,15 @@ function isE2bBoundaryUrl(url: string): boolean {
   return url.startsWith('https://api.e2b.app/') || /^https:\/\/[^/]+\.e2b\.app\//.test(url);
 }
 
+// Seeds a pool-eligible (poolingEnabled=true) claude_code row, so it must hold
+// the cross-process compute-pool lock: a concurrent suite's rotation tests
+// (integrations.blackbox.ts) assert exact LRU pool selection and a foreign
+// pool row seeded mid-test breaks them (see compute-pool-lock.testkit.ts).
 async function testBoundary_createCallsE2bApi() {
+  await withComputePoolLock(() => testBoundary_createCallsE2bApiLocked());
+}
+
+async function testBoundary_createCallsE2bApiLocked() {
   const seeded = await seedClaudeIntegration();
   const captureToken = `claude-create-${crypto.randomUUID()}`;
   let createdTaskId: string | null = null;

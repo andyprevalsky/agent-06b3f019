@@ -34,6 +34,11 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
     a.isLoadingNetwork ||
     a.isLoadingAgent ||
     (a.selectedAgentId && a.agentDetail?.status === 'STARTING_UP');
+  const showOpeningState =
+    !a.selectedAgentId ||
+    a.isLoadingAgent ||
+    (a.selectedAgentId && a.agentDetail?.status === 'STARTING_UP');
+  const showJoinWaitlistCta = showLoader && showOpeningState && !showNetworkDots;
 
   return (
     <ScrollArea
@@ -60,9 +65,18 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
         <div className="space-y-6 text-center md:mb-[20vh]">
           <div
             data-testid="terminal-opening-ascii-transform"
-            className="translate-y-[5%] scale-95 md:translate-y-0 md:scale-100"
+            className="relative translate-y-[5%] scale-95 md:translate-y-0 md:scale-100"
           >
-            <AsciiLoader showWarmingUp={false} size="large" variant="engine" />
+            <AsciiLoader
+              showWarmingUp={false}
+              size="large"
+              variant="engine"
+              cta={
+                showJoinWaitlistCta
+                  ? { label: 'Join Waitlist', onClick: a.handleJoinWaitlist }
+                  : undefined
+              }
+            />
           </div>
           {showLoader && (
             <div className="-mt-3">
@@ -76,7 +90,6 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
                     currentMessageIndex={opening.currentMessageIndex}
                     animationPhase={opening.animationPhase}
                     revealProgress={opening.revealProgress}
-                    onJoinWaitlist={a.handleJoinWaitlist}
                   />
                 )
               ) : null}

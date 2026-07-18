@@ -24,6 +24,7 @@ import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 
 import QueryInput from '@/features/terminal-component-group/components/QueryInput';
+import AsciiLoader from '@/features/terminal-component-group/components/AsciiLoader';
 import { OpeningMessageDisplay } from '@/features/terminal/components/OpeningMessageDisplay';
 import { OPENING_MESSAGES } from '@/features/terminal/config';
 import AttentionInbox from '@/features/terminal-component-group/components/AttentionInbox';
@@ -2136,13 +2137,12 @@ describe('BrowserViewPanel (blackbox)', () => {
 describe('OpeningMessageDisplay (blackbox)', () => {
   const LAST_INDEX = OPENING_MESSAGES.length - 1;
 
-  it('renders caption text for non-final messages', () => {
+  it('renders caption text for non-final messages without a CTA button', () => {
     renderWithProviders(
       <OpeningMessageDisplay
         currentMessageIndex={0}
         animationPhase="revealing"
         revealProgress={50}
-        onJoinWaitlist={() => {}}
       />,
     );
 
@@ -2150,14 +2150,32 @@ describe('OpeningMessageDisplay (blackbox)', () => {
     expect(screen.queryByTestId('opening-join-waitlist')).toBeNull();
   });
 
-  it('renders the Join Waitlist button on the final line and opens the modal on click', () => {
-    const onJoinWaitlist = vi.fn();
+  it('renders caption text for the final message (CTA is no longer the terminal frame)', () => {
     renderWithProviders(
       <OpeningMessageDisplay
         currentMessageIndex={LAST_INDEX}
         animationPhase="revealing"
         revealProgress={100}
-        onJoinWaitlist={onJoinWaitlist}
+      />,
+    );
+
+    // The final message shows its caption text — the CTA moved to a persistent
+    // overlay on the ASCII loader, not the last text-animation frame.
+    expect(screen.getByText(OPENING_MESSAGES[LAST_INDEX][0])).toBeInTheDocument();
+    expect(screen.queryByTestId('opening-join-waitlist')).toBeNull();
+  });
+});
+
+// ─── AsciiLoader CTA overlay (blackbox) ──────────────────────────────────
+describe('AsciiLoader CTA overlay (blackbox)', () => {
+  it('renders a transparent CTA whose pill tints the SAME frame chars + fills whitespace', () => {
+    const onClick = vi.fn();
+    const { container } = renderWithProviders(
+      <AsciiLoader
+        showWarmingUp={false}
+        size="large"
+        variant="engine"
+        cta={{ label: 'Join Waitlist', onClick }}
       />,
     );
 
@@ -2167,12 +2185,61 @@ describe('OpeningMessageDisplay (blackbox)', () => {
     expect(button.tagName).toBe('BUTTON');
     expect(button).not.toHaveAttribute('href');
     fireEvent.click(button);
-    expect(onJoinWaitlist).toHaveBeenCalledTimes(1);
-    // navi-black background, shadow, and clickable despite the loader's pointer-events-none wrapper.
-    expect(button.className).toContain('bg-navi-black');
-    expect(button.className).toContain('shadow-lg');
+    expect(onClick).toHaveBeenCalledTimes(1);
+    // Bold glossy-chrome label — the send button ring's metallic gradient
+    // clipped into the text. Button surface is transparent (no fill, no glow)
+    // with a 1px rose border outlining the capsule, centered on the animation.
+    expect(button.className).toContain('font-bold');
+    const label = within(button).getByTestId('opening-join-label') as HTMLElement;
+    expect(label.style.backgroundImage).toMatch(/#f0f0f0|240,\s*240,\s*240/);
+    expect(label.style.backgroundClip || label.style.webkitBackgroundClip).toBe('text');
+    expect(button.className).toContain('bg-transparent');
+    expect(button.className).toContain('border-[#E062CC]');
+    expect(button.className).not.toContain('shadow-');
+    expect(button.style.top).toBe('calc(50% + 0px)');
+    // Clickable despite the loader overlay's pointer-events-none wrapper.
     expect(button.className).toContain('pointer-events-auto');
-    // The final line is the CTA button, not the raw caption text.
-    expect(screen.queryByText(OPENING_MESSAGES[LAST_INDEX][0])).toBeNull();
+
+    // The prism layer re-renders the SAME frame as the animation beneath —
+    // every real glyph keeps its exact position (no chars-on-chars) — and only
+    // whitespace cells are filled, so the pill is fully packed.
+    const prism = screen.getByTestId('opening-join-prism') as HTMLElement;
+    expect(prism).toHaveAttribute('aria-hidden');
+    const basePre = container.querySelector('pre:not([data-testid])') as HTMLElement;
+    const baseText = basePre.textContent || '';
+    const prismText = prism.textContent || '';
+    expect(prismText.length).toBe(baseText.length);
+    expect(prismText).not.toMatch(/ /); // whitespace filled, fully packed
+    for (let i = 0; i < baseText.length; i++) {
+      if (baseText[i] !== ' ' || baseText[i] === '\n') {
+        expect(prismText[i]).toBe(baseText[i]); // real glyphs align 1:1
+      }
+    }
+    // Rose gradient is background-clipped into the glyphs (no solid rectangle)
+    // and pill-clipped via clip-path (no border/frame on the region).
+    expect(prism.style.backgroundImage.toLowerCase()).toContain('gradient');
+    expect(prism.style.backgroundImage.toLowerCase()).toMatch(/#ff6b00|255,\s*107,\s*0/);
+    expect(prism.style.backgroundClip || prism.style.webkitBackgroundClip).toBe('text');
+    expect(prism.style.clipPath).toContain('round');
+
+    // The glyph shadow is gradient-colored: a twin gradient-clipped layer
+    // rendered beneath the prism, offset down + tightly blurred + dimmed (a
+    // single-color drop-shadow can't follow the gradient). Same content, so
+    // shadow shapes match glyphs 1:1; blur stays small (no haze between chars).
+    const shadow = screen.getByTestId('opening-join-prism-shadow') as HTMLElement;
+    expect(shadow).toHaveAttribute('aria-hidden');
+    expect(shadow.textContent).toBe(prism.textContent);
+    expect(shadow.style.backgroundImage).toBe(prism.style.backgroundImage);
+    expect(shadow.style.transform).toContain('translateY');
+    expect(shadow.style.filter).toContain('blur');
+    expect(shadow.style.clipPath).toContain('round');
+    expect(prism.compareDocumentPosition(shadow) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy();
+  });
+
+  it('omits the CTA overlay entirely when no cta prop is passed', () => {
+    renderWithProviders(<AsciiLoader showWarmingUp={false} size="large" variant="engine" />);
+    expect(screen.queryByTestId('opening-join-waitlist')).toBeNull();
+    expect(screen.queryByTestId('opening-join-prism')).toBeNull();
+    expect(screen.queryByTestId('opening-join-prism-shadow')).toBeNull();
   });
 });

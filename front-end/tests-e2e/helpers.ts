@@ -192,30 +192,47 @@ export async function createAgent(goal: string, startPhase?: 'plan' | 'execute')
   const body: Record<string, unknown> = { goal };
   if (startPhase) body.start_phase = startPhase;
   const userId = await resolveTestUserId();
-  const res = await fetch(`${BACKEND_URL}/api/agents`, {
-    method: 'POST',
-    headers: {
-      'X-API-Key': TEST_API_KEY,
-      'X-User-Id': userId,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  });
-  const raw = await res.text();
-  let json: unknown = raw;
-  try {
-    json = raw ? JSON.parse(raw) : {};
-  } catch {
-    // Non-JSON body (proxy HTML, empty, etc.) — keep raw text in the error.
+
+  // Retry the specific transient "Failed to create agent" 500 — under
+  // concurrent load the interactive create-agent transaction can momentarily
+  // fail to acquire a pooled connection ("Unable to start a transaction").
+  // The backend now retries this itself (providers/database.ts
+  // runTransactionWithRetry), but the semantic gate spins up many agents at
+  // once, so keep the same client-side safety net the blackbox helpers use.
+  // Only this exact transient 500 is retried; every other failure throws.
+  let lastError = '';
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    const res = await fetch(`${BACKEND_URL}/api/agents`, {
+      method: 'POST',
+      headers: {
+        'X-API-Key': TEST_API_KEY,
+        'X-User-Id': userId,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+    const raw = await res.text();
+    let json: unknown = raw;
+    try {
+      json = raw ? JSON.parse(raw) : {};
+    } catch {
+      // Non-JSON body (proxy HTML, empty, etc.) — keep raw text in the error.
+    }
+    const id =
+      (json as { agent_id?: string; id?: string }).agent_id ??
+      (json as { agent_id?: string; id?: string }).id;
+    if (res.ok && id) return id;
+
+    const detail = typeof json === 'string' ? json.slice(0, 500) : JSON.stringify(json);
+    lastError = `${res.status} ${detail}`;
+    const transient =
+      res.status === 500 &&
+      (json as { error?: unknown }).error === 'Failed to create agent' &&
+      attempt < 5;
+    if (!transient) break;
+    await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
   }
-  const id =
-    (json as { agent_id?: string; id?: string }).agent_id ??
-    (json as { agent_id?: string; id?: string }).id;
-  if (!res.ok || !id) {
-    const body = typeof json === 'string' ? json.slice(0, 500) : JSON.stringify(json);
-    throw new Error(`Agent creation failed: ${res.status} ${body}`);
-  }
-  return id;
+  throw new Error(`Agent creation failed: ${lastError}`);
 }
 
 interface BenchmarkTask {
@@ -257,10 +274,7 @@ export async function deleteAgent(agentId: string): Promise<void> {
   }
 }
 
-export async function waitForTemporalWorkflow(
-  agentId: string,
-  timeoutMs: number,
-): Promise<string> {
+export async function waitForTemporalWorkflow(agentId: string, timeoutMs: number): Promise<string> {
   const userId = await resolveTestUserId();
   const deadline = Date.now() + timeoutMs;
   let lastState = 'not fetched';
@@ -271,8 +285,7 @@ export async function waitForTemporalWorkflow(
     });
     const data = await parseJsonResponse(res);
     const agent = data.agent as
-      | { temporal_workflow_id?: unknown; status?: unknown; status_message?: unknown }
-      | undefined;
+      { temporal_workflow_id?: unknown; status?: unknown; status_message?: unknown } | undefined;
     const workflowId = agent?.temporal_workflow_id;
     if (res.ok && typeof workflowId === 'string' && workflowId !== '') return workflowId;
 

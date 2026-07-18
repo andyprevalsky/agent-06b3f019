@@ -91,21 +91,7 @@ export const saveCustomization = async (
   }
 };
 
-/**
- * Waitlist gate: whether the signed-in user still needs an invite code.
- * Server-side state (User.usedInviteCode) — survives app relaunches.
- */
-export const checkNeedsInviteCode = async (): Promise<boolean> => {
-  const token = requireToken();
-  const response = await fetch(`${getBackendUrl()}/api/invite-codes/check`, {
-    headers: authHeader(token),
-  });
-  if (!response.ok) {
-    throw new Error('Failed to check invite code status');
-  }
-  const payload = (await response.json()) as { needsInviteCode?: boolean };
-  return payload.needsInviteCode === true;
-};
+export { checkWaitlistStatus, createSubscriptionCheckoutUrl } from './gateApi';
 
 /** Redeem an invite code; throws with the server's message on rejection. */
 export const redeemInviteCode = async (inviteCode: number): Promise<void> => {

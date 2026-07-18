@@ -2,15 +2,18 @@
  * Black-box coverage for the onboarding waitlist step (invite gate).
  *
  * Source under test: `mac-app/ui/features/onboarding/components/OnboardingWaitlist.tsx`.
- * On mount it checks GET /api/invite-codes/check: already-invited users pass
- * straight through (onComplete); gated users see "You're On The Waitlist!" and
- * can redeem a code via POST /api/invite-codes/use.
+ * On mount it checks GET /api/invite-codes/check: already-in users pass straight
+ * through (onComplete); gated users see "You're On The Waitlist!" — or, when an
+ * admin flagged them off the waitlist (offWaitlist), the subscribe view. Either
+ * view can still redeem a code via POST /api/invite-codes/use, and the subscribe
+ * view opens a Stripe checkout via POST /api/billing/subscription-checkout.
  *
  * State-machine sketch:
  *   checking --(needsInviteCode=false)--> onComplete
- *   checking --(needsInviteCode=true | check 5xx)--> waitlist
- *   waitlist --(use 200)--> onComplete
- *   waitlist --(use 4xx)--> waitlist (inline server error)
+ *   checking --(needsInviteCode=true & offWaitlist)--> subscribe
+ *   checking --(needsInviteCode=true & !offWaitlist | check 5xx)--> waitlist
+ *   waitlist/subscribe --(use 200)--> onComplete
+ *   waitlist/subscribe --(use 4xx)--> stay (inline server error)
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -37,9 +40,11 @@ function mockSession() {
   );
 }
 
-function gateResponse(needsInviteCode: boolean) {
+function gateResponse(needsInviteCode: boolean, offWaitlist = false) {
   server.use(
-    http.get(`${API_BASE}/invite-codes/check`, () => HttpResponse.json({ needsInviteCode }))
+    http.get(`${API_BASE}/invite-codes/check`, () =>
+      HttpResponse.json({ needsInviteCode, offWaitlist })
+    )
   );
 }
 
@@ -85,6 +90,56 @@ describe('OnboardingWaitlist — access check', () => {
     await waitFor(() => {
       expect(screen.getByText("You're On The Waitlist!")).toBeInTheDocument();
     });
+  });
+
+  it('shows the subscribe view when the user was invited off the waitlist', async () => {
+    gateResponse(true, true);
+    const onComplete = vi.fn();
+
+    renderWithProviders(<OnboardingWaitlist onComplete={onComplete} />);
+
+    await waitFor(() => {
+      expect(screen.getByText("You're off the waitlist!")).toBeInTheDocument();
+    });
+    expect(screen.getByRole('button', { name: /^subscribe$/i })).toBeInTheDocument();
+    // The invite-code path remains available as an alternative.
+    expect(screen.getByPlaceholderText('000000')).toBeInTheDocument();
+    expect(screen.queryByText("You're On The Waitlist!")).not.toBeInTheDocument();
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it('opens the Stripe checkout URL when Subscribe is clicked', async () => {
+    gateResponse(true, true);
+    server.use(
+      http.post(`${API_BASE}/billing/subscription-checkout`, () =>
+        HttpResponse.json({ url: 'https://checkout.stripe.com/c/pay/test-session' })
+      )
+    );
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(null);
+    const user = userEvent.setup();
+
+    renderWithProviders(<OnboardingWaitlist onComplete={vi.fn()} />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^subscribe$/i })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('button', { name: /^subscribe$/i }));
+
+    await waitFor(() => {
+      expect(
+        capturedRequests.some(
+          (r) => r.method === 'POST' && r.url.includes('/billing/subscription-checkout')
+        )
+      ).toBe(true);
+    });
+    await waitFor(() => {
+      expect(openSpy).toHaveBeenCalledWith(
+        'https://checkout.stripe.com/c/pay/test-session',
+        '_blank',
+        'noopener,noreferrer'
+      );
+    });
+    openSpy.mockRestore();
   });
 
   it('fails closed to the waitlist view when the check request errors', async () => {

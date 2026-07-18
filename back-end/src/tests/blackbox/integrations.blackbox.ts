@@ -71,6 +71,7 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { prisma } from '../../providers/database';
+import { withComputePoolLock } from './compute-pool-lock.testkit';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -2037,8 +2038,12 @@ async function testClaudeCodeUpload_missingFields() {
 }
 
 async function testClaudeCodeUpload_happyPath() {
-  const payload = { encryptedCredentials: 'test_encrypted_credentials_data' };
-  const encrypted = encryptPayload(payload);
+  // A real envelope that round-trips with the server key — the upload path now
+  // rejects anything it cannot decrypt (see testClaudeCodeUpload_rejectsUndecryptable).
+  const encryptedCredentials = buildCredentialPayload(
+    `sk-ant-oat-happy-${crypto.randomBytes(8).toString('hex')}`
+  );
+  const encrypted = encryptPayload({ encryptedCredentials });
   const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/upload`, {
     method: 'POST',
     headers: authHeaders(ctx.accessToken1!),
@@ -2046,6 +2051,22 @@ async function testClaudeCodeUpload_happyPath() {
   });
   assertStatus(res.status, 200, res.data);
   assertSchema(ClaudeCodeUploadResponse, res.data, 'claude-code happy');
+}
+
+// Regression (RCA 2026-07-17): the upload path stored client ciphertext WITHOUT
+// verifying it decrypts, so a mismatched-keypair client silently inserted garbage
+// that later flooded oaep/parse errors and degraded chat to the paid waterfall.
+// An undecryptable envelope must be rejected at the write boundary (400), never stored.
+async function testClaudeCodeUpload_rejectsUndecryptable() {
+  const { accessToken } = await createAnonSession();
+  const encrypted = encryptPayload({ encryptedCredentials: 'not-a-valid-envelope-' + Date.now() });
+  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/upload`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+    body: JSON.stringify(encrypted),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'claude-code rejects undecryptable envelope');
 }
 
 async function testClaudeCodeToken_notFound() {
@@ -3134,8 +3155,10 @@ async function testPasswordsRequest_basic() {
 
 // 16. Claude Code credentials upload: with encrypted payload
 async function testClaudeCodeCredentials_upload() {
-  const payload = { encryptedCredentials: 'test_encrypted_cred_' + Date.now() };
-  const encrypted = encryptPayload(payload);
+  const encryptedCredentials = buildCredentialPayload(
+    `sk-ant-oat-upload-${crypto.randomBytes(8).toString('hex')}`
+  );
+  const encrypted = encryptPayload({ encryptedCredentials });
   const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/upload`, {
     method: 'POST',
     headers: authHeaders(ctx.accessToken1!),
@@ -3705,9 +3728,14 @@ async function completeOnboarding(userId: string): Promise<void> {
   });
 }
 
+// Snapshot EVERY claude_code/gpt_code row id — not just currently pool-eligible
+// ones. A row that is EXPIRED / poolingEnabled=false at snapshot time can be
+// flipped back to CONNECTED+pooled by a concurrent writer mid-test; excluding
+// all ids up front makes the forced-pool LRU selection deterministic over OUR
+// seeded fixtures regardless of what state pre-existing rows transition to.
 async function existingPoolIds(): Promise<string[]> {
   const rows = await prisma.integration.findMany({
-    where: { name: 'claude_code', poolingEnabled: true, status: 'CONNECTED' },
+    where: { name: 'claude_code' },
     select: { id: true },
   });
   return rows.map((r) => r.id);
@@ -3715,11 +3743,16 @@ async function existingPoolIds(): Promise<string[]> {
 
 async function existingComputePoolIds(): Promise<string[]> {
   const rows = await prisma.integration.findMany({
-    where: { name: { in: ['claude_code', 'gpt_code'] }, poolingEnabled: true, status: 'CONNECTED' },
+    where: { name: { in: ['claude_code', 'gpt_code'] } },
     select: { id: true },
   });
   return rows.map((r) => r.id);
 }
+
+// Cross-process compute-pool mutex: the rotation/lineage/affinity block below
+// seeds pool fixtures and asserts EXACT LRU token selection, which a second
+// suite process sharing this Postgres can otherwise perturb mid-test (see
+// compute-pool-lock.testkit.ts for the full failure analysis).
 
 async function cleanupIntegrations(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
@@ -5420,6 +5453,10 @@ async function runAll() {
     },
     { name: 'POST /claude-code/credentials/upload happy path', fn: testClaudeCodeUpload_happyPath },
     {
+      name: 'POST /claude-code/credentials/upload rejects undecryptable envelope -> 400',
+      fn: testClaudeCodeUpload_rejectsUndecryptable,
+    },
+    {
       name: 'GET /claude-code/credentials/token not found -> 404',
       fn: testClaudeCodeToken_notFound,
     },
@@ -5656,6 +5693,13 @@ async function runAll() {
       name: 'anthropic api-key cooldown -- mark then on-cooldown',
       fn: testAnthropicApiKeyCooldown_markThenOnCooldown,
     },
+  ];
+
+  // Pool-mutating sequential tests: seed/select/disable rows in the SHARED
+  // compute-token pool and assert exact LRU selection. Run under the
+  // cross-process advisory lock (see withComputePoolLock) so a concurrent
+  // suite instance sharing this database cannot perturb pool state mid-test.
+  const pooledSequentialTests: { name: string; fn: () => Promise<void> }[] = [
     {
       name: 'rotation -- user rate-limited falls back to pool',
       fn: testRotation_userRateLimitedFallsBackToPool,
@@ -5724,8 +5768,9 @@ async function runAll() {
     },
   ];
 
+  const boundarySequentialTests: { name: string; fn: () => Promise<void> }[] = [];
   if (ctx.captureAvailable) {
-    sequentialTests.push(
+    boundarySequentialTests.push(
       { name: 'boundary -- create makes no outbound calls', fn: testBoundary_createNoOutbound },
       {
         name: 'boundary -- email/start makes no outbound calls',
@@ -5751,16 +5796,23 @@ async function runAll() {
     );
   }
 
-  console.log(`\nRunning ${sequentialTests.length} sequential tests...`);
+  const totalSequential =
+    sequentialTests.length + pooledSequentialTests.length + boundarySequentialTests.length;
+  console.log(`\nRunning ${totalSequential} sequential tests...`);
   const sequentialResults: TestResult[] = [];
-  for (const test of sequentialTests) {
-    const result = await runTest(test.name, test.fn);
-    sequentialResults.push(result);
-    const icon = result.passed ? '  PASS' : '  FAIL';
-    console.log(
-      `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
-    );
-  }
+  const runSequentialGroup = async (tests: { name: string; fn: () => Promise<void> }[]) => {
+    for (const test of tests) {
+      const result = await runTest(test.name, test.fn);
+      sequentialResults.push(result);
+      const icon = result.passed ? '  PASS' : '  FAIL';
+      console.log(
+        `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
+      );
+    }
+  };
+  await runSequentialGroup(sequentialTests);
+  await withComputePoolLock(() => runSequentialGroup(pooledSequentialTests));
+  await runSequentialGroup(boundarySequentialTests);
 
   // Summary
   const allResults = [...parallelResults, ...sequentialResults];

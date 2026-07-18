@@ -64,6 +64,34 @@ export function decryptCredentialEnvelope(
 }
 
 /**
+ * Verify a client-provided credential envelope actually round-trips with the
+ * server's private key BEFORE it is persisted. The upload path receives ciphertext
+ * the client encrypted with a public key; if that key doesn't match ours (keypair
+ * drift, wrong-env public key, malformed envelope), the ciphertext is unusable
+ * garbage that later floods `oaep`/parse errors and silently degrades every request
+ * for that user to the paid waterfall. Reject at the write boundary instead.
+ *
+ * Returns `{ ok: true }` when the key is unset (cannot validate — do not block), or
+ * when the envelope decrypts to a non-empty plaintext. Returns `{ ok: false, reason }`
+ * when we hold the key but the envelope will not decrypt.
+ */
+export function verifyCredentialEnvelopeDecryptable(
+  encryptedCredentials: string
+): { ok: true } | { ok: false; reason: string } {
+  const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
+  if (!decryptionKey) return { ok: true };
+  const decrypted = decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
+  if (decrypted === null || decrypted.trim() === '') {
+    return {
+      ok: false,
+      reason:
+        'credential envelope does not decrypt to a non-empty payload with the server key (mismatched keypair or malformed envelope)',
+    };
+  }
+  return { ok: true };
+}
+
+/**
  * Result of a Claude Code credential lookup, with tracking metadata so callers
  * can mark the underlying integration rate-limited if the CLI reports
  * exhaustion ("You've hit your limit · resets X:XX (UTC)").
@@ -436,7 +464,14 @@ export async function fetchClaudeCodeAccessToken(userId: string): Promise<string
     if (!encryptedCredentials) return null;
 
     const decrypted = decryptCredentialEnvelope(encryptedCredentials, decryptionKey);
-    if (!decrypted) return null;
+    if (!decrypted) {
+      // Name the culprit so an undecryptable row is attributable (and quarantinable)
+      // instead of only surfacing as an anonymous envelope-decrypt error.
+      log.error(
+        `Undecryptable claude_code credential for user ${userId} (integration ${integration.id}) — quarantine candidate`
+      );
+      return null;
+    }
 
     const parsed = JSON.parse(decrypted);
     const oauth = parsed?.claudeAiOauth;

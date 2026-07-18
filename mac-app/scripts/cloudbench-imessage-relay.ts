@@ -11,12 +11,14 @@
  */
 
 import { extractFile } from '@electron/asar';
-import { createClient } from '@supabase/supabase-js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { IMessageSender } from '../main/services/iMessageSender';
+
+/** Hard cap on the pre-runRelay auto-login fetch so a stalled backend can't eat the relay's heartbeat window. */
+const AUTO_LOGIN_FETCH_TIMEOUT_MS = 15_000;
 
 export interface RelayQueueMessage {
   id: string;
@@ -273,26 +275,55 @@ export async function resolveRelaySession(
   return session;
 }
 
-// Mint a fresh Supabase session for the benchmark user via the documented dev
-// SMS OTP bypass. Used only by the auto-login path so an unauthenticated (or
-// expired) installed Rose app cannot block the live message-person benchmark.
-async function mintSessionViaOtp(
-  supabaseUrl: string,
-  anonKey: string,
+// Mint a fresh session for the benchmark user via the backend's own OTP
+// verification (POST /api/auth/verify-otp), NOT Supabase directly. The dev test
+// OTP (181818) is a backend-level bypass (checkTwilioVerifyOTP auto-approves the
+// test phone) — Supabase never knows it, so a direct Supabase verifyOtp is
+// rejected as "Token expired or invalid". Going through the backend is the only
+// path that honors the documented dev bypass, and it returns the same
+// backend-signed session the app itself uses. Used only by the auto-login path
+// so an unauthenticated (or expired) installed Rose app cannot block the live
+// message-person benchmark.
+export async function mintSessionViaBackendOtp(
+  baseUrl: string,
   credentials: AutoLoginCredentials
 ): Promise<StoredSession> {
-  const client = createClient(supabaseUrl, anonKey, { auth: { persistSession: false } });
-  const { data, error } = await client.auth.verifyOtp({
-    phone: credentials.phone,
-    token: credentials.otp,
-    type: 'sms',
+  // Bound the auto-login fetch so a hung/slow backend (or DNS stall) fails fast
+  // instead of eating the relay's whole heartbeat window and delaying benchmark
+  // startup. This runs before runRelay, so there's no other timeout guarding it.
+  const response = await fetch(`${baseUrl}/api/auth/verify-otp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ phone: credentials.phone, token: credentials.otp }),
+    signal: AbortSignal.timeout(AUTO_LOGIN_FETCH_TIMEOUT_MS),
   });
-  if (error || !data.session?.access_token || !data.session.user?.id) {
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
     throw new Error(
-      `Auto-login failed for ${credentials.phone}: ${error?.message ?? 'no session returned'}`
+      `Auto-login failed for ${credentials.phone}: verify-otp ${response.status} ${detail.slice(0, 200)}`
     );
   }
-  return data.session as StoredSession;
+  const body = (await response.json()) as {
+    session?: {
+      access_token?: string;
+      refresh_token?: string;
+      expires_at?: number;
+      token_type?: string;
+    };
+    user?: { id?: string };
+  };
+  const accessToken = body.session?.access_token;
+  const userId = body.user?.id;
+  if (!accessToken || !userId) {
+    throw new Error(`Auto-login failed for ${credentials.phone}: no session returned`);
+  }
+  return {
+    access_token: accessToken,
+    refresh_token: body.session?.refresh_token,
+    expires_at: body.session?.expires_at,
+    token_type: body.session?.token_type ?? 'bearer',
+    user: { id: userId },
+  };
 }
 
 function envValue(contents: string, key: string): string | undefined {
@@ -305,7 +336,8 @@ function envValue(contents: string, key: string): string | undefined {
 
 export async function loadInstalledRoseSession(
   expectedUserId: string,
-  autoLogin?: AutoLoginCredentials
+  autoLogin?: AutoLoginCredentials,
+  baseUrl?: string
 ): Promise<StoredSession> {
   const appPath = process.env.ROSE_APP_PATH || '/Applications/Rose.app';
   const archive = path.join(appPath, 'Contents/Resources/app.asar');
@@ -330,20 +362,17 @@ export async function loadInstalledRoseSession(
           process.env.ROSE_USER_DATA_DIR ||
           path.join(os.homedir(), 'Library', 'Application Support', 'Rose'),
         encryptionKey,
-        clearInvalidConfig: false,
+        // A corrupt or differently-keyed store should self-heal through the
+        // explicit benchmark auto-login path instead of crashing the relay.
+        clearInvalidConfig: true,
       });
       return store.get('session') as StoredSession | undefined;
     },
     async () => {
-      const supabaseUrl =
-        envValue(productionEnv, 'VITE_SUPABASE_URL') || envValue(productionEnv, 'SUPABASE_URL');
-      const anonKey =
-        envValue(productionEnv, 'VITE_SUPABASE_ANON_KEY') ||
-        envValue(productionEnv, 'SUPABASE_ANON_KEY');
-      if (!supabaseUrl || !anonKey) {
-        throw new Error('Auto-login requires SUPABASE URL + anon key in the installed app env');
+      if (!baseUrl) {
+        throw new Error('Auto-login requires --base-url to reach the backend verify-otp endpoint');
       }
-      return mintSessionViaOtp(supabaseUrl, anonKey, autoLogin as AutoLoginCredentials);
+      return mintSessionViaBackendOtp(baseUrl, autoLogin as AutoLoginCredentials);
     },
     (session) => store?.set('session', session)
   );
@@ -428,7 +457,7 @@ async function main(): Promise<void> {
   const internalApiKey = process.env.BENCHMARK_IMESSAGE_API_KEY?.trim();
   const session = internalApiKey
     ? undefined
-    : await loadInstalledRoseSession(expectedUserId, autoLogin);
+    : await loadInstalledRoseSession(expectedUserId, autoLogin, baseUrl);
   const authentication = relayAuthHeaders(expectedUserId, internalApiKey, session?.access_token);
   const fetchOutcome = async <T>(url: string, init?: RequestInit): Promise<RelayOutcome<T>> => {
     try {

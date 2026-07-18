@@ -37,6 +37,7 @@ export async function createUser(data: {
   userId: string;
   phone?: string;
   name?: string | null;
+  email?: string | null;
   isAnonymous: boolean;
 }) {
   return prisma.user.create({ data });
@@ -47,11 +48,28 @@ export async function createUser(data: {
  */
 export async function updateUser(
   userId: string,
-  data: { phone?: string; name?: string; isAnonymous?: boolean; onboardingCompletedAt?: Date }
+  data: {
+    phone?: string;
+    name?: string;
+    isAnonymous?: boolean;
+    onboardingCompletedAt?: Date;
+  }
 ) {
   return prisma.user.update({
     where: { userId },
     data,
+  });
+}
+
+/**
+ * Backfill the user's email only when none is stored yet. The WHERE guard makes
+ * the check-and-set atomic — if a concurrent request already wrote an email,
+ * this write becomes a no-op instead of clobbering it.
+ */
+export async function backfillUserEmail(userId: string, email: string) {
+  return prisma.user.updateMany({
+    where: { userId, OR: [{ email: null }, { email: '' }] },
+    data: { email },
   });
 }
 

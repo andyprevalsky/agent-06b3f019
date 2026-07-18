@@ -297,6 +297,8 @@ sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
 
 27. **DO NOT KILL OTHER RUN-BENCH TASKS. EVER.** - Cloud benchmark controllers (`run-bench-fleet`, `run-bench-cloud`, `run-bench-hub-poller`) and their children may belong to OTHER workspaces/sessions sharing this machine. Broad kills (`pkill -f run-bench`, `pkill -f flyctl`, `pkill -f benchmark`, killing by port scans, etc.) have repeatedly murdered healthy 28-machine fleets mid-run from the outside. Rules: (a) NEVER pkill by a pattern that could match a benchmark process you did not launch in THIS session; (b) to stop YOUR OWN run, TERM exactly its controller PID (printed at launch; also in its detached log path / run dir) and let its cleanup traps reap machines/volumes — never kill children directly; (c) if a run you don't own looks stuck or abandoned, surface it to the user — killing it is the user's call, not yours. Controllers announce received signals (`⚰️ controller received TERM`) — check the victim's detached log before assuming an infra failure.
 
+28. **Every change must hold at 10k agents** - The design target is 10,000 concurrent agents. Before shipping ANY change, ask "what happens to this at 10k agents?" and reject designs that degrade with agent count. Concretely: no per-user/per-root fan-in that funnels many agents' traffic through one channel, connection, subscription, row, lock, or in-memory structure (e.g. broadcasting every agent's realtime stream onto a shared `user:<userId>` topic is a firehose that melts at scale — keep per-agent isolation like `agent:<id>`); no unbounded per-agent polling, N+1 queries, full-table scans, or O(agents) work on a hot path; no shared mutable state, global counter, or single-writer bottleneck that every agent contends on; no realtime/broadcast/DB pattern whose cost grows with the number of agents a user or tree owns rather than with the one agent being acted on. Prefer per-agent isolation, bounded/backpressured work, sharded/keyed resources, and derive-don't-accumulate. A fix that resolves a 1-agent symptom but scales O(agents) is not a fix — state the 10k-agent behavior of your change (channels opened, subscriptions held, rows/queries per agent, bytes per broadcast, lock contention) in the RCA/PR before merging.
+
 ## Plans
 
 All implementation plans live in `docs/plans/` (checked into the repo):
@@ -388,6 +390,21 @@ Env vars are in `back-end/.env`:
 - `RENDER_API_KEY` - Render API token
 - `RENDER_SERVICE_ID` - `srv-d3jga77diees73cgrvk0`
 - `RENDER_OWNER_ID` - `tea-csppgi56l47c73djvpig`
+
+### Prod health / latency dashboard (golden signals)
+
+**"Is the backend slow right now?"** → one call: `cd back-end && npx tsx scripts/prod-health.ts`. It pulls Render request logs for a window and prints the four golden signals in a single view: **latency** (per-endpoint p50/p90/p99/max, routes templatized so `/api/agents/<uuid>` aggregates), **traffic** (req counts), **errors** (4xx/5xx per route + total), and **saturation** (slowest Prisma ops + a `EMAXCONN`/max-connection banner and deploy/instance state). Each endpoint's p90 is diffed against a rolling historical baseline the script persists to `scripts/.prod-health-history.jsonl` (gitignored) and appends to on every run — so `▲ +180%` flags a real regression vs. normal.
+
+```bash
+npx tsx scripts/prod-health.ts               # last 30m vs history
+npx tsx scripts/prod-health.ts --window 2h   # wider window
+npx tsx scripts/prod-health.ts --top 30      # more routes
+npx tsx scripts/prod-health.ts --json        # machine-readable (for scripting/alerts)
+npx tsx scripts/prod-health.ts --history     # inspect the stored baseline
+npx tsx scripts/prod-health.ts --no-record   # don't append this run to history
+```
+
+Reads `RENDER_*` from `back-end/.env`; backs off on Render's log-API 429s. Typical culprit for a p99 spike with a pool-saturation banner: a Render deploy cutover (old+new instance Prisma pools exceed the Supabase pooler client cap → queries queue to Prisma's ~30s pool-acquisition timeout → `EMAXCONN`). Guarded since 2026-07: `providers/database.ts` derives `connection_limit` from the pooler budget (`POOLER_MAX_CLIENT_CONN`, set to 1000 on Render for the XL compute tier; code default 400) minus the fast-cache pool (`FAST_CACHE_DB_POOL`), cemented by `src/tests/structural/db-pool-invariant.test.ts`. DB is Supabase XL (4 dedicated cores, 16GB, `max_connections=240`, Supavisor `pool_size=60`).
 
 ## Production Env Vars
 

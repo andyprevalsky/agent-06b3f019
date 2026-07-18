@@ -505,7 +505,6 @@
     },
     "tool_count_scope": "root",
     "tags": [
-      "smoke",
       "approval"
     ],
     "price_limit_cents": 50,

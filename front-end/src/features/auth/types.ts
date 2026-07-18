@@ -15,6 +15,8 @@ export interface ProtectedRouteProps {
 export interface PhoneStepProps {
   phone: string;
   onPhoneChange: (value: string) => void;
+  email: string;
+  onEmailChange: (value: string) => void;
   loading: boolean;
   onSubmit: (e: React.FormEvent) => Promise<void>;
   onClose: () => void;

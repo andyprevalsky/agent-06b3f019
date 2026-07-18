@@ -24,6 +24,21 @@ export { sendTwilioVerifyOTP, checkTwilioVerifyOTP, findOrCreateSupabaseUser };
 
 const log = createLogger('Auth');
 
+/**
+ * Normalize an optional email captured at login. Trims whitespace and lowercases;
+ * returns undefined for empty/whitespace-only or clearly malformed values so we
+ * never persist junk. Email is optional, so an invalid value is dropped silently
+ * rather than failing the login.
+ */
+function normalizeEmail(email: string | undefined): string | undefined {
+  if (email === undefined) return undefined;
+  const trimmed = email.trim().toLowerCase();
+  if (trimmed === '') return undefined;
+  // Minimal shape check: something@something.tld with no spaces.
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) return undefined;
+  return trimmed;
+}
+
 // ---------------------------------------------------------------------------
 // Resource merging
 // ---------------------------------------------------------------------------
@@ -113,23 +128,27 @@ async function handleNewUser(
   phone: string,
   firstName: string | undefined,
   lastName: string | undefined,
+  email: string | undefined,
   anonymousUserId: string | undefined
 ): Promise<void> {
   const nameParts = [firstName, lastName].filter(
     (part): part is string => part !== undefined && part !== ''
   );
   const fullName = nameParts.length > 0 ? nameParts.join(' ') : null;
+  const normalizedEmail = normalizeEmail(email);
 
   await repo.createUser({
     userId,
     phone,
     name: fullName,
+    email: normalizedEmail ?? null,
     isAnonymous: false,
   });
   log.info('Created user record', {
     user_id: userId,
     phone: phone.slice(0, -4) + '****',
     name: fullName ?? undefined,
+    hasEmail: normalizedEmail !== undefined,
   });
 
   try {
@@ -154,6 +173,7 @@ async function handleExistingUser(
   phone: string,
   firstName: string | undefined,
   lastName: string | undefined,
+  email: string | undefined,
   anonymousUserId: string | undefined
 ): Promise<void> {
   const updates: { phone?: string; name?: string; isAnonymous?: boolean } = {};
@@ -172,6 +192,18 @@ async function handleExistingUser(
     const fullName = nameParts.join(' ');
     if (fullName !== '') {
       updates.name = fullName;
+    }
+  }
+
+  // Only backfill email when the user doesn't already have one — never clobber.
+  // The write is guarded atomically in the repo (conditional updateMany), so a
+  // concurrent verify-otp that already stored an email can't be overwritten by
+  // this request's stale read.
+  if (existingUser.email === null || existingUser.email === '') {
+    const normalizedEmail = normalizeEmail(email);
+    if (normalizedEmail !== undefined) {
+      await repo.backfillUserEmail(userId, normalizedEmail);
+      log.info('Backfilled user email', { user_id: userId });
     }
   }
 
@@ -194,7 +226,8 @@ async function handleExistingUser(
     });
   } else if (Object.keys(updates).length > 0) {
     await repo.updateUser(userId, updates);
-    log.info('Updated user', { user_id: userId, updates: JSON.stringify(updates) });
+    // Log field names only — `updates` can carry PII (email, name).
+    log.info('Updated user', { user_id: userId, updatedFields: Object.keys(updates).join(',') });
   } else {
     log.info('User already exists and is authenticated', { user_id: userId });
   }
@@ -224,8 +257,9 @@ export async function verifyOtpAndInitUser(params: {
   anonymousUserId?: string;
   firstName?: string;
   lastName?: string;
+  email?: string;
 }): Promise<VerifyOtpSuccess | VerifyOtpFailure> {
-  const { phone, token, anonymousUserId, firstName, lastName } = params;
+  const { phone, token, anonymousUserId, firstName, lastName, email } = params;
 
   const verifyResult = await checkTwilioVerifyOTP(phone, token);
 
@@ -249,9 +283,17 @@ export async function verifyOtpAndInitUser(params: {
   const existingUser = await repo.findUserById(userId);
 
   if (existingUser === null) {
-    await handleNewUser(userId, phone, firstName, lastName, anonymousUserId);
+    await handleNewUser(userId, phone, firstName, lastName, email, anonymousUserId);
   } else {
-    await handleExistingUser(existingUser, userId, phone, firstName, lastName, anonymousUserId);
+    await handleExistingUser(
+      existingUser,
+      userId,
+      phone,
+      firstName,
+      lastName,
+      email,
+      anonymousUserId
+    );
   }
 
   return {
