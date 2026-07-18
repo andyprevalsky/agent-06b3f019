@@ -15,11 +15,10 @@
  *   background-clip:text, with the frame's whitespace filled by shimmering
  *   glyphs so the pill is fully packed. A transparent button with a 1px rose
  *   border sits on top, centered on the animation (CTA_PILL.shiftY offsets).
- *   The button reveals its label on hover via a pure-CSS vertical roll: at rest
- *   an arrow glyph shows; on hover the arrow rolls up out of the capsule while
- *   the label rolls up into place (group-hover), the border warms, and a scrim
- *   fades in so the label reads over the bright glyphs. No React state — the
- *   whole reveal is CSS group-hover, so it doesn't touch the ANIMATING machine.
+ *   The button label stays visible across mouse, keyboard, and touch input; a
+ *   static scrim keeps it legible over the bright glyphs while the border warms
+ *   on hover/focus. The CTA has no React state, so it does not touch the
+ *   ANIMATING machine.
  */
 
 import { useEffect, useState } from 'react';
@@ -132,16 +131,12 @@ const CTA_SHADOW_STYLE: React.CSSProperties = {
   opacity: 0.7,
 };
 
-// Both the rest-state arrow and the revealed label are plain white glyphs — a
-// solid text-shadow keeps them legible over the bright rose pill without the
-// chrome gradient competing with the animation behind them.
+// The always-visible label is plain white; a solid text-shadow keeps it legible
+// over the bright rose pill without competing with the animation behind it.
 const CTA_GLYPH_STYLE: React.CSSProperties = {
   color: '#ffffff',
   textShadow: '0 1px 5px rgba(0, 0, 0, 0.9), 0 0 1px rgba(0, 0, 0, 0.9)',
 };
-
-// Ease + timing shared by the arrow/label roll so they move as one unit.
-const CTA_ROLL = 'transition-[transform,opacity] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]';
 
 function AsciiCtaOverlay({
   frame,
@@ -179,36 +174,26 @@ function AsciiCtaOverlay({
         onClick={cta.onClick}
         data-testid="opening-join-waitlist"
         aria-label={cta.label}
-        className="group pointer-events-auto absolute left-1/2 -translate-x-1/2 -translate-y-1/2 grid place-items-center overflow-hidden rounded-full border border-[#E062CC]/60 bg-transparent transition-colors duration-200 hover:border-[#FF4069]/90 focus-visible:border-[#FF4069]/90"
+        className="pointer-events-auto absolute left-1/2 -translate-x-1/2 -translate-y-1/2 grid place-items-center rounded-full border border-[#E062CC]/60 bg-transparent transition-colors duration-200 hover:border-[#FF4069]/90 focus-visible:border-[#FF4069]/90"
         style={{
           top: `calc(50% + ${CTA_PILL.shiftY}px)`,
           width: CTA_PILL.width,
           height: CTA_PILL.height,
         }}
       >
-        {/* Legibility scrim — darkens the pill center on hover so the white
-            label reads over the bright rose glyphs. */}
+        {/* Legibility scrim — always darkens the pill center so the static
+            white label reads over the bright rose glyphs. */}
         <span
           aria-hidden
-          className="pointer-events-none absolute inset-0 rounded-full opacity-0 transition-opacity duration-300 group-hover:opacity-100 group-focus-visible:opacity-100"
+          className="pointer-events-none absolute inset-0 rounded-full"
           style={{
             background:
               'radial-gradient(ellipse 72% 92% at 50% 50%, rgba(0,0,0,0.55), rgba(0,0,0,0) 74%)',
           }}
         />
-        {/* Rest state: arrow rolls up and out on hover. */}
-        <span
-          aria-hidden
-          data-testid="opening-join-icon"
-          className={`[grid-area:1/1] text-base font-semibold ${CTA_ROLL} group-hover:-translate-y-[150%] group-hover:opacity-0 group-focus-visible:-translate-y-[150%] group-focus-visible:opacity-0`}
-          style={CTA_GLYPH_STYLE}
-        >
-          →
-        </span>
-        {/* Hover state: label rolls up into place. */}
         <span
           data-testid="opening-join-label"
-          className={`[grid-area:1/1] translate-y-[150%] whitespace-nowrap text-sm font-bold tracking-wide opacity-0 ${CTA_ROLL} group-hover:translate-y-0 group-hover:opacity-100 group-focus-visible:translate-y-0 group-focus-visible:opacity-100`}
+          className="[grid-area:1/1] whitespace-nowrap text-sm font-bold tracking-wide"
           style={CTA_GLYPH_STYLE}
         >
           {cta.label}
