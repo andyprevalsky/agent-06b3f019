@@ -3521,6 +3521,53 @@ def test_launcher_detects_dead_onbox_driver() -> None:
     assert "last 40 lines of stack log" in run
 
 
+def test_dead_driver_refetches_durable_done_before_infra(tmp_path: Path) -> None:
+    """RCA (2026-07-17): a benchmark finished and durably wrote its tokenized
+    result + DONE marker, but the collector's preceding bench.log GET failed.
+    The next /driver-health probe returned 410, and the collector immediately
+    classified the run as dead-driver infra without refetching the durable log.
+    Require a bounded reconnect/refetch before that classification so a genuine
+    terminal verdict cannot become NORESULT because of a transport race."""
+    cloud = CLOUD_SCRIPT.read_text()
+    recovery = _extract_fleet_function(
+        cloud, "recover_terminal_marker_after_dead_driver() {"
+    )
+    ssh_log = tmp_path / "bench.log"
+    read_state = tmp_path / "read-count"
+    script = f"""
+{recovery}
+ensure_status_proxy() {{ :; }}
+read_bench_log() {{
+    count=0
+    [ ! -f "$READ_STATE" ] || count="$(cat "$READ_STATE")"
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$READ_STATE"
+    [ "$count" -gt 1 ] || return 1
+    printf '%s\n' 'report payload' "$DONE_MARKER exit=1"
+}}
+SSH_LOG="$1"
+READ_STATE="$2"
+DONE_MARKER='::CLOUDBENCH-DONE:: token=race-token'
+FINISHED=0
+BENCH_EXIT=''
+CLOUDBENCH_DEAD_DRIVER_FINAL_READ_ATTEMPTS=2
+CLOUDBENCH_DEAD_DRIVER_FINAL_READ_SLEEP_SECONDS=0
+recover_terminal_marker_after_dead_driver
+printf 'finished=%s exit=%s reads=%s\n' "$FINISHED" "$BENCH_EXIT" "$(cat "$READ_STATE")"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script, "recover", str(ssh_log), str(read_state)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "finished=1 exit=1 reads=2" in result.stdout
+    assert "recover_terminal_marker_after_dead_driver" in cloud
+    dead_branch = cloud.split('if [ "$driver_health" = "dead" ]; then', 1)[1]
+    assert "recover_terminal_marker_after_dead_driver" in dead_branch.split("fi", 1)[0]
+
+
 def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     """RCA (2026-07-15): the fleet's SSH-pull design (each of 30 boxes ssh_read-
     polling /data/bench.log every few seconds) saturates Fly's Machines-API rate

@@ -2504,6 +2504,31 @@ probe_driver_health() {
         *) return 20 ;;
     esac
 }
+recover_terminal_marker_after_dead_driver() {
+    # A driver can finish and append its tokenized DONE marker between a failed
+    # bench.log GET and the following health probe. A 410 proves only that the
+    # driver is gone; it does not prove that no terminal result was durably
+    # written. Reconnect and refetch before classifying the run as infra.
+    local attempts="${CLOUDBENCH_DEAD_DRIVER_FINAL_READ_ATTEMPTS:-5}"
+    local retry_sleep="${CLOUDBENCH_DEAD_DRIVER_FINAL_READ_SLEEP_SECONDS:-1}"
+    local attempt remote_log
+    for attempt in $(seq 1 "$attempts"); do
+        ensure_status_proxy >/dev/null 2>&1 || true
+        if remote_log="$(read_bench_log 2>/dev/null)"; then
+            printf '%s' "$remote_log" > "$SSH_LOG"
+            if grep -aq "$DONE_MARKER" "$SSH_LOG" 2>/dev/null; then
+                FINISHED="1"
+                BENCH_EXIT="$(grep -aoE "${DONE_MARKER} exit=[0-9]+" "$SSH_LOG" \
+                    | tail -1 | grep -oE '[0-9]+$' || echo '')"
+                return 0
+            fi
+        fi
+        if [ "$attempt" -lt "$attempts" ] && [ "$retry_sleep" != "0" ]; then
+            sleep "$retry_sleep"
+        fi
+    done
+    return 1
+}
 probe_machine_liveness() {  # 0=started, 10=explicitly not running, 20=unknown
     local machines state
     machines="$(_with_timeout 10 flyctl machines list -a "$APP" --json 2>/dev/null)" || return 20
@@ -2592,6 +2617,10 @@ while :; do
                 sleep 1
             done
             if [ "$driver_health" = "dead" ]; then
+                if recover_terminal_marker_after_dead_driver; then
+                    echo "✅ recovered durable terminal marker after the on-box driver exited."
+                    break
+                fi
                 echo "❌ on-box driver confirmed dead after ${DRIVER_STALL_SECONDS}s without progress -- bring-up (infra) failure; stopping this box so the fleet can proceed."
                 DRIVER_DIED="1"; BENCH_EXIT="1"
                 break
