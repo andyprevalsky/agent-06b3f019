@@ -279,11 +279,36 @@ export async function waitForTemporalWorkflow(agentId: string, timeoutMs: number
   const deadline = Date.now() + timeoutMs;
   let lastState = 'not fetched';
 
+  // Each poll gets its own short timeout so a single stalled socket (the
+  // concurrent Playwright browser is streaming a live cloud agent and can
+  // saturate the shared origin / event loop) can't consume the whole budget.
+  // A stall or transient 404 is retried — the backend persists
+  // temporal_workflow_id within a few seconds, so any healthy poll in the
+  // window resolves it.
+  const PER_REQUEST_TIMEOUT_MS = 2_500;
+  const POLL_INTERVAL_MS = 150;
+
   while (Date.now() < deadline) {
-    const res = await fetch(`${BACKEND_URL}/api/agents/${agentId}`, {
-      headers: { 'X-API-Key': TEST_API_KEY, 'X-User-Id': userId },
-    });
-    const data = await parseJsonResponse(res);
+    const url = `${BACKEND_URL}/api/agents/${agentId}`;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        headers: { 'X-API-Key': TEST_API_KEY, 'X-User-Id': userId },
+        signal: AbortSignal.timeout(PER_REQUEST_TIMEOUT_MS),
+      });
+    } catch (err) {
+      // Aborted (per-request timeout) or transient network error — retry.
+      lastState = `fetch-error ${err instanceof Error ? err.message : String(err)}`;
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      continue;
+    }
+    const rawBody = await res.text();
+    let data: Record<string, unknown>;
+    try {
+      data = rawBody ? (JSON.parse(rawBody) as Record<string, unknown>) : {};
+    } catch {
+      data = { raw: rawBody };
+    }
     const agent = data.agent as
       { temporal_workflow_id?: unknown; status?: unknown; status_message?: unknown } | undefined;
     const workflowId = agent?.temporal_workflow_id;
@@ -300,7 +325,7 @@ export async function waitForTemporalWorkflow(agentId: string, timeoutMs: number
     if (agent?.status === 'FAILED' || agent?.status === 'CANCELLED') {
       throw new Error(`Agent ${agentId} terminated before Temporal startup: ${lastState}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 
   throw new Error(
