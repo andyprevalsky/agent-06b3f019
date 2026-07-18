@@ -83,6 +83,7 @@ CLOUDBENCH_START_BARRIER="${CLOUDBENCH_START_BARRIER:-}"
 CLOUDBENCH_BARRIER_TOKEN="${CLOUDBENCH_BARRIER_TOKEN:-}"
 CLOUDBENCH_STATUS_PORT="${CLOUDBENCH_STATUS_PORT:-8011}"
 CLOUDBENCH_RUN_TOKEN="${CLOUDBENCH_RUN_TOKEN:-}"
+STACK_SEED_DUMP="${CLOUDBENCH_SEED_DUMP_PATH:-/data/cloudbench-cache/victoria-seed.dump}"
 
 if [ -n "$CLOUDBENCH_RUN_TOKEN" ]; then
     case "$CLOUDBENCH_RUN_TOKEN" in
@@ -106,6 +107,21 @@ log() { echo "[cloudbench $(date -u +%H:%M:%S)] $*"; }
 # Step markers: STEP <name> lines are machine-parseable timing boundaries for
 # scripts/cloudbench-bring-up-report.py — isolate each bring-up step's cost.
 step() { log "STEP $*"; }
+
+stack_wait_budget_seconds() {
+    local warm_budget first_run_budget
+    warm_budget="${CLOUDBENCH_STACK_WAIT_SECONDS:-900}"
+    first_run_budget="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"
+    # A newly cloned replacement guest has no persistent seed dump. Its first
+    # production sync is bounded but can legitimately exceed the warm guest's
+    # 900-second startup budget; subsequent claims restore the dump and retain
+    # the tighter deadline.
+    if [ ! -s "$STACK_SEED_DUMP" ] && [ "$first_run_budget" -gt "$warm_budget" ]; then
+        printf '%s\n' "$first_run_budget"
+    else
+        printf '%s\n' "$warm_budget"
+    fi
+}
 
 run_with_heartbeat() {
     local label="$1" command_pid interval
@@ -461,7 +477,7 @@ STACK_ENV=(
     # Warm-start cache: run.sh restores this /data dump (persists across stop/start
     # + fork) instead of the ~50s push+seed when the schema is unchanged. First run
     # on a machine seeds + writes it; later claims restore in seconds.
-    "BENCHMARK_SEED_DUMP=/data/cloudbench-cache/victoria-seed.dump"
+    "BENCHMARK_SEED_DUMP=$STACK_SEED_DUMP"
     "WMH_MODEL_NAME=$WMH_MODEL_NAME"
     "WMH_BUILD_DIR=$WMH_DIR"
     "BENCHMARK_SKIP_WMH_DELTA=1"
@@ -528,9 +544,15 @@ HEALTH_PORT=$((BASE_PORT + 2))
 log "waiting for stack to become healthy (services.json + backend + worker + WMH)..."
 STACK_READY=false
 STATUS="none"
-# No WMH build on this path (cached model served verbatim), so the stack comes up
-# fast — this ceiling only covers boot + DB seed + serve. Default 900s.
-STACK_WAIT_SECONDS="${CLOUDBENCH_STACK_WAIT_SECONDS:-900}"
+# No WMH build happens on this path (the cached model is served verbatim). Warm
+# guests keep a 900s ceiling; a newly cloned guest without the persistent seed
+# dump gets a bounded 1800s first-run ceiling for production sync + DB dump +
+# service startup. The live red case finished seeding at t+900s and was killed at
+# t+901s by the former single deadline.
+STACK_WAIT_SECONDS="$(stack_wait_budget_seconds)"
+if [ ! -s "$STACK_SEED_DUMP" ]; then
+    log "first-run seed dump absent — using cold stack health budget ${STACK_WAIT_SECONDS}s"
+fi
 for i in $(seq 1 "$STACK_WAIT_SECONDS"); do
     if ! kill -0 "$STACK_PID" 2>/dev/null; then
         # Capture the ACTUAL death cause. "see stack log above" was a dead end at
@@ -641,7 +663,7 @@ export ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1
 export CONDUCTOR_WORKSPACE_NAME='$WORKSPACE_NAME'
 export CONDUCTOR_PORT='$BASE_PORT'
 export TEMPORAL_TASK_QUEUE='navi-agent-tasks-$WORKSPACE_NAME'
-export BENCHMARK_SEED_DUMP='/data/cloudbench-cache/victoria-seed.dump'
+export BENCHMARK_SEED_DUMP='$STACK_SEED_DUMP'
 if [ -n '$BENCHMARK_FAST_MODE_CACHE' ]; then
   export BENCHMARK_FAST_MODE_CACHE='$BENCHMARK_FAST_MODE_CACHE'
 fi

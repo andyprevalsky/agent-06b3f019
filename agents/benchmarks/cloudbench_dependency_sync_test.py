@@ -520,6 +520,52 @@ def test_driver_clears_snapshot_reports_before_any_failing_setup_step() -> None:
     )
 
 
+def test_cold_fleet_guest_gets_a_first_run_stack_budget(tmp_path: Path) -> None:
+    """RCA (2026-07-17): a replacement fleet guest legitimately spent more
+    than the warm guest's fixed 900-second health deadline performing its first
+    production seed. It completed the seed at the deadline, then the driver
+    killed the stack before services could start, yielding a REAL NORESULT.
+
+    A guest without the persistent seed dump must get the bounded cold-start
+    budget; once the dump exists, subsequent claims retain the tighter warm
+    budget. Explicit operator overrides remain authoritative.
+    """
+    driver = DRIVER_SCRIPT.read_text()
+    helper = _extract_fleet_function(driver, "stack_wait_budget_seconds() {")
+    seed_dump = tmp_path / "victoria-seed.dump"
+
+    def budget(*, cold: bool, env: dict[str, str] | None = None) -> int:
+        if not cold:
+            seed_dump.write_bytes(b"valid seed")
+        elif seed_dump.exists():
+            seed_dump.unlink()
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'{helper}\nSTACK_SEED_DUMP="$1"\nstack_wait_budget_seconds',
+                "budget",
+                str(seed_dump),
+            ],
+            env={**os.environ, **(env or {})},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return int(result.stdout.strip())
+
+    assert budget(cold=True) >= 1800
+    assert budget(cold=False) == 900
+    assert budget(
+        cold=True,
+        env={
+            "CLOUDBENCH_STACK_WAIT_SECONDS": "120",
+            "CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS": "321",
+        },
+    ) == 321
+
+
 def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> None:
     driver = DRIVER_SCRIPT.read_text()
     cloud = CLOUD_SCRIPT.read_text()
