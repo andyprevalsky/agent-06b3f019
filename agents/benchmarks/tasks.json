@@ -906,7 +906,7 @@
     "name": "browser-agent",
     "title": "Browser Agent Shopping",
     "description": "Live Amazon shopping: buy a black beanie under $35 through the cart path (no Buy Now)",
-    "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed.",
+    "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed. The browser tool is synchronous: use its final returned purchase result and finish the task; never treat a spawned acknowledgement as completion or call wait_for for the browser tool.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
@@ -965,7 +965,7 @@
     "name": "browser-agent-amazon-cookie-payment",
     "title": "Amazon Cookie Auth Payment Write Lock",
     "description": "Buy a qualifying Amazon beanie through the normal cart path and complete the purchase.",
-    "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed.",
+    "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed. The browser tool is synchronous: use its final returned purchase result and finish the task; never treat a spawned acknowledgement as completion or call wait_for for the browser tool.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [

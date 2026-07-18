@@ -47,14 +47,9 @@ def test_every_benchmark_run_registers_in_app_hub_before_execution():
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    prior = {
-        name: os.environ.get(name)
-        for name in ("BENCHMARK_HUB_UPLOAD_URL", "BENCHMARK_HUB_API_KEY")
-    }
+    prior = {name: os.environ.get(name) for name in ("BENCHMARK_HUB_UPLOAD_URL", "BENCHMARK_HUB_API_KEY")}
     try:
-        os.environ["BENCHMARK_HUB_UPLOAD_URL"] = (
-            f"http://127.0.0.1:{server.server_address[1]}"
-        )
+        os.environ["BENCHMARK_HUB_UPLOAD_URL"] = f"http://127.0.0.1:{server.server_address[1]}"
         os.environ["BENCHMARK_HUB_API_KEY"] = "blackbox-key"
         bundle = {
             "run_id": "blackbox-visible-run",
@@ -187,7 +182,7 @@ def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success()
     assert 'BENCHMARK_IMESSAGE_API_KEY="$CLOUDBENCH_API_KEY"' in controller
     assert "bridge heartbeat established" in controller
     assert "IMESSAGE_RELAY_OK" in controller
-    assert '.vm.${APP}.internal' in controller
+    assert ".vm.${APP}.internal" in controller
     assert "cat '$REMOTE_REPO/.context/cloudbench/run.json'" in controller
     assert "BENCH_EXIT:-1" in controller
     assert 'RUN_PASS_OK" = "1' in controller
@@ -621,9 +616,7 @@ async def test_edge_warmup_requires_explicit_research_port():
 
 def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     """The deploy lifecycle helper must provision its declared sandbox float gate."""
-    helper = (
-        Path(__file__).resolve().parents[3] / "scripts" / "run-agentcard-lifecycle-task.sh"
-    ).read_text()
+    helper = (Path(__file__).resolve().parents[3] / "scripts" / "run-agentcard-lifecycle-task.sh").read_text()
 
     assert 'if [ "$BOOTSTRAP_FLAG" = "--bootstrap" ]' in helper
     assert "scripts/setup-benchmark-payment.ts" in helper
@@ -734,13 +727,7 @@ def test_payment_receipt_tax_rate_qualifier_preserves_exact_amount():
         start_phase="execute",
         expected_payment_receipt={"fees": [{"label": "Tax", "amountCents": 297}]},
     )
-    request = {
-        "metadata": {
-            "requestPaymentCard": {
-                "fees": [{"label": "Tax (8.25%)", "amountCents": 297}]
-            }
-        }
-    }
+    request = {"metadata": {"requestPaymentCard": {"fees": [{"label": "Tax (8.25%)", "amountCents": 297}]}}}
 
     assert _validate_payment_receipt(task, request) is None
     request["metadata"]["requestPaymentCard"]["fees"][0]["amountCents"] = 298
@@ -780,13 +767,12 @@ def test_payment_lifecycle_validation_cross_checks_nested_provider_state():
         "attention": {"openKinds": [], "resolvedKinds": []},
     }
 
-    assert _validate_payment_lifecycle(
-        task, {"_benchmark": {"payment_lifecycle": lifecycle}}
-    ) is None
+    assert _validate_payment_lifecycle(task, {"_benchmark": {"payment_lifecycle": lifecycle}}) is None
     lifecycle["orgTransfer"]["releasedCents"] = 4396
-    assert _validate_payment_lifecycle(
-        task, {"_benchmark": {"payment_lifecycle": lifecycle}}
-    ) == "payment_lifecycle.orgTransfer.releasedCents mismatch: expected 0, got 4396"
+    assert (
+        _validate_payment_lifecycle(task, {"_benchmark": {"payment_lifecycle": lifecycle}})
+        == "payment_lifecycle.orgTransfer.releasedCents mismatch: expected 0, got 4396"
+    )
 
 
 async def test_abandonment_waits_for_cron_reconciliation():
@@ -925,9 +911,7 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     assert task.expected_payment_lifecycle["purchase"]["status"] == "CLEARED"
     assert task.expected_payment_lifecycle["walletFunding"]["status"] == "CONSUMED"
     assert task.expected_payment_lifecycle["orgTransfer"]["livemode"] is False
-    assert _validate_payment_lifecycle(task, {"_benchmark": {}}) == (
-        "missing payment lifecycle snapshot"
-    )
+    assert _validate_payment_lifecycle(task, {"_benchmark": {}}) == ("missing payment lifecycle snapshot")
 
     idempotency = get_task_by_name("agent-payment-idempotent-abandonment")
     assert idempotency.expected_tools == ["spawn_browser_agent"]
@@ -958,9 +942,7 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     assert production.expected_payment_lifecycle["orgTransfer"]["livemode"] is True
     assert production.name not in {task.name for task in suite_tasks()}
 
-    assert [
-        task.name for task in get_tasks_by_tag("agentcard-lifecycle-sandbox")
-    ] == [
+    assert [task.name for task in get_tasks_by_tag("agentcard-lifecycle-sandbox")] == [
         "agent-payment-test-shop",
         "agent-payment-setup-resume",
         "agent-payment-idempotent-abandonment",
@@ -1023,11 +1005,7 @@ def test_agentcard_setup_attention_is_not_auto_approved():
     )
     assert not _should_auto_approve_attention(
         task,
-        {
-            "metadata": {
-                "attentionKind": "agentcard_user_cardholder_onboarding_required"
-            }
-        },
+        {"metadata": {"attentionKind": "agentcard_user_cardholder_onboarding_required"}},
     )
 
 
@@ -1068,9 +1046,7 @@ def test_ecommerce_attention_kind_rejects_auth_blocker():
 
     task = _required_ecommerce_judge_task()
     auth_request = {"metadata": {"attentionKind": "auth_assistance"}}
-    write_lock_request = {
-        "metadata": {"requestUserApproval": {"writePermission": True}}
-    }
+    write_lock_request = {"metadata": {"requestUserApproval": {"writePermission": True}}}
 
     assert _attention_request_matches_task(task, auth_request) is False
     assert _attention_request_matches_task(task, write_lock_request) is True
@@ -1433,20 +1409,10 @@ def test_approval_request_details_can_require_item_name_and_amount():
             }
         ]
     }
-    good = {
-        "_benchmark": {
-            "attention_requests_seen": [
-                {"question": "Buy the Black Knit Beanie for $19.99?"}
-            ]
-        }
-    }
+    good = {"_benchmark": {"attention_requests_seen": [{"question": "Buy the Black Knit Beanie for $19.99?"}]}}
     assert _run_declared_static_check(evaluator, good)[0] is True
 
-    missing_amount = {
-        "_benchmark": {
-            "attention_requests_seen": [{"question": "Buy the Black Knit Beanie?"}]
-        }
-    }
+    missing_amount = {"_benchmark": {"attention_requests_seen": [{"question": "Buy the Black Knit Beanie?"}]}}
     passed, reason = _run_declared_static_check(evaluator, missing_amount)
     assert passed is False
     assert "amount" in reason.lower()
@@ -1458,6 +1424,8 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
 
     task = get_task_by_name("browser-agent-amazon-cookie-payment")
     assert task.description.endswith("complete the purchase.")
+    assert "never treat a spawned acknowledgement as completion" in task.prompt
+    assert "call wait_for" in task.prompt
     assert task.approval_handling == "auto_approve"
     assert task.expected_attention_kind == "write_lock"
     assert task.expected_approval_count == 1
@@ -1478,9 +1446,7 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
         "approval_request_details",
     }
     approval_check = next(
-        check
-        for check in task.evaluators[0]["checks"]
-        if check["type"] == "approval_request_details"
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
     )
     assert approval_check["required_strings"] == ["beanie"]
     assert approval_check["require_amount"] is True
@@ -1518,11 +1484,7 @@ def test_alchemy_sauna_catalog_requires_single_clean_completed_booking():
         "approval_request_count",
         "approval_request_details",
     }
-    approval_check = next(
-        check
-        for check in static_evaluator["checks"]
-        if check["type"] == "approval_request_details"
-    )
+    approval_check = next(check for check in static_evaluator["checks"] if check["type"] == "approval_request_details")
     assert approval_check["required_strings"] == ["Alchemy Springs", "Sauna Garden"]
     assert approval_check["require_date"] is True
     assert approval_check["require_time"] is True
@@ -1596,11 +1558,7 @@ def test_approval_request_details_support_multiple_dates_and_seat():
     assert _run_declared_static_check(stay_evaluator, complete_stay)[0] is True
 
     incomplete_stay = {
-        "_benchmark": {
-            "attention_requests_seen": [
-                {"question": "Book Hotel Kabuki?", "checkIn": "2026-07-18"}
-            ]
-        }
+        "_benchmark": {"attention_requests_seen": [{"question": "Book Hotel Kabuki?", "checkIn": "2026-07-18"}]}
     }
     passed, reason = _run_declared_static_check(stay_evaluator, incomplete_stay)
     assert passed is False
@@ -1616,21 +1574,11 @@ def test_approval_request_details_support_multiple_dates_and_seat():
         ]
     }
     assigned_seat = {
-        "_benchmark": {
-            "attention_requests_seen": [
-                {"question": "Buy one AMC Metreon 16 ticket in seat H10?"}
-            ]
-        }
+        "_benchmark": {"attention_requests_seen": [{"question": "Buy one AMC Metreon 16 ticket in seat H10?"}]}
     }
     assert _run_declared_static_check(seat_evaluator, assigned_seat)[0] is True
 
-    missing_seat = {
-        "_benchmark": {
-            "attention_requests_seen": [
-                {"question": "Buy one AMC Metreon 16 ticket?"}
-            ]
-        }
-    }
+    missing_seat = {"_benchmark": {"attention_requests_seen": [{"question": "Buy one AMC Metreon 16 ticket?"}]}}
     passed, reason = _run_declared_static_check(seat_evaluator, missing_seat)
     assert passed is False
     assert "seat" in reason.lower()
@@ -1661,9 +1609,7 @@ def test_hotel_catalog_requires_single_clean_completed_reservation():
         "approval_request_details",
     }
     approval_check = next(
-        check
-        for check in task.evaluators[0]["checks"]
-        if check["type"] == "approval_request_details"
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
     )
     assert approval_check["required_strings"] == ["Hotel Kabuki", "free cancellation"]
     assert approval_check["minimum_date_count"] == 2
@@ -1690,9 +1636,7 @@ def test_event_ticket_catalog_requires_single_clean_completed_purchase():
         "single_turn_llm_judge",
     ]
     approval_check = next(
-        check
-        for check in task.evaluators[0]["checks"]
-        if check["type"] == "approval_request_details"
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
     )
     assert approval_check["required_strings"] == ["AMC Metreon 16"]
     assert approval_check["require_date"] is True
@@ -1721,9 +1665,7 @@ def test_amazon_return_catalog_requires_single_clean_completed_return():
         "single_turn_llm_judge",
     ]
     approval_check = next(
-        check
-        for check in task.evaluators[0]["checks"]
-        if check["type"] == "approval_request_details"
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
     )
     assert approval_check["required_strings"] == [
         "return",
@@ -2355,10 +2297,10 @@ def test_agent_sms_benchmark_prepares_phone_only_agentphone_sender():
         bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "ready"
         assert bench._prepare_local_agent_sms_sender("user-123") == "rose@example.test"
         assert len(queries) == 2
-        assert 'phone = \'+19123613984\'' in queries[0]
+        assert "phone = '+19123613984'" in queries[0]
         assert '"phoneProviderAgentId" = NULL' in queries[0]
         assert '"phoneProviderNumberId" = NULL' in queries[0]
-        assert '"userId" = \'user-123\'' in queries[0]
+        assert "\"userId\" = 'user-123'" in queries[0]
 
         responses = iter(["1", "invalid"])
         bench._run_local_victoria_sql = lambda sql: next(responses)
@@ -3846,6 +3788,7 @@ async def test_create_agent_sends_task_response_schema():
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
     try:
+
         async def fake_headers():
             return {"X-API-Key": "test-key"}
 
@@ -4236,8 +4179,7 @@ def test_local_manifest_uses_isolated_system_database_identity():
     }
 
     assert manifest_database_url(manifest) == (
-        "postgresql://postgres:postgres@localhost:5432/"
-        "victoria_bench_1783809252_85375_82461"
+        "postgresql://postgres:postgres@localhost:5432/victoria_bench_1783809252_85375_82461"
     )
 
 
@@ -5726,9 +5668,7 @@ def test_benchmark_public_base_url_uses_isolated_context_manifest_not_dashboard_
     )
     previous = {key: os.environ.get(key) for key in keys}
     with tempfile.TemporaryDirectory() as tmp:
-        Path(tmp, "services.json").write_text(
-            '{"urls":{"public":"https://isolated-phone.ngrok.app"}}\n'
-        )
+        Path(tmp, "services.json").write_text('{"urls":{"public":"https://isolated-phone.ngrok.app"}}\n')
         os.environ.pop("BENCHMARK_PHONE_TOOL_BASE_URL", None)
         os.environ.pop("PUBLIC_BASE_URL", None)
         os.environ["BENCHMARK_FRONTEND_URL"] = "http://localhost:8805"
@@ -6009,9 +5949,7 @@ def test_suite_selection_excludes_incomplete_entries():
         "gate-kyc-card-mint",
         "gate-source-connect-gmail",
     } <= suite_names
-    assert len(suite_names) == len(
-        [t for t in all_tasks() if t.status == "ready" and not t.production_only]
-    )
+    assert len(suite_names) == len([t for t in all_tasks() if t.status == "ready" and not t.production_only])
 
 
 def test_every_task_has_base_image_fixture_by_default():

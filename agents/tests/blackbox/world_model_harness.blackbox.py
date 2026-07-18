@@ -43,6 +43,7 @@ def _load_upstream_otel_adapter_class():
     import enum
 
     if not hasattr(enum, "StrEnum"):
+
         class StrEnum(str, enum.Enum):
             def __str__(self) -> str:
                 return str(self.value)
@@ -224,7 +225,12 @@ def _write_golden_bundle(root_agent_id: str, world_model_mode: str | None = None
     archive_json(
         root_agent_id=root_agent_id,
         path="provider/vapi/create/call-ext-1.json.gz.enc",
-        payload={"provider": "vapi", "external_id": "call-ext-1", "status": "queued", "api_key": "sk-ant-provider-secret"},
+        payload={
+            "provider": "vapi",
+            "external_id": "call-ext-1",
+            "status": "queued",
+            "api_key": "sk-ant-provider-secret",
+        },
     )
     archive_bytes(
         root_agent_id=root_agent_id,
@@ -498,7 +504,9 @@ def test_build_world_model_from_archives_uses_upstream_build_boundary():
             assert calls["build_kwargs"]["root"].endswith("models/rose-golden")
             assert manifest["metrics"]["held_out_accuracy"] == 0.88
             assert manifest["provider_abstraction"]["default"] == "upstream"
-            assert public_json_has_secret(json.loads(Path(manifest["manifest_path"]).read_text(encoding="utf-8"))) is False
+            assert (
+                public_json_has_secret(json.loads(Path(manifest["manifest_path"]).read_text(encoding="utf-8"))) is False
+            )
         finally:
             restore()
 
@@ -646,9 +654,7 @@ def test_update_world_model_excludes_simulated_bundles_from_corpus():
             _write_golden_bundle("root-shadow", world_model_mode="shadow")
             _write_golden_bundle("root-simulated", world_model_mode="simulate")
 
-            real, excluded = partition_real_world_bundles(
-                ["root-real", "root-shadow", "root-simulated"]
-            )
+            real, excluded = partition_real_world_bundles(["root-real", "root-shadow", "root-simulated"])
             assert real == ["root-real", "root-shadow"]
             assert excluded == {"root-simulated": "simulate"}
 
@@ -954,7 +960,9 @@ async def test_wmh_http_client_matches_upstream_serving_routes():
             assert body["action"]["kind"] == "tool_call"
             assert body["action"]["name"] == "rose.vapi.poll_call"
             assert body["action"]["arguments"]["tool_call_id"] == "tool-vapi-1"
-            return httpx.Response(200, json={"observation": {"content": "predicted", "metadata": {"state_note": "done"}}})
+            return httpx.Response(
+                200, json={"observation": {"content": "predicted", "metadata": {"state_note": "done"}}}
+            )
         return httpx.Response(404, json={"error": "unexpected"})
 
     setup_mock_fn(handler)
@@ -996,7 +1004,9 @@ async def test_evaluate_archive_with_world_model_scores_dimensions_and_redacts_p
         requests: list[dict] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
-            requests.append({"method": request.method, "url": str(request.url), "body": request.content.decode("utf-8")})
+            requests.append(
+                {"method": request.method, "url": str(request.url), "body": request.content.decode("utf-8")}
+            )
             if str(request.url).endswith("/world_models/rose-golden/sessions"):
                 return httpx.Response(200, json={"session_id": "session-fidelity"})
             if str(request.url).endswith("/world_models/rose-golden/sessions/session-fidelity/step"):
@@ -1069,7 +1079,9 @@ async def test_evaluate_archives_with_world_model_scores_batch_mean():
         requests: list[dict] = []
 
         def handler(request: httpx.Request) -> httpx.Response:
-            requests.append({"method": request.method, "url": str(request.url), "body": request.content.decode("utf-8")})
+            requests.append(
+                {"method": request.method, "url": str(request.url), "body": request.content.decode("utf-8")}
+            )
             if str(request.url).endswith("/world_models/rose-golden/sessions"):
                 return httpx.Response(200, json={"session_id": f"session-{len(requests)}"})
             if "/world_models/rose-golden/sessions/" in str(request.url) and str(request.url).endswith("/step"):
@@ -1216,6 +1228,134 @@ def test_world_model_observation_passes_through_activity_tool_result():
         assert result["world_model_observation"] == observation
         assert result["world_model_simulated"] is True
         assert result["simulated_elapsed_ms"] == 57
+
+
+def test_world_model_observation_decodes_real_server_json_content():
+    """WMH serves generated tool results inside Observation.content."""
+    from benchmarks.world_model_harness import world_model_observation_to_tool_result
+    from helpers.world_model_runtime import world_model_observation_to_tool_result as runtime_to_tool_result
+
+    observation = {
+        "content": json.dumps(
+            {
+                "status": "completed",
+                "success": True,
+                "structured_response": {"purchase_completed": True},
+            }
+        ),
+        "is_error": False,
+        "metadata": {},
+    }
+
+    for convert in (world_model_observation_to_tool_result, runtime_to_tool_result):
+        result = convert(observation, simulated=True, wall_elapsed_ms=9)
+        assert result["status"] == "completed"
+        assert result["structured_response"] == {"purchase_completed": True}
+        assert result["world_model_observation"] == observation
+        assert result["world_model_simulated"] is True
+
+
+def test_browser_world_model_contract_rejects_spawn_ack_and_requires_output():
+    from domains.spawn_browser_agent_v3.handler import (
+        _browser_world_model_contract,
+        _validate_simulated_browser_result,
+    )
+
+    schema = {
+        "fields": [
+            {"name": "order_confirmation_id", "required": True},
+            {"name": "purchase_completed", "required": True},
+        ]
+    }
+    contract = _browser_world_model_contract(
+        is_resume=False,
+        write_lock_enabled=True,
+        output_schema=schema,
+    )
+    assert contract["boundary"] == "synchronous_activity_result"
+    assert "spawned" in contract["instructions"]
+    assert contract["required_terminal_output_fields"] == [
+        "order_confirmation_id",
+        "purchase_completed",
+    ]
+
+    invalid = _validate_simulated_browser_result(
+        {"status": "spawned", "success": True, "world_model_simulated": True},
+        output_schema=schema,
+    )
+    assert invalid["status"] == "failed"
+    assert invalid["success"] is False
+    assert "synchronous" in invalid["message"]
+
+    completed = _validate_simulated_browser_result(
+        {
+            "status": "completed",
+            "success": True,
+            "world_model_simulated": True,
+            "order_confirmation_id": "111-2222222-3333333",
+            "purchase_completed": True,
+        },
+        output_schema=schema,
+    )
+    assert completed["structured_response"] == {
+        "order_confirmation_id": "111-2222222-3333333",
+        "purchase_completed": True,
+    }
+
+    missing = _validate_simulated_browser_result(
+        {"status": "completed", "success": True, "world_model_simulated": True},
+        output_schema=schema,
+    )
+    assert missing["status"] == "failed"
+    assert "order_confirmation_id" in missing["message"]
+
+
+async def test_runtime_world_model_session_uses_first_tool_goal_as_task():
+    from helpers import world_model_runtime as runtime
+
+    requests: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        requests.append((str(request.url), body))
+        if str(request.url).endswith("/world_models/rose-golden/sessions"):
+            return httpx.Response(200, json={"session_id": "session-goal"})
+        if str(request.url).endswith("/world_models/rose-golden/sessions/session-goal/step"):
+            return httpx.Response(
+                200,
+                json={
+                    "observation": {
+                        "content": '{"status":"completed","success":true}',
+                        "is_error": False,
+                        "metadata": {},
+                    }
+                },
+            )
+        return httpx.Response(404, json={"error": "unexpected"})
+
+    async def real_executor(_tool_name: str, _tool_args: dict, _tool_call_id: str) -> dict:
+        raise AssertionError("simulate mode must not call the real executor")
+
+    runtime._WMH_SESSION_CACHE.pop(("agent-goal-test", "rose-golden"), None)
+    setup_mock_fn(handler)
+    try:
+        adapter = runtime.WorldModelToolExecutionAdapter(
+            mode="simulate",
+            client=runtime.WMHHttpClient("https://wmh.example.test"),
+            world_model_name="rose-golden",
+            agent_id="agent-goal-test",
+        )
+        result = await adapter.execute(
+            "spawn_browser_agent",
+            {"goal": "Complete the Amazon checkout"},
+            "tool-browser",
+            real_executor,
+        )
+        assert result["status"] == "completed"
+        assert requests[0][1]["task"] == "Complete the Amazon checkout"
+    finally:
+        runtime._WMH_SESSION_CACHE.pop(("agent-goal-test", "rose-golden"), None)
+        teardown_mock()
 
 
 async def test_world_model_tool_execution_adapter_simulate_and_shadow_modes():
@@ -1411,9 +1551,7 @@ async def test_simulated_provider_activities_call_wmh_instead_of_live_services()
 
         assert (await web_search_activity("latest rose labs news"))["answer"] == "answer from web_search"
         assert (await web_fetch_activity("https://example.test"))["markdown"] == "markdown from web_fetch"
-        assert (await people_search_activity("Ada Lovelace", "enrich", "exa"))["results"] == [
-            {"name": "people_search"}
-        ]
+        assert (await people_search_activity("Ada Lovelace", "enrich", "exa"))["results"] == [{"name": "people_search"}]
         assert (await call_phone_number_activity("+15551234567", "ask", {}, "agent-1", "tool-call"))[
             "call_id"
         ] == "sim-call"
@@ -1428,9 +1566,9 @@ async def test_simulated_provider_activities_call_wmh_instead_of_live_services()
         assert (await notify_sms_event_activity("user-1", "completion", "agent-1", {"summary": "done"}))[
             "sms"
         ] == "sent"
-        assert (
-            await spawn_browser_agent_activity_v3("user-1", "agent-1", "inspect site", "tool-browser")
-        )["status"] == "completed"
+        assert (await spawn_browser_agent_activity_v3("user-1", "agent-1", "inspect site", "tool-browser"))[
+            "status"
+        ] == "completed"
 
         assert actions == [
             "web_search",
@@ -1513,7 +1651,10 @@ async def run_all_tests():
         "root_export_includes_child_agent_llm_dumps_when_manifest_lists_tree",
         test_root_export_includes_child_agent_llm_dumps_when_manifest_lists_tree,
     )
-    r.record("canonical_action_categories_cover_agent_tool_families", test_canonical_action_categories_cover_agent_tool_families)
+    r.record(
+        "canonical_action_categories_cover_agent_tool_families",
+        test_canonical_action_categories_cover_agent_tool_families,
+    )
     r.record(
         "world_model_action_timestamp_uses_sim_clock_env_and_validates_it",
         test_world_model_action_timestamp_uses_sim_clock_env_and_validates_it,
@@ -1526,8 +1667,18 @@ async def run_all_tests():
         "world_model_observation_passes_through_activity_tool_result",
         test_world_model_observation_passes_through_activity_tool_result,
     )
+    r.record(
+        "world_model_observation_decodes_real_server_json_content",
+        test_world_model_observation_decodes_real_server_json_content,
+    )
+    r.record(
+        "browser_world_model_contract_rejects_spawn_ack_and_requires_output",
+        test_browser_world_model_contract_rejects_spawn_ack_and_requires_output,
+    )
     r.record("write_eval_suite_matches_wmh_examples_shape", test_write_eval_suite_matches_wmh_examples_shape)
-    await r.record_async("wmh_http_client_matches_upstream_serving_routes", test_wmh_http_client_matches_upstream_serving_routes)
+    await r.record_async(
+        "wmh_http_client_matches_upstream_serving_routes", test_wmh_http_client_matches_upstream_serving_routes
+    )
     await r.record_async(
         "evaluate_archive_with_world_model_scores_dimensions_and_redacts_public_result",
         test_evaluate_archive_with_world_model_scores_dimensions_and_redacts_public_result,
@@ -1539,6 +1690,10 @@ async def run_all_tests():
     await r.record_async(
         "world_model_tool_execution_adapter_simulate_and_shadow_modes",
         test_world_model_tool_execution_adapter_simulate_and_shadow_modes,
+    )
+    await r.record_async(
+        "runtime_world_model_session_uses_first_tool_goal_as_task",
+        test_runtime_world_model_session_uses_first_tool_goal_as_task,
     )
     await r.record_async(
         "world_model_simulate_can_fallback_on_unavailable_observation",
