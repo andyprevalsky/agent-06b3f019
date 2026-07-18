@@ -2025,12 +2025,12 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     } > "$wrapper"
     ( for _ in $(seq 1 40); do
         if machine_storage_ready "$wid"; then
-            FLY machine start "$wid" -a "$APP" >/dev/null 2>&1 || true
+            fly_with_timeout 20 machine start "$wid" -a "$APP" >/dev/null 2>&1 || true
         fi
-        if FLY ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-worker.sh" /data/cloudbench-worker.sh >/dev/null 2>&1 \
-           && FLY ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh >/dev/null 2>&1; then
-            [ -n "$FLEET_PATCH_FILE" ] && FLY ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1 || true
-            FLY ssh console -a "$APP" --machine "$wid" -C "bash -c \"setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
+        if fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-worker.sh" /data/cloudbench-worker.sh >/dev/null 2>&1 \
+           && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh >/dev/null 2>&1; then
+            [ -n "$FLEET_PATCH_FILE" ] && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1 || true
+            fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" -C "bash -c \"setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
             echo "  ✅ [$bench] worker $wid staged + launched"
             break
         fi
@@ -2044,10 +2044,19 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     local pip="" metrics_proxy_pid="" metrics_port="" metrics_url="" offset
     local metrics_started_at candidate
     : > "$out/worker-clones.ids"
-    cleanup_metrics_proxy() {
+    cleanup_autoscaler_jobs() {
+        local job_pid
+        local -a live_jobs
+        live_jobs=()
+        while read -r job_pid; do
+            if [ -n "$job_pid" ] && [ "$job_pid" != "${metrics_proxy_pid:-}" ]; then
+                live_jobs+=("$job_pid")
+            fi
+        done < <(jobs -pr)
+        cloudbench_terminate_and_wait 30 "${live_jobs[@]:-}"
         cloudbench_terminate_and_wait 5 "${metrics_proxy_pid:-}"
     }
-    trap cleanup_metrics_proxy EXIT
+    trap cleanup_autoscaler_jobs EXIT
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM

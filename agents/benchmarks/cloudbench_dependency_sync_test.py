@@ -908,7 +908,7 @@ def test_pool_boot_update_is_bounded_and_skips_redundant_inventory_polling() -> 
     assert 'write_pool_claim "$claim_path"' in claim
     assert (
         'if machine_storage_ready "$wid"; then\n'
-        '            FLY machine start "$wid"' in fleet
+        '            fly_with_timeout 20 machine start "$wid"' in fleet
     )
 
 
@@ -929,6 +929,7 @@ def test_autoscaler_metrics_poll_over_data_plane_without_ssh() -> None:
     fleet = FLEET_SCRIPT.read_text()
     desired = _extract_fleet_function(fleet, "_box_desired() {")
     autoscaler = _extract_fleet_function(fleet, "bench_autoscaler() {")
+    provision_worker = _extract_fleet_function(fleet, "provision_worker() {")
 
     assert "FLY ssh" not in desired
     assert "curl --noproxy '*'" in desired
@@ -938,6 +939,9 @@ def test_autoscaler_metrics_poll_over_data_plane_without_ssh() -> None:
     assert '"http://127.0.0.1:$metrics_port/metrics"' in autoscaler
     assert "start_metrics_proxy 30" in autoscaler
     assert "autoscaler metrics via data plane" in autoscaler
+    assert "jobs -pr" in autoscaler
+    assert "cloudbench_terminate_and_wait" in autoscaler
+    assert "fly_with_timeout" in provision_worker
 
 
 def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost() -> None:
