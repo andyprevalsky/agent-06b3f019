@@ -56,6 +56,7 @@ export interface CategoryInputs {
     installed: BrowserInfo[];
     connected: Set<BrowserType>;
     loading: BrowserType | null;
+    error: string | null;
     onSync: (type: BrowserType) => void;
   };
   passwords: {
@@ -63,6 +64,7 @@ export interface CategoryInputs {
     appleSynced: boolean;
     atlasSynced: boolean;
     loading: 'chrome' | 'apple' | 'passkeys' | 'atlas' | null;
+    error: string | null;
     onChromeSync: () => void;
     onAppleConnect: () => void;
     onAtlasConnect: () => void;
@@ -72,6 +74,7 @@ export interface CategoryInputs {
     gptSynced: boolean;
     claudeLoading: boolean;
     gptLoading: boolean;
+    error: string | null;
     onClaudeSync: () => void;
     onGptSync: () => void;
   };
@@ -83,6 +86,7 @@ export interface CategoryInputs {
     iMessageLoading: boolean;
     chatLoading: 'whatsapp' | 'telegram' | null;
     gmailLoading: boolean;
+    error: string | null;
     onIMessageSync: () => void;
     onWhatsAppConnect: () => void;
     onTelegramConnect: () => void;
@@ -91,6 +95,7 @@ export interface CategoryInputs {
   socials: {
     linkedInStarted: boolean;
     linkedInLoading: boolean;
+    error: string | null;
     onLinkedInSync: () => void;
   };
   financials: {
@@ -116,6 +121,7 @@ function browsersCategory(b: CategoryInputs['browsers']): CategoryModel {
     desc: 'Sync browsing data for web automation',
     glyph: RING_GLYPHS.browsers,
     connected: b.connected.size > 0,
+    footerError: b.error,
     emptyText:
       'No supported browsers detected. Install Safari, Chrome, Edge, Brave, Arc, or another supported browser.',
     rows: b.installed.map((browser) => ({
@@ -136,6 +142,7 @@ function passwordsCategory(p: CategoryInputs['passwords']): CategoryModel {
     desc: 'Auto-fill login credentials',
     glyph: RING_GLYPHS.passwords,
     connected: p.chromeSynced || p.appleSynced || p.atlasSynced,
+    footerError: p.error,
     rows: [
       {
         key: 'chrome',
@@ -172,6 +179,7 @@ function computeCategory(c: CategoryInputs['compute']): CategoryModel {
     desc: 'Bring your own AI subscriptions',
     glyph: RING_GLYPHS.compute,
     connected: c.claudeSynced || c.gptSynced,
+    footerError: c.error,
     rows: [
       {
         key: 'claude',
@@ -211,6 +219,7 @@ function messagesCategory(m: CategoryInputs['messages']): CategoryModel {
       m.whatsAppConnected ||
       m.telegramConnected ||
       m.connectedEmails.length > 0,
+    footerError: m.error,
     rows: [
       {
         key: 'imessage',
@@ -256,6 +265,7 @@ function socialsCategory(s: CategoryInputs['socials']): CategoryModel {
     desc: 'Connect social media accounts',
     glyph: RING_GLYPHS.socials,
     connected: s.linkedInStarted,
+    footerError: s.error,
     rows: [
       { key: 'x', label: 'X', icon: <XIcon />, ...DropdownIconPreset.x, state: 'coming-soon' },
       {

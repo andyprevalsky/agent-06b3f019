@@ -7,6 +7,7 @@ import { clearIpcMock, installIpcMock } from './ipc-mock';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 import OnboardingData from '../../ui/features/onboarding/components/OnboardingData';
+import RingCarousel from '../../ui/features/onboarding/components/data/RingCarousel';
 import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
 import type { BrowserInfo, BrowserType, IPC } from '../../shared/types/ipc';
 
@@ -322,6 +323,22 @@ afterEach(() => {
 });
 
 describe('OnboardingData (ring)', () => {
+  it('starts the celebration spin when the ring mounts complete', () => {
+    renderWithProviders(
+      <RingCarousel
+        categories={[
+          { id: 'one', name: 'One', glyph: <span>1</span>, connected: true },
+          { id: 'two', name: 'Two', glyph: <span>2</span>, connected: true },
+        ]}
+        activeIndex={0}
+        onSelect={() => {}}
+        celebrate
+      />
+    );
+
+    expect(screen.getByRole('button', { name: 'One' })).toHaveClass('onb-no-anim');
+  });
+
   it('renders the ring, shows connected state, and Skip calls onComplete', async () => {
     const api = installOnboardingApiMocks();
     const onComplete = vi.fn();
@@ -465,6 +482,72 @@ describe('OnboardingData (ring)', () => {
       expect(screen.getByRole('button', { name: 'LinkedIn connected' })).toBeInTheDocument()
     );
   }, 30_000);
+
+  it('surfaces actionable connector errors in every affected category', async () => {
+    const api = installOnboardingApiMocks();
+    installBackendMocks([]);
+    api.syncBrowser.mockRejectedValue(new Error('Browser sync exploded'));
+    api.syncBrowserPasswords.mockRejectedValue(new Error('Password sync exploded'));
+    api.claudeCode!.syncCredentials.mockRejectedValue(new Error('Compute sync exploded'));
+    api.startIMessageUpload.mockResolvedValue({
+      success: false,
+      message: 'iMessage sync exploded',
+    });
+    server.use(
+      http.post(`${API_BASE}/integrations/email/gmail/start`, () =>
+        HttpResponse.json({ error: 'Gmail connect exploded' }, { status: 500 })
+      ),
+      http.post(`${API_BASE}/agents`, () =>
+        HttpResponse.json({ error: 'LinkedIn sync exploded' }, { status: 500 })
+      )
+    );
+    const user = userEvent.setup();
+
+    renderOnboarding();
+    await screen.findByText('Connect your Data');
+    await waitFor(() => expect(within(subCard()).getByText('Microsoft Edge')).toBeInTheDocument());
+
+    await user.click(connectButton('Microsoft Edge'));
+    expect(await within(subCard()).findByText('Browser sync exploded')).toBeInTheDocument();
+
+    await goToCategory(user, 'Passwords');
+    await user.click(connectButton('Chrome'));
+    expect(await within(subCard()).findByText('Password sync exploded')).toBeInTheDocument();
+
+    await goToCategory(user, 'Compute');
+    await user.click(connectButton('Claude Subscription'));
+    expect(await within(subCard()).findByText('Compute sync exploded')).toBeInTheDocument();
+
+    await goToCategory(user, 'Messages');
+    await user.click(connectButton('iMessage'));
+    expect(await within(subCard()).findByText('iMessage sync exploded')).toBeInTheDocument();
+    await user.click(connectButton('Gmail'));
+    expect(await within(subCard()).findByText('Gmail connect exploded')).toBeInTheDocument();
+
+    await goToCategory(user, 'Socials');
+    await user.click(connectButton('LinkedIn'));
+    expect(await within(subCard()).findByText('LinkedIn sync exploded')).toBeInTheDocument();
+  });
+
+  it('removes the WhatsApp QR listener after a terminal connection result', async () => {
+    const api = installOnboardingApiMocks();
+    installBackendMocks([]);
+    const qrCleanup = vi.fn();
+    api.whatsapp!.hasCredentials.mockResolvedValue(false);
+    vi.mocked(api.onWhatsAppQRCode!).mockImplementation((callback) => {
+      callback('terminal-qr-code');
+      return qrCleanup;
+    });
+    const user = userEvent.setup();
+
+    renderOnboarding();
+    await screen.findByText('Connect your Data');
+    await goToCategory(user, 'Messages');
+    await user.click(connectButton('WhatsApp'));
+
+    await waitFor(() => expect(api.whatsapp?.connect).toHaveBeenCalledTimes(1));
+    expect(qrCleanup).toHaveBeenCalledTimes(1);
+  });
 
   it('shows Get Started once every category is connected and completes', async () => {
     installOnboardingApiMocks();

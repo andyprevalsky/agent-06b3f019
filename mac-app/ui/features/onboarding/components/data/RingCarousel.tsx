@@ -69,7 +69,7 @@ function useCelebrationSpin(
   setRotation: (updater: (r: number) => number) => void
 ): boolean {
   const [spinning, setSpinning] = useState(false);
-  const wasCelebratingRef = useRef(celebrate);
+  const wasCelebratingRef = useRef(false);
   const rafRef = useRef(0);
 
   useEffect(() => {

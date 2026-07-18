@@ -38,9 +38,15 @@ interface WhatsAppCtx {
   setJustConnected: (connected: boolean) => void;
 }
 
+function clearWhatsAppQRListener(ref: MutableRefObject<(() => void) | null>): void {
+  ref.current?.();
+  ref.current = null;
+}
+
 async function connectWhatsApp(ctx: WhatsAppCtx): Promise<void> {
+  clearWhatsAppQRListener(ctx.qrCleanupRef);
   const whatsapp = window.api.whatsapp;
-  if (whatsapp === undefined) return;
+  if (whatsapp === undefined) throw new Error('WhatsApp is unavailable in this app version.');
   const hasCredentials = await whatsapp.hasCredentials();
   if (hasCredentials) {
     const result = await whatsapp.connect();
@@ -51,18 +57,25 @@ async function connectWhatsApp(ctx: WhatsAppCtx): Promise<void> {
     }
   }
   if (window.api.onWhatsAppQRCode !== undefined) {
-    ctx.qrCleanupRef.current?.();
+    clearWhatsAppQRListener(ctx.qrCleanupRef);
     ctx.qrCleanupRef.current = window.api.onWhatsAppQRCode((qr: string) => ctx.setQRCode(qr));
   }
   ctx.setQRModalOpen(true);
-  const result = await whatsapp.connect();
-  if (result.success) {
+  try {
+    const result = await whatsapp.connect();
+    if (!result.success) {
+      throw new Error(result.error ?? 'WhatsApp connection failed. Please try again.');
+    }
     ctx.setJustConnected(true);
     ctx.setQRModalOpen(false);
     ctx.setQRCode(null);
     await ctx.fetchIntegrations();
-  } else {
-    console.error('Failed to connect WhatsApp:', result.error);
+  } catch (error) {
+    ctx.setQRModalOpen(false);
+    ctx.setQRCode(null);
+    throw error;
+  } finally {
+    clearWhatsAppQRListener(ctx.qrCleanupRef);
   }
 }
 
@@ -74,10 +87,13 @@ interface TelegramCtx {
 
 async function connectTelegram(ctx: TelegramCtx): Promise<void> {
   const telegram = window.api.telegram;
-  if (telegram === undefined) return;
+  if (telegram === undefined) throw new Error('Telegram is unavailable in this app version.');
   const isConnected = await telegram.isConnected();
   if (isConnected) {
     const result = await telegram.syncHistorical();
+    if (!result.success) {
+      throw new Error(result.error ?? 'Telegram sync failed. Please try again.');
+    }
     console.log(`Telegram resync complete: ${result.count ?? 0} messages`);
     ctx.setJustConnected(true);
     return;
@@ -105,7 +121,7 @@ export function useOnboardingChat(fetchIntegrations: () => Promise<void>): Onboa
 
   useEffect(() => {
     return () => {
-      whatsAppQRCleanupRef.current?.();
+      clearWhatsAppQRListener(whatsAppQRCleanupRef);
     };
   }, []);
 
@@ -121,6 +137,7 @@ export function useOnboardingChat(fetchIntegrations: () => Promise<void>): Onboa
       });
     } catch (err) {
       console.error('Failed to connect WhatsApp:', err);
+      throw err;
     } finally {
       setChatSyncLoading(null);
     }
@@ -136,12 +153,14 @@ export function useOnboardingChat(fetchIntegrations: () => Promise<void>): Onboa
       });
     } catch (err) {
       console.error('Failed to connect Telegram:', err);
+      throw err;
     } finally {
       setChatSyncLoading(null);
     }
   }, [fetchIntegrations]);
 
   const closeWhatsAppQRModal = useCallback((): void => {
+    clearWhatsAppQRListener(whatsAppQRCleanupRef);
     setWhatsAppQRModalOpen(false);
     setWhatsAppQRCode(null);
   }, []);
