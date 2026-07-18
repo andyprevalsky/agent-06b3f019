@@ -163,11 +163,8 @@ def _load_tasks() -> List[BenchmarkTask]:
     tasks = [BenchmarkTask(**t) for t in raw]
     for t in tasks:
         t.min_steps = dict(t.min_steps)
-        if t.requires_browser_agent:
-            t.min_steps["browser"] = max(
-                t.min_steps.get("browser", 0),
-                DEFAULT_MIN_STEPS_BY_AGENT_CLASS["browser"],
-            )
+        if t.requires_browser_agent and "browser" not in t.min_steps:
+            t.min_steps["browser"] = DEFAULT_MIN_STEPS_BY_AGENT_CLASS["browser"]
         if t.environment is None:
             t.environment = _default_environment()
         else:

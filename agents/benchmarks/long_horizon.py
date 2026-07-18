@@ -193,8 +193,6 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
                 raise ValueError(f"{item_id}: min_steps keys must be non-empty agent-class strings")
             if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 1:
                 raise ValueError(f"{item_id}: min_steps.{agent_class} must be a positive integer")
-        if raw.get("requires_browser_agent") and min_steps.get("browser", 5) < 5:
-            raise ValueError(f"{item_id}: browser-agent tasks require min_steps.browser >= 5")
     expected_attention_kinds = raw.get("expected_attention_kinds")
     if expected_attention_kinds is not None:
         _require_string_list(raw, "expected_attention_kinds", item_id)

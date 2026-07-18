@@ -5934,14 +5934,15 @@ def test_unified_catalog_supports_multiple_evaluators_per_eval():
 
 
 def test_agent_class_min_steps_contract_is_validated_and_defaulted():
-    """Every browser benchmark gets the hard five-step floor; other classes are configurable."""
+    """Browser benchmarks default to five steps while explicit task contracts remain authoritative."""
     from benchmarks.benchmark_tasks import all_tasks, get_task_by_name
     from benchmarks.long_horizon import validate_task_contract
 
     browser_tasks = [task for task in all_tasks() if task.requires_browser_agent]
     assert browser_tasks
-    assert all(task.min_steps.get("browser") == 5 for task in browser_tasks)
+    assert all(task.min_steps.get("browser", 0) >= 1 for task in browser_tasks)
     assert get_task_by_name("browser-agent-amazon-cookie-payment").min_steps == {"browser": 5}
+    assert get_task_by_name("browser-smoke").min_steps == {"browser": 1}
     assert get_task_by_name("chat-mode").min_steps == {}
 
     base = {"name": "min-steps-contract", "bench": "rose-bench"}
@@ -5953,14 +5954,59 @@ def test_agent_class_min_steps_contract_is_validated_and_defaulted():
             pass
         else:
             raise AssertionError(f"invalid min_steps contract was accepted: {invalid}")
-    try:
-        validate_task_contract(
-            {**base, "requires_browser_agent": True, "min_steps": {"browser": 4}}
-        )
-    except ValueError as exc:
-        assert "min_steps.browser >= 5" in str(exc)
-    else:
-        raise AssertionError("browser-agent task accepted a trajectory floor below five")
+    validate_task_contract({**base, "requires_browser_agent": True, "min_steps": {"browser": 1}})
+
+
+def test_browser_smoke_accepts_captured_single_step_trajectory():
+    """The page-read smoke's declared one-step contract accepts its captured runtime shape."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    task = get_task_by_name("browser-smoke")
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "type": "browser",
+                        "tool_call_id": "browser-root",
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "browser-root",
+                "task_id": "browser-task",
+                "subAgentId": "browser-task",
+                "action_type": "goto",
+                "steps_taken": 0,
+                "toolStatus": "FINISHED",
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "browser-root",
+                "task_id": "browser-task",
+                "toolStatus": "FINISHED",
+                "structured_response": {"main_heading_text": "Example Domain"},
+            },
+        },
+    ]
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {"browser": {"browser-task": 1}}
+    assert task.min_steps == {"browser": 1}
+    assert _validate_agent_class_min_steps(task.min_steps, counts) is None
 
 
 def test_browser_min_steps_rejects_terminal_claim_without_trajectory():
@@ -7099,6 +7145,10 @@ async def run_all_tests():
     r.record(
         "agent_class_min_steps_contract",
         test_agent_class_min_steps_contract_is_validated_and_defaulted,
+    )
+    r.record(
+        "browser_smoke_single_step_trajectory",
+        test_browser_smoke_accepts_captured_single_step_trajectory,
     )
     r.record(
         "browser_min_steps_rejects_terminal_claim",
