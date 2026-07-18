@@ -2918,7 +2918,6 @@ def test_isolated_backend_startup_retries_one_hung_process(tmp_path: Path) -> No
     launcher = tmp_path / "backend_tree.py"
     launcher.write_text(
         "import os, pathlib, signal, subprocess, sys, time\n"
-        "os.setsid()\n"
         "child = subprocess.Popen([sys.executable, '-c', "
         "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])\n"
         "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
@@ -2938,7 +2937,7 @@ BACKEND_INDEX=0
 PIDS=("")
 launch_backend_service() {{
   count=$(cat "$LAUNCHES"); count=$((count + 1)); echo "$count" > "$LAUNCHES"
-  python3 "$LAUNCHER" "$CHILD_DIR/child-$count" &
+  python3 "$SESSION_LAUNCHER" python3 "$LAUNCHER" "$CHILD_DIR/child-$count" &
   BACKEND_PID=$!
   BACKEND_PGID=$BACKEND_PID
   PIDS[$BACKEND_INDEX]="$BACKEND_PID"
@@ -2962,6 +2961,7 @@ exit "$rc"
         ["bash", "-c", script],
         env={
             "LAUNCHER": str(launcher),
+            "SESSION_LAUNCHER": str(ROOT / "scripts" / "run-in-new-session.py"),
             "LAUNCHES": str(launches),
             "CHILD_DIR": str(child_dir),
             "PATH": os.environ["PATH"],
@@ -2977,6 +2977,99 @@ exit "$rc"
     assert "OLD_SURVIVED" not in result.stdout
     assert "SLOT_STALE" not in result.stdout
     assert "NEW_SURVIVED" not in result.stdout
+
+
+def test_isolated_backend_session_launcher_is_macos_portable(tmp_path: Path) -> None:
+    """The local smoke path must not require GNU setsid(1), absent on macOS."""
+    stack = STACK_SCRIPT.read_text()
+    session_launcher = ROOT / "scripts" / "run-in-new-session.py"
+    assert 'python3 "$ROOT_DIR/scripts/run-in-new-session.py" bash -c' in stack
+    assert "setsid bash" not in stack
+
+    ready = tmp_path / "ready"
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import os, pathlib, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"pathlib.Path({str(ready)!r}).write_text(f'{{os.getpid()}} {{os.getsid(0)}} {{os.getpgrp()}}')\n"
+        "time.sleep(30)\n"
+    )
+    # Deliberately provide no setsid executable. The helper must establish a
+    # session whose id and process group are both the owned root process.
+    process = subprocess.Popen(
+        [sys.executable, str(session_launcher), sys.executable, str(child)],
+        env={"PATH": str(tmp_path)},
+    )
+    try:
+        deadline = time.time() + 5
+        while time.time() < deadline and not ready.exists():
+            time.sleep(0.05)
+        assert ready.exists(), "session-owned child did not start"
+        pid, sid, pgid = (int(value) for value in ready.read_text().split())
+        assert pid == process.pid
+        assert sid == process.pid
+        assert pgid == process.pid
+    finally:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
+
+
+def test_local_predeploy_skips_wmh_and_wmh_logs_survive_agent_chdir(tmp_path: Path) -> None:
+    """Real-mode smoke must not build WMH; simulate logs still need a rooted path."""
+    predeploy = PREDEPLOY_LOCAL_SCRIPT.read_text()
+    stack = STACK_SCRIPT.read_text()
+
+    fixture = tmp_path / "predeploy"
+    (fixture / "scripts").mkdir(parents=True)
+    (fixture / "agents" / "benchmarks").mkdir(parents=True)
+    (fixture / "scripts" / "run-predeploy-local").write_text(predeploy)
+    (fixture / "agents" / "benchmarks" / "tasks.json").write_text(
+        json.dumps([{"name": "smoke-fixture", "tags": ["smoke"]}])
+    )
+    capture = fixture / "capture"
+    (fixture / "scripts" / "run-bench").write_text(
+        '#!/usr/bin/env bash\nprintf "%s\\n" "${BENCHMARK_SKIP_WMH_BUILD:-unset}" "$*" > "$CAPTURE"\n'
+    )
+    (fixture / "scripts" / "run-bench").chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(fixture / "scripts" / "run-predeploy-local")],
+        env={**os.environ, "CAPTURE": str(capture)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert capture.read_text().splitlines() == ["1", "--local smoke-fixture --max-concurrency 2"]
+
+    wmh = _extract_fleet_function(stack, "start_world_model_harness() {")
+    wmh_root = tmp_path / "wmh"
+    activate = wmh_root / "agents" / "venv" / "bin" / "activate"
+    activate.parent.mkdir(parents=True)
+    activate.write_text("python() { printf 'build-cwd=%s\\n' \"$PWD\"; return 1; }\n")
+    harness = f"""set -uo pipefail
+cd "$WMH_ROOT"
+should_serve_world_model() {{ return 0; }}
+PIDS=()
+NAMES=()
+RUN_CONTEXT_DIR=.context/isolated
+WMH_BUILD_DIR=.context/model
+WMH_MODEL_NAME=fixture
+WMH_PORT=39999
+BENCHMARK_MODE=true
+{wmh}
+start_world_model_harness
+"""
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        env={**os.environ, "WMH_ROOT": str(wmh_root)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    rooted_log = wmh_root / ".context" / "isolated" / "wmh-serve-log.txt"
+    assert rooted_log.read_text().strip() == f"build-cwd={wmh_root / 'agents'}"
+    assert not (wmh_root / "agents" / ".context").exists()
 
 
 def test_refresh_deps_mode_contract() -> None:

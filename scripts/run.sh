@@ -1042,7 +1042,11 @@ start_world_model_harness() {
     should_serve_world_model || return 0
 
     mkdir -p "$RUN_CONTEXT_DIR"
-    local wmh_log="$RUN_CONTEXT_DIR/wmh-serve-log.txt"
+    local wmh_log
+    case "$RUN_CONTEXT_DIR" in
+        /*) wmh_log="$RUN_CONTEXT_DIR/wmh-serve-log.txt" ;;
+        *)  wmh_log="$PWD/$RUN_CONTEXT_DIR/wmh-serve-log.txt" ;;
+    esac
 
     # Shared, persistent build root so the model is built ONCE and reused across
     # every run — NOT the per-run context dir (that would rebuild each time).
@@ -1272,7 +1276,7 @@ launch_backend_service() {
             # TERM-ignoring descendant; group ownership lets restart/cleanup
             # prove every descendant is gone before a replacement can bind.
             FAIL_DIR="$FAIL_DIR" BACKEND_LOG_FILE="$BACKEND_LOG_FILE" BACKEND_PORT="$BACKEND_PORT" \
-                setsid bash -c '
+                python3 "$ROOT_DIR/scripts/run-in-new-session.py" bash -c '
                     set +e
                     cd back-end || exit 1
                     rm -f "$BACKEND_LOG_FILE"
