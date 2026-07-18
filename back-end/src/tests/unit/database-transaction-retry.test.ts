@@ -137,6 +137,69 @@ async function main(): Promise<void> {
     );
   });
 
+  await test('NaN maxRetries normalizes to the default (3 attempts), not zero', async () => {
+    let attempts = 0;
+    await assert.rejects(
+      retryOnTransientTransactionStart(async () => {
+        attempts += 1;
+        throw txStartTimeout();
+      }, Number.NaN),
+      /Unable to start a transaction/
+    );
+    assert.strictEqual(
+      attempts,
+      3,
+      'NaN must fall back to the finite default, not a zero-iteration loop'
+    );
+  });
+
+  await test('Infinity maxRetries normalizes to the default (bounded), not unbounded', async () => {
+    let attempts = 0;
+    await assert.rejects(
+      retryOnTransientTransactionStart(async () => {
+        attempts += 1;
+        throw txStartTimeout();
+      }, Number.POSITIVE_INFINITY),
+      /Unable to start a transaction/
+    );
+    assert.strictEqual(attempts, 3, 'Infinity must be bounded to the finite default');
+  });
+
+  await test('does NOT retry once the transaction body has entered (mid-body failure)', async () => {
+    // A retryable-LOOKING error (P2024) that surfaces AFTER the callback body
+    // began must not be replayed — the body may have partially executed.
+    let attempts = 0;
+    await assert.rejects(
+      retryOnTransientTransactionStart(async (markBodyEntered) => {
+        attempts += 1;
+        markBodyEntered();
+        throw Object.assign(new Error('Timed out fetching a new connection from the pool'), {
+          code: 'P2024',
+        });
+      }, 5),
+      /Timed out fetching a new connection/
+    );
+    assert.strictEqual(attempts, 1, 'a failure after body entry must never be retried');
+  });
+
+  await test('retries a pre-body failure but stops the moment the body enters', async () => {
+    // First attempt fails before body entry (retry); second attempt enters the
+    // body then fails with a retryable-looking error (must NOT retry).
+    let attempts = 0;
+    await assert.rejects(
+      retryOnTransientTransactionStart(async (markBodyEntered) => {
+        attempts += 1;
+        if (attempts === 1) throw txStartTimeout(); // pre-body → retry
+        markBodyEntered();
+        throw Object.assign(new Error('Timed out fetching a new connection from the pool'), {
+          code: 'P2024',
+        }); // mid-body → stop
+      }, 5),
+      /Timed out fetching a new connection/
+    );
+    assert.strictEqual(attempts, 2, 'retry the pre-body failure, then stop once the body enters');
+  });
+
   console.log(`\n${passed} passed, ${failures.length} failed`);
   if (failures.length > 0) {
     for (const f of failures) console.log(`  ❌ ${f}`);

@@ -40,25 +40,49 @@ export function isRetryableTransactionError(error: unknown): boolean {
   return typeof e.code === 'string' && RETRYABLE_ERROR_CODES.has(e.code);
 }
 
+/** Normalize a caller-supplied retry count to a finite integer >= 1, so a NaN
+ *  (zero attempts → reject with undefined) or Infinity (unbounded) can't slip
+ *  through to the retry loop. */
+function normalizeMaxRetries(value: number): number {
+  return Number.isFinite(value) ? Math.max(1, Math.floor(value)) : 3;
+}
+
 /**
- * Bounded retry for a side-effect-free-on-failure operation that can hit a
- * transient transaction-START error. Delegates to the canonical
- * retryWithBackoff (providers/retry.ts) with a transaction-start-only
- * predicate. Extracted from runTransactionWithRetry so the retry policy is
- * unit-testable without a live database (inject any `run`).
+ * Bounded retry for an interactive transaction that can hit a transient
+ * transaction-START failure. Delegates to the canonical retryWithBackoff
+ * (providers/retry.ts).
+ *
+ * `run` receives a `markBodyEntered` callback that it MUST invoke the instant
+ * the transaction callback body begins executing. A retryable-looking error
+ * (P2024/P1001/P1017, or the start-timeout message) is only actually retried
+ * when the body did NOT enter this attempt — because those same conditions can
+ * also surface AFTER the callback started (a mid-body query fetching a
+ * connection, the server dropping the connection, etc.), and replaying a
+ * partially-executed callback is unsafe. Gating on body entry means we retry
+ * exactly the failures proven to occur before any side effect ran.
+ *
+ * Extracted from runTransactionWithRetry so the policy is unit-testable without
+ * a live database (inject any `run`).
  */
 export async function retryOnTransientTransactionStart<T>(
-  run: () => Promise<T>,
+  run: (markBodyEntered: () => void) => Promise<T>,
   maxRetries = 3
 ): Promise<T> {
-  return retryWithBackoff(run, {
-    // At least one attempt — a caller passing 0/negative must still run once
-    // rather than reject with `undefined` from a zero-iteration retry loop.
-    maxRetries: Math.max(1, maxRetries),
-    initialBackoffMs: 100,
-    isRetryable: isRetryableTransactionError,
-    component: 'PrismaTx',
-  });
+  let bodyEntered = false;
+  return retryWithBackoff(
+    () => {
+      bodyEntered = false; // reset per attempt
+      return run(() => {
+        bodyEntered = true;
+      });
+    },
+    {
+      maxRetries: normalizeMaxRetries(maxRetries),
+      initialBackoffMs: 100,
+      isRetryable: (error) => !bodyEntered && isRetryableTransactionError(error),
+      component: 'PrismaTx',
+    }
+  );
 }
 
 // Add connection pool parameters if not already present
@@ -163,21 +187,30 @@ if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
  * agents at once) this makes agent creation flaky even though the DB is healthy.
  *
  * This wrapper gives interactive transactions the same transient-fault
- * resilience the per-query path already has: retry only the start-timeout (the
- * body never ran, so retrying is side-effect-safe), with a slightly larger
- * `maxWait` for headroom and exponential backoff so the pool can drain between
- * attempts.
+ * resilience the per-query path already has, but only retries failures proven
+ * to occur BEFORE the callback body ran (see retryOnTransientTransactionStart):
+ * it marks body entry from inside the `$transaction` callback, so a mid-body
+ * failure is never replayed. A slightly larger `maxWait` gives the start more
+ * headroom, and backoff lets the pool drain between attempts.
  */
 export async function runTransactionWithRetry<T>(
   fn: (tx: Prisma.TransactionClient) => Promise<T>,
   options?: { maxWait?: number; timeout?: number; maxRetries?: number }
 ): Promise<T> {
   return retryOnTransientTransactionStart(
-    () =>
-      prisma.$transaction(fn, {
-        maxWait: options?.maxWait ?? 5_000,
-        timeout: options?.timeout ?? 10_000,
-      }),
+    (markBodyEntered) =>
+      prisma.$transaction(
+        (tx) => {
+          // The callback has now started — any failure from here on may have
+          // partially executed, so it must not be retried.
+          markBodyEntered();
+          return fn(tx);
+        },
+        {
+          maxWait: options?.maxWait ?? 5_000,
+          timeout: options?.timeout ?? 10_000,
+        }
+      ),
     options?.maxRetries ?? 3
   );
 }
