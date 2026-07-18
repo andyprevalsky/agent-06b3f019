@@ -80,24 +80,41 @@ export async function verifySupabaseAccessToken(
   const decoded = jwt.decode(token, { complete: true });
   const alg = decoded !== null && typeof decoded === 'object' ? decoded.header.alg : undefined;
 
+  let payload: jwt.JwtPayload;
   if (alg === 'HS256') {
     // Backend-minted token — verify with the shared secret.
-    return jwt.verify(token, getHs256Secret(), {
+    payload = jwt.verify(token, getHs256Secret(), {
       issuer,
       algorithms: ['HS256'],
     }) as jwt.JwtPayload;
+  } else {
+    // Supabase-issued asymmetric token — verify against the project JWKS.
+    // Pin to ES256 (the project's current signing alg) so a future non-ES256
+    // key in the JWKS can't silently widen the set of accepted algorithms.
+    try {
+      const result = await jwtVerify(token, jwksOverride ?? getJwks(), {
+        issuer,
+        algorithms: ['ES256'],
+      });
+      payload = result.payload as JWTPayload as jwt.JwtPayload;
+    } catch (err) {
+      // Surface a concise reason; callers translate to 401.
+      log.error('JWKS verification failed', {
+        alg: typeof alg === 'string' ? alg : 'unknown',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
   }
 
-  // Supabase-issued asymmetric token — verify against the project JWKS.
-  try {
-    const { payload } = await jwtVerify(token, jwksOverride ?? getJwks(), { issuer });
-    return payload as JWTPayload as jwt.JwtPayload;
-  } catch (err) {
-    // Surface a concise reason; callers translate to 401.
-    log.error('JWKS verification failed', {
-      alg: typeof alg === 'string' ? alg : 'unknown',
-      error: err instanceof Error ? err.message : String(err),
-    });
-    throw err;
+  // Both auth middlewares dereference `payload.sub!`, and a token without `exp`
+  // would never expire — require both before trusting the token.
+  if (typeof payload.sub !== 'string' || payload.sub.length === 0) {
+    throw new Error('Token is missing a subject (sub) claim');
   }
+  if (typeof payload.exp !== 'number') {
+    throw new Error('Token is missing an expiry (exp) claim');
+  }
+
+  return payload;
 }

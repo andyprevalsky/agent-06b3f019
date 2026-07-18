@@ -117,6 +117,25 @@ async function main(): Promise<void> {
     await assert.rejects(verifySupabaseAccessToken('not.a.jwt'));
   });
 
+  await test('rejects an otherwise-valid ES256 token missing the sub claim', async () => {
+    const token = await new SignJWT({ aud: 'authenticated' })
+      .setProtectedHeader({ alg: 'ES256', kid })
+      .setIssuer(ISSUER)
+      .setIssuedAt()
+      .setExpirationTime('1h')
+      .sign(privateKey);
+    await assert.rejects(verifySupabaseAccessToken(token, localJwks), /subject|sub/i);
+  });
+
+  await test('rejects an HS256 token with no exp claim', async () => {
+    // No expiresIn → no exp claim. Must be rejected (a token that never expires).
+    const token = jwtLib.sign({ sub: 'user', aud: 'authenticated' }, secret, {
+      algorithm: 'HS256',
+      issuer: ISSUER,
+    });
+    await assert.rejects(verifySupabaseAccessToken(token), /expiry|exp/i);
+  });
+
   console.log(`\n${passed} passed, ${failures.length} failed`);
   if (failures.length > 0) {
     for (const f of failures) console.log(`  ❌ ${f}`);
