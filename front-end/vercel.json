@@ -1,8 +1,14 @@
 {
+  "redirects": [
+    {
+      "source": "/subscribe",
+      "destination": "https://buy.stripe.com/test_5kQcN64tX2PccvS6dM9ws00",
+      "permanent": false
+    }
+  ],
   "rewrites": [
     { "source": "/api/:path*", "destination": "/api/:path*" },
     { "source": "/research/:slug", "destination": "/api/og/research?slug=:slug" },
     { "source": "/((?!.*\\.).*)", "destination": "/index.html" }
   ]
 }
-
