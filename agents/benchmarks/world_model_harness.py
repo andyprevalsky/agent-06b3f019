@@ -1468,7 +1468,6 @@ def update_world_model_for_simulation(
     )
 
     all_bundle_ids = sorted(list(root_agent_ids) if root_agent_ids is not None else list_archive_bundle_ids())
-    bundle_ids, excluded_bundles = partition_real_world_bundles(all_bundle_ids)
     index = _read_delta_index(index_path)
     old_bundles = index.get("bundles") if isinstance(index.get("bundles"), dict) else {}
     # Corpus cap for fast benchmark/cloud builds. The full R2 archive is large and
@@ -1476,15 +1475,19 @@ def update_world_model_for_simulation(
     # build to N bundles so a serving model is ready in minutes, not hours. A later
     # explicit --refresh-wmh (higher/unset cap) can grow it. 0/unset = no cap.
     _wmh_max_bundles = int(os.environ.get("WMH_MAX_BUNDLES", "0") or "0")
-    if _wmh_max_bundles > 0 and len(bundle_ids) > _wmh_max_bundles:
+    candidate_bundle_ids = all_bundle_ids
+    if _wmh_max_bundles > 0 and len(candidate_bundle_ids) > _wmh_max_bundles:
         # Keep already-indexed traces before deterministically admitting new
         # ones. Otherwise maintenance can evict the known-good corpus solely
-        # because a UUID sorts outside the capped prefix.
-        available = set(bundle_ids)
+        # because a UUID sorts outside the capped prefix. This selection must
+        # happen before partition_real_world_bundles: classification reads each
+        # encrypted manifest from R2 and was the uncapped refresh bottleneck.
+        available = set(candidate_bundle_ids)
         retained = sorted(bundle_id for bundle_id in old_bundles if bundle_id in available)
-        new = [bundle_id for bundle_id in bundle_ids if bundle_id not in old_bundles]
+        new = [bundle_id for bundle_id in candidate_bundle_ids if bundle_id not in old_bundles]
         limit = max(_wmh_max_bundles, len(retained))
-        bundle_ids = (retained + new)[:limit]
+        candidate_bundle_ids = (retained + new)[:limit]
+    bundle_ids, excluded_bundles = partition_real_world_bundles(candidate_bundle_ids)
     split = deterministic_split(bundle_ids, heldout_fraction=heldout_fraction) if bundle_ids else {}
     changed: list[str] = []
     unchanged: list[str] = []

@@ -695,11 +695,14 @@ def test_update_world_model_excludes_simulated_bundles_from_corpus():
 
 
 def test_world_model_bundle_cap_preserves_existing_index_entries():
-    from benchmarks.world_model_harness import update_world_model_for_simulation
+    import benchmarks.world_model_harness as world_model_harness
+
+    update_world_model_for_simulation = world_model_harness.update_world_model_for_simulation
 
     with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
         restore = _with_archive_env(tmp)
         prior_cap = os.environ.get("WMH_MAX_BUNDLES")
+        original_mode = world_model_harness.bundle_world_model_mode
         try:
             for bundle_id in ("root-existing-z", "root-new-a", "root-new-b"):
                 _write_golden_bundle(bundle_id)
@@ -725,6 +728,13 @@ def test_world_model_bundle_cap_preserves_existing_index_entries():
             )
 
             os.environ["WMH_MAX_BUNDLES"] = "2"
+            classified: list[str] = []
+
+            def recording_mode(bundle_id: str) -> str:
+                classified.append(bundle_id)
+                return original_mode(bundle_id)
+
+            world_model_harness.bundle_world_model_mode = recording_mode
             result = update_world_model_for_simulation(
                 output_dir=out,
                 root_agent_ids=["root-existing-z", "root-new-a", "root-new-b"],
@@ -740,6 +750,7 @@ def test_world_model_bundle_cap_preserves_existing_index_entries():
             )
 
             assert result["total_traces"] == 2
+            assert classified == ["root-existing-z", "root-new-a"]
             index = json.loads((Path(out) / "delta-index.json").read_text(encoding="utf-8"))
             assert set(index["bundles"]) == {"root-existing-z", "root-new-a"}
         finally:
@@ -747,6 +758,7 @@ def test_world_model_bundle_cap_preserves_existing_index_entries():
                 os.environ.pop("WMH_MAX_BUNDLES", None)
             else:
                 os.environ["WMH_MAX_BUNDLES"] = prior_cap
+            world_model_harness.bundle_world_model_mode = original_mode
             restore()
 
 
