@@ -11,30 +11,13 @@
  */
 
 import type { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
-import { createSecretKey, type KeyObject } from 'crypto';
+import type jwt from 'jsonwebtoken';
 import { prisma } from './database';
 import { createInitialCredit } from './credits';
 import { createLogger } from './logger';
+import { verifySupabaseAccessToken } from './supabaseJwt';
 
 const log = createLogger('HybridAuth');
-
-// Cache the secret key object to avoid recreating it on every request
-let cachedSecretKey: KeyObject | null = null;
-
-function getJwtSecret(): KeyObject {
-  if (cachedSecretKey !== null) {
-    return cachedSecretKey;
-  }
-
-  const secret = process.env.SUPABASE_JWT_SECRET;
-  if (secret === undefined || secret === '') {
-    throw new Error('Missing SUPABASE_JWT_SECRET environment variable');
-  }
-
-  cachedSecretKey = createSecretKey(Buffer.from(secret));
-  return cachedSecretKey;
-}
 
 export interface HybridAuthRequest extends Request {
   userId?: string;
@@ -84,22 +67,6 @@ async function addCredits(userId: string, amountDollars: number) {
 
   log.info('Added credit', { userId, amountDollars });
   return credit;
-}
-
-function verifyJwt(
-  token: string,
-  secret: KeyObject,
-  options: jwt.VerifyOptions
-): Promise<jwt.JwtPayload> {
-  return new Promise((resolve, reject) => {
-    jwt.verify(token, secret, options, (err, decoded) => {
-      if (err !== null && err !== undefined) {
-        reject(err);
-      } else {
-        resolve(decoded as jwt.JwtPayload);
-      }
-    });
-  });
 }
 
 function handleInternalApiKey(
@@ -169,14 +136,9 @@ async function handleJwtAuth(
     return;
   }
 
-  const secret = getJwtSecret();
-
   let payload: jwt.JwtPayload;
   try {
-    payload = await verifyJwt(token, secret, {
-      issuer: `${supabaseUrl}/auth/v1`,
-      algorithms: ['HS256'],
-    });
+    payload = await verifySupabaseAccessToken(token);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.error('JWT verification failed', { error: message });
