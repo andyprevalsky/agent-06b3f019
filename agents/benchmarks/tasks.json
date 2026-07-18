@@ -906,7 +906,7 @@
     "name": "browser-agent",
     "title": "Browser Agent Shopping",
     "description": "Live Amazon shopping: buy a black beanie under $35 through the cart path (no Buy Now)",
-    "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed. The browser tool is synchronous: use its final returned purchase result and finish the task; never treat a spawned acknowledgement as completion or call wait_for for the browser tool.",
+    "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed. Require the browser's final result and your completion evidence to include the exact product title, URL, price, grounded quality evidence observed on the product page (rating and review count or material details), order confirmation ID, purchase_completed=true, cart_checkout_used=true, and buy_now_used=false. The browser tool is synchronous: use its final returned purchase result and finish the task; never treat a spawned acknowledgement as completion or call wait_for for the browser tool.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
@@ -923,6 +923,58 @@
     "approval_handling": "ignore",
     "expected_attention_kind": "auth_assistance",
     "start_phase": "execute",
+    "response_schema": {
+      "fields": [
+        {
+          "name": "selected_beanie_title",
+          "type": "str",
+          "required": true,
+          "description": "Exact title of the purchased black beanie"
+        },
+        {
+          "name": "selected_beanie_url",
+          "type": "str",
+          "required": true,
+          "description": "Amazon product URL of the purchased black beanie"
+        },
+        {
+          "name": "selected_beanie_price_usd",
+          "type": "float",
+          "required": true,
+          "description": "Grounded item price in USD, below 35"
+        },
+        {
+          "name": "quality_evidence",
+          "type": "str",
+          "required": true,
+          "description": "Grounded rating and review count or material details observed on the product page"
+        },
+        {
+          "name": "order_confirmation_id",
+          "type": "str",
+          "required": true,
+          "description": "Amazon order number from the confirmation page"
+        },
+        {
+          "name": "purchase_completed",
+          "type": "bool",
+          "required": true,
+          "description": "True only after the order was placed"
+        },
+        {
+          "name": "cart_checkout_used",
+          "type": "bool",
+          "required": true,
+          "description": "True when Add to Cart and Proceed to checkout were used"
+        },
+        {
+          "name": "buy_now_used",
+          "type": "bool",
+          "required": true,
+          "description": "False when the forbidden Buy Now path was not used"
+        }
+      ]
+    },
     "environment": {
       "mode": "live",
       "db_fixtures": [],
@@ -965,7 +1017,7 @@
     "name": "browser-agent-amazon-cookie-payment",
     "title": "Amazon Cookie Auth Payment Write Lock",
     "description": "Buy a qualifying Amazon beanie through the normal cart path and complete the purchase.",
-    "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed. The browser tool is synchronous: use its final returned purchase result and finish the task; never treat a spawned acknowledgement as completion or call wait_for for the browser tool.",
+    "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed. Require the browser's final result and your completion evidence to include the exact product title, URL, price, grounded quality evidence observed on the product page (rating and review count or material details), order confirmation ID, purchase_completed=true, cart_checkout_used=true, and buy_now_used=false. The browser tool is synchronous: use its final returned purchase result and finish the task; never treat a spawned acknowledgement as completion or call wait_for for the browser tool.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
@@ -990,6 +1042,58 @@
     },
     "tool_count_scope": "root",
     "start_phase": "execute",
+    "response_schema": {
+      "fields": [
+        {
+          "name": "selected_beanie_title",
+          "type": "str",
+          "required": true,
+          "description": "Exact title of the purchased black beanie"
+        },
+        {
+          "name": "selected_beanie_url",
+          "type": "str",
+          "required": true,
+          "description": "Amazon product URL of the purchased black beanie"
+        },
+        {
+          "name": "selected_beanie_price_usd",
+          "type": "float",
+          "required": true,
+          "description": "Grounded item price in USD, below 35"
+        },
+        {
+          "name": "quality_evidence",
+          "type": "str",
+          "required": true,
+          "description": "Grounded rating and review count or material details observed on the product page"
+        },
+        {
+          "name": "order_confirmation_id",
+          "type": "str",
+          "required": true,
+          "description": "Amazon order number from the confirmation page"
+        },
+        {
+          "name": "purchase_completed",
+          "type": "bool",
+          "required": true,
+          "description": "True only after the order was placed"
+        },
+        {
+          "name": "cart_checkout_used",
+          "type": "bool",
+          "required": true,
+          "description": "True when Add to Cart and Proceed to checkout were used"
+        },
+        {
+          "name": "buy_now_used",
+          "type": "bool",
+          "required": true,
+          "description": "False when the forbidden Buy Now path was not used"
+        }
+      ]
+    },
     "environment": {
       "mode": "live",
       "db_fixtures": [],

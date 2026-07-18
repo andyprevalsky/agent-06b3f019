@@ -1426,6 +1426,7 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
     assert task.description.endswith("complete the purchase.")
     assert "never treat a spawned acknowledgement as completion" in task.prompt
     assert "call wait_for" in task.prompt
+    assert "grounded quality evidence" in task.prompt
     assert task.approval_handling == "auto_approve"
     assert task.expected_attention_kind == "write_lock"
     assert task.expected_approval_count == 1
@@ -1433,6 +1434,18 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
     assert task.tool_count_scope == "root"
     assert task.bench == "rose-bench"
     assert task.environment["live_fixtures"] == ["live"]
+    response_fields = {field["name"]: field for field in task.response_schema["fields"]}
+    assert set(response_fields) == {
+        "selected_beanie_title",
+        "selected_beanie_url",
+        "selected_beanie_price_usd",
+        "quality_evidence",
+        "order_confirmation_id",
+        "purchase_completed",
+        "cart_checkout_used",
+        "buy_now_used",
+    }
+    assert all(field["required"] is True for field in response_fields.values())
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
         "single_turn_llm_judge",
