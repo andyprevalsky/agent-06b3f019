@@ -1,6 +1,7 @@
-import { PrismaClient } from '@prisma/client';
+import { type Prisma, PrismaClient } from '@prisma/client';
 import dotenv from 'dotenv';
 import { createLogger } from './logger';
+import { retryWithBackoff } from './retry';
 import { currentTraceContext } from './tracing';
 
 // Ensure env vars are loaded before accessing DATABASE_URL
@@ -14,6 +15,41 @@ const globalForPrisma = global as unknown as { prisma: PrismaClient };
 // P1017 - Server has closed the connection (Supabase pooler idle timeout)
 // P2024 - Timed out fetching a new connection from the pool
 const RETRYABLE_ERROR_CODES = new Set(['P1001', 'P1017', 'P2024']);
+
+// Transient interactive-transaction START failures. P2028 ("Transaction API
+// error") wraps "Unable to start a transaction in the given time" — the
+// interactive `$transaction(fn)` couldn't acquire a connection within maxWait
+// under momentary pool pressure. This is transient, not a real failure.
+const RETRYABLE_TRANSACTION_ERROR_CODES = new Set([...RETRYABLE_ERROR_CODES, 'P2028']);
+
+export function isRetryableTransactionError(error: unknown): boolean {
+  const e = error as { code?: unknown; message?: unknown };
+  if (typeof e.code === 'string' && RETRYABLE_TRANSACTION_ERROR_CODES.has(e.code)) return true;
+  // Some pooler/driver paths surface the start-timeout without a stable P-code,
+  // so also match the canonical message. Keep this narrow: only the start
+  // timeout is safe to retry (the transaction body never ran, so no partial
+  // side effects to worry about).
+  return typeof e.message === 'string' && e.message.includes('Unable to start a transaction');
+}
+
+/**
+ * Bounded retry for a side-effect-free-on-failure operation that can hit a
+ * transient transaction-START error. Delegates to the canonical
+ * retryWithBackoff (providers/retry.ts) with a transaction-start-only
+ * predicate. Extracted from runTransactionWithRetry so the retry policy is
+ * unit-testable without a live database (inject any `run`).
+ */
+export async function retryOnTransientTransactionStart<T>(
+  run: () => Promise<T>,
+  maxRetries = 3
+): Promise<T> {
+  return retryWithBackoff(run, {
+    maxRetries,
+    initialBackoffMs: 100,
+    isRetryable: isRetryableTransactionError,
+    component: 'PrismaTx',
+  });
+}
 
 // Add connection pool parameters if not already present
 function getConnectionUrl(): string {
@@ -103,3 +139,35 @@ export const prisma =
   });
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma;
+
+/**
+ * Run an interactive transaction with bounded retry on transient
+ * transaction-START failures.
+ *
+ * The `$allOperations` retry extension above only wraps INDIVIDUAL queries — it
+ * does NOT intercept `prisma.$transaction(fn)`. So when the pool is momentarily
+ * saturated, the interactive transaction fails to start with P2028 "Unable to
+ * start a transaction in the given time" and that surfaces straight to the
+ * caller as a hard error (e.g. `POST /api/agents` → 500) with no retry. Under
+ * concurrent load (a fan-out or the chat-lifecycle ratchet spinning up many
+ * agents at once) this makes agent creation flaky even though the DB is healthy.
+ *
+ * This wrapper gives interactive transactions the same transient-fault
+ * resilience the per-query path already has: retry only the start-timeout (the
+ * body never ran, so retrying is side-effect-safe), with a slightly larger
+ * `maxWait` for headroom and exponential backoff so the pool can drain between
+ * attempts.
+ */
+export async function runTransactionWithRetry<T>(
+  fn: (tx: Prisma.TransactionClient) => Promise<T>,
+  options?: { maxWait?: number; timeout?: number; maxRetries?: number }
+): Promise<T> {
+  return retryOnTransientTransactionStart(
+    () =>
+      prisma.$transaction(fn, {
+        maxWait: options?.maxWait ?? 5_000,
+        timeout: options?.timeout ?? 10_000,
+      }),
+    options?.maxRetries ?? 3
+  );
+}

@@ -3,7 +3,7 @@
  */
 
 import type { Prisma, AgentSource, AgentStatus, VerifierType } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
 
 // ---------------------------------------------------------------------------
 // Agent mutations
@@ -53,7 +53,13 @@ export async function createAgentTransaction(params: {
   attachments?: Array<Record<string, unknown>>;
   temporalWorkflowId?: string | null;
 }) {
-  return prisma.$transaction(async (tx) => {
+  // runTransactionWithRetry (not raw prisma.$transaction): interactive
+  // transactions bypass the client's per-query retry extension, so a momentary
+  // pool-pressure "Unable to start a transaction" (P2028) would 500 the whole
+  // POST /api/agents. Agent creation is a hot, concurrency-spiky path (fan-outs,
+  // the chat-lifecycle ratchet) — retrying the side-effect-free start makes it
+  // resilient to transient pool saturation.
+  return runTransactionWithRetry(async (tx) => {
     const newAgent = await tx.agent.create({
       data: {
         id: params.agentId,
@@ -144,7 +150,9 @@ export interface BatchCreateAgentParams {
 export async function createAgentBatchTransaction(items: BatchCreateAgentParams[]) {
   if (items.length === 0) return [];
 
-  return prisma.$transaction(async (tx) => {
+  // Same rationale as createAgentTransaction: a batch fan-out is exactly when
+  // the pool is most contended, so guard the interactive-transaction start.
+  return runTransactionWithRetry(async (tx) => {
     const goalMessageTimestamp = new Date();
     await tx.agent.createMany({
       data: items.map((params) => ({
