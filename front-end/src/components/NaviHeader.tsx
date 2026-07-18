@@ -17,13 +17,20 @@
  *   |
  *   v
  * [OPEN] <-- contactModalOpen: true
+ *
+ * WAITLIST CTA VISIBILITY (auth):
+ * [SHOWN] <-- no authenticated user
+ *   |
+ *   | (user logs in)
+ *   v
+ * [HIDDEN] <-- user authenticated (waitlist nav + CTA removed)
  */
 
 import { isEarlyAccessEnabled } from '@/lib/utils';
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import ContactModal from './ContactModal';
-import { LoginButton } from '@/features/auth';
+import { LoginButton, useAuth } from '@/features/auth';
 
 const ROSE_SITE_ORIGIN = 'https://roselabs.ai';
 
@@ -57,6 +64,10 @@ const NaviHeader = () => {
   const [showMobileButton, setShowMobileButton] = useState(false);
   const [contactModalOpen, setContactModalOpen] = useState(false);
   const earlyAccess = isEarlyAccessEnabled();
+  const { isAuthenticated, isAnonymous } = useAuth({ passive: true });
+  // Only hide the waitlist CTA for a real signed-in account — anonymous
+  // bootstrap sessions (every landing visitor) are NOT "logged in".
+  const showWaitlistCta = !(isAuthenticated && !isAnonymous);
 
   useEffect(() => {
     const featuresSection = document.getElementById('features');
@@ -109,15 +120,17 @@ const NaviHeader = () => {
           >
             Features
           </button>
-          <button
-            onClick={() => {
-              const targetId = earlyAccess ? 'pre-order' : 'waitlist';
-              goToLandingSection(targetId, earlyAccess);
-            }}
-            className="text-muted-foreground hover:text-foreground transition-colors"
-          >
-            {earlyAccess ? 'Pre-order' : 'Join Waitlist'}
-          </button>
+          {showWaitlistCta && (
+            <button
+              onClick={() => {
+                const targetId = earlyAccess ? 'pre-order' : 'waitlist';
+                goToLandingSection(targetId, earlyAccess);
+              }}
+              className="text-muted-foreground hover:text-foreground transition-colors"
+            >
+              {earlyAccess ? 'Pre-order' : 'Join Waitlist'}
+            </button>
+          )}
           <a
             href="/research"
             onClick={(event) => {
@@ -142,20 +155,22 @@ const NaviHeader = () => {
 
         <div className="flex items-center space-x-3">
           {/* Mobile/Tablet CTA - shows below desktop (<lg) and fades in at Features */}
-          <button
-            className={`relative lg:hidden px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 overflow-hidden hover:scale-105 ${
-              showMobileButton ? 'opacity-100 visible' : 'opacity-0 invisible'
-            }`}
-            onClick={() => {
-              const targetId = earlyAccess ? 'pre-order' : 'waitlist';
-              goToLandingSection(targetId, earlyAccess);
-            }}
-          >
-            <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg"></div>
-            <span className="relative text-white z-10">
-              {earlyAccess ? 'Pre-order' : 'Join Waitlist'}
-            </span>
-          </button>
+          {showWaitlistCta && (
+            <button
+              className={`relative lg:hidden px-4 py-2 rounded-lg text-sm font-medium transition-all duration-200 overflow-hidden hover:scale-105 ${
+                showMobileButton ? 'opacity-100 visible' : 'opacity-0 invisible'
+              }`}
+              onClick={() => {
+                const targetId = earlyAccess ? 'pre-order' : 'waitlist';
+                goToLandingSection(targetId, earlyAccess);
+              }}
+            >
+              <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg"></div>
+              <span className="relative text-black z-10">
+                {earlyAccess ? 'Pre-order' : 'Join Waitlist'}
+              </span>
+            </button>
+          )}
 
           {/* Desktop Login Button */}
           <LoginButton />

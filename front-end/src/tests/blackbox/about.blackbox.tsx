@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
@@ -407,6 +407,77 @@ describe('About page', () => {
       await waitFor(() => {
         expect(screen.getByRole('heading', { name: /hiring/i, level: 2 })).toBeInTheDocument();
       });
+    });
+  });
+
+  // ─── Waitlist CTA visibility by auth state ────────────────────
+  //
+  // The header + footer "Join Waitlist" CTAs must disappear once a user is
+  // signed in with a real (non-anonymous) account, but must stay visible for
+  // logged-out AND anonymous-bootstrap visitors (every landing visitor gets an
+  // anonymous session — they are not "logged in").
+
+  describe('Waitlist CTA auth-gating', () => {
+    const SESSION_KEY = 'rose-session';
+    const USER_CACHE_KEY = 'app-user';
+
+    function seedSession(anonymous: boolean): void {
+      const session = {
+        access_token: 'test-token-abc',
+        refresh_token: 'test-refresh-xyz',
+        expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        token_type: 'bearer',
+        user: {
+          id: 'test-user-001',
+          phone: '+19729777432',
+          is_anonymous: anonymous,
+          aud: 'authenticated',
+          role: 'authenticated',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          app_metadata: anonymous
+            ? { provider: 'anonymous', providers: ['anonymous'] }
+            : { provider: 'phone', providers: ['phone'] },
+          user_metadata: {},
+        },
+      };
+      localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+      localStorage.setItem(USER_CACHE_KEY, JSON.stringify(session.user));
+    }
+
+    afterEach(() => {
+      localStorage.clear();
+    });
+
+    it('hides the header + footer Join Waitlist CTAs when signed in with a real account', async () => {
+      seedSession(false);
+      renderWithProviders(<About />);
+
+      await waitFor(() => {
+        const header = document.getElementById('site-header')!;
+        expect(within(header).queryByRole('button', { name: /join waitlist/i })).toBeNull();
+      });
+
+      const footer = document.querySelector('footer')!;
+      expect(within(footer).queryByRole('button', { name: /join waitlist/i })).toBeNull();
+    });
+
+    it('keeps the Join Waitlist CTAs visible for an anonymous (not-logged-in) session', async () => {
+      seedSession(true);
+      renderWithProviders(<About />);
+
+      // Let the passive auth effect settle, then confirm the CTAs remain.
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: /mission/i, level: 1 })).toBeInTheDocument();
+      });
+
+      const header = document.getElementById('site-header')!;
+      expect(
+        within(header).getAllByRole('button', { name: /join waitlist/i }).length,
+      ).toBeGreaterThanOrEqual(1);
+      const footer = document.querySelector('footer')!;
+      expect(within(footer).getByRole('button', { name: /join waitlist/i })).toBeInTheDocument();
     });
   });
 });

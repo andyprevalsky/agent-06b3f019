@@ -2186,19 +2186,33 @@ describe('AsciiLoader CTA overlay (blackbox)', () => {
     expect(button).not.toHaveAttribute('href');
     fireEvent.click(button);
     expect(onClick).toHaveBeenCalledTimes(1);
-    // Bold glossy-chrome label — the send button ring's metallic gradient
-    // clipped into the text. Button surface is transparent (no fill, no glow)
-    // with a 1px rose border outlining the capsule, centered on the animation.
-    expect(button.className).toContain('font-bold');
-    const label = within(button).getByTestId('opening-join-label') as HTMLElement;
-    expect(label.style.backgroundImage).toMatch(/#f0f0f0|240,\s*240,\s*240/);
-    expect(label.style.backgroundClip || label.style.webkitBackgroundClip).toBe('text');
+    // Transparent capsule with a 1px rose border, centered on the animation.
+    // No fill, no glow (drop shadow) — the border warms on hover.
     expect(button.className).toContain('bg-transparent');
     expect(button.className).toContain('border-[#E062CC]');
     expect(button.className).not.toContain('shadow-');
     expect(button.style.top).toBe('calc(50% + 0px)');
     // Clickable despite the loader overlay's pointer-events-none wrapper.
     expect(button.className).toContain('pointer-events-auto');
+
+    // Hover reveal via pure-CSS vertical roll: an arrow shows at rest and rolls
+    // up out of the capsule (group-hover), while the label rolls up into place.
+    // overflow-hidden clips the roll to the pill.
+    expect(button.className).toContain('group');
+    expect(button.className).toContain('overflow-hidden');
+    const icon = within(button).getByTestId('opening-join-icon') as HTMLElement;
+    expect(icon).toHaveAttribute('aria-hidden');
+    expect(icon.textContent).toBe('→');
+    expect(icon.className).toContain('group-hover:-translate-y-[150%]');
+    const label = within(button).getByTestId('opening-join-label') as HTMLElement;
+    expect(label).toHaveTextContent('Join Waitlist');
+    // Label starts rolled-down + hidden, rolls to center + visible on hover.
+    expect(label.className).toContain('translate-y-[150%]');
+    expect(label.className).toContain('opacity-0');
+    expect(label.className).toContain('group-hover:translate-y-0');
+    expect(label.className).toContain('group-hover:opacity-100');
+    // Plain white glyphs (no chrome gradient) so they don't fight the animation.
+    expect(label.style.color).toMatch(/#ffffff|rgb\(255,\s*255,\s*255\)|white/);
 
     // The prism layer re-renders the SAME frame as the animation beneath —
     // every real glyph keeps its exact position (no chars-on-chars) — and only

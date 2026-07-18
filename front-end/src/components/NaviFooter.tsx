@@ -16,6 +16,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import ContactModal from './ContactModal';
 import { isEarlyAccessEnabled } from '@/lib/utils';
+import { useAuth } from '@/features/auth';
 
 const ROSE_SITE_ORIGIN = 'https://roselabs.ai';
 
@@ -48,6 +49,10 @@ const goToLandingSection = (targetId: string, earlyAccess: boolean): void => {
 const NaviFooter = () => {
   const [contactModalOpen, setContactModalOpen] = useState(false);
   const earlyAccess = isEarlyAccessEnabled();
+  const { isAuthenticated, isAnonymous } = useAuth({ passive: true });
+  // Only hide the waitlist CTA for a real signed-in account — anonymous
+  // bootstrap sessions (every landing visitor) are NOT "logged in".
+  const showWaitlistCta = !(isAuthenticated && !isAnonymous);
   return (
     <footer className="relative z-20 bg-primary text-primary-foreground py-16">
       <div className="container mx-auto px-6">
@@ -84,17 +89,19 @@ const NaviFooter = () => {
                   Features
                 </button>
               </li>
-              <li>
-                <button
-                  onClick={() => {
-                    const targetId = earlyAccess ? 'pre-order' : 'waitlist';
-                    goToLandingSection(targetId, earlyAccess);
-                  }}
-                  className="hover:text-primary-foreground transition-colors text-left"
-                >
-                  {earlyAccess ? 'Pre-order' : 'Join Waitlist'}
-                </button>
-              </li>
+              {showWaitlistCta && (
+                <li>
+                  <button
+                    onClick={() => {
+                      const targetId = earlyAccess ? 'pre-order' : 'waitlist';
+                      goToLandingSection(targetId, earlyAccess);
+                    }}
+                    className="hover:text-primary-foreground transition-colors text-left"
+                  >
+                    {earlyAccess ? 'Pre-order' : 'Join Waitlist'}
+                  </button>
+                </li>
+              )}
             </ul>
           </div>
 
