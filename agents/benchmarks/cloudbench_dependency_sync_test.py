@@ -615,6 +615,46 @@ def test_fleet_barrier_budget_covers_cold_guest_bootstrap() -> None:
     assert 'per_box="$PER_BOX_BARRIER_WAIT_SECONDS"' in fleet
 
 
+def test_freshly_seeded_database_gets_cold_backend_health_budget() -> None:
+    """RCA (2026-07-17): live run 20260717-211552-12528 completed a
+    first-time 10k-message/22k-cookie production seed, then interrupted an
+    alive backend after the warm 60-second health window. Its retry was also
+    interrupted at 60 seconds, producing an infrastructure NORESULT without an
+    application error. A cold seed gets a bounded longer health window; restored
+    warm databases retain the fast budget, and operator overrides still win.
+    """
+    stack = STACK_SCRIPT.read_text()
+    helper = _extract_fleet_function(stack, "isolated_backend_ready_attempts() {")
+
+    def attempts(*, cold: bool, override: str | None = None) -> int:
+        env = os.environ.copy()
+        if override is not None:
+            env["CLOUDBENCH_BACKEND_START_READY_ATTEMPTS"] = override
+        else:
+            env.pop("CLOUDBENCH_BACKEND_START_READY_ATTEMPTS", None)
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"{helper}\nFIRST_RUN_SEEDED=$1\nisolated_backend_ready_attempts",
+                "attempts",
+                "true" if cold else "false",
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return int(result.stdout.strip())
+
+    assert attempts(cold=True) >= 180
+    assert attempts(cold=False) == 60
+    assert attempts(cold=True, override="17") == 17
+    assert 'FIRST_RUN_SEEDED=true' in stack
+    assert 'attempts="$(isolated_backend_ready_attempts)"' in stack
+
+
 def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> None:
     driver = DRIVER_SCRIPT.read_text()
     cloud = CLOUD_SCRIPT.read_text()

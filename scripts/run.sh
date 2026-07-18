@@ -561,6 +561,7 @@ export DIRECT_URL="$LOCAL_DB_URL"
 # skip BOTH the push and the seed. First run seeds normally, then writes the dump
 # for every later claim of that machine. Unset (local dev) → zero behaviour change.
 DB_RESTORED=false
+FIRST_RUN_SEEDED=false
 _SEED_DUMP="${BENCHMARK_SEED_DUMP:-}"
 _SCHEMA_HASH="$( (shasum back-end/prisma/schema.prisma 2>/dev/null || sha1sum back-end/prisma/schema.prisma 2>/dev/null) | awk '{print $1}')"
 if [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ] && [ "$(cat "${_SEED_DUMP}.schemahash" 2>/dev/null || echo x)" = "$_SCHEMA_HASH" ]; then
@@ -608,6 +609,7 @@ if [ "$USER_EXISTS" = "0" ]; then
         sleep $(( _seed_try * 3 ))
     done
     [ "$_seed_ok" = 1 ] || { echo "❌ first-run seed failed after 3 attempts — aborting stack"; exit 1; }
+    FIRST_RUN_SEEDED=true
 elif [ "${BENCHMARK_WORLD_MODEL_MODE:-}" = "simulate" ]; then
     # Simulate mode: the World Model Harness intercepts every environment-boundary
     # tool, so real browser cookies/passwords are never exercised. Re-syncing all
@@ -1293,9 +1295,22 @@ restart_backend_service() {
     rm -f "$FAIL_DIR/failed" "$FAIL_DIR/exit_code"
     launch_backend_service
 }
+isolated_backend_ready_attempts() {
+    if [ -n "${CLOUDBENCH_BACKEND_START_READY_ATTEMPTS:-}" ]; then
+        printf '%s\n' "$CLOUDBENCH_BACKEND_START_READY_ATTEMPTS"
+    elif $FIRST_RUN_SEEDED; then
+        # The first backend launch after a full production seed has substantially
+        # more database state to initialize. Do not kill a live process at the
+        # warm guest's 60-second boundary and thereby restart all of that work.
+        printf '%s\n' "${CLOUDBENCH_COLD_BACKEND_START_READY_ATTEMPTS:-180}"
+    else
+        printf '%s\n' 60
+    fi
+}
 wait_for_isolated_backend_ready() {
     local launch_attempt probe_attempt
-    local attempts="${CLOUDBENCH_BACKEND_START_READY_ATTEMPTS:-60}"
+    local attempts
+    attempts="$(isolated_backend_ready_attempts)"
     for launch_attempt in 1 2; do
         for probe_attempt in $(seq 1 "$attempts"); do
             if curl -fsS "http://localhost:$BACKEND_PORT/health" >/dev/null 2>&1; then
