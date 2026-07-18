@@ -694,6 +694,62 @@ def test_update_world_model_excludes_simulated_bundles_from_corpus():
             restore()
 
 
+def test_world_model_bundle_cap_preserves_existing_index_entries():
+    from benchmarks.world_model_harness import update_world_model_for_simulation
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+        restore = _with_archive_env(tmp)
+        prior_cap = os.environ.get("WMH_MAX_BUNDLES")
+        try:
+            for bundle_id in ("root-existing-z", "root-new-a", "root-new-b"):
+                _write_golden_bundle(bundle_id)
+
+            class FakeMetrics:
+                def model_dump(self):
+                    return {"held_out_accuracy": 0.91}
+
+            class FakeResult:
+                metrics = FakeMetrics()
+
+            def fake_upstream_build(_config, **kwargs):
+                Path(kwargs["root"]).mkdir(parents=True, exist_ok=True)
+                return FakeResult()
+
+            update_world_model_for_simulation(
+                output_dir=out,
+                root_agent_ids=["root-existing-z"],
+                name="rose-capped",
+                gepa_budget=0,
+                upstream_build=fake_upstream_build,
+                config_factory=lambda **kwargs: {"config": kwargs},
+            )
+
+            os.environ["WMH_MAX_BUNDLES"] = "2"
+            result = update_world_model_for_simulation(
+                output_dir=out,
+                root_agent_ids=["root-existing-z", "root-new-a", "root-new-b"],
+                name="rose-capped",
+                gepa_budget=0,
+                upstream_build=fake_upstream_build,
+                config_factory=lambda **kwargs: {"config": kwargs},
+                index_refresher=lambda *_args, **_kwargs: {
+                    "indexed_traces": 2,
+                    "indexed_steps": 2,
+                    "index_path": str(Path(out) / "models" / "rose-capped" / "index"),
+                },
+            )
+
+            assert result["total_traces"] == 2
+            index = json.loads((Path(out) / "delta-index.json").read_text(encoding="utf-8"))
+            assert set(index["bundles"]) == {"root-existing-z", "root-new-a"}
+        finally:
+            if prior_cap is None:
+                os.environ.pop("WMH_MAX_BUNDLES", None)
+            else:
+                os.environ["WMH_MAX_BUNDLES"] = prior_cap
+            restore()
+
+
 def test_load_transitions_drops_fast_cache_replays_from_corpus():
     from benchmarks.world_model_harness import load_transitions
     from helpers.trace_archive import archive_json
@@ -1634,6 +1690,10 @@ async def run_all_tests():
     r.record(
         "update_world_model_excludes_simulated_bundles_from_corpus",
         test_update_world_model_excludes_simulated_bundles_from_corpus,
+    )
+    r.record(
+        "world_model_bundle_cap_preserves_existing_index_entries",
+        test_world_model_bundle_cap_preserves_existing_index_entries,
     )
     r.record(
         "load_transitions_drops_fast_cache_replays_from_corpus",

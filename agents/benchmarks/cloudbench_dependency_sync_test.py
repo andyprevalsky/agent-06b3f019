@@ -3404,6 +3404,19 @@ def test_cloud_git_sync_uses_safe_directory_everywhere() -> None:
     assert "git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO'" in cloud
 
 
+def test_refresh_wmh_bounds_the_archive_scan_by_default() -> None:
+    """Maintenance must not scan every historical R2 bundle before a run."""
+    cloud = CLOUD_SCRIPT.read_text()
+    refresh = cloud[
+        cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') :
+        cloud.index('# MODE: run (default)')
+    ]
+
+    assert 'WMH_REFRESH_MAX_BUNDLES="${WMH_REFRESH_MAX_BUNDLES:-200}"' in refresh
+    assert "WMH_REFRESH_MAX_BUNDLES must be a non-negative integer" in refresh
+    assert "WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES'" in refresh
+
+
 def test_start_barrier_tolerates_infra_failures() -> None:
     """RCA (2026-07-15): at fleet width some isolated stacks sporadically fail
     on-box startup (resource/timing races under N concurrent full stacks). The

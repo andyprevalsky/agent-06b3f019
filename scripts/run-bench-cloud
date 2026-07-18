@@ -1299,8 +1299,18 @@ fi
 # This is the ONLY place the model is (re)built. NOT per run.
 # ═════════════════════════════════════════════════════════════════════════════
 if [ "$MODE" = "refresh-wmh" ]; then
+    # Thousands of archived bundles make an uncapped per-bundle R2 signature
+    # scan take hours. Bound maintenance by default; 0 remains the explicit
+    # opt-in for an exhaustive offline rebuild.
+    WMH_REFRESH_MAX_BUNDLES="${WMH_REFRESH_MAX_BUNDLES:-200}"
+    case "$WMH_REFRESH_MAX_BUNDLES" in
+        ''|*[!0-9]*)
+            echo "❌ WMH_REFRESH_MAX_BUNDLES must be a non-negative integer." >&2
+            exit 2
+            ;;
+    esac
     echo "═══ run-bench-cloud --refresh-wmh ═══"
-    echo "model=$WMH_MODEL_NAME target=$REMOTE_WMH"
+    echo "model=$WMH_MODEL_NAME target=$REMOTE_WMH max_bundles=$WMH_REFRESH_MAX_BUNDLES"
     echo ""
     ensure_app
     cleanup_refresh_wmh() {
@@ -1351,7 +1361,7 @@ chown rose:rose '$REMOTE_REPO/agents/.env' '$REMOTE_REPO/back-end/.env' 2>/dev/n
 mkdir -p '$REMOTE_WMH'
 chown -R rose:rose '$REMOTE_WMH' '$REMOTE_REPO/agents/venv' 2>/dev/null || true
 cd '$REMOTE_REPO/agents'
-gosu rose env HOME=/home/rose WMH_BUILD_DIR='$REMOTE_WMH' WMH_MODEL_NAME='$WMH_MODEL_NAME' WMH_GEPA_BUDGET=0 \\
+gosu rose env HOME=/home/rose WMH_BUILD_DIR='$REMOTE_WMH' WMH_MODEL_NAME='$WMH_MODEL_NAME' WMH_GEPA_BUDGET=0 WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES' \\
   venv/bin/python -u -c \"from benchmarks.world_model_harness import update_world_model_for_simulation as u; import json; print(json.dumps(u(progress=lambda e: print('[WMH]', e.get('title'), e.get('status'), flush=True))))\"
 echo '::WMH-REFRESH-DONE::'
 ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
