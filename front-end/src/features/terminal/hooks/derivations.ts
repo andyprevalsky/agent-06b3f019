@@ -144,6 +144,20 @@ function isBrowserTaskTerminalMessage(message: Message): boolean {
   );
 }
 
+// A terminal message posted at tool-call scope (no task_id) ends every browser
+// task spawned by that tool call. The browser manager's catch-all error path
+// (agents/domains/spawn_browser_agent_v3/handler.py, "Browser automation
+// failed") posts failures this way — the exception can fire before/between
+// tasks, so only the toolCallId is known and a task-scoped terminal message
+// may never arrive. Task-scoped terminal messages (task_id set) must NOT
+// close siblings: the same tool call can retry with a new task after one
+// task's task_complete. Messages carrying subAgentId are excluded by
+// isBrowserTaskTerminalMessage (task-scoped sub-agent actions are progress,
+// not terminals).
+function isToolCallScopedTerminalMessage(message: Message): boolean {
+  return message.metadata?.task_id == null && isBrowserTaskTerminalMessage(message);
+}
+
 function getBrowserMessageTimestamp(message: Message): number {
   const timestamp = Date.parse(message.timestamp);
   return Number.isFinite(timestamp) ? timestamp : 0;
@@ -165,16 +179,20 @@ function compareBrowserMessageOrder(a: Message, b: Message): number {
  *   -> browser URL events --sort by persisted event time--> [LATEST_LIVE_VIEW]
  *      (API hydration/realtime delivery order does not affect the selected URL)
  *   -> task-scoped browser progress messages
- *   -> terminal message:
- *        - action_type task_complete/session_paused, or
- *        - legacy system/untyped spawn_browser_agent toolStatus FINISHED/ERROR
+ *   -> terminal message, at either scope:
+ *        - task-scoped (metadata.task_id set): action_type
+ *          task_complete/session_paused, or legacy system/untyped
+ *          spawn_browser_agent toolStatus FINISHED/ERROR
+ *        - tool-call-scoped (no task_id, matched via the init message's
+ *          toolCallId): same predicate — covers session_paused and the
+ *          worker's generic tool-error path, which only knows the toolCallId
  *   -> auth_assistance FINISHED remains non-terminal and resumes this task
  *   -> [HIDDEN_STATUS_CHIP]
  */
 export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelData[] {
   const panels: BrowserPanelData[] = [];
   const browserTaskIds = new Set<string>();
-  const pausedBrowserToolCallIds = new Set<string>();
+  const terminalToolCallIds = new Set<string>();
 
   messages.forEach((m) => {
     const taskId = m.metadata?.task_id;
@@ -182,12 +200,8 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
       browserTaskIds.add(taskId);
     }
     const toolCallId = m.metadata?.toolCallId;
-    if (
-      toolCallId &&
-      m.metadata?.toolName === 'spawn_browser_agent' &&
-      m.metadata?.action_type === 'session_paused'
-    ) {
-      pausedBrowserToolCallIds.add(toolCallId);
+    if (toolCallId && isToolCallScopedTerminalMessage(m)) {
+      terminalToolCallIds.add(toolCallId);
     }
   });
 
@@ -210,7 +224,7 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
 
     const isComplete =
       hasTerminalTaskMessage ||
-      (typeof initToolCallId === 'string' && pausedBrowserToolCallIds.has(initToolCallId));
+      (typeof initToolCallId === 'string' && terminalToolCallIds.has(initToolCallId));
 
     if (!isComplete && initMessage) {
       panels.push({

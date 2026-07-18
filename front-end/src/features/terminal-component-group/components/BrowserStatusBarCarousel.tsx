@@ -77,6 +77,8 @@ function CarouselItem({ browser, idx, activeIndex, total, onSelect }: CarouselIt
 
   return (
     <div
+      data-testid="browser-status-chip"
+      data-browser-task-id={browser.taskId}
       onClick={isActive ? undefined : () => onSelect(idx)}
       className={`transition-all duration-300 ease-out ${
         !isActive ? 'cursor-pointer rounded-xl hover:ring-2 hover:ring-primary/50' : ''
@@ -141,7 +143,11 @@ function BrowserStatusBarCarouselImpl({ browsers }: BrowserStatusBarCarouselProp
   if (!hasMultipleBrowsers) {
     const browser = browsers[0];
     return (
-      <div className="w-full max-w-4xl mx-auto mb-3 relative z-30">
+      <div
+        className="w-full max-w-4xl mx-auto mb-3 relative z-30"
+        data-testid="browser-status-chip"
+        data-browser-task-id={browser.taskId}
+      >
         <BrowserStatusBar taskId={browser.taskId} browserUrl={browser.browserUrl} />
       </div>
     );
