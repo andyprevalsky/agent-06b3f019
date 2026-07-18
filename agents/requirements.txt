@@ -9,7 +9,6 @@ ddgs>=9.14.1
 
 # Database and backend integration
 supabase>=2.0.0
-psycopg2-binary>=2.9.9
 
 # LLM and AI
 openai>=1.12.0

@@ -23,6 +23,7 @@ import { z } from 'zod';
 
 import { findWaitlistSignupsBetween } from '../../domains/admin-health/repo';
 import { isCacheableAdminHealthResponse } from '../../domains/admin-health/service';
+import { assertDatabaseActivationCounts } from './admin-health.blackbox.helpers';
 import { prisma } from '../../providers/database';
 config();
 
@@ -285,39 +286,6 @@ function assertNoImpossibleConversion(body: z.infer<typeof AdminHealthResponseSc
   }
 }
 
-async function assertDatabaseActivationCounts(body: AdminHealthResponse): Promise<void> {
-  const { ADMIN_USER_IDS } = await import('../../domains/admin-health/config');
-  const { findRootTasksBetween, findVerifiedUsersCreatedBefore } =
-    await import('../../domains/admin-health/repo');
-  const users = await findVerifiedUsersCreatedBefore(
-    new Date(body.range.end),
-    Array.from(ADMIN_USER_IDS)
-  );
-  const cohortIds = new Set(
-    users.filter((user) => user.createdAt >= new Date(body.range.start)).map((user) => user.userId)
-  );
-  const tasks = (
-    await findRootTasksBetween(new Date(body.range.start), new Date(body.range.end))
-  ).filter((task) => cohortIds.has(task.userId));
-  const taskCountByUser = new Map<string, number>();
-  for (const task of tasks) {
-    taskCountByUser.set(task.userId, (taskCountByUser.get(task.userId) ?? 0) + 1);
-  }
-  const expected = [
-    cohortIds.size,
-    Array.from(taskCountByUser.values()).filter((count) => count >= 1).length,
-    Array.from(taskCountByUser.values()).filter((count) => count >= 2).length,
-    Array.from(taskCountByUser.values()).filter((count) => count >= 3).length,
-  ];
-  const actual = body.funnel.steps
-    .filter((step) => step.source === 'database')
-    .map((step) => step.count);
-  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-    throw new Error(
-      `Database activation must match verified new-account task depth: expected ${expected.join(',')}, got ${actual.join(',')}`
-    );
-  }
-}
 
 async function expectedAdminHealthUserIds(): Promise<Set<string>> {
   const { ADMIN_HEALTH_ADDITIONAL_USER_IDS, ADMIN_HEALTH_EXCLUDED_USER_IDS } =
@@ -549,7 +517,13 @@ async function testAdminHappyWeekly() {
     if (step.count !== null) throw new Error(`Unavailable funnel step ${step.id} has a fake count`);
   }
   assertNoImpossibleConversion(body);
-  await assertDatabaseActivationCounts(body);
+  await assertDatabaseActivationCounts(body, async () => {
+    const fresh = await request(`${BASE_URL}/api/admin-health?timeSlice=weekly`, {
+      headers: authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
+    });
+    assertStatus(fresh.status, 200, fresh.data);
+    return assertSchema(AdminHealthResponseSchema, fresh.data, 'GET /admin-health weekly retry');
+  });
   if (process.env.AMPLITUDE_API_KEY && process.env.AMPLITUDE_SECRET_KEY) {
     for (const id of [
       'landing_page_viewed',

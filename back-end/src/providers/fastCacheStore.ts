@@ -1,5 +1,5 @@
 import { PrismaClient } from '@prisma/client';
-import { prisma } from './database';
+import { FAST_CACHE_POOL_LIMIT, prisma } from './database';
 import { shouldWriteFastModeCacheForUser } from './fastCacheAccountPolicy';
 import { type CacheKind } from './fastCacheNormalizeConstants';
 import { stripSecrets } from './fastCacheNormalizeCore';
@@ -116,7 +116,9 @@ function getFastCacheDatabaseUrl(): string {
   try {
     const url = new URL(base);
     if (!url.searchParams.has('connection_limit')) {
-      url.searchParams.set('connection_limit', process.env.FAST_CACHE_DB_POOL ?? '75');
+      // Shared constant from database.ts — this pool is subtracted from the
+      // Supavisor client-connection budget there, so the sizes must not drift.
+      url.searchParams.set('connection_limit', String(FAST_CACHE_POOL_LIMIT));
     }
     if (!url.searchParams.has('pool_timeout')) {
       url.searchParams.set('pool_timeout', '20');
