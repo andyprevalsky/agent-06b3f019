@@ -75,6 +75,19 @@ async function main(): Promise<void> {
     assert.strictEqual(isRetryableTransactionError(new Error('boom')), false);
   });
 
+  await test('isRetryableTransactionError: a MID-transaction P2028 is NOT retryable', () => {
+    // P2028 also covers "Transaction already closed" — a timeout DURING the
+    // body, which may have partially executed. Only the start-timeout message
+    // is safe to retry; the bare P2028 code is not.
+    assert.strictEqual(
+      isRetryableTransactionError({
+        code: 'P2028',
+        message: 'Transaction API error: Transaction already closed: A query cannot be executed.',
+      }),
+      false
+    );
+  });
+
   await test('retries the transient start timeout, then succeeds', async () => {
     let attempts = 0;
     const result = await retryOnTransientTransactionStart(async () => {
@@ -108,6 +121,20 @@ async function main(): Promise<void> {
       /Unable to start a transaction/
     );
     assert.strictEqual(attempts, 3, 'should attempt exactly maxRetries times');
+  });
+
+  await test('maxRetries <= 0 still runs the operation exactly once', async () => {
+    let attempts = 0;
+    const result = await retryOnTransientTransactionStart(async () => {
+      attempts += 1;
+      return 'ok';
+    }, 0);
+    assert.strictEqual(result, 'ok');
+    assert.strictEqual(
+      attempts,
+      1,
+      'a non-positive maxRetries must still run once, not zero times'
+    );
   });
 
   console.log(`\n${passed} passed, ${failures.length} failed`);

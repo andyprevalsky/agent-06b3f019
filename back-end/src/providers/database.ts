@@ -16,20 +16,28 @@ const globalForPrisma = global as unknown as { prisma: PrismaClient };
 // P2024 - Timed out fetching a new connection from the pool
 const RETRYABLE_ERROR_CODES = new Set(['P1001', 'P1017', 'P2024']);
 
-// Transient interactive-transaction START failures. P2028 ("Transaction API
-// error") wraps "Unable to start a transaction in the given time" — the
-// interactive `$transaction(fn)` couldn't acquire a connection within maxWait
-// under momentary pool pressure. This is transient, not a real failure.
-const RETRYABLE_TRANSACTION_ERROR_CODES = new Set([...RETRYABLE_ERROR_CODES, 'P2028']);
-
+// A retry of an interactive transaction is ONLY safe when the failure provably
+// happened BEFORE the callback body ran — otherwise a retry could double any
+// non-DB side effects the body performed. So we retry exactly two provably
+// pre-body conditions:
+//
+//   1. The start-timeout message "Unable to start a transaction in the given
+//      time" — the interactive `$transaction(fn)` never acquired a connection
+//      within maxWait under momentary pool pressure, so the body never began.
+//      This is one variant of P2028; we deliberately match the MESSAGE, not the
+//      P2028 code, because other P2028s (e.g. "Transaction already closed" — a
+//      timeout DURING the body) may have partially executed and are NOT safe to
+//      blindly retry in a general helper.
+//   2. Connection-acquisition errors that fire before the body: P2024 (pool
+//      fetch timeout), P1001 (can't reach DB), P1017 (server closed connection).
+//      For an interactive transaction these surface while establishing the
+//      connection, i.e. before the callback runs.
 export function isRetryableTransactionError(error: unknown): boolean {
   const e = error as { code?: unknown; message?: unknown };
-  if (typeof e.code === 'string' && RETRYABLE_TRANSACTION_ERROR_CODES.has(e.code)) return true;
-  // Some pooler/driver paths surface the start-timeout without a stable P-code,
-  // so also match the canonical message. Keep this narrow: only the start
-  // timeout is safe to retry (the transaction body never ran, so no partial
-  // side effects to worry about).
-  return typeof e.message === 'string' && e.message.includes('Unable to start a transaction');
+  if (typeof e.message === 'string' && e.message.includes('Unable to start a transaction')) {
+    return true;
+  }
+  return typeof e.code === 'string' && RETRYABLE_ERROR_CODES.has(e.code);
 }
 
 /**
@@ -44,7 +52,9 @@ export async function retryOnTransientTransactionStart<T>(
   maxRetries = 3
 ): Promise<T> {
   return retryWithBackoff(run, {
-    maxRetries,
+    // At least one attempt — a caller passing 0/negative must still run once
+    // rather than reject with `undefined` from a zero-iteration retry loop.
+    maxRetries: Math.max(1, maxRetries),
     initialBackoffMs: 100,
     isRetryable: isRetryableTransactionError,
     component: 'PrismaTx',
