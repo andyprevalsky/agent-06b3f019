@@ -1,0 +1,969 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Onboarding — Connect your Data (3D ring mockup)</title>
+    <!--
+  Standalone mockup for the redesigned "Connect your Data" onboarding step
+  (mac-app/ui/features/onboarding/components/OnboardingData.tsx).
+
+  Matches the real mac-app onboarding shell (Onboarding.tsx):
+  - Same bg-background, back chevron top-left, and the 5 StepDots at the top
+    ("data" is the 2nd dot; done/current dots use ROSE_GRADIENT).
+  - Progress bar: top & center, filled with ROSE_GRADIENT
+    (linear-gradient(to bottom left, #FE7503, #FC585C, #FD5776, #E062CC, #A76CED, #7A6BEC)
+    from ui/features/onboarding/config.ts).
+
+  Design:
+  - 3D ring: category icons sit centered ON a visible ring (their centers are
+    in the ring's plane), viewed from the front, tilted downward so you can
+    see through the top. Front item = active category.
+  - Sub-connections for the active category are listed in a card under the
+    ring (e.g. Passwords -> Chrome / Apple Passwords / ChatGPT Atlas), with
+    Plus buttons matching the real integrations page (SyncItemButton).
+  - A category counts as connected once >= 1 of its sub-items is connected.
+  - One row of buttons: [Skip for now] [Next]. On the last item, Next jumps to
+    the next unconnected category; once ALL are connected it turns navi-blue
+    and reads "Get Started".
+
+  Editing knobs: RADIUS / tilt / scales at the top of <script>, ring CSS in
+  .scene / .ring3d / .ring-circle. Toolbar bottom-right: Connect all / Reset.
+-->
+    <link rel="stylesheet" href="../../../fonts.css" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              border: 'hsl(var(--border))',
+              background: 'hsl(var(--background))',
+              foreground: 'hsl(var(--foreground))',
+              card: { DEFAULT: 'hsl(var(--card))', foreground: 'hsl(var(--card-foreground))' },
+              muted: { DEFAULT: 'hsl(var(--muted))', foreground: 'hsl(var(--muted-foreground))' },
+              primary: {
+                DEFAULT: 'hsl(var(--primary))',
+                foreground: 'hsl(var(--primary-foreground))',
+              },
+            },
+            borderRadius: {
+              xl: 'calc(var(--radius) + 0.25rem)',
+              lg: 'var(--radius)',
+              md: 'calc(var(--radius) - 0.25rem)',
+            },
+          },
+        },
+      };
+    </script>
+    <style>
+      /* Theme tokens copied from ui/index.css :root (light theme) */
+      :root {
+        --background: 240 15% 98%;
+        --foreground: 240 15% 8%;
+        --card: 0 0% 100%;
+        --card-foreground: 240 15% 8%;
+        --muted: 240 8% 92%;
+        --muted-foreground: 240 8% 45%;
+        --primary: 240 15% 8%;
+        --primary-foreground: 240 15% 98%;
+        --border: 240 8% 88%;
+        --radius: 0.75rem;
+
+        /* navi blue (app's signature blue gradient) */
+        --navi-blue: 227 100% 52%; /* rgb(9,78,255) */
+        --navi-blue-light: 213 100% 56%; /* rgb(33,130,255) */
+      }
+      body {
+        font-family:
+          Inter,
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          'Segoe UI',
+          Roboto,
+          'Helvetica Neue',
+          Arial,
+          sans-serif;
+        font-feature-settings:
+          'rlig' 1,
+          'calt' 1;
+        -webkit-font-smoothing: antialiased;
+        overflow: hidden;
+      }
+
+      /* ============================ 3D ring ============================ */
+      .scene {
+        perspective: 1100px;
+        perspective-origin: 50% 32%; /* camera slightly above center -> see through the top */
+      }
+      /* Ring and icons live in two sibling 3D layers with the same tilt transform.
+     Separate stacking contexts guarantee icons ALWAYS paint above the ring line
+     (no 3D plane-splitting through the icon frames). Tilt set from JS (TILT_DEG). */
+      .ring-layer,
+      .items-layer {
+        position: absolute;
+        inset: 0;
+      }
+      .ring-layer {
+        z-index: 0;
+        transform-style: preserve-3d;
+      }
+      .items-layer {
+        z-index: 10;
+        transform-style: preserve-3d;
+      }
+      .items-layer.no-anim .ring-item {
+        transition: none !important;
+      }
+      /* The visible ring the icons are attached to (drawn in the orbit plane).
+     Rendered as an SVG: grey base circle + 5 fixed-color rose arc segments
+     (one per category, midpoint-to-midpoint) that glow when connected. */
+      .ring-circle {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        transform: translate(-50%, -50%) rotateX(90deg);
+        pointer-events: none; /* never intercept clicks on ring icons (incl. back ones) */
+      }
+      .ring-svg {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        overflow: visible;
+        transform-origin: 50% 50%;
+        transition: transform 0.7s cubic-bezier(0.33, 1, 0.68, 1); /* tracks icon rotation */
+      }
+      .ring-svg path {
+        transition: opacity 0.5s ease;
+      }
+      #ring-shimmer {
+        opacity: 0;
+        transition: opacity 1s ease;
+        transform-box: fill-box;
+        transform-origin: center;
+      }
+
+      /* ---- all-connected celebration ---- */
+      .celebrate-veil {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 1.2s ease;
+        background: radial-gradient(
+          640px 340px at 50% 42%,
+          rgba(253, 87, 118, 0.16),
+          rgba(167, 108, 237, 0.1),
+          transparent 72%
+        );
+      }
+      body.complete .celebrate-veil {
+        opacity: 1;
+      }
+      body.complete #ring-shimmer {
+        opacity: 0.55;
+        animation: ringSpin 5s linear infinite;
+      }
+      @keyframes ringSpin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      body.complete #next-btn.proceed {
+        box-shadow: 0 6px 24px rgba(9, 78, 255, 0.35);
+      }
+      .ring-item {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transition:
+          transform 0.7s cubic-bezier(0.33, 1, 0.68, 1),
+          opacity 0.7s ease,
+          filter 0.7s ease;
+        will-change: transform;
+        cursor: pointer;
+      }
+
+      /* Icon frame — scaled-up DropdownIconFrame (ring items) */
+      .icon-frame {
+        position: relative;
+        flex-shrink: 0;
+      }
+      .icon-frame .glow {
+        pointer-events: none;
+        position: absolute;
+        inset: -5px;
+        border-radius: 1.1rem;
+        opacity: 0;
+        filter: blur(7px);
+        transition: opacity 0.3s;
+        /* connected shadow = rose gradient (ROSE_GRADIENT tints) */
+        background-image: linear-gradient(
+          to bottom left,
+          rgba(254, 117, 3, 0.5),
+          rgba(252, 88, 92, 0.45),
+          rgba(224, 98, 204, 0.45),
+          rgba(122, 107, 236, 0.5)
+        );
+      }
+      .icon-frame[data-synced='true'] .glow {
+        opacity: 0.8;
+      }
+      .icon-frame .frame-inner {
+        position: relative;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        overflow: hidden;
+        border: 1px solid transparent;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.16);
+        background:
+          linear-gradient(#f5f5f5, #f5f5f5) padding-box,
+          conic-gradient(
+              from 45deg,
+              rgba(16, 16, 16, 0.9) 0deg,
+              rgba(255, 255, 255, 0.96) 90deg,
+              rgba(16, 16, 16, 0.9) 180deg,
+              rgba(255, 255, 255, 0.96) 270deg,
+              rgba(16, 16, 16, 0.9) 360deg
+            )
+            border-box;
+      }
+      /* ring size (60px) */
+      .icon-frame.lg,
+      .icon-frame.lg .frame-inner {
+        height: 60px;
+        width: 60px;
+      }
+      .icon-frame.lg .frame-inner {
+        border-radius: 0.9rem;
+      }
+      /* row size (34px) — exact DropdownIconFrame dimensions */
+      .icon-frame.sm,
+      .icon-frame.sm .frame-inner {
+        height: 34px;
+        width: 34px;
+      }
+      .icon-frame.sm .frame-inner {
+        border-radius: 0.5rem;
+      }
+      .icon-frame.sm .glow {
+        inset: -3px;
+        border-radius: 0.75rem;
+        filter: blur(4px);
+        opacity: 0;
+      }
+      .icon-frame.sm[data-synced='true'] .glow {
+        opacity: 0.75;
+      }
+      .icon-frame.sm img {
+        height: 32px;
+        width: 32px;
+        object-fit: cover;
+      }
+      /* Sub icons start grey; connected restores their normal brand colors */
+      .icon-frame.sm .frame-inner > * {
+        filter: grayscale(1) opacity(0.5) contrast(0.8) brightness(1.15);
+        transition: filter 0.3s;
+      }
+      .icon-frame.sm[data-synced='true'] .frame-inner > * {
+        filter: none;
+      }
+
+      /* Ring category glyphs: grey like the Rose tool-set icons in the query box
+     (text-muted-foreground); connected -> rose-gradient tint via SVG paint refs. */
+      .frame-inner .glyph-stroke {
+        stroke: hsl(var(--muted-foreground));
+      }
+      .frame-inner .glyph-fill {
+        fill: hsl(var(--muted-foreground));
+      }
+      .icon-frame[data-synced='true'] .glyph-stroke {
+        stroke: url(#roseIconGU);
+      }
+      .icon-frame[data-synced='true'] .glyph-fill {
+        fill: url(#roseIconG);
+      }
+
+      /* Rose gradient (ui/features/onboarding/config.ts ROSE_GRADIENT) */
+      .rose-gradient {
+        background: linear-gradient(
+          to bottom left,
+          #fe7503,
+          #fc585c,
+          #fd5776,
+          #e062cc,
+          #a76ced,
+          #7a6bec
+        );
+      }
+
+      /* Final navi-blue CTA state */
+      #next-btn.proceed {
+        background: linear-gradient(180deg, hsl(var(--navi-blue-light)), hsl(var(--navi-blue)));
+        color: white;
+      }
+
+      .spin {
+        animation: spin 1s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body class="bg-background text-foreground">
+    <!-- Shared SVG paint: rose gradient for connected ring glyphs -->
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <linearGradient id="roseIconG" x1="100%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#FE7503" />
+          <stop offset="20%" stop-color="#FC585C" />
+          <stop offset="40%" stop-color="#FD5776" />
+          <stop offset="60%" stop-color="#E062CC" />
+          <stop offset="80%" stop-color="#A76CED" />
+          <stop offset="100%" stop-color="#7A6BEC" />
+        </linearGradient>
+        <!-- userSpaceOnUse variant for STROKED glyphs: objectBoundingBox gradients
+         cannot paint zero-height paths (e.g. the globe's M2 12h20 line) -->
+        <linearGradient
+          id="roseIconGU"
+          gradientUnits="userSpaceOnUse"
+          x1="24"
+          y1="0"
+          x2="0"
+          y2="24"
+        >
+          <stop offset="0%" stop-color="#FE7503" />
+          <stop offset="20%" stop-color="#FC585C" />
+          <stop offset="40%" stop-color="#FD5776" />
+          <stop offset="60%" stop-color="#E062CC" />
+          <stop offset="80%" stop-color="#A76CED" />
+          <stop offset="100%" stop-color="#7A6BEC" />
+        </linearGradient>
+      </defs>
+    </svg>
+
+    <div class="celebrate-veil" aria-hidden="true"></div>
+
+    <!-- Mockup toolbar (not part of the real page) -->
+    <div class="fixed bottom-3 right-3 z-50 flex gap-2 text-xs">
+      <button
+        onclick="setAllConnected(true)"
+        class="rounded-md border border-border bg-card px-2.5 py-1.5 text-muted-foreground hover:text-foreground shadow-sm"
+      >
+        Connect all
+      </button>
+      <button
+        onclick="setAllConnected(false)"
+        class="rounded-md border border-border bg-card px-2.5 py-1.5 text-muted-foreground hover:text-foreground shadow-sm"
+      >
+        Reset
+      </button>
+    </div>
+
+    <div class="min-h-screen bg-background flex flex-col">
+      <!-- Back chevron (matches Onboarding.tsx shell) -->
+      <button
+        class="absolute top-14 left-4 p-1.5 text-muted-foreground/50 hover:text-foreground transition-colors z-10"
+      >
+        <svg
+          class="w-5 h-5"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        >
+          <path d="m15 18-6-6 6-6" />
+        </svg>
+      </button>
+
+      <!-- Step dots (matches Onboarding.tsx StepDots; "data" = 2nd of 5) -->
+      <div class="flex items-center justify-center gap-2 pt-8 pb-4">
+        <div class="w-2 h-2 rounded-full transition-all duration-300 rose-gradient"></div>
+        <div class="w-2 h-2 rounded-full transition-all duration-300 rose-gradient"></div>
+        <div class="w-2 h-2 rounded-full transition-all duration-300 bg-foreground/20"></div>
+        <div class="w-2 h-2 rounded-full transition-all duration-300 bg-foreground/20"></div>
+        <div class="w-2 h-2 rounded-full transition-all duration-300 bg-foreground/20"></div>
+      </div>
+
+      <!-- ======================= Stage ======================= -->
+      <main class="relative flex flex-1 flex-col items-center px-8">
+        <!-- Page title: aligned to the top, right under the progress bar -->
+        <div id="page-header" class="flex flex-col items-center pt-4 text-center">
+          <h1 class="text-2xl font-semibold text-foreground">Connect your Data</h1>
+          <p class="mt-1 text-sm text-muted-foreground">
+            The more data sources you connect the more powerful Rose becomes.
+          </p>
+        </div>
+
+        <!-- [ring + active category label]: centered in the space between the
+         page title and the submenu card. Free space splits 2:1 with the
+         spacer below the buttons, so the submenu row sits at ~2/3 vh. -->
+        <div id="ring-region" class="flex flex-col items-center justify-center" style="flex: 2 0 0">
+          <div class="scene relative" style="width: 560px; height: 210px">
+            <div class="ring-layer" aria-hidden="true">
+              <div class="ring-circle"></div>
+            </div>
+            <div class="items-layer">
+              <!-- .ring-item divs are generated by JS from CATEGORIES -->
+            </div>
+          </div>
+          <div id="active-name" class="h-6 text-base font-semibold leading-6 text-foreground"></div>
+          <div id="active-desc" class="mt-0.5 h-4 text-xs leading-4 text-muted-foreground"></div>
+        </div>
+
+        <!-- Submenu: FIXED height (fits the tallest category, Messages = 4 rows)
+         so the buttons row never shifts when switching categories. -->
+        <div
+          id="active-block"
+          class="flex w-full max-w-sm flex-col items-center"
+          style="height: 206px"
+        >
+          <div id="sub-card" class="w-full rounded-xl border border-border bg-card overflow-hidden">
+            <!-- rows injected by renderActive() -->
+          </div>
+        </div>
+
+        <!-- ======================= Buttons row ======================= -->
+        <div class="mt-4 flex w-full max-w-sm gap-3">
+          <button
+            id="skip-btn"
+            class="flex-1 rounded-xl py-3 px-4 text-sm text-muted-foreground transition-colors hover:text-foreground"
+          >
+            Skip for now
+          </button>
+          <button
+            id="next-btn"
+            onclick="handleNext()"
+            class="flex-1 rounded-xl bg-foreground py-3 px-4 text-sm font-medium text-background transition-all duration-300 hover:bg-foreground/90 flex items-center justify-center gap-2"
+          >
+            <span id="next-label">Next</span>
+            <svg
+              class="w-3.5 h-3.5"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M5 12h14" />
+              <path d="m12 5 7 7-7 7" />
+            </svg>
+          </button>
+        </div>
+
+        <!-- bottom spacer: 1 share vs ring-region's 2 -> submenu sits at ~2/3 vh -->
+        <div style="flex: 1 0 0; min-height: 24px" aria-hidden="true"></div>
+      </main>
+    </div>
+
+    <script>
+      // ============================ config ============================
+      const RADIUS = 200; // ring radius (px)
+      const ITEM = 60; // ring icon frame size (px)
+      const TILT_DEG = 16; // downward tilt of the ring plane
+      const FRONT_SCALE = 1;
+      const BACK_SCALE = 0.55;
+      const BACK_OPACITY = 0.35;
+
+      document.querySelectorAll('.ring-layer, .items-layer').forEach((el) => {
+        el.style.transform = `rotateX(${-TILT_DEG}deg)`;
+      });
+
+      const A = '../../../assets';
+      const img = (src, extra = '') => `<img src="${A}/${src}" ${extra} />`;
+
+      // Category + sub-connection catalog. Sub icons/rows mirror the real
+      // integrations page (SyncItemButton = Plus, DropdownIconFrame rows).
+      const CATEGORIES = [
+        {
+          id: 'browsers',
+          name: 'Browser Sync',
+          desc: 'Sync browsing data for web automation',
+          icon: `<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="height:30px;width:30px">
+        <circle class="glyph-stroke" cx="12" cy="12" r="10"/>
+        <path class="glyph-stroke" d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/>
+        <path class="glyph-stroke" d="M2 12h20"/></svg>`,
+          subs: [
+            {
+              id: 'safari',
+              name: 'Safari',
+              icon: `<svg viewBox="0 0 48 48" style="height:30px;width:30px"><defs><radialGradient id="safD" cx="50%" cy="50%" r="50%"><stop offset="0%" stop-color="#4FD8FF"/><stop offset="100%" stop-color="#0A6CFF"/></radialGradient></defs><circle cx="24" cy="24" r="21" fill="url(#safD)"/><circle cx="24" cy="24" r="17" fill="none" stroke="white" stroke-opacity="0.8"/><path d="M24 8v4M24 36v4M8 24h4M36 24h4" stroke="white" stroke-width="2"/><path d="M29 19 19 29l-2-2 10-10z" fill="#EF4444"/><path d="M19 29 29 19l2 2-10 10z" fill="white"/><circle cx="24" cy="24" r="2.5" fill="white"/></svg>`,
+            },
+            { id: 'chrome', name: 'Chrome', icon: img('chrome-icon.png') },
+            {
+              id: 'brave',
+              name: 'Brave',
+              icon: img('brave-icon.webp', 'style="background:white;border-radius:4px"'),
+            },
+            {
+              id: 'atlas',
+              name: 'ChatGPT Atlas',
+              icon: img('chatgpt-icon.webp', 'style="border-radius:4px"'),
+            },
+          ],
+        },
+        {
+          id: 'passwords',
+          name: 'Passwords',
+          desc: 'Auto-fill login credentials',
+          icon: `<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="height:30px;width:30px">
+        <path class="glyph-stroke" d="m21 2-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>`,
+          subs: [
+            { id: 'pw-chrome', name: 'Chrome', icon: img('chrome-icon.png') },
+            { id: 'pw-apple', name: 'Apple Passwords', icon: img('apple-passwords-icon.png') },
+            {
+              id: 'pw-atlas',
+              name: 'ChatGPT Atlas',
+              icon: img('chatgpt-icon.webp', 'style="border-radius:4px"'),
+            },
+          ],
+        },
+        {
+          id: 'compute',
+          name: 'Compute',
+          desc: 'Bring your own AI subscriptions',
+          icon: `<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="height:30px;width:30px">
+        <rect class="glyph-stroke" x="4" y="4" width="16" height="16" rx="2"/>
+        <rect class="glyph-stroke" x="9" y="9" width="6" height="6"/>
+        <path class="glyph-stroke" d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2"/></svg>`,
+          subs: [
+            {
+              id: 'claude',
+              name: 'Claude',
+              icon: img('claude-color.svg', 'style="object-fit:contain;padding:3px"'),
+            },
+            {
+              id: 'chatgpt',
+              name: 'ChatGPT',
+              icon: img('chatgpt-icon.webp', 'style="border-radius:4px"'),
+            },
+            {
+              id: 'gemini',
+              name: 'Gemini',
+              icon: img('gemini-icon.png', 'style="object-fit:contain;padding:3px"'),
+            },
+          ],
+        },
+        {
+          id: 'messages',
+          name: 'Messages',
+          desc: 'Sync messaging clients',
+          icon: `<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="height:30px;width:30px">
+        <path class="glyph-stroke" d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`,
+          subs: [
+            {
+              id: 'imessage',
+              name: 'iMessage',
+              icon: `<svg viewBox="0 0 24 24" style="height:32px;width:32px"><defs><linearGradient id="imG" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" stop-color="#5bf675"/><stop offset="100%" stop-color="#1fcc3f"/></linearGradient></defs><rect width="24" height="24" rx="5" fill="url(#imG)"/><path fill="white" d="M12 5C7.58 5 4 8.13 4 12c0 1.65.67 3.15 1.76 4.35L5 19l2.88-.93C9.05 18.66 10.48 19 12 19c4.42 0 8-3.13 8-7s-3.58-7-8-7z"/></svg>`,
+            },
+            {
+              id: 'whatsapp',
+              name: 'WhatsApp',
+              icon: `<svg viewBox="0 0 24 24" style="height:32px;width:32px"><rect width="24" height="24" rx="5" fill="#25D366"/><path fill="white" d="M12 4c-4.42 0-8 3.58-8 8 0 1.41.37 2.73 1.01 3.88L4 20l4.26-1.12A7.93 7.93 0 0 0 12 20c4.42 0 8-3.58 8-8s-3.58-8-8-8zm4.14 11.07c-.17.48-1 .93-1.38.99-.37.06-.84.09-1.35-.09-.31-.11-.71-.25-1.23-.49-2.16-1-3.57-3.18-3.68-3.33-.1-.15-.86-1.14-.86-2.18s.55-1.55.74-1.76c.2-.21.43-.27.57-.27h.42c.13 0 .31-.05.48.37.18.43.61 1.49.66 1.59.05.1.08.22.02.35-.07.14-.1.22-.2.34-.1.12-.21.26-.3.35-.1.1-.2.2-.09.4.12.2.53.87 1.13 1.41.78.7 1.43.91 1.63 1.02.2.1.32.09.44-.06.12-.14.5-.58.64-.78.13-.2.27-.16.45-.1.18.07 1.15.54 1.34.64.2.1.33.15.38.23.05.09.05.51-.12.99z"/></svg>`,
+            },
+            {
+              id: 'telegram',
+              name: 'Telegram',
+              icon: `<svg viewBox="0 0 24 24" style="height:32px;width:32px"><rect width="24" height="24" rx="5" fill="#229ED9"/><path fill="white" d="M5.5 11.5l10.7-4.3c.6-.24 1.1.12.9.92l-1.9 9c-.14.64-.52.8-1.06.5l-2.9-2.1-1.4 1.4c-.12.1-.2.2-.4.2-.26 0-.37-.15-.5-.52l-1.1-3.5-2.7-.84c-.32-.11-.34-.41.06-.56zm4.7 1.7l.6 2.55.17-1.85 4.5-4c.2-.18-.05-.27-.32-.1l-5.5 3.4z" transform="translate(12, 12) scale(1.05) translate(-12, -12)"/></svg>`,
+            },
+            {
+              id: 'gmail',
+              name: 'Gmail',
+              icon: `<svg viewBox="0 0 24 24" style="height:20px;width:20px"><path fill="#EA4335" d="M24 5.457v13.909c0 .904-.732 1.636-1.636 1.636h-3.819V11.73L12 16.64l-6.545-4.91v9.273H1.636A1.636 1.636 0 0 1 0 19.366V5.457c0-2.023 2.309-3.178 3.927-1.964L5.455 4.64 12 9.548l6.545-4.91 1.528-1.145C21.69 2.28 24 3.434 24 5.457z"/></svg>`,
+            },
+          ],
+        },
+        {
+          id: 'socials',
+          name: 'Socials',
+          desc: 'Connect social media accounts',
+          icon: `<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="height:30px;width:30px">
+        <circle class="glyph-stroke" cx="18" cy="5" r="3"/><circle class="glyph-stroke" cx="6" cy="12" r="3"/><circle class="glyph-stroke" cx="18" cy="19" r="3"/>
+        <line class="glyph-stroke" x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line class="glyph-stroke" x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg>`,
+          subs: [
+            {
+              id: 'x',
+              name: 'X',
+              comingSoon: true,
+              icon: `<svg viewBox="0 0 24 24" style="height:32px;width:32px"><rect width="24" height="24" rx="5" fill="#000000"/><path fill="white" d="M13.3 10.75L18.18 5h-1.16l-4.23 4.99L9.26 5H5l5.11 7.55L5 19h1.16l4.47-5.27L14.74 19H19l-5.7-8.25zm-1.58 1.87l-.52-.75L6.68 5.92h1.77l3.32 4.83.52.75 4.33 6.29h-1.77l-3.53-5.17z" transform="scale(0.72) translate(4.7, 4.7)"/></svg>`,
+            },
+            {
+              id: 'linkedin',
+              name: 'LinkedIn',
+              icon: `<svg viewBox="0 0 24 24" style="height:32px;width:32px"><rect width="24" height="24" rx="5" fill="#0A66C2"/><path fill="white" d="M8.34 18H5.66V9.75h2.68V18zM7 8.62a1.56 1.56 0 1 1 0-3.12 1.56 1.56 0 0 1 0 3.12zM18.34 18h-2.67v-4.02c0-.96-.02-2.19-1.33-2.19-1.34 0-1.54 1.04-1.54 2.12V18h-2.68V9.75h2.57v1.12h.04c.36-.68 1.23-1.39 2.53-1.39 2.7 0 3.2 1.78 3.2 4.1V18z" transform="scale(0.85) translate(2.1, 2.1)"/></svg>`,
+            },
+            {
+              id: 'instagram',
+              name: 'Instagram',
+              comingSoon: true,
+              icon: `<svg viewBox="0 0 24 24" style="height:32px;width:32px"><defs><linearGradient id="igG" x1="0%" y1="100%" x2="100%" y2="0%"><stop offset="0%" stop-color="#FFDC80"/><stop offset="25%" stop-color="#F77737"/><stop offset="50%" stop-color="#E1306C"/><stop offset="75%" stop-color="#C13584"/><stop offset="100%" stop-color="#833AB4"/></linearGradient></defs><rect width="24" height="24" rx="5" fill="url(#igG)"/><rect x="6" y="6" width="12" height="12" rx="3.5" stroke="white" stroke-width="1.5" fill="none"/><circle cx="12" cy="12" r="3" stroke="white" stroke-width="1.5" fill="none"/><circle cx="16.5" cy="7.5" r="1" fill="white"/></svg>`,
+            },
+          ],
+        },
+        {
+          id: 'financials',
+          name: 'Financials',
+          desc: 'Connect your financial accounts',
+          icon: `<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="height:30px;width:30px">
+        <line class="glyph-stroke" x1="12" y1="2" x2="12" y2="22"/>
+        <path class="glyph-stroke" d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>`,
+          subs: [
+            {
+              id: 'plaid',
+              name: 'Your Bank',
+              icon: `<svg viewBox="0 0 47 48" fill="none" style="height:20px;width:20px;color:#111111"><path fill="currentColor" d="M18.637 0L4.09 3.81.081 18.439l5.014 5.148L0 28.65l3.773 14.693 14.484 4.047 5.096-5.064 5.014 5.147 14.547-3.81 4.008-14.63-5.013-5.146 5.095-5.063L43.231 4.13 28.745.083l-5.094 5.063L18.637 0zM9.71 6.624l7.663-2.008 3.351 3.44-4.887 4.856L9.71 6.624zm16.822 1.478l3.405-3.383 7.63 2.132-6.227 6.187-4.808-4.936zM4.672 17.238l2.111-7.705 6.125 6.288-4.886 4.856-3.35-3.44zm29.547-1.243l6.227-6.189 1.986 7.74-3.404 3.384-4.809-4.935zm-15.502-.127l4.887-4.856 4.807 4.936-4.886 4.856-4.808-4.936zm-7.814 7.765l4.886-4.856 4.81 4.936-4.888 4.856-4.808-4.936zm15.503.127l4.886-4.856L36.1 23.84l-4.887 4.856-4.807-4.936zM4.57 29.927l3.406-3.385 4.807 4.937-6.225 6.186-1.988-7.738zm14.021 1.598l4.887-4.856 4.808 4.936-4.886 4.856-4.809-4.936zm15.502.128l4.887-4.856 3.351 3.439-2.11 7.705-6.128-6.288zm-24.656 8.97l6.226-6.189 4.81 4.936-3.406 3.385-7.63-2.133zm16.843-1.206l4.886-4.856 6.126 6.289-7.662 2.007-3.35-3.44z"/></svg>`,
+            },
+          ],
+        },
+      ];
+
+      const N = CATEGORIES.length;
+      const STEP = 360 / N;
+      const connectedSubs = new Set(); // "catId:subId"
+      let activeIndex = 0;
+      let rotation = 0;
+
+      const catConnected = (cat) => cat.subs.some((s) => connectedSubs.has(cat.id + ':' + s.id));
+      const connectedCount = () => CATEGORIES.filter(catConnected).length;
+      const allConnected = () => connectedCount() === N;
+
+      // ---------- build ring ----------
+      const ringCircle = document.querySelector('.ring-circle');
+      ringCircle.style.width = RADIUS * 2 + 'px';
+      ringCircle.style.height = RADIUS * 2 + 'px';
+
+      // Segment colors: each category's arc keeps a FIXED color from the rose
+      // gradient palette (stable regardless of rotation/connection order).
+      const ROSE_STOPS = ['#FE7503', '#FC585C', '#FD5776', '#E062CC', '#A76CED', '#7A6BEC'];
+      const ringPt = (deg) => {
+        const r = (deg * Math.PI) / 180;
+        return [RADIUS + RADIUS * Math.sin(r), RADIUS + RADIUS * Math.cos(r)];
+      };
+      // 50/50 hex blend for smooth color hand-off between neighboring segments
+      const mixHex = (a, b) => {
+        const pa = a
+          .slice(1)
+          .match(/../g)
+          .map((h) => parseInt(h, 16));
+        const pb = b
+          .slice(1)
+          .match(/../g)
+          .map((h) => parseInt(h, 16));
+        return (
+          '#' +
+          pa
+            .map((v, k) =>
+              Math.round((v + pb[k]) / 2)
+                .toString(16)
+                .padStart(2, '0')
+            )
+            .join('')
+        );
+      };
+      (function buildRingSvg() {
+        const half = STEP / 2;
+        // Each segment gets a gradient along its chord: neighbor-blend at the
+        // edges, its own fixed color in the middle — adjacent arcs share edge
+        // colors, so a fully lit ring reads as one continuous gradient.
+        const segDefs = CATEGORIES.map((cat, i) => {
+          const cPrev =
+            ROSE_STOPS[((i + CATEGORIES.length - 1) % CATEGORIES.length) % ROSE_STOPS.length];
+          const cSelf = ROSE_STOPS[i % ROSE_STOPS.length];
+          const cNext = ROSE_STOPS[((i + 1) % CATEGORIES.length) % ROSE_STOPS.length];
+          const [x1, y1] = ringPt(i * STEP - half);
+          const [x2, y2] = ringPt(i * STEP + half);
+          return `<linearGradient id="segG${i}" gradientUnits="userSpaceOnUse"
+          x1="${x1.toFixed(2)}" y1="${y1.toFixed(2)}" x2="${x2.toFixed(2)}" y2="${y2.toFixed(2)}">
+        <stop offset="0%" stop-color="${mixHex(cPrev, cSelf)}"/>
+        <stop offset="50%" stop-color="${cSelf}"/>
+        <stop offset="100%" stop-color="${mixHex(cSelf, cNext)}"/>
+      </linearGradient>`;
+        }).join('');
+        const segPaths = () =>
+          CATEGORIES.map((cat, i) => {
+            const [x1, y1] = ringPt(i * STEP - half);
+            const [x2, y2] = ringPt(i * STEP + half);
+            const d = `M ${x1.toFixed(2)} ${y1.toFixed(2)} A ${RADIUS} ${RADIUS} 0 0 0 ${x2.toFixed(2)} ${y2.toFixed(2)}`;
+            return `<path data-seg="${i}" d="${d}" stroke="url(#segG${i})" opacity="0"/>`;
+          }).join('');
+        const D = RADIUS * 2;
+        const circumference = 2 * Math.PI * RADIUS;
+        ringCircle.innerHTML = `
+      <svg class="ring-svg" viewBox="0 0 ${D} ${D}">
+        <defs>
+          <filter id="segBlur" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="5"/></filter>
+          <linearGradient id="shimmerG" x1="100%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#FE7503"/><stop offset="50%" stop-color="#E062CC"/><stop offset="100%" stop-color="#7A6BEC"/>
+          </linearGradient>
+          ${segDefs}
+        </defs>
+        <circle cx="${RADIUS}" cy="${RADIUS}" r="${RADIUS}" fill="none" stroke="hsl(var(--border))" stroke-width="1.5"/>
+        <g fill="none" stroke-linecap="round" stroke-width="9" filter="url(#segBlur)">${segPaths()}</g>
+        <g fill="none" stroke-linecap="round" stroke-width="2.5">${segPaths()}</g>
+        <circle id="ring-shimmer" cx="${RADIUS}" cy="${RADIUS}" r="${RADIUS}" fill="none" stroke="url(#shimmerG)"
+          stroke-width="3" stroke-linecap="round" stroke-dasharray="110 ${(circumference - 110).toFixed(0)}"/>
+      </svg>`;
+      })();
+
+      const itemsHost = document.querySelector('.items-layer');
+      const items = CATEGORIES.map((cat, i) => {
+        const el = document.createElement('div');
+        el.className = 'ring-item';
+        el.dataset.cat = cat.id;
+        el.style.width = ITEM + 'px';
+        el.style.height = ITEM + 'px';
+        el.style.top = '50%';
+        el.style.left = '50%';
+        el.style.margin = `-${ITEM / 2}px 0 0 -${ITEM / 2}px`;
+        el.innerHTML = `
+      <div class="icon-frame lg" data-synced="false">
+        <span class="glow" aria-hidden="true"></span>
+        <div class="frame-inner">${cat.icon}</div>
+      </div>`;
+        el.addEventListener('click', () => rotateTo(i));
+        itemsHost.appendChild(el);
+        return el;
+      });
+
+      function layout() {
+        items.forEach((el, i) => {
+          const angle = i * STEP + rotation;
+          const rad = (angle * Math.PI) / 180;
+          const depth = (Math.cos(rad) + 1) / 2;
+          const scale = BACK_SCALE + (FRONT_SCALE - BACK_SCALE) * depth;
+          // billboard: rotate into place on the ring, push out, face the camera,
+          // then counter-tilt so the icon itself stands upright (not tilted with the ring)
+          el.style.transform = `rotateY(${angle}deg) translateZ(${RADIUS}px) rotateY(${-angle}deg) rotateX(${TILT_DEG}deg) scale(${scale})`;
+          el.style.opacity = String(BACK_OPACITY + (1 - BACK_OPACITY) * depth);
+          el.style.zIndex = String(100 + Math.round(depth * 100));
+          el.style.filter = depth < 0.6 ? 'saturate(0.7)' : 'none';
+        });
+        // ring segments rotate in the ring plane to stay glued to their icons
+        const svg = document.querySelector('.ring-svg');
+        if (svg) svg.style.transform = `rotate(${-rotation}deg)`;
+      }
+
+      function rotateTo(index) {
+        if (spinning) return;
+        let delta = index - activeIndex;
+        if (delta > N / 2) delta -= N;
+        if (delta < -N / 2) delta += N;
+        rotation -= delta * STEP;
+        activeIndex = ((index % N) + N) % N;
+        layout();
+        renderActive();
+      }
+
+      // ---------- all-connected celebration spin ----------
+      // The ring revs up like an engine: 4 full turns in 3s (ease-in-out), then
+      // settles back on the same resting angle. Driven per-frame with transitions
+      // off so depth scale/opacity/z-order stay correct throughout.
+      let spinning = false;
+      function celebrationSpin() {
+        if (spinning) return;
+        spinning = true;
+        const layer = document.querySelector('.items-layer');
+        const svg = document.querySelector('.ring-svg');
+        layer.classList.add('no-anim');
+        if (svg) svg.style.transition = 'none';
+        const startRot = rotation;
+        const TURNS = 4;
+        const DUR = 3000;
+        const start = performance.now();
+        const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+        const frame = (now) => {
+          const t = Math.min(1, (now - start) / DUR);
+          rotation = startRot - TURNS * 360 * ease(t);
+          layout();
+          if (t < 1) {
+            requestAnimationFrame(frame);
+          } else {
+            rotation = startRot; // 4 whole turns -> identical resting pose
+            layout();
+            // Commit the snap-back while transitions are still off, THEN restore
+            // them a frame later — restoring in the same tick would animate the
+            // 1440° reset as a visible reverse spin.
+            void layer.offsetHeight;
+            requestAnimationFrame(() => {
+              layer.classList.remove('no-anim');
+              if (svg) svg.style.transition = '';
+              spinning = false;
+            });
+          }
+        };
+        requestAnimationFrame(frame);
+      }
+
+      // ---------- active category card ----------
+      const PLUS =
+        '<svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>';
+      const CHECK =
+        '<svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>';
+      const SPINNER =
+        '<svg class="w-3.5 h-3.5 spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>';
+
+      function renderActive() {
+        const cat = CATEGORIES[activeIndex];
+        document.getElementById('active-name').textContent = cat.name;
+        document.getElementById('active-desc').textContent = cat.desc;
+
+        const card = document.getElementById('sub-card');
+        card.innerHTML = cat.subs
+          .map((sub, i) => {
+            const key = cat.id + ':' + sub.id;
+            const isConn = connectedSubs.has(key);
+            const borderCls = i < cat.subs.length - 1 ? ' border-b border-border/50' : '';
+            const action = sub.comingSoon
+              ? '<span class="text-xs text-muted-foreground italic">Coming soon</span>'
+              : `<button onclick="connectSub('${key}', this)" ${isConn ? 'disabled' : ''}
+             class="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 ${isConn ? 'bg-[#FD5776]/10 text-[#E062CC]' : 'bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground'}">
+             ${isConn ? CHECK : PLUS}
+           </button>`;
+            return `
+        <div class="px-4 py-2 flex items-center justify-between${borderCls}">
+          <div class="flex items-center gap-3">
+            <div class="icon-frame sm" data-synced="${isConn}">
+              <span class="glow" aria-hidden="true"></span>
+              <div class="frame-inner">${sub.icon}</div>
+            </div>
+            <span class="truncate text-sm text-foreground">${sub.name}</span>
+          </div>
+          ${action}
+        </div>`;
+          })
+          .join('');
+
+        updateNextButton();
+      }
+
+      function connectSub(key, btn) {
+        if (connectedSubs.has(key)) return;
+        btn.disabled = true;
+        btn.innerHTML = SPINNER;
+        setTimeout(() => {
+          connectedSubs.add(key);
+          syncRingGlow();
+          renderActive();
+        }, 900);
+      }
+
+      function syncRingGlow() {
+        CATEGORIES.forEach((cat, i) => {
+          items[i].querySelector('.icon-frame').dataset.synced = String(catConnected(cat));
+        });
+        // connected categories light their ring segment (midpoint-to-midpoint arc)
+        document.querySelectorAll('[data-seg]').forEach((p) => {
+          p.style.opacity = catConnected(CATEGORIES[Number(p.dataset.seg)]) ? '1' : '0';
+        });
+      }
+
+      // ---------- next button ----------
+      function nextUnconnected(from) {
+        for (let k = 1; k <= N; k++) {
+          const i = (from + k) % N;
+          if (!catConnected(CATEGORIES[i])) return i;
+        }
+        return null;
+      }
+
+      function updateNextButton() {
+        const btn = document.getElementById('next-btn');
+        const label = document.getElementById('next-label');
+        const wasComplete = document.body.classList.contains('complete');
+        document.body.classList.toggle('complete', allConnected());
+        if (allConnected() && !wasComplete) celebrationSpin();
+        if (allConnected()) {
+          btn.classList.add('proceed');
+          label.textContent = 'Get Started';
+        } else {
+          btn.classList.remove('proceed');
+          label.textContent = 'Next';
+        }
+      }
+
+      function handleNext() {
+        if (allConnected()) {
+          alert('onComplete() — proceed to next onboarding step');
+          return;
+        }
+        if (activeIndex === N - 1) {
+          const target = nextUnconnected(activeIndex);
+          if (target !== null) rotateTo(target);
+          return;
+        }
+        rotateTo(activeIndex + 1);
+      }
+
+      // ---------- toolbar ----------
+      function setAllConnected(value) {
+        connectedSubs.clear();
+        if (value) {
+          CATEGORIES.forEach((cat) =>
+            cat.subs
+              .filter((s) => !s.comingSoon)
+              .forEach((s) => connectedSubs.add(cat.id + ':' + s.id))
+          );
+        }
+        syncRingGlow();
+        renderActive();
+      }
+
+      // ---------- spacing normalization ----------
+      // The 3D projection paints inside the .scene layout box (constant overhangs
+      // that margins can't know statically). Collapse the box to its RENDERED
+      // bounds so the flex centering of #ring-region and the gap to the category
+      // label are visually exact. Overhangs are margin-independent, so this is a
+      // one-shot, idempotent measurement (safe to re-run after late styles).
+      const GAP_BELOW_RING = 18; // lowest rendered point (front icon) -> category name
+      // (kept tighter than the label -> sub-card gap so the
+      // title reads as attached to the ring, not the card)
+
+      const ringVisualBounds = () => {
+        const frameRects = items.map((el) =>
+          el.querySelector('.icon-frame').getBoundingClientRect()
+        );
+        const ringRect = ringCircle.getBoundingClientRect();
+        return {
+          top: Math.min(ringRect.top, ...frameRects.map((r) => r.top)),
+          bottom: Math.max(ringRect.bottom, ...frameRects.map((r) => r.bottom)),
+        };
+      };
+
+      function settleLayout() {
+        const scene = document.querySelector('.scene');
+        const sceneRect = scene.getBoundingClientRect();
+        const bounds = ringVisualBounds();
+        scene.style.marginTop = sceneRect.top - bounds.top + 'px';
+        scene.style.marginBottom = GAP_BELOW_RING - (sceneRect.bottom - bounds.bottom) + 'px';
+      }
+
+      // Initial layout: transitions off so items land instantly, then measure.
+      const itemsLayer = document.querySelector('.items-layer');
+      itemsLayer.classList.add('no-anim');
+      layout();
+      renderActive();
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          settleLayout();
+          itemsLayer.classList.remove('no-anim');
+        })
+      );
+      window.addEventListener('load', settleLayout);
+      window.addEventListener('resize', settleLayout);
+      setTimeout(settleLayout, 600);
+    </script>
+  </body>
+</html>

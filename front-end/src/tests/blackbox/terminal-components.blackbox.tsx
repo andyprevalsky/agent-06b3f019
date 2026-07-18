@@ -26,6 +26,7 @@ import { renderWithProviders } from './test-wrapper';
 import QueryInput from '@/features/terminal-component-group/components/QueryInput';
 import AsciiLoader from '@/features/terminal-component-group/components/AsciiLoader';
 import { OpeningMessageDisplay } from '@/features/terminal/components/OpeningMessageDisplay';
+import { ChatScrollArea } from '@/features/terminal/components/ChatScrollArea';
 import { OPENING_MESSAGES } from '@/features/terminal/config';
 import AttentionInbox from '@/features/terminal-component-group/components/AttentionInbox';
 import BrowserStatusBar from '@/features/terminal-component-group/components/BrowserStatusBar';
@@ -40,11 +41,15 @@ const API_BASE = 'http://localhost:3001/api';
 // MessageList is used by BrowserStatusBar/BrowserViewPanel and mounts a
 // framer-motion tree keyed to the full AgentContext. Stubbing it keeps the
 // tests focused on the parent's own DOM contract.
-vi.mock('@/features/terminal-component-group/components/MessageList', () => ({
-  MessageList: ({ subAgentId }: { subAgentId?: string }) => (
+vi.mock('@/features/terminal-component-group/components/MessageList', () => {
+  const MessageListStub = ({ subAgentId }: { subAgentId?: string }) => (
     <div data-testid="message-list-stub" data-subagent-id={subAgentId || ''} />
-  ),
-}));
+  );
+  // The components barrel re-exports MessageList from this module's DEFAULT
+  // export (`export { default as MessageList }`), so the default must be
+  // stubbed too — otherwise the barrel-level `MessageList` is undefined.
+  return { MessageList: MessageListStub, default: MessageListStub };
+});
 
 vi.mock('@/features/terminal-component-group/components/BrowserBorderGlow', () => ({
   default: () => <div data-testid="browser-border-glow" />,
@@ -2248,5 +2253,70 @@ describe('AsciiLoader CTA overlay (blackbox)', () => {
     expect(screen.queryByTestId('opening-join-waitlist')).toBeNull();
     expect(screen.queryByTestId('opening-join-prism')).toBeNull();
     expect(screen.queryByTestId('opening-join-prism-shadow')).toBeNull();
+  });
+});
+
+// ─── ChatScrollArea waitlist CTA auth-gating (blackbox) ──────────────────
+//
+// The terminal's opening "Join Waitlist" CTA must disappear once a user is
+// signed in with a real (non-anonymous) account, but stay visible for
+// logged-out AND anonymous-bootstrap visitors (every landing visitor gets an
+// anonymous session — they are not "logged in").
+describe('ChatScrollArea Join Waitlist auth-gating (blackbox)', () => {
+  function makeAgentSlice(auth: { isAuthenticated: boolean; isAnonymous: boolean }) {
+    // Opening state that surfaces the CTA: no selected agent, no messages,
+    // nothing loading. Only the fields ChatScrollArea reads are populated.
+    return {
+      selectedAgentId: null,
+      agentDetail: null,
+      messages: [],
+      isLoadingAgent: false,
+      isLoadingNetwork: false,
+      loadingDots: '',
+      isAuthenticated: auth.isAuthenticated,
+      isAnonymous: auth.isAnonymous,
+      handleJoinWaitlist: vi.fn(),
+      handleSelectAgent: vi.fn(),
+      handleSubmitFeedback: vi.fn(),
+      setShowCreditModal: vi.fn(),
+      setShowCostLimitModal: vi.fn(),
+    } as unknown as Parameters<typeof ChatScrollArea>[0]['agents'];
+  }
+
+  const drip = {
+    dripStyles: { blur: 0, saturation: 1, brightness: 1 },
+    blur: 0,
+  } as unknown as Parameters<typeof ChatScrollArea>[0]['drip'];
+
+  const opening = {
+    currentMessageIndex: 0,
+    animationPhase: 'revealing',
+    revealProgress: 100,
+  } as unknown as Parameters<typeof ChatScrollArea>[0]['opening'];
+
+  function renderChat(auth: { isAuthenticated: boolean; isAnonymous: boolean }) {
+    return renderWithProviders(
+      <ChatScrollArea
+        agents={makeAgentSlice(auth)}
+        drip={drip}
+        opening={opening}
+        messagesEndRef={React.createRef<HTMLDivElement>()}
+      />,
+    );
+  }
+
+  it('shows the Join Waitlist CTA for a logged-out visitor', () => {
+    renderChat({ isAuthenticated: false, isAnonymous: false });
+    expect(screen.getByTestId('opening-join-waitlist')).toBeInTheDocument();
+  });
+
+  it('shows the Join Waitlist CTA for an anonymous-bootstrap session', () => {
+    renderChat({ isAuthenticated: true, isAnonymous: true });
+    expect(screen.getByTestId('opening-join-waitlist')).toBeInTheDocument();
+  });
+
+  it('hides the Join Waitlist CTA when signed in with a real account', () => {
+    renderChat({ isAuthenticated: true, isAnonymous: false });
+    expect(screen.queryByTestId('opening-join-waitlist')).toBeNull();
   });
 });

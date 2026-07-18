@@ -17,12 +17,18 @@ interface DropdownIconFrameProps {
   iconFit?: 'contain' | 'cover' | 'fill';
   iconScale?: number;
   isSynced?: boolean;
+  /** Override the synced glow gradient (defaults to the teal integrations glow). */
+  glowGradient?: string;
 }
 
 export const dropdownIconImageClassName = 'h-8 w-8 object-cover';
 
 const connectedTealGlowGradient =
   'linear-gradient(to bottom left, rgba(45, 212, 191, 0.5), rgba(20, 184, 166, 0.42), rgba(15, 118, 110, 0.46))';
+
+/** Rose variant used by the mac-app onboarding ring (ROSE_GRADIENT tints). */
+export const connectedRoseGlowGradient =
+  'linear-gradient(to bottom left, rgba(254, 117, 3, 0.5), rgba(252, 88, 92, 0.45), rgba(224, 98, 204, 0.45), rgba(122, 107, 236, 0.5))';
 
 export const DropdownIconPreset = {
   browserMain: { iconScale: 62, iconFit: 'contain' },
@@ -88,6 +94,7 @@ export default function DropdownIconFrame({
   iconFit = 'cover',
   iconScale = 100,
   isSynced = false,
+  glowGradient = connectedTealGlowGradient,
 }: DropdownIconFrameProps): JSX.Element {
   return (
     <div className="relative h-[34px] w-[34px] shrink-0">
@@ -95,7 +102,7 @@ export default function DropdownIconFrame({
         <span
           aria-hidden="true"
           className="pointer-events-none absolute -inset-[3px] rounded-xl opacity-75 blur-sm"
-          style={{ backgroundImage: connectedTealGlowGradient }}
+          style={{ backgroundImage: glowGradient }}
         />
       )}
       <div

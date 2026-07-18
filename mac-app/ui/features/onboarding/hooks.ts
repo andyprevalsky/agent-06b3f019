@@ -3,21 +3,13 @@ import { sendOTP, verifyOTP } from '@/features/auth/api';
 import { isSubmittablePhone } from '@/lib/phone';
 import { getErrorMessageOrFallback } from '../../../shared/utils/error';
 import {
-  createPlaidLinkToken,
   checkWaitlistStatus,
   createSubscriptionCheckoutUrl,
-  exchangePlaidPublicToken,
   fetchCustomPreviewUrl,
   fetchCustomization,
-  fetchIntegrations,
-  fetchPlaidItems,
   resolvePresetSamplePath,
   redeemInviteCode,
   saveCustomization,
-  sendPasswordIntegrationRequest,
-  spawnLinkedInSyncAgent,
-  startGmailOAuth,
-  uploadApplePasswords,
 } from './api';
 import { RESEND_COOLDOWN_SECONDS } from './config';
 import type { AuthStep, UseOnboardingAuthResult } from './types';
@@ -27,26 +19,6 @@ const ONBOARDING_CUSTOMIZATION_API: {
   saveCustomization: typeof saveCustomization;
 } = { fetchCustomization, saveCustomization };
 
-const ONBOARDING_DATA_API: {
-  fetchIntegrations: typeof fetchIntegrations;
-  startGmailOAuth: typeof startGmailOAuth;
-  uploadApplePasswords: typeof uploadApplePasswords;
-  sendPasswordIntegrationRequest: typeof sendPasswordIntegrationRequest;
-  spawnLinkedInSyncAgent: typeof spawnLinkedInSyncAgent;
-  createPlaidLinkToken: typeof createPlaidLinkToken;
-  exchangePlaidPublicToken: typeof exchangePlaidPublicToken;
-  fetchPlaidItems: typeof fetchPlaidItems;
-} = {
-  fetchIntegrations,
-  startGmailOAuth,
-  uploadApplePasswords,
-  sendPasswordIntegrationRequest,
-  spawnLinkedInSyncAgent,
-  createPlaidLinkToken,
-  exchangePlaidPublicToken,
-  fetchPlaidItems,
-};
-
 const ONBOARDING_WAITLIST_API: {
   checkWaitlistStatus: typeof checkWaitlistStatus;
   redeemInviteCode: typeof redeemInviteCode;
@@ -55,8 +27,6 @@ const ONBOARDING_WAITLIST_API: {
 
 export const useOnboardingCustomizationApi = (): typeof ONBOARDING_CUSTOMIZATION_API =>
   ONBOARDING_CUSTOMIZATION_API;
-
-export const useOnboardingDataApi = (): typeof ONBOARDING_DATA_API => ONBOARDING_DATA_API;
 
 export const useOnboardingWaitlistApi = (): typeof ONBOARDING_WAITLIST_API =>
   ONBOARDING_WAITLIST_API;

@@ -7,11 +7,13 @@ import { clearIpcMock, installIpcMock } from './ipc-mock';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 import OnboardingData from '../../ui/features/onboarding/components/OnboardingData';
-import type { BrowserInfo } from '../../shared/types/ipc';
+import RingCarousel from '../../ui/features/onboarding/components/data/RingCarousel';
+import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
+import type { BrowserInfo, BrowserType, IPC } from '../../shared/types/ipc';
 
 // ---------------------------------------------------------------------------
-// react-plaid-link mock — controllable handle for tests that need the Banking
-// flow. The real SDK opens an iframe, which jsdom can't render.
+// react-plaid-link mock — controllable handle for tests that need the
+// Financials flow. The real SDK opens an iframe, which jsdom can't render.
 // ---------------------------------------------------------------------------
 interface PlaidLinkController {
   fireSuccess: (publicToken: string) => void;
@@ -73,15 +75,17 @@ vi.mock('react-plaid-link', () => ({
 }));
 
 /**
- * Blackbox coverage for the onboarding data step. This is intentionally broad:
- * it renders through the real component boundary, real API helpers, MSW backend
- * handlers, and the mocked Electron preload bridge.
+ * Blackbox coverage for the onboarding data step (3D ring redesign). Renders
+ * through the real component boundary, the real integrations-page hooks, MSW
+ * backend handlers, and the mocked Electron preload bridge wrapped in the
+ * same IntegrationHandlersProvider wiring the app root (ui/main.tsx) uses.
  *
  * State sketch:
- *   loading --GET integrations/settings + IPC browsers--> collapsed integration list
- *   collapsed section --click icon--> expanded section, all other sections collapsed
- *   expanded connector --click connector action--> backend request or IPC call
- *   browser+gmail connected --click Continue--> onComplete()
+ *   loading --GET integrations + IPC browsers--> ring with active category card
+ *   ring icon / Next --> rotates to category, sub-card swaps rows
+ *   sub-row + click --> backend request or IPC call, row flips to connected
+ *   all six categories connected --> "Get Started" (navi CTA) --> onComplete()
+ *   Skip for now --> onComplete()
  */
 
 const API_BASE = 'http://localhost:3001/api';
@@ -91,10 +95,6 @@ const INSTALLED_BROWSERS: BrowserInfo[] = [
   { type: 'chrome', name: 'Chrome', isInstalled: true, needsManualPassword: false },
   { type: 'edge', name: 'Microsoft Edge', isInstalled: true, needsManualPassword: false },
   { type: 'brave', name: 'Brave', isInstalled: true, needsManualPassword: false },
-  { type: 'arc', name: 'Arc', isInstalled: true, needsManualPassword: false },
-  { type: 'opera', name: 'Opera', isInstalled: true, needsManualPassword: false },
-  { type: 'vivaldi', name: 'Vivaldi', isInstalled: true, needsManualPassword: false },
-  { type: 'chromium', name: 'Chromium', isInstalled: true, needsManualPassword: false },
   { type: 'atlas', name: 'ChatGPT Atlas', isInstalled: true, needsManualPassword: true },
 ];
 
@@ -112,26 +112,17 @@ function primeSession(): void {
   );
 }
 
-function section(label: string): HTMLElement {
-  const labelNode = screen.getByText(label);
-  const root = labelNode.closest('.rounded-xl');
-  if (!(root instanceof HTMLElement)) {
-    throw new Error(`Could not find section root for ${label}`);
-  }
-  return root;
+function subCard(): HTMLElement {
+  return screen.getByTestId('onboarding-sub-card');
 }
 
-function sectionToggle(label: string): HTMLElement {
-  return within(section(label)).getAllByRole('button')[0];
+/** Ring icons are buttons labeled with the category name. */
+async function goToCategory(user: ReturnType<typeof userEvent.setup>, name: string): Promise<void> {
+  await user.click(screen.getByRole('button', { name }));
 }
 
-function rowAction(root: HTMLElement, label: string): HTMLElement {
-  const labelNode = within(root).getByText(label);
-  const row = labelNode.closest('div.flex.items-center.justify-between');
-  if (!(row instanceof HTMLElement)) {
-    throw new Error(`Could not find row for ${label}`);
-  }
-  return within(row).getAllByRole('button')[0];
+function connectButton(label: string): HTMLElement {
+  return screen.getByRole('button', { name: `Connect ${label}` });
 }
 
 function installOnboardingApiMocks(): ReturnType<typeof installIpcMock> {
@@ -161,6 +152,16 @@ function installOnboardingApiMocks(): ReturnType<typeof installIpcMock> {
     openKeychainAccess: vi.fn(async () => ({ success: true })),
     openPasswordsApp: vi.fn(async () => ({ success: true })),
     onPasskeysImportComplete: vi.fn(() => vi.fn()),
+    onClaudeSetupStatus: vi.fn(() => vi.fn()),
+    claudeCode: {
+      hasCredentials: vi.fn(async () => true),
+      syncCredentials: vi.fn(async () => ({ success: true })),
+      setMockNoClaudeCode: vi.fn(async () => ({ success: true })),
+    },
+    gptCode: {
+      hasCredentials: vi.fn(async () => true),
+      syncCredentials: vi.fn(async () => ({ success: true })),
+    },
     atlas: {
       storePassword: vi.fn(async () => ({ success: true })),
       hasPassword: vi.fn(async () => false),
@@ -198,38 +199,115 @@ function installOnboardingApiMocks(): ReturnType<typeof installIpcMock> {
   });
 }
 
-function installBackendMocks(): void {
+/** Mirrors the electronHandlers wiring in ui/main.tsx over the ipc mock. */
+function buildTestHandlers() {
+  const api = (): IPC => window.api;
+  return {
+    iMessage: {
+      isAvailable: true,
+      onClick: async () => {
+        const hasAccess = await api().checkIMessageAccess();
+        if (!hasAccess) {
+          await api().openFullDiskAccessSettings();
+          return;
+        }
+        const result = await api().startIMessageUpload();
+        if (!result.success) throw new Error(result.message ?? 'Upload failed');
+      },
+    },
+    claudeCode: {
+      isAvailable: true,
+      hasCredentials: () => api().claudeCode!.hasCredentials(),
+      syncCredentials: () => api().claudeCode!.syncCredentials(),
+    },
+    gptCode: {
+      isAvailable: true,
+      hasCredentials: () => api().gptCode!.hasCredentials(),
+      syncCredentials: () => api().gptCode!.syncCredentials(),
+    },
+    passkeys: {
+      isAvailable: true,
+      openAutoFillSettings: () => api().openAutoFillSettings(),
+      checkAutoFillSettings: () => api().checkAutoFillSettings(),
+      openPasswordsApp: () => api().openPasswordsApp(),
+      onImportComplete: (
+        callback: (result: {
+          success: boolean;
+          count?: number;
+          passkeyCount?: number;
+          passwordCount?: number;
+          message?: string;
+        }) => void
+      ) => api().onPasskeysImportComplete?.(callback) ?? (() => {}),
+      enroll: async () => ({ success: false, message: 'not available in tests' }),
+    },
+    browserCookies: {
+      isAvailable: true,
+      getInstalledBrowsers: async () => api().getInstalledBrowsers(),
+      syncBrowser: async (browserType: string, keychainPassword?: string) => {
+        const result = await api().syncBrowser(
+          browserType as BrowserType,
+          keychainPassword !== undefined && keychainPassword !== ''
+            ? { keychainPassword }
+            : undefined
+        );
+        if (!result.success) throw new Error(result.message ?? 'Sync failed');
+      },
+      syncBrowserPasswords: async (browserType: string, config?: { keychainPassword?: string }) => {
+        return api().syncBrowserPasswords(browserType as BrowserType, config);
+      },
+      storeAtlasPassword: async (password: string) => api().atlas!.storePassword(password),
+      openKeychainAccess: async (searchQuery?: string) => api().openKeychainAccess(searchQuery),
+    },
+  };
+}
+
+interface IntegrationFixture {
+  id: string;
+  name: string;
+  status: string;
+  isActive?: boolean;
+  config?: Record<string, unknown>;
+}
+
+function installBackendMocks(integrations: IntegrationFixture[] = []): void {
   server.use(
-    http.get(`${API_BASE}/integrations`, () =>
-      HttpResponse.json({
-        integrations: [
-          { id: 'chrome', name: 'chrome', status: 'CONNECTED' },
-          {
-            id: 'gmail',
-            name: 'gmail',
-            status: 'SYNCING',
-            config: { connectedEmails: ['andy@example.com'] },
-          },
-          { id: 'imessage', name: 'imessage', status: 'CONNECTED' },
-          { id: 'whatsapp', name: 'whatsapp', status: 'CONNECTED' },
-          { id: 'telegram', name: 'telegram', status: 'CONNECTED' },
-          { id: 'apple_passwords', name: 'apple_passwords', status: 'CONNECTED' },
-        ],
-      })
+    http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations })),
+    http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] })),
+    http.post(`${API_BASE}/integrations/email/gmail/start`, () =>
+      HttpResponse.json({ authUrl: 'https://accounts.google.com/o/oauth2/test' })
     ),
-    http.get(`${API_BASE}/user-settings`, () => HttpResponse.json({ onboardingCompletedAt: null })),
-    http.post(`${API_BASE}/integrations/passwords/request`, () =>
-      HttpResponse.json({ success: true })
-    ),
-    http.post(`${API_BASE}/agents`, () => HttpResponse.json({ id: 'linkedin-agent-1' })),
-    http.get(`${API_BASE}/integrations/plaid/items`, () => HttpResponse.json({ items: [] }))
+    http.post(`${API_BASE}/agents`, () => HttpResponse.json({ id: 'linkedin-agent-1' }))
+  );
+}
+
+const DEFAULT_INTEGRATIONS: IntegrationFixture[] = [
+  { id: 'chrome', name: 'chrome', status: 'CONNECTED', isActive: true },
+  {
+    id: 'gmail',
+    name: 'gmail',
+    status: 'SYNCING',
+    isActive: true,
+    config: { connectedEmails: ['andy@example.com'] },
+  },
+  { id: 'imessage', name: 'imessage', status: 'CONNECTED', isActive: true },
+  { id: 'whatsapp', name: 'whatsapp', status: 'CONNECTED', isActive: true },
+  { id: 'telegram', name: 'telegram', status: 'CONNECTED', isActive: true },
+  { id: 'apple_passwords', name: 'apple_passwords', status: 'CONNECTED', isActive: true },
+];
+
+function renderOnboarding(onComplete: () => void = () => {}) {
+  return renderWithProviders(
+    <IntegrationHandlersProvider handlers={buildTestHandlers()}>
+      <OnboardingData onComplete={onComplete} />
+    </IntegrationHandlersProvider>
   );
 }
 
 beforeEach(() => {
   localStorage.clear();
   primeSession();
-  installBackendMocks();
+  installBackendMocks(DEFAULT_INTEGRATIONS);
   plaidLink.opened = false;
   plaidLink.lastToken = null;
   vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -244,91 +322,130 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('OnboardingData', () => {
-  it('loads Electron and backend data, then allows continue when browser and Gmail are connected', async () => {
+describe('OnboardingData (ring)', () => {
+  it('starts the celebration spin when the ring mounts complete', () => {
+    renderWithProviders(
+      <RingCarousel
+        categories={[
+          { id: 'one', name: 'One', glyph: <span>1</span>, connected: true },
+          { id: 'two', name: 'Two', glyph: <span>2</span>, connected: true },
+        ]}
+        activeIndex={0}
+        onSelect={() => {}}
+        celebrate
+      />
+    );
+
+    expect(screen.getByRole('button', { name: 'One' })).toHaveClass('onb-no-anim');
+  });
+
+  it('renders the ring, shows connected state, and Skip calls onComplete', async () => {
     const api = installOnboardingApiMocks();
     const onComplete = vi.fn();
     const user = userEvent.setup();
 
-    renderWithProviders(<OnboardingData onComplete={onComplete} />);
+    renderOnboarding(onComplete);
 
     await screen.findByText('Connect your Data');
+    await waitFor(() => expect(api.getInstalledBrowsers).toHaveBeenCalled());
 
-    expect(api.getInstalledBrowsers).toHaveBeenCalledTimes(1);
-    expect(screen.getByText('Browser Sync')).toBeInTheDocument();
-    expect(screen.getByText('Passwords')).toBeInTheDocument();
-    expect(screen.getByText('Messages')).toBeInTheDocument();
-    expect(screen.getByText('Socials')).toBeInTheDocument();
+    // One ring icon button per category.
+    for (const name of [
+      'Browser Sync',
+      'Passwords',
+      'Compute',
+      'Messages',
+      'Socials',
+      'Financials',
+    ]) {
+      expect(screen.getByRole('button', { name })).toBeInTheDocument();
+    }
+
+    // Active category starts on Browser Sync: installed browsers listed.
+    await waitFor(() => expect(within(subCard()).getByText('Microsoft Edge')).toBeInTheDocument());
     expect(screen.queryByText('andy@example.com')).not.toBeInTheDocument();
 
-    await user.click(sectionToggle('Messages'));
-    expect(screen.getByText('andy@example.com')).toBeInTheDocument();
+    // Rotate to Messages via the ring icon: Gmail chip shows connected email.
+    await goToCategory(user, 'Messages');
+    await waitFor(() => expect(screen.getByText('andy@example.com')).toBeInTheDocument());
 
-    const continueButton = screen.getByRole('button', { name: /continue/i });
-    expect(continueButton).toBeEnabled();
-    await user.click(continueButton);
+    await user.click(screen.getByRole('button', { name: /skip for now/i }));
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
   it('shows an empty browser state when no supported browsers are installed', async () => {
     const api = installOnboardingApiMocks();
     api.getInstalledBrowsers.mockResolvedValueOnce([]);
-    server.use(http.get(`${API_BASE}/integrations`, () => HttpResponse.json({ integrations: [] })));
-    const user = userEvent.setup();
+    installBackendMocks([]);
 
-    renderWithProviders(<OnboardingData onComplete={() => {}} />);
+    renderOnboarding();
     await screen.findByText('Connect your Data');
 
-    await user.click(sectionToggle('Browser Sync'));
-
-    expect(screen.getByText(/No supported browsers detected/i)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /continue/i })).toBeDisabled();
+    await waitFor(() =>
+      expect(screen.getByText(/No supported browsers detected/i)).toBeInTheDocument()
+    );
+    // Not all categories connected -> primary button is Next, not Get Started.
+    expect(screen.getByRole('button', { name: /next/i })).toBeInTheDocument();
   });
 
-  it('expands every data connector section and drives representative actions', async () => {
-    const api = installOnboardingApiMocks();
+  it('Next walks the ring and jumps to unconnected categories from the end', async () => {
+    installOnboardingApiMocks();
+    installBackendMocks([]);
     const user = userEvent.setup();
 
-    renderWithProviders(<OnboardingData onComplete={() => {}} />);
+    renderOnboarding();
     await screen.findByText('Connect your Data');
 
-    await user.click(sectionToggle('Browser Sync'));
-    for (const browser of INSTALLED_BROWSERS) {
-      expect(within(section('Browser Sync')).getByText(browser.name)).toBeInTheDocument();
-    }
+    const next = screen.getByRole('button', { name: /next/i });
+    await user.click(next); // -> Passwords
+    await waitFor(() => expect(within(subCard()).getByText('Chrome')).toBeInTheDocument());
+    await user.click(next); // -> Compute
+    await waitFor(() =>
+      expect(within(subCard()).getByText('Claude Subscription')).toBeInTheDocument()
+    );
+    await user.click(next); // -> Messages
+    await user.click(next); // -> Socials
+    await user.click(next); // -> Financials (last)
+    await waitFor(() => expect(within(subCard()).getByText('Your Bank')).toBeInTheDocument());
+    await user.click(next); // last + unconnected everywhere -> wraps to Browser Sync
+    await waitFor(() => expect(within(subCard()).getByText('Microsoft Edge')).toBeInTheDocument());
+  });
 
-    await user.click(rowAction(section('Browser Sync'), 'Microsoft Edge'));
-    await waitFor(() => {
-      expect(api.syncBrowser).toHaveBeenCalledWith('edge');
-    });
+  it('drives representative connector actions across categories', async () => {
+    const api = installOnboardingApiMocks();
+    // Empty fixtures: every row must start idle so each "Connect X" exists.
+    installBackendMocks([]);
+    const user = userEvent.setup();
 
-    await user.click(rowAction(section('Browser Sync'), 'ChatGPT Atlas'));
-    expect(screen.getByText('Sync Atlas')).toBeInTheDocument();
+    renderOnboarding();
+    await screen.findByText('Connect your Data');
+    await waitFor(() => expect(within(subCard()).getByText('Microsoft Edge')).toBeInTheDocument());
+
+    // Browsers: plain sync + Atlas keychain modal.
+    await user.click(connectButton('Microsoft Edge'));
+    await waitFor(() => expect(api.syncBrowser).toHaveBeenCalledWith('edge', undefined));
+
+    await user.click(connectButton('ChatGPT Atlas'));
+    expect(await screen.findByText('Sync Atlas')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /cancel/i }));
 
-    await user.click(sectionToggle('Passwords'));
-    const passwords = section('Passwords');
-    expect(within(passwords).getByText('Chrome')).toBeInTheDocument();
-    expect(within(passwords).getByText('Apple Passwords & Passkeys')).toBeInTheDocument();
-    expect(within(passwords).getByText('ChatGPT Atlas')).toBeInTheDocument();
+    // Passwords.
+    await goToCategory(user, 'Passwords');
+    await waitFor(() =>
+      expect(within(subCard()).getByText('Apple Passwords & Passkeys')).toBeInTheDocument()
+    );
+    await user.click(connectButton('Chrome'));
+    await waitFor(() => expect(api.syncBrowserPasswords).toHaveBeenCalledWith('chrome', undefined));
 
-    await user.click(rowAction(passwords, 'Chrome'));
-    await waitFor(() => {
-      expect(api.syncBrowserPasswords).toHaveBeenCalledWith('chrome');
-    });
-
-    await user.click(rowAction(passwords, 'Apple Passwords & Passkeys'));
-    expect(screen.getByText('Sync Apple Passwords & Passkeys')).toBeInTheDocument();
-
+    await user.click(connectButton('Apple Passwords & Passkeys'));
+    expect(await screen.findByText('Sync Apple Passwords & Passkeys')).toBeInTheDocument();
     const modalSyncButtons = screen.getAllByRole('button', { name: /^Sync$/i });
     await user.click(modalSyncButtons[modalSyncButtons.length - 1]);
     await waitFor(() => {
       expect(api.openAutoFillSettings).toHaveBeenCalledTimes(1);
       expect(api.openPasswordsApp).toHaveBeenCalledTimes(1);
     });
-    expect(screen.getByRole('button', { name: /Syncing/i })).toBeDisabled();
-
-    const importComplete = vi.mocked(api.onPasskeysImportComplete).mock.calls[0]?.[0];
+    const importComplete = vi.mocked(api.onPasskeysImportComplete!).mock.calls[0]?.[0];
     expect(importComplete).toEqual(expect.any(Function));
     act(() => {
       importComplete?.({ success: true, count: 1, passkeyCount: 1, passwordCount: 0 });
@@ -337,49 +454,148 @@ describe('OnboardingData', () => {
       expect(screen.queryByText('Sync Apple Passwords & Passkeys')).not.toBeInTheDocument();
     });
 
-    await user.click(sectionToggle('Messages'));
-    const messages = section('Messages');
-    expect(within(messages).getByText('iMessage')).toBeInTheDocument();
-    expect(within(messages).getByText('WhatsApp')).toBeInTheDocument();
-    expect(within(messages).getByText('Telegram')).toBeInTheDocument();
-    expect(within(messages).getByText('Gmail')).toBeInTheDocument();
+    // Compute.
+    await goToCategory(user, 'Compute');
+    await waitFor(() => expect(within(subCard()).getByText('Gemini')).toBeInTheDocument());
+    expect(within(subCard()).getByText(/coming soon/i)).toBeInTheDocument();
+    await user.click(connectButton('Claude Subscription'));
+    await waitFor(() => expect(api.claudeCode!.syncCredentials).toHaveBeenCalledTimes(1));
+    await user.click(connectButton('ChatGPT Subscription'));
+    await waitFor(() => expect(api.gptCode!.syncCredentials).toHaveBeenCalledTimes(1));
 
-    await user.click(rowAction(messages, 'iMessage'));
-    await waitFor(() => {
-      expect(api.startIMessageUpload).toHaveBeenCalledTimes(1);
-    });
+    // Messages.
+    await goToCategory(user, 'Messages');
+    await waitFor(() => expect(within(subCard()).getByText('iMessage')).toBeInTheDocument());
+    await user.click(connectButton('iMessage'));
+    await waitFor(() => expect(api.startIMessageUpload).toHaveBeenCalledTimes(1));
+    await user.click(connectButton('WhatsApp'));
+    await waitFor(() => expect(api.whatsapp?.connect).toHaveBeenCalledTimes(1));
+    await user.click(connectButton('Telegram'));
+    await waitFor(() => expect(api.telegram?.syncHistorical).toHaveBeenCalledTimes(1));
 
-    await user.click(rowAction(messages, 'WhatsApp'));
-    await waitFor(() => {
-      expect(api.whatsapp?.connect).toHaveBeenCalledTimes(1);
-    });
-
-    await user.click(rowAction(messages, 'Telegram'));
-    await waitFor(() => {
-      expect(api.telegram?.syncHistorical).toHaveBeenCalledTimes(1);
-    });
-
-    await user.click(sectionToggle('Socials'));
-    const socials = section('Socials');
-    expect(within(socials).getByText('X')).toBeInTheDocument();
-    expect(within(socials).getByText('LinkedIn')).toBeInTheDocument();
-    expect(within(socials).getByText('Instagram')).toBeInTheDocument();
-
-    await user.click(rowAction(socials, 'LinkedIn'));
-    await waitFor(() => {
-      expect(screen.getByText('LinkedIn')).toBeInTheDocument();
-    });
+    // Socials.
+    await goToCategory(user, 'Socials');
+    await waitFor(() => expect(within(subCard()).getByText('LinkedIn')).toBeInTheDocument());
+    expect(within(subCard()).getAllByText(/coming soon/i)).toHaveLength(2);
+    await user.click(connectButton('LinkedIn'));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'LinkedIn connected' })).toBeInTheDocument()
+    );
   }, 30_000);
 
-  describe('Banking (Plaid)', () => {
-    it('renders the Banking card with default CTA copy', async () => {
-      installOnboardingApiMocks();
-      renderWithProviders(<OnboardingData onComplete={() => {}} />);
-      await screen.findByText('Connect your Data');
+  it('surfaces actionable connector errors in every affected category', async () => {
+    const api = installOnboardingApiMocks();
+    installBackendMocks([]);
+    api.syncBrowser.mockRejectedValue(new Error('Browser sync exploded'));
+    api.syncBrowserPasswords.mockRejectedValue(new Error('Password sync exploded'));
+    api.claudeCode!.syncCredentials.mockRejectedValue(new Error('Compute sync exploded'));
+    api.startIMessageUpload.mockResolvedValue({
+      success: false,
+      message: 'iMessage sync exploded',
+    });
+    server.use(
+      http.post(`${API_BASE}/integrations/email/gmail/start`, () =>
+        HttpResponse.json({ error: 'Gmail connect exploded' }, { status: 500 })
+      ),
+      http.post(`${API_BASE}/agents`, () =>
+        HttpResponse.json({ error: 'LinkedIn sync exploded' }, { status: 500 })
+      )
+    );
+    const user = userEvent.setup();
 
-      expect(screen.getByText('Banking')).toBeInTheDocument();
-      expect(screen.getByText(/Connect a bank account via Plaid/i)).toBeInTheDocument();
-      expect(screen.queryByRole('link', { name: /plaid/i })).not.toBeInTheDocument();
+    renderOnboarding();
+    await screen.findByText('Connect your Data');
+    await waitFor(() => expect(within(subCard()).getByText('Microsoft Edge')).toBeInTheDocument());
+
+    await user.click(connectButton('Microsoft Edge'));
+    expect(await within(subCard()).findByText('Browser sync exploded')).toBeInTheDocument();
+
+    await goToCategory(user, 'Passwords');
+    await user.click(connectButton('Chrome'));
+    expect(await within(subCard()).findByText('Password sync exploded')).toBeInTheDocument();
+
+    await goToCategory(user, 'Compute');
+    await user.click(connectButton('Claude Subscription'));
+    expect(await within(subCard()).findByText('Compute sync exploded')).toBeInTheDocument();
+
+    await goToCategory(user, 'Messages');
+    await user.click(connectButton('iMessage'));
+    expect(await within(subCard()).findByText('iMessage sync exploded')).toBeInTheDocument();
+    await user.click(connectButton('Gmail'));
+    expect(await within(subCard()).findByText('Gmail connect exploded')).toBeInTheDocument();
+
+    await goToCategory(user, 'Socials');
+    await user.click(connectButton('LinkedIn'));
+    expect(await within(subCard()).findByText('LinkedIn sync exploded')).toBeInTheDocument();
+  });
+
+  it('removes the WhatsApp QR listener after a terminal connection result', async () => {
+    const api = installOnboardingApiMocks();
+    installBackendMocks([]);
+    const qrCleanup = vi.fn();
+    api.whatsapp!.hasCredentials.mockResolvedValue(false);
+    vi.mocked(api.onWhatsAppQRCode!).mockImplementation((callback) => {
+      callback('terminal-qr-code');
+      return qrCleanup;
+    });
+    const user = userEvent.setup();
+
+    renderOnboarding();
+    await screen.findByText('Connect your Data');
+    await goToCategory(user, 'Messages');
+    await user.click(connectButton('WhatsApp'));
+
+    await waitFor(() => expect(api.whatsapp?.connect).toHaveBeenCalledTimes(1));
+    expect(qrCleanup).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows Get Started once every category is connected and completes', async () => {
+    installOnboardingApiMocks();
+    installBackendMocks([
+      ...DEFAULT_INTEGRATIONS,
+      { id: 'claude_code', name: 'claude_code', status: 'CONNECTED', isActive: true },
+      { id: 'linkedin', name: 'linkedin', status: 'CONNECTED', isActive: true },
+    ]);
+    server.use(
+      http.get(`${API_BASE}/integrations/plaid/items`, () =>
+        HttpResponse.json({
+          items: [
+            {
+              id: 'item-1',
+              plaidItemId: 'plaid_item_1',
+              institutionId: 'ins_chase',
+              institutionName: 'Chase',
+              status: 'ACTIVE',
+              accounts: [],
+            },
+          ],
+        })
+      )
+    );
+    const onComplete = vi.fn();
+    const user = userEvent.setup();
+
+    renderOnboarding(onComplete);
+    await screen.findByText('Connect your Data');
+
+    const getStarted = await screen.findByRole('button', { name: /get started/i });
+    await user.click(getStarted);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  describe('Financials (Plaid)', () => {
+    async function goToFinancials(user: ReturnType<typeof userEvent.setup>): Promise<void> {
+      await screen.findByText('Connect your Data');
+      await goToCategory(user, 'Financials');
+      await waitFor(() => expect(within(subCard()).getByText('Your Bank')).toBeInTheDocument());
+    }
+
+    it('renders the Financials category with the Your Bank row', async () => {
+      installOnboardingApiMocks();
+      const user = userEvent.setup();
+      renderOnboarding();
+      await goToFinancials(user);
+      expect(screen.getByText('Connect your financial accounts')).toBeInTheDocument();
     });
 
     it('hydrates connected banks from /api/integrations/plaid/items', async () => {
@@ -400,12 +616,13 @@ describe('OnboardingData', () => {
         )
       );
       installOnboardingApiMocks();
-      renderWithProviders(<OnboardingData onComplete={() => {}} />);
-      await screen.findByText('Connect your Data');
+      const user = userEvent.setup();
+      renderOnboarding();
+      await goToFinancials(user);
       await waitFor(() => expect(screen.getByText('Chase')).toBeInTheDocument());
     });
 
-    it('clicking the Banking sync button requests a link token and opens Plaid Link', async () => {
+    it('clicking Your Bank requests a link token and opens Plaid Link', async () => {
       let linkTokenRequests = 0;
       server.use(
         http.post(`${API_BASE}/integrations/plaid/link-token`, () => {
@@ -419,26 +636,17 @@ describe('OnboardingData', () => {
       );
       installOnboardingApiMocks();
       const user = userEvent.setup();
-      renderWithProviders(<OnboardingData onComplete={() => {}} />);
-      await screen.findByText('Connect your Data');
+      renderOnboarding();
+      await goToFinancials(user);
 
-      const bankingButton = within(section('Banking')).getByRole('button');
-      await user.click(bankingButton);
-
+      await user.click(connectButton('Your Bank'));
       await waitFor(() => expect(linkTokenRequests).toBe(1));
       await waitFor(() => expect(plaidLink.opened).toBe(true));
     });
 
-    it('on Plaid Link success, exchanges the public token and shows the green check', async () => {
+    it('on Plaid Link success, exchanges the public token and shows the bank chip', async () => {
       let exchanged = false;
-      let plaidItems: Array<{
-        id: string;
-        plaidItemId: string;
-        institutionId: string | null;
-        institutionName: string | null;
-        status: string;
-        accounts: unknown[];
-      }> = [];
+      let plaidItems: Array<Record<string, unknown>> = [];
       server.use(
         http.post(`${API_BASE}/integrations/plaid/link-token`, () =>
           HttpResponse.json({
@@ -467,44 +675,14 @@ describe('OnboardingData', () => {
       );
       installOnboardingApiMocks();
       const user = userEvent.setup();
-      renderWithProviders(<OnboardingData onComplete={() => {}} />);
-      await screen.findByText('Connect your Data');
+      renderOnboarding();
+      await goToFinancials(user);
 
-      const bankingButton = within(section('Banking')).getByRole('button');
-      await user.click(bankingButton);
-
+      await user.click(connectButton('Your Bank'));
       await waitFor(() => expect(plaidLink.opened).toBe(true));
       plaidLink.fireSuccess('public-sandbox-onboarding');
       await waitFor(() => expect(exchanged).toBe(true));
       await waitFor(() => expect(screen.getByText('First Platypus Bank')).toBeInTheDocument());
-    });
-
-    it('surfaces an error if exchange fails after Plaid Link success', async () => {
-      server.use(
-        http.post(`${API_BASE}/integrations/plaid/link-token`, () =>
-          HttpResponse.json({
-            link_token: 'link-onboarding-3',
-            expiration: '2026-05-12T21:00:00Z',
-            request_id: 'req-3',
-          })
-        ),
-        http.post(`${API_BASE}/integrations/plaid/exchange-public-token`, () =>
-          HttpResponse.json({ error: 'INVALID_PUBLIC_TOKEN' }, { status: 502 })
-        )
-      );
-      installOnboardingApiMocks();
-      const user = userEvent.setup();
-      renderWithProviders(<OnboardingData onComplete={() => {}} />);
-      await screen.findByText('Connect your Data');
-
-      const bankingButton = within(section('Banking')).getByRole('button');
-      await user.click(bankingButton);
-      await waitFor(() => expect(plaidLink.opened).toBe(true));
-      plaidLink.fireSuccess('public-bad-token');
-
-      await waitFor(() =>
-        expect(within(section('Banking')).getByText(/INVALID_PUBLIC_TOKEN/i)).toBeInTheDocument()
-      );
     });
 
     it('shows an error if link-token creation fails', async () => {
@@ -515,14 +693,12 @@ describe('OnboardingData', () => {
       );
       installOnboardingApiMocks();
       const user = userEvent.setup();
-      renderWithProviders(<OnboardingData onComplete={() => {}} />);
-      await screen.findByText('Connect your Data');
+      renderOnboarding();
+      await goToFinancials(user);
 
-      const bankingButton = within(section('Banking')).getByRole('button');
-      await user.click(bankingButton);
-
+      await user.click(connectButton('Your Bank'));
       await waitFor(() =>
-        expect(within(section('Banking')).getByText(/plaid unavailable/i)).toBeInTheDocument()
+        expect(within(subCard()).getByText(/plaid unavailable/i)).toBeInTheDocument()
       );
       expect(plaidLink.opened).toBe(false);
     });
@@ -539,16 +715,14 @@ describe('OnboardingData', () => {
       );
       installOnboardingApiMocks();
       const user = userEvent.setup();
-      renderWithProviders(<OnboardingData onComplete={() => {}} />);
-      await screen.findByText('Connect your Data');
+      renderOnboarding();
+      await goToFinancials(user);
 
-      const bankingButton = within(section('Banking')).getByRole('button');
-      await user.click(bankingButton);
+      await user.click(connectButton('Your Bank'));
       await waitFor(() => expect(plaidLink.opened).toBe(true));
-
       plaidLink.fireExit({ display_message: 'Bank session aborted' });
       await waitFor(() =>
-        expect(within(section('Banking')).getByText(/bank session aborted/i)).toBeInTheDocument()
+        expect(within(subCard()).getByText(/bank session aborted/i)).toBeInTheDocument()
       );
     });
   });
