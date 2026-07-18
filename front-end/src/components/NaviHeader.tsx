@@ -152,7 +152,7 @@ const NaviHeader = () => {
             }}
           >
             <div className="absolute inset-0 bg-gradient-to-r from-[#FE7503] via-[#FC585C] via-[#FD5776] via-[#E062CC] via-[#A76CED] to-[#7A6BEC] bg-[length:200%_200%] animate-gradient-rotate rounded-lg"></div>
-            <span className="relative text-white z-10">
+            <span className="relative text-black z-10">
               {earlyAccess ? 'Pre-order' : 'Join Waitlist'}
             </span>
           </button>
