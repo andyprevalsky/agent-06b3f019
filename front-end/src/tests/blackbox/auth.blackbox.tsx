@@ -187,6 +187,8 @@ describe('PhoneAuthModal', () => {
     expect(screen.getByText('Start Building.')).toBeInTheDocument();
     expect(screen.getByText('Create free account')).toBeInTheDocument();
     expect(screen.getByLabelText('Phone Number')).toBeInTheDocument();
+    expect(screen.queryByLabelText('First name')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Last name')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /continue/i })).toBeInTheDocument();
   });
 

@@ -1,0 +1,119 @@
+/**
+ * Branded transactional-email delivery through a connected Gmail account.
+ *
+ * This provider is intentionally independent of the integrations domain so
+ * product domains can send service-owned email without crossing domain
+ * boundaries or depending on the acting user's connected inbox.
+ */
+
+import { EmailProvider } from '@prisma/client';
+
+import { getValidAccessToken } from '../services/integrations/gmailSync';
+import { prisma } from './database';
+import { createLogger } from './logger';
+
+const log = createLogger('TransactionalEmail');
+
+export interface TransactionalEmailInput {
+  ownerUserId: string;
+  from: string;
+  fromName: string;
+  to: string;
+  subject: string;
+  body: string;
+}
+
+export class TransactionalEmailError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TransactionalEmailError';
+  }
+}
+
+function assertSafeHeader(name: string, value: string): void {
+  if (value === '' || /[\r\n]/.test(value)) {
+    throw new TransactionalEmailError(`Invalid ${name} email header`);
+  }
+}
+
+/** Build the RFC 5322 message accepted by Gmail's messages.send endpoint. */
+export function buildTransactionalRawEmail(input: Omit<TransactionalEmailInput, 'ownerUserId'>) {
+  assertSafeHeader('from', input.from);
+  assertSafeHeader('fromName', input.fromName);
+  assertSafeHeader('to', input.to);
+  assertSafeHeader('subject', input.subject);
+
+  const raw = [
+    `From: ${input.fromName} <${input.from}>`,
+    `To: ${input.to}`,
+    `Subject: ${input.subject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=UTF-8',
+    '',
+    input.body,
+  ].join('\r\n');
+
+  return Buffer.from(raw, 'utf8')
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+/** Send one transactional email from a service-owned connected Gmail inbox. */
+export async function sendTransactionalEmail(
+  input: TransactionalEmailInput
+): Promise<{ id: string }> {
+  const credential = await prisma.emailIntegrationCredential.findFirst({
+    where: {
+      userId: input.ownerUserId,
+      provider: EmailProvider.GMAIL,
+      email: input.from,
+      accessToken: { not: null },
+    },
+    select: {
+      id: true,
+      accessToken: true,
+      refreshToken: true,
+      expiresAt: true,
+    },
+  });
+  if (credential === null) {
+    throw new TransactionalEmailError(`Sender ${input.from} is not connected`);
+  }
+
+  const accessToken = await getValidAccessToken(credential);
+  if (accessToken === null) {
+    throw new TransactionalEmailError(`Sender ${input.from} needs to reconnect Gmail`);
+  }
+
+  const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ raw: buildTransactionalRawEmail(input) }),
+  });
+  const data = (await response.json()) as { id?: unknown; error?: { message?: unknown } };
+  if (!response.ok || typeof data.id !== 'string') {
+    const providerMessage =
+      typeof data.error?.message === 'string'
+        ? data.error.message
+        : `Gmail HTTP ${response.status}`;
+    log.error('Transactional email send failed', {
+      sender: input.from,
+      recipientDomain: input.to.split('@').at(-1) ?? 'unknown',
+      status: response.status,
+      error: providerMessage,
+    });
+    throw new TransactionalEmailError(providerMessage);
+  }
+
+  log.info('Transactional email accepted', {
+    messageId: data.id,
+    sender: input.from,
+    recipientDomain: input.to.split('@').at(-1) ?? 'unknown',
+  });
+  return { id: data.id };
+}

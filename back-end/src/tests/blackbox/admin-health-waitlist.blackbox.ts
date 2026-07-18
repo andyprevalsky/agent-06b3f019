@@ -14,8 +14,8 @@
  *   - status derivation: getWaitlistPeople joins signups to accounts + gate state
  *
  * The invite flags the account off the waitlist (so onboarding shows the
- * subscription view) — it does NOT grant access. Outside production the SMS is
- * skipped, so the happy-path test never texts anyone.
+ * subscription view) — it does NOT grant access. Outside production the SMS
+ * and email are skipped, so the happy-path test never contacts anyone.
  *
  * Usage:
  *   npx tsx src/tests/blackbox/admin-health-waitlist.blackbox.ts
@@ -25,10 +25,20 @@ import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 
-import { getWaitlistPeople } from '../../domains/admin-health/service';
+import {
+  WAITLIST_INVITE_COPY,
+  WAITLIST_INVITE_EMAIL_FROM,
+  WAITLIST_INVITE_EMAIL_SUBJECT,
+  WAITLIST_INVITE_EMAIL_SENDER_USER_ID,
+} from '../../domains/admin-health/config';
+import {
+  getWaitlistPeople,
+  inviteWaitlistPerson,
+} from '../../domains/admin-health/service.waitlist';
 import { checkInviteCode } from '../../domains/invite-codes/service';
 import { prisma } from '../../providers/database';
 import { markOffWaitlistByPhone } from '../../providers/inviteGate';
+import { buildTransactionalRawEmail } from '../../providers/transactionalEmail';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -176,9 +186,9 @@ async function testInvite_unknownId404() {
 }
 
 // End-to-end invite: flags the matching account off the waitlist, stamps
-// invitedAt, and (outside production) skips the real SMS so the test never
-// texts anyone. The flag does NOT grant access (usedInviteCode stays null).
-// A re-send is idempotent.
+// invitedAt, and (outside production) skips the real notifications so the test
+// never contacts anyone. The flag does NOT grant access (usedInviteCode stays
+// null). A re-send is idempotent.
 async function testInvite_happyPathFlagsAndMarks() {
   const marker = `blackbox-invite-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const phone = uniquePhone();
@@ -195,6 +205,9 @@ async function testInvite_happyPathFlagsAndMarks() {
     assertStatus(res.status, 200, res.data);
     const body = assertSchema(WaitlistInviteResponseSchema, res.data, 'POST invite happy-path');
     if (body.smsSent) throw new Error('Non-production invite must not send a real SMS');
+    if ((res.data as { emailSent?: unknown }).emailSent !== false) {
+      throw new Error('Non-production invite must not send a real email');
+    }
     if (!body.flagged || !body.hasAccount) {
       throw new Error(`Expected flagged + hasAccount, got ${JSON.stringify(body)}`);
     }
@@ -233,6 +246,97 @@ async function testInvite_happyPathFlagsAndMarks() {
   } finally {
     await prisma.waitlist.deleteMany({ where: { name: marker } });
     await prisma.user.deleteMany({ where: { userId: marker } });
+  }
+}
+
+// Production dispatch uses one canonical body for both channels, resolves the
+// optional login email from the matching User row, and supplies a branded,
+// actionable subject to the transactional-email provider.
+async function testInvite_dispatchesSameCopyBySmsAndEmail() {
+  const marker = `blackbox-dual-invite-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const phone = uniquePhone();
+  const email = `${marker}@example.com`;
+  const invitedAt = new Date('2026-07-18T20:00:00.000Z');
+  const smsCalls: Array<{ to: string; body: string }> = [];
+  const emailCalls: Array<{
+    ownerUserId: string;
+    from: string;
+    to: string;
+    subject: string;
+    body: string;
+  }> = [];
+
+  try {
+    await prisma.user.create({
+      data: { userId: marker, phone, email, usedInviteCode: null },
+    });
+    const created = await prisma.waitlist.create({
+      data: { name: marker, phone, variant: 'gated-login' },
+    });
+
+    const result = await inviteWaitlistPerson(created.id, {
+      isProduction: true,
+      now: () => invitedAt,
+      sendSms: async (to, body) => {
+        smsCalls.push({ to, body });
+        return { success: true, messageSid: 'sms-test-id' };
+      },
+      sendEmail: async (params) => {
+        emailCalls.push(params);
+        return { id: 'email-test-id' };
+      },
+    });
+
+    if (!result.smsSent || !result.emailSent) {
+      throw new Error(`Expected both channels to send, got ${JSON.stringify(result)}`);
+    }
+    if (result.invitedAt !== invitedAt.toISOString()) {
+      throw new Error(`Expected deterministic invitedAt, got ${result.invitedAt}`);
+    }
+    if (smsCalls.length !== 1 || emailCalls.length !== 1) {
+      throw new Error(
+        `Expected one send per channel, got SMS=${smsCalls.length} email=${emailCalls.length}`
+      );
+    }
+    if (smsCalls[0].to !== phone || smsCalls[0].body !== WAITLIST_INVITE_COPY) {
+      throw new Error(`Unexpected SMS payload: ${JSON.stringify(smsCalls[0])}`);
+    }
+    const sentEmail = emailCalls[0];
+    if (sentEmail.to !== email || sentEmail.body !== WAITLIST_INVITE_COPY) {
+      throw new Error(
+        `Email must use the account email and SMS copy: ${JSON.stringify(sentEmail)}`
+      );
+    }
+    if (sentEmail.subject !== WAITLIST_INVITE_EMAIL_SUBJECT) {
+      throw new Error(`Unexpected invite email subject: ${sentEmail.subject}`);
+    }
+    if (
+      sentEmail.ownerUserId !== WAITLIST_INVITE_EMAIL_SENDER_USER_ID ||
+      sentEmail.from !== WAITLIST_INVITE_EMAIL_FROM
+    ) {
+      throw new Error(`Unexpected branded sender: ${JSON.stringify(sentEmail)}`);
+    }
+  } finally {
+    await prisma.waitlist.deleteMany({ where: { name: marker } });
+    await prisma.user.deleteMany({ where: { userId: marker } });
+  }
+}
+
+async function testTransactionalEmail_rawMessageCarriesCopyAndSubject() {
+  const encoded = buildTransactionalRawEmail({
+    from: WAITLIST_INVITE_EMAIL_FROM,
+    fromName: 'Rose',
+    to: 'invitee@example.com',
+    subject: WAITLIST_INVITE_EMAIL_SUBJECT,
+    body: WAITLIST_INVITE_COPY,
+  });
+  const base64 = encoded.replace(/-/g, '+').replace(/_/g, '/');
+  const raw = Buffer.from(base64, 'base64').toString('utf8');
+  if (!raw.includes(`Subject: ${WAITLIST_INVITE_EMAIL_SUBJECT}`)) {
+    throw new Error(`Raw email omitted the subject: ${raw}`);
+  }
+  if (!raw.endsWith(`\r\n\r\n${WAITLIST_INVITE_COPY}`)) {
+    throw new Error(`Raw email omitted the canonical invite body: ${raw}`);
   }
 }
 
@@ -432,8 +536,16 @@ async function main() {
       fn: testInvite_unknownId404,
     },
     {
-      name: 'POST /api/admin-health/waitlist/:id/invite flags + marks (no SMS in dev)',
+      name: 'POST /api/admin-health/waitlist/:id/invite flags + marks (no sends in dev)',
       fn: testInvite_happyPathFlagsAndMarks,
+    },
+    {
+      name: 'invite dispatches the same copy by SMS + email',
+      fn: testInvite_dispatchesSameCopyBySmsAndEmail,
+    },
+    {
+      name: 'transactional email raw message carries invite copy + subject',
+      fn: testTransactionalEmail_rawMessageCarriesCopyAndSubject,
     },
     {
       name: 'markOffWaitlistByPhone sets the flag and is idempotent',

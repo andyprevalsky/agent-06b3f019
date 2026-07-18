@@ -112,6 +112,9 @@ describe('App wiring', () => {
         within(screen.getByRole('dialog')).queryByText('Start Building.'),
       ).not.toBeInTheDocument();
       expect(screen.getByLabelText('Phone Number')).toBeInTheDocument();
+      expect(screen.getByLabelText('Email')).toBeInTheDocument();
+      expect(screen.getByLabelText('First name')).toBeInTheDocument();
+      expect(screen.getByLabelText('Last name')).toBeInTheDocument();
       expect(screen.getByTestId('terminal-input-area')).toBeInTheDocument();
 
       // Press Escape the way a real user would: userEvent flushes pending React

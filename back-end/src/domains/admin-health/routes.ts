@@ -6,19 +6,23 @@ import {
   AdminHealthForbiddenError,
   assertCanViewAdminHealth,
   getAdminHealth,
+  parseTimeSlice,
+} from './service';
+import {
   getWaitlistPeople,
   inviteWaitlistPerson,
-  parseTimeSlice,
+  WaitlistInviteEmailError,
   WaitlistInviteSmsError,
   WaitlistPersonNotFoundError,
-} from './service';
+} from './service.waitlist';
 
 const log = createLogger('AdminHealth');
 const router = Router();
+const authenticateRequest = asyncHandler<AuthRequest>(authenticate);
 
 router.get(
   '/',
-  authenticate,
+  authenticateRequest,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     if (!req.user) {
       res.status(401).json({ error: 'Not authenticated' });
@@ -45,7 +49,7 @@ router.get(
 
 router.get(
   '/waitlist',
-  authenticate,
+  authenticateRequest,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     if (!req.user) {
       res.status(401).json({ error: 'Not authenticated' });
@@ -71,7 +75,7 @@ router.get(
 
 router.post(
   '/waitlist/:id/invite',
-  authenticate,
+  authenticateRequest,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     if (!req.user) {
       res.status(401).json({ error: 'Not authenticated' });
@@ -91,7 +95,7 @@ router.post(
         res.status(404).json({ error: error.message });
         return;
       }
-      if (error instanceof WaitlistInviteSmsError) {
+      if (error instanceof WaitlistInviteSmsError || error instanceof WaitlistInviteEmailError) {
         res.status(502).json({ error: error.message });
         return;
       }

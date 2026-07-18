@@ -144,6 +144,20 @@ describe('Terminal page', () => {
       });
     });
 
+    it('opens the name-collecting waitlist modal from the opening CTA', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<Terminal />);
+
+      await user.click(await screen.findByTestId('opening-join-waitlist'));
+
+      await waitFor(() => {
+        expect(screen.getByRole('heading', { name: 'Join the Waitlist' })).toBeInTheDocument();
+      });
+      expect(screen.getByLabelText('Email')).toBeInTheDocument();
+      expect(screen.getByLabelText('First name')).toBeInTheDocument();
+      expect(screen.getByLabelText('Last name')).toBeInTheDocument();
+    });
+
     it('shows Popular Goals carousel when no agent is selected', async () => {
       renderWithProviders(<Terminal />);
       await waitFor(() => {

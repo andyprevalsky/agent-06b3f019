@@ -18,7 +18,7 @@ import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
 
 import { sendOTP, verifyOTP } from './api';
 import { initAuthSession, logAuth } from './hooks/initAuthSession';
-import type { AuthStep } from './types';
+import { useAuthFormState } from './hooks/useAuthFormState';
 
 /** Extract a human-readable message from an unknown error value. */
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -45,35 +45,17 @@ function toastError(
   toast({ title, description: getErrorMessage(error, fallback), variant: 'destructive' });
 }
 
-/** Internal form state for the phone auth flow. */
-function useAuthFormState() {
-  const [step, setStep] = useState<AuthStep>('phone');
-  const [phone, setPhone] = useState('');
-  const [email, setEmail] = useState('');
-  const [otp, setOtp] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [smsAuthorized, setSmsAuthorized] = useState(false);
-  const resetForm = useCallback(() => {
-    setStep('phone');
-    setPhone('');
-    setEmail('');
-    setOtp('');
-    setSmsAuthorized(false);
-  }, []);
+type AuthFormState = ReturnType<typeof useAuthFormState>;
+
+function hasRequiredName(form: AuthFormState, collectName: boolean): boolean {
+  return !collectName || (form.firstName.trim().length > 0 && form.lastName.trim().length > 0);
+}
+
+function buildUserInfo(form: AuthFormState, collectName: boolean) {
   return {
-    step,
-    setStep,
-    phone,
-    setPhone,
-    email,
-    setEmail,
-    otp,
-    setOtp,
-    loading,
-    setLoading,
-    smsAuthorized,
-    setSmsAuthorized,
-    resetForm,
+    email: form.email,
+    firstName: collectName ? form.firstName.trim() : undefined,
+    lastName: collectName ? form.lastName.trim() : undefined,
   };
 }
 
@@ -82,6 +64,7 @@ export function usePhoneAuth(
   onOpenChange: (open: boolean) => void,
   onAuthComplete?: () => void,
   anonymousUserId?: string,
+  collectName = false,
 ) {
   const { toast } = useToast();
   const form = useAuthFormState();
@@ -97,6 +80,7 @@ export function usePhoneAuth(
   const handleSendOTP = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
+      if (!hasRequiredName(form, collectName)) return;
       form.setLoading(true);
       try {
         // form.phone is canonical E.164 (PhoneInput owns normalization).
@@ -110,7 +94,7 @@ export function usePhoneAuth(
         form.setLoading(false);
       }
     },
-    [form, toast],
+    [collectName, form, toast],
   );
 
   const handleVerifyOTP = useCallback(
@@ -118,7 +102,7 @@ export function usePhoneAuth(
       e.preventDefault();
       form.setLoading(true);
       try {
-        await verifyOTP(form.phone, form.otp, anonymousUserId, { email: form.email });
+        await verifyOTP(form.phone, form.otp, anonymousUserId, buildUserInfo(form, collectName));
         analytics.track('otp_code_submitted');
         analytics.setUserId(form.phone);
         completeAuth();
@@ -127,7 +111,7 @@ export function usePhoneAuth(
         form.setLoading(false);
       }
     },
-    [form, anonymousUserId, completeAuth, toast],
+    [form, anonymousUserId, collectName, completeAuth, toast],
   );
 
   return {
@@ -136,6 +120,10 @@ export function usePhoneAuth(
     setPhone: form.setPhone,
     email: form.email,
     setEmail: form.setEmail,
+    firstName: form.firstName,
+    setFirstName: form.setFirstName,
+    lastName: form.lastName,
+    setLastName: form.setLastName,
     otp: form.otp,
     setOtp: form.setOtp,
     loading: form.loading,

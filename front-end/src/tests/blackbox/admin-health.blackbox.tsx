@@ -477,7 +477,7 @@ describe('WaitlistPeopleSection', () => {
     expect(screen.getByText((text) => text.startsWith('2 on the waitlist'))).toBeInTheDocument();
   });
 
-  it('texts an invite and pulls the person off the waitlist on click', async () => {
+  it('texts and emails an invite, then pulls the person off the waitlist', async () => {
     clearCaptures();
     server.use(
       http.get(`${API_BASE}/admin-health/waitlist`, () =>
@@ -488,6 +488,7 @@ describe('WaitlistPeopleSection', () => {
           id: params.id,
           invitedAt: '2026-07-17T00:00:00.000Z',
           smsSent: true,
+          emailSent: true,
           flagged: true,
           alreadyOffWaitlist: false,
           hasAccount: true,
@@ -498,7 +499,7 @@ describe('WaitlistPeopleSection', () => {
     const user = userEvent.setup();
     renderWithProviders(<WaitlistPeopleSection />);
 
-    const inviteButton = await screen.findByRole('button', { name: /Invite & text/ });
+    const inviteButton = await screen.findByRole('button', { name: /Invite, text & email/ });
     await user.click(inviteButton);
 
     await waitFor(() => {
