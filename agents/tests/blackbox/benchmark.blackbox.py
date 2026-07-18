@@ -855,6 +855,63 @@ async def test_abandonment_retries_a_pending_company_release():
     assert recoveries == 1
 
 
+async def test_abandonment_tolerates_one_transient_lifecycle_read_failure():
+    """One provider timeout cannot erase an already-started durable compensation."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    task = get_task_by_name("agent-payment-abandonment")
+    reads = 0
+
+    async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError('500 {"error":"Failed to read test payment lifecycle"}')
+        return task.expected_payment_lifecycle
+
+    result = await _wait_for_expected_payment_lifecycle(
+        "http://localhost:55120",
+        "agent-123",
+        task,
+        {
+            "purchase": {"status": "FUNDING_RECLAIM_FAILED"},
+            "walletFunding": {"status": "RECLAIM_FAILED"},
+        },
+        timeout_seconds=1,
+        poll_interval_seconds=0,
+        fetch_lifecycle=fetch_lifecycle,
+    )
+
+    assert result["purchase"]["status"] == "VOIDED"
+    assert reads == 2
+
+
+async def test_abandonment_surfaces_three_consecutive_lifecycle_read_failures():
+    """The transient guard stays bounded and reports a persistent provider outage."""
+    import pytest
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        raise RuntimeError("upstream unavailable")
+
+    with pytest.raises(RuntimeError, match="unavailable after 3 consecutive reads"):
+        await _wait_for_expected_payment_lifecycle(
+            "http://localhost:55120",
+            "agent-123",
+            get_task_by_name("agent-payment-abandonment"),
+            {
+                "purchase": {"status": "FUNDING_RECLAIM_FAILED"},
+                "walletFunding": {"status": "RECLAIM_FAILED"},
+            },
+            timeout_seconds=1,
+            poll_interval_seconds=0,
+            fetch_lifecycle=fetch_lifecycle,
+        )
+
+
 def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     """Checkout text alone cannot pass the AgentCard lifecycle benchmark."""
     from benchmarks.benchmark_tasks import get_task_by_name, get_tasks_by_tag, suite_tasks
@@ -6776,6 +6833,18 @@ async def run_all_tests():
     await r.record_async(
         "abandonment_waits_for_cron_reconciliation",
         test_abandonment_waits_for_cron_reconciliation,
+    )
+    await r.record_async(
+        "abandonment_retries_pending_company_release",
+        test_abandonment_retries_a_pending_company_release,
+    )
+    await r.record_async(
+        "abandonment_tolerates_transient_lifecycle_read",
+        test_abandonment_tolerates_one_transient_lifecycle_read_failure,
+    )
+    await r.record_async(
+        "abandonment_bounds_persistent_lifecycle_outage",
+        test_abandonment_surfaces_three_consecutive_lifecycle_read_failures,
     )
     r.record(
         "agent_payment_requires_lifecycle_evidence",

@@ -1303,6 +1303,7 @@ async def _wait_for_expected_payment_lifecycle(
     lifecycle = initial_lifecycle
     deadline = time.monotonic() + timeout_seconds
     retryable_statuses = {"FUNDING_RECLAIM_FAILED", "REFUND_FAILED"}
+    consecutive_fetch_errors = 0
     while True:
         error = _validate_payment_lifecycle(
             task,
@@ -1321,7 +1322,25 @@ async def _wait_for_expected_payment_lifecycle(
         if (status not in retryable_statuses and not release_pending) or time.monotonic() >= deadline:
             return lifecycle
         await asyncio.sleep(poll_interval_seconds)
-        lifecycle = await (recover_lifecycle or fetch_lifecycle)(base_url, agent_id)
+        try:
+            lifecycle = await (recover_lifecycle or fetch_lifecycle)(base_url, agent_id)
+            consecutive_fetch_errors = 0
+        except Exception as error:
+            # Lifecycle reads join local DB state with several read-only provider
+            # views. A single transient provider timeout must not turn a
+            # successfully compensated purchase into a benchmark failure. Keep
+            # the last durable snapshot and retry within the existing bounded
+            # reconciliation window, but surface persistent outages promptly.
+            consecutive_fetch_errors += 1
+            if consecutive_fetch_errors >= 3 or time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "Payment lifecycle remained unavailable after "
+                    f"{consecutive_fetch_errors} consecutive reads: {error}"
+                ) from error
+            print(
+                "    ⚠ Transient payment lifecycle read failed "
+                f"({consecutive_fetch_errors}/3); retrying: {error}"
+            )
 
 
 async def abandon_test_payment(base_url: str, agent_id: str) -> dict:
