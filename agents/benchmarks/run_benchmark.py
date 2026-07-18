@@ -60,6 +60,7 @@ from benchmarks.benchmark_tasks import (
 )
 from benchmarks.context_validator import validate_context
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES, resolve_live_fixtures
+from benchmarks.llm_usage import aggregate_repeatable_cache_usage, aggregate_usage_items
 from benchmarks.logs import (
     collect_logs,
     collect_tree_messages,
@@ -79,7 +80,6 @@ from benchmarks.phone_callee import (
 )
 from benchmarks.realtime_monitor import SupabaseRealtimeSmokeMonitor
 from benchmarks.results import BenchmarkRun, TaskResult, compare_runs
-from benchmarks.llm_usage import aggregate_usage_items
 from benchmarks.timeout_history import (
     InsufficientHistoryError,
 )
@@ -174,6 +174,20 @@ SOURCE_CONNECT_GATE_TASK_NAME = "gate-source-connect-gmail"
 PURCHASE_SUBSCRIPTION_GATE_USER_ID = "00000000-0000-4000-8000-000000000102"
 PURCHASE_KYC_GATE_USER_ID = "00000000-0000-4000-8000-000000000103"
 SOURCE_CONNECT_GATE_USER_ID = "00000000-0000-4000-8000-000000000104"
+# Repeatable-cache baselines from local smoke run
+# 4657d9e8-6c05-48c2-bc20-1acd0513728a. The metric groups by authoritative
+# agent identity + call site and excludes one-shot calls. Per the one-way
+# ratchet policy, each qualifying task moved up by one 5-point increment:
+# spawn 40.7% (20 -> 25), parallel 47.6% (25 -> 30), browser 51.0% (35 -> 40).
+# Claude Code observed 47.5%, exactly the 45% + 2.5% trigger, so strict
+# "more than" leaves its 40% floor unchanged.
+PER_TASK_CACHE_HIT_RATCHET = {
+    "chat-mode": 0.0,
+    "spawn-sub-agents": 25.0,
+    "parallel-tool-calls": 30.0,
+    "claude-code-agent": 40.0,
+    "browser-smoke": 40.0,
+}
 GATE_FIXTURE_TASK_MODES = {
     PURCHASE_SUBSCRIPTION_GATE_TASK_NAME: "purchase-subscription",
     PURCHASE_KYC_GATE_TASK_NAME: "purchase-kyc",
@@ -1229,11 +1243,14 @@ async def get_agent_tool_usage(base_url: str, agent_id: str) -> dict:
         resp = await client.get(f"{base_url}/api/tool-usage/{agent_id}", headers=headers)
         if resp.status_code == 200:
             return resp.json()
-        return {}
+        raise RuntimeError(
+            f"Incomplete benchmark usage telemetry for agent {agent_id[:12]}: "
+            f"GET /api/tool-usage returned {resp.status_code}"
+        )
 
 
-async def get_llm_usage_breakdown(base_url: str, root_agent_id: str, tree_stats: dict) -> dict:
-    """Aggregate raw LLM calls across every agent in a tree by auth path/model."""
+async def get_llm_usage_details(base_url: str, root_agent_id: str, tree_stats: dict) -> tuple[dict, dict]:
+    """Aggregate provider attribution and repeatable cache usage for an agent tree."""
     agent_ids = {
         str(agent.get("agent_id") or agent.get("id") or "")
         for agent in tree_stats.get("all_agents", [])
@@ -1245,12 +1262,16 @@ async def get_llm_usage_breakdown(base_url: str, root_agent_id: str, tree_stats:
         *(get_agent_tool_usage(base_url, agent_id) for agent_id in sorted(agent_ids))
     )
     items: list[dict] = []
-    for payload in payloads:
+    for agent_id, payload in zip(sorted(agent_ids), payloads):
         for usage in payload.get("usages", []):
             usage_items = usage.get("usage_items") if isinstance(usage, dict) else None
             if isinstance(usage_items, list):
-                items.extend(item for item in usage_items if isinstance(item, dict))
-    return aggregate_usage_items(items)
+                items.extend(
+                    {**item, "_benchmark_agent_id": agent_id}
+                    for item in usage_items
+                    if isinstance(item, dict)
+                )
+    return aggregate_usage_items(items), aggregate_repeatable_cache_usage(items)
 
 
 async def get_test_payment_lifecycle(base_url: str, agent_id: str) -> dict:
@@ -6133,7 +6154,11 @@ async def run_single_task(
                 }
 
         tree_stats = await _fetch_tree_stats(base_url, agent_id)
-        llm_usage_by_provider = await get_llm_usage_breakdown(base_url, agent_id, tree_stats)
+        llm_usage_by_provider, repeatable_cache_usage = await get_llm_usage_details(
+            base_url,
+            agent_id,
+            tree_stats,
+        )
         tree_agent_count = max(tree_agent_count, int(tree_stats.get("agent_count") or 0))
         tree_tokens_in = max(
             _as_nonnegative_int(tree_stats.get("tree_tokens_in")),
@@ -6358,6 +6383,13 @@ async def run_single_task(
             cache_read_input_tokens=cache_read_input_tokens,
             cache_creation_input_tokens=cache_creation_input_tokens,
             cache_hit_pct=cache_hit_pct,
+            repeatable_cache_read_input_tokens=int(
+                repeatable_cache_usage["cache_read_input_tokens"]
+            ),
+            repeatable_cache_creation_input_tokens=int(
+                repeatable_cache_usage["cache_creation_input_tokens"]
+            ),
+            repeatable_cache_hit_pct=float(repeatable_cache_usage["cache_hit_pct"]),
             llm_call_count=llm_call_count,
             tree_agent_count=tree_agent_count,
             tokens_in=tokens_in,
@@ -6390,6 +6422,17 @@ async def run_single_task(
         if total_input > 0:
             print(
                 f"       Cache: read={cache_read_input_tokens} write={cache_creation_input_tokens} hit={cache_hit_pct}%"
+            )
+        repeatable_total = (
+            result.repeatable_cache_read_input_tokens
+            + result.repeatable_cache_creation_input_tokens
+        )
+        if repeatable_total > 0:
+            print(
+                "       Repeatable cache: "
+                f"read={result.repeatable_cache_read_input_tokens} "
+                f"write={result.repeatable_cache_creation_input_tokens} "
+                f"hit={result.repeatable_cache_hit_pct}%"
             )
 
         # Clean up: delete the agent now that we've collected all data, unless
@@ -7190,6 +7233,54 @@ async def _check_compute_code_credentials(base_url: str) -> bool:
         return False
 
 
+def cache_ratchet_failures(
+    task_results: list[TaskResult],
+    floors: dict[str, float] = PER_TASK_CACHE_HIT_RATCHET,
+) -> list[tuple[str, str, float, float]]:
+    """Return repeatable-cache floor violations, including missing telemetry."""
+    failures: list[tuple[str, str, float, float]] = []
+    for result in task_results:
+        floor = floors.get(result.name)
+        if floor is None:
+            continue
+        total = (
+            result.repeatable_cache_read_input_tokens
+            + result.repeatable_cache_creation_input_tokens
+        )
+        if total <= 0:
+            if floor > 0:
+                failures.append((result.name, result.agent_id, 0.0, floor))
+            continue
+        hit_pct = round(result.repeatable_cache_read_input_tokens / total * 100, 1)
+        if hit_pct < floor:
+            failures.append((result.name, result.agent_id, hit_pct, floor))
+    return failures
+
+
+def enforce_cache_ratchets(task_results: list[TaskResult]) -> None:
+    """Fail the benchmark when repeatable cache reuse regresses or is absent."""
+    failures = cache_ratchet_failures(task_results)
+    if not failures:
+        return
+    print("\n  ❌ CACHE RATCHET FAILED (per-task repeatable prompt-cache hit floor):")
+    for name, _agent_id, hit_pct, floor in failures:
+        print(f"    - {name}: {hit_pct}% < {floor}% ratchet")
+    print(
+        "\n  Diagnose each failure with agent_cache.py to see per-LLM-call"
+        "\n  read/write/hit% and find where the prefix fingerprint is drifting:"
+    )
+    for name, agent_id, _hit_pct, _floor in failures:
+        print(
+            "    cd agents && source venv/bin/activate && "
+            f"python benchmarks/agent_cache.py {agent_id}  # {name}"
+        )
+    print(
+        "\n  Fix the cache miss (e.g. unstable prefix hash, model mix,"
+        "\n  claudeAuth fall-through) and re-run until hit% ≥ ratchet."
+    )
+    raise SystemExit(1)
+
+
 async def main_async(args):
     if args.list:
         print("\nBenchmark Tasks:")
@@ -7720,61 +7811,7 @@ async def main_async(args):
         )
         sys.exit(1)
 
-    # Per-task cache hit ratchets — each value is the floor for that smoke
-    # task's prompt-cache hit %. Baseline values come from the run that
-    # established each task as passing, rounded DOWN to the nearest 5% to
-    # absorb run-to-run variance.
-    #
-    # Update rule: only RAISE a ratchet, never lower it. Move in 5%
-    # increments, and only when the observed hit % is more than 2.5% past
-    # the next threshold. Examples:
-    #   - ratchet 30%, observed 33%   → stay at 30  (only 3% past, <5% step)
-    #   - ratchet 30%, observed 32%   → stay at 30  (under 32.5% trigger)
-    #   - ratchet 25%, observed 32.6% → bump to 30  (>2.5% past 30)
-    #   - ratchet 30%, observed 37.6% → bump to 35
-    # Cold-vs-warm baseline: short tasks with 1-2 main-loop LLM calls
-    # (browser-smoke, claude-code-agent) have cache hit % dominated by
-    # whether iter-1's writes are still in prod's 5-min Anthropic
-    # ephemeral cache. Deploy gates often run after a quiet period, so
-    # ratchets for those tasks reflect the COLD-CACHE floor — not the
-    # warm-cache ceiling seen when smoke runs back-to-back. Tasks with
-    # >=3 main-loop calls (spawn-sub-agents, parallel-tool-calls) reach
-    # warm cache within the same run, so their ratchets stay higher.
-    PER_TASK_CACHE_HIT_RATCHET = {
-        "chat-mode": 0.0,  # observed 0.0% (no LLM cache path)
-        "spawn-sub-agents": 20.0,  # observed 24.4%
-        "parallel-tool-calls": 25.0,  # observed 29.1%
-        "claude-code-agent": 40.0,  # cold-cache floor (observed 44.2% w/ cold prod)
-        "browser-smoke": 35.0,  # cold-cache floor (observed 38.5% w/ cold prod)
-    }
-
-    cache_failures: list[tuple[str, str, float, float]] = []
-    for r in run.task_results:
-        floor = PER_TASK_CACHE_HIT_RATCHET.get(r.name)
-        if floor is None:
-            continue
-        per_task_total = r.cache_read_input_tokens + r.cache_creation_input_tokens
-        if per_task_total <= 0:
-            continue
-        per_task_pct = round(r.cache_read_input_tokens / per_task_total * 100, 1)
-        if per_task_pct < floor:
-            cache_failures.append((r.name, r.agent_id, per_task_pct, floor))
-
-    if cache_failures:
-        print("\n  ❌ CACHE RATCHET FAILED (per-task prompt-cache hit floor):")
-        for name, _aid, pct, floor in cache_failures:
-            print(f"    - {name}: {pct}% < {floor}% ratchet")
-        print(
-            "\n  Diagnose each failure with agent_cache.py to see per-LLM-call"
-            "\n  read/write/hit% and find where the prefix fingerprint is drifting:"
-        )
-        for name, aid, _pct, _floor in cache_failures:
-            print(f"    cd agents && source venv/bin/activate && python benchmarks/agent_cache.py {aid}  # {name}")
-        print(
-            "\n  Fix the cache miss (e.g. unstable prefix hash, model mix,"
-            "\n  claudeAuth fall-through) and re-run until hit% ≥ ratchet."
-        )
-        sys.exit(1)
+    enforce_cache_ratchets(run.task_results)
 
     # CI mode: exit non-zero if any task failed or was skipped. A skipped
     # required benchmark means the deploy gate did not actually run.

@@ -6,7 +6,6 @@ import runpy
 from pathlib import Path
 from typing import Any, Iterable
 
-
 # Load the data-only registry file without importing providers.rose.__init__,
 # which pulls runtime HTTP dependencies that the standalone fleet aggregator
 # intentionally does not need.
@@ -87,6 +86,44 @@ def aggregate_usage_items(items: Iterable[dict[str, Any]]) -> dict[str, dict[str
             row["output_tokens"] += output_tokens
             row["cost_usd"] += cost_usd
     return _round_costs(breakdown)
+
+
+def aggregate_repeatable_cache_usage(items: Iterable[dict[str, Any]]) -> dict[str, int | float]:
+    """Return cache reuse for call groups that repeat within one agent run.
+
+    A one-shot verifier or summary call has no same-run reuse opportunity, so
+    mixing it into a prefix-reuse ratchet makes the result depend on unrelated
+    output size. Group by agent, call site, and normalized cache namespace, then
+    retain every call from groups with at least two calls so the first write and
+    later reads stay accountable.
+    """
+    llm_items = [item for item in items if item.get("type") == "llm"]
+    def cache_group(item: dict[str, Any]) -> tuple[str, str, str, str]:
+        provider, model = classify_usage_item(item)
+        return (
+            str(item.get("_benchmark_agent_id") or item.get("agent_id") or "unknown"),
+            str(item.get("call_site") or "unknown"),
+            provider,
+            model,
+        )
+
+    group_counts: dict[tuple[str, str, str, str], int] = {}
+    for item in llm_items:
+        group = cache_group(item)
+        group_counts[group] = group_counts.get(group, 0) + 1
+    repeatable_items = [
+        item
+        for item in llm_items
+        if group_counts[cache_group(item)] >= 2
+    ]
+    cache_read = sum(int(item.get("cache_read_input_tokens") or 0) for item in repeatable_items)
+    cache_write = sum(int(item.get("cache_creation_input_tokens") or 0) for item in repeatable_items)
+    total = cache_read + cache_write
+    return {
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_write,
+        "cache_hit_pct": round(cache_read / total * 100, 1) if total else 0.0,
+    }
 
 
 def merge_usage_breakdowns(

@@ -24,6 +24,9 @@ class TaskResult:
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_hit_pct: float = 0.0
+    repeatable_cache_read_input_tokens: int = 0
+    repeatable_cache_creation_input_tokens: int = 0
+    repeatable_cache_hit_pct: float = 0.0
     llm_call_count: int = 0
     tree_agent_count: int = 0
     tokens_in: int = 0
