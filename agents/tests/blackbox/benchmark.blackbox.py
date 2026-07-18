@@ -6123,6 +6123,122 @@ def test_browser_smoke_accepts_captured_single_step_trajectory():
     assert _validate_agent_class_min_steps(task.min_steps, counts) is None
 
 
+def test_payment_abandonment_accepts_captured_two_step_trajectory():
+    """The checkout-ready card-mint-and-abandon flow ends after its second browser action."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    task = get_task_by_name("agent-payment-abandonment")
+    root_call_id = "call_SV1B22HCOvtaIBDUgTfC8C1H"
+    browser_task_id = "eb49400c-eaa0-40b2-ab7e-c25eaab9e5cc"
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "type": "browser",
+                        "tool_call_id": root_call_id,
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": root_call_id,
+                "task_id": browser_task_id,
+                "toolStatus": "IN_PROGRESS",
+            },
+        },
+    ]
+    captured_actions = (
+        (0, "goto", "call_SV1B22HCOvtaIBDUgTfC8C1H"),
+        (1, "request_payment_card", "call_504TlJ4rwJ8nmWMct75JUYJg"),
+    )
+    for step_number, action_type, action_call_id in captured_actions:
+        messages.append(
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolCallId": action_call_id,
+                    "task_id": browser_task_id,
+                    "subAgentId": browser_task_id,
+                    "action_type": action_type,
+                    "steps_taken": step_number,
+                    "toolStatus": "FINISHED",
+                },
+            }
+        )
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {"browser": {browser_task_id: 2}}
+    assert task.min_steps == {"browser": 2}
+    assert _validate_agent_class_min_steps(task.min_steps, counts) is None
+
+
+def test_production_payment_abandonment_accepts_checkout_ready_two_step_trajectory():
+    """The preselected production fixture only requires navigation and card minting."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    task = get_task_by_name("agent-payment-production-abandonment")
+    root_call_id = "production-browser-root"
+    browser_task_id = "production-browser-task"
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "type": "browser",
+                        "tool_call_id": root_call_id,
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": root_call_id,
+                "task_id": browser_task_id,
+                "toolStatus": "IN_PROGRESS",
+            },
+        },
+    ]
+    for step_number, action_type in enumerate(("goto", "request_payment_card")):
+        messages.append(
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolCallId": f"production-action-{step_number}",
+                    "task_id": browser_task_id,
+                    "subAgentId": browser_task_id,
+                    "action_type": action_type,
+                    "steps_taken": step_number,
+                    "toolStatus": "FINISHED",
+                },
+            }
+        )
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {"browser": {browser_task_id: 2}}
+    assert task.min_steps == {"browser": 2}
+    assert _validate_agent_class_min_steps(task.min_steps, counts) is None
+
+
 def test_browser_min_steps_rejects_terminal_claim_without_trajectory():
     """A synthetic terminal response and lifecycle messages prove zero browser work."""
     from benchmarks.run_benchmark import (
@@ -7278,6 +7394,14 @@ async def run_all_tests():
     r.record(
         "browser_smoke_single_step_trajectory",
         test_browser_smoke_accepts_captured_single_step_trajectory,
+    )
+    r.record(
+        "payment_abandonment_two_step_trajectory",
+        test_payment_abandonment_accepts_captured_two_step_trajectory,
+    )
+    r.record(
+        "production_payment_abandonment_two_step_trajectory",
+        test_production_payment_abandonment_accepts_checkout_ready_two_step_trajectory,
     )
     r.record(
         "browser_min_steps_rejects_terminal_claim",
