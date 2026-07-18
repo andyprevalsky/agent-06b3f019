@@ -38,7 +38,12 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
     !a.selectedAgentId ||
     a.isLoadingAgent ||
     (a.selectedAgentId && a.agentDetail?.status === 'STARTING_UP');
-  const showJoinWaitlistCta = showLoader && showOpeningState && !showNetworkDots;
+  // Only show the waitlist CTA to logged-out / anonymous-bootstrap visitors.
+  // A real signed-in account (authenticated AND non-anonymous) is "logged in"
+  // and should not see it.
+  const showWaitlistCta = !(a.isAuthenticated && !a.isAnonymous);
+  const showJoinWaitlistCta =
+    showWaitlistCta && showLoader && showOpeningState && !showNetworkDots;
 
   return (
     <ScrollArea
