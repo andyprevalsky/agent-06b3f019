@@ -5598,6 +5598,157 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
     return max(len(browser_call_ids), len(browser_session_ids)), failures
 
 
+_AGENT_CLASS_BY_RUNTIME_TOOL = {
+    "spawn_browser_agent": "browser",
+    "spawn_claude_code_agent": "code",
+    "spawn_general_purpose_agent": "explore",
+}
+_AGENT_ORCHESTRATION_TOOLS = {
+    "spawn_agent",
+    "spawn_browser_agent",
+    "spawn_claude_code_agent",
+    "spawn_general_purpose_agent",
+}
+
+
+def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
+    """Count grounded trajectory steps for each spawned agent instance.
+
+    Browser steps are deliberately strict: only explicit, non-negative
+    ``steps_taken`` counters emitted by browser action events count. Lifecycle
+    messages and terminal structured responses count as zero work. Other agent
+    classes use the same per-instance grouping and count their distinct leaf
+    tool calls, unless they expose explicit step counters of their own.
+    """
+    parents: dict[tuple[str, str], tuple[str, str]] = {}
+    explicit_steps: dict[tuple[str, str], set[int]] = {}
+    leaf_steps: dict[tuple[str, str], set[str]] = {}
+
+    def register(agent_class: str, instance_id: object) -> tuple[str, str] | None:
+        normalized_class = str(agent_class or "").strip().lower()
+        normalized_id = str(instance_id or "").strip()
+        if not normalized_class or not normalized_id:
+            return None
+        node = (normalized_class, normalized_id)
+        parents.setdefault(node, node)
+        return node
+
+    def find(node: tuple[str, str]) -> tuple[str, str]:
+        parent = parents[node]
+        if parent != node:
+            parents[node] = find(parent)
+        return parents[node]
+
+    def union(left: tuple[str, str], right: tuple[str, str]) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    messages = data.get("messages", []) or []
+    for message in messages:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        for tool_call in metadata.get("tool_calls", []) or []:
+            if not isinstance(tool_call, dict):
+                continue
+            tool_name = tool_call.get("tool")
+            agent_class = tool_call.get("type") or _AGENT_CLASS_BY_RUNTIME_TOOL.get(tool_name)
+            if tool_name == "spawn_agent" or tool_name in _AGENT_CLASS_BY_RUNTIME_TOOL:
+                register(agent_class, tool_call.get("tool_call_id") or tool_call.get("toolCallId"))
+
+    step_events: list[tuple[tuple[str, str], dict, bool]] = []
+    for message in messages:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        candidates = [metadata]
+        if isinstance(metadata.get("auxiliary"), dict):
+            candidates.append(metadata["auxiliary"])
+        for candidate in candidates:
+            tool_name = candidate.get("toolName") or candidate.get("tool_name")
+            agent_class = (
+                candidate.get("agentType")
+                or candidate.get("agent_type")
+                or _AGENT_CLASS_BY_RUNTIME_TOOL.get(tool_name)
+            )
+            if not agent_class:
+                continue
+            direct_ids = [
+                candidate.get("subAgentId"),
+                candidate.get("sub_agent_id"),
+                candidate.get("task_id"),
+                candidate.get("taskId"),
+            ]
+            nodes = [node for value in direct_ids if (node := register(agent_class, value))]
+            tool_call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
+            if tool_name in _AGENT_ORCHESTRATION_TOOLS:
+                tool_node = register(agent_class, tool_call_id)
+                if tool_node:
+                    nodes.append(tool_node)
+            if not nodes:
+                continue
+            anchor = nodes[0]
+            for node in nodes[1:]:
+                union(anchor, node)
+            has_direct_instance = any(value for value in direct_ids)
+            step_events.append((anchor, candidate, has_direct_instance))
+
+    for node, candidate, has_direct_instance in step_events:
+        root = find(node)
+        step_number = candidate.get("steps_taken")
+        if isinstance(step_number, int) and not isinstance(step_number, bool) and step_number >= 0:
+            explicit_steps.setdefault(root, set()).add(step_number)
+        if root[0] == "browser" or not has_direct_instance:
+            continue
+        tool_name = candidate.get("toolName") or candidate.get("tool_name")
+        tool_call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
+        if tool_name and tool_name not in _AGENT_ORCHESTRATION_TOOLS and tool_call_id:
+            leaf_steps.setdefault(root, set()).add(f"{tool_name}:{tool_call_id}")
+
+    grouped_explicit: dict[tuple[str, str], set[int]] = {}
+    grouped_leaf: dict[tuple[str, str], set[str]] = {}
+    for node, values in explicit_steps.items():
+        grouped_explicit.setdefault(find(node), set()).update(values)
+    for node, values in leaf_steps.items():
+        grouped_leaf.setdefault(find(node), set()).update(values)
+
+    counts: dict[str, dict[str, int]] = {}
+    for node in parents:
+        root = find(node)
+        if root != node:
+            continue
+        agent_class, instance_id = root
+        explicit_count = len(grouped_explicit.get(root, set()))
+        leaf_count = len(grouped_leaf.get(root, set()))
+        counts.setdefault(agent_class, {})[instance_id] = (
+            explicit_count if explicit_count else leaf_count
+        )
+    return counts
+
+
+def _validate_agent_class_min_steps(
+    min_steps: dict[str, int],
+    counts: dict[str, dict[str, int]],
+) -> Optional[str]:
+    """Require every observed instance of each configured class to meet its minimum."""
+    for agent_class, minimum in sorted(min_steps.items()):
+        instances = counts.get(agent_class, {})
+        if not instances:
+            return (
+                f"No {agent_class} agent trajectory was recorded; expected at least "
+                f"{minimum} steps per {agent_class} agent"
+            )
+        for instance_id, actual in sorted(instances.items()):
+            if actual < minimum:
+                return (
+                    f"{agent_class.capitalize()} agent {instance_id} recorded {actual} trajectory "
+                    f"step(s); expected at least {minimum} per {agent_class} agent"
+                )
+    return None
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
@@ -6152,6 +6303,24 @@ async def run_single_task(
             if not plaid_passed:
                 passed = False
                 failure_reason = plaid_reason
+
+        agent_class_step_counts = _agent_class_step_counts(data)
+        data["_benchmark"] = {
+            **data.get("_benchmark", {}),
+            "agent_class_step_counts": agent_class_step_counts,
+            "min_steps": dict(task.min_steps),
+        }
+        min_steps_error = _validate_agent_class_min_steps(
+            task.min_steps,
+            agent_class_step_counts,
+        )
+        if min_steps_error:
+            passed = False
+            failure_reason = (
+                f"{failure_reason} | {min_steps_error}"
+                if failure_reason
+                else min_steps_error
+            )
 
         # Tree agent count check — counts spawn_agent-type sub-agents only
         # (excludes root and explore agents; explore agents have no output_schema)

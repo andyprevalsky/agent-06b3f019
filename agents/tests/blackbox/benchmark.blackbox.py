@@ -1422,15 +1422,19 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
     """Amazon uses the standard completed-commerce runtime and preserves cart-path semantics."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
+    approved_prompt = (
+        "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. "
+        "Avoid using the Buy Now button as the purchase path, but make sure purchase is completed."
+    )
     task = get_task_by_name("browser-agent-amazon-cookie-payment")
     assert task.description.endswith("complete the purchase.")
-    assert "never treat a spawned acknowledgement as completion" in task.prompt
-    assert "call wait_for" in task.prompt
-    assert "grounded quality evidence" in task.prompt
+    assert task.prompt == approved_prompt
+    assert get_task_by_name("browser-agent").prompt == approved_prompt
     assert task.approval_handling == "auto_approve"
     assert task.expected_attention_kind == "write_lock"
     assert task.expected_approval_count == 1
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.min_steps == {"browser": 5}
     assert task.tool_count_scope == "root"
     assert task.bench == "rose-bench"
     assert task.environment["live_fixtures"] == ["live"]
@@ -5929,6 +5933,198 @@ def test_unified_catalog_supports_multiple_evaluators_per_eval():
     )
 
 
+def test_agent_class_min_steps_contract_is_validated_and_defaulted():
+    """Every browser benchmark gets the hard five-step floor; other classes are configurable."""
+    from benchmarks.benchmark_tasks import all_tasks, get_task_by_name
+    from benchmarks.long_horizon import validate_task_contract
+
+    browser_tasks = [task for task in all_tasks() if task.requires_browser_agent]
+    assert browser_tasks
+    assert all(task.min_steps.get("browser") == 5 for task in browser_tasks)
+    assert get_task_by_name("browser-agent-amazon-cookie-payment").min_steps == {"browser": 5}
+    assert get_task_by_name("chat-mode").min_steps == {}
+
+    base = {"name": "min-steps-contract", "bench": "rose-bench"}
+    validate_task_contract({**base, "min_steps": {"browser": 5, "explore": 3}})
+    for invalid in ({}, {"browser": 0}, {"browser": True}, {"": 5}):
+        try:
+            validate_task_contract({**base, "min_steps": invalid})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid min_steps contract was accepted: {invalid}")
+    try:
+        validate_task_contract(
+            {**base, "requires_browser_agent": True, "min_steps": {"browser": 4}}
+        )
+    except ValueError as exc:
+        assert "min_steps.browser >= 5" in str(exc)
+    else:
+        raise AssertionError("browser-agent task accepted a trajectory floor below five")
+
+
+def test_browser_min_steps_rejects_terminal_claim_without_trajectory():
+    """A synthetic terminal response and lifecycle messages prove zero browser work."""
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "type": "browser",
+                        "tool_call_id": "browser-root",
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "browser-root",
+                "toolStatus": "IN_PROGRESS",
+                "title": "Starting up a browser",
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": '{"status":"completed","purchase_completed":true}',
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "browser-root",
+                "toolStatus": "FINISHED",
+                "structured_response": {"purchase_completed": True},
+            },
+        },
+    ]
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {"browser": {"browser-root": 0}}
+    reason = _validate_agent_class_min_steps({"browser": 5}, counts)
+    assert reason is not None
+    assert "recorded 0 trajectory step(s)" in reason
+
+
+def test_browser_min_steps_is_per_instance_not_aggregate():
+    """Five steps on one browser cannot cover a second under-worked browser."""
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    messages = []
+    for instance_number, step_count in ((1, 5), (2, 4)):
+        root_id = f"browser-root-{instance_number}"
+        task_id = f"browser-task-{instance_number}"
+        messages.extend(
+            [
+                {
+                    "role": "ASSISTANT",
+                    "metadata": {
+                        "tool_calls": [
+                            {
+                                "tool": "spawn_agent",
+                                "type": "browser",
+                                "tool_call_id": root_id,
+                            }
+                        ]
+                    },
+                },
+                {
+                    "role": "TOOL",
+                    "metadata": {
+                        "toolName": "spawn_browser_agent",
+                        "toolCallId": root_id,
+                        "task_id": task_id,
+                        "action_type": "browser",
+                    },
+                },
+            ]
+        )
+        for step in range(step_count):
+            messages.append(
+                {
+                    "role": "TOOL",
+                    "metadata": {
+                        "toolName": "spawn_browser_agent",
+                        "toolCallId": f"action-{instance_number}-{step}",
+                        "task_id": task_id,
+                        "subAgentId": task_id,
+                        "action_type": "click",
+                        "steps_taken": step,
+                    },
+                }
+            )
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {
+        "browser": {
+            "browser-task-1": 5,
+            "browser-task-2": 4,
+        }
+    }
+    reason = _validate_agent_class_min_steps({"browser": 5}, counts)
+    assert reason is not None
+    assert "browser-task-2 recorded 4" in reason
+
+
+def test_min_steps_supports_non_browser_agent_classes():
+    """The same contract counts distinct leaf tool steps for explore agents."""
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "type": "explore",
+                        "tool_call_id": "explore-root",
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_agent",
+                "toolCallId": "explore-root",
+                "taskId": "explore-task",
+                "agentType": "explore",
+            },
+        },
+    ]
+    for step in range(5):
+        messages.append(
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_search",
+                    "toolCallId": f"search-{step}",
+                    "taskId": "explore-task",
+                    "subAgentId": "explore-task",
+                    "agentType": "explore",
+                    "toolStatus": "FINISHED",
+                },
+            }
+        )
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {"explore": {"explore-task": 5}}
+    assert _validate_agent_class_min_steps({"explore": 5}, counts) is None
+
+
 def test_suite_selection_excludes_incomplete_entries():
     """Suite runs execute only ready benchmark evals; incomplete entries are catalogued but skipped."""
     from benchmarks.benchmark_tasks import all_tasks, suite_tasks
@@ -6899,6 +7095,22 @@ async def run_all_tests():
     r.record(
         "unified_catalog_multiple_evaluators",
         test_unified_catalog_supports_multiple_evaluators_per_eval,
+    )
+    r.record(
+        "agent_class_min_steps_contract",
+        test_agent_class_min_steps_contract_is_validated_and_defaulted,
+    )
+    r.record(
+        "browser_min_steps_rejects_terminal_claim",
+        test_browser_min_steps_rejects_terminal_claim_without_trajectory,
+    )
+    r.record(
+        "browser_min_steps_per_instance",
+        test_browser_min_steps_is_per_instance_not_aggregate,
+    )
+    r.record(
+        "min_steps_non_browser_classes",
+        test_min_steps_supports_non_browser_agent_classes,
     )
     r.record(
         "suite_selection_excludes_incomplete",

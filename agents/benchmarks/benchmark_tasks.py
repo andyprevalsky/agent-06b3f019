@@ -9,6 +9,9 @@ from benchmarks.fixtures import DEFAULT_BASE_IMAGE
 from benchmarks.live_fixtures import resolve_live_fixtures
 
 
+DEFAULT_MIN_STEPS_BY_AGENT_CLASS: dict[str, int] = {"browser": 5}
+
+
 @dataclass
 class BenchmarkTask:
     name: str
@@ -43,6 +46,7 @@ class BenchmarkTask:
     required_structured_response_fields: List[str] = field(default_factory=list)  # non-empty browser result fields
     expected_gate: Optional[dict] = None  # Expected metadata.gate fields for gate-blocked tasks
     min_agent_count: Optional[int] = None  # Minimum total agents in tree (root + sub-agents)
+    min_steps: dict[str, int] = field(default_factory=dict)  # Per-instance trajectory minimums by agent class
     expected_tool_counts: Optional[dict] = None  # Exact tool call counts (toolName → count)
     min_tool_counts: Optional[dict] = None  # Minimum tool call counts (toolName → min count)
     tool_count_scope: str = "tree"  # "tree" counts all descendants; "root" counts root-visible tool calls only
@@ -158,6 +162,12 @@ def _load_tasks() -> List[BenchmarkTask]:
         raw = json.load(f)
     tasks = [BenchmarkTask(**t) for t in raw]
     for t in tasks:
+        t.min_steps = dict(t.min_steps)
+        if t.requires_browser_agent:
+            t.min_steps["browser"] = max(
+                t.min_steps.get("browser", 0),
+                DEFAULT_MIN_STEPS_BY_AGENT_CLASS["browser"],
+            )
         if t.environment is None:
             t.environment = _default_environment()
         else:
