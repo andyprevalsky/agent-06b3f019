@@ -22,8 +22,6 @@ import {
   type LocalStorageOrigin,
 } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import { runSyncStep, syncUserRecord } from '../../../scripts/seed-local-helpers';
 
 type TestFn = () => Promise<void>;
@@ -470,74 +468,9 @@ test('required credential table sync propagates write failures', async () => {
   );
 });
 
-test('full sync defers browser-auth failure until later tables finish', async () => {
-  const source = readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
-  const fullSyncCollector = source.indexOf('const browserAuthSyncFailures: Error[] = [];');
-  const collectedBrowserSync = source.indexOf(
-    'await syncBrowserAuthForCurrentMode(browserAuthSyncFailures);'
-  );
-  const laterTable = source.indexOf("await syncTable('Goal Blueprints'");
-  const deferredFailure = source.indexOf('throwBrowserAuthSyncFailures(browserAuthSyncFailures);');
-  const credentialsOnlyBranch = source.indexOf('if (CREDENTIALS_ONLY)');
-  const failFastBrowserSync = source.indexOf(
-    'await syncBrowserAuthForCurrentMode();',
-    credentialsOnlyBranch
-  );
-
-  assert(fullSyncCollector > 0, 'expected full sync to collect browser-auth failures');
-  assert(
-    collectedBrowserSync > fullSyncCollector,
-    'expected full sync to pass its failure collector to browser-auth sync'
-  );
-  assert(laterTable > collectedBrowserSync, 'expected later full-sync tables after browser auth');
-  assert(
-    deferredFailure > laterTable,
-    'expected collected browser-auth failures to throw only after later tables finish'
-  );
-  assert(
-    failFastBrowserSync > credentialsOnlyBranch && failFastBrowserSync < fullSyncCollector,
-    'expected credentials-only sync to remain fail-fast'
-  );
-});
-
-test('passkeys-only seed mode never enters browser state or password sync', async () => {
-  const source = readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
-  const flag = source.indexOf("process.argv.includes('--passkeys-only')");
-  const branch = source.indexOf('if (PASSKEYS_ONLY)');
-  const passkeySync = source.indexOf(
-    'await syncPasskeysOnly(undefined, { authoritative: true });',
-    branch
-  );
-  const branchReturn = source.indexOf('return;', passkeySync);
-  const credentialsOnlyBranch = source.indexOf('if (CREDENTIALS_ONLY)');
-
-  assert(flag > 0, 'expected a dedicated --passkeys-only CLI flag');
-  assert(branch > flag, 'expected passkeys-only branch after flag declaration');
-  assert(passkeySync > branch, 'expected passkeys-only branch to sync passkeys');
-  assert(branchReturn > passkeySync, 'expected passkeys-only branch to return immediately');
-  assert(
-    source.includes("'Stale Local Passkeys'") &&
-      source.includes('local.passkeyCredential.deleteMany'),
-    'expected passkeys-only mode to remove stale local passkeys'
-  );
-  assert(
-    credentialsOnlyBranch > branchReturn,
-    'expected passkeys-only mode to return before browser state/password sync'
-  );
-});
-
-test('seed-local rejects conflicting exclusive sync modes before creating database clients', async () => {
-  const source = readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
-  const validation = source.indexOf('if (requestedSeedModes.length > 1)');
-  const clients = source.indexOf('const remote = new PrismaClient');
-
-  assert(validation > 0, 'expected mutually exclusive seed-mode validation');
-  assert(clients > validation, 'expected seed-mode validation before database client creation');
-  assert(
-    source.includes('Seed modes are mutually exclusive; received'),
-    'expected conflicting flags to be named in the failure'
-  );
-});
+// Source-structure invariants for seed-local sync modes (mode branching,
+// failure deferral, transient-failure retries) live in
+// seed-local.part2.blackbox.ts.
 
 test('browser-state natural-key sync crosses the real Prisma uniqueness boundary', async () => {
   const databaseUrl = process.env.DATABASE_URL;
