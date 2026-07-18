@@ -159,6 +159,47 @@ export async function drainQueueForCurrentUser(): Promise<number> {
   return drainNext();
 }
 
+export async function testPopInternalKeyRequiresRelayScope(): Promise<void> {
+  const response = await request(`${BASE_URL}/api/imessage/queue/pop`, {
+    headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
+  });
+  assertStatus(response.status, 403, response.data);
+}
+
+export async function testInternalBenchmarkRelayRoundTrip(): Promise<void> {
+  const unique = `Internal benchmark relay ${Date.now()}`;
+  const queued = await request(`${BASE_URL}/api/imessage/queue`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      user_id: ctx.userId,
+      agent_id: 'internal-benchmark-relay-agent',
+      idempotency_key: `internal-benchmark-relay-${Date.now()}`,
+      phone_number: '+19729777432',
+      message: unique,
+    }),
+  });
+  assertStatus(queued.status, 200, queued.data);
+
+  const popped = await request(`${BASE_URL}/api/imessage/queue/pop`, {
+    headers: internalRelayHeaders(),
+  });
+  assertStatus(popped.status, 200, popped.data);
+  const message = (
+    popped.data as { message: { id: string; message: string; claim_token: string } | null }
+  ).message;
+  if (message?.message !== unique || !message.claim_token) {
+    throw new Error('Scoped internal relay did not claim the exact queued message');
+  }
+
+  const result = await request(`${BASE_URL}/api/imessage/queue/${message.id}/result`, {
+    method: 'POST',
+    headers: internalRelayHeaders(),
+    body: JSON.stringify({ claim_token: message.claim_token, success: true }),
+  });
+  assertStatus(result.status, 200, result.data);
+}
+
 export async function testDeliveryResultThirdFailureIsTerminal(): Promise<void> {
   const uniqueMsg = `Terminal Mac failure ${Date.now()}`;
   const queued = await request(`${BASE_URL}/api/imessage/queue`, {

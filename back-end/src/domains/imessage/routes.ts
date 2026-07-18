@@ -21,6 +21,7 @@ import { MessageChannel } from './types';
 const log = createLogger('iMessage');
 const router = Router();
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
+const userAuth = asyncHandler<AuthRequest>(authenticate);
 
 /**
  * POST /api/imessage/queue
@@ -241,7 +242,7 @@ router.post(
  */
 router.get(
   '/recent-inbound',
-  authenticate,
+  userAuth,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     const userId =
       req.user?.id ?? (req.isInternal === true ? (req.headers['x-user-id'] as string) : undefined);

@@ -46,13 +46,14 @@ import {
   authHeaders,
   ctx,
   drainQueueForCurrentUser,
-  internalRelayHeaders,
   request,
   runPool,
   runTest,
   setup,
   testBridgeHeartbeatMakesExactBackendReady,
   testDeliveryResultThirdFailureIsTerminal,
+  testInternalBenchmarkRelayRoundTrip,
+  testPopInternalKeyRequiresRelayScope,
   testQueueDatabaseDefaultDoesNotExpire,
   testQueuedEntryPersistsUntilMacReturns,
   testQueueReceiptIncludesRelayStatusAtEnqueue,
@@ -189,13 +190,6 @@ async function testPop_invalidToken() {
   assertStatus(res.status, 401, res.data);
 }
 
-async function testPop_internalKeyRequiresRelayScope() {
-  const res = await request(`${BASE_URL}/api/imessage/queue/pop`, {
-    headers: { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
-  });
-  assertStatus(res.status, 403, res.data);
-}
-
 async function testDeliveryResult_noAuth() {
   const res = await request(`${BASE_URL}/api/imessage/queue/queue-id/result`, {
     method: 'POST',
@@ -223,40 +217,6 @@ async function testPop_emptyQueue() {
   if (body.message !== null) {
     throw new Error('Expected null message for empty queue');
   }
-}
-
-async function testInternalBenchmarkRelayRoundTrip() {
-  const unique = `Internal benchmark relay ${Date.now()}`;
-  const queued = await request(`${BASE_URL}/api/imessage/queue`, {
-    method: 'POST',
-    headers: apiKeyHeaders(),
-    body: JSON.stringify({
-      user_id: ctx.userId,
-      agent_id: 'internal-benchmark-relay-agent',
-      idempotency_key: `internal-benchmark-relay-${Date.now()}`,
-      phone_number: '+19729777432',
-      message: unique,
-    }),
-  });
-  assertStatus(queued.status, 200, queued.data);
-
-  const popped = await request(`${BASE_URL}/api/imessage/queue/pop`, {
-    headers: internalRelayHeaders(),
-  });
-  assertStatus(popped.status, 200, popped.data);
-  const message = (
-    popped.data as { message: { id: string; message: string; claim_token: string } | null }
-  ).message;
-  if (message?.message !== unique || !message.claim_token) {
-    throw new Error('Scoped internal relay did not claim the exact queued message');
-  }
-
-  const result = await request(`${BASE_URL}/api/imessage/queue/${message.id}/result`, {
-    method: 'POST',
-    headers: internalRelayHeaders(),
-    body: JSON.stringify({ claim_token: message.claim_token, success: true }),
-  });
-  assertStatus(result.status, 200, result.data);
 }
 
 // ==================== READ-AFTER-WRITE ====================
@@ -626,7 +586,7 @@ async function runAll() {
     { name: 'GET /queue/pop -- invalid token -> 401', fn: testPop_invalidToken },
     {
       name: 'GET /queue/pop -- internal key without relay scope -> 403',
-      fn: testPop_internalKeyRequiresRelayScope,
+      fn: testPopInternalKeyRequiresRelayScope,
     },
     { name: 'POST /queue/:id/result -- no auth -> 401', fn: testDeliveryResult_noAuth },
     { name: 'GET /queue/:id/status -- no auth -> 401', fn: testDeliveryStatus_noAuth },
