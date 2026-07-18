@@ -9,6 +9,7 @@
  *         -> rolling 7|30|90|365-day periods anchored to the UTC retrieval day
  *         -> backend day + time-slice response cache
  *         -> Stripe charges + Prisma waitlist/task/user metrics + Linear/GitHub velocity
+ *         -> active connectors grouped into six onboarding subtype adoption rates
  *      -> ordered website funnel -> horizontal volume BarChart + comparison tiles
  *      -> verified-account activation -> separate BarChart + comparison tiles
  *
@@ -46,11 +47,12 @@ import { cn } from '@/lib/utils';
 import { useAdminHealthData } from '../hooks';
 import { MetricChange } from './MetricChange';
 import { MetricSectionHeader } from './MetricHierarchy';
+import ConnectorAdoptionSection from './ConnectorAdoptionSection';
 import PrimaryMetricSection from './PrimaryMetricSection';
 import VelocitySection from './VelocitySection';
 import WaitlistPeopleSection from './WaitlistPeopleSection';
 import WaitlistSignupsChart from './WaitlistSignupsChart';
-import { relativeChange, seriesMetricChange } from './metricComparison';
+import { funnelEndToEnd, relativeChange, seriesMetricChange } from './metricComparison';
 import type {
   AdminHealthData,
   AdminHealthFunnelStep,
@@ -184,33 +186,6 @@ function FunnelStepMetrics({
     );
   }
   return <span className="text-xs text-muted-foreground">Needs analytics</span>;
-}
-
-export function funnelEndToEnd(steps: AdminHealthFunnelStep[]) {
-  const first = steps[0];
-  const last = steps.at(-1);
-  const conversionRate =
-    first?.count === null ||
-    first?.count === undefined ||
-    first.count === 0 ||
-    last?.count === null ||
-    last?.count === undefined ||
-    last.count > first.count
-      ? null
-      : last.count / first.count;
-  const previousConversionRate =
-    first?.previousCount === null ||
-    first?.previousCount === undefined ||
-    first.previousCount === 0 ||
-    last?.previousCount === null ||
-    last?.previousCount === undefined ||
-    last.previousCount > first.previousCount
-      ? null
-      : last.previousCount / first.previousCount;
-  return {
-    conversionRate,
-    conversionRateChange: relativeChange(conversionRate, previousConversionRate),
-  };
 }
 
 function FunnelGroup({
@@ -625,6 +600,7 @@ export default function AdminHealth() {
               />
               <SecondaryMetricGrid data={data} />
               <EfficiencyCharts data={data} />
+              <ConnectorAdoptionSection adoption={data.connectorAdoption} />
               <FunnelSection data={data} />
               <RetentionChart data={data} />
             </section>

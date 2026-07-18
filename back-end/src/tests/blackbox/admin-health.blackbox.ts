@@ -20,7 +20,10 @@ import { z } from 'zod';
 
 import { findWaitlistSignupsBetween } from '../../domains/admin-health/repo';
 import { isCacheableAdminHealthResponse } from '../../domains/admin-health/service';
-import { assertDatabaseActivationCounts } from './admin-health.blackbox.helpers';
+import {
+  assertConnectorAdoption,
+  assertDatabaseActivationCounts,
+} from './admin-health.blackbox.helpers';
 import { prisma } from '../../providers/database';
 config();
 
@@ -394,6 +397,7 @@ async function testAdminHappyWeekly() {
   });
   assertStatus(res.status, 200, res.data);
   assertWaitlistMetrics(res.data);
+  assertConnectorAdoption(res.data);
   const body = assertSchema(AdminHealthResponseSchema, res.data, 'GET /admin-health weekly');
   if (body.timeSlice !== 'weekly') throw new Error(`Expected weekly, got ${body.timeSlice}`);
   assertRollingPeriods(body, 12, 7);

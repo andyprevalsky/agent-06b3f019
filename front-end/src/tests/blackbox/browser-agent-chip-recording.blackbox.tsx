@@ -57,7 +57,12 @@ const anchorMsg: Message = {
   timestamp: '2026-07-16T00:00:02Z',
   role: 'TOOL',
   text: '**Status**: ✅ SUCCESS',
-  metadata: { task_id: TASK, toolCallId: CALL, toolName: 'spawn_browser_agent', action_type: 'task_complete' },
+  metadata: {
+    task_id: TASK,
+    toolCallId: CALL,
+    toolName: 'spawn_browser_agent',
+    action_type: 'task_complete',
+  },
 };
 
 function recordingMsg(extra: Record<string, unknown>): Message {

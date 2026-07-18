@@ -1,4 +1,4 @@
-import type { AgentStatus } from '@prisma/client';
+import { IntegrationStatus, type AgentStatus } from '@prisma/client';
 
 import { prisma } from '../../providers/database';
 
@@ -27,6 +27,11 @@ export interface WaitlistSignupRecord {
 export interface SubscriptionUserRecord {
   userId: string;
   stripeCustomerId: string;
+}
+
+export interface ConnectedConnectorRecord {
+  userId: string;
+  name: string;
 }
 
 export async function findUserForAdminCheck(userId: string): Promise<AdminUserRecord | null> {
@@ -65,6 +70,21 @@ export async function findVerifiedUsersCreatedBefore(
   return users
     .filter((user) => (user.phone ?? '').trim() !== '')
     .map(({ userId, createdAt }) => ({ userId, createdAt }));
+}
+
+/**
+ * Active connector rows that have reached a connected state. SYNCING is
+ * included only for already-active rows (for example Gmail during a refresh),
+ * while first-time uploads remain inactive until their import succeeds.
+ */
+export async function findConnectedConnectors(): Promise<ConnectedConnectorRecord[]> {
+  return prisma.integration.findMany({
+    where: {
+      isActive: true,
+      status: { in: [IntegrationStatus.CONNECTED, IntegrationStatus.SYNCING] },
+    },
+    select: { userId: true, name: true },
+  });
 }
 
 export async function findUsersByIds(userIds: string[]): Promise<UserCreatedRecord[]> {

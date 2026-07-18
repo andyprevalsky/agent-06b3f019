@@ -16,8 +16,8 @@
  *   glyphs so the pill is fully packed. A transparent button with a 1px rose
  *   border sits on top, centered on the animation (CTA_PILL.shiftY offsets).
  *   The button label stays visible across mouse, keyboard, and touch input; a
- *   static scrim keeps it legible over the bright glyphs while the border warms
- *   on hover/focus. The CTA has no React state, so it does not touch the
+ *   text shadow keeps it legible without darkening the whole pill while the
+ *   border warms on hover/focus. The CTA has no React state, so it does not touch the
  *   ANIMATING machine.
  */
 
@@ -181,16 +181,6 @@ function AsciiCtaOverlay({
           height: CTA_PILL.height,
         }}
       >
-        {/* Legibility scrim — always darkens the pill center so the static
-            white label reads over the bright rose glyphs. */}
-        <span
-          aria-hidden
-          className="pointer-events-none absolute inset-0 rounded-full"
-          style={{
-            background:
-              'radial-gradient(ellipse 72% 92% at 50% 50%, rgba(0,0,0,0.55), rgba(0,0,0,0) 74%)',
-          }}
-        />
         <span
           data-testid="opening-join-label"
           className="[grid-area:1/1] whitespace-nowrap text-sm font-bold tracking-wide"

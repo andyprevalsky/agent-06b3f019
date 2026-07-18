@@ -22,7 +22,7 @@ export interface AuthRequest extends Request {
   isInternal?: boolean;
 }
 
-export async function authenticate(
+async function authenticateRequest(
   req: AuthRequest,
   res: Response,
   next: NextFunction
@@ -73,4 +73,13 @@ export async function authenticate(
     });
     res.status(500).json({ error: 'Internal server error' });
   }
+}
+
+/**
+ * Express 4 expects middleware to return void, so keep the promise contained
+ * at this provider boundary. authenticateRequest owns error reporting for the
+ * entire async verification path.
+ */
+export function authenticate(req: AuthRequest, res: Response, next: NextFunction): void {
+  void authenticateRequest(req, res, next);
 }

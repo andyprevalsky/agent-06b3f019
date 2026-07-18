@@ -1,5 +1,56 @@
 import { retryWithBackoff } from '../../providers/retry';
 
+export interface ConnectorAdoptionResponse {
+  eligibleUserCount: number;
+  subtypes: Array<{
+    id: string;
+    label: string;
+    connectedUsers: number;
+    connectionRate: number;
+  }>;
+}
+
+export function assertConnectorAdoption(value: unknown): asserts value is {
+  connectorAdoption: ConnectorAdoptionResponse;
+} {
+  if (value === null || typeof value !== 'object' || !('connectorAdoption' in value)) {
+    throw new Error('Admin health response is missing connectorAdoption');
+  }
+  const adoption = (value as { connectorAdoption?: unknown }).connectorAdoption;
+  if (adoption === null || typeof adoption !== 'object') {
+    throw new Error('connectorAdoption must be an object');
+  }
+  const candidate = adoption as Partial<ConnectorAdoptionResponse>;
+  if (!Number.isInteger(candidate.eligibleUserCount) || (candidate.eligibleUserCount ?? -1) < 0) {
+    throw new Error('connectorAdoption.eligibleUserCount must be a non-negative integer');
+  }
+  if (!Array.isArray(candidate.subtypes)) {
+    throw new Error('connectorAdoption.subtypes must be an array');
+  }
+  const expectedIds = ['browsers', 'passwords', 'compute', 'messages', 'socials', 'financials'];
+  if (candidate.subtypes.map((subtype) => subtype.id).join(',') !== expectedIds.join(',')) {
+    throw new Error('connectorAdoption must include every onboarding connector subtype in order');
+  }
+  for (const subtype of candidate.subtypes) {
+    if (!Number.isInteger(subtype.connectedUsers) || subtype.connectedUsers < 0) {
+      throw new Error(`${subtype.id}.connectedUsers must be a non-negative integer`);
+    }
+    if (subtype.connectedUsers > (candidate.eligibleUserCount ?? 0)) {
+      throw new Error(`${subtype.id}.connectedUsers cannot exceed the eligible population`);
+    }
+    if (subtype.connectionRate < 0 || subtype.connectionRate > 1) {
+      throw new Error(`${subtype.id}.connectionRate must be between zero and one`);
+    }
+    const expectedRate =
+      candidate.eligibleUserCount === 0
+        ? 0
+        : Number((subtype.connectedUsers / candidate.eligibleUserCount).toFixed(4));
+    if (subtype.connectionRate !== expectedRate) {
+      throw new Error(`${subtype.id}.connectionRate does not match its user counts`);
+    }
+  }
+}
+
 /** Structural slice of AdminHealthResponse needed for activation-count checks. */
 export interface ActivationCheckBody {
   generatedAt: string;

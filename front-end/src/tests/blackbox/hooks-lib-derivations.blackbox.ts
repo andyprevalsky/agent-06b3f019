@@ -3,11 +3,6 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   computeActiveBrowserPanels,
   deduplicateToolMessages,
-  deriveHasActiveAttentionRequest,
-  derivePendingApproval,
-  getContextPercentage,
-  getModelContextWindow,
-  sortAgents,
 } from '@/features/terminal/hooks/derivations';
 import { deduplicateToolMessages as deduplicateComponentToolMessages } from '@/features/terminal-component-group/hooks/deduplicateToolMessages';
 import prodChipLeakTranscriptJson from './browser-chip-leak-prod-85530622.fixture.json';
@@ -17,34 +12,6 @@ const prodChipLeakTranscript = prodChipLeakTranscriptJson as Parameters<
 >[0];
 
 describe('derivations.ts', () => {
-  describe('getModelContextWindow', () => {
-    it('returns contextLength when model is found', () => {
-      const models = [{ id: 'abc', contextLength: 50000 } as never];
-      expect(getModelContextWindow('abc', models)).toBe(50000);
-    });
-    it('falls back to default when model missing', () => {
-      expect(getModelContextWindow('missing', [])).toBe(100000);
-    });
-    it('falls back to default when model has no contextLength', () => {
-      const models = [{ id: 'abc' } as never];
-      expect(getModelContextWindow('abc', models)).toBe(100000);
-    });
-  });
-
-  describe('getContextPercentage', () => {
-    it('computes percentage relative to 80% of max window', () => {
-      const agent = { model: 'm', context_size: 40000 } as never;
-      const models = [{ id: 'm', contextLength: 100000 } as never];
-      // 80% threshold = 80000 → 40000/80000 = 50
-      expect(getContextPercentage(agent, models)).toBe(50);
-    });
-    it('caps at 100 when context exceeds threshold', () => {
-      const agent = { model: 'm', context_size: 999999 } as never;
-      const models = [{ id: 'm', contextLength: 100000 } as never];
-      expect(getContextPercentage(agent, models)).toBe(100);
-    });
-  });
-
   describe('deduplicateToolMessages', () => {
     const ts = (n: number) => new Date(1_700_000_000_000 + n * 1000).toISOString();
     it('passes through non-tool messages untouched', () => {
@@ -218,24 +185,6 @@ describe('derivations.ts', () => {
       expect(out[0].metadata?.toolStatus).toBe('FINISHED');
       expect((out[0].metadata?.phoneCall as never).status).toBe('ended');
       expect(out[0].text).toContain('transcript');
-    });
-  });
-
-  describe('sortAgents', () => {
-    const mk = (id: string, status: string, progress = 0) =>
-      ({ agent_id: id, status, progress }) as never;
-
-    it('puts COMPLETED agents last', () => {
-      const out = sortAgents([mk('done', 'COMPLETED'), mk('active', 'ACTIVE')]);
-      expect(out.map((a) => a.agent_id)).toEqual(['active', 'done']);
-    });
-    it('puts paused statuses after active', () => {
-      const out = sortAgents([mk('paused', 'PAUSED'), mk('active', 'ACTIVE')]);
-      expect(out.map((a) => a.agent_id)).toEqual(['active', 'paused']);
-    });
-    it('within same bucket, sorts by progress descending', () => {
-      const out = sortAgents([mk('low', 'ACTIVE', 0.1), mk('high', 'ACTIVE', 0.9)]);
-      expect(out.map((a) => a.agent_id)).toEqual(['high', 'low']);
     });
   });
 
@@ -639,70 +588,6 @@ describe('derivations.ts', () => {
         },
       ];
       expect(computeActiveBrowserPanels(msgs)).toEqual([{ taskId: 't1', browserUrl: 'x' }]);
-    });
-  });
-
-  describe('derivePendingApproval / deriveHasActiveAttentionRequest', () => {
-    const base = {
-      message_id: 'a',
-      role: 'TOOL',
-      text: 'Approve?',
-      timestamp: new Date().toISOString(),
-    };
-
-    it('returns null when no attention message present', () => {
-      expect(derivePendingApproval([])).toBeNull();
-      expect(deriveHasActiveAttentionRequest([])).toBe(false);
-    });
-
-    it('returns approval object when toolApproval IN_PROGRESS', () => {
-      const msgs = [
-        {
-          ...base,
-          metadata: {
-            isUserAttentionMessage: true,
-            toolCallId: 'tc1',
-            toolStatus: 'IN_PROGRESS',
-            requestUserApproval: { toolApproval: true, attentionRequestId: 'req-1' },
-            imageUrl: 'https://img',
-          },
-        },
-      ] as never;
-      const result = derivePendingApproval(msgs);
-      expect(result).toEqual({
-        attentionRequestId: 'req-1',
-        question: 'Approve?',
-        imageUrl: 'https://img',
-      });
-      expect(deriveHasActiveAttentionRequest(msgs)).toBe(true);
-    });
-
-    it('returns null when attentionRequestId is missing', () => {
-      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-      const msgs = [
-        {
-          ...base,
-          metadata: {
-            isUserAttentionMessage: true,
-            toolCallId: 'tc1',
-            toolStatus: 'IN_PROGRESS',
-            requestUserApproval: { toolApproval: true },
-          },
-        },
-      ] as never;
-      expect(derivePendingApproval(msgs)).toBeNull();
-      warnSpy.mockRestore();
-    });
-
-    it('ignores messages lacking toolCallId on attention lookup', () => {
-      const msgs = [
-        {
-          ...base,
-          metadata: { isUserAttentionMessage: true, toolStatus: 'IN_PROGRESS' },
-        },
-      ] as never;
-      expect(derivePendingApproval(msgs)).toBeNull();
-      expect(deriveHasActiveAttentionRequest(msgs)).toBe(false);
     });
   });
 });

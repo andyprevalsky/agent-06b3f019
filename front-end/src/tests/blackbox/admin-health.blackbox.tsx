@@ -7,7 +7,7 @@ import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import AdminHealth from '@/pages/AdminHealth';
 import { fetchAdminHealthData } from '@/features/admin-health/api';
-import { funnelEndToEnd } from '@/features/admin-health/components/AdminHealth';
+import { funnelEndToEnd } from '@/features/admin-health/components/metricComparison';
 import WaitlistPeopleSection from '@/features/admin-health/components/WaitlistPeopleSection';
 import type { AdminWaitlistPerson } from '@/features/admin-health/types';
 
@@ -155,6 +155,17 @@ function adminHealthPayload(timeSlice = 'monthly') {
         conversionRateChange: 0,
       },
     },
+    connectorAdoption: {
+      eligibleUserCount: 24,
+      subtypes: [
+        { id: 'browsers', label: 'Browser Sync', connectedUsers: 12, connectionRate: 0.5 },
+        { id: 'passwords', label: 'Passwords', connectedUsers: 9, connectionRate: 0.375 },
+        { id: 'compute', label: 'Compute', connectedUsers: 18, connectionRate: 0.75 },
+        { id: 'messages', label: 'Messages', connectedUsers: 15, connectionRate: 0.625 },
+        { id: 'socials', label: 'Socials', connectedUsers: 6, connectionRate: 0.25 },
+        { id: 'financials', label: 'Financials', connectedUsers: 3, connectionRate: 0.125 },
+      ],
+    },
     velocity: {
       dev: {
         linearPointsCompleted: {
@@ -234,6 +245,17 @@ describe('AdminHealth page', () => {
     expect(screen.getAllByText('1,840').length).toBeGreaterThan(0);
     expect(screen.getAllByText('Task Completion Rate').length).toBeGreaterThan(0);
     expect(screen.getAllByText('82%').length).toBeGreaterThan(0);
+    const connectorAdoption = screen.getByRole('region', { name: 'Connector Adoption' });
+    expect(within(connectorAdoption).getByText('Browser Sync')).toBeInTheDocument();
+    expect(within(connectorAdoption).getByText('Passwords')).toBeInTheDocument();
+    expect(within(connectorAdoption).getByText('Compute')).toBeInTheDocument();
+    expect(within(connectorAdoption).getByText('Messages')).toBeInTheDocument();
+    expect(within(connectorAdoption).getByText('Socials')).toBeInTheDocument();
+    expect(within(connectorAdoption).getByText('Financials')).toBeInTheDocument();
+    expect(within(connectorAdoption).getByText('75%')).toBeInTheDocument();
+    expect(
+      within(connectorAdoption).getByText('18 of 24 verified users connected'),
+    ).toBeInTheDocument();
     expect(screen.getByText('Conversion Funnels')).toBeInTheDocument();
     expect(screen.getByText('Website Acquisition')).toBeInTheDocument();
     expect(screen.getByText('New-Account Activation')).toBeInTheDocument();
