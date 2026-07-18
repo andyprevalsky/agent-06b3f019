@@ -376,6 +376,23 @@ describe('BenchmarksView (in-app hub)', () => {
     });
   });
 
+  it('renders the run status bar with passed/failed/queued segments', async () => {
+    renderWithProviders(<BenchmarksView />);
+    await waitFor(() => expect(screen.getByTestId('run-row-run-abc')).toBeInTheDocument());
+
+    const runRow = screen.getByTestId('run-row-run-abc');
+    // run-abc has a single passing task → green segment only, no red/blue.
+    const bar = within(runRow).getByTestId('run-status-bar');
+    expect(within(bar).getByTestId('run-status-seg-passed')).toBeInTheDocument();
+    expect(within(bar).queryByTestId('run-status-seg-failed')).not.toBeInTheDocument();
+    expect(within(bar).queryByTestId('run-status-seg-queued')).not.toBeInTheDocument();
+    // accessible label + compact count summary
+    expect(bar).toHaveAttribute('aria-label', '1 passed, 0 failed, 0 queued');
+    expect(runRow.textContent).toContain('1✓');
+    // the old text badges are gone
+    expect(within(runRow).queryByText('pass')).not.toBeInTheDocument();
+  });
+
   it('opens a run into the run view; Open agent goes to the MAIN panel', async () => {
     const onOpenAgent = vi.fn();
     renderWithProviders(<BenchmarksView onOpenAgent={onOpenAgent} />);
@@ -433,6 +450,32 @@ const LIVE_RUN_NO_AGENT = {
           failure_reason: null,
         },
       ],
+    },
+  ],
+};
+
+const MIXED_LIVE_RUN = {
+  runs: [
+    {
+      run_id: 'run-mixed',
+      timestamp: '2026-07-10T03:00:00Z',
+      suite: 'hub-dispatch',
+      source: 'hub-poller',
+      live: true,
+      uploaded_at: '2026-07-10T03:00:10Z',
+      tasks: [
+        { name: 't-pass', passed: true, status: 'passed', agent_id: 'a1' },
+        { name: 't-fail', passed: false, status: 'failed', agent_id: 'a2' },
+        { name: 't-run', passed: null, status: 'running', agent_id: null },
+      ].map((t) => ({
+        world_model_mode: null,
+        fast_mode: false,
+        tree_agent_count: null,
+        failure_reason: null,
+        duration_seconds: null,
+        cost_cents: null,
+        ...t,
+      })),
     },
   ],
 };
@@ -501,6 +544,24 @@ describe('BenchmarksView edge states', () => {
       return new Response('{}', { status: 404 });
     });
   }
+
+  it('shows all three status-bar segments for a mixed live run', async () => {
+    mockWith({ runs: MIXED_LIVE_RUN });
+    renderWithProviders(<BenchmarksView />);
+    await waitFor(() => expect(screen.getByTestId('run-row-run-mixed')).toBeInTheDocument());
+
+    const runRow = screen.getByTestId('run-row-run-mixed');
+    const bar = within(runRow).getByTestId('run-status-bar');
+    expect(within(bar).getByTestId('run-status-seg-passed')).toBeInTheDocument();
+    expect(within(bar).getByTestId('run-status-seg-failed')).toBeInTheDocument();
+    expect(within(bar).getByTestId('run-status-seg-queued')).toBeInTheDocument();
+    expect(bar).toHaveAttribute('aria-label', '1 passed, 1 failed, 1 queued');
+    // live run → the queued segment pulses to read as "loading"
+    expect(within(bar).getByTestId('run-status-seg-queued')).toHaveClass('animate-pulse');
+    expect(runRow.textContent).toContain('1✓');
+    expect(runRow.textContent).toContain('1✗');
+    expect(runRow.textContent).toContain('1⋯');
+  });
 
   it('hides cancelled requests from the Runs pane (C5)', async () => {
     mockWith({ requests: CANCELLED_REQUEST });

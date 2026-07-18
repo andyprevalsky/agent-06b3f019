@@ -16,34 +16,79 @@
 
 import { useState } from 'react';
 import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
-import { Badge } from '@/components/ui/badge';
+import { cn } from '@/lib/utils';
 import type { HubRun, HubRunRequest } from '@/lib/api/benchmarksHub';
 
-function statusBadge(status: string, live: boolean) {
-  const s = status.toLowerCase();
-  if (live || s === 'running' || s === 'queued') {
-    return (
-      <Badge className="bg-orange-100 text-orange-700 dark:bg-orange-950 dark:text-orange-300 gap-1">
-        {s === 'queued' ? 'queued' : '● live'}
-      </Badge>
-    );
-  }
-  if (s === 'passed' || s === 'completed') {
-    return (
-      <Badge className="bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">
-        pass
-      </Badge>
-    );
-  }
-  if (s === 'cancelled') return <Badge variant="secondary">cancelled</Badge>;
-  return <Badge className="bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300">{s}</Badge>;
+interface StatusCounts {
+  passed: number;
+  failed: number;
+  queued: number;
 }
 
-function runVerdict(run: HubRun): string {
-  if (run.live) return 'running';
-  const failed = run.tasks.filter((t) => t.passed === false).length;
-  if (run.tasks.length === 0) return 'empty';
-  return failed === 0 ? 'passed' : 'failed';
+// A run's per-task outcomes bucketed for the status bar: passed / failed and
+// everything still in flight (passed === null → queued or running) as "queued".
+function runCounts(run: HubRun): StatusCounts {
+  let passed = 0;
+  let failed = 0;
+  let queued = 0;
+  for (const t of run.tasks) {
+    if (t.passed === true) passed++;
+    else if (t.passed === false) failed++;
+    else queued++;
+  }
+  return { passed, failed, queued };
+}
+
+// A dispatch request has no per-task outcomes yet — a failed dispatch reads as
+// all-failed, anything else (queued/running) as all-queued.
+function requestCounts(request: HubRunRequest): StatusCounts {
+  const total = Math.max(request.taskNames.length, 1);
+  if (request.status === 'failed') return { passed: 0, failed: total, queued: 0 };
+  return { passed: 0, failed: 0, queued: total };
+}
+
+// Segmented loading bar: green passed · red failed · blue queued, sized by
+// count. The queued segment pulses while the run is live so in-flight work
+// reads as "loading" at a glance.
+function RunStatusBar({ passed, failed, queued, live }: StatusCounts & { live?: boolean }) {
+  const total = passed + failed + queued;
+  const segments = [
+    { key: 'passed', count: passed, className: 'bg-emerald-500' },
+    { key: 'failed', count: failed, className: 'bg-red-500' },
+    { key: 'queued', count: queued, className: cn('bg-blue-500', live && 'animate-pulse') },
+  ];
+  return (
+    <div
+      className="flex h-2 w-24 shrink-0 overflow-hidden rounded-full bg-muted"
+      role="img"
+      aria-label={`${passed} passed, ${failed} failed, ${queued} queued`}
+      title={`${passed} passed · ${failed} failed · ${queued} queued`}
+      data-testid="run-status-bar"
+    >
+      {total > 0 &&
+        segments.map((seg) =>
+          seg.count === 0 ? null : (
+            <div
+              key={seg.key}
+              className={seg.className}
+              style={{ width: `${(seg.count / total) * 100}%` }}
+              data-testid={`run-status-seg-${seg.key}`}
+            />
+          ),
+        )}
+    </div>
+  );
+}
+
+// Compact colored counts beside the bar — only non-zero buckets show.
+function StatusCountsLabel({ passed, failed, queued }: StatusCounts) {
+  return (
+    <span className="flex shrink-0 items-center gap-1.5 text-[11px] tabular-nums">
+      {passed > 0 && <span className="text-emerald-600 dark:text-emerald-400">{passed}✓</span>}
+      {failed > 0 && <span className="text-red-600 dark:text-red-400">{failed}✗</span>}
+      {queued > 0 && <span className="text-blue-600 dark:text-blue-400">{queued}⋯</span>}
+    </span>
+  );
 }
 
 interface RunsPaneProps {
@@ -94,7 +139,7 @@ export function RunsPane({ runs, requests, loading, error, onOpenRun }: RunsPane
               data-testid={`request-row-${request.id}`}
             >
               <div className="flex items-center gap-2">
-                {statusBadge(request.status, false)}
+                <RunStatusBar {...requestCounts(request)} live={request.status !== 'failed'} />
                 <span className="text-sm truncate flex-1">{request.taskNames.join(', ')}</span>
                 {request.runId !== null ? (
                   <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
@@ -143,7 +188,8 @@ export function RunsPane({ runs, requests, loading, error, onOpenRun }: RunsPane
             onClick={() => onOpenRun(run.run_id)}
             data-testid={`run-row-${run.run_id}`}
           >
-            {statusBadge(runVerdict(run), run.live)}
+            <RunStatusBar {...runCounts(run)} live={run.live} />
+            <StatusCountsLabel {...runCounts(run)} />
             <span className="text-sm font-medium truncate flex-1">{run.run_id}</span>
             <span className="text-[11px] text-muted-foreground shrink-0">
               {run.tasks.length} task{run.tasks.length === 1 ? '' : 's'} ·{' '}
