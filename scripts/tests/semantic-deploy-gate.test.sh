@@ -8,6 +8,7 @@ HELPERS="$ROOT_DIR/front-end/tests-e2e/helpers.ts"
 LIFECYCLE_SPEC="$ROOT_DIR/front-end/tests-e2e/chat-lifecycle-latency.spec.ts"
 WORKFLOW="$ROOT_DIR/.github/workflows/chat-lifecycle-ratchet.yml"
 DEPLOY_COMMAND="$ROOT_DIR/.claude/commands/deploy.md"
+DEPLOY_ENV="$ROOT_DIR/scripts/lib/deploy-local-env.sh"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -21,7 +22,7 @@ require_text() {
   grep -Fq -- "$text" "$file" || fail "$description"
 }
 
-for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$DEPLOY_COMMAND"; do
+for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$DEPLOY_COMMAND" "$DEPLOY_ENV"; do
   [ -f "$file" ] || fail "required semantic deploy gate file is missing: $file"
 done
 
@@ -65,8 +66,16 @@ fi
 # /deploy runs all local semantics unconditionally and waits on the production gate.
 require_text "$DEPLOY_COMMAND" "Semantic tests run on every /deploy and may never be skipped." "/deploy must make semantic tests unconditional"
 require_text "$DEPLOY_COMMAND" "SEMANTIC_WORKERS=4" "/deploy local semantic gate must use four workers"
-require_text "$DEPLOY_COMMAND" 'export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMANTIC_QUEUE_WORKSPACE}-deploy-' "/deploy must mint a unique Temporal queue before starting services"
-require_text "$DEPLOY_COMMAND" 'LOCAL_DB_PORT=$((CONDUCTOR_PORT + 5))' "/deploy DB preflight must use run.sh's actual database port"
+require_text "$DEPLOY_COMMAND" '. "$DEPLOY_ROOT/scripts/lib/workspace-env.sh"' "/deploy must load canonical workspace identity normalization"
+require_text "$DEPLOY_COMMAND" '. "$DEPLOY_ROOT/scripts/lib/deploy-local-env.sh"' "/deploy must load the tested local environment boundary"
+require_text "$DEPLOY_COMMAND" 'configure_deploy_local_env' "/deploy must normalize identity before resolving local resources"
+require_text "$DEPLOY_COMMAND" 'bash scripts/tests/workspace-env.test.sh' "/deploy must run the behavioral workspace identity regression"
+require_text "$DEPLOY_COMMAND" 'bash scripts/tests/semantic-deploy-gate.test.sh' "/deploy must keep its command invariants in the static gate"
+require_text "$DEPLOY_ENV" 'normalize_conductor_workspace_env' "/deploy environment must normalize stale workspace identity"
+require_text "$DEPLOY_ENV" 'export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMANTIC_QUEUE_WORKSPACE}-deploy-' "/deploy must mint a unique Temporal queue from normalized identity"
+require_text "$DEPLOY_ENV" 'export DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"' "/deploy DB container must use normalized identity"
+require_text "$DEPLOY_ENV" 'export DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME:-local}"' "/deploy DB volume must use normalized identity"
+require_text "$DEPLOY_ENV" 'export LOCAL_DB_PORT=$((CONDUCTOR_PORT + 5))' "/deploy DB preflight must use run.sh's database port"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=1' "/deploy semantic stack must not spend resources on unrelated benchmark workers or WMH"
 require_text "$DEPLOY_COMMAND" 'TRACE_ARCHIVE_ENABLED=0' "/deploy lifecycle measurements must disable the out-of-band trace recorder"
 require_text "$DEPLOY_COMMAND" "gh workflow run chat-lifecycle-ratchet.yml" "/deploy must dispatch the production semantic gate"
