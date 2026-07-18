@@ -697,7 +697,6 @@ def test_predeploy_cloud_runner_selects_the_catalog_smoke_group() -> None:
         "chat-mode",
         "spawn-sub-agents",
         "parallel-tool-calls",
-        "message-person",
         "claude-code-agent",
         "browser-smoke",
         "browser-biometrics-webdecoy",
@@ -2982,6 +2981,7 @@ exit "$rc"
     )
     broken = subprocess.run(
         ["bash", "-c", broken_script],
+        cwd=ROOT,
         env=harness_env,
         text=True,
         capture_output=True,
@@ -2993,6 +2993,7 @@ exit "$rc"
 
     result = subprocess.run(
         ["bash", "-c", script],
+        cwd=ROOT,
         env=harness_env,
         text=True, capture_output=True, check=False, timeout=25,
     )
