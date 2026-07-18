@@ -49,6 +49,14 @@ async function readCaptures(baseUrl: string, query = ''): Promise<CaptureRespons
   return (await response.json()) as CaptureResponse;
 }
 
+async function readCaptureStatus(
+  baseUrl: string
+): Promise<{ captureEnabled: boolean; replayEnabled: boolean }> {
+  const response = await fetch(`${baseUrl}/captures/status`);
+  assert.strictEqual(response.status, 200);
+  return (await response.json()) as { captureEnabled: boolean; replayEnabled: boolean };
+}
+
 async function run(): Promise<void> {
   assert.strictEqual(shouldBypassOutboundReplay('https://api.e2b.app/sandboxes'), true);
   assert.strictEqual(shouldBypassOutboundReplay('https://api.onkernel.com/profiles'), true);
@@ -114,6 +122,11 @@ async function run(): Promise<void> {
   const { server, baseUrl } = await listen(app);
 
   try {
+    assert.deepStrictEqual(await readCaptureStatus(baseUrl), {
+      captureEnabled: true,
+      replayEnabled: false,
+    });
+
     const form = new FormData();
     form.append('file', new Blob(['audio-bytes'], { type: 'audio/wav' }), 'voice.wav');
     const multipart = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {

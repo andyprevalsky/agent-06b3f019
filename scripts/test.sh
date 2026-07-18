@@ -236,6 +236,7 @@ else
 fi
 run_suite "Claude Review Fallback" bash scripts/tests/claude-review-fallback.test.sh
 run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
+run_suite "Existing Backend Replay Gate" bash scripts/tests/blackbox-existing-replay-gate.test.sh
 run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.sh
 run_suite "Cloud Benchmark Lifecycle" agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py
 run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh

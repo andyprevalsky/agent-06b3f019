@@ -411,9 +411,16 @@ echo "DB pre-started: $DB_CONTAINER on port $LOCAL_DB_PORT"
 # Keep all service output redirected so the managed session cannot exhaust its output budget.
 # run.sh will detect the DB as already-running and won't stop it on cleanup.
 # Use run_in_background=true for this command:
-BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=1 TRACE_ARCHIVE_ENABLED=0 \
+BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_REPLAY_OUTBOUND=1 \
+  BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8 TRACE_ARCHIVE_ENABLED=0 \
   bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1
 ```
+
+The replay opt-in is required because Step 5a runs the fixture-backed blackbox
+suite against this existing backend. Benchmark mode otherwise captures outbound
+calls without consuming fixtures, which would make seeded auth cases dial live
+Twilio/Supabase endpoints. This is a local test-stack opt-in only; ordinary
+benchmark stacks keep replay disabled by default.
 
 Poll the background Bash call at least every 30 seconds while Steps 5-6b run. This keeps the managed process session active without streaming the high-volume service logs; use `.context/deploy-smoke.log` only for targeted diagnosis. `BENCHMARK_BUNDLED_FRONTEND=true` builds and serves the frontend so the browser-agent lifecycle gates have a stable target.
 

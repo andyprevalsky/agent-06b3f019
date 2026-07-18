@@ -394,6 +394,14 @@ export function installFetchCapture(): Router {
   // Build router for test endpoints
   const router = Router();
 
+  // Existing-backend blackbox runners must be able to distinguish capture-only
+  // benchmark stacks from fixture-replay stacks before they execute seeded
+  // provider cases. Keep the capability explicit instead of making callers
+  // infer replay support from the existence of the capture endpoint.
+  router.get('/status', (_req: Request, res: Response) => {
+    res.json({ captureEnabled: true, replayEnabled });
+  });
+
   // Soft-clear baseline: DELETE sets this so GET (without ?after) only returns
   // captures recorded after the clear. Cursor-based reads (?after=N) ignore it,
   // making them immune to concurrent clears from other test domains.
