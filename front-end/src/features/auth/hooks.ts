@@ -59,6 +59,19 @@ function buildUserInfo(form: AuthFormState, collectName: boolean) {
   };
 }
 
+function useAuthNavigation(form: AuthFormState, onOpenChange: (open: boolean) => void) {
+  const handleBack = useCallback(() => {
+    form.setStep('phone');
+    form.setOtp('');
+    form.setSmsAuthorized(false);
+  }, [form]);
+  const handleClose = useCallback(() => {
+    form.resetForm();
+    onOpenChange(false);
+  }, [onOpenChange, form]);
+  return { handleBack, handleClose };
+}
+
 /** Manages the full phone auth flow (phone -> OTP -> verified). */
 export function usePhoneAuth(
   onOpenChange: (open: boolean) => void,
@@ -68,6 +81,7 @@ export function usePhoneAuth(
 ) {
   const { toast } = useToast();
   const form = useAuthFormState();
+  const navigation = useAuthNavigation(form, onOpenChange);
 
   const completeAuth = useCallback(() => {
     toast({ title: 'Success!', description: "You're now logged in." });
@@ -139,16 +153,7 @@ export function usePhoneAuth(
     setSmsAuthorized: form.setSmsAuthorized,
     handleSendOTP,
     handleVerifyOTP,
-    handleBack: useCallback(() => {
-      form.setStep('phone');
-      form.setOtp('');
-      form.setSmsAuthorized(false);
-    }, [form]),
-    handleClose: useCallback(() => {
-      form.cancelRequests();
-      onOpenChange(false);
-      setTimeout(form.resetForm, 200);
-    }, [onOpenChange, form]),
+    ...navigation,
   } as const;
 }
 

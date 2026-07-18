@@ -75,7 +75,7 @@ require_text "$DEPLOY_ENV" 'normalize_conductor_workspace_env' "/deploy environm
 require_text "$DEPLOY_ENV" 'export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMANTIC_QUEUE_WORKSPACE}-deploy-' "/deploy must mint a unique Temporal queue from normalized identity"
 require_text "$DEPLOY_ENV" 'export DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"' "/deploy DB container must use normalized identity"
 require_text "$DEPLOY_ENV" 'export DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME:-local}"' "/deploy DB volume must use normalized identity"
-require_text "$DEPLOY_ENV" 'export LOCAL_DB_PORT=$((CONDUCTOR_PORT + 5))' "/deploy DB preflight must use run.sh's database port"
+require_text "$DEPLOY_ENV" 'export LOCAL_DB_PORT=$((conductor_port + 5))' "/deploy DB preflight must use the validated run.sh database port"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=1' "/deploy semantic stack must not spend resources on unrelated benchmark workers or WMH"
 require_text "$DEPLOY_COMMAND" 'TRACE_ARCHIVE_ENABLED=0' "/deploy lifecycle measurements must disable the out-of-band trace recorder"
 require_text "$DEPLOY_COMMAND" "gh workflow run chat-lifecycle-ratchet.yml" "/deploy must dispatch the production semantic gate"

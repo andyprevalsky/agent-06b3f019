@@ -32,7 +32,7 @@ expect_deploy_port_rejected() {
   )"
   status=$?
   set -e
-  if [ "$status" -eq 0 ] || [[ "$output" != *"CONDUCTOR_PORT must be a decimal integer between 1 and 65530."* ]]; then
+  if [ "$status" -eq 0 ] || [[ "$output" != *"CONDUCTOR_PORT must be a decimal integer between 1 and 65526."* ]]; then
     echo "FAIL: $label: status=$status output='$output'" >&2
     exit 1
   fi
@@ -110,15 +110,15 @@ expect_eq "$deploy_db_port" "55195" "deploy DB port uses assigned range"
 
 expect_deploy_port_rejected "abc" "deploy env rejects a nonnumeric assigned port"
 expect_deploy_port_rejected "055190" "deploy env rejects a leading-zero assigned port"
-expect_deploy_port_rejected "65531" "deploy env rejects a port range that would overflow"
+expect_deploy_port_rejected "65527" "deploy env rejects a port range whose +9 reservation would overflow"
 
 max_port_db="$(
   cd "$workspace"
-  CONDUCTOR_PORT=65530 \
+  CONDUCTOR_PORT=65526 \
   CONDUCTOR_WORKSPACE_PATH="$workspace" \
   bash -c ". '$HELPER_SRC'; . '$DEPLOY_HELPER_SRC'; configure_deploy_local_env >/dev/null; printf '%s' \"\$LOCAL_DB_PORT\""
 )"
-expect_eq "$max_port_db" "65535" "deploy env accepts the highest safe assigned port"
+expect_eq "$max_port_db" "65531" "deploy env accepts the highest safe assigned port"
 
 run_context="$workspace/.context/benchmarks/example-run"
 mkdir -p "$workspace/agents" "$run_context"

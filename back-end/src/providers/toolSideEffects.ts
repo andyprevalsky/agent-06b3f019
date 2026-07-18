@@ -13,6 +13,7 @@ export class ToolSideEffectAlreadyStartedError extends Error {
 export type ToolSideEffectClaim =
   { status: 'claimed'; record: ToolSideEffect } | { status: 'existing'; record: ToolSideEffect };
 export type ToolSideEffectJson = Prisma.InputJsonValue;
+export type ToolSideEffectRecord = ToolSideEffect;
 
 export async function claimToolSideEffect(params: {
   operationKey: string;
@@ -38,6 +39,10 @@ export async function claimToolSideEffect(params: {
     }
     throw error;
   }
+}
+
+export async function findToolSideEffect(operationKey: string): Promise<ToolSideEffect | null> {
+  return prisma.toolSideEffect.findUnique({ where: { operationKey } });
 }
 
 /** Atomically re-open a provider call that previously failed before acceptance. */

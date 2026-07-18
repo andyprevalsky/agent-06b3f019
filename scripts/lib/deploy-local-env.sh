@@ -5,8 +5,9 @@ configure_deploy_local_env() {
     echo "CONDUCTOR_PORT must be set (run this from Conductor)." >&2
     return 1
   fi
-  if ! [[ "$CONDUCTOR_PORT" =~ ^[1-9][0-9]{0,4}$ ]] || (( 10#$CONDUCTOR_PORT > 65530 )); then
-    echo "CONDUCTOR_PORT must be a decimal integer between 1 and 65530." >&2
+  # run.sh reserves through base + 9 for the ngrok inspector.
+  if ! [[ "$CONDUCTOR_PORT" =~ ^[1-9][0-9]{0,4}$ ]] || (( 10#$CONDUCTOR_PORT > 65526 )); then
+    echo "CONDUCTOR_PORT must be a decimal integer between 1 and 65526." >&2
     return 1
   fi
   if ! command -v normalize_conductor_workspace_env >/dev/null 2>&1; then

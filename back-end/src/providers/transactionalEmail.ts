@@ -30,6 +30,14 @@ export class TransactionalEmailError extends Error {
   }
 }
 
+/** A failure known to have happened before Gmail accepted the message. */
+export class TransactionalEmailDefinitiveError extends TransactionalEmailError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TransactionalEmailDefinitiveError';
+  }
+}
+
 export interface TransactionalEmailDependencies {
   getAccessToken: typeof getValidAccessToken;
   fetch: typeof fetch;
@@ -44,7 +52,7 @@ const TRANSACTIONAL_EMAIL_DEPENDENCIES: TransactionalEmailDependencies = {
 
 function assertSafeHeader(name: string, value: string): void {
   if (value === '' || /[\r\n]/.test(value)) {
-    throw new TransactionalEmailError(`Invalid ${name} email header`);
+    throw new TransactionalEmailDefinitiveError(`Invalid ${name} email header`);
   }
 }
 
@@ -91,12 +99,12 @@ export async function sendTransactionalEmail(
     },
   });
   if (credential === null) {
-    throw new TransactionalEmailError(`Sender ${input.from} is not connected`);
+    throw new TransactionalEmailDefinitiveError(`Sender ${input.from} is not connected`);
   }
 
   const accessToken = await dependencies.getAccessToken(credential);
   if (accessToken === null) {
-    throw new TransactionalEmailError(`Sender ${input.from} needs to reconnect Gmail`);
+    throw new TransactionalEmailDefinitiveError(`Sender ${input.from} needs to reconnect Gmail`);
   }
 
   const controller = new AbortController();
@@ -114,8 +122,16 @@ export async function sendTransactionalEmail(
         signal: controller.signal,
       }
     );
-    const data = (await response.json()) as { id?: unknown; error?: { message?: unknown } };
-    if (!response.ok || typeof data.id !== 'string') {
+    let data: { id?: unknown; error?: { message?: unknown } };
+    try {
+      data = (await response.json()) as typeof data;
+    } catch (error) {
+      if (!response.ok) {
+        throw new TransactionalEmailDefinitiveError(`Gmail HTTP ${response.status}`);
+      }
+      throw error;
+    }
+    if (!response.ok) {
       const providerMessage =
         typeof data.error?.message === 'string'
           ? data.error.message
@@ -126,7 +142,10 @@ export async function sendTransactionalEmail(
         status: response.status,
         error: providerMessage,
       });
-      throw new TransactionalEmailError(providerMessage);
+      throw new TransactionalEmailDefinitiveError(providerMessage);
+    }
+    if (typeof data.id !== 'string') {
+      throw new TransactionalEmailError('Gmail accepted the request without a message id');
     }
 
     log.info('Transactional email accepted', {
@@ -136,6 +155,7 @@ export async function sendTransactionalEmail(
     });
     return { id: data.id };
   } catch (error) {
+    if (error instanceof TransactionalEmailDefinitiveError) throw error;
     if (controller.signal.aborted) {
       throw new TransactionalEmailError('Gmail request timed out');
     }

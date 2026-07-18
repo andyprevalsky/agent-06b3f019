@@ -21,10 +21,6 @@ export function useAuthFormState() {
     (generation: number) => requestGeneration.current === generation,
     [],
   );
-  const cancelRequests = useCallback(() => {
-    requestGeneration.current += 1;
-    setLoading(false);
-  }, []);
   const resetForm = useCallback(() => {
     requestGeneration.current += 1;
     setLoading(false);
@@ -56,7 +52,6 @@ export function useAuthFormState() {
     setSmsAuthorized,
     beginRequest,
     isRequestCurrent,
-    cancelRequests,
     resetForm,
   };
 }

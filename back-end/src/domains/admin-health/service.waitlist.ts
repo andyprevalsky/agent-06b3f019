@@ -8,7 +8,10 @@ import {
   reclaimFailedToolSideEffect,
   type ToolSideEffectJson,
 } from '../../providers/toolSideEffects';
-import { sendTransactionalEmail } from '../../providers/transactionalEmail';
+import {
+  sendTransactionalEmail,
+  TransactionalEmailDefinitiveError,
+} from '../../providers/transactionalEmail';
 import {
   IS_PRODUCTION,
   WAITLIST_INVITE_COPY,
@@ -18,7 +21,17 @@ import {
   WAITLIST_INVITE_EMAIL_SUBJECT,
 } from './config';
 import * as repo from './repo';
+import {
+  finalizeWaitlistInviteOutcome,
+  findStoredInviteFinalOutcome,
+  WaitlistInviteInProgressError,
+} from './service.waitlist-finalization';
 import type { AdminWaitlistInviteResponse, AdminWaitlistPeopleResponse } from './types';
+
+export {
+  waitlistInviteFinalOperationKey,
+  WaitlistInviteInProgressError,
+} from './service.waitlist-finalization';
 
 const log = createLogger('AdminHealthWaitlist');
 
@@ -47,13 +60,6 @@ export class WaitlistInviteIdempotencyKeyError extends Error {
   constructor() {
     super('Idempotency-Key must be 1-200 letters, numbers, underscores, or hyphens');
     this.name = 'WaitlistInviteIdempotencyKeyError';
-  }
-}
-
-export class WaitlistInviteInProgressError extends Error {
-  constructor() {
-    super('This invite attempt is already in progress');
-    this.name = 'WaitlistInviteInProgressError';
   }
 }
 
@@ -123,13 +129,19 @@ async function sendInviteSms(params: {
     sms = await params.dependencies.sendSms(params.phone, WAITLIST_INVITE_COPY, {
       archiveContext: { source: 'admin-health-waitlist-invite', waitlist_id: params.id },
     });
-    if (!sms.success) throw new WaitlistInviteSmsError(sms.error ?? 'unknown error');
   } catch (error) {
-    const wrapped =
-      error instanceof WaitlistInviteSmsError
-        ? error
-        : new WaitlistInviteSmsError(error instanceof Error ? error.message : String(error));
-    await markToolSideEffectFailed({ operationKey: delivery.operationKey, error: wrapped.message });
+    // A thrown transport error may follow provider acceptance, so retain the
+    // STARTED claim and require a deliberate new idempotency key.
+    throw new WaitlistInviteSmsError(error instanceof Error ? error.message : String(error));
+  }
+  if (!sms.success) {
+    const wrapped = new WaitlistInviteSmsError(sms.error ?? 'unknown error');
+    if (sms.definitiveFailure === true) {
+      await markToolSideEffectFailed({
+        operationKey: delivery.operationKey,
+        error: wrapped.message,
+      });
+    }
     throw wrapped;
   }
 
@@ -169,7 +181,12 @@ async function sendInviteEmail(params: {
     const wrapped = new WaitlistInviteEmailError(
       error instanceof Error ? error.message : String(error)
     );
-    await markToolSideEffectFailed({ operationKey: delivery.operationKey, error: wrapped.message });
+    if (error instanceof TransactionalEmailDefinitiveError) {
+      await markToolSideEffectFailed({
+        operationKey: delivery.operationKey,
+        error: wrapped.message,
+      });
+    }
     throw wrapped;
   }
 
@@ -235,6 +252,16 @@ export async function inviteWaitlistPerson(
   const person = await repo.findWaitlistPersonById(id);
   if (person === null) throw new WaitlistPersonNotFoundError();
 
+  const markInvited = dependencies.markInvited ?? repo.markWaitlistInvited;
+  const storedFinalOutcome = await findStoredInviteFinalOutcome({
+    id,
+    idempotencyKey,
+    markInvited,
+  });
+  if (storedFinalOutcome !== null) {
+    return storedFinalOutcome;
+  }
+
   const offWaitlist = await markOffWaitlistByPhone(person.phone);
   const accountEmail =
     offWaitlist.userId === null ? null : await repo.findUserEmailById(offWaitlist.userId);
@@ -263,16 +290,14 @@ export async function inviteWaitlistPerson(
     log.info('Skipping waitlist invite notifications outside production', { waitlistId: id });
   }
 
-  const invitedAt = dependencies.now();
-  await (dependencies.markInvited ?? repo.markWaitlistInvited)(id, invitedAt);
-
-  return {
+  const result: AdminWaitlistInviteResponse = {
     id,
-    invitedAt: invitedAt.toISOString(),
+    invitedAt: dependencies.now().toISOString(),
     smsSent,
     emailSent,
     flagged: offWaitlist.flagged,
     alreadyOffWaitlist: offWaitlist.alreadyOffWaitlist,
     hasAccount: offWaitlist.userId !== null,
   };
+  return finalizeWaitlistInviteOutcome({ result, idempotencyKey, markInvited });
 }

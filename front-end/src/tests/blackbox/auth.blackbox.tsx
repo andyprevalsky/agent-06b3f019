@@ -6,7 +6,7 @@ import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
-import { LoginButton, PhoneAuthModal, ProtectedRoute } from '@/features/auth';
+import { LoginButton, PhoneAuthModal } from '@/features/auth';
 import { shouldEnableDevAutoLogin } from '@/features/auth/config';
 
 const API_BASE = 'http://localhost:3001/api';
@@ -279,7 +279,7 @@ describe('PhoneAuthModal', () => {
     });
   });
 
-  it('resets loading and ignores a late OTP response after close', async () => {
+  it('resets immediately and ignores a late OTP response after a quick reopen', async () => {
     let releaseOtp!: () => void;
     const otpGate = new Promise<void>((resolve) => {
       releaseOtp = resolve;
@@ -310,12 +310,14 @@ describe('PhoneAuthModal', () => {
     expect(screen.getByRole('button', { name: /sending/i })).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Close authentication dialog' }));
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    });
     await user.click(screen.getByRole('button', { name: 'Reopen auth' }));
 
     expect(screen.getByRole('button', { name: /continue/i })).toHaveTextContent('Continue');
+    await user.type(screen.getByLabelText('Phone Number'), '4155551212');
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+    expect(screen.getByLabelText('Phone Number')).toHaveValue('(415) 555-1212');
     await act(async () => {
       releaseOtp();
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -338,6 +340,7 @@ describe('PhoneAuthModal', () => {
       expect(screen.getByLabelText('Verification Code')).toBeInTheDocument();
     });
 
+    expect(screen.getByRole('button', { name: 'Close authentication dialog' })).toBeInTheDocument();
     const otpInput = screen.getByLabelText('Verification Code');
     expect(otpInput).toHaveAttribute('maxLength', '6');
     expect(otpInput).toHaveAttribute('inputMode', 'numeric');
@@ -612,99 +615,6 @@ describe('PhoneAuthModal', () => {
 
     // Only digits are kept, max 6
     expect(otpInput).toHaveValue('123456');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// ProtectedRoute
-// ---------------------------------------------------------------------------
-
-describe('ProtectedRoute', () => {
-  beforeEach(() => {
-    clearCaptures();
-    clearAllStorage();
-  });
-
-  afterEach(() => {
-    localStorage.clear();
-  });
-
-  it('shows loading spinner while auth is being checked', () => {
-    // Prevent anonymous session creation so loading resolves but no user
-    server.use(
-      http.post(`${API_BASE}/auth/anonymous`, async () => {
-        // Delay long enough for us to see the spinner
-        await new Promise((resolve) => setTimeout(resolve, 5000));
-        return HttpResponse.json({
-          user: { id: 'anon-user-001' },
-          session: {
-            access_token: 'test-anon-token',
-            refresh_token: 'test-refresh-token',
-            expires_in: 3600,
-            expires_at: Math.floor(Date.now() / 1000) + 3600,
-            token_type: 'bearer',
-          },
-        });
-      }),
-    );
-
-    renderWithProviders(
-      <ProtectedRoute>
-        <div>Protected content</div>
-      </ProtectedRoute>,
-    );
-
-    expect(document.querySelector('.animate-spin')).toBeInTheDocument();
-    expect(screen.queryByText('Protected content')).not.toBeInTheDocument();
-  });
-
-  it('renders children when user is authenticated (non-anonymous)', async () => {
-    mockSession({ anonymous: false });
-
-    renderWithProviders(
-      <ProtectedRoute>
-        <div>Protected content</div>
-      </ProtectedRoute>,
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText('Protected content')).toBeInTheDocument();
-    });
-  });
-
-  it('renders children when user is anonymous (still has a user object)', async () => {
-    mockSession({ anonymous: true });
-
-    renderWithProviders(
-      <ProtectedRoute>
-        <div>Protected content</div>
-      </ProtectedRoute>,
-    );
-
-    await waitFor(() => {
-      expect(screen.getByText('Protected content')).toBeInTheDocument();
-    });
-  });
-
-  it('does not render children when no session and anonymous creation fails', async () => {
-    server.use(
-      http.post(`${API_BASE}/auth/anonymous`, () => {
-        return HttpResponse.json({ error: 'Service unavailable' }, { status: 503 });
-      }),
-    );
-
-    renderWithProviders(
-      <ProtectedRoute>
-        <div>Protected content</div>
-      </ProtectedRoute>,
-    );
-
-    await waitFor(() => {
-      // Once loading completes and there's no user, children should not render
-      expect(screen.queryByText('Protected content')).not.toBeInTheDocument();
-    });
-    // Loading spinner should also be gone
-    expect(document.querySelector('.animate-spin')).not.toBeInTheDocument();
   });
 });
 

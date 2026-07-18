@@ -70,13 +70,18 @@ export async function sendSms(
   phoneNumber: string,
   message: string,
   options: SmsArchiveOptions = {}
-): Promise<{ success: boolean; messageSid?: string; error?: string }> {
+): Promise<{
+  success: boolean;
+  messageSid?: string;
+  error?: string;
+  definitiveFailure?: boolean;
+}> {
   const apiKey = process.env.SURGE_API_KEY;
   const accountId = process.env.SURGE_ACCOUNT_ID;
 
   if (!apiKey || !accountId) {
     log.error('Surge credentials not configured');
-    return { success: false, error: 'Surge not configured' };
+    return { success: false, error: 'Surge not configured', definitiveFailure: true };
   }
 
   const requestBody = {
@@ -105,7 +110,11 @@ export async function sendSms(
         success: false,
         context: options.archiveContext,
       });
-      return { success: false, error: `Surge API error: ${response.status}` };
+      return {
+        success: false,
+        error: `Surge API error: ${response.status}`,
+        definitiveFailure: true,
+      };
     }
 
     const result = (await response.json()) as SurgeMessageResponse;

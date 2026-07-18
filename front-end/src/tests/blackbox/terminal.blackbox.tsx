@@ -146,6 +146,9 @@ describe('Terminal page', () => {
 
     it('opens the name-collecting waitlist modal from the opening CTA', async () => {
       const user = userEvent.setup();
+      // The CTA is for logged-out/anonymous visitors. Keeping the default
+      // authenticated fixture here only exposed it transiently during auth init.
+      mockAnonymousSession();
       renderWithProviders(<Terminal />);
 
       await user.click(await screen.findByTestId('opening-join-waitlist'));
