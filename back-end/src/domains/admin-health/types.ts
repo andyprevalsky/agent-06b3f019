@@ -70,6 +70,37 @@ export interface AdminHealthFunnelStep {
   detail?: string;
 }
 
+export interface AdminWaitlistPerson {
+  id: string;
+  name: string;
+  phone: string;
+  variant: string | null;
+  joinedAt: string;
+  invitedAt: string | null;
+  /** A signed-up account exists for this phone. */
+  hasAccount: boolean;
+  /** Account exists but is still behind the invite gate (usedInviteCode null). */
+  isGated: boolean;
+}
+
+export interface AdminWaitlistPeopleResponse {
+  people: AdminWaitlistPerson[];
+  total: number;
+}
+
+export interface AdminWaitlistInviteResponse {
+  id: string;
+  invitedAt: string;
+  /** The invite SMS was accepted by Surge (production only). */
+  smsSent: boolean;
+  /** A matching account was just flagged off the waitlist. */
+  flagged: boolean;
+  /** A matching account was already flagged off the waitlist. */
+  alreadyOffWaitlist: boolean;
+  /** A signed-up account exists for this phone. */
+  hasAccount: boolean;
+}
+
 export interface AdminHealthResponse {
   timeSlice: AdminHealthTimeSlice;
   generatedAt: string;

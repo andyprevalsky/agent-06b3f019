@@ -8,6 +8,8 @@ import { renderWithProviders } from './test-wrapper';
 import AdminHealth from '@/pages/AdminHealth';
 import { fetchAdminHealthData } from '@/features/admin-health/api';
 import { funnelEndToEnd } from '@/features/admin-health/components/AdminHealth';
+import WaitlistPeopleSection from '@/features/admin-health/components/WaitlistPeopleSection';
+import type { AdminWaitlistPerson } from '@/features/admin-health/types';
 
 const API_BASE = 'http://localhost:3001/api';
 const defaultResizeObserver = window.ResizeObserver;
@@ -179,6 +181,11 @@ function installAdminHealthHandler() {
       const url = new URL(request.url);
       return HttpResponse.json(adminHealthPayload(url.searchParams.get('timeSlice') ?? 'weekly'));
     }),
+    // The Waitlist People section fetches this on mount; default to empty so the
+    // full-page tests don't trip the onUnhandledRequest guard.
+    http.get(`${API_BASE}/admin-health/waitlist`, () =>
+      HttpResponse.json({ people: [], total: 0 }),
+    ),
   );
 }
 
@@ -413,5 +420,117 @@ describe('AdminHealth page', () => {
       fetchMock.mockRestore();
       vi.useRealTimers();
     }
+  });
+});
+
+function waitlistPerson(overrides: Partial<AdminWaitlistPerson> = {}): AdminWaitlistPerson {
+  return {
+    id: 'wl-1',
+    name: 'Ada Lovelace',
+    phone: '+13234498210',
+    variant: 'gated-login',
+    joinedAt: '2026-07-01T00:00:00.000Z',
+    invitedAt: null,
+    hasAccount: true,
+    isGated: true,
+    ...overrides,
+  };
+}
+
+describe('WaitlistPeopleSection', () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    mockSession();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    sessionStorage.clear();
+  });
+
+  it('lists the waitlist people with their gate status', async () => {
+    server.use(
+      http.get(`${API_BASE}/admin-health/waitlist`, () =>
+        HttpResponse.json({
+          people: [
+            waitlistPerson({ id: 'wl-1', name: 'Ada Lovelace', isGated: true }),
+            waitlistPerson({
+              id: 'wl-2',
+              name: 'Alan Turing',
+              phone: '+14157915649',
+              invitedAt: '2026-07-10T00:00:00.000Z',
+            }),
+          ],
+          total: 2,
+        }),
+      ),
+    );
+
+    renderWithProviders(<WaitlistPeopleSection />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Ada Lovelace')).toBeInTheDocument();
+    });
+    expect(screen.getByText('+13234498210')).toBeInTheDocument();
+    expect(screen.getByText('On waitlist')).toBeInTheDocument();
+    expect(screen.getByText('Invited')).toBeInTheDocument();
+    expect(screen.getByText((text) => text.startsWith('2 on the waitlist'))).toBeInTheDocument();
+  });
+
+  it('texts an invite and pulls the person off the waitlist on click', async () => {
+    clearCaptures();
+    server.use(
+      http.get(`${API_BASE}/admin-health/waitlist`, () =>
+        HttpResponse.json({ people: [waitlistPerson()], total: 1 }),
+      ),
+      http.post(`${API_BASE}/admin-health/waitlist/:id/invite`, ({ params }) =>
+        HttpResponse.json({
+          id: params.id,
+          invitedAt: '2026-07-17T00:00:00.000Z',
+          smsSent: true,
+          flagged: true,
+          alreadyOffWaitlist: false,
+          hasAccount: true,
+        }),
+      ),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<WaitlistPeopleSection />);
+
+    const inviteButton = await screen.findByRole('button', { name: /Invite & text/ });
+    await user.click(inviteButton);
+
+    await waitFor(() => {
+      expect(
+        capturedRequests.some(
+          (request) =>
+            request.method === 'POST' &&
+            request.url.includes('/admin-health/waitlist/wl-1/invite') &&
+            request.headers.authorization === 'Bearer admin-token',
+        ),
+      ).toBe(true);
+    });
+
+    // Row flips to the invited state and is no longer marked as gated.
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Re-send/ })).toBeInTheDocument();
+    });
+    expect(screen.getByText('Invited')).toBeInTheDocument();
+    expect(screen.queryByText('On waitlist')).not.toBeInTheDocument();
+  });
+
+  it('surfaces an error when the waitlist list fails to load', async () => {
+    server.use(
+      http.get(`${API_BASE}/admin-health/waitlist`, () =>
+        HttpResponse.json({ error: 'Failed to load waitlist' }, { status: 500 }),
+      ),
+    );
+
+    renderWithProviders(<WaitlistPeopleSection />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Failed to load waitlist')).toBeInTheDocument();
+    });
   });
 });

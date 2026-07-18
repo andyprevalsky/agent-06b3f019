@@ -123,13 +123,14 @@ model Message {
 }
 
 model Waitlist {
-  id           String   @id @default(uuid())
-  name         String   @default("")
-  email        String?  @unique
-  phone        String?  @unique
+  id           String    @id @default(uuid())
+  name         String    @default("")
+  email        String?   @unique
+  phone        String?   @unique
   variant      String?
-  referralCode String?  @map("referral_code")
-  createdAt    DateTime @default(now()) @map("created_at")
+  referralCode String?   @map("referral_code")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  invitedAt    DateTime? @map("invited_at")
 
   @@index([createdAt])
   @@index([email])
@@ -232,6 +233,7 @@ model User {
   inviteCode                  Int?                        @unique
   inviteCodeUses              Int                         @default(0)
   usedInviteCode              Int?
+  offWaitlistAt               DateTime?
   encryptedPaymentInformation String?
   phone                       String?
   isAnonymous                 Boolean                     @default(false)

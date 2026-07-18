@@ -296,6 +296,60 @@ describe('useRealtimeSubscription', () => {
     expect(deps.setAgent).toHaveBeenCalled();
   });
 
+  // Regression (RCA 2026-07-17): the prod chat-lifecycle gate stayed red even
+  // with the reconnect backfill because a BRAND-NEW agent's first subscribe is a
+  // COLD START (initialLoadDoneRef !== agentId, forceResubscribeCounter === 0),
+  // not a reconnection — so the gated backfill never fired. The stream produced
+  // during the ~1-2s subscribe/auth-race window was missed and never replayed, so
+  // the answer sat stranded in the DB. Every successful (re)subscribe must now
+  // reconcile from the API, cold start included.
+  it('backfills on a cold-start first subscribe (new agent, not a reconnection)', async () => {
+    server.use(
+      http.get(`${API_BASE}/agents/agent-1`, () =>
+        HttpResponse.json({
+          agent: {
+            agent_id: 'agent-1',
+            goal: 'g',
+            model: 'm',
+            source: 'WEB',
+            reasoning_effort: 'off',
+            progress: 1,
+            status: 'COMPLETED',
+            status_message: null,
+            temporal_workflow_id: null,
+            token_count: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            tool_tokens_in: 0,
+            tool_tokens_out: 0,
+            tool_cost_cents: 0,
+            context_size: 0,
+            message_count: 1,
+            price_limit_cents: 100,
+            tree_cost_cents: 0,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            write_lock_enabled: false,
+            verifier: null,
+            tools: [],
+          },
+          messages: [{ message_id: 'answer', timestamp: 't', text: 'ANSWER', role: 'ASSISTANT' }],
+          pagination: { has_more: false, oldest_timestamp: null },
+        }),
+      ),
+    );
+    vi.mocked(RealtimeMod.subscribeToAgent).mockResolvedValue(fakeChannel());
+    const deps = makeDeps({
+      forceResubscribeCounter: 0,
+      initialLoadDoneRef: { current: null as string | null },
+    });
+    mockSession();
+    renderHook(() => useRealtimeSubscription(deps as never));
+    // The stranded answer must be reconciled from the API on the cold-start join.
+    await waitFor(() => expect(deps.setMessages).toHaveBeenCalled());
+    expect(deps.setAgent).toHaveBeenCalled();
+  });
+
   // Regression: prod chat stalled on "Thinking" because the agent:<id> private
   // channel join was rejected Unauthorized for ~43s (auth race right after
   // creation) and realtime never replays missed broadcasts. The disconnected
@@ -329,5 +383,39 @@ describe('useRealtimeSubscription', () => {
     expect(deps.channelRef.current).toBeNull();
     expect(deps.setMessages).toHaveBeenCalled();
     expect(deps.setAgent).toHaveBeenCalled();
+  });
+
+  // Regression (CodeRabbit PR #783): once the channel is live, channelRef.current
+  // is set, so the disconnected fallback poll skips every tick. A SINGLE transient
+  // failure of the post-subscribe reconcile fetch would therefore strand the
+  // auth-race messages until an unrelated resubscribe. The bounded retry must
+  // recover: fetchAgentDetail 500s once, then succeeds, and the backfill lands
+  // (setMessages called + agent marked reconciled) without any resubscribe.
+  it('retries a transiently failing post-subscribe backfill while the channel is live', async () => {
+    let calls = 0;
+    server.use(
+      http.get(`${API_BASE}/agents/agent-1`, () => {
+        calls += 1;
+        if (calls === 1) return new HttpResponse(null, { status: 500 });
+        return HttpResponse.json(
+          agentDetailJson([
+            { message_id: 'answer', timestamp: 't', text: 'RECOVERED', role: 'ASSISTANT' },
+          ]),
+        );
+      }),
+    );
+    // Channel joins successfully → channelRef is set → the disconnected poll is a
+    // no-op, so ONLY the post-subscribe retry loop can recover the first 500.
+    vi.mocked(RealtimeMod.subscribeToAgent).mockResolvedValue(fakeChannel());
+    mockSession();
+    const deps = makeDeps({
+      forceResubscribeCounter: 0,
+      initialLoadDoneRef: { current: null as string | null },
+    });
+    renderHook(() => useRealtimeSubscription(deps as never));
+    await waitFor(() => expect(deps.setMessages).toHaveBeenCalled(), { timeout: 3000 });
+    expect(calls).toBeGreaterThanOrEqual(2);
+    // Reconciled flag only flips AFTER a successful backfill, never on the 500.
+    expect(deps.initialLoadDoneRef.current).toBe('agent-1');
   });
 });

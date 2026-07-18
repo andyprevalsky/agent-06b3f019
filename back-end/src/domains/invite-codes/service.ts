@@ -2,16 +2,15 @@
  * Invite-codes domain service — business logic.
  */
 
-import {
-  MAX_INVITE_CODE_USES,
-  MASTER_INVITE_CODE,
-  INVITE_CODE_MIN,
-  INVITE_CODE_RANGE,
-} from './config';
+import { MAX_INVITE_CODE_USES, INVITE_CODE_MIN, INVITE_CODE_RANGE } from './config';
 import type { MyCodeResponse, UseCodeResponse, CheckResponse } from './types';
 import * as repo from './repo';
 import { createInitialCredit } from '../../providers/credits';
-import { registerGatedUser } from '../../providers/inviteGate';
+import {
+  hasActiveSubscription,
+  registerGatedUser,
+  WAITLIST_BYPASS_INVITE_CODE,
+} from '../../providers/inviteGate';
 
 // ---------------------------------------------------------------------------
 // Error classes
@@ -114,7 +113,7 @@ export async function useCode(userId: string, inviteCode: number): Promise<UseCo
   }
 
   // MASTER INVITE CODE: bypasses all checks
-  if (inviteCode === MASTER_INVITE_CODE) {
+  if (inviteCode === WAITLIST_BYPASS_INVITE_CODE) {
     await repo.recordMasterCodeUse(userId, inviteCode);
     return {
       success: true,
@@ -155,11 +154,13 @@ export async function checkInviteCode(userId: string, phone?: string): Promise<C
     await createInitialCredit(userId);
   }
 
-  const needsInviteCode = user.usedInviteCode === null;
+  // Redeemed invite code OR an active subscription clears the gate.
+  const needsInviteCode = user.usedInviteCode === null && !(await hasActiveSubscription(userId));
+  const offWaitlist = user.offWaitlistAt !== null;
 
   if (needsInviteCode && phone !== undefined && phone !== '') {
     await registerGatedUser({ userId, phone });
   }
 
-  return { needsInviteCode };
+  return { needsInviteCode, offWaitlist };
 }
