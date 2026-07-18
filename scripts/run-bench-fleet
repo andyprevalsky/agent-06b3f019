@@ -98,6 +98,7 @@ RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
 BARRIER_RELEASE_TOKEN="${CLOUDBENCH_BARRIER_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')}"
 export CLOUDBENCH_BARRIER_TOKEN="$BARRIER_RELEASE_TOKEN"
 FLEET_DIR="$RUNS_ROOT/$RUN_ID"
+TAINTED_POOL_FILE="$FLEET_DIR/tainted-pool.ids"
 HUB_CTX_DIR="$RUNS_ROOT/_hub"
 LOCK_DIR="$ROOT_DIR/.context/cloudbench-controller.lock"
 HUB_UPLOAD_HELPER="$ROOT_DIR/agents/benchmarks/hub_upload.py"
@@ -1026,6 +1027,49 @@ pool_ledger_record_id() {  # pool_ledger_record_id <machine-id>; atomic + verifi
     return "$rc"
 }
 
+pool_ledger_remove_id() {  # pool_ledger_remove_id <machine-id>; atomic + verified + serialized
+    local id="$1" tmp="$POOL_IDS_FILE.tmp.$$" rc=0
+    case "$id" in ''|*[!0-9a-f]*) return 1 ;; esac
+    pool_ledger_lock_acquire || return 1
+    if [ ! -f "$POOL_IDS_FILE" ]; then
+        rc=1
+    elif ! grep -Fxv "$id" "$POOL_IDS_FILE" > "$tmp" 2>/dev/null; then
+        # grep returns 1 when removing the only line, which is still a valid
+        # empty pool ledger.
+        : > "$tmp"
+    fi
+    if [ "$rc" = "0" ] && { ! mv "$tmp" "$POOL_IDS_FILE" \
+        || grep -Fxq "$id" "$POOL_IDS_FILE" 2>/dev/null; }; then
+        rm -f "$tmp"
+        rc=1
+    fi
+    pool_ledger_lock_release
+    return "$rc"
+}
+
+pool_machine_guest_corruption_signature() {  # <fleet-child.log>
+    local log="$1"
+    # One application process can legitimately segfault. Multiple unrelated
+    # image utilities failing with different memory-access signals on one guest
+    # is a high-confidence corrupt VM/rootfs/runtime signature.
+    grep -aEq 'Bus error.*[[:space:]]fuser([[:space:]]|$)' "$log" 2>/dev/null \
+        && grep -aEq 'Segmentation fault.*[[:space:]]dropdb([[:space:]]|$)' "$log" 2>/dev/null
+}
+
+record_tainted_claimed_pool_machines() {
+    local j src id log
+    for j in "${!CHILD_OUT[@]}"; do
+        log="${CHILD_OUT[$j]}/remote-logs/cloudbench-driver.log"
+        [ -f "$log" ] || log="${CHILD_OUT[$j]}/fleet-child.log"
+        pool_machine_guest_corruption_signature "$log" || continue
+        read -r src id < "${CHILD_OUT[$j]}/.cid" 2>/dev/null || true
+        [ "$src" = "pool" ] && [ -n "$id" ] || continue
+        grep -Fxq "$id" "$TAINTED_POOL_FILE" 2>/dev/null \
+            || printf '%s\n' "$id" >> "$TAINTED_POOL_FILE"
+        echo "☣️  [${CHILD_BENCH[$j]}] quarantining corrupt pool machine $id (fuser SIGBUS + dropdb SIGSEGV)" >&2
+    done
+}
+
 provision_pool_slot() {  # provision_pool_slot <slot> <total>
     local i="$1" n="$2" id ready=0 st="" slot_ledger
     slot_ledger="$FLEET_DIR/pool-provision-$i.ids"
@@ -1490,6 +1534,7 @@ cleanup() {
     cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${AUTOSCALER_PIDS[@]:-}"
     cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${PROVISION_PIDS[@]:-}"
     cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${CHILD_PIDS[@]:-}"
+    record_tainted_claimed_pool_machines
     # Return only machines this fleet actually claimed. The pool ledger can be
     # shared by sibling workspaces, so stopping every listed ID would interrupt
     # their active runs. Stop this run's machines concurrently: serial stop +
@@ -1499,6 +1544,18 @@ cleanup() {
     if [ -s "$CLAIMED_POOL_FILE" ]; then
         while read -r id; do
             [ -n "$id" ] || continue
+            if grep -Fxq "$id" "$TAINTED_POOL_FILE" 2>/dev/null; then
+                echo "☣️  destroying quarantined pool machine $id instead of returning it"
+                claim_path="$POOL_CLAIMS_DIR/$id"
+                if reap_machine "$id"; then
+                    pool_ledger_remove_id "$id" || ec=1
+                    pool_claim_owned_by_current "$claim_path" && rm -f "$claim_path"
+                else
+                    echo "❌ quarantined pool machine $id survived destroy; retaining ownership claim" >&2
+                    ec=1
+                fi
+                continue
+            fi
             echo "↩️  returning claimed pool machine $id (stop)"
             claimed_pool_ids+=("$id")
         done < "$CLAIMED_POOL_FILE"

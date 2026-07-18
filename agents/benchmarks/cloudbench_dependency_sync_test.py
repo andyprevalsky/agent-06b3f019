@@ -3589,6 +3589,38 @@ printf 'finished=%s exit=%s reads=%s\n' "$FINISHED" "$BENCH_EXIT" "$(cat "$READ_
     assert "recover_terminal_marker_after_dead_driver" in dead_branch.split("fi", 1)[0]
 
 
+def test_corrupt_pool_guest_is_quarantined_instead_of_reused(tmp_path: Path) -> None:
+    """RCA (2026-07-17): one pooled guest produced SIGBUS from fuser and
+    SIGSEGV from dropdb during stack startup. Returning that guest to the pool
+    makes the same corrupt runtime eligible for later benchmark runs. Require a
+    high-confidence multi-binary signature and durable pool eviction."""
+    fleet = FLEET_SCRIPT.read_text()
+    signature = _extract_fleet_function(
+        fleet, "pool_machine_guest_corruption_signature() {"
+    )
+    corrupt = tmp_path / "corrupt.log"
+    corrupt.write_text(
+        '/repo/scripts/run.sh: line 320: 1104 Bus error fuser "$port/tcp"\n'
+        'line 516: 1122 Segmentation fault PGPASSWORD=x dropdb -h localhost\n'
+    )
+    benign = tmp_path / "benign.log"
+    benign.write_text("application worker Segmentation fault\n")
+    detected = subprocess.run(
+        ["bash", "-c", f"{signature}\npool_machine_guest_corruption_signature \"$1\"", "sig", str(corrupt)],
+        check=False,
+    )
+    ignored = subprocess.run(
+        ["bash", "-c", f"{signature}\npool_machine_guest_corruption_signature \"$1\"", "sig", str(benign)],
+        check=False,
+    )
+    assert detected.returncode == 0
+    assert ignored.returncode != 0
+    cleanup = _extract_fleet_function(fleet, "cleanup() {")
+    assert "record_tainted_claimed_pool_machines" in cleanup
+    assert "destroying quarantined pool machine" in cleanup
+    assert 'pool_ledger_remove_id "$id"' in cleanup
+
+
 def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
     """RCA (2026-07-15): the fleet's SSH-pull design (each of 30 boxes ssh_read-
     polling /data/bench.log every few seconds) saturates Fly's Machines-API rate
