@@ -251,6 +251,22 @@ async function listSmsArchivePaths(rootAgentId: string): Promise<string[]> {
     .sort();
 }
 
+/**
+ * Whether the target backend has the trace archive disabled
+ * (TRACE_ARCHIVE_ENABLED=0 — the /deploy Step-5 stack config). agent-start
+ * responds `fixture: null` ONLY in that case; every real archive failure
+ * throws server-side instead. Probed lazily — only when an archive assertion
+ * is about to fail — so archive-enabled stacks see no extra writes.
+ */
+async function archiveDisabledOnBackend(agentId: string): Promise<boolean> {
+  const res = await request(`${BASE_URL}/api/archive/agent-start`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({ agentId }),
+  });
+  return res.status === 200 && (res.data as { fixture?: unknown | null }).fixture === null;
+}
+
 // ==================== POST / (send SMS) -- CONTRACT ====================
 
 async function testSend_noAuth() {
@@ -952,6 +968,13 @@ async function testBoundary_notifyCompletionCallsSurgeApi() {
         entry.startsWith('provider/sms/surge/') &&
         entry.endsWith('.json.gz.enc')
     );
+    if (newEncryptedArtifacts.length === 0 && (await archiveDisabledOnBackend(agent.id))) {
+      // The /deploy Step-5 stack runs with TRACE_ARCHIVE_ENABLED=0, so no SMS
+      // provider archive is written there. The coverage-gate backend runs
+      // archive-enabled, so the archive assertions still execute every deploy.
+      console.log('    [info] trace archive disabled on target backend — skipping archive checks');
+      return;
+    }
     assert(
       newEncryptedArtifacts.length >= 1,
       `Expected encrypted SMS provider archive for agent ${agent.id}`
