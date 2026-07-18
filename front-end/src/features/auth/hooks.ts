@@ -81,17 +81,21 @@ export function usePhoneAuth(
     async (e: React.FormEvent) => {
       e.preventDefault();
       if (!hasRequiredName(form, collectName)) return;
+      const requestGeneration = form.beginRequest();
       form.setLoading(true);
       try {
         // form.phone is canonical E.164 (PhoneInput owns normalization).
         await sendOTP(form.phone);
+        if (!form.isRequestCurrent(requestGeneration)) return;
         analytics.track('phone_entered');
         form.setStep('otp');
         toast({ title: 'Code sent!', description: 'Check your phone for the 6-digit code.' });
       } catch (error: unknown) {
-        toastError(toast, 'Error', error, 'Failed to send code. Please try again.');
+        if (form.isRequestCurrent(requestGeneration)) {
+          toastError(toast, 'Error', error, 'Failed to send code. Please try again.');
+        }
       } finally {
-        form.setLoading(false);
+        if (form.isRequestCurrent(requestGeneration)) form.setLoading(false);
       }
     },
     [collectName, form, toast],
@@ -100,15 +104,19 @@ export function usePhoneAuth(
   const handleVerifyOTP = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
+      const requestGeneration = form.beginRequest();
       form.setLoading(true);
       try {
         await verifyOTP(form.phone, form.otp, anonymousUserId, buildUserInfo(form, collectName));
+        if (!form.isRequestCurrent(requestGeneration)) return;
         analytics.track('otp_code_submitted');
         analytics.setUserId(form.phone);
         completeAuth();
       } catch (error: unknown) {
-        toastError(toast, 'Invalid code', error, 'Please check the code and try again.');
-        form.setLoading(false);
+        if (form.isRequestCurrent(requestGeneration)) {
+          toastError(toast, 'Invalid code', error, 'Please check the code and try again.');
+          form.setLoading(false);
+        }
       }
     },
     [form, anonymousUserId, collectName, completeAuth, toast],
@@ -137,6 +145,7 @@ export function usePhoneAuth(
       form.setSmsAuthorized(false);
     }, [form]),
     handleClose: useCallback(() => {
+      form.cancelRequests();
       onOpenChange(false);
       setTimeout(form.resetForm, 200);
     }, [onOpenChange, form]),

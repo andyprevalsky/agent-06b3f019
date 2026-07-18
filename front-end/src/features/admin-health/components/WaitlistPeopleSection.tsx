@@ -25,6 +25,7 @@ import { cn } from '@/lib/utils';
 
 import { useWaitlistPeople } from '../hooks';
 import type { AdminWaitlistPerson } from '../types';
+import type { AdminWaitlistInviteResponse } from '../types';
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', {
@@ -64,6 +65,13 @@ function StatusPill({ person }: { person: AdminWaitlistPerson }) {
   );
 }
 
+export function inviteGateOutcome(result: AdminWaitlistInviteResponse): string {
+  if (result.flagged) return 'flagged to subscribe';
+  if (result.alreadyOffWaitlist) return 'already flagged to subscribe';
+  if (!result.hasAccount) return 'no account available to flag';
+  return 'account status unchanged';
+}
+
 function SectionPanel({ eyebrow, children }: { eyebrow: string; children: React.ReactNode }) {
   return (
     <section className="rounded-xl border border-border/50 bg-background/85 p-5 shadow-sm backdrop-blur-md">
@@ -91,17 +99,17 @@ export default function WaitlistPeopleSection() {
     invite(person.id)
       .then((result) => {
         const sent = result.smsSent || result.emailSent;
-        const description =
+        const delivery =
           result.smsSent && result.emailSent
-            ? 'Sent by text and email · flagged to subscribe'
+            ? 'Sent by text and email'
             : result.smsSent
-              ? `Texted ${person.phone} · no email on file · flagged to subscribe`
+              ? `Texted ${person.phone} · no email on file`
               : result.emailSent
-                ? 'Sent by email · flagged to subscribe'
-                : 'Flagged to subscribe · notifications skipped (non-production)';
+                ? 'Sent by email'
+                : 'Notifications skipped (non-production)';
         toast({
           title: sent ? 'Invite sent' : 'Invite recorded',
-          description,
+          description: `${delivery} · ${inviteGateOutcome(result)}`,
         });
       })
       .catch((err: unknown) => {

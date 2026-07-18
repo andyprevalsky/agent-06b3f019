@@ -1,5 +1,6 @@
+import { useState } from 'react';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
@@ -190,6 +191,7 @@ describe('PhoneAuthModal', () => {
     expect(screen.queryByLabelText('First name')).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Last name')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /continue/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Close authentication dialog' })).toBeInTheDocument();
   });
 
   it('does not render when closed', () => {
@@ -275,6 +277,51 @@ describe('PhoneAuthModal', () => {
     await waitFor(() => {
       expect(screen.getByText('Verify Code')).toBeInTheDocument();
     });
+  });
+
+  it('resets loading and ignores a late OTP response after close', async () => {
+    let releaseOtp!: () => void;
+    const otpGate = new Promise<void>((resolve) => {
+      releaseOtp = resolve;
+    });
+    server.use(
+      http.post(`${API_BASE}/auth/send-otp`, async () => {
+        await otpGate;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+
+    function AuthHarness() {
+      const [open, setOpen] = useState(true);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>
+            Reopen auth
+          </button>
+          <PhoneAuthModal open={open} onOpenChange={setOpen} />
+        </>
+      );
+    }
+
+    const user = userEvent.setup();
+    renderWithProviders(<AuthHarness />);
+    await user.type(screen.getByLabelText('Phone Number'), '9729777432');
+    await user.click(screen.getByRole('button', { name: /continue/i }));
+    expect(screen.getByRole('button', { name: /sending/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Close authentication dialog' }));
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+    await user.click(screen.getByRole('button', { name: 'Reopen auth' }));
+
+    expect(screen.getByRole('button', { name: /continue/i })).toHaveTextContent('Continue');
+    await act(async () => {
+      releaseOtp();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(screen.getByText('Start Building.')).toBeInTheDocument();
+    expect(screen.queryByText('Verify Code')).not.toBeInTheDocument();
   });
 
   // -- OTP step --

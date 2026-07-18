@@ -19,6 +19,26 @@ expect_eq() {
   echo "PASS: $label"
 }
 
+expect_deploy_port_rejected() {
+  local port="$1"
+  local label="$2"
+  local output
+  local status
+  set +e
+  output="$(
+    CONDUCTOR_PORT="$port" \
+    CONDUCTOR_WORKSPACE_PATH="$workspace" \
+    bash -c ". '$HELPER_SRC'; . '$DEPLOY_HELPER_SRC'; configure_deploy_local_env" 2>&1
+  )"
+  status=$?
+  set -e
+  if [ "$status" -eq 0 ] || [[ "$output" != *"CONDUCTOR_PORT must be a decimal integer between 1 and 65530."* ]]; then
+    echo "FAIL: $label: status=$status output='$output'" >&2
+    exit 1
+  fi
+  echo "PASS: $label"
+}
+
 workspace="$TMP_ROOT/salvador-v1"
 mkdir -p "$workspace"
 
@@ -87,6 +107,18 @@ case "$deploy_queue" in
 esac
 expect_eq "$deploy_backend_url" "http://localhost:55190" "deploy backend URL uses assigned port"
 expect_eq "$deploy_db_port" "55195" "deploy DB port uses assigned range"
+
+expect_deploy_port_rejected "abc" "deploy env rejects a nonnumeric assigned port"
+expect_deploy_port_rejected "055190" "deploy env rejects a leading-zero assigned port"
+expect_deploy_port_rejected "65531" "deploy env rejects a port range that would overflow"
+
+max_port_db="$(
+  cd "$workspace"
+  CONDUCTOR_PORT=65530 \
+  CONDUCTOR_WORKSPACE_PATH="$workspace" \
+  bash -c ". '$HELPER_SRC'; . '$DEPLOY_HELPER_SRC'; configure_deploy_local_env >/dev/null; printf '%s' \"\$LOCAL_DB_PORT\""
+)"
+expect_eq "$max_port_db" "65535" "deploy env accepts the highest safe assigned port"
 
 run_context="$workspace/.context/benchmarks/example-run"
 mkdir -p "$workspace/agents" "$run_context"

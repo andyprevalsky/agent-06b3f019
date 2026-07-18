@@ -34,11 +34,16 @@ import {
 import {
   getWaitlistPeople,
   inviteWaitlistPerson,
+  WaitlistInviteEmailError,
 } from '../../domains/admin-health/service.waitlist';
 import { checkInviteCode } from '../../domains/invite-codes/service';
 import { prisma } from '../../providers/database';
 import { markOffWaitlistByPhone } from '../../providers/inviteGate';
-import { buildTransactionalRawEmail } from '../../providers/transactionalEmail';
+import {
+  buildTransactionalRawEmail,
+  sendTransactionalEmail,
+  TransactionalEmailError,
+} from '../../providers/transactionalEmail';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -67,6 +72,7 @@ const WaitlistInviteResponseSchema = z.object({
   id: z.string(),
   invitedAt: z.string(),
   smsSent: z.boolean(),
+  emailSent: z.boolean(),
   flagged: z.boolean(),
   alreadyOffWaitlist: z.boolean(),
   hasAccount: z.boolean(),
@@ -179,10 +185,28 @@ async function testInvite_nonAdminForbidden() {
 async function testInvite_unknownId404() {
   const res = await request(
     `${BASE_URL}/api/admin-health/waitlist/nonexistent-${Date.now()}/invite`,
-    { method: 'POST', headers: authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')) }
+    {
+      method: 'POST',
+      headers: {
+        ...authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
+        'Idempotency-Key': `unknown-${Date.now()}`,
+      },
+    }
   );
   assertStatus(res.status, 404, res.data);
   assertSchema(ErrorResponseSchema, res.data, 'POST /admin-health/waitlist invite unknown-id');
+}
+
+async function testInvite_missingIdempotencyKey400() {
+  const res = await request(`${BASE_URL}/api/admin-health/waitlist/does-not-matter/invite`, {
+    method: 'POST',
+    headers: authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = assertSchema(ErrorResponseSchema, res.data, 'POST invite missing idempotency key');
+  if (!body.error.includes('Idempotency-Key')) {
+    throw new Error(`Expected Idempotency-Key validation error, got ${body.error}`);
+  }
 }
 
 // End-to-end invite: flags the matching account off the waitlist, stamps
@@ -200,7 +224,10 @@ async function testInvite_happyPathFlagsAndMarks() {
 
     const res = await request(`${BASE_URL}/api/admin-health/waitlist/${created.id}/invite`, {
       method: 'POST',
-      headers: authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
+      headers: {
+        ...authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
+        'Idempotency-Key': `${marker}-first`,
+      },
     });
     assertStatus(res.status, 200, res.data);
     const body = assertSchema(WaitlistInviteResponseSchema, res.data, 'POST invite happy-path');
@@ -232,7 +259,10 @@ async function testInvite_happyPathFlagsAndMarks() {
 
     const resAgain = await request(`${BASE_URL}/api/admin-health/waitlist/${created.id}/invite`, {
       method: 'POST',
-      headers: authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
+      headers: {
+        ...authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
+        'Idempotency-Key': `${marker}-resend`,
+      },
     });
     assertStatus(resAgain.status, 200, resAgain.data);
     const bodyAgain = assertSchema(
@@ -274,18 +304,22 @@ async function testInvite_dispatchesSameCopyBySmsAndEmail() {
       data: { name: marker, phone, variant: 'gated-login' },
     });
 
-    const result = await inviteWaitlistPerson(created.id, {
-      isProduction: true,
-      now: () => invitedAt,
-      sendSms: async (to, body) => {
-        smsCalls.push({ to, body });
-        return { success: true, messageSid: 'sms-test-id' };
+    const result = await Reflect.apply(inviteWaitlistPerson, undefined, [
+      created.id,
+      {
+        isProduction: true,
+        now: () => invitedAt,
+        sendSms: async (to: string, body: string) => {
+          smsCalls.push({ to, body });
+          return { success: true, messageSid: 'sms-test-id' };
+        },
+        sendEmail: async (params: (typeof emailCalls)[number]) => {
+          emailCalls.push(params);
+          return { id: 'email-test-id' };
+        },
       },
-      sendEmail: async (params) => {
-        emailCalls.push(params);
-        return { id: 'email-test-id' };
-      },
-    });
+      `${marker}-dispatch`,
+    ]);
 
     if (!result.smsSent || !result.emailSent) {
       throw new Error(`Expected both channels to send, got ${JSON.stringify(result)}`);
@@ -317,6 +351,187 @@ async function testInvite_dispatchesSameCopyBySmsAndEmail() {
       throw new Error(`Unexpected branded sender: ${JSON.stringify(sentEmail)}`);
     }
   } finally {
+    await prisma.toolSideEffect.deleteMany({
+      where: { operationKey: { contains: `${marker}-dispatch` } },
+    });
+    await prisma.waitlist.deleteMany({ where: { name: marker } });
+    await prisma.user.deleteMany({ where: { userId: marker } });
+  }
+}
+
+async function testInvite_retryDoesNotRepeatSuccessfulChannel() {
+  const marker = `blackbox-retry-invite-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const phone = uniquePhone();
+  const email = `${marker}@example.com`;
+  const idempotencyKey = `${marker}-attempt`;
+  let smsCalls = 0;
+  let emailCalls = 0;
+  const dependencies = {
+    isProduction: true,
+    now: () => new Date('2026-07-18T20:01:00.000Z'),
+    sendSms: async () => {
+      smsCalls += 1;
+      return { success: true, messageSid: `sms-${smsCalls}` };
+    },
+    sendEmail: async () => {
+      emailCalls += 1;
+      if (emailCalls === 1) throw new Error('temporary Gmail failure');
+      return { id: `email-${emailCalls}` };
+    },
+  };
+
+  try {
+    await prisma.user.create({ data: { userId: marker, phone, email, usedInviteCode: null } });
+    const created = await prisma.waitlist.create({ data: { name: marker, phone } });
+
+    try {
+      await Reflect.apply(inviteWaitlistPerson, undefined, [
+        created.id,
+        dependencies,
+        idempotencyKey,
+      ]);
+      throw new Error('Expected the first email attempt to fail');
+    } catch (error) {
+      if (!(error instanceof WaitlistInviteEmailError)) throw error;
+    }
+
+    const result = await Reflect.apply(inviteWaitlistPerson, undefined, [
+      created.id,
+      dependencies,
+      idempotencyKey,
+    ]);
+    if (!result.smsSent || !result.emailSent) {
+      throw new Error(`Retry should complete both channels, got ${JSON.stringify(result)}`);
+    }
+    if (smsCalls !== 1 || emailCalls !== 2) {
+      throw new Error(`Retry duplicated delivery: SMS=${smsCalls}, email=${emailCalls}`);
+    }
+  } finally {
+    await prisma.toolSideEffect.deleteMany({
+      where: { operationKey: { contains: idempotencyKey } },
+    });
+    await prisma.waitlist.deleteMany({ where: { name: marker } });
+    await prisma.user.deleteMany({ where: { userId: marker } });
+  }
+}
+
+async function testInvite_concurrentSameKeyClaimsChannelOnce() {
+  const marker = `blackbox-concurrent-invite-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const phone = uniquePhone();
+  const email = `${marker}@example.com`;
+  const idempotencyKey = `${marker}-attempt`;
+  let smsCalls = 0;
+  let releaseFirstSms!: () => void;
+  let firstSmsStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    firstSmsStarted = resolve;
+  });
+  const release = new Promise<void>((resolve) => {
+    releaseFirstSms = resolve;
+  });
+  const dependencies = {
+    isProduction: true,
+    now: () => new Date('2026-07-18T20:02:00.000Z'),
+    sendSms: async () => {
+      smsCalls += 1;
+      if (smsCalls === 1) {
+        firstSmsStarted();
+        await release;
+      }
+      return { success: true, messageSid: `sms-${smsCalls}` };
+    },
+    sendEmail: async () => ({ id: 'email-test-id' }),
+  };
+
+  try {
+    await prisma.user.create({ data: { userId: marker, phone, email, usedInviteCode: null } });
+    const created = await prisma.waitlist.create({ data: { name: marker, phone } });
+    const first = Reflect.apply(inviteWaitlistPerson, undefined, [
+      created.id,
+      dependencies,
+      idempotencyKey,
+    ]);
+    await started;
+    const second = Reflect.apply(inviteWaitlistPerson, undefined, [
+      created.id,
+      dependencies,
+      idempotencyKey,
+    ]);
+    const outcomesPromise = Promise.allSettled([first, second]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    releaseFirstSms();
+    const outcomes = await outcomesPromise;
+
+    if (smsCalls !== 1) throw new Error(`Concurrent requests sent ${smsCalls} SMS messages`);
+    if (outcomes.filter((outcome) => outcome.status === 'fulfilled').length !== 1) {
+      throw new Error(`Expected one owner for the delivery claim: ${JSON.stringify(outcomes)}`);
+    }
+  } finally {
+    releaseFirstSms?.();
+    await prisma.toolSideEffect.deleteMany({
+      where: { operationKey: { contains: idempotencyKey } },
+    });
+    await prisma.waitlist.deleteMany({ where: { name: marker } });
+    await prisma.user.deleteMany({ where: { userId: marker } });
+  }
+}
+
+async function testInvite_retryAfterMarkFailureDoesNotRepeatNotifications() {
+  const marker = `blackbox-mark-retry-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const phone = uniquePhone();
+  const email = `${marker}@example.com`;
+  const idempotencyKey = `${marker}-attempt`;
+  let smsCalls = 0;
+  let emailCalls = 0;
+  let markCalls = 0;
+  const dependencies = {
+    isProduction: true,
+    now: () => new Date('2026-07-18T20:03:00.000Z'),
+    sendSms: async () => {
+      smsCalls += 1;
+      return { success: true, messageSid: 'sms-mark-retry' };
+    },
+    sendEmail: async () => {
+      emailCalls += 1;
+      return { id: 'email-mark-retry' };
+    },
+    markInvited: async (id: string, invitedAt: Date) => {
+      markCalls += 1;
+      if (markCalls === 1) throw new Error('temporary invitedAt write failure');
+      await prisma.waitlist.update({ where: { id }, data: { invitedAt } });
+    },
+  };
+
+  try {
+    await prisma.user.create({ data: { userId: marker, phone, email, usedInviteCode: null } });
+    const created = await prisma.waitlist.create({ data: { name: marker, phone } });
+    try {
+      await Reflect.apply(inviteWaitlistPerson, undefined, [
+        created.id,
+        dependencies,
+        idempotencyKey,
+      ]);
+      throw new Error('Expected invitedAt persistence to fail');
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== 'temporary invitedAt write failure') {
+        throw error;
+      }
+    }
+
+    await Reflect.apply(inviteWaitlistPerson, undefined, [
+      created.id,
+      dependencies,
+      idempotencyKey,
+    ]);
+    if (smsCalls !== 1 || emailCalls !== 1 || markCalls !== 2) {
+      throw new Error(
+        `Mark retry repeated work: SMS=${smsCalls}, email=${emailCalls}, mark=${markCalls}`
+      );
+    }
+  } finally {
+    await prisma.toolSideEffect.deleteMany({
+      where: { operationKey: { contains: idempotencyKey } },
+    });
     await prisma.waitlist.deleteMany({ where: { name: marker } });
     await prisma.user.deleteMany({ where: { userId: marker } });
   }
@@ -337,6 +552,96 @@ async function testTransactionalEmail_rawMessageCarriesCopyAndSubject() {
   }
   if (!raw.endsWith(`\r\n\r\n${WAITLIST_INVITE_COPY}`)) {
     throw new Error(`Raw email omitted the canonical invite body: ${raw}`);
+  }
+}
+
+async function testTransactionalEmail_refreshOnlyCredentialAndBodyDeadline() {
+  const marker = `blackbox-transactional-email-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const sender = `${marker}@example.com`;
+  const integration = await prisma.integration.create({
+    data: {
+      userId: marker,
+      name: `gmail-${marker}`,
+      type: 'TOOL_SETUP',
+      status: 'CONNECTED',
+      isActive: true,
+    },
+  });
+  try {
+    await prisma.emailIntegrationCredential.create({
+      data: {
+        userId: marker,
+        integrationId: integration.id,
+        provider: 'GMAIL',
+        email: sender,
+        accessToken: null,
+        refreshToken: 'refresh-only-token',
+      },
+    });
+    const input = {
+      ownerUserId: marker,
+      from: sender,
+      fromName: 'Rose',
+      to: 'recipient@example.com',
+      subject: 'Refresh-only credential',
+      body: 'Test body',
+    };
+    const sent = await Reflect.apply(sendTransactionalEmail, undefined, [
+      input,
+      {
+        getAccessToken: async () => 'refreshed-access-token',
+        fetch: async (_url: string | URL | Request, init?: RequestInit) => {
+          if (
+            (init?.headers as Record<string, string>).Authorization !==
+            'Bearer refreshed-access-token'
+          ) {
+            throw new Error('Refreshed access token was not used');
+          }
+          return new Response(JSON.stringify({ id: 'refresh-only-message' }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        },
+        requestTimeoutMs: 100,
+      },
+    ]);
+    if (sent.id !== 'refresh-only-message') {
+      throw new Error(`Unexpected refresh-only delivery result: ${JSON.stringify(sent)}`);
+    }
+
+    await prisma.emailIntegrationCredential.updateMany({
+      where: { integrationId: integration.id },
+      data: { accessToken: 'current-access-token' },
+    });
+    const deadlineFetch = async (_url: string | URL | Request, init?: RequestInit) =>
+      ({
+        ok: true,
+        status: 200,
+        json: () =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () =>
+              reject(new DOMException('Aborted', 'AbortError'))
+            );
+            setTimeout(() => reject(new Error('Response body escaped its deadline')), 50);
+          }),
+      }) as Response;
+    try {
+      await Reflect.apply(sendTransactionalEmail, undefined, [
+        input,
+        {
+          getAccessToken: async () => 'current-access-token',
+          fetch: deadlineFetch,
+          requestTimeoutMs: 5,
+        },
+      ]);
+      throw new Error('Expected Gmail response-body timeout');
+    } catch (error) {
+      if (!(error instanceof TransactionalEmailError) || !error.message.includes('timed out')) {
+        throw error;
+      }
+    }
+  } finally {
+    await prisma.integration.deleteMany({ where: { id: integration.id } });
   }
 }
 
@@ -536,6 +841,10 @@ async function main() {
       fn: testInvite_unknownId404,
     },
     {
+      name: 'POST /api/admin-health/waitlist/:id/invite missing idempotency key -> 400',
+      fn: testInvite_missingIdempotencyKey400,
+    },
+    {
       name: 'POST /api/admin-health/waitlist/:id/invite flags + marks (no sends in dev)',
       fn: testInvite_happyPathFlagsAndMarks,
     },
@@ -544,8 +853,24 @@ async function main() {
       fn: testInvite_dispatchesSameCopyBySmsAndEmail,
     },
     {
+      name: 'invite retry does not repeat a channel that already succeeded',
+      fn: testInvite_retryDoesNotRepeatSuccessfulChannel,
+    },
+    {
+      name: 'concurrent invite requests with one key claim each channel once',
+      fn: testInvite_concurrentSameKeyClaimsChannelOnce,
+    },
+    {
+      name: 'invite retry after invitedAt failure does not repeat notifications',
+      fn: testInvite_retryAfterMarkFailureDoesNotRepeatNotifications,
+    },
+    {
       name: 'transactional email raw message carries invite copy + subject',
       fn: testTransactionalEmail_rawMessageCarriesCopyAndSubject,
+    },
+    {
+      name: 'transactional email accepts refresh-only credentials and bounds body reads',
+      fn: testTransactionalEmail_refreshOnlyCredentialAndBodyDeadline,
     },
     {
       name: 'markOffWaitlistByPhone sets the flag and is idempotent',

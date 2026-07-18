@@ -12,6 +12,8 @@ import {
   getWaitlistPeople,
   inviteWaitlistPerson,
   WaitlistInviteEmailError,
+  WaitlistInviteIdempotencyKeyError,
+  WaitlistInviteInProgressError,
   WaitlistInviteSmsError,
   WaitlistPersonNotFoundError,
 } from './service.waitlist';
@@ -84,7 +86,11 @@ router.post(
 
     try {
       await assertCanViewAdminHealth(req.user.id, req.user.phone);
-      const result = await inviteWaitlistPerson(req.params.id);
+      const result = await inviteWaitlistPerson(
+        req.params.id,
+        undefined,
+        req.get('Idempotency-Key')
+      );
       res.json(result);
     } catch (error) {
       if (error instanceof AdminHealthForbiddenError) {
@@ -93,6 +99,14 @@ router.post(
       }
       if (error instanceof WaitlistPersonNotFoundError) {
         res.status(404).json({ error: error.message });
+        return;
+      }
+      if (error instanceof WaitlistInviteIdempotencyKeyError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      if (error instanceof WaitlistInviteInProgressError) {
+        res.status(409).json({ error: error.message });
         return;
       }
       if (error instanceof WaitlistInviteSmsError || error instanceof WaitlistInviteEmailError) {

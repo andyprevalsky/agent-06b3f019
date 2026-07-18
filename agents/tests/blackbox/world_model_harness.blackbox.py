@@ -361,6 +361,71 @@ def test_exported_otel_jsonl_ingests_with_upstream_wmh_and_preserves_state_refs(
             restore()
 
 
+def test_bundle_signature_ignores_plaintext_public_manifest_but_rejects_untracked_ciphertext():
+    from benchmarks.world_model_harness import _bundle_signature
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        try:
+            root_agent_id = "root-public-manifest"
+            _write_golden_bundle(root_agent_id)
+            bundle_root = Path(tmp) / root_agent_id
+            (bundle_root / "manifest.public.json").write_text(
+                json.dumps({"root_agent_id": root_agent_id}), encoding="utf-8"
+            )
+
+            signature = _bundle_signature(root_agent_id)
+            encrypted_paths = [path for path in bundle_root.rglob("*.enc") if path.is_file()]
+            assert signature["artifact_count"] == len(encrypted_paths)
+
+            (bundle_root / "untracked.enc").write_bytes(b"missing archive metadata")
+            try:
+                _bundle_signature(root_agent_id)
+            except ValueError as exc:
+                assert "Archive metadata missing for untracked.enc" in str(exc)
+            else:
+                raise AssertionError("Encrypted artifacts without metadata must fail closed")
+        finally:
+            restore()
+
+
+def test_bundle_signature_r2_rejects_enumerated_ciphertext_without_metadata():
+    from benchmarks.world_model_harness import _bundle_signature
+
+    with tempfile.TemporaryDirectory() as tmp:
+        local_restore = _with_archive_env(tmp)
+        try:
+            root_agent_id = "root-r2-public-manifest"
+            _write_golden_bundle(root_agent_id)
+            bundle_root = Path(tmp) / root_agent_id
+            (bundle_root / "manifest.public.json").write_text(
+                json.dumps({"root_agent_id": root_agent_id}), encoding="utf-8"
+            )
+            objects = _local_bundle_to_fake_r2(tmp)
+        finally:
+            local_restore()
+
+        r2_restore = _with_fake_r2_archive(objects)
+        try:
+            signature = _bundle_signature(root_agent_id)
+            encrypted_keys = [
+                key
+                for key in objects
+                if key.startswith(f"trace-archive/{root_agent_id}/") and key.endswith(".enc")
+            ]
+            assert signature["artifact_count"] == len(encrypted_keys)
+
+            objects[f"trace-archive/{root_agent_id}/untracked.enc"] = b"missing archive metadata"
+            try:
+                _bundle_signature(root_agent_id)
+            except ValueError as exc:
+                assert "Archive metadata missing for untracked.enc" in str(exc)
+            else:
+                raise AssertionError("R2 ciphertext listed without metadata must fail closed")
+        finally:
+            r2_restore()
+
+
 def test_refresh_world_model_index_persists_retriever_index_without_gepa():
     _load_upstream_otel_adapter_class()  # skip when upstream wmh is unavailable
     from benchmarks.world_model_harness import export_archive_to_otel_jsonl, refresh_world_model_index
@@ -1476,6 +1541,14 @@ async def run_all_tests():
     r.record(
         "exported_otel_jsonl_reads_trace_bundle_from_r2_backend",
         test_exported_otel_jsonl_reads_trace_bundle_from_r2_backend,
+    )
+    r.record(
+        "bundle_signature_ignores_plaintext_public_manifest_but_rejects_untracked_ciphertext",
+        test_bundle_signature_ignores_plaintext_public_manifest_but_rejects_untracked_ciphertext,
+    )
+    r.record(
+        "bundle_signature_r2_rejects_enumerated_ciphertext_without_metadata",
+        test_bundle_signature_r2_rejects_enumerated_ciphertext_without_metadata,
     )
     r.record(
         "replay_corpus_split_and_initial_state_are_deterministic_and_public",

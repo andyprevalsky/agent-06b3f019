@@ -40,6 +40,18 @@ export async function claimToolSideEffect(params: {
   }
 }
 
+/** Atomically re-open a provider call that previously failed before acceptance. */
+export async function reclaimFailedToolSideEffect(
+  operationKey: string
+): Promise<ToolSideEffectClaim> {
+  const result = await prisma.toolSideEffect.updateMany({
+    where: { operationKey, status: 'FAILED' },
+    data: { status: 'STARTED', error: null },
+  });
+  const record = await prisma.toolSideEffect.findUniqueOrThrow({ where: { operationKey } });
+  return result.count === 1 ? { status: 'claimed', record } : { status: 'existing', record };
+}
+
 export async function markToolSideEffectSucceeded(params: {
   operationKey: string;
   externalId: string;

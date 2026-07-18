@@ -30,6 +30,18 @@ export class TransactionalEmailError extends Error {
   }
 }
 
+export interface TransactionalEmailDependencies {
+  getAccessToken: typeof getValidAccessToken;
+  fetch: typeof fetch;
+  requestTimeoutMs: number;
+}
+
+const TRANSACTIONAL_EMAIL_DEPENDENCIES: TransactionalEmailDependencies = {
+  getAccessToken: getValidAccessToken,
+  fetch: (input, init) => fetch(input, init),
+  requestTimeoutMs: 15_000,
+};
+
 function assertSafeHeader(name: string, value: string): void {
   if (value === '' || /[\r\n]/.test(value)) {
     throw new TransactionalEmailError(`Invalid ${name} email header`);
@@ -62,14 +74,14 @@ export function buildTransactionalRawEmail(input: Omit<TransactionalEmailInput, 
 
 /** Send one transactional email from a service-owned connected Gmail inbox. */
 export async function sendTransactionalEmail(
-  input: TransactionalEmailInput
+  input: TransactionalEmailInput,
+  dependencies: TransactionalEmailDependencies = TRANSACTIONAL_EMAIL_DEPENDENCIES
 ): Promise<{ id: string }> {
   const credential = await prisma.emailIntegrationCredential.findFirst({
     where: {
       userId: input.ownerUserId,
       provider: EmailProvider.GMAIL,
       email: input.from,
-      accessToken: { not: null },
     },
     select: {
       id: true,
@@ -82,38 +94,53 @@ export async function sendTransactionalEmail(
     throw new TransactionalEmailError(`Sender ${input.from} is not connected`);
   }
 
-  const accessToken = await getValidAccessToken(credential);
+  const accessToken = await dependencies.getAccessToken(credential);
   if (accessToken === null) {
     throw new TransactionalEmailError(`Sender ${input.from} needs to reconnect Gmail`);
   }
 
-  const response = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({ raw: buildTransactionalRawEmail(input) }),
-  });
-  const data = (await response.json()) as { id?: unknown; error?: { message?: unknown } };
-  if (!response.ok || typeof data.id !== 'string') {
-    const providerMessage =
-      typeof data.error?.message === 'string'
-        ? data.error.message
-        : `Gmail HTTP ${response.status}`;
-    log.error('Transactional email send failed', {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), dependencies.requestTimeoutMs);
+  try {
+    const response = await dependencies.fetch(
+      'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ raw: buildTransactionalRawEmail(input) }),
+        signal: controller.signal,
+      }
+    );
+    const data = (await response.json()) as { id?: unknown; error?: { message?: unknown } };
+    if (!response.ok || typeof data.id !== 'string') {
+      const providerMessage =
+        typeof data.error?.message === 'string'
+          ? data.error.message
+          : `Gmail HTTP ${response.status}`;
+      log.error('Transactional email send failed', {
+        sender: input.from,
+        recipientDomain: input.to.split('@').at(-1) ?? 'unknown',
+        status: response.status,
+        error: providerMessage,
+      });
+      throw new TransactionalEmailError(providerMessage);
+    }
+
+    log.info('Transactional email accepted', {
+      messageId: data.id,
       sender: input.from,
       recipientDomain: input.to.split('@').at(-1) ?? 'unknown',
-      status: response.status,
-      error: providerMessage,
     });
-    throw new TransactionalEmailError(providerMessage);
+    return { id: data.id };
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new TransactionalEmailError('Gmail request timed out');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  log.info('Transactional email accepted', {
-    messageId: data.id,
-    sender: input.from,
-    recipientDomain: input.to.split('@').at(-1) ?? 'unknown',
-  });
-  return { id: data.id };
 }

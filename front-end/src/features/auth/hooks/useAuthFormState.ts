@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 import type { AuthStep } from '../types';
 
@@ -12,7 +12,22 @@ export function useAuthFormState() {
   const [otp, setOtp] = useState('');
   const [loading, setLoading] = useState(false);
   const [smsAuthorized, setSmsAuthorized] = useState(false);
+  const requestGeneration = useRef(0);
+  const beginRequest = useCallback(() => {
+    requestGeneration.current += 1;
+    return requestGeneration.current;
+  }, []);
+  const isRequestCurrent = useCallback(
+    (generation: number) => requestGeneration.current === generation,
+    [],
+  );
+  const cancelRequests = useCallback(() => {
+    requestGeneration.current += 1;
+    setLoading(false);
+  }, []);
   const resetForm = useCallback(() => {
+    requestGeneration.current += 1;
+    setLoading(false);
     setStep('phone');
     setPhone('');
     setEmail('');
@@ -39,6 +54,9 @@ export function useAuthFormState() {
     setLoading,
     smsAuthorized,
     setSmsAuthorized,
+    beginRequest,
+    isRequestCurrent,
+    cancelRequests,
     resetForm,
   };
 }
