@@ -566,6 +566,55 @@ def test_cold_fleet_guest_gets_a_first_run_stack_budget(tmp_path: Path) -> None:
     ) == 321
 
 
+def test_fleet_barrier_budget_covers_cold_guest_bootstrap() -> None:
+    """RCA (2026-07-17): after the on-box cold-start budget was raised to
+    1800s, the parent controller still used its independent 720s per-box
+    barrier ceiling. Live run 20260717-204617-18785 excluded the healthy cold
+    replacement at exactly 720s while it was still syncing browser data.
+
+    The parent budget must derive from the same cold-stack contract, include
+    bounded pre-stack time (boot, checkout, dependency sync), and propagate an
+    override all the way into the remote driver. The global barrier may never
+    be shorter than the per-box budget.
+    """
+    fleet = FLEET_SCRIPT.read_text()
+    cloud = CLOUD_SCRIPT.read_text()
+    helper = _extract_fleet_function(fleet, "per_box_barrier_wait_seconds() {")
+    result = subprocess.run(
+        ["bash", "-c", f"{helper}\nper_box_barrier_wait_seconds"],
+        env=os.environ.copy(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert int(result.stdout.strip()) >= 2400
+
+    overridden = subprocess.run(
+        ["bash", "-c", f"{helper}\nper_box_barrier_wait_seconds"],
+        env={**os.environ, "CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS": "777"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert overridden.returncode == 0, overridden.stderr
+    assert overridden.stdout.strip() == "777"
+
+    assert (
+        'CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS="$FIRST_RUN_STACK_WAIT_SECONDS"'
+        in fleet
+    )
+    assert (
+        '--env "CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS=${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"'
+        in cloud
+    )
+    assert (
+        '"$START_BARRIER_WAIT_SECONDS" -lt "$PER_BOX_BARRIER_WAIT_SECONDS"'
+        in fleet
+    )
+    assert 'per_box="$PER_BOX_BARRIER_WAIT_SECONDS"' in fleet
+
+
 def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> None:
     driver = DRIVER_SCRIPT.read_text()
     cloud = CLOUD_SCRIPT.read_text()

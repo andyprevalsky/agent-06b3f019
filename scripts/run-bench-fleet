@@ -217,14 +217,38 @@ fi
 # per-benchmark timeout, then add that barrier budget to the child's outer
 # polling ceiling so benchmark execution still receives RUN_TIMEOUT seconds
 # after every isolated stack is ready.
+per_box_barrier_wait_seconds() {
+    local first_run_stack_wait pre_stack_allowance
+    if [ -n "${CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS:-}" ]; then
+        printf '%s\n' "$CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS"
+        return
+    fi
+    first_run_stack_wait="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"
+    pre_stack_allowance="${CLOUDBENCH_PRE_STACK_WAIT_SECONDS:-600}"
+    case "$first_run_stack_wait:$pre_stack_allowance" in
+        *[!0-9:]*|:*|*:)
+            echo "invalid cold bootstrap barrier budget" >&2
+            return 2
+            ;;
+    esac
+    printf '%s\n' "$((first_run_stack_wait + pre_stack_allowance))"
+}
+
+FIRST_RUN_STACK_WAIT_SECONDS="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"
+PER_BOX_BARRIER_WAIT_SECONDS="$(per_box_barrier_wait_seconds)" || exit 2
 START_BARRIER_WAIT_SECONDS="${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}"
-for seconds in "$RUN_TIMEOUT" "$START_BARRIER_WAIT_SECONDS"; do
+for seconds in "$RUN_TIMEOUT" "$FIRST_RUN_STACK_WAIT_SECONDS" "$PER_BOX_BARRIER_WAIT_SECONDS" "$START_BARRIER_WAIT_SECONDS"; do
     case "$seconds" in
-        ''|*[!0-9]*) echo "❌ --timeout and CLOUDBENCH_START_BARRIER_WAIT_SECONDS must be positive integers" >&2; exit 2 ;;
+        ''|*[!0-9]*) echo "❌ benchmark and barrier timeouts must be positive integers" >&2; exit 2 ;;
     esac
     [ "$seconds" -gt 0 ] \
-        || { echo "❌ --timeout and CLOUDBENCH_START_BARRIER_WAIT_SECONDS must be positive integers" >&2; exit 2; }
+        || { echo "❌ benchmark and barrier timeouts must be positive integers" >&2; exit 2; }
 done
+# The global barrier cannot expire before a legitimate cold guest's per-box
+# budget. This clamps an undersized default or override to the shared contract.
+if [ "$START_BARRIER_WAIT_SECONDS" -lt "$PER_BOX_BARRIER_WAIT_SECONDS" ]; then
+    START_BARRIER_WAIT_SECONDS="$PER_BOX_BARRIER_WAIT_SECONDS"
+fi
 case "$CONTROLLER_RETRY_SECONDS" in
     ''|*[!0-9]*|0) echo "❌ CLOUDBENCH_CONTROLLER_RETRY_SECONDS must be a positive integer" >&2; exit 2 ;;
 esac
@@ -2293,6 +2317,7 @@ for bench in "${BENCHES[@]}"; do
         CLOUDBENCH_START_BARRIER="$([ "$SYNCHRONIZED_START" = "1" ] && printf '%s' "$RUN_ID")" \
         CLOUDBENCH_BARRIER_TOKEN="$BARRIER_RELEASE_TOKEN" \
         CLOUDBENCH_START_BARRIER_WAIT_SECONDS="$START_BARRIER_WAIT_SECONDS" \
+        CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS="$FIRST_RUN_STACK_WAIT_SECONDS" \
         CLOUDBENCH_BOOT_LAUNCH="${CLOUDBENCH_BOOT_LAUNCH:-1}" \
         CLOUDBENCH_BOOT_CONFIG_BARRIER="$BOOT_CONFIG_BARRIER" \
         NO_OPEN=1 \
@@ -2524,7 +2549,7 @@ release_start_barrier() {
     # loop where staleness can't see it) otherwise drags the WHOLE barrier until
     # the global timeout, and every ready box waits idle. Exclude such a holdout
     # after a generous window (covers the slowest legitimate bring-up).
-    per_box="${CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS:-720}"
+    per_box="$PER_BOX_BARRIER_WAIT_SECONDS"
     echo "⏸️  waiting for $total isolated stacks at synchronized start barrier..."
     while :; do
         now="$(date +%s)"
