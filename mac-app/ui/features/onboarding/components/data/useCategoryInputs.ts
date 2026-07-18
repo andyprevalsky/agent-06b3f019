@@ -10,7 +10,7 @@
  *   flows via useOnboardingChat).
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 
 import type {
   useBrowserSync,
@@ -35,6 +35,11 @@ interface UseCategoryInputsArgs {
   plaid: ReturnType<typeof usePlaidIntegration>;
 }
 
+interface UseCategoryInputsResult {
+  inputs: CategoryInputs;
+  chat: OnboardingChatState;
+}
+
 interface AssembleCtx extends UseCategoryInputsArgs {
   chat: OnboardingChatState;
   connectedEmails: string[];
@@ -42,11 +47,13 @@ interface AssembleCtx extends UseCategoryInputsArgs {
   linkedInConnected: boolean;
   onLinkedInSync: () => void;
   operationErrors: OperationErrors;
+  operationGenerations: OperationGenerations;
   setOperationError: SetOperationError;
 }
 
 type OperationCategory = 'browsers' | 'passwords' | 'compute' | 'messages' | 'socials';
 type OperationErrors = Record<OperationCategory, string | null>;
+type OperationGenerations = Record<OperationCategory, number>;
 type SetOperationError = (category: OperationCategory, error: string | null) => void;
 
 const INITIAL_OPERATION_ERRORS: OperationErrors = {
@@ -57,6 +64,10 @@ const INITIAL_OPERATION_ERRORS: OperationErrors = {
   socials: null,
 };
 
+function initialOperationGenerations(): OperationGenerations {
+  return { browsers: 0, passwords: 0, compute: 0, messages: 0, socials: 0 };
+}
+
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message !== '' ? error.message : fallback;
 }
@@ -66,13 +77,17 @@ function run(
   category: OperationCategory,
   label: string,
   fn: () => Promise<unknown>,
+  operationGenerations: OperationGenerations,
   setOperationError: SetOperationError
 ): () => void {
   return () => {
+    const generation = ++operationGenerations[category];
     setOperationError(category, null);
     void fn().catch((err: unknown) => {
       console.error(`[OnboardingData] ${label} failed:`, err);
-      setOperationError(category, errorMessage(err, `${label} failed. Please try again.`));
+      if (generation === operationGenerations[category]) {
+        setOperationError(category, errorMessage(err, `${label} failed. Please try again.`));
+      }
     });
   };
 }
@@ -90,9 +105,9 @@ function deriveConnectedEmails(data: UseCategoryInputsArgs['data']): string[] {
 
 function assembleInputs(ctx: AssembleCtx): CategoryInputs {
   const { data, browser, passwords, compute, messages, gmail, plaid, chat } = ctx;
-  const { operationErrors, setOperationError } = ctx;
+  const { operationErrors, operationGenerations, setOperationError } = ctx;
   const runFor = (category: OperationCategory, label: string, fn: () => Promise<unknown>) =>
-    run(category, label, fn, setOperationError);
+    run(category, label, fn, operationGenerations, setOperationError);
   return {
     browsers: {
       installed: browser.installedBrowsers,
@@ -149,26 +164,31 @@ function assembleInputs(ctx: AssembleCtx): CategoryInputs {
   };
 }
 
-export function useCategoryInputs(args: UseCategoryInputsArgs): {
-  inputs: CategoryInputs;
-  chat: OnboardingChatState;
-} {
+export function useCategoryInputs(args: UseCategoryInputsArgs): UseCategoryInputsResult {
   const { data, browser, passwords, compute, messages, gmail, plaid } = args;
   const chat = useOnboardingChat(data.fetchIntegrations);
   const [linkedInStarted, setLinkedInStarted] = useState(false);
   const [operationErrors, setOperationErrors] = useState<OperationErrors>(INITIAL_OPERATION_ERRORS);
-
+  const operationGenerationsRef = useRef<OperationGenerations>(initialOperationGenerations());
   const setOperationError = useCallback<SetOperationError>((category, error) => {
     setOperationErrors((current) => ({ ...current, [category]: error }));
   }, []);
 
   const onLinkedInSync = useCallback((): void => {
+    const generation = ++operationGenerationsRef.current.socials;
     setOperationError('socials', null);
     void messages.handleLinkedInSync().then(
-      () => setLinkedInStarted(true),
+      () => {
+        if (generation === operationGenerationsRef.current.socials) setLinkedInStarted(true);
+      },
       (err: unknown) => {
         console.error('[OnboardingData] LinkedIn sync failed:', err);
-        setOperationError('socials', errorMessage(err, 'LinkedIn sync failed. Please try again.'));
+        if (generation === operationGenerationsRef.current.socials) {
+          setOperationError(
+            'socials',
+            errorMessage(err, 'LinkedIn sync failed. Please try again.')
+          );
+        }
       }
     );
   }, [messages, setOperationError]);
@@ -203,6 +223,7 @@ export function useCategoryInputs(args: UseCategoryInputsArgs): {
         linkedInConnected,
         onLinkedInSync,
         operationErrors,
+        operationGenerations: operationGenerationsRef.current,
         setOperationError,
       }),
     [

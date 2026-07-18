@@ -20,11 +20,29 @@ function electronExternalApi(): ElectronExternalApi | null {
   return null;
 }
 
+function useGmailDisconnect(fetchIntegrations: () => Promise<void>) {
+  const [disconnectingEmail, setDisconnectingEmail] = useState<string | null>(null);
+  const handleEmailDisconnect = useCallback(
+    async (email: string) => {
+      setDisconnectingEmail(email);
+      try {
+        await disconnectGmailAccountApi(email);
+        await fetchIntegrations();
+      } finally {
+        setDisconnectingEmail(null);
+      }
+    },
+    [fetchIntegrations],
+  );
+  return { disconnectingEmail, handleEmailDisconnect } as const;
+}
+
 export function useGmailConnect(fetchIntegrations: () => Promise<void>) {
   const [connectingProvider, setConnectingProvider] = useState<'gmail' | null>(null);
-  const [disconnectingEmail, setDisconnectingEmail] = useState<string | null>(null);
+  const { disconnectingEmail, handleEmailDisconnect } = useGmailDisconnect(fetchIntegrations);
   const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const oauthAttemptRef = useRef(0);
 
   const clearPolling = useCallback((): void => {
     if (pollIntervalRef.current !== null) {
@@ -37,10 +55,17 @@ export function useGmailConnect(fetchIntegrations: () => Promise<void>) {
     }
   }, []);
 
-  useEffect(() => clearPolling, [clearPolling]);
+  useEffect(
+    () => () => {
+      oauthAttemptRef.current += 1;
+      clearPolling();
+    },
+    [clearPolling],
+  );
 
   const handleEmailConnect = useCallback(
     async (provider: 'gmail') => {
+      const attempt = ++oauthAttemptRef.current;
       setConnectingProvider(provider);
       clearPolling();
       const electronApi = electronExternalApi();
@@ -49,14 +74,17 @@ export function useGmailConnect(fetchIntegrations: () => Promise<void>) {
         const returnUrl =
           electronApi !== null ? undefined : window.location.origin + window.location.pathname;
         const payload = await startGmailOAuthApi(returnUrl);
+        if (attempt !== oauthAttemptRef.current) return;
 
         if (electronApi !== null) {
           await electronApi.openExternal(payload.authUrl);
+          if (attempt !== oauthAttemptRef.current) return;
 
           pollIntervalRef.current = setInterval(() => {
             void (async () => {
               try {
                 const integrations = await fetchIntegrationsApi();
+                if (attempt !== oauthAttemptRef.current) return;
                 const gmail = integrations.find((i) => i.name === provider);
                 if (gmail) {
                   clearPolling();
@@ -70,6 +98,7 @@ export function useGmailConnect(fetchIntegrations: () => Promise<void>) {
           }, GMAIL_POLL_INTERVAL_MS);
 
           pollTimeoutRef.current = setTimeout(() => {
+            if (attempt !== oauthAttemptRef.current) return;
             clearPolling();
             setConnectingProvider(null);
           }, GMAIL_POLL_TIMEOUT_MS);
@@ -77,25 +106,14 @@ export function useGmailConnect(fetchIntegrations: () => Promise<void>) {
           window.location.href = payload.authUrl;
         }
       } catch (err) {
-        clearPolling();
-        setConnectingProvider(null);
+        if (attempt === oauthAttemptRef.current) {
+          clearPolling();
+          setConnectingProvider(null);
+        }
         throw err;
       }
     },
     [clearPolling, fetchIntegrations],
-  );
-
-  const handleEmailDisconnect = useCallback(
-    async (email: string) => {
-      setDisconnectingEmail(email);
-      try {
-        await disconnectGmailAccountApi(email);
-        await fetchIntegrations();
-      } finally {
-        setDisconnectingEmail(null);
-      }
-    },
-    [fetchIntegrations],
   );
 
   return {
