@@ -176,7 +176,7 @@ async function handleExistingUser(
   email: string | undefined,
   anonymousUserId: string | undefined
 ): Promise<void> {
-  const updates: { phone?: string; name?: string; email?: string; isAnonymous?: boolean } = {};
+  const updates: { phone?: string; name?: string; isAnonymous?: boolean } = {};
 
   if ((existingUser.phone === null || existingUser.phone === '') && phone !== '') {
     updates.phone = phone;
@@ -196,10 +196,14 @@ async function handleExistingUser(
   }
 
   // Only backfill email when the user doesn't already have one — never clobber.
+  // The write is guarded atomically in the repo (conditional updateMany), so a
+  // concurrent verify-otp that already stored an email can't be overwritten by
+  // this request's stale read.
   if (existingUser.email === null || existingUser.email === '') {
     const normalizedEmail = normalizeEmail(email);
     if (normalizedEmail !== undefined) {
-      updates.email = normalizedEmail;
+      await repo.backfillUserEmail(userId, normalizedEmail);
+      log.info('Backfilled user email', { user_id: userId });
     }
   }
 
@@ -222,7 +226,8 @@ async function handleExistingUser(
     });
   } else if (Object.keys(updates).length > 0) {
     await repo.updateUser(userId, updates);
-    log.info('Updated user', { user_id: userId, updates: JSON.stringify(updates) });
+    // Log field names only — `updates` can carry PII (email, name).
+    log.info('Updated user', { user_id: userId, updatedFields: Object.keys(updates).join(',') });
   } else {
     log.info('User already exists and is authenticated', { user_id: userId });
   }

@@ -706,6 +706,19 @@ async function testVerifyOtp_missingPhone() {
   assertSchema(ErrorResponse, res.data, 'verify-otp missing phone');
 }
 
+async function testVerifyOtp_nonStringEmail() {
+  // email is optional, but a non-string payload (number/object) must be
+  // rejected at the boundary — normalizeEmail would otherwise .trim() it and
+  // 500 after the OTP verification already succeeded. null is tolerated
+  // (treated as absent) since JSON clients commonly send explicit nulls.
+  const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
+    method: 'POST',
+    body: JSON.stringify({ phone: '+10000000000', token: '123456', email: 123 }),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'verify-otp non-string email');
+}
+
 async function testVerifyOtp_emptyStrings() {
   const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',
@@ -2351,6 +2364,7 @@ async function runAll() {
     { name: 'POST /verify-otp -- missing all fields -> 400', fn: testVerifyOtp_missingAllFields },
     { name: 'POST /verify-otp -- missing token -> 400', fn: testVerifyOtp_missingToken },
     { name: 'POST /verify-otp -- missing phone -> 400', fn: testVerifyOtp_missingPhone },
+    { name: 'POST /verify-otp -- non-string email -> 400', fn: testVerifyOtp_nonStringEmail },
     { name: 'POST /verify-otp -- empty strings -> 400', fn: testVerifyOtp_emptyStrings },
     { name: 'POST /complete-onboarding -- no auth -> 401', fn: testCompleteOnboarding_noAuth },
     {
