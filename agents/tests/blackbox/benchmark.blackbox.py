@@ -1,5 +1,6 @@
 """Blackbox tests for benchmark helpers."""
 
+import asyncio
 import json
 import importlib.util
 import os
@@ -434,6 +435,49 @@ def test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail():
     from benchmarks.benchmark_tasks import get_smoke_cap
 
     assert get_smoke_cap("parallel-tool-calls") == 600
+
+
+async def test_parallel_benchmark_scheduler_serializes_browser_profile_writers():
+    """Two browser benchmarks must never write the same persistent profile concurrently."""
+    from benchmarks.run_benchmark import _parallel_task_runners
+
+    class Task:
+        def __init__(self, name: str, requires_browser_agent: bool):
+            self.name = name
+            self.requires_browser_agent = requires_browser_agent
+
+    active_browser_tasks = 0
+    max_active_browser_tasks = 0
+    two_browser_tasks_running = asyncio.Event()
+
+    async def runner(task):
+        nonlocal active_browser_tasks, max_active_browser_tasks
+        if task.requires_browser_agent:
+            active_browser_tasks += 1
+            max_active_browser_tasks = max(max_active_browser_tasks, active_browser_tasks)
+            if active_browser_tasks == 2:
+                two_browser_tasks_running.set()
+            try:
+                await asyncio.wait_for(two_browser_tasks_running.wait(), timeout=0.05)
+            except TimeoutError:
+                pass
+            finally:
+                active_browser_tasks -= 1
+        else:
+            await asyncio.sleep(0)
+        return task.name
+
+    tasks = [
+        Task("browser-smoke", True),
+        Task("browser-biometrics-webdecoy", True),
+        Task("chat-mode", False),
+    ]
+    await asyncio.gather(*_parallel_task_runners(tasks, 2, runner))
+
+    assert max_active_browser_tasks == 1, (
+        "browser-backed tasks overlapped as persistent profile writers; "
+        f"observed concurrency={max_active_browser_tasks}"
+    )
 
 
 def test_response_schema_feedback_benchmark_declares_real_mid_run_message():
@@ -2458,6 +2502,76 @@ def test_amazon_passkey_catalog_requires_live_passkey_kernel_evidence():
     assert task.approval_handling is None
     assert "password" in task.prompt.lower()
     assert "otp" in task.prompt.lower()
+
+
+def test_webdecoy_biometrics_uses_fresh_isolated_browser_state():
+    """Public biometrics probes must not inherit the user's saved browser identity."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks import run_benchmark as bench
+
+    task = get_task_by_name("browser-biometrics-webdecoy")
+    assert getattr(task, "browser_profile_mode", None) == "fresh"
+    assert getattr(task, "browser_auth_realm", None) == "webdecoy.com"
+    assert task.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
+    assert task.expected_browser_session_metadata_values == {
+        "profile_source": "new_user_persistent",
+        "auth_source": "none",
+        "cookies_injected": False,
+        "cookies_count": 0,
+        "local_storage_origin_count": 0,
+        "indexed_db_origin_count": 0,
+        "permission_grant_count": 0,
+        "cache_storage_origin_count": 0,
+    }
+
+    snapshot = {
+        "steel_ids": ["steel-webdecoy"],
+        "bundle_ids": ["bundle-webdecoy"],
+        "password_ids": [],
+        "profiles": [
+            {
+                "id": "profile-row",
+                "contextId": "context-row",
+                "provider": "kernel",
+                "profileId": "persisted-kernel-profile",
+            }
+        ],
+    }
+    sql_calls = []
+    responses = iter([json.dumps(snapshot), "7"])
+    original_sql = bench._run_local_victoria_sql
+    try:
+        bench._run_local_victoria_sql = lambda sql: (sql_calls.append(sql), next(responses))[1]
+        manifest = bench._apply_fresh_browser_state_scenario(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:3001",
+                user_id=bench.USER_ID,
+                auth_realm="webdecoy.com",
+            )
+        )
+    finally:
+        bench._run_local_victoria_sql = original_sql
+
+    assert manifest["scenario"] == "fresh_browser_state"
+    assert manifest["auth_realm"] == "webdecoy.com"
+    assert manifest["cleared"] == 7
+    cleanup_sql = sql_calls[1]
+    assert 'UPDATE "CookieBundle"' in cleanup_sql
+    assert 'UPDATE "SteelSessionAuth"' in cleanup_sql
+    assert 'DELETE FROM "Cookie"' in cleanup_sql
+    assert 'DELETE FROM "LocalStorageOrigin"' in cleanup_sql
+    assert 'DELETE FROM "IndexedDBOrigin"' in cleanup_sql
+    assert 'DELETE FROM "CacheStorageOrigin"' in cleanup_sql
+    assert 'DELETE FROM "BrowserProviderProfile"' in cleanup_sql
+
+    restored = []
+    original_restore = bench._restore_isolated_browser_state_scenario
+    try:
+        bench._restore_isolated_browser_state_scenario = lambda saved, *, label: restored.append((saved, label))
+        bench._restore_live_fixture_scenarios([{"fixture": "live"}, manifest])
+    finally:
+        bench._restore_isolated_browser_state_scenario = original_restore
+    assert restored == [(manifest, "fresh browser state")]
 
 
 def test_benchmark_agent_source_override_validates_known_sources():
@@ -6244,11 +6358,15 @@ def test_amazon_passkey_scenario_is_exclusive_and_restorable():
     assert bench.AMAZON_PASSKEY_TASK_NAME in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
 
     sql_calls = []
+    deleted_profiles = []
     original_sync = bench._sync_browser_credentials
     original_sql = bench._run_local_victoria_sql
+    original_delete_profile = bench._delete_kernel_profile
     try:
         bench._sync_browser_credentials = lambda: True
-        bench._run_local_victoria_sql = lambda sql: sql_calls.append(sql) or ""
+        sql_results = iter(['["run-created-profile"]', ""])
+        bench._run_local_victoria_sql = lambda sql: sql_calls.append(sql) or next(sql_results)
+        bench._delete_kernel_profile = lambda profile_id: deleted_profiles.append(profile_id)
         bench._restore_amazon_passkey_scenario(
             {
                 "scenario": "amazon_passkey",
@@ -6274,9 +6392,12 @@ def test_amazon_passkey_scenario_is_exclusive_and_restorable():
     finally:
         bench._sync_browser_credentials = original_sync
         bench._run_local_victoria_sql = original_sql
+        bench._delete_kernel_profile = original_delete_profile
 
-    assert len(sql_calls) == 1
-    restore_sql = sql_calls[0]
+    assert deleted_profiles == ["run-created-profile"]
+    assert len(sql_calls) == 2
+    assert 'SELECT COALESCE(json_agg(profile."profileId")' in sql_calls[0]
+    restore_sql = sql_calls[1]
     assert 'UPDATE "SteelSessionAuth"' in restore_sql and "'steel-1'" in restore_sql
     assert 'UPDATE "CookieBundle"' in restore_sql and "'bundle-1'" in restore_sql
     assert 'UPDATE "BrowserPassword"' in restore_sql and "'password-1'" in restore_sql
@@ -6824,12 +6945,20 @@ async def run_all_tests():
         test_amazon_passkey_catalog_requires_live_passkey_kernel_evidence,
     )
     r.record(
+        "webdecoy_fresh_browser_state",
+        test_webdecoy_biometrics_uses_fresh_isolated_browser_state,
+    )
+    r.record(
         "anon_benchmark_mode_disables_saved_auth",
         test_anon_benchmark_mode_disables_saved_auth_material,
     )
     r.record(
         "local_benchmark_task_queue_uses_workspace",
         test_local_benchmark_task_queue_uses_conductor_workspace_only_for_local_urls,
+    )
+    await r.record_async(
+        "parallel_scheduler_serializes_browser_profiles",
+        test_parallel_benchmark_scheduler_serializes_browser_profile_writers,
     )
     r.record(
         "browser_agent_cookie_bundle_bootstrap_local_only",

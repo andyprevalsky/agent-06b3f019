@@ -2975,6 +2975,18 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
+    "browser_profile_mode": "fresh",
+    "browser_auth_realm": "webdecoy.com",
+    "expected_browser_session_metadata_values": {
+      "profile_source": "new_user_persistent",
+      "auth_source": "none",
+      "cookies_injected": false,
+      "cookies_count": 0,
+      "local_storage_origin_count": 0,
+      "indexed_db_origin_count": 0,
+      "permission_grant_count": 0,
+      "cache_storage_origin_count": 0
+    },
     "bench": "pipeline-e2e",
     "group": "pre-deploy"
   },

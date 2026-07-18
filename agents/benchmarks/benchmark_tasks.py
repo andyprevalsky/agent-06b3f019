@@ -27,6 +27,8 @@ class BenchmarkTask:
     attachment: Optional[str]
     approval_handling: Optional[str]  # "auto_approve", "ignore", "prompt_user", "count_only", or None
     start_phase: Optional[str]  # "plan", "execute", or None (chat mode)
+    browser_profile_mode: str = "persistent"  # "persistent" or isolated "fresh" browser state
+    browser_auth_realm: Optional[str] = None  # Realm whose saved auth is isolated for fresh mode
     attachments: List[str] = field(default_factory=list)  # Multiple attachments (alternative to single attachment)
     row_start: Optional[int] = None  # Slice CSV attachments starting at this 1-indexed data row
     row_end: Optional[int] = None    # Slice CSV attachments ending at this 1-indexed data row (inclusive)
@@ -162,6 +164,15 @@ def _load_tasks() -> List[BenchmarkTask]:
         raw = json.load(f)
     tasks = [BenchmarkTask(**t) for t in raw]
     for t in tasks:
+        if t.browser_profile_mode not in {"persistent", "fresh"}:
+            raise ValueError(
+                f"Benchmark task '{t.name}' has invalid browser_profile_mode={t.browser_profile_mode!r}"
+            )
+        if t.browser_profile_mode == "fresh":
+            if not t.requires_browser_agent:
+                raise ValueError(f"Benchmark task '{t.name}' requests fresh browser state without a browser agent")
+            if not t.browser_auth_realm:
+                raise ValueError(f"Benchmark task '{t.name}' requests fresh browser state without browser_auth_realm")
         t.min_steps = dict(t.min_steps)
         if t.requires_browser_agent and "browser" not in t.min_steps:
             t.min_steps["browser"] = DEFAULT_MIN_STEPS_BY_AGENT_CLASS["browser"]

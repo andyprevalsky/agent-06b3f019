@@ -130,6 +130,7 @@ AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
 EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     GREP_EXPLORE_STRESS_TASK_NAME,
     AMAZON_PASSKEY_TASK_NAME,
+    BIOMETRICS_WEBDECOY_TASK_NAME,
 }
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 MESSAGE_PERSON_TASK_NAME = "message-person"
@@ -3772,6 +3773,78 @@ def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
 
 
+def _snapshot_browser_state(ctx: LiveFixtureContext, *, include_passwords: bool) -> dict:
+    """Capture the shared browser rows needed to reverse an isolated scenario."""
+    user = _sql_literal(ctx.user_id)
+    realm = _sql_literal(ctx.auth_realm)
+    password_snapshot = (
+        "COALESCE((SELECT json_agg(id) FROM \"BrowserPassword\" "
+        f'WHERE "userId" = {user} AND "disabledAt" IS NULL), \'[]\'::json)'
+        if include_passwords
+        else "'[]'::json"
+    )
+    snapshot_sql = (
+        "SELECT json_build_object("
+        "'steel_ids', COALESCE((SELECT json_agg(id) FROM \"SteelSessionAuth\" "
+        f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL), \'[]\'::json), '
+        "'bundle_ids', COALESCE((SELECT json_agg(id) FROM \"CookieBundle\" "
+        f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL), \'[]\'::json), '
+        f"'password_ids', {password_snapshot}, "
+        "'profiles', COALESCE((SELECT json_agg(row_to_json(profile)) "
+        'FROM "BrowserProviderProfile" profile JOIN "BrowserContext" context '
+        'ON context.id = profile."contextId" '
+        f"WHERE context.\"userId\" = {user} AND profile.provider = 'kernel'), '[]'::json)"
+        ")::text;"
+    )
+    return json.loads(_run_local_victoria_sql(snapshot_sql))
+
+
+def _clear_browser_state(
+    ctx: LiveFixtureContext,
+    *,
+    disable_passwords: bool,
+    disabled_reason: str,
+) -> int:
+    """Disable saved auth and remove persistent state before a fresh browser run."""
+    user = _sql_literal(ctx.user_id)
+    realm = _sql_literal(ctx.auth_realm)
+    reason = _sql_literal(disabled_reason)
+    ctes = [
+        'steel AS (UPDATE "SteelSessionAuth" SET "disabledAt" = NOW(), '
+        f'"disabledReason" = {reason} WHERE "userId" = {user} '
+        f'AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id)',
+        'bundles AS (UPDATE "CookieBundle" SET "disabledAt" = NOW(), '
+        f'"disabledReason" = {reason} WHERE "userId" = {user} '
+        f'AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id)',
+    ]
+    if disable_passwords:
+        ctes.append(
+            'passwords AS (UPDATE "BrowserPassword" SET "disabledAt" = NOW(), '
+            f'"disabledReason" = {reason} WHERE "userId" = {user} '
+            'AND "disabledAt" IS NULL RETURNING id)'
+        )
+    ctes.extend(
+        [
+            f'cookies AS (DELETE FROM "Cookie" WHERE "userId" = {user} RETURNING id)',
+            f'local_storage AS (DELETE FROM "LocalStorageOrigin" WHERE "userId" = {user} RETURNING id)',
+            f'indexed_db AS (DELETE FROM "IndexedDBOrigin" WHERE "userId" = {user} RETURNING id)',
+            f'cache_storage AS (DELETE FROM "CacheStorageOrigin" WHERE "userId" = {user} RETURNING id)',
+            f'permissions AS (DELETE FROM "BrowserPermission" WHERE "userId" = {user} RETURNING id)',
+            'profiles AS (DELETE FROM "BrowserProviderProfile" profile USING "BrowserContext" context '
+            f'WHERE profile."contextId" = context.id AND context."userId" = {user} '
+            "AND profile.provider = 'kernel' RETURNING profile.id)",
+        ]
+    )
+    cleanup_sql = (
+        "WITH "
+        + ", ".join(ctes)
+        + " SELECT (SELECT COUNT(*) FROM cookies) + (SELECT COUNT(*) FROM local_storage) + "
+        "(SELECT COUNT(*) FROM indexed_db) + (SELECT COUNT(*) FROM cache_storage) + "
+        "(SELECT COUNT(*) FROM permissions) + (SELECT COUNT(*) FROM profiles);"
+    )
+    return int(_run_local_victoria_sql(cleanup_sql).splitlines()[-1].strip() or "0")
+
+
 def _apply_amazon_passkey_scenario(ctx: LiveFixtureContext) -> dict:
     """Apply the task-specific destructive isolation for the passkey probe.
 
@@ -3783,21 +3856,7 @@ def _apply_amazon_passkey_scenario(ctx: LiveFixtureContext) -> dict:
 
     user = _sql_literal(ctx.user_id)
     realm = _sql_literal(ctx.auth_realm)
-    snapshot_sql = (
-        "SELECT json_build_object("
-        "'steel_ids', COALESCE((SELECT json_agg(id) FROM \"SteelSessionAuth\" "
-        f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL), \'[]\'::json), '
-        "'bundle_ids', COALESCE((SELECT json_agg(id) FROM \"CookieBundle\" "
-        f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL), \'[]\'::json), '
-        "'password_ids', COALESCE((SELECT json_agg(id) FROM \"BrowserPassword\" "
-        f'WHERE "userId" = {user} AND "disabledAt" IS NULL), \'[]\'::json), '
-        "'profiles', COALESCE((SELECT json_agg(row_to_json(profile)) "
-        'FROM "BrowserProviderProfile" profile JOIN "BrowserContext" context '
-        'ON context.id = profile."contextId" '
-        f"WHERE context.\"userId\" = {user} AND profile.provider = 'kernel'), '[]'::json)"
-        ")::text;"
-    )
-    snapshot = json.loads(_run_local_victoria_sql(snapshot_sql))
+    snapshot = _snapshot_browser_state(ctx, include_passwords=True)
     passkey_sql = (
         'SELECT COUNT(*) FROM "PasskeyCredential" '
         f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL;'
@@ -3806,30 +3865,11 @@ def _apply_amazon_passkey_scenario(ctx: LiveFixtureContext) -> dict:
     if passkey_count <= 0:
         raise RuntimeError(f"No enabled passkey found for {ctx.auth_realm}")
 
-    disabled_reason = _sql_literal("disabled by passkey-only benchmark scenario")
-    cleanup_sql = (
-        'WITH steel AS (UPDATE "SteelSessionAuth" SET "disabledAt" = NOW(), '
-        f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
-        f'AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id), '
-        'bundles AS (UPDATE "CookieBundle" SET "disabledAt" = NOW(), '
-        f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
-        f'AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id), '
-        'passwords AS (UPDATE "BrowserPassword" SET "disabledAt" = NOW(), '
-        f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
-        'AND "disabledAt" IS NULL RETURNING id), '
-        f'cookies AS (DELETE FROM "Cookie" WHERE "userId" = {user} RETURNING id), '
-        f'local_storage AS (DELETE FROM "LocalStorageOrigin" WHERE "userId" = {user} RETURNING id), '
-        f'indexed_db AS (DELETE FROM "IndexedDBOrigin" WHERE "userId" = {user} RETURNING id), '
-        f'cache_storage AS (DELETE FROM "CacheStorageOrigin" WHERE "userId" = {user} RETURNING id), '
-        f'permissions AS (DELETE FROM "BrowserPermission" WHERE "userId" = {user} RETURNING id), '
-        'profiles AS (DELETE FROM "BrowserProviderProfile" profile USING "BrowserContext" context '
-        f'WHERE profile."contextId" = context.id AND context."userId" = {user} '
-        "AND profile.provider = 'kernel' RETURNING profile.id) "
-        "SELECT (SELECT COUNT(*) FROM cookies) + (SELECT COUNT(*) FROM local_storage) + "
-        "(SELECT COUNT(*) FROM indexed_db) + (SELECT COUNT(*) FROM cache_storage) + "
-        "(SELECT COUNT(*) FROM permissions) + (SELECT COUNT(*) FROM profiles);"
+    cleared = _clear_browser_state(
+        ctx,
+        disable_passwords=True,
+        disabled_reason="disabled by passkey-only benchmark scenario",
     )
-    cleared = int(_run_local_victoria_sql(cleanup_sql).splitlines()[-1].strip() or "0")
     print(f"    🔐 Prepared {passkey_count} Amazon passkey(s); cleared {cleared} saved-state row(s)")
     return {
         "scenario": "amazon_passkey",
@@ -3841,20 +3881,90 @@ def _apply_amazon_passkey_scenario(ctx: LiveFixtureContext) -> dict:
     }
 
 
-def _restore_amazon_passkey_scenario(manifest: dict) -> None:
-    """Restore shared browser auth after the destructive passkey-only run."""
+def _apply_fresh_browser_state_scenario(ctx: LiveFixtureContext) -> dict:
+    """Give a public browser probe a clean profile with no inherited identity."""
+    snapshot = _snapshot_browser_state(ctx, include_passwords=False)
+    cleared = _clear_browser_state(
+        ctx,
+        disable_passwords=False,
+        disabled_reason="disabled by fresh-browser benchmark scenario",
+    )
+    print(f"    🧼 Prepared fresh browser state for {ctx.auth_realm}; cleared {cleared} saved-state row(s)")
+    return {
+        "scenario": "fresh_browser_state",
+        "cleared": cleared,
+        "user_id": ctx.user_id,
+        "auth_realm": ctx.auth_realm,
+        "restore_snapshot": snapshot,
+    }
+
+
+def _delete_kernel_profile(profile_id: str) -> None:
+    """Delete a run-created external Kernel profile; missing profiles are already clean."""
+    api_key = load_env_var("KERNEL_API_KEY", _BACKEND_ENV, _AGENTS_ENV)
+    if not api_key:
+        raise RuntimeError("KERNEL_API_KEY is required to delete an isolated benchmark profile")
+    base_url = (
+        load_env_var("KERNEL_API_BASE_URL", _BACKEND_ENV, _AGENTS_ENV) or "https://api.onkernel.com"
+    ).rstrip("/")
+    url = f"{base_url}/profiles/{quote(profile_id, safe='')}"
+    last_error: Exception | None = None
+    for attempt, delay in enumerate((0.0, 0.25, 0.5), start=1):
+        if delay:
+            time.sleep(delay)
+        try:
+            response = httpx.delete(
+                url,
+                headers={"Authorization": f"Bearer {api_key}", "Accept": "*/*"},
+                timeout=15,
+            )
+            if response.status_code == 404 or 200 <= response.status_code < 300:
+                return
+            last_error = RuntimeError(f"Kernel profile delete failed: HTTP {response.status_code}")
+        except Exception as exc:
+            last_error = exc
+        if attempt == 3:
+            break
+    raise RuntimeError(f"Failed to delete isolated Kernel profile {profile_id}: {last_error}")
+
+
+def _restore_isolated_browser_state_scenario(manifest: dict, *, label: str) -> None:
+    """Restore shared browser auth after a destructive isolated browser run."""
     snapshot = manifest.get("restore_snapshot")
     if not isinstance(snapshot, dict):
-        raise RuntimeError("Amazon passkey scenario did not capture a restore snapshot")
-    if not _sync_browser_credentials():
-        raise RuntimeError("Amazon passkey scenario could not restore live browser credentials")
-
+        raise RuntimeError(f"{label} scenario did not capture a restore snapshot")
     user = _sql_literal(str(manifest["user_id"]))
+
+    current_profile_ids_sql = (
+        "SELECT COALESCE(json_agg(profile.\"profileId\"), '[]'::json)::text "
+        'FROM "BrowserProviderProfile" profile JOIN "BrowserContext" context '
+        'ON context.id = profile."contextId" '
+        f"WHERE context.\"userId\" = {user} AND profile.provider = 'kernel';"
+    )
+    current_profile_ids = json.loads(_run_local_victoria_sql(current_profile_ids_sql))
+    if not isinstance(current_profile_ids, list):
+        raise RuntimeError(f"{label} restore could not read current Kernel profiles")
+    snapshot_profiles = snapshot.get("profiles")
+    if not isinstance(snapshot_profiles, list):
+        raise RuntimeError(f"{label} restore snapshot has invalid profiles")
+    snapshot_profile_ids = {
+        str(profile.get("profileId"))
+        for profile in snapshot_profiles
+        if isinstance(profile, dict) and profile.get("profileId")
+    }
+    run_created_profile_ids = {
+        str(profile_id) for profile_id in current_profile_ids if profile_id
+    } - snapshot_profile_ids
+    for profile_id in sorted(run_created_profile_ids):
+        _delete_kernel_profile(profile_id)
+
+    if not _sync_browser_credentials():
+        raise RuntimeError(f"{label} scenario could not restore live browser credentials")
 
     def ids_sql(key: str) -> str:
         values = snapshot.get(key)
         if not isinstance(values, list):
-            raise RuntimeError(f"Amazon passkey restore snapshot has invalid {key}")
+            raise RuntimeError(f"{label} restore snapshot has invalid {key}")
         return ", ".join(_sql_literal(str(value)) for value in values)
 
     statements: list[str] = []
@@ -3874,18 +3984,30 @@ def _restore_amazon_passkey_scenario(manifest: dict) -> None:
         'WHERE profile."contextId" = context.id '
         f"AND context.\"userId\" = {user} AND profile.provider = 'kernel'"
     )
-    profiles = snapshot.get("profiles")
-    if not isinstance(profiles, list):
-        raise RuntimeError("Amazon passkey restore snapshot has invalid profiles")
-    if profiles:
-        profiles_json = _sql_literal(json.dumps(profiles, separators=(",", ":")))
+    if snapshot_profiles:
+        profiles_json = _sql_literal(json.dumps(snapshot_profiles, separators=(",", ":")))
         statements.append(
             'INSERT INTO "BrowserProviderProfile" '
             'SELECT * FROM json_populate_recordset(NULL::"BrowserProviderProfile", '
             f"{profiles_json}::json)"
         )
     _run_local_victoria_sql("; ".join(statements) + ";")
-    print("    🧹 Restored shared browser auth after Amazon passkey scenario")
+    print(f"    🧹 Restored shared browser auth after {label} scenario")
+
+
+def _restore_amazon_passkey_scenario(manifest: dict) -> None:
+    """Restore shared browser auth after the destructive passkey-only run."""
+    _restore_isolated_browser_state_scenario(manifest, label="Amazon passkey")
+
+
+def _restore_live_fixture_scenarios(manifests: list[dict]) -> None:
+    """Restore destructive task scenarios in reverse setup order."""
+    for manifest in reversed(manifests):
+        scenario = manifest.get("scenario")
+        if scenario == "fresh_browser_state":
+            _restore_isolated_browser_state_scenario(manifest, label="fresh browser state")
+        elif scenario == "amazon_passkey" or manifest.get("fixture") == "amazon_passkey":
+            _restore_amazon_passkey_scenario(manifest)
 
 
 LIVE_FIXTURE_APPLIERS = {
@@ -6092,6 +6214,18 @@ async def run_single_task(
         # scenario intentionally removes shared browser state and must restore it
         # even when agent creation or evaluation fails.
         live_fixture_manifests = _apply_live_fixtures(task, base_url)
+        if task.browser_profile_mode == "fresh" and not _is_simulate_mode():
+            if not _is_local_base_url(base_url):
+                raise RuntimeError(f"{task.name}: fresh browser state requires an isolated local benchmark stack")
+            live_fixture_manifests.append(
+                _apply_fresh_browser_state_scenario(
+                    LiveFixtureContext(
+                        base_url=base_url,
+                        user_id=_current_benchmark_user_id(),
+                        auth_realm=str(task.browser_auth_realm),
+                    )
+                )
+            )
 
         # Handle attachments: create agent first, upload files, then post file messages
         if all_attachments:
@@ -6684,17 +6818,7 @@ async def run_single_task(
                 _run_plaid_transactions_fixture("cleanup")
             except Exception as exc:
                 print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
-        passkey_manifest = next(
-            (
-                manifest
-                for manifest in live_fixture_manifests
-                if manifest.get("scenario") == "amazon_passkey"
-                or manifest.get("fixture") == "amazon_passkey"
-            ),
-            None,
-        )
-        if passkey_manifest is not None:
-            _restore_amazon_passkey_scenario(passkey_manifest)
+        _restore_live_fixture_scenarios(live_fixture_manifests)
         if previous_benchmark_user_id is None:
             os.environ.pop("BENCHMARK_RUN_USER_ID", None)
         else:
@@ -7373,6 +7497,43 @@ def enforce_cache_ratchets(task_results: list[TaskResult]) -> None:
     raise SystemExit(1)
 
 
+def _parallel_task_runners(
+    tasks: list[BenchmarkTask],
+    max_concurrency: int | None,
+    runner: Callable[[BenchmarkTask], Awaitable[TaskResult]],
+) -> list[Awaitable[TaskResult]]:
+    """Build task runners with batch and shared browser-profile limits.
+
+    Browser sessions persist changes into the benchmark user's provider profile.
+    Two browser-backed tasks therefore cannot safely overlap: whichever session
+    closes last can overwrite cookies, storage, and tabs written by its sibling.
+    Keep that resource exclusive while allowing non-browser work to use the rest
+    of the configured batch concurrency.
+    """
+    semaphore = (
+        asyncio.Semaphore(max_concurrency)
+        if max_concurrency is not None and max_concurrency < len(tasks)
+        else None
+    )
+    browser_profile_writer = asyncio.Semaphore(1)
+
+    async def run_with_batch_limit(task: BenchmarkTask) -> TaskResult:
+        if semaphore is None:
+            return await runner(task)
+        async with semaphore:
+            return await runner(task)
+
+    async def run_limited(task: BenchmarkTask) -> TaskResult:
+        if task.requires_browser_agent:
+            # Acquire the resource-specific lock first so a queued browser task
+            # does not consume a general slot that non-browser work can use.
+            async with browser_profile_writer:
+                return await run_with_batch_limit(task)
+        return await run_with_batch_limit(task)
+
+    return [run_limited(task) for task in tasks]
+
+
 async def main_async(args):
     if args.list:
         print("\nBenchmark Tasks:")
@@ -7725,29 +7886,22 @@ async def main_async(args):
 
             if max_concurrency is None or max_concurrency >= len(parallel_batch):
                 print(f"\n  Running {len(parallel_batch)} tasks in parallel...")
-                task_runners = [
-                    run_single_task(
-                        base_url,
-                        task,
-                        args.keep_failed_agents,
-                        on_agent_created=_remember_live_agent,
-                    )
-                    for task in parallel_batch
-                ]
             else:
                 print(f"\n  Running {len(parallel_batch)} tasks in parallel (max_concurrency={max_concurrency})...")
-                semaphore = asyncio.Semaphore(max_concurrency)
 
-                async def run_limited(task: BenchmarkTask) -> TaskResult:
-                    async with semaphore:
-                        return await run_single_task(
-                            base_url,
-                            task,
-                            args.keep_failed_agents,
-                            on_agent_created=_remember_live_agent,
-                        )
+            async def run_parallel_task(task: BenchmarkTask) -> TaskResult:
+                return await run_single_task(
+                    base_url,
+                    task,
+                    args.keep_failed_agents,
+                    on_agent_created=_remember_live_agent,
+                )
 
-                task_runners = [run_limited(task) for task in parallel_batch]
+            task_runners = _parallel_task_runners(
+                parallel_batch,
+                max_concurrency,
+                run_parallel_task,
+            )
 
             pending_results: dict[asyncio.Task, BenchmarkTask] = {
                 asyncio.create_task(runner, name=f"benchmark-{task.name}"): task
