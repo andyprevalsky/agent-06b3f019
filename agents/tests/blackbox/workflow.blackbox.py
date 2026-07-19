@@ -3242,8 +3242,20 @@ async def test_workflow_run_skips_response_schema_generation_for_subagent():
         _restore_workflow(original_workflow)
 
 
-async def test_workflow_dag_error_never_falls_through_to_run_agent():
-    """A failed DAG is terminal so committed siblings cannot be replayed."""
+async def test_workflow_dag_failure_recovers_via_run_agent():
+    """A single failed planned task must NOT terminate the run.
+
+    Regression guard for commit 500715a5f, which converted a recoverable DAG-task
+    failure into a terminal FAILED (it stopped falling through to run_agent). A
+    failed/stalled DAG must fall through to the LLM loop so the agent CONTINUES
+    ITERATING from the recorded context (completed results + the failure), exactly
+    like the completed-but-unverified DAG path. execute_dag runs once and is never
+    re-entered, so this does not replay the plan.
+
+    ⚠️ Inverting this assertion (run_agent must NOT run / result FAILED on a single
+    task failure) is a deliberate agent-recovery behavior change and requires human
+    approval via /deploy's agent-behavior guard (Step 0b). Do not flip it silently.
+    """
     wf = _bare_workflow_instance()
     fake = _FakeWorkflowModule()
     fake.activity_returns.update(
@@ -3258,6 +3270,11 @@ async def test_workflow_dag_error_never_falls_through_to_run_agent():
             "fetch_agent_config": {
                 "response_schema": {"fields": []},
                 "write_lock_enabled": True,
+            },
+            "generate_completion_summary": {
+                "summary": "Recovered after a failed planned task.",
+                "tool_counts": {},
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             },
         }
     )
@@ -3278,15 +3295,25 @@ async def test_workflow_dag_error_never_falls_through_to_run_agent():
 
     async def fake_execute_dag(**kwargs):
         dag_calls.append(kwargs)
+        # execute_dag signals a recoverable failure via "needs_llm" (never a
+        # terminal status) so the workflow falls through to run_agent.
         return {
-            "status": "error",
+            "status": "needs_llm",
             "context": [{"role": "TOOL", "text": "failed", "metadata": {"error": True}}],
             "message": "Planned task 1 failed during DAG execution.",
         }
 
     async def fake_run_agent(**kwargs):
+        # Reaching run_agent IS the invariant: the failed DAG handed off to the
+        # LLM loop for recovery instead of terminating.
         run_agent_calls.append(kwargs)
-        raise AssertionError("run_agent must not run after a DAG execution error")
+        return {
+            "status": "completed",
+            "context": [{"role": "ASSISTANT", "text": "recovered", "metadata": None}],
+            "structured_response": None,
+            "token_count": 3,
+            "context_size": 30,
+        }
 
     workflow_module.execute_dag = fake_execute_dag
     workflow_module.run_agent = fake_run_agent
@@ -3309,13 +3336,14 @@ async def test_workflow_dag_error_never_falls_through_to_run_agent():
             {},
         )
 
-        assert result == {"status": "failed", "reason": "error", "goal": "Complete the task"}
         assert len(dag_calls) == 1
-        assert run_agent_calls == []
+        # The core regression guard: a failed planned task must reach run_agent.
+        assert run_agent_calls, "failed DAG task must fall through to run_agent recovery, not terminate"
+        assert result == {"status": "completed", "goal": "Complete the task"}
         failed_status_updates = [
             call for call in fake.activity_calls if call[0] == "update_agent_status" and call[1][1] == "FAILED"
         ]
-        assert len(failed_status_updates) == 1
+        assert failed_status_updates == [], "a recoverable DAG-task failure must not mark the agent FAILED"
     finally:
         workflow_module.extract_plan_from_context = original_extract_plan
         workflow_module.execute_dag = original_execute_dag
@@ -4806,8 +4834,8 @@ async def run_all_tests():
         test_workflow_run_skips_response_schema_generation_for_subagent,
     )
     await r.record_async(
-        "wf_dag_error_no_run_agent_replay",
-        test_workflow_dag_error_never_falls_through_to_run_agent,
+        "wf_dag_failure_recovers_via_run_agent",
+        test_workflow_dag_failure_recovers_via_run_agent,
     )
     await r.record_async("wf_handle_tool_event_forwards", test_workflow_handle_tool_event_forwards_to_helper)
     await r.record_async(

@@ -323,7 +323,7 @@ def test_build_param_population_message_spawn_preserves_outer_alias_contract():
         )
 
         assert f"outer planned alias `{alias}`" in msg
-        assert f"`type=\"{override['type']}\"`" in msg
+        assert f'`type="{override["type"]}"`' in msg
         assert "MUST call exactly one tool: `spawn_agent`" in msg
         for field_name in required_fields[alias]:
             assert field_name in msg
@@ -879,7 +879,7 @@ async def test_execute_dag_exhausted_alias_retry_never_replays_committed_sibling
         on_tokens=on_tokens,
     )
 
-    assert result["status"] == "error"
+    assert result["status"] == "needs_llm"
     assert attempts == {"Tokyo": 1, "New York City": 2}
     assert [(name, goal) for name, goal, _id in recorded] == [("spawn_agent", "Research Tokyo")]
     assert len(token_calls) == 3
@@ -906,7 +906,7 @@ async def test_execute_dag_validates_overridden_spawn_payload_before_execution()
         param_tool_calls=lambda _args: [{"tool": "spawn_agent", "type": "general_purpose", "goal": "Research Tokyo"}],
     )
 
-    assert result["status"] == "error"
+    assert result["status"] == "needs_llm"
     assert recorded == []
     assert dag.tasks[0].state.value == "FAILED"
 
@@ -941,13 +941,13 @@ async def test_execute_dag_rejects_multiple_param_tool_calls():
         param_tool_calls=param_tool_calls,
     )
 
-    assert result["status"] == "error"
+    assert result["status"] == "needs_llm"
     assert recorded == []
     assert dag.tasks[0].state.value == "FAILED"
 
 
-async def test_execute_dag_tool_failure_returns_error():
-    """execute_dag returns status=error when a tool reports error."""
+async def test_execute_dag_tool_failure_returns_needs_llm():
+    """execute_dag returns status=needs_llm (recoverable) when a tool reports error."""
     plan_data = {
         "tasks": [{"goal": "bad task", "tool_name": "web_search"}],
         "dependencies": {},
@@ -958,7 +958,7 @@ async def test_execute_dag_tool_failure_returns_error():
 
     result, events, dag = await _run_execute_dag(plan_data, execute_tool_impl=execute_tool)
 
-    assert result["status"] == "error"
+    assert result["status"] == "needs_llm"
     assert dag.tasks[0].state.value == "FAILED"
 
 
@@ -974,7 +974,7 @@ async def test_execute_dag_exception_in_tool_yields_error_event():
 
     result, events, dag = await _run_execute_dag(plan_data, execute_tool_impl=execute_tool)
 
-    assert result["status"] == "error"
+    assert result["status"] == "needs_llm"
     # should have an ERROR tool_event posted via handle_tool_event_fn
     error_events = [e for e in events if e["type"] == "tool_event" and e["tool_name"] == "web_search"]
     assert len(error_events) >= 1
@@ -1062,15 +1062,13 @@ async def test_execute_dag_terminalizes_canceled_sibling_tool_event():
         param_tool_calls=param_tool_calls,
     )
 
-    assert result["status"] == "error"
+    assert result["status"] == "needs_llm"
 
     # The SlowSibling (task index 1) emitted an early IN_PROGRESS chip.
     sibling_in_progress = [
         e
         for e in events
-        if e["type"] == "tool_event"
-        and e["status"] == "IN_PROGRESS"
-        and e["metadata"].get("dagTaskIndex") == 1
+        if e["type"] == "tool_event" and e["status"] == "IN_PROGRESS" and e["metadata"].get("dagTaskIndex") == 1
     ]
     assert len(sibling_in_progress) == 1
     sibling_id = sibling_in_progress[0]["tool_call_id"]
@@ -1079,9 +1077,7 @@ async def test_execute_dag_terminalizes_canceled_sibling_tool_event():
     sibling_terminal = [
         e
         for e in events
-        if e["type"] == "tool_event"
-        and e["tool_call_id"] == sibling_id
-        and e["status"] not in (None, "IN_PROGRESS")
+        if e["type"] == "tool_event" and e["tool_call_id"] == sibling_id and e["status"] not in (None, "IN_PROGRESS")
     ]
     assert len(sibling_terminal) >= 1, f"canceled sibling chip {sibling_id} not terminalized: {events}"
     assert sibling_terminal[0]["metadata"].get("canceled") is True
@@ -1158,7 +1154,7 @@ async def run_all_tests():
         "execute_dag_rejects_multiple_param_tool_calls",
         test_execute_dag_rejects_multiple_param_tool_calls,
     )
-    await r.record_async("execute_dag_tool_failure_returns_error", test_execute_dag_tool_failure_returns_error)
+    await r.record_async("execute_dag_tool_failure_returns_needs_llm", test_execute_dag_tool_failure_returns_needs_llm)
     await r.record_async(
         "execute_dag_exception_in_tool_yields_error_event", test_execute_dag_exception_in_tool_yields_error_event
     )
