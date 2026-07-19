@@ -31,10 +31,26 @@ import { SUPERVISOR_RESPONSE_MODEL } from './schema';
 import { appendOutboundSms } from './sessionStore';
 import * as environment from './environmentMessages';
 import { loadBlackboxSupervisorResponseFixture } from './supervisorFixtures';
+import { callWithRetries, dispatchToolSafely } from './supervisorResilience';
 
 const log = createLogger('SmsSupervisor');
 
 const SMS_SUPERVISOR_MODEL = 'rose-labs/rose-1-lite';
+
+// A single supervisor round's LLM call is retried this many times when the
+// stream *throws* (network blip, peer-closed / [NO END] mid-stream, socket
+// timeout, a single 429 slipping past Rose's internal provider race). Rose
+// already races providers, so the residual throw class is transient; retrying
+// with a short backoff turns "Sorry, something went wrong" into a real answer.
+const SUPERVISOR_LLM_ATTEMPTS = 3;
+const SUPERVISOR_LLM_RETRY_BASE_DELAY_MS = 400;
+
+// User-facing last-resort line when a run genuinely cannot produce a reply after
+// exhausting retries. Deliberately warmer + actionable than a bare "something
+// went wrong", and delivered through the seq-gated deliverUserMessage path so it
+// never double-sends or races a newer inbound.
+export const SUPERVISOR_FALLBACK_MESSAGE =
+  "Sorry — I hit a snag on my end and couldn't get to that one. Please send it again in a moment.";
 
 /**
  * Per-user commit lock. Held while a run flushes pendingWrites + sends SMS +
@@ -260,9 +276,35 @@ export async function handleSmsSupervisorMessage(config: {
       ),
     });
 
-    // Call LLM
+    // Call LLM. A thrown stream error (peer-closed mid-stream, socket timeout,
+    // a stray 429) is retried with backoff INSIDE the round so a transient blip
+    // never escapes to the webhook's generic "something went wrong". If every
+    // retry throws, the LLM is genuinely unreachable this round — stop hammering
+    // it across all remaining rounds and fall through to the graceful terminal
+    // net below (which delivers SUPERVISOR_FALLBACK_MESSAGE only if nothing was
+    // sent yet, seq-gated + persisted).
     const llmStart = Date.now();
-    const llmResponse = await callSupervisorLlm(messages, computeToken, userId);
+    let llmResponse: SupervisorResponse;
+    try {
+      llmResponse = await callWithRetries(() => callSupervisorLlm(messages, computeToken, userId), {
+        attempts: SUPERVISOR_LLM_ATTEMPTS,
+        baseDelayMs: SUPERVISOR_LLM_RETRY_BASE_DELAY_MS,
+        onRetry: (attempt, error) =>
+          log.warn('[SmsSupervisor] LLM call threw; retrying round', {
+            round,
+            attempt,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+      });
+    } catch (error) {
+      log.error('[SmsSupervisor] LLM call failed after retries; degrading gracefully', {
+        round,
+        attempts: SUPERVISOR_LLM_ATTEMPTS,
+        alreadySent: sentMessages.length,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      break;
+    }
 
     log.info('[SmsSupervisor] LLM response received', {
       round,
@@ -284,7 +326,10 @@ export async function handleSmsSupervisorMessage(config: {
     let terminalFailureReported = false;
     for (const toolCall of dispatchCalls) {
       const toolStart = Date.now();
-      const result =
+      // dispatchToolSafely converts a THROWN tool/environment error into a
+      // failure result so it feeds back to the model instead of escaping the
+      // loop into the generic top-level apology.
+      const result = await dispatchToolSafely(toolCall.tool, async () =>
         toolCall.tool === 'get_environment'
           ? {
               tool: 'get_environment',
@@ -294,7 +339,8 @@ export async function handleSmsSupervisorMessage(config: {
                 inboundAlreadyPersisted ? mySeq : undefined
               ),
             }
-          : await dispatchToolCall(toolCall, userId, pendingWrites, invocationContext);
+          : await dispatchToolCall(toolCall, userId, pendingWrites, invocationContext)
+      );
       toolResults.push(result);
       allToolsExecuted.push(toolCall.tool);
 
@@ -461,7 +507,7 @@ export async function handleSmsSupervisorMessage(config: {
   }
 
   if (!completionAccepted && sentMessages.length === 0 && !abortSignal?.aborted) {
-    await deliverUserMessage('Sorry, I had trouble processing that. Please try again.');
+    await deliverUserMessage(SUPERVISOR_FALLBACK_MESSAGE);
   }
 
   const committed = sentMessages.length > 0;

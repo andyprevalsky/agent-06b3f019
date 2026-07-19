@@ -33,8 +33,15 @@ import {
 } from '../../providers/rose/structuredOutput';
 import {
   finalizeSupervisorResponse,
+  SUPERVISOR_FALLBACK_MESSAGE,
   type SupervisorResponse,
 } from '../../providers/smsSupervisor/supervisorHandler';
+import {
+  callWithRetries,
+  dispatchToolSafely,
+} from '../../providers/smsSupervisor/supervisorResilience';
+
+const noSleep = async (): Promise<void> => {};
 
 /**
  * A no-actionable-output round must surface as an empty tool_calls response so
@@ -166,13 +173,106 @@ function testValidStructuredAnswerPassesThrough(): void {
   assert.equal(res.tool_calls[0].arguments.message, 'Try Wingstop on 5th.');
 }
 
-function main(): void {
+/**
+ * A transient LLM/stream throw (peer-closed mid-stream, socket timeout, a stray
+ * 429) must NOT reach the user. callWithRetries retries the round and returns
+ * the first success, so a blip that recovers on retry yields a real answer
+ * instead of "Sorry, something went wrong".
+ */
+async function testLlmRetrySucceedsAfterTransientThrows(): Promise<void> {
+  let calls = 0;
+  const result = await callWithRetries(
+    async () => {
+      calls += 1;
+      if (calls < 3) throw new Error('peer closed connection');
+      return 'answered';
+    },
+    { attempts: 3, baseDelayMs: 1, sleep: noSleep }
+  );
+  assert.equal(result, 'answered', 'retry should return the first success');
+  assert.equal(calls, 3, 'should have retried until the third attempt succeeded');
+}
+
+/**
+ * When every attempt throws (LLM genuinely unreachable this round), callWithRetries
+ * rethrows the LAST error after exhausting the budget — the loop catches it and
+ * degrades to the seq-gated fallback rather than spinning forever.
+ */
+async function testLlmRetryRethrowsAfterExhaustion(): Promise<void> {
+  let calls = 0;
+  await assert.rejects(
+    () =>
+      callWithRetries(
+        async () => {
+          calls += 1;
+          throw new Error(`down attempt ${calls}`);
+        },
+        { attempts: 3, baseDelayMs: 1, sleep: noSleep }
+      ),
+    /down attempt 3/,
+    'should rethrow the last error after all attempts fail'
+  );
+  assert.equal(calls, 3, 'should have made exactly `attempts` calls');
+}
+
+/**
+ * A thrown tool/environment error (e.g. a Prisma blip in refreshEnvironmentSnapshot)
+ * must become a failure ToolResult, not escape the loop into the generic apology.
+ */
+async function testDispatchToolSafelyConvertsThrowToFailure(): Promise<void> {
+  const res = await dispatchToolSafely('get_environment', async () => {
+    throw new Error('P2024 pool timeout');
+  });
+  assert.equal(res.success, false, 'thrown tool error must degrade to a failure result');
+  assert.equal(res.tool, 'get_environment', 'tool name must be preserved for the model');
+  assert.match(
+    res.error ?? '',
+    /P2024 pool timeout/,
+    'error message must be surfaced to the model'
+  );
+}
+
+/**
+ * A tool that succeeds passes through untouched (no spurious failure wrapping).
+ */
+async function testDispatchToolSafelyPassesThroughSuccess(): Promise<void> {
+  const res = await dispatchToolSafely('spawn_agent', async () => ({
+    tool: 'spawn_agent',
+    success: true,
+    result: 'spawned',
+  }));
+  assert.equal(res.success, true, 'a successful tool result must pass through');
+  assert.equal(res.result, 'spawned');
+}
+
+/**
+ * Guard the last-resort line stays warm + actionable — never regresses back to
+ * the bare "something went wrong" dead-end this whole change set removes.
+ */
+function testFallbackMessageStaysWarm(): void {
+  assert.ok(SUPERVISOR_FALLBACK_MESSAGE.length > 0, 'fallback message must be non-empty');
+  assert.doesNotMatch(
+    SUPERVISOR_FALLBACK_MESSAGE,
+    /something went wrong/i,
+    'fallback must not regress to the bare "something went wrong" dead-end'
+  );
+}
+
+async function main(): Promise<void> {
   testReasoningOnlyStreamDoesNotThrow();
   testIgnoredPhaseOnlyStreamDoesNotThrow();
   testAmbiguousMultiItemStreamDoesNotThrow();
   testNativeToolCallsPassThrough();
   testValidStructuredAnswerPassesThrough();
-  console.log('PASS sms-supervisor-stream (5 cases)');
+  await testLlmRetrySucceedsAfterTransientThrows();
+  await testLlmRetryRethrowsAfterExhaustion();
+  await testDispatchToolSafelyConvertsThrowToFailure();
+  await testDispatchToolSafelyPassesThroughSuccess();
+  testFallbackMessageStaysWarm();
+  console.log('PASS sms-supervisor-stream (10 cases)');
 }
 
-main();
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

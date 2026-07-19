@@ -16,7 +16,10 @@ import type { SurgeAttachment } from './types';
 import { getTemporalClient } from '../../providers/temporal';
 import { sendSms } from '../../providers/smsQueue';
 import { createSignupBonusCredit } from '../../providers/credits';
-import { handleSmsSupervisorMessage } from '../../providers/smsSupervisor';
+import {
+  handleSmsSupervisorMessage,
+  SUPERVISOR_FALLBACK_MESSAGE,
+} from '../../providers/smsSupervisor';
 import { createLogger } from '../../providers/logger';
 import { recordInboundSms } from '../../providers/smsSupervisor/sessionStore';
 
@@ -207,7 +210,7 @@ export async function routeToSupervisor(
             });
             return;
           }
-          await sendSms(fromPhone, 'Sorry, something went wrong. Please try again.');
+          await sendSms(fromPhone, SUPERVISOR_FALLBACK_MESSAGE);
         })
         .catch((smsError) => {
           log.error('Failed to send error SMS', {
