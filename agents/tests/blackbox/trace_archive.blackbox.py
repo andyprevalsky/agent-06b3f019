@@ -627,7 +627,8 @@ async def test_backend_failure_spools_encrypted_outbox_and_async_drain():
     from helpers.trace_archive import archive_json
 
     with tempfile.TemporaryDirectory() as tmp:
-        restore = _with_archive_env(tmp)
+        archive_root = Path(tmp) / "archive"
+        restore = _with_archive_env(str(archive_root))
         old_env = {
             "FLY_APP_NAME": os.environ.get("FLY_APP_NAME"),
             "TRACE_ARCHIVE_BACKEND": os.environ.get("TRACE_ARCHIVE_BACKEND"),
@@ -672,7 +673,7 @@ async def test_backend_failure_spools_encrypted_outbox_and_async_drain():
 
             failed = archive_json(root_agent_id="agent-outbox", path="llm/failed.json.gz.enc", payload={"n": 1})
             assert failed is None
-            pending = Path(tmp).parent / "trace-archive-outbox" / "agent-outbox" / "llm" / "failed.json.gz.enc"
+            pending = archive_root.parent / "trace-archive-outbox" / "agent-outbox" / "llm" / "failed.json.gz.enc"
             assert pending.exists()
             assert pending.with_suffix(pending.suffix + ".meta.json").exists()
 
