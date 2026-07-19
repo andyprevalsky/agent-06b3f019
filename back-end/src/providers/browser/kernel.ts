@@ -30,6 +30,17 @@ const log = createLogger('Kernel');
 
 class KernelSessionValidationError extends Error {}
 
+/**
+ * Kernel profiles persist Chromium's open pages along with cookies and storage.
+ * Close only the restored pages so every browser session starts with an empty
+ * tab set while retaining the rest of the profile state.
+ */
+export async function resetKernelSessionTabs(browser: Browser): Promise<number> {
+  const pages = browser.contexts().flatMap((context) => context.pages());
+  await Promise.all(pages.map((page) => page.close({ runBeforeUnload: false })));
+  return pages.length;
+}
+
 type KernelProxySelection = {
   proxyId?: string;
   proxyKey?: string;
@@ -158,6 +169,10 @@ async function createRemoteSession(
           headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
           stealth,
           gpu: browserProviderEnabled('KERNEL_GPU_ENABLED', false),
+          // Do not let Chromium reopen the profile's previous window. The new-tab
+          // page created by this policy is closed below along with any unexpected
+          // restored pages, leaving the validated session with zero tabs.
+          chrome_policy: { RestoreOnStartup: 5 },
           timeout_seconds: kernelTimeoutSeconds(),
           viewport: { width: 1280, height: 800, refresh_rate: 60 },
           ...(profile.profileId !== null
@@ -169,16 +184,31 @@ async function createRemoteSession(
 
         const validationBrowser = await connectValidatedBrowser(session.cdp_ws_url);
         if (validationBrowser !== null) {
-          return {
-            sessionId: session.session_id,
-            debugUrl: readOnlyLiveView(session.browser_live_view_url),
-            wsUrl: session.cdp_ws_url,
-            proxySource: proxy.proxySource,
-            proxyLocation: proxy.proxyLocation,
-            profileId: session.profile?.id ?? profile.profileId,
-            profileSource: profile.profileSource,
-            validationBrowser,
-          };
+          try {
+            const closedTabCount = await resetKernelSessionTabs(validationBrowser);
+            log.info('Reset restored Kernel profile tabs', {
+              sessionId: session.session_id,
+              closedTabCount,
+            });
+            return {
+              sessionId: session.session_id,
+              debugUrl: readOnlyLiveView(session.browser_live_view_url),
+              wsUrl: session.cdp_ws_url,
+              proxySource: proxy.proxySource,
+              proxyLocation: proxy.proxyLocation,
+              profileId: session.profile?.id ?? profile.profileId,
+              profileSource: profile.profileSource,
+              validationBrowser,
+            };
+          } catch (error) {
+            await validationBrowser.close().catch(() => {});
+            await deleteKernelBrowser(session.session_id).catch(() => {});
+            throw new KernelSessionValidationError(
+              `Kernel session ${session.session_id} failed tab reset: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            );
+          }
         }
 
         await deleteKernelBrowser(session.session_id).catch((error) => {
@@ -365,7 +395,7 @@ export async function resumeKernelSession(taskId: string): Promise<BrowserProvid
     const { chromium } = await import('playwright');
     const browser = await chromium.connectOverCDP(remote.wsUrl);
     const context = browser.contexts()[0];
-    const page = context.pages()[0];
+    const page = context.pages()[0] ?? (await context.newPage());
     await page.goto(savedUrl, { waitUntil: 'domcontentloaded', timeout: 10_000 }).catch(() => {});
     await browser.close().catch(() => {});
   }
