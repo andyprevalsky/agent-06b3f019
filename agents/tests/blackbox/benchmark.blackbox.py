@@ -980,9 +980,11 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     production = get_task_by_name("agent-payment-production-abandonment")
     assert production.production_only is True
     assert production.payment_card_request_action == "abandon"
-    assert production.expected_payment_receipt["totalCents"] == 50
+    assert "exactly $1.00" in production.prompt
+    assert production.expected_payment_receipt["totalCents"] == 100
     assert production.expected_payment_lifecycle["purchase"]["status"] == "VOIDED"
-    assert production.expected_payment_lifecycle["stripeRefund"]["amountCents"] == 50
+    assert production.expected_payment_lifecycle["stripeRefund"]["amountCents"] == 100
+    assert production.expected_payment_lifecycle["orgTransfer"]["amountCents"] == 100
     assert production.expected_payment_lifecycle["orgTransfer"]["livemode"] is True
     assert production.name not in {task.name for task in suite_tasks()}
 

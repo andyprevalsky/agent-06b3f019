@@ -2845,7 +2845,7 @@
   {
     "name": "agent-payment-production-abandonment",
     "title": "Agent Payment Production Lifecycle",
-    "prompt": "Use one browser agent to go to {frontend_url}/test_payment?benchmark=agentcard-live-lifecycle. Prepare the visible Rose Labs Test Payment checkout for the single Agent Card Lifecycle Probe item. Request a one-time payment card for exactly $0.50. Do not click Place order and do not submit payment.",
+    "prompt": "Use one browser agent to go to {frontend_url}/test_payment?benchmark=agentcard-live-lifecycle. Prepare the visible Rose Labs Test Payment checkout for the single Agent Card Lifecycle Probe item. Request a one-time payment card for exactly $1.00. Do not click Place order and do not submit payment.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -2894,15 +2894,15 @@
     "expected_payment_receipt": {
       "merchant": "Rose Labs Test Payment",
       "currency": "USD",
-      "subtotalCents": 50,
-      "totalCents": 50,
+      "subtotalCents": 100,
+      "totalCents": 100,
       "lineItems": [
         {
           "name": "Agent Card Lifecycle Probe",
           "imageUrl": "https://placehold.co/320x220/png?text=Agent+Card+Lifecycle+Probe",
-          "unitPriceCents": 50,
+          "unitPriceCents": 100,
           "quantity": 1,
-          "lineTotalCents": 50
+          "lineTotalCents": 100
         }
       ],
       "fees": []
@@ -2911,30 +2911,30 @@
       "purchase": {
         "status": "VOIDED",
         "merchant": "Rose Labs Test Payment",
-        "totalCents": 50
+        "totalCents": 100
       },
       "walletFunding": {
         "status": "RECLAIMED",
-        "amountCents": 50
+        "amountCents": 100
       },
       "stripeHold": {
         "status": "succeeded",
-        "amountCents": 50,
+        "amountCents": 100,
         "amountCapturableCents": 0,
-        "amountReceivedCents": 50
+        "amountReceivedCents": 100
       },
       "stripeRefund": {
         "status": "succeeded",
-        "amountCents": 50
+        "amountCents": 100
       },
       "agentCard": {
         "balanceCents": 0
       },
       "orgTransfer": {
         "status": "reclaimed",
-        "amountCents": 50,
-        "transferredCents": 50,
-        "releasedCents": 50,
+        "amountCents": 100,
+        "transferredCents": 100,
+        "releasedCents": 100,
         "livemode": true
       },
       "attention": {

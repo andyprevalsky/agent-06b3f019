@@ -41,7 +41,7 @@ export const LIVE_LIFECYCLE_ITEM: TestPaymentItem = {
   name: 'Agent Card Lifecycle Probe',
   description: 'Single-use checkout verification item.',
   imageUrl: 'https://placehold.co/320x220/png?text=Agent+Card+Lifecycle+Probe',
-  priceCents: 50,
+  priceCents: 100,
   productUrl: '/p/agentcard-lifecycle-probe',
   rating: '5.0 stars',
   reviewCount: '128 reviews',
