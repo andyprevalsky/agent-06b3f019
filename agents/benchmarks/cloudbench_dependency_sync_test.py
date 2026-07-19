@@ -24,6 +24,8 @@ FLEET_SCRIPT = ROOT / "scripts" / "run-bench-fleet"
 CLOUD_SCRIPT = ROOT / "scripts" / "run-bench-cloud"
 PREDEPLOY_SCRIPT = ROOT / "scripts" / "run-predeploy-cloud"
 PREDEPLOY_LOCAL_SCRIPT = ROOT / "scripts" / "run-predeploy-local"
+PREDEPLOY_METRICS_SCRIPT = ROOT / "agents" / "benchmarks" / "predeploy_metrics.py"
+LOGGED_COMMAND_SCRIPT = ROOT / "scripts" / "run_logged_command.py"
 RUN_BENCH_SCRIPT = ROOT / "scripts" / "run-bench"
 STACK_SCRIPT = ROOT / "scripts" / "run.sh"
 LOCAL_RUNNER = ROOT / "agents" / "benchmarks" / "local.py"
@@ -3082,6 +3084,10 @@ def test_local_predeploy_skips_wmh_and_wmh_logs_survive_agent_chdir(tmp_path: Pa
     (fixture / "scripts").mkdir(parents=True)
     (fixture / "agents" / "benchmarks").mkdir(parents=True)
     (fixture / "scripts" / "run-predeploy-local").write_text(predeploy)
+    (fixture / "scripts" / "run_logged_command.py").write_text(LOGGED_COMMAND_SCRIPT.read_text())
+    (fixture / "agents" / "benchmarks" / "predeploy_metrics.py").write_text(
+        PREDEPLOY_METRICS_SCRIPT.read_text()
+    )
     (fixture / "agents" / "benchmarks" / "tasks.json").write_text(
         json.dumps([{"name": "smoke-fixture", "tags": ["smoke"]}])
     )
@@ -3090,6 +3096,13 @@ def test_local_predeploy_skips_wmh_and_wmh_logs_survive_agent_chdir(tmp_path: Pa
         '#!/usr/bin/env bash\nprintf "%s\\n" "${BENCHMARK_SKIP_WMH_BUILD:-unset}" "$*" > "$CAPTURE"\n'
     )
     (fixture / "scripts" / "run-bench").chmod(0o755)
+    subprocess.run(["git", "init", "-q", str(fixture)], check=True)
+    subprocess.run(
+        ["git", "-C", str(fixture), "config", "user.email", "test@example.com"], check=True
+    )
+    subprocess.run(["git", "-C", str(fixture), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(fixture), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(fixture), "commit", "-qm", "fixture"], check=True)
     result = subprocess.run(
         ["bash", str(fixture / "scripts" / "run-predeploy-local")],
         env={**os.environ, "CAPTURE": str(capture)},
