@@ -149,6 +149,12 @@ async function main(): Promise<void> {
   });
   assert.deepEqual(paddedArgs, { cardholder_id: 'ch-padded' });
 
+  // KYC-specific keys take precedence over a generic transport `status`.
+  const precedenceStatus = await getOrgCardholderVerificationStatus('ch-both', {
+    callOrgTool: async () => toolResult({ status: 'ok', kyc_status: 'verified' }),
+  });
+  assert.equal(precedenceStatus, 'verified');
+
   process.stdout.write('AgentCard org onboarding tests passed\n');
 }
 

@@ -138,7 +138,11 @@ export async function getOrgCardholderVerificationStatus(
   const result = resultRecord(
     await callTool('get_cardholder_kyc_status', { cardholder_id: trimmedCardholderId })
   );
-  return stringField(result, ['status', 'kyc_status', 'kycStatus']) ?? 'unknown';
+  // Prefer the KYC-specific keys over a generic transport `status`: a payload
+  // carrying both (e.g. status:"ok" + kyc_status:"verified") must report the
+  // terminal KYC state, not the transport state, or a verified cardholder is
+  // wrongly treated as not ready.
+  return stringField(result, ['kyc_status', 'kycStatus', 'status']) ?? 'unknown';
 }
 
 export async function refreshOrgCardholderStatus(
