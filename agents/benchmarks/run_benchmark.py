@@ -490,6 +490,12 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     explicit = os.environ.get("BENCHMARK_FRONTEND_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
+    # Production/remote runs target the public prod frontend, never a local
+    # run.sh ngrok tunnel: any non-localhost base_url is a remote (prod) backend,
+    # so short-circuit to roselabs.ai BEFORE consulting any local-stack signal
+    # (PUBLIC_BASE_URL / services.json), which can carry a stale ngrok public URL
+    # left over from a concurrent local stack and would otherwise hijack a live
+    # prod run to an unreachable tunnel.
     parsed = urlparse(base_url)
     if parsed.hostname not in {"localhost", "127.0.0.1"}:
         return "https://roselabs.ai"
