@@ -153,9 +153,32 @@ bash scripts/run-deploy-stage prompt-approval -- bash scripts/check-prompt-human
 
 Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisfy the guard. Do not pass it until explicit human approval has been retrieved in this deploy flow for the current prompt diff. Record `Prompt Human Approval Guard | Pass | human approval retrieved for prompt edits` in `TEST_REPORT`.
 
+## Step 0b: Agent recovery / terminal-behavior human-approval guard (no skip — always runs)
+
+The prompt guard (Step 0p) only catches changes to **LLM-visible text**. It cannot catch a change to **agent control-flow semantics** — flipping a recoverable failure into a terminal one, deleting a recovery fall-through, or inverting a recovery-invariant test. Those are as consequential as a prompt change but invisible to a text-only gate, and **an automated test cannot validate that the new behavior is the correct product decision** (the author just updates the test to match — all green). Regression precedent: commit `500715a5f` turned every single-planned-task DAG failure into a terminal agent FAILED instead of continuing iteration, and shipped green because its blackbox test was rewritten to bless the new behavior.
+
+This guard scans the narrow agent control-flow layer (`agents/loop/run_agent.py`, `agents/loop/dag_executor.py`, `agents/workflows/agent_workflow.py`) and its behavior tests (`agents/tests/blackbox/{workflow,dag_executor,workflow_determinism}.blackbox.py`) for **hunks that change recovery vs. terminal semantics** — status/reason literals (`error`/`failed`/`aborted`/`max_iterations`/`needs_llm`/`completed`/`paused`), `_handle_incomplete`/`_mark_failed`/`_mark_complete`/`run_agent(` fall-through, `continue_as_new`, or a recovery-invariant test assertion (`run_agent_calls`, "must not run", `recovers_via`, result-status dicts). Comment- and logging-only edits are stripped so they do not trip it.
+
+Run the guard without the approval flag first:
+
+```bash
+bash scripts/run-deploy-stage agent-behavior-approval -- bash scripts/check-agent-behavior-approval.sh
+```
+
+If it passes (no watched-file change, or no recovery/terminal-semantics hunk), record `Agent Behavior Approval Guard | Pass | no agent-behavior changes detected` in `TEST_REPORT`.
+
+If it fails, examine every flagged hunk. Unlike Step 0p there is no "code-behavior only" bypass — a flagged hunk **is** an agent-behavior change by construction. Stop and request explicit human approval for it (show the hunk and state, in one line, how it changes when the agent gives up vs. keeps iterating). Approval is snapshot-scoped exactly like the prompt gate: if later fixes add or change recovery/terminal hunks, re-run without the flag and request fresh approval. After the human approves, rerun with the mandatory flag:
+
+```bash
+bash scripts/run-deploy-stage agent-behavior-approval -- bash scripts/check-agent-behavior-approval.sh mandatory-human-approval-retrieved=true
+```
+
+Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies the guard. Record `Agent Behavior Approval Guard | Pass | human approval retrieved for agent-behavior edits` in `TEST_REPORT`.
+
 **Execution model for Steps 1–4a (run in this order):**
 
 1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them, then rerun Step 0p with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change prompt/instruction files, return to Step 0p without the flag and request fresh approval for those additional prompt changes.
+1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them, then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
 2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1r (`research fmt/lint --fix`, skip if `CHANGED_RESEARCH` is empty) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
 3. **Parallel verifiers** (all read-only, independent — run in a single message with multiple Bash tool calls):
    - Step 2b: `eslint` verify (0 errors)
@@ -239,9 +262,10 @@ If any invariant fails, fix the violation. The test output includes remediation 
 ```bash
 bash scripts/tests/workspace-env.test.sh
 bash scripts/tests/semantic-deploy-gate.test.sh
+bash scripts/tests/check-agent-behavior-approval.test.sh
 ```
 
-These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate wired into every run.
+These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
 
 ## Step 4a: Code coverage check (skip if no back-end/ changes)
 

@@ -99,7 +99,11 @@ async def test_dag_reasoning_oversize_context_fails_fast():
             handle_tool_event_fn=handle_tool_event_fn,
         )
 
-    assert result["status"] == "error"
+    # A failed DAG task is recoverable: execute_dag returns "needs_llm" so the
+    # workflow falls through to run_agent (LLM loop) instead of terminating. The
+    # payload guard's contract still holds — it fails fast (no execute_activity),
+    # surfaces a visible ERROR tool event, and marks the task FAILED.
+    assert result["status"] == "needs_llm"
     tool_events = [e for e in events if e["type"] == "tool_event"]
     assert any("execute_reasoning_activity" in (e.get("message") or "") for e in tool_events), (
         f"expected a visible ERROR tool event mentioning the activity; got {tool_events}"
