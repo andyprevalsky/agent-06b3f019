@@ -85,7 +85,7 @@ describe('test-payment Confirmation receipt', () => {
       />,
     );
     expect(screen.getByText('Agent Card Lifecycle Probe x1')).toBeInTheDocument();
-    expect(screen.getByTestId('test-payment-checkout-reference')).toHaveTextContent('TP-CART-50');
+    expect(screen.getByTestId('test-payment-checkout-reference')).toHaveTextContent('TP-CART-100');
     expect(screen.queryByText('Tax')).not.toBeInTheDocument();
     expect(screen.queryByText('Shipping')).not.toBeInTheDocument();
   });
@@ -96,7 +96,7 @@ describe('test-payment Confirmation receipt', () => {
 
     expect(screen.getByRole('heading', { name: 'Test Payment' })).toBeInTheDocument();
     expect(screen.getByText('Agent Card Lifecycle Probe')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Place order $0.50' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Place order $1.00' })).toBeEnabled();
   });
 
   it('issues cards without allowing merchant submission in the abandonment fixture', async () => {
