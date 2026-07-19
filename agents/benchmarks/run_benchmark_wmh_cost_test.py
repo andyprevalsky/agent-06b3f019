@@ -89,33 +89,39 @@ def _fixture_ctx():
     )
 
 
-def test_base_live_fixture_skips_browser_creds_in_simulate(monkeypatch):
-    """Simulate mode: the WMH mocks env tools, so the heavy 21k-cookie browser
-    credential sync is skipped (it otherwise blows the 180s budget on a throttled
-    uplink and stalls agent creation). Compute tokens are still refreshed."""
+def test_live_fixture_skips_entire_overlay_in_simulate(monkeypatch):
+    """Simulation must not apply a partial production-credential overlay."""
     monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "simulate")
     calls = []
     monkeypatch.setattr(rb, "_sync_compute_tokens", lambda: calls.append("compute") or True)
     monkeypatch.setattr(rb, "_sync_browser_credentials", lambda: calls.append("browser"))
 
-    manifest = rb._apply_base_live_fixture(_fixture_ctx())
+    manifest = rb._apply_live_fixture(_fixture_ctx())
 
-    assert calls == ["compute"]  # browser cred sync NOT called
-    assert manifest == {"fixture": "base", "browser_credentials": False}
+    assert calls == []
+    assert manifest == {"fixture": "live", "skipped": True, "reason": "simulate"}
 
 
-def test_base_live_fixture_syncs_browser_creds_when_live(monkeypatch):
-    """Real (non-simulate) mode still refreshes cookies/passwords — live tasks
-    exercise real browser auth."""
+def test_live_fixture_syncs_complete_browser_auth_when_real(monkeypatch):
     monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "real")
     calls = []
     monkeypatch.setattr(rb, "_sync_compute_tokens", lambda: calls.append("compute") or True)
     monkeypatch.setattr(rb, "_sync_browser_credentials", lambda: calls.append("browser") or True)
 
-    manifest = rb._apply_base_live_fixture(_fixture_ctx())
+    manifest = rb._apply_live_fixture(_fixture_ctx())
 
     assert calls == ["compute", "browser"]
-    assert manifest == {"fixture": "base", "browser_credentials": True}
+    assert manifest == {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
+
+
+def test_local_run_refreshes_compute_tokens_without_live_browser_state(monkeypatch):
+    calls = []
+    monkeypatch.setattr(rb, "_sync_compute_tokens", lambda: calls.append("compute") or True)
+
+    rb._refresh_local_compute_tokens_for_run("http://localhost:3001")
+    rb._refresh_local_compute_tokens_for_run("https://api.roselabs.ai")
+
+    assert calls == ["compute"]
 
 
 def test_is_simulate_mode_reads_env(monkeypatch):

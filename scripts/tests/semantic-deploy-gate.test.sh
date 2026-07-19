@@ -67,9 +67,21 @@ require_text "$DEPLOY_COMMAND" "Semantic tests run on every /deploy and may neve
 require_text "$DEPLOY_COMMAND" "SEMANTIC_WORKERS=4" "/deploy local semantic gate must use four workers"
 require_text "$DEPLOY_COMMAND" 'export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMANTIC_QUEUE_WORKSPACE}-deploy-' "/deploy must mint a unique Temporal queue before starting services"
 require_text "$DEPLOY_COMMAND" 'LOCAL_DB_PORT=$((CONDUCTOR_PORT + 5))' "/deploy DB preflight must use run.sh's actual database port"
-require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=1' "/deploy semantic stack must not spend resources on unrelated benchmark workers or WMH"
+require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8' "/deploy stack must run enough benchmark workers (8) for the blackbox agent suite it also serves — a single worker saturates under the full-domain load"
 require_text "$DEPLOY_COMMAND" 'TRACE_ARCHIVE_ENABLED=0' "/deploy lifecycle measurements must disable the out-of-band trace recorder"
 require_text "$DEPLOY_COMMAND" "gh workflow run chat-lifecycle-ratchet.yml" "/deploy must dispatch the production semantic gate"
 require_text "$DEPLOY_COMMAND" 'gh run watch "$SEMANTIC_RUN_ID" --exit-status' "/deploy must block on production semantic success"
+
+# Bind the replay opt-in to the actual run.sh launch block. A free-floating
+# mention in explanatory prose must not satisfy this contract.
+DEPLOY_STACK_LAUNCH=$(awk '
+  /BENCHMARK_BUNDLED_FRONTEND=true/ { capture=1 }
+  capture { print }
+  capture && /bash scripts\/run.sh --benchmark/ { exit }
+' "$DEPLOY_COMMAND")
+grep -Fq 'BLACKBOX_TEST_REPLAY_OUTBOUND=1' <<<"$DEPLOY_STACK_LAUNCH" || \
+  fail "/deploy run.sh launch must opt the existing-backend blackbox stack into fixture replay"
+grep -Fq 'bash scripts/run.sh --benchmark' <<<"$DEPLOY_STACK_LAUNCH" || \
+  fail "/deploy replay assertion must be bound to the run.sh benchmark launch"
 
 echo "All semantic deploy gate checks passed."

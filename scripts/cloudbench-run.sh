@@ -60,6 +60,8 @@ FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-$REPO_DIR/scripts/cloudbench-fe
 SYNC_DEPS_SCRIPT="${CLOUDBENCH_SYNC_DEPS_SCRIPT:-$REPO_DIR/scripts/cloudbench-sync-deps.sh}"
 SYNC_PRISMA_SCRIPT="${CLOUDBENCH_SYNC_PRISMA_SCRIPT:-$REPO_DIR/scripts/cloudbench-sync-prisma-client.sh}"
 CURRENT_RUN_ARTIFACT_SCRIPT="${CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT:-$REPO_DIR/scripts/cloudbench-current-run-artifact.py}"
+PREPARE_PATCH_SCRIPT="${CLOUDBENCH_PREPARE_PATCH_SCRIPT:-$REPO_DIR/scripts/cloudbench-prepare-patch.sh}"
+STATUS_SERVER_SCRIPT="${CLOUDBENCH_STATUS_SERVER_SCRIPT:-$REPO_DIR/scripts/cloudbench-status-server.py}"
 
 # ── Inputs (env) ────────────────────────────────────────────────────────────
 REF="${REF:-}"
@@ -78,7 +80,10 @@ BENCHMARK_PEAK_FLY_MACHINES="${BENCHMARK_PEAK_FLY_MACHINES:-}"
 BENCHMARK_VM_USD_PER_HOUR="${BENCHMARK_VM_USD_PER_HOUR:-}"
 BENCHMARK_FRONTEND_URL="${BENCHMARK_FRONTEND_URL:-}"
 CLOUDBENCH_START_BARRIER="${CLOUDBENCH_START_BARRIER:-}"
+CLOUDBENCH_BARRIER_TOKEN="${CLOUDBENCH_BARRIER_TOKEN:-}"
+CLOUDBENCH_STATUS_PORT="${CLOUDBENCH_STATUS_PORT:-8011}"
 CLOUDBENCH_RUN_TOKEN="${CLOUDBENCH_RUN_TOKEN:-}"
+STACK_SEED_DUMP="${CLOUDBENCH_SEED_DUMP_PATH:-/data/cloudbench-cache/victoria-seed.dump}"
 
 if [ -n "$CLOUDBENCH_RUN_TOKEN" ]; then
     case "$CLOUDBENCH_RUN_TOKEN" in
@@ -98,7 +103,40 @@ RESULT_BEGIN="::CLOUDBENCH-RESULT-BEGIN::$MARKER_SUFFIX"
 RESULT_END="::CLOUDBENCH-RESULT-END::$MARKER_SUFFIX"
 DONE_MARKER="::CLOUDBENCH-DONE::$MARKER_SUFFIX"
 
-log() { echo "[cloudbench] $*"; }
+log() { echo "[cloudbench $(date -u +%H:%M:%S)] $*"; }
+# Step markers: STEP <name> lines are machine-parseable timing boundaries for
+# scripts/cloudbench-bring-up-report.py — isolate each bring-up step's cost.
+step() { log "STEP $*"; }
+
+stack_wait_budget_seconds() {
+    local warm_budget first_run_budget
+    warm_budget="${CLOUDBENCH_STACK_WAIT_SECONDS:-900}"
+    first_run_budget="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"
+    # A newly cloned replacement guest has no persistent seed dump. Its first
+    # production sync is bounded but can legitimately exceed the warm guest's
+    # 900-second startup budget; subsequent claims restore the dump and retain
+    # the tighter deadline.
+    if [ ! -s "$STACK_SEED_DUMP" ] && [ "$first_run_budget" -gt "$warm_budget" ]; then
+        printf '%s\n' "$first_run_budget"
+    else
+        printf '%s\n' "$warm_budget"
+    fi
+}
+
+run_with_heartbeat() {
+    local label="$1" command_pid interval
+    shift
+    interval="${CLOUDBENCH_HEARTBEAT_SECONDS:-30}"
+    "$@" &
+    command_pid=$!
+    while kill -0 "$command_pid" 2>/dev/null; do
+        sleep "$interval"
+        if kill -0 "$command_pid" 2>/dev/null; then
+            log "$label heartbeat (pid=$command_pid)"
+        fi
+    done
+    wait "$command_pid"
+}
 
 # ── Normalize the task list (comma OR space separated) into an array ────────
 # The controller may pass "a,b,c" or "a b c"; accept both.
@@ -137,10 +175,17 @@ emit_report_and_result() {
 
 # Best-effort teardown of the static dashboard server started in step 5.
 DASH_PID=""
+STATUS_PID=""
 stop_dashboard() {
     [ -n "$DASH_PID" ] || return 0
     kill "$DASH_PID" 2>/dev/null || true
     DASH_PID=""
+}
+
+stop_status_server() {
+    [ -n "$STATUS_PID" ] || return 0
+    kill "$STATUS_PID" 2>/dev/null || true
+    STATUS_PID=""
 }
 
 finish() {
@@ -174,12 +219,14 @@ rm -rf "$CONTEXT_DIR"
 mkdir -p "$CONTEXT_DIR"
 chown -R "$APP_USER:$APP_USER" "$REPO_DIR/.context"
 touch "$RUN_OUTPUT_MARKER"
+printf '%s\n' "$$" > /data/cloudbench-driver.pid
 if [ -n "$CLOUDBENCH_START_BARRIER" ]; then
     rm -f "/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.ready" \
         "/data/cloudbench-start-$CLOUDBENCH_START_BARRIER.release"
 fi
 
 # ── 1. git-sync the branch/sha under test ───────────────────────────────────
+step git_sync
 # The volume checkout's origin URL already embeds a working repo token (set at
 # box provisioning), so a plain fetch/checkout/reset needs NO token handling here.
 if [ -n "$REF" ]; then
@@ -202,6 +249,10 @@ fi
 log "checkout at $(gosu "$APP_USER" git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 if [ -n "${LOCAL_PATCH_FILE:-}" ] && [ -s "$LOCAL_PATCH_FILE" ]; then
     log "applying uploaded local workspace patch on top of checkout"
+    if ! bash "$PREPARE_PATCH_SCRIPT" "$REPO_DIR" "$LOCAL_PATCH_FILE"; then
+        log "FATAL: could not prepare uploaded local workspace patch"
+        finish 1
+    fi
     if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn "$LOCAL_PATCH_FILE" 2>&1 | sed 's/^/   /'; then
         log "FATAL: could not apply uploaded local workspace patch"
         finish 1
@@ -210,6 +261,10 @@ elif [ -n "${LOCAL_PATCH_B64:-}" ]; then
     PATCH_FILE="/tmp/cloudbench-local.patch"
     if printf '%s' "$LOCAL_PATCH_B64" | base64 -d > "$PATCH_FILE" 2>/dev/null && [ -s "$PATCH_FILE" ]; then
         log "applying local workspace patch on top of checkout"
+        if ! bash "$PREPARE_PATCH_SCRIPT" "$REPO_DIR" "$PATCH_FILE"; then
+            log "FATAL: could not prepare local workspace patch"
+            finish 1
+        fi
         if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn "$PATCH_FILE" 2>&1 | sed 's/^/   /'; then
             log "FATAL: could not apply local workspace patch"
             finish 1
@@ -217,7 +272,24 @@ elif [ -n "${LOCAL_PATCH_B64:-}" ]; then
     fi
 fi
 
+# Replace the bootstrap read-only http.server with the ref's authenticated
+# data-plane server. The same WireGuard proxy keeps serving bench.log, while the
+# controller can now release the synchronized barrier without an SSH/API burst.
+pkill -f "http.server $CLOUDBENCH_STATUS_PORT" 2>/dev/null || true
+pkill -f "cloudbench-status-server.py.*--port $CLOUDBENCH_STATUS_PORT" 2>/dev/null || true
+if [ ! -f "$STATUS_SERVER_SCRIPT" ]; then
+    log "FATAL: missing $STATUS_SERVER_SCRIPT"
+    finish 1
+fi
+setsid python3 "$STATUS_SERVER_SCRIPT" \
+    --directory /data \
+    --port "$CLOUDBENCH_STATUS_PORT" \
+    --barrier "$CLOUDBENCH_START_BARRIER" \
+    >/dev/null 2>&1 </dev/null &
+STATUS_PID=$!
+
 # ── 2. Decode injected secrets into the repo .env files the stack reads ─────
+step env_decode
 # Fly secrets are exposed as env vars in the machine init AND in ssh sessions.
 ENV_HELPER="$REPO_DIR/scripts/lib/cloudbench-env.sh"
 [ -f "$ENV_HELPER" ] || { log "FATAL: missing $ENV_HELPER"; finish 1; }
@@ -245,6 +317,7 @@ cloudbench_validate_browser_provider_contract \
     "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || finish 1
 
 # ── 3. Sync baked deps from the image into the volume checkout ──────────────
+step dep_sync
 # A persistent volume can outlive many donor images. Missing-only checks leave
 # old package trees behind after package-lock/requirements changes, so compare
 # fingerprints and refresh atomically from the image. A donor/ref mismatch is a
@@ -276,6 +349,7 @@ chown "$APP_USER:$APP_USER" "$REPO_DIR/.cloud-env"
 WMH_PORT=$((BASE_PORT + 6))   # run.sh: WMH_PORT = base + 6 (3001 → 3007).
 
 # ── 5. System Postgres (no Docker on Fly) ──────────────────────────────────
+step postgres
 log "ensuring system Postgres cluster (victoria on :5432)..."
 PG_VER="$(pg_lsclusters -h 2>/dev/null | head -1 | awk '{print $1}')"
 if [ -z "$PG_VER" ]; then
@@ -344,18 +418,45 @@ DASH_PID=$!
 log "dashboard static server pid=$DASH_PID on :$BENCH_DASHPORT (root $CONTEXT_DIR)"
 
 # ── 8. Launch the stack (run.sh --benchmark) — SERVE the cached WMH ─────────
+step stack_launch
 # WMH_BUILD_DIR points run.sh at the cached model on the volume;
 # BENCHMARK_SKIP_WMH_DELTA=1 makes run.sh SERVE it verbatim with NO R2 read / delta
 # refresh / rebuild. FLY_APP_NAME="" disables the worker's prod-style fleet
 # autoscaler (the Fly runtime injects the app name; _scale_fleet() would otherwise
 # hammer the Fly API with the prod-scoped token → 403 log spam).
+ensure_cloudflared_agent() {
+    command -v cloudflared >/dev/null 2>&1 && return 0
+    log "cloudflared missing from warm image — installing official release"
+    local attempt
+    for attempt in 1 2 3; do
+        rm -f /tmp/cloudflared.deb
+        if curl -fsSL --connect-timeout 10 --max-time 120 \
+                "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(dpkg --print-architecture).deb" \
+                -o /tmp/cloudflared.deb \
+            && apt-get install -y -qq --no-install-recommends /tmp/cloudflared.deb; then
+            rm -f /tmp/cloudflared.deb
+            command -v cloudflared >/dev/null 2>&1 && return 0
+        fi
+        log "cloudflared install attempt $attempt/3 failed"
+        sleep 2
+    done
+    rm -f /tmp/cloudflared.deb
+    return 1
+}
+
+if [ "$BENCH_SIMULATE" != "1" ]; then
+    if ! ensure_cloudflared_agent; then
+        log "FATAL: could not install cloudflared for isolated benchmark webhooks"
+        finish 1
+    fi
+fi
+
 STACK_LOG="$CONTEXT_DIR/stack.log"
 STACK_ENV=(
     "HOME=/home/$APP_USER"
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     "BENCHMARK_ISOLATED_RUN=true"
     "BENCHMARK_CONTEXT_DIR=$CONTEXT_DIR"
-    "BENCHMARK_SKIP_PUBLIC_TUNNEL=1"
     "CONDUCTOR_PORT=$BASE_PORT"
     "CONDUCTOR_WORKSPACE_NAME=$WORKSPACE_NAME"
     "ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1"
@@ -376,7 +477,7 @@ STACK_ENV=(
     # Warm-start cache: run.sh restores this /data dump (persists across stop/start
     # + fork) instead of the ~50s push+seed when the schema is unchanged. First run
     # on a machine seeds + writes it; later claims restore in seconds.
-    "BENCHMARK_SEED_DUMP=/data/cloudbench-cache/victoria-seed.dump"
+    "BENCHMARK_SEED_DUMP=$STACK_SEED_DUMP"
     "WMH_MODEL_NAME=$WMH_MODEL_NAME"
     "WMH_BUILD_DIR=$WMH_DIR"
     "BENCHMARK_SKIP_WMH_DELTA=1"
@@ -393,12 +494,18 @@ fi
 if [ "$BENCH_SIMULATE" = "1" ]; then
     STACK_ENV+=(
         "BENCHMARK_WORLD_MODEL_MODE=simulate"
+        "BENCHMARK_SKIP_PUBLIC_TUNNEL=1"
         "BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1"
         "BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE=1"
         "WMH_BASE_URL=http://localhost:$WMH_PORT"
     )
 else
-    STACK_ENV+=("BENCHMARK_SKIP_WMH_BUILD=1")
+    STACK_ENV+=(
+        "BENCHMARK_SKIP_WMH_BUILD=1"
+        # Each isolated VM gets a random Quick Tunnel URL for this run. The URL
+        # is process-scoped, so concurrent benchmark stacks cannot share traffic.
+        "BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL=1"
+    )
 fi
 
 # The DB warm-start dump lives on the /data volume (persists across stop/start +
@@ -429,6 +536,7 @@ cleanup_stack() {
 trap 'cleanup_stack' EXIT
 
 # ── 9. Wait for services.json (status=running) + WMH health ────────────────
+step services_wait
 MANIFEST="$CONTEXT_DIR/services.json"
 BACKEND_PORT="$BASE_PORT"
 HEALTH_PORT=$((BASE_PORT + 2))
@@ -436,13 +544,29 @@ HEALTH_PORT=$((BASE_PORT + 2))
 log "waiting for stack to become healthy (services.json + backend + worker + WMH)..."
 STACK_READY=false
 STATUS="none"
-# No WMH build on this path (cached model served verbatim), so the stack comes up
-# fast — this ceiling only covers boot + DB seed + serve. Default 900s.
-STACK_WAIT_SECONDS="${CLOUDBENCH_STACK_WAIT_SECONDS:-900}"
+# No WMH build happens on this path (the cached model is served verbatim). Warm
+# guests keep a 900s ceiling; a newly cloned guest without the persistent seed
+# dump gets a bounded 1800s first-run ceiling for production sync + DB dump +
+# service startup. The live red case finished seeding at t+900s and was killed at
+# t+901s by the former single deadline.
+STACK_WAIT_SECONDS="$(stack_wait_budget_seconds)"
+if [ ! -s "$STACK_SEED_DUMP" ]; then
+    log "first-run seed dump absent — using cold stack health budget ${STACK_WAIT_SECONDS}s"
+fi
 for i in $(seq 1 "$STACK_WAIT_SECONDS"); do
     if ! kill -0 "$STACK_PID" 2>/dev/null; then
-        log "FATAL: stack process exited before becoming healthy (see stack log above)"
-        wait "$STACK_PID" 2>/dev/null
+        # Capture the ACTUAL death cause. "see stack log above" was a dead end at
+        # fleet width: the stack log truncated mid-startup with no error, leaving
+        # the failure unclassifiable (OOM? sync error? signal?). Record the exit
+        # code (rc=137 ⇒ SIGKILL/OOM), the stack-log tail, and a dmesg OOM probe
+        # so a sporadic bring-up death is diagnosable from the pulled-back logs.
+        wait "$STACK_PID" 2>/dev/null; stack_rc=$?
+        log "FATAL: stack process exited (rc=$stack_rc) before becoming healthy after ${i}s"
+        log "───── last 40 lines of stack log ($STACK_LOG) ─────"
+        tail -40 "$STACK_LOG" 2>/dev/null | while IFS= read -r _line; do log "  | $_line"; done
+        if [ "$stack_rc" = 137 ] || dmesg 2>/dev/null | grep -qiE 'out of memory|oom-kill'; then
+            log "  ⚠️ rc=137/OOM signature — stack was SIGKILLed (likely out-of-memory); check machine RAM vs concurrent service footprint"
+        fi
         finish 1
     fi
     if [ -f "$MANIFEST" ]; then
@@ -501,6 +625,7 @@ if [ -n "$CLOUDBENCH_START_BARRIER" ]; then
 fi
 
 # ── 10. Run the benchmark ──────────────────────────────────────────────────
+step benchmark
 if [ "${#BENCH_TASK_LIST[@]}" -eq 0 ]; then
     log "FATAL: BENCH_TASKS is empty"
     finish 1
@@ -530,7 +655,7 @@ set +e
 # Export the workspace/queue env explicitly INSIDE the shell (not just an `env`
 # prefix) so run_benchmark's _verify_worker_queue_alignment() reliably sees
 # CONDUCTOR_WORKSPACE_NAME, and echo it so the log proves what the process got.
-gosu "$APP_USER" bash -c "
+run_with_heartbeat "benchmark" gosu "$APP_USER" bash -c "
 export HOME='/home/$APP_USER'
 export BENCHMARK_CONTEXT_DIR='$CONTEXT_DIR'
 export BENCHMARK_ISOLATED_RUN=true
@@ -538,6 +663,7 @@ export ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1
 export CONDUCTOR_WORKSPACE_NAME='$WORKSPACE_NAME'
 export CONDUCTOR_PORT='$BASE_PORT'
 export TEMPORAL_TASK_QUEUE='navi-agent-tasks-$WORKSPACE_NAME'
+export BENCHMARK_SEED_DUMP='$STACK_SEED_DUMP'
 if [ -n '$BENCHMARK_FAST_MODE_CACHE' ]; then
   export BENCHMARK_FAST_MODE_CACHE='$BENCHMARK_FAST_MODE_CACHE'
 fi

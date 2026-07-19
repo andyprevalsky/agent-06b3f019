@@ -1,7 +1,12 @@
 import importlib.util
 import json
 import os
+import signal
+import shlex
+import socket
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -12,11 +17,16 @@ ARTIFACT_SCRIPT = ROOT / "scripts" / "cloudbench-current-run-artifact.py"
 FETCH_SCRIPT = ROOT / "scripts" / "cloudbench-fetch-ref.sh"
 SNAPSHOT_SCRIPT = ROOT / "scripts" / "cloudbench-select-snapshot.py"
 MACHINE_READINESS_SCRIPT = ROOT / "scripts" / "cloudbench-machine-readiness.py"
+STATUS_SERVER_SCRIPT = ROOT / "scripts" / "cloudbench-status-server.py"
 AGGREGATE_SCRIPT = ROOT / "scripts" / "cloudbench-aggregate-runs.py"
 DRIVER_SCRIPT = ROOT / "scripts" / "cloudbench-run.sh"
 FLEET_SCRIPT = ROOT / "scripts" / "run-bench-fleet"
 CLOUD_SCRIPT = ROOT / "scripts" / "run-bench-cloud"
 PREDEPLOY_SCRIPT = ROOT / "scripts" / "run-predeploy-cloud"
+PREDEPLOY_LOCAL_SCRIPT = ROOT / "scripts" / "run-predeploy-local"
+RUN_BENCH_SCRIPT = ROOT / "scripts" / "run-bench"
+STACK_SCRIPT = ROOT / "scripts" / "run.sh"
+LOCAL_RUNNER = ROOT / "agents" / "benchmarks" / "local.py"
 DEPLOY_COMMAND = ROOT / ".claude" / "commands" / "deploy.md"
 
 
@@ -125,6 +135,23 @@ def test_prisma_client_generation_failure_is_fatal_and_keeps_old_fingerprint(
     assert marker.read_text() == baseline_fingerprint
 
 
+def test_boot_launch_propagates_parent_hub_identity_to_remote_benchmark() -> None:
+    """Fleet children must never register duplicate one-task Hub runs.
+
+    The parent controller is already fail-closed on its visible aggregate row.
+    Dropping this identity at the Fly Machine boundary makes every child perform
+    its own required Hub upload concurrently, so transient upload saturation
+    turns otherwise valid tasks into NORESULT before benchmark execution.
+    """
+    cloud_script = CLOUD_SCRIPT.read_text()
+    env_args = cloud_script.split("_envargs=(", 1)[1].split("    )", 1)[0]
+
+    assert (
+        '--env "BENCHMARK_HUB_PARENT_RUN_ID=${BENCHMARK_HUB_PARENT_RUN_ID:-}"'
+        in env_args
+    )
+
+
 def test_refreshes_stale_volume_dependency_trees(tmp_path: Path) -> None:
     donor = tmp_path / "donor"
     repo = tmp_path / "repo"
@@ -150,6 +177,48 @@ def test_refreshes_stale_volume_dependency_trees(tmp_path: Path) -> None:
     assert (repo / "agents/venv/bin/python").read_text() == "current"
     assert (repo / "node_modules/.cloudbench-deps-fingerprint").is_file()
     assert (repo / "agents/venv/.cloudbench-deps-fingerprint").is_file()
+
+
+def test_refreshes_fingerprinted_venv_when_runtime_files_are_unreadable(
+    tmp_path: Path,
+) -> None:
+    donor = tmp_path / "donor"
+    repo = tmp_path / "repo"
+    _write_manifests(donor)
+    _write_manifests(repo)
+    (donor / "node_modules/current-package").mkdir(parents=True)
+    donor_python = donor / "agents/venv/bin/python"
+    donor_python.parent.mkdir(parents=True)
+    donor_python.write_text("#!/usr/bin/env bash\nexit 0\n")
+    donor_python.chmod(0o755)
+
+    first = subprocess.run(
+        ["bash", str(SCRIPT), str(donor), str(repo)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert first.returncode == 0, first.stderr
+
+    cached_python = repo / "agents/venv/bin/python"
+    cached_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "echo 'OSError: [Errno 5] Input/output error' >&2\n"
+        "exit 5\n"
+    )
+    cached_python.chmod(0o755)
+    marker_before = (repo / "agents/venv/.cloudbench-deps-fingerprint").read_text()
+
+    repaired = subprocess.run(
+        ["bash", str(SCRIPT), str(donor), str(repo)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert repaired.returncode == 0, repaired.stderr
+    assert cached_python.read_text() == donor_python.read_text()
+    assert (repo / "agents/venv/.cloudbench-deps-fingerprint").read_text() == marker_before
 
 
 def test_relocates_donor_virtualenv_text_prefixes_after_sync(tmp_path: Path) -> None:
@@ -240,6 +309,143 @@ def test_rejects_branch_whose_manifests_do_not_match_donor_image(tmp_path: Path)
     assert "warm image/volume JavaScript dependencies do not match" in result.stderr
 
 
+def test_central_refresh_installs_changed_manifest_dependencies(tmp_path: Path) -> None:
+    """The explicit central refresh may rebuild the warm volume from manifests.
+
+    Ordinary per-box sync remains fail-closed when the immutable image donor is
+    stale; the fleet's one-time refresh path opts into installation so a synced
+    main dependency change does not permanently strand every stopped pool box.
+    """
+    donor = tmp_path / "donor"
+    repo = tmp_path / "repo"
+    bin_dir = tmp_path / "bin"
+    install_log = tmp_path / "install.log"
+    _write_manifests(donor, lock="image-lock")
+    _write_manifests(repo, lock="branch-lock")
+    (donor / "node_modules/image-package").mkdir(parents=True)
+    (donor / "agents/venv/bin").mkdir(parents=True)
+    (donor / "agents/venv/bin/python").write_text("current")
+    bin_dir.mkdir()
+    npm = bin_dir / "npm"
+    npm.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "printf 'npm cwd=%s args=%s\\n' \"$PWD\" \"$*\" >> \"$INSTALL_LOG\"\n"
+        "mkdir -p node_modules\n"
+        "touch node_modules/installed-from-manifests\n"
+    )
+    npm.chmod(0o755)
+    npx = bin_dir / "npx"
+    npx.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "printf 'npx cwd=%s args=%s\\n' \"$PWD\" \"$*\" >> \"$INSTALL_LOG\"\n"
+    )
+    npx.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), str(donor), str(repo)],
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "INSTALL_LOG": str(install_log),
+            "CLOUDBENCH_REBUILD_DEPS": "1",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (repo / "node_modules/installed-from-manifests").is_file()
+    assert not (repo / "node_modules/image-package").exists()
+    assert (repo / "node_modules/.cloudbench-deps-fingerprint").read_text().strip()
+    calls = install_log.read_text()
+    assert "npm cwd=" in calls and "args=install --no-audit --no-fund" in calls
+    assert "npx cwd=" in calls and "args=prisma generate" in calls
+
+
+def _write_fake_python_with_venv(path: Path, *, fail_pip: bool) -> None:
+    pip_script = (
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        "printf 'pip cwd=%s args=%s\\n' \"$PWD\" \"$*\" >> \"$INSTALL_LOG\"\n"
+        + ("exit 9\n" if fail_pip else "touch \"$(dirname \"$0\")/../installed-from-manifests\"\n")
+    )
+    real_python = sys.executable
+    path.write_text(
+        f"#!{real_python}\n"
+        "import os, pathlib, sys\n"
+        f"real_python = {real_python!r}\n"
+        "if sys.argv[1:3] == ['-m', 'venv']:\n"
+        "    target = pathlib.Path(sys.argv[3])\n"
+        "    (target / 'bin').mkdir(parents=True)\n"
+        f"    pip = target / 'bin/pip'; pip.write_text({pip_script!r}); pip.chmod(0o755)\n"
+        "    raise SystemExit(0)\n"
+        "os.execv(real_python, [real_python, *sys.argv[1:]])\n"
+    )
+    path.chmod(0o755)
+
+
+def _python_rebuild_fixture(tmp_path: Path, *, fail_pip: bool) -> tuple[Path, Path, dict[str, str]]:
+    donor = tmp_path / "donor"
+    repo = tmp_path / "repo"
+    bin_dir = tmp_path / "bin"
+    install_log = tmp_path / "install.log"
+    _write_manifests(donor, lock="same", requirements="image-requirement")
+    _write_manifests(repo, lock="same", requirements="branch-requirement")
+    (donor / "node_modules/current-package").mkdir(parents=True)
+    (donor / "agents/venv/bin").mkdir(parents=True)
+    (donor / "agents/venv/bin/python").write_text("image-python")
+    old_venv = repo / "agents/venv"
+    old_venv.mkdir(parents=True)
+    (old_venv / "old-only").write_text("preserve-until-commit")
+    (old_venv / ".cloudbench-deps-fingerprint").write_text("old-fingerprint\n")
+    bin_dir.mkdir()
+    _write_fake_python_with_venv(bin_dir / "python3", fail_pip=fail_pip)
+    return donor, repo, {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "INSTALL_LOG": str(install_log),
+        "CLOUDBENCH_REBUILD_DEPS": "1",
+    }
+
+
+def test_central_refresh_replaces_python_venv_from_changed_requirements(tmp_path: Path) -> None:
+    donor, repo, env = _python_rebuild_fixture(tmp_path, fail_pip=False)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), str(donor), str(repo)],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (repo / "agents/venv/old-only").exists()
+    assert (repo / "agents/venv/installed-from-manifests").is_file()
+    assert (repo / "agents/venv/.cloudbench-deps-fingerprint").read_text().strip()
+    assert "install -r agents/requirements.txt" in Path(env["INSTALL_LOG"]).read_text()
+
+
+def test_central_refresh_does_not_publish_failed_python_rebuild(tmp_path: Path) -> None:
+    donor, repo, env = _python_rebuild_fixture(tmp_path, fail_pip=True)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), str(donor), str(repo)],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert (repo / "agents/venv/old-only").is_file()
+    assert (repo / "agents/venv/.cloudbench-deps-fingerprint").read_text() == "old-fingerprint\n"
+    assert not list((repo / "agents").glob(".venv-cloudbench-new.*"))
+
+
 def test_accepts_fingerprinted_volume_when_image_donor_is_older(tmp_path: Path) -> None:
     donor = tmp_path / "donor"
     repo = tmp_path / "repo"
@@ -247,7 +453,9 @@ def test_accepts_fingerprinted_volume_when_image_donor_is_older(tmp_path: Path) 
     _write_manifests(repo, lock="current")
     (donor / "node_modules/current-package").mkdir(parents=True)
     (donor / "agents/venv/bin").mkdir(parents=True)
-    (donor / "agents/venv/bin/python").write_text("current")
+    donor_python = donor / "agents/venv/bin/python"
+    donor_python.write_text("#!/usr/bin/env bash\nexit 0\n")
+    donor_python.chmod(0o755)
     first = subprocess.run(
         ["bash", str(SCRIPT), str(donor), str(repo)],
         text=True,
@@ -312,6 +520,141 @@ def test_driver_clears_snapshot_reports_before_any_failing_setup_step() -> None:
     )
 
 
+def test_cold_fleet_guest_gets_a_first_run_stack_budget(tmp_path: Path) -> None:
+    """RCA (2026-07-17): a replacement fleet guest legitimately spent more
+    than the warm guest's fixed 900-second health deadline performing its first
+    production seed. It completed the seed at the deadline, then the driver
+    killed the stack before services could start, yielding a REAL NORESULT.
+
+    A guest without the persistent seed dump must get the bounded cold-start
+    budget; once the dump exists, subsequent claims retain the tighter warm
+    budget. Explicit operator overrides remain authoritative.
+    """
+    driver = DRIVER_SCRIPT.read_text()
+    helper = _extract_fleet_function(driver, "stack_wait_budget_seconds() {")
+    seed_dump = tmp_path / "victoria-seed.dump"
+
+    def budget(*, cold: bool, env: dict[str, str] | None = None) -> int:
+        if not cold:
+            seed_dump.write_bytes(b"valid seed")
+        elif seed_dump.exists():
+            seed_dump.unlink()
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f'{helper}\nSTACK_SEED_DUMP="$1"\nstack_wait_budget_seconds',
+                "budget",
+                str(seed_dump),
+            ],
+            env={**os.environ, **(env or {})},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return int(result.stdout.strip())
+
+    assert budget(cold=True) >= 1800
+    assert budget(cold=False) == 900
+    assert budget(
+        cold=True,
+        env={
+            "CLOUDBENCH_STACK_WAIT_SECONDS": "120",
+            "CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS": "321",
+        },
+    ) == 321
+
+
+def test_fleet_barrier_budget_covers_cold_guest_bootstrap() -> None:
+    """RCA (2026-07-17): after the on-box cold-start budget was raised to
+    1800s, the parent controller still used its independent 720s per-box
+    barrier ceiling. Live run 20260717-204617-18785 excluded the healthy cold
+    replacement at exactly 720s while it was still syncing browser data.
+
+    The parent budget must derive from the same cold-stack contract, include
+    bounded pre-stack time (boot, checkout, dependency sync), and propagate an
+    override all the way into the remote driver. The global barrier may never
+    be shorter than the per-box budget.
+    """
+    fleet = FLEET_SCRIPT.read_text()
+    cloud = CLOUD_SCRIPT.read_text()
+    helper = _extract_fleet_function(fleet, "per_box_barrier_wait_seconds() {")
+    result = subprocess.run(
+        ["bash", "-c", f"{helper}\nper_box_barrier_wait_seconds"],
+        env=os.environ.copy(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert int(result.stdout.strip()) >= 2400
+
+    overridden = subprocess.run(
+        ["bash", "-c", f"{helper}\nper_box_barrier_wait_seconds"],
+        env={**os.environ, "CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS": "777"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert overridden.returncode == 0, overridden.stderr
+    assert overridden.stdout.strip() == "777"
+
+    assert (
+        'CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS="$FIRST_RUN_STACK_WAIT_SECONDS"'
+        in fleet
+    )
+    assert (
+        '--env "CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS=${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"'
+        in cloud
+    )
+    assert (
+        '"$START_BARRIER_WAIT_SECONDS" -lt "$PER_BOX_BARRIER_WAIT_SECONDS"'
+        in fleet
+    )
+    assert 'per_box="$PER_BOX_BARRIER_WAIT_SECONDS"' in fleet
+
+
+def test_freshly_seeded_database_gets_cold_backend_health_budget() -> None:
+    """RCA (2026-07-17): live run 20260717-211552-12528 completed a
+    first-time 10k-message/22k-cookie production seed, then interrupted an
+    alive backend after the warm 60-second health window. Its retry was also
+    interrupted at 60 seconds, producing an infrastructure NORESULT without an
+    application error. A cold seed gets a bounded longer health window; restored
+    warm databases retain the fast budget, and operator overrides still win.
+    """
+    stack = STACK_SCRIPT.read_text()
+    helper = _extract_fleet_function(stack, "isolated_backend_ready_attempts() {")
+
+    def attempts(*, cold: bool, override: str | None = None) -> int:
+        env = os.environ.copy()
+        if override is not None:
+            env["CLOUDBENCH_BACKEND_START_READY_ATTEMPTS"] = override
+        else:
+            env.pop("CLOUDBENCH_BACKEND_START_READY_ATTEMPTS", None)
+        result = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"{helper}\nFIRST_RUN_SEEDED=$1\nisolated_backend_ready_attempts",
+                "attempts",
+                "true" if cold else "false",
+            ],
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return int(result.stdout.strip())
+
+    assert attempts(cold=True) >= 180
+    assert attempts(cold=False) == 60
+    assert attempts(cold=True, override="17") == 17
+    assert 'FIRST_RUN_SEEDED=true' in stack
+    assert 'attempts="$(isolated_backend_ready_attempts)"' in stack
+
+
 def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> None:
     driver = DRIVER_SCRIPT.read_text()
     cloud = CLOUD_SCRIPT.read_text()
@@ -330,9 +673,12 @@ def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> N
         in fleet
     )
     assert '--timeout "$CHILD_RUN_TIMEOUT"' in fleet
-    assert "deadline=$(( $(date +%s) + START_BARRIER_WAIT_SECONDS ))" in fleet
+    assert "deadline=$(( barrier_start + START_BARRIER_WAIT_SECONDS ))" in fleet
     assert 'CHILD_MACHINE+=("$cid")' in fleet
-    assert "isolated stacks reached the synchronized start barrier" in fleet
+    # The barrier now tolerates infra failures (see
+    # test_start_barrier_tolerates_infra_failures): it releases the ready set and
+    # only the LIVE stacks gate the release, rather than aborting on any one exit.
+    assert "isolated stacks reached the barrier" in fleet
     assert "releasing synchronized start barrier" in fleet
     assert "returning claimed pool machine" in fleet
 
@@ -351,25 +697,64 @@ def test_predeploy_cloud_runner_selects_the_catalog_smoke_group() -> None:
         "chat-mode",
         "spawn-sub-agents",
         "parallel-tool-calls",
-        "message-person",
         "claude-code-agent",
         "browser-smoke",
         "browser-biometrics-webdecoy",
     ]
 
 
-def test_deploy_smoke_gate_uses_the_visible_cloud_runner() -> None:
+def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
+    # The policy, shell entrypoints, and Python owner form one executable chain.
+    # Assert every hop so documentation can delegate without duplicating a
+    # transitive implementation string, while a shared-stack regression cannot
+    # hide behind otherwise-correct source routing.
     deploy = DEPLOY_COMMAND.read_text()
     step = deploy.split("## Step 6: Smoke benchmarks + fix", 1)[1].split(
         "## Step 6b: Semantic tests + fix", 1
     )[0]
 
-    assert "scripts/run-predeploy-cloud" in step
-    assert "Benchmarks → Runs" in step
+    assert "bash scripts/run-predeploy-local" in step
+    assert "LOCAL isolated benchmark stack" in step
+    assert "Use the cloud fleet only as an explicit opt-in" in step
     assert "7/7" in step
     assert "run_benchmark.py --suite smoke" not in step
+
+    predeploy_local = PREDEPLOY_LOCAL_SCRIPT.read_text()
+    assert 'exec bash "$ROOT_DIR/scripts/run-bench" --local' in predeploy_local
+    run_bench = RUN_BENCH_SCRIPT.read_text()
+    local_branch = run_bench.split('if [[ "${1:-}" == "--local" ]]', 1)[1].split(
+        'if [[ "${1:-}" == "--single-box" ]]', 1
+    )[0]
+    assert 'exec "$PY" -u benchmarks/local.py "$@"' in local_branch
+
+    from benchmarks import local as local_runner
+
+    monkeypatch.setattr(local_runner, "allocate_port_range", lambda _preferred: 62000)
+    args = local_runner.parse_args(
+        ["single-creator-arm", "--run-id", "predeploy-contract", "--base-port", "62000"]
+    )
+    stack = local_runner.build_service_stack(args)
+    assert stack.isolated is True
+    assert stack.workspace_name is not None
+    assert stack.base_port == 62000
+    assert '["bash", "scripts/run.sh", "--benchmark"]' in LOCAL_RUNNER.read_text()
+
     assert "git diff --name-only HEAD" in deploy
     assert "git ls-files --others --exclude-standard" in deploy
+
+
+def test_deploy_always_gates_changed_cloudbench_controllers() -> None:
+    deploy = DEPLOY_COMMAND.read_text()
+    assert "CHANGED_CLOUDBENCH=" in deploy
+    gate = deploy.split("## Step 4cb: Cloud benchmark controller regressions", 1)[1].split(
+        "## Step 4c: Credential health check", 1
+    )[0]
+    assert "bash scripts/tests/cloudbench-env.test.sh" in gate
+    assert "cloudbench_dependency_sync_test.py" in gate
+    assert "fleet_barrier_reads_the_authoritative_rotated_status_port" in gate
+    assert "data_plane_barrier_release_at_full_fleet_width" in gate
+    assert "must never pause for human approval" in gate
+    assert "Operational gate maintenance is pre-authorized" in deploy
 
 
 def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
@@ -378,6 +763,27 @@ def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
 
     assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in cloud
     assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in fleet
+
+
+def test_cloud_patch_can_be_disabled_for_a_pinned_committed_ref() -> None:
+    """A controller validating a committed ref must be able to ignore unrelated
+    concurrent workspace edits without stashing, reverting, or shipping them."""
+    cloud = CLOUD_SCRIPT.read_text()
+    patch_block = cloud.split('LOCAL_PATCH_FILE=""', 1)[1].split(
+        "# Proxy the box BACKEND", 1
+    )[0]
+    assert 'CLOUDBENCH_SKIP_LOCAL_PATCH:-0' in patch_block
+    assert '!= "1"' in patch_block
+    assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in patch_block
+    fleet = FLEET_SCRIPT.read_text()
+    fleet_patch_block = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split(
+        "_machine_priv_ip()", 1
+    )[0]
+    assert 'CLOUDBENCH_SKIP_LOCAL_PATCH:-0' in fleet_patch_block
+    assert '!= "1"' in fleet_patch_block
+    provenance = _extract_fleet_function(fleet, "print_code_provenance() {")
+    assert 'CLOUDBENCH_SKIP_LOCAL_PATCH:-0' in provenance
+    assert "local changes intentionally excluded" in provenance
 
 
 def test_fetch_ref_never_falls_back_to_stale_fetch_head(tmp_path: Path) -> None:
@@ -624,20 +1030,91 @@ def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
         'request_machine_start "$mid"'
     )
     assert 'MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"' in fleet
-    assert (
-        'if machine_storage_ready "$id"; then\n'
-        '                FLY machine start "$id"' in fleet
+    assert 'CLOUDBENCH_STORAGE_READY="$([ "$src" = "pool" ] && printf 1 || printf 0)"' in fleet
+    storage = _extract_fleet_function(cloud, "machine_storage_ready() {")
+    assert 'CLOUDBENCH_STORAGE_READY:-0' in storage
+    pool_slot = _extract_fleet_function(fleet, "provision_pool_slot() {")
+    assert 'if machine_storage_ready "$id"; then' in pool_slot
+    assert pool_slot.index('if machine_storage_ready "$id"; then') < pool_slot.index(
+        'FLY machine start "$id"'
     )
+
+
+def test_pool_boot_update_is_bounded_and_skips_redundant_inventory_polling() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    fleet = FLEET_SCRIPT.read_text()
+    branch = cloud[cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then'):]
+    assert 'CLOUDBENCH_BOOT_UPDATE_TIMEOUT' in branch
+    assert '_with_timeout "${CLOUDBENCH_BOOT_UPDATE_TIMEOUT:-90}"' in branch
+    assert "final Fly update error" in branch
+    pool_fast_path = branch[branch.index('if [ "${CLOUDBENCH_STORAGE_READY:-0}" = "1" ]; then'):]
+    pool_fast_path = pool_fast_path[: pool_fast_path.index("else")]
+    assert "machine_state" not in pool_fast_path
+    assert "machine_storage_ready" not in pool_fast_path
+    assert "request_machine_start" not in pool_fast_path
+    assert 'CLOUDBENCH_BOOT_START_TIMEOUT' in pool_fast_path
+    assert 'flyctl machine start "$mid"' in pool_fast_path
     claim_start = fleet.index("claim_pool_machine() {")
     claim_end = fleet.index("\n}\n", claim_start)
     claim = fleet[claim_start:claim_end]
-    assert claim.index('machine_storage_ready "$id" || continue') < claim.index(
-        'FLY machine start "$id"'
-    )
+    assert "machine_storage_ready" not in claim
+    assert "FLY machine status" not in claim
+    assert "FLY machine start" not in claim
+    assert 'write_pool_claim "$claim_path"' in claim
     assert (
         'if machine_storage_ready "$wid"; then\n'
-        '            FLY machine start "$wid"' in fleet
+        '            fly_with_timeout 20 machine start "$wid"' in fleet
     )
+
+
+def test_snapshot_and_pool_dependency_proofs_are_exact() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+
+    assert '[ "$_rest" = "$SNAP_ID" ]' in fleet
+    assert 'RECORDED_SNAP_ID="$(awk' in fleet
+    assert 'SNAP_ID="$RECORDED_SNAP_ID"' in fleet
+    assert "using recorded proven snapshot" in fleet
+    assert "an interrupted refresh" in fleet
+    assert 'POOL_META_FILE="$POOL_IDS_FILE.deps"' in fleet
+    assert 'printf \'%s %s %s\\n\' "$CURRENT_NODE_FP" "$CURRENT_PY_FP" "$SNAP_ID"' in fleet
+    assert 'pooled machines were built from unproven/stale dependency trees' in fleet
+
+
+def test_autoscaler_metrics_poll_over_data_plane_without_ssh() -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    desired = _extract_fleet_function(fleet, "_box_desired() {")
+    autoscaler = _extract_fleet_function(fleet, "bench_autoscaler() {")
+    provision_worker = _extract_fleet_function(fleet, "provision_worker() {")
+
+    assert "FLY ssh" not in desired
+    assert "curl --noproxy '*'" in desired
+    assert "flyctl proxy" in autoscaler
+    assert '"${cid}.vm.${APP}.internal"' in autoscaler
+    assert "seq 10 18" in autoscaler
+    assert '"http://127.0.0.1:$metrics_port/metrics"' in autoscaler
+    assert "start_metrics_proxy 30" in autoscaler
+    assert "autoscaler metrics via data plane" in autoscaler
+    assert "jobs -pr" in autoscaler
+    assert "cloudbench_terminate_and_wait" in autoscaler
+    assert "fly_with_timeout" in provision_worker
+
+
+def test_data_plane_proxies_retry_machine_dns_and_restart_if_lost() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    starter = _extract_fleet_function(cloud, "start_data_plane_proxy() {")
+    ensure = _extract_fleet_function(cloud, "ensure_status_proxy() {")
+
+    assert "CLOUDBENCH_DATA_PROXY_READY_TIMEOUT" in starter
+    assert 'flyctl proxy "$local_port:$remote_port" "$host"' in starter
+    assert 'kill -0 "$pid"' in starter
+    assert '"http://127.0.0.1:$local_port/driver-health"' in starter
+    assert "resolves the remote host lazily" in starter
+    assert "CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS" in starter
+    assert "post-probe survival window" in starter
+    assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 3))"' in cloud
+    assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 1))"' in cloud
+    assert "start_leased_data_plane_proxy" in ensure
+    assert "ensure_status_proxy >/dev/null 2>&1 || true" in cloud
 
 
 def test_fleet_children_cannot_replace_persistent_warm_state() -> None:
@@ -1080,7 +1557,7 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
     # then READ-ONLY verifies the shared environment. It never refreshes it,
     # never inherits another process's lock ownership, and never references
     # the app-environment lock at all.
-    verify_call = "bash scripts/run-bench-cloud --verify-secrets"
+    verify_call = 'bash "$RUN_BENCH_CLOUD_BIN" --verify-secrets'
     assert fleet.index("reconcile_pool || exit 1") < fleet.index(verify_call)
     assert fleet.index(verify_call) < fleet.index('cid="$(claim_pool_machine)"')
     assert "run-bench-cloud --refresh-secrets;" not in fleet
@@ -1119,13 +1596,14 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
     helper = ENV_HELPER_SCRIPT.read_text()
     assert "cloudbench_terminate_and_wait() {" in helper
     assert 'kill -KILL "$pid"' in helper
-    assert "trap 'exit 129' HUP" in fleet
+    # fleet traps name the signal before exiting (still exit 129/130/143)
+    assert "controller received HUP" in fleet and "exit 129' HUP" in fleet
     assert "trap 'exit 129' HUP" in cloud
 
 
 def test_pool_reconcile_leaves_concurrent_owner_untouched(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    function_start = fleet.index("pool_machine_state() {")
+    function_start = fleet.index("pool_machine_state_from_json() {")
     reconcile_start = fleet.index("reconcile_pool() {", function_start)
     function_end = fleet.index("\n}\n", reconcile_start) + 3
     reconcile_functions = fleet[function_start:function_end]
@@ -1248,12 +1726,12 @@ printf '%s\\n%s\\n' "$first" "$second"
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == ["def456", "fed789"]
     assert claims_file.read_text().splitlines() == ["def456", "fed789"]
-    assert starts_file.read_text().splitlines() == ["def456", "fed789"]
+    assert not starts_file.exists()
 
 
 def test_pool_reconcile_fails_closed_on_falsy_non_list_machine_json(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
-    function_start = fleet.index("pool_machine_state() {")
+    function_start = fleet.index("pool_machine_state_from_json() {")
     reconcile_start = fleet.index("reconcile_pool() {", function_start)
     function_end = fleet.index("\n}\n", reconcile_start) + 3
     reconcile_functions = fleet[function_start:function_end]
@@ -1346,6 +1824,7 @@ FLY() {{
   fi
   return 2
 }}
+fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
 fleet_registry_record_name() {{ return 0; }}
 fleet_registry_record_id() {{ return 0; }}
 {clone_function}
@@ -1359,6 +1838,9 @@ clone_machine_target "$LEDGER"
                 "RETURNED_ID": returned_id,
                 "TARGET_NAME_FILE": str(target_name_file),
                 "CLOUDBENCH_CLONE_LOOKUP_SECONDS": "0",
+                # Isolate identity resolution to a single attempt; retry
+                # behavior is covered by test_clone_retries_transient_*.
+                "CLOUDBENCH_CLONE_MAX_ATTEMPTS": "1",
             },
             text=True,
             capture_output=True,
@@ -1418,25 +1900,77 @@ clone_machine_target "$LEDGER"
     assert failed_target_ledger.with_suffix(".names").read_text() == ""
     assert "--detach" in clone_function
     assert "--name" in clone_function
-    assert fleet.count("FLY machine clone") == 1
+    # Exactly one clone-from-source call site, and it is bounded by the
+    # hung-clone watchdog (fly_with_timeout) rather than an unbounded FLY call.
+    assert fleet.count('machine clone "$source_id"') == 1
+    assert "fly_with_timeout" in clone_function
     assert "\\b[0-9a-f]{14}\\b" not in fleet
+
+
+def test_clone_releases_only_definitive_preallocation_failures() -> None:
+    """A rate-limited/CPU-rejected clone creates no Machine. After the bounded
+    name lookup confirms absence, its attempt record must be released so a
+    later successful retry does not leave a phantom stale registry. Ambiguous
+    launch errors retain ownership fail-closed."""
+    fleet = FLEET_SCRIPT.read_text()
+    classifier = _extract_fleet_function(fleet, "clone_failure_definitively_unallocated() {")
+    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    script = f"""{classifier}
+for message in \
+  'Error: failed to create volume: resource_exhausted: rate limit exceeded' \
+  'Error: failed to create volume: machine capacity hold failed' \
+  \"Error: failed to launch VM: insufficient resources to create new machine with existing volume 'vol_x'\"; do
+  clone_failure_definitively_unallocated "$message" || exit 1
+done
+clone_failure_definitively_unallocated 'Error: failed to launch VM: volume not found' && exit 2
+exit 0
+"""
+    result = subprocess.run(["bash", "-c", script], check=False)
+    assert result.returncode == 0
+    assert 'fleet_registry_release_name "$target_name"' in cloner
+    assert cloner.index('clone_failure_definitively_unallocated "$clone_out"') < cloner.index(
+        'fleet_registry_release_name "$target_name"'
+    )
 
 
 def test_pool_promotes_only_successful_owned_clone_ids() -> None:
     fleet = FLEET_SCRIPT.read_text()
-    pool_start = fleet.index("provision_pool() {")
-    pool_end = fleet.index("\n}\n", pool_start) + 3
-    pool_function = fleet[pool_start:pool_end]
+    pool_function = _extract_fleet_function(fleet, "provision_pool_slot() {")
 
-    clone_call = 'id="$(clone_machine_target "$OWNED_CLONES_FILE")"'
-    promotion = 'if pool_ledger_record_id "$id"; then'
+    clone_call = 'id="$(clone_machine_target "$slot_ledger")"'
+    promotion = 'if ! pool_ledger_record_id "$id"; then'
     registry_release = 'fleet_registry_release_id "$id"'
-    release = 'grep -Fxv "$id" "$OWNED_CLONES_FILE"'
     assert clone_call in pool_function
     assert pool_function.index(clone_call) < pool_function.index(promotion)
     assert pool_function.index(promotion) < pool_function.index(registry_release)
-    assert pool_function.index(registry_release) < pool_function.index(release)
     assert 'clone_machine_target "$POOL_IDS_FILE"' not in pool_function
+
+
+def test_pool_provision_fans_out_slots_concurrently() -> None:
+    """A 30-machine warm pool must take roughly one clone's wall clock, not
+    thirty. Each concurrent slot owns a separate ephemeral ledger; only the
+    stopped-id promotion is serialized by the durable pool ledger lock."""
+    fleet = FLEET_SCRIPT.read_text()
+    pool = _extract_fleet_function(fleet, "provision_pool() {")
+    slot = _extract_fleet_function(fleet, "provision_pool_slot() {")
+
+    assert 'provision_pool_slot "$i" "$n" &' in pool
+    assert 'pool_pids+=("$pid")' in pool
+    assert 'for pid in "${pool_pids[@]}"; do' in pool
+    assert pool.index('wait "$pid"') < pool.index("PROVISION_PIDS=()")
+    assert "CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS" in pool
+    assert 'pool-provision-$i.ids' in slot
+    assert 'pool_ledger_record_id "$id"' in slot
+    assert "snapshot_machine_state" in slot
+    assert "FLY machine status" not in slot
+    assert "pool_machine_state" not in slot
+    cleanup = _extract_fleet_function(fleet, "cleanup() {")
+    assert '"${PROVISION_PIDS[@]:-}"' in cleanup
+
+    pool_branch = fleet[fleet.index('if [ -n "$PROVISION_POOL" ]; then'):]
+    assert pool_branch.index("machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!") < pool_branch.index(
+        'provision_pool "$PROVISION_POOL"'
+    )
 
 
 def test_unresolved_clone_name_fails_loudly_without_polling_past_deadline() -> None:
@@ -1516,6 +2050,22 @@ def test_fleet_aggregate_contains_every_isolated_task(tmp_path: Path) -> None:
                             "passed": passed,
                             "duration_seconds": 10 if name == "one" else 20,
                             "cost_cents": 1,
+                            "llm_usage_by_provider": {
+                                "codex_token": {
+                                    "calls": 1,
+                                    "input_tokens": 10,
+                                    "output_tokens": 2,
+                                    "cost_usd": 0,
+                                    "models": {
+                                        "gpt-5.6-sol": {
+                                            "calls": 1,
+                                            "input_tokens": 10,
+                                            "output_tokens": 2,
+                                            "cost_usd": 0,
+                                        }
+                                    },
+                                }
+                            },
                         }
                     ]
                 }
@@ -1537,3 +2087,2176 @@ def test_fleet_aggregate_contains_every_isolated_task(tmp_path: Path) -> None:
     assert aggregated["summary"]["passed"] == 1
     assert aggregated["summary"]["failed"] == 1
     assert aggregated["summary"]["total_duration_seconds"] == 30
+    usage = json.loads((batch / "llm-usage.json").read_text())
+    assert usage["run_id"] == "run-1"
+    assert usage["providers"]["codex_token"]["calls"] == 2
+    assert usage["providers"]["codex_token"]["models"]["gpt-5.6-sol"]["input_tokens"] == 20
+
+
+def _extract_fleet_function(source: str, signature: str) -> str:
+    start = source.index(signature)
+    end = source.index("\n}\n", start) + 3
+    return source[start:end]
+
+
+def test_runner_ownership_probe_executes_through_remote_shell() -> None:
+    """RCA (2026-07-17): flyctl v0.4.70 executes ``ssh -C`` arguments
+    directly. A probe beginning with an environment assignment was interpreted
+    as an executable name, so stale idle pool claims became permanently
+    unreadable and every successor fleet failed before provisioning.
+
+    Model flyctl's direct-exec boundary: only an explicit remote shell may
+    interpret the assignment, pipeline, command substitution, and printf.
+    """
+    probe = _extract_fleet_function(
+        FLEET_SCRIPT.read_text(), "registry_runner_count() {"
+    )
+    script = f"""set -u
+APP=test-app
+FLY() {{
+  local remote=""
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = "-C" ]; then shift; remote="${{1:-}}"; break; fi
+    shift
+  done
+  case "$remote" in
+    'bash -c '*|'bash -lc '*) printf 'CLOUDBENCH_RUNNER_COUNT=0\\n' ;;
+    *) printf 'exec: ownership assignment is not an executable\\n' >&2; return 1 ;;
+  esac
+}}
+{probe}
+test "$(registry_runner_count machine-1)" = 0
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=5
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_fleet_canonicalizes_short_ref_before_remote_handoff(tmp_path: Path) -> None:
+    """RCA (2026-07-17): ``--ref 0ec3f5d65`` resolved in the controller
+    checkout but was handed to fresh Fly clones verbatim. Git servers do not
+    advertise abbreviated object IDs, so every clone failed ``git fetch``
+    before its status server or synchronized-ready marker could start.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "config", "user.name", "Test"], check=True
+    )
+    (tmp_path / "tracked").write_text("content\n")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "tracked"], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "fixture"], check=True)
+    full_ref = subprocess.check_output(
+        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True
+    ).strip()
+    short_ref = full_ref[:9]
+    fleet = FLEET_SCRIPT.read_text()
+    canonicalize = (
+        _extract_fleet_function(fleet, "canonicalize_bench_ref() {")
+        if "canonicalize_bench_ref() {" in fleet
+        else ""
+    )
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"{canonicalize}\ncanonicalize_bench_ref {shlex.quote(short_ref)}",
+        ],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == full_ref
+
+
+def test_clone_retries_transient_volume_not_found(tmp_path: Path) -> None:
+    """A single Fly clone-from-snapshot volume race must not abort the batch:
+    clone_machine_target retries with a fresh name and returns the id once the
+    transient failure clears. Guards the 28-wide synchronized-start barrier
+    against one flaky clone tearing down every isolated stack."""
+    fleet = FLEET_SCRIPT.read_text()
+    timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
+    resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
+    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    ledger = tmp_path / "owned-clones.ids"
+    attempt_file = tmp_path / "attempts"
+    machines_file = tmp_path / "machines"
+    machines_file.write_text("")
+
+    script = f"""set -uo pipefail
+APP=bench-app
+REGION=iad
+WARM_ID=warm-1
+SNAP_ID=vs_test
+export ATTEMPT_FILE="$ATTEMPT_FILE" MACHINES_FILE="$MACHINES_FILE"
+FLY() {{
+  if [ "$1 $2" = "machine clone" ]; then
+    local name=""
+    while [ $# -gt 0 ]; do
+      if [ "$1" = "--name" ]; then name="$2"; shift 2; continue; fi
+      shift
+    done
+    local n; n=$(( $(cat "$ATTEMPT_FILE" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$ATTEMPT_FILE"
+    if [ "$n" -lt 2 ]; then echo "Error: failed to launch VM: volume not found" >&2; return 1; fi
+    printf '{{"id":"clone-%s","name":"%s"}}\\n' "$n" "$name" >> "$MACHINES_FILE"
+    return 0
+  fi
+  if [ "$1 $2" = "machines list" ]; then
+    python3 -c 'import os; ls=[l.strip() for l in open(os.environ["MACHINES_FILE"]) if l.strip()]; print("["+",".join(ls)+"]")'
+    return 0
+  fi
+  return 0
+}}
+CLOUDBENCH_CLONE_RETRY_SECONDS=0
+CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
+CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
+{timeout_fn}
+fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
+fleet_registry_record_name() {{ return 0; }}
+fleet_registry_record_id() {{ return 0; }}
+{resolver}
+{cloner}
+clone_machine_target "$LEDGER"
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            "ATTEMPT_FILE": str(attempt_file),
+            "MACHINES_FILE": str(machines_file),
+            "LEDGER": str(ledger),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    # Second attempt is the one that succeeds → clone-2.
+    assert result.stdout.strip() == "clone-2", result.stdout
+    assert attempt_file.read_text().strip() == "2", "expected exactly one retry"
+    assert "retrying" in result.stderr
+    # The resolved id is recorded once in the ownership ledger.
+    assert ledger.read_text().split() == ["clone-2"]
+
+
+def test_clone_gives_up_after_max_attempts(tmp_path: Path) -> None:
+    """Persistent (non-transient) clone failure still fails closed after the
+    bounded retry budget — retries must not loop forever."""
+    fleet = FLEET_SCRIPT.read_text()
+    timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
+    resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
+    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    ledger = tmp_path / "owned-clones.ids"
+    attempt_file = tmp_path / "attempts"
+
+    script = f"""set -uo pipefail
+APP=bench-app
+REGION=iad
+WARM_ID=warm-1
+SNAP_ID=vs_test
+export ATTEMPT_FILE="$ATTEMPT_FILE"
+FLY() {{
+  if [ "$1 $2" = "machine clone" ]; then
+    local n; n=$(( $(cat "$ATTEMPT_FILE" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$ATTEMPT_FILE"
+    echo "Error: failed to launch VM: volume not found" >&2; return 1
+  fi
+  if [ "$1 $2" = "machines list" ]; then echo "[]"; return 0; fi
+  return 0
+}}
+CLOUDBENCH_CLONE_RETRY_SECONDS=0
+CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
+CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
+{timeout_fn}
+fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
+fleet_registry_record_name() {{ return 0; }}
+fleet_registry_record_id() {{ return 0; }}
+{resolver}
+{cloner}
+clone_machine_target "$LEDGER"
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"ATTEMPT_FILE": str(attempt_file), "LEDGER": str(ledger)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout
+    assert attempt_file.read_text().strip() == "3", "should stop at the attempt budget"
+    assert "after 3 attempt(s)" in result.stderr
+
+
+def test_clone_times_out_and_retries_a_hung_clone(tmp_path: Path) -> None:
+    """A hung `flyctl machine clone` (stalled Fly API) must not freeze the
+    sequential provisioning loop: fly_with_timeout reaps it and the retry loop
+    proceeds with a fresh clone. This is the iteration-3 failure (controller
+    blocked 25min on one clone → barrier never released → 0/28)."""
+    fleet = FLEET_SCRIPT.read_text()
+    timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
+    resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
+    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    ledger = tmp_path / "owned-clones.ids"
+    attempt_file = tmp_path / "attempts"
+    machines_file = tmp_path / "machines"
+    machines_file.write_text("")
+
+    script = f"""set -uo pipefail
+APP=bench-app
+REGION=iad
+WARM_ID=warm-1
+SNAP_ID=vs_test
+export ATTEMPT_FILE="$ATTEMPT_FILE" MACHINES_FILE="$MACHINES_FILE"
+FLY() {{
+  if [ "$1 $2" = "machine clone" ]; then
+    local name=""
+    while [ $# -gt 0 ]; do
+      if [ "$1" = "--name" ]; then name="$2"; shift 2; continue; fi
+      shift
+    done
+    local n; n=$(( $(cat "$ATTEMPT_FILE" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$ATTEMPT_FILE"
+    if [ "$n" -lt 2 ]; then sleep 30; return 0; fi
+    printf '{{"id":"clone-%s","name":"%s"}}\\n' "$n" "$name" >> "$MACHINES_FILE"
+    return 0
+  fi
+  if [ "$1 $2" = "machines list" ]; then
+    python3 -c 'import os; ls=[l.strip() for l in open(os.environ["MACHINES_FILE"]) if l.strip()]; print("["+",".join(ls)+"]")'
+    return 0
+  fi
+  return 0
+}}
+CLOUDBENCH_CLONE_TIMEOUT_SECONDS=1
+CLOUDBENCH_CLONE_RETRY_SECONDS=0
+CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
+CLOUDBENCH_CLONE_MAX_ATTEMPTS=3
+{timeout_fn}
+fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
+fleet_registry_record_name() {{ return 0; }}
+fleet_registry_record_id() {{ return 0; }}
+{resolver}
+{cloner}
+clone_machine_target "$LEDGER"
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            "ATTEMPT_FILE": str(attempt_file),
+            "MACHINES_FILE": str(machines_file),
+            "LEDGER": str(ledger),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "clone-2", result.stdout
+    assert attempt_file.read_text().strip() == "2", "hung clone should be reaped then retried once"
+    assert "retrying" in result.stderr
+
+
+def test_fleet_provisions_clones_concurrently() -> None:
+    """All per-bench clones must fan out concurrently, not serialize. Sequential
+    cloning stretched provisioning to 30-50min — the window every clone hang /
+    volume race / cross-workspace contention event aborted the batch in. Phase 1
+    backgrounds each claim-or-clone in its own subshell writing its own per-bench
+    ledger; a barrier waits for all before Phase 2 launches any child."""
+    fleet = FLEET_SCRIPT.read_text()
+    assert "concurrently (claim-or-clone)" in fleet
+    prov = fleet.index("# ── Phase 1:")
+    wait_all = fleet.index('for pp in "${PROVISION_PIDS[@]}"; do wait')
+    phase2 = fleet.index("# ── Phase 2:")
+    # ordering: fan-out → barrier → launch
+    assert prov < wait_all < phase2, "phases out of order"
+    assert fleet.index("PROVISION_PIDS=()", wait_all) < phase2
+    phase1 = fleet[prov:wait_all]
+    # each provision is a backgrounded subshell using its OWN per-bench ledger
+    assert 'clone_machine_target "$out/primary.ids"' in phase1
+    assert ") &" in phase1
+    assert 'PROVISION_PIDS+=("$!")' in phase1
+    # provisioning is decoupled from the run: Phase 1 never launches a child, so
+    # one slow clone cannot block the others (or the whole batch).
+    assert "CHILD_PIDS+=" not in phase1
+    assert "run-bench-cloud" not in phase1
+    # No leak if killed mid-provision: each concurrent clone records into the
+    # durable fleet-ownership registry (inside clone_machine_target), which the
+    # cleanup reaps via reap_registry_clones — authoritative even across
+    # workspace deletion, and it calls reap_machine (which also reaps volumes).
+    assert "fleet_registry_record_name" in fleet
+    assert "reap_registry_clones" in fleet
+
+
+def test_reap_machine_destroys_the_clones_forked_volume(tmp_path: Path) -> None:
+    """`flyctl machine destroy` never destroys the clone's forked volume — it
+    leaks and bills forever (observed: 42 x 20GB in one day). reap_machine must
+    resolve the volume BEFORE the machine disappears and destroy it after,
+    while never touching the warm source's volume."""
+    fleet = FLEET_SCRIPT.read_text()
+    helpers = "".join(
+        _extract_fleet_function(fleet, sig)
+        for sig in ("machine_volume_id() {", "reap_volume() {", "reap_machine() {")
+    )
+    calls = tmp_path / "calls"
+
+    script = f"""set -uo pipefail
+APP=bench-app
+WARM_ID=warm-1
+WARM_VOLUME_ID=vol_warm
+export CALLS_FILE="$CALLS_FILE"
+FLY() {{
+  echo "$*" >> "$CALLS_FILE"
+  case "$1 $2" in
+    "machines list")
+      # clone-1 exists (with its volume) until it has been destroyed once
+      if grep -q "machine destroy" "$CALLS_FILE"; then echo "[]"; else
+        printf '[{{"id":"clone-1","config":{{"mounts":[{{"volume":"vol_clone"}}]}}}}]\\n'
+      fi ;;
+    "machine destroy") return 0 ;;
+    "volumes destroy") return 0 ;;
+    "volumes list") echo "[]" ;;
+  esac
+  return 0
+}}
+{helpers}
+reap_machine clone-1
+echo "reap_machine_exit=$?"
+reap_volume vol_warm && echo "warm_guard=missing" || echo "warm_guard=held"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"CALLS_FILE": str(calls)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    log = calls.read_text()
+    assert "machine destroy --force clone-1" in log
+    assert "volumes destroy vol_clone" in log, "forked volume must be reaped with its machine"
+    # the volume was resolved BEFORE the destroy (list precedes destroy)
+    assert log.index("machines list") < log.index("machine destroy")
+    assert "reap_machine_exit=0" in result.stdout
+    # warm volume is never destroyable through the reap path
+    assert "warm_guard=held" in result.stdout
+    assert "volumes destroy vol_warm" not in log
+
+
+def test_orphan_volume_sweep_reaps_only_aged_unattached_clone_volumes(tmp_path: Path) -> None:
+    """The fleet-start sweep self-heals volumes leaked by killed runs. It must
+    destroy ONLY unattached cloudbench_data volumes older than the grace period
+    — never attached ones, other apps' volume names, fresh in-flight forks
+    (concurrent controller create->attach window), or the warm source volume."""
+    fleet = FLEET_SCRIPT.read_text()
+    helpers = "".join(
+        _extract_fleet_function(fleet, sig)
+        for sig in ("reap_volume() {", "sweep_orphaned_volumes() {")
+    )
+    calls = tmp_path / "calls"
+
+    script = f"""set -uo pipefail
+APP=bench-app
+VOLUME_NAME=cloudbench_data
+WARM_VOLUME_ID=vol_warm
+CLOUDBENCH_VOLUME_ORPHAN_GRACE_SECONDS=3600
+export CALLS_FILE="$CALLS_FILE"
+FLY() {{
+  echo "$*" >> "$CALLS_FILE"
+  case "$1 $2" in
+    "volumes list")
+      python3 - <<'PYJSON'
+import json
+from datetime import datetime, timedelta, timezone
+now = datetime.now(timezone.utc)
+iso = lambda dt: dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+print(json.dumps([
+  {{"id": "vol_old_orphan", "name": "cloudbench_data", "attached_machine_id": None,
+    "created_at": iso(now - timedelta(hours=2))}},
+  {{"id": "vol_fresh_fork", "name": "cloudbench_data", "attached_machine_id": None,
+    "created_at": iso(now - timedelta(minutes=5))}},
+  {{"id": "vol_attached", "name": "cloudbench_data", "attached_machine_id": "m1",
+    "created_at": iso(now - timedelta(hours=9))}},
+  {{"id": "vol_other_app", "name": "captest", "attached_machine_id": None,
+    "created_at": iso(now - timedelta(hours=9))}},
+  {{"id": "vol_warm", "name": "cloudbench_data", "attached_machine_id": None,
+    "created_at": iso(now - timedelta(hours=9))}},
+]))
+PYJSON
+      ;;
+    "volumes destroy") return 0 ;;
+  esac
+  return 0
+}}
+{helpers}
+sweep_orphaned_volumes
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"CALLS_FILE": str(calls)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    log = calls.read_text()
+    assert "volumes destroy vol_old_orphan" in log
+    for protected in ("vol_fresh_fork", "vol_attached", "vol_other_app", "vol_warm"):
+        assert f"volumes destroy {protected}" not in log, f"{protected} must survive the sweep"
+    # the sweep runs at fleet start, wired in (not just defined)
+    assert "\nsweep_orphaned_volumes\n" in fleet
+
+
+def test_detach_reexec_survives_launcher_session_death(tmp_path: Path) -> None:
+    """cloudbench_detach_reexec must re-exec the command in its OWN session
+    (fork -> setsid -> exec): a fleet controller otherwise dies with the
+    launching terminal/agent session's process group (observed: a 28-machine
+    fleet torn down mid-run by launcher exit). Verified functionally: the
+    detached child reports a different session id than the launcher and keeps
+    running after the launcher is gone."""
+    env_lib = ENV_HELPER_SCRIPT.read_text()
+    start = env_lib.index("cloudbench_detach_reexec() {")
+    end = env_lib.index("\nPY\n}", start) + len("\nPY\n}")
+    helper = env_lib[start:end]
+    log = tmp_path / "detached.log"
+    sid_file = tmp_path / "sids"
+
+    launcher = f"""set -uo pipefail
+{helper}
+sid() {{ python3 -c 'import os; print(os.getsid(0))'; }}
+echo "launcher_sid=$(sid)" >> "$SID_FILE"
+cloudbench_detach_reexec "$LOG" bash -c \
+  'echo "child_sid=$(python3 -c "import os; print(os.getsid(0))")" >> "$SID_FILE"; sleep 2; echo survived >> "$SID_FILE"'
+"""
+    result = subprocess.run(
+        ["bash", "-c", launcher],
+        env={"LOG": str(log), "SID_FILE": str(sid_file), "PATH": os.environ["PATH"]},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    # launcher has fully exited; the detached child must still complete
+    deadline = time.time() + 10
+    while time.time() < deadline and "survived" not in sid_file.read_text():
+        time.sleep(0.2)
+    content = sid_file.read_text()
+    assert "survived" in content, f"detached child died with the launcher: {content!r}"
+    sids = dict(line.split("=") for line in content.splitlines() if "=" in line)
+    assert sids["launcher_sid"] != sids["child_sid"], "child must run in its OWN session"
+    # the fleet wires --detach before any lock/machine acquisition
+    fleet = FLEET_SCRIPT.read_text()
+    assert "--detach)" in fleet
+    assert fleet.index("cloudbench_detach_reexec") < fleet.index("cloudbench_controller_lock_acquire"), (
+        "detach must happen before the controller lock so the surviving process owns it"
+    )
+
+
+def test_read_pollers_share_one_machines_snapshot(tmp_path: Path) -> None:
+    """28 autoscalers + clone resolvers each running their own `flyctl machines
+    list` was ~28x redundant API load per interval — the source of
+    resource_exhausted throttling at fleet width. Read-only pollers must consume
+    the controller-owned snapshot (fleet_machines_json/fleet_volumes_json);
+    mutation-verification paths (reap, pool claims) must stay live for
+    post-write freshness."""
+    fleet = FLEET_SCRIPT.read_text()
+
+    # the snapshot loop exists, starts before Phase 1, and is reaped in cleanup
+    assert "machines_snapshot_loop() {" in fleet
+    assert "machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!" in fleet
+    assert 'kill "$SNAPSHOT_LOOP_PID"' in fleet
+    assert fleet.index("machines_snapshot_loop & SNAPSHOT_LOOP_PID") < fleet.index(
+        "# ── Phase 1:"
+    )
+    # backoff on API failure lives in the loop (single caller = single backoff)
+    loop = _extract_fleet_function(fleet, "machines_snapshot_loop() {")
+    assert "backoff" in loop
+
+    # read-only pollers consume the shared snapshot. The exceptional post-clone
+    # resolver requests a coalesced fresh snapshot before reading it, so 30
+    # fallback resolvers do not each hammer the Machines API or read stale data.
+    for fn_sig in ("machine_id_for_clone_name() {", "_machine_priv_ip() {", "machine_storage_ready() {"):
+        body = _extract_fleet_function(fleet, fn_sig)
+        assert "FLY machines list" not in body, f"{fn_sig} must read the shared snapshot"
+        assert "fleet_machines_json" in body
+    resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
+    assert "refresh_machines_snapshot_after" in resolver
+    refresh = _extract_fleet_function(fleet, "refresh_machines_snapshot_after() {")
+    assert "FLY machines list" in refresh
+    assert "machines-refresh.lock" in refresh
+    ready = _extract_fleet_function(fleet, "machine_storage_ready() {")
+    assert "FLY volumes list" not in ready and "fleet_volumes_json" in ready
+    # the autoscaler liveness check reads the snapshot, not machine status
+    assert 'while fleet_machines_json | grep -q "\\"$cid\\""' in fleet
+
+    # mutation-verification paths stay LIVE (a 5s-stale snapshot would make
+    # reap retry against ghosts and claims race)
+    for fn_sig in ("reap_machine() {", "pool_machine_state() {"):
+        body = _extract_fleet_function(fleet, fn_sig)
+        assert "FLY machines list" in body, f"{fn_sig} must verify against live state"
+
+    # fleet_machines_json: functional — serves fresh snapshot, falls back live
+    helpers = "".join(
+        _extract_fleet_function(fleet, sig)
+        for sig in ("_fresh_snapshot_or() {", "fleet_machines_json() {")
+    )
+    snap = tmp_path / "machines.json"
+    snap.write_text('[{"id":"from-snapshot"}]\n')
+    script = f"""set -uo pipefail
+APP=bench-app
+SNAPSHOT_POLL=5
+MACHINES_SNAPSHOT="$SNAP"
+FLY() {{ echo '[{{"id":"from-live"}}]'; }}
+{helpers}
+fleet_machines_json
+touch -t 202001010000 "$SNAP"   # stale → must fall back to live
+fleet_machines_json
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"SNAP": str(snap), "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    lines = result.stdout.strip().splitlines()
+    assert lines[0] == '[{"id":"from-snapshot"}]', lines
+    assert lines[1] == '[{"id":"from-live"}]', lines
+
+
+def _preflight_harness(tmp_path: Path, *, state_line: str | None, dirty: bool,
+                       autorefresh: str, snap_epoch: int, refresh_status: int = 0,
+                       refreshed_snapshot: str = "snap-transaction") -> tuple:
+    """Run warm_deps_preflight with stubbed FLY/git/refresh; returns (result, calls)."""
+    fleet = FLEET_SCRIPT.read_text()
+    helpers = "".join(
+        _extract_fleet_function(fleet, sig)
+        for sig in (
+            "snapshot_created_epoch() {",
+            "snapshot_is_complete_exact() {",
+            "warm_deps_preflight() {",
+        )
+    )
+    root = tmp_path / "root"
+    (root / "scripts").mkdir(parents=True)
+    fake_cloud = root / "scripts" / "run-bench-cloud"
+    fake_cloud.write_text(
+        '#!/usr/bin/env bash\n'
+        'echo "refresh-deps $*" >> "$CALLS_FILE"\n'
+        f'printf "NODEFP PYFP 2000 {refreshed_snapshot}\\n" > "$COMMON/cloudbench-warm-deps.fp"\n'
+        f'exit {refresh_status}\n'
+    )
+    fake_cloud.chmod(0o755)
+    (root / "scripts" / "cloudbench-select-snapshot.py").write_text('print("snap-new")\n')
+    common = tmp_path / "common"
+    common.mkdir()
+    if state_line is not None:
+        (common / "cloudbench-warm-deps.fp").write_text(state_line + "\n")
+    calls = tmp_path / "calls"
+    calls.write_text("")
+
+    script = f"""set -uo pipefail
+APP=bench-app
+VOL_ID=vol_warm
+SNAP_ID=snap-current
+BENCH_REF=abc123
+BENCHES=(a b c)
+ROOT_DIR="$ROOT"
+RUN_BENCH_CLOUD_BIN="$ROOT/scripts/run-bench-cloud"
+GIT_COMMON_DIR="$COMMON"
+CLOUDBENCH_WARM_DEPS_AUTOREFRESH={autorefresh}
+export CALLS_FILE="$CALLS_FILE"
+FLY() {{
+  echo '[{{"id":"snap-current","created_at":"{__import__("datetime").datetime.fromtimestamp(snap_epoch, __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}","status":"created","size":9}},{{"id":"{refreshed_snapshot}","created_at":"2026-07-17T00:00:00Z","status":"created","size":9}},{{"id":"snap-unrelated-newer","created_at":"2026-07-17T00:01:00Z","status":"created","size":9}}]'
+}}
+cloudbench_node_dependency_fingerprint() {{ echo NODEFP; }}
+cloudbench_manifest_fingerprint() {{ echo PYFP; }}
+CLOUDBENCH_PYTHON_MANIFESTS=(agents/requirements.txt)
+git() {{ [ "{int(dirty)}" = "1" ] && return 1 || return 0; }}
+{helpers}
+warm_deps_preflight || exit $?
+echo "SNAP_AFTER=$SNAP_ID"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"ROOT": str(root), "COMMON": str(common), "CALLS_FILE": str(calls),
+             "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+    return result, calls
+
+
+def test_warm_deps_preflight_fast_path_and_central_heal(tmp_path: Path) -> None:
+    """Stale warm-snapshot dep trees made EVERY clone pay a multi-minute rsync
+    (the fleet's dominant bring-up cost). The preflight must (a) prove
+    freshness from the shared state file and skip healing, (b) heal centrally
+    ONCE via --refresh-deps when the state is absent/stale, and (c) never heal
+    when manifests are dirty vs HEAD (uncommitted deps can't be healed
+    centrally). It must never block the run on failure."""
+    # (a) matching state + fresh snapshot → fast path, no refresh
+    result, calls = _preflight_harness(
+        tmp_path / "a", state_line="NODEFP PYFP 1000 snap-current", dirty=False,
+        autorefresh="1", snap_epoch=2000)
+    assert result.returncode == 0, result.stderr
+    assert "fast bring-up" in result.stdout
+    assert calls.read_text() == ""
+    assert "SNAP_AFTER=snap-current" in result.stdout
+
+    # (b) no state → central heal once, then adopt only the exact snapshot
+    # the refresh transaction published (never a newer unrelated snapshot).
+    result, calls = _preflight_harness(
+        tmp_path / "b", state_line=None, dirty=False, autorefresh="1", snap_epoch=2000)
+    assert result.returncode == 0, result.stderr
+    assert "refresh-deps --refresh-deps --ref abc123" in calls.read_text()
+    assert "SNAP_AFTER=snap-transaction" in result.stdout
+
+    # (c) dirty manifests cannot be fetched/rebuilt centrally and must fail
+    # before provisioning; the old advertised per-box fallback hits the same
+    # immutable donor mismatch and cannot work.
+    result, calls = _preflight_harness(
+        tmp_path / "c", state_line=None, dirty=True, autorefresh="1", snap_epoch=2000)
+    assert result.returncode != 0
+    assert "DIRTY" in result.stdout + result.stderr
+    assert calls.read_text() == ""
+
+    # (d) a failed central transaction aborts immediately instead of launching
+    # clones that are already known to fail the copy-only dependency gate.
+    result, calls = _preflight_harness(
+        tmp_path / "d", state_line=None, dirty=False, autorefresh="1",
+        snap_epoch=2000, refresh_status=1)
+    assert result.returncode != 0
+    assert "refresh-deps --refresh-deps --ref abc123" in calls.read_text()
+    assert "refusing to provision" in result.stdout + result.stderr
+
+    # (e) disabling required maintenance also fails before provisioning and
+    # prints the explicit manual repair command.
+    result, calls = _preflight_harness(
+        tmp_path / "e", state_line=None, dirty=False, autorefresh="0", snap_epoch=2000)
+    assert result.returncode != 0
+    assert "--refresh-deps" in result.stdout + result.stderr
+    assert calls.read_text() == ""
+
+
+def test_refresh_deps_is_a_validated_maintenance_transaction() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    fleet = FLEET_SCRIPT.read_text()
+    driver = DRIVER_SCRIPT.read_text()
+    refresh = cloud[
+        cloud.index('if [ "$MODE" = "refresh-deps" ]; then'):
+        cloud.index('# MODE: --refresh-wmh')
+    ]
+    snapshot_helper = _extract_fleet_function(cloud, "create_volume_snapshot_exact() {")
+
+    assert "CLOUDBENCH_REBUILD_DEPS=1" in refresh
+    assert "CLOUDBENCH_REBUILD_DEPS=1" not in driver
+    assert "EXPECTED_REF=" in refresh
+    assert "REMOTE_REF=" in refresh
+    assert "REMOTE_NODE_FP=" in refresh
+    assert "REMOTE_PY_FP=" in refresh
+    assert "remote dependency state did not match" in refresh
+    assert 'create_volume_snapshot_exact "$VOL_ID" || exit 1' in refresh
+    assert 'volumes snapshots create "$vol" -a "$APP" --json' in snapshot_helper
+    assert 'CREATED_SNAPSHOT_ID=' in snapshot_helper
+    assert 'BEFORE_IDS="$before_ids"' in snapshot_helper
+    assert "authoritative pre-snapshot inventory" in snapshot_helper
+    assert "multiple new snapshots appeared" in snapshot_helper
+    assert "snap-unrelated" not in snapshot_helper
+    assert "central dep refresh failed; refusing to provision" in fleet
+    assert "clones will pay the per-box rsync" not in fleet
+    assert "warm_deps_preflight || exit 1" in fleet
+
+
+def test_refresh_deps_requires_confirmed_stop_before_snapshot(tmp_path: Path) -> None:
+    """A failed/slow stop must prevent both snapshot creation and publication."""
+    cloud = CLOUD_SCRIPT.read_text()
+    strict_stop = _extract_fleet_function(cloud, "stop_machine_strict() {")
+    calls = tmp_path / "calls"
+    calls.write_text("")
+    script = f"""set -uo pipefail
+APP=bench-app
+CLOUDBENCH_MAINTENANCE_STOP_ATTEMPTS=2
+FLY() {{ echo "$*" >> "$CALLS"; [ "$1 $2" != "machine stop" ]; }}
+machine_state() {{ echo started; }}
+sleep() {{ :; }}
+{strict_stop}
+if stop_machine_strict warm-1; then
+  FLY volumes snapshots create vol-1 -a "$APP" --json
+  echo PUBLISHED
+fi
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"CALLS": str(calls), "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "machine stop warm-1" in calls.read_text()
+    assert "snapshots create" not in calls.read_text()
+    assert "PUBLISHED" not in result.stdout
+
+    # A stop request that succeeds but never reaches provider state=stopped is
+    # equally unsafe and must have the same fail-before-snapshot outcome.
+    calls.write_text("")
+    slow_script = script.replace(
+        'FLY() { echo "$*" >> "$CALLS"; [ "$1 $2" != "machine stop" ]; }',
+        'FLY() { echo "$*" >> "$CALLS"; return 0; }',
+    )
+    slow = subprocess.run(
+        ["bash", "-c", slow_script],
+        env={"CALLS": str(calls), "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+    assert slow.returncode == 0, slow.stderr
+    assert "snapshots create" not in calls.read_text()
+    assert "PUBLISHED" not in slow.stdout
+
+
+def test_refresh_deps_tracks_exact_created_snapshot(tmp_path: Path) -> None:
+    """Fly's empty create response is bound by a strict before/after ID diff."""
+    cloud = CLOUD_SCRIPT.read_text()
+    create_snapshot = _extract_fleet_function(cloud, "create_volume_snapshot_exact() {")
+    calls = tmp_path / "calls"
+    calls.write_text("")
+    created = tmp_path / "created"
+    script = f"""set -uo pipefail
+APP=bench-app
+CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS=2
+FLY() {{
+  echo "$*" >> "$CALLS"
+  if [ "$1 $2 $3" = "volumes snapshots create" ]; then
+    touch "$CREATED"
+    return 0
+  elif [ -f "$CREATED" ]; then
+    echo '[{{"id":"snap-unrelated-older","status":"created","size":99}},{{"id":"snap-owned","status":"created","size":10}}]'
+  else
+    echo '[{{"id":"snap-unrelated-older","status":"created","size":99}}]'
+  fi
+}}
+sleep() {{ :; }}
+{create_snapshot}
+create_volume_snapshot_exact vol-1 || exit $?
+echo "EXACT=$CREATED_SNAPSHOT_ID"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"CALLS": str(calls), "CREATED": str(created), "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "EXACT=snap-owned" in result.stdout
+    assert "snap-unrelated-older" not in result.stdout
+
+    created.unlink()
+    ambiguous_script = script.replace(
+        '{"id":"snap-owned","status":"created","size":10}]',
+        '{"id":"snap-owned","status":"created","size":10},'
+        '{"id":"snap-racing","status":"running","size":0}]',
+    )
+    ambiguous = subprocess.run(
+        ["bash", "-c", ambiguous_script],
+        env={"CALLS": str(calls), "CREATED": str(created), "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+    assert ambiguous.returncode != 0
+    assert "multiple new snapshots appeared" in ambiguous.stderr
+    assert "EXACT=" not in ambiguous.stdout
+
+
+def test_refresh_deps_rejects_invalid_ref_before_fly(tmp_path: Path) -> None:
+    """An unresolved ref is input failure and must cause zero Fly API calls."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "fly-calls"
+    calls.write_text("")
+    fake_fly = bin_dir / "flyctl"
+    fake_fly.write_text(
+        '#!/usr/bin/env bash\n'
+        'printf "%s\\n" "$*" >> "$FLY_CALLS"\n'
+        'echo "[]"\n'
+    )
+    fake_fly.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(CLOUD_SCRIPT), "--refresh-deps", "--ref", "definitely-not-a-commit"],
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "FLY_BENCH_API_TOKEN": "test-token",
+            "FLY_CALLS": str(calls),
+        },
+        text=True, capture_output=True, check=False, timeout=20,
+    )
+
+    assert result.returncode != 0
+    assert calls.read_text() == ""
+    assert "invalid benchmark ref" in result.stdout + result.stderr
+
+
+def test_isolated_backend_startup_retries_one_hung_process(tmp_path: Path) -> None:
+    """A live-but-never-listening first backend cannot abort the whole fleet slot."""
+    stack = STACK_SCRIPT.read_text()
+    helpers = "".join(
+        _extract_fleet_function(stack, signature)
+        for signature in (
+            "launch_backend_service() {",
+            "terminate_backend_group() {",
+            "restart_backend_service() {",
+            "isolated_backend_ready_attempts() {",
+            "wait_for_isolated_backend_ready() {",
+        )
+    )
+    launcher = tmp_path / "backend_tree.py"
+    launcher.write_text(
+        "import os, pathlib, signal, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', "
+        "'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'])\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
+        "time.sleep(30)\n"
+    )
+    launches = tmp_path / "launches"
+    launches.write_text("0\n")
+    child_dir = tmp_path / "children"
+    child_dir.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_npx = bin_dir / "npx"
+    fake_npx.write_text(
+        "#!/usr/bin/env bash\n"
+        'count=$(cat "$LAUNCHES")\n'
+        'count=$((count + 1))\n'
+        'echo "$count" > "$LAUNCHES"\n'
+        'exec python3 "$LAUNCHER" "$CHILD_DIR/child-$count"\n'
+    )
+    fake_npx.chmod(0o755)
+    script = f"""set -eo pipefail
+BACKEND_PORT=3001
+BACKEND_LOG_FILE="$CHILD_DIR/backend.log"
+FAIL_DIR="$CHILD_DIR/fail"
+mkdir -p "$FAIL_DIR"
+CLOUDBENCH_BACKEND_START_READY_ATTEMPTS=2
+BACKEND_INDEX=0
+PIDS=("")
+NAMES=()
+BENCHMARK_MODE=true
+BENCHMARK_ISOLATED_RUN=true
+SCRIPT_DIR="$SCRIPT_DIR"
+curl() {{ [ "$(cat "$LAUNCHES")" -ge 2 ]; }}
+{helpers}
+launch_backend_service
+echo "$BACKEND_PID" > "$CHILD_DIR/root-1"
+for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$CHILD_DIR/child-1" ] && break; sleep 0.1; done
+wait_for_isolated_backend_ready
+rc=$?
+old_child=$(cat "$CHILD_DIR/child-1")
+if kill -0 "$old_child" 2>/dev/null; then echo OLD_SURVIVED; rc=1; else echo OLD_GONE; fi
+new_root="$BACKEND_PID"
+[ "${{PIDS[0]}}" = "$new_root" ] || {{ echo SLOT_STALE; rc=1; }}
+terminate_backend_group || rc=1
+kill -0 "$new_root" 2>/dev/null && {{ echo NEW_SURVIVED; rc=1; }}
+exit "$rc"
+"""
+    harness_env = {
+        "LAUNCHER": str(launcher),
+        "LAUNCHES": str(launches),
+        "CHILD_DIR": str(child_dir),
+        "SCRIPT_DIR": str(ROOT / "scripts"),
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+    }
+    # Preserve the exact smoke failure as a negative control: production does
+    # not enable nounset, so an invented empty ROOT_DIR resolves to /scripts.
+    broken_script = script.replace(
+        'python3 "$SCRIPT_DIR/run-in-new-session.py"',
+        'python3 "$ROOT_DIR/scripts/run-in-new-session.py"',
+    )
+    broken = subprocess.run(
+        ["bash", "-c", broken_script],
+        cwd=ROOT,
+        env=harness_env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert broken.returncode != 0
+    assert "can't open file '/scripts/run-in-new-session.py'" in broken.stderr
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        cwd=ROOT,
+        env=harness_env,
+        text=True, capture_output=True, check=False, timeout=25,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert launches.read_text().strip() == "2"
+    assert "backend startup attempt 1/2 did not become healthy" in result.stdout + result.stderr
+    assert "backend became healthy after restart" in result.stdout
+    assert "OLD_GONE" in result.stdout
+    assert "OLD_SURVIVED" not in result.stdout
+    assert "SLOT_STALE" not in result.stdout
+    assert "NEW_SURVIVED" not in result.stdout
+
+
+def test_isolated_backend_session_launcher_is_macos_portable(tmp_path: Path) -> None:
+    """The local smoke path must not require GNU setsid(1), absent on macOS."""
+    stack = STACK_SCRIPT.read_text()
+    session_launcher = ROOT / "scripts" / "run-in-new-session.py"
+    assert 'python3 "$SCRIPT_DIR/run-in-new-session.py" bash -c' in stack
+    assert "$ROOT_DIR/scripts/run-in-new-session.py" not in stack
+    assert "setsid bash" not in stack
+
+    ready = tmp_path / "ready"
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import os, pathlib, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"pathlib.Path({str(ready)!r}).write_text(f'{{os.getpid()}} {{os.getsid(0)}} {{os.getpgrp()}}')\n"
+        "time.sleep(30)\n"
+    )
+    # Deliberately provide no setsid executable. The helper must establish a
+    # session whose id and process group are both the owned root process.
+    process = subprocess.Popen(
+        [sys.executable, str(session_launcher), sys.executable, str(child)],
+        env={"PATH": str(tmp_path)},
+    )
+    try:
+        deadline = time.time() + 5
+        while time.time() < deadline and not ready.exists():
+            time.sleep(0.05)
+        assert ready.exists(), "session-owned child did not start"
+        pid, sid, pgid = (int(value) for value in ready.read_text().split())
+        assert pid == process.pid
+        assert sid == process.pid
+        assert pgid == process.pid
+    finally:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait(timeout=5)
+
+
+def test_local_predeploy_skips_wmh_and_wmh_logs_survive_agent_chdir(tmp_path: Path) -> None:
+    """Real-mode smoke must not build WMH; simulate logs still need a rooted path."""
+    predeploy = PREDEPLOY_LOCAL_SCRIPT.read_text()
+    stack = STACK_SCRIPT.read_text()
+
+    fixture = tmp_path / "predeploy"
+    (fixture / "scripts").mkdir(parents=True)
+    (fixture / "agents" / "benchmarks").mkdir(parents=True)
+    (fixture / "scripts" / "run-predeploy-local").write_text(predeploy)
+    (fixture / "agents" / "benchmarks" / "tasks.json").write_text(
+        json.dumps([{"name": "smoke-fixture", "tags": ["smoke"]}])
+    )
+    capture = fixture / "capture"
+    (fixture / "scripts" / "run-bench").write_text(
+        '#!/usr/bin/env bash\nprintf "%s\\n" "${BENCHMARK_SKIP_WMH_BUILD:-unset}" "$*" > "$CAPTURE"\n'
+    )
+    (fixture / "scripts" / "run-bench").chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(fixture / "scripts" / "run-predeploy-local")],
+        env={**os.environ, "CAPTURE": str(capture)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert capture.read_text().splitlines() == ["1", "--local smoke-fixture --max-concurrency 2"]
+
+    wmh = _extract_fleet_function(stack, "start_world_model_harness() {")
+    wmh_root = tmp_path / "wmh"
+    activate = wmh_root / "agents" / "venv" / "bin" / "activate"
+    activate.parent.mkdir(parents=True)
+    activate.write_text("python() { printf 'build-cwd=%s\\n' \"$PWD\"; return 1; }\n")
+    harness = f"""set -uo pipefail
+cd "$WMH_ROOT"
+should_serve_world_model() {{ return 0; }}
+PIDS=()
+NAMES=()
+RUN_CONTEXT_DIR=.context/isolated
+WMH_BUILD_DIR=.context/model
+WMH_MODEL_NAME=fixture
+WMH_PORT=39999
+BENCHMARK_MODE=true
+{wmh}
+start_world_model_harness
+"""
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        env={**os.environ, "WMH_ROOT": str(wmh_root)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    rooted_log = wmh_root / ".context" / "isolated" / "wmh-serve-log.txt"
+    assert rooted_log.read_text().strip() == f"build-cwd={wmh_root / 'agents'}"
+    assert not (wmh_root / "agents" / ".context").exists()
+
+
+def test_refresh_deps_mode_contract() -> None:
+    """--refresh-deps must sync the ref, run the marker-gated dep sync, STOP the
+        machine before snapshotting (quiesced snapshot), wait boundedly for the
+        exact created snapshot, and record the shared freshness state file."""
+    cloud = CLOUD_SCRIPT.read_text()
+    start = cloud.index('if [ "$MODE" = "refresh-deps" ]; then')
+    end = cloud.index('# MODE: --refresh-wmh', start)
+    mode = cloud[start:end]
+    snapshot_helper = _extract_fleet_function(cloud, "create_volume_snapshot_exact() {")
+    assert "cloudbench-sync-deps.sh' /app" in mode
+    assert "::DEPS-REFRESH-DONE::" in mode
+    # stop precedes the snapshot cut
+    assert mode.index('stop_machine_strict "$mid"') < mode.index('create_volume_snapshot_exact "$VOL_ID"')
+    # bounded wait for a COMPLETE fresh snapshot
+    assert 'CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS:-90' in snapshot_helper
+    # shared freshness state recorded for fleet preflights
+    assert 'cloudbench-warm-deps.fp' in mode
+    assert "cloudbench_node_dependency_fingerprint" in mode
+    assert "cloudbench_manifest_fingerprint" in mode
+    # flag is wired
+    assert '--refresh-deps)   MODE="refresh-deps"' in cloud
+    # the fleet preflight exists and runs before cloning begins
+    fleet = FLEET_SCRIPT.read_text()
+    assert fleet.index("warm_deps_preflight || exit 1\n") < fleet.index("# ── Phase 1:")
+
+
+def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
+    """bash reads scripts lazily from disk: editing run-bench-fleet or
+    run-bench-cloud while a controller is mid-run shifts bytes under the
+    interpreter and kills a healthy fleet with a parse error (observed: 28
+    provisioned boxes torn down by "syntax error near unexpected token 'fi'"
+    after an in-flight edit). The controller must re-exec from an immutable
+    per-invocation snapshot before any long-running work, and every child
+    run-bench-cloud invocation must use the snapshot copy."""
+    fleet = FLEET_SCRIPT.read_text()
+    cloud = CLOUD_SCRIPT.read_text()
+
+    # snapshot-exec happens before arg parsing / locks / machines
+    snap_at = fleet.index('exec bash "$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-fleet"')
+    assert snap_at < fleet.index('while [ $# -gt 0 ]; do')
+    assert snap_at < fleet.index("cloudbench_controller_lock_acquire")
+    # the snapshot carries all three co-versioned interpreter files
+    for f in ("run-bench-fleet", "run-bench-cloud", "cloudbench-env.sh"):
+        assert f in fleet[fleet.index("cloudbench-scripts.XXXXXX"):snap_at], f"{f} missing from snapshot copy set"
+    # every child/preflight/verify call goes through the snapshot binary —
+    # no direct executable reference to the live checkout remains
+    assert 'RUN_BENCH_CLOUD_BIN="$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-cloud"' in fleet
+    for line in fleet.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") or "echo " in stripped:
+            continue
+        if "bash scripts/run-bench-cloud" in stripped or 'bash "$ROOT_DIR/scripts/run-bench-cloud"' in stripped:
+            raise AssertionError(f"live-checkout invocation must use RUN_BENCH_CLOUD_BIN: {line}")
+    # both interpreters honor the fleet-root override so snapshot copies keep
+    # resolving repo paths correctly
+    assert 'ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-' in fleet
+    assert 'ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-' in cloud
+    assert 'source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"' in fleet
+    assert 'source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"' in cloud
+    # the run's cleanup reaps the snapshot dir
+    assert 'rm -rf "$CLOUDBENCH_SCRIPT_SNAPSHOT"' in fleet
+
+    # functional: the re-exec chain is sound end-to-end (--help flows through
+    # the snapshot exec and still exits 0 with usage text)
+    result = subprocess.run(
+        ["bash", str(FLEET_SCRIPT), "--help"],
+        env={**os.environ, "CLOUDBENCH_SCRIPT_SNAPSHOT": "", "TMPDIR": str(tmp_path)},
+        text=True, capture_output=True, check=False, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "run-bench-fleet" in result.stdout
+    # and the snapshot dir was actually created under our TMPDIR
+    assert any(d.name.startswith("cloudbench-scripts.") for d in tmp_path.iterdir())
+
+
+def test_bring_up_report_attributes_time_to_named_steps(tmp_path: Path) -> None:
+    """Every bring-up second must be attributable to a named step: the driver
+    stamps `STEP <name>` boundaries and cloudbench-bring-up-report.py turns a
+    fleet run dir into per-step durations + p50/max + slowest-step callout."""
+    driver = DRIVER_SCRIPT.read_text()
+    # timestamped log + step marker helpers exist and phases are stamped
+    assert 'log() { echo "[cloudbench $(date -u +%H:%M:%S)] $*"; }' in driver
+    assert 'step() { log "STEP $*"; }' in driver
+    for name in ("git_sync", "dep_sync", "postgres", "stack_launch", "services_wait", "benchmark"):
+        assert f"\nstep {name}\n" in driver, f"driver missing STEP stamp: {name}"
+
+    run = tmp_path / "run"
+    (run / "bench-a").mkdir(parents=True)
+    (run / "bench-a" / "fleet-child.log").write_text(
+        "   | [cloudbench 10:00:00] STEP git_sync\n"
+        "   | [cloudbench 10:00:20] STEP dep_sync\n"
+        "   | [cloudbench 10:03:20] STEP postgres\n"
+        "   | [cloudbench 10:03:30] STEP stack_launch\n"
+        "   | [cloudbench 10:04:30] STEP services_wait\n"
+        "   | [cloudbench 10:05:00] STEP benchmark\n"
+    )
+    (run / "bench-b").mkdir(parents=True)
+    (run / "bench-b" / "fleet-child.log").write_text(
+        "   | [cloudbench 10:00:00] STEP git_sync\n"
+        "   | [cloudbench 10:00:10] STEP dep_sync\n"
+        "   | [cloudbench 10:00:15] STEP postgres\n"
+        "   | [cloudbench 10:00:25] STEP stack_launch\n"
+        "   | [cloudbench 10:01:25] STEP services_wait\n"
+        "   | [cloudbench 10:02:00] STEP benchmark\n"
+    )
+    result = subprocess.run(
+        ["python3", str(ROOT / "scripts" / "cloudbench-bring-up-report.py"), str(run)],
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    out = result.stdout
+    assert "bench-a" in out and "bench-b" in out
+    # bench-a's dep_sync is 180s and must surface as the slowest step
+    assert "slowest step: dep_sync on bench-a (180s)" in out
+    assert "p50" in out and "max" in out
+
+
+def test_run_is_visible_in_hub_from_fire_time(tmp_path: Path) -> None:
+    """A fired run must appear in the central hub IMMEDIATELY with an explicit
+    starting phase — a run waiting on a snapshot/heal/provisioning was invisible
+    until Phase 2 wrote its first real report card. The startup card is written
+    and the hub started right after the controller lock, before any
+    preflight/heal/machine work, and the phase updates at each stage."""
+    fleet = FLEET_SCRIPT.read_text()
+    lock_at = fleet.index('if ! cloudbench_controller_lock_acquire_wait')
+    card_at = fleet.index('write_startup_card "controller starting"')
+    hub_at = fleet.index("start_central_hub\n")
+    require_hub_at = fleet.index("require_central_hub_visibility || exit 1")
+    verify_at = fleet.index('Verifying the shared benchmark app environment')
+    fanout_at = fleet.index("# ── Phase 1:")
+    assert lock_at < card_at < verify_at, "startup card must precede preflight"
+    assert lock_at < hub_at < verify_at, "hub must serve before preflight"
+    assert hub_at < require_hub_at < verify_at, "hub visibility must be proven before preflight"
+    assert card_at < fanout_at and hub_at < fanout_at
+    # phase updates at each controller stage
+    for phase in ("verifying environment", "healing warm snapshot", "provisioning"):
+        assert f'write_startup_card "{phase}' in fleet, f"missing phase update: {phase}"
+    # early + late hub starts must stay the SAME server invocation (no drift)
+    assert fleet.count('agents/benchmarks/agent_link_server.py') == 2
+
+    # functional: the card is a valid hub-readable starting card
+    helper_start = fleet.index("write_startup_card() {")
+    helper = fleet[helper_start:fleet.index("\nPY\n}", helper_start) + len("\nPY\n}")]
+    result = subprocess.run(
+        ["bash", "-c", f'''set -uo pipefail
+FLEET_DIR="$FD"
+RUN_ID=test-run
+BENCHES=(alpha beta)
+{helper}
+write_startup_card "healing warm snapshot (dep trees)"
+'''],
+        env={"FD": str(tmp_path), "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    card = json.loads((tmp_path / "_batch" / "report-card.json").read_text())
+    assert card["status"] == "starting"
+    assert "healing warm snapshot" in card["phase"]
+    assert card["summary"]["total"] == 2
+    assert [t["name"] for t in card["tasks"]] == ["alpha", "beta"]
+    assert all(t["status"] == "starting" for t in card["tasks"])
+    assert [t["name"] for t in card["per_task"]] == ["alpha", "beta"]
+    assert all(t["status"] == "starting" for t in card["per_task"])
+
+    visibility_start = fleet.index("require_central_hub_visibility() {")
+    visibility_fn = fleet[visibility_start : fleet.index("\n}\n", visibility_start) + 3]
+    visibility = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'''set -uo pipefail
+RUN_ID=visible-run
+DASH_BASE=8765
+UNIFIED_DASH_PID=
+{visibility_fn}
+curl() {{ printf '<html>visible-run</html>'; }}
+require_central_hub_visibility
+curl() {{ return 1; }}
+sleep() {{ :; }}
+CLOUDBENCH_HUB_VISIBILITY_ATTEMPTS=1
+if require_central_hub_visibility; then exit 99; fi
+''',
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert visibility.returncode == 0, visibility.stderr
+    assert "central hub registration verified" in visibility.stdout
+    assert "refusing to continue invisibly" in visibility.stderr
+
+
+def test_warm_source_parks_between_maintenance_and_fleet_runs() -> None:
+    """The stopped donor must not consume the config transaction's CPU margin."""
+    fleet = FLEET_SCRIPT.read_text()
+    cloud = CLOUD_SCRIPT.read_text()
+    park_at = fleet.index('parking warm source at $WARM_PARKED_VM_SIZE')
+    fanout_at = fleet.index("# ── Phase 1:")
+    assert park_at < fanout_at
+    assert 'WARM_PARKED_VM_SIZE="${CLOUDBENCH_WARM_PARKED_VM_SIZE:-shared-cpu-1x}"' in fleet
+    assert 'WARM_PARKED_VM_MEMORY="${CLOUDBENCH_WARM_PARKED_VM_MEMORY:-2048}"' in fleet
+    assert 'prepare_warm_source "$mid" || exit 1' in cloud
+    assert 'park_warm_source "${mid:-${maintenance_mid:-}}" || true' in cloud
+    assert cloud.count('park_warm_source "${mid:-${maintenance_mid:-}}" || true') == 2
+
+
+def test_controller_names_the_signal_that_killed_it() -> None:
+    """Silent teardowns (children mass-TERM'd, no error, no barrier release)
+    repeatedly masqueraded as infra failures when the controller was signalled
+    externally. Each fatal signal trap must announce itself before exiting."""
+    fleet = FLEET_SCRIPT.read_text()
+    for sig in ("HUP", "INT", "TERM"):
+        assert f"controller received {sig}" in fleet, f"unannounced {sig} trap"
+
+
+def test_stale_name_only_registry_survives_provider_visibility_gap(tmp_path: Path) -> None:
+    """A successful Fly clone can become list-visible after the controller's
+    lookup deadline. The name-only record is the sole durable ownership proof
+    during that gap, so stale recovery must retain it and fail closed rather
+    than orphaning a late machine while provisioning a replacement fleet."""
+    fleet = FLEET_SCRIPT.read_text()
+    helpers = "".join(
+        _extract_fleet_function(fleet, sig)
+        for sig in (
+            "registry_meta_value() {",
+            "registry_resolve_name() {",
+            "registry_machine_details() {",
+            "reap_registry_clones() {",
+        )
+    )
+    root = tmp_path / "cloudbench-fleet-ownership"
+    reg = root / "deadtoken"
+    (reg / "clones").mkdir(parents=True)
+    # a clone recorded by name only (no id) whose machine is absent on Fly
+    (reg / "clones" / "cloudbench-gone").write_text("name=cloudbench-gone\n")
+
+    script = f"""set -uo pipefail
+APP=bench-app
+FLEET_OWNERSHIP_ROOT="$ROOT"
+CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
+FLY() {{
+  if [ "$1 $2" = "machines list" ]; then echo "[]"; fi   # clone is absent
+}}
+{helpers}
+reap_registry_clones "$REG" stale
+echo "reap_exit=$?"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={"ROOT": str(root), "REG": str(reg), "PATH": os.environ["PATH"]},
+        text=True, capture_output=True, check=False,
+    )
+    assert "retaining ownership and refusing to provision" in result.stderr
+    assert "reap_exit=1" in result.stdout, f"{result.stdout}\n{result.stderr}"
+    assert (reg / "clones" / "cloudbench-gone").exists(), "uncertain clone ownership must survive"
+
+
+def test_fleet_dedupes_duplicate_bench_names() -> None:
+    """RCA (2026-07-15): the daily catalog gained duplicate task names via a
+    merge. run-bench-fleet keys each bench's isolated machine on
+    $FLEET_DIR/$bench, so a duplicate name shared an out-dir/machine and tripped
+    'isolation violation: machine … allocated twice', aborting all 31 benches at
+    t+312s. The fleet must dedupe bench args (first-seen order) and run once."""
+    fleet = FLEET_SCRIPT.read_text()
+    # the dedupe runs before the isolation-checked launch loop
+    assert "duplicate bench" in fleet
+    dedupe_at = fleet.index("_deduped_benches=()")
+    launch_at = fleet.index("# ── Phase 1:")
+    assert dedupe_at < launch_at, "dedupe must precede provisioning"
+
+    # functional: a b a c b -> a b c (order preserved, dupes dropped)
+    block_start = fleet.index('if [ "${#BENCHES[@]}" -ge 1 ]; then', dedupe_at - 400)
+    block_end = fleet.index("\nfi\n", block_start) + 3
+    dedupe_block = fleet[block_start:block_end]
+    script = f"""set -uo pipefail
+BENCHES=(alpha beta alpha gamma beta alpha)
+{dedupe_block}
+printf '%s ' "${{BENCHES[@]}}"
+echo
+"""
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "alpha beta gamma", result.stdout
+    assert result.stderr.count("duplicate bench") == 3
+
+
+def test_cloud_git_sync_uses_safe_directory_everywhere() -> None:
+    """RCA (2026-07-15): --refresh-deps and --refresh-wmh ran `git -C
+    '$REMOTE_REPO'` as ROOT on the rose-owned /data/repo checkout, so git's
+    dubious-ownership guard fired ('detected dubious ownership in repository at
+    /data/repo') and every fetch/checkout/reset failed — the central heal could
+    not run, leaving the warm snapshot stale and each fleet box paying a slow
+    dep-rsync + Prisma regen that aborted the batch. Every root-run git on the
+    volume checkout must set -c safe.directory (verified on the warm box: bare
+    git -> dubious ownership; with safe.directory -> resolves HEAD)."""
+    cloud = CLOUD_SCRIPT.read_text()
+    # No bare `git -C '$REMOTE_REPO'` may remain (root-run heal/wmh sync paths).
+    bare = "git -C '$REMOTE_REPO'"
+    assert bare not in cloud, f"root-run git on the volume checkout must use -c safe.directory: {bare}"
+    # And the safe.directory form must be present where those syncs happen.
+    assert "git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO'" in cloud
+
+
+def test_refresh_wmh_bounds_the_archive_scan_by_default() -> None:
+    """Maintenance must not scan every historical R2 bundle before a run."""
+    cloud = CLOUD_SCRIPT.read_text()
+    refresh = cloud[
+        cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') :
+        cloud.index('# MODE: run (default)')
+    ]
+
+    assert 'WMH_REFRESH_MAX_BUNDLES="${WMH_REFRESH_MAX_BUNDLES:-20}"' in refresh
+    assert "WMH_REFRESH_MAX_BUNDLES must be a non-negative integer" in refresh
+    assert "WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES'" in refresh
+
+
+def test_start_barrier_tolerates_infra_failures() -> None:
+    """RCA (2026-07-15): at fleet width some isolated stacks sporadically fail
+    on-box startup (resource/timing races under N concurrent full stacks). The
+    all-or-nothing barrier returned failure the instant ANY child exited before
+    signalling ready, aborting the whole batch — a 30/31-healthy run reported
+    ZERO results, twice. The barrier must EXCLUDE a stack that dies before ready
+    (infra failure, not a benchmark verdict), keep the live set, release for the
+    survivors, and fail only if EVERY stack dies."""
+    fleet = FLEET_SCRIPT.read_text()
+    fn = _extract_fleet_function(fleet, "release_start_barrier() {")
+    # A single dead child no longer aborts: the old `return 1` on child exit is gone.
+    assert "isolated runner exited before synchronized start barrier" not in fn
+    # It excludes the dead stack and keeps going.
+    assert "excluding it (infra)" in fn
+    # It only fails when the whole live set is gone.
+    assert 'live" -eq 0 ]' in fn and "every isolated stack failed" in fn
+    # Release only targets the ready machines. A release failure must stop the
+    # invalid run immediately; silently proceeding strands that task at the
+    # barrier and guarantees a missing verdict.
+    assert 'is_ready[$j]}" = "1" ] || continue' in fn
+    assert "could not release synchronized start barrier" in fn
+    # Timeout releases the ready set instead of aborting.
+    assert "releasing the ready set anyway" in fn
+
+
+def test_start_barrier_release_uses_authenticated_data_plane(tmp_path: Path) -> None:
+    """RCA (2026-07-16): boot launch removed the N-wide SSH launch burst and
+    status polling moved to the WireGuard data plane, but synchronized release
+    still fired one `flyctl ssh console ... touch` per ready box. In a live
+    30-wide run, one release RPC failed and released boxes subsequently stopped
+    without DONE markers. Release must use the already-established status proxy,
+    authenticate the request, and fail the controller if any ready box cannot be
+    released instead of silently waiting for that box's barrier timeout.
+    """
+    import urllib.error
+    import urllib.request
+
+    fleet = FLEET_SCRIPT.read_text()
+    fn = _extract_fleet_function(fleet, "release_start_barrier() {")
+    assert "FLY ssh console" not in fn
+    assert "CLOUDBENCH_BARRIER_TOKEN" in fleet
+    assert "http://127.0.0.1:" in fn and "/release" in fn
+    assert "could not release synchronized start barrier" in fn
+
+    assert STATUS_SERVER_SCRIPT.exists(), "data-plane release server is missing"
+    barrier = "run-123"
+    token = "release-secret"
+    (tmp_path / "bench.log").write_text("ready\n")
+    ready_file = tmp_path / "server.port"
+    env = os.environ.copy()
+    env["CLOUDBENCH_BARRIER_TOKEN"] = token
+    server = subprocess.Popen(
+        [
+            "python3",
+            str(STATUS_SERVER_SCRIPT),
+            "--directory",
+            str(tmp_path),
+            "--port",
+            "0",
+            "--barrier",
+            barrier,
+            "--bind",
+            "127.0.0.1",
+            "--ready-file",
+            str(ready_file),
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.time() + 5
+        while not ready_file.is_file():
+            if server.poll() is not None:
+                raise AssertionError("status server exited before binding")
+            if time.time() >= deadline:
+                raise AssertionError("status server did not publish its port")
+            time.sleep(0.02)
+        port = int(ready_file.read_text().strip())
+        base = f"http://127.0.0.1:{port}"
+        local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        while True:
+            try:
+                with local_opener.open(f"{base}/bench.log", timeout=0.5) as response:
+                    assert response.read() == b"ready\n"
+                break
+            except (OSError, urllib.error.URLError):
+                if time.time() >= deadline:
+                    raise
+                time.sleep(0.05)
+
+        release = tmp_path / f"cloudbench-start-{barrier}.release"
+        denied = urllib.request.Request(
+            f"{base}/release",
+            data=b"",
+            method="POST",
+            headers={"Authorization": "Bearer wrong"},
+        )
+        try:
+            local_opener.open(denied, timeout=1)
+            raise AssertionError("wrong barrier token unexpectedly succeeded")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
+        assert not release.exists()
+
+        allowed = urllib.request.Request(
+            f"{base}/release",
+            data=b"",
+            method="POST",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        with local_opener.open(allowed, timeout=1) as response:
+            assert response.status == 204
+        assert release.exists()
+
+        pid_file = tmp_path / "cloudbench-driver.pid"
+        pid_file.write_text(f"{os.getpid()}\n")
+        with local_opener.open(f"{base}/driver-health", timeout=1) as response:
+            assert response.status == 204
+        health_probe = _extract_fleet_function(
+            CLOUD_SCRIPT.read_text(), "probe_driver_health() {"
+        )
+
+        def probe(probe_port: int) -> int:
+            result = subprocess.run(
+                [
+                    "bash",
+                    "-c",
+                    f'{health_probe}\nLOCAL_STATUS_PORT="$1"\nprobe_driver_health',
+                    "probe",
+                    str(probe_port),
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            return result.returncode
+
+        assert probe(port) == 0
+        pid_file.write_text("99999999\n")
+        try:
+            local_opener.open(f"{base}/driver-health", timeout=1)
+            raise AssertionError("dead driver unexpectedly reported healthy")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 410
+        assert probe(port) == 10
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            unused_port = sock.getsockname()[1]
+        assert probe(unused_port) == 20
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
+def test_status_server_defaults_to_fly_6pn_ipv6(tmp_path: Path) -> None:
+    import urllib.request
+
+    if not socket.has_ipv6:
+        return
+    (tmp_path / "bench.log").write_text("ipv6-ready\n")
+    ready_file = tmp_path / "server.port"
+    server = subprocess.Popen(
+        [
+            "python3",
+            str(STATUS_SERVER_SCRIPT),
+            "--directory",
+            str(tmp_path),
+            "--port",
+            "0",
+            "--ready-file",
+            str(ready_file),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.time() + 5
+        while not ready_file.is_file():
+            if server.poll() is not None:
+                raise AssertionError(server.stderr.read())
+            if time.time() >= deadline:
+                raise AssertionError("IPv6 status server did not publish its port")
+            time.sleep(0.02)
+        port = int(ready_file.read_text().strip())
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://[::1]:{port}/bench.log", timeout=2) as response:
+            assert response.read() == b"ipv6-ready\n"
+    finally:
+        server.terminate()
+        server.wait(timeout=5)
+
+
+def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
+    """All 30 ready boxes release concurrently over their existing data-plane
+    proxies; readiness comes from the authoritative marker, not streamed logs,
+    and one unavailable endpoint makes the run fail immediately and visibly.
+
+    RCA (2026-07-17): two healthy Fly stacks wrote their ``.ready`` marker in
+    74 seconds, but their lossy ``fleet-child.log`` streams omitted the READY
+    line. The controller grepped those streams, falsely excluded both stacks at
+    720 seconds, and reset the clean-run streak. The status server exposes the
+    persisted marker over the same data plane used for release, so the barrier
+    must observe that artifact directly.
+    """
+    import socket
+    import urllib.error
+    import urllib.request
+
+    barrier = "fleet-30"
+    token = "fleet-release-token"
+    servers: list[subprocess.Popen[str]] = []
+    roots: list[Path] = []
+    ports: list[int] = []
+    env = os.environ.copy()
+    env["CLOUDBENCH_BARRIER_TOKEN"] = token
+    try:
+        for index in range(30):
+            root = tmp_path / str(index)
+            root.mkdir()
+            (root / "bench.log").write_text(
+                f"synchronized start barrier ready: {barrier}\n"
+            )
+            ready_file = root / "server.port"
+            server = subprocess.Popen(
+                [
+                    "python3",
+                    str(STATUS_SERVER_SCRIPT),
+                    "--directory",
+                    str(root),
+                    "--port",
+                    "0",
+                    "--barrier",
+                    barrier,
+                    "--bind",
+                    "127.0.0.1",
+                    "--ready-file",
+                    str(ready_file),
+                ],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+            servers.append(server)
+            roots.append(root)
+            ready_deadline = time.time() + 5
+            while not ready_file.is_file():
+                if server.poll() is not None:
+                    raise AssertionError(f"status server {index} exited before binding")
+                if time.time() >= ready_deadline:
+                    raise AssertionError(f"status server {index} did not publish its port")
+                time.sleep(0.02)
+            ports.append(int(ready_file.read_text().strip()))
+
+        deadline = time.time() + 5
+        local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        while True:
+            try:
+                with local_opener.open(
+                    f"http://127.0.0.1:{ports[-1]}/bench.log", timeout=0.2
+                ):
+                    break
+            except (OSError, urllib.error.URLError):
+                if time.time() >= deadline:
+                    raise
+                time.sleep(0.05)
+
+        for root, port in zip(roots, ports, strict=True):
+            # Mirror the production failure: the on-box marker exists while
+            # the controller's streamed log never received the READY line.
+            (root / f"cloudbench-start-{barrier}.ready").touch()
+            (root / "fleet-child.log").write_text(
+                f"status proxy: 127.0.0.1:{port} -> fly:8011\n"
+            )
+            (root / "status-proxy.port").write_text(f"{port}\n")
+
+        release_fn = _extract_fleet_function(
+            FLEET_SCRIPT.read_text(), "release_start_barrier() {"
+        )
+        quoted_roots = " ".join(shlex.quote(str(root)) for root in roots)
+        script = f"""set +e
+SYNCHRONIZED_START=1
+RUN_ID={barrier}
+START_BARRIER_WAIT_SECONDS=2
+CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS=2
+CLOUDBENCH_BARRIER_TOKEN={token}
+CLOUDBENCH_BARRIER_RELEASE_ATTEMPTS=2
+CHILD_PIDS=({' '.join([str(os.getpid())] * 30)})
+CHILD_OUT=({quoted_roots})
+CHILD_BENCH=({' '.join(f'task-{i}' for i in range(30))})
+CHILD_MACHINE=({' '.join(f'machine-{i}' for i in range(30))})
+{release_fn}
+release_start_barrier
+"""
+        success = subprocess.run(
+            ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=8
+        )
+        assert success.returncode == 0, success.stderr
+        assert all(
+            (root / f"cloudbench-start-{barrier}.release").exists() for root in roots
+        )
+
+        for root in roots:
+            (root / f"cloudbench-start-{barrier}.release").unlink()
+        # The second half isolates release failure (not readiness discovery):
+        # retain the compatibility READY signal after taking its server down so
+        # the controller must attempt, and fail, the release POST.
+        (roots[-1] / "fleet-child.log").write_text(
+            f"status proxy: 127.0.0.1:{ports[-1]} -> fly:8011\n"
+            f"synchronized start barrier ready: {barrier}\n"
+        )
+        servers[-1].terminate()
+        servers[-1].wait(timeout=5)
+        failed = subprocess.run(
+            ["bash", "-c", script.replace("ATTEMPTS=2", "ATTEMPTS=1")],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=8,
+        )
+        assert failed.returncode == 1
+        assert "could not release synchronized start barrier" in failed.stderr
+    finally:
+        for server in servers:
+            if server.poll() is None:
+                server.terminate()
+                server.wait(timeout=5)
+
+
+def test_clone_burst_is_rate_limit_resilient() -> None:
+    """RCA (2026-07-15): a 30-wide daily fleet fired all clones in the SAME
+    instant, saturating Fly's Machines API — `resource_exhausted: rate limit
+    exceeded` on clone/create-volume. The fixed-8s/3-attempt retry landed every
+    retry back inside the same saturation window, so 3 clones exhausted their
+    attempts and dropped from the batch (silent coverage loss, an infra failure).
+    Fix: stagger the launch burst + exponential backoff with jitter + more
+    attempts, so a rate-limited clone outlasts the burst instead of giving up."""
+    fleet = FLEET_SCRIPT.read_text()
+    # More attempts (was 3).
+    assert (
+        'max_attempts="${CLOUDBENCH_CLONE_MAX_ATTEMPTS:-'
+        '${CLOUDBENCH_CLONE_ATTEMPTS:-5}}"' in fleet
+    )
+    # Launch burst is staggered, not simultaneous.
+    assert 'CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS' in fleet
+    # Exponential backoff (bit-shift by attempt) with a cap and jitter.
+    clone_fn = _extract_fleet_function(fleet, "clone_machine_target() {")
+    assert "1 << (attempt - 1)" in clone_fn
+    assert "CLOUDBENCH_CLONE_RETRY_MAX_SECONDS" in clone_fn
+    assert "RANDOM % 5" in clone_fn
+    # The old fixed-delay retry (`sleep "$retry_delay"` unconditionally) is gone.
+    assert 'sleep "$retry_delay"\n' not in clone_fn
+
+
+def test_launcher_detects_dead_onbox_driver() -> None:
+    """RCA (2026-07-15): at fleet width the detached on-box driver sometimes dies
+    at launch (an early kill/crash before its first STEP — Fly API rate-limited).
+    It then never writes the DONE marker, so the launcher's poll loop — which only
+    watched for DONE or the 3600s hard timeout — spun the FULL run timeout while
+    the fleet's synchronized-start barrier waited on that box, stalling the whole
+    batch for up to an hour on ONE flaky launch. The launcher must probe driver
+    liveness after a stall and stop promptly when it's gone with no DONE marker,
+    so the controller excludes the box fast; launches are staggered to reduce the
+    burst that triggers the death; and the health-wait FATAL must capture the exit
+    code + stack-log tail so a bring-up death is diagnosable."""
+    cloud = CLOUD_SCRIPT.read_text()
+    # Poll loop probes driver liveness over the data plane on stall and breaks on death.
+    assert "DRIVER_STALL_SECONDS" in cloud
+    assert "/driver-health" in cloud
+    assert "confirmed dead after" in cloud
+    assert "probe_machine_liveness()" in cloud
+    assert "explicitly no longer running" in cloud
+    # Stall exclusion uses the data-plane liveness contract, never an ssh pgrep.
+    assert "driver-health" in STATUS_SERVER_SCRIPT.read_text()
+    # Driver launch is retried until confirmed running (a single rate-limited
+    # fire-and-forget launch left boxes dead at RUNSTAMP), and the liveness
+    # probe presumes death on repeated non-ALIVE results (DEAD OR unreachable),
+    # since the rate-limiting that kills the driver also fails a strict probe.
+    assert "CLOUDBENCH_DRIVER_LAUNCH_ATTEMPTS" in cloud
+    assert "driver not confirmed running (attempt" in cloud
+    # Boot launches are minimally staggered (30 submissions in ~7.5s), while
+    # the legacy multi-SSH path retains its conservative throttle.
+    fleet = FLEET_SCRIPT.read_text()
+    assert "CLOUDBENCH_LAUNCH_STAGGER_SECONDS" in fleet
+    assert 'CLOUDBENCH_LAUNCH_STAGGER_SECONDS:-0.25}' in fleet
+    assert 'CLOUDBENCH_LAUNCH_STAGGER_SECONDS:-3.5}' in fleet
+    # Stack-health FATAL captures the actual death cause (exit code + tail + OOM).
+    run = (CLOUD_SCRIPT.parent / "cloudbench-run.sh").read_text()
+    assert "stack process exited (rc=$stack_rc)" in run
+    assert "last 40 lines of stack log" in run
+
+
+def test_dead_driver_refetches_durable_done_before_infra(tmp_path: Path) -> None:
+    """RCA (2026-07-17): a benchmark finished and durably wrote its tokenized
+    result + DONE marker, but the collector's preceding bench.log GET failed.
+    The next /driver-health probe returned 410, and the collector immediately
+    classified the run as dead-driver infra without refetching the durable log.
+    Require a bounded reconnect/refetch before that classification so a genuine
+    terminal verdict cannot become NORESULT because of a transport race."""
+    cloud = CLOUD_SCRIPT.read_text()
+    recovery = _extract_fleet_function(
+        cloud, "recover_terminal_marker_after_dead_driver() {"
+    )
+    ssh_log = tmp_path / "bench.log"
+    read_state = tmp_path / "read-count"
+    script = f"""
+{recovery}
+ensure_status_proxy() {{ :; }}
+read_bench_log() {{
+    count=0
+    [ ! -f "$READ_STATE" ] || count="$(cat "$READ_STATE")"
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$READ_STATE"
+    [ "$count" -gt 1 ] || return 1
+    printf '%s\n' 'report payload' "$DONE_MARKER exit=1"
+}}
+SSH_LOG="$1"
+READ_STATE="$2"
+DONE_MARKER='::CLOUDBENCH-DONE:: token=race-token'
+FINISHED=0
+BENCH_EXIT=''
+CLOUDBENCH_DEAD_DRIVER_FINAL_READ_ATTEMPTS=2
+CLOUDBENCH_DEAD_DRIVER_FINAL_READ_SLEEP_SECONDS=0
+recover_terminal_marker_after_dead_driver
+printf 'finished=%s exit=%s reads=%s\n' "$FINISHED" "$BENCH_EXIT" "$(cat "$READ_STATE")"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script, "recover", str(ssh_log), str(read_state)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "finished=1 exit=1 reads=2" in result.stdout
+    assert "recover_terminal_marker_after_dead_driver" in cloud
+    dead_branch = cloud.split('if [ "$driver_health" = "dead" ]; then', 1)[1]
+    assert "recover_terminal_marker_after_dead_driver" in dead_branch.split("fi", 1)[0]
+
+
+def test_corrupt_pool_guest_is_quarantined_instead_of_reused(tmp_path: Path) -> None:
+    """RCA (2026-07-17): one pooled guest produced SIGBUS from fuser and
+    SIGSEGV from dropdb during stack startup. Returning that guest to the pool
+    makes the same corrupt runtime eligible for later benchmark runs. Require a
+    high-confidence multi-binary signature and durable pool eviction."""
+    fleet = FLEET_SCRIPT.read_text()
+    signature = _extract_fleet_function(
+        fleet, "pool_machine_guest_corruption_signature() {"
+    )
+    corrupt = tmp_path / "corrupt.log"
+    corrupt.write_text(
+        '/repo/scripts/run.sh: line 320: 1104 Bus error fuser "$port/tcp"\n'
+        'line 516: 1122 Segmentation fault PGPASSWORD=x dropdb -h localhost\n'
+    )
+    benign = tmp_path / "benign.log"
+    benign.write_text("application worker Segmentation fault\n")
+    detected = subprocess.run(
+        ["bash", "-c", f"{signature}\npool_machine_guest_corruption_signature \"$1\"", "sig", str(corrupt)],
+        check=False,
+    )
+    ignored = subprocess.run(
+        ["bash", "-c", f"{signature}\npool_machine_guest_corruption_signature \"$1\"", "sig", str(benign)],
+        check=False,
+    )
+    assert detected.returncode == 0
+    assert ignored.returncode != 0
+    cleanup = _extract_fleet_function(fleet, "cleanup() {")
+    assert "record_tainted_claimed_pool_machines" in cleanup
+    assert "destroying quarantined pool machine" in cleanup
+    assert 'pool_ledger_remove_id "$id"' in cleanup
+
+
+def test_status_polled_over_data_plane_proxy_not_ssh() -> None:
+    """RCA (2026-07-15): the fleet's SSH-pull design (each of 30 boxes ssh_read-
+    polling /data/bench.log every few seconds) saturates Fly's Machines-API rate
+    limit — confirmed by manual 'flyctl machines list' being throttled ~1/3 of
+    calls during a live 30-box run, which froze the batch. Fix: serve bench.log
+    from a tiny on-box HTTP server and poll it over a `flyctl proxy` (WireGuard
+    DATA plane — zero Machines-API cost). Never fall back to SSH inside the hard-
+    timeout loop: a stopped box left flyctl SSH hung for 2h22m beyond its 7200s
+    ceiling, and 30 simultaneous fallbacks recreate the control-plane burst."""
+    cloud = CLOUD_SCRIPT.read_text()
+    # On-box status server over /data, and a data-plane proxy to it.
+    assert "REMOTE_STATUS_PORT" in cloud
+    assert "http.server ${REMOTE_STATUS_PORT} --directory /data" in cloud
+    assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 3))" LOCAL_STATUS_PORT' in cloud
+    assert 'publish_status_proxy_port "$port"' in cloud
+    # The poll reads only over the bounded data-plane proxy.
+    assert "read_bench_log()" in cloud
+    assert 'curl -fsS --max-time 6 "http://127.0.0.1:$LOCAL_STATUS_PORT/bench.log"' in cloud
+    assert 'if remote_log="$(read_bench_log' in cloud
+    read_log = _extract_fleet_function(cloud, "read_bench_log() {")
+    assert "ssh_read" not in read_log
+    # Proxy cleanup is PID-owned; no cross-run pattern kill is allowed.
+    assert 'cloudbench_terminate_and_wait 5 "${PROXY_PID:-}" "${STATUS_PROXY_PID:-}"' in cloud
+    assert 'flyctl proxy "$local_port:$remote_port"' in cloud
+    assert 'FLY proxy "$local_port:$remote_port"' not in cloud
+    assert 'pkill -f "flyctl proxy $LOCAL_STATUS_PORT' not in cloud
+
+    # Backgrounding the FLY() shell function records a wrapper-subshell PID and
+    # can orphan its flyctl child. Autoscaler metrics tunnels must also record
+    # and reap the executable PID directly.
+    fleet = FLEET_SCRIPT.read_text()
+    assert 'flyctl proxy "$metrics_port:$BOX_HEALTH_PORT"' in fleet
+    assert 'FLY proxy "$metrics_port:$BOX_HEALTH_PORT"' not in fleet
+    assert 'cloudbench_terminate_and_wait 5 "${metrics_proxy_pid:-}"' in fleet
+
+
+def test_live_but_unreachable_status_tunnel_is_replaced(tmp_path: Path) -> None:
+    """RCA (2026-07-17): a Fly status-proxy process survived while its lazy
+    GraphQL/DNS setup was wedged, so ``kill -0`` reported healthy even though
+    every HTTP read failed. The launcher then remained blind to a healthy
+    on-box driver and the fleet falsely excluded the task at the barrier.
+
+    Reproduce that exact boundary with a live PID plus an unreachable HTTP
+    contract. ``ensure_status_proxy`` must terminate/release/restart the tunnel,
+    not accept process survival as transport health.
+    """
+    cloud = CLOUD_SCRIPT.read_text()
+    ensure = _extract_fleet_function(cloud, "ensure_status_proxy() {")
+    transport = (
+        _extract_fleet_function(cloud, "status_proxy_transport_healthy() {")
+        if "status_proxy_transport_healthy() {" in cloud
+        else ""
+    )
+    restarted = tmp_path / "restarted"
+    script = f"""set -eu
+STATUS_PROXY_PID=$$
+LOCAL_STATUS_PORT=61945
+REMOTE_STATUS_PORT=8011
+REMOTE_STATUS_HOST=machine.internal
+OUT_DIR={shlex.quote(str(tmp_path))}
+curl() {{ printf 000; return 0; }}
+cloudbench_terminate_and_wait() {{ :; }}
+release_local_port_lease() {{ :; }}
+start_leased_data_plane_proxy() {{
+  touch {shlex.quote(str(restarted))}
+  printf -v "$6" '%s' "$$"
+}}
+{transport}
+{ensure}
+ensure_status_proxy
+test -f {shlex.quote(str(restarted))}
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=5
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_boot_config_updates_bound_provider_cpu_reservations(tmp_path: Path) -> None:
+    """RCA (2026-07-17): the stopped-fleet barrier prevented guest starts but
+    still submitted all 37 ``machine update`` operations concurrently. Fly
+    temporarily reserves replacement CPU for those config updates, and one
+    child exhausted all retries at ``cpu_overcommit_exceeded`` before any
+    benchmark reached the synchronized start barrier.
+
+    The shared config phase must cap provider mutations independently of the
+    later full-width guest start.
+    """
+    cloud = CLOUD_SCRIPT.read_text()
+    acquire = (
+        _extract_fleet_function(cloud, "acquire_boot_config_update_slot() {")
+        if "acquire_boot_config_update_slot() {" in cloud
+        else ""
+    )
+    release = (
+        _extract_fleet_function(cloud, "release_boot_config_update_slot() {")
+        if "release_boot_config_update_slot() {" in cloud
+        else ""
+    )
+    barrier = tmp_path / "config-barrier"
+    observed = tmp_path / "observed"
+    script = f"""set -eu
+CLOUDBENCH_BOOT_CONFIG_BARRIER={shlex.quote(str(barrier))}
+CLOUDBENCH_BOOT_CONFIG_MAX_IN_FLIGHT=4
+CLOUDBENCH_BOOT_CONFIG_SLOT_WAIT_SECONDS=5
+BOOT_CONFIG_UPDATE_SLOT=""
+{acquire}
+{release}
+mkdir -p "$CLOUDBENCH_BOOT_CONFIG_BARRIER"
+for _worker in $(seq 1 12); do
+  (
+    BOOT_CONFIG_UPDATE_SLOT=""
+    acquire_boot_config_update_slot
+    find "$CLOUDBENCH_BOOT_CONFIG_BARRIER/update-slots" -mindepth 1 -maxdepth 1 -type d | wc -l >> {shlex.quote(str(observed))}
+    sleep 0.1
+    release_boot_config_update_slot
+  ) &
+done
+wait
+test "$(wc -l < {shlex.quote(str(observed))} | tr -d ' ')" = 12
+test "$(sort -nr {shlex.quote(str(observed))} | head -1 | tr -d ' ')" -le 4
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_boot_launch_collects_terminal_artifacts_without_post_done_ssh() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    collection = cloud[
+        cloud.index("# Preserve the complete remote driver") : cloud.index(
+            "RUN_IDENTITY_OK=", cloud.index("# Preserve the complete remote driver")
+        )
+    ]
+
+    assert 'if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" != "1" ]; then' in collection
+    assert 'if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then' in collection
+    assert 'CARD_JSON="$(awk' in collection
+    assert 'RUN_JSON="$(awk' in collection
+    assert "Never re-enter Machines-API SSH after DONE" in collection
+
+
+def test_boot_launch_dashboard_card_mirror_uses_data_plane() -> None:
+    """The live dashboard must not create one Machines-API SSH session per
+    second per box; at daily width that exhausted Fly and left an SSH child
+    alive after the real verdict and DONE marker."""
+    cloud = CLOUD_SCRIPT.read_text()
+    mirror = cloud[
+        cloud.index("expected_total=\"${#BENCH_TASKS[@]}\"") : cloud.index(
+            "DASHBOARD_MIRROR_PID=$!"
+        )
+    ]
+
+    assert 'if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then' in mirror
+    assert "/repo/.context/cloudbench/report-card.json" in mirror
+    assert "curl -fsS --max-time 6" in mirror
+    assert "30 control-plane sessions/second" in mirror
+
+
+def test_boot_supervisor_keeps_data_plane_alive_after_done() -> None:
+    """A Fly Machine must not stop between the on-box DONE write and the
+    controller's next data-plane poll, or a real verdict becomes NORESULT."""
+    boot = (CLOUD_SCRIPT.parent / "cloudbench-boot.sh").read_text()
+
+    assert 'bash "$REPO/scripts/cloudbench-run.sh" >> "$LOG" 2>&1' in boot
+    assert 'exec bash "$REPO/scripts/cloudbench-run.sh"' not in boot
+    assert "holding for controller collection" in boot
+    assert boot.rstrip().endswith("exec sleep infinity")
+
+
+def test_claimed_pool_teardown_is_parallel_with_shared_inventory() -> None:
+    """Thirty serial stop-and-list loops add N teardown latency and API load."""
+    fleet = FLEET_SCRIPT.read_text()
+    cleanup = _extract_fleet_function(fleet, "cleanup() {")
+    claimed = cleanup[
+        cleanup.index("pending_pool_ids=") : cleanup.index(
+            'if [ "$FLEET_REGISTRY_PUBLISHED"'
+        )
+    ]
+
+    assert 'machine stop "$id"' in claimed
+    assert "CLOUDBENCH_POOL_STOP_REQUEST_TIMEOUT" in claimed
+    assert 'stop_pids+=("$!")' in claimed
+    assert 'FLY machines list -a "$APP" --json' in claimed
+    assert 'pool_machine_state "$id"' not in claimed
+    assert "CLOUDBENCH_POOL_STOP_REQUEST_ATTEMPTS" in claimed
+    assert "shared inventory" in claimed
+
+
+def test_cloud_timeout_kills_a_command_that_ignores_sigalrm() -> None:
+    """RCA (2026-07-16): the perl-alarm wrapper exec'd flyctl and relied on
+    SIGALRM surviving exec. A stopped-machine SSH ignored that contract and ran
+    for 2h22m, preventing the outer 7200s loop deadline from being checked.
+    The wrapper must own, terminate, and wait for the child process itself."""
+    cloud = CLOUD_SCRIPT.read_text()
+    timeout_fn = _extract_fleet_function(cloud, "_with_timeout() {")
+    script = f"""{timeout_fn}
+_with_timeout 1 python3 -c 'import signal,time; signal.signal(signal.SIGALRM, signal.SIG_IGN); time.sleep(30)'
+"""
+    started = time.monotonic()
+    proc = subprocess.Popen(
+        ["bash", "-c", script],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=4)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        raise AssertionError("timeout wrapper left its signal-ignoring child hung")
+    assert proc.returncode != 0, (stdout, stderr)
+    assert time.monotonic() - started < 4
+
+
+def test_staleness_pauses_during_barrier_wait_and_per_box_timeout() -> None:
+    """RCA (2026-07-15): the data-plane staleness exclusion wrongly killed boxes
+    that had reached 'barrier ready' and were legitimately BLOCKED on the release
+    file (no bench.log output while waiting) — when the barrier took a while to
+    release, every ready box was excluded → 0/30 NORESULT. Fix: pause the staleness
+    timer while the log shows 'barrier ready' but not yet 'barrier released'. And
+    a per-box barrier ceiling so one holdout (hung relay / driver dead before the
+    poll loop) can't drag the whole barrier to the global timeout."""
+    cloud = CLOUD_SCRIPT.read_text()
+    assert "synchronized start barrier ready" in cloud
+    assert "! grep -aq 'synchronized start barrier released'" in cloud
+    fleet = FLEET_SCRIPT.read_text()
+    assert "CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS" in fleet
+    assert "did not reach the start barrier within" in fleet
+
+
+def test_quiet_benchmark_emits_driver_heartbeats() -> None:
+    """RCA (2026-07-16): the 210-second no-log watchdog was described as a
+    bring-up detector but remained active after barrier release. Multiple real
+    benchmarks ran quietly for 210 seconds, were killed as alleged bring-up
+    failures, and became missing verdicts. The driver must heartbeat while the
+    benchmark subprocess is alive so true driver death still becomes stale while
+    quiet, healthy benchmark execution does not.
+    """
+    driver = DRIVER_SCRIPT.read_text()
+    heartbeat = _extract_fleet_function(driver, "run_with_heartbeat() {")
+    assert "CLOUDBENCH_HEARTBEAT_SECONDS" in heartbeat
+    assert 'log "$label heartbeat' in heartbeat
+    assert 'run_with_heartbeat "benchmark"' in driver
+
+    script = f"""set +e
+log() {{ echo "$*"; }}
+{heartbeat}
+CLOUDBENCH_HEARTBEAT_SECONDS=1 run_with_heartbeat benchmark bash -c 'sleep 2; exit 7'
+rc=$?
+echo rc=$rc
+exit 0
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=6
+    )
+    assert "benchmark heartbeat" in result.stdout
+    assert "rc=7" in result.stdout
+
+
+def test_cloud_runner_avoids_live_run_port_collisions() -> None:
+    """RCA (2026-07-16): concurrent runs in one workspace reused the same fixed
+    per-task ports. Live evidence showed status proxies exiting with `bind:
+    address already in use`, which blinded liveness/release and caused infra
+    exclusions. Every locally bound per-task endpoint must resolve a free port,
+    and the fleet must discover the selected status port from the child rather
+    than reconstructing the preferred value.
+    """
+    cloud = CLOUD_SCRIPT.read_text()
+    assert 'claim_local_port "$LOCAL_DASH_PORT" LOCAL_DASH_PORT' in cloud
+    assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 3))" LOCAL_STATUS_PORT' in cloud
+    assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 1))" LIVE_BACKEND_PORT' in cloud
+    assert "return 98" in _extract_fleet_function(cloud, "start_data_plane_proxy() {")
+    assert "release_local_port_lease" in _extract_fleet_function(
+        cloud, "start_leased_data_plane_proxy() {"
+    )
+    assert "release_local_port_leases" in _extract_fleet_function(cloud, "stop_on_exit() {")
+    assert 'pkill -f "flyctl proxy $LOCAL_STATUS_PORT' not in cloud
+    assert 'pkill -f "flyctl proxy $LIVE_BACKEND_PORT' not in cloud
+    fleet = FLEET_SCRIPT.read_text()
+    barrier = _extract_fleet_function(fleet, "release_start_barrier() {")
+    assert "status-proxy.port" in barrier
+    assert 'status_port="$(cat "$release_port_file"' in barrier
+    assert "sed -nE 's/.*status proxy:" not in barrier
+    assert "CHILD_PORT[j] + 3" not in barrier
+
+    bindable = _extract_fleet_function(cloud, "local_port_is_bindable() {")
+    claim = _extract_fleet_function(cloud, "claim_local_port() {")
+    release = _extract_fleet_function(cloud, "release_local_port_leases() {")
+    lease_root = ROOT / ".context" / f"port-lease-test-{os.getpid()}"
+    lease_root.mkdir(parents=True, exist_ok=True)
+    script = f"""set -eu
+PORT_LEASE_ROOT="$1"
+PORT_LEASE_NONCE="$$-$RANDOM"
+PORT_LEASES=()
+{bindable}
+{claim}
+{release}
+trap release_local_port_leases EXIT
+claim_local_port "$2" CLAIMED_PORT
+echo "$CLAIMED_PORT"
+sleep 1
+"""
+    first = subprocess.Popen(
+        ["bash", "-c", script, "lease", str(lease_root), "42000"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    second = subprocess.Popen(
+        ["bash", "-c", script, "lease", str(lease_root), "42000"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    first_out, first_err = first.communicate(timeout=5)
+    second_out, second_err = second.communicate(timeout=5)
+    assert first.returncode == 0, first_err
+    assert second.returncode == 0, second_err
+    assert first_out.strip() != second_out.strip()
+    assert not any(lease_root.iterdir())
+    lease_root.rmdir()
+
+
+def test_fleet_barrier_reads_the_authoritative_rotated_status_port(tmp_path: Path) -> None:
+    """A recovered status tunnel may rotate after its first published log line.
+
+    Barrier release must read the atomic port handoff, not stale console output.
+    """
+    fleet = FLEET_SCRIPT.read_text()
+    release = _extract_fleet_function(fleet, "release_start_barrier() {")
+    child_out = tmp_path / "child"
+    child_out.mkdir()
+    (child_out / "fleet-child.log").write_text(
+        "status proxy: 127.0.0.1:60944 -> fly:8011\n"
+        "synchronized start barrier ready: rotation-test\n"
+    )
+    (child_out / "status-proxy.port").write_text("61945\n")
+    observed_url = tmp_path / "release-url"
+    script = f"""set -e
+SYNCHRONIZED_START=1
+RUN_ID=rotation-test
+START_BARRIER_WAIT_SECONDS=5
+CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS=5
+CLOUDBENCH_BARRIER_RELEASE_ATTEMPTS=1
+CLOUDBENCH_BARRIER_TOKEN=test-token
+CHILD_PIDS=("$$")
+CHILD_OUT=({shlex.quote(str(child_out))})
+CHILD_MACHINE=(machine-1)
+CHILD_BENCH=(bench-1)
+curl() {{
+  for arg in "$@"; do
+    case "$arg" in http://*) printf '%s\n' "$arg" > {shlex.quote(str(observed_url))} ;; esac
+  done
+  printf 204
+}}
+sleep() {{ :; }}
+{release}
+release_start_barrier
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=5
+    )
+    assert result.returncode == 0, result.stderr
+    assert observed_url.read_text().strip() == "http://127.0.0.1:61945/release"

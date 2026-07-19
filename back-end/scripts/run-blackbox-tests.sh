@@ -45,6 +45,29 @@ for arg in "$@"; do
   fi
 done
 
+# Fixture-backed domains write deterministic outbound responses into the
+# fast-forward cache. When the full suite targets an existing backend, prove
+# that backend consumes those fixtures before any database setup or test can
+# reach a live provider. Capture-only benchmark stacks deliberately fail this
+# contract; callers must relaunch them with the explicit replay opt-in.
+if [[ "$USE_EXISTING_BACKEND" == "1" ]]; then
+  if [[ -z "${TEST_BASE_URL:-}" ]]; then
+    echo "❌ TEST_BASE_URL must be set when BLACKBOX_TEST_USE_EXISTING_BACKEND=1 or CONTRACT_TEST_USE_EXISTING_BACKEND=1"
+    exit 1
+  fi
+  CAPTURE_STATUS_URL="${TEST_BASE_URL%/}/api/test/captures/status"
+  if ! CAPTURE_STATUS_JSON=$(curl -fsS --max-time 5 "$CAPTURE_STATUS_URL" 2>/dev/null); then
+    echo "❌ Existing backend does not expose blackbox capture capabilities: $CAPTURE_STATUS_URL"
+    exit 1
+  fi
+  if ! jq -e '.captureEnabled == true and .replayEnabled == true' \
+    <<<"$CAPTURE_STATUS_JSON" >/dev/null; then
+    echo "❌ Existing-backend blackbox requires outbound capture and replay; got: $CAPTURE_STATUS_JSON"
+    echo "   Relaunch the local test stack with BLACKBOX_TEST_REPLAY_OUTBOUND=1."
+    exit 1
+  fi
+fi
+
 # ── Use local Postgres for blackbox tests ──
 # run.sh launches a per-workspace Postgres container on CONDUCTOR_PORT+5.
 # Mirror that here so the isolated test backend + test scripts both hit the
@@ -202,10 +225,6 @@ else
 fi
 
 if [[ "$USE_EXISTING_BACKEND" == "1" ]]; then
-  if [[ -z "${TEST_BASE_URL:-}" ]]; then
-    echo "❌ TEST_BASE_URL must be set when BLACKBOX_TEST_USE_EXISTING_BACKEND=1 or CONTRACT_TEST_USE_EXISTING_BACKEND=1"
-    exit 1
-  fi
   cat >"$MANIFEST_PATH" <<EOF
 {"run_id":"$RUN_ID","mode":"existing-blackbox-backend","base_url":"$TEST_BASE_URL","artifact_dir":"$ARTIFACT_DIR","runner_log":"$RUNNER_LOG"}
 EOF
@@ -283,7 +302,7 @@ echo "Starting isolated backend for black-box tests on port $PORT"
 echo "Backend log: $BACKEND_LOG"
 echo "Artifacts: $ARTIFACT_DIR"
 
-PORT="$PORT" DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_CAPTURE_OUTBOUND=1 npx tsx src/server.ts >"$BACKEND_LOG" 2>&1 &
+PORT="$PORT" DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_CAPTURE_OUTBOUND=1 BLACKBOX_TEST_REPLAY_OUTBOUND=1 npx tsx src/server.ts >"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
 
 cleanup() {

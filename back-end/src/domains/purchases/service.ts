@@ -18,6 +18,11 @@ import { kycRequiredPurchaseError } from './kyc';
 import * as repo from './repo';
 import { reclaimPurchaseWalletFunding } from './walletFunding';
 import { chargeAndIssueCard } from './charge';
+import { canonicalStoredPurchaseFingerprint } from './fingerprint';
+import {
+  ensureAllLegacyFingerprintsIndexed,
+  ensureRecentLegacyFingerprintsIndexed,
+} from './fingerprintBackfill';
 import {
   PurchaseSpendStatus,
   type MintPurchaseInput,
@@ -61,10 +66,10 @@ function isReusableStatus(status: PurchaseSpendStatus): boolean {
   return status === PurchaseSpendStatus.HELD;
 }
 
-function isStaleChargingPurchase(purchase: PurchaseSpend): boolean {
+function isStaleChargingPurchase(purchase: PurchaseSpend, now: Date): boolean {
   return (
     purchase.status === PurchaseSpendStatus.CHARGING &&
-    Date.now() - purchase.updatedAt.getTime() > PURCHASE_STALE_CHARGING_MS
+    now.getTime() - purchase.updatedAt.getTime() > PURCHASE_STALE_CHARGING_MS
   );
 }
 
@@ -93,14 +98,19 @@ async function tryGetLiveCardDetails(
 export async function lookupPurchase(
   userId: string,
   fingerprint: string,
-  cardProvider?: CardProvider
+  cardProvider?: CardProvider,
+  now = new Date()
 ): Promise<PurchaseLookupResult> {
   if (fingerprint.trim() === '') {
     throw new PurchaseError('fingerprint is required');
   }
 
-  const since = new Date(Date.now() - PURCHASE_APPROVAL_CACHE_HOURS * 60 * 60 * 1000);
-  const purchase = await repo.findRecentPurchaseByUserAndFingerprint(userId, fingerprint, since);
+  const since = new Date(now.getTime() - PURCHASE_APPROVAL_CACHE_HOURS * 60 * 60 * 1000);
+  let purchase = await repo.findRecentPurchaseByUserAndFingerprint(userId, fingerprint, since);
+  if (!purchase) {
+    await ensureRecentLegacyFingerprintsIndexed(userId, since);
+    purchase = await repo.findRecentPurchaseByUserAndFingerprint(userId, fingerprint, since);
+  }
   if (!purchase) {
     return { found: false, reusable: false, purchase: null };
   }
@@ -148,9 +158,10 @@ export async function lookupPurchase(
 async function tryReuseExistingPurchase(
   existing: PurchaseSpend,
   cardProvider?: CardProvider,
-  walletFundingProvider?: WalletFundingProvider
+  walletFundingProvider?: WalletFundingProvider,
+  now = new Date()
 ): Promise<MintPurchaseResult | null> {
-  if (isStaleChargingPurchase(existing)) {
+  if (isStaleChargingPurchase(existing, now)) {
     await recoverStaleChargingPurchase(existing, walletFundingProvider);
     return null;
   }
@@ -238,12 +249,22 @@ async function openPendingPurchase(
     subtotalCents: input.subtotalCents,
     totalCents: input.totalCents,
   };
+  const canonicalFingerprint = canonicalStoredPurchaseFingerprint({
+    userId: input.userId,
+    merchant: input.merchant,
+    lineItemsJson: receipt,
+    totalCents: input.totalCents,
+  });
+  if (canonicalFingerprint === null) {
+    throw new PurchaseError('purchase receipt cannot be fingerprinted');
+  }
 
   if (existing && RETRYABLE_PURCHASE_STATUSES.has(existing.status)) {
     return repo.createPendingPurchase({
       userId: input.userId,
       agentId: input.agentId,
       fingerprint: input.fingerprint,
+      canonicalFingerprint,
       merchant: input.merchant,
       lineItemsJson: receipt,
       totalCents: input.totalCents,
@@ -253,6 +274,7 @@ async function openPendingPurchase(
     userId: input.userId,
     agentId: input.agentId,
     fingerprint: input.fingerprint,
+    canonicalFingerprint,
     merchant: input.merchant,
     lineItemsJson: receipt,
     totalCents: input.totalCents,
@@ -262,7 +284,8 @@ async function openPendingPurchase(
 export async function mintPurchaseCard(
   input: MintPurchaseInput,
   cardProvider?: CardProvider,
-  walletFundingProvider?: WalletFundingProvider
+  walletFundingProvider?: WalletFundingProvider,
+  now = new Date()
 ): Promise<MintPurchaseResult> {
   if (input.userId.trim() === '') throw new PurchaseError('userId is required', 401);
   if (input.fingerprint.trim() === '') throw new PurchaseError('fingerprint is required');
@@ -277,12 +300,26 @@ export async function mintPurchaseCard(
     );
   }
 
-  const existing = await repo.findMostRecentPurchaseByUserAndFingerprint(
+  let existing = await repo.findMostRecentPurchaseByUserAndFingerprint(
     input.userId,
     input.fingerprint
   );
+  if (!existing) {
+    // Mint's in-flight guard has no age limit: an old CHARGING row can still need recovery, and a
+    // recently-updated PENDING row must still return 409. Index all pre-rollout history here.
+    await ensureAllLegacyFingerprintsIndexed(input.userId);
+    existing = await repo.findMostRecentPurchaseByUserAndFingerprint(
+      input.userId,
+      input.fingerprint
+    );
+  }
   if (existing) {
-    const reused = await tryReuseExistingPurchase(existing, cardProvider, walletFundingProvider);
+    const reused = await tryReuseExistingPurchase(
+      existing,
+      cardProvider,
+      walletFundingProvider,
+      now
+    );
     if (reused) return reused;
   }
 

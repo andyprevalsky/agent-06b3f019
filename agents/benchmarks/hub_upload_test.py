@@ -1,6 +1,7 @@
 """Tests for hub_upload — env-gated, best-effort run-bundle upload."""
 
 import json
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -65,6 +66,40 @@ def test_upload_failure_is_swallowed(monkeypatch):
     monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", "http://127.0.0.1:1")
     monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "k")
     assert upload_run_bundle({"run_id": "r"}) is False
+
+
+def test_required_upload_retries_transient_disconnect(monkeypatch):
+    attempts: list[int] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            attempts.append(1)
+            length = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(length)
+            if len(attempts) == 1:
+                self.connection.shutdown(socket.SHUT_RDWR)
+                self.connection.close()
+                return
+            self.send_response(201)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        monkeypatch.setenv(
+            "BENCHMARK_HUB_UPLOAD_URL",
+            f"http://127.0.0.1:{server.server_address[1]}",
+        )
+        monkeypatch.setenv("BENCHMARK_HUB_API_KEY", "test-key")
+        monkeypatch.setattr("benchmarks.hub_upload.time.sleep", lambda _delay: None)
+        assert upload_run_bundle({"run_id": "terminal-42", "tasks": []}, required=True)
+        assert len(attempts) == 2
+    finally:
+        server.shutdown()
 
 
 def test_missing_key_skips(monkeypatch):
