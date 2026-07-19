@@ -10,6 +10,7 @@ export interface AdminUserRecord {
 export interface RootTaskRecord {
   taskId: string;
   userId: string;
+  goal: string;
   createdAt: Date;
   tokensOut: number;
   status: AgentStatus;
@@ -252,15 +253,25 @@ export async function markWaitlistInvited(id: string, invitedAt: Date): Promise<
 
 export async function findRootTasksBetween(start: Date, end: Date): Promise<RootTaskRecord[]> {
   const [liveTasks, archivedTasks] = await Promise.all([
+    // isBenchmark: false strips benchmark/eval runs (which create real root agents
+    // under an operator's account) from every task metric. See agents/routes.ts.
     prisma.agent.findMany({
-      where: { parentAgentId: null, createdAt: { gte: start, lt: end } },
-      select: { id: true, userId: true, createdAt: true, tokensOut: true, status: true },
+      where: { parentAgentId: null, isBenchmark: false, createdAt: { gte: start, lt: end } },
+      select: {
+        id: true,
+        userId: true,
+        goal: true,
+        createdAt: true,
+        tokensOut: true,
+        status: true,
+      },
     }),
     prisma.goalHistory.findMany({
-      where: { depth: 0, agentCreatedAt: { gte: start, lt: end } },
+      where: { depth: 0, isBenchmark: false, agentCreatedAt: { gte: start, lt: end } },
       select: {
         originalAgentId: true,
         userId: true,
+        goal: true,
         agentCreatedAt: true,
         tokensOut: true,
         status: true,
@@ -272,6 +283,7 @@ export async function findRootTasksBetween(start: Date, end: Date): Promise<Root
     tasks.set(task.originalAgentId, {
       taskId: task.originalAgentId,
       userId: task.userId,
+      goal: task.goal,
       createdAt: task.agentCreatedAt,
       tokensOut: task.tokensOut,
       status: task.status,
@@ -290,12 +302,12 @@ export async function findFirstRootTasksByUserBetween(
   const [liveRows, archivedRows] = await Promise.all([
     prisma.agent.groupBy({
       by: ['userId'],
-      where: { parentAgentId: null, createdAt: { lt: end } },
+      where: { parentAgentId: null, isBenchmark: false, createdAt: { lt: end } },
       _min: { createdAt: true },
     }),
     prisma.goalHistory.groupBy({
       by: ['userId'],
-      where: { depth: 0, agentCreatedAt: { lt: end } },
+      where: { depth: 0, isBenchmark: false, agentCreatedAt: { lt: end } },
       _min: { agentCreatedAt: true },
     }),
   ]);

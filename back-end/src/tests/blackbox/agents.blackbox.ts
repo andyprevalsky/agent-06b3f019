@@ -3720,6 +3720,46 @@ test('POST /agents — no resolvable IP falls back to user delivery address', as
   await deleteTestAgent(body.agent_id, session.user.id);
 });
 
+// X-Benchmark-Run header marks the root agent as a benchmark run so admin-health
+// metrics strip it out. Without the header it must stay false. This is the durable,
+// going-forward mechanism for keeping benchmark/eval runs out of the metrics even when
+// they execute under a real operator's account. See admin-health/repo.ts.
+test('POST /agents — X-Benchmark-Run header persists isBenchmark', async () => {
+  const session = await createAnonymousSession('bench-flag');
+  const marked = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(session.user.id), 'X-Benchmark-Run': 'true' },
+    body: JSON.stringify({ goal: 'Benchmark-flagged agent', model: 'rose-1-lite' }),
+  });
+  assertStatus(marked.status, 201, marked.data);
+  const markedId = (marked.data as { agent_id: string }).agent_id;
+
+  const unmarked = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({ goal: 'Regular agent', model: 'rose-1-lite' }),
+  });
+  assertStatus(unmarked.status, 201, unmarked.data);
+  const unmarkedId = (unmarked.data as { agent_id: string }).agent_id;
+
+  const [markedRow, unmarkedRow] = await Promise.all([
+    prisma.agent.findUnique({ where: { id: markedId }, select: { isBenchmark: true } }),
+    prisma.agent.findUnique({ where: { id: unmarkedId }, select: { isBenchmark: true } }),
+  ]);
+  if (markedRow?.isBenchmark !== true) {
+    throw new Error(
+      `Expected isBenchmark=true for benchmark-flagged agent, got ${JSON.stringify(markedRow)}`
+    );
+  }
+  if (unmarkedRow?.isBenchmark !== false) {
+    throw new Error(
+      `Expected isBenchmark=false for regular agent, got ${JSON.stringify(unmarkedRow)}`
+    );
+  }
+  await deleteTestAgent(markedId, session.user.id);
+  await deleteTestAgent(unmarkedId, session.user.id);
+});
+
 // 3. POST /:id/messages with invalid body (Zod validation error → handleRouteError ZodError branch)
 test('POST /:id/messages — invalid body → 400 (Zod)', async () => {
   const session = await createAnonymousSession('msg-zod-err');

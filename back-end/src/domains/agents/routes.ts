@@ -162,11 +162,17 @@ router.post(
         return;
       }
       const clientIP = getClientIP(req);
+      // Benchmark/eval runs create real root agents under an operator's account
+      // (e.g. Andy for prod/live-fixture evals). They set this header so admin-health
+      // metrics can strip them out. Real web/mac-app/SMS clients never send it, so a
+      // marked task is unambiguously a benchmark run. See admin-health/repo.ts.
+      const isBenchmark = req.header('X-Benchmark-Run') === 'true';
       const result = await lifecycleService.createAgent(
         body,
         userId,
         req.isInternal === true,
-        clientIP
+        clientIP,
+        isBenchmark
       );
       res.status(201).json(result);
     } catch (error) {
