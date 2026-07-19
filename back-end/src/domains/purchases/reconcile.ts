@@ -1,5 +1,4 @@
 import crypto from 'node:crypto';
-import { PurchaseWalletFundingStatus } from '@prisma/client';
 import { createCardProvider, type CardProvider } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
 import { refundCapturedPurchase } from '../../providers/stripe';
@@ -11,7 +10,11 @@ import {
 import { AGENTCARD_WEBHOOK_SECRET } from './config';
 import { PurchaseError } from './errors';
 import * as repo from './repo';
-import { PurchaseSpendStatus, type AgentCardWebhookEvent } from './types';
+import {
+  PurchaseSpendStatus,
+  PurchaseWalletFundingStatus,
+  type AgentCardWebhookEvent,
+} from './types';
 import {
   beginPurchaseWalletReclaim,
   consumePurchaseWalletFunding,

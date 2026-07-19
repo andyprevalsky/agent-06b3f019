@@ -1,6 +1,6 @@
-import { PurchaseSpendStatus, type PurchaseSpend } from '@prisma/client';
+import { PurchaseSpendStatus, PurchaseWalletFundingStatus, type PurchaseSpend } from '@prisma/client';
 
-export { PurchaseSpendStatus };
+export { PurchaseSpendStatus, PurchaseWalletFundingStatus };
 export type { PurchaseSpend };
 
 export interface PurchaseLineItem {
