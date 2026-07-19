@@ -111,7 +111,7 @@ process_belongs_to_this_worktree() {
 port_requires_reassign() {
     local port=$1
     local pids
-    pids=$(lsof -ti :"$port" 2>/dev/null) || true
+    pids=$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null) || true
     for pid in $pids; do
         local cmd
         cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
@@ -138,7 +138,7 @@ port_requires_reassign() {
 
 port_is_free_for_candidate_range() {
     local port=$1
-    if lsof -ti :"$port" >/dev/null 2>&1; then
+    if lsof -nP -tiTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
         return 1
     fi
     if docker_ps_ports_quick '{{.Ports}}' | grep -q ":${port}->"; then
@@ -699,7 +699,7 @@ if ! $IS_CLOUD; then
     SERVICE_PORTS=($BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $SDK_METRICS_PORT $NGROK_WEB_PORT)
     $IS_MAC && SERVICE_PORTS+=($MAC_APP_PORT)
     for port in "${SERVICE_PORTS[@]}"; do
-        for pid in $(lsof -ti :"$port" 2>/dev/null); do
+        for pid in $(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null); do
             cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
             echo "$cmd" | grep -qi docker && continue
             if process_belongs_to_this_worktree "$pid"; then
