@@ -3720,19 +3720,31 @@ test('POST /agents — no resolvable IP falls back to user delivery address', as
   await deleteTestAgent(body.agent_id, session.user.id);
 });
 
-// X-Benchmark-Run header marks the root agent as a benchmark run so admin-health
-// metrics strip it out. Without the header it must stay false. This is the durable,
-// going-forward mechanism for keeping benchmark/eval runs out of the metrics even when
-// they execute under a real operator's account. See admin-health/repo.ts.
-test('POST /agents — X-Benchmark-Run header persists isBenchmark', async () => {
+// X-Benchmark-Run marks the root agent as a benchmark run so admin-health metrics
+// strip it out. The header value must equal the internal backend key — a marker that
+// external clients can't forge — so it works no matter whether the benchmark created
+// the agent via API key or a real operator JWT, while a spoofed value (or no header)
+// stays false. This is the durable, going-forward mechanism for keeping benchmark/eval
+// runs out of the metrics even under a real operator's account. See admin-health/repo.ts.
+test('POST /agents — X-Benchmark-Run key persists isBenchmark; spoof/absent stay false', async () => {
   const session = await createAnonymousSession('bench-flag');
   const marked = await request(`${BASE_URL}/api/agents`, {
     method: 'POST',
-    headers: { ...apiKeyHeaders(session.user.id), 'X-Benchmark-Run': 'true' },
+    headers: { ...apiKeyHeaders(session.user.id), 'X-Benchmark-Run': API_KEY },
     body: JSON.stringify({ goal: 'Benchmark-flagged agent', model: 'rose-1-lite' }),
   });
   assertStatus(marked.status, 201, marked.data);
   const markedId = (marked.data as { agent_id: string }).agent_id;
+
+  // Wrong header value must NOT mark the run — otherwise any authenticated caller
+  // could exclude their own agents from admin-health metrics.
+  const spoofed = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: { ...apiKeyHeaders(session.user.id), 'X-Benchmark-Run': 'true' },
+    body: JSON.stringify({ goal: 'Spoofed benchmark agent', model: 'rose-1-lite' }),
+  });
+  assertStatus(spoofed.status, 201, spoofed.data);
+  const spoofedId = (spoofed.data as { agent_id: string }).agent_id;
 
   const unmarked = await request(`${BASE_URL}/api/agents`, {
     method: 'POST',
@@ -3742,13 +3754,19 @@ test('POST /agents — X-Benchmark-Run header persists isBenchmark', async () =>
   assertStatus(unmarked.status, 201, unmarked.data);
   const unmarkedId = (unmarked.data as { agent_id: string }).agent_id;
 
-  const [markedRow, unmarkedRow] = await Promise.all([
+  const [markedRow, spoofedRow, unmarkedRow] = await Promise.all([
     prisma.agent.findUnique({ where: { id: markedId }, select: { isBenchmark: true } }),
+    prisma.agent.findUnique({ where: { id: spoofedId }, select: { isBenchmark: true } }),
     prisma.agent.findUnique({ where: { id: unmarkedId }, select: { isBenchmark: true } }),
   ]);
   if (markedRow?.isBenchmark !== true) {
     throw new Error(
       `Expected isBenchmark=true for benchmark-flagged agent, got ${JSON.stringify(markedRow)}`
+    );
+  }
+  if (spoofedRow?.isBenchmark !== false) {
+    throw new Error(
+      `Expected isBenchmark=false for spoofed header value, got ${JSON.stringify(spoofedRow)}`
     );
   }
   if (unmarkedRow?.isBenchmark !== false) {
@@ -3757,6 +3775,7 @@ test('POST /agents — X-Benchmark-Run header persists isBenchmark', async () =>
     );
   }
   await deleteTestAgent(markedId, session.user.id);
+  await deleteTestAgent(spoofedId, session.user.id);
   await deleteTestAgent(unmarkedId, session.user.id);
 });
 
