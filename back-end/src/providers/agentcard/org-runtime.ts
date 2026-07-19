@@ -75,6 +75,15 @@ function directAccessToken(): string | undefined {
 
 export class AgentCardOrgRuntime {
   private cachedToken?: { accessToken: string; expiresAtMs: number };
+  /**
+   * Client-credential tokens can enter their refresh window while several org
+   * reads are fanned out together (for example, the payment lifecycle reads a
+   * card and two transfer views concurrently). Coalesce that burst into one
+   * token exchange. Besides avoiding needless load, this prevents one member
+   * of the burst timing out after its siblings have already refreshed the same
+   * credential.
+   */
+  private inFlightToken?: Promise<string>;
 
   constructor(
     private readonly toolCaller: TokenMcpToolCaller = mcpCallTool,
@@ -100,6 +109,16 @@ export class AgentCardOrgRuntime {
       return this.cachedToken.accessToken;
     }
 
+    if (this.inFlightToken !== undefined) return this.inFlightToken;
+
+    const tokenPromise = this.fetchAccessToken().finally(() => {
+      if (this.inFlightToken === tokenPromise) this.inFlightToken = undefined;
+    });
+    this.inFlightToken = tokenPromise;
+    return tokenPromise;
+  }
+
+  private async fetchAccessToken(): Promise<string> {
     let response: Awaited<ReturnType<FetchLike>>;
     try {
       response = await this.fetchImpl(

@@ -30,6 +30,7 @@ async def test_evaluate_condition_uses_llm_not_httpx():
 
     assert result["satisfied"] is True
     assert "reasoning" in result
+    assert "response_model" not in mock_llm.call_args.kwargs
     # No raw httpx calls should be captured
     assert len(get_captured_requests()) == 0
 
@@ -113,6 +114,28 @@ async def test_evaluate_condition_non_json_fallback():
         )
     assert result["satisfied"] is False
     assert "maybe later" in result["reasoning"]
+
+
+async def test_evaluate_condition_accepts_prefixed_and_fenced_json():
+    """Fallback providers may wrap otherwise valid JSON in harmless prose."""
+    from tools.wait_for import evaluate_condition_activity
+
+    responses = [
+        'Here is the JSON requested: {"satisfied": true, "reasoning": "done"}',
+        '```json\n{"satisfied": true, "reasoning": "also done"}\n```',
+    ]
+    for content in responses:
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch("helpers.llm.call_llm") as mock_llm,
+        ):
+            mock_llm.return_value = {"content": content, "usage": {}}
+            result = await evaluate_condition_activity(
+                condition="C",
+                evidence="E",
+                model="rose-1-lite",
+            )
+        assert result["satisfied"] is True
 
 
 # ── Pure helper coverage ──────────────────────────────────────────
@@ -573,6 +596,10 @@ async def run_all_tests():
     await r.record_async("evaluate_negative", test_evaluate_condition_negative)
     await r.record_async("evaluate_loose_json", test_evaluate_condition_loose_json_fallback)
     await r.record_async("evaluate_non_json", test_evaluate_condition_non_json_fallback)
+    await r.record_async(
+        "evaluate_prefixed_and_fenced_json",
+        test_evaluate_condition_accepts_prefixed_and_fenced_json,
+    )
     r.record("format_duration_seconds", test_format_duration_seconds)
     r.record("format_duration_minutes_int", test_format_duration_minutes_integer)
     r.record("format_duration_minutes_frac", test_format_duration_minutes_fractional)

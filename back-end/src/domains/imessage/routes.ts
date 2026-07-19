@@ -75,16 +75,20 @@ router.post(
 
 /**
  * GET /api/imessage/queue/pop
- * Auth: Bearer token (mac app - user-authenticated)
+ * Auth: Bearer token (mac app) or an explicitly scoped internal benchmark relay.
  *
  * Claims the next pending iMessage for the authenticated user.
  * The Mac app reports the send result through POST /queue/:id/result.
  */
 router.get(
   '/queue/pop',
-  authenticate,
-  asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
-    const userId = req.user?.id;
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
+    if (req.isInternal === true && req.get('X-CloudBench-iMessage-Relay') !== 'v1') {
+      res.status(403).json({ error: 'Internal iMessage relay scope required' });
+      return;
+    }
+    const userId = req.isInternal === true ? (req.headers['x-user-id'] as string) : req.userId;
 
     if (userId === undefined || userId === '') {
       res.status(401).json({ error: 'User not authenticated' });
@@ -176,13 +180,18 @@ router.get(
 );
 
 /** POST /api/imessage/queue/:id/result
- * Records whether the authenticated Mac app sent a claimed queue item.
+ * Records whether the authenticated Mac app or scoped benchmark relay sent a
+ * claimed queue item.
  */
 router.post(
   '/queue/:id/result',
-  authenticate,
-  asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
-    const userId = req.user?.id;
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
+    if (req.isInternal === true && req.get('X-CloudBench-iMessage-Relay') !== 'v1') {
+      res.status(403).json({ error: 'Internal iMessage relay scope required' });
+      return;
+    }
+    const userId = req.isInternal === true ? (req.headers['x-user-id'] as string) : req.userId;
     if (userId === undefined || userId === '') {
       res.status(401).json({ error: 'User not authenticated' });
       return;

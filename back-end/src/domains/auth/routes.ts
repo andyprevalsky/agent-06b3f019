@@ -128,7 +128,7 @@ router.post(
  */
 router.post(
   '/complete-onboarding',
-  asyncHandler(authenticate),
+  authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const userId = req.user?.id;

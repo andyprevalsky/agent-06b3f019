@@ -590,6 +590,39 @@ async function testReproducibility_threeSequential() {
   }
 }
 
+async function testPollDiagnosticsArchiveFreshnessSignalsWithoutSecrets() {
+  const { buildVapiPollExchange } = await import('../../domains/vapi/service');
+  const response = new Response('{}', {
+    status: 200,
+    headers: {
+      authorization: 'Bearer provider-secret',
+      'cf-cache-status': 'DYNAMIC',
+      date: 'Mon, 13 Jul 2026 01:53:58 GMT',
+      etag: 'W/"poll-version"',
+      'set-cookie': 'provider-session=secret',
+    },
+  });
+  const exchange = buildVapiPollExchange(
+    'https://api.vapi.ai/call/call-1',
+    new Date('2026-07-13T01:53:57.900Z'),
+    new Date('2026-07-13T01:53:58.025Z'),
+    response
+  );
+
+  if (exchange.response.durationMs !== 125) {
+    throw new Error(`Expected 125ms duration, got ${exchange.response.durationMs}`);
+  }
+  if (exchange.response.headers.etag !== 'W/"poll-version"') {
+    throw new Error('ETag was not preserved in poll diagnostics');
+  }
+  if (exchange.response.headers['cf-cache-status'] !== 'DYNAMIC') {
+    throw new Error('Cloudflare cache status was not preserved in poll diagnostics');
+  }
+  if ('authorization' in exchange.response.headers || 'set-cookie' in exchange.response.headers) {
+    throw new Error('Poll diagnostics captured a secret-bearing header');
+  }
+}
+
 // ==================== RUN ====================
 
 async function runAll() {
@@ -630,6 +663,10 @@ async function runAll() {
     {
       name: 'reproducibility -- 3 sequential identical status',
       fn: testReproducibility_threeSequential,
+    },
+    {
+      name: 'observability -- poll freshness signals exclude secrets',
+      fn: testPollDiagnosticsArchiveFreshnessSignalsWithoutSecrets,
     },
   ];
 

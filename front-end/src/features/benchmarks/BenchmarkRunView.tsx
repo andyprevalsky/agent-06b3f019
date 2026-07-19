@@ -379,9 +379,15 @@ export function BenchmarkRunView({ runId, onOpenAgent, onBack }: BenchmarkRunVie
                       <Button
                         variant="outline"
                         size="sm"
-                        className={cn('h-7 px-2 text-xs', task.agent_id === null && 'opacity-50')}
-                        disabled={task.agent_id === null}
-                        onClick={() => task.agent_id !== null && onOpenAgent(runId, task.agent_id)}
+                        className={cn('h-7 px-2 text-xs', !task.agent_id?.trim() && 'opacity-50')}
+                        disabled={!task.agent_id?.trim()}
+                        title={
+                          !task.agent_id?.trim() ? 'Agent has not been created yet' : undefined
+                        }
+                        onClick={() => {
+                          const agentId = task.agent_id?.trim();
+                          if (agentId) onOpenAgent(runId, agentId);
+                        }}
                         data-testid={`run-view-open-${task.name}`}
                       >
                         Open agent

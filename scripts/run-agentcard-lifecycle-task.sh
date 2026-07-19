@@ -33,6 +33,13 @@ export ALLOW_TEMPORAL_CLEANUP=true
 # Force it off unconditionally — a pre-set BENCHMARK_FAST_MODE_CACHE=true would
 # otherwise reintroduce the stale-replay loop.
 export BENCHMARK_FAST_MODE_CACHE=false
+# Hosted AgentCard onboarding requires an allowlisted HTTPS callback. The local
+# lifecycle benchmark never follows this URL—it completes the sandbox fixture
+# through the scoped test-payment API—but minting must still create a genuine
+# hosted session before the expected attention gate can be raised. Pin that
+# boundary to the stable backend callback registered for the Rose Labs org so a
+# workspace-local `.env` URL cannot turn setup/resume into an opaque mint 500.
+export AGENTCARD_ONBOARDING_RETURN_URL="${AGENTCARD_ONBOARDING_RETURN_URL:-https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback}"
 
 LOG_FILE="$ROOT_DIR/.context/agentcard-lifecycle-$TASK_NAME.log"
 STACK_PID=""

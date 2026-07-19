@@ -24,21 +24,24 @@ Every task runs on a **base-image fixture**: undeclared environments inherit `ba
 
 ### Live data fixtures (`environment.live_fixtures`)
 
-`db_fixtures` are *frozen* deltas on a base image (reproducible). **Live fixtures** are the opposite: prod-synced credentials that must be **current at runtime** — compute tokens (the $0 claudeAuth path), browser cookies (authenticated site access), passwords. A frozen expired token is worthless, so live fixtures re-sync from prod into the isolated benchmark DB right before the agent starts, every run, and are never snapshotted. Registry: `live_fixtures.py` (metadata) + `run_benchmark.py:_apply_live_fixtures` (runtime appliers, kept in sync by an import-time assertion).
+`db_fixtures` are *frozen* task deltas on a base image (reproducible). The single **`live` fixture** is the opposite: an explicit prod-synced overlay for credentials that must be current at runtime. It includes compute tokens, browser context/provider profiles, cookies and origin storage, passwords, passkeys, `CookieBundle` rows, and `SteelSessionAuth` rows. A frozen expired token is worthless, so tasks that need current credentials declare the overlay explicitly.
 
-Declare them per task, composable and ordered:
+Declare it only on tasks that exercise current credentials:
 
 ```jsonc
 "environment": {
   "mode": "live",
-  "live_fixtures": ["base", "amazon_auth"]   // base first (syncs cookies), then amazon builds the CookieBundle
+  "live_fixtures": ["live"]
 }
 ```
 
-- **`base`** — the default every `live`/`hybrid` task inherits when it omits `live_fixtures` (like `base_images` inheriting the default). Syncs fresh compute tokens + browser cookies/context/storage + passwords/passkeys from prod (`seed-local.ts --compute-tokens-only` then `--credentials-only`). `synthetic` tasks inherit `[]`.
-- **`amazon_auth`** — builds active `CookieBundle` rows for amazon.com from the synced prod cookies so the browser agent starts logged in.
+- **`live`** — syncs fresh compute tokens plus the complete browser-auth graph from production (`seed-local.ts --compute-tokens-only` and `--credentials-only`). In simulator mode the overlay is skipped as a unit because environment-boundary tools are simulated.
+- Omitted `live_fixtures` resolve to `[]`; using a live website does not implicitly import production credentials.
+- Site-specific setup is task scenario logic, not another live fixture. For example, the Amazon passkey probe applies `live`, then temporarily removes competing cookie/password paths and restores them in cleanup.
 
-Validated by `long_horizon.py:_validate_environment`: unknown fixture names and `synthetic` + live fixtures both fail catalog validation. Add a new live fixture by registering a `LiveFixtureSpec` in `live_fixtures.py` and its applier in `run_benchmark.py` — no per-task-name branching.
+Validated by `long_horizon.py:_validate_environment`: the only accepted fixture name is `live`, and synthetic tasks cannot declare it.
+
+Task-specific DB deltas remain separate from the base image. The dedicated gate-user deltas are safe to pre-seed physically, but their declarations remain useful for reset/isolation. Plaid and user-data deltas use the regular benchmark user and must not be bundled into the shared base image because they would contaminate unrelated tasks.
 
 Suite selection (`run_benchmark.py --suite ...`) runs only `status: "ready"` benchmark entries; explicit `--task <name>` still targets incomplete agent evals for dev iteration. **Never rename an existing task `name`** — it is the primary key into `history/task_durations.jsonl` (success ledger), `history/span_durations.jsonl` (p99 baselines), and `runs/*.json`; a rename orphans that history (guarded by `test_history_ledger_task_names_still_exist_in_catalog`). The FE dev query box reads this same catalog via `GET /api/benchmarks/test-prompts`.
 

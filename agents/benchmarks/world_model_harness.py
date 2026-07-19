@@ -49,9 +49,7 @@ _SECRET_VALUE_RE = re.compile(
     r"(sk-[A-Za-z0-9_-]{12,}|sk-ant-[A-Za-z0-9_-]+|Bearer\s+[A-Za-z0-9._-]+|"
     r"[A-Za-z0-9+/]{32,}={0,2})"
 )
-_HIGH_CONFIDENCE_SECRET_VALUE_RE = re.compile(
-    r"(sk-[A-Za-z0-9_-]{12,}|sk-ant-[A-Za-z0-9_-]+|Bearer\s+[A-Za-z0-9._-]+)"
-)
+_HIGH_CONFIDENCE_SECRET_VALUE_RE = re.compile(r"(sk-[A-Za-z0-9_-]{12,}|sk-ant-[A-Za-z0-9_-]+|Bearer\s+[A-Za-z0-9._-]+)")
 
 
 JsonObject = dict[str, Any]
@@ -471,7 +469,18 @@ def _artifact_category(path: str, content_type: Any = None) -> str:
     content = str(content_type or "")
     lower = path.lower()
     if content.startswith(("image/", "video/", "audio/")) or lower.endswith(
-        (".jpg.enc", ".jpeg.enc", ".png.enc", ".gif.enc", ".webp.enc", ".mp4.enc", ".m4a.enc", ".mp3.enc", ".wav.enc", ".m3u8.enc")
+        (
+            ".jpg.enc",
+            ".jpeg.enc",
+            ".png.enc",
+            ".gif.enc",
+            ".webp.enc",
+            ".mp4.enc",
+            ".m4a.enc",
+            ".mp3.enc",
+            ".wav.enc",
+            ".m3u8.enc",
+        )
     ):
         return "media"
     if lower.startswith("provider/") or "/provider/" in lower or "vapi" in lower:
@@ -527,9 +536,7 @@ def reconstruct_initial_state(root_agent_id: str, *, redaction_mode: str = "publ
                 break
     initial_trace_state = _initial_trace_state(root_agent_id, redaction_mode)
     refs = ["db/start.fixture.json.gz.enc", *_json_ref_paths(initial_trace_state)]
-    artifact_refs = [
-        ref for ref in (_artifact_meta_ref(root_agent_id, path) for path in refs) if ref is not None
-    ]
+    artifact_refs = [ref for ref in (_artifact_meta_ref(root_agent_id, path) for path in refs) if ref is not None]
     state = {
         "schema": "rose.initial_state.v1",
         "root_agent_id": root_agent_id,
@@ -571,7 +578,9 @@ def _transition_from_raw(raw: JsonObject, root_agent_id: str, redaction_mode: st
         is_error=bool(observation_raw.get("is_error")),
         metadata=_maybe_redact(observation_raw.get("metadata") or {}, redaction_mode),
         artifact_refs=list(observation_raw.get("artifact_refs") or []),
-        timestamp_ms=observation_raw.get("timestamp_ms") if isinstance(observation_raw.get("timestamp_ms"), int) else None,
+        timestamp_ms=observation_raw.get("timestamp_ms")
+        if isinstance(observation_raw.get("timestamp_ms"), int)
+        else None,
     )
     return RoseTransition(
         state_before=_maybe_redact(state_raw, redaction_mode),
@@ -648,7 +657,11 @@ def _transitions_from_llm_dumps(
                 continue
             artifact_ref = path if archive_agent_id == root_agent_id else f"{archive_agent_id}/{path}"
             base = read_archive_json(archive_agent_id, path)
-            base_payload = base.get("payload") if base.get("kind") == "legacy-llm-dump" and isinstance(base.get("payload"), dict) else base
+            base_payload = (
+                base.get("payload")
+                if base.get("kind") == "legacy-llm-dump" and isinstance(base.get("payload"), dict)
+                else base
+            )
             payload = updates.get(str(base_payload.get("dump_id")), base_payload)
             output = payload.get("output") if isinstance(payload.get("output"), dict) else {}
             usage = output.get("usage") if isinstance(output.get("usage"), dict) else {}
@@ -679,7 +692,9 @@ def _transitions_from_llm_dumps(
                 if not isinstance(args, dict):
                     args = {"value": args}
                 timestamp_ms = None
-                metadata = payload.get("archive", {}).get("metadata") if isinstance(payload.get("archive"), dict) else {}
+                metadata = (
+                    payload.get("archive", {}).get("metadata") if isinstance(payload.get("archive"), dict) else {}
+                )
                 if isinstance(metadata, dict) and isinstance(metadata.get("created_at_ms"), int):
                     timestamp_ms = metadata["created_at_ms"] + index
                 action = CanonicalAction(
@@ -1144,7 +1159,9 @@ def export_archive_to_otel_jsonl(
     )
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text("\n".join(json.dumps(span, ensure_ascii=False, sort_keys=True) for span in spans) + "\n", encoding="utf-8")
+    out.write_text(
+        "\n".join(json.dumps(span, ensure_ascii=False, sort_keys=True) for span in spans) + "\n", encoding="utf-8"
+    )
     return out
 
 
@@ -1180,9 +1197,7 @@ def score_observation_prediction(
         "artifact_refs": artifact_refs,
     }
     score = sum(dimensions.values()) / len(dimensions)
-    critique = "; ".join(
-        f"{name}={value:.2f}" for name, value in dimensions.items() if value < 1.0
-    )
+    critique = "; ".join(f"{name}={value:.2f}" for name, value in dimensions.items() if value < 1.0)
     return score, dimensions, critique
 
 
@@ -1276,8 +1291,7 @@ async def evaluate_archive_with_world_model(
         )
     mean_score = sum(step.score for step in step_scores) / len(step_scores)
     dimension_means = {
-        name: sum(step.dimensions[name] for step in step_scores) / len(step_scores)
-        for name in _FIDELITY_DIMENSIONS
+        name: sum(step.dimensions[name] for step in step_scores) / len(step_scores) for name in _FIDELITY_DIMENSIONS
     }
     result: JsonObject = {
         "status": "scored",
@@ -1358,7 +1372,9 @@ def deterministic_split(trace_ids: Iterable[str], *, heldout_fraction: float = 0
     return split
 
 
-def build_replay_corpus(bundle_ids: Iterable[str], output_dir: str | Path, *, heldout_fraction: float = 0.2) -> JsonObject:
+def build_replay_corpus(
+    bundle_ids: Iterable[str], output_dir: str | Path, *, heldout_fraction: float = 0.2
+) -> JsonObject:
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     bundle_ids = list(bundle_ids)
@@ -1379,9 +1395,13 @@ def _build_replay_session(root_agent_id: str, split: str) -> JsonObject:
         keys.append(
             {
                 "task": state.get("root_goal"),
-                "state_summary_hash": hashlib.sha256(json.dumps(transition.state_before, sort_keys=True).encode()).hexdigest(),
+                "state_summary_hash": hashlib.sha256(
+                    json.dumps(transition.state_before, sort_keys=True).encode()
+                ).hexdigest(),
                 "tool_action": transition.action.to_wmh_tool_name(),
-                "arguments_hash": hashlib.sha256(json.dumps(transition.action.arguments, sort_keys=True).encode()).hexdigest(),
+                "arguments_hash": hashlib.sha256(
+                    json.dumps(transition.action.arguments, sort_keys=True).encode()
+                ).hexdigest(),
                 "environment_fixture_hash": (state.get("db_fixture_ref") or {}).get("plaintext_sha256"),
                 "provider_domain": transition.observation.metadata.get("provider_domain"),
             }
@@ -1448,17 +1468,27 @@ def update_world_model_for_simulation(
     )
 
     all_bundle_ids = sorted(list(root_agent_ids) if root_agent_ids is not None else list_archive_bundle_ids())
-    bundle_ids, excluded_bundles = partition_real_world_bundles(all_bundle_ids)
+    index = _read_delta_index(index_path)
+    old_bundles = index.get("bundles") if isinstance(index.get("bundles"), dict) else {}
     # Corpus cap for fast benchmark/cloud builds. The full R2 archive is large and
     # downloads slowly from some hosts (~KB/s); WMH_MAX_BUNDLES bounds the first
     # build to N bundles so a serving model is ready in minutes, not hours. A later
     # explicit --refresh-wmh (higher/unset cap) can grow it. 0/unset = no cap.
     _wmh_max_bundles = int(os.environ.get("WMH_MAX_BUNDLES", "0") or "0")
-    if _wmh_max_bundles > 0 and len(bundle_ids) > _wmh_max_bundles:
-        bundle_ids = bundle_ids[:_wmh_max_bundles]
+    candidate_bundle_ids = all_bundle_ids
+    if _wmh_max_bundles > 0 and len(candidate_bundle_ids) > _wmh_max_bundles:
+        # Keep already-indexed traces before deterministically admitting new
+        # ones. Otherwise maintenance can evict the known-good corpus solely
+        # because a UUID sorts outside the capped prefix. This selection must
+        # happen before partition_real_world_bundles: classification reads each
+        # encrypted manifest from R2 and was the uncapped refresh bottleneck.
+        available = set(candidate_bundle_ids)
+        retained = sorted(bundle_id for bundle_id in old_bundles if bundle_id in available)
+        new = [bundle_id for bundle_id in candidate_bundle_ids if bundle_id not in old_bundles]
+        limit = max(_wmh_max_bundles, len(retained))
+        candidate_bundle_ids = (retained + new)[:limit]
+    bundle_ids, excluded_bundles = partition_real_world_bundles(candidate_bundle_ids)
     split = deterministic_split(bundle_ids, heldout_fraction=heldout_fraction) if bundle_ids else {}
-    index = _read_delta_index(index_path)
-    old_bundles = index.get("bundles") if isinstance(index.get("bundles"), dict) else {}
     changed: list[str] = []
     unchanged: list[str] = []
     signatures: dict[str, JsonObject] = {}
@@ -1680,7 +1710,9 @@ def compare_real_vs_world_model_benchmark(
         "terminal_status_match": str(real_result.get("status") or "") == str(world_model_result.get("status") or ""),
         "progress_within_delta": progress_delta <= max_progress_delta,
         "fidelity_above_threshold": fidelity_score >= min_fidelity_score,
-        "world_model_mode_recorded": bool(world_model_result.get("world_model_mode") or world_model_result.get("world_model_fidelity")),
+        "world_model_mode_recorded": bool(
+            world_model_result.get("world_model_mode") or world_model_result.get("world_model_fidelity")
+        ),
     }
     comparison: JsonObject = {
         "schema": "rose.wmh_benchmark_comparison.v1",
@@ -1713,7 +1745,9 @@ class WMHHttpClient:
         models = data.get("world_models")
         return models if isinstance(models, list) else []
 
-    async def start_session(self, world_model: str, *, task: str | None = None, seed_state: JsonObject | None = None) -> str:
+    async def start_session(
+        self, world_model: str, *, task: str | None = None, seed_state: JsonObject | None = None
+    ) -> str:
         body: JsonObject = {"task": task, "seed_state": seed_state}
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(f"{self.base_url}/world_models/{world_model}/sessions", json=body)
@@ -1939,4 +1973,12 @@ def _observation_tool_result_payload(observation: JsonObject) -> Any:
     for candidate in candidates:
         if candidate is not None:
             return candidate
+    content = observation.get("content")
+    if isinstance(content, str) and content.strip():
+        try:
+            decoded = json.loads(content)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, dict):
+            return decoded
     return None

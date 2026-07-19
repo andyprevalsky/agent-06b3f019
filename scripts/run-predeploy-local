@@ -146,7 +146,7 @@ trap 'forward_signal HUP 129' HUP
 trap 'forward_signal INT 130' INT
 trap 'forward_signal TERM 143' TERM
 
-python3 "$LOGGED_COMMAND" "$RUNNER_LOG" -- \
+BENCHMARK_SKIP_WMH_BUILD=1 python3 "$LOGGED_COMMAND" "$RUNNER_LOG" -- \
     bash "$ROOT_DIR/scripts/run-bench" --local "${SCHEDULED_TASKS[@]}" \
     --max-concurrency "$LOCAL_CONCURRENCY" &
 SUPERVISOR_PID=$!

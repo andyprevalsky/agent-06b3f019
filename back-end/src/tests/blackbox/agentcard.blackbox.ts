@@ -13,6 +13,10 @@ import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
 import { z } from 'zod';
 import { prisma } from '../../providers/database';
+import {
+  refreshOrgCardholderStatus,
+  startOrgCardholderOnboarding,
+} from '../../providers/agentcard/org-onboarding';
 import { saveUserToken } from '../../providers/agentcard/store';
 
 config();
@@ -100,6 +104,55 @@ async function runTest(name: string, fn: () => Promise<void>): Promise<TestResul
 }
 
 const tests: Array<[string, () => Promise<void>]> = [
+  [
+    'organization onboarding preserves AgentCard configuration errors',
+    async () => {
+      const capturedResponse = {
+        content: [
+          {
+            type: 'text',
+            text: 'create_onboarding_session failed: return_url does not match any registered onboarding return URL',
+          },
+        ],
+        structuredContent: {
+          status: 'error',
+          message:
+            'create_onboarding_session failed: return_url does not match any registered onboarding return URL',
+        },
+      };
+      let observed: unknown;
+      try {
+        await startOrgCardholderOnboarding('agentcard-bb-onboarding-error', {
+          getOrgOnboardingConfig: async () => undefined,
+          callOrgTool: async () => capturedResponse,
+          saveOrgOnboardingConfig: async () => {
+            throw new Error('an error response must never be persisted as onboarding state');
+          },
+        });
+      } catch (error) {
+        observed = error;
+      }
+      assert(observed instanceof Error, 'expected the captured AgentCard error to be thrown');
+      assert(
+        observed.message.includes('return_url does not match any registered onboarding return URL'),
+        `expected the original configuration error, got: ${observed.message}`
+      );
+    },
+  ],
+  [
+    'organization onboarding preserves failed business status',
+    async () => {
+      const result = await refreshOrgCardholderStatus('agentcard-bb-failed-status', {
+        getOrgManagedCardholderId: async () => 'cardholder-failed',
+        callOrgTool: async () => ({
+          structuredContent: { status: 'failed' },
+          content: [{ type: 'text', text: JSON.stringify({ status: 'failed' }) }],
+        }),
+      });
+      assert(result.connected === false, 'failed KYC must not be reported as connected');
+      assert(result.status === 'failed', 'failed KYC must remain observable as business state');
+    },
+  ],
   [
     'status rejects unauthenticated requests',
     async () => {
