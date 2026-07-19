@@ -6817,7 +6817,7 @@ def _validate_task_target(task: BenchmarkTask, base_url: str) -> None:
 def _agentcard_setup_fixture_action(task: BenchmarkTask, base_url: str) -> Optional[str]:
     if task.agentcard_setup_action == "complete":
         return "reset"
-    if task.expected_payment_lifecycle and _is_local_base_url(base_url):
+    if task.expected_payment_lifecycle:
         return "complete"
     return None
 

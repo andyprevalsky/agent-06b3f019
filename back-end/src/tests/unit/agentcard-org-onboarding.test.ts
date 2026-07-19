@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import {
   completeOrgCardholderOnboarding,
+  getOrgCardholderVerificationStatus,
   refreshOrgCardholderStatus,
   type OrgOnboardingDependencies,
 } from '../../providers/agentcard/org-onboarding';
@@ -125,6 +126,34 @@ async function main(): Promise<void> {
     })
   );
   assert.equal(pending.connected, false);
+
+  let verificationArgs: Record<string, unknown> | undefined;
+  const verificationStatus = await getOrgCardholderVerificationStatus('ch-ready', {
+    callOrgTool: async (name, args) => {
+      assert.equal(name, 'get_cardholder_kyc_status');
+      verificationArgs = args;
+      return toolResult({ kyc_status: 'verified' });
+    },
+  });
+  assert.equal(verificationStatus, 'verified');
+  assert.deepEqual(verificationArgs, { cardholder_id: 'ch-ready' });
+
+  // The cardholder id is validated after trimming, so the trimmed value must be
+  // what gets sent to the org tool (not the padded input).
+  let paddedArgs: Record<string, unknown> | undefined;
+  await getOrgCardholderVerificationStatus('  ch-padded  ', {
+    callOrgTool: async (_name, args) => {
+      paddedArgs = args;
+      return toolResult({ kyc_status: 'verified' });
+    },
+  });
+  assert.deepEqual(paddedArgs, { cardholder_id: 'ch-padded' });
+
+  // KYC-specific keys take precedence over a generic transport `status`.
+  const precedenceStatus = await getOrgCardholderVerificationStatus('ch-both', {
+    callOrgTool: async () => toolResult({ status: 'ok', kyc_status: 'verified' }),
+  });
+  assert.equal(precedenceStatus, 'verified');
 
   process.stdout.write('AgentCard org onboarding tests passed\n');
 }

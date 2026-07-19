@@ -120,16 +120,20 @@ function findUrl(value: unknown): string | undefined {
 }
 
 function errorCode(record: Record<string, unknown>, text: string): string | undefined {
-  const value = field(record, ['code', 'error', 'status']);
-  if (typeof value === 'string' && value !== '') return value;
-  const normalized = text.toLowerCase();
-  return [
+  const explicitCode = optionalString(record, ['code', 'error'])?.toLowerCase();
+  const message = optionalString(record, ['message']);
+  const normalized = [explicitCode, message, text].filter(Boolean).join('\n').toLowerCase();
+  const knownCode = [
     'funding_in_progress',
     'kyc_required',
+    'org_onboarding_required',
     'org_wallet_funding_required',
     'wallet_funding_required',
     'payment_method_required',
   ].find((code) => normalized.includes(code));
+  if (knownCode !== undefined) return knownCode;
+  if (explicitCode !== undefined) return explicitCode;
+  return optionalString(record, ['status'])?.toLowerCase();
 }
 
 function throwForGate(record: Record<string, unknown>, result: unknown): void {
@@ -169,7 +173,23 @@ function throwForGate(record: Record<string, unknown>, result: unknown): void {
       { agentcardStatus: code, agentcardResult: record }
     );
   }
-  if ((result as McpResult).isError === true) {
+  if (code === 'org_onboarding_required') {
+    throw new AgentCardProviderError(
+      optionalString(record, ['message', 'error']) ??
+        (text || 'AgentCard organization onboarding is required'),
+      409,
+      undefined,
+      'agentcard_setup_required',
+      {
+        agentcardStatus: code,
+        setupAction: 'complete_agentcard_cardholder_onboarding',
+        agentcardResult: record,
+      }
+    );
+  }
+  const status = optionalString(record, ['status'])?.toLowerCase();
+  const hasExplicitError = (result as McpResult).isError === true || status === 'error';
+  if (hasExplicitError) {
     throw new AgentCardProviderError(
       optionalString(record, ['message', 'error']) ?? (text || 'AgentCard Organization MCP failed')
     );

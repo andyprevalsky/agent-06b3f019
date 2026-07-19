@@ -128,6 +128,23 @@ const defaultOnboardingDependencies: OrgOnboardingDependencies = {
   saveOrgOnboardingConfig,
 };
 
+export async function getOrgCardholderVerificationStatus(
+  cardholderId: string,
+  dependencies: Partial<Pick<OrgOnboardingDependencies, 'callOrgTool'>> = {}
+): Promise<string> {
+  const trimmedCardholderId = cardholderId.trim();
+  if (trimmedCardholderId === '') throw new Error('AgentCard cardholder id is required');
+  const callTool = dependencies.callOrgTool ?? defaultOnboardingDependencies.callOrgTool;
+  const result = resultRecord(
+    await callTool('get_cardholder_kyc_status', { cardholder_id: trimmedCardholderId })
+  );
+  // Prefer the KYC-specific keys over a generic transport `status`: a payload
+  // carrying both (e.g. status:"ok" + kyc_status:"verified") must report the
+  // terminal KYC state, not the transport state, or a verified cardholder is
+  // wrongly treated as not ready.
+  return stringField(result, ['kyc_status', 'kycStatus', 'status']) ?? 'unknown';
+}
+
 export async function refreshOrgCardholderStatus(
   userId: string,
   dependencies: Partial<OrgOnboardingDependencies> = {}

@@ -1044,7 +1044,7 @@ def test_production_frontend_url_ignores_stale_local_services_manifest():
                 os.environ[name] = value
 
 
-def test_agentcard_setup_fixture_is_seeded_only_for_local_non_setup_tasks():
+def test_agentcard_setup_fixture_preflights_every_lifecycle_task():
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _agentcard_setup_fixture_action
 
@@ -1054,7 +1054,7 @@ def test_agentcard_setup_fixture_is_seeded_only_for_local_non_setup_tasks():
 
     assert _agentcard_setup_fixture_action(standard, "http://localhost:55120") == "complete"
     assert _agentcard_setup_fixture_action(setup, "http://localhost:55120") == "reset"
-    assert _agentcard_setup_fixture_action(production, "https://api.roselabs.ai") is None
+    assert _agentcard_setup_fixture_action(production, "https://api.roselabs.ai") == "complete"
 
 
 def test_expected_attention_kind_uses_ordered_sequence():
