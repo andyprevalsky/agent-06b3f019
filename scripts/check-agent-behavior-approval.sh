@@ -70,7 +70,7 @@ FLAGGED="$(
               f == "agents/tests/blackbox/dag_executor.blackbox.py" ||
               f == "agents/tests/blackbox/workflow_determinism.blackbox.py")
     }
-    function is_behavioral(line) {
+    function is_behavioral(line, fname,    code) {
       sub(/^[+-]/, "", line)
 
       code=line
@@ -84,26 +84,42 @@ FLAGGED="$(
       if (code ~ /(^|[^A-Za-z0-9_])run_agent[[:space:]]*\(/) return 1
 
       # Status/reason literals that gate terminal vs. recoverable outcomes.
-      if (code ~ /(status|"status")[[:space:]]*[:=][[:space:]]*["'"'"']?(error|failed|aborted|max_iterations|needs_llm|completed|paused)/) return 1
-      if (code ~ /(reason|"reason")[[:space:]]*[:=][[:space:]]*["'"'"']/) return 1
+      # Matches ASSIGNMENT / dict form (status: / status=), SUBSCRIPT comparison
+      # (["status"] == / != ), and ATTRIBUTE comparison (.status == / != ). The
+      # optional quote+bracket before the operator is what lets a recovery-test
+      # inversion like  assert result["status"] == "failed"  trip the guard, not
+      # just the assignment  result = {"status": "failed"}.
+      if (code ~ /status["'"'"']?[]]?[[:space:]]*(:|==|!=|=)[[:space:]]*["'"'"']?(error|failed|aborted|max_iterations|needs_llm|completed|paused)/) return 1
+      if (code ~ /reason["'"'"']?[]]?[[:space:]]*(:|==|!=|=)[[:space:]]*["'"'"']/) return 1
 
-      # Recovery-invariant assertions in the behavior test suites.
-      if (file ~ /\.blackbox\.py$/) {
+      # Recovery-invariant assertions in the behavior test suites (the status
+      # comparison above already covers assert ...["status"] == "failed").
+      if (fname ~ /\.blackbox\.py$/) {
         if (code ~ /run_agent_calls/) return 1
         if (code ~ /(must not run|never.*run_agent|falls?_through|recovers?_via)/) return 1
-        if (code ~ /["'"'"']status["'"'"'][[:space:]]*:[[:space:]]*["'"'"'](failed|completed|error|aborted)["'"'"']/) return 1
       }
 
       return 0
     }
-    /^\+\+\+ b\// {
-      file=substr($0, 7)
+    # Track BOTH sides of each file header. A deletion emits "+++ /dev/null" and a
+    # rename out of the allowlist changes the +++ path, so keying only on the new
+    # side (+++) would let someone delete/rename a watched file to strip recovery
+    # logic without tripping the guard. Evaluate old (---) OR new (+++) path.
+    /^--- (a\/|\/dev\/null)/ {
+      oldfile=substr($0, 5)
+      sub(/^a\//, "", oldfile)
       next
     }
-    /^[+-][^+-]/ && file != "" && is_watched(file) {
-      if (is_behavioral($0)) {
-        print file
-      }
+    /^\+\+\+ (b\/|\/dev\/null)/ {
+      file=substr($0, 5)
+      sub(/^b\//, "", file)
+      next
+    }
+    /^[+-][^+-]/ {
+      wf=""
+      if (is_watched(file)) wf=file
+      else if (is_watched(oldfile)) wf=oldfile
+      if (wf != "" && is_behavioral($0, wf)) print wf
     }
   ' | sort -u
 )"

@@ -110,4 +110,27 @@ PY
 git -C "$unwatched_repo" add agents/tools/some_tool.py
 expect_pass "$unwatched_repo" "terminal literals outside the control-flow layer do not fire"
 
+# 6. Inverting a recovery invariant via a subscript COMPARISON (not an assignment)
+#    must fire. `assert result["status"] == "failed"` is the natural test-inversion
+#    shape; a guard that only matched `status: "failed"` assignments would miss it.
+compare_repo="$(new_repo compare-assertion)"
+cat >>"$compare_repo/agents/tests/blackbox/workflow.blackbox.py" <<'PY'
+    assert result["status"] == "failed"  # regressed: expect terminal, not recovery
+PY
+git -C "$compare_repo" add agents/tests/blackbox/workflow.blackbox.py
+expect_fail "$compare_repo" 'inverting a status invariant via ["status"] == comparison requires approval'
+
+# 7. DELETING a watched file that carries recovery logic must fire. A deletion
+#    emits "+++ /dev/null", so keying only on the new-side (+++) path would let
+#    someone strip recovery control flow — or rename the file out of the
+#    allowlist — without tripping the guard. The old-side (---) path must be read.
+delete_repo="$(new_repo delete-watched)"
+cat >>"$delete_repo/agents/loop/dag_executor.py" <<'PY'
+    return {"status": "needs_llm", "context": context}
+PY
+git -C "$delete_repo" add agents/loop/dag_executor.py
+git -C "$delete_repo" commit -q -m "add recovery return"
+git -C "$delete_repo" rm -q agents/loop/dag_executor.py
+expect_fail "$delete_repo" "deleting a watched file's recovery logic requires approval"
+
 echo "All agent-behavior guard tests passed."

@@ -108,6 +108,11 @@ done < <(
 if [ "$(smoke_set_uses_codex)" = "0" ]; then
     export SEED_ALLOW_MISSING_GPT_CODE=1
     echo "ℹ️  Smoke set is Codex-free — tolerating a missing/rate-limited gpt_code integration (SEED_ALLOW_MISSING_GPT_CODE=1)."
+else
+    # A Codex-using smoke set MUST enforce a usable gpt_code integration. Clear any
+    # value inherited from the caller's environment so it can never leave a
+    # Codex-using run permissively passing without the required credential.
+    unset SEED_ALLOW_MISSING_GPT_CODE
 fi
 
 echo "🧪 Pre-Deploy smoke (LOCAL isolated stack) — ${#PREDEPLOY_TASKS[@]} tasks: ${PREDEPLOY_TASKS[*]}"
