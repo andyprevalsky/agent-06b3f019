@@ -1980,6 +1980,115 @@
     ]
   },
   {
+    "name": "browser-imax-group-tickets",
+    "title": "IMAX Group Movie Tickets with Adjacent Seats",
+    "description": "Buy multiple premium-format movie tickets for tonight with all seats adjacent in the same row — a group purchase that stresses quantity, seat-adjacency, and format selection beyond the single-ticket case.",
+    "prompt": "Buy 3 adult IMAX tickets for tonight at AMC Metreon 16 in San Francisco. Choose the earliest IMAX showtime remaining tonight (any film is fine), and select 3 available seats that are all directly adjacent to each other in the same row. Keep each ticket under $35 before fees and add no concessions, memberships, donations, insurance, or upgrades. If no IMAX showtime remains tonight, fall back to the earliest remaining Dolby Cinema showtime tonight with 3 adjacent seats. Complete the purchase so all 3 tickets are confirmed under the account holder.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "ticketing"
+    ],
+    "group": "daily",
+    "price_limit_cents": 350,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_approval_count": 1,
+    "expected_attention_kinds": [
+      "write_lock"
+    ],
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "tool_count_scope": "root",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "amctheatres.com",
+        "write_lock"
+      ],
+      "secrets": [],
+      "live_targets": [
+        "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
+      ],
+      "context_notes": "Live IMAX showtime/seat inventory. The benchmark fixes venue, tonight's date, premium format (IMAX, Dolby Cinema fallback), quantity (3 adult tickets), a same-row adjacency constraint across all 3 seats, a per-ticket price cap, and a no-add-on constraint, and auto-approves one write boundary to require a confirmed multi-ticket purchase."
+    },
+    "evaluators": [
+      {
+        "id": "imax-group-ticket-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The root agent completes after exactly one auto-approved write-lock",
+          "The approval identifies AMC Metreon 16, the date, showtime, all three seat assignments, and total amount"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "AMC Metreon 16"
+            ],
+            "require_date": true,
+            "require_time": true,
+            "require_amount": true,
+            "require_seat": true
+          }
+        ]
+      },
+      {
+        "id": "imax-group-ticket-adjacency-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The completed purchase is for exactly 3 adult IMAX tickets (or Dolby Cinema only if no IMAX showtime remained tonight) at AMC Metreon 16 for a showtime tonight",
+          "Grounded showtime and seat-map evidence shows the selected show is the earliest qualifying premium-format show remaining tonight and all 3 selected seats are available and directly adjacent in the same row",
+          "Each ticket price is under $35 before fees, and no concessions, memberships, donations, insurance, or upgrades are added",
+          "The single approval identifies the venue, date, showtime, all three seat assignments, and total amount, and the trajectory reaches a grounded final confirmation or receipt showing all 3 tickets purchased after approval; checkout, an approval request, or a write-lock alone is not completion"
+        ],
+        "judge_prompt": "Review the full showtime, format, seat-map, cart, browser, and attention evidence. Pass only if exactly 3 adult premium-format tickets are purchased with all 3 seats grounded as adjacent in the same row, every selection and exclusion is grounded, the single approval is complete, and a final confirmed receipt for all 3 tickets is reached after approval. The Dolby Cinema fallback is acceptable only with grounded evidence that no IMAX showtime remained tonight."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:ecommerce-v1-2026-07-19",
+      "agent:d29e631e-b78a-40dd-8f0b-732d1143a854",
+      "coverage-gap:group-ticketing-adjacent-seats"
+    ]
+  },
+  {
     "name": "browser-amazon-return",
     "title": "Amazon Return and Refund Initiation",
     "description": "Exercise the post-purchase lifecycle by initiating a return with refund-method and drop-off constraints.",

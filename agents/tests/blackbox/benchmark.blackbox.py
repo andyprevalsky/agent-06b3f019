@@ -5984,7 +5984,7 @@ def test_unified_catalog_delineates_bench_axes():
     assert live["environment"]["live_targets"] == ["https://www.amazon.com"]
 
 
-def test_daily_ecommerce_v1_catalog_has_ten_distinct_transaction_flows():
+def test_daily_ecommerce_v1_catalog_has_eleven_distinct_transaction_flows():
     """The daily ecommerce slice stays focused, complete, and stable."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.fixtures import DEFAULT_BASE_IMAGE
@@ -6000,13 +6000,14 @@ def test_daily_ecommerce_v1_catalog_has_ten_distinct_transaction_flows():
         "browser-alchemy-springs-sauna",
         "browser-hotel-booking",
         "browser-event-ticket",
+        "browser-imax-group-tickets",
         "browser-amazon-return",
     }
     tasks = validate_catalog()
     ecommerce = [task for task in tasks if "ecommerce" in task.get("tags", [])]
 
     assert {task["name"] for task in ecommerce} == expected_names
-    assert len(ecommerce) == 10
+    assert len(ecommerce) == 11
     assert all(task.get("group", "").lower() == "daily" for task in ecommerce)
     assert all(task.get("status", "ready") == "ready" for task in ecommerce)
     assert all(task.get("enforce_declared_evaluators") is True for task in ecommerce)
@@ -7445,7 +7446,7 @@ async def run_all_tests():
     )
     r.record(
         "daily_ecommerce_v1_catalog",
-        test_daily_ecommerce_v1_catalog_has_ten_distinct_transaction_flows,
+        test_daily_ecommerce_v1_catalog_has_eleven_distinct_transaction_flows,
     )
     r.record(
         "unified_catalog_multiple_evaluators",
