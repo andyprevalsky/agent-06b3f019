@@ -1460,4 +1460,38 @@ then
 fi
 echo "PASS: scenario 13 — repeat provisioning preserves every prior pool owner record"
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Scenario 14 — the shared-warm-box RUN footgun is closed
+#
+# A bare `run-bench-cloud <task>` (no --machine) would execute on the ONE shared
+# warm box — NOT parallel-safe: two worktrees collide on the same machine and
+# whichever stops it clobbers the other's in-flight run (a real cross-workspace
+# incident: the 683e47df clobber). The guard must REJECT that run (and the
+# `run-bench --single-box` dispatcher alias) at arg-parse time, BEFORE any Fly
+# call. The fleet path (--machine) and the maintainer env escape hatch
+# (CLOUDBENCH_ALLOW_SHARED_WARM_RUN=1) are exempt by the same guard condition —
+# and the fleet path's full end-to-end success is already proven by scenario 2.
+# Only the fast, Fly-free rejection paths are exercised here (a pass-through run
+# would proceed into real machine provisioning).
+# ═══════════════════════════════════════════════════════════════════════════
+: > "$FAKE_DIR/journal.log"
+guard_cloud="$TMP_ROOT/guard-cloud.log"
+if env PATH="$FAKE_BIN:$PATH" CLOUDBENCH_FAKE_DIR="$FAKE_DIR" \
+    bash "$WS_A/scripts/run-bench-cloud" some-bench > "$guard_cloud" 2>&1; then
+    fail "scenario 14: run-bench-cloud <task> on the shared warm box must be rejected"
+fi
+grep -qiF "parallel-safe" "$guard_cloud" ||
+    fail "scenario 14: rejection must explain the shared-warm-box parallel-safety hazard"
+if grep -qE '^machine (clone|start|update|stop)' "$FAKE_DIR/journal.log"; then
+    fail "scenario 14: the guard must reject BEFORE any Fly machine operation"
+fi
+
+guard_single="$TMP_ROOT/guard-single-box.log"
+if env PATH="$FAKE_BIN:$PATH" bash "$WS_A/scripts/run-bench" --single-box some-bench > "$guard_single" 2>&1; then
+    fail "scenario 14: run-bench --single-box must be rejected"
+fi
+grep -qiF "parallel-safe" "$guard_single" ||
+    fail "scenario 14: --single-box rejection must explain the parallel-safety hazard"
+echo "PASS: scenario 14 — the shared-warm-box run footgun is closed (fleet + escape-hatch exempt by guard condition)"
+
 echo "PASS: two workstreams ran cloud benchmarks concurrently, isolated end to end"

@@ -166,6 +166,29 @@ while [ $# -gt 0 ]; do
     esac
 done
 
+# ── Parallel-safety guard: never run a bench on the SHARED warm machine ──────
+# A bench RUN executes on whatever machine resolve_machine_id() returns. Without
+# --machine (set ONLY by run-bench-fleet, which clones a DEDICATED ephemeral
+# machine per bench), a run lands on the one shared warm box (name=cloudbench-
+# warm). Two worktrees doing that collide on the SAME box — and whichever one
+# stops it kills the other's in-flight run (a real cross-workspace clobber).
+# So the warm machine is a CLONE SOURCE only; benches never run on it directly.
+# Force every run through the parallel-safe fleet. Admin/maintenance modes
+# (--setup / --refresh-* / --verify-secrets / --destroy) legitimately operate on
+# the warm box and are exempt because MODE != "run". A maintainer can still opt
+# in explicitly with CLOUDBENCH_ALLOW_SHARED_WARM_RUN=1 (not for agent use).
+if [ "$MODE" = "run" ] && [ -z "$FLEET_MACHINE_ID" ] && [ "${CLOUDBENCH_ALLOW_SHARED_WARM_RUN:-0}" != "1" ]; then
+    echo "❌ Direct cloud-bench runs on the shared warm machine are disabled — NOT parallel-safe." >&2
+    echo "   Two worktrees running here collide on the one 'cloudbench-warm' box, and stopping it" >&2
+    echo "   kills the other's in-flight run. Use the parallel-safe entrypoint (clones a dedicated" >&2
+    echo "   Fly machine per bench, so concurrent worktrees never share a box):" >&2
+    echo "       bash scripts/run-bench <task...>          # default: per-bench isolated Fly fleet" >&2
+    echo "       bash scripts/run-bench-fleet <task...>    # same, explicit" >&2
+    echo "   (run-bench-fleet invokes this script with --machine <clone> per bench; this guard only" >&2
+    echo "    blocks bench RUNs on the shared warm box — --setup/--refresh-*/--destroy still work.)" >&2
+    exit 2
+fi
+
 # CI never pops a browser / proxy.
 if [ -n "${CI:-}" ] || [ -n "${GITHUB_ACTIONS:-}" ] || [ -n "${CONTINUOUS_INTEGRATION:-}" ]; then
     DASHBOARD="0"
