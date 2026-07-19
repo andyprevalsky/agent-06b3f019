@@ -277,25 +277,41 @@ function hasEncryptedCredentials(config: unknown): boolean {
   return typeof encryptedCredentials === 'string' && encryptedCredentials.length > 0;
 }
 
-async function countUsableGptCodeIntegrations(): Promise<number> {
+interface GptCodeAvailability {
+  // Connected, credentialed, bench-available, and NOT currently rate-limited.
+  usable: number;
+  // Connected, credentialed, bench-available, but throttled (rateLimitedUntil in
+  // the future) — i.e. present but temporarily blocked by an external quota.
+  rateLimited: number;
+}
+
+async function inspectGptCodeIntegrations(): Promise<GptCodeAvailability> {
   const now = new Date();
   const integrations = await local.integration.findMany({
-    where: {
-      name: 'gpt_code',
-      status: 'CONNECTED',
-      OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
-    },
+    where: { name: 'gpt_code', status: 'CONNECTED' },
     select: {
       userId: true,
       poolingEnabled: true,
       config: true,
+      rateLimitedUntil: true,
     },
   });
 
-  return integrations.filter((integration) => {
+  const eligible = integrations.filter((integration) => {
     const isAvailableToBench = integration.userId === DEV_USER_ID || integration.poolingEnabled;
     return isAvailableToBench && hasEncryptedCredentials(integration.config);
-  }).length;
+  });
+
+  let usable = 0;
+  let rateLimited = 0;
+  for (const integration of eligible) {
+    if (integration.rateLimitedUntil !== null && integration.rateLimitedUntil > now) {
+      rateLimited += 1;
+    } else {
+      usable += 1;
+    }
+  }
+  return { usable, rateLimited };
 }
 
 async function syncComputeTokensWithRetries(): Promise<void> {
@@ -304,13 +320,28 @@ async function syncComputeTokensWithRetries(): Promise<void> {
   for (let attempt = 1; attempt <= COMPUTE_TOKEN_SYNC_ATTEMPTS; attempt++) {
     try {
       const count = await syncIntegrations();
-      const usableGptCodeCount = await countUsableGptCodeIntegrations();
+      const { usable: usableGptCodeCount, rateLimited: rateLimitedGptCodeCount } =
+        await inspectGptCodeIntegrations();
       if (usableGptCodeCount === 0) {
+        // A gpt_code (Codex) integration that EXISTS but is merely rate-limited
+        // is an external-quota transient (e.g. the ChatGPT quota window), not a
+        // misconfiguration. It must never hard-fail the compute-token sync: the
+        // claude tokens every non-Codex run needs still synced, and a run that
+        // actually uses Codex will surface the quota error at runtime. Only a
+        // genuinely MISSING integration is a real setup problem — and even that
+        // stays skippable via the explicit opt-out for known Codex-free runs.
+        if (rateLimitedGptCodeCount > 0) {
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, 0 usable gpt_code ` +
+              `(${rateLimitedGptCodeCount} present but rate-limited by an external quota) — ` +
+              `proceeding; claude tokens synced`
+          );
+          return;
+        }
         // gpt_code (Codex) is only needed by runs that actually spawn a Codex
         // agent. When a caller knows the run doesn't use Codex — e.g. the
-        // AgentCard browser payment-lifecycle gate — an externally
-        // rate-limited/quota-exhausted Codex integration must not block an
-        // otherwise-healthy compute-token sync (claude tokens still synced).
+        // AgentCard browser payment-lifecycle gate — a missing Codex integration
+        // must not block an otherwise-healthy compute-token sync.
         // Default (flag unset) stays strict so Codex regressions still surface.
         if (process.env.SEED_ALLOW_MISSING_GPT_CODE === '1') {
           console.warn(

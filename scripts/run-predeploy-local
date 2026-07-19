@@ -60,5 +60,11 @@ echo "🧪 Pre-Deploy smoke (LOCAL isolated stack) — ${#PREDEPLOY_TASKS[@]} ta
 # resource profile close to the calibration (still parallel, ~1 browser task at a
 # time) so the timeouts hold. Override with PREDEPLOY_LOCAL_CONCURRENCY.
 LOCAL_CONCURRENCY="${PREDEPLOY_LOCAL_CONCURRENCY:-2}"
+# None of the smoke-tagged tasks spawn a Codex agent, so a rate-limited or
+# quota-exhausted gpt_code (Codex) integration must not fail the isolated stack's
+# compute-token sync (seed-local hard-requires a usable gpt_code otherwise). The
+# claude tokens the smoke tasks actually need still sync. Codex regressions are
+# caught by the codex-code test that uses Codex, not by this gate.
+export SEED_ALLOW_MISSING_GPT_CODE=1
 BENCHMARK_SKIP_WMH_BUILD=1 exec bash "$ROOT_DIR/scripts/run-bench" --local "${PREDEPLOY_TASKS[@]}" \
     --max-concurrency "$LOCAL_CONCURRENCY"
