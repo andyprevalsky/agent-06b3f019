@@ -1,6 +1,7 @@
-import { exclusiveCerebrasCompletion } from './cerebrasRoute';
+import { clearsChatStallGuard, exclusiveCerebrasCompletion } from './cerebrasRoute';
 import { RosePaymentRequiredError, RoseRateLimitError } from './errors';
 import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStream';
+import { hedgeStreams } from './hedgedStream';
 import { createLogger } from '../logger';
 import { exclusiveOpenRouterCerebrasCompletion } from './openrouterCerebrasRoute';
 import { exclusiveOpenRouterWaterfall } from './openrouterRoute';
@@ -9,9 +10,23 @@ import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './type
 
 const log = createLogger('Rose');
 
+/**
+ * How long the exclusive Cerebras stream may stay silent before the generic
+ * waterfall starts IN PARALLEL as a hedge. Shorter than the 1.2s pre-content
+ * stall guard, so a throttled/queued Cerebras stream no longer serializes
+ * stall detection + waterfall TTFT (which breached the 5s chat lifecycle
+ * ratchet). Non-positive values disable hedging (pure serial fallover).
+ */
+export const DEFAULT_CEREBRAS_CHAT_HEDGE_MS = 800;
+
+function chatHedgeMs(): number {
+  const configured = Number(process.env.CEREBRAS_CHAT_HEDGE_MS);
+  return Number.isFinite(configured) ? configured : DEFAULT_CEREBRAS_CHAT_HEDGE_MS;
+}
+
 interface ExclusiveCerebrasChatRoute {
   doneEvent: string;
-  produce: () => AsyncIterable<RoseStreamChunk>;
+  produce: (optionsOverride?: CompletionOptions) => AsyncIterable<RoseStreamChunk>;
 }
 
 export function selectExclusiveCerebrasChatRoute(params: {
@@ -26,7 +41,12 @@ export function selectExclusiveCerebrasChatRoute(params: {
     }
     return {
       doneEvent: 'openrouter_cerebras.done',
-      produce: () => exclusiveOpenRouterCerebrasCompletion({ ...params, openrouterKey }),
+      produce: (optionsOverride) =>
+        exclusiveOpenRouterCerebrasCompletion({
+          ...params,
+          options: optionsOverride ?? params.options,
+          openrouterKey,
+        }),
     };
   }
   if (params.options.provider_route === 'direct-cerebras') {
@@ -36,10 +56,26 @@ export function selectExclusiveCerebrasChatRoute(params: {
     }
     return {
       doneEvent: 'direct_cerebras.done',
-      produce: () => exclusiveCerebrasCompletion({ ...params, cerebrasKey }),
+      produce: (optionsOverride) =>
+        exclusiveCerebrasCompletion({
+          ...params,
+          options: optionsOverride ?? params.options,
+          cerebrasKey,
+        }),
     };
   }
   return null;
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+function withBranchAbort(options: CompletionOptions, branchSignal: AbortSignal): CompletionOptions {
+  return {
+    ...options,
+    abort_signal: options.abort_signal
+      ? AbortSignal.any([options.abort_signal, branchSignal])
+      : branchSignal,
+  };
 }
 
 /**
@@ -72,28 +108,98 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
   };
 
   let cerebrasFailure: unknown = null;
-  try {
-    yield* runWithFallThrough({ produce: params.cerebrasRoute.produce, emit });
-    if (emittedAny) {
-      log.info(params.cerebrasRoute.doneEvent, {
+  const hedgeMs = chatHedgeMs();
+
+  if (hedgeMs > 0) {
+    // Hedged stage: race Cerebras against the generic waterfall. The hedge only
+    // starts after hedgeMs of silence, and only one branch's chunks ever reach
+    // the caller, so the fast path costs nothing extra.
+    let winnerName = '';
+    try {
+      const hedged = hedgeStreams<RoseStreamChunk>({
+        primary: {
+          name: 'cerebras',
+          produce: (signal) =>
+            params.cerebrasRoute.produce(withBranchAbort(params.options, signal)),
+        },
+        hedge: {
+          name: 'waterfall',
+          produce: (signal) =>
+            exclusiveOpenRouterWaterfall({
+              poolSpec: params.poolSpec,
+              options: withBranchAbort(params.options, signal),
+              requestId: params.requestId,
+              callSite: params.callSite,
+            }),
+        },
+        hedgeAfter: () => sleep(hedgeMs),
+        isContent: (chunk) => clearsChatStallGuard(chunk.kind),
+        onWinner: (name) => {
+          winnerName = name;
+          if (name !== 'cerebras') {
+            log.warn('cerebras_chat.hedge_waterfall_won', {
+              request_id: params.requestId,
+              pool: params.pool,
+              hedge_ms: hedgeMs,
+              elapsed_ms: Date.now() - params.startedAt,
+            });
+          }
+        },
+      });
+      for await (const chunk of hedged) {
+        const output = emit(chunk);
+        if (output !== null) yield output;
+      }
+      if (emittedAny) {
+        log.info(
+          winnerName === 'cerebras'
+            ? params.cerebrasRoute.doneEvent
+            : 'cerebras_chat.hedge_waterfall.done',
+          {
+            request_id: params.requestId,
+            pool: params.pool,
+            elapsed_ms: Date.now() - params.startedAt,
+          }
+        );
+        return;
+      }
+      log.warn('cerebras_chat.empty_stream_failover_to_waterfall', {
         request_id: params.requestId,
         pool: params.pool,
-        elapsed_ms: Date.now() - params.startedAt,
       });
-      return;
+    } catch (error) {
+      if (emittedAny) throw error; // post-content failures surface unchanged
+      cerebrasFailure = error;
+      log.warn('cerebras_chat.pre_content_failover_to_waterfall', {
+        request_id: params.requestId,
+        pool: params.pool,
+        error_name: error instanceof Error ? error.name : 'unknown',
+      });
     }
-    log.warn('cerebras_chat.empty_stream_failover_to_waterfall', {
-      request_id: params.requestId,
-      pool: params.pool,
-    });
-  } catch (error) {
-    if (!(error instanceof PreContentFallThroughError)) throw error;
-    cerebrasFailure = error.cause;
-    log.warn('cerebras_chat.pre_content_failover_to_waterfall', {
-      request_id: params.requestId,
-      pool: params.pool,
-      error_name: error.cause.name,
-    });
+  } else {
+    try {
+      yield* runWithFallThrough({ produce: () => params.cerebrasRoute.produce(), emit });
+      if (emittedAny) {
+        log.info(params.cerebrasRoute.doneEvent, {
+          request_id: params.requestId,
+          pool: params.pool,
+          elapsed_ms: Date.now() - params.startedAt,
+        });
+        return;
+      }
+      log.warn('cerebras_chat.empty_stream_failover_to_waterfall', {
+        request_id: params.requestId,
+        pool: params.pool,
+      });
+    } catch (error) {
+      if (!(error instanceof PreContentFallThroughError)) throw error;
+      cerebrasFailure = error.cause;
+      log.warn('cerebras_chat.pre_content_failover_to_waterfall', {
+        request_id: params.requestId,
+        pool: params.pool,
+        error_name: error.cause.name,
+      });
+    }
   }
 
   // Same-model fallover for a rate cap: GLM-4.7 on Cerebras is capped hard at the
