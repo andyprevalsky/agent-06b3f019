@@ -20,11 +20,10 @@ import {
 
 const log = createLogger('AdminHealth');
 const router = Router();
-const authenticateRequest = asyncHandler<AuthRequest>(authenticate);
 
 router.get(
   '/',
-  authenticateRequest,
+  authenticate,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     if (!req.user) {
       res.status(401).json({ error: 'Not authenticated' });
@@ -51,7 +50,7 @@ router.get(
 
 router.get(
   '/waitlist',
-  authenticateRequest,
+  authenticate,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     if (!req.user) {
       res.status(401).json({ error: 'Not authenticated' });
@@ -77,7 +76,7 @@ router.get(
 
 router.post(
   '/waitlist/:id/invite',
-  authenticateRequest,
+  authenticate,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     if (!req.user) {
       res.status(401).json({ error: 'Not authenticated' });

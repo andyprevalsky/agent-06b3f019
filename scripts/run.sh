@@ -1054,7 +1054,10 @@ start_world_model_harness() {
 
     mkdir -p "$RUN_CONTEXT_DIR"
     local wmh_log
-    wmh_log="$(resolve_run_context_file "$PWD" "$RUN_CONTEXT_DIR" "wmh-serve-log.txt")"
+    case "$RUN_CONTEXT_DIR" in
+        /*) wmh_log="$RUN_CONTEXT_DIR/wmh-serve-log.txt" ;;
+        *)  wmh_log="$PWD/$RUN_CONTEXT_DIR/wmh-serve-log.txt" ;;
+    esac
 
     # Shared, persistent build root so the model is built ONCE and reused across
     # every run — NOT the per-run context dir (that would rebuild each time).
