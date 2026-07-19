@@ -7,6 +7,7 @@ import {
   type AgentCardSandboxSettlementInput,
   type AgentCardSandboxSettlementResult,
 } from '../../providers/agentcard/sandbox-settlement';
+import { getOrgCardholderVerificationStatus } from '../../providers/agentcard/org-onboarding';
 import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
 import { stripe } from '../../providers/stripe';
 import {
@@ -20,6 +21,7 @@ import {
 import {
   getBenchmarkAgentCardCardholderIdOverride,
   getPhoneBenchmarkPaymentAuditPathOverride,
+  isProductionEnv,
   TEST_PAYMENT_PUBLIC_BASE_URL,
 } from './config';
 import { TestPaymentError } from './errors';
@@ -48,12 +50,16 @@ interface TestPaymentDependencies {
   settleAgentCardSandboxPayment?: (
     input: AgentCardSandboxSettlementInput
   ) => Promise<AgentCardSandboxSettlementResult>;
+  getCardholderVerificationStatus?: (cardholderId: string) => Promise<string>;
 }
 
-export async function configureBenchmarkAgentCardSetup(input: {
-  userId?: unknown;
-  action?: unknown;
-}): Promise<{ status: 'connect_required' | 'connected' }> {
+export async function configureBenchmarkAgentCardSetup(
+  input: {
+    userId?: unknown;
+    action?: unknown;
+  },
+  dependencies: TestPaymentDependencies = {}
+): Promise<{ status: 'connect_required' | 'connected' }> {
   const userId = typeof input.userId === 'string' ? input.userId.trim() : '';
   if (userId === '') throw new TestPaymentError('userId is required');
   if (input.action === 'reset') {
@@ -64,6 +70,27 @@ export async function configureBenchmarkAgentCardSetup(input: {
     const cardholderIdOverride = getBenchmarkAgentCardCardholderIdOverride();
     const cardholderId =
       cardholderIdOverride !== '' ? cardholderIdOverride : DEFAULT_SANDBOX_CARDHOLDER_ID;
+    const getVerificationStatus =
+      dependencies.getCardholderVerificationStatus ??
+      (isProductionEnv() ? getOrgCardholderVerificationStatus : undefined);
+    if (getVerificationStatus !== undefined) {
+      let verificationStatus: string;
+      try {
+        verificationStatus = await getVerificationStatus(cardholderId);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new TestPaymentError(
+          `Benchmark AgentCard cardholder readiness check failed: ${message}`,
+          502
+        );
+      }
+      if (verificationStatus !== 'verified' && verificationStatus !== 'approved') {
+        throw new TestPaymentError(
+          `Benchmark AgentCard cardholder is not ready (${verificationStatus})`,
+          409
+        );
+      }
+    }
     await testPaymentRepo.completeBenchmarkAgentCardSetup(userId, cardholderId);
     return { status: 'connected' };
   }

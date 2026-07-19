@@ -2,9 +2,10 @@
 
 The blanket local pre-flight (`_refresh_local_compute_tokens_for_run`) must
 tolerate a quota-blocked Codex (gpt_code) when claude_code is healthy, because
-the agent runtime drives claude_code. Live-fixture syncs (`_apply_live_fixture`)
-must stay strict so Codex-dependent tasks still fail closed. These tests pin the
-CLI-flag threading that enforces that split without needing a live DB.
+the agent runtime drives claude_code. It opts in via the seed's
+``SEED_ALLOW_MISSING_GPT_CODE`` env var (owned by seed-local.ts). Live-fixture
+syncs (`_apply_live_fixture`) never set it, so Codex-dependent tasks still fail
+closed. These tests pin that split without needing a live DB.
 """
 
 from unittest.mock import patch
@@ -19,11 +20,11 @@ class _Result:
         self.stderr = ""
 
 
-def _captured_seed_cmd(**kwargs) -> list[str]:
-    seen: dict[str, list[str]] = {}
+def _captured_seed_env(**kwargs) -> dict[str, str]:
+    seen: dict[str, dict[str, str]] = {}
 
-    def fake_run(cmd, **_kw):
-        seen["cmd"] = cmd
+    def fake_run(_cmd, **kw):
+        seen["env"] = kw.get("env", {})
         return _Result(0)
 
     with (
@@ -31,19 +32,17 @@ def _captured_seed_cmd(**kwargs) -> list[str]:
         patch.object(rb.subprocess, "run", side_effect=fake_run),
     ):
         rb._sync_compute_tokens(**kwargs)
-    return seen["cmd"]
+    return seen["env"]
 
 
-def test_default_sync_does_not_tolerate_gpt_code_unavailable():
-    cmd = _captured_seed_cmd()
-    assert "--compute-tokens-only" in cmd
-    assert "--tolerate-gpt-code-unavailable" not in cmd
+def test_default_sync_does_not_opt_into_missing_gpt_code():
+    env = _captured_seed_env()
+    assert env.get("SEED_ALLOW_MISSING_GPT_CODE") is None
 
 
-def test_tolerant_sync_passes_the_flag():
-    cmd = _captured_seed_cmd(tolerate_gpt_code_unavailable=True)
-    assert "--compute-tokens-only" in cmd
-    assert "--tolerate-gpt-code-unavailable" in cmd
+def test_tolerant_sync_sets_the_seed_env_opt_in():
+    env = _captured_seed_env(tolerate_gpt_code_unavailable=True)
+    assert env.get("SEED_ALLOW_MISSING_GPT_CODE") == "1"
 
 
 def test_blanket_preflight_uses_tolerant_sync():

@@ -55,13 +55,6 @@ const SKIP_BROWSER_AUTH_SYNC =
 const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
 const PASSKEYS_ONLY = process.argv.includes('--passkeys-only');
 const COMPUTE_TOKEN_SYNC_ATTEMPTS = 5;
-// General-purpose local runs (the blanket pre-flight refresh) only need SOME
-// usable agent compute token — the agent runtime drives claude_code. Codex
-// (gpt_code) is optional there and can be quota-blocked (rateLimitedUntil set)
-// without invalidating a claude_code run. This flag downgrades "0 usable
-// gpt_code" from fatal to a loud warning ONLY when a usable claude_code exists.
-// Live-fixture syncs never pass it, so Codex-dependent tasks still fail closed.
-const TOLERATE_GPT_CODE_UNAVAILABLE = process.argv.includes('--tolerate-gpt-code-unavailable');
 
 const requestedSeedModes = [
   ['--compute-tokens-only', COMPUTE_TOKENS_ONLY],
@@ -305,27 +298,6 @@ async function countUsableGptCodeIntegrations(): Promise<number> {
   }).length;
 }
 
-async function countUsableClaudeCodeIntegrations(): Promise<number> {
-  const now = new Date();
-  const integrations = await local.integration.findMany({
-    where: {
-      name: 'claude_code',
-      status: 'CONNECTED',
-      OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
-    },
-    select: {
-      userId: true,
-      poolingEnabled: true,
-      config: true,
-    },
-  });
-
-  return integrations.filter((integration) => {
-    const isAvailableToBench = integration.userId === DEV_USER_ID || integration.poolingEnabled;
-    return isAvailableToBench && hasEncryptedCredentials(integration.config);
-  }).length;
-}
-
 async function syncComputeTokensWithRetries(): Promise<void> {
   let lastError: unknown = null;
 
@@ -334,22 +306,18 @@ async function syncComputeTokensWithRetries(): Promise<void> {
       const count = await syncIntegrations();
       const usableGptCodeCount = await countUsableGptCodeIntegrations();
       if (usableGptCodeCount === 0) {
-        // The blanket pre-flight only needs a usable agent compute token, and
-        // the agent runtime uses claude_code. When Codex is quota-blocked but
-        // claude_code is healthy, warn instead of failing the whole run — the
-        // stale-fixture failure mode this gate guards against is still caught,
-        // because it would leave claude_code unusable too.
-        if (TOLERATE_GPT_CODE_UNAVAILABLE) {
-          const usableClaudeCodeCount = await countUsableClaudeCodeIntegrations();
-          if (usableClaudeCodeCount > 0) {
-            console.warn(
-              `  ⚠️  Compute Tokens: 0 usable gpt_code (Codex quota-blocked); ` +
-                `proceeding on ${usableClaudeCodeCount} usable claude_code. ` +
-                `Codex-dependent tasks will still fail closed.`
-            );
-            console.log(`  ✅ Compute Tokens (integrations): ${count} synced`);
-            return;
-          }
+        // gpt_code (Codex) is only needed by runs that actually spawn a Codex
+        // agent. When a caller knows the run doesn't use Codex — e.g. the
+        // AgentCard browser payment-lifecycle gate — an externally
+        // rate-limited/quota-exhausted Codex integration must not block an
+        // otherwise-healthy compute-token sync (claude tokens still synced).
+        // Default (flag unset) stays strict so Codex regressions still surface.
+        if (process.env.SEED_ALLOW_MISSING_GPT_CODE === '1') {
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, 0 usable gpt_code — ` +
+              `proceeding without Codex (SEED_ALLOW_MISSING_GPT_CODE=1; this run does not use Codex)`
+          );
+          return;
         }
         throw new Error('No usable gpt_code integrations after sync');
       }

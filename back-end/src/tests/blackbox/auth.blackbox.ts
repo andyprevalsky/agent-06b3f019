@@ -411,6 +411,26 @@ function seedFastForward(
 }
 
 /**
+ * Seed through the running backend so an already-memoized key is replaced in
+ * memory as well as on disk. Use this for shared keys that earlier auth cases
+ * may have requested before the deterministic fixture is installed.
+ */
+async function seedLiveFastForward(
+  url: string,
+  method: string,
+  body: string | null,
+  response: SerializedFFResponse
+): Promise<void> {
+  const key = ffCacheKey(url, method, body);
+  const value = { __ff_promise_result: true, value: response };
+  const res = await request(`${BASE_URL}/api/test/captures/cache`, {
+    method: 'PUT',
+    body: JSON.stringify({ key, value }),
+  });
+  assertStatus(res.status, 200, res.data);
+}
+
+/**
  * Seed a Twilio Verify VerificationCheck response for (phone, code).
  * Returns whether seeding succeeded (false if TWILIO_VERIFY_SERVICE_SID is unset).
  */
@@ -515,17 +535,20 @@ function seedSupabaseAdminCreate(
 /**
  * Seed Supabase Admin GET /auth/v1/admin/users for the phone_exists recovery path.
  */
-function seedSupabaseAdminListUsers(users: Array<{ id: string; phone?: string }>): boolean {
+async function seedSupabaseAdminListUsers(
+  users: Array<{ id: string; phone?: string }>
+): Promise<boolean> {
   if (SUPABASE_URL === '') return false;
   const url = new URL(`${SUPABASE_URL}/auth/v1/admin/users`);
   url.searchParams.set('page', '1');
   url.searchParams.set('per_page', '1000');
-  seedFastForward(url.toString(), 'GET', null, {
+  const response = {
     status: 200,
     statusText: 'OK',
     body: JSON.stringify({ users }),
     headers: { 'content-type': 'application/json' },
-  });
+  };
+  await seedLiveFastForward(url.toString(), 'GET', null, response);
   return true;
 }
 
@@ -2228,7 +2251,7 @@ async function testVerifyOtp_seededSupabasePhoneExists() {
     errorCode: 'phone_exists',
     msg: 'Phone already in use',
   });
-  seedSupabaseAdminListUsers([{ id: userId, phone }]);
+  await seedSupabaseAdminListUsers([{ id: userId, phone }]);
 
   const res = await request(`${BASE_URL}/api/auth/verify-otp`, {
     method: 'POST',

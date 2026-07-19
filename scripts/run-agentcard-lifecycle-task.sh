@@ -40,6 +40,14 @@ export BENCHMARK_FAST_MODE_CACHE=false
 # boundary to the stable backend callback registered for the Rose Labs org so a
 # workspace-local `.env` URL cannot turn setup/resume into an opaque mint 500.
 export AGENTCARD_ONBOARDING_RETURN_URL="${AGENTCARD_ONBOARDING_RETURN_URL:-https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback}"
+# These payment-lifecycle tasks drive a browser checkout on claude compute
+# tokens and never spawn a Codex agent. An externally rate-limited or
+# quota-exhausted gpt_code (Codex) integration must not fail the stack's
+# compute-token sync and block an otherwise-healthy lifecycle gate. Allow the
+# sync to proceed without a usable Codex integration; the compute-token sync
+# stays strict everywhere else (default), so Codex regressions still surface in
+# the codex-code test that actually uses it.
+export SEED_ALLOW_MISSING_GPT_CODE=1
 
 LOG_FILE="$ROOT_DIR/.context/agentcard-lifecycle-$TASK_NAME.log"
 STACK_PID=""

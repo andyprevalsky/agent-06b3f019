@@ -202,14 +202,11 @@ def plan_invocations(tasks: Sequence[str]) -> list[BenchmarkInvocation]:
     return [BenchmarkInvocation("benchmarks", list(tasks), is_load=False)] if tasks else []
 
 
-def build_task_selector_args(selected_tasks: Sequence[str], all_names: Sequence[str]) -> list[str]:
-    selected = list(selected_tasks)
-    if len(selected) == 1:
-        return ["--task", selected[0]]
-    excluded = [name for name in all_names if name not in set(selected)]
-    args = ["--suite", "all"]
-    if excluded:
-        args.extend(["--exclude-task", ",".join(excluded)])
+def build_task_selector_args(selected_tasks: Sequence[str], _all_names: Sequence[str]) -> list[str]:
+    """Pass an exact ordered task list through to run_benchmark.py."""
+    args: list[str] = []
+    for task in selected_tasks:
+        args.extend(["--task", task])
     return args
 
 

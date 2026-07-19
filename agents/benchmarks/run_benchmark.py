@@ -3637,10 +3637,11 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     which forces the agent's claudeAuth fetch to fail into the paid waterfall.
     Reads the prod source from back-end/.env; writes to the isolated DB.
 
-    ``tolerate_gpt_code_unavailable`` is for the blanket pre-flight only: it lets
-    the sync succeed when Codex (gpt_code) is quota-blocked but a usable
-    claude_code exists, since the agent runtime drives claude_code. Live-fixture
-    syncs never set it, so Codex-dependent tasks still fail closed."""
+    ``tolerate_gpt_code_unavailable`` is for the blanket pre-flight only: it sets
+    the seed's ``SEED_ALLOW_MISSING_GPT_CODE`` opt-in so the sync succeeds when
+    Codex (gpt_code) is quota-blocked (rateLimitedUntil set), since the agent
+    runtime drives claude_code. Live-fixture syncs never set it, so
+    Codex-dependent tasks still fail closed."""
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Compute-token sync skipped: local Victoria DB not found")
@@ -3648,12 +3649,11 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
-    cmd = ["npx", "tsx", "scripts/seed-local.ts", "--compute-tokens-only"]
     if tolerate_gpt_code_unavailable:
-        cmd.append("--tolerate-gpt-code-unavailable")
+        env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
     try:
         result = subprocess.run(
-            cmd,
+            ["npx", "tsx", "scripts/seed-local.ts", "--compute-tokens-only"],
             cwd=REPO_ROOT / "back-end",
             env=env,
             capture_output=True,
@@ -6828,7 +6828,7 @@ def _validate_task_target(task: BenchmarkTask, base_url: str) -> None:
 def _agentcard_setup_fixture_action(task: BenchmarkTask, base_url: str) -> Optional[str]:
     if task.agentcard_setup_action == "complete":
         return "reset"
-    if task.expected_payment_lifecycle and _is_local_base_url(base_url):
+    if task.expected_payment_lifecycle:
         return "complete"
     return None
 

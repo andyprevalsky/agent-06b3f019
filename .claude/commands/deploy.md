@@ -29,6 +29,14 @@ If `ORIGINAL_WORKSPACE_TITLE` is empty, continue deploy but skip the final Step 
 
 **ABSOLUTE RULE: 100% of tests must pass before proceeding to Phase 2. There are ZERO exceptions.** "Pre-existing failure", "not related to my changes", "performance issue", "local resource contention", "flaky test" — NONE of these are valid excuses. If a test fails, you fix it or you stop and ask the user. You NEVER skip, rationalize, or proceed with failing tests. A deploy with failing tests is a critical failure on your part.
 
+Start one durable timing run before the first gate. Every timed command below tees its console output to a per-stage log and atomically appends status + wall duration to the run timeline, so parallel verifier writes are safe:
+
+```bash
+bash scripts/run-deploy-stage --start
+```
+
+Artifacts land under `.context/deploy-runs/<run-id>/`. `bash scripts/run-deploy-stage --summary` prints the active run, and `bash scripts/run-deploy-stage --history` prints successful-stage p50/p90 plus end-to-end spans from finalized runs (active/aborted runs are reported separately).
+
 **You must fix ALL failing tests, even if they are not caused by the changes in this branch.** The deploy flow is a gate — it guarantees that main is always green. If a test was already broken before your branch, that is now your responsibility to fix before merging. This includes infrastructure issues, flaky tests, timeout tuning, missing credentials, third-party integration problems, and anything else. The bar is simple: every test passes, or you don't merge.
 
 Run all checks locally. If any step fails, fix the issue and re-run that step. If fixing required code changes, re-run the entire Test Loop from the top.
@@ -39,7 +47,7 @@ As you run each step in Phase 1, track the results in a `TEST_REPORT` variable. 
 
 - The step name
 - Pass/fail status
-- A brief summary of the output (e.g., "0 errors", "3 files formatted", "7/7 benchmarks passed")
+- A brief summary of the output (e.g., "0 errors", "3 files formatted", "6/6 benchmarks passed")
 
 Build the report as a markdown table:
 
@@ -51,7 +59,7 @@ Build the report as a markdown table:
 | TypeScript | ✅ Pass | 0 errors |
 | Structural Tests | ✅ Pass | All invariants hold |
 | Blackbox API Tests | ✅ Pass | 12/12 tests passed |
-| Smoke Benchmarks | ✅ Pass | 7/7 passed locally, `RESULTS: 7/7 passed`, run `runs/<...>.json` |
+| Smoke Benchmarks | ✅ Pass | 6/6 passed locally, `RESULTS: 6/6 passed`, run `runs/<...>.json` |
 ```
 
 Carry this report forward into Phase 2 for use in the commit message and PR body.
@@ -128,7 +136,7 @@ Prompt modifications are high-risk behavior changes. **Any prompt modification M
 Run the guard without the approval flag first:
 
 ```bash
-bash scripts/check-prompt-human-approval.sh
+bash scripts/run-deploy-stage prompt-approval -- bash scripts/check-prompt-human-approval.sh
 ```
 
 If it passes, record `Prompt Human Approval Guard | Pass | no prompt edits detected` in `TEST_REPORT`.
@@ -140,7 +148,7 @@ Human approval is scoped only to the prompt diff that exists when approval is re
 After the human explicitly approves the current prompt changes, rerun the guard with the mandatory flag:
 
 ```bash
-bash scripts/check-prompt-human-approval.sh mandatory-human-approval-retrieved=true
+bash scripts/run-deploy-stage prompt-approval -- bash scripts/check-prompt-human-approval.sh mandatory-human-approval-retrieved=true
 ```
 
 Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisfy the guard. Do not pass it until explicit human approval has been retrieved in this deploy flow for the current prompt diff. Record `Prompt Human Approval Guard | Pass | human approval retrieved for prompt edits` in `TEST_REPORT`.
@@ -169,7 +177,7 @@ If any verifier fails, fix and re-run the full Step 0 → verifier flow. Do not 
 If `$CHANGED_TS` is non-empty, format them:
 
 ```bash
-cd back-end && npx prettier --write $CHANGED_TS
+cd back-end && bash ../scripts/run-deploy-stage prettier -- npx prettier --write $CHANGED_TS
 ```
 
 If any files were modified by this step, stage and commit them:
@@ -191,13 +199,13 @@ can change the meaning of every unchanged file.
 **Step 2a (mutator — runs before the parallel verifier batch):**
 
 ```bash
-cd back-end && node scripts/lint-affected.mjs --fix $LINT_TS
+cd back-end && bash ../scripts/run-deploy-stage eslint-fix -- node scripts/lint-affected.mjs --fix $LINT_TS
 ```
 
 **Step 2b (verifier — runs in parallel with Steps 3, 4, 4a):**
 
 ```bash
-cd back-end && node scripts/lint-affected.mjs $LINT_TS
+cd back-end && bash ../scripts/run-deploy-stage eslint -- node scripts/lint-affected.mjs $LINT_TS
 ```
 
 If there are remaining errors, fix them manually. Loop until the affected-file lint reports 0 errors.
@@ -209,7 +217,7 @@ If any files were modified by this step, stage and commit them (can combine with
 ## Step 3: TypeScript type check
 
 ```bash
-cd back-end && npx tsc --noEmit
+cd back-end && bash ../scripts/run-deploy-stage typescript -- npx tsc --noEmit
 ```
 
 Catches type errors that ESLint misses (wrong argument types, missing properties, bad generics). Fix any errors before proceeding — pre-existing type errors in touched files are your responsibility.
@@ -219,7 +227,7 @@ Catches type errors that ESLint misses (wrong argument types, missing properties
 **Skip if `$CHANGED_TS` is empty** (structural invariants only apply to back-end TS changes).
 
 ```bash
-cd back-end && npx tsx src/tests/structural/layer-deps.test.ts
+cd back-end && bash ../scripts/run-deploy-stage backend-structural -- npx tsx src/tests/structural/layer-deps.test.ts
 ```
 
 This enforces architectural invariants across all domains: import direction, cross-domain isolation, provider/util boundaries, domain completeness, Prisma/Express encapsulation, and circular import detection.
@@ -238,7 +246,7 @@ These tests execute the workspace identity boundary with a stale Conductor displ
 ## Step 4a: Code coverage check (skip if no back-end/ changes)
 
 ```bash
-cd back-end && npm run test:coverage
+cd back-end && bash ../scripts/run-deploy-stage backend-coverage -- npm run test:coverage
 ```
 
 Coverage must meet the configured thresholds in `back-end/.c8rc.json`. If it fails, add tests to cover the gap before proceeding.
@@ -246,7 +254,7 @@ Coverage must meet the configured thresholds in `back-end/.c8rc.json`. If it fai
 ## Step 4b: Front-end code coverage check (skip if no front-end/ changes)
 
 ```bash
-cd front-end && npm run test:coverage
+cd front-end && bash ../scripts/run-deploy-stage frontend-coverage -- npm run test:coverage
 ```
 
 Coverage must meet the thresholds configured in `front-end/vitest.config.ts` (`coverage.thresholds`). Thresholds ratchet toward a target of 80% — if the gate fails, add tests to cover the gap before proceeding. Never loosen the threshold.
@@ -254,7 +262,7 @@ Coverage must meet the thresholds configured in `front-end/vitest.config.ts` (`c
 ## Step 4g: Agents code coverage check (skip if no agents/ changes)
 
 ```bash
-cd agents && bash scripts/run-coverage.sh
+cd agents && bash ../scripts/run-deploy-stage agents-coverage -- bash scripts/run-coverage.sh
 ```
 
 Coverage must meet the `fail_under` threshold in `agents/pyproject.toml` (`[tool.coverage.report]`). Threshold ratchets toward a target of 80% — if the gate fails, add tests to cover the gap before proceeding. Never loosen the threshold.
@@ -264,7 +272,8 @@ Coverage must meet the `fail_under` threshold in `agents/pyproject.toml` (`[tool
 Sequential mutator — runs before the parallel verifier batch, same pattern as Step 1 (prettier) and Step 2a (eslint --fix) for the back-end.
 
 ```bash
-cd mac-app && npm run format && npm run lint:fix
+cd mac-app && bash ../scripts/run-deploy-stage mac-format -- npm run format
+cd mac-app && bash ../scripts/run-deploy-stage mac-lint-fix -- npm run lint:fix
 ```
 
 Commit any resulting changes (can combine with Step 1's commit).
@@ -274,7 +283,7 @@ Commit any resulting changes (can combine with Step 1's commit).
 Parallel verifier. Enforces the same 0-error bar as back-end Step 2b — "pre-existing" violations in the mac-app files you touched are your responsibility.
 
 ```bash
-cd mac-app && npm run format:check && npm run lint && npm run type-check
+cd mac-app && bash ../scripts/run-deploy-stage mac-static -- bash -c 'npm run format:check && npm run lint && npm run type-check'
 ```
 
 If any check fails, fix and re-run. `npm run lint` applies both base rules and the type-aware strict overlay defined by `STRICT_DOMAIN_FILES` in `mac-app/eslint.config.mjs` (max-lines, max-lines-per-function, no-floating-promises, strict-boolean-expressions, etc.).
@@ -282,7 +291,7 @@ If any check fails, fix and re-run. `npm run lint` applies both base rules and t
 ## Step 4m-coverage: Mac-app code coverage check (skip if `$CHANGED_MAC_APP` is empty)
 
 ```bash
-cd mac-app && npm run test:coverage
+cd mac-app && bash ../scripts/run-deploy-stage mac-coverage -- npm run test:coverage
 ```
 
 Coverage must meet the thresholds configured in `mac-app/vitest.config.ts` (`coverage.thresholds`). Thresholds ratchet toward a target of 80% — if the gate fails, add tests to cover the gap before proceeding. Never loosen the threshold.
@@ -292,7 +301,7 @@ Coverage must meet the thresholds configured in `mac-app/vitest.config.ts` (`cov
 The mac-app has its own vitest + MSW + jsdom blackbox suite covering every renderer and main-process domain (see `mac-app/tests/blackbox/`). Run the full suite:
 
 ```bash
-cd mac-app && bash scripts/run-blackbox-tests.sh
+cd mac-app && bash ../scripts/run-deploy-stage mac-blackbox -- bash scripts/run-blackbox-tests.sh
 ```
 
 **ALL domains must pass — 0 failures.** Same rule as backend blackbox (Step 5a): "pre-existing" is not an excuse, fix every failure. The runner writes artifacts to `mac-app/.context/test-runs/<run-id>/` with a `manifest.json` + `runner.log` for diagnosis.
@@ -304,14 +313,14 @@ If the failure is renderer-only (jsdom + React), check `mac-app/tests/blackbox/t
 If the diff touches `research/`, run the research-side check harness. It enforces fmt/lint (base + strict overlay), structural invariants (max 300 lines per file, 80 per function), and Python ruff.
 
 ```bash
-cd research && bash scripts/lint-check.sh
+cd research && bash ../scripts/run-deploy-stage research-static -- bash scripts/lint-check.sh
 ```
 
 If anything fails, re-run with `--fix` to auto-apply format/lint fixes, then re-run without `--fix` to verify:
 
 ```bash
-cd research && bash scripts/lint-check.sh --fix
-cd research && bash scripts/lint-check.sh
+cd research && bash ../scripts/run-deploy-stage research-fix -- bash scripts/lint-check.sh --fix
+cd research && bash ../scripts/run-deploy-stage research-static -- bash scripts/lint-check.sh
 ```
 
 Commit any auto-fix changes before proceeding. "Pre-existing" violations in touched files are your responsibility — the same 0-failure rule from Steps 2/3/4 applies here.
@@ -333,7 +342,7 @@ Both commands must pass. This operational verification wiring is pre-authorized 
 Before spinning up services or spending money on smoke benchmarks, validate every external credential (E2B, Steel, Parallel.ai, Anthropic, OpenRouter, Supabase). This runs standalone against real provider endpoints — no local backend needed. Finishes in ~3s and fails fast on 401/402/403.
 
 ```bash
-cd back-end && npx tsx src/tests/blackbox/integration-health.blackbox.ts
+cd back-end && bash ../scripts/run-deploy-stage credential-health -- npx tsx src/tests/blackbox/integration-health.blackbox.ts
 ```
 
 **If ANY credential is rejected** the error message names the exact env var to refresh and the provider dashboard URL. Escalate to the user immediately — do NOT proceed to Step 5. Refreshing credentials is a human task; working around auth failures in code is forbidden.
@@ -463,7 +472,8 @@ With the backend running from Step 5:
 
 ```bash
 cd back-end
-BLACKBOX_TEST_USE_EXISTING_BACKEND=1 TEST_BASE_URL=$SMOKE_BASE_URL bash scripts/run-blackbox-tests.sh
+BLACKBOX_TEST_USE_EXISTING_BACKEND=1 TEST_BASE_URL=$SMOKE_BASE_URL \
+  bash ../scripts/run-deploy-stage backend-blackbox -- bash scripts/run-blackbox-tests.sh
 ```
 
 **ALL domains must pass — 0 failures.** If ANY domain fails, you must fix it before proceeding, even if the failing domain was not modified in this PR. "Pre-existing" is not an excuse. Fix it, re-run, get 100%. If you cannot fix a failure, STOP and escalate to the user — do NOT proceed to Phase 2.
@@ -521,10 +531,16 @@ Run the complete Pre-Deploy smoke group on the **LOCAL isolated benchmark stack*
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-bash scripts/run-predeploy-local
+bash scripts/run-deploy-stage smoke -- bash scripts/run-predeploy-local
 ```
 
-`scripts/run-predeploy-local` derives the task set from every catalog entry tagged `smoke` (identical selection to the cloud path, so they can't drift) and runs them through `scripts/run-bench --local` at max concurrency 5 on this machine. It exits non-zero unless every requested task passes, so the command IS the gate.
+`scripts/run-predeploy-local` derives the task set from every catalog entry tagged `smoke` (identical selection to the cloud path, so they can't drift) and runs them through `scripts/run-bench --local` at max concurrency 2 on this machine. It orders tasks longest-recent-median first, using the pass ledger, to target a shorter two-lane idle tail without increasing simultaneous load. It exits non-zero unless every requested task passes, so the command IS the gate.
+
+Every invocation tees its console output to `.context/predeploy-runs/<run-id>/runner.log` and writes actual start/end time, total wall duration, status, concurrency, task set, and schedule to `summary.json` beside it. Inspect the accumulated actual totals plus per-task pass history at any time:
+
+```bash
+bash scripts/run-predeploy-local --history
+```
 
 **Why local is the default:** the shared cloud fleet (`run-predeploy-cloud`, app `navi-whisper-lux-bench`) is frequently rate-limited, volume-capacity-starved, and — worst — **leaks paid Fly machines when the controller is killed** (a killed run orphans clones + autoscaler workers that keep billing until manually destroyed). Local has no shared-resource contention and no cross-workspace blast radius. Use the cloud fleet only as an explicit opt-in when local resources are insufficient:
 
@@ -570,7 +586,7 @@ At each poll, check:
 
 ### Pass criteria
 
-**ALL Pre-Deploy smoke benchmarks must pass — currently 7/7, with 0 failures.** On the local path, `run-predeploy-local` must exit 0 ("All requested benchmarks passed") and every task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
+**ALL Pre-Deploy smoke benchmarks must pass — currently 6/6, with 0 failures.** On the local path, `run-predeploy-local` must exit 0 ("All requested benchmarks passed") and every task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
 
 **Diagnosis process — MUST be delegated to a `general-purpose` sub-agent.**
 
@@ -707,21 +723,25 @@ bash scripts/kill-services.sh
 
 ```bash
 CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
+  bash scripts/run-deploy-stage agentcard-test-shop -- \
   bash scripts/run-agentcard-lifecycle-task.sh agent-payment-test-shop --bootstrap
 ```
 
 ```bash
 CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
+  bash scripts/run-deploy-stage agentcard-setup-resume -- \
   bash scripts/run-agentcard-lifecycle-task.sh agent-payment-setup-resume
 ```
 
 ```bash
 CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
+  bash scripts/run-deploy-stage agentcard-idempotent-abandonment -- \
   bash scripts/run-agentcard-lifecycle-task.sh agent-payment-idempotent-abandonment
 ```
 
 ```bash
 CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
+  bash scripts/run-deploy-stage agentcard-abandonment -- \
   bash scripts/run-agentcard-lifecycle-task.sh agent-payment-abandonment
 ```
 
@@ -742,7 +762,7 @@ With the full stack from Step 5 still running (backend, worker, research, **and 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
 SEMANTIC_WORKERS=4 BACKEND_PORT=$CONDUCTOR_PORT FRONTEND_PORT=$((CONDUCTOR_PORT + 1)) \
-  bash front-end/scripts/run-semantic-tests.sh
+  bash scripts/run-deploy-stage semantic -- bash front-end/scripts/run-semantic-tests.sh
 ```
 
 The runner generates one authenticated session and shares it across all four Playwright workers. Every semantic spec runs. Inside the lifecycle spec, the `direct_answer`, `web_search`, `agent_plan`, and `agent_execute` paths run concurrently; each path takes five independent samples and every sample must complete the full browser lifecycle in under five seconds.
@@ -768,6 +788,12 @@ If Chromium is missing, install once: `cd front-end && npx playwright install ch
 4. Restart services (Step 5) and re-run the failed semantic test.
 
 After Steps 6a and 6b pass, run the mandatory Step 5 teardown. If either fails, preserve the failed agent long enough to collect diagnostics, complete any payment lifecycle cleanup, then tear down before restarting the Test Loop.
+
+Finalize and print the timing summary before evaluating the Phase 2 hard gate. The interval-union metrics separate true parallel overlap from untimed gaps:
+
+```bash
+bash scripts/run-deploy-stage --finish
+```
 
 ---
 
@@ -805,7 +831,7 @@ After Steps 6a and 6b pass, run the mandatory Step 5 teardown. If either fails, 
 
 # ║ 6. Smoke benchmarks: complete Pre-Deploy group passes ║
 
-# ║ (currently 7/7) via run-predeploy-local (default) or the ║
+# ║ (currently 6/6) via run-predeploy-local (default) or the ║
 
 # ║ cloud fleet alternate — OR explicitly skipped per the ║
 
@@ -1344,7 +1370,7 @@ python benchmarks/run_benchmark.py \
   --bootstrap
 ```
 
-This production-only task reserves exactly $0.50 from the existing AgentCard organization float, captures the matching live Stripe payment, issues a live AgentCard, and deliberately leaves merchant checkout unsubmitted. The benchmark must then close the card, observe the organization transfer as `reclaimed` with `livemode=true`, refund the Stripe capture, and report no open payment attention request.
+This production-only task reserves exactly $1.00 from the existing AgentCard organization float, captures the matching live Stripe payment, issues a live AgentCard, and deliberately leaves merchant checkout unsubmitted. The benchmark must then close the card, observe the organization transfer as `reclaimed` with `livemode=true`, refund the Stripe capture, and report no open payment attention request.
 
 The runner performs the abandon/reclaim/refund action idempotently on success, failure, cancellation, and verifier errors before deleting the benchmark agent. Any missing cleanup snapshot or non-terminal lifecycle state fails the command. Do not declare the deploy complete until this task passes; if the process is forcibly killed, recover the printed agent ID through `/api/test-payment/lifecycle/abandon` and verify the same terminal assertions before rerunning.
 
