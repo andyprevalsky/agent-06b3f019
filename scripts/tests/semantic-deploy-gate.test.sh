@@ -80,9 +80,21 @@ require_text "$DEPLOY_ENV" 'export RUN_SH_STRICT_CONDUCTOR_PORT=1' "/deploy must
 require_text "$RUN_SH" 'if ! port_range_can_reassign; then' "run.sh must honor strict deploy port mode"
 require_text "$RUN_SH" '[ "${RUN_SH_STRICT_CONDUCTOR_PORT:-0}" = "1" ] || { $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]' "bundled deploy stacks must preserve strict ports across shell boundaries"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_BUNDLED_FRONTEND=true' "/deploy launch must carry strict-port mode across shell boundaries"
-require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=1' "/deploy semantic stack must not spend resources on unrelated benchmark workers or WMH"
+require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8' "/deploy stack must run enough benchmark workers (8) for the blackbox agent suite it also serves — a single worker saturates under the full-domain load"
 require_text "$DEPLOY_COMMAND" 'TRACE_ARCHIVE_ENABLED=0' "/deploy lifecycle measurements must disable the out-of-band trace recorder"
 require_text "$DEPLOY_COMMAND" "gh workflow run chat-lifecycle-ratchet.yml" "/deploy must dispatch the production semantic gate"
 require_text "$DEPLOY_COMMAND" 'gh run watch "$SEMANTIC_RUN_ID" --exit-status' "/deploy must block on production semantic success"
+
+# Bind the replay opt-in to the actual run.sh launch block. A free-floating
+# mention in explanatory prose must not satisfy this contract.
+DEPLOY_STACK_LAUNCH=$(awk '
+  /BENCHMARK_BUNDLED_FRONTEND=true/ { capture=1 }
+  capture { print }
+  capture && /bash scripts\/run.sh --benchmark/ { exit }
+' "$DEPLOY_COMMAND")
+grep -Fq 'BLACKBOX_TEST_REPLAY_OUTBOUND=1' <<<"$DEPLOY_STACK_LAUNCH" || \
+  fail "/deploy run.sh launch must opt the existing-backend blackbox stack into fixture replay"
+grep -Fq 'bash scripts/run.sh --benchmark' <<<"$DEPLOY_STACK_LAUNCH" || \
+  fail "/deploy replay assertion must be bound to the run.sh benchmark launch"
 
 echo "All semantic deploy gate checks passed."

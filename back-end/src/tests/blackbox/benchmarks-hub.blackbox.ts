@@ -32,6 +32,7 @@ import { resolve } from 'path';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { config } from 'dotenv';
 import { z } from 'zod';
+import { syntheticBenchmarkBundle } from './benchmarks-hub.testkit';
 
 config();
 
@@ -107,50 +108,7 @@ const ROOT_AGENT = `bb-root-${process.pid}`;
 const SUB_AGENT = `bb-sub-${process.pid}`;
 
 function syntheticBundle(): Record<string, unknown> {
-  return {
-    run_id: RUN_ID,
-    timestamp: new Date().toISOString(),
-    suite: 'blackbox',
-    source: 'blackbox-test',
-    tasks: [
-      {
-        name: 'chat-mode',
-        passed: true,
-        status: 'passed',
-        agent_id: ROOT_AGENT,
-        duration_seconds: 12.5,
-        cost_cents: 3,
-        world_model_mode: 'real',
-        fast_mode_cache_enabled: true,
-        tree_agent_count: 2,
-        logs: {
-          messages: [
-            { role: 'USER', message: 'hub blackbox goal', created_at: '2026-07-10T00:00:01Z' },
-            { role: 'ASSISTANT', message: 'root reply', created_at: '2026-07-10T00:00:02Z' },
-          ],
-          tree: {
-            [ROOT_AGENT]: {
-              parent_agent_id: null,
-              goal: 'hub blackbox goal',
-              status: 'COMPLETED',
-              messages: [
-                { role: 'USER', message: 'hub blackbox goal', created_at: '2026-07-10T00:00:01Z' },
-                { role: 'ASSISTANT', message: 'root reply', created_at: '2026-07-10T00:00:02Z' },
-              ],
-            },
-            [SUB_AGENT]: {
-              parent_agent_id: ROOT_AGENT,
-              goal: 'sub research goal',
-              status: 'COMPLETED',
-              messages: [
-                { role: 'ASSISTANT', message: 'sub result', created_at: '2026-07-10T00:00:03Z' },
-              ],
-            },
-          },
-        },
-      },
-    ],
-  };
+  return syntheticBenchmarkBundle(RUN_ID, ROOT_AGENT, SUB_AGENT);
 }
 
 // ==================== tests ====================
@@ -189,7 +147,7 @@ async function testCatalog_returnsTasksWithStatsShape(): Promise<void> {
   }
 }
 
-async function testCatalog_groupsAreTheThreeKnown(): Promise<void> {
+async function testCatalog_groupsAreLabelDriven(): Promise<void> {
   const res = await request(`${BASE_URL}/api/benchmarks/tasks`, { headers: internalHeaders });
   assertStatus(res.status, 200, res.data);
   const tasks = (res.data as { tasks: Array<{ name: string; group: string }> }).tasks;
@@ -200,8 +158,16 @@ async function testCatalog_groupsAreTheThreeKnown(): Promise<void> {
       `unexpected group: ${g}`
     );
   }
-  // the smoke-tagged suite is the pre-deploy gate — it must be represented
+  // Grouping is driven off the stored `group` label in tasks.json; every ready
+  // runnable bucket must be represented (proves the label resolves, not just
+  // the smoke gate).
   assert(groups.has('pre-deploy'), 'no pre-deploy (smoke) tasks found');
+  assert(groups.has('daily'), 'no daily tasks found');
+  assert(groups.has('rose-bench'), 'no rose-bench tasks found');
+  // Every task must carry a resolvable group (label or derived fallback).
+  for (const t of tasks) {
+    assert(typeof t.group === 'string' && t.group.length > 0, `task ${t.name} has no group`);
+  }
   const messagePerson = tasks.find((task) => task.name === 'message-person');
   assert(messagePerson, 'message-person missing from benchmark catalog');
   assert(
@@ -433,6 +399,36 @@ async function testRuns_uploadListDetailAgentRoundTrip(): Promise<void> {
   }
 }
 
+async function testRuns_blankAgentIdNormalizesToNull(): Promise<void> {
+  const runId = `${RUN_ID}-blank-agent`;
+  const bundle = syntheticBundle();
+  bundle.run_id = runId;
+  const tasks = bundle.tasks as Array<Record<string, unknown>>;
+  tasks[0].agent_id = '   ';
+
+  try {
+    const upload = await request(`${BASE_URL}/api/benchmarks/runs?live=1`, {
+      method: 'POST',
+      headers: internalHeaders,
+      body: JSON.stringify(bundle),
+    });
+    assertStatus(upload.status, 201, upload.data);
+
+    const list = await request(`${BASE_URL}/api/benchmarks/runs`, { headers: internalHeaders });
+    assertStatus(list.status, 200, list.data);
+    const entry = (
+      list.data as { runs: Array<{ run_id: string; tasks: Array<{ agent_id: string | null }> }> }
+    ).runs.find((run) => run.run_id === runId);
+    assert(entry !== undefined, 'blank-agent run missing from index');
+    assert(entry.tasks[0].agent_id === null, 'blank agent id must normalize to null');
+  } finally {
+    await request(`${BASE_URL}/api/benchmarks/runs/${runId}`, {
+      method: 'DELETE',
+      headers: internalHeaders,
+    });
+  }
+}
+
 async function testAgents_mainPanelFallbackServesBenchmarkAgents(): Promise<void> {
   try {
     const upload = await request(`${BASE_URL}/api/benchmarks/runs`, {
@@ -632,7 +628,7 @@ async function runAll(): Promise<void> {
     ['auth: /run-requests rejects unauthenticated', testAuth_runRequestsRejectsUnauthenticated],
     ['auth: POST /runs rejects unauthenticated', testAuth_uploadRejectsUnauthenticated],
     ['catalog: tasks + stats shape', testCatalog_returnsTasksWithStatsShape],
-    ['catalog: groups are the four known', testCatalog_groupsAreTheThreeKnown],
+    ['catalog: groups are label-driven', testCatalog_groupsAreLabelDriven],
     [
       'catalog: Daily migration upgrades legacy message-person',
       testCatalog_dailyMigrationUpgradesLegacyMessagePerson,
@@ -644,6 +640,7 @@ async function runAll(): Promise<void> {
     ['patch: rejects bad type', testPatch_rejectsBadType],
     ['patch: unknown task 404', testPatch_unknownTask404],
     ['runs: upload→list→detail→agents round-trip', testRuns_uploadListDetailAgentRoundTrip],
+    ['runs: blank agent ids normalize to null', testRuns_blankAgentIdNormalizesToNull],
     ['runs: upload requires run_id', testRuns_uploadRequiresRunId],
     [
       'agents API fallback: benchmark agents open in the main panel',

@@ -71,3 +71,19 @@ export async function runSyncStep(name: string, fn: () => Promise<number>): Prom
     throw err;
   }
 }
+
+export async function syncRowsWithConcurrency<T>(
+  rows: readonly T[],
+  concurrency: number,
+  syncRow: (row: T) => Promise<unknown>,
+  onBatchComplete?: (completed: number, total: number) => void
+): Promise<number> {
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new Error(`sync concurrency must be a positive integer, got ${concurrency}`);
+  }
+  for (let offset = 0; offset < rows.length; offset += concurrency) {
+    await Promise.all(rows.slice(offset, offset + concurrency).map(syncRow));
+    onBatchComplete?.(Math.min(offset + concurrency, rows.length), rows.length);
+  }
+  return rows.length;
+}

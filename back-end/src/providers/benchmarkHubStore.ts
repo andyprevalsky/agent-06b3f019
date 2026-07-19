@@ -171,6 +171,11 @@ async function withIndexLock<T>(operation: () => Promise<T>): Promise<T> {
   );
 }
 
+function normalizeAgentId(value: unknown): string | null {
+  const trimmed = typeof value === 'string' ? value.trim() : '';
+  return trimmed || null;
+}
+
 function taskSummary(task: Record<string, unknown>): HubRunTaskSummary {
   const passed = typeof task.passed === 'boolean' ? task.passed : null;
   // The verdict wins over the raw agent status (run bundles carry the AGENT
@@ -187,7 +192,7 @@ function taskSummary(task: Record<string, unknown>): HubRunTaskSummary {
     name: String(task.name ?? ''),
     passed,
     status,
-    agent_id: typeof task.agent_id === 'string' ? task.agent_id : null,
+    agent_id: normalizeAgentId(task.agent_id),
     duration_seconds: typeof task.duration_seconds === 'number' ? task.duration_seconds : null,
     cost_cents: typeof task.cost_cents === 'number' ? task.cost_cents : null,
     world_model_mode: typeof task.world_model_mode === 'string' ? task.world_model_mode : null,
@@ -247,8 +252,14 @@ export async function listRuns(): Promise<HubRunSummary[]> {
   const raw = await getObject('index.json');
   if (!raw) return [];
   try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as HubRunSummary[]) : [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return (parsed as HubRunSummary[]).map((run) => ({
+      ...run,
+      tasks: Array.isArray(run.tasks)
+        ? run.tasks.map((task) => ({ ...task, agent_id: normalizeAgentId(task.agent_id) }))
+        : [],
+    }));
   } catch {
     return [];
   }

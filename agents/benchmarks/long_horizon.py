@@ -105,8 +105,7 @@ def _validate_environment(env: dict[str, Any], item_id: str) -> dict[str, Any]:
         raise ValueError(f"{item_id}: environment.context_notes must be a non-empty string")
     if mode == "live" and env.get("db_fixtures"):
         raise ValueError(f"{item_id}: live evals must not declare db_fixtures")
-    # live_fixtures is optional in the raw catalog (tasks omitting it inherit
-    # ["base"] at load time); validate only when explicitly declared.
+    # live_fixtures is optional and opt-in; omitted declarations resolve to [].
     live_fixtures = env.get("live_fixtures")
     if live_fixtures is not None:
         _require_string_list(env, "live_fixtures", item_id, allow_empty=True)
@@ -185,6 +184,15 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
         raise ValueError(f"{item_id}: runner must be one of {sorted(TASK_RUNNERS)}")
     if raw.get("bench") not in TASK_BENCHES:
         raise ValueError(f"{item_id}: bench must be declared explicitly, one of {sorted(TASK_BENCHES)}")
+    min_steps = raw.get("min_steps")
+    if min_steps is not None:
+        if not isinstance(min_steps, dict) or not min_steps:
+            raise ValueError(f"{item_id}: min_steps must be a non-empty object keyed by agent class")
+        for agent_class, minimum in min_steps.items():
+            if not isinstance(agent_class, str) or not agent_class.strip():
+                raise ValueError(f"{item_id}: min_steps keys must be non-empty agent-class strings")
+            if not isinstance(minimum, int) or isinstance(minimum, bool) or minimum < 1:
+                raise ValueError(f"{item_id}: min_steps.{agent_class} must be a positive integer")
     expected_attention_kinds = raw.get("expected_attention_kinds")
     if expected_attention_kinds is not None:
         _require_string_list(raw, "expected_attention_kinds", item_id)

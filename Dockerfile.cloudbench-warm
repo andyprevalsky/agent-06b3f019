@@ -60,6 +60,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gosu \
     && rm -rf /var/lib/apt/lists/*
 
+# Real isolated phone/payment benchmarks expose each per-machine frontend and
+# backend callback route through its own random Cloudflare Quick Tunnel. Bake
+# the agent into new warm images; cloudbench-run.sh also installs it as a
+# compatibility fallback for already-provisioned warm snapshots.
+RUN curl -fsSL \
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(dpkg --print-architecture).deb" \
+        -o /tmp/cloudflared.deb \
+    && apt-get install -y --no-install-recommends /tmp/cloudflared.deb \
+    && rm -f /tmp/cloudflared.deb
+
 # ── Non-root user that owns the repo + can drive the Postgres cluster ──────
 # run.sh's system-Postgres fallback uses `su - postgres` / pg_ctlcluster; the
 # per-run script runs those bits via sudo-less gosu as needed. The app itself

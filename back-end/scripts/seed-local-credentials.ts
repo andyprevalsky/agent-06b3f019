@@ -3,11 +3,13 @@ import type {
   BrowserPermission,
   CacheStorageOrigin,
   Cookie,
+  CookieBundle,
   IndexedDBOrigin,
   Integration,
   LocalStorageOrigin,
   PasskeyCredential,
   Prisma,
+  SteelSessionAuth,
 } from '@prisma/client';
 
 type PasskeyRecord = PasskeyCredential;
@@ -85,6 +87,59 @@ export async function syncCookieCredentials(
     );
   }
   return cookies.length;
+}
+
+export type CookieBundleModel = {
+  upsert(args: Prisma.CookieBundleUpsertArgs): Promise<unknown>;
+};
+
+export async function syncCookieBundleCredentials(
+  localCookieBundle: CookieBundleModel,
+  bundles: CookieBundle[]
+): Promise<number> {
+  for (const bundle of bundles) {
+    const { id: remoteId, ...updateData } = bundle;
+    void remoteId;
+    await localCookieBundle.upsert({
+      where: {
+        userId_authRealm_browserSource_browserProfile: {
+          userId: bundle.userId,
+          authRealm: bundle.authRealm,
+          browserSource: bundle.browserSource,
+          browserProfile: bundle.browserProfile,
+        },
+      },
+      create: bundle,
+      update: updateData,
+    });
+  }
+  return bundles.length;
+}
+
+export type SteelSessionAuthModel = {
+  upsert(args: Prisma.SteelSessionAuthUpsertArgs): Promise<unknown>;
+};
+
+export async function syncSteelSessionAuthCredentials(
+  localSteelSessionAuth: SteelSessionAuthModel,
+  sessions: SteelSessionAuth[]
+): Promise<number> {
+  for (const session of sessions) {
+    const { id: remoteId, ...updateData } = session;
+    void remoteId;
+    await localSteelSessionAuth.upsert({
+      where: {
+        userId_contextId_authRealm: {
+          userId: session.userId,
+          contextId: session.contextId,
+          authRealm: session.authRealm,
+        },
+      },
+      create: session,
+      update: updateData,
+    });
+  }
+  return sessions.length;
 }
 
 type BrowserOriginRecord = LocalStorageOrigin | IndexedDBOrigin | CacheStorageOrigin;

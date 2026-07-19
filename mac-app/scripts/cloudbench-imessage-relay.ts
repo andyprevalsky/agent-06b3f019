@@ -72,6 +72,24 @@ export interface RelayReceipt {
   phoneNumber: string;
 }
 
+export function relayAuthHeaders(
+  expectedUserId: string,
+  internalApiKey: string | undefined,
+  accessToken?: string
+): Record<string, string> {
+  if (internalApiKey) {
+    return {
+      'X-API-Key': internalApiKey,
+      'X-User-Id': expectedUserId,
+      'X-CloudBench-iMessage-Relay': 'v1',
+    };
+  }
+  if (accessToken) {
+    return { Authorization: `Bearer ${accessToken}` };
+  }
+  throw new Error('The iMessage relay has no authenticated backend identity');
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -205,6 +223,58 @@ export function isUsableSession(
   );
 }
 
+export async function resolveRelaySession(
+  expectedUserId: string,
+  autoLogin: AutoLoginCredentials | undefined,
+  readInstalledSession: () => StoredSession | undefined,
+  mintBenchmarkSession: () => Promise<StoredSession>,
+  persistInstalledSession: (session: StoredSession) => void
+): Promise<StoredSession> {
+  let session: StoredSession | undefined;
+  let installedStoreReadable = true;
+  try {
+    session = readInstalledSession();
+  } catch (error) {
+    installedStoreReadable = false;
+    if (!autoLogin) {
+      throw new Error(`Installed Rose session store is unreadable: ${errorMessage(error)}`);
+    }
+  }
+  if (isUsableSession(session, expectedUserId)) {
+    return session as StoredSession;
+  }
+
+  // Explicit benchmark auto-login is an independent recovery boundary. An
+  // installed store encrypted with an older/different app key must not block
+  // the relay, and must never be overwritten merely to make a benchmark pass.
+  if (autoLogin) {
+    const minted = await mintBenchmarkSession();
+    if (minted.user?.id !== expectedUserId) {
+      throw new Error(
+        `Auto-login session belongs to ${minted.user?.id}, expected benchmark user ${expectedUserId}`
+      );
+    }
+    if (installedStoreReadable) {
+      persistInstalledSession(minted);
+    }
+    return minted;
+  }
+
+  const expiresAt = sessionExpiresAtMs(session);
+  if (!session?.access_token || !session.user?.id) {
+    throw new Error('Installed Rose app has no authenticated session');
+  }
+  if (session.user.id !== expectedUserId) {
+    throw new Error(
+      `Installed Rose session belongs to ${session.user.id}, expected benchmark user ${expectedUserId}`
+    );
+  }
+  if (expiresAt <= Date.now() + 60_000) {
+    throw new Error('Installed Rose session is expired or expires within one minute');
+  }
+  return session;
+}
+
 // Mint a fresh session for the benchmark user via the backend's own OTP
 // verification (POST /api/auth/verify-otp), NOT Supabase directly. The dev test
 // OTP (181818) is a backend-level bypass (checkTwilioVerifyOTP auto-approves the
@@ -281,59 +351,31 @@ export async function loadInstalledRoseSession(
   }
 
   const { default: Store } = await import('electron-store');
-  // clearInvalidConfig: true — if the on-disk navi-auth store can't be decrypted
-  // with the installed app's key (stale/rotated key, or a store written by a
-  // differently-keyed build), electron-store would otherwise THROW on
-  // construction ("Unexpected token '<binary>' ... is not valid JSON") and crash
-  // the relay before auto-login can run. Clearing the invalid config instead
-  // lets us fall through to auto-login, which re-mints a session and persists it
-  // encrypted with the current key — self-healing the corrupt store.
-  const store = new Store({
-    name: 'navi-auth',
-    cwd:
-      process.env.ROSE_USER_DATA_DIR ||
-      path.join(os.homedir(), 'Library', 'Application Support', 'Rose'),
-    encryptionKey,
-    clearInvalidConfig: true,
-  });
-  const session = store.get('session') as StoredSession | undefined;
-  if (isUsableSession(session, expectedUserId)) {
-    return session as StoredSession;
-  }
-
-  // No usable installed session. When benchmark auto-login credentials are
-  // supplied, mint a fresh session for the expected user and persist it into
-  // the same encrypted store the installed Rose app reads, so a signed-out (or
-  // expired) app can no longer block the live message-person benchmark. This
-  // path is gated on explicit credentials, so production relays without them
-  // still fail closed with the diagnostics below.
-  if (autoLogin) {
-    if (!baseUrl) {
-      throw new Error('Auto-login requires --base-url to reach the backend verify-otp endpoint');
-    }
-    const minted = await mintSessionViaBackendOtp(baseUrl, autoLogin);
-    if (minted.user?.id !== expectedUserId) {
-      throw new Error(
-        `Auto-login session belongs to ${minted.user?.id}, expected benchmark user ${expectedUserId}`
-      );
-    }
-    store.set('session', minted);
-    return minted;
-  }
-
-  const expiresAt = sessionExpiresAtMs(session);
-  if (!session?.access_token || !session.user?.id) {
-    throw new Error('Installed Rose app has no authenticated session');
-  }
-  if (session.user.id !== expectedUserId) {
-    throw new Error(
-      `Installed Rose session belongs to ${session.user.id}, expected benchmark user ${expectedUserId}`
-    );
-  }
-  if (expiresAt <= Date.now() + 60_000) {
-    throw new Error('Installed Rose session is expired or expires within one minute');
-  }
-  return session;
+  let store: InstanceType<typeof Store> | undefined;
+  return resolveRelaySession(
+    expectedUserId,
+    autoLogin,
+    () => {
+      store = new Store({
+        name: 'navi-auth',
+        cwd:
+          process.env.ROSE_USER_DATA_DIR ||
+          path.join(os.homedir(), 'Library', 'Application Support', 'Rose'),
+        encryptionKey,
+        // A corrupt or differently-keyed store should self-heal through the
+        // explicit benchmark auto-login path instead of crashing the relay.
+        clearInvalidConfig: true,
+      });
+      return store.get('session') as StoredSession | undefined;
+    },
+    async () => {
+      if (!baseUrl) {
+        throw new Error('Auto-login requires --base-url to reach the backend verify-otp endpoint');
+      }
+      return mintSessionViaBackendOtp(baseUrl, autoLogin as AutoLoginCredentials);
+    },
+    (session) => store?.set('session', session)
+  );
 }
 
 function createFileMarkerStore(markerFile: string): RelayMarkerStore {
@@ -412,8 +454,11 @@ async function main(): Promise<void> {
   const autoLogin =
     autoLoginPhone && autoLoginOtp ? { phone: autoLoginPhone, otp: autoLoginOtp } : undefined;
 
-  const session = await loadInstalledRoseSession(expectedUserId, autoLogin, baseUrl);
-  const authorization = `Bearer ${session.access_token}`;
+  const internalApiKey = process.env.BENCHMARK_IMESSAGE_API_KEY?.trim();
+  const session = internalApiKey
+    ? undefined
+    : await loadInstalledRoseSession(expectedUserId, autoLogin, baseUrl);
+  const authentication = relayAuthHeaders(expectedUserId, internalApiKey, session?.access_token);
   const fetchOutcome = async <T>(url: string, init?: RequestInit): Promise<RelayOutcome<T>> => {
     try {
       const response = await fetch(url, init);
@@ -433,7 +478,7 @@ async function main(): Promise<void> {
       pop: () =>
         fetchOutcome<PopResponse>(`${baseUrl}/api/imessage/queue/pop`, {
           headers: {
-            Authorization: authorization,
+            ...authentication,
             'X-iMessage-Delivery-Results': 'v1',
           },
         }),
@@ -441,7 +486,7 @@ async function main(): Promise<void> {
         fetchOutcome(`${baseUrl}/api/imessage/queue/${encodeURIComponent(queueId)}/result`, {
           method: 'POST',
           headers: {
-            Authorization: authorization,
+            ...authentication,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(result),

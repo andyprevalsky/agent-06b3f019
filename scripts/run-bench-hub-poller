@@ -278,6 +278,9 @@ process_request() {  # process_request <request_json>
         exit_code=0
         BENCHMARK_CONTEXT_DIR="$local_artifact_root" \
             CLOUDBENCH_RUNS_ROOT="$artifact_root/fleet/runs" \
+            BENCHMARK_HUB_PARENT_RUN_ID="$hub_run_id" \
+            BENCHMARK_HUB_UPLOAD_URL="$HUB_URL" \
+            BENCHMARK_HUB_API_KEY="$BACKEND_API_KEY" \
             "$RUN_BENCH_BIN" "${runner_args[@]}" >> "$log_file" 2>&1 || exit_code=$?
         [ "$exit_code" -ne "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] && break
 

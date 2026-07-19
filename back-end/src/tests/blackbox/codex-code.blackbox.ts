@@ -233,10 +233,7 @@ function testResolveCodexAuthEnvs_oauthWithoutFundedKey() {
     envs.CODEX_AUTH_JSON === '{"tokens":{"access_token":"a","refresh_token":"r"}}',
     'CODEX_AUTH_JSON set when OAuth credential present and no funded key'
   );
-  assert(
-    envs.OPENAI_API_KEY === undefined,
-    'no OPENAI_API_KEY when funded key is not configured'
-  );
+  assert(envs.OPENAI_API_KEY === undefined, 'no OPENAI_API_KEY when funded key is not configured');
 }
 
 function testResolveCodexAuthEnvs_apiKeyFallback() {
@@ -334,7 +331,9 @@ async function testSmoke_codexCompletesE2bTask() {
         sawAuthFallback,
         `Codex OAuth token hit its usage limit but did NOT fall back to the OpenAI API key. events=${JSON.stringify(events).slice(-1000)}`
       );
-      console.log('    ↳ codex smoke completed via OPENAI_API_KEY runtime fallback (OAuth usage-limited)');
+      console.log(
+        '    ↳ codex smoke completed via OPENAI_API_KEY runtime fallback (OAuth usage-limited)'
+      );
     } else {
       console.log('    ↳ codex smoke completed via ChatGPT OAuth token (no usage limit hit)');
     }

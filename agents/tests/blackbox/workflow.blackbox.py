@@ -52,6 +52,21 @@ def test_task_dag_parallel():
     assert dag.is_complete(), "Should be complete with all 3 done"
 
 
+def test_usage_model_falls_back_when_cache_provenance_is_unknown():
+    """Legacy Fast Mode entries use the literal ``unknown`` provenance value.
+
+    That sentinel must not become an unclassified benchmark usage model; the
+    requested pool alias still identifies the credential path for the replay.
+    """
+    from workflows.agent_workflow import _resolve_usage_model
+
+    requested = "rose-r2-archive-anthropic"
+    assert _resolve_usage_model("unknown", requested) == requested
+    assert _resolve_usage_model("", requested) == requested
+    assert _resolve_usage_model(None, requested) == requested
+    assert _resolve_usage_model("gpt-5.6-sol-gpt", requested) == "gpt-5.6-sol-gpt"
+
+
 def test_task_dag_sequential():
     """3-task sequential chain (0 -> 1 -> 2). Only one ready at a time."""
     plan_data = {
@@ -4631,6 +4646,7 @@ async def run_all_tests():
     r.record("extract_plan_empty", test_extract_plan_from_context_empty)
     r.record("extract_error_simple", test_extract_error_message_simple)
     r.record("extract_error_chained", test_extract_error_message_chained)
+    r.record("usage_model_unknown_fallback", test_usage_model_falls_back_when_cache_provenance_is_unknown)
 
     # AgentWorkflow pure-method tests
     r.record("wf_pending_children_empty", test_workflow_get_pending_child_workflow_ids_empty)

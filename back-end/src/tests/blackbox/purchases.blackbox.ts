@@ -20,6 +20,7 @@ import { PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { AgentCardProviderError, type CardProvider } from '../../providers/card-provider';
 import * as purchasesService from '../../domains/purchases/service';
+import { canonicalStoredPurchaseFingerprint } from '../../domains/purchases/fingerprint';
 import {
   assert,
   FakeCardProvider,
@@ -166,6 +167,10 @@ const tests: Array<[string, () => Promise<void>]> = [
         assert(row?.status === PurchaseSpendStatus.HELD, `expected HELD, got ${row?.status}`);
         assert(row?.cardId === provider.cardId, 'purchase spend should store the card id');
         assert(
+          typeof row?.canonicalFingerprint === 'string' && row.canonicalFingerprint.length > 0,
+          'new purchase rows should persist an indexed canonical fingerprint'
+        );
+        assert(
           row?.stripePaymentIntentId !== null,
           'purchase spend should store the payment intent id'
         );
@@ -304,6 +309,101 @@ const tests: Array<[string, () => Promise<void>]> = [
       assert(result.found === true, 'should find the held purchase');
       assert(result.reusable === true, 'a live, unspent held card should remain reusable');
       assert(provider.getDetailsCalls === 1, 'should verify card liveness via the provider');
+    },
+  ],
+  [
+    'lookup canonicalizes mixed review-count punctuation from pre-fix held receipts',
+    async () => {
+      const userId = await createUser('lookup-canonical-mixed-reviews');
+      const oldFingerprint = `pre-fix-mixed-${randomUUID()}`;
+      const cardId = `held-card-${randomUUID()}`;
+      const baseItems = [
+        {
+          name: 'Aurora Notebook',
+          imageUrl: 'https://example.test/notebook.png',
+          productUrl: 'https://example.test/p/notebook',
+          rating: '4.8 stars',
+          reviewCount: '1,284 reviews',
+          unitPriceCents: 1200,
+          quantity: 1,
+          lineTotalCents: 1200,
+        },
+        {
+          name: 'Canvas Tote',
+          imageUrl: 'https://example.test/tote.png',
+          productUrl: 'https://example.test/p/tote',
+          rating: '4.9 stars',
+          reviewCount: '5678 reviews',
+          unitPriceCents: 1500,
+          quantity: 1,
+          lineTotalCents: 1500,
+        },
+      ];
+      const storedReceipt = {
+        currency: 'USD',
+        lineItems: baseItems,
+        fees: [{ label: 'Tax', amountCents: 200 }],
+        subtotalCents: 2700,
+        totalCents: 2900,
+      };
+      const storedPurchase = await prisma.purchaseSpend.create({
+        data: {
+          userId,
+          fingerprint: oldFingerprint,
+          merchant: 'Rose Labs Test Payment',
+          lineItemsJson: storedReceipt,
+          totalCents: 2900,
+          status: PurchaseSpendStatus.HELD,
+          cardId,
+          createdAt: new Date('2026-07-19T12:00:00.000Z'),
+        },
+      });
+
+      const retryReceipt = {
+        ...storedReceipt,
+        lineItems: [
+          { ...baseItems[0], reviewCount: '1284 reviews' },
+          { ...baseItems[1], reviewCount: '5,678 reviews' },
+        ],
+      };
+      const canonicalFingerprint = canonicalStoredPurchaseFingerprint({
+        userId,
+        merchant: 'Rose Labs Test Payment',
+        lineItemsJson: retryReceipt,
+        totalCents: 2900,
+      });
+      assert(canonicalFingerprint !== null, 'retry receipt should produce a canonical fingerprint');
+      assert(
+        canonicalStoredPurchaseFingerprint({
+          userId: 'fixture-user',
+          merchant: 'Rose Labs Test Payment',
+          lineItemsJson: retryReceipt,
+          totalCents: 2900,
+        }) === '15ff20e0397ee6fd67716bd8c7e3f05711bc9197502a4218376a7dd01165aade',
+        'backend canonicalization must match the agents-side Python fingerprint fixture'
+      );
+      const provider = new StubCardStateProvider({ status: 'OPEN', balanceCents: 2900 });
+
+      const result = await purchasesService.lookupPurchase(
+        userId,
+        canonicalFingerprint,
+        provider,
+        new Date('2026-07-19T13:00:00.000Z')
+      );
+
+      assert(result.reusable === true, 'mixed-format pre-fix hold should remain reusable');
+      assert(
+        result.purchase?.fingerprint === oldFingerprint,
+        'lookup must return the stored key so mint reuses the original card'
+      );
+      assert(result.purchase?.cardId === cardId, 'lookup should return the original held card');
+      const indexedPurchase = await prisma.purchaseSpend.findUnique({
+        where: { id: storedPurchase.id },
+      });
+      assert(
+        indexedPurchase?.canonicalFingerprint === canonicalFingerprint,
+        'legacy lookup should persist the canonical fingerprint for indexed retries'
+      );
     },
   ],
   [

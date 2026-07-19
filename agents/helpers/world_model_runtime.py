@@ -260,7 +260,11 @@ _WMH_SESSION_LOCK = asyncio.Lock()
 
 
 async def ensure_world_model_session(
-    client: "WMHHttpClient", world_model_name: str, agent_id: str | None
+    client: "WMHHttpClient",
+    world_model_name: str,
+    agent_id: str | None,
+    *,
+    task: str | None = None,
 ) -> str:
     """Return a cached WMH session for (agent_id, world_model), creating one if absent."""
     key = (agent_id or "default", world_model_name)
@@ -271,7 +275,7 @@ async def ensure_world_model_session(
         cached = _WMH_SESSION_CACHE.get(key)
         if cached:
             return cached
-        session_id = await client.create_session(world_model_name, task=None)
+        session_id = await client.create_session(world_model_name, task=task)
         _WMH_SESSION_CACHE[key] = session_id
         return session_id
 
@@ -336,7 +340,10 @@ class WorldModelToolExecutionAdapter:
         # Session is created lazily on first boundary tool and cached per (agent, model);
         # an explicit WMH_SESSION_ID (if set) still wins.
         session_id = self.session_id or await ensure_world_model_session(
-            self.client, self.world_model_name, self.agent_id
+            self.client,
+            self.world_model_name,
+            self.agent_id,
+            task=_world_model_task_for_tool(tool_name, tool_args),
         )
         action = self.action_for_tool(tool_name, tool_args, tool_call_id)
         if self.mode == "simulate":
@@ -446,7 +453,29 @@ def _observation_tool_result_payload(observation: JsonObject) -> Any:
     for candidate in candidates:
         if candidate is not None:
             return candidate
+    # The real WMH server serializes its generated environment result into
+    # Observation.content.  Test doubles historically put tool_result directly
+    # on the envelope, which hid this production integration gap.  Decode only
+    # object-shaped JSON so ordinary text observations retain their old shape.
+    content = observation.get("content")
+    if isinstance(content, str) and content.strip():
+        try:
+            decoded = json.loads(content)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, dict):
+            return decoded
     return None
+
+
+def _world_model_task_for_tool(tool_name: str, tool_args: JsonObject) -> str | None:
+    """Give a lazily-created WMH session the user-facing task when available."""
+
+    for key in ("goal", "task", "query", "condition"):
+        value = tool_args.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return tool_name or None
 
 
 def _wmh_fallback_on_unavailable_enabled() -> bool:
