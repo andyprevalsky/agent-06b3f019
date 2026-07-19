@@ -65,6 +65,12 @@ export interface HubRunTask {
 
 export interface HubRun {
   run_id: string;
+  /**
+   * Optional human-readable label for the run. When a bundle carries one it is
+   * shown next to the opaque run_id; otherwise the UI derives a semantic name
+   * from the run's task list (see deriveRunName in RunsPane).
+   */
+  name?: string | null;
   timestamp: string;
   suite: string | null;
   source: string | null;
