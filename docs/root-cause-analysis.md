@@ -1,6 +1,17 @@
 # Root Cause Analysis Guidelines
 
-These guidelines define how to diagnose bugs in this codebase. Follow this methodology exactly — do NOT skip steps.
+These guidelines define how to diagnose bugs in this codebase. Follow this methodology exactly — do NOT skip steps. Invoke `/RCA` to run this correctly.
+
+> ## ⛔ THE HARD GATE — read this first
+>
+> **You may NOT report a root cause without BOTH of these, executed locally:**
+>
+> 1. **A local reproduction you actually ran and watched FAIL** on the buggy code (record the exact command + failure output).
+> 2. **A fix that makes that same reproduction PASS** (re-run the identical command; do not weaken the assertion).
+>
+> **Never come back with a theory.** "It's probably load / a race / a 404 / third-party state" is not a deliverable. If you cannot reproduce it, you have *preliminary findings + an observability gap* — say so and keep the RCA open; do not present code-reading or correlation as a finished RCA.
+>
+> **Beware fake failures:** running a test the wrong way (wrong `DATABASE_URL`, missing env, stale/leftover services) produces failures that aren't the bug. Reproduce the harness's real conditions and confirm the repro is valid before diagnosing.
 
 ## System Architecture (request flow)
 

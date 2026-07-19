@@ -52,6 +52,21 @@ def test_task_dag_parallel():
     assert dag.is_complete(), "Should be complete with all 3 done"
 
 
+def test_usage_model_falls_back_when_cache_provenance_is_unknown():
+    """Legacy Fast Mode entries use the literal ``unknown`` provenance value.
+
+    That sentinel must not become an unclassified benchmark usage model; the
+    requested pool alias still identifies the credential path for the replay.
+    """
+    from workflows.agent_workflow import _resolve_usage_model
+
+    requested = "rose-r2-archive-anthropic"
+    assert _resolve_usage_model("unknown", requested) == requested
+    assert _resolve_usage_model("", requested) == requested
+    assert _resolve_usage_model(None, requested) == requested
+    assert _resolve_usage_model("gpt-5.6-sol-gpt", requested) == "gpt-5.6-sol-gpt"
+
+
 def test_task_dag_sequential():
     """3-task sequential chain (0 -> 1 -> 2). Only one ready at a time."""
     plan_data = {
@@ -2937,6 +2952,43 @@ async def test_workflow_advances_pending_cloud_agent_tool():
         _restore_workflow(original)
 
 
+async def test_workflow_lifecycle_updates_preserve_start_phase():
+    """Lifecycle updates carry the pending row's startPhase forward.
+
+    The chat handler stamps startPhase only on the initial "Creating Cloud
+    Agent" row; the front-end dedups tool messages by toolCallId keeping the
+    LATEST, so an update without startPhase erases the chip's
+    data-agent-start-phase attribute (prod chat-lifecycle-ratchet route
+    milestone flake, 2026-07-18).
+    """
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["poll_new_messages"] = [
+        {
+            "role": "TOOL",
+            "text": "",
+            "metadata": {
+                "toolCallId": "tc-cloud",
+                "toolName": "cloud_agent",
+                "toolStatus": "IN_PROGRESS",
+                "title": "Creating Cloud Agent",
+                "startPhase": "execute",
+            },
+        }
+    ]
+    original = _patch_workflow(fake)
+    try:
+        await wf._advance_cloud_agent_lifecycle("Preparing Cloud Agent", "IN_PROGRESS")
+        await wf._advance_cloud_agent_lifecycle("Cloud Agent Ready", "FINISHED")
+        posts = [c for c in fake.activity_calls if c[0] == "post_agent_message"]
+        assert len(posts) == 2
+        for post in posts:
+            assert post[1][3]["startPhase"] == "execute"
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_does_not_advance_terminal_cloud_agent_tool():
     """Existing terminal cloud_agent row prevents duplicate lifecycle messages."""
     wf = _bare_workflow_instance()
@@ -4010,8 +4062,7 @@ async def test_workflow_approval_text_repopulates_same_tool_then_executes_once()
         positional_params = [
             parameter
             for parameter in inspect.signature(workflow_module.call_llm_activity).parameters.values()
-            if parameter.kind
-            in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
         ]
         assert len(llm_args) <= len(positional_params)
         assert llm_args[2] == wf._current_tools, "JIT must preserve the execute-phase tool schema"
@@ -4514,6 +4565,7 @@ async def run_all_tests():
     r.record("extract_plan_empty", test_extract_plan_from_context_empty)
     r.record("extract_error_simple", test_extract_error_message_simple)
     r.record("extract_error_chained", test_extract_error_message_chained)
+    r.record("usage_model_unknown_fallback", test_usage_model_falls_back_when_cache_provenance_is_unknown)
 
     # AgentWorkflow pure-method tests
     r.record("wf_pending_children_empty", test_workflow_get_pending_child_workflow_ids_empty)
@@ -4664,6 +4716,7 @@ async def run_all_tests():
     await r.record_async("wf_post_message", test_workflow_post_message_executes_activity)
     await r.record_async("wf_post_message_failure", test_workflow_post_message_failure_logs_warning)
     await r.record_async("wf_advance_cloud_agent_tool", test_workflow_advances_pending_cloud_agent_tool)
+    await r.record_async("wf_cloud_agent_lifecycle_start_phase", test_workflow_lifecycle_updates_preserve_start_phase)
     await r.record_async("wf_no_duplicate_cloud_agent_tool", test_workflow_does_not_advance_terminal_cloud_agent_tool)
     await r.record_async("wf_missing_cloud_agent_tool", test_workflow_caches_missing_cloud_agent_tool)
     await r.record_async("wf_run_startup_completion", test_workflow_run_covers_chat_agent_startup_and_completion)
@@ -4683,9 +4736,15 @@ async def run_all_tests():
     await r.record_async("wf_check_parent_paused", test_workflow_check_parent_state_parent_paused_inherits)
     await r.record_async("wf_check_parent_cost_limited", test_workflow_check_parent_state_parent_cost_limited_inherits)
     await r.record_async("wf_check_parent_resumes", test_workflow_check_parent_state_parent_resumes_clears_inherit)
-    await r.record_async("wf_check_parent_missing_orphans", test_workflow_check_parent_state_parent_missing_orphans_child)
-    await r.record_async("wf_check_parent_missing_ignores_manual", test_workflow_check_parent_state_parent_missing_ignores_manual_pause)
-    await r.record_async("wf_check_parent_transient_backstop", test_workflow_check_parent_state_transient_failure_backstop_orphans)
+    await r.record_async(
+        "wf_check_parent_missing_orphans", test_workflow_check_parent_state_parent_missing_orphans_child
+    )
+    await r.record_async(
+        "wf_check_parent_missing_ignores_manual", test_workflow_check_parent_state_parent_missing_ignores_manual_pause
+    )
+    await r.record_async(
+        "wf_check_parent_transient_backstop", test_workflow_check_parent_state_transient_failure_backstop_orphans
+    )
     await r.record_async("wf_mark_complete_happy", test_workflow_mark_complete_happy_path)
     await r.record_async("wf_mark_complete_no_parent", test_workflow_mark_complete_no_parent_no_signal)
     await r.record_async("wf_format_outputs_with_schema", test_workflow_format_outputs_with_schema)

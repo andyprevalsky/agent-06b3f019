@@ -20,7 +20,8 @@
     "approval_handling": null,
     "start_phase": null,
     "min_agent_count": 50,
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "group": "rose-bench"
   },
   {
     "name": "single-creator-arm",
@@ -41,7 +42,8 @@
     "approval_handling": null,
     "start_phase": "execute",
     "min_agent_count": 0,
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "chat-mode",
@@ -60,7 +62,8 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": null,
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "pre-deploy"
   },
   {
     "name": "spawn-sub-agents",
@@ -88,7 +91,8 @@
       "spawn_browser_agent": 0,
       "spawn_claude_code_agent": 0
     },
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "pre-deploy"
   },
   {
     "name": "parallel-tool-calls",
@@ -117,7 +121,8 @@
       "spawn_browser_agent",
       "spawn_claude_code_agent"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "pre-deploy"
   },
   {
     "name": "response-schema-non-goal-feedback",
@@ -184,7 +189,8 @@
     ],
     "source": [
       "regression:mid-run-response-schema-non-goal-feedback"
-    ]
+    ],
+    "group": "daily"
   },
   {
     "name": "grep-explore-stress",
@@ -216,7 +222,8 @@
       "message_person",
       "send_message_to_user_execute_phase"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "user-data-prod-grep",
@@ -261,7 +268,8 @@
       "secrets": [],
       "live_targets": [],
       "context_notes": "Frozen user-data documents (apple_notes, chatgpt, claude, obsidian) seeded by back-end/scripts/user-data-benchmark-fixture.ts from .context/benchmarks/user-data-grep-fixture.json — real prod docs frozen once (gitignored, re-derivable via BENCHMARK_USER_DATA_SOURCE_DATABASE_URL). grep source=documents is the required data path."
-    }
+    },
+    "group": "daily"
   },
   {
     "name": "plaid-transactions-monthly-spend",
@@ -332,7 +340,8 @@
       "main-sync:plaid-transactions-monthly-spend",
       "fixture:back-end/scripts/plaid-transactions-benchmark-fixture.ts"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "plaid-transactions-doordash-count",
@@ -403,7 +412,8 @@
       "main-sync:plaid-transactions-doordash-count",
       "fixture:back-end/scripts/plaid-transactions-benchmark-fixture.ts"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "plaid-transactions-dead-subscriptions",
@@ -477,7 +487,8 @@
       "main-sync:plaid-transactions-dead-subscriptions",
       "fixture:back-end/scripts/plaid-transactions-benchmark-fixture.ts"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "message-person",
@@ -542,7 +553,7 @@
       "blackbox:mac-app/tests/blackbox/i-message-sender.blackbox.ts"
     ],
     "bench": "pipeline-e2e",
-    "group": "Daily",
+    "group": "daily",
     "fast_cache": "off"
   },
   {
@@ -609,7 +620,7 @@
       "unit:back-end/src/tests/unit/agentphone-provider.test.ts"
     ],
     "bench": "pipeline-e2e",
-    "group": "Daily",
+    "group": "daily",
     "fast_cache": "off"
   },
   {
@@ -675,7 +686,8 @@
       "sms-onboarding-gates:free-credit-subscription-gate",
       "fixture:back-end/scripts/free-credit-subscription-gate-fixture.ts"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "gate-subscription-card-mint",
@@ -742,7 +754,8 @@
       "sms-onboarding-gates:card-mint-subscription-gate",
       "fixture:back-end/scripts/gate-benchmark-fixture.ts"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "gate-kyc-card-mint",
@@ -813,7 +826,8 @@
       "sms-onboarding-gates:card-mint-kyc-gate",
       "fixture:back-end/scripts/gate-benchmark-fixture.ts"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "gate-source-connect-gmail",
@@ -885,7 +899,8 @@
       "sms-onboarding-gates:source-connect-gmail-gate",
       "fixture:back-end/scripts/gate-benchmark-fixture.ts"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "browser-agent",
@@ -908,25 +923,76 @@
     "approval_handling": "ignore",
     "expected_attention_kind": "auth_assistance",
     "start_phase": "execute",
+    "response_schema": {
+      "fields": [
+        {
+          "name": "selected_beanie_title",
+          "type": "str",
+          "required": true,
+          "description": "Exact title of the purchased black beanie"
+        },
+        {
+          "name": "selected_beanie_url",
+          "type": "str",
+          "required": true,
+          "description": "Amazon product URL of the purchased black beanie"
+        },
+        {
+          "name": "selected_beanie_price_usd",
+          "type": "float",
+          "required": true,
+          "description": "Grounded item price in USD, below 35"
+        },
+        {
+          "name": "quality_evidence",
+          "type": "str",
+          "required": true,
+          "description": "Grounded rating and review count or material details observed on the product page"
+        },
+        {
+          "name": "order_confirmation_id",
+          "type": "str",
+          "required": true,
+          "description": "Amazon order number from the confirmation page"
+        },
+        {
+          "name": "purchase_completed",
+          "type": "bool",
+          "required": true,
+          "description": "True only after the order was placed"
+        },
+        {
+          "name": "cart_checkout_used",
+          "type": "bool",
+          "required": true,
+          "description": "True when Add to Cart and Proceed to checkout were used"
+        },
+        {
+          "name": "buy_now_used",
+          "type": "bool",
+          "required": true,
+          "description": "False when the forbidden Buy Now path was not used"
+        }
+      ]
+    },
     "environment": {
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base",
-        "amazon_auth"
+        "live"
       ],
       "services": [
         "amazon.com",
         "write_lock"
       ],
       "secrets": [
-        "amazon_auth_bundle"
+        "live_browser_auth"
       ],
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie)."
+      "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. The live fixture refreshes compute tokens and the complete browser-auth graph from prod, including CookieBundles. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie)."
     },
     "evaluators": [
       {
@@ -944,7 +1010,8 @@
       "long-horizon:shopping-black-beanie-live-amazon",
       "test-prompts:Test Browser Agent"
     ],
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "group": "rose-bench"
   },
   {
     "name": "browser-agent-amazon-cookie-payment",
@@ -973,27 +1040,81 @@
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
+    "min_steps": {
+      "browser": 5
+    },
     "tool_count_scope": "root",
     "start_phase": "execute",
+    "response_schema": {
+      "fields": [
+        {
+          "name": "selected_beanie_title",
+          "type": "str",
+          "required": true,
+          "description": "Exact title of the purchased black beanie"
+        },
+        {
+          "name": "selected_beanie_url",
+          "type": "str",
+          "required": true,
+          "description": "Amazon product URL of the purchased black beanie"
+        },
+        {
+          "name": "selected_beanie_price_usd",
+          "type": "float",
+          "required": true,
+          "description": "Grounded item price in USD, below 35"
+        },
+        {
+          "name": "quality_evidence",
+          "type": "str",
+          "required": true,
+          "description": "Grounded rating and review count or material details observed on the product page"
+        },
+        {
+          "name": "order_confirmation_id",
+          "type": "str",
+          "required": true,
+          "description": "Amazon order number from the confirmation page"
+        },
+        {
+          "name": "purchase_completed",
+          "type": "bool",
+          "required": true,
+          "description": "True only after the order was placed"
+        },
+        {
+          "name": "cart_checkout_used",
+          "type": "bool",
+          "required": true,
+          "description": "True when Add to Cart and Proceed to checkout were used"
+        },
+        {
+          "name": "buy_now_used",
+          "type": "bool",
+          "required": true,
+          "description": "False when the forbidden Buy Now path was not used"
+        }
+      ]
+    },
     "environment": {
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base",
-        "amazon_auth"
+        "live"
       ],
       "services": [
         "amazon.com",
         "write_lock"
       ],
       "secrets": [
-        "amazon_auth_bundle"
+        "live_browser_auth"
       ],
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "Live Amazon via synced-prod cookie auth. The base live fixture refreshes compute tokens + cookies + passwords from prod; amazon_auth builds the active CookieBundle used to complete one auto-approved cart purchase."
+      "context_notes": "Live Amazon via synced-prod browser auth. The live fixture refreshes compute tokens and the complete browser-auth graph, including the CookieBundle used to complete one auto-approved cart purchase."
     },
     "evaluators": [
       {
@@ -1094,8 +1215,7 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "compute_tokens",
-        "amazon_passkey"
+        "live"
       ],
       "services": [
         "amazon.com",
@@ -1107,7 +1227,7 @@
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "compute_tokens refreshes only LLM credentials. amazon_passkey syncs only the live passkey, deletes Amazon cookies and origin storage, disables saved-session/password alternatives, and detaches the local Kernel profile mapping so the run proves CDP passkey injection from a fresh profile."
+      "context_notes": "The live fixture refreshes all current credentials. Task-specific passkey isolation then deletes Amazon cookies and origin storage, disables saved-session/password alternatives, and detaches the local Kernel profile mapping so the run proves CDP passkey injection from a fresh profile."
     },
     "evaluators": [
       {
@@ -1172,7 +1292,8 @@
       "commit:8923d6e87",
       "live-amazon:kernel-passkey"
     ],
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "group": "rose-bench"
   },
   {
     "name": "browser-toast-nopa-write-lock",
@@ -1233,6 +1354,25 @@
     },
     "success_on_payment_card_request": true,
     "start_phase": "execute",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "order.toasttab.com",
+        "payment_approval"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://order.toasttab.com/online/nopafish"
+      ],
+      "context_notes": "Live Toast menu and checkout flow. The live fixture explicitly refreshes compute credentials and the complete browser-auth graph before the payment-card approval probe."
+    },
     "evaluators": [
       {
         "id": "toast-payment-receipt",
@@ -1291,7 +1431,7 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base"
+        "live"
       ],
       "services": [
         "opentable.com",
@@ -1390,7 +1530,7 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base"
+        "live"
       ],
       "services": [
         "instacart.com",
@@ -1461,7 +1601,7 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base"
+        "live"
       ],
       "services": [
         "doordash.com",
@@ -1556,7 +1696,7 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base"
+        "live"
       ],
       "services": [
         "alchemysprings.com",
@@ -1663,7 +1803,7 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base"
+        "live"
       ],
       "services": [
         "booking.com",
@@ -1770,7 +1910,7 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base"
+        "live"
       ],
       "services": [
         "amctheatres.com",
@@ -1878,15 +2018,14 @@
       "db_fixtures": [],
       "base_images": [],
       "live_fixtures": [
-        "base",
-        "amazon_auth"
+        "live"
       ],
       "services": [
         "amazon.com",
         "write_lock"
       ],
       "secrets": [
-        "amazon_auth_bundle"
+        "live_browser_auth"
       ],
       "live_targets": [
         "https://www.amazon.com/gp/your-account/order-history"
@@ -1952,7 +2091,7 @@
   {
     "name": "minted-agent-accounts-uber",
     "title": "Uber Ride to FITNESS SF Transbay",
-    "description": "Request an exact UberX route using the live account authentication in the base fixture.",
+    "description": "Request an exact UberX route using the explicit live authentication overlay.",
     "prompt": "Use Uber to request an UberX ride now from 88 Howard Street, San Francisco, CA 94105 to FITNESS SF Transbay, 425 Mission Street, San Francisco, CA 94105. Confirm both map pins are at those exact addresses and do not select a premium or shared ride. Complete the ride request.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
@@ -1980,6 +2119,25 @@
     },
     "tool_count_scope": "root",
     "start_phase": "execute",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "uber.com",
+        "write_lock"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://m.uber.com"
+      ],
+      "context_notes": "Live Uber route, pricing, and checkout state with current account authentication supplied by the single live credential overlay."
+    },
     "evaluators": [
       {
         "id": "uber-runtime-contract",
@@ -2042,7 +2200,8 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "browser-indeed-account-create",
@@ -2101,7 +2260,8 @@
     ],
     "source": [
       "user-request:indeed-account-create"
-    ]
+    ],
+    "group": "rose-bench"
   },
   {
     "name": "claude-code-agent",
@@ -2122,7 +2282,8 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "pre-deploy"
   },
   {
     "name": "browser-smoke",
@@ -2140,10 +2301,14 @@
     "price_limit_cents": 50,
     "requires_browser_agent": true,
     "requires_claude_code": false,
+    "min_steps": {
+      "browser": 1
+    },
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "pre-deploy"
   },
   {
     "name": "browser-google-search-single-result",
@@ -2200,7 +2365,8 @@
     ],
     "source": [
       "user-request:browser-google-single-result"
-    ]
+    ],
+    "group": "daily"
   },
   {
     "name": "browser-bing-search-single-result",
@@ -2257,7 +2423,8 @@
     ],
     "source": [
       "user-request:browser-bing-single-result"
-    ]
+    ],
+    "group": "daily"
   },
   {
     "name": "agent-payment-test-shop",
@@ -2349,7 +2516,8 @@
         "openKinds": []
       }
     },
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "agent-payment-setup-resume",
@@ -2568,6 +2736,9 @@
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
+    "min_steps": {
+      "browser": 2
+    },
     "attachment": null,
     "approval_handling": "auto_approve",
     "expected_attention_kind": "payment_approval",
@@ -2688,6 +2859,9 @@
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
+    "min_steps": {
+      "browser": 2
+    },
     "attachment": null,
     "approval_handling": "auto_approve",
     "expected_attention_kind": "payment_approval",
@@ -2807,7 +2981,20 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "bench": "pipeline-e2e"
+    "browser_profile_mode": "fresh",
+    "browser_auth_realm": "webdecoy.com",
+    "expected_browser_session_metadata_values": {
+      "profile_source": "new_user_persistent",
+      "auth_source": "none",
+      "cookies_injected": false,
+      "cookies_count": 0,
+      "local_storage_origin_count": 0,
+      "indexed_db_origin_count": 0,
+      "permission_grant_count": 0,
+      "cache_storage_origin_count": 0
+    },
+    "bench": "pipeline-e2e",
+    "group": "pre-deploy"
   },
   {
     "name": "cache-coverage",
@@ -2839,7 +3026,8 @@
       "message_person": 1
     },
     "tool_count_scope": "root",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "image-handling",
@@ -2859,7 +3047,8 @@
     "attachment": "rs.jpeg",
     "approval_handling": null,
     "start_phase": "execute",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "files-in-sub-agents",
@@ -2880,7 +3069,8 @@
     "attachment": "rs.jpeg",
     "approval_handling": null,
     "start_phase": "plan",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "agent-for-each",
@@ -2901,7 +3091,8 @@
     "attachment": "entities-12.csv",
     "approval_handling": null,
     "start_phase": "plan",
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "family-office-angel-outreach",
@@ -2925,7 +3116,8 @@
     "attachment": "vcs-and-angels.csv",
     "approval_handling": "prompt_user",
     "start_phase": "plan",
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "group": "rose-bench"
   },
   {
     "name": "outreach-batch",
@@ -2982,7 +3174,8 @@
       "long-horizon:outreach-angel-feedback-batch",
       "test-prompts:Outreach In Batch"
     ],
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "group": "incomplete"
   },
   {
     "name": "load-test-sias",
@@ -3035,7 +3228,8 @@
       "long-horizon:load-test-mass-agent-arithmetic"
     ],
     "bench": "pipeline-e2e",
-    "status": "retired"
+    "status": "retired",
+    "group": "incomplete"
   },
   {
     "name": "build-boxing-payment",
@@ -3104,7 +3298,8 @@
       "long-horizon:site-build-boxing-payment-flow",
       "test-prompts:Build New Boxing Payment Flow"
     ],
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "group": "rose-bench"
   },
   {
     "name": "job-applications",
@@ -3158,7 +3353,8 @@
       "long-horizon:job-application-blitz-synthetic",
       "test-prompts:Get Jessie a Job"
     ],
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "group": "rose-bench"
   },
   {
     "name": "calendly-schedule-meeting",
@@ -3181,7 +3377,8 @@
     "attachment": null,
     "approval_handling": "auto_approve",
     "start_phase": "plan",
-    "bench": "rose-bench"
+    "bench": "rose-bench",
+    "group": "rose-bench"
   },
   {
     "name": "people-search-criteria",
@@ -3208,7 +3405,8 @@
       "spawn_browser_agent": 0,
       "spawn_claude_code_agent": 0
     },
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "people-search-targeted",
@@ -3235,7 +3433,8 @@
       "spawn_browser_agent": 0,
       "spawn_claude_code_agent": 0
     },
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "linkedin-data-download",
@@ -3261,7 +3460,8 @@
     "source": [
       "test-prompts:Test Automatic LinkedIn Connection"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "incomplete"
   },
   {
     "name": "browser-file-upload-tinypng",
@@ -3287,7 +3487,8 @@
     "source": [
       "test-prompts:Test Files in Browser Agent"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "wait-for-trigger",
@@ -3314,7 +3515,8 @@
       "test-prompts:Test Wait For",
       "user-label:daily-immediate-bitcoin-trigger"
     ],
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "group": "daily"
   },
   {
     "name": "phone-call-client-intake",
@@ -3388,7 +3590,7 @@
       "provided_mailing_address": "4821 Maplewood Drive, Austin, Texas 78731"
     },
     "description": "Real outbound phone call to a controlled AI callee that provides pinned client name and address.",
-    "group": "Daily",
+    "group": "daily",
     "human_time": "10min",
     "world_surface": "live",
     "fast_cache": "off",
@@ -3505,7 +3707,7 @@
       "total_charged_usd": "34.20"
     },
     "description": "Real outbound phone call to a controlled sandbox merchant AI callee that completes a Stripe test-card payment.",
-    "group": "Daily",
+    "group": "daily",
     "human_time": "15min",
     "world_surface": "live",
     "fast_cache": "off",

@@ -81,6 +81,28 @@ cloudbench_validate_browser_provider_contract() {
   echo "browser provider contract verified: backend=$prod_backend worker=$prod_worker"
 }
 
+cloudbench_detach_reexec() {  # cloudbench_detach_reexec <log-file> <argv...>
+  # Re-exec the given command in its OWN SESSION (fork → setsid → exec), stdin
+  # from /dev/null, stdout+stderr appended to <log-file>. A long controller
+  # launched from a terminal or agent session otherwise dies with that
+  # session's process group (observed: a 28-machine fleet torn down mid-run by
+  # launcher exit). macOS ships no setsid(1), so use Python's os.setsid.
+  local log="$1"; shift
+  python3 - "$log" "$@" <<'PY'
+import os, sys
+log, *argv = sys.argv[1:]
+if os.fork():
+    sys.exit(0)
+os.setsid()
+fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+os.dup2(fd, 1)
+os.dup2(fd, 2)
+null = os.open(os.devnull, os.O_RDONLY)
+os.dup2(null, 0)
+os.execvp(argv[0], argv)
+PY
+}
+
 cloudbench_retry_command() {
   local max_attempts="$1" retry_delay_seconds="$2"
   shift 2
@@ -186,6 +208,32 @@ for machine in json.load(sys.stdin) or []:
     if machine.get("id"):
         print(machine["id"])
 '
+}
+
+# Python-side manifest list + fingerprint (single source of truth — sync-deps,
+# the fleet preflight, and --refresh-deps must agree byte-for-byte or the
+# warm-snapshot freshness check misfires).
+CLOUDBENCH_PYTHON_MANIFESTS=(agents/requirements.txt)
+cloudbench_manifest_fingerprint() {
+    local root="$1"
+    shift
+    python3 - "$root" "$@" <<'FPY'
+import hashlib
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+digest = hashlib.sha256()
+for relative in sys.argv[2:]:
+    path = root / relative
+    if not path.is_file():
+        raise SystemExit(f"missing dependency manifest: {path}")
+    digest.update(relative.encode())
+    digest.update(b"\0")
+    digest.update(path.read_bytes())
+    digest.update(b"\0")
+print(digest.hexdigest())
+FPY
 }
 
 cloudbench_node_dependency_fingerprint() {

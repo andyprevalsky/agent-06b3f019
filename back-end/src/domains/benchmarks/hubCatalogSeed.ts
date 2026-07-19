@@ -80,17 +80,26 @@ export function ensureBenchmarkTasksSeeded(): Promise<{ inserted: number; total:
 }
 
 /**
- * Two narrow exceptions to DB-wins, applied on every seed:
+ * Three narrow exceptions to DB-wins, applied on every seed:
  *   - empty-string descriptions violate the catalog contract (patchTask deletes
  *     the key on clear) — heal rows seeded before that rule existed
  *   - `retired` in tasks.json propagates to existing rows: retirement is a
  *     repo-level decree (the eval suite reads the file). Un-retiring via the
  *     hub still sticks — the poller exports the DB catalog back to tasks.json,
  *     after which the file no longer says retired.
+ *   - the `group` label (the Benchmarks page's group filter) is a repo-level
+ *     classification, not hub-editable (absent from taskEditSchema), so it
+ *     propagates file→DB on every seed — this is how the label reaches rows
+ *     seeded before the field existed without a full reseed.
  */
 async function reconcileSeededRows(tasks: RawTask[]): Promise<void> {
   const retiredInFile = new Set(
     tasks.filter((t) => t.status === 'retired').map((t) => t.name as string)
+  );
+  const groupInFile = new Map(
+    tasks
+      .filter((t) => typeof t.group === 'string')
+      .map((t) => [t.name as string, t.group as string])
   );
   for (const row of await repo.findAllTasks()) {
     const definition = { ...((row.definition ?? {}) as Record<string, unknown>) };
@@ -102,6 +111,11 @@ async function reconcileSeededRows(tasks: RawTask[]): Promise<void> {
     if (retiredInFile.has(row.name) && row.status !== 'retired') {
       data.status = 'retired';
       definition.status = 'retired';
+      data.definition = definition as repo.JsonInput;
+    }
+    const fileGroup = groupInFile.get(row.name);
+    if (fileGroup !== undefined && definition.group !== fileGroup) {
+      definition.group = fileGroup;
       data.definition = definition as repo.JsonInput;
     }
     if (Object.keys(data).length > 0) {

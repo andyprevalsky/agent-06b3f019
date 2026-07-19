@@ -21,6 +21,10 @@ export default defineConfig({
         __dirname,
         'tests/blackbox/stubs/paper-design-shaders.ts'
       ),
+      // front-end sources resolve react-plaid-link from the repo-root
+      // node_modules while test files resolve mac-app's copy; pin one id so
+      // vi.mock('react-plaid-link') intercepts both import sites.
+      'react-plaid-link': path.resolve(__dirname, 'node_modules/react-plaid-link'),
     },
   },
   define: {

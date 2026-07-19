@@ -9,6 +9,57 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+PROVIDER_ORDER = (
+    "codex_token",
+    "claude_oauth_token",
+    "gpt_api_key",
+    "anthropic_api_key",
+    "openrouter_model_1",
+    "openrouter_model_2",
+)
+
+
+def merge_usage_breakdowns(breakdowns) -> dict:
+    """Merge already-classified usage without importing the full agents tree.
+
+    This script is copied into the fleet's minimal immutable script snapshot,
+    where the ``benchmarks`` package is intentionally unavailable.
+    """
+    merged: dict[str, dict] = {}
+    for breakdown in breakdowns:
+        for provider, usage in breakdown.items():
+            provider_total = merged.setdefault(
+                provider,
+                {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "models": {}},
+            )
+            for field in ("calls", "input_tokens", "output_tokens"):
+                provider_total[field] += int(usage.get(field) or 0)
+            provider_total["cost_usd"] += float(usage.get("cost_usd") or 0)
+            for model, model_usage in (usage.get("models") or {}).items():
+                model_total = provider_total["models"].setdefault(
+                    model,
+                    {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0},
+                )
+                for field in ("calls", "input_tokens", "output_tokens"):
+                    model_total[field] += int(model_usage.get(field) or 0)
+                model_total["cost_usd"] += float(model_usage.get("cost_usd") or 0)
+    for provider in PROVIDER_ORDER:
+        merged.setdefault(
+            provider,
+            {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0, "models": {}},
+        )
+    merged = {
+        provider: merged[provider]
+        for provider in (*PROVIDER_ORDER, "unclassified")
+        if provider in merged
+    }
+    for usage in merged.values():
+        usage["cost_usd"] = round(usage["cost_usd"], 8)
+        for model_usage in usage["models"].values():
+            model_usage["cost_usd"] = round(model_usage["cost_usd"], 8)
+    return merged
+
+
 def aggregate(fleet_dir: Path) -> dict:
     benches = json.loads((fleet_dir / "_batch/benches.json").read_text())
     tasks: list[dict] = []
@@ -45,6 +96,9 @@ def aggregate(fleet_dir: Path) -> dict:
     cache_read = sum(int(task.get("cache_read_input_tokens") or 0) for task in tasks)
     cache_create = sum(int(task.get("cache_creation_input_tokens") or 0) for task in tasks)
     cache_total = cache_read + cache_create
+    llm_usage = merge_usage_breakdowns(
+        task.get("llm_usage_by_provider") or {} for task in tasks
+    )
     return {
         "run_id": fleet_dir.name,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -61,6 +115,7 @@ def aggregate(fleet_dir: Path) -> dict:
             "cache_read_input_tokens": cache_read,
             "cache_creation_input_tokens": cache_create,
             "cache_hit_pct": round(100 * cache_read / cache_total, 1) if cache_total else None,
+            "llm_usage_by_provider": llm_usage,
         },
         "memory_summary": None,
         "tasks": tasks,
@@ -73,7 +128,13 @@ def main() -> int:
         return 2
     fleet_dir = Path(sys.argv[1])
     output = Path(sys.argv[2])
-    output.write_text(json.dumps(aggregate(fleet_dir), indent=2) + "\n")
+    result = aggregate(fleet_dir)
+    output.write_text(json.dumps(result, indent=2) + "\n")
+    usage_artifact = {
+        "run_id": result["run_id"],
+        "providers": result["summary"]["llm_usage_by_provider"],
+    }
+    output.with_name("llm-usage.json").write_text(json.dumps(usage_artifact, indent=2) + "\n")
     return 0
 
 

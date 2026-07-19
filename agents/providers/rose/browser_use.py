@@ -415,8 +415,6 @@ def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]
             "required": required,
             "additionalProperties": False,
         }
-        if "anyOf" in tool:
-            input_schema["anyOf"] = tool["anyOf"]
         tools.append({"name": action_name, "description": tool["description"], "input_schema": input_schema})
     return tools
 

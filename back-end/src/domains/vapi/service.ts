@@ -17,10 +17,26 @@ import {
   type ToolSideEffectJson,
 } from '../../providers/toolSideEffects';
 import { lookupUserVoiceAndName, normalizeJsonSchema, normalizePhoneNumber } from './helpers';
-import { agentIdFromOperationKey, archiveVapiJson, archiveVapiPollResult } from './archive';
+import {
+  agentIdFromOperationKey,
+  archiveVapiJson,
+  archiveVapiPollResult,
+  type VapiPollExchange,
+} from './archive';
 
 const log = createLogger('Vapi');
 const VAPI_CALL_OPERATION_TYPE = 'vapi.outbound_call';
+const VAPI_POLL_DIAGNOSTIC_HEADERS = [
+  'age',
+  'cache-control',
+  'cf-cache-status',
+  'date',
+  'etag',
+  'last-modified',
+  'server',
+  'via',
+  'x-cache',
+] as const;
 
 type PreparedCall = {
   vapiPrivateKey: string;
@@ -70,6 +86,33 @@ function getVapiPrivateKey(): string {
     throw new VapiNotConfiguredError();
   }
   return vapiPrivateKey;
+}
+
+export function buildVapiPollExchange(
+  requestUrl: string,
+  startedAt: Date,
+  receivedAt: Date,
+  response: Response
+): VapiPollExchange {
+  const headers = Object.fromEntries(
+    VAPI_POLL_DIAGNOSTIC_HEADERS.flatMap((name) => {
+      const value = response.headers.get(name);
+      return value === null ? [] : [[name, value]];
+    })
+  );
+  return {
+    request: {
+      method: 'GET',
+      url: requestUrl,
+      startedAt: startedAt.toISOString(),
+    },
+    response: {
+      status: response.status,
+      headers,
+      receivedAt: receivedAt.toISOString(),
+      durationMs: Math.max(0, receivedAt.getTime() - startedAt.getTime()),
+    },
+  };
 }
 
 /** Fetch wrapper that converts AbortError (timeout) into VapiApiError. */
@@ -260,8 +303,10 @@ export async function getCallStatus(callId: string): Promise<Record<string, unkn
   }
 
   // Get call status from Vapi API
+  const requestUrl = `${VAPI_BASE_URL}/call/${callId}`;
+  const startedAt = new Date();
   const response = await fetchVapi(
-    `${VAPI_BASE_URL}/call/${callId}`,
+    requestUrl,
     {
       method: 'GET',
       headers: {
@@ -270,15 +315,18 @@ export async function getCallStatus(callId: string): Promise<Record<string, unkn
     },
     15_000
   );
+  const receivedAt = new Date();
+  const exchange = buildVapiPollExchange(requestUrl, startedAt, receivedAt, response);
 
   if (!response.ok) {
     const errorText = await response.text();
+    await archiveVapiPollResult(callId, { error: errorText }, exchange);
     log.error('Vapi API error', { status: response.status, details: logTruncate(errorText) });
     throw new VapiApiError(response.status, errorText);
   }
 
   const result = (await response.json()) as Record<string, unknown>;
-  await archiveVapiPollResult(callId, result);
+  await archiveVapiPollResult(callId, result, exchange);
 
   log.info('Vapi call poll response', {
     callId,

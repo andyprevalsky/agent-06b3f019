@@ -10152,6 +10152,35 @@ def test_payment_card_verifier_evidence_exposes_only_valid_last_four():
     assert _build_payment_card_verifier_evidence(None) is None
 
 
+async def test_payment_lookup_reuses_backend_matched_legacy_fingerprint():
+    from domains.spawn_browser_agent_v3.handler import _lookup_payment_purchase
+
+    calls = []
+
+    async def fake_execute_activity(activity_name, *args, **kwargs):
+        calls.append((activity_name, kwargs["args"]))
+        return {
+            "found": True,
+            "reusable": True,
+            "purchase": {"cardId": "held-card", "fingerprint": "stored-legacy-fingerprint"},
+        }
+
+    with patch(
+        "domains.spawn_browser_agent_v3.handler.workflow.execute_activity",
+        side_effect=fake_execute_activity,
+    ):
+        result, matched = await _lookup_payment_purchase(
+            "user-1",
+            {"fingerprint": "canonical-fingerprint"},
+        )
+
+    assert result["reusable"] is True
+    assert matched == "stored-legacy-fingerprint"
+    assert calls == [
+        ("lookup_purchase_activity", ["user-1", "canonical-fingerprint"]),
+    ]
+
+
 class _FakePaymentGateHandle:
     """Awaitable activity handle returning a fixed result (matches manager fake)."""
 
@@ -10388,6 +10417,10 @@ async def run_all_tests():
     r.record(
         "payment_card_verifier_evidence_only_last_four",
         test_payment_card_verifier_evidence_exposes_only_valid_last_four,
+    )
+    await r.record_async(
+        "payment_lookup_backend_matched_legacy_fingerprint",
+        test_payment_lookup_reuses_backend_matched_legacy_fingerprint,
     )
 
     await r.record_async("cdp_use_websocket_direct", test_cdp_use_websocket_patch_disables_proxy_discovery)

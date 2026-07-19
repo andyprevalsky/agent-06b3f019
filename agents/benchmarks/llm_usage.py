@@ -1,0 +1,162 @@
+"""Provider/model-level LLM usage aggregation for benchmark artifacts."""
+
+from __future__ import annotations
+
+import runpy
+from pathlib import Path
+from typing import Any, Iterable
+
+# Load the data-only registry file without importing providers.rose.__init__,
+# which pulls runtime HTTP dependencies that the standalone fleet aggregator
+# intentionally does not need.
+POOL_REGISTRY = runpy.run_path(
+    str(Path(__file__).resolve().parents[1] / "providers" / "rose" / "pools.py")
+)["POOL_REGISTRY"]
+
+
+PROVIDER_ORDER = (
+    "codex_token",
+    "claude_oauth_token",
+    "gpt_api_key",
+    "anthropic_api_key",
+    "openrouter_model_1",
+    "openrouter_model_2",
+)
+
+
+def classify_model(model: str) -> tuple[str, str]:
+    suffixes = (
+        ("-gpt", "codex_token"),
+        ("-claude", "claude_oauth_token"),
+        ("-openai", "gpt_api_key"),
+        ("-anthropic", "anthropic_api_key"),
+    )
+    for suffix, provider in suffixes:
+        if model.endswith(suffix):
+            return provider, model[: -len(suffix)]
+    for slot in (0, 1):
+        if any(model == spec.waterfall[slot] for spec in POOL_REGISTRY.values()):
+            return f"openrouter_model_{slot + 1}", model
+    return "unclassified", model or "unknown"
+
+
+def classify_usage_item(item: dict[str, Any]) -> tuple[str, str]:
+    """Classify usage records whose transport model was not serialized.
+
+    Verifier telemetry records the forced Rose Ultra pool alias even though
+    ``check_progress`` supplies the Claude OAuth token, and browser-use telemetry
+    can omit ``model`` while naming the Rose Browser Use provider. Both pools'
+    direct Claude-auth submodel is Fable 5. Preserve that credential/submodel
+    attribution instead of leaking otherwise-known calls into ``unclassified``.
+    """
+    model = str(item.get("model") or "")
+    provider = str(item.get("provider") or "")
+    if model == "rose-labs/rose-1-ultra" and provider.startswith("Verifier ("):
+        return "claude_oauth_token", POOL_REGISTRY["rose-1-ultra"].claude_auth_model
+    # Browser telemetry is created without a transport model, then
+    # AgentWorkflow._track_usage may persist the parent agent's pool alias in
+    # that field. The provider label survives both paths and is the reliable
+    # credential identity.
+    if provider == "Rose 1 Browser Use":
+        return "claude_oauth_token", POOL_REGISTRY["rose-1-browser-use"].claude_auth_model
+    return classify_model(model)
+
+
+def _empty_metrics() -> dict[str, int | float]:
+    return {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0}
+
+
+def aggregate_usage_items(items: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    breakdown: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if item.get("type") != "llm":
+            continue
+        provider, sub_model = classify_usage_item(item)
+        provider_row = breakdown.setdefault(provider, {**_empty_metrics(), "models": {}})
+        model_row = provider_row["models"].setdefault(sub_model, _empty_metrics())
+        input_tokens = sum(
+            int(item.get(key) or 0)
+            for key in ("tokens_in", "cache_read_input_tokens", "cache_creation_input_tokens")
+        )
+        output_tokens = int(item.get("tokens_out") or 0)
+        cost_usd = float(item.get("cost_cents") or 0) / 100.0
+        for row in (provider_row, model_row):
+            row["calls"] += 1
+            row["input_tokens"] += input_tokens
+            row["output_tokens"] += output_tokens
+            row["cost_usd"] += cost_usd
+    return _round_costs(breakdown)
+
+
+def aggregate_repeatable_cache_usage(items: Iterable[dict[str, Any]]) -> dict[str, int | float]:
+    """Return cache reuse for call groups that repeat within one agent run.
+
+    A one-shot verifier or summary call has no same-run reuse opportunity, so
+    mixing it into a prefix-reuse ratchet makes the result depend on unrelated
+    output size. Group by agent, call site, and normalized cache namespace, then
+    retain every call from groups with at least two calls so the first write and
+    later reads stay accountable.
+    """
+    llm_items = [item for item in items if item.get("type") == "llm"]
+    def cache_group(item: dict[str, Any]) -> tuple[str, str, str, str]:
+        provider, model = classify_usage_item(item)
+        return (
+            str(item.get("_benchmark_agent_id") or item.get("agent_id") or "unknown"),
+            str(item.get("call_site") or "unknown"),
+            provider,
+            model,
+        )
+
+    group_counts: dict[tuple[str, str, str, str], int] = {}
+    for item in llm_items:
+        group = cache_group(item)
+        group_counts[group] = group_counts.get(group, 0) + 1
+    repeatable_items = [
+        item
+        for item in llm_items
+        if group_counts[cache_group(item)] >= 2
+    ]
+    cache_read = sum(int(item.get("cache_read_input_tokens") or 0) for item in repeatable_items)
+    cache_write = sum(int(item.get("cache_creation_input_tokens") or 0) for item in repeatable_items)
+    total = cache_read + cache_write
+    return {
+        "cache_read_input_tokens": cache_read,
+        "cache_creation_input_tokens": cache_write,
+        "cache_hit_pct": round(cache_read / total * 100, 1) if total else 0.0,
+    }
+
+
+def merge_usage_breakdowns(
+    breakdowns: Iterable[dict[str, dict[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for breakdown in breakdowns:
+        for provider, source in breakdown.items():
+            target = merged.setdefault(provider, {**_empty_metrics(), "models": {}})
+            for key in ("calls", "input_tokens", "output_tokens", "cost_usd"):
+                target[key] += source.get(key, 0)
+            for model, model_source in (source.get("models") or {}).items():
+                model_target = target["models"].setdefault(model, _empty_metrics())
+                for key in ("calls", "input_tokens", "output_tokens", "cost_usd"):
+                    model_target[key] += model_source.get(key, 0)
+    return _round_costs(merged)
+
+
+def _round_costs(breakdown: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    ordered: dict[str, dict[str, Any]] = {}
+    # The batch artifact is a fixed report contract: emit every requested auth
+    # path even when it had zero calls, so absence cannot be mistaken for a
+    # collector failure. ``unclassified`` remains conditional and must be empty
+    # in a successful artifact audit.
+    for provider in PROVIDER_ORDER:
+        breakdown.setdefault(provider, {**_empty_metrics(), "models": {}})
+    for provider in (*PROVIDER_ORDER, "unclassified"):
+        if provider not in breakdown:
+            continue
+        row = breakdown[provider]
+        row["cost_usd"] = round(float(row["cost_usd"]), 6)
+        row["models"] = dict(sorted(row["models"].items()))
+        for model_row in row["models"].values():
+            model_row["cost_usd"] = round(float(model_row["cost_usd"]), 6)
+        ordered[provider] = row
+    return ordered

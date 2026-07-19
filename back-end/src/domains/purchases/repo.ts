@@ -1,12 +1,36 @@
-import { PurchaseSpendStatus, PurchaseWalletFundingStatus, type Prisma } from '@prisma/client';
+import { Prisma, PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
+import { canonicalStoredPurchaseFingerprint } from './fingerprint';
+
+const FINGERPRINT_BACKFILL_LOCK_SEED = 8_675_309;
+const IDEMPOTENT_PURCHASE_STATUSES = [
+  PurchaseSpendStatus.PENDING_APPROVAL,
+  PurchaseSpendStatus.CHARGING,
+  PurchaseSpendStatus.HELD,
+];
+
+function legacyFingerprintWhere(
+  userId: string,
+  since: Date,
+  before: Date
+): Prisma.PurchaseSpendWhereInput {
+  return {
+    userId,
+    status: { in: IDEMPOTENT_PURCHASE_STATUSES },
+    canonicalFingerprint: null,
+    createdAt: { gte: since, lt: before },
+  };
+}
 
 export async function findMostRecentPurchaseByUserAndFingerprint(
   userId: string,
   fingerprint: string
 ) {
   return prisma.purchaseSpend.findFirst({
-    where: { userId, fingerprint },
+    where: {
+      userId,
+      OR: [{ fingerprint }, { canonicalFingerprint: fingerprint }],
+    },
     orderBy: { createdAt: 'desc' },
   });
 }
@@ -19,17 +43,69 @@ export async function findRecentPurchaseByUserAndFingerprint(
   return prisma.purchaseSpend.findFirst({
     where: {
       userId,
-      fingerprint,
+      OR: [{ fingerprint }, { canonicalFingerprint: fingerprint }],
       createdAt: { gte: since },
     },
     orderBy: { createdAt: 'desc' },
   });
 }
 
+export async function backfillLegacyCanonicalFingerprints(
+  userId: string,
+  since: Date,
+  before: Date
+) {
+  const where = legacyFingerprintWhere(userId, since, before);
+  const remaining = await prisma.purchaseSpend.findFirst({ where, select: { id: true } });
+  if (remaining === null) return 0;
+
+  return prisma.$transaction(
+    async (transaction) => {
+      // Serialize the one-time migration per user. Concurrent first misses wait here, then see no
+      // remaining null rows instead of independently materializing and updating the same receipts.
+      await transaction.$queryRaw`
+        WITH acquired AS MATERIALIZED (
+          SELECT pg_advisory_xact_lock(
+            hashtextextended(${userId}, ${FINGERPRINT_BACKFILL_LOCK_SEED})
+          )
+        )
+        SELECT 1 AS locked FROM acquired
+      `;
+      const candidates = await transaction.purchaseSpend.findMany({
+        where,
+        orderBy: { createdAt: 'asc' },
+      });
+      const entries = candidates.flatMap((candidate) => {
+        const canonicalFingerprint = canonicalStoredPurchaseFingerprint({
+          userId,
+          merchant: candidate.merchant,
+          lineItemsJson: candidate.lineItemsJson,
+          totalCents: candidate.totalCents,
+        });
+        return canonicalFingerprint === null ? [] : [{ id: candidate.id, canonicalFingerprint }];
+      });
+      if (entries.length === 0) return 0;
+
+      const valueRows = entries.map(
+        (entry) => Prisma.sql`(${entry.id}, ${entry.canonicalFingerprint})`
+      );
+      return transaction.$executeRaw(Prisma.sql`
+        UPDATE "PurchaseSpend" AS purchase
+        SET "canonicalFingerprint" = candidate."canonicalFingerprint"
+        FROM (VALUES ${Prisma.join(valueRows)}) AS candidate("id", "canonicalFingerprint")
+        WHERE purchase.id = candidate.id
+          AND purchase."canonicalFingerprint" IS NULL
+      `);
+    },
+    { maxWait: 30_000, timeout: 30_000 }
+  );
+}
+
 export async function createPendingPurchase(data: {
   userId: string;
   agentId?: string;
   fingerprint: string;
+  canonicalFingerprint: string;
   merchant: string;
   lineItemsJson: unknown;
   totalCents: number;
@@ -39,6 +115,7 @@ export async function createPendingPurchase(data: {
       userId: data.userId,
       agentId: data.agentId,
       fingerprint: data.fingerprint,
+      canonicalFingerprint: data.canonicalFingerprint,
       merchant: data.merchant,
       lineItemsJson: data.lineItemsJson as Prisma.InputJsonValue,
       totalCents: data.totalCents,

@@ -296,6 +296,7 @@ model PurchaseSpend {
   userId                String
   agentId               String?
   fingerprint           String
+  canonicalFingerprint  String?
   cardId                String?
   merchant              String
   lineItemsJson         Json
@@ -313,6 +314,7 @@ model PurchaseSpend {
   // is enforced in application logic (status checks + a Stripe idempotency key per purchase row)
   // plus the 24h reuse window — not a DB constraint.
   @@index([userId, fingerprint])
+  @@index([userId, canonicalFingerprint])
   @@index([agentId])
   @@index([cardId])
   @@index([status])

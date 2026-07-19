@@ -8,6 +8,7 @@ import {
 } from './store';
 
 type McpResult = {
+  isError?: boolean;
   structuredContent?: unknown;
   toolResult?: unknown;
   content?: Array<{ type: string; text?: string }>;
@@ -27,14 +28,25 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function resultRecord(result: unknown): Record<string, unknown> {
+function resultText(result: unknown): string {
   const envelope = result as McpResult;
-  const direct = asRecord(envelope.toolResult) ?? asRecord(envelope.structuredContent);
-  if (direct !== undefined) return direct;
-  const text = (envelope.content ?? [])
+  return (envelope.content ?? [])
     .filter((part) => part.type === 'text' && typeof part.text === 'string')
     .map((part) => part.text)
     .join('\n');
+}
+
+function resultRecord(result: unknown): Record<string, unknown> {
+  const envelope = result as McpResult;
+  const direct = asRecord(envelope.toolResult) ?? asRecord(envelope.structuredContent);
+  const text = resultText(result);
+  const status = direct?.status;
+  if (envelope.isError === true || status === 'error') {
+    const message =
+      direct === undefined ? undefined : stringField(direct, ['message', 'error', 'detail']);
+    throw new Error(message ?? (text || 'AgentCard Organization MCP tool failed'));
+  }
+  if (direct !== undefined) return direct;
   if (text !== '') {
     try {
       return asRecord(JSON.parse(text)) ?? { message: text };
@@ -69,11 +81,15 @@ function isExpired(config: OrgOnboardingConfig): boolean {
   return Number.isFinite(expiresAt) && expiresAt <= Date.now();
 }
 
-export async function startOrgCardholderOnboarding(userId: string): Promise<OrgOnboardingConfig> {
-  const existing = await getOrgOnboardingConfig(userId);
+export async function startOrgCardholderOnboarding(
+  userId: string,
+  dependencies: Partial<OrgOnboardingDependencies> = {}
+): Promise<OrgOnboardingConfig> {
+  const deps = { ...defaultOnboardingDependencies, ...dependencies };
+  const existing = await deps.getOrgOnboardingConfig(userId);
   if (existing !== undefined && !isExpired(existing)) return existing;
 
-  const result = await callOrgTool('create_onboarding_session', {
+  const result = await deps.callOrgTool('create_onboarding_session', {
     return_url: onboardingReturnUrl(),
     external_user_id: userId,
     state: userId,
@@ -92,7 +108,7 @@ export async function startOrgCardholderOnboarding(userId: string): Promise<OrgO
       return expiresAt !== undefined ? { expiresAt } : {};
     })(),
   };
-  await saveOrgOnboardingConfig(userId, onboarding);
+  await deps.saveOrgOnboardingConfig(userId, onboarding);
   return onboarding;
 }
 
@@ -101,6 +117,7 @@ export interface OrgOnboardingDependencies {
   getOrgManagedCardholderId: typeof getOrgManagedCardholderId;
   getOrgOnboardingConfig: typeof getOrgOnboardingConfig;
   saveOrgCardholderId: typeof saveOrgCardholderId;
+  saveOrgOnboardingConfig: typeof saveOrgOnboardingConfig;
 }
 
 const defaultOnboardingDependencies: OrgOnboardingDependencies = {
@@ -108,6 +125,7 @@ const defaultOnboardingDependencies: OrgOnboardingDependencies = {
   getOrgManagedCardholderId,
   getOrgOnboardingConfig,
   saveOrgCardholderId,
+  saveOrgOnboardingConfig,
 };
 
 export async function refreshOrgCardholderStatus(

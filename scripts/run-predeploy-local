@@ -60,5 +60,5 @@ echo "🧪 Pre-Deploy smoke (LOCAL isolated stack) — ${#PREDEPLOY_TASKS[@]} ta
 # resource profile close to the calibration (still parallel, ~1 browser task at a
 # time) so the timeouts hold. Override with PREDEPLOY_LOCAL_CONCURRENCY.
 LOCAL_CONCURRENCY="${PREDEPLOY_LOCAL_CONCURRENCY:-2}"
-exec bash "$ROOT_DIR/scripts/run-bench" --local "${PREDEPLOY_TASKS[@]}" \
+BENCHMARK_SKIP_WMH_BUILD=1 exec bash "$ROOT_DIR/scripts/run-bench" --local "${PREDEPLOY_TASKS[@]}" \
     --max-concurrency "$LOCAL_CONCURRENCY"

@@ -96,19 +96,52 @@ export async function computeTaskStats(): Promise<Map<string, TaskStats>> {
 
 const READY_STATUSES = new Set(['ready']);
 
+/** Canonical catalog-group tokens the Benchmarks page filters + renders on. */
+const CATALOG_GROUPS = ['pre-deploy', 'daily', 'rose-bench', 'incomplete'] as const;
+
 /**
- * The four catalog groups (matches how the suites actually run):
+ * Normalize a stored `group` label (from tasks.json) to a canonical token.
+ * Tolerates casing + the human-readable aliases used historically
+ * ("Daily", "Pre-Deploy", "Rose Bench", "Incomplete"). Returns null for an
+ * absent or unrecognized label so the caller falls back to derivation.
+ */
+function normalizeStoredGroup(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const token = raw
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_]+/g, '-');
+  return (CATALOG_GROUPS as readonly string[]).includes(token) ? token : null;
+}
+
+/**
+ * Derive the catalog group when a task carries no explicit `group` label
+ * (matches how the suites actually run):
  *   incomplete — not runnable (missing fixtures/judges; excluded from suites)
  *   pre-deploy — the `smoke` tag set (`run_benchmark.py --suite smoke`, the
  *                gate /deploy and scripts/test.sh run before merging)
  *   rose-bench — harness-independent capability benches (bench field)
  *   daily      — every other ready pipeline-e2e task (the broad eval suite)
  */
-function taskGroup(status: string | null, bench: string | null, tags: string[]): string {
+function deriveTaskGroup(status: string | null, bench: string | null, tags: string[]): string {
   if (status !== null && !READY_STATUSES.has(status)) return 'incomplete';
   if (tags.includes('smoke')) return 'pre-deploy';
   if (bench === 'rose-bench') return 'rose-bench';
   return 'daily';
+}
+
+/**
+ * The Benchmarks page groups off the stored `group` label (tasks.json →
+ * definition.group). Derivation is only the fallback for tasks that carry no
+ * explicit label (e.g. freshly hub-created rows before an export).
+ */
+function resolveTaskGroup(
+  storedGroup: unknown,
+  status: string | null,
+  bench: string | null,
+  tags: string[]
+): string {
+  return normalizeStoredGroup(storedGroup) ?? deriveTaskGroup(status, bench, tags);
 }
 
 export interface CatalogTask {
@@ -153,7 +186,7 @@ function toCatalogTask(
     prompt: row.prompt,
     status: row.status,
     bench: row.bench,
-    group: taskGroup(row.status, row.bench, row.tags),
+    group: resolveTaskGroup(definition.group, row.status, row.bench, row.tags),
     tags: row.tags,
     timeout_seconds: row.timeoutSeconds,
     price_limit_cents: row.priceLimitCents,

@@ -222,7 +222,9 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     write_lock = tools[3]
     purchase_item = write_lock["input_schema"]["properties"]["purchase"]["properties"]["items"]["items"]
     assert purchase_item["required"] == ["title", "rating", "review_count", "product_url"]
-    assert write_lock["input_schema"]["anyOf"][0]["required"] == ["purchase"]
+    assert "anyOf" not in write_lock["input_schema"]
+    assert "oneOf" not in write_lock["input_schema"]
+    assert "allOf" not in write_lock["input_schema"]
 
 
 def test_build_browser_use_tools_emits_valid_required_keywords():

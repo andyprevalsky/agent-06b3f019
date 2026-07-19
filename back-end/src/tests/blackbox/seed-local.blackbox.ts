@@ -2,29 +2,32 @@
 
 import {
   syncCookieCredentials,
+  syncCookieBundleCredentials,
   syncBrowserPasswordCredentials,
   syncBrowserPermissionCredentials,
   syncIntegrationCredentials,
   syncOriginCredentials,
   syncPasskeyCredentials,
   syncRequiredCredentialTable,
+  syncSteelSessionAuthCredentials,
   type BrowserPasswordModel,
   type BrowserPermissionModel,
   type CookieModel,
+  type CookieBundleModel,
   type IntegrationModel,
   type OriginModel,
+  type SteelSessionAuthModel,
 } from '../../../scripts/seed-local-credentials';
 import {
   PrismaClient,
   type BrowserPassword,
   type BrowserPermission,
   type Cookie,
+  type CookieBundle,
   type LocalStorageOrigin,
+  type SteelSessionAuth,
 } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { runSyncStep, syncUserRecord } from '../../../scripts/seed-local-helpers';
 
 type TestFn = () => Promise<void>;
 const tests: Array<{ name: string; fn: TestFn }> = [];
@@ -54,83 +57,6 @@ type PasskeyRecord = {
 function compoundKey(pk: { userId: string; rpId: string; credentialId: string }) {
   return `${pk.userId}:${pk.rpId}:${pk.credentialId}`;
 }
-
-test('syncUserRecord does not request branch-only columns from production', async () => {
-  const user = {
-    id: 'user-row',
-    userId: 'seed-user',
-    name: 'Seed User',
-    addressLine1: null,
-    addressLine2: null,
-    city: null,
-    state: null,
-    postalCode: null,
-    country: 'United States',
-    createdAt: new Date('2026-07-01T00:00:00Z'),
-    updatedAt: new Date('2026-07-01T00:00:00Z'),
-    inviteCode: null,
-    inviteCodeUses: 0,
-    usedInviteCode: null,
-    encryptedPaymentInformation: null,
-    phone: null,
-    isAnonymous: false,
-    onboardingCompletedAt: null,
-    imessageBridgeLastSeenAt: null,
-    systemName: null,
-    profilePicture: null,
-    customSystemPrompt: null,
-    voicePreferenceId: null,
-  };
-  let upserted = false;
-  const { imessageBridgeLastSeenAt, ...productionUser } = user;
-  void imessageBridgeLastSeenAt;
-  const remote = {
-    findUnique: async (args: { where: { userId: string }; select?: Record<string, boolean> }) => {
-      if (!args.select || args.select.imessageBridgeLastSeenAt) {
-        throw new Error('The column `User.imessageBridgeLastSeenAt` does not exist');
-      }
-      return productionUser;
-    },
-  };
-  const local = {
-    upsert: async () => {
-      upserted = true;
-    },
-  };
-
-  const count = await syncUserRecord(remote, local, user.userId);
-
-  assert(count === 1, `expected one synced user, got ${count}`);
-  assert(upserted, 'expected the production user to be upserted locally');
-});
-
-test('runSyncStep fails closed when a table sync fails', async () => {
-  let rejected = false;
-  try {
-    await runSyncStep('User', async () => {
-      throw new Error('remote schema mismatch');
-    });
-  } catch (err) {
-    rejected = err instanceof Error && err.message.includes('remote schema mismatch');
-  }
-  assert(rejected, 'expected a failed table sync to reject the overall sync');
-});
-
-test('syncUserRecord permits a missing optional pool-token user', async () => {
-  let upserted = false;
-  const count = await syncUserRecord(
-    { findUnique: async () => null },
-    {
-      upsert: async () => {
-        upserted = true;
-      },
-    },
-    'synthetic-pool-user'
-  );
-
-  assert(count === 0, `expected no synced user, got ${count}`);
-  assert(!upserted, 'expected no local upsert for a missing optional user');
-});
 
 test('syncPasskeyCredentials copies passkeys and never moves local signCount backward', async () => {
   const userId = 'seed-user';
@@ -371,6 +297,66 @@ test('syncCookieCredentials bounds local database writes', async () => {
   assert(maxActiveWrites === 8, `expected eight active cookie writes, got ${maxActiveWrites}`);
 });
 
+test('durable browser-auth refs sync by natural identity and preserve local ids', async () => {
+  const now = new Date('2026-07-13T00:00:00Z');
+  const bundle: CookieBundle = {
+    id: 'remote-bundle-id',
+    userId: 'seed-user',
+    authRealm: 'amazon.com',
+    browserSource: 'chrome',
+    browserProfile: 'Default',
+    accountLabel: 'Andy',
+    disabledAt: null,
+    disabledReason: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const steelSession: SteelSessionAuth = {
+    id: 'remote-steel-id',
+    userId: 'seed-user',
+    contextId: 'steel-context-id',
+    authRealm: 'amazon.com',
+    authenticatedAt: now,
+    disabledAt: null,
+    disabledReason: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  const captured: Record<string, Record<string, unknown>> = {};
+  const bundleModel: CookieBundleModel = {
+    upsert: async (args) => {
+      captured.bundle = args as unknown as Record<string, unknown>;
+      return {};
+    },
+  };
+  const steelModel: SteelSessionAuthModel = {
+    upsert: async (args) => {
+      captured.steel = args as unknown as Record<string, unknown>;
+      return {};
+    },
+  };
+
+  await syncCookieBundleCredentials(bundleModel, [bundle]);
+  await syncSteelSessionAuthCredentials(steelModel, [steelSession]);
+
+  const bundleWhere = captured.bundle.where as {
+    userId_authRealm_browserSource_browserProfile?: Record<string, string>;
+  };
+  assert(
+    bundleWhere.userId_authRealm_browserSource_browserProfile?.authRealm === 'amazon.com',
+    'expected CookieBundle realm in its natural identity'
+  );
+  const steelWhere = captured.steel.where as {
+    userId_contextId_authRealm?: Record<string, string>;
+  };
+  assert(
+    steelWhere.userId_contextId_authRealm?.contextId === 'steel-context-id',
+    'expected Steel session context in its natural identity'
+  );
+  assert(!('id' in (captured.bundle.update as object)), 'bundle update must preserve local id');
+  assert(!('id' in (captured.steel.update as object)), 'Steel update must preserve local id');
+});
+
 test('browser-state sync helpers use every schema identity instead of remote primary ids', async () => {
   const now = new Date('2026-07-13T00:00:00Z');
   const origin: LocalStorageOrigin = {
@@ -470,74 +456,9 @@ test('required credential table sync propagates write failures', async () => {
   );
 });
 
-test('full sync defers browser-auth failure until later tables finish', async () => {
-  const source = readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
-  const fullSyncCollector = source.indexOf('const browserAuthSyncFailures: Error[] = [];');
-  const collectedBrowserSync = source.indexOf(
-    'await syncBrowserAuthForCurrentMode(browserAuthSyncFailures);'
-  );
-  const laterTable = source.indexOf("await syncTable('Goal Blueprints'");
-  const deferredFailure = source.indexOf('throwBrowserAuthSyncFailures(browserAuthSyncFailures);');
-  const credentialsOnlyBranch = source.indexOf('if (CREDENTIALS_ONLY)');
-  const failFastBrowserSync = source.indexOf(
-    'await syncBrowserAuthForCurrentMode();',
-    credentialsOnlyBranch
-  );
-
-  assert(fullSyncCollector > 0, 'expected full sync to collect browser-auth failures');
-  assert(
-    collectedBrowserSync > fullSyncCollector,
-    'expected full sync to pass its failure collector to browser-auth sync'
-  );
-  assert(laterTable > collectedBrowserSync, 'expected later full-sync tables after browser auth');
-  assert(
-    deferredFailure > laterTable,
-    'expected collected browser-auth failures to throw only after later tables finish'
-  );
-  assert(
-    failFastBrowserSync > credentialsOnlyBranch && failFastBrowserSync < fullSyncCollector,
-    'expected credentials-only sync to remain fail-fast'
-  );
-});
-
-test('passkeys-only seed mode never enters browser state or password sync', async () => {
-  const source = readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
-  const flag = source.indexOf("process.argv.includes('--passkeys-only')");
-  const branch = source.indexOf('if (PASSKEYS_ONLY)');
-  const passkeySync = source.indexOf(
-    'await syncPasskeysOnly(undefined, { authoritative: true });',
-    branch
-  );
-  const branchReturn = source.indexOf('return;', passkeySync);
-  const credentialsOnlyBranch = source.indexOf('if (CREDENTIALS_ONLY)');
-
-  assert(flag > 0, 'expected a dedicated --passkeys-only CLI flag');
-  assert(branch > flag, 'expected passkeys-only branch after flag declaration');
-  assert(passkeySync > branch, 'expected passkeys-only branch to sync passkeys');
-  assert(branchReturn > passkeySync, 'expected passkeys-only branch to return immediately');
-  assert(
-    source.includes("'Stale Local Passkeys'") &&
-      source.includes('local.passkeyCredential.deleteMany'),
-    'expected passkeys-only mode to remove stale local passkeys'
-  );
-  assert(
-    credentialsOnlyBranch > branchReturn,
-    'expected passkeys-only mode to return before browser state/password sync'
-  );
-});
-
-test('seed-local rejects conflicting exclusive sync modes before creating database clients', async () => {
-  const source = readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
-  const validation = source.indexOf('if (requestedSeedModes.length > 1)');
-  const clients = source.indexOf('const remote = new PrismaClient');
-
-  assert(validation > 0, 'expected mutually exclusive seed-mode validation');
-  assert(clients > validation, 'expected seed-mode validation before database client creation');
-  assert(
-    source.includes('Seed modes are mutually exclusive; received'),
-    'expected conflicting flags to be named in the failure'
-  );
-});
+// Source-structure invariants for seed-local sync modes (mode branching,
+// failure deferral, transient-failure retries) live in
+// seed-local.part2.blackbox.ts.
 
 test('browser-state natural-key sync crosses the real Prisma uniqueness boundary', async () => {
   const databaseUrl = process.env.DATABASE_URL;

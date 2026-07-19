@@ -86,18 +86,17 @@ const electronHandlers = {
     getInstalledBrowsers: async () => {
       return getElectronApi()?.getInstalledBrowsers() ?? [];
     },
+    // Full browser-state sync (cookies + history + fingerprint) — the same
+    // path onboarding has always used, not just a cookie upload.
     syncBrowser: async (browserType: string, keychainPassword?: string) => {
       const api = getElectronApi();
       if (!api) throw new Error('Desktop bridge is not available');
-      const cookies = await api.readBrowserCookies(
+      const result = await api.syncBrowser(
         browserType as BrowserType,
         keychainPassword !== undefined && keychainPassword !== '' ? { keychainPassword } : undefined
       );
-      if (cookies.length > 0) {
-        const result = await api.uploadBrowserCookies(browserType as BrowserType, cookies);
-        if (!result.success) {
-          throw new Error(result.message ?? 'Upload failed');
-        }
+      if (!result.success) {
+        throw new Error(result.message ?? 'Sync failed');
       }
     },
     syncBrowserPasswords: async (browserType: string, config?: { keychainPassword?: string }) => {

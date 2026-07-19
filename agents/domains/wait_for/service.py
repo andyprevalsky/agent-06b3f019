@@ -64,7 +64,10 @@ async def evaluate_condition_activity(
 ) -> dict[str, Any]:
     """Lightweight LLM call to determine if a condition is satisfied given evidence.
 
-    Uses structured output (Pydantic schema) for reliable boolean extraction.
+    Requests JSON explicitly and parses it locally.  The lite-provider waterfall
+    includes routes that do not support provider-native structured output, so
+    passing ``response_model`` here can reject an otherwise valid JSON answer
+    before this activity gets a chance to parse it.
 
     Returns:
         Dict with satisfied (bool), reasoning (str)
@@ -75,7 +78,9 @@ async def evaluate_condition_activity(
 
     system_prompt = (
         "You are a yes/no classifier. Given a condition and evidence gathered from "
-        "the web, determine if the condition is currently satisfied."
+        "the web, determine if the condition is currently satisfied. Return exactly "
+        "one JSON object with this shape and no prose or markdown: "
+        '{"satisfied": true, "reasoning": "brief reason"}'
     )
 
     user_prompt = f"Condition: {condition}\n\nEvidence:\n{evidence}"
@@ -89,23 +94,47 @@ async def evaluate_condition_activity(
         messages,
         model=model,
         max_tokens=200,
-        response_model=ConditionEvaluation,
         claude_token=claude_token,
         skip_cache_write=True,  # Unique evidence each poll -- no cache reuse
         call_site="wait_for",
     )
     raw = result.get("content", "")
 
-    try:
-        parsed = ConditionEvaluation.model_validate_json(raw)
+    parsed = _parse_condition_evaluation(raw)
+    if parsed is not None:
         return {"satisfied": parsed.satisfied, "reasoning": parsed.reasoning}
-    except Exception:
-        # Fallback: try loose JSON parse
+    return {"satisfied": False, "reasoning": raw.strip()}
+
+
+def _parse_condition_evaluation(raw: Any) -> ConditionEvaluation | None:
+    """Extract the first valid condition object from a provider response.
+
+    Some fallback models prefix valid JSON with prose or wrap it in a markdown
+    fence.  ``JSONDecoder.raw_decode`` lets us accept that harmless formatting
+    while still validating the resulting object with the domain schema.
+    """
+
+    if not isinstance(raw, str):
+        return None
+
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(raw):
+        if character != "{":
+            continue
         try:
-            data = json.loads(raw)
-            return {
-                "satisfied": bool(data.get("satisfied", False)),
-                "reasoning": str(data.get("reasoning", raw.strip())),
-            }
-        except (json.JSONDecodeError, TypeError):
-            return {"satisfied": False, "reasoning": raw.strip()}
+            value, _ = decoder.raw_decode(raw[index:])
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(value, dict):
+            continue
+        try:
+            return ConditionEvaluation.model_validate(value)
+        except Exception:
+            # Preserve the previous loose-JSON behavior for truthy numeric
+            # booleans and missing/free-form reasoning.
+            if "satisfied" in value:
+                return ConditionEvaluation(
+                    satisfied=bool(value.get("satisfied", False)),
+                    reasoning=str(value.get("reasoning", raw.strip())),
+                )
+    return None

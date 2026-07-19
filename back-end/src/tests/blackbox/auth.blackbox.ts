@@ -154,9 +154,10 @@ interface TestContext {
   accessTokenOnboarding?: string;
   userIdOnboarding?: string;
   captureAvailable: boolean;
+  replayAvailable: boolean;
 }
 
-const ctx: TestContext = { captureAvailable: false };
+const ctx: TestContext = { captureAvailable: false, replayAvailable: false };
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const JWT_RE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
@@ -276,13 +277,21 @@ function captureToken(prefix: string): string {
   return `auth-${prefix}-${crypto.randomUUID()}`;
 }
 
-/** Check if the capture endpoint is available (requires BLACKBOX_TEST_CAPTURE_OUTBOUND=1). */
-async function checkCaptureAvailable(): Promise<boolean> {
+/** Read independently configured capture/replay capabilities from the backend. */
+async function readCaptureCapabilities(): Promise<{
+  captureEnabled: boolean;
+  replayEnabled: boolean;
+}> {
   try {
-    const res = await fetch(`${BASE_URL}/api/test/captures`);
-    return res.status === 200;
+    const res = await fetch(`${BASE_URL}/api/test/captures/status`);
+    if (res.status !== 200) return { captureEnabled: false, replayEnabled: false };
+    const body = (await res.json()) as { captureEnabled?: unknown; replayEnabled?: unknown };
+    return {
+      captureEnabled: body.captureEnabled === true,
+      replayEnabled: body.replayEnabled === true,
+    };
   } catch {
-    return false;
+    return { captureEnabled: false, replayEnabled: false };
   }
 }
 
@@ -545,7 +554,12 @@ function uniqueFakePhone(): string {
  *  Twilio/Supabase calls — so seeded tests can't pass).
  */
 function canSeedAuthFlow(): boolean {
-  return TWILIO_VERIFY_SERVICE_SID !== '' && SUPABASE_URL !== '' && ctx.captureAvailable;
+  return (
+    TWILIO_VERIFY_SERVICE_SID !== '' &&
+    SUPABASE_URL !== '' &&
+    ctx.captureAvailable &&
+    ctx.replayAvailable
+  );
 }
 
 // ==================== SETUP ====================
@@ -562,7 +576,9 @@ async function setup(): Promise<void> {
   ctx.userId2 = s2.userId;
   ctx.accessTokenOnboarding = s3.accessToken;
   ctx.userIdOnboarding = s3.userId;
-  ctx.captureAvailable = await checkCaptureAvailable();
+  const captureCapabilities = await readCaptureCapabilities();
+  ctx.captureAvailable = captureCapabilities.captureEnabled;
+  ctx.replayAvailable = captureCapabilities.replayEnabled;
 }
 
 // ==================== POST /api/auth/anonymous ====================
@@ -2340,7 +2356,8 @@ async function runAll() {
   console.log(`  User 1: ${ctx.userId1}`);
   console.log(`  User 2: ${ctx.userId2}`);
   console.log(`  Onboarding user: ${ctx.userIdOnboarding}`);
-  console.log(`  Capture available: ${ctx.captureAvailable}\n`);
+  console.log(`  Capture available: ${ctx.captureAvailable}`);
+  console.log(`  Replay available: ${ctx.replayAvailable}\n`);
 
   // Phase 2: Parallel independent tests
   const parallelTests = [

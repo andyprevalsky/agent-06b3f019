@@ -15,13 +15,15 @@ import dotenv from 'dotenv';
 import {
   syncBrowserPasswordCredentials,
   syncBrowserPermissionCredentials,
+  syncCookieBundleCredentials,
   syncCookieCredentials,
   syncIntegrationCredentials,
   syncOriginCredentials,
   syncPasskeyCredentials,
   syncRequiredCredentialTable,
+  syncSteelSessionAuthCredentials,
 } from './seed-local-credentials';
-import { runSyncStep, syncUserRecord } from './seed-local-helpers';
+import { runSyncStep, syncRowsWithConcurrency, syncUserRecord } from './seed-local-helpers';
 
 // Parse .env file directly to get remote DB URL
 // (process.env.DATABASE_URL is already overridden to local by run.sh)
@@ -131,8 +133,9 @@ async function syncIntegrations(): Promise<number> {
   return syncedIds.length;
 }
 
-// Browser auth merge shared by full sync and --credentials-only. Production
-// identities refresh or add rows, while local-only identities are preserved.
+// Browser auth sync shared by full sync and --credentials-only. Natural-keyed
+// credentials merge production rows; provider-profile mappings are replaced so
+// their BrowserContext foreign key always points at the local context row.
 async function syncBrowserState(failures?: Error[]): Promise<void> {
   // ── Browser Context ──
   await syncRequiredTable(
@@ -151,6 +154,41 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
     failures
   );
 
+  // ── Browser Provider Profiles ──
+  // BrowserProviderProfile.contextId is a foreign key to BrowserContext.id.
+  // The local context may intentionally retain a different primary key than
+  // production, so replace the local mappings with rows remapped to that id.
+  await syncRequiredTable(
+    'Browser Provider Profiles',
+    async () => {
+      const remoteContext = await remote.browserContext.findUnique({
+        where: { userId: DEV_USER_ID },
+        select: { id: true },
+      });
+      const localContext = await local.browserContext.findUnique({
+        where: { userId: DEV_USER_ID },
+        select: { id: true },
+      });
+      if (!remoteContext || !localContext) return 0;
+      const profiles = await remote.browserProviderProfile.findMany({
+        where: { contextId: remoteContext.id },
+      });
+      await local.$transaction(async (tx) => {
+        await tx.browserProviderProfile.deleteMany({ where: { contextId: localContext.id } });
+        for (const profile of profiles) {
+          const { id, contextId, ...data } = profile;
+          void id;
+          void contextId;
+          await tx.browserProviderProfile.create({
+            data: { ...data, contextId: localContext.id },
+          });
+        }
+      });
+      return profiles.length;
+    },
+    failures
+  );
+
   // ── Cookies ──
   await syncRequiredTable(
     'Cookies',
@@ -165,6 +203,25 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
         }
       }
       return cookies.length;
+    },
+    failures
+  );
+
+  // ── Durable browser-auth references ──
+  await syncRequiredTable(
+    'Cookie Bundles',
+    async () => {
+      const bundles = await remote.cookieBundle.findMany({ where: { userId: DEV_USER_ID } });
+      return syncCookieBundleCredentials(local.cookieBundle, bundles);
+    },
+    failures
+  );
+
+  await syncRequiredTable(
+    'Steel Session Auth',
+    async () => {
+      const sessions = await remote.steelSessionAuth.findMany({ where: { userId: DEV_USER_ID } });
+      return syncSteelSessionAuthCredentials(local.steelSessionAuth, sessions);
     },
     failures
   );
@@ -340,6 +397,42 @@ async function syncBrowserAuthForCurrentMode(failures?: Error[]): Promise<void> 
   await syncBrowserCredentials(failures);
 }
 
+// Benchmark live fixtures shell out to `--credentials-only` while the isolated
+// bench stack is under load (concurrent agents, cascade deletes of finished
+// agent trees). A single transient local-DB failure (pool timeout, connection
+// churn, upsert race) would otherwise fail the whole benchmark task before an
+// agent even exists — observed 2026-07-18 (claude-code-agent smoke: one
+// `localCookie.upsert()` invocation failed; the identical sync succeeded
+// seconds later). Every sync step is an idempotent upsert, so bounded retries
+// are safe. Mirrors syncComputeTokensWithRetries above.
+const BROWSER_AUTH_SYNC_ATTEMPTS = 3;
+
+async function syncBrowserAuthWithRetries(): Promise<void> {
+  let lastError: unknown = null;
+
+  for (let attempt = 1; attempt <= BROWSER_AUTH_SYNC_ATTEMPTS; attempt++) {
+    try {
+      await syncBrowserAuthForCurrentMode();
+      return;
+    } catch (err) {
+      lastError = err;
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(
+        `  ❌ Browser auth sync: attempt ${attempt}/${BROWSER_AUTH_SYNC_ATTEMPTS} failed: ${message}`
+      );
+      if (attempt < BROWSER_AUTH_SYNC_ATTEMPTS) {
+        await sleep(500 * 2 ** (attempt - 1));
+      }
+    }
+  }
+
+  throw new Error(
+    `Browser auth sync failed after ${BROWSER_AUTH_SYNC_ATTEMPTS} attempts: ${
+      lastError instanceof Error ? lastError.message : String(lastError)
+    }`
+  );
+}
+
 function throwBrowserAuthSyncFailures(failures: Error[]): void {
   if (failures.length === 0) return;
   if (failures.length === 1) throw failures[0];
@@ -375,8 +468,10 @@ async function sync() {
   }
 
   if (CREDENTIALS_ONLY) {
-    console.log('  ℹ️  Browser auth merge refreshes production rows and preserves local-only rows');
-    await syncBrowserAuthForCurrentMode();
+    console.log(
+      '  ℹ️  Refreshing the complete production browser-auth graph while preserving local-only rows'
+    );
+    await syncBrowserAuthWithRetries();
     console.log('\n🔄 Credential sync complete.');
     return;
   }
@@ -456,24 +551,28 @@ async function sync() {
       take: MESSAGE_LIMIT,
     });
 
-    // Batch in groups of 500 for large datasets
-    for (let i = 0; i < messages.length; i += 500) {
-      const batch = messages.slice(i, i + 500);
-      await Promise.all(
-        batch.map((m) => {
-          const { id, ...rest } = m;
-          return local.messageRecord.upsert({
-            where: { id },
-            create: m as any,
-            update: rest as any,
-          });
-        })
-      );
-      if (messages.length > 500 && i + 500 < messages.length) {
-        process.stdout.write(`     ${Math.min(i + 500, messages.length)}/${messages.length}...\r`);
+    // The local benchmark DB runs beside the entire agent stack. Launching 500
+    // Prisma upserts at once repeatedly killed Postgres on 4GB Fly primaries,
+    // leaving every seed retry to fail with P1001. Stay below the configured
+    // 50-connection pool so cold pool replacements can seed without an infra
+    // loss; normal benchmark claims restore the resulting persistent dump.
+    return syncRowsWithConcurrency(
+      messages,
+      25,
+      (m) => {
+        const { id, ...rest } = m;
+        return local.messageRecord.upsert({
+          where: { id },
+          create: m as any,
+          update: rest as any,
+        });
+      },
+      (completed, total) => {
+        if (total > 25 && completed < total) {
+          process.stdout.write(`     ${completed}/${total}...\r`);
+        }
       }
-    }
-    return messages.length;
+    );
   });
 
   // ── Rose API Keys ──
@@ -482,7 +581,7 @@ async function sync() {
     return upsertById(local.roseApiKey, keys);
   });
 
-  // ── Browser auth state (context, cookies, storage) + credentials ──
+  // ── Complete browser auth graph + credentials ──
   const browserAuthSyncFailures: Error[] = [];
   await syncBrowserAuthForCurrentMode(browserAuthSyncFailures);
 

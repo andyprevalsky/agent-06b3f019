@@ -6,7 +6,10 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from benchmarks.fixtures import DEFAULT_BASE_IMAGE
-from benchmarks.live_fixtures import DEFAULT_LIVE_FIXTURE, resolve_live_fixtures
+from benchmarks.live_fixtures import resolve_live_fixtures
+
+
+DEFAULT_MIN_STEPS_BY_AGENT_CLASS: dict[str, int] = {"browser": 5}
 
 
 @dataclass
@@ -24,6 +27,8 @@ class BenchmarkTask:
     attachment: Optional[str]
     approval_handling: Optional[str]  # "auto_approve", "ignore", "prompt_user", "count_only", or None
     start_phase: Optional[str]  # "plan", "execute", or None (chat mode)
+    browser_profile_mode: str = "persistent"  # "persistent" or isolated "fresh" browser state
+    browser_auth_realm: Optional[str] = None  # Realm whose saved auth is isolated for fresh mode
     attachments: List[str] = field(default_factory=list)  # Multiple attachments (alternative to single attachment)
     row_start: Optional[int] = None  # Slice CSV attachments starting at this 1-indexed data row
     row_end: Optional[int] = None    # Slice CSV attachments ending at this 1-indexed data row (inclusive)
@@ -43,6 +48,7 @@ class BenchmarkTask:
     required_structured_response_fields: List[str] = field(default_factory=list)  # non-empty browser result fields
     expected_gate: Optional[dict] = None  # Expected metadata.gate fields for gate-blocked tasks
     min_agent_count: Optional[int] = None  # Minimum total agents in tree (root + sub-agents)
+    min_steps: dict[str, int] = field(default_factory=dict)  # Per-instance trajectory minimums by agent class
     expected_tool_counts: Optional[dict] = None  # Exact tool call counts (toolName → count)
     min_tool_counts: Optional[dict] = None  # Minimum tool call counts (toolName → min count)
     tool_count_scope: str = "tree"  # "tree" counts all descendants; "root" counts root-visible tool calls only
@@ -69,7 +75,7 @@ class BenchmarkTask:
     evaluators: List[dict] = field(default_factory=list)  # Declared evaluator contract (static_check | single_turn_llm_judge | agentic_llm_judge)
     enforce_declared_evaluators: bool = False  # Execute evaluators[] and require them to pass in run_benchmark.py
     source: List[str] = field(default_factory=list)  # Provenance pointers (origin task/test-prompt/smoke/agent_id)
-    group: Optional[str] = None  # Review slice label: Pre-Deploy, Daily, Weekly, Rose Bench, None, etc.
+    group: Optional[str] = None  # Benchmarks-page group label the UI groups off (canonical tokens: pre-deploy | daily | rose-bench | incomplete). Absent → backend derives from status/tags/bench.
     human_time: Optional[str] = None  # Approximate human-equivalent time for capability/complexity bucketing
     world_surface: Optional[str] = None  # "live" or "simulated"; binary world-model surface, independent of DB fixtures
     fast_cache: Optional[str] = None  # "on" or "off" for the intended benchmark run mode
@@ -141,14 +147,14 @@ def _default_environment() -> dict:
         "mode": "live",
         "db_fixtures": [],
         "base_images": [DEFAULT_BASE_IMAGE],
-        "live_fixtures": [DEFAULT_LIVE_FIXTURE],
+        "live_fixtures": [],
         "services": [],
         "secrets": [],
         "live_targets": [],
         "context_notes": (
             "Default environment: workspace base-image DB (prod sync via "
-            "scripts/setup-db.sh) + live third-party services + base live "
-            "fixture (fresh compute tokens, cookies, passwords)."
+            "scripts/setup-db.sh) + live third-party services. Expiring "
+            "credentials are added only by an explicit live fixture."
         ),
     }
 
@@ -158,13 +164,25 @@ def _load_tasks() -> List[BenchmarkTask]:
         raw = json.load(f)
     tasks = [BenchmarkTask(**t) for t in raw]
     for t in tasks:
+        if t.browser_profile_mode not in {"persistent", "fresh"}:
+            raise ValueError(
+                f"Benchmark task '{t.name}' has invalid browser_profile_mode={t.browser_profile_mode!r}"
+            )
+        if t.browser_profile_mode == "fresh":
+            if not t.requires_browser_agent:
+                raise ValueError(f"Benchmark task '{t.name}' requests fresh browser state without a browser agent")
+            if not t.browser_auth_realm:
+                raise ValueError(f"Benchmark task '{t.name}' requests fresh browser state without browser_auth_realm")
+        t.min_steps = dict(t.min_steps)
+        if t.requires_browser_agent and "browser" not in t.min_steps:
+            t.min_steps["browser"] = DEFAULT_MIN_STEPS_BY_AGENT_CLASS["browser"]
         if t.environment is None:
             t.environment = _default_environment()
         else:
             if not t.environment.get("base_images"):
                 t.environment["base_images"] = [DEFAULT_BASE_IMAGE]
-            # Inherit the base live fixture when unspecified (live/hybrid tasks
-            # get ["base"]; synthetic tasks get []). Explicit lists win verbatim.
+            # Expiring production credentials are opt-in. Do not make every
+            # live-world task mutate its DB merely because it uses a live URL.
             if t.environment.get("live_fixtures") is None:
                 t.environment["live_fixtures"] = resolve_live_fixtures(t.environment)
         if t.sub_agent_count is not None:

@@ -25,6 +25,7 @@ fi
 . "$SCRIPT_DIR/lib/workspace-env.sh"
 normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
+. "$SCRIPT_DIR/lib/ngrok-tunnel.sh"
 . "$SCRIPT_DIR/lib/run-context.sh"
 
 RUN_CONTEXT_DIR="$(normalize_run_context_dir "$PWD" "${BENCHMARK_CONTEXT_DIR:-.context}")"
@@ -231,7 +232,7 @@ fi
 export NODE_ENV="${NODE_ENV:-development}"
 export TEMPORAL_TASK_QUEUE
 TEMPORAL_TASK_QUEUE="$(resolve_temporal_task_queue "$CONDUCTOR_WORKSPACE_NAME")"
-echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT wmh=$WMH_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE worker_processes=${WORKER_PROCESSES:-1} workflow_max_slots=${MAX_CONCURRENT_WORKFLOWS:-50} workflow_pollers=${MAX_CONCURRENT_WORKFLOW_TASK_POLLERS:-8} nonsticky_to_sticky=${NONSTICKY_TO_STICKY_POLL_RATIO:-0.5} activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
+echo "🔌 Ports: backend=$BACKEND_PORT frontend=$FRONTEND_PORT health=$HEALTH_PORT mac-app=$MAC_APP_PORT metrics=$SDK_METRICS_PORT db=$LOCAL_DB_PORT wmh=$WMH_PORT ngrok_api=$NGROK_WEB_PORT queue=$TEMPORAL_TASK_QUEUE benchmark_mode=$BENCHMARK_MODE worker_processes=${WORKER_PROCESSES:-8} workflow_max_slots=${MAX_CONCURRENT_WORKFLOWS:-50} workflow_pollers=${MAX_CONCURRENT_WORKFLOW_TASK_POLLERS:-8} nonsticky_to_sticky=${NONSTICKY_TO_STICKY_POLL_RATIO:-0.5} activity_max_slots=${MAX_CONCURRENT_ACTIVITIES:-100} activity_pollers=${MAX_CONCURRENT_ACTIVITY_TASK_POLLERS:-8}"
 
 run_kill_stale_same_task_queue_workers "$PWD" "$TEMPORAL_TASK_QUEUE" "$BACKEND_API_URL" "$$"
 
@@ -266,7 +267,7 @@ kill_stale_same_worktree_benchmark_stack() {
     $BENCHMARK_MODE || return 0
 
     local killed_any=false
-    local pattern='scripts/run\.sh --benchmark|worker\.py|tsx.*src/server\.ts|node_modules/.bin/vite|ngrok http'
+    local pattern='scripts/run\.sh --benchmark|worker\.py|tsx.*src/server\.ts|node_modules/.bin/vite|ngrok http|cloudflared tunnel'
     for pid in $(pgrep -f "$pattern" 2>/dev/null); do
         [ "$pid" = "$$" ] && continue
         is_current_process_family "$pid" && continue
@@ -579,6 +580,7 @@ export DIRECT_URL="$LOCAL_DB_URL"
 # skip BOTH the push and the seed. First run seeds normally, then writes the dump
 # for every later claim of that machine. Unset (local dev) → zero behaviour change.
 DB_RESTORED=false
+FIRST_RUN_SEEDED=false
 _SEED_DUMP="${BENCHMARK_SEED_DUMP:-}"
 _SCHEMA_HASH="$( (shasum back-end/prisma/schema.prisma 2>/dev/null || sha1sum back-end/prisma/schema.prisma 2>/dev/null) | awk '{print $1}')"
 if [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ] && [ "$(cat "${_SEED_DUMP}.schemahash" 2>/dev/null || echo x)" = "$_SCHEMA_HASH" ]; then
@@ -611,17 +613,40 @@ else
 fi
 if [ "$USER_EXISTS" = "0" ]; then
     echo "🌱 Syncing production data to local database (first run)..."
-    (cd back-end && npx tsx scripts/seed-local.ts)
+    # Retry the seed on a transient crash. At cloud fleet width this tsx/node
+    # process intermittently SIGSEGVs a few seconds in (observed rc=139 ~11s after
+    # stack launch — not deterministic, or every box would fail), and under
+    # `set -eo pipefail` a single crash killed the ENTIRE stack → "stack process
+    # exited before becoming healthy" → the box dropped from the batch (an infra
+    # loss, not a benchmark verdict). Retry a few times before giving up so a
+    # one-off native crash doesn't cost a whole box.
+    _seed_ok=0
+    for _seed_try in 1 2 3; do
+        if (cd back-end && npx tsx scripts/seed-local.ts); then _seed_ok=1; break; fi
+        _seed_rc=$?
+        echo "   ⚠️ first-run seed attempt ${_seed_try}/3 failed (rc=${_seed_rc}$([ "$_seed_rc" = 139 ] && echo ' = SIGSEGV')) — retrying..."
+        sleep $(( _seed_try * 3 ))
+    done
+    [ "$_seed_ok" = 1 ] || { echo "❌ first-run seed failed after 3 attempts — aborting stack"; exit 1; }
+    FIRST_RUN_SEEDED=true
 elif [ "${BENCHMARK_WORLD_MODEL_MODE:-}" = "simulate" ]; then
     # Simulate mode: the World Model Harness intercepts every environment-boundary
     # tool, so real browser cookies/passwords are never exercised. Re-syncing all
     # 21k+ cookie rows on every stack start is pure overhead (and stalls on a
     # throttled cloud uplink). Compute tokens stay fresh via run_benchmark's
-    # per-task base fixture (_sync_compute_tokens), so skip the cred sync here.
+    # run-level infrastructure preflight, so skip browser auth sync here.
     echo "🌍 simulate mode — skipping startup browser credential sync (WMH mocks env tools)"
 else
     echo "🌱 Local database already seeded; syncing browser credentials..."
-    (cd back-end && npx tsx scripts/seed-local.ts --credentials-only)
+    # Same transient-SIGSEGV resilience as the first-run seed above.
+    _cred_ok=0
+    for _cred_try in 1 2 3; do
+        if (cd back-end && npx tsx scripts/seed-local.ts --credentials-only); then _cred_ok=1; break; fi
+        _cred_rc=$?
+        echo "   ⚠️ credential sync attempt ${_cred_try}/3 failed (rc=${_cred_rc}$([ "$_cred_rc" = 139 ] && echo ' = SIGSEGV')) — retrying..."
+        sleep $(( _cred_try * 3 ))
+    done
+    [ "$_cred_ok" = 1 ] || { echo "❌ credential sync failed after 3 attempts — aborting stack"; exit 1; }
 fi
 
 # Persist a dump on /data so the NEXT claim of this machine restores in seconds
@@ -696,6 +721,7 @@ PIDS=()
 NAMES=()
 NGROK_PID=""
 NGROK_CONFIG_FILE=""
+PUBLIC_TUNNEL_SERVICE_NAME=""
 SHUTTING_DOWN=false
 SERVICE_STATUS=starting
 
@@ -743,33 +769,72 @@ ensure_ngrok_domain_reserved() {
     }
 }
 
-start_public_tunnel() {
+start_cloudflare_quick_tunnel() {
+    if ! command -v cloudflared >/dev/null 2>&1; then
+        echo "❌ cloudflared is required for isolated benchmark public tunnels."
+        exit 1
+    fi
+    mkdir -p "$RUN_CONTEXT_DIR"
+    local tunnel_log="$RUN_CONTEXT_DIR/cloudflared.log"
+    local tunnel_home="$RUN_CONTEXT_DIR/cloudflared-home"
+    mkdir -p "$tunnel_home"
+    echo "🌐 Starting run-scoped public frontend tunnel → localhost:$FRONTEND_PORT"
+    HOME="$tunnel_home" cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$FRONTEND_PORT" \
+        > "$tunnel_log" 2>&1 &
+    NGROK_PID=$!
+    PUBLIC_TUNNEL_SERVICE_NAME="cloudflared"
+    PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
+
+    for attempt in $(seq 1 60); do
+        if ! kill -0 "$NGROK_PID" 2>/dev/null; then
+            echo "❌ cloudflared exited before the public tunnel became ready."
+            tail -80 "$tunnel_log" || true
+            exit 1
+        fi
+        if cloudflare_publish_reported_environment "$tunnel_log" "$ALLOWED_ORIGINS"; then
+            echo "🌐 Public tunnel ready: $PUBLIC_BASE_URL"
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "❌ cloudflared did not publish a valid run-scoped HTTPS origin for :$FRONTEND_PORT"
+    tail -80 "$tunnel_log" || true
+    exit 1
+}
+
+start_ngrok_public_tunnel() {
     if ! command -v ngrok >/dev/null 2>&1; then
         echo "❌ ngrok is required for scripts/run.sh. Install it and configure an authtoken."
         exit 1
     fi
-    ngrok config check >/dev/null 2>&1 || {
-        echo "❌ ngrok config is invalid or missing an authtoken. Run: ngrok config add-authtoken <token>"
-        exit 1
-    }
+    if [ -z "${NGROK_AUTHTOKEN:-}" ]; then
+        ngrok config check >/dev/null 2>&1 || {
+            echo "❌ ngrok config is invalid or missing an authtoken. Run: ngrok config add-authtoken <token>"
+            exit 1
+        }
+    fi
 
     WORKSPACE_DNS_LABEL="$(dns_label_from_workspace)"
-    NGROK_DOMAIN_SUFFIX="${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
-    WORKTREE_DOMAIN="${NGROK_WORKTREE_DOMAIN:-rose-${WORKSPACE_DNS_LABEL}.${NGROK_DOMAIN_SUFFIX}}"
-    export WORKTREE_DOMAIN
-    export PUBLIC_BASE_URL="https://$WORKTREE_DOMAIN"
-    export VITE_ALLOWED_HOSTS="$WORKTREE_DOMAIN"
-    export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
     export NGROK_API_URL="http://127.0.0.1:$NGROK_WEB_PORT/api/tunnels"
-
-    ensure_ngrok_domain_reserved
+    NGROK_DOMAIN_SUFFIX="${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
+    local configured_domain="${NGROK_WORKTREE_DOMAIN:-rose-${WORKSPACE_DNS_LABEL}.${NGROK_DOMAIN_SUFFIX}}"
+    ngrok_configure_endpoint_mode 0 "$configured_domain"
+    if [ "$NGROK_RESERVE_DOMAIN" = "1" ]; then
+        WORKTREE_DOMAIN="$configured_domain"
+        export WORKTREE_DOMAIN
+        export PUBLIC_BASE_URL="https://$WORKTREE_DOMAIN"
+        export VITE_ALLOWED_HOSTS="$WORKTREE_DOMAIN"
+        export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
+        ensure_ngrok_domain_reserved
+    fi
 
     mkdir -p "$RUN_CONTEXT_DIR"
     local ngrok_base_config="$HOME/Library/Application Support/ngrok/ngrok.yml"
     if [ ! -f "$ngrok_base_config" ]; then
         ngrok_base_config="$HOME/.config/ngrok/ngrok.yml"
     fi
-    if [ ! -f "$ngrok_base_config" ]; then
+    if [ ! -f "$ngrok_base_config" ] && [ -z "${NGROK_AUTHTOKEN:-}" ]; then
         echo "❌ Could not find the ngrok config file after ngrok config check succeeded."
         exit 1
     fi
@@ -781,16 +846,20 @@ agent:
   web_addr: 127.0.0.1:$NGROK_WEB_PORT
 EOF
 
+    local -a ngrok_config_args=(--config "$NGROK_CONFIG_FILE")
+    if [ -f "$ngrok_base_config" ]; then
+        ngrok_config_args=(--config "$ngrok_base_config" --config "$NGROK_CONFIG_FILE")
+    fi
     echo "🌐 Starting public frontend tunnel: $PUBLIC_BASE_URL → localhost:$FRONTEND_PORT"
     ngrok http "$FRONTEND_PORT" \
-        --config "$ngrok_base_config" \
-        --config "$NGROK_CONFIG_FILE" \
-        --domain "$WORKTREE_DOMAIN" \
+        "${ngrok_config_args[@]}" \
+        "${NGROK_ENDPOINT_ARGS[@]}" \
         --log stdout \
         --log-format logfmt \
         --log-level info > "$RUN_CONTEXT_DIR/ngrok.log" 2>&1 &
     NGROK_PID=$!
-    PIDS+=($NGROK_PID); NAMES+=("ngrok")
+    PUBLIC_TUNNEL_SERVICE_NAME="ngrok"
+    PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
 
     for attempt in $(seq 1 60); do
         if ! kill -0 "$NGROK_PID" 2>/dev/null; then
@@ -801,19 +870,10 @@ EOF
             echo "Checkout: https://dashboard.ngrok.com/billing/choose-a-plan"
             exit 1
         fi
-        if curl -fsS "$NGROK_API_URL" >/tmp/rose-ngrok-tunnels.json 2>/dev/null; then
-            if python3 - <<'PY'
-import json
-from pathlib import Path
-
-data = json.loads(Path("/tmp/rose-ngrok-tunnels.json").read_text())
-for tunnel in data.get("tunnels", []):
-    if tunnel.get("proto") == "https" and tunnel.get("public_url"):
-        raise SystemExit(0)
-raise SystemExit(1)
-PY
-            then
-                rm -f /tmp/rose-ngrok-tunnels.json
+        local tunnels_json="$RUN_CONTEXT_DIR/ngrok-tunnels.json"
+        if curl -fsS "$NGROK_API_URL" > "$tunnels_json" 2>/dev/null; then
+            if ngrok_publish_reported_environment "$tunnels_json" "$ALLOWED_ORIGINS"; then
+                rm -f "$tunnels_json"
                 echo "🌐 Public tunnel ready: $PUBLIC_BASE_URL"
                 return 0
             fi
@@ -821,10 +881,18 @@ PY
         sleep 1
     done
 
-    echo "❌ ngrok tunnel did not become ready for $PUBLIC_BASE_URL → :$FRONTEND_PORT"
+    echo "❌ ngrok tunnel did not become ready for ${PUBLIC_BASE_URL:-provider-assigned endpoint} → :$FRONTEND_PORT"
     echo "   ngrok API: $NGROK_API_URL"
     tail -80 "$RUN_CONTEXT_DIR/ngrok.log" || true
     exit 1
+}
+
+start_public_tunnel() {
+    case "$(public_tunnel_provider_for_mode "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}")" in
+        cloudflare) start_cloudflare_quick_tunnel ;;
+        ngrok) start_ngrok_public_tunnel ;;
+        *) echo "❌ Invalid public tunnel mode." >&2; exit 2 ;;
+    esac
 }
 
 write_services_manifest() {
@@ -909,7 +977,7 @@ data = {
     "env": {
         "benchmark_anon_steel_profile": os.environ.get("BENCHMARK_ANON_STEEL_PROFILE", "").lower() in ("1", "true", "yes", "on"),
         "benchmark_disable_saved_browser_auth": os.environ.get("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", "").lower() in ("1", "true", "yes", "on"),
-        "worker_processes": env_int("WORKER_PROCESSES", 1),
+        "worker_processes": env_int("WORKER_PROCESSES", 8),
         "max_concurrent_workflows": env_int("MAX_CONCURRENT_WORKFLOWS", 50),
         "max_cached_workflows": env_int("MAX_CACHED_WORKFLOWS", 100),
         "max_concurrent_workflow_task_pollers": env_int("MAX_CONCURRENT_WORKFLOW_TASK_POLLERS", 8),
@@ -931,6 +999,17 @@ with open(tmp_path, "w") as f:
     f.write("\n")
 os.replace(tmp_path, path)
 PY
+    if [ "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}" = "1" ]; then
+        local services_manifest
+        case "$RUN_CONTEXT_DIR" in
+            /*) services_manifest="$RUN_CONTEXT_DIR/services.json" ;;
+            *) services_manifest="$PWD/$RUN_CONTEXT_DIR/services.json" ;;
+        esac
+        public_tunnel_publish_url_manifest "$services_manifest" || {
+            echo "❌ Failed to publish ephemeral public URL to $services_manifest" >&2
+            return 1
+        }
+    fi
 }
 
 # ── World Model Harness (WMH) ──
@@ -963,7 +1042,11 @@ start_world_model_harness() {
     should_serve_world_model || return 0
 
     mkdir -p "$RUN_CONTEXT_DIR"
-    local wmh_log="$RUN_CONTEXT_DIR/wmh-serve-log.txt"
+    local wmh_log
+    case "$RUN_CONTEXT_DIR" in
+        /*) wmh_log="$RUN_CONTEXT_DIR/wmh-serve-log.txt" ;;
+        *)  wmh_log="$PWD/$RUN_CONTEXT_DIR/wmh-serve-log.txt" ;;
+    esac
 
     # Shared, persistent build root so the model is built ONCE and reused across
     # every run — NOT the per-run context dir (that would rebuild each time).
@@ -1077,7 +1160,12 @@ cleanup() {
     echo "🛑 Stopping all services... (triggered by: $(caller 0 2>/dev/null || echo 'EXIT trap'), DB_OWNED_BY_US=$DB_OWNED_BY_US)"
     # Kill only the process trees we spawned (SIGTERM then SIGKILL)
     for pid in "${PIDS[@]}"; do
-        kill_tree_hard "$pid"
+        if [ -n "${BACKEND_PID:-}" ] && [ "$pid" = "$BACKEND_PID" ] \
+            && [ -n "${BACKEND_PGID:-}" ]; then
+            terminate_backend_group || true
+        else
+            kill_tree_hard "$pid"
+        fi
     done
     # Sweep by manifest, cwd, and service ports in case a wrapper exited before
     # its child, or a descendant reparented during a cascade shutdown. Isolated
@@ -1117,13 +1205,13 @@ run_service() {
 
 # Public URL flow:
 #   CONDUCTOR_WORKSPACE_NAME -> rose-<workspace>.<suffix>
-#   ngrok reserved domain -> Vite dev server on FRONTEND_PORT
+#   stable local ngrok or run-scoped cloud tunnel -> Vite on FRONTEND_PORT
 #   backend exposes PUBLIC_BASE_URL for /api/test-payment/public-url
 #
 # BENCHMARK_SKIP_PUBLIC_TUNNEL=1 opt-out: a self-contained cloud-bench box
 # (scripts/run-bench-cloud) runs simulate-only, where the WMH intercepts every
 # provider/environment boundary and no external browser ever needs to reach the
-# frontend over the internet. Standing up an ngrok reserved domain per one-shot
+# frontend over the internet. Standing up a public tunnel per one-shot
 # Fly machine is fragile and unnecessary there, so we point PUBLIC_BASE_URL at the
 # local frontend and skip the tunnel + tunnel smoke. Never set this for the normal
 # dev/benchmark stack — real browser agents need the public URL.
@@ -1131,7 +1219,7 @@ if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
     export PUBLIC_BASE_URL="http://localhost:$FRONTEND_PORT"
     export VITE_ALLOWED_HOSTS="localhost"
     export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
-    echo "🌐 BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping ngrok public tunnel; PUBLIC_BASE_URL=$PUBLIC_BASE_URL (simulate-only cloud bench)"
+    echo "🌐 BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel; PUBLIC_BASE_URL=$PUBLIC_BASE_URL (simulate-only cloud bench)"
 else
     start_public_tunnel
 fi
@@ -1170,12 +1258,121 @@ if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
     export NAVI_WORKER_LOG_STREAM=false
 fi
 
+# A few fleet-width cold starts have left `tsx src/server.ts` alive but stuck
+# during module loading (backend log contains only the first Supabase warning).
+# The public-tunnel smoke used to discover that indirectly after 60 blank curls
+# and abort the slot. Own backend startup here: one clean process-tree restart
+# is allowed before the normal stack-level readiness owner decides the box is
+# unhealthy. This is startup supervision, not a benchmark/task retry.
+BACKEND_INDEX=${#PIDS[@]}
+PIDS+=("")
+NAMES+=("back-end")
+BACKEND_PID=""
+BACKEND_PGID=""
+launch_backend_service() {
+    if $BENCHMARK_MODE; then
+        if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+            # Give the backend its own process group. A hung import can leave a
+            # TERM-ignoring descendant; group ownership lets restart/cleanup
+            # prove every descendant is gone before a replacement can bind.
+            FAIL_DIR="$FAIL_DIR" BACKEND_LOG_FILE="$BACKEND_LOG_FILE" BACKEND_PORT="$BACKEND_PORT" \
+                python3 "$SCRIPT_DIR/run-in-new-session.py" bash -c '
+                    set +e
+                    cd back-end || exit 1
+                    rm -f "$BACKEND_LOG_FILE"
+                    PORT="$BACKEND_PORT" npx tsx src/server.ts > "$BACKEND_LOG_FILE" 2>&1
+                    code=$?
+                    if [ "$code" -ne 0 ]; then
+                        printf "%s\n" back-end > "$FAIL_DIR/failed"
+                        printf "%s\n" "$code" > "$FAIL_DIR/exit_code"
+                    fi
+                    exit "$code"
+                ' &
+            BACKEND_PID=$!
+            BACKEND_PGID="$BACKEND_PID"
+        else
+            run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
+            BACKEND_PID=$!
+            BACKEND_PGID=""
+        fi
+    else
+        run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx watch src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
+        BACKEND_PID=$!
+        BACKEND_PGID=""
+    fi
+    PIDS[$BACKEND_INDEX]="$BACKEND_PID"
+}
+terminate_backend_group() {
+    local pgid="${BACKEND_PGID:-}" root="${BACKEND_PID:-}" still_alive=0
+    [ -n "$pgid" ] || { [ -z "$root" ] || kill_tree_hard "$root"; return; }
+    kill -TERM -- "-$pgid" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+        if ! kill -0 -- "-$pgid" 2>/dev/null; then still_alive=0; break; fi
+        still_alive=1
+        sleep 1
+    done
+    [ "$still_alive" = 0 ] || kill -KILL -- "-$pgid" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+        kill -0 -- "-$pgid" 2>/dev/null || { still_alive=0; break; }
+        still_alive=1
+        sleep 0.2
+    done
+    wait "$root" 2>/dev/null || true
+    if [ "$still_alive" != 0 ] || kill -0 -- "-$pgid" 2>/dev/null; then
+        echo "❌ backend process group $pgid survived termination" >&2
+        return 1
+    fi
+    BACKEND_PID=""
+    BACKEND_PGID=""
+}
+restart_backend_service() {
+    echo "♻️  restarting hung backend process tree (pid=$BACKEND_PID)"
+    terminate_backend_group || return 1
+    rm -f "$FAIL_DIR/failed" "$FAIL_DIR/exit_code"
+    launch_backend_service
+}
+isolated_backend_ready_attempts() {
+    if [ -n "${CLOUDBENCH_BACKEND_START_READY_ATTEMPTS:-}" ]; then
+        printf '%s\n' "$CLOUDBENCH_BACKEND_START_READY_ATTEMPTS"
+    elif $FIRST_RUN_SEEDED; then
+        # The first backend launch after a full production seed has substantially
+        # more database state to initialize. Do not kill a live process at the
+        # warm guest's 60-second boundary and thereby restart all of that work.
+        printf '%s\n' "${CLOUDBENCH_COLD_BACKEND_START_READY_ATTEMPTS:-180}"
+    else
+        printf '%s\n' 60
+    fi
+}
+wait_for_isolated_backend_ready() {
+    local launch_attempt probe_attempt
+    local attempts
+    attempts="$(isolated_backend_ready_attempts)"
+    for launch_attempt in 1 2; do
+        for probe_attempt in $(seq 1 "$attempts"); do
+            if curl -fsS "http://localhost:$BACKEND_PORT/health" >/dev/null 2>&1; then
+                [ "$launch_attempt" = 1 ] \
+                    && echo "✅ isolated backend healthy on first launch" \
+                    || echo "✅ backend became healthy after restart"
+                return 0
+            fi
+            kill -0 "$BACKEND_PID" 2>/dev/null || break
+            sleep 1
+        done
+        echo "⚠️  backend startup attempt $launch_attempt/2 did not become healthy" >&2
+        tail -40 "$BACKEND_LOG_FILE" 2>/dev/null | sed 's/^/   | /' >&2 || true
+        [ "$launch_attempt" = 1 ] || return 1
+        restart_backend_service
+    done
+    return 1
+}
+
 # Launch each service
 if $BENCHMARK_MODE; then
     export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
     export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
     export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$PWD/.context}"
     export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
+    export BLACKBOX_TEST_REPLAY_OUTBOUND="${BLACKBOX_TEST_REPLAY_OUTBOUND:-0}"
     export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
     # Capture-outbound flips IS_BLACKBOX_TEST, which would disable the dev-phone
     # OTP login bypass — but the message-person iMessage relay needs it to
@@ -1187,16 +1384,8 @@ if $BENCHMARK_MODE; then
     export VITE_DEV_AUTO_LOGIN_PHONE="${VITE_DEV_AUTO_LOGIN_PHONE:-+15555550123}"
     export VITE_DEV_AUTO_LOGIN_OTP="${VITE_DEV_AUTO_LOGIN_OTP:-191919}"
 
-    # In benchmark mode, use plain tsx (no watch) to prevent file-change restarts from killing the backend mid-run
-    if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
-        run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx src/server.ts > "$BACKEND_LOG_FILE" 2>&1' &
-    else
-        run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
-    fi
-else
-    run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx watch src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
 fi
-PIDS+=($!); NAMES+=("back-end")
+launch_backend_service
 
 # Front-end is always launched. Public payment benchmarks use a production bundle
 # so the cloud browser does not fetch the Vite development module graph over ngrok.
@@ -1236,13 +1425,20 @@ fi
 # fields when it comes up. A no-op on plain (non-benchmark) run.sh.
 start_world_model_harness
 
+if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
+    wait_for_isolated_backend_ready || {
+        echo "❌ isolated backend failed both supervised startup attempts" >&2
+        exit 1
+    }
+fi
+
 SERVICE_STATUS=running
 write_services_manifest
 echo "🧭 Service manifest: $RUN_CONTEXT_DIR/services.json"
 echo "🌐 Public frontend: $PUBLIC_BASE_URL"
 
 if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
-    echo "⏭️  BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel smoke (no ngrok on this cloud bench box)"
+    echo "⏭️  BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel smoke (simulate-only cloud bench)"
 else
     echo "⏳ Verifying public tunnel smoke..."
     bash scripts/test-public-tunnel.sh
@@ -1295,12 +1491,19 @@ while true; do
                 code=$?
             fi
             name="${NAMES[$i]}"
-            if [ "$name" = "ngrok" ]; then
-                echo "⚠️  ngrok (PID $pid) exited with code $code; keeping local services running."
+            if [ "$name" = "ngrok" ] && \
+                ! public_tunnel_process_is_required "$name" "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}"; then
+                echo "⚠️  local public tunnel $name (PID $pid) exited with code $code; keeping local services running."
                 unset "PIDS[$i]"
                 unset "NAMES[$i]"
                 write_services_manifest || true
                 continue
+            fi
+            if public_tunnel_process_is_required "$name" "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}" && \
+                [ "$code" -eq 0 ]; then
+                # A required long-running tunnel exiting cleanly is still a stack
+                # failure: the published callback URL is now permanently dead.
+                code=1
             fi
             if [ $code -ne 0 ]; then
                 echo ""

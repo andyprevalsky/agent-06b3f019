@@ -60,6 +60,7 @@ from benchmarks.benchmark_tasks import (
 )
 from benchmarks.context_validator import validate_context
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES, resolve_live_fixtures
+from benchmarks.llm_usage import aggregate_repeatable_cache_usage, aggregate_usage_items
 from benchmarks.logs import (
     collect_logs,
     collect_tree_messages,
@@ -129,6 +130,7 @@ AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
 EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     GREP_EXPLORE_STRESS_TASK_NAME,
     AMAZON_PASSKEY_TASK_NAME,
+    BIOMETRICS_WEBDECOY_TASK_NAME,
 }
 USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 MESSAGE_PERSON_TASK_NAME = "message-person"
@@ -153,8 +155,6 @@ MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
 AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 AGENT_PAYMENT_PRODUCTION_TASK_NAME = "agent-payment-production-abandonment"
-# Cookie-bundle bootstrap for these tasks is now declared as the `amazon_auth`
-# live fixture in tasks.json (see live_fixtures.py), not a task-name branch.
 BENCHMARK_FORCE_SHOW_PASSWORDS_ENV = "BENCHMARK_FORCE_SHOW_PASSWORDS"
 BAD_AMAZON_PASSWORD_USERNAME = "andyprevalsky@yahoo.com"
 BAD_AMAZON_COOKIE_SOURCE = "benchmark_bad_auth"
@@ -173,6 +173,20 @@ SOURCE_CONNECT_GATE_TASK_NAME = "gate-source-connect-gmail"
 PURCHASE_SUBSCRIPTION_GATE_USER_ID = "00000000-0000-4000-8000-000000000102"
 PURCHASE_KYC_GATE_USER_ID = "00000000-0000-4000-8000-000000000103"
 SOURCE_CONNECT_GATE_USER_ID = "00000000-0000-4000-8000-000000000104"
+# Repeatable-cache baselines from local smoke run
+# 4657d9e8-6c05-48c2-bc20-1acd0513728a. The metric groups by authoritative
+# agent identity + call site and excludes one-shot calls. Per the one-way
+# ratchet policy, each qualifying task moved up by one 5-point increment:
+# spawn 40.7% (20 -> 25), parallel 47.6% (25 -> 30), browser 51.0% (35 -> 40).
+# Claude Code observed 47.5%, exactly the 45% + 2.5% trigger, so strict
+# "more than" leaves its 40% floor unchanged.
+PER_TASK_CACHE_HIT_RATCHET = {
+    "chat-mode": 0.0,
+    "spawn-sub-agents": 25.0,
+    "parallel-tool-calls": 30.0,
+    "claude-code-agent": 40.0,
+    "browser-smoke": 40.0,
+}
 GATE_FIXTURE_TASK_MODES = {
     PURCHASE_SUBSCRIPTION_GATE_TASK_NAME: "purchase-subscription",
     PURCHASE_KYC_GATE_TASK_NAME: "purchase-kyc",
@@ -344,8 +358,7 @@ def _attention_request_matches_task(
 def _should_auto_approve_attention(task: BenchmarkTask, req: dict) -> bool:
     return not (
         task.agentcard_setup_action == "complete"
-        and _attention_request_kind(req)
-        == "agentcard_user_cardholder_onboarding_required"
+        and _attention_request_kind(req) == "agentcard_user_cardholder_onboarding_required"
     )
 
 
@@ -604,9 +617,7 @@ def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
         from browser_tools.schemas import RequestPaymentCardBrowserTool
 
         try:
-            RequestPaymentCardBrowserTool.model_validate(
-                {"tool": "request_payment_card", **receipt}
-            )
+            RequestPaymentCardBrowserTool.model_validate({"tool": "request_payment_card", **receipt})
         except ValueError as exc:
             return f"malformed complete payment receipt: {exc}"
         fingerprint = receipt.get("fingerprint")
@@ -992,7 +1003,7 @@ def _benchmark_agent_source_override() -> str:
 def _apply_local_agent_source_override(agent_id: str, source: str) -> None:
     _run_local_victoria_sql(
         'UPDATE "Agent" '
-        f'SET source = {_sql_literal(source)} '
+        f"SET source = {_sql_literal(source)} "
         f'WHERE id = {_sql_literal(agent_id)} AND "userId" = {_sql_literal(_current_benchmark_user_id())};'
     )
 
@@ -1230,6 +1241,44 @@ async def get_tool_usage(base_url: str, agent_id: str) -> dict:
         return {}
 
 
+async def get_agent_tool_usage(base_url: str, agent_id: str) -> dict:
+    """GET raw per-agent usage items for provider/model attribution."""
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(f"{base_url}/api/tool-usage/{agent_id}", headers=headers)
+        if resp.status_code == 200:
+            return resp.json()
+        raise RuntimeError(
+            f"Incomplete benchmark usage telemetry for agent {agent_id[:12]}: "
+            f"GET /api/tool-usage returned {resp.status_code}"
+        )
+
+
+async def get_llm_usage_details(base_url: str, root_agent_id: str, tree_stats: dict) -> tuple[dict, dict]:
+    """Aggregate provider attribution and repeatable cache usage for an agent tree."""
+    agent_ids = {
+        str(agent.get("agent_id") or agent.get("id") or "")
+        for agent in tree_stats.get("all_agents", [])
+        if isinstance(agent, dict)
+    }
+    agent_ids.discard("")
+    agent_ids.add(root_agent_id)
+    payloads = await asyncio.gather(
+        *(get_agent_tool_usage(base_url, agent_id) for agent_id in sorted(agent_ids))
+    )
+    items: list[dict] = []
+    for agent_id, payload in zip(sorted(agent_ids), payloads):
+        for usage in payload.get("usages", []):
+            usage_items = usage.get("usage_items") if isinstance(usage, dict) else None
+            if isinstance(usage_items, list):
+                items.extend(
+                    {**item, "_benchmark_agent_id": agent_id}
+                    for item in usage_items
+                    if isinstance(item, dict)
+                )
+    return aggregate_usage_items(items), aggregate_repeatable_cache_usage(items)
+
+
 async def get_test_payment_lifecycle(base_url: str, agent_id: str) -> dict:
     """Read the sanitized cross-provider lifecycle snapshot for a benchmark agent."""
     headers = await _api_headers()
@@ -1240,9 +1289,7 @@ async def get_test_payment_lifecycle(base_url: str, agent_id: str) -> dict:
             params={"agentId": agent_id},
         )
         if resp.status_code != 200:
-            raise Exception(
-                f"Failed to get payment lifecycle: {resp.status_code} {resp.text[:300]}"
-            )
+            raise Exception(f"Failed to get payment lifecycle: {resp.status_code} {resp.text[:300]}")
         return resp.json()
 
 
@@ -1261,6 +1308,7 @@ async def _wait_for_expected_payment_lifecycle(
     lifecycle = initial_lifecycle
     deadline = time.monotonic() + timeout_seconds
     retryable_statuses = {"FUNDING_RECLAIM_FAILED", "REFUND_FAILED"}
+    consecutive_fetch_errors = 0
     while True:
         error = _validate_payment_lifecycle(
             task,
@@ -1272,14 +1320,30 @@ async def _wait_for_expected_payment_lifecycle(
         status = purchase.get("status") if isinstance(purchase, dict) else None
         wallet_funding = lifecycle.get("walletFunding") if isinstance(lifecycle, dict) else None
         release_pending = (
-            status == "HELD"
-            and isinstance(wallet_funding, dict)
-            and wallet_funding.get("status") == "RECLAIMING"
+            status == "HELD" and isinstance(wallet_funding, dict) and wallet_funding.get("status") == "RECLAIMING"
         )
         if (status not in retryable_statuses and not release_pending) or time.monotonic() >= deadline:
             return lifecycle
         await asyncio.sleep(poll_interval_seconds)
-        lifecycle = await (recover_lifecycle or fetch_lifecycle)(base_url, agent_id)
+        try:
+            lifecycle = await (recover_lifecycle or fetch_lifecycle)(base_url, agent_id)
+            consecutive_fetch_errors = 0
+        except Exception as error:
+            # Lifecycle reads join local DB state with several read-only provider
+            # views. A single transient provider timeout must not turn a
+            # successfully compensated purchase into a benchmark failure. Keep
+            # the last durable snapshot and retry within the existing bounded
+            # reconciliation window, but surface persistent outages promptly.
+            consecutive_fetch_errors += 1
+            if consecutive_fetch_errors >= 3 or time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "Payment lifecycle remained unavailable after "
+                    f"{consecutive_fetch_errors} consecutive reads: {error}"
+                ) from error
+            print(
+                "    ⚠ Transient payment lifecycle read failed "
+                f"({consecutive_fetch_errors}/3); retrying: {error}"
+            )
 
 
 async def abandon_test_payment(base_url: str, agent_id: str) -> dict:
@@ -1292,9 +1356,7 @@ async def abandon_test_payment(base_url: str, agent_id: str) -> dict:
             json={"agentId": agent_id},
         )
         if resp.status_code != 200:
-            raise Exception(
-                f"Failed to abandon test payment: {resp.status_code} {resp.text[:300]}"
-            )
+            raise Exception(f"Failed to abandon test payment: {resp.status_code} {resp.text[:300]}")
         return resp.json()
 
 
@@ -1307,10 +1369,7 @@ async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dic
             json={"userId": USER_ID, "action": action},
         )
         if resp.status_code != 200:
-            raise RuntimeError(
-                f"Failed to {action} benchmark AgentCard setup: "
-                f"{resp.status_code} {resp.text[:300]}"
-            )
+            raise RuntimeError(f"Failed to {action} benchmark AgentCard setup: {resp.status_code} {resp.text[:300]}")
         return resp.json()
 
 
@@ -2157,8 +2216,7 @@ async def poll_agent(
             task.payment_card_request_action == "abandon"
             and not payment_card_action_completed
             and any(
-                isinstance(message.get("metadata"), dict)
-                and message["metadata"].get("title") == "Payment card ready"
+                isinstance(message.get("metadata"), dict) and message["metadata"].get("title") == "Payment card ready"
                 for message in messages
             )
         ):
@@ -2174,9 +2232,7 @@ async def poll_agent(
                 **data.get("_benchmark", {}),
                 "payment_card_request_action": "abandon",
                 "payment_lifecycle": lifecycle,
-                "expected_payment_receipt_seen": bool(
-                    task.expected_payment_receipt and approvals_triggered > 0
-                ),
+                "expected_payment_receipt_seen": bool(task.expected_payment_receipt and approvals_triggered > 0),
                 "expected_attention_kind_seen": task.expected_attention_kind,
             }
             print("    ✅ Abandoned issued payment card and reconciled funding")
@@ -2255,8 +2311,7 @@ async def poll_agent(
             if task.agentcard_setup_action == "complete":
                 setup_kind = "agentcard_user_cardholder_onboarding_required"
                 setup_still_open = any(
-                    _attention_request_is_open(req)
-                    and _attention_request_kind(req) == setup_kind
+                    _attention_request_is_open(req) and _attention_request_kind(req) == setup_kind
                     for req in _pending_attention
                 )
                 data["_benchmark"] = {
@@ -2268,12 +2323,18 @@ async def poll_agent(
                     ),
                 }
                 if not agentcard_setup_attention_seen:
-                    return data, approvals_triggered, approvals_resolved, (
-                        "Expected agentcard_user_cardholder_onboarding_required attention request was not observed"
+                    return (
+                        data,
+                        approvals_triggered,
+                        approvals_resolved,
+                        ("Expected agentcard_user_cardholder_onboarding_required attention request was not observed"),
                     )
                 if setup_still_open:
-                    return data, approvals_triggered, approvals_resolved, (
-                        "AgentCard setup attention request remained open after agent completion"
+                    return (
+                        data,
+                        approvals_triggered,
+                        approvals_resolved,
+                        ("AgentCard setup attention request remained open after agent completion"),
                     )
             return data, approvals_triggered, approvals_resolved, None
 
@@ -2485,9 +2546,7 @@ async def poll_agent(
                                 ):
                                     await respond_to_attention_request(base_url, req_id, "approved")
                                     approvals_resolved += 1
-                                    print(
-                                        f"    ✅ Auto-approved payment-card prerequisite {req_id[:8]}"
-                                    )
+                                    print(f"    ✅ Auto-approved payment-card prerequisite {req_id[:8]}")
                                     continue
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
@@ -2551,10 +2610,7 @@ async def poll_agent(
                                     "expected_payment_receipt_seen": True,
                                     "expected_payment_receipt_request_id": req_id,
                                 }
-                            if (
-                                task.success_on_payment_card_request
-                                and task.payment_card_request_action is None
-                            ):
+                            if task.success_on_payment_card_request and task.payment_card_request_action is None:
                                 if task.approval_handling == "count_only":
                                     await respond_to_attention_request(base_url, req_id, _count_only_release_response())
                                     approvals_resolved += 1
@@ -2584,9 +2640,7 @@ async def poll_agent(
                             ):
                                 await configure_benchmark_agentcard_setup(base_url, "complete")
                                 agentcard_setup_attention_seen = True
-                                print(
-                                    f"    ✅ Completed one-time AgentCard setup for attention {req_id[:8]}"
-                                )
+                                print(f"    ✅ Completed one-time AgentCard setup for attention {req_id[:8]}")
                                 continue
                         if task.name == CALENDLY_TASK_NAME and _contains_calendly_link(req):
                             data["_benchmark"] = {"calendly_link_approval_seen": True}
@@ -2603,10 +2657,7 @@ async def poll_agent(
                                 f"({approvals_triggered}/{task.expected_approval_count})"
                             )
                             return data, approvals_triggered, approvals_resolved, None
-                        if (
-                            task.approval_handling == "auto_approve"
-                            and _should_auto_approve_attention(task, req)
-                        ):
+                        if task.approval_handling == "auto_approve" and _should_auto_approve_attention(task, req):
                             if req_id:
                                 if not _phone_approval_matches_callee(task, req):
                                     await respond_to_attention_request(base_url, req_id, "denied")
@@ -2756,11 +2807,7 @@ def evaluate_task(
             ),
             None,
         )
-        scope = (
-            f"{task_scope}|browser_session:{browser_session_value}"
-            if browser_session_value
-            else task_scope
-        )
+        scope = f"{task_scope}|browser_session:{browser_session_value}" if browser_session_value else task_scope
 
         # Only completed browser actions are grounded page evidence. Task
         # prompts, verifier prose, and assistant restatements can contain the
@@ -2779,9 +2826,7 @@ def evaluate_task(
         grounded_action_types = {"click"}
         if message.get("role") == "TOOL" and tool_status == "FINISHED" and action_type in grounded_action_types:
             evidence = "\n".join(
-                candidate["title"]
-                for candidate in candidates
-                if isinstance(candidate.get("title"), str)
+                candidate["title"] for candidate in candidates if isinstance(candidate.get("title"), str)
             )
             if evidence:
                 message_evidence_by_scope.setdefault(scope, []).append((message_index, evidence))
@@ -2956,7 +3001,10 @@ def evaluate_task(
     if task.approval_handling == "ignore":
         if approvals_triggered == 0:
             if task.expected_attention_kinds:
-                return False, f"Expected one of {task.expected_attention_kinds} attention requests (to ignore) but none was triggered"
+                return (
+                    False,
+                    f"Expected one of {task.expected_attention_kinds} attention requests (to ignore) but none was triggered",
+                )
             if task.expected_attention_kind:
                 return (
                     False,
@@ -2971,7 +3019,10 @@ def evaluate_task(
             benchmark_state = data.get("_benchmark", {})
             observed_kind = benchmark_state.get("attention_request_kind_seen")
             if observed_kind not in task.expected_attention_kinds:
-                return False, f"Expected one of {task.expected_attention_kinds} attention requests, observed {observed_kind}"
+                return (
+                    False,
+                    f"Expected one of {task.expected_attention_kinds} attention requests, observed {observed_kind}",
+                )
         return True, None
 
     if task.name == CALENDLY_TASK_NAME:
@@ -3065,8 +3116,7 @@ def evaluate_task(
     ):
         return (
             False,
-            f"Expected exactly {task.expected_approval_count} approval request(s), "
-            f"observed {approvals_triggered}",
+            f"Expected exactly {task.expected_approval_count} approval request(s), observed {approvals_triggered}",
         )
 
     # Progress score check (verifier gave a score)
@@ -3148,7 +3198,7 @@ def evaluate_force_show_passwords_auth_task(
         return False, f"expected agent to fail after empty auth assistance approval, got {status}"
     if "max" not in str(status_message).lower() and "iteration" not in str(status_message).lower():
         return False, f"expected max-turn/max-iteration failure after resume, got: {status_message or '(empty)'}"
-    rows_ok, rows_reason = _validate_bad_amazon_auth_fixture(USER_ID)
+    rows_ok, rows_reason = _validate_bad_amazon_auth_scenario(USER_ID)
     if not rows_ok:
         return False, rows_reason
     return True, None
@@ -3542,8 +3592,7 @@ def _run_free_credit_subscription_fixture(action: str) -> dict:
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"free-credit subscription benchmark fixture {action} failed: "
-            f"{(result.stderr or result.stdout).strip()}"
+            f"free-credit subscription benchmark fixture {action} failed: {(result.stderr or result.stdout).strip()}"
         )
     return _parse_last_json_line(result.stdout)
 
@@ -3570,10 +3619,22 @@ def _run_gate_fixture(task_name: str, action: str) -> dict:
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"gate benchmark fixture {action} failed for {task_name}: "
-            f"{(result.stderr or result.stdout).strip()}"
+            f"gate benchmark fixture {action} failed for {task_name}: {(result.stderr or result.stdout).strip()}"
         )
     return _parse_last_json_line(result.stdout)
+
+
+def _seed_sync_error_detail(result: "subprocess.CompletedProcess[str]") -> str:
+    """Render a failed seed-local subprocess's output without destroying the
+    diagnosis. Prisma errors put the actual reason (error code / constraint /
+    timeout) at the END of the message, after the invocation header — a naive
+    head truncation reduced the 2026-07-18 claude-code-agent smoke failure to
+    an unusable 'Invalid `localCookie.upsert()` invocation in <file>' stub.
+    Keep the head for context and the tail for the root cause."""
+    detail = (result.stderr or result.stdout or "").strip()
+    if len(detail) <= 1200:
+        return detail
+    return f"{detail[:300]}\n    … [{len(detail) - 1100} chars elided] …\n    {detail[-800:]}"
 
 
 def _sync_compute_tokens() -> bool:
@@ -3603,17 +3664,18 @@ def _sync_compute_tokens() -> bool:
         print(f"    ⚠ Compute-token sync error: {exc}")
         return False
     if result.returncode != 0:
-        print(f"    ⚠ Compute-token sync failed: {(result.stderr or result.stdout).strip()[:200]}")
+        print(f"    ⚠ Compute-token sync failed: {_seed_sync_error_detail(result)}")
         return False
     print("    🔑 Refreshed compute tokens from prod")
     return True
 
 
 def _sync_browser_credentials() -> bool:
-    """Refresh live browser auth state (cookies + browser context/storage +
-    passwords/passkeys) from prod into the isolated benchmark DB. Same pattern as
+    """Refresh the complete live browser auth graph (context/provider profiles,
+    cookies/storage, CookieBundles, Steel sessions, passwords, and passkeys) from
+    prod into the isolated benchmark DB. Same pattern as
     _sync_compute_tokens: a one-time setup-db sync goes stale as cookies expire,
-    so the `base` live fixture re-pulls them right before the agent starts.
+    so the live fixture re-pulls them right before the agent starts.
     Best-effort but loud. Reads the prod source from back-end/.env."""
     database_url = _local_victoria_database_url()
     if not database_url:
@@ -3629,15 +3691,18 @@ def _sync_browser_credentials() -> bool:
             env=env,
             capture_output=True,
             text=True,
-            timeout=180,
+            # A healthy sync takes ~60-90s; seed-local retries transient DB
+            # failures up to 3x internally (BROWSER_AUTH_SYNC_ATTEMPTS), so the
+            # outer budget must cover multiple attempts, not just one.
+            timeout=420,
         )
     except Exception as exc:
         print(f"    ⚠ Credential sync error: {exc}")
         return False
     if result.returncode != 0:
-        print(f"    ⚠ Credential sync failed: {(result.stderr or result.stdout).strip()[:200]}")
+        print(f"    ⚠ Credential sync failed: {_seed_sync_error_detail(result)}")
         return False
-    print("    🍪 Refreshed browser cookies + passwords from prod")
+    print("    🍪 Refreshed complete browser auth state from prod")
     return True
 
 
@@ -3667,7 +3732,7 @@ def _sync_passkeys() -> None:
     except Exception as exc:
         raise RuntimeError(f"Passkey-only sync failed: {exc}") from exc
     if result.returncode != 0:
-        raise RuntimeError(f"Passkey-only sync failed: {(result.stderr or result.stdout).strip()[:500]}")
+        raise RuntimeError(f"Passkey-only sync failed: {_seed_sync_error_detail(result)}")
     print("    🔐 Refreshed passkeys only from prod")
 
 
@@ -3686,69 +3751,121 @@ def _is_simulate_mode() -> bool:
     return os.environ.get("BENCHMARK_WORLD_MODEL_MODE") == "simulate"
 
 
-def _apply_base_live_fixture(ctx: LiveFixtureContext) -> dict:
-    """The default live fixture every live task inherits: current compute tokens
-    + browser cookies/passwords, pulled fresh from prod into the isolated DB.
+def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
+    """Apply the one complete, current production-credential overlay.
 
-    In simulate mode the World Model Harness intercepts every environment-boundary
-    tool (browser, purchases, messaging), so real browser cookies/passwords are
-    never exercised. Re-syncing all 21k+ cookie/password rows per task is then pure
-    overhead — and on a throttled cloud uplink it blows the 180s sync budget,
-    stalling agent creation. Compute tokens are still refreshed because WMH
-    inference (RoseWMHProvider) and the agent's own LLM waterfall lease them."""
-    if not _sync_compute_tokens():
-        raise RuntimeError("Base live fixture could not refresh compute tokens")
+    Simulation skips the overlay as a unit. Applying only compute tokens while
+    omitting browser auth made the old ``base`` fixture neither reproducible nor
+    truthful, and allowed later site-specific fixtures to fail before an agent
+    was created.
+    """
     if _is_simulate_mode():
-        print("    🌍 simulate mode — skipping browser cookie/password sync (WMH mocks env tools)")
-        return {"fixture": "base", "browser_credentials": False}
-    if not _sync_browser_credentials():
-        raise RuntimeError("Base live fixture could not refresh browser credentials/auth state")
-    return {"fixture": "base", "browser_credentials": True}
-
-
-def _apply_compute_tokens(ctx: LiveFixtureContext) -> dict:
-    """Refresh compute tokens without importing any browser authentication state."""
+        print("    🌍 simulate mode — skipping the live credential overlay")
+        return {"fixture": "live", "skipped": True, "reason": "simulate"}
     if not _sync_compute_tokens():
-        raise RuntimeError("Compute-token live fixture could not refresh compute tokens")
-    return {"fixture": "compute_tokens"}
+        raise RuntimeError("Live fixture could not refresh compute tokens")
+    if not _sync_browser_credentials():
+        raise RuntimeError("Live fixture could not refresh complete browser auth state")
+    return {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
 
 
-def _apply_amazon_auth(ctx: LiveFixtureContext) -> dict:
-    """Build active CookieBundle rows for the amazon auth realm from synced
-    prod cookies so the browser agent starts logged in."""
-    if _skip_cookie_bundle_bootstrap():
-        print(f"    🍪 Skipping local CookieBundle bootstrap for {ctx.auth_realm}")
-        return {"fixture": "amazon_auth", "bundle_count": 0, "skipped": True}
-    bundle_count = _ensure_local_cookie_bundle_for_realm(ctx.user_id, ctx.auth_realm)
-    if bundle_count <= 0:
-        raise RuntimeError(
-            f"No usable local cookies found for {ctx.auth_realm}; cannot bootstrap an "
-            f"active CookieBundle. Refresh prod cookies (the `base` live fixture) first."
-        )
-    print(f"    🍪 Ensured {bundle_count} active local CookieBundle row(s) for {ctx.auth_realm}")
-    return {"fixture": "amazon_auth", "bundle_count": bundle_count}
+def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
+    """Refresh agent-infrastructure compute credentials once before local tasks.
+
+    This is required even when no task opts into browser credential state. It is
+    deliberately separate from ``environment.live_fixtures`` so simulated and
+    synthetic runs can still create and drive agents to completion.
+    """
+    if not _is_local_base_url(base_url):
+        return
+    if not _sync_compute_tokens():
+        raise RuntimeError("Benchmark run could not refresh local compute tokens")
 
 
-def _apply_amazon_passkey(ctx: LiveFixtureContext) -> dict:
-    _sync_passkeys()
-
+def _snapshot_browser_state(ctx: LiveFixtureContext, *, include_passwords: bool) -> dict:
+    """Capture the shared browser rows needed to reverse an isolated scenario."""
     user = _sql_literal(ctx.user_id)
     realm = _sql_literal(ctx.auth_realm)
+    password_snapshot = (
+        "COALESCE((SELECT json_agg(id) FROM \"BrowserPassword\" "
+        f'WHERE "userId" = {user} AND "disabledAt" IS NULL), \'[]\'::json)'
+        if include_passwords
+        else "'[]'::json"
+    )
     snapshot_sql = (
         "SELECT json_build_object("
         "'steel_ids', COALESCE((SELECT json_agg(id) FROM \"SteelSessionAuth\" "
-        f"WHERE \"userId\" = {user} AND \"authRealm\" = {realm} AND \"disabledAt\" IS NULL), '[]'::json), "
+        f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL), \'[]\'::json), '
         "'bundle_ids', COALESCE((SELECT json_agg(id) FROM \"CookieBundle\" "
-        f"WHERE \"userId\" = {user} AND \"authRealm\" = {realm} AND \"disabledAt\" IS NULL), '[]'::json), "
-        "'password_ids', COALESCE((SELECT json_agg(id) FROM \"BrowserPassword\" "
-        f"WHERE \"userId\" = {user} AND \"disabledAt\" IS NULL), '[]'::json), "
+        f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL), \'[]\'::json), '
+        f"'password_ids', {password_snapshot}, "
         "'profiles', COALESCE((SELECT json_agg(row_to_json(profile)) "
         'FROM "BrowserProviderProfile" profile JOIN "BrowserContext" context '
         'ON context.id = profile."contextId" '
         f"WHERE context.\"userId\" = {user} AND profile.provider = 'kernel'), '[]'::json)"
         ")::text;"
     )
-    snapshot = json.loads(_run_local_victoria_sql(snapshot_sql))
+    return json.loads(_run_local_victoria_sql(snapshot_sql))
+
+
+def _clear_browser_state(
+    ctx: LiveFixtureContext,
+    *,
+    disable_passwords: bool,
+    disabled_reason: str,
+) -> int:
+    """Disable saved auth and remove persistent state before a fresh browser run."""
+    user = _sql_literal(ctx.user_id)
+    realm = _sql_literal(ctx.auth_realm)
+    reason = _sql_literal(disabled_reason)
+    ctes = [
+        'steel AS (UPDATE "SteelSessionAuth" SET "disabledAt" = NOW(), '
+        f'"disabledReason" = {reason} WHERE "userId" = {user} '
+        f'AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id)',
+        'bundles AS (UPDATE "CookieBundle" SET "disabledAt" = NOW(), '
+        f'"disabledReason" = {reason} WHERE "userId" = {user} '
+        f'AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id)',
+    ]
+    if disable_passwords:
+        ctes.append(
+            'passwords AS (UPDATE "BrowserPassword" SET "disabledAt" = NOW(), '
+            f'"disabledReason" = {reason} WHERE "userId" = {user} '
+            'AND "disabledAt" IS NULL RETURNING id)'
+        )
+    ctes.extend(
+        [
+            f'cookies AS (DELETE FROM "Cookie" WHERE "userId" = {user} RETURNING id)',
+            f'local_storage AS (DELETE FROM "LocalStorageOrigin" WHERE "userId" = {user} RETURNING id)',
+            f'indexed_db AS (DELETE FROM "IndexedDBOrigin" WHERE "userId" = {user} RETURNING id)',
+            f'cache_storage AS (DELETE FROM "CacheStorageOrigin" WHERE "userId" = {user} RETURNING id)',
+            f'permissions AS (DELETE FROM "BrowserPermission" WHERE "userId" = {user} RETURNING id)',
+            'profiles AS (DELETE FROM "BrowserProviderProfile" profile USING "BrowserContext" context '
+            f'WHERE profile."contextId" = context.id AND context."userId" = {user} '
+            "AND profile.provider = 'kernel' RETURNING profile.id)",
+        ]
+    )
+    cleanup_sql = (
+        "WITH "
+        + ", ".join(ctes)
+        + " SELECT (SELECT COUNT(*) FROM cookies) + (SELECT COUNT(*) FROM local_storage) + "
+        "(SELECT COUNT(*) FROM indexed_db) + (SELECT COUNT(*) FROM cache_storage) + "
+        "(SELECT COUNT(*) FROM permissions) + (SELECT COUNT(*) FROM profiles);"
+    )
+    return int(_run_local_victoria_sql(cleanup_sql).splitlines()[-1].strip() or "0")
+
+
+def _apply_amazon_passkey_scenario(ctx: LiveFixtureContext) -> dict:
+    """Apply the task-specific destructive isolation for the passkey probe.
+
+    This is scenario setup, not a reusable live fixture: the generic ``live``
+    overlay first refreshes every credential class, then this one benchmark
+    removes competing auth paths so it can prove passkey injection.
+    """
+    _sync_passkeys()
+
+    user = _sql_literal(ctx.user_id)
+    realm = _sql_literal(ctx.auth_realm)
+    snapshot = _snapshot_browser_state(ctx, include_passwords=True)
     passkey_sql = (
         'SELECT COUNT(*) FROM "PasskeyCredential" '
         f'WHERE "userId" = {user} AND "authRealm" = {realm} AND "disabledAt" IS NULL;'
@@ -3757,33 +3874,14 @@ def _apply_amazon_passkey(ctx: LiveFixtureContext) -> dict:
     if passkey_count <= 0:
         raise RuntimeError(f"No enabled passkey found for {ctx.auth_realm}")
 
-    disabled_reason = _sql_literal("disabled by passkey-only benchmark fixture")
-    cleanup_sql = (
-        'WITH steel AS (UPDATE "SteelSessionAuth" SET "disabledAt" = NOW(), '
-        f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
-        f'AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id), '
-        'bundles AS (UPDATE "CookieBundle" SET "disabledAt" = NOW(), '
-        f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
-        f'AND "authRealm" = {realm} AND "disabledAt" IS NULL RETURNING id), '
-        'passwords AS (UPDATE "BrowserPassword" SET "disabledAt" = NOW(), '
-        f'"disabledReason" = {disabled_reason} WHERE "userId" = {user} '
-        'AND "disabledAt" IS NULL RETURNING id), '
-        f'cookies AS (DELETE FROM "Cookie" WHERE "userId" = {user} RETURNING id), '
-        f'local_storage AS (DELETE FROM "LocalStorageOrigin" WHERE "userId" = {user} RETURNING id), '
-        f'indexed_db AS (DELETE FROM "IndexedDBOrigin" WHERE "userId" = {user} RETURNING id), '
-        f'cache_storage AS (DELETE FROM "CacheStorageOrigin" WHERE "userId" = {user} RETURNING id), '
-        f'permissions AS (DELETE FROM "BrowserPermission" WHERE "userId" = {user} RETURNING id), '
-        'profiles AS (DELETE FROM "BrowserProviderProfile" profile USING "BrowserContext" context '
-        f'WHERE profile."contextId" = context.id AND context."userId" = {user} '
-        "AND profile.provider = 'kernel' RETURNING profile.id) "
-        "SELECT (SELECT COUNT(*) FROM cookies) + (SELECT COUNT(*) FROM local_storage) + "
-        "(SELECT COUNT(*) FROM indexed_db) + (SELECT COUNT(*) FROM cache_storage) + "
-        "(SELECT COUNT(*) FROM permissions) + (SELECT COUNT(*) FROM profiles);"
+    cleared = _clear_browser_state(
+        ctx,
+        disable_passwords=True,
+        disabled_reason="disabled by passkey-only benchmark scenario",
     )
-    cleared = int(_run_local_victoria_sql(cleanup_sql).splitlines()[-1].strip() or "0")
     print(f"    🔐 Prepared {passkey_count} Amazon passkey(s); cleared {cleared} saved-state row(s)")
     return {
-        "fixture": "amazon_passkey",
+        "scenario": "amazon_passkey",
         "passkey_count": passkey_count,
         "cleared": cleared,
         "user_id": ctx.user_id,
@@ -3792,20 +3890,90 @@ def _apply_amazon_passkey(ctx: LiveFixtureContext) -> dict:
     }
 
 
-def _restore_amazon_passkey_fixture(manifest: dict) -> None:
-    """Restore shared browser auth after the destructive passkey-only run."""
+def _apply_fresh_browser_state_scenario(ctx: LiveFixtureContext) -> dict:
+    """Give a public browser probe a clean profile with no inherited identity."""
+    snapshot = _snapshot_browser_state(ctx, include_passwords=False)
+    cleared = _clear_browser_state(
+        ctx,
+        disable_passwords=False,
+        disabled_reason="disabled by fresh-browser benchmark scenario",
+    )
+    print(f"    🧼 Prepared fresh browser state for {ctx.auth_realm}; cleared {cleared} saved-state row(s)")
+    return {
+        "scenario": "fresh_browser_state",
+        "cleared": cleared,
+        "user_id": ctx.user_id,
+        "auth_realm": ctx.auth_realm,
+        "restore_snapshot": snapshot,
+    }
+
+
+def _delete_kernel_profile(profile_id: str) -> None:
+    """Delete a run-created external Kernel profile; missing profiles are already clean."""
+    api_key = load_env_var("KERNEL_API_KEY", _BACKEND_ENV, _AGENTS_ENV)
+    if not api_key:
+        raise RuntimeError("KERNEL_API_KEY is required to delete an isolated benchmark profile")
+    base_url = (
+        load_env_var("KERNEL_API_BASE_URL", _BACKEND_ENV, _AGENTS_ENV) or "https://api.onkernel.com"
+    ).rstrip("/")
+    url = f"{base_url}/profiles/{quote(profile_id, safe='')}"
+    last_error: Exception | None = None
+    for attempt, delay in enumerate((0.0, 0.25, 0.5), start=1):
+        if delay:
+            time.sleep(delay)
+        try:
+            response = httpx.delete(
+                url,
+                headers={"Authorization": f"Bearer {api_key}", "Accept": "*/*"},
+                timeout=15,
+            )
+            if response.status_code == 404 or 200 <= response.status_code < 300:
+                return
+            last_error = RuntimeError(f"Kernel profile delete failed: HTTP {response.status_code}")
+        except Exception as exc:
+            last_error = exc
+        if attempt == 3:
+            break
+    raise RuntimeError(f"Failed to delete isolated Kernel profile {profile_id}: {last_error}")
+
+
+def _restore_isolated_browser_state_scenario(manifest: dict, *, label: str) -> None:
+    """Restore shared browser auth after a destructive isolated browser run."""
     snapshot = manifest.get("restore_snapshot")
     if not isinstance(snapshot, dict):
-        raise RuntimeError("Amazon passkey fixture did not capture a restore snapshot")
-    if not _sync_browser_credentials():
-        raise RuntimeError("Amazon passkey fixture could not restore live browser credentials")
-
+        raise RuntimeError(f"{label} scenario did not capture a restore snapshot")
     user = _sql_literal(str(manifest["user_id"]))
+
+    current_profile_ids_sql = (
+        "SELECT COALESCE(json_agg(profile.\"profileId\"), '[]'::json)::text "
+        'FROM "BrowserProviderProfile" profile JOIN "BrowserContext" context '
+        'ON context.id = profile."contextId" '
+        f"WHERE context.\"userId\" = {user} AND profile.provider = 'kernel';"
+    )
+    current_profile_ids = json.loads(_run_local_victoria_sql(current_profile_ids_sql))
+    if not isinstance(current_profile_ids, list):
+        raise RuntimeError(f"{label} restore could not read current Kernel profiles")
+    snapshot_profiles = snapshot.get("profiles")
+    if not isinstance(snapshot_profiles, list):
+        raise RuntimeError(f"{label} restore snapshot has invalid profiles")
+    snapshot_profile_ids = {
+        str(profile.get("profileId"))
+        for profile in snapshot_profiles
+        if isinstance(profile, dict) and profile.get("profileId")
+    }
+    run_created_profile_ids = {
+        str(profile_id) for profile_id in current_profile_ids if profile_id
+    } - snapshot_profile_ids
+    for profile_id in sorted(run_created_profile_ids):
+        _delete_kernel_profile(profile_id)
+
+    if not _sync_browser_credentials():
+        raise RuntimeError(f"{label} scenario could not restore live browser credentials")
 
     def ids_sql(key: str) -> str:
         values = snapshot.get(key)
         if not isinstance(values, list):
-            raise RuntimeError(f"Amazon passkey restore snapshot has invalid {key}")
+            raise RuntimeError(f"{label} restore snapshot has invalid {key}")
         return ", ".join(_sql_literal(str(value)) for value in values)
 
     statements: list[str] = []
@@ -3817,36 +3985,42 @@ def _restore_amazon_passkey_fixture(manifest: dict) -> None:
         identifiers = ids_sql(key)
         if identifiers:
             statements.append(
-                f'UPDATE "{table}" SET "disabledAt" = NULL, "disabledReason" = NULL '
-                f"WHERE id IN ({identifiers})"
+                f'UPDATE "{table}" SET "disabledAt" = NULL, "disabledReason" = NULL WHERE id IN ({identifiers})'
             )
 
     statements.append(
         'DELETE FROM "BrowserProviderProfile" profile USING "BrowserContext" context '
         'WHERE profile."contextId" = context.id '
-        f'AND context."userId" = {user} AND profile.provider = \'kernel\''
+        f"AND context.\"userId\" = {user} AND profile.provider = 'kernel'"
     )
-    profiles = snapshot.get("profiles")
-    if not isinstance(profiles, list):
-        raise RuntimeError("Amazon passkey restore snapshot has invalid profiles")
-    if profiles:
-        profiles_json = _sql_literal(json.dumps(profiles, separators=(",", ":")))
+    if snapshot_profiles:
+        profiles_json = _sql_literal(json.dumps(snapshot_profiles, separators=(",", ":")))
         statements.append(
             'INSERT INTO "BrowserProviderProfile" '
             'SELECT * FROM json_populate_recordset(NULL::"BrowserProviderProfile", '
             f"{profiles_json}::json)"
         )
     _run_local_victoria_sql("; ".join(statements) + ";")
-    print("    🧹 Restored shared browser auth after Amazon passkey fixture")
+    print(f"    🧹 Restored shared browser auth after {label} scenario")
 
 
-# Runtime bindings for the metadata registry in live_fixtures.py. Kept in sync by
-# the assertion below so a fixture can never be declared without an applier.
+def _restore_amazon_passkey_scenario(manifest: dict) -> None:
+    """Restore shared browser auth after the destructive passkey-only run."""
+    _restore_isolated_browser_state_scenario(manifest, label="Amazon passkey")
+
+
+def _restore_live_fixture_scenarios(manifests: list[dict]) -> None:
+    """Restore destructive task scenarios in reverse setup order."""
+    for manifest in reversed(manifests):
+        scenario = manifest.get("scenario")
+        if scenario == "fresh_browser_state":
+            _restore_isolated_browser_state_scenario(manifest, label="fresh browser state")
+        elif scenario == "amazon_passkey" or manifest.get("fixture") == "amazon_passkey":
+            _restore_amazon_passkey_scenario(manifest)
+
+
 LIVE_FIXTURE_APPLIERS = {
-    "base": _apply_base_live_fixture,
-    "compute_tokens": _apply_compute_tokens,
-    "amazon_auth": _apply_amazon_auth,
-    "amazon_passkey": _apply_amazon_passkey,
+    "live": _apply_live_fixture,
 }
 assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
     f"live-fixture appliers {sorted(LIVE_FIXTURE_APPLIERS)} must match registry {sorted(LIVE_FIXTURE_NAMES)}"
@@ -3856,10 +4030,8 @@ assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
 def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
     """Apply every live fixture the task's environment resolves to, in order.
 
-    Replaces the old per-task-name credential/cookie branches: compute-token sync
-    and amazon cookie bootstrap are now declared as live_fixtures in tasks.json
-    (the `base` fixture is inherited by every live task). Live fixtures only apply
-    against the local benchmark stack.
+    Live fixtures only apply against the local benchmark stack. Scenario-specific
+    mutations remain explicit task setup and are not added to the fixture registry.
     """
     fixtures = resolve_live_fixtures(task.environment)
     if not fixtures:
@@ -3875,6 +4047,8 @@ def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
         if applier is None:
             raise RuntimeError(f"{task.name}: unknown live_fixture '{name}'")
         manifests.append(applier(ctx))
+    if task.name == AMAZON_PASSKEY_TASK_NAME and not _is_simulate_mode():
+        manifests.append(_apply_amazon_passkey_scenario(ctx))
     return manifests
 
 
@@ -4117,17 +4291,12 @@ async def evaluate_plaid_transaction_task(
     return True, None
 
 
-def _skip_cookie_bundle_bootstrap() -> bool:
-    return os.environ.get("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP", "").lower() in {"1", "true", "yes"}
-
-
 def _force_show_passwords_mode() -> bool:
     return os.environ.get(BENCHMARK_FORCE_SHOW_PASSWORDS_ENV, "").lower() in {"1", "true", "yes"}
 
 
 def _apply_anon_benchmark_mode(*, force_show_passwords: bool = False) -> None:
     """Force auth benchmarks to exercise freshly minted credentials."""
-    os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] = "true"
     os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] = "true"
     os.environ["BENCHMARK_ANON_STEEL_PROFILE"] = "true"
     if force_show_passwords:
@@ -4135,42 +4304,6 @@ def _apply_anon_benchmark_mode(*, force_show_passwords: bool = False) -> None:
         os.environ.pop("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", None)
     else:
         os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = "true"
-
-
-def _ensure_local_cookie_bundle_for_realm(user_id: str, auth_realm: str) -> int:
-    """Upsert active CookieBundle rows for an auth realm from existing local cookies."""
-    if _skip_cookie_bundle_bootstrap():
-        return 0
-    realm = _sql_literal(auth_realm.lower())
-    user = _sql_literal(user_id)
-    sql = (
-        "WITH matching_cookies AS ("
-        'SELECT "browserSource", "browserProfile", MAX(COALESCE("creationUtc", 0)) AS "freshestCookieUtc" '
-        'FROM "Cookie" '
-        f'WHERE "userId" = {user} '
-        "AND COALESCE(\"name\", '') <> '' "
-        "AND COALESCE(\"value\", '') <> '' "
-        f"AND (LOWER(TRIM(LEADING '.' FROM \"domain\")) = {realm} "
-        f"OR LOWER(TRIM(LEADING '.' FROM \"domain\")) LIKE '%.' || {realm}) "
-        'AND ("expiresUtc" IS NULL OR "expiresUtc" <= 0 '
-        'OR (("expiresUtc" / 1000000) - 11644473600) > EXTRACT(EPOCH FROM NOW())) '
-        'GROUP BY "browserSource", "browserProfile"'
-        "), upserted AS ("
-        'INSERT INTO "CookieBundle" '
-        '(id, "userId", "authRealm", "browserSource", "browserProfile", '
-        '"createdAt", "updatedAt", "disabledAt", "disabledReason") '
-        f'SELECT gen_random_uuid(), {user}, {realm}, "browserSource", "browserProfile", '
-        "NOW(), NOW(), NULL, NULL FROM matching_cookies "
-        'ON CONFLICT ("userId", "authRealm", "browserSource", "browserProfile") DO UPDATE SET '
-        '"updatedAt" = NOW(), "disabledAt" = NULL, "disabledReason" = NULL '
-        "RETURNING id"
-        ") SELECT COUNT(*) FROM upserted;"
-    )
-    out = _run_local_victoria_sql(sql)
-    try:
-        return int(out.splitlines()[-1].strip() or "0")
-    except Exception:
-        return 0
 
 
 def _delete_local_minted_accounts_for_user(user_id: str, *, reset_agent_identity: bool = False) -> int:
@@ -4293,7 +4426,7 @@ EwIDAQAB
     return base64.b64encode(json.dumps(envelope).encode("utf-8")).decode("utf-8")
 
 
-def _seed_local_bad_amazon_auth_fixture(user_id: str, auth_realm: str) -> dict:
+def _seed_local_bad_amazon_auth_scenario(user_id: str, auth_realm: str) -> dict:
     """Seed one bad CookieBundle and two bad Amazon password rows for auth e2e coverage."""
     if auth_realm != "amazon.com":
         raise RuntimeError("--force-show-passwords currently only supports the amazon.com auth benchmark.")
@@ -4393,7 +4526,7 @@ def _seed_local_bad_amazon_auth_fixture(user_id: str, auth_realm: str) -> dict:
     return fixture
 
 
-def _validate_bad_amazon_auth_fixture(user_id: str) -> Tuple[bool, Optional[str]]:
+def _validate_bad_amazon_auth_scenario(user_id: str) -> Tuple[bool, Optional[str]]:
     cookie_bundle_id = os.environ.get("BENCHMARK_BAD_AUTH_COOKIE_BUNDLE_ID", "")
     password_ids = [value for value in os.environ.get("BENCHMARK_BAD_AUTH_PASSWORD_IDS", "").split(",") if value]
     if not cookie_bundle_id or not password_ids:
@@ -4501,7 +4634,7 @@ def _prepare_local_agent_sms_sender(user_id: str) -> Optional[str]:
     _run_local_victoria_sql(
         'UPDATE "AgentIdentity" SET '
         f"phone = {_sql_literal(phone)}, "
-        '"phoneProvider" = \'agentphone\', '
+        "\"phoneProvider\" = 'agentphone', "
         '"phoneProviderAgentId" = NULL, '
         '"phoneProviderNumberId" = NULL '
         f'WHERE "userId" = {_sql_literal(user_id)};'
@@ -5532,7 +5665,7 @@ eligible orders fail unless a criterion explicitly defines that state as success
 Task requirement: {task.prompt}
 Criteria:
 {criteria}
-Judge-specific instruction: {evaluator.get('judge_prompt', '')}
+Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 """
     evidence = _declared_evaluator_evidence(data)
     return await check_progress(
@@ -5588,6 +5721,157 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
     return max(len(browser_call_ids), len(browser_session_ids)), failures
 
 
+_AGENT_CLASS_BY_RUNTIME_TOOL = {
+    "spawn_browser_agent": "browser",
+    "spawn_claude_code_agent": "code",
+    "spawn_general_purpose_agent": "explore",
+}
+_AGENT_ORCHESTRATION_TOOLS = {
+    "spawn_agent",
+    "spawn_browser_agent",
+    "spawn_claude_code_agent",
+    "spawn_general_purpose_agent",
+}
+
+
+def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
+    """Count grounded trajectory steps for each spawned agent instance.
+
+    Browser steps are deliberately strict: only explicit, non-negative
+    ``steps_taken`` counters emitted by browser action events count. Lifecycle
+    messages and terminal structured responses count as zero work. Other agent
+    classes use the same per-instance grouping and count their distinct leaf
+    tool calls, unless they expose explicit step counters of their own.
+    """
+    parents: dict[tuple[str, str], tuple[str, str]] = {}
+    explicit_steps: dict[tuple[str, str], set[int]] = {}
+    leaf_steps: dict[tuple[str, str], set[str]] = {}
+
+    def register(agent_class: str, instance_id: object) -> tuple[str, str] | None:
+        normalized_class = str(agent_class or "").strip().lower()
+        normalized_id = str(instance_id or "").strip()
+        if not normalized_class or not normalized_id:
+            return None
+        node = (normalized_class, normalized_id)
+        parents.setdefault(node, node)
+        return node
+
+    def find(node: tuple[str, str]) -> tuple[str, str]:
+        parent = parents[node]
+        if parent != node:
+            parents[node] = find(parent)
+        return parents[node]
+
+    def union(left: tuple[str, str], right: tuple[str, str]) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    messages = data.get("messages", []) or []
+    for message in messages:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        for tool_call in metadata.get("tool_calls", []) or []:
+            if not isinstance(tool_call, dict):
+                continue
+            tool_name = tool_call.get("tool")
+            agent_class = tool_call.get("type") or _AGENT_CLASS_BY_RUNTIME_TOOL.get(tool_name)
+            if tool_name == "spawn_agent" or tool_name in _AGENT_CLASS_BY_RUNTIME_TOOL:
+                register(agent_class, tool_call.get("tool_call_id") or tool_call.get("toolCallId"))
+
+    step_events: list[tuple[tuple[str, str], dict, bool]] = []
+    for message in messages:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        candidates = [metadata]
+        if isinstance(metadata.get("auxiliary"), dict):
+            candidates.append(metadata["auxiliary"])
+        for candidate in candidates:
+            tool_name = candidate.get("toolName") or candidate.get("tool_name")
+            agent_class = (
+                candidate.get("agentType")
+                or candidate.get("agent_type")
+                or _AGENT_CLASS_BY_RUNTIME_TOOL.get(tool_name)
+            )
+            if not agent_class:
+                continue
+            direct_ids = [
+                candidate.get("subAgentId"),
+                candidate.get("sub_agent_id"),
+                candidate.get("task_id"),
+                candidate.get("taskId"),
+            ]
+            nodes = [node for value in direct_ids if (node := register(agent_class, value))]
+            tool_call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
+            if tool_name in _AGENT_ORCHESTRATION_TOOLS:
+                tool_node = register(agent_class, tool_call_id)
+                if tool_node:
+                    nodes.append(tool_node)
+            if not nodes:
+                continue
+            anchor = nodes[0]
+            for node in nodes[1:]:
+                union(anchor, node)
+            has_direct_instance = any(value for value in direct_ids)
+            step_events.append((anchor, candidate, has_direct_instance))
+
+    for node, candidate, has_direct_instance in step_events:
+        root = find(node)
+        step_number = candidate.get("steps_taken")
+        if isinstance(step_number, int) and not isinstance(step_number, bool) and step_number >= 0:
+            explicit_steps.setdefault(root, set()).add(step_number)
+        if root[0] == "browser" or not has_direct_instance:
+            continue
+        tool_name = candidate.get("toolName") or candidate.get("tool_name")
+        tool_call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
+        if tool_name and tool_name not in _AGENT_ORCHESTRATION_TOOLS and tool_call_id:
+            leaf_steps.setdefault(root, set()).add(f"{tool_name}:{tool_call_id}")
+
+    grouped_explicit: dict[tuple[str, str], set[int]] = {}
+    grouped_leaf: dict[tuple[str, str], set[str]] = {}
+    for node, values in explicit_steps.items():
+        grouped_explicit.setdefault(find(node), set()).update(values)
+    for node, values in leaf_steps.items():
+        grouped_leaf.setdefault(find(node), set()).update(values)
+
+    counts: dict[str, dict[str, int]] = {}
+    for node in parents:
+        root = find(node)
+        if root != node:
+            continue
+        agent_class, instance_id = root
+        explicit_count = len(grouped_explicit.get(root, set()))
+        leaf_count = len(grouped_leaf.get(root, set()))
+        counts.setdefault(agent_class, {})[instance_id] = (
+            explicit_count if explicit_count else leaf_count
+        )
+    return counts
+
+
+def _validate_agent_class_min_steps(
+    min_steps: dict[str, int],
+    counts: dict[str, dict[str, int]],
+) -> Optional[str]:
+    """Require every observed instance of each configured class to meet its minimum."""
+    for agent_class, minimum in sorted(min_steps.items()):
+        instances = counts.get(agent_class, {})
+        if not instances:
+            return (
+                f"No {agent_class} agent trajectory was recorded; expected at least "
+                f"{minimum} steps per {agent_class} agent"
+            )
+        for instance_id, actual in sorted(instances.items()):
+            if actual < minimum:
+                return (
+                    f"{agent_class.capitalize()} agent {instance_id} recorded {actual} trajectory "
+                    f"step(s); expected at least {minimum} per {agent_class} agent"
+                )
+    return None
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
@@ -5629,7 +5913,7 @@ _APPROVAL_AMOUNT_RE = re.compile(
 _APPROVAL_SEAT_RE = re.compile(
     r"(?:\bseat(?:s)?(?:\s+(?:number|assignment))?\s*[:#-]?\s*[a-z]{1,2}\s*-?\s*\d{1,3}\b|"
     r"\brow\s+[a-z]{1,2}\s*,?\s+seat\s+\d{1,3}\b|"
-    r'[\"\']seat[\"\']\s*:\s*[\"\']?[a-z]{1,2}\s*-?\s*\d{1,3}\b)',
+    r"[\"\']seat[\"\']\s*:\s*[\"\']?[a-z]{1,2}\s*-?\s*\d{1,3}\b)",
     re.IGNORECASE,
 )
 
@@ -5715,8 +5999,7 @@ def _run_declared_static_check(evaluator: dict, data: dict) -> tuple[bool, str]:
                 amount_suffix = " and a monetary amount" if require_amount else ""
                 seat_suffix = " and a seat assignment" if require_seat else ""
                 return False, (
-                    "Approval request did not include "
-                    f"{missing}{date_suffix}{time_suffix}{amount_suffix}{seat_suffix}"
+                    f"Approval request did not include {missing}{date_suffix}{time_suffix}{amount_suffix}{seat_suffix}"
                 )
             continue
         return False, f"Unsupported enforced static check: {check_type}"
@@ -5793,7 +6076,7 @@ async def run_single_task(
     if task.name == AMAZON_AUTH_ASSISTANCE_TASK_NAME and _force_show_passwords_mode() and _is_local_base_url(base_url):
         auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
         disabled_count = _disable_local_steel_and_cookie_auth_for_realm(USER_ID, auth_realm)
-        fixture = _seed_local_bad_amazon_auth_fixture(USER_ID, auth_realm)
+        fixture = _seed_local_bad_amazon_auth_scenario(USER_ID, auth_realm)
         print(
             f"    🔐 Force-show-passwords fixture: disabled {disabled_count} Steel/Cookie auth row(s), "
             f"seeded CookieBundle {fixture['cookie_bundle_id'][:8]} and "
@@ -5932,16 +6215,26 @@ async def run_single_task(
 
         if task.name == MESSAGE_PERSON_TASK_NAME:
             await _preflight_message_person_bridge(base_url)
-        if task.name == MESSAGE_PERSON_AGENT_SMS_TASK_NAME and (
-            "localhost" in base_url or "127.0.0.1" in base_url
-        ):
+        if task.name == MESSAGE_PERSON_AGENT_SMS_TASK_NAME and ("localhost" in base_url or "127.0.0.1" in base_url):
             seeded_email = _prepare_local_agent_sms_sender(USER_ID)
             if seeded_email:
                 print(f"    🧪 Seeded AgentPhone sender for live bench: {seeded_email}")
-        # Apply live fixtures inside the cleanup boundary. The passkey-only
-        # fixture intentionally removes shared browser state and must restore it
+        # Apply the live overlay inside the cleanup boundary. The passkey-only
+        # scenario intentionally removes shared browser state and must restore it
         # even when agent creation or evaluation fails.
         live_fixture_manifests = _apply_live_fixtures(task, base_url)
+        if task.browser_profile_mode == "fresh" and not _is_simulate_mode():
+            if not _is_local_base_url(base_url):
+                raise RuntimeError(f"{task.name}: fresh browser state requires an isolated local benchmark stack")
+            live_fixture_manifests.append(
+                _apply_fresh_browser_state_scenario(
+                    LiveFixtureContext(
+                        base_url=base_url,
+                        user_id=_current_benchmark_user_id(),
+                        auth_realm=str(task.browser_auth_realm),
+                    )
+                )
+            )
 
         # Handle attachments: create agent first, upload files, then post file messages
         if all_attachments:
@@ -6079,6 +6372,11 @@ async def run_single_task(
                 }
 
         tree_stats = await _fetch_tree_stats(base_url, agent_id)
+        llm_usage_by_provider, repeatable_cache_usage = await get_llm_usage_details(
+            base_url,
+            agent_id,
+            tree_stats,
+        )
         tree_agent_count = max(tree_agent_count, int(tree_stats.get("agent_count") or 0))
         tree_tokens_in = max(
             _as_nonnegative_int(tree_stats.get("tree_tokens_in")),
@@ -6137,6 +6435,24 @@ async def run_single_task(
             if not plaid_passed:
                 passed = False
                 failure_reason = plaid_reason
+
+        agent_class_step_counts = _agent_class_step_counts(data)
+        data["_benchmark"] = {
+            **data.get("_benchmark", {}),
+            "agent_class_step_counts": agent_class_step_counts,
+            "min_steps": dict(task.min_steps),
+        }
+        min_steps_error = _validate_agent_class_min_steps(
+            task.min_steps,
+            agent_class_step_counts,
+        )
+        if min_steps_error:
+            passed = False
+            failure_reason = (
+                f"{failure_reason} | {min_steps_error}"
+                if failure_reason
+                else min_steps_error
+            )
 
         # Tree agent count check — counts spawn_agent-type sub-agents only
         # (excludes root and explore agents; explore agents have no output_schema)
@@ -6303,10 +6619,18 @@ async def run_single_task(
             cache_read_input_tokens=cache_read_input_tokens,
             cache_creation_input_tokens=cache_creation_input_tokens,
             cache_hit_pct=cache_hit_pct,
+            repeatable_cache_read_input_tokens=int(
+                repeatable_cache_usage["cache_read_input_tokens"]
+            ),
+            repeatable_cache_creation_input_tokens=int(
+                repeatable_cache_usage["cache_creation_input_tokens"]
+            ),
+            repeatable_cache_hit_pct=float(repeatable_cache_usage["cache_hit_pct"]),
             llm_call_count=llm_call_count,
             tree_agent_count=tree_agent_count,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
+            llm_usage_by_provider=llm_usage_by_provider,
             stop_metadata={
                 "llm_call_count": llm_call_count,
                 "tree_agent_count": tree_agent_count,
@@ -6334,6 +6658,17 @@ async def run_single_task(
         if total_input > 0:
             print(
                 f"       Cache: read={cache_read_input_tokens} write={cache_creation_input_tokens} hit={cache_hit_pct}%"
+            )
+        repeatable_total = (
+            result.repeatable_cache_read_input_tokens
+            + result.repeatable_cache_creation_input_tokens
+        )
+        if repeatable_total > 0:
+            print(
+                "       Repeatable cache: "
+                f"read={result.repeatable_cache_read_input_tokens} "
+                f"write={result.repeatable_cache_creation_input_tokens} "
+                f"hit={result.repeatable_cache_hit_pct}%"
             )
 
         # Clean up: delete the agent now that we've collected all data, unless
@@ -6492,16 +6827,7 @@ async def run_single_task(
                 _run_plaid_transactions_fixture("cleanup")
             except Exception as exc:
                 print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
-        passkey_manifest = next(
-            (
-                manifest
-                for manifest in live_fixture_manifests
-                if manifest.get("fixture") == "amazon_passkey"
-            ),
-            None,
-        )
-        if passkey_manifest is not None:
-            _restore_amazon_passkey_fixture(passkey_manifest)
+        _restore_live_fixture_scenarios(live_fixture_manifests)
         if previous_benchmark_user_id is None:
             os.environ.pop("BENCHMARK_RUN_USER_ID", None)
         else:
@@ -6563,9 +6889,7 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
             # The anon/cookie split used to live on dedicated tags; the curated
             # tag vocabulary merged them into `auth`, so the split is by name.
             auth_names = (
-                ("browser-agent",)
-                if getattr(args, "anon", False)
-                else ("browser-agent-amazon-cookie-payment",)
+                ("browser-agent",) if getattr(args, "anon", False) else ("browser-agent-amazon-cookie-payment",)
             )
             tasks = [get_task_by_name(name) for name in auth_names]
         elif args.suite in ("rose-bench", "pipeline-e2e"):
@@ -7134,6 +7458,91 @@ async def _check_compute_code_credentials(base_url: str) -> bool:
         return False
 
 
+def cache_ratchet_failures(
+    task_results: list[TaskResult],
+    floors: dict[str, float] = PER_TASK_CACHE_HIT_RATCHET,
+) -> list[tuple[str, str, float, float]]:
+    """Return repeatable-cache floor violations, including missing telemetry."""
+    failures: list[tuple[str, str, float, float]] = []
+    for result in task_results:
+        floor = floors.get(result.name)
+        if floor is None:
+            continue
+        total = (
+            result.repeatable_cache_read_input_tokens
+            + result.repeatable_cache_creation_input_tokens
+        )
+        if total <= 0:
+            if floor > 0:
+                failures.append((result.name, result.agent_id, 0.0, floor))
+            continue
+        hit_pct = round(result.repeatable_cache_read_input_tokens / total * 100, 1)
+        if hit_pct < floor:
+            failures.append((result.name, result.agent_id, hit_pct, floor))
+    return failures
+
+
+def enforce_cache_ratchets(task_results: list[TaskResult]) -> None:
+    """Fail the benchmark when repeatable cache reuse regresses or is absent."""
+    failures = cache_ratchet_failures(task_results)
+    if not failures:
+        return
+    print("\n  ❌ CACHE RATCHET FAILED (per-task repeatable prompt-cache hit floor):")
+    for name, _agent_id, hit_pct, floor in failures:
+        print(f"    - {name}: {hit_pct}% < {floor}% ratchet")
+    print(
+        "\n  Diagnose each failure with agent_cache.py to see per-LLM-call"
+        "\n  read/write/hit% and find where the prefix fingerprint is drifting:"
+    )
+    for name, agent_id, _hit_pct, _floor in failures:
+        print(
+            "    cd agents && source venv/bin/activate && "
+            f"python benchmarks/agent_cache.py {agent_id}  # {name}"
+        )
+    print(
+        "\n  Fix the cache miss (e.g. unstable prefix hash, model mix,"
+        "\n  claudeAuth fall-through) and re-run until hit% ≥ ratchet."
+    )
+    raise SystemExit(1)
+
+
+def _parallel_task_runners(
+    tasks: list[BenchmarkTask],
+    max_concurrency: int | None,
+    runner: Callable[[BenchmarkTask], Awaitable[TaskResult]],
+) -> list[Awaitable[TaskResult]]:
+    """Build task runners with batch and shared browser-profile limits.
+
+    Browser sessions persist changes into the benchmark user's provider profile.
+    Two browser-backed tasks therefore cannot safely overlap: whichever session
+    closes last can overwrite cookies, storage, and tabs written by its sibling.
+    Keep that resource exclusive while allowing non-browser work to use the rest
+    of the configured batch concurrency.
+    """
+    semaphore = (
+        asyncio.Semaphore(max_concurrency)
+        if max_concurrency is not None and max_concurrency < len(tasks)
+        else None
+    )
+    browser_profile_writer = asyncio.Semaphore(1)
+
+    async def run_with_batch_limit(task: BenchmarkTask) -> TaskResult:
+        if semaphore is None:
+            return await runner(task)
+        async with semaphore:
+            return await runner(task)
+
+    async def run_limited(task: BenchmarkTask) -> TaskResult:
+        if task.requires_browser_agent:
+            # Acquire the resource-specific lock first so a queued browser task
+            # does not consume a general slot that non-browser work can use.
+            async with browser_profile_writer:
+                return await run_with_batch_limit(task)
+        return await run_with_batch_limit(task)
+
+    return [run_limited(task) for task in tasks]
+
+
 async def main_async(args):
     if args.list:
         print("\nBenchmark Tasks:")
@@ -7223,6 +7632,7 @@ async def main_async(args):
                 print("  ⚠ Temporal stale-workflow cleanup timed out after 30s; continuing")
             await _fail_stale_active_agents()
         await _warmup_edge_functions(base_url)
+        _refresh_local_compute_tokens_for_run(base_url)
 
     # Pre-flight: check provider-typed compute credentials for code-agent tests.
     skipped_claude_tasks: List[BenchmarkTask] = []
@@ -7293,6 +7703,30 @@ async def main_async(args):
 
     # Run tasks — finally block ensures flyctl cleanup + results are always saved
     run = BenchmarkRun(suite=suite_name, base_url=base_url)
+    parent_hub_run_id = os.environ.get("BENCHMARK_HUB_PARENT_RUN_ID", "").strip()
+    if parent_hub_run_id:
+        print(f"  📊 In-app Benchmark Hub: managed by parent run {parent_hub_run_id}")
+    else:
+        # Registration is a launch invariant: a benchmark agent must never be
+        # created unless the Mac app's persisted Hub can already resolve this
+        # run. Final save uses the same required contract below via results.py.
+        from benchmarks.hub_upload import DEFAULT_HUB_URL, require_run_visible
+
+        os.environ.setdefault("BENCHMARK_HUB_UPLOAD_URL", DEFAULT_HUB_URL)
+        os.environ.setdefault("BENCHMARK_HUB_API_KEY", API_KEY)
+        os.environ["BENCHMARK_HUB_REQUIRED"] = "1"
+        require_run_visible(
+            {
+                "run_id": run.run_id,
+                "timestamp": run.timestamp,
+                "suite": run.suite,
+                "source": "benchmark-runner",
+                "tasks": [
+                    {"name": task.name, "status": "starting"}
+                    for task in [*tasks, *skipped_claude_tasks]
+                ],
+            }
+        )
     checkpoint_source_mode = args.checkpoint_source_index is not None
     memory_gate_enabled = (
         suite_name == "smoke"
@@ -7456,35 +7890,27 @@ async def main_async(args):
             if exclusive_db_tasks:
                 names = ", ".join(t.name for t in exclusive_db_tasks)
                 print(
-                    f"\n  Deferring {len(exclusive_db_tasks)} destructive DB fixture task(s) "
-                    f"to a serial phase: {names}"
+                    f"\n  Deferring {len(exclusive_db_tasks)} destructive DB fixture task(s) to a serial phase: {names}"
                 )
 
             if max_concurrency is None or max_concurrency >= len(parallel_batch):
                 print(f"\n  Running {len(parallel_batch)} tasks in parallel...")
-                task_runners = [
-                    run_single_task(
-                        base_url,
-                        task,
-                        args.keep_failed_agents,
-                        on_agent_created=_remember_live_agent,
-                    )
-                    for task in parallel_batch
-                ]
             else:
                 print(f"\n  Running {len(parallel_batch)} tasks in parallel (max_concurrency={max_concurrency})...")
-                semaphore = asyncio.Semaphore(max_concurrency)
 
-                async def run_limited(task: BenchmarkTask) -> TaskResult:
-                    async with semaphore:
-                        return await run_single_task(
-                            base_url,
-                            task,
-                            args.keep_failed_agents,
-                            on_agent_created=_remember_live_agent,
-                        )
+            async def run_parallel_task(task: BenchmarkTask) -> TaskResult:
+                return await run_single_task(
+                    base_url,
+                    task,
+                    args.keep_failed_agents,
+                    on_agent_created=_remember_live_agent,
+                )
 
-                task_runners = [run_limited(task) for task in parallel_batch]
+            task_runners = _parallel_task_runners(
+                parallel_batch,
+                max_concurrency,
+                run_parallel_task,
+            )
 
             pending_results: dict[asyncio.Task, BenchmarkTask] = {
                 asyncio.create_task(runner, name=f"benchmark-{task.name}"): task
@@ -7640,61 +8066,7 @@ async def main_async(args):
         )
         sys.exit(1)
 
-    # Per-task cache hit ratchets — each value is the floor for that smoke
-    # task's prompt-cache hit %. Baseline values come from the run that
-    # established each task as passing, rounded DOWN to the nearest 5% to
-    # absorb run-to-run variance.
-    #
-    # Update rule: only RAISE a ratchet, never lower it. Move in 5%
-    # increments, and only when the observed hit % is more than 2.5% past
-    # the next threshold. Examples:
-    #   - ratchet 30%, observed 33%   → stay at 30  (only 3% past, <5% step)
-    #   - ratchet 30%, observed 32%   → stay at 30  (under 32.5% trigger)
-    #   - ratchet 25%, observed 32.6% → bump to 30  (>2.5% past 30)
-    #   - ratchet 30%, observed 37.6% → bump to 35
-    # Cold-vs-warm baseline: short tasks with 1-2 main-loop LLM calls
-    # (browser-smoke, claude-code-agent) have cache hit % dominated by
-    # whether iter-1's writes are still in prod's 5-min Anthropic
-    # ephemeral cache. Deploy gates often run after a quiet period, so
-    # ratchets for those tasks reflect the COLD-CACHE floor — not the
-    # warm-cache ceiling seen when smoke runs back-to-back. Tasks with
-    # >=3 main-loop calls (spawn-sub-agents, parallel-tool-calls) reach
-    # warm cache within the same run, so their ratchets stay higher.
-    PER_TASK_CACHE_HIT_RATCHET = {
-        "chat-mode": 0.0,  # observed 0.0% (no LLM cache path)
-        "spawn-sub-agents": 20.0,  # observed 24.4%
-        "parallel-tool-calls": 25.0,  # observed 29.1%
-        "claude-code-agent": 40.0,  # cold-cache floor (observed 44.2% w/ cold prod)
-        "browser-smoke": 35.0,  # cold-cache floor (observed 38.5% w/ cold prod)
-    }
-
-    cache_failures: list[tuple[str, str, float, float]] = []
-    for r in run.task_results:
-        floor = PER_TASK_CACHE_HIT_RATCHET.get(r.name)
-        if floor is None:
-            continue
-        per_task_total = r.cache_read_input_tokens + r.cache_creation_input_tokens
-        if per_task_total <= 0:
-            continue
-        per_task_pct = round(r.cache_read_input_tokens / per_task_total * 100, 1)
-        if per_task_pct < floor:
-            cache_failures.append((r.name, r.agent_id, per_task_pct, floor))
-
-    if cache_failures:
-        print("\n  ❌ CACHE RATCHET FAILED (per-task prompt-cache hit floor):")
-        for name, _aid, pct, floor in cache_failures:
-            print(f"    - {name}: {pct}% < {floor}% ratchet")
-        print(
-            "\n  Diagnose each failure with agent_cache.py to see per-LLM-call"
-            "\n  read/write/hit% and find where the prefix fingerprint is drifting:"
-        )
-        for name, aid, _pct, _floor in cache_failures:
-            print(f"    cd agents && source venv/bin/activate && python benchmarks/agent_cache.py {aid}  # {name}")
-        print(
-            "\n  Fix the cache miss (e.g. unstable prefix hash, model mix,"
-            "\n  claudeAuth fall-through) and re-run until hit% ≥ ratchet."
-        )
-        sys.exit(1)
+    enforce_cache_ratchets(run.task_results)
 
     # CI mode: exit non-zero if any task failed or was skipped. A skipped
     # required benchmark means the deploy gate did not actually run.
@@ -7835,8 +8207,8 @@ def main():
     parser.add_argument(
         "--anon",
         action="store_true",
-        help="For minted-auth benchmarks, start without saved auth: skip cookie-bundle bootstrap "
-        "and disable existing SteelSessionAuth/CookieBundle rows for the target realm.",
+        help="For minted-auth benchmarks, start without saved auth by disabling existing "
+        "SteelSessionAuth/CookieBundle rows for the target realm.",
     )
     parser.add_argument(
         "--force-show-passwords",

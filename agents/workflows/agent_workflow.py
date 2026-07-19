@@ -61,15 +61,15 @@ with workflow.unsafe.imports_passed_through():
     from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent
     from tools.call_phone_number import call_phone_number
     from tools.call_phone_number import get_manager as get_call_phone_manager
-
-    # Tool executors (map tool name → workflow helper)
-    from tools.grep import grep
     from tools.gate import (
         GateRejectedError,
         build_subscription_gate,
         mint_subscription_checkout_activity,
         raise_gate_direct,
     )
+
+    # Tool executors (map tool name → workflow helper)
+    from tools.grep import grep
     from tools.knowledge_base import save_blueprint_activity
     from tools.message_person import message_person
     from tools.prompts import TOOL_PROMPTS
@@ -109,6 +109,19 @@ CLOUD_AGENT_IN_PROGRESS_TITLES = {
 }
 FAST_MODE_WRITE_THROUGH_USER_IDS = {"1f85ff25-6e29-4c1b-8739-f917bd101a30"}
 RESPONSE_SCHEMA_UPDATE_PREFIX = "Output schema revised from user feedback."
+
+
+def _resolve_usage_model(actual_model: Optional[str], requested_model: str) -> str:
+    """Return durable provider provenance for usage accounting.
+
+    Legacy Fast Mode cache entries serialize the literal ``unknown`` when the
+    original transport model was not stored. Treating that sentinel as a model
+    creates an unactionable ``unclassified`` bucket in benchmark artifacts.
+    The requested pool alias is still known and encodes the credential path, so
+    use it for missing/unknown replay provenance.
+    """
+    candidate = str(actual_model or "").strip()
+    return requested_model if not candidate or candidate == "unknown" else candidate
 
 
 def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
@@ -212,6 +225,7 @@ class AgentWorkflow:
         # Context - kept in sync with run_agent for tools that check it
         self.context: List[Dict] = []
         self._cloud_agent_lifecycle_tool_call_id: Optional[str] = None
+        self._cloud_agent_lifecycle_start_phase: Optional[str] = None
         self._cloud_agent_lifecycle_updates_sent: Set[str] = set()
         self._cloud_agent_lifecycle_finished: bool = False
 
@@ -1774,6 +1788,13 @@ class AgentWorkflow:
                 and tool_call_id
             ):
                 pending_tool_call_id = tool_call_id
+                # The chat handler stamps startPhase only on the initial
+                # "Creating Cloud Agent" row. The front-end dedups tool
+                # messages by toolCallId keeping the LATEST, so every
+                # lifecycle update we post must carry startPhase forward or
+                # the phase is erased from the rendered chip.
+                if metadata.get("startPhase") in {"plan", "execute"}:
+                    self._cloud_agent_lifecycle_start_phase = metadata.get("startPhase")
 
         if pending_tool_call_id and pending_tool_call_id not in terminal_tool_call_ids:
             self._cloud_agent_lifecycle_tool_call_id = pending_tool_call_id
@@ -1804,15 +1825,18 @@ class AgentWorkflow:
             if not tool_call_id:
                 return
 
+            lifecycle_metadata = {
+                "toolCallId": tool_call_id,
+                "toolName": CLOUD_AGENT_TOOL_NAME,
+                "toolStatus": tool_status,
+                "title": title,
+            }
+            if self._cloud_agent_lifecycle_start_phase:
+                lifecycle_metadata["startPhase"] = self._cloud_agent_lifecycle_start_phase
             await self._post_message(
                 "",
                 "TOOL",
-                {
-                    "toolCallId": tool_call_id,
-                    "toolName": CLOUD_AGENT_TOOL_NAME,
-                    "toolStatus": tool_status,
-                    "title": title,
-                },
+                lifecycle_metadata,
             )
             self._cloud_agent_lifecycle_updates_sent.add(update_key)
             if tool_status in {"FINISHED", "ERROR"}:
@@ -1944,10 +1968,11 @@ class AgentWorkflow:
                         metadata={"toolApproval": True},
                     )
                     approval_response = str(approval.get("response") or "").strip()
-                    if (
-                        workflow.patched(APPROVAL_SIGNAL_PARAM_REFRESH_PATCH)
-                        and approval_response.casefold() not in {"", "approve", "approved"}
-                    ):
+                    if workflow.patched(APPROVAL_SIGNAL_PARAM_REFRESH_PATCH) and approval_response.casefold() not in {
+                        "",
+                        "approve",
+                        "approved",
+                    }:
                         tool_args = await self._repopulate_approved_tool_args(
                             tool_name,
                             tool_args,
@@ -2195,18 +2220,13 @@ class AgentWorkflow:
             heartbeat_timeout=timedelta(seconds=180),
         )
 
-        matching_calls = [
-            call for call in llm_result.get("tool_calls", []) if call.get("tool") == tool_name
-        ]
+        matching_calls = [call for call in llm_result.get("tool_calls", []) if call.get("tool") == tool_name]
         if len(matching_calls) != 1:
             raise ValueError(
-                f"Approval parameter population expected exactly one {tool_name} call; "
-                f"received {len(matching_calls)}"
+                f"Approval parameter population expected exactly one {tool_name} call; received {len(matching_calls)}"
             )
 
-        refreshed_args = {
-            key: value for key, value in matching_calls[0].items() if key != "tool"
-        }
+        refreshed_args = {key: value for key, value in matching_calls[0].items() if key != "tool"}
         merged_args = dict(original_args)
         merged_args.update(refreshed_args)
 
@@ -2315,7 +2335,7 @@ class AgentWorkflow:
 
         # Calculate cost from tokens using stored pricing (fractional cents)
         cost_cents = 0.0
-        model_for_usage = actual_model or self.model
+        model_for_usage = _resolve_usage_model(actual_model, self.model)
         if from_fast_cache:
             workflow.logger.info(
                 f"💰 $0 cost (fast cache replay): actual_model={model_for_usage}, "
@@ -2610,9 +2630,7 @@ class AgentWorkflow:
         # dead parent, so abort instead of waiting forever.
         if state.get("parent_missing"):
             if self._paused_by_parent and not self._orphaned:
-                workflow.logger.warning(
-                    "Parent workflow gone — orphaned child aborting (was paused by parent)"
-                )
+                workflow.logger.warning("Parent workflow gone — orphaned child aborting (was paused by parent)")
                 self._orphaned = True
                 self.is_paused = False
                 self._paused_by_parent = False
@@ -2627,8 +2645,7 @@ class AgentWorkflow:
                 self._parent_query_failures_while_paused += 1
                 if self._parent_query_failures_while_paused >= _ORPHAN_TRANSIENT_FAILURE_LIMIT:
                     workflow.logger.warning(
-                        "Parent unreachable for %d consecutive checks while paused — "
-                        "orphaned child aborting",
+                        "Parent unreachable for %d consecutive checks while paused — orphaned child aborting",
                         self._parent_query_failures_while_paused,
                     )
                     self._orphaned = True
@@ -2906,7 +2923,7 @@ class AgentWorkflow:
                 await self._update_cost_and_signal_parent()
 
         # Save ToolUsage record for credit billing (with actual_model and correct cost)
-        model_for_usage = actual_model or self.model
+        model_for_usage = _resolve_usage_model(actual_model, self.model)
         try:
             await workflow.execute_activity(
                 save_tool_usage,

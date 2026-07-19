@@ -13,8 +13,12 @@
  *   A pill-shaped window over the animation. Inside the pill the SAME frame is
  *   re-rendered (chars align 1:1 with the animation beneath), rose-tinted via
  *   background-clip:text, with the frame's whitespace filled by shimmering
- *   glyphs so the pill is fully packed. A transparent, borderless button with
- *   the label sits on top, centered on the animation (CTA_PILL.shiftY offsets).
+ *   glyphs so the pill is fully packed. A transparent button with a 1px rose
+ *   border sits on top, centered on the animation (CTA_PILL.shiftY offsets).
+ *   The button label stays visible across mouse, keyboard, and touch input; a
+ *   static scrim keeps it legible over the bright glyphs while the border warms
+ *   on hover/focus. The CTA has no React state, so it does not touch the
+ *   ANIMATING machine.
  */
 
 import { useEffect, useState } from 'react';
@@ -127,17 +131,11 @@ const CTA_SHADOW_STYLE: React.CSSProperties = {
   opacity: 0.7,
 };
 
-// Glossy chrome label — the same beveled metallic gradient as the send
-// button's chrome ring (liquid-white-button), clipped into the text. Fill is
-// transparent, so depth comes from a drop-shadow (a text-shadow would show
-// through the glyphs).
-const CTA_LABEL_STYLE: React.CSSProperties = {
-  backgroundImage:
-    'linear-gradient(180deg, #f0f0f0 0%, #888 25%, #333 50%, #888 75%, #f0f0f0 100%)',
-  WebkitBackgroundClip: 'text',
-  WebkitTextFillColor: 'transparent',
-  backgroundClip: 'text',
-  filter: 'drop-shadow(0 1px 2px rgba(0, 0, 0, 0.35))',
+// The always-visible label is plain white; a solid text-shadow keeps it legible
+// over the bright rose pill without competing with the animation behind it.
+const CTA_GLYPH_STYLE: React.CSSProperties = {
+  color: '#ffffff',
+  textShadow: '0 1px 5px rgba(0, 0, 0, 0.9), 0 0 1px rgba(0, 0, 0, 0.9)',
 };
 
 function AsciiCtaOverlay({
@@ -175,14 +173,29 @@ function AsciiCtaOverlay({
         type="button"
         onClick={cta.onClick}
         data-testid="opening-join-waitlist"
-        className="pointer-events-auto absolute left-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-[#E062CC]/60 bg-transparent text-sm font-bold tracking-wide"
+        aria-label={cta.label}
+        className="pointer-events-auto absolute left-1/2 -translate-x-1/2 -translate-y-1/2 grid place-items-center rounded-full border border-[#E062CC]/60 bg-transparent transition-colors duration-200 hover:border-[#FF4069]/90 focus-visible:border-[#FF4069]/90"
         style={{
           top: `calc(50% + ${CTA_PILL.shiftY}px)`,
           width: CTA_PILL.width,
           height: CTA_PILL.height,
         }}
       >
-        <span data-testid="opening-join-label" style={CTA_LABEL_STYLE}>
+        {/* Legibility scrim — always darkens the pill center so the static
+            white label reads over the bright rose glyphs. */}
+        <span
+          aria-hidden
+          className="pointer-events-none absolute inset-0 rounded-full"
+          style={{
+            background:
+              'radial-gradient(ellipse 72% 92% at 50% 50%, rgba(0,0,0,0.55), rgba(0,0,0,0) 74%)',
+          }}
+        />
+        <span
+          data-testid="opening-join-label"
+          className="[grid-area:1/1] whitespace-nowrap text-sm font-bold tracking-wide"
+          style={CTA_GLYPH_STYLE}
+        >
           {cta.label}
         </span>
       </button>

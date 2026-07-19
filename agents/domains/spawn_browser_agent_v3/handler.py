@@ -151,6 +151,23 @@ def _build_payment_card_verifier_evidence(last4: Any) -> Optional[Dict[str, Any]
     }
 
 
+async def _lookup_payment_purchase(
+    user_id: str,
+    payment_payload: Dict[str, Any],
+) -> tuple[Dict[str, Any], str]:
+    """Look up the canonical key and retain a matched pre-canonicalization key for mint."""
+    fingerprint = str(payment_payload.get("fingerprint") or "")
+    result = await workflow.execute_activity(
+        "lookup_purchase_activity",
+        args=[user_id, fingerprint],
+        start_to_close_timeout=timedelta(seconds=30),
+        retry_policy=RetryPolicy(maximum_attempts=3),
+    )
+    purchase = result.get("purchase")
+    matched = purchase.get("fingerprint") if isinstance(purchase, dict) else None
+    return result, str(matched or fingerprint)
+
+
 async def record_used_passkey_credentials(
     *,
     dom_service: Any,
@@ -2555,7 +2572,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             fast_mode_cache_enabled=fast_mode_cache_enabled,
         )
 
-    return await WorldModelToolExecutionAdapter.from_env(agent_id=agent_id).execute(
+    result = await WorldModelToolExecutionAdapter.from_env(agent_id=agent_id).execute(
         "spawn_browser_agent",
         {
             "user_id": user_id,
@@ -2570,10 +2587,108 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             "start_url": start_url,
             "system_name": system_name,
             "use_claude_mode": use_claude_mode,
+            "simulation_contract": _browser_world_model_contract(
+                is_resume=is_resume,
+                write_lock_enabled=write_lock_enabled,
+                output_schema=output_schema,
+            ),
         },
         tool_call_id,
         real_executor,
     )
+    return _validate_simulated_browser_result(result, output_schema=output_schema)
+
+
+def _browser_world_model_contract(
+    *,
+    is_resume: bool,
+    write_lock_enabled: bool,
+    output_schema: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Describe the synchronous activity boundary the simulator must model."""
+
+    required_fields = [
+        str(field.get("name"))
+        for field in (output_schema or {}).get("fields", [])
+        if isinstance(field, dict) and field.get("name")
+    ]
+    return {
+        "boundary": "synchronous_activity_result",
+        "is_resume": is_resume,
+        "write_lock_enabled": write_lock_enabled,
+        "instructions": (
+            "Return the result of this whole synchronous browser activity invocation, not an "
+            "acknowledgement that a browser was spawned. Never return spawned, active, pending, "
+            "or in_progress as the final status. Before an irreversible browser write, return "
+            "status awaiting_write_approval with question, approval_type, current_url, and "
+            "resume identifiers. On a resumed approved invocation, perform the pending action "
+            "and return a terminal completed or failed result."
+        ),
+        "allowed_statuses": [
+            "awaiting_write_approval",
+            "awaiting_payment_card_approval",
+            "awaiting_auth_assistance",
+            "completed",
+            "failed",
+            "cancelled",
+        ],
+        "required_terminal_output_fields": required_fields,
+    }
+
+
+def _validate_simulated_browser_result(
+    result: Dict[str, Any],
+    *,
+    output_schema: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Fail fast when WMH returns an async acknowledgement at a sync boundary."""
+
+    if not result.get("world_model_simulated"):
+        return result
+
+    status = str(result.get("status") or "").strip().lower()
+    if status in {"spawned", "active", "pending", "in_progress", "running"}:
+        return {
+            **result,
+            "status": "failed",
+            "success": False,
+            "error": True,
+            "message": (
+                "World Model simulator contract violation: spawn_browser_agent is synchronous "
+                f"and returned non-terminal status {status!r}."
+            ),
+        }
+
+    approval_statuses = {
+        "awaiting_write_approval",
+        "awaiting_payment_card_approval",
+        "awaiting_auth_assistance",
+    }
+    if output_schema and status not in approval_statuses | {"failed", "cancelled"}:
+        required_fields = [
+            str(field.get("name"))
+            for field in output_schema.get("fields", [])
+            if isinstance(field, dict) and field.get("name") and field.get("required", False)
+        ]
+        structured = result.get("structured_response")
+        if not isinstance(structured, dict):
+            top_level = {field: result[field] for field in required_fields if field in result}
+            if len(top_level) == len(required_fields):
+                structured = top_level
+                result = {**result, "structured_response": structured}
+        missing = [field for field in required_fields if not isinstance(structured, dict) or field not in structured]
+        if missing:
+            return {
+                **result,
+                "status": "failed",
+                "success": False,
+                "error": True,
+                "message": (
+                    "World Model simulator contract violation: completed browser result omitted "
+                    f"required output fields: {', '.join(missing)}."
+                ),
+            }
+    return result
 
 
 async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
@@ -2668,9 +2783,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         session_id = write_lock_resume_state.get("session_id") or session_id
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
         auth_realm = write_lock_resume_state.get("auth_realm") or auth_realm
-        payment_card_last4 = _normalize_payment_card_last4(
-            write_lock_resume_state.get("payment_card_last4")
-        )
+        payment_card_last4 = _normalize_payment_card_last4(write_lock_resume_state.get("payment_card_last4"))
         if write_lock_resume_state.get("approval_type") == "auth_assistance":
             resume_user_messages.append(
                 build_auth_assistance_resume_user_message(
@@ -5487,12 +5600,14 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         fingerprint=payment_payload.get("fingerprint"),
                         payment_request_summary=_summarize_payment_request_for_log(payment_payload),
                     )
-                    lookup_result = await workflow.execute_activity(
-                        "lookup_purchase_activity",
-                        args=[workflow_instance.user_id or "", payment_payload["fingerprint"]],
-                        start_to_close_timeout=timedelta(seconds=30),
-                        retry_policy=RetryPolicy(maximum_attempts=3),
+                    lookup_result, matched_fingerprint = await _lookup_payment_purchase(
+                        workflow_instance.user_id or "",
+                        payment_payload,
                     )
+                    # Mint uses the same fingerprint as lookup. When a held
+                    # purchase was created before canonicalization shipped,
+                    # retain its legacy key so the backend returns that card.
+                    payment_payload["fingerprint"] = matched_fingerprint
                     logger.info(
                         "Browser payment purchase lookup finished",
                         agent_id=workflow_instance.agent_id,
@@ -5544,9 +5659,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "the one-time payment card for your approved purchase."
                         )
                         if primary_setup_url:
-                            setup_question = (
-                                f"{setup_question}\n\nOpen this setup link:\n{primary_setup_url}"
-                            )
+                            setup_question = f"{setup_question}\n\nOpen this setup link:\n{primary_setup_url}"
                         setup_question = (
                             f"{setup_question}\n\nAfter setup is complete, return to Rose "
                             "and I will retry the payment automatically."
@@ -5600,9 +5713,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "Created AgentCard setup attention request",
                             agentcard_status=setup_info["agentcard_status"],
                             setup_action=setup_info["setup_action"],
-                            attention_request_id=setup_info["setup_attention"].get(
-                                "attention_request_id"
-                            ),
+                            attention_request_id=setup_info["setup_attention"].get("attention_request_id"),
                         )
                         yield ToolEvent(
                             type=EventType.POST_MESSAGE,
@@ -5622,9 +5733,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                     "setupStatus": card.get("setupStatus"),
                                     "setupSessionId": card.get("setupSessionId"),
                                 },
-                                "agentCardSetupAttentionRequestId": setup_info[
-                                    "setup_attention"
-                                ].get("attention_request_id"),
+                                "agentCardSetupAttentionRequestId": setup_info["setup_attention"].get(
+                                    "attention_request_id"
+                                ),
                                 "previousPaymentApprovalAttentionRequestId": approval_response.get(
                                     "attention_request_id"
                                 ),
@@ -5652,21 +5763,15 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             logger.info(
                                 "Timed out waiting for AgentCard setup",
                                 agentcard_status=setup_info["agentcard_status"],
-                                attention_request_id=setup_info["setup_attention"].get(
-                                    "attention_request_id"
-                                ),
+                                attention_request_id=setup_info["setup_attention"].get("attention_request_id"),
                             )
                             return
 
                         logger.info(
                             "AgentCard setup completed; retrying card mint",
-                            attention_request_id=setup_info["setup_attention"].get(
-                                "attention_request_id"
-                            ),
+                            attention_request_id=setup_info["setup_attention"].get("attention_request_id"),
                         )
-                        setup_attention_id = setup_info["setup_attention"].get(
-                            "attention_request_id"
-                        )
+                        setup_attention_id = setup_info["setup_attention"].get("attention_request_id")
                         if setup_attention_id:
                             await workflow.execute_activity(
                                 "resolve_attention_request_activity",
@@ -5827,9 +5932,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "task_id": result.get("task_id"),
                         "payment_card_refs": payment_card_refs,
                         "payment_card_last4": _normalize_payment_card_last4(card.get("last4")),
-                        "recorded_passkey_credential_ids": result.get(
-                            "recorded_passkey_credential_ids", []
-                        ),
+                        "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
 
                     yield ToolEvent(
@@ -6002,9 +6105,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 final_metadata["best_effort_response"] = best_effort_response
                 if result.get("structured_response") is None:
                     final_message = (
-                        f"{final_message}\n\n{best_effort_response}"
-                        if final_message
-                        else best_effort_response
+                        f"{final_message}\n\n{best_effort_response}" if final_message else best_effort_response
                     )
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,

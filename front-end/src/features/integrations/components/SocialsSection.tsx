@@ -40,7 +40,7 @@ function SocialsIcon() {
   );
 }
 
-function XIcon() {
+export function XIcon() {
   return (
     <svg className="w-6 h-6" viewBox="0 0 24 24">
       <rect width="24" height="24" rx="5" fill="#000000" />
@@ -53,7 +53,7 @@ function XIcon() {
   );
 }
 
-function LinkedInIcon() {
+export function LinkedInIcon() {
   return (
     <svg className="w-6 h-6" viewBox="0 0 24 24">
       <rect width="24" height="24" rx="5" fill="#0A66C2" />
@@ -66,7 +66,7 @@ function LinkedInIcon() {
   );
 }
 
-function InstagramIcon() {
+export function InstagramIcon() {
   return (
     <svg className="w-6 h-6" viewBox="0 0 24 24">
       <defs>
