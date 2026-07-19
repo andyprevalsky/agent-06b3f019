@@ -14,8 +14,8 @@
  *   - status derivation: getWaitlistPeople joins signups to accounts + gate state
  *
  * The invite flags the account off the waitlist (so onboarding shows the
- * subscription view) — it does NOT grant access. Outside production the SMS is
- * skipped, so the happy-path test never texts anyone.
+ * subscription view) — it does NOT grant access. Outside production the SMS
+ * and email are skipped, so the happy-path test never contacts anyone.
  *
  * Usage:
  *   npx tsx src/tests/blackbox/admin-health-waitlist.blackbox.ts
@@ -25,7 +25,7 @@ import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 
-import { getWaitlistPeople } from '../../domains/admin-health/service';
+import { getWaitlistPeople } from '../../domains/admin-health/service.waitlist';
 import { checkInviteCode } from '../../domains/invite-codes/service';
 import { prisma } from '../../providers/database';
 import { markOffWaitlistByPhone } from '../../providers/inviteGate';
@@ -57,6 +57,7 @@ const WaitlistInviteResponseSchema = z.object({
   id: z.string(),
   invitedAt: z.string(),
   smsSent: z.boolean(),
+  emailSent: z.boolean(),
   flagged: z.boolean(),
   alreadyOffWaitlist: z.boolean(),
   hasAccount: z.boolean(),
@@ -169,16 +170,34 @@ async function testInvite_nonAdminForbidden() {
 async function testInvite_unknownId404() {
   const res = await request(
     `${BASE_URL}/api/admin-health/waitlist/nonexistent-${Date.now()}/invite`,
-    { method: 'POST', headers: authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')) }
+    {
+      method: 'POST',
+      headers: {
+        ...authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
+        'Idempotency-Key': `unknown-${Date.now()}`,
+      },
+    }
   );
   assertStatus(res.status, 404, res.data);
   assertSchema(ErrorResponseSchema, res.data, 'POST /admin-health/waitlist invite unknown-id');
 }
 
+async function testInvite_missingIdempotencyKey400() {
+  const res = await request(`${BASE_URL}/api/admin-health/waitlist/does-not-matter/invite`, {
+    method: 'POST',
+    headers: authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
+  });
+  assertStatus(res.status, 400, res.data);
+  const body = assertSchema(ErrorResponseSchema, res.data, 'POST invite missing idempotency key');
+  if (!body.error.includes('Idempotency-Key')) {
+    throw new Error(`Expected Idempotency-Key validation error, got ${body.error}`);
+  }
+}
+
 // End-to-end invite: flags the matching account off the waitlist, stamps
-// invitedAt, and (outside production) skips the real SMS so the test never
-// texts anyone. The flag does NOT grant access (usedInviteCode stays null).
-// A re-send is idempotent.
+// invitedAt, and (outside production) skips the real notifications so the test
+// never contacts anyone. The flag does NOT grant access (usedInviteCode stays
+// null). A re-send is idempotent.
 async function testInvite_happyPathFlagsAndMarks() {
   const marker = `blackbox-invite-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const phone = uniquePhone();
@@ -190,11 +209,17 @@ async function testInvite_happyPathFlagsAndMarks() {
 
     const res = await request(`${BASE_URL}/api/admin-health/waitlist/${created.id}/invite`, {
       method: 'POST',
-      headers: authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
+      headers: {
+        ...authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
+        'Idempotency-Key': `${marker}-first`,
+      },
     });
     assertStatus(res.status, 200, res.data);
     const body = assertSchema(WaitlistInviteResponseSchema, res.data, 'POST invite happy-path');
     if (body.smsSent) throw new Error('Non-production invite must not send a real SMS');
+    if ((res.data as { emailSent?: unknown }).emailSent !== false) {
+      throw new Error('Non-production invite must not send a real email');
+    }
     if (!body.flagged || !body.hasAccount) {
       throw new Error(`Expected flagged + hasAccount, got ${JSON.stringify(body)}`);
     }
@@ -219,7 +244,10 @@ async function testInvite_happyPathFlagsAndMarks() {
 
     const resAgain = await request(`${BASE_URL}/api/admin-health/waitlist/${created.id}/invite`, {
       method: 'POST',
-      headers: authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
+      headers: {
+        ...authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
+        'Idempotency-Key': `${marker}-resend`,
+      },
     });
     assertStatus(resAgain.status, 200, resAgain.data);
     const bodyAgain = assertSchema(
@@ -432,7 +460,11 @@ async function main() {
       fn: testInvite_unknownId404,
     },
     {
-      name: 'POST /api/admin-health/waitlist/:id/invite flags + marks (no SMS in dev)',
+      name: 'POST /api/admin-health/waitlist/:id/invite missing idempotency key -> 400',
+      fn: testInvite_missingIdempotencyKey400,
+    },
+    {
+      name: 'POST /api/admin-health/waitlist/:id/invite flags + marks (no sends in dev)',
       fn: testInvite_happyPathFlagsAndMarks,
     },
     {

@@ -4,6 +4,7 @@
  * Renders all modal dialogs for the terminal feature.
  * Each modal is controlled by boolean open/close state from parent.
  * No internal business logic — purely presentation wiring.
+ * Waitlist auth additionally collects a required first and last name.
  */
 
 import { CreateAgentModal } from '@/features/terminal-component-group';
@@ -20,6 +21,8 @@ interface TerminalModalsProps {
     setLoginModalOpen: (v: boolean) => void;
     loginModalTitle?: string;
     setLoginModalTitle: (v: string | undefined) => void;
+    loginModalCollectName: boolean;
+    setLoginModalCollectName: (v: boolean) => void;
     showCreditModal: boolean;
     setShowCreditModal: (v: boolean) => void;
     showCostLimitModal: boolean;
@@ -52,13 +55,17 @@ export function TerminalModals({ agents }: TerminalModalsProps) {
           agents.setLoginModalOpen(open);
           // Clear any CTA-specific heading (e.g. waitlist) once the modal closes
           // so the next open falls back to the default copy.
-          if (!open) agents.setLoginModalTitle(undefined);
+          if (!open) {
+            agents.setLoginModalTitle(undefined);
+            agents.setLoginModalCollectName(false);
+          }
         }}
         onAuthComplete={() => {
           void agents.refreshAuthState('phone-auth-modal');
         }}
         anonymousUserId={agents.isAnonymous ? agents.authUser?.id : undefined}
         title={agents.loginModalTitle}
+        collectName={agents.loginModalCollectName}
       />
 
       <SubscriptionModal

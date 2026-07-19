@@ -93,6 +93,8 @@ export interface AdminWaitlistInviteResponse {
   invitedAt: string;
   /** The invite SMS was accepted by Surge (production only). */
   smsSent: boolean;
+  /** The invite email was accepted by Gmail (production only, when an email exists). */
+  emailSent: boolean;
   /** A matching account was just flagged off the waitlist. */
   flagged: boolean;
   /** A matching account was already flagged off the waitlist. */

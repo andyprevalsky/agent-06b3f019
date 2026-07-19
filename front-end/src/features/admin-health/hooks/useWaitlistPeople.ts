@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { fetchWaitlistPeople, inviteWaitlistPerson } from '../api';
 import type { AdminWaitlistInviteResponse, AdminWaitlistPerson } from '../types';
@@ -12,6 +12,7 @@ export function useWaitlistPeople() {
   const [people, setPeople] = useState<AdminWaitlistPerson[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [invitingIds, setInvitingIds] = useState<ReadonlySet<string>>(new Set());
+  const attemptKeys = useRef(new Map<string, string>());
 
   useEffect(() => {
     let active = true;
@@ -31,8 +32,11 @@ export function useWaitlistPeople() {
 
   const invite = useCallback(async (id: string): Promise<AdminWaitlistInviteResponse> => {
     setInvitingIds((prev) => new Set(prev).add(id));
+    const idempotencyKey = attemptKeys.current.get(id) ?? crypto.randomUUID();
+    attemptKeys.current.set(id, idempotencyKey);
     try {
-      const result = await inviteWaitlistPerson(id);
+      const result = await inviteWaitlistPerson(id, idempotencyKey);
+      attemptKeys.current.delete(id);
       setPeople((prev) =>
         (prev ?? []).map((row) => (row.id === id ? { ...row, invitedAt: result.invitedAt } : row)),
       );

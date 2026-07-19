@@ -4,7 +4,7 @@
  * [AUTH_LOADING] -- auth resolved signed-out/anonymous --> [LOGIN_OPEN]
  *       |                                                  |
  *       | auth resolved signed-in                          +-- close --> [LOGIN_DISMISSED]
- *       v                                                  +-- OTP success --> [SIGNED_IN]
+ *       v                                                  +-- phone/email/name + OTP --> [SIGNED_IN]
  * [SIGNED_IN] ----------------------------------------------------------+
  *       |
  *       +-- global WaitlistGate checks invite status
@@ -41,6 +41,7 @@ const Waitlist = () => {
         onAuthComplete={handleAuthComplete}
         anonymousUserId={isAnonymous ? user?.id : undefined}
         title="Join the Waitlist"
+        collectName={true}
       />
     </>
   );

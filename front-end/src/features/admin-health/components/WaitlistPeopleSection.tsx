@@ -6,14 +6,15 @@
  *     +--fetch err--> [ERROR]|
  *                            |
  * Per row (independent):
- *   [IDLE] --click Invite--> [SENDING] --ok--> [INVITED] (row stamped, gate cleared)
+ *   [IDLE] --click Invite--> [SENDING] --ok--> [INVITED] (available channels sent, row stamped)
  *                                |
  *                                +--err--> [IDLE] (toast error, retryable)
  *
  * The list comes from GET /api/admin-health/waitlist (the same phone-bearing
  * population the signup metric counts). "Invite" POSTs to
  * /api/admin-health/waitlist/:id/invite, which clears the invite gate for the
- * matching account and texts the Mac-app download link via Surge.
+ * matching account and sends the Mac-app download link by Surge SMS and
+ * branded transactional email.
  */
 
 import { useMemo } from 'react';
@@ -24,6 +25,7 @@ import { cn } from '@/lib/utils';
 
 import { useWaitlistPeople } from '../hooks';
 import type { AdminWaitlistPerson } from '../types';
+import type { AdminWaitlistInviteResponse } from '../types';
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString('en-US', {
@@ -63,6 +65,13 @@ function StatusPill({ person }: { person: AdminWaitlistPerson }) {
   );
 }
 
+export function inviteGateOutcome(result: AdminWaitlistInviteResponse): string {
+  if (result.flagged) return 'flagged to subscribe';
+  if (result.alreadyOffWaitlist) return 'already flagged to subscribe';
+  if (!result.hasAccount) return 'no account available to flag';
+  return 'account status unchanged';
+}
+
 function SectionPanel({ eyebrow, children }: { eyebrow: string; children: React.ReactNode }) {
   return (
     <section className="rounded-xl border border-border/50 bg-background/85 p-5 shadow-sm backdrop-blur-md">
@@ -89,11 +98,18 @@ export default function WaitlistPeopleSection() {
   const handleInvite = (person: AdminWaitlistPerson) => {
     invite(person.id)
       .then((result) => {
+        const sent = result.smsSent || result.emailSent;
+        const delivery =
+          result.smsSent && result.emailSent
+            ? 'Sent by text and email'
+            : result.smsSent
+              ? `Texted ${person.phone} · no email on file`
+              : result.emailSent
+                ? 'Sent by email'
+                : 'Notifications skipped (non-production)';
         toast({
-          title: result.smsSent ? 'Invite sent' : 'Invite recorded',
-          description: result.smsSent
-            ? `Texted ${person.phone} · flagged to subscribe`
-            : `Flagged to subscribe · SMS skipped (non-production)`,
+          title: sent ? 'Invite sent' : 'Invite recorded',
+          description: `${delivery} · ${inviteGateOutcome(result)}`,
         });
       })
       .catch((err: unknown) => {
@@ -107,7 +123,7 @@ export default function WaitlistPeopleSection() {
 
   if (error !== null) {
     return (
-      <SectionPanel eyebrow="Text a download link to pull people off the waitlist">
+      <SectionPanel eyebrow="Send a download link by text and email">
         <div className="rounded-lg border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
           {error}
         </div>
@@ -117,7 +133,7 @@ export default function WaitlistPeopleSection() {
 
   if (people === null) {
     return (
-      <SectionPanel eyebrow="Text a download link to pull people off the waitlist">
+      <SectionPanel eyebrow="Send a download link by text and email">
         <div className="flex h-[200px] items-center justify-center">
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </div>
@@ -176,7 +192,7 @@ export default function WaitlistPeopleSection() {
                         ) : (
                           <Send className="h-3.5 w-3.5" />
                         )}
-                        {inviting ? 'Sending…' : invited ? 'Re-send' : 'Invite & text'}
+                        {inviting ? 'Sending…' : invited ? 'Re-send' : 'Invite, text & email'}
                       </button>
                     </td>
                   </tr>
