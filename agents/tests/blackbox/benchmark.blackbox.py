@@ -980,9 +980,11 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     production = get_task_by_name("agent-payment-production-abandonment")
     assert production.production_only is True
     assert production.payment_card_request_action == "abandon"
-    assert production.expected_payment_receipt["totalCents"] == 50
+    assert "exactly $1.00" in production.prompt
+    assert production.expected_payment_receipt["totalCents"] == 100
     assert production.expected_payment_lifecycle["purchase"]["status"] == "VOIDED"
-    assert production.expected_payment_lifecycle["stripeRefund"]["amountCents"] == 50
+    assert production.expected_payment_lifecycle["stripeRefund"]["amountCents"] == 100
+    assert production.expected_payment_lifecycle["orgTransfer"]["amountCents"] == 100
     assert production.expected_payment_lifecycle["orgTransfer"]["livemode"] is True
     assert production.name not in {task.name for task in suite_tasks()}
 
@@ -1007,7 +1009,42 @@ def test_production_payment_lifecycle_refuses_sandbox_target():
     _validate_task_target(task, "https://api.roselabs.ai")
 
 
-def test_agentcard_setup_fixture_is_seeded_only_for_local_non_setup_tasks():
+def test_production_frontend_url_ignores_stale_local_services_manifest():
+    """A stopped local stack must not redirect production browser agents to its tunnel."""
+    from benchmarks.run_benchmark import _frontend_url_for_benchmark
+
+    environment_names = (
+        "BENCHMARK_CONTEXT_DIR",
+        "BENCHMARK_FRONTEND_URL",
+        "PUBLIC_BASE_URL",
+        "CONDUCTOR_PORT",
+    )
+    prior = {name: os.environ.get(name) for name in environment_names}
+    try:
+        with tempfile.TemporaryDirectory() as context_dir:
+            Path(context_dir, "services.json").write_text(
+                json.dumps(
+                    {
+                        "status": "stopped",
+                        "urls": {"public": "https://stale-workspace.ngrok.app"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            for name in ("BENCHMARK_FRONTEND_URL", "PUBLIC_BASE_URL", "CONDUCTOR_PORT"):
+                os.environ.pop(name, None)
+
+            assert _frontend_url_for_benchmark("https://navi-j9a9.onrender.com") == "https://roselabs.ai"
+    finally:
+        for name, value in prior.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def test_agentcard_setup_fixture_preflights_every_lifecycle_task():
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _agentcard_setup_fixture_action
 
@@ -1017,7 +1054,7 @@ def test_agentcard_setup_fixture_is_seeded_only_for_local_non_setup_tasks():
 
     assert _agentcard_setup_fixture_action(standard, "http://localhost:55120") == "complete"
     assert _agentcard_setup_fixture_action(setup, "http://localhost:55120") == "reset"
-    assert _agentcard_setup_fixture_action(production, "https://api.roselabs.ai") is None
+    assert _agentcard_setup_fixture_action(production, "https://api.roselabs.ai") == "complete"
 
 
 def test_expected_attention_kind_uses_ordered_sequence():
@@ -7306,6 +7343,14 @@ async def run_all_tests():
     r.record(
         "agent_payment_requires_lifecycle_evidence",
         test_agent_payment_catalog_requires_terminal_lifecycle_evidence,
+    )
+    r.record(
+        "production_payment_rejects_sandbox_target",
+        test_production_payment_lifecycle_refuses_sandbox_target,
+    )
+    r.record(
+        "production_frontend_ignores_stale_local_manifest",
+        test_production_frontend_url_ignores_stale_local_services_manifest,
     )
     r.record(
         "ordered_attention_kind_sequence",

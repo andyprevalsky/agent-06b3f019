@@ -1,4 +1,4 @@
-import type { AdminHealthData, AdminHealthTimeSlice } from '../types';
+import type { AdminHealthData, AdminHealthFunnelStep, AdminHealthTimeSlice } from '../types';
 
 export type SeriesMetricKey =
   | 'revenueCents'
@@ -37,4 +37,31 @@ export function seriesMetricChange(data: AdminHealthData, key: SeriesMetricKey):
   const current = data.series.at(-1)?.[key];
   const previous = data.series.at(-2)?.[key];
   return relativeChange(current, previous);
+}
+
+export function funnelEndToEnd(steps: AdminHealthFunnelStep[]) {
+  const first = steps[0];
+  const last = steps.at(-1);
+  const conversionRate =
+    first?.count === null ||
+    first?.count === undefined ||
+    first.count === 0 ||
+    last?.count === null ||
+    last?.count === undefined ||
+    last.count > first.count
+      ? null
+      : last.count / first.count;
+  const previousConversionRate =
+    first?.previousCount === null ||
+    first?.previousCount === undefined ||
+    first.previousCount === 0 ||
+    last?.previousCount === null ||
+    last?.previousCount === undefined ||
+    last.previousCount > first.previousCount
+      ? null
+      : last.previousCount / first.previousCount;
+  return {
+    conversionRate,
+    conversionRateChange: relativeChange(conversionRate, previousConversionRate),
+  };
 }

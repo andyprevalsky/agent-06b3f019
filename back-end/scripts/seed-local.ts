@@ -22,7 +22,6 @@ import {
   syncPasskeyCredentials,
   syncRequiredCredentialTable,
   syncSteelSessionAuthCredentials,
-  evaluateGptCodeComputeGate,
 } from './seed-local-credentials';
 import { runSyncStep, syncRowsWithConcurrency, syncUserRecord } from './seed-local-helpers';
 
@@ -56,17 +55,6 @@ const SKIP_BROWSER_AUTH_SYNC =
 const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
 const PASSKEYS_ONLY = process.argv.includes('--passkeys-only');
 const COMPUTE_TOKEN_SYNC_ATTEMPTS = 5;
-// The compute-token sync normally fails closed when there is no usable gpt_code
-// (Codex) integration, so a stale DB fixture cannot silently push agents onto
-// the paid waterfall. But when Codex's upstream quota is exhausted the gpt_code
-// credential is CONNECTED yet `rateLimitedUntil` is set to a future reset date
-// (e.g. a multi-day ChatGPT usage-limit window), which makes it "unusable" for
-// hours/days. That must not block claudeAuth-only benchmark runs (browser
-// payment tasks, chat, etc.) that never touch gpt_code. Setting this flag lets
-// the seed proceed with 0 usable gpt_code integrations — Codex/gpt_code tasks
-// will still fail at runtime, but non-Codex tasks stay unblocked during the
-// outage. Off by default so ordinary runs keep the fail-closed guarantee.
-const ALLOW_MISSING_GPT_CODE = process.env.BENCHMARK_ALLOW_MISSING_GPT_CODE === '1';
 
 const requestedSeedModes = [
   ['--compute-tokens-only', COMPUTE_TOKENS_ONLY],
@@ -317,17 +305,21 @@ async function syncComputeTokensWithRetries(): Promise<void> {
     try {
       const count = await syncIntegrations();
       const usableGptCodeCount = await countUsableGptCodeIntegrations();
-      const gate = evaluateGptCodeComputeGate(usableGptCodeCount, ALLOW_MISSING_GPT_CODE);
-      if (gate === 'blocked') {
+      if (usableGptCodeCount === 0) {
+        // gpt_code (Codex) is only needed by runs that actually spawn a Codex
+        // agent. When a caller knows the run doesn't use Codex — e.g. the
+        // AgentCard browser payment-lifecycle gate — an externally
+        // rate-limited/quota-exhausted Codex integration must not block an
+        // otherwise-healthy compute-token sync (claude tokens still synced).
+        // Default (flag unset) stays strict so Codex regressions still surface.
+        if (process.env.SEED_ALLOW_MISSING_GPT_CODE === '1') {
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, 0 usable gpt_code — ` +
+              `proceeding without Codex (SEED_ALLOW_MISSING_GPT_CODE=1; this run does not use Codex)`
+          );
+          return;
+        }
         throw new Error('No usable gpt_code integrations after sync');
-      }
-      if (gate === 'allowed-missing') {
-        console.warn(
-          `  ⚠ Compute Tokens (integrations): ${count} synced, 0 usable gpt_code ` +
-            `(rate-limited or unavailable) — proceeding because ` +
-            `BENCHMARK_ALLOW_MISSING_GPT_CODE=1. Codex/gpt_code tasks will fail until the credential recovers.`
-        );
-        return;
       }
       console.log(
         `  ✅ Compute Tokens (integrations): ${count} synced, ${usableGptCodeCount} usable gpt_code`

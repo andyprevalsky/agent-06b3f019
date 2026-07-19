@@ -1048,7 +1048,10 @@ class AgentWorkflow:
                         tool_names=execute_tools,
                     )
 
-                    # DAG completed or failed - both hand off to normal completion/recovery.
+                    # A completed DAG hands off to normal completion. A failed
+                    # DAG is terminal for this run: unrestricted run_agent recovery
+                    # can replay sibling tasks whose external side effects already
+                    # committed (for example, duplicate child-agent spawns).
                     # The completed path must use the attempt_completion tool so
                     # the UI and transcript show the same visible completion
                     # attempt as an LLM-initiated finish.
@@ -1085,7 +1088,8 @@ class AgentWorkflow:
                             "— falling through to run_agent for recovery"
                         )
                     else:
-                        workflow.logger.info("[DAG] Execution needs LLM recovery, falling through to run_agent")
+                        workflow.logger.warning("[DAG] Execution failed; stopping before unrestricted replay")
+                        return await self._handle_incomplete(dag_result, "EXECUTE")
             else:
                 workflow.logger.info("[DAG] No plan found, using LLM-driven execution")
 

@@ -1,4 +1,4 @@
-import type { AgentStatus } from '@prisma/client';
+import { IntegrationStatus, type AgentStatus } from '@prisma/client';
 
 import { prisma } from '../../providers/database';
 
@@ -27,6 +27,11 @@ export interface WaitlistSignupRecord {
 export interface SubscriptionUserRecord {
   userId: string;
   stripeCustomerId: string;
+}
+
+export interface ConnectedConnectorRecord {
+  userId: string;
+  name: string;
 }
 
 export async function findUserForAdminCheck(userId: string): Promise<AdminUserRecord | null> {
@@ -67,6 +72,21 @@ export async function findVerifiedUsersCreatedBefore(
     .map(({ userId, createdAt }) => ({ userId, createdAt }));
 }
 
+/**
+ * Active connector rows that have reached a connected state. SYNCING is
+ * included only for already-active rows (for example Gmail during a refresh),
+ * while first-time uploads remain inactive until their import succeeds.
+ */
+export async function findConnectedConnectors(): Promise<ConnectedConnectorRecord[]> {
+  return prisma.integration.findMany({
+    where: {
+      isActive: true,
+      status: { in: [IntegrationStatus.CONNECTED, IntegrationStatus.SYNCING] },
+    },
+    select: { userId: true, name: true },
+  });
+}
+
 export async function findUsersByIds(userIds: string[]): Promise<UserCreatedRecord[]> {
   if (userIds.length === 0) return [];
   return prisma.user.findMany({
@@ -104,6 +124,7 @@ export async function findWaitlistSignupsBetween(
 export interface WaitlistPersonRow {
   id: string;
   name: string;
+  email: string | null;
   phone: string;
   variant: string | null;
   createdAt: Date;
@@ -121,6 +142,7 @@ export async function findWaitlistPeople(): Promise<WaitlistPersonRow[]> {
     select: {
       id: true,
       name: true,
+      email: true,
       phone: true,
       variant: true,
       createdAt: true,
@@ -133,6 +155,7 @@ export async function findWaitlistPeople(): Promise<WaitlistPersonRow[]> {
     .map((row) => ({
       id: row.id,
       name: row.name,
+      email: row.email,
       phone: row.phone as string,
       variant: row.variant,
       createdAt: row.createdAt,
@@ -146,6 +169,7 @@ export async function findWaitlistPersonById(id: string): Promise<WaitlistPerson
     select: {
       id: true,
       name: true,
+      email: true,
       phone: true,
       variant: true,
       createdAt: true,
@@ -156,11 +180,21 @@ export async function findWaitlistPersonById(id: string): Promise<WaitlistPerson
   return {
     id: row.id,
     name: row.name,
+    email: row.email,
     phone: row.phone as string,
     variant: row.variant,
     createdAt: row.createdAt,
     invitedAt: row.invitedAt,
   };
+}
+
+export async function findUserEmailById(userId: string): Promise<string | null> {
+  const user = await prisma.user.findUnique({
+    where: { userId },
+    select: { email: true },
+  });
+  const email = user?.email?.trim() ?? '';
+  return email === '' ? null : email;
 }
 
 export interface AccountGateRecord {

@@ -13,6 +13,7 @@
  * REST endpoints (mounted at /api/test/captures):
  *   GET    /               — list captured calls (with ?after=N filtering)
  *   DELETE /               — clear capture log (resets in-memory list, not cache)
+ *   PUT    /cache          — seed one replay entry in memory and on disk
  *   DELETE /cache          — clear fast-forward cache (forces re-record on next run)
  *
  * Activation: BLACKBOX_TEST_CAPTURE_OUTBOUND=1 before server boot. Replay is a
@@ -423,6 +424,24 @@ export function installFetchCapture(): Router {
   router.delete('/', (_req: Request, res: Response) => {
     clearedAfterId = nextId - 1;
     res.json({ cleared: true, nextId });
+  });
+
+  // PUT /cache — seed a deterministic fixture through the live cache instance.
+  // Writing only the cache file is insufficient if this key was already read:
+  // NonBlockingFileCache intentionally memoizes hits for the process lifetime.
+  router.put('/cache', (req: Request, res: Response) => {
+    const body = req.body as { key?: unknown; value?: unknown } | undefined;
+    if (!replayEnabled || fsCache === null) {
+      res.status(409).json({ error: 'Outbound replay is not enabled' });
+      return;
+    }
+    if (typeof body?.key !== 'string' || body.key === '' || !('value' in body)) {
+      res.status(400).json({ error: 'key must be a non-empty string and value is required' });
+      return;
+    }
+
+    fsCache.set(body.key, body.value);
+    res.json({ seeded: true });
   });
 
   // DELETE /cache — clear fast-forward cache to force re-record

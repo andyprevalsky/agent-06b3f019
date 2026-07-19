@@ -42,8 +42,7 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
   // A real signed-in account (authenticated AND non-anonymous) is "logged in"
   // and should not see it.
   const showWaitlistCta = !(a.isAuthenticated && !a.isAnonymous);
-  const showJoinWaitlistCta =
-    showWaitlistCta && showLoader && showOpeningState && !showNetworkDots;
+  const showJoinWaitlistCta = showWaitlistCta && showLoader && showOpeningState && !showNetworkDots;
 
   return (
     <ScrollArea

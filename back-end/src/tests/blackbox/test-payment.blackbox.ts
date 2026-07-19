@@ -13,6 +13,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
 import {
+  configureBenchmarkAgentCardSetup,
   confirmPhoneBenchmarkPayment,
   confirmTestPayment,
   getTestPaymentLifecycle,
@@ -132,6 +133,33 @@ async function withFakeStripe<T>(
 }
 
 const tests: Array<[string, () => Promise<void>]> = [
+  [
+    'benchmark AgentCard setup refuses an unverified production fixture',
+    async () => {
+      const userId = `benchmark-agentcard-unverified-${Date.now()}`;
+      let errorMessage = '';
+      try {
+        await configureBenchmarkAgentCardSetup(
+          { userId, action: 'complete' },
+          { getCardholderVerificationStatus: async () => 'not_started' }
+        );
+      } catch (error) {
+        errorMessage = error instanceof Error ? error.message : String(error);
+      }
+      try {
+        assert(
+          errorMessage.includes('not ready') && errorMessage.includes('not_started'),
+          `expected readiness failure, got "${errorMessage}"`
+        );
+        const integration = await prisma.integration.findUnique({
+          where: { userId_name: { userId, name: 'agentcard' } },
+        });
+        assert(integration === null, 'unverified cardholder must not be marked CONNECTED');
+      } finally {
+        await prisma.integration.deleteMany({ where: { userId, name: 'agentcard' } });
+      }
+    },
+  ],
   [
     'benchmark AgentCard setup endpoint persists connect and reset transitions',
     async () => {

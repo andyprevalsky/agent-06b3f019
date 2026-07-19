@@ -161,6 +161,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisf
    - Step 2b: `eslint` verify (0 errors)
    - Step 3: `tsc --noEmit`
    - Step 4: structural tests (skip if `CHANGED_TS` is empty)
+   - Step 4s: deploy environment + command structural tests (no skip)
    - Step 4a: back-end coverage (skip if `CHANGED_BACKEND` is empty)
    - Step 4b: front-end coverage (skip if `CHANGED_FRONTEND` is empty)
    - Step 4m-lint: mac-app format:check + lint + type-check (skip if `CHANGED_MAC_APP` is empty)
@@ -232,6 +233,15 @@ cd back-end && bash ../scripts/run-deploy-stage backend-structural -- npx tsx sr
 This enforces architectural invariants across all domains: import direction, cross-domain isolation, provider/util boundaries, domain completeness, Prisma/Express encapsulation, and circular import detection.
 
 If any invariant fails, fix the violation. The test output includes remediation guidance (e.g., "Move the needed logic to service.ts or extract to a provider.").
+
+## Step 4s: Deploy environment + command structural tests (no skip)
+
+```bash
+bash scripts/tests/workspace-env.test.sh
+bash scripts/tests/semantic-deploy-gate.test.sh
+```
+
+These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate wired into every run.
 
 ## Step 4a: Code coverage check (skip if no back-end/ changes)
 
@@ -376,30 +386,24 @@ if [ -z "$CONDUCTOR_PORT" ]; then
   exit 1
 fi
 
-export CONDUCTOR_WORKSPACE_NAME="${CONDUCTOR_WORKSPACE_NAME:-$(basename "$(git rev-parse --show-toplevel)")}"
+DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
+. "$DEPLOY_ROOT/scripts/lib/workspace-env.sh"
+. "$DEPLOY_ROOT/scripts/lib/deploy-local-env.sh"
+configure_deploy_local_env
 
-export SMOKE_BASE_URL="http://localhost:$CONDUCTOR_PORT"
-export SMOKE_HEALTH_URL="http://localhost:$((CONDUCTOR_PORT + 2))"
-export SMOKE_FRONTEND_URL="http://localhost:$((CONDUCTOR_PORT + 1))"
-SEMANTIC_QUEUE_WORKSPACE="${CONDUCTOR_WORKSPACE_NAME:-local}"
-export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMANTIC_QUEUE_WORKSPACE}-deploy-$(date -u +%Y%m%d%H%M%S)-$$"
-
-cd "$(git rev-parse --show-toplevel)"
+cd "$DEPLOY_ROOT"
 ```
 
 **CRITICAL: Start the DB container BEFORE `run.sh` so that `run.sh` treats it as pre-existing and won't stop it on cleanup.** `run.sh` has an EXIT trap that stops all services it started — including the DB container. By pre-starting the DB, `run.sh` sees it as already running and skips DB cleanup, which prevents the DB from dying if `run.sh` exits for any reason (signal, child process exit, timeout, etc.).
 
 ```bash
 # Step 1: Ensure DB is running BEFORE run.sh starts (so run.sh won't own/stop it)
-DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"
-LOCAL_DB_PORT=$((CONDUCTOR_PORT + 5))
-
 if ! docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
   if docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
     docker start "$DB_CONTAINER" >/dev/null
   else
     docker run -d --name "$DB_CONTAINER" -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=victoria \
-      -p "$LOCAL_DB_PORT:5432" -v "victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME:-local}:/var/lib/postgresql/data" \
+      -p "$LOCAL_DB_PORT:5432" -v "$DB_VOLUME:/var/lib/postgresql/data" \
       postgres:16-alpine >/dev/null
     # Wait + push schema + seed for fresh containers
     for i in $(seq 1 30); do docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null && break; sleep 1; done
@@ -810,6 +814,8 @@ bash scripts/run-deploy-stage --finish
 # ║ 3. TypeScript: 0 errors ║
 
 # ║ 4. Structural tests: 100% pass ║
+
+# ║ 4s. Deploy environment + command structural tests: 100% pass ║
 
 # ║ 4a. Code coverage: meets thresholds in .c8rc.json ║
 
@@ -1364,7 +1370,7 @@ python benchmarks/run_benchmark.py \
   --bootstrap
 ```
 
-This production-only task reserves exactly $0.50 from the existing AgentCard organization float, captures the matching live Stripe payment, issues a live AgentCard, and deliberately leaves merchant checkout unsubmitted. The benchmark must then close the card, observe the organization transfer as `reclaimed` with `livemode=true`, refund the Stripe capture, and report no open payment attention request.
+This production-only task reserves exactly $1.00 from the existing AgentCard organization float, captures the matching live Stripe payment, issues a live AgentCard, and deliberately leaves merchant checkout unsubmitted. The benchmark must then close the card, observe the organization transfer as `reclaimed` with `livemode=true`, refund the Stripe capture, and report no open payment attention request.
 
 The runner performs the abandon/reclaim/refund action idempotently on success, failure, cancellation, and verifier errors before deleting the benchmark agent. Any missing cleanup snapshot or non-terminal lifecycle state fails the command. Do not declare the deploy complete until this task passes; if the process is forcibly killed, recover the printed agent ID through `/api/test-payment/lifecycle/abandon` and verify the same terminal assertions before rerunning.
 

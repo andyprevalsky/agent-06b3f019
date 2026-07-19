@@ -257,6 +257,13 @@ def _read_r2_object(key: str) -> bytes:
     return body.read()
 
 
+def _is_missing_r2_object_error(exc: Exception) -> bool:
+    error_code = getattr(getattr(exc, "response", None), "get", lambda *_: {})("Error", {}).get("Code")
+    if error_code in {"NoSuchKey", "404", "NotFound"}:
+        return True
+    return exc.__class__.__name__ in {"NoSuchKey", "ClientError"} and "NoSuchKey" in str(exc)
+
+
 def read_local_artifact(*, root_agent_id: str, path: str) -> Optional[tuple[bytes, dict[str, Any]]]:
     """Read a locally archived encrypted artifact and its metadata."""
     safe_root = _safe_segment(root_agent_id)
@@ -275,15 +282,17 @@ def read_r2_artifact(*, root_agent_id: str, path: str) -> Optional[tuple[bytes, 
     key = _object_key(root_agent_id, path)
     try:
         ciphertext = _read_r2_object(key)
-        metadata = json.loads(_read_r2_object(f"{key}.meta.json").decode("utf-8"))
-        return ciphertext, metadata
     except Exception as exc:
-        error_code = getattr(getattr(exc, "response", None), "get", lambda *_: {})("Error", {}).get("Code")
-        if error_code in {"NoSuchKey", "404", "NotFound"}:
-            return None
-        if exc.__class__.__name__ in {"NoSuchKey", "ClientError"} and "NoSuchKey" in str(exc):
+        if _is_missing_r2_object_error(exc):
             return None
         raise
+    try:
+        metadata = json.loads(_read_r2_object(f"{key}.meta.json").decode("utf-8"))
+    except Exception as exc:
+        if _is_missing_r2_object_error(exc):
+            raise ValueError(f"Archive metadata missing for {path}") from exc
+        raise
+    return ciphertext, metadata
 
 
 def read_archive_artifact(*, root_agent_id: str, path: str) -> Optional[tuple[bytes, dict[str, Any]]]:

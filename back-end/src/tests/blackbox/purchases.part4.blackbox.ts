@@ -14,7 +14,7 @@ import { z } from 'zod';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { stripe } from '../../providers/stripe';
-import { AgentCardProviderError } from '../../providers/card-provider';
+import { AgentCardOrgMcpProvider, AgentCardProviderError } from '../../providers/card-provider';
 import * as purchasesService from '../../domains/purchases/service';
 import { getCustomerDefaultPaymentMethodId } from '../../domains/purchases/stripeCustomer';
 import { isKycRequiredError } from '../../domains/purchases/kyc';
@@ -173,6 +173,53 @@ async function cleanup(): Promise<void> {
 }
 
 const tests: Array<[string, () => Promise<void>]> = [
+  [
+    'organization MCP structured errors surface the upstream failure message',
+    async () => {
+      const calls: string[] = [];
+      const provider = new AgentCardOrgMcpProvider('cardholder-missing', async (name) => {
+        calls.push(name);
+        const message =
+          'create_card failed: org_onboarding_required: This cardholder has no linked user yet — complete hosted onboarding first.';
+        return {
+          content: [{ type: 'text', text: message }],
+          structuredContent: {
+            message,
+            status: 'error',
+          },
+        };
+      });
+
+      let caught: unknown;
+      try {
+        await provider.mintCard({
+          amountCents: 100,
+          fundsSource: 'company_flow',
+          idempotencyKey: 'purchase:missing-cardholder',
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      assert(
+        caught instanceof AgentCardProviderError &&
+          caught.message ===
+            'create_card failed: org_onboarding_required: This cardholder has no linked user yet — complete hosted onboarding first.',
+        `expected upstream AgentCard error, got "${caught instanceof Error ? caught.message : String(caught)}"`
+      );
+      assert(
+        caught instanceof AgentCardProviderError &&
+          caught.status === 409 &&
+          caught.code === 'agentcard_setup_required' &&
+          caught.details.agentcardStatus === 'org_onboarding_required',
+        'organization onboarding must surface as a typed 409 setup gate'
+      );
+      assert(
+        calls.length === 1 && calls[0] === 'create_card',
+        `error response must stop before card details; calls=${calls.join(',')}`
+      );
+    },
+  ],
   [
     'mint recovers stale charging rows before retrying the same cart',
     async () => {

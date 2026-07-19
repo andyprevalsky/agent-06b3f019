@@ -71,7 +71,10 @@ export async function fetchWaitlistPeople(): Promise<AdminWaitlistPeopleResponse
   }
 }
 
-export async function inviteWaitlistPerson(id: string): Promise<AdminWaitlistInviteResponse> {
+export async function inviteWaitlistPerson(
+  id: string,
+  idempotencyKey: string,
+): Promise<AdminWaitlistInviteResponse> {
   const session = getStoredSession();
   if (!session) throw new Error('Not authenticated');
 
@@ -85,6 +88,7 @@ export async function inviteWaitlistPerson(id: string): Promise<AdminWaitlistInv
         headers: {
           Authorization: `Bearer ${session.access_token}`,
           'Content-Type': 'application/json',
+          'Idempotency-Key': idempotencyKey,
         },
         signal: controller.signal,
       },

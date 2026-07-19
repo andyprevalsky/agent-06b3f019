@@ -833,7 +833,10 @@ def _write_delta_index(index_path: Path, index: JsonObject) -> None:
 
 
 def _bundle_signature(root_agent_id: str) -> JsonObject:
-    paths = archive_artifact_paths(root_agent_id)
+    # Archive listings also contain intentionally plaintext public projections
+    # (for example manifest.public.json). Only encrypted artifacts participate
+    # in this signature and therefore carry the metadata read below.
+    paths = [path for path in archive_artifact_paths(root_agent_id) if path.endswith(".enc")]
     artifacts: list[JsonObject] = []
     plaintext_bytes = 0
     ciphertext_bytes = 0

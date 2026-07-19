@@ -18,7 +18,7 @@ import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
 
 import { sendOTP, verifyOTP } from './api';
 import { initAuthSession, logAuth } from './hooks/initAuthSession';
-import type { AuthStep } from './types';
+import { useAuthFormState } from './hooks/useAuthFormState';
 
 /** Extract a human-readable message from an unknown error value. */
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -45,36 +45,31 @@ function toastError(
   toast({ title, description: getErrorMessage(error, fallback), variant: 'destructive' });
 }
 
-/** Internal form state for the phone auth flow. */
-function useAuthFormState() {
-  const [step, setStep] = useState<AuthStep>('phone');
-  const [phone, setPhone] = useState('');
-  const [email, setEmail] = useState('');
-  const [otp, setOtp] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [smsAuthorized, setSmsAuthorized] = useState(false);
-  const resetForm = useCallback(() => {
-    setStep('phone');
-    setPhone('');
-    setEmail('');
-    setOtp('');
-    setSmsAuthorized(false);
-  }, []);
+type AuthFormState = ReturnType<typeof useAuthFormState>;
+
+function hasRequiredName(form: AuthFormState, collectName: boolean): boolean {
+  return !collectName || (form.firstName.trim().length > 0 && form.lastName.trim().length > 0);
+}
+
+function buildUserInfo(form: AuthFormState, collectName: boolean) {
   return {
-    step,
-    setStep,
-    phone,
-    setPhone,
-    email,
-    setEmail,
-    otp,
-    setOtp,
-    loading,
-    setLoading,
-    smsAuthorized,
-    setSmsAuthorized,
-    resetForm,
+    email: form.email,
+    firstName: collectName ? form.firstName.trim() : undefined,
+    lastName: collectName ? form.lastName.trim() : undefined,
   };
+}
+
+function useAuthNavigation(form: AuthFormState, onOpenChange: (open: boolean) => void) {
+  const handleBack = useCallback(() => {
+    form.setStep('phone');
+    form.setOtp('');
+    form.setSmsAuthorized(false);
+  }, [form]);
+  const handleClose = useCallback(() => {
+    form.resetForm();
+    onOpenChange(false);
+  }, [onOpenChange, form]);
+  return { handleBack, handleClose };
 }
 
 /** Manages the full phone auth flow (phone -> OTP -> verified). */
@@ -82,9 +77,11 @@ export function usePhoneAuth(
   onOpenChange: (open: boolean) => void,
   onAuthComplete?: () => void,
   anonymousUserId?: string,
+  collectName = false,
 ) {
   const { toast } = useToast();
   const form = useAuthFormState();
+  const navigation = useAuthNavigation(form, onOpenChange);
 
   const completeAuth = useCallback(() => {
     toast({ title: 'Success!', description: "You're now logged in." });
@@ -97,37 +94,46 @@ export function usePhoneAuth(
   const handleSendOTP = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
+      if (!hasRequiredName(form, collectName)) return;
+      const requestGeneration = form.beginRequest();
       form.setLoading(true);
       try {
         // form.phone is canonical E.164 (PhoneInput owns normalization).
         await sendOTP(form.phone);
+        if (!form.isRequestCurrent(requestGeneration)) return;
         analytics.track('phone_entered');
         form.setStep('otp');
         toast({ title: 'Code sent!', description: 'Check your phone for the 6-digit code.' });
       } catch (error: unknown) {
-        toastError(toast, 'Error', error, 'Failed to send code. Please try again.');
+        if (form.isRequestCurrent(requestGeneration)) {
+          toastError(toast, 'Error', error, 'Failed to send code. Please try again.');
+        }
       } finally {
-        form.setLoading(false);
+        if (form.isRequestCurrent(requestGeneration)) form.setLoading(false);
       }
     },
-    [form, toast],
+    [collectName, form, toast],
   );
 
   const handleVerifyOTP = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
+      const requestGeneration = form.beginRequest();
       form.setLoading(true);
       try {
-        await verifyOTP(form.phone, form.otp, anonymousUserId, { email: form.email });
+        await verifyOTP(form.phone, form.otp, anonymousUserId, buildUserInfo(form, collectName));
+        if (!form.isRequestCurrent(requestGeneration)) return;
         analytics.track('otp_code_submitted');
         analytics.setUserId(form.phone);
         completeAuth();
       } catch (error: unknown) {
-        toastError(toast, 'Invalid code', error, 'Please check the code and try again.');
-        form.setLoading(false);
+        if (form.isRequestCurrent(requestGeneration)) {
+          toastError(toast, 'Invalid code', error, 'Please check the code and try again.');
+          form.setLoading(false);
+        }
       }
     },
-    [form, anonymousUserId, completeAuth, toast],
+    [form, anonymousUserId, collectName, completeAuth, toast],
   );
 
   return {
@@ -136,6 +142,10 @@ export function usePhoneAuth(
     setPhone: form.setPhone,
     email: form.email,
     setEmail: form.setEmail,
+    firstName: form.firstName,
+    setFirstName: form.setFirstName,
+    lastName: form.lastName,
+    setLastName: form.setLastName,
     otp: form.otp,
     setOtp: form.setOtp,
     loading: form.loading,
@@ -143,15 +153,7 @@ export function usePhoneAuth(
     setSmsAuthorized: form.setSmsAuthorized,
     handleSendOTP,
     handleVerifyOTP,
-    handleBack: useCallback(() => {
-      form.setStep('phone');
-      form.setOtp('');
-      form.setSmsAuthorized(false);
-    }, [form]),
-    handleClose: useCallback(() => {
-      onOpenChange(false);
-      setTimeout(form.resetForm, 200);
-    }, [onOpenChange, form]),
+    ...navigation,
   } as const;
 }
 

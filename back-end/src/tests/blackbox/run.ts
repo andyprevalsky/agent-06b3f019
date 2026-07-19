@@ -74,20 +74,44 @@ if (listOnly) {
   process.exit(0);
 }
 
-const requested = domainsArg
+const requestedRaw = domainsArg
   ? domainsArg
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean)
   : allDomains;
-if (requested.length === 0) {
+if (requestedRaw.length === 0) {
   process.stderr.write('No black-box test domains selected.\n');
   process.exit(1);
 }
-const unknown = requested.filter((d) => !allDomains.includes(d));
+const unknown = requestedRaw.filter((d) => !allDomains.includes(d));
 if (unknown.length) {
   process.stderr.write(`Unknown domain(s): ${unknown.join(', ')}\n`);
   process.stderr.write(`Available: ${allDomains.join(', ')}\n`);
+  process.exit(1);
+}
+
+// Operational escape hatch for domains blocked by an external outage the runner
+// cannot fix in code — e.g. a third-party quota exhaustion that resets on a
+// known date. Defaults to empty (no domain is ever skipped silently); when set,
+// every dropped domain is announced loudly so a skip can never masquerade as a
+// pass. This is NOT a way to duck a real regression — only use it for a domain
+// that is red purely because of an external billing/credential block.
+const skipDomains = new Set(
+  (readEnv('BLACKBOX_TEST_SKIP_DOMAINS', 'CONTRACT_TEST_SKIP_DOMAINS') ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
+const skippedDomains = requestedRaw.filter((d) => skipDomains.has(d));
+const requested = requestedRaw.filter((d) => !skipDomains.has(d));
+if (skippedDomains.length) {
+  process.stdout.write(
+    `⚠️  SKIPPING ${skippedDomains.length} blackbox domain(s) via BLACKBOX_TEST_SKIP_DOMAINS (external block, NOT verified): ${skippedDomains.join(', ')}\n\n`
+  );
+}
+if (requested.length === 0) {
+  process.stderr.write('No black-box test domains left to run after skip filtering.\n');
   process.exit(1);
 }
 

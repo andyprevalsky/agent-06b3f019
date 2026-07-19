@@ -6,6 +6,7 @@ export interface PhoneAuthModalProps {
   onAuthComplete?: () => void;
   anonymousUserId?: string;
   title?: string;
+  collectName?: boolean;
 }
 
 export interface ProtectedRouteProps {
@@ -17,6 +18,11 @@ export interface PhoneStepProps {
   onPhoneChange: (value: string) => void;
   email: string;
   onEmailChange: (value: string) => void;
+  firstName: string;
+  onFirstNameChange: (value: string) => void;
+  lastName: string;
+  onLastNameChange: (value: string) => void;
+  collectName: boolean;
   loading: boolean;
   onSubmit: (e: React.FormEvent) => Promise<void>;
   onClose: () => void;

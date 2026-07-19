@@ -572,8 +572,11 @@ class SpawnAgentTool(BaseModel):
     tool: Literal["spawn_agent"]
     type: Literal["browser", "code", "general_purpose", "explore", "for_each"] = Field(
         description=(
-            "The type of specialized agent you are spawning; this parameter affects what other "
-            "parameters are expected. Allowed: 'browser', 'code', 'general_purpose', 'explore', 'for_each'."
+            "Select by capability: 'browser' starts a browser session for stateful or authenticated web work; "
+            "'code' starts a coding agent using Claude Code or Codex CLI in an ephemeral sandbox, selected by "
+            "available credentials and configuration; 'general_purpose' starts a full autonomous agent for "
+            "cross-domain multi-step work; 'explore' performs read-only research for web or user-data facts; "
+            "'for_each' starts one general-purpose agent per item for repeated fan-out."
         )
     )
     goal: str = Field(

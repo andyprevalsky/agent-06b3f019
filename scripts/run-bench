@@ -28,10 +28,16 @@ if [[ "${1:-}" == "--local" ]]; then
     exec "$PY" -u benchmarks/local.py "$@"
 fi
 
-# --single-box opts out to the legacy shared warm box (all tasks on ONE stack).
+# --single-box is DISABLED: it ran every task directly on the ONE shared warm
+# box, which is NOT parallel-safe — two worktrees collide on the same machine and
+# whichever stops it kills the other's in-flight run. The default fleet path
+# already isolates each bench on its own cloned machine, so a single bench is
+# just `run-bench <task>`. (run-bench-cloud enforces the same guard directly.)
 if [[ "${1:-}" == "--single-box" ]]; then
-    shift
-    exec bash "$ROOT_DIR/scripts/run-bench-cloud" "$@"
+    echo "❌ --single-box is disabled: running benches on the shared warm box is not parallel-safe." >&2
+    echo "   Use the default per-bench isolated fleet (clones a dedicated machine per bench):" >&2
+    echo "       bash scripts/run-bench <task...>" >&2
+    exit 2
 fi
 
 # DEFAULT: per-bench ISOLATED cloud fleet. Every bench gets its OWN Fly machine

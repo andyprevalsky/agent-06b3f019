@@ -10,7 +10,6 @@ import {
   syncPasskeyCredentials,
   syncRequiredCredentialTable,
   syncSteelSessionAuthCredentials,
-  evaluateGptCodeComputeGate,
   type BrowserPasswordModel,
   type BrowserPermissionModel,
   type CookieModel,
@@ -154,33 +153,6 @@ test('syncPasskeyCredentials copies passkeys and never moves local signCount bac
     'expected new passkey copied'
   );
   assert(!('id' in upserts[0].update), 'expected update not to rewrite local primary key');
-});
-
-test('evaluateGptCodeComputeGate fails closed when no usable gpt_code and not opted in', () => {
-  // Default behavior: zero usable gpt_code integrations must block the seed so a
-  // stale fixture cannot silently push agents onto the paid waterfall.
-  assert(
-    evaluateGptCodeComputeGate(0, false) === 'blocked',
-    'expected blocked when 0 usable gpt_code and allowMissing=false'
-  );
-});
-
-test('evaluateGptCodeComputeGate allows missing gpt_code only when explicitly opted in', () => {
-  // During a Codex upstream-quota outage (gpt_code CONNECTED but rate-limited)
-  // BENCHMARK_ALLOW_MISSING_GPT_CODE=1 lets claudeAuth-only runs proceed.
-  assert(
-    evaluateGptCodeComputeGate(0, true) === 'allowed-missing',
-    'expected allowed-missing when 0 usable gpt_code and allowMissing=true'
-  );
-});
-
-test('evaluateGptCodeComputeGate is ok whenever a usable gpt_code exists regardless of the flag', () => {
-  // A present usable credential never blocks and never needs the override.
-  assert(
-    evaluateGptCodeComputeGate(1, false) === 'ok',
-    'expected ok with usable gpt_code, flag off'
-  );
-  assert(evaluateGptCodeComputeGate(3, true) === 'ok', 'expected ok with usable gpt_code, flag on');
 });
 
 test('syncIntegrationCredentials preserves a local id for the same user and name', async () => {

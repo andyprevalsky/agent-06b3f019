@@ -1,9 +1,9 @@
 import type { AdminHealthTimeSlice } from './types';
 
-// Only production actually texts waitlist people. The local dev DB is seeded
+// Only production actually contacts waitlist people. The local dev DB is seeded
 // with real phone-bearing waitlist rows (see back-end/scripts/seed-local.ts),
-// so an admin clicking "Invite & text" locally must NOT fire a real SMS to a
-// stranger — dev still ungates + marks invited, it just skips the send.
+// so an admin clicking the invite action locally must NOT fire a real SMS or
+// email — dev still ungates + marks invited, it just skips the sends.
 export const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 export const ADMIN_USER_IDS = new Set([
@@ -40,14 +40,18 @@ export const AMPLITUDE_API_KEY = process.env.AMPLITUDE_API_KEY ?? '';
 export const AMPLITUDE_SECRET_KEY = process.env.AMPLITUDE_SECRET_KEY ?? '';
 export const AMPLITUDE_API_BASE_URL = process.env.AMPLITUDE_API_BASE_URL ?? 'https://amplitude.com';
 /**
- * SMS texted to a waitlist person when an admin pulls them off the waitlist.
- * Points at the Mac app download; the invite itself clears the gate server-side
- * so no code is needed once they sign in.
+ * Canonical copy sent by both SMS and email when an admin pulls someone off
+ * the waitlist. Keeping one value prevents the two channels from drifting.
  */
-export const WAITLIST_INVITE_SMS =
+export const WAITLIST_INVITE_COPY =
   'Welcome to Rose. You are one of the first people in the world to access super intelligence. ' +
   'To finish setting up your account, download our Mac application at https://roselabs.ai/download ' +
   'and follow the steps';
+export const WAITLIST_INVITE_EMAIL_SUBJECT = 'Welcome to Rose - finish setting up your account';
+export const WAITLIST_INVITE_EMAIL_SENDER_USER_ID =
+  process.env.WAITLIST_INVITE_EMAIL_SENDER_USER_ID ?? '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+export const WAITLIST_INVITE_EMAIL_FROM = process.env.WAITLIST_INVITE_EMAIL_FROM ?? 'a@roselabs.ai';
+export const WAITLIST_INVITE_EMAIL_FROM_NAME = 'Rose';
 
 export const STRIPE_REVENUE_EXCLUDED_CHARGE_IDS = new Set(
   (process.env.ADMIN_HEALTH_STRIPE_EXCLUDED_CHARGE_IDS ?? '')

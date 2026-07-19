@@ -28,6 +28,7 @@
  * - step: 'phone' | 'otp'
  * - phone: string (E.164, e.g. +5215512345678 — set by PhoneInput's country selector)
  * - email: string (optional; collected on the phone step, sent with verify-otp)
+ * - firstName/lastName: required only when collectName is enabled for waitlist signup
  * - otp: string (6-digit code)
  * - loading: boolean
  */
@@ -56,8 +57,9 @@ const PhoneAuthModal = ({
   onAuthComplete,
   anonymousUserId,
   title,
+  collectName = false,
 }: PhoneAuthModalProps) => {
-  const auth = usePhoneAuth(onOpenChange, onAuthComplete, anonymousUserId);
+  const auth = usePhoneAuth(onOpenChange, onAuthComplete, anonymousUserId, collectName);
 
   return (
     <Dialog open={open} onOpenChange={auth.handleClose} modal={false}>
@@ -71,6 +73,11 @@ const PhoneAuthModal = ({
             onPhoneChange={auth.setPhone}
             email={auth.email}
             onEmailChange={auth.setEmail}
+            firstName={auth.firstName}
+            onFirstNameChange={auth.setFirstName}
+            lastName={auth.lastName}
+            onLastNameChange={auth.setLastName}
+            collectName={collectName}
             loading={auth.loading}
             onSubmit={auth.handleSendOTP}
             onClose={auth.handleClose}

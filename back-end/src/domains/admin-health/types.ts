@@ -70,6 +70,19 @@ export interface AdminHealthFunnelStep {
   detail?: string;
 }
 
+export type AdminHealthConnectorSubtypeId =
+  'browsers' | 'passwords' | 'compute' | 'messages' | 'socials' | 'financials';
+
+export interface AdminHealthConnectorAdoption {
+  eligibleUserCount: number;
+  subtypes: Array<{
+    id: AdminHealthConnectorSubtypeId;
+    label: string;
+    connectedUsers: number;
+    connectionRate: number;
+  }>;
+}
+
 export interface AdminWaitlistPerson {
   id: string;
   name: string;
@@ -93,6 +106,8 @@ export interface AdminWaitlistInviteResponse {
   invitedAt: string;
   /** The invite SMS was accepted by Surge (production only). */
   smsSent: boolean;
+  /** The invite email was accepted by Gmail (production only, when an email exists). */
+  emailSent: boolean;
   /** A matching account was just flagged off the waitlist. */
   flagged: boolean;
   /** A matching account was already flagged off the waitlist. */
@@ -131,5 +146,6 @@ export interface AdminHealthResponse {
       conversionRateChange: number | null;
     };
   };
+  connectorAdoption: AdminHealthConnectorAdoption;
   velocity: AdminHealthVelocity;
 }

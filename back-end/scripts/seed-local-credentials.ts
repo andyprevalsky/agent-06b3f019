@@ -277,26 +277,3 @@ export async function syncPasskeyCredentials(
   }
   return passkeys.length;
 }
-
-/** Outcome of the gpt_code compute-token seed gate. */
-export type GptCodeComputeGateOutcome = 'ok' | 'allowed-missing' | 'blocked';
-
-/**
- * Decide whether the compute-token seed may proceed given the number of usable
- * gpt_code (Codex) integrations found after syncing from prod.
- *
- * Fails closed by default (`blocked` when zero usable) so a stale/frozen DB
- * fixture cannot silently strip the Codex compute token and push agents onto
- * the paid waterfall. When the caller has explicitly opted in via
- * `BENCHMARK_ALLOW_MISSING_GPT_CODE=1` — used when Codex's upstream quota is
- * exhausted and the gpt_code credential is CONNECTED but `rateLimitedUntil` is a
- * future reset date — a claudeAuth-only benchmark run may proceed
- * (`allowed-missing`); Codex/gpt_code tasks still fail at runtime.
- */
-export function evaluateGptCodeComputeGate(
-  usableGptCodeCount: number,
-  allowMissing: boolean
-): GptCodeComputeGateOutcome {
-  if (usableGptCodeCount > 0) return 'ok';
-  return allowMissing ? 'allowed-missing' : 'blocked';
-}

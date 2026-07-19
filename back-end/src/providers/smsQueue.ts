@@ -70,13 +70,18 @@ export async function sendSms(
   phoneNumber: string,
   message: string,
   options: SmsArchiveOptions = {}
-): Promise<{ success: boolean; messageSid?: string; error?: string }> {
+): Promise<{
+  success: boolean;
+  messageSid?: string;
+  error?: string;
+  definitiveFailure?: boolean;
+}> {
   const apiKey = process.env.SURGE_API_KEY;
   const accountId = process.env.SURGE_ACCOUNT_ID;
 
   if (!apiKey || !accountId) {
     log.error('Surge credentials not configured');
-    return { success: false, error: 'Surge not configured' };
+    return { success: false, error: 'Surge not configured', definitiveFailure: true };
   }
 
   const requestBody = {
@@ -95,7 +100,12 @@ export async function sendSms(
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
+      let errorText: string;
+      try {
+        errorText = await response.text();
+      } catch (error) {
+        errorText = `Unable to read Surge error response: ${error instanceof Error ? error.message : String(error)}`;
+      }
       log.error('Surge API error', { status: response.status, error: logTruncate(errorText) });
       await archiveSmsTransportBoundary({
         rootAgentId: options.archiveRootAgentId,
@@ -105,7 +115,11 @@ export async function sendSms(
         success: false,
         context: options.archiveContext,
       });
-      return { success: false, error: `Surge API error: ${response.status}` };
+      return {
+        success: false,
+        error: `Surge API error: ${response.status}`,
+        definitiveFailure: true,
+      };
     }
 
     const result = (await response.json()) as SurgeMessageResponse;
