@@ -2443,6 +2443,9 @@
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
+    "min_steps": {
+      "browser": 4
+    },
     "attachment": null,
     "approval_handling": "auto_approve",
     "expected_attention_kind": "payment_approval",
@@ -2537,6 +2540,9 @@
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
+    "min_steps": {
+      "browser": 4
+    },
     "attachment": null,
     "approval_handling": "auto_approve",
     "expected_attention_kinds": [
@@ -2642,6 +2648,9 @@
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
+    "min_steps": {
+      "browser": 4
+    },
     "attachment": null,
     "approval_handling": "auto_approve",
     "expected_attention_kind": "payment_approval",
