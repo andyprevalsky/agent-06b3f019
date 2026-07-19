@@ -1,4 +1,3 @@
-import { markOffWaitlistByPhone } from '../../providers/inviteGate';
 import { createLogger } from '../../providers/logger';
 import { sendSms } from '../../providers/smsQueue';
 import {
@@ -26,6 +25,7 @@ import {
   findStoredInviteFinalOutcome,
   WaitlistInviteInProgressError,
 } from './service.waitlist-finalization';
+import { resolveInviteGate } from './service.waitlist-gate';
 import type { AdminWaitlistInviteResponse, AdminWaitlistPeopleResponse } from './types';
 
 export {
@@ -262,7 +262,7 @@ export async function inviteWaitlistPerson(
     return storedFinalOutcome;
   }
 
-  const offWaitlist = await markOffWaitlistByPhone(person.phone);
+  const offWaitlist = await resolveInviteGate({ id, idempotencyKey, phone: person.phone });
   const accountEmail =
     offWaitlist.userId === null ? null : await repo.findUserEmailById(offWaitlist.userId);
   const recipientEmail = preferredRecipientEmail(person.email, accountEmail);

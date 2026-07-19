@@ -100,7 +100,12 @@ export async function sendSms(
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
+      let errorText: string;
+      try {
+        errorText = await response.text();
+      } catch (error) {
+        errorText = `Unable to read Surge error response: ${error instanceof Error ? error.message : String(error)}`;
+      }
       log.error('Surge API error', { status: response.status, error: logTruncate(errorText) });
       await archiveSmsTransportBoundary({
         rootAgentId: options.archiveRootAgentId,

@@ -42,6 +42,10 @@ export interface TransactionalEmailDependencies {
   getAccessToken: typeof getValidAccessToken;
   fetch: typeof fetch;
   requestTimeoutMs: number;
+  findCredential?: (input: {
+    ownerUserId: string;
+    from: string;
+  }) => Promise<Parameters<typeof getValidAccessToken>[0] | null>;
 }
 
 const TRANSACTIONAL_EMAIL_DEPENDENCIES: TransactionalEmailDependencies = {
@@ -49,6 +53,25 @@ const TRANSACTIONAL_EMAIL_DEPENDENCIES: TransactionalEmailDependencies = {
   fetch: (input, init) => fetch(input, init),
   requestTimeoutMs: 15_000,
 };
+
+async function findTransactionalEmailCredential(input: {
+  ownerUserId: string;
+  from: string;
+}): Promise<Parameters<typeof getValidAccessToken>[0] | null> {
+  return prisma.emailIntegrationCredential.findFirst({
+    where: {
+      userId: input.ownerUserId,
+      provider: EmailProvider.GMAIL,
+      email: input.from,
+    },
+    select: {
+      id: true,
+      accessToken: true,
+      refreshToken: true,
+      expiresAt: true,
+    },
+  });
+}
 
 function assertSafeHeader(name: string, value: string): void {
   if (value === '' || /[\r\n]/.test(value)) {
@@ -85,24 +108,25 @@ export async function sendTransactionalEmail(
   input: TransactionalEmailInput,
   dependencies: TransactionalEmailDependencies = TRANSACTIONAL_EMAIL_DEPENDENCIES
 ): Promise<{ id: string }> {
-  const credential = await prisma.emailIntegrationCredential.findFirst({
-    where: {
-      userId: input.ownerUserId,
-      provider: EmailProvider.GMAIL,
-      email: input.from,
-    },
-    select: {
-      id: true,
-      accessToken: true,
-      refreshToken: true,
-      expiresAt: true,
-    },
-  });
-  if (credential === null) {
-    throw new TransactionalEmailDefinitiveError(`Sender ${input.from} is not connected`);
+  let credential: Parameters<typeof getValidAccessToken>[0];
+  let accessToken: string | null;
+  try {
+    const foundCredential = await (dependencies.findCredential ?? findTransactionalEmailCredential)(
+      {
+        ownerUserId: input.ownerUserId,
+        from: input.from,
+      }
+    );
+    if (foundCredential === null) {
+      throw new TransactionalEmailDefinitiveError(`Sender ${input.from} is not connected`);
+    }
+    credential = foundCredential;
+    accessToken = await dependencies.getAccessToken(credential);
+  } catch (error) {
+    if (error instanceof TransactionalEmailDefinitiveError) throw error;
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new TransactionalEmailDefinitiveError(`Failed to prepare Gmail delivery: ${detail}`);
   }
-
-  const accessToken = await dependencies.getAccessToken(credential);
   if (accessToken === null) {
     throw new TransactionalEmailDefinitiveError(`Sender ${input.from} needs to reconnect Gmail`);
   }

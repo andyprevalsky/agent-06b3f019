@@ -90,7 +90,7 @@ deploy_env="$(
   CONDUCTOR_PORT=55190 \
   CONDUCTOR_WORKSPACE_NAME=stale-branch-title \
   CONDUCTOR_WORKSPACE_PATH="$workspace" \
-  bash -c ". '$HELPER_SRC'; . '$DEPLOY_HELPER_SRC'; configure_deploy_local_env >/dev/null; printf '%s\\n' \"\$CONDUCTOR_WORKSPACE_NAME\" \"\$DB_CONTAINER\" \"\$DB_VOLUME\" \"\$TEMPORAL_TASK_QUEUE\" \"\$SMOKE_BASE_URL\" \"\$LOCAL_DB_PORT\""
+  bash -c ". '$HELPER_SRC'; . '$DEPLOY_HELPER_SRC'; configure_deploy_local_env >/dev/null; printf '%s\\n' \"\$CONDUCTOR_WORKSPACE_NAME\" \"\$DB_CONTAINER\" \"\$DB_VOLUME\" \"\$TEMPORAL_TASK_QUEUE\" \"\$SMOKE_BASE_URL\" \"\$LOCAL_DB_PORT\" \"\$RUN_SH_STRICT_CONDUCTOR_PORT\""
 )"
 deploy_workspace=$(printf '%s\n' "$deploy_env" | sed -n '1p')
 deploy_container=$(printf '%s\n' "$deploy_env" | sed -n '2p')
@@ -98,6 +98,7 @@ deploy_volume=$(printf '%s\n' "$deploy_env" | sed -n '3p')
 deploy_queue=$(printf '%s\n' "$deploy_env" | sed -n '4p')
 deploy_backend_url=$(printf '%s\n' "$deploy_env" | sed -n '5p')
 deploy_db_port=$(printf '%s\n' "$deploy_env" | sed -n '6p')
+deploy_strict_port=$(printf '%s\n' "$deploy_env" | sed -n '7p')
 expect_eq "$deploy_workspace" "salvador-v1" "deploy env normalizes stale workspace identity"
 expect_eq "$deploy_container" "victoria-db-salvador-v1" "deploy DB container uses normalized identity"
 expect_eq "$deploy_volume" "victoria-pgdata-salvador-v1" "deploy DB volume uses normalized identity"
@@ -107,6 +108,7 @@ case "$deploy_queue" in
 esac
 expect_eq "$deploy_backend_url" "http://localhost:55190" "deploy backend URL uses assigned port"
 expect_eq "$deploy_db_port" "55195" "deploy DB port uses assigned range"
+expect_eq "$deploy_strict_port" "1" "deploy stack forbids silent port reassignment"
 
 expect_deploy_port_rejected "abc" "deploy env rejects a nonnumeric assigned port"
 expect_deploy_port_rejected "055190" "deploy env rejects a leading-zero assigned port"

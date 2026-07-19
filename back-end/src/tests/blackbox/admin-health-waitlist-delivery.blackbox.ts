@@ -134,7 +134,14 @@ async function testRetrySkipsSuccessfulChannel() {
       if (!(error instanceof WaitlistInviteEmailError)) throw error;
     }
     const result = await inviteWaitlistPerson(seeded.waitlist.id, dependencies, idempotencyKey);
-    if (!result.smsSent || !result.emailSent || smsCalls !== 1 || emailCalls !== 2) {
+    if (
+      !result.smsSent ||
+      !result.emailSent ||
+      !result.flagged ||
+      result.alreadyOffWaitlist ||
+      smsCalls !== 1 ||
+      emailCalls !== 2
+    ) {
       throw new Error(`Retry duplicated delivery: SMS=${smsCalls}, email=${emailCalls}`);
     }
   } finally {

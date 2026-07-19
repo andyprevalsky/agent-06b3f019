@@ -78,6 +78,21 @@ async function resumeFinalOutcome(params: {
   if (params.record.status === 'SUCCEEDED') {
     return parseStoredInviteResponse(params.record.response, params.id);
   }
+  if (params.record.status === 'STARTED') {
+    let result: AdminWaitlistInviteResponse;
+    try {
+      result = parseStoredInviteResponse(params.record.request, params.id);
+    } catch {
+      throw new WaitlistInviteInProgressError();
+    }
+    // Finalization contains only an idempotent DB timestamp write. Replaying a
+    // stored result is safe when the first success-record write was interrupted.
+    return persistFinalOutcome({
+      operationKey: params.record.operationKey,
+      result,
+      markInvited: params.markInvited,
+    });
+  }
   if (params.record.status !== 'FAILED') throw new WaitlistInviteInProgressError();
 
   const claim = await reclaimFailedToolSideEffect(params.record.operationKey);

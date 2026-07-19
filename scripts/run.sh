@@ -146,6 +146,14 @@ port_is_free_for_candidate_range() {
     return 0
 }
 
+port_range_can_reassign() {
+    if [ "${RUN_SH_STRICT_CONDUCTOR_PORT:-0}" = "1" ] || { $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; }; then
+        echo "❌ Port range $CONDUCTOR_PORT is occupied; strict Conductor port mode forbids reassignment." >&2
+        return 1
+    fi
+    return 0
+}
+
 if [ "${RUN_SH_SOURCE_ONLY:-false}" = "true" ]; then
     return 0 2>/dev/null || exit 0
 fi
@@ -163,6 +171,9 @@ for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $MAC_APP_PORT $SDK_METRICS
 done
 
 if $COLLISION; then
+    if ! port_range_can_reassign; then
+        exit 1
+    fi
     echo "⚠️  Port range $CONDUCTOR_PORT is already occupied — scanning for free range..."
     # Scan upward in steps of 20 from the assigned port
     CANDIDATE=$((CONDUCTOR_PORT + 20))

@@ -20,6 +20,9 @@ configure_deploy_local_env() {
   export SMOKE_BASE_URL="http://localhost:$conductor_port"
   export SMOKE_HEALTH_URL="http://localhost:$((conductor_port + 2))"
   export SMOKE_FRONTEND_URL="http://localhost:$((conductor_port + 1))"
+  # Deploy gates address the stack through these exact URLs. Fail on a
+  # collision instead of letting run.sh silently move to a different range.
+  export RUN_SH_STRICT_CONDUCTOR_PORT=1
   export SEMANTIC_QUEUE_WORKSPACE="${CONDUCTOR_WORKSPACE_NAME:-local}"
   export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMANTIC_QUEUE_WORKSPACE}-deploy-$(date -u +%Y%m%d%H%M%S)-$$"
   export DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"
