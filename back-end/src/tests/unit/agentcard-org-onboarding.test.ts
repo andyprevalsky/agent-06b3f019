@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import {
   completeOrgCardholderOnboarding,
+  getOrgCardholderVerificationStatus,
   refreshOrgCardholderStatus,
   type OrgOnboardingDependencies,
 } from '../../providers/agentcard/org-onboarding';
@@ -125,6 +126,17 @@ async function main(): Promise<void> {
     })
   );
   assert.equal(pending.connected, false);
+
+  let verificationArgs: Record<string, unknown> | undefined;
+  const verificationStatus = await getOrgCardholderVerificationStatus('ch-ready', {
+    callOrgTool: async (name, args) => {
+      assert.equal(name, 'get_cardholder_kyc_status');
+      verificationArgs = args;
+      return toolResult({ kyc_status: 'verified' });
+    },
+  });
+  assert.equal(verificationStatus, 'verified');
+  assert.deepEqual(verificationArgs, { cardholder_id: 'ch-ready' });
 
   process.stdout.write('AgentCard org onboarding tests passed\n');
 }

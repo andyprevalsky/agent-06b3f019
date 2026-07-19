@@ -570,10 +570,16 @@ async function testAdminHappyYearly() {
 // Waitlist signups are a phone-verified product signal: entries without a phone
 // number (the legacy email-only waitlist) must be cleared out of the metric.
 async function testWaitlist_excludesPhonelessSignups() {
-  const marker = `blackbox-wl-${Date.now()}`;
+  const marker = `blackbox-wl-${Date.now()}-${process.pid}`;
   const start = new Date('2000-01-01T00:00:00.000Z');
   const end = new Date('2000-01-02T00:00:00.000Z');
   const at = new Date('2000-01-01T12:00:00.000Z');
+  // `phone` is @unique, so the empty-string row below can only exist once
+  // globally. A prior run that was SIGKILLed before its `finally` cleanup (e.g.
+  // a coverage run killed on timeout) would leave a `phone: ''` row behind and
+  // make every subsequent run collide. Purge any leaked fixture rows first so
+  // the test self-heals instead of staying wedged.
+  await prisma.waitlist.deleteMany({ where: { name: { startsWith: 'blackbox-wl-' } } });
   try {
     await prisma.waitlist.createMany({
       data: [

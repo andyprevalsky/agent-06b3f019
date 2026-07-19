@@ -128,6 +128,18 @@ const defaultOnboardingDependencies: OrgOnboardingDependencies = {
   saveOrgOnboardingConfig,
 };
 
+export async function getOrgCardholderVerificationStatus(
+  cardholderId: string,
+  dependencies: Partial<Pick<OrgOnboardingDependencies, 'callOrgTool'>> = {}
+): Promise<string> {
+  if (cardholderId.trim() === '') throw new Error('AgentCard cardholder id is required');
+  const callTool = dependencies.callOrgTool ?? defaultOnboardingDependencies.callOrgTool;
+  const result = resultRecord(
+    await callTool('get_cardholder_kyc_status', { cardholder_id: cardholderId })
+  );
+  return stringField(result, ['status', 'kyc_status', 'kycStatus']) ?? 'unknown';
+}
+
 export async function refreshOrgCardholderStatus(
   userId: string,
   dependencies: Partial<OrgOnboardingDependencies> = {}
