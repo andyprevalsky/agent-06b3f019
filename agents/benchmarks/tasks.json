@@ -2517,7 +2517,10 @@
       }
     },
     "bench": "pipeline-e2e",
-    "group": "daily"
+    "group": "daily",
+    "min_steps": {
+      "browser": 3
+    }
   },
   {
     "name": "agent-payment-setup-resume",
@@ -2615,7 +2618,10 @@
         "openKinds": []
       }
     },
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "min_steps": {
+      "browser": 3
+    }
   },
   {
     "name": "agent-payment-idempotent-abandonment",
@@ -2716,7 +2722,10 @@
         "openKinds": []
       }
     },
-    "bench": "pipeline-e2e"
+    "bench": "pipeline-e2e",
+    "min_steps": {
+      "browser": 2
+    }
   },
   {
     "name": "agent-payment-abandonment",
