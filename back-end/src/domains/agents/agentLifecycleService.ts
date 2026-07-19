@@ -174,7 +174,8 @@ export async function createAgent(
   body: CreateAgentBody,
   userId: string,
   isInternal: boolean,
-  clientIP: string | null
+  clientIP: string | null,
+  isBenchmark = false
 ) {
   if (isInternal) {
     body.goal = resolvePromptSecrets(body.goal);
@@ -224,6 +225,7 @@ export async function createAgent(
     writeLockEnabled: body.write_lock_enabled,
     fastModeCacheEnabled: body.fast_mode_cache_enabled,
     verifierType: verifier.type,
+    isBenchmark,
     attachments: body.attachments as Array<Record<string, unknown>> | undefined,
     temporalWorkflowId: willStartWorkflow ? agentId : null,
   });

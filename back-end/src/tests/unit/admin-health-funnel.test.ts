@@ -53,6 +53,7 @@ const period: AdminHealthPeriod = {
 const task = (taskId: string, userId: string, createdAt: string) => ({
   taskId,
   userId,
+  goal: `goal-${taskId}`,
   createdAt: new Date(createdAt),
   tokensOut: 100,
   status: 'COMPLETED' as AgentStatus,

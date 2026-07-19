@@ -44,6 +44,7 @@ model Agent {
   ownCostCents              Float           @default(0)
   writeLockEnabled          Boolean         @default(true)
   fastModeCacheEnabled      Boolean         @default(false)
+  isBenchmark               Boolean         @default(false)
   githubRepoUrl             String?
   parent                    Agent?          @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
   children                  Agent[]         @relation("AgentHierarchy")
@@ -918,6 +919,7 @@ model GoalHistory {
   agentUpdatedAt  DateTime
   agentDeletedAt  DateTime?
   archivedAt      DateTime    @default(now())
+  isBenchmark     Boolean     @default(false)
 
   @@index([userId])
   @@index([archivedAt])

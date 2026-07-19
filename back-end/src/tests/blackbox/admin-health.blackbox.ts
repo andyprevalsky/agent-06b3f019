@@ -444,9 +444,14 @@ async function testAdminHappyWeekly() {
       );
     }
     const { findRootTasksBetween } = await import('../../domains/admin-health/repo');
-    const cohortTaskCount = (
-      await findRootTasksBetween(new Date(body.range.start), new Date(body.range.end))
-    ).filter((task) => expectedUserIds.has(task.userId)).length;
+    const { dedupeInternalRepeatTasks } = await import('../../domains/admin-health/benchmarkDedup');
+    // Mirror buildSeries: filter to the counted cohort, then collapse internal-account
+    // repeat goals (benchmark stripping) exactly as the metric does.
+    const cohortTaskCount = dedupeInternalRepeatTasks(
+      (await findRootTasksBetween(new Date(body.range.start), new Date(body.range.end))).filter(
+        (task) => expectedUserIds.has(task.userId)
+      )
+    ).length;
     if (body.summary.taskCount !== cohortTaskCount) {
       throw new Error(
         `Task count must use the same user cohort: expected ${cohortTaskCount}, got ${body.summary.taskCount}`
