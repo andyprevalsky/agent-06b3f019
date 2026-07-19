@@ -49,6 +49,17 @@ if [ -z "$BASE_REF" ]; then
   fi
 fi
 
+# Fail CLOSED: this is an approval gate, so an unresolvable base ref must never be
+# silently tolerated. Without this, `git diff "$BASE_REF"...HEAD` below errors into
+# `|| true`, omitting all committed changes — a checkout without main/origin/main
+# (or an explicit --base-ref=missing) would then "pass" a worktree that actually
+# committed a recovery/terminal flip.
+if ! git rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null; then
+  echo "Agent-behavior human-approval guard: base ref '$BASE_REF' does not resolve to a commit — refusing to run (fail closed)." >&2
+  echo "Pass a valid --base-ref=REF or ensure origin/main / main is available." >&2
+  exit 2
+fi
+
 # Scan added/removed lines for recovery/terminal-transition semantics, restricted
 # to the narrow set of files that own agent recovery / terminal control flow (plus
 # the blackbox suites that pin those invariants). The whole diff is scanned and the

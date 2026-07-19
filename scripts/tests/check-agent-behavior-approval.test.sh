@@ -133,4 +133,15 @@ git -C "$delete_repo" commit -q -m "add recovery return"
 git -C "$delete_repo" rm -q agents/loop/dag_executor.py
 expect_fail "$delete_repo" "deleting a watched file's recovery logic requires approval"
 
+# 8. Fail CLOSED on an unresolvable base ref. An approval gate must never treat a
+#    missing/typo'd base as "no changes" and silently pass — a clean worktree with
+#    a bad --base-ref must exit nonzero rather than approve.
+failclosed_repo="$(new_repo fail-closed-base-ref)"
+if (cd "$failclosed_repo" && bash scripts/check-agent-behavior-approval.sh --base-ref=nonexistent-ref-xyz >/tmp/agent-behavior-guard.out 2>&1); then
+  echo "FAIL: expected guard to FAIL CLOSED on an unresolvable base ref" >&2
+  cat /tmp/agent-behavior-guard.out >&2
+  exit 1
+fi
+echo "PASS: an unresolvable base ref fails closed"
+
 echo "All agent-behavior guard tests passed."
