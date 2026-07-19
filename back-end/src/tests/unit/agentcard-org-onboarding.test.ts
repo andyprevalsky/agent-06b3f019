@@ -138,6 +138,17 @@ async function main(): Promise<void> {
   assert.equal(verificationStatus, 'verified');
   assert.deepEqual(verificationArgs, { cardholder_id: 'ch-ready' });
 
+  // The cardholder id is validated after trimming, so the trimmed value must be
+  // what gets sent to the org tool (not the padded input).
+  let paddedArgs: Record<string, unknown> | undefined;
+  await getOrgCardholderVerificationStatus('  ch-padded  ', {
+    callOrgTool: async (_name, args) => {
+      paddedArgs = args;
+      return toolResult({ kyc_status: 'verified' });
+    },
+  });
+  assert.deepEqual(paddedArgs, { cardholder_id: 'ch-padded' });
+
   process.stdout.write('AgentCard org onboarding tests passed\n');
 }
 
