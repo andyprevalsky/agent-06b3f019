@@ -25,8 +25,8 @@ import {
   ToolCall,
   ToolResult,
 } from './supervisorTools';
-import { fetchComputeTokenForUser } from '../computeCredentials';
 import { createLogger } from '../logger';
+import { getComputeToken, type SupervisorComputeToken } from './supervisorComputeToken';
 import { SUPERVISOR_RESPONSE_MODEL } from './schema';
 import { appendOutboundSms } from './sessionStore';
 import * as environment from './environmentMessages';
@@ -254,15 +254,34 @@ export async function handleSmsSupervisorMessage(config: {
           error: smsResult.error ?? 'SMS delivery failed',
         };
       }
-      await appendOutboundSms(
-        userId,
-        message,
-        smsResult.messageSid,
-        inboundStoredForRun ? undefined : inboundMessage
-      );
-      inboundStoredForRun = true;
+      // The reply is now DELIVERED. Persistence is best-effort: a throw here must
+      // NOT propagate, because an escaped throw would bubble to the webhook's
+      // top-level catch and send SUPERVISOR_FALLBACK_MESSAGE on top of the reply
+      // the user already received (a "real answer + spurious apology" double-send).
+      // Record delivery regardless; log the persistence gap.
+      let persisted = false;
+      try {
+        await appendOutboundSms(
+          userId,
+          message,
+          smsResult.messageSid,
+          inboundStoredForRun ? undefined : inboundMessage
+        );
+        inboundStoredForRun = true;
+        persisted = true;
+      } catch (persistError) {
+        log.error('[SmsSupervisor] Outbound SMS delivered but persistence failed', {
+          userId,
+          messageSid: smsResult.messageSid,
+          error: persistError instanceof Error ? persistError.message : String(persistError),
+        });
+      }
       sentMessages.push(message);
-      return { tool: 'send_user_message', success: true, result: 'SMS sent and persisted' };
+      return {
+        tool: 'send_user_message',
+        success: true,
+        result: persisted ? 'SMS sent and persisted' : 'SMS sent (persistence failed, logged)',
+      };
     });
 
   for (let round = 0; round < environment.MAX_TOOL_ROUNDS; round++) {
@@ -528,44 +547,6 @@ export async function handleSmsSupervisorMessage(config: {
     committed,
     toolsExecuted: allToolsExecuted,
   };
-}
-
-// ============================================
-// Compute Token Fetching
-// ============================================
-
-interface SupervisorComputeToken {
-  type: 'claude' | 'gpt';
-  accessToken: string;
-  accountId?: string;
-}
-
-async function getComputeToken(userId: string): Promise<SupervisorComputeToken | null> {
-  try {
-    const computeToken = await fetchComputeTokenForUser(userId);
-    if (computeToken) {
-      log.info('[SmsSupervisor] Using compute token', {
-        userId,
-        type: computeToken.type,
-        source: computeToken.source,
-        poolTokenId: computeToken.poolTokenId,
-      });
-      return {
-        type: computeToken.type,
-        accessToken: computeToken.accessToken,
-        accountId: computeToken.accountId,
-      };
-    }
-
-    log.info('[SmsSupervisor] No compute token available, will use waterfall', { userId });
-    return null;
-  } catch (error) {
-    log.warn('[SmsSupervisor] Failed to fetch compute token, falling back to waterfall', {
-      userId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  }
 }
 
 // ============================================
