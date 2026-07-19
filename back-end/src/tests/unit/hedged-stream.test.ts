@@ -186,6 +186,22 @@ async function main(): Promise<void> {
     assert.deepEqual(h.winners, ['waterfall']);
   }
 
+  // 4c. Primary ends CLEANLY empty pre-latch: it can never win, so the hedge
+  //     arms immediately without waiting for the delay.
+  {
+    const h = harness();
+    const result = h.collect();
+    await tick();
+    h.primary.end();
+    await tick();
+    assert.equal(h.hedge.started(), true, 'clean-empty primary must arm the hedge immediately');
+    h.hedge.push({ kind: 'content', text: 'hedge fills the silence' });
+    h.hedge.end();
+    const { items, error } = await result;
+    assert.equal(error, null);
+    assert.deepEqual(items, [{ kind: 'content', text: 'hedge fills the silence' }]);
+  }
+
   // 5. Every branch fails pre-latch: the primary's failure surfaces to the caller.
   {
     const h = harness();

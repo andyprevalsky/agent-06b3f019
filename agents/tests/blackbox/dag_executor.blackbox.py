@@ -378,11 +378,17 @@ async def _run_execute_dag(
     param_tool_calls=None,
     execute_activity_calls=None,
     alias_retry_patch_enabled=True,
+    settle_patch_enabled=True,
     **execute_dag_kwargs,
 ):
     """Helper: run execute_dag with mocked execute_activity that returns canned data."""
     from helpers.llm import _pending_llm_context
-    from loop.dag_executor import TaskDAG, execute_dag
+    from loop.dag_executor import (
+        DAG_ALIAS_PARAM_CONTRACT_RETRY_PATCH,
+        DAG_SETTLE_IN_FLIGHT_PATCH,
+        TaskDAG,
+        execute_dag,
+    )
 
     dag = TaskDAG(plan_data)
 
@@ -443,10 +449,20 @@ async def _run_execute_dag(
         }
 
     # Patch workflow.logger (only valid inside workflow event loop) with a stub
+    def fake_patched(patch_id):
+        # Patch gates are per-marker: tests control the alias-retry and
+        # settlement markers independently; any other marker behaves as a
+        # new execution (patched -> True).
+        if patch_id == DAG_ALIAS_PARAM_CONTRACT_RETRY_PATCH:
+            return alias_retry_patch_enabled
+        if patch_id == DAG_SETTLE_IN_FLIGHT_PATCH:
+            return settle_patch_enabled
+        return True
+
     fake_logger = MagicMock()
     with (
         patch("loop.dag_executor.workflow.logger", fake_logger),
-        patch("loop.dag_executor.workflow.patched", return_value=alias_retry_patch_enabled),
+        patch("loop.dag_executor.workflow.patched", side_effect=fake_patched),
     ):
         result = await execute_dag(
             dag=dag,
@@ -786,9 +802,10 @@ async def test_execute_dag_preserves_pre_patch_alias_param_history():
     populate_attempts = 0
     executed = []
 
-    def param_tool_calls(_args):
+    def param_tool_calls(args):
         nonlocal populate_attempts
         populate_attempts += 1
+        assert "planned `spawn_general_purpose_agent` action resolves" not in args[10]
         return [
             {
                 "tool": "spawn_agent",
@@ -961,6 +978,50 @@ async def test_execute_dag_failure_settles_in_flight_siblings_before_recovery():
     assert [message["message_id"] for message in result["context"]] == ["sibling-terminal-message"]
 
 
+async def test_execute_dag_failure_unpatched_history_keeps_legacy_cancel():
+    """Histories without the settlement marker must replay the legacy branch.
+
+    Pre-marker workflow histories recorded sibling cancellation followed by an
+    immediate needs_llm return; replaying them through the settlement branch
+    would await results the history never recorded (Temporal nondeterminism).
+    """
+    plan_data = {
+        "tasks": [
+            {"goal": "fail quickly", "tool_name": "web_search"},
+            {"goal": "sibling that must be canceled", "tool_name": "web_search"},
+        ],
+        "dependencies": {},
+    }
+    sibling_started = asyncio.Event()
+    sibling_finished = []
+
+    def param_tool_calls(args):
+        goal = "fail" if "fail quickly" in args[10] else "sibling"
+        return [{"tool": "web_search", "query": goal}]
+
+    async def execute_tool(_name, params, _tool_call_id):
+        if params["query"] == "fail":
+            await sibling_started.wait()
+            return {"error": True, "message": "planned failure"}
+        sibling_started.set()
+        await asyncio.sleep(5)  # long enough that only cancellation ends it
+        sibling_finished.append(params["query"])
+        return {"message": "sibling completed"}
+
+    result, _events, dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=param_tool_calls,
+        settle_patch_enabled=False,
+    )
+
+    assert result["status"] == "needs_llm"
+    assert dag.tasks[0].state.value == "FAILED"
+    # Legacy path cancels the sibling instead of settling it.
+    assert sibling_finished == []
+    assert dag.tasks[1].state.value != "COMPLETED"
+
+
 async def test_execute_dag_retries_structured_param_failure_once():
     """A non-retryable activity contract failure is retried by the DAG, not Temporal."""
     plan_data = {
@@ -1044,6 +1105,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_dag_retries_captured_wrong_spawn_alias_params",
         test_execute_dag_retries_captured_wrong_spawn_alias_params,
+    )
+    await r.record_async(
+        "execute_dag_preserves_pre_patch_alias_param_history",
+        test_execute_dag_preserves_pre_patch_alias_param_history,
     )
     await r.record_async(
         "execute_dag_rejects_multiple_param_tool_calls",

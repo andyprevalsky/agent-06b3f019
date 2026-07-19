@@ -42,6 +42,16 @@ PARAM_CONTRACT_MAX_ATTEMPTS = 2
 # path or replay could schedule an activity where history expects tool execution.
 DAG_ALIAS_PARAM_CONTRACT_RETRY_PATCH = "dag-alias-param-contract-retry-v1"
 
+# Replay gate for settling in-flight siblings on task failure. Histories that
+# predate this marker recorded cancellation commands for the pending siblings;
+# replaying them through the settlement branch would await task results the
+# history never recorded and strand those workflows on nondeterminism.
+DAG_SETTLE_IN_FLIGHT_PATCH = "dag-settle-in-flight-v1"
+
+# Replay gate for reporting param-populator token usage via on_tokens, which
+# can schedule activities; ungated it would diverge from pre-marker histories.
+DAG_PARAM_USAGE_TOKENS_PATCH = "dag-param-usage-tokens-v1"
+
 DAG_REASONING_UI_TOOL_NAME = "thought"
 DAG_REASONING_IN_PROGRESS_TITLE = "Thinking"
 DAG_REASONING_FINISHED_TITLE = "Thought"
@@ -663,6 +673,20 @@ async def execute_dag(
 
             if not success:
                 dag.mark_failed(task_index)
+                if not workflow.patched(DAG_SETTLE_IN_FLIGHT_PATCH):
+                    # Legacy replay branch: histories that predate the
+                    # settlement marker recorded cancellation of the pending
+                    # siblings followed by an immediate return. Reproduce that
+                    # command sequence exactly so those workflows replay clean.
+                    workflow.logger.info(
+                        f"[DAG] Task {task_index} failed - canceling remaining and returning for LLM recovery"
+                    )
+                    for pending in pending_tasks.values():
+                        pending.cancel()
+                    return {
+                        "status": "needs_llm",
+                        "context": context,
+                    }
                 batch_failed = True
                 workflow.logger.info(f"[DAG] Task {task_index} failed")
             else:
@@ -953,6 +977,10 @@ async def _execute_single_task(
                 return llm_result
 
             async def record_param_usage(llm_result: Dict[str, Any]) -> None:
+                if not workflow.patched(DAG_PARAM_USAGE_TOKENS_PATCH):
+                    # Pre-marker histories never scheduled on_tokens work from
+                    # the param populator; replaying it would diverge.
+                    return
                 param_usage = llm_result.get("usage", {})
                 if not on_tokens or not param_usage:
                     return

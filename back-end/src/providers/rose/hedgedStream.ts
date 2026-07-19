@@ -111,6 +111,12 @@ export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T>
           if (state !== active) state.controller.abort(new Error('lost chat hedge race'));
         }
         while (consumed < active.buffer.length) yield active.buffer[consumed++];
+        if (consumed > 0) {
+          // Drop the emitted prefix so a long winning stream doesn't
+          // accumulate every chunk for its whole life.
+          active.buffer.splice(0, consumed);
+          consumed = 0;
+        }
         if (active.done) {
           if (active.failure !== null) throw active.failure;
           return;
@@ -123,9 +129,13 @@ export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T>
       // immediately: fast provider errors (402 quota, 429, 5xx) must reach the
       // caller's error-classified fallover chain (e.g. same-model GLM-4.7 via
       // OpenRouter for quota) rather than silently racing the generic hedge.
-      // Only silence arms the hedge; once racing, the race is played out.
-      const primaryOut = primary.state.done && primary.state.failure !== null;
-      if (primaryOut && states.length === 1) throw primary.state.failure;
+      // A primary that ends CLEANLY empty can never win, so the hedge starts
+      // right away instead of waiting out the delay. Once racing, the race is
+      // played out.
+      if (primary.state.done && states.length === 1) {
+        if (primary.state.failure !== null) throw primary.state.failure;
+        armHedge();
+      }
       if (states.length > 1 && states.every((state) => state.done)) {
         // No branch produced content. Prefer the primary failure for the
         // caller's existing error-classified fallover chain; fall back to the
