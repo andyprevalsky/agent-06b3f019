@@ -25,19 +25,25 @@ if [ "${1:-}" = "--start" ]; then
         [ "$#" -eq 0 ] || { usage; exit 2; }
         RUN_ID="$(date -u +%Y%m%d-%H%M%S)-$$"
     fi
-    [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "invalid deploy run id: $RUN_ID" >&2; exit 2; }
+    [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] && [ "$RUN_ID" != "." ] && [ "$RUN_ID" != ".." ] || {
+        echo "invalid deploy run id: $RUN_ID" >&2
+        exit 2
+    }
     RUN_DIR="$RUN_ROOT/$RUN_ID"
     mkdir -p "$RUN_ROOT" "$RUN_DIR/logs"
-    CURRENT_TMP="$CURRENT_RUN_FILE.$$"
-    printf '%s\n' "$RUN_ID" > "$CURRENT_TMP"
-    mv "$CURRENT_TMP" "$CURRENT_RUN_FILE"
-    python3 "$TIMING_SCRIPT" init \
+    if ! python3 "$TIMING_SCRIPT" init \
         --run-dir "$RUN_DIR" \
         --run-id "$RUN_ID" \
         --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --started-epoch "$(python3 -c 'import time; print(time.time())')" \
         --git-sha "$(git rev-parse HEAD)" \
-        --branch "$(git branch --show-current)"
+        --branch "$(git branch --show-current)"; then
+        echo "failed to initialize deploy timing run" >&2
+        exit 1
+    fi
+    CURRENT_TMP="$CURRENT_RUN_FILE.$$"
+    printf '%s\n' "$RUN_ID" > "$CURRENT_TMP"
+    mv "$CURRENT_TMP" "$CURRENT_RUN_FILE"
     echo "Deploy timing run: $RUN_ID"
     echo "Artifacts: $RUN_DIR"
     exit 0
@@ -54,7 +60,10 @@ if [ ! -f "$CURRENT_RUN_FILE" ]; then
     exit 2
 fi
 RUN_ID="$(sed -n '1p' "$CURRENT_RUN_FILE")"
-[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "invalid active deploy run id" >&2; exit 2; }
+[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] && [ "$RUN_ID" != "." ] && [ "$RUN_ID" != ".." ] || {
+    echo "invalid active deploy run id" >&2
+    exit 2
+}
 RUN_DIR="$RUN_ROOT/$RUN_ID"
 
 if [ "${1:-}" = "--summary" ]; then
@@ -69,8 +78,16 @@ if [ "${1:-}" = "--finish" ]; then
         --run-dir "$RUN_DIR" \
         --finished-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --finished-epoch "$(python3 -c 'import time; print(time.time())')"
+    FINALIZE_EXIT=$?
+    if [ "$FINALIZE_EXIT" -eq 0 ]; then
+        rm -f "$CURRENT_RUN_FILE"
+    fi
     python3 "$TIMING_SCRIPT" summary --run-dir "$RUN_DIR"
-    exit $?
+    SUMMARY_EXIT=$?
+    if [ "$FINALIZE_EXIT" -ne 0 ]; then
+        exit "$FINALIZE_EXIT"
+    fi
+    exit "$SUMMARY_EXIT"
 fi
 
 STAGE="${1:-}"
@@ -90,10 +107,12 @@ echo "== deploy stage: $STAGE =="
 
 SUPERVISOR_PID=""
 SIGNAL_EXIT=0
+PENDING_SIGNAL=""
 forward_signal() {
     signal_name="$1"
     signal_exit="$2"
     SIGNAL_EXIT="$signal_exit"
+    PENDING_SIGNAL="$signal_name"
     trap - HUP INT TERM
     if [ -n "$SUPERVISOR_PID" ] && kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
         kill -s "$signal_name" "$SUPERVISOR_PID" 2>/dev/null || true
@@ -106,6 +125,9 @@ trap 'forward_signal TERM 143' TERM
 
 python3 "$LOGGED_COMMAND" "$LOG_PATH" -- "$@" &
 SUPERVISOR_PID=$!
+if [ -n "$PENDING_SIGNAL" ]; then
+    kill -s "$PENDING_SIGNAL" "$SUPERVISOR_PID" 2>/dev/null || true
+fi
 wait "$SUPERVISOR_PID"
 STAGE_EXIT=$?
 if [ "$SIGNAL_EXIT" -ne 0 ]; then
@@ -124,6 +146,6 @@ python3 "$TIMING_SCRIPT" append \
     --started-epoch "$STARTED_EPOCH" \
     --finished-epoch "$FINISHED_EPOCH" \
     --exit-code "$STAGE_EXIT" \
-    --log "$LOG_RELATIVE"
+    --log "$LOG_RELATIVE" || echo "warning: could not append deploy stage record" >&2
 echo "== deploy stage: $STAGE exit=$STAGE_EXIT log=$LOG_PATH =="
 exit "$STAGE_EXIT"

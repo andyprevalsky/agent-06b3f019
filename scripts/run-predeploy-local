@@ -91,6 +91,12 @@ echo "Schedule (longest recent median first, concurrency $LOCAL_CONCURRENCY): ${
 # that fixed cap, longest-recent-median-first list scheduling targets a shorter
 # idle tail without increasing simultaneous load or changing any benchmark contract.
 PREDEPLOY_RUN_ID="${PREDEPLOY_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
+[[ "$PREDEPLOY_RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] \
+    && [ "$PREDEPLOY_RUN_ID" != "." ] \
+    && [ "$PREDEPLOY_RUN_ID" != ".." ] || {
+    echo "invalid pre-deploy run id: $PREDEPLOY_RUN_ID" >&2
+    exit 2
+}
 ARTIFACT_DIR="$RUN_ROOT/$PREDEPLOY_RUN_ID"
 RUNNER_LOG="$ARTIFACT_DIR/runner.log"
 SUMMARY_PATH="$ARTIFACT_DIR/summary.json"
@@ -132,10 +138,12 @@ trap 'record_summary $?' EXIT
 set +e
 SUPERVISOR_PID=""
 SIGNAL_EXIT=0
+PENDING_SIGNAL=""
 forward_signal() {
     signal_name="$1"
     signal_exit="$2"
     SIGNAL_EXIT="$signal_exit"
+    PENDING_SIGNAL="$signal_name"
     trap - HUP INT TERM
     if [ -n "$SUPERVISOR_PID" ] && kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
         kill -s "$signal_name" "$SUPERVISOR_PID" 2>/dev/null || true
@@ -150,6 +158,9 @@ BENCHMARK_SKIP_WMH_BUILD=1 python3 "$LOGGED_COMMAND" "$RUNNER_LOG" -- \
     bash "$ROOT_DIR/scripts/run-bench" --local "${SCHEDULED_TASKS[@]}" \
     --max-concurrency "$LOCAL_CONCURRENCY" &
 SUPERVISOR_PID=$!
+if [ -n "$PENDING_SIGNAL" ]; then
+    kill -s "$PENDING_SIGNAL" "$SUPERVISOR_PID" 2>/dev/null || true
+fi
 wait "$SUPERVISOR_PID"
 RUN_EXIT=$?
 if [ "$SIGNAL_EXIT" -ne 0 ]; then
