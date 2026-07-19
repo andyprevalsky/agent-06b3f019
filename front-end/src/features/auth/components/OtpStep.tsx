@@ -40,6 +40,7 @@ function OtpStep({
         <button
           type="button"
           onClick={onClose}
+          aria-label="Close authentication dialog"
           className="text-gray-400 hover:text-gray-600 transition-colors p-1"
         >
           <X className="w-5 h-5" />

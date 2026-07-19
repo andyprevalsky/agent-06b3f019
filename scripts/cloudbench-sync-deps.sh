@@ -7,30 +7,9 @@ set -euo pipefail
 
 DEPS_DIR="${1:?usage: cloudbench-sync-deps.sh <donor-dir> <repo-dir>}"
 REPO_DIR="${2:?usage: cloudbench-sync-deps.sh <donor-dir> <repo-dir>}"
+REBUILD_DEPS="${CLOUDBENCH_REBUILD_DEPS:-0}"
 # shellcheck source=lib/cloudbench-env.sh
 source "$REPO_DIR/scripts/lib/cloudbench-env.sh"
-
-fingerprint() {
-    local root="$1"
-    shift
-    python3 - "$root" "$@" <<'PY'
-import hashlib
-import pathlib
-import sys
-
-root = pathlib.Path(sys.argv[1])
-digest = hashlib.sha256()
-for relative in sys.argv[2:]:
-    path = root / relative
-    if not path.is_file():
-        raise SystemExit(f"missing dependency manifest: {path}")
-    digest.update(relative.encode())
-    digest.update(b"\0")
-    digest.update(path.read_bytes())
-    digest.update(b"\0")
-print(digest.hexdigest())
-PY
-}
 
 sync_tree() {
     local label="$1" donor_tree="$2" repo_tree="$3" expected="$4"
@@ -82,6 +61,113 @@ print(f"[cloudbench] relocated {rewritten} Python venv path(s) to {root}")
 PY
 }
 
+python_venv_healthy() {
+    local tree="$1"
+    [ -x "$tree/bin/python" ] \
+        && "$tree/bin/python" -c 'import pip, temporalio, traceback' >/dev/null 2>&1
+}
+
+refresh_python_dependencies_from_donor() {
+    local expected="$1" donor="$2"
+    local target="$REPO_DIR/agents/venv"
+    local fresh="$REPO_DIR/agents/.venv-cloudbench-refresh.$$"
+    local backup="$REPO_DIR/agents/.venv-cloudbench-unhealthy.$$"
+    local attempt
+    echo "[cloudbench] refreshing unreadable Python venv from the immutable donor"
+    for attempt in 1 2 3; do
+        rm -rf "$fresh"
+        if [ -e "$backup" ]; then
+            if [ -e "$target" ] || ! mv "$backup" "$target"; then
+                echo "[cloudbench] FATAL: could not restore cached Python venv backup" >&2
+                return 1
+            fi
+        fi
+        mkdir -p "$fresh"
+        if ! rsync -a --delete "$donor/" "$fresh/"; then
+            rm -rf "$fresh"
+            sleep "$attempt"
+            continue
+        fi
+        if [ -e "$target" ] && ! mv "$target" "$backup"; then
+            rm -rf "$fresh"
+            sleep "$attempt"
+            continue
+        fi
+        if ! mv "$fresh" "$target"; then
+            if [ -e "$backup" ] && ! mv "$backup" "$target"; then
+                echo "[cloudbench] FATAL: could not restore cached Python venv backup" >&2
+                return 1
+            fi
+            sleep "$attempt"
+            continue
+        fi
+        if relocate_venv "$donor" "$target" && python_venv_healthy "$target"; then
+            rm -rf "$backup"
+            printf '%s\n' "$expected" > "$target/.cloudbench-deps-fingerprint"
+            return 0
+        fi
+        rm -rf "$target"
+        if [ -e "$backup" ] && ! mv "$backup" "$target"; then
+            echo "[cloudbench] FATAL: could not restore cached Python venv backup" >&2
+            return 1
+        fi
+        sleep "$attempt"
+    done
+    rm -rf "$fresh"
+    if [ -e "$backup" ] && [ ! -e "$target" ]; then
+        mv "$backup" "$target" || true
+    fi
+    echo "[cloudbench] FATAL: cached Python venv is unreadable and donor refresh failed" >&2
+    return 1
+}
+
+rebuild_node_dependencies() {
+    local expected="$1" marker="$REPO_DIR/node_modules/.cloudbench-deps-fingerprint"
+    echo "[cloudbench] rebuilding JavaScript dependencies from checked-out manifests"
+    # Never let an interrupted install retain a marker that claims the tree is
+    # current. npm install matches Dockerfile.cloudbench-warm's root-workspace
+    # build, and Prisma generation is repeated explicitly for the backend.
+    rm -f "$marker"
+    (
+        cd "$REPO_DIR"
+        npm install --no-audit --no-fund
+        cd back-end
+        npx prisma generate
+    )
+    printf '%s\n' "$expected" > "$marker"
+}
+
+rebuild_python_dependencies() {
+    local expected="$1"
+    local target="$REPO_DIR/agents/venv"
+    local fresh="$REPO_DIR/agents/.venv-cloudbench-new.$$"
+    local backup="$REPO_DIR/agents/.venv-cloudbench-old.$$"
+    echo "[cloudbench] rebuilding Python dependencies from checked-out requirements"
+    rm -rf "$fresh" "$backup"
+    if ! python3 -m venv "$fresh" \
+        || ! "$fresh/bin/pip" install --upgrade pip \
+        || ! (cd "$REPO_DIR" && "$fresh/bin/pip" install -r agents/requirements.txt); then
+        rm -rf "$fresh"
+        return 1
+    fi
+    [ ! -e "$target" ] || mv "$target" "$backup"
+    if ! mv "$fresh" "$target"; then
+        [ ! -e "$backup" ] || mv "$backup" "$target"
+        rm -rf "$fresh"
+        return 1
+    fi
+    # venv launchers embed their creation prefix. Relocate only after the
+    # same-filesystem rename; if relocation fails, atomically restore the prior
+    # known tree and leave its old fingerprint untouched.
+    if ! relocate_venv "$fresh" "$target"; then
+        rm -rf "$target"
+        [ ! -e "$backup" ] || mv "$backup" "$target"
+        return 1
+    fi
+    rm -rf "$backup"
+    printf '%s\n' "$expected" > "$target/.cloudbench-deps-fingerprint"
+}
+
 repo_node="$(cloudbench_node_dependency_fingerprint "$REPO_DIR")"
 node_marker="$REPO_DIR/node_modules/.cloudbench-deps-fingerprint"
 installed_node=""
@@ -89,33 +175,47 @@ installed_node=""
 if [ "$installed_node" != "$repo_node" ]; then
     donor_node="$(cloudbench_node_dependency_fingerprint "$DEPS_DIR")"
     if [ "$donor_node" != "$repo_node" ]; then
-        echo "[cloudbench] FATAL: warm image/volume JavaScript dependencies do not match the checked-out ref" >&2
-        echo "[cloudbench]        rebuild the image or refresh the warm volume before running benchmarks" >&2
-        exit 1
-    fi
-    sync_tree "JavaScript" "$DEPS_DIR/node_modules" "$REPO_DIR/node_modules" "$repo_node"
-    if [ "$SYNC_TREE_REFRESHED" = "1" ]; then
-        printf '%s\n' "$repo_node" > "$node_marker"
+        if [ "$REBUILD_DEPS" = "1" ]; then
+            rebuild_node_dependencies "$repo_node"
+        else
+            echo "[cloudbench] FATAL: warm image/volume JavaScript dependencies do not match the checked-out ref" >&2
+            echo "[cloudbench]        rebuild the image or refresh the warm volume before running benchmarks" >&2
+            exit 1
+        fi
+    else
+        sync_tree "JavaScript" "$DEPS_DIR/node_modules" "$REPO_DIR/node_modules" "$repo_node"
+        if [ "$SYNC_TREE_REFRESHED" = "1" ]; then
+            printf '%s\n' "$repo_node" > "$node_marker"
+        fi
     fi
 fi
 
-PYTHON_MANIFESTS=(agents/requirements.txt)
-repo_python="$(fingerprint "$REPO_DIR" "${PYTHON_MANIFESTS[@]}")"
+repo_python="$(cloudbench_manifest_fingerprint "$REPO_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")"
 python_marker="$REPO_DIR/agents/venv/.cloudbench-deps-fingerprint"
 installed_python=""
 [ -f "$python_marker" ] && installed_python="$(cat "$python_marker" 2>/dev/null || true)"
 if [ "$installed_python" != "$repo_python" ]; then
-    donor_python="$(fingerprint "$DEPS_DIR" "${PYTHON_MANIFESTS[@]}")"
+    donor_python="$(cloudbench_manifest_fingerprint "$DEPS_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")"
     if [ "$donor_python" != "$repo_python" ]; then
-        echo "[cloudbench] FATAL: warm image/volume Python dependencies do not match the checked-out ref" >&2
-        echo "[cloudbench]        rebuild the image or refresh the warm volume before running benchmarks" >&2
-        exit 1
+        if [ "$REBUILD_DEPS" = "1" ]; then
+            rebuild_python_dependencies "$repo_python"
+        else
+            echo "[cloudbench] FATAL: warm image/volume Python dependencies do not match the checked-out ref" >&2
+            echo "[cloudbench]        rebuild the image or refresh the warm volume before running benchmarks" >&2
+            exit 1
+        fi
+    else
+        sync_tree "Python" "$DEPS_DIR/agents/venv" "$REPO_DIR/agents/venv" "$repo_python"
+        if [ "$SYNC_TREE_REFRESHED" = "1" ]; then
+            relocate_venv "$DEPS_DIR/agents/venv" "$REPO_DIR/agents/venv"
+            printf '%s\n' "$repo_python" > "$python_marker"
+        fi
     fi
-    sync_tree "Python" "$DEPS_DIR/agents/venv" "$REPO_DIR/agents/venv" "$repo_python"
-    if [ "$SYNC_TREE_REFRESHED" = "1" ]; then
-        relocate_venv "$DEPS_DIR/agents/venv" "$REPO_DIR/agents/venv"
-        printf '%s\n' "$repo_python" > "$python_marker"
-    fi
+fi
+if [ "$installed_python" = "$repo_python" ] \
+    && ! python_venv_healthy "$REPO_DIR/agents/venv"; then
+    refresh_python_dependencies_from_donor \
+        "$repo_python" "$DEPS_DIR/agents/venv"
 fi
 
 # npm workspaces hoist runtime packages to the root. These marker directories

@@ -4,9 +4,9 @@
  *
  * Domain surface:
  *   POST /api/imessage/queue     — queue an iMessage for sending (auth: API key or JWT)
- *   GET  /api/imessage/queue/pop — claim next pending iMessage (auth: JWT)
+ *   GET  /api/imessage/queue/pop — claim next pending iMessage (auth: JWT or scoped internal relay)
  *   GET  /api/imessage/queue/:id/status — read durable send state (auth: API key or JWT)
- *   POST /api/imessage/queue/:id/result — acknowledge send or release for retry (auth: JWT)
+ *   POST /api/imessage/queue/:id/result — acknowledge send or release for retry (auth: JWT or scoped internal relay)
  *
  * Invariants covered:
  *   - auth boundary: unauthenticated requests return 401 for every endpoint
@@ -52,6 +52,8 @@ import {
   setup,
   testBridgeHeartbeatMakesExactBackendReady,
   testDeliveryResultThirdFailureIsTerminal,
+  testInternalBenchmarkRelayRoundTrip,
+  testPopInternalKeyRequiresRelayScope,
   testQueueDatabaseDefaultDoesNotExpire,
   testQueuedEntryPersistsUntilMacReturns,
   testQueueReceiptIncludesRelayStatusAtEnqueue,
@@ -582,6 +584,10 @@ async function runAll() {
     { name: 'POST /queue -- invalid token -> 401', fn: testQueue_invalidToken },
     { name: 'GET /queue/pop -- no auth -> 401', fn: testPop_noAuth },
     { name: 'GET /queue/pop -- invalid token -> 401', fn: testPop_invalidToken },
+    {
+      name: 'GET /queue/pop -- internal key without relay scope -> 403',
+      fn: testPopInternalKeyRequiresRelayScope,
+    },
     { name: 'POST /queue/:id/result -- no auth -> 401', fn: testDeliveryResult_noAuth },
     { name: 'GET /queue/:id/status -- no auth -> 401', fn: testDeliveryStatus_noAuth },
     { name: 'GET /bridge/status -- no auth -> 401', fn: testBridgeStatus_noAuth },
@@ -609,6 +615,10 @@ async function runAll() {
 
   // Drain any messages created by happy path tests before RAW tests
   const drainTests = [
+    {
+      name: 'internal benchmark relay -- scoped claim and acknowledgement',
+      fn: testInternalBenchmarkRelayRoundTrip,
+    },
     // read-after-write (queue then pop, must be sequential)
     { name: 'read-after-write -- queue then pop', fn: testReadAfterWrite_queueThenPop },
     { name: 'atomicity -- no duplicate pop', fn: testAtomicity_noDuplicate },

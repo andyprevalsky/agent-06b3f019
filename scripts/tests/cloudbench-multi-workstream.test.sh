@@ -59,9 +59,27 @@ SANDBOX="$TMP_ROOT/repo"
 mkdir -p "$SANDBOX"
 cp -R "$ROOT_DIR/scripts" "$SANDBOX/scripts"
 cp -R "$ROOT_DIR/agents/benchmarks/fleet_startup_phase.py" "$SANDBOX/scripts/" 2>/dev/null || true
+# Keep the synthetic worktrees dependency-fingerprintable. Pool compatibility is
+# now a fail-closed production contract, so an intentionally minimal fake repo
+# still needs real (minimal) manifests rather than relying on an absent proof.
+mkdir -p "$SANDBOX/back-end" "$SANDBOX/front-end" "$SANDBOX/agents/benchmarks"
+cp "$ROOT_DIR/agents/benchmarks/hub_upload.py" "$SANDBOX/agents/benchmarks/hub_upload.py"
+printf '{}\n' > "$SANDBOX/package.json"
+printf '{}\n' > "$SANDBOX/back-end/package.json"
+printf '{}\n' > "$SANDBOX/front-end/package.json"
+printf '{}\n' > "$SANDBOX/back-end/package-lock.json"
+: > "$SANDBOX/agents/requirements.txt"
 git -C "$SANDBOX" init -q
 git -C "$SANDBOX" -c user.email=test@test -c user.name=test add -A
 git -C "$SANDBOX" -c user.email=test@test -c user.name=test commit -qm "snapshot" >/dev/null
+# The fake provider exposes snap_0001 as the warm snapshot. Tie the manifest
+# proof to that exact ID, mirroring --refresh-deps without a live donor image.
+(
+    source "$SANDBOX/scripts/lib/cloudbench-env.sh"
+    node_fp="$(cloudbench_node_dependency_fingerprint "$SANDBOX")"
+    py_fp="$(cloudbench_manifest_fingerprint "$SANDBOX" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}")"
+    printf '%s %s 0 snap_0001\n' "$node_fp" "$py_fp" > "$SANDBOX/.git/cloudbench-warm-deps.fp"
+)
 WS_A="$TMP_ROOT/ws-a"
 WS_B="$TMP_ROOT/ws-b"
 git -C "$SANDBOX" worktree add -q -b ws-a "$WS_A" >/dev/null
@@ -119,6 +137,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -191,7 +210,7 @@ def rb_export(rb_text, key):
 
 def run_fake_driver(mdir):
     """Emulate the on-box driver contract: barrier-ready → wait for the fleet's
-    ssh release-touch → write report-card.json/run.json → DONE marker. The PASS
+    data-plane release POST → write report-card.json/run.json → DONE marker. The PASS
     therefore requires the real controller loop to complete every leg."""
     rb_text = open(os.path.join(mdir, "tmp", "rb.sh")).read()
     token = rb_export(rb_text, "CLOUDBENCH_RUN_TOKEN")
@@ -229,25 +248,33 @@ def run_fake_driver(mdir):
             "duration_seconds": 1.0, "cost_cents": 0,
             "world_model_mode": "real", "code_ref": ref,
         }
+        card = {
+            "run_id": "fake", "elapsed_s": 1.0, "world_model_mode": "real",
+            "cost": {"agents_llm_usd": 0, "wmh_grounding_usd": 0,
+                     "infra_usd": 0, "total_usd": 0},
+            "metadata": {"tokens_in": 0, "tokens_out": 0},
+            "per_task": [{"name": bench, "status": "passed",
+                          "duration_s": 1.0, "cost_usd": 0,
+                          "tokens_in": 0, "tokens_out": 0,
+                          "world_model_mode": "real", "agent_url": None}],
+        }
+        run = {
+            "summary": {"total": 1, "passed": 1, "failed": 0, "skipped": 0,
+                        "pass_rate": 1.0, "total_duration_seconds": 1.0,
+                        "total_cost_cents": 0},
+            "tasks": [task],
+            "code_ref": ref,
+        }
         with open(os.path.join(context, "report-card.json"), "w") as fh:
-            json.dump({
-                "run_id": "fake", "elapsed_s": 1.0, "world_model_mode": "real",
-                "cost": {"agents_llm_usd": 0, "wmh_grounding_usd": 0,
-                         "infra_usd": 0, "total_usd": 0},
-                "metadata": {"tokens_in": 0, "tokens_out": 0},
-                "per_task": [{"name": bench, "status": "passed",
-                              "duration_s": 1.0, "cost_usd": 0,
-                              "tokens_in": 0, "tokens_out": 0,
-                              "world_model_mode": "real", "agent_url": None}],
-            }, fh)
+            json.dump(card, fh)
         with open(os.path.join(context, "run.json"), "w") as fh:
-            json.dump({
-                "summary": {"total": 1, "passed": 1, "failed": 0, "skipped": 0,
-                            "pass_rate": 1.0, "total_duration_seconds": 1.0,
-                            "total_cost_cents": 0},
-                "tasks": [task],
-                "code_ref": ref,
-            }, fh)
+            json.dump(run, fh)
+        log(f"::CLOUDBENCH-REPORT-CARD-BEGIN:: token={token}")
+        log(json.dumps(card, separators=(",", ":")))
+        log(f"::CLOUDBENCH-REPORT-CARD-END:: token={token}")
+        log(f"::CLOUDBENCH-RESULT-BEGIN:: token={token}")
+        log(json.dumps(run, separators=(",", ":")))
+        log(f"::CLOUDBENCH-RESULT-END:: token={token}")
         log("benchmark complete")
     log(f"::CLOUDBENCH-DONE:: token={token} exit={exit_code}")
 
@@ -304,12 +331,19 @@ elif args[:3] == ["volume", "snapshots", "list"]:
 elif args[:2] == ["machine", "clone"]:
     name = flag_value("--name")
     machine_id = uuid.uuid4().hex[:14]
+    vm_size = flag_value("--vm-size") or "shared-cpu-4x"
+    vm_memory = int(flag_value("--vm-memory") or "8192")
+    cpu_match = re.search(r"(\d+)x$", vm_size)
+    vm_cpus = int(cpu_match.group(1)) if cpu_match else 1
+    cpu_kind = "performance" if vm_size.startswith("performance-") else "shared"
     with locked_state() as state:
         volume_id = "vol_" + uuid.uuid4().hex[:8]
         state["machines"].append({
             "id": machine_id, "name": name, "state": "stopped",
             "region": flag_value("--region") or "iad", "private_ip": "",
-            "config": {"mounts": [{"volume": volume_id}]},
+            "config": {"mounts": [{"volume": volume_id}],
+                       "guest": {"cpu_kind": cpu_kind, "cpus": vm_cpus,
+                                 "memory_mb": vm_memory}},
         })
         state["volumes"].append(
             {"id": volume_id, "name": "cloudbench_data_fork", "state": "created"})
@@ -343,11 +377,55 @@ elif args[:2] == ["machine", "status"]:
     if found is None:
         sys.exit(1)
     print(f"  State: {found['state']}")
-elif args[:2] == ["machine", "start"]:
+elif args[:2] == ["machine", "update"]:
+    machine_id = args[2]
+    boot_env = {}
+    for index, value in enumerate(args):
+        if value == "--env" and index + 1 < len(args) and "=" in args[index + 1]:
+            key, env_value = args[index + 1].split("=", 1)
+            boot_env[key] = env_value
     with locked_state() as state:
-        found = find_machine(state, args[2])
+        found = find_machine(state, machine_id)
+        if found is None:
+            sys.exit(1)
+        found["boot_env"] = boot_env
+        found["state"] = "stopped"
+        if flag_value("--vm-size"):
+            vm_size = flag_value("--vm-size")
+            cpu_match = re.search(r"(\d+)x$", vm_size)
+            found.setdefault("config", {}).setdefault("guest", {})["cpus"] = (
+                int(cpu_match.group(1)) if cpu_match else 1
+            )
+            found["config"]["guest"]["cpu_kind"] = (
+                "performance" if vm_size.startswith("performance-") else "shared"
+            )
+        if flag_value("--vm-memory"):
+            found.setdefault("config", {}).setdefault("guest", {})["memory_mb"] = int(
+                flag_value("--vm-memory")
+            )
+    mdir = machine_dir(machine_id)
+    rb_path = os.path.join(mdir, "tmp", "rb.sh")
+    os.makedirs(os.path.dirname(rb_path), exist_ok=True)
+    with open(rb_path, "w") as fh:
+        for key, value in boot_env.items():
+            fh.write(f"export {key}={shlex.quote(value)}\n")
+elif args[:2] == ["machine", "start"]:
+    machine_id = args[2]
+    with locked_state() as state:
+        found = find_machine(state, machine_id)
         if found:
             found["state"] = "started"
+            boot_env = found.get("boot_env") or {}
+        else:
+            boot_env = {}
+    mdir = machine_dir(machine_id)
+    if boot_env and not os.path.exists(os.path.join(mdir, "driver.started")):
+        subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__), "__fake_driver__", mdir],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        open(os.path.join(mdir, "driver.started"), "w").close()
 elif args[:2] == ["machine", "stop"]:
     with locked_state() as state:
         found = find_machine(state, args[2])
@@ -420,7 +498,47 @@ elif args[:2] == ["ssh", "console"]:
 elif args[:2] == ["tokens", "create"]:
     print(json.dumps({"token": "fake-deploy-token"}))
 elif args[:1] == ["proxy"]:
-    time.sleep(3600)
+    import http.server
+    local_port = int(args[1].split(":", 1)[0])
+    remote_host = args[2]
+    machine_id = remote_host.split(".vm.", 1)[0]
+    mdir = machine_dir(machine_id)
+
+    class ProxyHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/driver-health":
+                code = 204 if os.path.exists(os.path.join(mdir, "driver.started")) else 410
+                self.send_response(code)
+                self.end_headers()
+                return
+            if self.path != "/bench.log":
+                self.send_error(404)
+                return
+            path = os.path.join(mdir, "data", "bench.log")
+            try:
+                body = open(path, "rb").read()
+            except OSError:
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            if self.path != "/release":
+                self.send_error(404)
+                return
+            rb_path = os.path.join(mdir, "tmp", "rb.sh")
+            barrier = rb_export(open(rb_path).read(), "CLOUDBENCH_START_BARRIER")
+            open(os.path.join(mdir, "data", f"cloudbench-start-{barrier}.release"), "w").close()
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, *unused):
+            pass
+
+    http.server.ThreadingHTTPServer(("127.0.0.1", local_port), ProxyHandler).serve_forever()
 else:
     print(f"FATAL: fake flyctl has no handler for: {' '.join(args)}", file=sys.stderr)
     sys.exit(1)
@@ -449,12 +567,16 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
     env PATH="$FAKE_BIN:$PATH" \
         FLY_BENCH_API_TOKEN="fake-token" \
         CONDUCTOR_PORT="$port" \
+        BENCHMARK_HUB_UPLOAD_URL="http://127.0.0.1:$((port + 5764))" \
+        BENCHMARK_HUB_API_KEY="test-key" \
         CI=1 \
         CLOUDBENCH_FAKE_DIR="$FAKE_DIR" \
         CLOUDBENCH_FAKE_BREAK_REGISTRY_ROOT="${CLOUDBENCH_FAKE_BREAK_REGISTRY_ROOT:-}" \
         CLOUDBENCH_FAKE_BREAK_POOL_LEDGER="${CLOUDBENCH_FAKE_BREAK_POOL_LEDGER:-}" \
         CLOUDBENCH_CLONE_LOOKUP_SECONDS="${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-20}" \
         CLOUDBENCH_POOL_STOP_ATTEMPTS="${CLOUDBENCH_POOL_STOP_ATTEMPTS:-3}" \
+        CLOUDBENCH_POOL_STOP_REQUEST_TIMEOUT="${CLOUDBENCH_POOL_STOP_REQUEST_TIMEOUT:-3}" \
+        CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0.1 \
         CLOUDBENCH_POLL_INTERVAL=2 \
         CLOUDBENCH_LAUNCH_SETTLE_SECONDS=1 \
         bash "$ws/scripts/run-bench-fleet" "$@" > "$log" 2>&1
@@ -573,16 +695,57 @@ rm -f "$POOL_A" "$POOL_B"
 # Pre-serve each workspace's central hub on its DERIVED port (CONDUCTOR_PORT +
 # 5764) so the fleet adopts it — and so the test proves two workspaces get
 # NON-COLLIDING hub ports.
-hub_stub() {  # hub_stub <port>
-    python3 - "$1" <<'PY' &
-import http.server, sys
+hub_stub() {  # hub_stub <port> <runs-root>
+    python3 - "$1" "$2" <<'PY' &
+import http.server, json, pathlib, sys
+from urllib.parse import urlparse
+
+runs_root = pathlib.Path(sys.argv[2])
+registered = {}
+
 class Hub(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
-        body = b"Benchmark runs (test hub stub)"
+        path = urlparse(self.path).path
+        if path.startswith("/api/benchmarks/runs/"):
+            run_id = path.rsplit("/", 1)[-1]
+            if run_id not in registered:
+                self.send_error(404)
+                return
+            body = json.dumps({"run": registered[run_id]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        run_ids = " ".join(
+            path.name for path in runs_root.iterdir()
+            if path.is_dir() and not path.name.startswith("_")
+        ) if runs_root.is_dir() else ""
+        body = f"Benchmark runs (test hub stub) {run_ids}".encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def do_POST(self):
+        if urlparse(self.path).path != "/api/benchmarks/runs":
+            self.send_error(404)
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(length) or b"{}")
+        run_id = payload.get("run_id")
+        if not run_id:
+            self.send_error(400)
+            return
+        registered[run_id] = payload
+        body = json.dumps({"run": payload}).encode()
+        self.send_response(201)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def log_message(self, *a):
         pass
 http.server.ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), Hub).serve_forever()
@@ -590,8 +753,8 @@ PY
     PIDS+=("$!")
     HUB_PIDS+=("$!")
 }
-hub_stub "$HUB_PORT_A"
-hub_stub "$HUB_PORT_B"
+hub_stub "$HUB_PORT_A" "$WS_A/.context/fleet/runs"
+hub_stub "$HUB_PORT_B" "$WS_B/.context/fleet/runs"
 for port in "$HUB_PORT_A" "$HUB_PORT_B"; do
     for _ in $(seq 1 50); do
         curl -fsS "http://127.0.0.1:$port/" 2>/dev/null | grep -q "Benchmark runs" && break
@@ -716,6 +879,20 @@ CLOUDBENCH_TEST_BARRIER_MIN=1 \
     fail "stopped inventory must not block a seven-benchmark active fleet (exit=$capacity_status)"
 grep -qF "7/7 passed" "$TMP_ROOT/controller-capacity.log" ||
     fail "capacity replay fleet summary must report 7/7 passed"
+JOURNAL="$FAKE_DIR/journal.log" python3 - <<'PY' ||
+import os
+
+calls = open(os.environ["JOURNAL"]).read().splitlines()
+updates = [index for index, call in enumerate(calls) if call.startswith("machine update ")]
+starts = [index for index, call in enumerate(calls) if call.startswith("machine start ")]
+if len(updates) < 7 or len(starts) < 7:
+    raise SystemExit(f"expected seven update/start calls, got updates={len(updates)} starts={len(starts)}")
+if max(updates[:7]) >= min(starts[:7]):
+    raise SystemExit("a fleet machine started before every boot config update completed")
+if any("--skip-start" not in calls[index] for index in updates[:7]):
+    raise SystemExit("boot config updates must explicitly keep every machine stopped")
+PY
+    fail "capacity replay must configure the entire stopped fleet before any machine starts"
 
 capacity_counts="$(FAKE_STATE="$FAKE_DIR/state.json" python3 - <<'PY'
 import json
@@ -1100,6 +1277,7 @@ echo "PASS: scenario 8 — pool handoff and deleted-workspace claim recover dura
 # Make WS_B own the existing stopped pool, then force Fly's cleanup stop to be a
 # no-op. The controller may fail, but it must leave an auditable claim behind.
 cp "$POOL_A" "$POOL_B"
+cp "$POOL_A.deps" "$POOL_B.deps"
 FAKE_STATE="$FAKE_DIR/state.json" POOL_ID="$pool_id" python3 - <<'PY'
 import json
 import os
@@ -1281,5 +1459,39 @@ then
     fail "repeat provisioning left a ledger ID absent or non-stopped"
 fi
 echo "PASS: scenario 13 — repeat provisioning preserves every prior pool owner record"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Scenario 14 — the shared-warm-box RUN footgun is closed
+#
+# A bare `run-bench-cloud <task>` (no --machine) would execute on the ONE shared
+# warm box — NOT parallel-safe: two worktrees collide on the same machine and
+# whichever stops it clobbers the other's in-flight run (a real cross-workspace
+# incident: the 683e47df clobber). The guard must REJECT that run (and the
+# `run-bench --single-box` dispatcher alias) at arg-parse time, BEFORE any Fly
+# call. The fleet path (--machine) and the maintainer env escape hatch
+# (CLOUDBENCH_ALLOW_SHARED_WARM_RUN=1) are exempt by the same guard condition —
+# and the fleet path's full end-to-end success is already proven by scenario 2.
+# Only the fast, Fly-free rejection paths are exercised here (a pass-through run
+# would proceed into real machine provisioning).
+# ═══════════════════════════════════════════════════════════════════════════
+: > "$FAKE_DIR/journal.log"
+guard_cloud="$TMP_ROOT/guard-cloud.log"
+if env PATH="$FAKE_BIN:$PATH" CLOUDBENCH_FAKE_DIR="$FAKE_DIR" \
+    bash "$WS_A/scripts/run-bench-cloud" some-bench > "$guard_cloud" 2>&1; then
+    fail "scenario 14: run-bench-cloud <task> on the shared warm box must be rejected"
+fi
+grep -qiF "parallel-safe" "$guard_cloud" ||
+    fail "scenario 14: rejection must explain the shared-warm-box parallel-safety hazard"
+if grep -qE '^machine (clone|start|update|stop)' "$FAKE_DIR/journal.log"; then
+    fail "scenario 14: the guard must reject BEFORE any Fly machine operation"
+fi
+
+guard_single="$TMP_ROOT/guard-single-box.log"
+if env PATH="$FAKE_BIN:$PATH" bash "$WS_A/scripts/run-bench" --single-box some-bench > "$guard_single" 2>&1; then
+    fail "scenario 14: run-bench --single-box must be rejected"
+fi
+grep -qiF "parallel-safe" "$guard_single" ||
+    fail "scenario 14: --single-box rejection must explain the parallel-safety hazard"
+echo "PASS: scenario 14 — the shared-warm-box run footgun is closed (fleet + escape-hatch exempt by guard condition)"
 
 echo "PASS: two workstreams ran cloud benchmarks concurrently, isolated end to end"

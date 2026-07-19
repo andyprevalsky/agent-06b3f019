@@ -1,14 +1,93 @@
 """Blackbox tests for benchmark helpers."""
 
+import asyncio
 import json
 import importlib.util
 import os
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 
 from _test_utils import BlackboxResult
+
+
+def test_every_benchmark_run_registers_in_app_hub_before_execution():
+    """The Mac-app Hub is a fail-closed launch invariant, not best-effort save telemetry."""
+    from benchmarks.hub_upload import HubVisibilityError, require_run_visible
+
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            requests.append(("POST", self.path, body))
+            payload = json.dumps({"run": {"run_id": body["run_id"]}}).encode()
+            self.send_response(201)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            requests.append(("GET", self.path, None))
+            run_id = self.path.rsplit("/", 1)[-1]
+            payload = json.dumps({"run": {"run_id": run_id, "live": True}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    prior = {name: os.environ.get(name) for name in ("BENCHMARK_HUB_UPLOAD_URL", "BENCHMARK_HUB_API_KEY")}
+    try:
+        os.environ["BENCHMARK_HUB_UPLOAD_URL"] = f"http://127.0.0.1:{server.server_address[1]}"
+        os.environ["BENCHMARK_HUB_API_KEY"] = "blackbox-key"
+        bundle = {
+            "run_id": "blackbox-visible-run",
+            "suite": "blackbox",
+            "tasks": [{"name": "task-a", "status": "starting"}],
+        }
+        require_run_visible(bundle, timeout=1)
+        assert requests[0][0:2] == ("POST", "/api/benchmarks/runs?live=1")
+        assert requests[1][0:2] == (
+            "GET",
+            "/api/benchmarks/runs/blackbox-visible-run",
+        )
+
+        os.environ["BENCHMARK_HUB_UPLOAD_URL"] = "http://127.0.0.1:1"
+        try:
+            require_run_visible(bundle, timeout=0.1)
+            raise AssertionError("an invisible run was allowed to execute")
+        except HubVisibilityError:
+            pass
+    finally:
+        server.shutdown()
+        server.server_close()
+        for name, value in prior.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+    repo_root = Path(__file__).resolve().parents[3]
+    runner = (repo_root / "agents/benchmarks/run_benchmark.py").read_text()
+    fleet = (repo_root / "scripts/run-bench-fleet").read_text()
+    poller = (repo_root / "scripts/run-bench-hub-poller").read_text()
+    assert "require_run_visible" in runner
+    assert "BENCHMARK_HUB_PARENT_RUN_ID" in runner
+    assert "--require-visible" in fleet
+    assert "BENCHMARK_HUB_PARENT_RUN_ID" in fleet
+    assert 'BENCHMARK_HUB_PARENT_RUN_ID="$hub_run_id"' in poller
 
 
 def _load_cloudbench_result_module():
@@ -101,9 +180,10 @@ def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success()
     assert 'bash "$SYNC_PRISMA_SCRIPT" "$REPO_DIR" "$APP_USER"' in driver
     assert "NEEDS_IMESSAGE_RELAY" in controller
     assert "cloudbench-imessage-relay.ts" in controller
+    assert 'BENCHMARK_IMESSAGE_API_KEY="$CLOUDBENCH_API_KEY"' in controller
     assert "bridge heartbeat established" in controller
     assert "IMESSAGE_RELAY_OK" in controller
-    assert '.vm.${APP}.internal' in controller
+    assert ".vm.${APP}.internal" in controller
     assert "cat '$REMOTE_REPO/.context/cloudbench/run.json'" in controller
     assert "BENCH_EXIT:-1" in controller
     assert 'RUN_PASS_OK" = "1' in controller
@@ -130,6 +210,30 @@ def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "2 passed" in result.stdout
+
+
+def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
+    repo_root = Path(__file__).resolve().parents[3]
+    behavioral_suite = repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            str(behavioral_suite),
+            "-k",
+            "central_refresh_ or refresh_deps_ or warm_deps_preflight or isolated_backend or local_predeploy_skips_wmh",
+        ],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "12 passed" in result.stdout
 
 
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
@@ -333,6 +437,49 @@ def test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail():
     assert get_smoke_cap("parallel-tool-calls") == 600
 
 
+async def test_parallel_benchmark_scheduler_serializes_browser_profile_writers():
+    """Two browser benchmarks must never write the same persistent profile concurrently."""
+    from benchmarks.run_benchmark import _parallel_task_runners
+
+    class Task:
+        def __init__(self, name: str, requires_browser_agent: bool):
+            self.name = name
+            self.requires_browser_agent = requires_browser_agent
+
+    active_browser_tasks = 0
+    max_active_browser_tasks = 0
+    two_browser_tasks_running = asyncio.Event()
+
+    async def runner(task):
+        nonlocal active_browser_tasks, max_active_browser_tasks
+        if task.requires_browser_agent:
+            active_browser_tasks += 1
+            max_active_browser_tasks = max(max_active_browser_tasks, active_browser_tasks)
+            if active_browser_tasks == 2:
+                two_browser_tasks_running.set()
+            try:
+                await asyncio.wait_for(two_browser_tasks_running.wait(), timeout=0.05)
+            except TimeoutError:
+                pass
+            finally:
+                active_browser_tasks -= 1
+        else:
+            await asyncio.sleep(0)
+        return task.name
+
+    tasks = [
+        Task("browser-smoke", True),
+        Task("browser-biometrics-webdecoy", True),
+        Task("chat-mode", False),
+    ]
+    await asyncio.gather(*_parallel_task_runners(tasks, 2, runner))
+
+    assert max_active_browser_tasks == 1, (
+        "browser-backed tasks overlapped as persistent profile writers; "
+        f"observed concurrency={max_active_browser_tasks}"
+    )
+
+
 def test_response_schema_feedback_benchmark_declares_real_mid_run_message():
     """The regression benchmark must inject non-goal feedback into a live agent run."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -513,9 +660,7 @@ async def test_edge_warmup_requires_explicit_research_port():
 
 def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     """The deploy lifecycle helper must provision its declared sandbox float gate."""
-    helper = (
-        Path(__file__).resolve().parents[3] / "scripts" / "run-agentcard-lifecycle-task.sh"
-    ).read_text()
+    helper = (Path(__file__).resolve().parents[3] / "scripts" / "run-agentcard-lifecycle-task.sh").read_text()
 
     assert 'if [ "$BOOTSTRAP_FLAG" = "--bootstrap" ]' in helper
     assert "scripts/setup-benchmark-payment.ts" in helper
@@ -626,13 +771,7 @@ def test_payment_receipt_tax_rate_qualifier_preserves_exact_amount():
         start_phase="execute",
         expected_payment_receipt={"fees": [{"label": "Tax", "amountCents": 297}]},
     )
-    request = {
-        "metadata": {
-            "requestPaymentCard": {
-                "fees": [{"label": "Tax (8.25%)", "amountCents": 297}]
-            }
-        }
-    }
+    request = {"metadata": {"requestPaymentCard": {"fees": [{"label": "Tax (8.25%)", "amountCents": 297}]}}}
 
     assert _validate_payment_receipt(task, request) is None
     request["metadata"]["requestPaymentCard"]["fees"][0]["amountCents"] = 298
@@ -672,13 +811,12 @@ def test_payment_lifecycle_validation_cross_checks_nested_provider_state():
         "attention": {"openKinds": [], "resolvedKinds": []},
     }
 
-    assert _validate_payment_lifecycle(
-        task, {"_benchmark": {"payment_lifecycle": lifecycle}}
-    ) is None
+    assert _validate_payment_lifecycle(task, {"_benchmark": {"payment_lifecycle": lifecycle}}) is None
     lifecycle["orgTransfer"]["releasedCents"] = 4396
-    assert _validate_payment_lifecycle(
-        task, {"_benchmark": {"payment_lifecycle": lifecycle}}
-    ) == "payment_lifecycle.orgTransfer.releasedCents mismatch: expected 0, got 4396"
+    assert (
+        _validate_payment_lifecycle(task, {"_benchmark": {"payment_lifecycle": lifecycle}})
+        == "payment_lifecycle.orgTransfer.releasedCents mismatch: expected 0, got 4396"
+    )
 
 
 async def test_abandonment_waits_for_cron_reconciliation():
@@ -747,6 +885,63 @@ async def test_abandonment_retries_a_pending_company_release():
     assert recoveries == 1
 
 
+async def test_abandonment_tolerates_one_transient_lifecycle_read_failure():
+    """One provider timeout cannot erase an already-started durable compensation."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    task = get_task_by_name("agent-payment-abandonment")
+    reads = 0
+
+    async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError('500 {"error":"Failed to read test payment lifecycle"}')
+        return task.expected_payment_lifecycle
+
+    result = await _wait_for_expected_payment_lifecycle(
+        "http://localhost:55120",
+        "agent-123",
+        task,
+        {
+            "purchase": {"status": "FUNDING_RECLAIM_FAILED"},
+            "walletFunding": {"status": "RECLAIM_FAILED"},
+        },
+        timeout_seconds=1,
+        poll_interval_seconds=0,
+        fetch_lifecycle=fetch_lifecycle,
+    )
+
+    assert result["purchase"]["status"] == "VOIDED"
+    assert reads == 2
+
+
+async def test_abandonment_surfaces_three_consecutive_lifecycle_read_failures():
+    """The transient guard stays bounded and reports a persistent provider outage."""
+    import pytest
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        raise RuntimeError("upstream unavailable")
+
+    with pytest.raises(RuntimeError, match="unavailable after 3 consecutive reads"):
+        await _wait_for_expected_payment_lifecycle(
+            "http://localhost:55120",
+            "agent-123",
+            get_task_by_name("agent-payment-abandonment"),
+            {
+                "purchase": {"status": "FUNDING_RECLAIM_FAILED"},
+                "walletFunding": {"status": "RECLAIM_FAILED"},
+            },
+            timeout_seconds=1,
+            poll_interval_seconds=0,
+            fetch_lifecycle=fetch_lifecycle,
+        )
+
+
 def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     """Checkout text alone cannot pass the AgentCard lifecycle benchmark."""
     from benchmarks.benchmark_tasks import get_task_by_name, get_tasks_by_tag, suite_tasks
@@ -760,9 +955,7 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     assert task.expected_payment_lifecycle["purchase"]["status"] == "CLEARED"
     assert task.expected_payment_lifecycle["walletFunding"]["status"] == "CONSUMED"
     assert task.expected_payment_lifecycle["orgTransfer"]["livemode"] is False
-    assert _validate_payment_lifecycle(task, {"_benchmark": {}}) == (
-        "missing payment lifecycle snapshot"
-    )
+    assert _validate_payment_lifecycle(task, {"_benchmark": {}}) == ("missing payment lifecycle snapshot")
 
     idempotency = get_task_by_name("agent-payment-idempotent-abandonment")
     assert idempotency.expected_tools == ["spawn_browser_agent"]
@@ -787,15 +980,15 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     production = get_task_by_name("agent-payment-production-abandonment")
     assert production.production_only is True
     assert production.payment_card_request_action == "abandon"
-    assert production.expected_payment_receipt["totalCents"] == 50
+    assert "exactly $1.00" in production.prompt
+    assert production.expected_payment_receipt["totalCents"] == 100
     assert production.expected_payment_lifecycle["purchase"]["status"] == "VOIDED"
-    assert production.expected_payment_lifecycle["stripeRefund"]["amountCents"] == 50
+    assert production.expected_payment_lifecycle["stripeRefund"]["amountCents"] == 100
+    assert production.expected_payment_lifecycle["orgTransfer"]["amountCents"] == 100
     assert production.expected_payment_lifecycle["orgTransfer"]["livemode"] is True
     assert production.name not in {task.name for task in suite_tasks()}
 
-    assert [
-        task.name for task in get_tasks_by_tag("agentcard-lifecycle-sandbox")
-    ] == [
+    assert [task.name for task in get_tasks_by_tag("agentcard-lifecycle-sandbox")] == [
         "agent-payment-test-shop",
         "agent-payment-setup-resume",
         "agent-payment-idempotent-abandonment",
@@ -814,6 +1007,41 @@ def test_production_payment_lifecycle_refuses_sandbox_target():
     with pytest.raises(RuntimeError, match="production-only"):
         _validate_task_target(task, "http://localhost:55120")
     _validate_task_target(task, "https://api.roselabs.ai")
+
+
+def test_production_frontend_url_ignores_stale_local_services_manifest():
+    """A stopped local stack must not redirect production browser agents to its tunnel."""
+    from benchmarks.run_benchmark import _frontend_url_for_benchmark
+
+    environment_names = (
+        "BENCHMARK_CONTEXT_DIR",
+        "BENCHMARK_FRONTEND_URL",
+        "PUBLIC_BASE_URL",
+        "CONDUCTOR_PORT",
+    )
+    prior = {name: os.environ.get(name) for name in environment_names}
+    try:
+        with tempfile.TemporaryDirectory() as context_dir:
+            Path(context_dir, "services.json").write_text(
+                json.dumps(
+                    {
+                        "status": "stopped",
+                        "urls": {"public": "https://stale-workspace.ngrok.app"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            for name in ("BENCHMARK_FRONTEND_URL", "PUBLIC_BASE_URL", "CONDUCTOR_PORT"):
+                os.environ.pop(name, None)
+
+            assert _frontend_url_for_benchmark("https://navi-j9a9.onrender.com") == "https://roselabs.ai"
+    finally:
+        for name, value in prior.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def test_agentcard_setup_fixture_is_seeded_only_for_local_non_setup_tasks():
@@ -858,11 +1086,7 @@ def test_agentcard_setup_attention_is_not_auto_approved():
     )
     assert not _should_auto_approve_attention(
         task,
-        {
-            "metadata": {
-                "attentionKind": "agentcard_user_cardholder_onboarding_required"
-            }
-        },
+        {"metadata": {"attentionKind": "agentcard_user_cardholder_onboarding_required"}},
     )
 
 
@@ -903,9 +1127,7 @@ def test_ecommerce_attention_kind_rejects_auth_blocker():
 
     task = _required_ecommerce_judge_task()
     auth_request = {"metadata": {"attentionKind": "auth_assistance"}}
-    write_lock_request = {
-        "metadata": {"requestUserApproval": {"writePermission": True}}
-    }
+    write_lock_request = {"metadata": {"requestUserApproval": {"writePermission": True}}}
 
     assert _attention_request_matches_task(task, auth_request) is False
     assert _attention_request_matches_task(task, write_lock_request) is True
@@ -1222,7 +1444,7 @@ def test_doordash_catalog_requires_single_clean_completed_browser_run():
 
 
 def test_uber_catalog_is_normal_single_browser_task_not_stateful_minted_flow():
-    """Uber uses base live auth and the same one-agent runtime contract as other commerce tasks."""
+    """Uber uses live auth and the same one-agent runtime contract as other commerce tasks."""
     import benchmarks.run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
 
@@ -1238,7 +1460,7 @@ def test_uber_catalog_is_normal_single_browser_task_not_stateful_minted_flow():
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
     assert task.bench == "rose-bench"
-    assert task.environment["live_fixtures"] == ["base"]
+    assert task.environment["live_fixtures"] == ["live"]
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
         "single_turn_llm_judge",
@@ -1268,20 +1490,10 @@ def test_approval_request_details_can_require_item_name_and_amount():
             }
         ]
     }
-    good = {
-        "_benchmark": {
-            "attention_requests_seen": [
-                {"question": "Buy the Black Knit Beanie for $19.99?"}
-            ]
-        }
-    }
+    good = {"_benchmark": {"attention_requests_seen": [{"question": "Buy the Black Knit Beanie for $19.99?"}]}}
     assert _run_declared_static_check(evaluator, good)[0] is True
 
-    missing_amount = {
-        "_benchmark": {
-            "attention_requests_seen": [{"question": "Buy the Black Knit Beanie?"}]
-        }
-    }
+    missing_amount = {"_benchmark": {"attention_requests_seen": [{"question": "Buy the Black Knit Beanie?"}]}}
     passed, reason = _run_declared_static_check(evaluator, missing_amount)
     assert passed is False
     assert "amount" in reason.lower()
@@ -1291,15 +1503,34 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
     """Amazon uses the standard completed-commerce runtime and preserves cart-path semantics."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
+    approved_prompt = (
+        "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. "
+        "Avoid using the Buy Now button as the purchase path, but make sure purchase is completed."
+    )
     task = get_task_by_name("browser-agent-amazon-cookie-payment")
     assert task.description.endswith("complete the purchase.")
+    assert task.prompt == approved_prompt
+    assert get_task_by_name("browser-agent").prompt == approved_prompt
     assert task.approval_handling == "auto_approve"
     assert task.expected_attention_kind == "write_lock"
     assert task.expected_approval_count == 1
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.min_steps == {"browser": 5}
     assert task.tool_count_scope == "root"
     assert task.bench == "rose-bench"
-    assert task.environment["live_fixtures"] == ["base", "amazon_auth"]
+    assert task.environment["live_fixtures"] == ["live"]
+    response_fields = {field["name"]: field for field in task.response_schema["fields"]}
+    assert set(response_fields) == {
+        "selected_beanie_title",
+        "selected_beanie_url",
+        "selected_beanie_price_usd",
+        "quality_evidence",
+        "order_confirmation_id",
+        "purchase_completed",
+        "cart_checkout_used",
+        "buy_now_used",
+    }
+    assert all(field["required"] is True for field in response_fields.values())
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
         "single_turn_llm_judge",
@@ -1313,9 +1544,7 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
         "approval_request_details",
     }
     approval_check = next(
-        check
-        for check in task.evaluators[0]["checks"]
-        if check["type"] == "approval_request_details"
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
     )
     assert approval_check["required_strings"] == ["beanie"]
     assert approval_check["require_amount"] is True
@@ -1353,11 +1582,7 @@ def test_alchemy_sauna_catalog_requires_single_clean_completed_booking():
         "approval_request_count",
         "approval_request_details",
     }
-    approval_check = next(
-        check
-        for check in static_evaluator["checks"]
-        if check["type"] == "approval_request_details"
-    )
+    approval_check = next(check for check in static_evaluator["checks"] if check["type"] == "approval_request_details")
     assert approval_check["required_strings"] == ["Alchemy Springs", "Sauna Garden"]
     assert approval_check["require_date"] is True
     assert approval_check["require_time"] is True
@@ -1431,11 +1656,7 @@ def test_approval_request_details_support_multiple_dates_and_seat():
     assert _run_declared_static_check(stay_evaluator, complete_stay)[0] is True
 
     incomplete_stay = {
-        "_benchmark": {
-            "attention_requests_seen": [
-                {"question": "Book Hotel Kabuki?", "checkIn": "2026-07-18"}
-            ]
-        }
+        "_benchmark": {"attention_requests_seen": [{"question": "Book Hotel Kabuki?", "checkIn": "2026-07-18"}]}
     }
     passed, reason = _run_declared_static_check(stay_evaluator, incomplete_stay)
     assert passed is False
@@ -1451,21 +1672,11 @@ def test_approval_request_details_support_multiple_dates_and_seat():
         ]
     }
     assigned_seat = {
-        "_benchmark": {
-            "attention_requests_seen": [
-                {"question": "Buy one AMC Metreon 16 ticket in seat H10?"}
-            ]
-        }
+        "_benchmark": {"attention_requests_seen": [{"question": "Buy one AMC Metreon 16 ticket in seat H10?"}]}
     }
     assert _run_declared_static_check(seat_evaluator, assigned_seat)[0] is True
 
-    missing_seat = {
-        "_benchmark": {
-            "attention_requests_seen": [
-                {"question": "Buy one AMC Metreon 16 ticket?"}
-            ]
-        }
-    }
+    missing_seat = {"_benchmark": {"attention_requests_seen": [{"question": "Buy one AMC Metreon 16 ticket?"}]}}
     passed, reason = _run_declared_static_check(seat_evaluator, missing_seat)
     assert passed is False
     assert "seat" in reason.lower()
@@ -1496,9 +1707,7 @@ def test_hotel_catalog_requires_single_clean_completed_reservation():
         "approval_request_details",
     }
     approval_check = next(
-        check
-        for check in task.evaluators[0]["checks"]
-        if check["type"] == "approval_request_details"
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
     )
     assert approval_check["required_strings"] == ["Hotel Kabuki", "free cancellation"]
     assert approval_check["minimum_date_count"] == 2
@@ -1525,9 +1734,7 @@ def test_event_ticket_catalog_requires_single_clean_completed_purchase():
         "single_turn_llm_judge",
     ]
     approval_check = next(
-        check
-        for check in task.evaluators[0]["checks"]
-        if check["type"] == "approval_request_details"
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
     )
     assert approval_check["required_strings"] == ["AMC Metreon 16"]
     assert approval_check["require_date"] is True
@@ -1556,9 +1763,7 @@ def test_amazon_return_catalog_requires_single_clean_completed_return():
         "single_turn_llm_judge",
     ]
     approval_check = next(
-        check
-        for check in task.evaluators[0]["checks"]
-        if check["type"] == "approval_request_details"
+        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
     )
     assert approval_check["required_strings"] == [
         "return",
@@ -1571,7 +1776,7 @@ def test_amazon_return_catalog_requires_single_clean_completed_return():
         assert requirement in semantic_criteria
 
 
-def test_base_live_fixture_fails_when_live_auth_refresh_fails():
+def test_live_fixture_fails_when_live_auth_refresh_fails():
     """A live benchmark never starts with missing/stale browser auth."""
     import os
 
@@ -1585,7 +1790,7 @@ def test_base_live_fixture_fails_when_live_auth_refresh_fails():
         os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
         bench._sync_compute_tokens = lambda: True
         bench._sync_browser_credentials = lambda: False
-        bench._apply_base_live_fixture(
+        bench._apply_live_fixture(
             bench.LiveFixtureContext(
                 base_url="http://localhost:54121",
                 user_id="user-123",
@@ -1593,7 +1798,7 @@ def test_base_live_fixture_fails_when_live_auth_refresh_fails():
             )
         )
     except RuntimeError as exc:
-        raised = "browser credential" in str(exc).lower()
+        raised = "browser auth" in str(exc).lower()
     finally:
         bench._sync_compute_tokens = original_compute
         bench._sync_browser_credentials = original_browser
@@ -1602,7 +1807,7 @@ def test_base_live_fixture_fails_when_live_auth_refresh_fails():
         else:
             os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
 
-    assert raised, "base live fixture must fail closed when credential refresh fails"
+    assert raised, "live fixture must fail closed when credential refresh fails"
 
 
 def test_expected_passkey_credential_ref_is_required_even_when_approval_is_terminal():
@@ -2190,10 +2395,10 @@ def test_agent_sms_benchmark_prepares_phone_only_agentphone_sender():
         bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "ready"
         assert bench._prepare_local_agent_sms_sender("user-123") == "rose@example.test"
         assert len(queries) == 2
-        assert 'phone = \'+19123613984\'' in queries[0]
+        assert "phone = '+19123613984'" in queries[0]
         assert '"phoneProviderAgentId" = NULL' in queries[0]
         assert '"phoneProviderNumberId" = NULL' in queries[0]
-        assert '"userId" = \'user-123\'' in queries[0]
+        assert "\"userId\" = 'user-123'" in queries[0]
 
         responses = iter(["1", "invalid"])
         bench._run_local_victoria_sql = lambda sql: next(responses)
@@ -2236,56 +2441,8 @@ def test_minted_x_signup_evidence_rejects_terminal_phone_blocker():
     assert bench._x_signup_has_account_creation_evidence(success) is True
 
 
-def test_browser_agent_cookie_bundle_bootstrap_upserts_active_bundle_from_cookies():
-    """Amazon auth-assistance bench activates CookieBundle rows from existing local cookies."""
-    import benchmarks.run_benchmark as bench
-
-    queries = []
-    original_run_sql = bench._run_local_victoria_sql
-
-    try:
-        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "1"
-
-        assert bench._ensure_local_cookie_bundle_for_realm("user-123", "amazon.com") == 1
-    finally:
-        bench._run_local_victoria_sql = original_run_sql
-
-    assert len(queries) == 1
-    assert 'FROM "Cookie"' in queries[0]
-    assert 'INSERT INTO "CookieBundle"' in queries[0]
-    assert 'ON CONFLICT ("userId", "authRealm", "browserSource", "browserProfile") DO UPDATE' in queries[0]
-    assert '"disabledAt" = NULL' in queries[0]
-    assert '"disabledReason" = NULL' in queries[0]
-    assert "amazon.com" in queries[0]
-
-
-def test_browser_agent_cookie_bundle_bootstrap_can_be_skipped_with_env():
-    """Local auth-assistance reruns can intentionally exercise password auth without cookies."""
-    import os
-
-    import benchmarks.run_benchmark as bench
-
-    queries = []
-    original_run_sql = bench._run_local_victoria_sql
-    original_env = os.environ.get("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP")
-
-    try:
-        bench._run_local_victoria_sql = lambda sql: queries.append(sql) or "1"
-        os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] = "true"
-
-        assert bench._ensure_local_cookie_bundle_for_realm("user-123", "amazon.com") == 0
-    finally:
-        bench._run_local_victoria_sql = original_run_sql
-        if original_env is None:
-            os.environ.pop("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP", None)
-        else:
-            os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] = original_env
-
-    assert queries == []
-
-
-def test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile():
-    """The passkey fixture syncs through its boundary and snapshots destructive state."""
+def test_amazon_passkey_scenario_isolates_passkey_and_fresh_kernel_profile():
+    """Passkey scenario setup syncs its key and snapshots destructive state."""
     import benchmarks.run_benchmark as bench
 
     queries = []
@@ -2306,7 +2463,7 @@ def test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile():
             AssertionError("fixture bypassed _sync_passkeys")
         )
         bench._run_local_victoria_sql = lambda sql: queries.append(sql) or next(sql_results)
-        manifest = bench._apply_amazon_passkey(
+        manifest = bench._apply_amazon_passkey_scenario(
             bench.LiveFixtureContext(
                 base_url="http://localhost:54121",
                 user_id="user-123",
@@ -2319,7 +2476,7 @@ def test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile():
         bench.subprocess.run = original_subprocess_run
 
     assert manifest == {
-        "fixture": "amazon_passkey",
+        "scenario": "amazon_passkey",
         "passkey_count": 1,
         "cleared": 10,
         "user_id": "user-123",
@@ -2357,7 +2514,7 @@ def test_amazon_passkey_catalog_requires_live_passkey_kernel_evidence():
 
     task = get_task_by_name("browser-agent-amazon-passkey")
 
-    assert task.environment["live_fixtures"] == ["compute_tokens", "amazon_passkey"]
+    assert task.environment["live_fixtures"] == ["live"]
     assert task.expected_browser_provider == "kernel"
     assert task.expected_credential_ref_kind == "passkey"
     assert task.expected_browser_session_metadata_values == {
@@ -2382,6 +2539,76 @@ def test_amazon_passkey_catalog_requires_live_passkey_kernel_evidence():
     assert task.approval_handling is None
     assert "password" in task.prompt.lower()
     assert "otp" in task.prompt.lower()
+
+
+def test_webdecoy_biometrics_uses_fresh_isolated_browser_state():
+    """Public biometrics probes must not inherit the user's saved browser identity."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks import run_benchmark as bench
+
+    task = get_task_by_name("browser-biometrics-webdecoy")
+    assert getattr(task, "browser_profile_mode", None) == "fresh"
+    assert getattr(task, "browser_auth_realm", None) == "webdecoy.com"
+    assert task.name in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
+    assert task.expected_browser_session_metadata_values == {
+        "profile_source": "new_user_persistent",
+        "auth_source": "none",
+        "cookies_injected": False,
+        "cookies_count": 0,
+        "local_storage_origin_count": 0,
+        "indexed_db_origin_count": 0,
+        "permission_grant_count": 0,
+        "cache_storage_origin_count": 0,
+    }
+
+    snapshot = {
+        "steel_ids": ["steel-webdecoy"],
+        "bundle_ids": ["bundle-webdecoy"],
+        "password_ids": [],
+        "profiles": [
+            {
+                "id": "profile-row",
+                "contextId": "context-row",
+                "provider": "kernel",
+                "profileId": "persisted-kernel-profile",
+            }
+        ],
+    }
+    sql_calls = []
+    responses = iter([json.dumps(snapshot), "7"])
+    original_sql = bench._run_local_victoria_sql
+    try:
+        bench._run_local_victoria_sql = lambda sql: (sql_calls.append(sql), next(responses))[1]
+        manifest = bench._apply_fresh_browser_state_scenario(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:3001",
+                user_id=bench.USER_ID,
+                auth_realm="webdecoy.com",
+            )
+        )
+    finally:
+        bench._run_local_victoria_sql = original_sql
+
+    assert manifest["scenario"] == "fresh_browser_state"
+    assert manifest["auth_realm"] == "webdecoy.com"
+    assert manifest["cleared"] == 7
+    cleanup_sql = sql_calls[1]
+    assert 'UPDATE "CookieBundle"' in cleanup_sql
+    assert 'UPDATE "SteelSessionAuth"' in cleanup_sql
+    assert 'DELETE FROM "Cookie"' in cleanup_sql
+    assert 'DELETE FROM "LocalStorageOrigin"' in cleanup_sql
+    assert 'DELETE FROM "IndexedDBOrigin"' in cleanup_sql
+    assert 'DELETE FROM "CacheStorageOrigin"' in cleanup_sql
+    assert 'DELETE FROM "BrowserProviderProfile"' in cleanup_sql
+
+    restored = []
+    original_restore = bench._restore_isolated_browser_state_scenario
+    try:
+        bench._restore_isolated_browser_state_scenario = lambda saved, *, label: restored.append((saved, label))
+        bench._restore_live_fixture_scenarios([{"fixture": "live"}, manifest])
+    finally:
+        bench._restore_isolated_browser_state_scenario = original_restore
+    assert restored == [(manifest, "fresh browser state")]
 
 
 def test_benchmark_agent_source_override_validates_known_sources():
@@ -2471,27 +2698,20 @@ def test_anon_benchmark_mode_disables_saved_auth_material():
 
     import benchmarks.run_benchmark as bench
 
-    previous_skip = os.environ.get("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP")
     previous_clear = os.environ.get("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH")
     previous_steel_profile = os.environ.get("BENCHMARK_ANON_STEEL_PROFILE")
     previous_disable_saved_auth = os.environ.get("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH")
     try:
-        os.environ.pop("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP", None)
         os.environ.pop("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH", None)
         os.environ.pop("BENCHMARK_ANON_STEEL_PROFILE", None)
         os.environ.pop("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", None)
 
         bench._apply_anon_benchmark_mode()
 
-        assert os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] == "true"
         assert os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] == "true"
         assert os.environ["BENCHMARK_ANON_STEEL_PROFILE"] == "true"
         assert os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] == "true"
     finally:
-        if previous_skip is None:
-            os.environ.pop("BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP", None)
-        else:
-            os.environ["BENCHMARK_SKIP_COOKIE_BUNDLE_BOOTSTRAP"] = previous_skip
         if previous_clear is None:
             os.environ.pop("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH", None)
         else:
@@ -3736,6 +3956,7 @@ async def test_create_agent_sends_task_response_schema():
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
     try:
+
         async def fake_headers():
             return {"X-API-Key": "test-key"}
 
@@ -4126,8 +4347,7 @@ def test_local_manifest_uses_isolated_system_database_identity():
     }
 
     assert manifest_database_url(manifest) == (
-        "postgresql://postgres:postgres@localhost:5432/"
-        "victoria_bench_1783809252_85375_82461"
+        "postgresql://postgres:postgres@localhost:5432/victoria_bench_1783809252_85375_82461"
     )
 
 
@@ -4759,7 +4979,7 @@ def test_message_person_agent_sms_benchmark_requires_immediate_provider_receipt(
     from benchmarks.run_benchmark import _validate_message_person_agent_sms_send
 
     task = get_task_by_name("message-person-agent-sms")
-    assert task.group == "Daily"
+    assert task.group == "daily"
     assert task.expected_tool_counts == {"message_person": 1}
     assert task.tool_count_scope == "root"
 
@@ -5176,6 +5396,258 @@ def test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap():
     assert _CALLEE_ASSISTANT_BASE["maxDurationSeconds"] == 150
 
 
+def test_phone_callee_session_number_names_follow_provider_contract():
+    """Transient number names remain unique within Vapi's documented API limit."""
+    from benchmarks.phone_callee import PhoneCalleeSession, VAPI_PHONE_NUMBER_NAME_MAX_LENGTH
+
+    first = PhoneCalleeSession("phone-a", {"system_prompt": "persona a"}, api_key="test")
+    second = PhoneCalleeSession("phone-b", {"system_prompt": "persona b"}, api_key="test")
+
+    assert VAPI_PHONE_NUMBER_NAME_MAX_LENGTH == 40
+    assert first.phone_number_name != second.phone_number_name
+    assert len(first.phone_number_name) <= 40
+    assert len(second.phone_number_name) <= 40
+
+
+async def test_phone_callee_waits_for_new_number_activation():
+    """Fresh Vapi numbers wait out the provider's documented activation window."""
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import AsyncMock, patch
+
+    from benchmarks.phone_callee import CALLEE_SESSION_NUMBER_ACTIVATION_DELAY, PhoneCalleeSession
+
+    session = PhoneCalleeSession("phone-a", {"system_prompt": "persona"}, api_key="test")
+    fresh = {"createdAt": datetime.now(timezone.utc).isoformat()}
+    active = {
+        "createdAt": (
+            datetime.now(timezone.utc) - CALLEE_SESSION_NUMBER_ACTIVATION_DELAY - timedelta(seconds=1)
+        ).isoformat()
+    }
+
+    sleep = AsyncMock()
+    with patch("benchmarks.phone_callee.asyncio.sleep", sleep):
+        await session._wait_for_number_activation(fresh)
+        await session._wait_for_number_activation(active)
+
+    sleep.assert_awaited_once()
+    assert CALLEE_SESSION_NUMBER_ACTIVATION_DELAY.total_seconds() - 1 <= sleep.await_args.args[0]
+    assert sleep.await_args.args[0] <= CALLEE_SESSION_NUMBER_ACTIVATION_DELAY.total_seconds()
+
+
+async def test_phone_callee_activation_cancellation_deletes_owned_number():
+    """Cancellation during activation cannot orphan a quota-limited Vapi number."""
+    import asyncio
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, patch
+
+    from benchmarks.phone_callee import PhoneCalleeSession
+
+    class Response:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise AssertionError(f"unexpected response status {self.status_code}")
+
+    class Client:
+        def __init__(self):
+            self.deleted = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, path):
+            assert path == "/phone-number"
+            return Response(200, [])
+
+        async def post(self, path, json):
+            assert path == "/phone-number"
+            return Response(
+                201,
+                {
+                    "id": "fresh-owned-number",
+                    "name": json["name"],
+                    "number": "+16195550109",
+                    "createdAt": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+
+        async def delete(self, path):
+            self.deleted.append(path)
+            return Response(200, {})
+
+    client = Client()
+    session = PhoneCalleeSession("phone-a", {"system_prompt": "persona"}, api_key="test")
+    with (
+        patch("benchmarks.phone_callee._configured_number_id_for_task", return_value=""),
+        patch("benchmarks.phone_callee.httpx.AsyncClient", return_value=client),
+        patch("benchmarks.phone_callee.asyncio.sleep", AsyncMock(side_effect=asyncio.CancelledError)),
+    ):
+        try:
+            await session.setup()
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("activation cancellation must propagate")
+
+    assert client.deleted == ["/phone-number/fresh-owned-number"]
+
+
+async def test_phone_callee_sessions_isolate_distributed_phone_number_resources():
+    """Independent benchmark processes must not attach personas to one shared number."""
+    import asyncio
+    from unittest.mock import patch
+
+    from benchmarks.phone_callee import CALLEE_NUMBER_NAME, PhoneCalleeSession
+
+    class Response:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+            self.text = json.dumps(payload)
+
+        def json(self):
+            return self._payload
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise AssertionError(f"unexpected response status {self.status_code}")
+
+    class Client:
+        def __init__(self, suffix):
+            self.suffix = suffix
+            self.created = []
+
+        async def get(self, path):
+            assert path == "/phone-number"
+            return Response(
+                200,
+                [
+                    {
+                        "id": "shared-number",
+                        "name": CALLEE_NUMBER_NAME,
+                        "number": "+16195550100",
+                    }
+                ],
+            )
+
+        async def post(self, path, json):
+            assert path == "/phone-number"
+            self.created.append(json)
+            return Response(
+                201,
+                {
+                    "id": f"isolated-{self.suffix}",
+                    "name": json["name"],
+                    "number": f"+1619555010{self.suffix}",
+                    "createdAt": "2020-01-01T00:00:00Z",
+                },
+            )
+
+    first = PhoneCalleeSession("phone-a", {"system_prompt": "persona a"}, api_key="test")
+    second = PhoneCalleeSession("phone-b", {"system_prompt": "persona b"}, api_key="test")
+    first_client = Client("1")
+    second_client = Client("2")
+    with patch("benchmarks.phone_callee._configured_number_id_for_task", return_value=""):
+        await asyncio.gather(
+            first._ensure_phone_number(first_client),
+            second._ensure_phone_number(second_client),
+        )
+
+    assert first.phone_number_id != second.phone_number_id, (
+        f"distributed sessions shared phone number {first.phone_number_id}"
+    )
+    assert len(first_client.created) == 1
+    assert len(second_client.created) == 1
+
+
+async def test_phone_callee_reclaims_only_stale_session_owned_numbers():
+    """Orphan reclamation cannot delete persistent or currently live callee numbers."""
+    from datetime import datetime, timedelta, timezone
+
+    from benchmarks.phone_callee import CALLEE_NUMBER_NAME, CALLEE_SESSION_NUMBER_PREFIX, PhoneCalleeSession
+
+    class Response:
+        status_code = 200
+        text = "ok"
+
+    class Client:
+        def __init__(self):
+            self.deleted = []
+
+        async def delete(self, path):
+            self.deleted.append(path)
+            return Response()
+
+    now = datetime.now(timezone.utc)
+    client = Client()
+    session = PhoneCalleeSession("phone-a", {"system_prompt": "persona"}, api_key="test")
+    await session._reclaim_stale_session_numbers(
+        client,
+        [
+            {
+                "id": "persistent",
+                "name": CALLEE_NUMBER_NAME,
+                "createdAt": (now - timedelta(days=1)).isoformat(),
+            },
+            {
+                "id": "fresh-session",
+                "name": f"{CALLEE_SESSION_NUMBER_PREFIX}fresh",
+                "createdAt": now.isoformat(),
+            },
+            {
+                "id": "stale-session",
+                "name": f"{CALLEE_SESSION_NUMBER_PREFIX}stale",
+                "createdAt": (now - timedelta(days=1)).isoformat(),
+            },
+        ],
+    )
+
+    assert client.deleted == ["/phone-number/stale-session"]
+
+
+async def test_phone_callee_cleanup_deletes_only_explicitly_owned_number():
+    """Cleanup deletes transient session numbers without touching configured overrides."""
+    from benchmarks.phone_callee import PhoneCalleeSession
+
+    class Response:
+        status_code = 200
+        text = "ok"
+
+    class Client:
+        def __init__(self):
+            self.deleted = []
+
+        async def delete(self, path):
+            self.deleted.append(path)
+            return Response()
+
+    client = Client()
+    owned = PhoneCalleeSession("phone-a", {"system_prompt": "persona"}, api_key="test")
+    owned.phone_number_id = "owned-number"
+    owned.phone_number = "+16195550101"
+    owned._owns_phone_number = True
+    await owned._delete_owned_phone_number(client)
+
+    configured = PhoneCalleeSession("phone-b", {"system_prompt": "persona"}, api_key="test")
+    configured.phone_number_id = "configured-number"
+    configured.phone_number = "+16195550102"
+    await configured._delete_owned_phone_number(client)
+
+    assert client.deleted == ["/phone-number/owned-number"]
+    assert owned.phone_number_id == ""
+    assert configured.phone_number_id == "configured-number"
+
+
 def test_missing_call_findings_tolerates_spacing_and_punctuation():
     """Finding matcher survives transcript formatting like '48 21' or 'rose 4471'."""
     from benchmarks.phone_callee import missing_call_findings
@@ -5348,6 +5820,37 @@ def test_benchmark_public_base_url_uses_env_override():
             os.environ["BENCHMARK_PHONE_TOOL_BASE_URL"] = previous
 
 
+def test_benchmark_public_base_url_uses_isolated_context_manifest_not_dashboard_url():
+    """Vapi callbacks use the isolated stack's public origin, never controller-local UI metadata."""
+    import os
+    import tempfile
+    from pathlib import Path
+
+    from benchmarks.phone_callee import benchmark_public_base_url
+
+    keys = (
+        "BENCHMARK_PHONE_TOOL_BASE_URL",
+        "PUBLIC_BASE_URL",
+        "BENCHMARK_FRONTEND_URL",
+        "BENCHMARK_CONTEXT_DIR",
+    )
+    previous = {key: os.environ.get(key) for key in keys}
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, "services.json").write_text('{"urls":{"public":"https://isolated-phone.ngrok.app"}}\n')
+        os.environ.pop("BENCHMARK_PHONE_TOOL_BASE_URL", None)
+        os.environ.pop("PUBLIC_BASE_URL", None)
+        os.environ["BENCHMARK_FRONTEND_URL"] = "http://localhost:8805"
+        os.environ["BENCHMARK_CONTEXT_DIR"] = tmp
+        try:
+            assert benchmark_public_base_url() == "https://isolated-phone.ngrok.app"
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+
+
 def test_phone_auto_approval_requires_active_callee_number():
     """Phone tasks auto-approve only approval requests for the controlled callee number."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -5494,7 +5997,7 @@ def test_daily_ecommerce_v1_catalog_has_ten_distinct_transaction_flows():
     for name in expected_names:
         loaded = get_task_by_name(name)
         assert DEFAULT_BASE_IMAGE in loaded.environment["base_images"]
-        assert loaded.environment["live_fixtures"][0] == "base"
+        assert loaded.environment["live_fixtures"] == ["live"]
 
 
 def test_browser_search_single_result_tasks_use_browser_only():
@@ -5581,6 +6084,360 @@ def test_unified_catalog_supports_multiple_evaluators_per_eval():
     )
 
 
+def test_agent_class_min_steps_contract_is_validated_and_defaulted():
+    """Browser benchmarks default to five steps while explicit task contracts remain authoritative."""
+    from benchmarks.benchmark_tasks import all_tasks, get_task_by_name
+    from benchmarks.long_horizon import validate_task_contract
+
+    browser_tasks = [task for task in all_tasks() if task.requires_browser_agent]
+    assert browser_tasks
+    assert all(task.min_steps.get("browser", 0) >= 1 for task in browser_tasks)
+    assert get_task_by_name("browser-agent-amazon-cookie-payment").min_steps == {"browser": 5}
+    assert get_task_by_name("browser-smoke").min_steps == {"browser": 1}
+    assert get_task_by_name("chat-mode").min_steps == {}
+
+    base = {"name": "min-steps-contract", "bench": "rose-bench"}
+    validate_task_contract({**base, "min_steps": {"browser": 5, "explore": 3}})
+    for invalid in ({}, {"browser": 0}, {"browser": True}, {"": 5}):
+        try:
+            validate_task_contract({**base, "min_steps": invalid})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid min_steps contract was accepted: {invalid}")
+    validate_task_contract({**base, "requires_browser_agent": True, "min_steps": {"browser": 1}})
+
+
+def test_browser_smoke_accepts_captured_single_step_trajectory():
+    """The page-read smoke's declared one-step contract accepts its captured runtime shape."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    task = get_task_by_name("browser-smoke")
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "type": "browser",
+                        "tool_call_id": "browser-root",
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "browser-root",
+                "task_id": "browser-task",
+                "subAgentId": "browser-task",
+                "action_type": "goto",
+                "steps_taken": 0,
+                "toolStatus": "FINISHED",
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "browser-root",
+                "task_id": "browser-task",
+                "toolStatus": "FINISHED",
+                "structured_response": {"main_heading_text": "Example Domain"},
+            },
+        },
+    ]
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {"browser": {"browser-task": 1}}
+    assert task.min_steps == {"browser": 1}
+    assert _validate_agent_class_min_steps(task.min_steps, counts) is None
+
+
+def test_payment_abandonment_accepts_captured_two_step_trajectory():
+    """The checkout-ready card-mint-and-abandon flow ends after its second browser action."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    task = get_task_by_name("agent-payment-abandonment")
+    root_call_id = "call_SV1B22HCOvtaIBDUgTfC8C1H"
+    browser_task_id = "eb49400c-eaa0-40b2-ab7e-c25eaab9e5cc"
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "type": "browser",
+                        "tool_call_id": root_call_id,
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": root_call_id,
+                "task_id": browser_task_id,
+                "toolStatus": "IN_PROGRESS",
+            },
+        },
+    ]
+    captured_actions = (
+        (0, "goto", "call_SV1B22HCOvtaIBDUgTfC8C1H"),
+        (1, "request_payment_card", "call_504TlJ4rwJ8nmWMct75JUYJg"),
+    )
+    for step_number, action_type, action_call_id in captured_actions:
+        messages.append(
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolCallId": action_call_id,
+                    "task_id": browser_task_id,
+                    "subAgentId": browser_task_id,
+                    "action_type": action_type,
+                    "steps_taken": step_number,
+                    "toolStatus": "FINISHED",
+                },
+            }
+        )
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {"browser": {browser_task_id: 2}}
+    assert task.min_steps == {"browser": 2}
+    assert _validate_agent_class_min_steps(task.min_steps, counts) is None
+
+
+def test_production_payment_abandonment_accepts_checkout_ready_two_step_trajectory():
+    """The preselected production fixture only requires navigation and card minting."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    task = get_task_by_name("agent-payment-production-abandonment")
+    root_call_id = "production-browser-root"
+    browser_task_id = "production-browser-task"
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "type": "browser",
+                        "tool_call_id": root_call_id,
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": root_call_id,
+                "task_id": browser_task_id,
+                "toolStatus": "IN_PROGRESS",
+            },
+        },
+    ]
+    for step_number, action_type in enumerate(("goto", "request_payment_card")):
+        messages.append(
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolCallId": f"production-action-{step_number}",
+                    "task_id": browser_task_id,
+                    "subAgentId": browser_task_id,
+                    "action_type": action_type,
+                    "steps_taken": step_number,
+                    "toolStatus": "FINISHED",
+                },
+            }
+        )
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {"browser": {browser_task_id: 2}}
+    assert task.min_steps == {"browser": 2}
+    assert _validate_agent_class_min_steps(task.min_steps, counts) is None
+
+
+def test_browser_min_steps_rejects_terminal_claim_without_trajectory():
+    """A synthetic terminal response and lifecycle messages prove zero browser work."""
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "type": "browser",
+                        "tool_call_id": "browser-root",
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "browser-root",
+                "toolStatus": "IN_PROGRESS",
+                "title": "Starting up a browser",
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": '{"status":"completed","purchase_completed":true}',
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "browser-root",
+                "toolStatus": "FINISHED",
+                "structured_response": {"purchase_completed": True},
+            },
+        },
+    ]
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {"browser": {"browser-root": 0}}
+    reason = _validate_agent_class_min_steps({"browser": 5}, counts)
+    assert reason is not None
+    assert "recorded 0 trajectory step(s)" in reason
+
+
+def test_browser_min_steps_is_per_instance_not_aggregate():
+    """Five steps on one browser cannot cover a second under-worked browser."""
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    messages = []
+    for instance_number, step_count in ((1, 5), (2, 4)):
+        root_id = f"browser-root-{instance_number}"
+        task_id = f"browser-task-{instance_number}"
+        messages.extend(
+            [
+                {
+                    "role": "ASSISTANT",
+                    "metadata": {
+                        "tool_calls": [
+                            {
+                                "tool": "spawn_agent",
+                                "type": "browser",
+                                "tool_call_id": root_id,
+                            }
+                        ]
+                    },
+                },
+                {
+                    "role": "TOOL",
+                    "metadata": {
+                        "toolName": "spawn_browser_agent",
+                        "toolCallId": root_id,
+                        "task_id": task_id,
+                        "action_type": "browser",
+                    },
+                },
+            ]
+        )
+        for step in range(step_count):
+            messages.append(
+                {
+                    "role": "TOOL",
+                    "metadata": {
+                        "toolName": "spawn_browser_agent",
+                        "toolCallId": f"action-{instance_number}-{step}",
+                        "task_id": task_id,
+                        "subAgentId": task_id,
+                        "action_type": "click",
+                        "steps_taken": step,
+                    },
+                }
+            )
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {
+        "browser": {
+            "browser-task-1": 5,
+            "browser-task-2": 4,
+        }
+    }
+    reason = _validate_agent_class_min_steps({"browser": 5}, counts)
+    assert reason is not None
+    assert "browser-task-2 recorded 4" in reason
+
+
+def test_min_steps_supports_non_browser_agent_classes():
+    """The same contract counts distinct leaf tool steps for explore agents."""
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "type": "explore",
+                        "tool_call_id": "explore-root",
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_agent",
+                "toolCallId": "explore-root",
+                "taskId": "explore-task",
+                "agentType": "explore",
+            },
+        },
+    ]
+    for step in range(5):
+        messages.append(
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "web_search",
+                    "toolCallId": f"search-{step}",
+                    "taskId": "explore-task",
+                    "subAgentId": "explore-task",
+                    "agentType": "explore",
+                    "toolStatus": "FINISHED",
+                },
+            }
+        )
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {"explore": {"explore-task": 5}}
+    assert _validate_agent_class_min_steps({"explore": 5}, counts) is None
+
+
 def test_suite_selection_excludes_incomplete_entries():
     """Suite runs execute only ready benchmark evals; incomplete entries are catalogued but skipped."""
     from benchmarks.benchmark_tasks import all_tasks, suite_tasks
@@ -5614,9 +6471,7 @@ def test_suite_selection_excludes_incomplete_entries():
         "gate-kyc-card-mint",
         "gate-source-connect-gmail",
     } <= suite_names
-    assert len(suite_names) == len(
-        [t for t in all_tasks() if t.status == "ready" and not t.production_only]
-    )
+    assert len(suite_names) == len([t for t in all_tasks() if t.status == "ready" and not t.production_only])
 
 
 def test_every_task_has_base_image_fixture_by_default():
@@ -5646,25 +6501,28 @@ def test_live_fixture_registry_appliers_stay_in_sync():
     from benchmarks.run_benchmark import LIVE_FIXTURE_APPLIERS
 
     assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES)
-    assert "base" in LIVE_FIXTURE_NAMES  # the default every live task inherits
-    assert {"compute_tokens", "amazon_passkey"} <= LIVE_FIXTURE_NAMES
+    assert LIVE_FIXTURE_NAMES == {"live"}
 
 
-def test_amazon_passkey_fixture_is_exclusive_and_restorable():
+def test_amazon_passkey_scenario_is_exclusive_and_restorable():
     """Passkey-only state cannot race siblings and its shared mutations are undone."""
     import benchmarks.run_benchmark as bench
 
     assert bench.AMAZON_PASSKEY_TASK_NAME in bench.EXCLUSIVE_SHARED_DB_TASK_NAMES
 
     sql_calls = []
+    deleted_profiles = []
     original_sync = bench._sync_browser_credentials
     original_sql = bench._run_local_victoria_sql
+    original_delete_profile = bench._delete_kernel_profile
     try:
         bench._sync_browser_credentials = lambda: True
-        bench._run_local_victoria_sql = lambda sql: sql_calls.append(sql) or ""
-        bench._restore_amazon_passkey_fixture(
+        sql_results = iter(['["run-created-profile"]', ""])
+        bench._run_local_victoria_sql = lambda sql: sql_calls.append(sql) or next(sql_results)
+        bench._delete_kernel_profile = lambda profile_id: deleted_profiles.append(profile_id)
+        bench._restore_amazon_passkey_scenario(
             {
-                "fixture": "amazon_passkey",
+                "scenario": "amazon_passkey",
                 "user_id": "user-1",
                 "auth_realm": "amazon.com",
                 "restore_snapshot": {
@@ -5687,9 +6545,12 @@ def test_amazon_passkey_fixture_is_exclusive_and_restorable():
     finally:
         bench._sync_browser_credentials = original_sync
         bench._run_local_victoria_sql = original_sql
+        bench._delete_kernel_profile = original_delete_profile
 
-    assert len(sql_calls) == 1
-    restore_sql = sql_calls[0]
+    assert deleted_profiles == ["run-created-profile"]
+    assert len(sql_calls) == 2
+    assert 'SELECT COALESCE(json_agg(profile."profileId")' in sql_calls[0]
+    restore_sql = sql_calls[1]
     assert 'UPDATE "SteelSessionAuth"' in restore_sql and "'steel-1'" in restore_sql
     assert 'UPDATE "CookieBundle"' in restore_sql and "'bundle-1'" in restore_sql
     assert 'UPDATE "BrowserPassword"' in restore_sql and "'password-1'" in restore_sql
@@ -5697,52 +6558,39 @@ def test_amazon_passkey_fixture_is_exclusive_and_restorable():
     assert 'INSERT INTO "BrowserProviderProfile"' in restore_sql
 
 
-def test_live_fixtures_default_to_base_and_synthetic_to_none():
-    """Live/hybrid tasks inherit ["base"]; synthetic tasks resolve to []."""
+def test_live_fixture_is_single_and_explicit():
+    """Only credential-dependent tasks opt into the single live overlay."""
     from benchmarks.benchmark_tasks import all_tasks
     from benchmarks.live_fixtures import resolve_live_fixtures
 
     # Pure resolver contract
-    assert resolve_live_fixtures(None) == ["base"]
-    assert resolve_live_fixtures({"mode": "live"}) == ["base"]
-    assert resolve_live_fixtures({"mode": "hybrid"}) == ["base"]
+    assert resolve_live_fixtures(None) == []
+    assert resolve_live_fixtures({"mode": "live"}) == []
+    assert resolve_live_fixtures({"mode": "hybrid"}) == []
     assert resolve_live_fixtures({"mode": "synthetic"}) == []
     assert resolve_live_fixtures({"mode": "live", "live_fixtures": []}) == []  # explicit wins
-    assert resolve_live_fixtures({"mode": "live", "live_fixtures": ["base", "amazon_auth"]}) == [
-        "base",
-        "amazon_auth",
-    ]
+    assert resolve_live_fixtures({"mode": "live", "live_fixtures": ["live"]}) == ["live"]
 
     # Loaded catalog: every task has effective live_fixtures matching its mode
     for t in all_tasks():
         env = t.environment
         assert env is not None and "live_fixtures" in env, f"{t.name}: no effective live_fixtures"
+        assert set(env["live_fixtures"]) <= {"live"}, f"{t.name}: noncanonical live fixture"
         if env.get("mode") == "synthetic":
             assert env["live_fixtures"] == [], f"{t.name}: synthetic must not carry live fixtures"
-        else:
-            assert env["live_fixtures"], f"{t.name}: live/hybrid must inherit a live fixture"
 
     by_name = {t.name: t for t in all_tasks()}
-    # Amazon tasks compose amazon_auth onto the base fixture
-    assert by_name["browser-agent"].environment["live_fixtures"] == ["base", "amazon_auth"]
-    assert by_name["browser-agent-amazon-cookie-payment"].environment["live_fixtures"] == [
-        "base",
-        "amazon_auth",
-    ]
-    # Passkey auth must refresh compute separately and start from passkey-only
-    # browser state; inheriting base would silently restore cookies/passwords.
-    assert by_name["browser-agent-amazon-passkey"].environment["live_fixtures"] == [
-        "compute_tokens",
-        "amazon_passkey",
-    ]
+    assert by_name["browser-agent"].environment["live_fixtures"] == ["live"]
+    assert by_name["browser-agent-amazon-cookie-payment"].environment["live_fixtures"] == ["live"]
+    assert by_name["browser-agent-amazon-passkey"].environment["live_fixtures"] == ["live"]
     assert by_name["browser-agent-amazon-passkey"].expected_credential_ref_kind == "passkey"
     assert by_name["browser-agent-amazon-passkey"].forbidden_credential_ref_kinds == [
         "password",
         "email_otp",
         "sms_otp",
     ]
-    # An undeclared-environment task inherits ["base"]
-    assert by_name["chat-mode"].environment["live_fixtures"] == ["base"]
+    # An undeclared-environment task does not import expiring credentials.
+    assert by_name["chat-mode"].environment["live_fixtures"] == []
 
 
 def test_live_fixture_validation_rejects_unknown_and_synthetic_declarations():
@@ -5769,7 +6617,7 @@ def test_live_fixture_validation_rejects_unknown_and_synthetic_declarations():
     assert raised, "unknown live_fixture must fail validation"
 
     # Synthetic task declaring live fixtures fails
-    syn = {**base_env, "mode": "synthetic", "live_fixtures": ["base"]}
+    syn = {**base_env, "mode": "synthetic", "live_fixtures": ["live"]}
     raised = False
     try:
         _validate_environment(syn, "t-synthetic")
@@ -5778,8 +6626,8 @@ def test_live_fixture_validation_rejects_unknown_and_synthetic_declarations():
     assert raised, "synthetic + live_fixtures must fail validation"
 
     # A valid declaration passes
-    ok = {**base_env, "live_fixtures": ["base", "amazon_auth"]}
-    assert _validate_environment(ok, "t-ok")["live_fixtures"] == ["base", "amazon_auth"]
+    ok = {**base_env, "live_fixtures": ["live"]}
+    assert _validate_environment(ok, "t-ok")["live_fixtures"] == ["live"]
 
 
 def test_tag_slices_still_resolve():
@@ -6113,6 +6961,10 @@ async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
     r.record(
+        "every_benchmark_run_registers_in_app_hub",
+        test_every_benchmark_run_registers_in_app_hub_before_execution,
+    )
+    r.record(
         "cloudbench_rejects_stale_wrong_task",
         test_cloudbench_result_rejects_stale_passing_artifact_from_another_task,
     )
@@ -6133,6 +6985,10 @@ async def run_all_tests():
         test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate,
     )
     r.record(
+        "cloudbench_dependency_rebuild_permanent_gate",
+        test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate,
+    )
+    r.record(
         "cloudbench_patch_includes_untracked_files",
         test_cloudbench_worktree_patch_includes_tracked_and_untracked_files,
     )
@@ -6142,6 +6998,30 @@ async def run_all_tests():
     )
     r.record("phone_call_tasks_two_sided_verification", test_phone_call_tasks_define_two_sided_verification)
     r.record("phone_callee_end_call_config", test_phone_callee_assistant_base_has_end_call_tool_and_duration_cap)
+    r.record(
+        "phone_callee_session_number_name_contract",
+        test_phone_callee_session_number_names_follow_provider_contract,
+    )
+    await r.record_async(
+        "phone_callee_number_activation_window",
+        test_phone_callee_waits_for_new_number_activation,
+    )
+    await r.record_async(
+        "phone_callee_activation_cancellation_cleanup",
+        test_phone_callee_activation_cancellation_deletes_owned_number,
+    )
+    await r.record_async(
+        "phone_callee_distributed_resource_isolation",
+        test_phone_callee_sessions_isolate_distributed_phone_number_resources,
+    )
+    await r.record_async(
+        "phone_callee_stale_resource_reclamation",
+        test_phone_callee_reclaims_only_stale_session_owned_numbers,
+    )
+    await r.record_async(
+        "phone_callee_owned_resource_cleanup",
+        test_phone_callee_cleanup_deletes_only_explicitly_owned_number,
+    )
     r.record("phone_findings_matcher_squashes_separators", test_missing_call_findings_tolerates_spacing_and_punctuation)
     r.record("phone_search_text_includes_metadata", test_phone_search_text_includes_phone_call_metadata)
     r.record(
@@ -6155,6 +7035,10 @@ async def run_all_tests():
     )
     r.record("phone_callee_prompt_resolution", test_resolve_callee_prompt_requires_active_session)
     r.record("phone_public_base_url", test_benchmark_public_base_url_uses_env_override)
+    r.record(
+        "phone_public_base_url_isolated_manifest",
+        test_benchmark_public_base_url_uses_isolated_context_manifest_not_dashboard_url,
+    )
     r.record("phone_auto_approval_requires_callee", test_phone_auto_approval_requires_active_callee_number)
     r.record("extract_worker_pids_macos_python", test_extract_worker_pids_from_ps_matches_macos_python_executable)
     r.record("extract_worker_pids_lowercase_python", test_extract_worker_pids_from_ps_matches_lowercase_python)
@@ -6206,20 +7090,16 @@ async def run_all_tests():
         test_minted_x_signup_evidence_rejects_terminal_phone_blocker,
     )
     r.record(
-        "browser_agent_cookie_bundle_bootstrap_upserts",
-        test_browser_agent_cookie_bundle_bootstrap_upserts_active_bundle_from_cookies,
-    )
-    r.record(
-        "browser_agent_cookie_bundle_bootstrap_skip_env",
-        test_browser_agent_cookie_bundle_bootstrap_can_be_skipped_with_env,
-    )
-    r.record(
-        "amazon_passkey_fixture_isolation",
-        test_amazon_passkey_fixture_isolates_passkey_and_fresh_kernel_profile,
+        "amazon_passkey_scenario_isolation",
+        test_amazon_passkey_scenario_isolates_passkey_and_fresh_kernel_profile,
     )
     r.record(
         "amazon_passkey_catalog_contract",
         test_amazon_passkey_catalog_requires_live_passkey_kernel_evidence,
+    )
+    r.record(
+        "webdecoy_fresh_browser_state",
+        test_webdecoy_biometrics_uses_fresh_isolated_browser_state,
     )
     r.record(
         "anon_benchmark_mode_disables_saved_auth",
@@ -6228,6 +7108,10 @@ async def run_all_tests():
     r.record(
         "local_benchmark_task_queue_uses_workspace",
         test_local_benchmark_task_queue_uses_conductor_workspace_only_for_local_urls,
+    )
+    await r.record_async(
+        "parallel_scheduler_serializes_browser_profiles",
+        test_parallel_benchmark_scheduler_serializes_browser_profile_writers,
     )
     r.record(
         "browser_agent_cookie_bundle_bootstrap_local_only",
@@ -6425,9 +7309,29 @@ async def run_all_tests():
         "abandonment_waits_for_cron_reconciliation",
         test_abandonment_waits_for_cron_reconciliation,
     )
+    await r.record_async(
+        "abandonment_retries_pending_company_release",
+        test_abandonment_retries_a_pending_company_release,
+    )
+    await r.record_async(
+        "abandonment_tolerates_transient_lifecycle_read",
+        test_abandonment_tolerates_one_transient_lifecycle_read_failure,
+    )
+    await r.record_async(
+        "abandonment_bounds_persistent_lifecycle_outage",
+        test_abandonment_surfaces_three_consecutive_lifecycle_read_failures,
+    )
     r.record(
         "agent_payment_requires_lifecycle_evidence",
         test_agent_payment_catalog_requires_terminal_lifecycle_evidence,
+    )
+    r.record(
+        "production_payment_rejects_sandbox_target",
+        test_production_payment_lifecycle_refuses_sandbox_target,
+    )
+    r.record(
+        "production_frontend_ignores_stale_local_manifest",
+        test_production_frontend_url_ignores_stale_local_services_manifest,
     )
     r.record(
         "ordered_attention_kind_sequence",
@@ -6502,8 +7406,8 @@ async def run_all_tests():
         test_amazon_return_catalog_requires_single_clean_completed_return,
     )
     r.record(
-        "base_live_fixture_auth_failure_is_fatal",
-        test_base_live_fixture_fails_when_live_auth_refresh_fails,
+        "live_fixture_auth_failure_is_fatal",
+        test_live_fixture_fails_when_live_auth_refresh_fails,
     )
     r.record(
         "expected_passkey_credential_ref",
@@ -6529,16 +7433,44 @@ async def run_all_tests():
         test_unified_catalog_supports_multiple_evaluators_per_eval,
     )
     r.record(
+        "agent_class_min_steps_contract",
+        test_agent_class_min_steps_contract_is_validated_and_defaulted,
+    )
+    r.record(
+        "browser_smoke_single_step_trajectory",
+        test_browser_smoke_accepts_captured_single_step_trajectory,
+    )
+    r.record(
+        "payment_abandonment_two_step_trajectory",
+        test_payment_abandonment_accepts_captured_two_step_trajectory,
+    )
+    r.record(
+        "production_payment_abandonment_two_step_trajectory",
+        test_production_payment_abandonment_accepts_checkout_ready_two_step_trajectory,
+    )
+    r.record(
+        "browser_min_steps_rejects_terminal_claim",
+        test_browser_min_steps_rejects_terminal_claim_without_trajectory,
+    )
+    r.record(
+        "browser_min_steps_per_instance",
+        test_browser_min_steps_is_per_instance_not_aggregate,
+    )
+    r.record(
+        "min_steps_non_browser_classes",
+        test_min_steps_supports_non_browser_agent_classes,
+    )
+    r.record(
         "suite_selection_excludes_incomplete",
         test_suite_selection_excludes_incomplete_entries,
     )
     r.record("every_task_has_base_image_fixture", test_every_task_has_base_image_fixture_by_default)
     r.record("live_fixture_registry_appliers_in_sync", test_live_fixture_registry_appliers_stay_in_sync)
     r.record(
-        "amazon_passkey_fixture_is_exclusive_and_restorable",
-        test_amazon_passkey_fixture_is_exclusive_and_restorable,
+        "amazon_passkey_scenario_is_exclusive_and_restorable",
+        test_amazon_passkey_scenario_is_exclusive_and_restorable,
     )
-    r.record("live_fixtures_default_to_base", test_live_fixtures_default_to_base_and_synthetic_to_none)
+    r.record("live_fixture_is_single_and_explicit", test_live_fixture_is_single_and_explicit)
     r.record("live_fixture_validation_guards", test_live_fixture_validation_rejects_unknown_and_synthetic_declarations)
     r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)
     r.record("antibot_slice_daily_commerce", test_antibot_slice_includes_daily_toast_and_amazon_commerce)

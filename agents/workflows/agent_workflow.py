@@ -111,6 +111,19 @@ FAST_MODE_WRITE_THROUGH_USER_IDS = {"1f85ff25-6e29-4c1b-8739-f917bd101a30"}
 RESPONSE_SCHEMA_UPDATE_PREFIX = "Output schema revised from user feedback."
 
 
+def _resolve_usage_model(actual_model: Optional[str], requested_model: str) -> str:
+    """Return durable provider provenance for usage accounting.
+
+    Legacy Fast Mode cache entries serialize the literal ``unknown`` when the
+    original transport model was not stored. Treating that sentinel as a model
+    creates an unactionable ``unclassified`` bucket in benchmark artifacts.
+    The requested pool alias is still known and encodes the credential path, so
+    use it for missing/unknown replay provenance.
+    """
+    candidate = str(actual_model or "").strip()
+    return requested_model if not candidate or candidate == "unknown" else candidate
+
+
 def _fast_cache_compute_affinity_key(user_id: str, goal: str) -> str:
     material = _json.dumps(
         {"version": 1, "user_id": user_id, "goal": goal},
@@ -1035,7 +1048,10 @@ class AgentWorkflow:
                         tool_names=execute_tools,
                     )
 
-                    # DAG completed or failed - both hand off to normal completion/recovery.
+                    # A completed DAG hands off to normal completion. A failed
+                    # DAG is terminal for this run: unrestricted run_agent recovery
+                    # can replay sibling tasks whose external side effects already
+                    # committed (for example, duplicate child-agent spawns).
                     # The completed path must use the attempt_completion tool so
                     # the UI and transcript show the same visible completion
                     # attempt as an LLM-initiated finish.
@@ -1072,7 +1088,8 @@ class AgentWorkflow:
                             "— falling through to run_agent for recovery"
                         )
                     else:
-                        workflow.logger.info("[DAG] Execution needs LLM recovery, falling through to run_agent")
+                        workflow.logger.warning("[DAG] Execution failed; stopping before unrestricted replay")
+                        return await self._handle_incomplete(dag_result, "EXECUTE")
             else:
                 workflow.logger.info("[DAG] No plan found, using LLM-driven execution")
 
@@ -2322,7 +2339,7 @@ class AgentWorkflow:
 
         # Calculate cost from tokens using stored pricing (fractional cents)
         cost_cents = 0.0
-        model_for_usage = actual_model or self.model
+        model_for_usage = _resolve_usage_model(actual_model, self.model)
         if from_fast_cache:
             workflow.logger.info(
                 f"💰 $0 cost (fast cache replay): actual_model={model_for_usage}, "
@@ -2910,7 +2927,7 @@ class AgentWorkflow:
                 await self._update_cost_and_signal_parent()
 
         # Save ToolUsage record for credit billing (with actual_model and correct cost)
-        model_for_usage = actual_model or self.model
+        model_for_usage = _resolve_usage_model(actual_model, self.model)
         try:
             await workflow.execute_activity(
                 save_tool_usage,

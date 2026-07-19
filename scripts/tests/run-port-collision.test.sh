@@ -83,4 +83,27 @@ if port_requires_reassign "$own_port"; then
 fi
 echo "PASS: current-worktree listener does not require reassignment"
 
+unset RUN_SH_STRICT_CONDUCTOR_PORT
+if ! port_range_can_reassign; then
+    echo "FAIL: ordinary run.sh sessions should allow port reassignment" >&2
+    exit 1
+fi
+echo "PASS: ordinary run.sh sessions allow port reassignment"
+
+export RUN_SH_STRICT_CONDUCTOR_PORT=1
+if port_range_can_reassign >/dev/null 2>&1; then
+    echo "FAIL: deploy sessions should reject port reassignment" >&2
+    exit 1
+fi
+echo "PASS: deploy sessions reject port reassignment"
+
+unset RUN_SH_STRICT_CONDUCTOR_PORT
+BENCHMARK_MODE=true
+export BENCHMARK_BUNDLED_FRONTEND=true
+if port_range_can_reassign >/dev/null 2>&1; then
+    echo "FAIL: bundled benchmark stacks should reject port reassignment" >&2
+    exit 1
+fi
+echo "PASS: bundled benchmark stacks reject port reassignment across shell boundaries"
+
 echo "All run.sh port collision tests passed."

@@ -14,6 +14,7 @@ export function useTerminalModals() {
   // Optional heading shown atop the phone-auth modal. Undefined => the modal's
   // default "Start Building." copy; set to override (e.g. waitlist CTA).
   const [loginModalTitle, setLoginModalTitle] = useState<string | undefined>(undefined);
+  const [loginModalCollectName, setLoginModalCollectName] = useState(false);
   const [showCreditModal, setShowCreditModal] = useState(false);
   const [showCostLimitModal, setShowCostLimitModal] = useState(false);
 
@@ -24,6 +25,8 @@ export function useTerminalModals() {
     setLoginModalOpen,
     loginModalTitle,
     setLoginModalTitle,
+    loginModalCollectName,
+    setLoginModalCollectName,
     showCreditModal,
     setShowCreditModal,
     showCostLimitModal,

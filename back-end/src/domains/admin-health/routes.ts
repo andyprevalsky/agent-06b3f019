@@ -6,12 +6,17 @@ import {
   AdminHealthForbiddenError,
   assertCanViewAdminHealth,
   getAdminHealth,
+  parseTimeSlice,
+} from './service';
+import {
   getWaitlistPeople,
   inviteWaitlistPerson,
-  parseTimeSlice,
+  WaitlistInviteEmailError,
+  WaitlistInviteIdempotencyKeyError,
+  WaitlistInviteInProgressError,
   WaitlistInviteSmsError,
   WaitlistPersonNotFoundError,
-} from './service';
+} from './service.waitlist';
 
 const log = createLogger('AdminHealth');
 const router = Router();
@@ -80,7 +85,11 @@ router.post(
 
     try {
       await assertCanViewAdminHealth(req.user.id, req.user.phone);
-      const result = await inviteWaitlistPerson(req.params.id);
+      const result = await inviteWaitlistPerson(
+        req.params.id,
+        undefined,
+        req.get('Idempotency-Key')
+      );
       res.json(result);
     } catch (error) {
       if (error instanceof AdminHealthForbiddenError) {
@@ -91,7 +100,15 @@ router.post(
         res.status(404).json({ error: error.message });
         return;
       }
-      if (error instanceof WaitlistInviteSmsError) {
+      if (error instanceof WaitlistInviteIdempotencyKeyError) {
+        res.status(400).json({ error: error.message });
+        return;
+      }
+      if (error instanceof WaitlistInviteInProgressError) {
+        res.status(409).json({ error: error.message });
+        return;
+      }
+      if (error instanceof WaitlistInviteSmsError || error instanceof WaitlistInviteEmailError) {
         res.status(502).json({ error: error.message });
         return;
       }

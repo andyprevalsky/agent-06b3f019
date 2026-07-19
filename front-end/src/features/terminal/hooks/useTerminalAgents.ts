@@ -131,12 +131,21 @@ type BuildArgs = {
   setCurrentView: (v: TerminalView) => void;
 };
 
-function buildReturn(a: BuildArgs) {
-  const handleLoginClick = () => a.modals.setLoginModalOpen(true);
-  const handleJoinWaitlist = () => {
-    a.modals.setLoginModalTitle('Join the Waitlist');
-    a.modals.setLoginModalOpen(true);
+function buildAuthModalHandlers(modals: ReturnType<typeof useTerminalModals>) {
+  const handleLoginClick = () => {
+    modals.setLoginModalCollectName(false);
+    modals.setLoginModalOpen(true);
   };
+  const handleJoinWaitlist = () => {
+    modals.setLoginModalTitle('Join the Waitlist');
+    modals.setLoginModalCollectName(true);
+    modals.setLoginModalOpen(true);
+  };
+  return { handleLoginClick, handleJoinWaitlist };
+}
+
+function buildReturn(a: BuildArgs) {
+  const { handleLoginClick, handleJoinWaitlist } = buildAuthModalHandlers(a.modals);
   const handleCreateNewAgent = () => {
     a.cleanupAgentState();
     a.resetAnimationState();
@@ -183,6 +192,8 @@ function buildReturn(a: BuildArgs) {
     setLoginModalOpen: a.modals.setLoginModalOpen,
     loginModalTitle: a.modals.loginModalTitle,
     setLoginModalTitle: a.modals.setLoginModalTitle,
+    loginModalCollectName: a.modals.loginModalCollectName,
+    setLoginModalCollectName: a.modals.setLoginModalCollectName,
     showCreditModal: a.modals.showCreditModal,
     setShowCreditModal: a.modals.setShowCreditModal,
     showCostLimitModal: a.modals.showCostLimitModal,

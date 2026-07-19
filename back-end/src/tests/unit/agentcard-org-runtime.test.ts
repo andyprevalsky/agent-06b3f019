@@ -53,6 +53,37 @@ async function main(): Promise<void> {
     assert.equal(calledWithToken, 'fresh-org-token');
     assert.equal(tokenRequests, 1, 'client-credential tokens should be cached until near expiry');
 
+    let concurrentTokenRequests = 0;
+    let releaseTokenRequest: (() => void) | undefined;
+    const tokenRequestReleased = new Promise<void>((resolve) => {
+      releaseTokenRequest = resolve;
+    });
+    const concurrentRuntime = new AgentCardOrgRuntime(
+      async () => ({ structuredContent: { transfers: [] } }),
+      async () => {
+        concurrentTokenRequests += 1;
+        await tokenRequestReleased;
+        return new Response(
+          JSON.stringify({ access_token: 'shared-org-token', expires_in: 3600 }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        );
+      }
+    );
+    const concurrentCalls = Promise.all([
+      concurrentRuntime.callTool('get_card', { card_id: 'card-1' }),
+      concurrentRuntime.callTool('list_transfers', { status: 'consumed', limit: 100 }),
+      concurrentRuntime.callTool('list_transfers', { limit: 100 }),
+    ]);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(
+      concurrentTokenRequests,
+      1,
+      'concurrent org reads must share one client-credential token exchange'
+    );
+    releaseTokenRequest?.();
+    await concurrentCalls;
+    assert.equal(concurrentTokenRequests, 1);
+
     let retryTokenRequests = 0;
     let toolCalls = 0;
     const retryingRuntime = new AgentCardOrgRuntime(

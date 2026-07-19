@@ -85,6 +85,21 @@ test('credentials-only sync retries transient failures with bounded attempts', a
   );
 });
 
+test('browser-auth sync includes every durable credential reference', async () => {
+  const source = readSeedLocalSource();
+  const browserStateStart = source.indexOf('async function syncBrowserState');
+  const browserStateEnd = source.indexOf('function sleep', browserStateStart);
+  const browserState = source.slice(browserStateStart, browserStateEnd);
+
+  for (const model of ['browserProviderProfile', 'cookieBundle', 'steelSessionAuth']) {
+    assert(browserState.includes(`remote.${model}`), `expected production ${model} read`);
+    assert(
+      browserState.includes(`local.${model}`) || browserState.includes(`tx.${model}`),
+      `expected local ${model} write`
+    );
+  }
+});
+
 test('passkeys-only seed mode never enters browser state or password sync', async () => {
   const source = readSeedLocalSource();
   const flag = source.indexOf("process.argv.includes('--passkeys-only')");

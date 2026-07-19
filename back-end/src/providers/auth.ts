@@ -75,11 +75,7 @@ async function authenticateRequest(
   }
 }
 
-/**
- * Express 4 expects middleware to return void, so keep the promise contained
- * at this provider boundary. authenticateRequest owns error reporting for the
- * entire async verification path.
- */
+/** Express middleware must return void; contain async token verification here. */
 export function authenticate(req: AuthRequest, res: Response, next: NextFunction): void {
   void authenticateRequest(req, res, next);
 }

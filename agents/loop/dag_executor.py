@@ -4,12 +4,12 @@ DAG Executor - Rigid execution of plans from set_plan.
 Executes the task DAG with maximum parallelism:
 - Tasks fire immediately when their dependencies complete
 - Uses asyncio.wait(FIRST_COMPLETED) for efficient scheduling
-- On error, breaks out to allow LLM recovery via run_agent
+- On error, stops the DAG without unrestricted LLM replay of completed tasks
 
 USAGE:
 - Called from agent_workflow.py at EXECUTE phase start if a plan exists
 - On success: returns completed status
-- On failure: error already in context, returns needs_llm for recovery
+- On failure: error already in context, returns error for terminal handling
 """
 
 import asyncio
@@ -30,27 +30,11 @@ from tools.base import EventType, MessageStatus, ToolEvent
 from utils.error_utils import error_chain_has_type
 from utils.llm_timeouts import STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 from utils.tool_call_ids import spawn_group_id
-from utils.tool_schemas import SpawnAgentTool
 
 logger = structlog.get_logger()
 
 STRUCTURED_OUTPUT_ERROR_TYPE = "LLMStructuredOutputError"
 STRUCTURED_OUTPUT_MAX_ATTEMPTS = 2
-PARAM_CONTRACT_MAX_ATTEMPTS = 2
-# Replay gate for the alias-aware param prompt and its corrective LLM activity.
-# Workflows whose history predates this marker must retain the old single-call
-# path or replay could schedule an activity where history expects tool execution.
-DAG_ALIAS_PARAM_CONTRACT_RETRY_PATCH = "dag-alias-param-contract-retry-v1"
-
-# Replay gate for settling in-flight siblings on task failure. Histories that
-# predate this marker recorded cancellation commands for the pending siblings;
-# replaying them through the settlement branch would await task results the
-# history never recorded and strand those workflows on nondeterminism.
-DAG_SETTLE_IN_FLIGHT_PATCH = "dag-settle-in-flight-v1"
-
-# Replay gate for reporting param-populator token usage via on_tokens, which
-# can schedule activities; ungated it would diverge from pre-marker histories.
-DAG_PARAM_USAGE_TOKENS_PATCH = "dag-param-usage-tokens-v1"
 
 DAG_REASONING_UI_TOOL_NAME = "thought"
 DAG_REASONING_IN_PROGRESS_TITLE = "Thinking"
@@ -82,6 +66,20 @@ ALIAS_TYPE_OVERRIDES = {
     "spawn_general_purpose_agent_for_each": {"type": "for_each", "start_phase": "EXECUTE"},
 }
 
+ALIAS_REQUIRED_FIELDS = {
+    "spawn_explore_agent": (),
+    "spawn_browser_agent": ("start_url", "output_schema"),
+    "spawn_code_agent": ("output_schema",),
+    "spawn_general_purpose_agent": ("start_phase", "output_schema"),
+    "spawn_general_purpose_agent_for_each": ("start_phase", "output_schema", "items or items_csv"),
+}
+
+assert set(ALIAS_REQUIRED_FIELDS) == set(ALIAS_TYPE_OVERRIDES)
+
+
+class ParamPopulationContractError(ValueError):
+    """The param-populator returned a call that cannot execute the planned DAG node."""
+
 
 def _apply_alias_override(params: Dict[str, Any], tool_name: str) -> Dict[str, Any]:
     """Merge an alias's type/start_phase override into a populated param dict.
@@ -106,12 +104,20 @@ def _apply_alias_override(params: Dict[str, Any], tool_name: str) -> Dict[str, A
 def _select_param_tool_call(tool_calls: List[Dict[str, Any]], actual_tool: str, task: "DAGTask") -> Dict[str, Any]:
     """Require the one planned tool call promised by the param-populator prompt."""
     if len(tool_calls) != 1:
-        raise ValueError(f"LLM must return exactly one tool call for task {task.index}; got {len(tool_calls)}")
+        raise ParamPopulationContractError(
+            f"LLM must return exactly one tool call for task {task.index}; got {len(tool_calls)}"
+        )
 
     tool_call = tool_calls[0]
     returned_tool = tool_call.get("tool")
     if returned_tool != actual_tool:
-        raise ValueError(f"LLM expected {actual_tool}, got {returned_tool} for task {task.index}")
+        raise ParamPopulationContractError(f"LLM expected {actual_tool}, got {returned_tool} for task {task.index}")
+
+    expected_type = ALIAS_TYPE_OVERRIDES.get(task.tool_name, {}).get("type")
+    if actual_tool == "spawn_agent" and expected_type and tool_call.get("type") != expected_type:
+        raise ParamPopulationContractError(
+            f"LLM expected {actual_tool} type {expected_type}, got {tool_call.get('type')} for task {task.index}"
+        )
     return tool_call
 
 
@@ -119,7 +125,9 @@ def _build_param_population_message(
     task_number: int,
     goal: str,
     tool_name: str,
+    *,
     planned_tool_name: Optional[str] = None,
+    contract_error: Optional[str] = None,
 ) -> str:
     """Build user message that prompts the LLM to call a specific tool.
 
@@ -131,46 +139,30 @@ def _build_param_population_message(
         f"Please execute task {task_number} of the plan: {goal}\n\n"
         f"You MUST call exactly one tool: `{tool_name}`. Do not respond with text only."
     )
+
     alias_override = ALIAS_TYPE_OVERRIDES.get(planned_tool_name or "")
-    if not alias_override or tool_name != "spawn_agent":
+    if not alias_override:
         return message
 
-    required_type = alias_override["type"]
-    subtype_requirements = {
-        "browser": " Include start_url and output_schema.",
-        "code": " Include output_schema.",
-        "general_purpose": " Include output_schema.",
-        "for_each": " Include output_schema and exactly one of items or items_csv.",
-    }.get(required_type, "")
-    return (
-        f"{message}\n\n"
-        f"The planned `{planned_tool_name}` action resolves to "
-        f"`spawn_agent(type='{required_type}')`. Set type to exactly "
-        f"`{required_type}` and preserve every parameter required by that subtype."
-        f"{subtype_requirements}"
+    expected_type = alias_override["type"]
+    required_fields = ALIAS_REQUIRED_FIELDS[planned_tool_name or ""]
+    required_text = ", ".join(f"`{field}`" for field in required_fields) or "none beyond `goal` and `type`"
+    message += (
+        f"\n\nThe outer planned alias `{planned_tool_name}` requires `type=\"{expected_type}\"`. "
+        f"Required type-specific fields: {required_text}. "
+        "Instructions to use another agent type for nested work belong inside the child goal; "
+        "they must not change the outer spawn type."
     )
 
-
-def _alias_param_contract_error(params: Dict[str, Any], task: "DAGTask") -> Optional[str]:
-    """Return why populated spawn params violate the planner's alias contract."""
-    alias_override = ALIAS_TYPE_OVERRIDES.get(task.tool_name)
-    if not alias_override:
-        return None
-
-    expected_type = alias_override["type"]
-    returned_type = params.get("type")
-    if returned_type != expected_type:
-        return (
-            f"planned {task.tool_name} requires spawn_agent type='{expected_type}', "
-            f"but the populated call used type='{returned_type}'"
+    if contract_error:
+        bounded_error = " ".join(contract_error.split())[:500]
+        message += (
+            f"\n\nPrevious attempt violated the planned tool contract: {bounded_error}. "
+            f"Retry with exactly one `{tool_name}` call and the required discriminator "
+            f"`type=\"{expected_type}\"`."
         )
 
-    normalized = _apply_alias_override(dict(params), task.tool_name)
-    try:
-        SpawnAgentTool.model_validate({"tool": "spawn_agent", **normalized})
-    except Exception as exc:
-        return str(exc)
-    return None
+    return message
 
 
 def _build_early_tool_event(
@@ -496,39 +488,6 @@ def _metadata_matches_task(metadata: Dict[str, Any], task: DAGTask) -> bool:
     return False
 
 
-async def _settle_in_flight_tasks(
-    pending_tasks: Dict[int, asyncio.Task],
-    task_to_index: Dict[asyncio.Task, int],
-    dag: TaskDAG,
-) -> None:
-    """Let already-started sibling tasks reach a durable terminal state.
-
-    Spawn and external-action tools may commit their side effect before their
-    coroutine finishes. Canceling them when a sibling fails hides that committed
-    work from the recovery LLM, which can then repeat it. No new DAG tasks are
-    started here; only the current in-flight batch is drained.
-    """
-    in_flight = list(pending_tasks.items())
-    if not in_flight:
-        return
-
-    workflow.logger.info(f"[DAG] Settling {len(in_flight)} in-flight task(s) before LLM recovery")
-    outcomes = await asyncio.gather(*(future for _, future in in_flight), return_exceptions=True)
-
-    for (task_index, future), outcome in zip(in_flight, outcomes, strict=True):
-        pending_tasks.pop(task_index, None)
-        task_to_index.pop(future, None)
-        if isinstance(outcome, BaseException):
-            workflow.logger.error(f"[DAG] In-flight task {task_index} raised while settling: {outcome}")
-            dag.mark_failed(task_index)
-        elif outcome:
-            dag.mark_completed(task_index)
-            workflow.logger.info(f"[DAG] In-flight task {task_index} completed before recovery")
-        else:
-            dag.mark_failed(task_index)
-            workflow.logger.info(f"[DAG] In-flight task {task_index} failed before recovery")
-
-
 async def execute_dag(
     dag: TaskDAG,
     agent_id: str,
@@ -570,7 +529,7 @@ async def execute_dag(
 
     Returns:
         Dict with:
-        - status: "completed" | "needs_llm"
+        - status: "completed" | "error"
         - context: Updated context
     """
     # Import here to avoid circular imports
@@ -579,8 +538,6 @@ async def execute_dag(
     pending_tasks: Dict[int, asyncio.Task] = {}
     # Map asyncio.Task to task index for lookup
     task_to_index: Dict[asyncio.Task, int] = {}
-
-    alias_param_contract_retry_enabled = workflow.patched(DAG_ALIAS_PARAM_CONTRACT_RETRY_PATCH)
 
     workflow.logger.info(f"[DAG] Starting execution with {len(dag.tasks)} tasks, join={dag.join}")
 
@@ -639,7 +596,6 @@ async def execute_dag(
                     tool_names=tool_names,
                     param_cache_seed_event=param_cache_seed_event,
                     param_cache_seed_lock=param_cache_seed_lock,
-                    alias_param_contract_retry_enabled=alias_param_contract_retry_enabled,
                 )
                 asyncio_task = asyncio.create_task(coro)
                 pending_tasks[task.index] = asyncio_task
@@ -647,19 +603,17 @@ async def execute_dag(
 
         if not pending_tasks:
             # No tasks running and none ready - stuck (shouldn't happen with valid DAG)
-            workflow.logger.warning("[DAG] No pending tasks and DAG not complete - returning for LLM recovery")
+            workflow.logger.warning("[DAG] No pending tasks and DAG not complete - returning an execution error")
             return {
-                "status": "needs_llm",
+                "status": "error",
                 "context": context,
+                "message": "DAG execution stalled before all planned tasks completed.",
             }
 
         # Wait for ANY task to complete
         done, _ = await asyncio.wait(pending_tasks.values(), return_when=asyncio.FIRST_COMPLETED)
 
-        # Process every task in this completed batch before deciding whether
-        # recovery is needed. A sibling may have completed in the same event-loop
-        # tick as the failure and its result must remain visible.
-        batch_failed = False
+        # Process completed tasks
         for completed_future in done:
             task_index = task_to_index[completed_future]
             del pending_tasks[task_index]
@@ -672,38 +626,31 @@ async def execute_dag(
                 success = False
 
             if not success:
+                # Error already posted to context by execute_tool/handle_tool_event
+                workflow.logger.info(f"[DAG] Task {task_index} failed - canceling remaining DAG work")
                 dag.mark_failed(task_index)
-                if not workflow.patched(DAG_SETTLE_IN_FLIGHT_PATCH):
-                    # Legacy replay branch: histories that predate the
-                    # settlement marker recorded cancellation of the pending
-                    # siblings followed by an immediate return. Reproduce that
-                    # command sequence exactly so those workflows replay clean.
-                    workflow.logger.info(
-                        f"[DAG] Task {task_index} failed - canceling remaining and returning for LLM recovery"
-                    )
-                    for pending in pending_tasks.values():
-                        pending.cancel()
-                    return {
-                        "status": "needs_llm",
-                        "context": context,
-                    }
-                batch_failed = True
-                workflow.logger.info(f"[DAG] Task {task_index} failed")
-            else:
-                dag.mark_completed(task_index)
-                workflow.logger.info(f"[DAG] Task {task_index} completed")
 
-        if batch_failed:
-            # Do not cancel siblings: a spawn/message/purchase may already have
-            # committed its external side effect. Drain the current batch and
-            # merge its terminal messages so the recovery LLM cannot duplicate it.
-            await _settle_in_flight_tasks(pending_tasks, task_to_index, dag)
-            if poll_messages:
-                last_checked = await poll_and_update_context(poll_messages, context, last_checked)
-            return {
-                "status": "needs_llm",
-                "context": context,
-            }
+                # Cancel and drain remaining task wrappers. Awaiting their
+                # cancellation keeps workflow-local cleanup deterministic even
+                # when an underlying activity was already in flight.
+                remaining = list(pending_tasks.values())
+                for pending in remaining:
+                    pending.cancel()
+                if remaining:
+                    await asyncio.gather(*remaining, return_exceptions=True)
+
+                return {
+                    # Never fall through to unrestricted run_agent recovery here.
+                    # A sibling or an earlier dependency may already have committed
+                    # an external side effect; replaying the whole plan can duplicate
+                    # it (for example, spawning the same child agent twice).
+                    "status": "error",
+                    "context": context,
+                    "message": f"Planned task {task_index + 1} failed during DAG execution.",
+                }
+
+            dag.mark_completed(task_index)
+            workflow.logger.info(f"[DAG] Task {task_index} completed")
 
         # Loop continues - get_ready_tasks will now return newly ready dependents
 
@@ -737,7 +684,6 @@ async def _execute_single_task(
     tool_names: Optional[List[str]] = None,
     param_cache_seed_event: Optional[asyncio.Event] = None,
     param_cache_seed_lock: Optional[asyncio.Lock] = None,
-    alias_param_contract_retry_enabled: bool = False,
 ) -> bool:
     """
     Execute a single task from the DAG.
@@ -764,6 +710,9 @@ async def _execute_single_task(
     tool_call_id = str(workflow.uuid4())
     reasoning_stream_id: Optional[str] = None
     reasoning_started_at: Optional[str] = None
+    # Name of the early IN_PROGRESS tool chip once emitted (non-reasoning path).
+    # Tracked so a cancellation can terminalize the exact same live chip.
+    early_tool_event_name: Optional[str] = None
     dag.mark_in_progress(task.index, tool_call_id)
 
     try:
@@ -884,6 +833,7 @@ async def _execute_single_task(
             # concrete planned tool while the LLM fills arguments.
             early_tool_name, early_event = _build_early_tool_event(task, actual_tool, tool_call_id)
             await handle_tool_event_fn(early_event, tool_call_id, early_tool_name)
+            early_tool_event_name = early_tool_name
 
             # Populate tool params by extending the current agent context with a
             # user message that prompts the LLM to call the specific tool.
@@ -892,13 +842,14 @@ async def _execute_single_task(
                 task.index + 1,
                 task.goal,
                 actual_tool,
-                task.tool_name if alias_param_contract_retry_enabled else None,
+                planned_tool_name=task.tool_name,
             )
 
-            # Store context snapshot in shared memory for same-machine activity pickup.
-            # Parallel DAG tasks share the key — same data, and worst case the
-            # second task falls back to backend API after the first cleans up.
-            _pending_llm_context[agent_id] = (list(context), system_prompt_text, None)
+            # Store a reusable context snapshot for same-machine activity pickup.
+            # call_llm_activity removes the entry after a successful call, so a
+            # locally rejected contract attempt must restore it before retrying.
+            pending_context = (list(context), system_prompt_text, None)
+            _pending_llm_context[agent_id] = pending_context
 
             # Keep the exact execute-phase tool schema so every param-populator
             # shares the same system+tools+conversation cache prefix. The
@@ -940,48 +891,7 @@ async def _execute_single_task(
                 True,
             ]
 
-            async def populate_params() -> Dict[str, Any]:
-                for structured_attempt in range(1, STRUCTURED_OUTPUT_MAX_ATTEMPTS + 1):
-                    try:
-                        return await execute_activity(
-                            call_llm_activity,
-                            args=llm_args,
-                            start_to_close_timeout=timedelta(seconds=600),
-                            retry_policy=RetryPolicy(maximum_attempts=2),
-                            heartbeat_timeout=timedelta(seconds=180),
-                        )
-                    except Exception as exc:
-                        should_retry = error_chain_has_type(exc, STRUCTURED_OUTPUT_ERROR_TYPE)
-                        if not should_retry or structured_attempt >= STRUCTURED_OUTPUT_MAX_ATTEMPTS:
-                            raise
-                        workflow.logger.warning(
-                            f"[DAG] Param population structured output failed "
-                            f"(attempt {structured_attempt}/{STRUCTURED_OUTPUT_MAX_ATTEMPTS}); retrying"
-                        )
-                raise RuntimeError("Param population exhausted attempts")
-
-            async def populate_params_with_cache_seed() -> Dict[str, Any]:
-                llm_result: Optional[Dict[str, Any]] = None
-                if param_cache_seed_event is not None and param_cache_seed_lock is not None:
-                    async with param_cache_seed_lock:
-                        if not param_cache_seed_event.is_set():
-                            try:
-                                llm_result = await populate_params()
-                            finally:
-                                param_cache_seed_event.set()
-
-                if llm_result is None:
-                    if param_cache_seed_event is not None:
-                        await param_cache_seed_event.wait()
-                    llm_result = await populate_params()
-                return llm_result
-
-            async def record_param_usage(llm_result: Dict[str, Any]) -> None:
-                if not workflow.patched(DAG_PARAM_USAGE_TOKENS_PATCH):
-                    # Pre-marker histories never scheduled on_tokens work from
-                    # the param populator; replaying it would diverge.
-                    return
-                param_usage = llm_result.get("usage", {})
+            async def track_param_usage(param_usage: Dict[str, Any]) -> None:
                 if not on_tokens or not param_usage:
                     return
                 p_in = param_usage.get("prompt_tokens", 0)
@@ -1006,37 +916,64 @@ async def _execute_single_task(
                 except Exception as e:
                     workflow.logger.warning(f"on_tokens failed for dag_param_populator: {e}")
 
-            tool_call: Dict[str, Any]
-            params: Dict[str, Any]
-            for contract_attempt in range(1, PARAM_CONTRACT_MAX_ATTEMPTS + 1):
-                llm_result = await populate_params_with_cache_seed()
-                await record_param_usage(llm_result)
+            async def populate_params() -> tuple[Dict[str, Any], Dict[str, Any]]:
+                contract_error: Optional[str] = None
+                for structured_attempt in range(1, STRUCTURED_OUTPUT_MAX_ATTEMPTS + 1):
+                    try:
+                        # A successful activity consumes the shared pending context
+                        # before local alias validation runs. Restore the identical
+                        # snapshot so a bounded semantic retry keeps the same prefix.
+                        _pending_llm_context[agent_id] = pending_context
+                        attempt_llm_args = list(llm_args)
+                        attempt_llm_args[10] = _build_param_population_message(
+                            task.index + 1,
+                            task.goal,
+                            actual_tool,
+                            planned_tool_name=task.tool_name,
+                            contract_error=contract_error,
+                        )
+                        result = await execute_activity(
+                            call_llm_activity,
+                            args=attempt_llm_args,
+                            start_to_close_timeout=timedelta(seconds=600),
+                            retry_policy=RetryPolicy(maximum_attempts=2),
+                            heartbeat_timeout=timedelta(seconds=180),
+                        )
+                        usage = result.get("usage", {})
+                        # Account a completed LLM call before local validation can
+                        # reject it. This also covers the final exhausted attempt.
+                        await track_param_usage(usage)
+                        selected_call = _select_param_tool_call(result.get("tool_calls", []), actual_tool, task)
+                        return result, selected_call
+                    except Exception as exc:
+                        should_retry = isinstance(exc, ParamPopulationContractError) or error_chain_has_type(
+                            exc, STRUCTURED_OUTPUT_ERROR_TYPE
+                        )
+                        if not should_retry or structured_attempt >= STRUCTURED_OUTPUT_MAX_ATTEMPTS:
+                            raise
+                        contract_error = extract_error_message(exc)
+                        workflow.logger.warning(
+                            f"[DAG] Param population contract failed "
+                            f"(attempt {structured_attempt}/{STRUCTURED_OUTPUT_MAX_ATTEMPTS}); retrying"
+                        )
+                raise RuntimeError("Param population exhausted attempts")
 
-                tool_calls = llm_result.get("tool_calls", [])
-                tool_call = _select_param_tool_call(tool_calls, actual_tool, task)
-                params = {k: v for k, v in tool_call.items() if k != "tool"}
-                contract_error = (
-                    _alias_param_contract_error(params, task) if alias_param_contract_retry_enabled else None
-                )
-                if not contract_error:
-                    break
-                if contract_attempt >= PARAM_CONTRACT_MAX_ATTEMPTS:
-                    raise ValueError(
-                        f"DAG alias parameter contract remained invalid after {contract_attempt} attempts: "
-                        f"{contract_error}"
-                    )
+            populated_result: Optional[tuple[Dict[str, Any], Dict[str, Any]]] = None
+            if param_cache_seed_event is not None and param_cache_seed_lock is not None:
+                async with param_cache_seed_lock:
+                    if not param_cache_seed_event.is_set():
+                        try:
+                            populated_result = await populate_params()
+                        finally:
+                            param_cache_seed_event.set()
 
-                workflow.logger.warning(
-                    f"[DAG] Param population violated {task.tool_name} contract "
-                    f"(attempt {contract_attempt}/{PARAM_CONTRACT_MAX_ATTEMPTS}): "
-                    f"{contract_error[:300]}; retrying"
-                )
-                llm_args[10] = (
-                    f"{extra_msg}\n\n"
-                    f"Your previous tool call violated the planned alias contract: {contract_error[:500]}. "
-                    "Return a corrected call that satisfies the exact type and all subtype-required fields."
-                )
-                _pending_llm_context[agent_id] = (list(context), system_prompt_text, None)
+            if populated_result is None:
+                if param_cache_seed_event is not None:
+                    await param_cache_seed_event.wait()
+                populated_result = await populate_params()
+
+            _, tool_call = populated_result
+            params = {k: v for k, v in tool_call.items() if k != "tool"}
 
             # Force correct type for spawn_agent aliases (LLM can't be trusted to pick the right type)
             type_override = ALIAS_TYPE_OVERRIDES.get(task.tool_name)
@@ -1059,6 +996,14 @@ async def _execute_single_task(
                 if type_override.get("type") in {"general_purpose", "for_each"}:
                     params["_spawn_group_id"] = spawn_group_id(tool_call_id)
 
+            # Validate the final, overridden spawn payload before any external
+            # child workflow can be started. Alias coercion must never bypass the
+            # canonical SpawnAgentTool cross-field constraints.
+            if actual_tool == "spawn_agent":
+                from utils.tool_schemas import SpawnAgentTool
+
+                SpawnAgentTool.model_validate({"tool": actual_tool, **params})
+
             # Execute tool (uses existing flow - posts result to context)
             result = await execute_tool(actual_tool, params, tool_call_id)
 
@@ -1076,6 +1021,56 @@ async def _execute_single_task(
                     f"items={len(params.get('items')) if isinstance(params.get('items'), list) else params.get('items')}"
                 )
             return not failed
+
+    except asyncio.CancelledError:
+        # asyncio.CancelledError is NOT an Exception (it is BaseException), so the
+        # broad `except Exception` handler below never runs on cancellation.
+        # execute_dag cancels every remaining task wrapper the moment a sibling
+        # fails; without terminalizing here, the early IN_PROGRESS tool chip
+        # (emitted before param population) and the reasoning stream bubble stay
+        # live forever in the UI as a phantom chip. Emit a terminal event for the
+        # same tool_call_id, then re-raise so the gather-based cancellation drain
+        # in execute_dag still completes.
+        try:
+            if early_tool_event_name is not None:
+                await handle_tool_event_fn(
+                    ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title=task.tool_name,
+                        message="Canceled: a sibling task failed.",
+                        status=MessageStatus.ERROR,
+                        metadata={
+                            "dagTaskIndex": task.index,
+                            "plannedToolName": task.tool_name,
+                            "canceled": True,
+                        },
+                    ),
+                    tool_call_id,
+                    early_tool_event_name,
+                )
+            elif reasoning_stream_id is not None:
+                await handle_tool_event_fn(
+                    ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title=DAG_REASONING_FINISHED_TITLE,
+                        message="Canceled: a sibling task failed.",
+                        status=MessageStatus.ERROR,
+                        metadata={
+                            "dagTaskIndex": task.index,
+                            "plannedToolName": task.tool_name,
+                            "streamId": reasoning_stream_id,
+                            "firstTimestamp": reasoning_started_at,
+                            "startedAt": reasoning_started_at,
+                            "canceled": True,
+                            "error": True,
+                        },
+                    ),
+                    tool_call_id,
+                    DAG_REASONING_UI_TOOL_NAME,
+                )
+        except Exception as terminal_err:  # never mask the cancellation
+            workflow.logger.warning(f"[DAG] Failed to terminalize canceled task {task.index}: {terminal_err}")
+        raise
 
     except Exception as e:
         # Extract actual error message (unwrap Temporal's ActivityError wrapper)

@@ -1,13 +1,13 @@
 /**
  * Full-lifecycle latency ratchet for every synchronous chat-router path.
  *
- * Each path runs five independent samples. The timer starts immediately before
- * Enter and stops only at a terminal browser state: a canonical answer for
+ * Each path runs five independent samples. The timer starts at Enter keydown in
+ * the browser and stops only at a terminal browser state: a canonical answer for
  * answer paths, or the post-Temporal agent-mode transition for escalations.
  */
 import { randomUUID } from 'node:crypto';
 
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 import {
   FRONTEND_URL,
@@ -83,8 +83,39 @@ const CHAT_PATHS: ChatPathDefinition[] = [
   },
 ];
 
-function elapsed(startedAt: number): number {
-  return Math.round(performance.now() - startedAt);
+function elapsed(startedAt: Promise<number>): Promise<number> {
+  return startedAt.then((timestamp) => Math.round(Date.now() - timestamp));
+}
+
+async function armLifecycleClock(
+  page: Page,
+  input: Locator,
+): Promise<{ startedAt: Promise<number> }> {
+  // Anchor the SLA to the user's actual Enter key event in the browser.
+  // A Node-side timestamp taken before input.press() also measures
+  // Playwright command-dispatch delay when the host is under load.
+  await input.evaluate((element) => {
+    const attribute = 'data-chat-lifecycle-started-at';
+    document.documentElement.removeAttribute(attribute);
+    element.addEventListener(
+      'keydown',
+      (event) => {
+        if ((event as KeyboardEvent).key === 'Enter') {
+          document.documentElement.setAttribute(attribute, String(Date.now()));
+        }
+      },
+      { once: true },
+    );
+  });
+  const startedAt = page
+    .waitForFunction(() => document.documentElement.getAttribute('data-chat-lifecycle-started-at'))
+    .then((handle) => handle.jsonValue())
+    .then((timestamp) => {
+      const value = Number(timestamp);
+      if (!Number.isFinite(value)) throw new Error('Submit timestamp was not captured');
+      return value;
+    });
+  return { startedAt };
 }
 
 function percentile(values: number[], quantile: number): number {
@@ -130,7 +161,7 @@ function selectedPaths(): ChatPathDefinition[] {
   return [selected];
 }
 
-function waitForFirstResponse(page: Page, startedAt: number): Promise<number> {
+function waitForFirstResponse(page: Page, startedAt: Promise<number>): Promise<number> {
   return page
     .waitForFunction(
       () => {
@@ -166,7 +197,7 @@ async function waitForRoute(
   page: Page,
   path: ChatPathDefinition,
   marker: string,
-  startedAt: number,
+  startedAt: Promise<number>,
 ): Promise<number> {
   if (path.id === 'web_search') {
     await page
@@ -197,7 +228,7 @@ async function waitForTerminalState(
   page: Page,
   path: ChatPathDefinition,
   marker: string,
-  startedAt: number,
+  startedAt: Promise<number>,
   agentIdentity: Promise<string>,
 ): Promise<number> {
   if (path.terminal === 'agent_mode') {
@@ -216,6 +247,18 @@ async function waitForTerminalState(
 
 test.describe('chat full-lifecycle latency', () => {
   test.describe.configure({ mode: 'parallel' });
+
+  test('latency clock excludes Playwright command-dispatch delay', async ({ page }) => {
+    await page.setContent('<textarea aria-label="Goal"></textarea>');
+    const input = page.getByRole('textbox', { name: 'Goal' });
+    const { startedAt } = await armLifecycleClock(page, input);
+    const delayStartedAt = Date.now();
+
+    await page.waitForTimeout(250);
+    await input.press('Enter');
+
+    expect(await startedAt).toBeGreaterThanOrEqual(delayStartedAt + 200);
+  });
 
   for (const path of selectedPaths()) {
     test(`${path.id}: five full-lifecycle samples stay below five seconds`, async ({ page }) => {
@@ -252,7 +295,7 @@ test.describe('chat full-lifecycle latency', () => {
         await input.fill(goal);
 
         let agentId: string | null = null;
-        const startedAt = performance.now();
+        const { startedAt } = await armLifecycleClock(page, input);
         const agentIdentity = page
           .waitForURL((url) => Boolean(url.searchParams.get('agent-id')), {
             timeout: MILESTONE_TIMEOUT_MS,

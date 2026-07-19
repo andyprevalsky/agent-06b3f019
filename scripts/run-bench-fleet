@@ -47,25 +47,63 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
-source "$ROOT_DIR/scripts/lib/cloudbench-env.sh"
+source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"
+
+# ── Run from a script SNAPSHOT, never the live checkout ─────────────────────
+# bash reads scripts lazily from disk: editing run-bench-fleet/run-bench-cloud
+# while a controller is mid-run shifts bytes under the interpreter and kills a
+# healthy fleet with a parse error (observed: 28 provisioned boxes torn down by
+# "syntax error near unexpected token 'fi'" after an in-flight edit). Re-exec
+# from an immutable per-invocation copy so the working tree stays editable.
+if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
+    CLOUDBENCH_SCRIPT_SNAPSHOT="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-scripts.XXXXXX")"
+    cp "$ROOT_DIR/scripts/run-bench-fleet" \
+       "$ROOT_DIR/scripts/run-bench-cloud" \
+       "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
+       "$CLOUDBENCH_SCRIPT_SNAPSHOT/"
+    export CLOUDBENCH_SCRIPT_SNAPSHOT CLOUDBENCH_FLEET_ROOT="$ROOT_DIR"
+    exec bash "$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-fleet" "$@"
+fi
+RUN_BENCH_CLOUD_BIN="$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-cloud"
 MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"
 
 APP="navi-whisper-lux-bench"
 REGION="${CLOUDBENCH_REGION:-iad}"
 MACHINE_NAME="cloudbench-warm"
 VOLUME_NAME="cloudbench_data"
+# The warm maintenance source is intentionally roomy (shared-cpu-4x/8GB), but
+# inheriting that shape across 37 primaries consumed 148 CPU units. With prod's
+# observed 16 active units, Fly rejected the 37th at its 160-unit overcommit
+# governor. Fly caps shared-cpu-2x at 4GB, while converting the entire stopped
+# pool to performance-1x/8GB exhausts the org's performance-CPU reservation
+# before all 37 machines are configured. The valid fleet-wide shape is
+# shared-cpu-2x/4GB: 74 running CPU units at full concurrency, below the
+# observed ceiling, with no performance reservation dependency. Worker-only
+# clones mirror prod's performance-1x/2GB shape.
+FLEET_PRIMARY_VM_SIZE="${CLOUDBENCH_FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}"
+FLEET_PRIMARY_VM_MEMORY="${CLOUDBENCH_FLEET_PRIMARY_VM_MEMORY:-4096}"
+FLEET_WORKER_VM_SIZE="${CLOUDBENCH_FLEET_WORKER_VM_SIZE:-performance-1x}"
+FLEET_WORKER_VM_MEMORY="${CLOUDBENCH_FLEET_WORKER_VM_MEMORY:-2048}"
+WARM_PARKED_VM_SIZE="${CLOUDBENCH_WARM_PARKED_VM_SIZE:-shared-cpu-1x}"
+WARM_PARKED_VM_MEMORY="${CLOUDBENCH_WARM_PARKED_VM_MEMORY:-2048}"
 # Every run lands in its OWN dir under the runs-root; the central hub (one
 # persistent dashboard on DASH_BASE) scans the runs-root so ALL runs show up and
 # each is clickable at /run/<id>/. Runs never clobber each other.
 RUNS_ROOT="${CLOUDBENCH_RUNS_ROOT:-$ROOT_DIR/.context/fleet/runs}"
 case "$RUNS_ROOT" in /*) ;; *) RUNS_ROOT="$ROOT_DIR/$RUNS_ROOT" ;; esac
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+BARRIER_RELEASE_TOKEN="${CLOUDBENCH_BARRIER_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')}"
+export CLOUDBENCH_BARRIER_TOKEN="$BARRIER_RELEASE_TOKEN"
 FLEET_DIR="$RUNS_ROOT/$RUN_ID"
+TAINTED_POOL_FILE="$FLEET_DIR/tainted-pool.ids"
 HUB_CTX_DIR="$RUNS_ROOT/_hub"
 LOCK_DIR="$ROOT_DIR/.context/cloudbench-controller.lock"
+HUB_UPLOAD_HELPER="$ROOT_DIR/agents/benchmarks/hub_upload.py"
+INHERITED_HUB_RUN_ID="${BENCHMARK_HUB_PARENT_RUN_ID:-}"
+SELF_MANAGED_HUB_RUN="0"
 
 # ── Args ─────────────────────────────────────────────────────────────────────
 BENCHES=()
@@ -87,9 +125,12 @@ GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/
 case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
 POOL_WORKSPACE_KEY="$(printf '%s' "$(basename "$ROOT_DIR")" | tr -c 'a-zA-Z0-9._-' '-')"
 POOL_IDS_FILE="$GIT_COMMON_DIR/cloudbench-pools/$POOL_WORKSPACE_KEY.ids"
+POOL_META_FILE="$POOL_IDS_FILE.deps"
 POOL_IDS_LOCK="$POOL_IDS_FILE.lock"
 LEGACY_POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"
 POOL_CLAIMS_DIR="$GIT_COMMON_DIR/cloudbench-pool-claims"
+ORIG_ARGS=("$@")
+DETACH="0"
 # Ephemeral clone ownership must outlive a disposable Conductor workspace and
 # the controller process itself. Each fleet writes one registry under the shared
 # git-common dir; per-clone records are independent files so concurrent
@@ -106,6 +147,7 @@ FLEET_REGISTRY_DIR="$FLEET_OWNERSHIP_ROOT/$FLEET_OWNER_TOKEN"
 FLEET_REGISTRY_PUBLISHED=0
 while [ $# -gt 0 ]; do
     case "$1" in
+        --detach)         DETACH="1"; shift ;;
         --sim-on)         SIM_ON_CSV="${2:-}"; shift 2 ;;
         --ref)            BENCH_REF="${2:-}"; shift 2 ;;
         --dash-base)      DASH_BASE="${2:-}"; shift 2 ;;
@@ -120,24 +162,93 @@ while [ $# -gt 0 ]; do
         *)                BENCHES+=("$1"); shift ;;
     esac
 done
+# Dedupe bench names (preserve first-seen order). Each bench gets ONE isolated
+# machine keyed on $FLEET_DIR/$bench, so a duplicate name (e.g. a duplicate
+# catalog entry) would share an out-dir/machine and trip the isolation guard
+# ("machine … allocated twice"), aborting the whole batch. A duplicate is
+# meaningless anyway — you can't isolate two runs of the same name — so run it
+# once and warn.
+if [ "${#BENCHES[@]}" -ge 1 ]; then
+    _seen_benches=" "
+    _deduped_benches=()
+    for _b in "${BENCHES[@]}"; do
+        case "$_seen_benches" in
+            *" $_b "*) echo "⚠️  duplicate bench '$_b' — running once (can't isolate two runs of the same name)" >&2 ;;
+            *) _deduped_benches+=("$_b"); _seen_benches="$_seen_benches$_b " ;;
+        esac
+    done
+    BENCHES=("${_deduped_benches[@]}")
+fi
+
 # --provision-pool takes no bench args; everything else needs at least one bench.
 [ -n "$PROVISION_POOL" ] || true
 [ -n "$PROVISION_POOL" ] || [ "${#BENCHES[@]}" -ge 1 ] || { echo "usage: run-bench-fleet <bench> [<bench>...] [--sim-on a,b] [--ref X]  |  --provision-pool N" >&2; exit 2; }
 [ -z "$BENCH_REF" ] && BENCH_REF="$(git rev-parse HEAD 2>/dev/null || echo '')"
+canonicalize_bench_ref() {
+    local requested="$1" resolved
+    # A fresh remote clone cannot fetch an abbreviated object ID because Git
+    # servers advertise refs, not arbitrary short SHAs. Canonicalize every ref
+    # the controller can resolve locally; preserve remote-only branch/tag names.
+    if resolved="$(git rev-parse --verify "${requested}^{commit}" 2>/dev/null)"; then
+        printf '%s' "$resolved"
+    else
+        printf '%s' "$requested"
+    fi
+}
+BENCH_REF="$(canonicalize_bench_ref "$BENCH_REF")"
+
+# --detach: re-exec THIS invocation in its own session before acquiring any
+# lock or machine, so the controller (and its cleanup traps) survive the
+# launching terminal/agent session dying mid-run. The surviving process owns
+# the controller lock, the clones, and the teardown.
+if [ "$DETACH" = "1" ]; then
+    DETACH_ARGS=()
+    for a in "${ORIG_ARGS[@]}"; do [ "$a" = "--detach" ] || DETACH_ARGS+=("$a"); done
+    mkdir -p "$RUNS_ROOT"
+    DETACH_LOG="$RUNS_ROOT/detached-$RUN_ID.log"
+    cloudbench_detach_reexec "$DETACH_LOG" bash "${BASH_SOURCE[0]}" "${DETACH_ARGS[@]}"
+    echo "🛰️  fleet controller detached (own session; survives launcher exit)"
+    echo "    log: tail -f $DETACH_LOG"
+    exit 0
+fi
 
 # A synchronized child begins polling before the controller has finished
 # provisioning the remaining machines. Give the remote barrier the full
 # per-benchmark timeout, then add that barrier budget to the child's outer
 # polling ceiling so benchmark execution still receives RUN_TIMEOUT seconds
 # after every isolated stack is ready.
+per_box_barrier_wait_seconds() {
+    local first_run_stack_wait pre_stack_allowance
+    if [ -n "${CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS:-}" ]; then
+        printf '%s\n' "$CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS"
+        return
+    fi
+    first_run_stack_wait="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"
+    pre_stack_allowance="${CLOUDBENCH_PRE_STACK_WAIT_SECONDS:-600}"
+    case "$first_run_stack_wait:$pre_stack_allowance" in
+        *[!0-9:]*|:*|*:)
+            echo "invalid cold bootstrap barrier budget" >&2
+            return 2
+            ;;
+    esac
+    printf '%s\n' "$((first_run_stack_wait + pre_stack_allowance))"
+}
+
+FIRST_RUN_STACK_WAIT_SECONDS="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"
+PER_BOX_BARRIER_WAIT_SECONDS="$(per_box_barrier_wait_seconds)" || exit 2
 START_BARRIER_WAIT_SECONDS="${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}"
-for seconds in "$RUN_TIMEOUT" "$START_BARRIER_WAIT_SECONDS"; do
+for seconds in "$RUN_TIMEOUT" "$FIRST_RUN_STACK_WAIT_SECONDS" "$PER_BOX_BARRIER_WAIT_SECONDS" "$START_BARRIER_WAIT_SECONDS"; do
     case "$seconds" in
-        ''|*[!0-9]*) echo "❌ --timeout and CLOUDBENCH_START_BARRIER_WAIT_SECONDS must be positive integers" >&2; exit 2 ;;
+        ''|*[!0-9]*) echo "❌ benchmark and barrier timeouts must be positive integers" >&2; exit 2 ;;
     esac
     [ "$seconds" -gt 0 ] \
-        || { echo "❌ --timeout and CLOUDBENCH_START_BARRIER_WAIT_SECONDS must be positive integers" >&2; exit 2; }
+        || { echo "❌ benchmark and barrier timeouts must be positive integers" >&2; exit 2; }
 done
+# The global barrier cannot expire before a legitimate cold guest's per-box
+# budget. This clamps an undersized default or override to the shared contract.
+if [ "$START_BARRIER_WAIT_SECONDS" -lt "$PER_BOX_BARRIER_WAIT_SECONDS" ]; then
+    START_BARRIER_WAIT_SECONDS="$PER_BOX_BARRIER_WAIT_SECONDS"
+fi
 case "$CONTROLLER_RETRY_SECONDS" in
     ''|*[!0-9]*|0) echo "❌ CLOUDBENCH_CONTROLLER_RETRY_SECONDS must be a positive integer" >&2; exit 2 ;;
 esac
@@ -166,15 +277,117 @@ FLY_API_TOKEN="$(resolve_fly_token)"
 export FLY_API_TOKEN
 FLY() { flyctl "$@"; }
 
+# ── ONE shared machines snapshot for every read-only poller ─────────────────
+# 28 autoscalers + clone resolvers each running their own `flyctl machines
+# list` was ~28× redundant Fly API load per interval — the direct source of
+# resource_exhausted throttling at fleet width. A single controller-owned loop
+# refreshes $FLEET_DIR/machines.json atomically on one cadence (with backoff on
+# API failure, keeping the last good snapshot), and every read-only consumer
+# reads the snapshot. Mutating paths that need post-write freshness (reap
+# verification, pool claims) intentionally stay live.
+MACHINES_SNAPSHOT="$FLEET_DIR/machines.json"
+VOLUMES_SNAPSHOT="$FLEET_DIR/volumes.json"
+SNAPSHOT_POLL="${CLOUDBENCH_SNAPSHOT_POLL_SECONDS:-5}"
+machines_snapshot_loop() {
+    local tmp backoff=0 ok
+    while :; do
+        ok=1
+        tmp="$MACHINES_SNAPSHOT.tmp.$$"
+        if FLY machines list -a "$APP" --json > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+            mv "$tmp" "$MACHINES_SNAPSHOT"
+        else rm -f "$tmp"; ok=0; fi
+        tmp="$VOLUMES_SNAPSHOT.tmp.$$"
+        if FLY volumes list -a "$APP" --json > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+            mv "$tmp" "$VOLUMES_SNAPSHOT"
+        else rm -f "$tmp"; ok=0; fi
+        if [ "$ok" = 1 ]; then backoff=0; else
+            # rate-limited/transient API failure: back off (bounded) and keep
+            # serving the last good snapshot rather than hammering the API
+            backoff=$(( backoff < 30 ? backoff + SNAPSHOT_POLL : 30 ))
+        fi
+        sleep $(( SNAPSHOT_POLL + backoff + (RANDOM % 3) ))
+    done
+}
+_fresh_snapshot_or() {  # _fresh_snapshot_or <snapshot-file> <live-cmd...>
+    # Serve the shared snapshot when fresh; fall back to a live call when the
+    # loop hasn't started (early preflight) or died — readers never block on
+    # snapshot plumbing.
+    local f="$1" now mt; shift
+    if [ -f "$f" ]; then
+        now=$(date +%s)
+        mt=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
+        if [ $(( now - mt )) -le $(( SNAPSHOT_POLL * 4 )) ]; then cat "$f"; return 0; fi
+    fi
+    "$@" 2>/dev/null
+}
+fleet_machines_json() { _fresh_snapshot_or "$MACHINES_SNAPSHOT" FLY machines list -a "$APP" --json; }
+fleet_volumes_json()  { _fresh_snapshot_or "$VOLUMES_SNAPSHOT" FLY volumes list -a "$APP" --json; }
+
+machines_snapshot_identity() {
+    [ -f "$MACHINES_SNAPSHOT" ] || { printf 'missing'; return; }
+    stat -f '%i:%m' "$MACHINES_SNAPSHOT" 2>/dev/null \
+        || stat -c '%i:%Y' "$MACHINES_SNAPSHOT" 2>/dev/null \
+        || printf 'unknown'
+}
+
+refresh_machines_snapshot_after() {  # refresh_machines_snapshot_after <prior-identity>
+    # Clone output very rarely omits the target id.  In that exceptional path,
+    # all concurrent resolvers share one live refresh instead of issuing one
+    # Machines API list call per clone.  A renamed snapshot changes inode, so
+    # waiters can prove they observed a refresh newer than their prior view.
+    local prior="$1" lock="$FLEET_DIR/machines-refresh.lock" tmp current i
+    for i in $(seq 1 100); do
+        current="$(machines_snapshot_identity)"
+        [ "$current" != "$prior" ] && return 0
+        if mkdir "$lock" 2>/dev/null; then
+            # A peer may have refreshed between our read and lock acquisition.
+            current="$(machines_snapshot_identity)"
+            if [ "$current" = "$prior" ]; then
+                tmp="$MACHINES_SNAPSHOT.refresh.$$"
+                if FLY machines list -a "$APP" --json > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+                    mv "$tmp" "$MACHINES_SNAPSHOT"
+                else
+                    rm -f "$tmp" "$lock"
+                    return 1
+                fi
+            fi
+            rmdir "$lock" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.1
+    done
+    echo "❌ timed out waiting for the coalesced Machines API refresh" >&2
+    return 1
+}
+
 # A clone ID is allocated before its snapshot-backed volume becomes mountable.
 # Keep every clone start behind the same storage lifecycle contract as the
 # per-benchmark child runner.
 machine_storage_ready() {  # machine_storage_ready <id>
     local id="$1" machines volumes
-    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
-    volumes="$(FLY volumes list -a "$APP" --json 2>/dev/null)" || return 1
+    machines="$(fleet_machines_json)" || return 1
+    volumes="$(fleet_volumes_json)" || return 1
     python3 "$MACHINE_READINESS_SCRIPT" "$id" \
         <(printf '%s' "$machines") <(printf '%s' "$volumes") >/dev/null
+}
+
+snapshot_machine_state() {  # snapshot_machine_state <id>; 0=state, 1=absent, 2=unsafe
+    local id="$1"
+    fleet_machines_json | MACHINE_ID="$id" python3 -c '
+import json, os, sys
+try:
+    machines = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(2)
+if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+    raise SystemExit(2)
+matches = [machine for machine in machines if machine.get("id") == os.environ["MACHINE_ID"]]
+if not matches:
+    raise SystemExit(1)
+if len(matches) != 1 or not isinstance(matches[0].get("state"), str):
+    raise SystemExit(2)
+print(matches[0]["state"])
+'
 }
 
 is_sim_on() { case ",$SIM_ON_CSV," in *",$1,"*) return 0 ;; esac; return 1; }
@@ -211,7 +424,10 @@ print_code_provenance() {
     echo "  ref    : $BENCH_REF  ($head_sha $head_sub)"
     echo "  pushed : $pushed"
     untracked_count="$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | wc -l | tr -d ' ')"
-    if git -C "$ROOT_DIR" diff --quiet 2>/dev/null && [ "$untracked_count" = "0" ]; then
+    if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" = "1" ]; then
+        echo "  diff   : local changes intentionally excluded (running committed $head_sha exactly)"
+        CODE_SUMMARY="$branch@$head_sha (pinned; local patch excluded)"
+    elif git -C "$ROOT_DIR" diff --quiet 2>/dev/null && [ "$untracked_count" = "0" ]; then
         echo "  diff   : clean working tree (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (clean)"
     else
@@ -227,16 +443,55 @@ print_code_provenance() {
 # Destroy a machine RELIABLY. A clone still in Fly's 'created'/provisioning state
 # no-ops a `--force` destroy (and then auto-starts later → a money-burning
 # zombie), so retry across the transition; last resort, stop then destroy.
+machine_volume_id() {  # machine_volume_id <machine_id> → its mounted volume id (or empty)
+    FLY machines list -a "$APP" --json 2>/dev/null | MID="$1" python3 -c '
+import json, os, sys
+try: machines = json.load(sys.stdin) or []
+except Exception: machines = []
+for m in machines:
+    if m.get("id") == os.environ["MID"]:
+        mounts = m.get("config", {}).get("mounts") or []
+        if mounts and mounts[0].get("volume"):
+            print(mounts[0]["volume"])
+        break
+' 2>/dev/null || true
+}
+
+reap_volume() {  # reap_volume <volume_id> — destroy a clone's forked volume
+    local vol="$1" i
+    [ -n "$vol" ] || return 0
+    if [ -n "${WARM_VOLUME_ID:-}" ] && [ "$vol" = "$WARM_VOLUME_ID" ]; then
+        echo "  ❌ refusing to destroy warm source volume $vol" >&2
+        return 1
+    fi
+    for i in 1 2 3; do
+        if FLY volumes destroy "$vol" -a "$APP" --yes >/dev/null 2>&1; then return 0; fi
+        # already gone? treat as reaped
+        FLY volumes list -a "$APP" --json 2>/dev/null | grep -q "\"$vol\"" || return 0
+        sleep 2
+    done
+    echo "  ⚠️ could not destroy volume $vol — it will bill until swept: flyctl volumes destroy $vol -a $APP" >&2
+    return 1
+}
+
 reap_machine() {  # reap_machine <id> — returns non-zero if the machine survived
-    local id="$1" i
+    local id="$1" i vol=""
     [ -n "$id" ] || return 0
     if [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; then
         echo "  ❌ refusing to destroy warm source machine $id" >&2
         return 1
     fi
+    # `machine destroy` never destroys the clone's forked volume — it leaks and
+    # bills forever (a single day once leaked 42 × 20GB). Resolve the volume
+    # BEFORE the machine disappears; destroy it after the machine is confirmed
+    # gone.
+    vol="$(machine_volume_id "$id")"
     for i in 1 2 3 4 5; do
         FLY machine destroy --force "$id" -a "$APP" >/dev/null 2>&1 || true
-        FLY machines list -a "$APP" --json 2>/dev/null | grep -q "\"$id\"" || return 0
+        if ! FLY machines list -a "$APP" --json 2>/dev/null | grep -q "\"$id\""; then
+            reap_volume "$vol" || true
+            return 0
+        fi
         [ "$i" = 3 ] && FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
         sleep 3
     done
@@ -244,6 +499,7 @@ reap_machine() {  # reap_machine <id> — returns non-zero if the machine surviv
         echo "  ⚠️ could not destroy machine $id — check: flyctl machines list -a $APP" >&2
         return 1
     fi
+    reap_volume "$vol" || true
     return 0
 }
 
@@ -330,6 +586,24 @@ fleet_registry_release_id() {  # fleet_registry_release_id <machine-id>
     done
 }
 
+fleet_registry_release_name() {  # fleet_registry_release_name <clone-name>
+    local clone_name="$1" record="$FLEET_REGISTRY_DIR/clones/$1"
+    [ -f "$record" ] || return 0
+    [ "$(registry_meta_value "$record" name)" = "$clone_name" ] || return 1
+    rm -f "$record"
+}
+
+clone_failure_definitively_unallocated() {  # stdin/arg: fly clone stderr
+    # These Fly errors occur before a Machine exists. A forked volume may exist
+    # for the launch-capacity case, but cleanup's detached-volume sweep owns it.
+    # All other errors remain ambiguous and retain durable name ownership.
+    case "$1" in
+        *"failed to create volume:"*) return 0 ;;
+        *"failed to launch VM: insufficient resources to create new machine with existing volume"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 registry_owner_alive() {  # registry_owner_alive <meta-file>; 0=alive, 1=dead, 2=other host/invalid
     local meta="$1" host pid expected_start actual_start
     host="$(registry_meta_value "$meta" host)"
@@ -396,9 +670,15 @@ print(state, name)
 }
 
 registry_runner_count() {  # registry_runner_count <started-machine-id>; exact integer or non-zero
-    local id="$1" output count
+    local id="$1" output count remote_command escaped_command
+    # flyctl executes the -C payload directly rather than through a shell. The
+    # owner probe uses an assignment, command substitution, a pipeline, and a
+    # printf, so make the interpreter boundary explicit and pass one safely
+    # escaped script argument to bash -c.
+    remote_command="CLOUDBENCH_OWNER_PROBE=1; n=\$(pgrep -f '/data/[c]loudbench-run.sh|/tmp/[r]b.sh|benchmarks/[r]un_benchmark.py|scripts/[r]un.sh --benchmark|/tmp/[r]bw.sh|/data/[c]loudbench-worker.sh|agents/[w]orker.py' 2>/dev/null | wc -l | tr -d ' '); printf 'CLOUDBENCH_RUNNER_COUNT=%s\\n' \"\$n\""
+    printf -v escaped_command '%q' "$remote_command"
     output="$(FLY ssh console -a "$APP" --machine "$id" -q -C \
-        "CLOUDBENCH_OWNER_PROBE=1; n=\$(pgrep -f '/data/[c]loudbench-run.sh|/tmp/[r]b.sh|benchmarks/[r]un_benchmark.py|scripts/[r]un.sh --benchmark|/tmp/[r]bw.sh|/data/[c]loudbench-worker.sh|agents/[w]orker.py' 2>/dev/null | wc -l | tr -d ' '); printf 'CLOUDBENCH_RUNNER_COUNT=%s\\n' \"\$n\"" 2>/dev/null)" || return 1
+        "bash -c $escaped_command" 2>/dev/null)" || return 1
     count="$(printf '%s\n' "$output" | sed -n 's/^CLOUDBENCH_RUNNER_COUNT=//p' | tail -1)"
     case "$count" in ''|*[!0-9]*) return 1 ;; esac
     printf '%s' "$count"
@@ -420,6 +700,11 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale>
             case $? in
                 0) id="$resolved"; printf 'id=%s\n' "$id" >> "$record" ;;
                 1)
+                    # A successful Fly clone request may become list-visible
+                    # only after our lookup deadline.  The name-only ledger is
+                    # the sole durable ownership proof during that gap: keep it
+                    # and fail closed so a late-visible clone cannot be orphaned
+                    # while a successor provisions another fleet.
                     echo "❌ owned clone name '$clone_name' is not provider-visible yet; retaining ownership and refusing to provision" >&2
                     return 1
                     ;;
@@ -554,9 +839,17 @@ reconcile_stale_fleet_registries() {
 # the CURRENT branch code — the baked image only supplies deps. Stopped pool
 # machines cost $0 compute (volumes only) between runs.
 machine_id_for_clone_name() {  # machine_id_for_clone_name <name> <absolute-seconds-deadline>
-    local target_name="$1" deadline="$2" matches
+    local target_name="$1" deadline="$2" matches prior_snapshot
+    prior_snapshot=""
+    declare -F machines_snapshot_identity >/dev/null && prior_snapshot="$(machines_snapshot_identity)"
     while :; do
-        matches="$(FLY machines list -a "$APP" --json 2>/dev/null \
+        # This is the post-mutation fallback for clone output that omitted an
+        # authoritative target id.  Coalesce one fresh API read into the shared
+        # snapshot; the normal clone-output path does not call this at all.
+        if declare -F refresh_machines_snapshot_after >/dev/null; then
+            refresh_machines_snapshot_after "$prior_snapshot" || true
+        fi
+        matches="$(fleet_machines_json \
             | TARGET_NAME="$target_name" python3 -c '
 import json, os, sys
 try: machines = json.load(sys.stdin) or []
@@ -573,44 +866,102 @@ for machine in machines:
             echo "❌ unresolved clone name '$target_name'; inspect with: flyctl machines list -a $APP --json" >&2
             return 1
         fi
+        declare -F machines_snapshot_identity >/dev/null && prior_snapshot="$(machines_snapshot_identity)"
         sleep 1
     done
 }
 
-clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id]; echo target id
-    local ledger="$1" source_id="${2:-$WARM_ID}" clone_out clone_status target_id target_name diagnostic_log names_ledger deadline
-    local attempt attempts backoff
-    # Fly's API rate-limits bursts of machine clone/get calls (the whole fleet
-    # forks its clones near-simultaneously, plus per-bench autoscalers). A burst
-    # surfaces as `resource_exhausted: rate limit exceeded`, which is transient.
-    # Retry with exponential backoff (fresh name each attempt so a half-created
-    # clone from a rate-limited submit can't collide) instead of failing the
-    # whole synchronized barrier on a recoverable API throttle.
-    attempts="${CLOUDBENCH_CLONE_ATTEMPTS:-5}"
-    diagnostic_log="${ledger%.ids}.log"
-    names_ledger="${ledger%.ids}.names"
+# Run `FLY <args>` under a hard wall-clock ceiling, echoing its combined output.
+# `flyctl machine clone` has been observed to hang indefinitely on a stalled Fly
+# API call (even with --detach), which freezes the whole sequential provisioning
+# loop and starves the synchronized barrier. Backgrounding FLY (a function → its
+# flyctl child is a grandchild of this subshell) lets a watchdog reap the child
+# by parent (pkill -P) on timeout; returns 142 so the caller's retry loop treats
+# a hang exactly like any other transient clone failure. Portable (no `timeout`).
+fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
+    local secs="$1"; shift
+    local out; out="$(mktemp)"
+    FLY "$@" >"$out" 2>&1 &
+    local pid=$! waited=0 rc
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$waited" -ge "$secs" ]; then
+            pkill -TERM -P "$pid" 2>/dev/null || true
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 2
+            pkill -KILL -P "$pid" 2>/dev/null || true
+            kill -KILL "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            cat "$out"; rm -f "$out"
+            return 142
+        fi
+        sleep 1; waited=$((waited + 1))
+    done
+    wait "$pid"; rc=$?
+    cat "$out"; rm -f "$out"
+    return "$rc"
+}
+
+clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] [vm-size] [memory-mb]
+    local ledger="$1" source_id="${2:-$WARM_ID}"
+    local vm_size="${3:-${FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}}" vm_memory="${4:-${FLEET_PRIMARY_VM_MEMORY:-4096}}"
+    local clone_out clone_status target_id target_name diagnostic_log names_ledger deadline
+    local attempt max_attempts retry_delay clone_timeout
+    # Fly API throttles (resource_exhausted/429) and clone-from-snapshot can lose a create-volume→launch-VM race
+    # ("failed to launch VM: volume not found") or leaves the new machine
+    # momentarily unlistable — both transient, both fatal to a synchronized
+    # 28-wide barrier if a single clone aborts the batch. Retry with backoff
+    # (fresh name per attempt; the names-ledger keeps every attempted name so
+    # teardown reaps any machine that did materialize — no new leak path).
+    max_attempts="${CLOUDBENCH_CLONE_MAX_ATTEMPTS:-${CLOUDBENCH_CLONE_ATTEMPTS:-5}}"
+    retry_delay="${CLOUDBENCH_CLONE_RETRY_SECONDS:-8}"
+    # Bound each clone so a hung Fly API call can't freeze the whole loop. A real
+    # clone-from-snapshot + --detach returns well under this; 25min+ = hung.
+    clone_timeout="${CLOUDBENCH_CLONE_TIMEOUT_SECONDS:-240}"
     mkdir -p "$(dirname "$ledger")"
-    for attempt in $(seq 1 "$attempts"); do
+    names_ledger="${ledger%.ids}.names"
+    diagnostic_log="${ledger%.ids}.log"
+    attempt=1
+    while :; do
         target_name="cloudbench-$(python3 -c 'import uuid; print(uuid.uuid4().hex[:24])')"
-        # Record the provider target name outside the disposable workspace BEFORE
-        # asking Fly to allocate. If this process is SIGKILLed at any later point, a
-        # successor can still bind the late-appearing machine to this dead fleet.
+        # Record the provider target name durably BEFORE asking Fly to allocate,
+        # so a successor can bind a late-appearing machine to this dead fleet even
+        # if this process is SIGKILLed mid-clone (survives workspace deletion).
         if ! fleet_registry_record_name "$target_name"; then
             echo "❌ could not persist durable ownership for clone name '$target_name'; refusing provider allocation" >&2
             return 1
         fi
         printf '%s\n' "$target_name" >> "$names_ledger"
-        clone_out="$(FLY machine clone "$source_id" -a "$APP" \
-            --from-snapshot "$SNAP_ID" --region "$REGION" --name "$target_name" --detach 2>&1)"
+        clone_out="$(fly_with_timeout "$clone_timeout" machine clone "$source_id" -a "$APP" \
+            --from-snapshot "$SNAP_ID" --region "$REGION" --name "$target_name" \
+            --vm-size "$vm_size" --vm-memory "$vm_memory" --detach 2>&1)"
         clone_status=$?
         {
-            printf 'clone attempt=%s/%s name=%s source=%s status=%s\n' \
-                "$attempt" "$attempts" "$target_name" "$source_id" "$clone_status"
+            printf 'clone name=%s source=%s status=%s attempt=%s/%s\n' \
+                "$target_name" "$source_id" "$clone_status" "$attempt" "$max_attempts"
             printf '%s\n' "$clone_out"
         } >> "$diagnostic_log"
 
-        deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-10}))
-        target_id="$(machine_id_for_clone_name "$target_name" "$deadline")" || target_id=""
+        # `flyctl machine clone` normally returns the authoritative id in this
+        # stable line. Parse it directly: at fleet width this removes 30
+        # redundant Machines API list calls from the provision critical path.
+        target_id="$(printf '%s\n' "$clone_out" \
+            | sed -nE 's/^[[:space:]]*Machine ([0-9a-f]+) has been created[.][.][.]$/\1/p' \
+            | tail -1)"
+        case "$target_id" in ''|*[!0-9a-f]*) target_id="" ;; esac
+        if [ -z "$target_id" ]; then
+            deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-20}))
+            target_id="$(machine_id_for_clone_name "$target_name" "$deadline")" || target_id=""
+        fi
+        if [ "$clone_status" -ne 0 ] && [ -z "$target_id" ] \
+            && clone_failure_definitively_unallocated "$clone_out"; then
+            # The provider explicitly rejected this attempt before allocating a
+            # Machine, and the bounded name lookup also found none. Release only
+            # this attempt's name record so a later successful retry does not
+            # leave a phantom registry that blocks every future controller.
+            fleet_registry_release_name "$target_name" || return 1
+            grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
+            mv "$names_ledger.tmp" "$names_ledger"
+        fi
         if [ -n "$target_id" ] && [ "$target_id" != "$source_id" ] && [ "$target_id" != "$WARM_ID" ]; then
             if ! fleet_registry_record_id "$target_name" "$target_id"; then
                 echo "❌ could not persist provider ID $target_id; name ownership remains for teardown" >&2
@@ -626,27 +977,26 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id];
             printf '%s' "$target_id"
             return 0
         fi
-
-        # Retry recoverable transient failures; leave the final-attempt failure to
-        # the error path below. Any late-appearing machine under this attempt's name
-        # is reaped by the caller's ownership-ledger teardown. Two transient classes:
-        #   * Fly API throttle (`rate limit exceeded`/`resource_exhausted`/429)
-        #   * Fly volume-creation capacity (`failed to launch VM: volume not found`) —
-        #     the snapshot-backed volume isn't ready in-region yet; a fresh clone
-        #     name on retry usually lands. Without this, one flaky clone leaves the
-        #     synchronized barrier short a stack (N-1/N) and fails the whole gate.
-        if [ "$attempt" -lt "$attempts" ] \
-            && printf '%s' "$clone_out" | grep -qiE 'rate limit exceeded|resource_exhausted|429|too many requests|volume not found|failed to launch vm'; then
-            backoff=$((attempt * attempt * 3))   # 3s, 12s, 27s, 48s — spread past Fly's window
-            echo "   ⏳ Transient Fly clone failure for $source_id (attempt $attempt/$attempts); backing off ${backoff}s" >&2
-            sleep "$backoff"
-            continue
+        if [ "$attempt" -ge "$max_attempts" ]; then
+            echo "❌ Fly clone did not return a distinct authoritative target after $attempt attempt(s) (last name=$target_name, source=$source_id, status=$clone_status)" >&2
+            printf '%s\n' "$clone_out" | sed 's/^/   /' >&2
+            return 1
         fi
-        break
+        # Exponential backoff + jitter. Fly returns `resource_exhausted: rate limit
+        # exceeded` on clone/create-volume when the fleet fires N clones at once; a
+        # FIXED short delay makes every retry land back inside the SAME saturation
+        # window, so a few clones exhaust their attempts and drop out of the batch
+        # (an infra loss, not a benchmark verdict — it silently shrinks coverage).
+        # Backing off exponentially with jitter lets a rate-limited clone outlast
+        # the burst instead of giving up.
+        local this_delay cap="${CLOUDBENCH_CLONE_RETRY_MAX_SECONDS:-90}"
+        this_delay=$(( retry_delay * (1 << (attempt - 1)) ))
+        [ "$this_delay" -gt "$cap" ] && this_delay="$cap"
+        this_delay=$(( this_delay + (RANDOM % 5) ))
+        echo "⏳ transient clone failure (attempt $attempt/$max_attempts, status=$clone_status); retrying in ${this_delay}s ..." >&2
+        sleep "$this_delay"
+        attempt=$((attempt + 1))
     done
-    echo "❌ Fly clone did not return a distinct authoritative target (name=$target_name, source=$source_id, status=$clone_status)" >&2
-    printf '%s\n' "$clone_out" | sed 's/^/   /' >&2
-    return 1
 }
 
 pool_ledger_lock_acquire() {  # serialize read-modify-write of the shared pool ledger
@@ -701,9 +1051,98 @@ pool_ledger_record_id() {  # pool_ledger_record_id <machine-id>; atomic + verifi
     return "$rc"
 }
 
-provision_pool() {  # provision_pool <N> — create N stopped clones, record ids, exit
-    local n="$1" i id ready st failed=0
-    local -a created_ids=()
+pool_ledger_remove_id() {  # pool_ledger_remove_id <machine-id>; atomic + verified + serialized
+    local id="$1" tmp="$POOL_IDS_FILE.tmp.$$" rc=0
+    case "$id" in ''|*[!0-9a-f]*) return 1 ;; esac
+    pool_ledger_lock_acquire || return 1
+    if [ ! -f "$POOL_IDS_FILE" ]; then
+        rc=1
+    elif ! grep -Fxv "$id" "$POOL_IDS_FILE" > "$tmp" 2>/dev/null; then
+        # grep returns 1 when removing the only line, which is still a valid
+        # empty pool ledger.
+        : > "$tmp"
+    fi
+    if [ "$rc" = "0" ] && { ! mv "$tmp" "$POOL_IDS_FILE" \
+        || grep -Fxq "$id" "$POOL_IDS_FILE" 2>/dev/null; }; then
+        rm -f "$tmp"
+        rc=1
+    fi
+    pool_ledger_lock_release
+    return "$rc"
+}
+
+pool_machine_guest_corruption_signature() {  # <fleet-child.log>
+    local log="$1"
+    # One application process can legitimately segfault. Multiple unrelated
+    # image utilities failing with different memory-access signals on one guest
+    # is a high-confidence corrupt VM/rootfs/runtime signature.
+    grep -aEq 'Bus error.*[[:space:]]fuser([[:space:]]|$)' "$log" 2>/dev/null \
+        && grep -aEq 'Segmentation fault.*[[:space:]]dropdb([[:space:]]|$)' "$log" 2>/dev/null
+}
+
+record_tainted_claimed_pool_machines() {
+    local j src id log
+    for j in "${!CHILD_OUT[@]}"; do
+        log="${CHILD_OUT[$j]}/remote-logs/cloudbench-driver.log"
+        [ -f "$log" ] || log="${CHILD_OUT[$j]}/fleet-child.log"
+        pool_machine_guest_corruption_signature "$log" || continue
+        read -r src id < "${CHILD_OUT[$j]}/.cid" 2>/dev/null || true
+        [ "$src" = "pool" ] && [ -n "$id" ] || continue
+        grep -Fxq "$id" "$TAINTED_POOL_FILE" 2>/dev/null \
+            || printf '%s\n' "$id" >> "$TAINTED_POOL_FILE"
+        echo "☣️  [${CHILD_BENCH[$j]}] quarantining corrupt pool machine $id (fuser SIGBUS + dropdb SIGSEGV)" >&2
+    done
+}
+
+provision_pool_slot() {  # provision_pool_slot <slot> <total>
+    local i="$1" n="$2" id ready=0 st="" slot_ledger
+    slot_ledger="$FLEET_DIR/pool-provision-$i.ids"
+    if ! id="$(clone_machine_target "$slot_ledger")" || [ -z "$id" ]; then
+        echo "  [$i/$n] ⚠ clone failed"
+        return 1
+    fi
+    echo "  [$i/$n] created $id"
+    for _ in $(seq 1 90); do
+        st="$(snapshot_machine_state "$id")" || st=""
+        if printf '%s' "$st" | grep -qiE '^(started|stopped)$'; then
+            ready=1
+            break
+        fi
+        if machine_storage_ready "$id"; then
+            FLY machine start "$id" -a "$APP" >/dev/null 2>&1 || true
+        fi
+        sleep 5
+    done
+    if [ "$ready" != "1" ]; then
+        echo "  ⚠ $id never became startable"
+        return 1
+    fi
+    FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
+    for _ in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
+        if st="$(snapshot_machine_state "$id")" && [ "$st" = "stopped" ]; then
+            break
+        fi
+        sleep 2
+    done
+    if [ "$st" != "stopped" ]; then
+        echo "  ⚠ $id did not verify stopped; retaining fleet ownership for teardown" >&2
+        return 1
+    fi
+    # Serialize only the tiny durable-ledger promotion. Clone/start/stop remain
+    # fully concurrent, while cleanup retains authoritative ownership until the
+    # exact stopped id is committed and re-read from the shared pool ledger.
+    if ! pool_ledger_record_id "$id"; then
+        echo "  ⚠ failed to persist $id in durable pool ledger; retaining fleet ownership for teardown" >&2
+        return 1
+    fi
+    fleet_registry_release_id "$id"
+    rm -f "$slot_ledger" "${slot_ledger%.ids}.names"
+    echo "  ✅ pooled (stopped): $id"
+}
+
+provision_pool() {  # provision_pool <N> — create N stopped clones concurrently
+    local n="$1" i pid failed=0
+    local -a pool_pids=()
     mkdir -p "$(dirname "$POOL_IDS_FILE")" \
         || { echo "❌ could not initialize durable pool ledger $POOL_IDS_FILE" >&2; return 1; }
     if [ -e "$POOL_IDS_FILE" ]; then
@@ -714,56 +1153,30 @@ provision_pool() {  # provision_pool <N> — create N stopped clones, record ids
             || { echo "❌ could not initialize durable pool ledger $POOL_IDS_FILE" >&2; return 1; }
     fi
     echo "🏊 Provisioning pool of $n stopped machines (image = warm $WARM_ID, snapshot $SNAP_ID, region $REGION)..."
+    echo "⏳ cloning, provisioning, and stopping all pool slots concurrently..."
     for i in $(seq 1 "$n"); do
-        id="$(clone_machine_target "$OWNED_CLONES_FILE")"
-        if [ -n "$id" ]; then
-            echo "  [$i/$n] created $id"
-            created_ids+=("$id")
-        else
-            echo "  [$i/$n] ⚠ clone failed"
-            failed=1
-        fi
+        provision_pool_slot "$i" "$n" &
+        pid=$!
+        pool_pids+=("$pid")
+        PROVISION_PIDS+=("$pid")
+        sleep "${CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS:-0.4}"
     done
-    echo "⏳ waiting for volumes to provision, then stopping (pool idles at \$0 compute)..."
-    for id in "${created_ids[@]}"; do
-        ready=0
-        for _ in $(seq 1 90); do
-            if FLY machine status "$id" -a "$APP" 2>/dev/null | grep -qiE "State.*(started|stopped)"; then ready=1; break; fi
-            if machine_storage_ready "$id"; then
-                FLY machine start "$id" -a "$APP" >/dev/null 2>&1 || true
-            fi
-            sleep 5
-        done
-        if [ "$ready" = 1 ]; then
-            FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
-            st=""
-            for _ in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
-                if st="$(pool_machine_state "$id")" && [ "$st" = "stopped" ]; then
-                    break
-                fi
-                sleep 2
-            done
-            if [ "$st" = "stopped" ]; then
-                # Only release ephemeral ownership after the durable pool
-                # ledger has atomically accepted and re-read the exact ID.
-                if pool_ledger_record_id "$id"; then
-                    fleet_registry_release_id "$id"
-                    grep -Fxv "$id" "$OWNED_CLONES_FILE" > "$OWNED_CLONES_FILE.tmp" 2>/dev/null || true
-                    mv "$OWNED_CLONES_FILE.tmp" "$OWNED_CLONES_FILE"
-                    echo "  ✅ pooled (stopped): $id"
-                else
-                    echo "  ⚠ failed to persist $id in durable pool ledger; retaining fleet ownership for teardown" >&2
-                    failed=1
-                fi
-            else
-                echo "  ⚠ $id did not verify stopped; retaining fleet ownership for teardown" >&2
-                failed=1
-            fi
-        else
-            echo "  ⚠ $id never became startable"
-            failed=1
-        fi
+    for pid in "${pool_pids[@]}"; do
+        wait "$pid" || failed=1
     done
+    # Every provision child is reaped. Drop stale numeric PIDs immediately so
+    # a later controller cleanup cannot signal an unrelated PID-reuse occupant.
+    PROVISION_PIDS=()
+    if [ "$failed" = "0" ]; then
+        # A pool volume is immutable with respect to its baked dependency trees.
+        # Record the fingerprints proven for the exact snapshot used here; a
+        # later ref with changed manifests must never claim these machines and
+        # discover the mismatch only after all boxes have booted.
+        printf '%s %s %s\n' "$CURRENT_NODE_FP" "$CURRENT_PY_FP" "$SNAP_ID" \
+            > "$POOL_META_FILE.tmp.$$" \
+            && mv "$POOL_META_FILE.tmp.$$" "$POOL_META_FILE" \
+            || failed=1
+    fi
     echo "✅ pool ready: $(grep -c . "$POOL_IDS_FILE" 2>/dev/null || echo 0) machines → $POOL_IDS_FILE"
     [ "$failed" = "0" ]
 }
@@ -794,10 +1207,9 @@ pool_claim_owned_by_current() {  # pool_claim_owned_by_current <claim-path>
 # Self-heal a same-host dead claim only after proving the remote runner is idle.
 # Live/other-host owners remain unavailable; an unreadable or busy dead claim
 # blocks provisioning rather than risking interruption or compounding spend.
-pool_machine_state() {  # pool_machine_state <id>: prints state; 1=absent, 2=invalid read
-    local id="$1" machines
-    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
-    printf '%s' "$machines" | MACHINE_ID="$id" python3 -c '
+pool_machine_state_from_json() {  # pool_machine_state_from_json <id>; JSON on stdin
+    local id="$1"
+    MACHINE_ID="$id" python3 -c '
 import json, os, sys
 try:
     machines = json.load(sys.stdin)
@@ -814,14 +1226,28 @@ if not isinstance(state, str) or not state:
 print(state)
 '
 }
+pool_machine_state() {  # pool_machine_state <id>: prints state; 1=absent, 2=invalid read
+    local id="$1" machines
+    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
+    printf '%s' "$machines" | pool_machine_state_from_json "$id"
+}
 
+POOL_INVENTORY_JSON=""
 reconcile_pool() {
-    local pool_file id st presence claim_path claim_host owner_status runner_count
+    local pool_file id st presence claim_path claim_host owner_status runner_count machines
+    # Normal reconciliation is one shared inventory read, not one Machines-API
+    # list per pooled box. Only the rare stop-and-recover branch re-reads live
+    # state for the single machine being changed.
+    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
+        echo "❌ could not read pool inventory before refresh" >&2
+        return 1
+    }
+    POOL_INVENTORY_JSON="$machines"
     for pool_file in "$GIT_COMMON_DIR"/cloudbench-pools/*.ids; do
       [ -f "$pool_file" ] || continue
       while read -r id; do
         [ -n "$id" ] || continue
-        st="$(pool_machine_state "$id")"
+        st="$(printf '%s' "$machines" | pool_machine_state_from_json "$id")"
         presence=$?
         [ "$presence" -eq 1 ] && continue
         [ "$presence" -eq 0 ] || { echo "❌ could not read pool machine $id before refresh" >&2; return 1; }
@@ -885,9 +1311,85 @@ reconcile_pool() {
       done < "$pool_file"
     done
 }
-claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none free)
+
+pool_machine_shape_from_json() {  # pool_machine_shape_from_json <id>; JSON on stdin
+    local id="$1"
+    MACHINE_ID="$id" python3 -c '
+import json, os, sys
+try: machines = json.load(sys.stdin) or []
+except Exception: raise SystemExit(2)
+machine = next((m for m in machines if m.get("id") == os.environ["MACHINE_ID"]), None)
+if not machine: raise SystemExit(1)
+guest = (machine.get("config") or {}).get("guest") or {}
+print(machine.get("state") or "", guest.get("cpu_kind") or "", guest.get("cpus") or "", guest.get("memory_mb") or "")
+'
+}
+
+resize_pool_machine() {  # resize_pool_machine <id>
+    local id="$1" attempt log
+    log="$FLEET_DIR/pool-resize-$id.log"
+    for attempt in $(seq 1 "${CLOUDBENCH_POOL_RESIZE_ATTEMPTS:-5}"); do
+        if fly_with_timeout "${CLOUDBENCH_POOL_RESIZE_TIMEOUT_SECONDS:-90}" \
+            machine update "$id" -a "$APP" --vm-size "$FLEET_PRIMARY_VM_SIZE" \
+            --vm-memory "$FLEET_PRIMARY_VM_MEMORY" --skip-start --yes > "$log" 2>&1; then
+            return 0
+        fi
+        sleep $((attempt * 3))
+    done
+    echo "❌ could not resize stopped pool machine $id to $FLEET_PRIMARY_VM_SIZE/${FLEET_PRIMARY_VM_MEMORY}MB" >&2
+    tail -20 "$log" 2>/dev/null | sed 's/^/   /' >&2 || true
+    return 1
+}
+
+normalize_current_pool_shape() {
     [ -f "$POOL_IDS_FILE" ] || return 0
-    local id st claim_path owner_status claim_host
+    local id shape state kind cpus memory failed=0 inventory
+    local target_kind="shared" target_cpus
+    local -a resize_ids=() resize_pids=()
+    target_cpus="$(printf '%s' "$FLEET_PRIMARY_VM_SIZE" | sed -nE 's/.*-([0-9]+)x$/\1/p')"
+    case "$FLEET_PRIMARY_VM_SIZE" in performance-*) target_kind="performance" ;; esac
+    [ -n "$target_cpus" ] || { echo "❌ invalid fleet primary VM size: $FLEET_PRIMARY_VM_SIZE" >&2; return 1; }
+    inventory="$POOL_INVENTORY_JSON"
+    [ -n "$inventory" ] || inventory="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
+    while read -r id; do
+        [ -n "$id" ] || continue
+        shape="$(printf '%s' "$inventory" | pool_machine_shape_from_json "$id")" || continue
+        read -r state kind cpus memory <<< "$shape"
+        [ "$state" = "stopped" ] || continue
+        if [ "$kind" != "$target_kind" ] || [ "$cpus" != "$target_cpus" ] \
+            || [ "$memory" != "$FLEET_PRIMARY_VM_MEMORY" ]; then
+            resize_ids+=("$id")
+        fi
+    done < "$POOL_IDS_FILE"
+    [ "${#resize_ids[@]}" -gt 0 ] || return 0
+    echo "🧮 resizing ${#resize_ids[@]} stopped pool machine(s) to capacity-safe $FLEET_PRIMARY_VM_SIZE/${FLEET_PRIMARY_VM_MEMORY}MB..."
+    mkdir -p "$FLEET_DIR"
+    for id in "${resize_ids[@]}"; do
+        resize_pool_machine "$id" &
+        resize_pids+=("$!")
+        if [ "${#resize_pids[@]}" -ge "${CLOUDBENCH_POOL_RESIZE_CONCURRENCY:-8}" ]; then
+            for _pid in "${resize_pids[@]}"; do wait "$_pid" || failed=1; done
+            resize_pids=()
+        fi
+    done
+    for _pid in "${resize_pids[@]}"; do wait "$_pid" || failed=1; done
+    [ "$failed" = "0" ] || return 1
+    inventory="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
+    for id in "${resize_ids[@]}"; do
+        shape="$(printf '%s' "$inventory" | pool_machine_shape_from_json "$id")" || return 1
+        read -r state kind cpus memory <<< "$shape"
+        if [ "$state" != "stopped" ] || [ "$kind" != "$target_kind" ] \
+            || [ "$cpus" != "$target_cpus" ] || [ "$memory" != "$FLEET_PRIMARY_VM_MEMORY" ]; then
+            echo "❌ pool machine $id shape verification failed: $shape" >&2
+            return 1
+        fi
+    done
+    POOL_INVENTORY_JSON="$inventory"
+    echo "✅ pool shape verified: $FLEET_PRIMARY_VM_SIZE/${FLEET_PRIMARY_VM_MEMORY}MB"
+}
+claim_pool_machine() {  # echo a claimed stopped pool machine id (or '' if none free)
+    [ -f "$POOL_IDS_FILE" ] || return 0
+    local id claim_path owner_status claim_host
     mkdir -p "$POOL_CLAIMS_DIR" "$(dirname "$CLAIMED_POOL_FILE")"
     while read -r id; do
         [ -n "$id" ] || continue
@@ -907,9 +1409,11 @@ claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none
                 continue
             fi
         fi
-        st="$(FLY machine status "$id" -a "$APP" 2>/dev/null | grep -iE '^[[:space:]]*State' | head -1)"
-        printf '%s' "$st" | grep -qi "stopped" || continue   # only claim an existing, stopped machine
-        machine_storage_ready "$id" || continue
+        # reconcile_pool already proved every eligible ledger machine stopped,
+        # and pool creation proved its snapshot volume startable. Re-reading
+        # machine+volume state for every one of 30 claims recreates the API burst
+        # pooling is meant to eliminate. The atomic claim file is the only state
+        # transition here; run-bench-cloud's update/start activates the box once.
         # claim_pool_machine is called through command substitution, so shell
         # arrays mutate in a subshell. Claim files are the cross-subshell and
         # cross-workspace ownership source of truth; creation is ATOMIC
@@ -917,7 +1421,6 @@ claim_pool_machine() {  # echo a started, claimed pool machine id (or '' if none
         # machine — the loser just moves on to the next candidate.
         write_pool_claim "$claim_path" || continue
         printf '%s\n' "$id" >> "$CLAIMED_POOL_FILE"
-        FLY machine start "$id" -a "$APP" >/dev/null 2>&1 || true
         printf '%s' "$id"; return 0
     done < "$POOL_IDS_FILE"
 }
@@ -932,8 +1435,100 @@ if ! cloudbench_controller_lock_acquire_wait \
     exit 1
 fi
 
+# ── Fire-time visibility: the run card exists from the moment the fleet is
+# fired (status=starting + explicit phase), and the central hub is serving it
+# BEFORE any preflight/heal/provisioning — a run waiting on a snapshot or heal
+# is visibly "starting", never invisible. The live aggregator overwrites this
+# card once real per-bench results flow.
+write_startup_card() {  # write_startup_card <phase-text>
+    mkdir -p "$FLEET_DIR/_batch"
+    STARTUP_BENCHES="${BENCHES[*]:-}" PHASE="$1" CARD_RUN_ID="$RUN_ID" \
+    python3 - "$FLEET_DIR/_batch/report-card.json" <<'PY'
+import json, os, sys
+benches = os.environ.get("STARTUP_BENCHES", "").split()
+phase = os.environ["PHASE"]
+card = {
+    "run_id": os.environ["CARD_RUN_ID"],
+    "status": "starting",
+    "phase": phase,
+    "summary": {"total": len(benches), "passed": 0, "failed": 0,
+                "status": f"starting: {phase}"},
+    "tasks": [{"name": b, "status": "starting", "phase": phase} for b in benches],
+    "per_task": [{"name": b, "status": "starting", "phase": phase} for b in benches],
+}
+json.dump(card, open(sys.argv[1], "w"), indent=1)
+PY
+}
+start_central_hub() {
+    mkdir -p "$HUB_CTX_DIR"
+    if lsof -tiTCP:"$DASH_BASE" -sTCP:LISTEN >/dev/null 2>&1; then
+        echo "📊 reusing the central hub already open on :$DASH_BASE (no new window)"
+    else
+        python3 "$ROOT_DIR/agents/benchmarks/agent_link_server.py" \
+            --root "$RUNS_ROOT" --host 127.0.0.1 --port "$DASH_BASE" \
+            --repo-root "$ROOT_DIR" --context-dir "$HUB_CTX_DIR" \
+            --frontend-dir "$ROOT_DIR/front-end" --hub-runs-dir "$RUNS_ROOT" \
+            --preferred-archive-port "$((DASH_BASE + 200))" \
+            > "$HUB_CTX_DIR/hub.log" 2>&1 & UNIFIED_DASH_PID=$!
+        printf '%s\n' "$UNIFIED_DASH_PID" > "$HUB_CTX_DIR/agent-link-server.pid"
+    fi
+    echo "🖥️  local benchmark diagnostics: http://localhost:$DASH_BASE/ — run visible as STARTING"
+}
+require_central_hub_visibility() {
+    local attempt page
+    for attempt in $(seq 1 "${CLOUDBENCH_HUB_VISIBILITY_ATTEMPTS:-30}"); do
+        page="$(curl --noproxy '*' -fsS --max-time 2 "http://127.0.0.1:$DASH_BASE/" 2>/dev/null || true)"
+        if printf '%s' "$page" | grep -Fq "$RUN_ID"; then
+            echo "✅ central hub registration verified: run=$RUN_ID"
+            return 0
+        fi
+        if [ -n "${UNIFIED_DASH_PID:-}" ] && ! kill -0 "$UNIFIED_DASH_PID" 2>/dev/null; then
+            break
+        fi
+        sleep 0.2
+    done
+    echo "❌ benchmark run is not visible in the central hub; refusing to continue invisibly (run=$RUN_ID, hub=http://127.0.0.1:$DASH_BASE/)" >&2
+    return 1
+}
+require_in_app_hub_visibility() {
+    local hub_url hub_api_key active_run_id
+    hub_url="${BENCHMARK_HUB_UPLOAD_URL:-https://navi-j9a9.onrender.com}"
+    hub_api_key="${BENCHMARK_HUB_API_KEY:-${BACKEND_API_KEY:-}}"
+    if [ -z "$hub_api_key" ]; then
+        hub_api_key="$(grep -E '^BACKEND_API_KEY=' "$ROOT_DIR/back-end/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')"
+    fi
+    [ -n "$hub_api_key" ] || {
+        echo "❌ BACKEND_API_KEY is required to register benchmark runs in the in-app Hub" >&2
+        return 1
+    }
+    export BENCHMARK_HUB_UPLOAD_URL="$hub_url"
+    export BENCHMARK_HUB_API_KEY="$hub_api_key"
+    if [ -n "$INHERITED_HUB_RUN_ID" ]; then
+        active_run_id="$INHERITED_HUB_RUN_ID"
+        python3 "$HUB_UPLOAD_HELPER" --verify-visible "$active_run_id" || return 1
+    else
+        active_run_id="$RUN_ID"
+        python3 "$HUB_UPLOAD_HELPER" \
+            --require-visible "$FLEET_DIR/_batch/report-card.json" \
+            --run-id "$active_run_id" --source direct-cloud-fleet || return 1
+        SELF_MANAGED_HUB_RUN="1"
+    fi
+    # Every per-machine run belongs to this already-visible aggregate. Child
+    # run_benchmark.py processes must not create duplicate one-task Hub rows.
+    export BENCHMARK_HUB_PARENT_RUN_ID="$active_run_id"
+    echo "📊 Mac app Benchmark Hub: run=$active_run_id"
+}
+if [ -z "$PROVISION_POOL" ]; then
+    mkdir -p "$FLEET_DIR"
+    write_startup_card "controller starting"
+    start_central_hub
+    require_central_hub_visibility || exit 1
+    require_in_app_hub_visibility || exit 1
+fi
+
 OWNED_CLONES_FILE="$FLEET_DIR/owned-clones.ids"
 AUTOSCALER_PIDS=()
+PROVISION_PIDS=()
 CHILD_PIDS=()
 CHILD_EXIT_CODES=()
 CHILD_OUT=()
@@ -943,33 +1538,110 @@ CHILD_PORT=()
 CHILD_MACHINE=()
 
 cleanup() {
-    local ec=$? id claim_path st presence
+    local ec=$? id claim_path st presence machines round stop_pid
+    local -a claimed_pool_ids pending_pool_ids next_pending_pool_ids stop_pids
+    claimed_pool_ids=()
+    pending_pool_ids=()
+    next_pending_pool_ids=()
+    stop_pids=()
     # The poller and terminal can deliver TERM to the same process group. Do not
     # let a second signal interrupt teardown after the EXIT trap has begun.
     trap - EXIT
     trap '' HUP INT TERM
     [ -n "${UNIFIED_AGG_PID:-}" ] && kill "$UNIFIED_AGG_PID" 2>/dev/null || true
+    [ -n "${SNAPSHOT_LOOP_PID:-}" ] && kill "$SNAPSHOT_LOOP_PID" 2>/dev/null || true
+    [ -n "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ] && rm -rf "$CLOUDBENCH_SCRIPT_SNAPSHOT" 2>/dev/null || true
     # Do NOT kill the central hub (UNIFIED_DASH_PID): it is THE one persistent
     # dashboard — shared across every run, carrying the user's open tab, resolving
     # "open agent" from local run data long after teardown. The next fleet run
     # REUSES it (never rebinds/kills it), so exactly one hub ever runs.
     cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${AUTOSCALER_PIDS[@]:-}"
+    cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${PROVISION_PIDS[@]:-}"
     cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${CHILD_PIDS[@]:-}"
+    record_tainted_claimed_pool_machines
     # Return only machines this fleet actually claimed. The pool ledger can be
     # shared by sibling workspaces, so stopping every listed ID would interrupt
-    # their active runs. Keep the global lease until the machine is stopped.
-    if [ -f "$CLAIMED_POOL_FILE" ]; then
+    # their active runs. Stop this run's machines concurrently: serial stop +
+    # per-machine inventory polling added N teardown latency after an otherwise
+    # perfectly parallel batch. Keep every global lease until a shared inventory
+    # read proves its machine stopped (or absent).
+    if [ -s "$CLAIMED_POOL_FILE" ]; then
         while read -r id; do
             [ -n "$id" ] || continue
+            if grep -Fxq "$id" "$TAINTED_POOL_FILE" 2>/dev/null; then
+                echo "☣️  destroying quarantined pool machine $id instead of returning it"
+                claim_path="$POOL_CLAIMS_DIR/$id"
+                if reap_machine "$id"; then
+                    pool_ledger_remove_id "$id" || ec=1
+                    pool_claim_owned_by_current "$claim_path" && rm -f "$claim_path"
+                else
+                    echo "❌ quarantined pool machine $id survived destroy; retaining ownership claim" >&2
+                    ec=1
+                fi
+                continue
+            fi
             echo "↩️  returning claimed pool machine $id (stop)"
-            FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
-            presence=0
-            for _ in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
-                st="$(pool_machine_state "$id")"; presence=$?
-                [ "$presence" -eq 1 ] && break
-                [ "$st" = "stopped" ] && break
-                sleep 2
+            claimed_pool_ids+=("$id")
+        done < "$CLAIMED_POOL_FILE"
+
+        pending_pool_ids=("${claimed_pool_ids[@]}")
+        # A bounded retry handles an instantaneous control-plane throttle while
+        # preserving parallel teardown. Each round uses one shared inventory
+        # read, never one Machines-API list call per box.
+        for round in $(seq 1 "${CLOUDBENCH_POOL_STOP_REQUEST_ATTEMPTS:-3}"); do
+            stop_pids=()
+            for id in "${pending_pool_ids[@]}"; do
+                fly_with_timeout "${CLOUDBENCH_POOL_STOP_REQUEST_TIMEOUT:-20}" \
+                    machine stop "$id" -a "$APP" >/dev/null 2>&1 &
+                stop_pids+=("$!")
             done
+            for stop_pid in "${stop_pids[@]}"; do
+                wait "$stop_pid" 2>/dev/null || true
+            done
+            machines="$(FLY machines list -a "$APP" --json 2>/dev/null || true)"
+            next_pending_pool_ids=()
+            for id in "${pending_pool_ids[@]}"; do
+                st="$(printf '%s' "$machines" | pool_machine_state_from_json "$id" 2>/dev/null)"
+                presence=$?
+                if [ "$presence" -ne 1 ] && [ "$st" != "stopped" ]; then
+                    next_pending_pool_ids+=("$id")
+                fi
+            done
+            if [ "${next_pending_pool_ids[0]+set}" = "set" ]; then
+                pending_pool_ids=("${next_pending_pool_ids[@]}")
+            else
+                pending_pool_ids=()
+                break
+            fi
+            sleep "$round"
+        done
+
+        # Stop commands normally wait for the transition. Retain a bounded
+        # shared-inventory poll for Fly transitions that outlive the request.
+        for _ in $(seq 1 "${CLOUDBENCH_POOL_STOP_ATTEMPTS:-30}"); do
+            [ "${pending_pool_ids[0]+set}" = "set" ] || break
+            machines="$(FLY machines list -a "$APP" --json 2>/dev/null || true)"
+            next_pending_pool_ids=()
+            for id in "${pending_pool_ids[@]}"; do
+                st="$(printf '%s' "$machines" | pool_machine_state_from_json "$id" 2>/dev/null)"
+                presence=$?
+                if [ "$presence" -ne 1 ] && [ "$st" != "stopped" ]; then
+                    next_pending_pool_ids+=("$id")
+                fi
+            done
+            if [ "${next_pending_pool_ids[0]+set}" = "set" ]; then
+                pending_pool_ids=("${next_pending_pool_ids[@]}")
+                sleep 2
+            else
+                pending_pool_ids=()
+                break
+            fi
+        done
+
+        machines="$(FLY machines list -a "$APP" --json 2>/dev/null || true)"
+        for id in "${claimed_pool_ids[@]}"; do
+            st="$(printf '%s' "$machines" | pool_machine_state_from_json "$id" 2>/dev/null)"
+            presence=$?
             claim_path="$POOL_CLAIMS_DIR/$id"
             if { [ "$presence" -eq 1 ] || [ "$st" = "stopped" ]; } \
                 && pool_claim_owned_by_current "$claim_path"; then
@@ -978,7 +1650,7 @@ cleanup() {
                 echo "❌ claimed pool machine $id did not verify stopped; retaining ownership claim" >&2
                 ec=1
             fi
-        done < "$CLAIMED_POOL_FILE"
+        done
     fi
     if [ "$FLEET_REGISTRY_PUBLISHED" = "1" ] && [ "$KEEP_CLONES" != "1" ]; then
         # The durable registry is authoritative for primaries AND autoscaler
@@ -1031,9 +1703,12 @@ for v in vols:
     exit "$ec"
 }
 trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+# Name the killer: silent teardowns (no ❌, no barrier release) have repeatedly
+# looked like infra failures when the controller was actually signalled from
+# outside (session kill, stray pkill). Record which signal fired before exiting.
+trap 'echo "⚰️  controller received HUP ($(date -u +%H:%M:%S))"; exit 129' HUP
+trap 'echo "⚰️  controller received INT ($(date -u +%H:%M:%S))"; exit 130' INT
+trap 'echo "⚰️  controller received TERM ($(date -u +%H:%M:%S))"; exit 143' TERM
 
 mkdir -p "$(dirname "$POOL_IDS_FILE")" "$POOL_CLAIMS_DIR" || {
     echo "❌ could not initialize durable cloudbench ownership directories under $GIT_COMMON_DIR" >&2
@@ -1050,11 +1725,13 @@ fleet_registry_init || {
     exit 1
 }
 reconcile_pool || exit 1   # stop + verify this workspace's pool before machine start
+normalize_current_pool_shape || exit 1
 # READ-ONLY env preflight: the run path never stages/mutates the shared
 # prod-aligned app secrets (that would race concurrent workstreams). It only
 # verifies they exist; refreshing them is an explicit maintenance op.
+write_startup_card "verifying environment"
 echo "🔎 Verifying the shared benchmark app environment (read-only)..."
-if ! bash scripts/run-bench-cloud --verify-secrets; then
+if ! bash "$RUN_BENCH_CLOUD_BIN" --verify-secrets; then
     echo "❌ Cloud benchmark environment is not ready; no benchmark machine was started." >&2
     echo "   Refresh it explicitly (maintenance op): bash scripts/run-bench-cloud --refresh-secrets" >&2
     exit 1
@@ -1068,14 +1745,76 @@ d=json.load(sys.stdin) or []
 mn=os.environ["MN"]
 for m in d:
     if m.get("name")==mn and m.get("id"):
-        print(m["id"], m.get("region") or ""); break
+        mounts=m.get("config",{}).get("mounts") or []
+        vol=mounts[0].get("volume","") if mounts else ""
+        print(m["id"], m.get("region") or "", vol); break
 ' 2>/dev/null || true)"
 WARM_ID="$(printf '%s' "$warm_pair" | awk '{print $1}')"
 warm_region="$(printf '%s' "$warm_pair" | awk '{print $2}')"
+WARM_VOLUME_ID="$(printf '%s' "$warm_pair" | awk '{print $3}')"
 [ -n "$WARM_ID" ] || { echo "❌ No warm machine '$MACHINE_NAME' in $APP — run: bash scripts/run-bench-cloud --setup" >&2; exit 1; }
 # Volume snapshots are region-scoped, so clones MUST land in the warm box's region.
 [ -n "$warm_region" ] && REGION="$warm_region"
 echo "🏭 warm source machine: $WARM_ID (region $REGION)"
+
+# A stopped-machine config update briefly reserves both old and new CPU shapes.
+# Keeping the 4x maintenance donor parked beside 37 2x primaries leaves only an
+# exact two-CPU margin and has produced real cpu_overcommit deaths before boot.
+# The volume snapshot does not depend on guest shape, so park the donor at 1x
+# between maintenance transactions; run-bench-cloud expands it only while
+# rebuilding/snapshotting and parks it again on every exit path.
+warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID")" || {
+    echo "❌ could not read warm source shape" >&2; exit 1;
+}
+read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
+if [ "$warm_state" != "stopped" ]; then
+    echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state)" >&2
+    exit 1
+fi
+if [ "$warm_kind/$warm_cpus/$warm_memory" != "shared/1/$WARM_PARKED_VM_MEMORY" ]; then
+    echo "🅿️  parking warm source at $WARM_PARKED_VM_SIZE/${WARM_PARKED_VM_MEMORY}MB for config headroom"
+    fly_with_timeout 90 machine update "$WARM_ID" -a "$APP" \
+        --vm-size "$WARM_PARKED_VM_SIZE" --vm-memory "$WARM_PARKED_VM_MEMORY" \
+        --skip-start --yes >/dev/null || {
+        echo "❌ could not park warm source for fleet capacity headroom" >&2; exit 1;
+    }
+fi
+
+# ── Self-heal: sweep orphaned clone volumes ──────────────────────────────────
+# A killed run (session death, SIGKILL, crash) can destroy machines without
+# their forked volumes, or die before reaping anything — leaked volumes bill
+# forever (observed: 42 × 20GB in one day). Any UNATTACHED cloudbench_data
+# volume older than the grace period is definitively orphaned: live clones are
+# attached at creation, and the grace covers a concurrent controller's brief
+# create→attach window. Never touches the warm source volume.
+sweep_orphaned_volumes() {
+    local grace="${CLOUDBENCH_VOLUME_ORPHAN_GRACE_SECONDS:-3600}" swept=0 vid
+    while read -r vid; do
+        [ -n "$vid" ] || continue
+        echo "🧹 sweeping orphaned clone volume $vid"
+        reap_volume "$vid" && swept=$((swept + 1))
+    done < <(FLY volumes list -a "$APP" --json 2>/dev/null | \
+        GRACE="$grace" WARM_VOL="${WARM_VOLUME_ID:-}" VOL_NAME="$VOLUME_NAME" python3 -c '
+import json, os, sys
+from datetime import datetime, timezone
+try: vols = json.load(sys.stdin) or []
+except Exception: vols = []
+grace = int(os.environ["GRACE"]); now = datetime.now(timezone.utc)
+for v in vols:
+    if v.get("attached_machine_id"): continue
+    if v.get("name") != os.environ["VOL_NAME"]: continue
+    if v.get("id") == os.environ["WARM_VOL"]: continue
+    created = v.get("created_at") or ""
+    try:
+        age = (now - datetime.fromisoformat(created.replace("Z", "+00:00"))).total_seconds()
+    except ValueError:
+        continue
+    if age > grace: print(v["id"])
+' 2>/dev/null || true)
+    [ "$swept" -gt 0 ] && echo "✅ swept $swept orphaned volume(s)"
+    return 0
+}
+sweep_orphaned_volumes
 
 # Clones fork the warm volume from a completed snapshot. Fly reports incremental
 # stored size, not logical completeness, so a valid current snapshot can be much
@@ -1090,13 +1829,149 @@ for v in d:
     if v.get("name")==vn and v.get("id"): print(v["id"]); break
 ' 2>/dev/null || true)"
 [ -n "$VOL_ID" ] || { echo "❌ Could not find warm volume '$VOLUME_NAME' in $APP" >&2; exit 1; }
-SNAP_ID="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | python3 "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" 2>/dev/null || true)"
+# CLOUDBENCH_SNAPSHOT_ID pins a specific snapshot (Fly can't delete snapshots, so
+# when the auto-selected newest one is stale — e.g. missing the dep-fingerprint
+# marker → cloudbench-sync-deps.sh FATAL — pin a known-good one until a fresh
+# warm image/snapshot is baked).
+if [ -n "${CLOUDBENCH_SNAPSHOT_ID:-}" ]; then
+    SNAP_ID="$CLOUDBENCH_SNAPSHOT_ID"
+    echo "📌 pinned snapshot (CLOUDBENCH_SNAPSHOT_ID): $SNAP_ID"
+else
+    SNAPSHOTS_JSON="$(FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null || echo '[]')"
+    RECORDED_SNAP_ID="$(awk 'NF >= 4 {print $4; exit}' "$GIT_COMMON_DIR/cloudbench-warm-deps.fp" 2>/dev/null || true)"
+    # The newest snapshot is not necessarily proven: an interrupted refresh can
+    # leave a newer complete snapshot without ever publishing its dependency
+    # proof. Prefer the exact recorded snapshot while it still exists and is
+    # complete; warm_deps_preflight below independently verifies its fingerprints
+    # and creation epoch. This prevents an orphan snapshot from invalidating a
+    # perfectly warm 30-Machine pool and triggering another multi-minute cut.
+    if [ -n "$RECORDED_SNAP_ID" ] && printf '%s' "$SNAPSHOTS_JSON" | \
+        SID="$RECORDED_SNAP_ID" python3 -c '
+import json, os, sys
+try: snapshots = json.load(sys.stdin) or []
+except Exception: snapshots = []
+valid = {"created", "complete", "completed", "ready"}
+match = next((s for s in snapshots if s.get("id") == os.environ["SID"]), None)
+raise SystemExit(0 if match and str(match.get("status") or "").lower() in valid
+                 and int(match.get("size") or 0) > 0 and match.get("created_at") else 1)
+' 2>/dev/null; then
+        SNAP_ID="$RECORDED_SNAP_ID"
+        echo "🧾 using recorded proven snapshot: $SNAP_ID"
+    else
+        SNAP_ID="$(printf '%s' "$SNAPSHOTS_JSON" | python3 "$ROOT_DIR/scripts/cloudbench-select-snapshot.py" 2>/dev/null || true)"
+    fi
+fi
 if [ -z "$SNAP_ID" ]; then
     echo "❌ No complete snapshot for warm volume $VOL_ID. Create one and wait for it to finish:" >&2
     echo "   flyctl volume snapshots create $VOL_ID -a $APP   # then wait until STORED SIZE ≈ VOL SIZE" >&2
     exit 1
 fi
+# ── Preflight: will clones inherit up-to-date dep trees from this snapshot? ──
+# When the warm snapshot's node_modules/venv are stale vs the current ref's
+# manifests, EVERY clone pays a multi-minute rsync refresh on bring-up — the
+# fleet's dominant cost at width. --refresh-deps records what the snapshot
+# carries in a git-common state file (shared across sibling workspaces); heal
+# centrally ONCE when it drifts.
+snapshot_created_epoch() {  # snapshot_created_epoch <snap_id>
+    FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | SID="$1" python3 -c '
+import json, os, sys
+from datetime import datetime
+try: snaps = json.load(sys.stdin) or []
+except Exception: snaps = []
+for s in snaps:
+    if s.get("id") == os.environ["SID"]:
+        try:
+            print(int(datetime.fromisoformat(str(s.get("created_at","")).replace("Z","+00:00")).timestamp()))
+        except ValueError:
+            print(0)
+        break
+' 2>/dev/null || true
+}
+snapshot_is_complete_exact() {  # snapshot_is_complete_exact <snap_id>
+    FLY volume snapshots list "$VOL_ID" -a "$APP" --json 2>/dev/null | SNAP_ID="$1" python3 -c '
+import json, os, sys
+try: snaps = json.load(sys.stdin) or []
+except Exception: raise SystemExit(1)
+match = next((s for s in snaps if s.get("id") == os.environ["SNAP_ID"]), None)
+valid = {"created", "complete", "completed", "ready"}
+raise SystemExit(0 if match and str(match.get("status") or "").lower() in valid
+                 and int(match.get("size") or 0) > 0 else 1)
+' 2>/dev/null
+}
+CURRENT_NODE_FP=""
+CURRENT_PY_FP=""
+warm_deps_preflight() {
+    local state="$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
+    local node_fp py_fp snap_epoch s_node s_py s_epoch _rest new_snap
+    node_fp="$(cloudbench_node_dependency_fingerprint "$ROOT_DIR" 2>/dev/null || true)"
+    py_fp="$(cloudbench_manifest_fingerprint "$ROOT_DIR" "${CLOUDBENCH_PYTHON_MANIFESTS[@]}" 2>/dev/null || true)"
+    CURRENT_NODE_FP="$node_fp"
+    CURRENT_PY_FP="$py_fp"
+    if [ -z "$node_fp" ] || [ -z "$py_fp" ]; then
+        echo "⚠️  could not fingerprint dep manifests — skipping warm-deps preflight" >&2
+        return 0
+    fi
+    if [ -f "$state" ]; then
+        read -r s_node s_py s_epoch _rest < "$state" || true
+        snap_epoch="$(snapshot_created_epoch "$SNAP_ID")"
+        if [ "$s_node" = "$node_fp" ] && [ "$s_py" = "$py_fp" ] && \
+           [ "$_rest" = "$SNAP_ID" ] && \
+           [ "${snap_epoch:-0}" -ge $(( ${s_epoch:-0} - 60 )) ]; then
+            echo "✅ warm snapshot dep trees match the current ref (fast bring-up)"
+            return 0
+        fi
+    fi
+    # Uncommitted manifest edits can't be healed centrally (--refresh-deps syncs
+    # the committed ref), and the task-box path intentionally refuses to install
+    # from the network. Fail before provisioning instead of advertising an
+    # impossible per-box fallback.
+    if ! git -C "$ROOT_DIR" diff --quiet HEAD -- agents/requirements.txt \
+        '*package.json' '*package-lock.json' 2>/dev/null; then
+        echo "❌ dep manifests are DIRTY vs HEAD — commit them before the central dependency rebuild" >&2
+        return 1
+    fi
+    if [ "${CLOUDBENCH_WARM_DEPS_AUTOREFRESH:-1}" != "1" ]; then
+        echo "❌ warm snapshot dep trees are STALE vs the current ref and automatic maintenance is disabled." >&2
+        echo "    heal centrally: bash scripts/run-bench-cloud --refresh-deps --ref $BENCH_REF" >&2
+        return 1
+    fi
+    write_startup_card "healing warm snapshot (dep trees)"
+    echo "♻️  warm snapshot dep trees unproven/stale → central refresh ONCE (instead of ×${#BENCHES[@]} per-clone rsyncs) ..."
+    if bash "$RUN_BENCH_CLOUD_BIN" --refresh-deps --ref "$BENCH_REF" 2>&1 | while IFS= read -r _l; do printf '   %s\n' "$_l"; done; then
+        s_node=""; s_py=""; s_epoch=""; new_snap=""
+        [ -f "$state" ] && read -r s_node s_py s_epoch new_snap < "$state" || true
+        snap_epoch="$(snapshot_created_epoch "$new_snap")"
+        if [ "$s_node" = "$node_fp" ] && [ "$s_py" = "$py_fp" ] \
+            && [ -n "$new_snap" ] && snapshot_is_complete_exact "$new_snap" \
+            && [ "${snap_epoch:-0}" -ge $(( ${s_epoch:-0} - 60 )) ]; then
+            SNAP_ID="$new_snap"
+            echo "✅ central refresh done — forking from its exact proven snapshot $SNAP_ID"
+            return 0
+        fi
+        echo "❌ central refresh returned without a matching exact snapshot proof" >&2
+    fi
+    echo "❌ central dep refresh failed; refusing to provision task machines" >&2
+    return 1
+}
+warm_deps_preflight || exit 1
 echo "🧊 forking clones from complete snapshot: $SNAP_ID"
+
+# A newer snapshot is not proof that it contains the dependency state recorded
+# for an older snapshot: the mutable warm checkout can subsequently move to an
+# older ref. Likewise, an existing pool must carry the manifest fingerprints
+# current code expects. Fail before claiming or starting a single task box.
+if [ -s "$POOL_IDS_FILE" ]; then
+    pool_node=""; pool_py=""; pool_snap=""
+    [ -f "$POOL_META_FILE" ] && read -r pool_node pool_py pool_snap < "$POOL_META_FILE" || true
+    if [ -z "$CURRENT_NODE_FP" ] || [ -z "$CURRENT_PY_FP" ] \
+        || [ "$pool_node" != "$CURRENT_NODE_FP" ] \
+        || [ "$pool_py" != "$CURRENT_PY_FP" ]; then
+        echo "❌ pooled machines were built from unproven/stale dependency trees; refusing to start them" >&2
+        echo "   retire this workspace's stopped pool first; then rebuild with: bash scripts/run-bench-fleet --provision-pool ${PROVISION_POOL:-${#BENCHES[@]}}" >&2
+        exit 1
+    fi
+    echo "✅ pooled dependency trees match the current ref (${pool_snap:-unknown snapshot})"
+fi
 
 # Recover only positively owned ephemeral clones whose same-host controller
 # identity is definitively dead. Any active runner, unreadable probe, malformed
@@ -1143,6 +2018,19 @@ fi
 
 # --provision-pool: one-time pre-provision of N stopped clones, then exit.
 if [ -n "$PROVISION_POOL" ]; then
+    # Pool slots all observe ONE controller-owned inventory stream. Without it,
+    # 30 readiness loops each issued machine+volume list calls every five
+    # seconds (90 API reads/cycle), recreating resource_exhausted before the
+    # benchmark even started.
+    machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!
+    for _ in $(seq 1 30); do
+        [ -s "$MACHINES_SNAPSHOT" ] && [ -s "$VOLUMES_SNAPSHOT" ] && break
+        sleep 0.2
+    done
+    [ -s "$MACHINES_SNAPSHOT" ] && [ -s "$VOLUMES_SNAPSHOT" ] || {
+        echo "❌ shared inventory snapshots did not initialize for pool provisioning" >&2
+        exit 1
+    }
     provision_pool "$PROVISION_POOL"
     exit $?
 fi
@@ -1162,14 +2050,15 @@ BOX_HEALTH_PORT="3003"     # cloudbench-run.sh HEALTH_PORT = CONDUCTOR_PORT(3001
 BOX_BACKEND_PORT="3001"
 BOX_WMH_PORT="3007"        # run.sh WMH_PORT = base+6
 FLEET_PATCH_FILE=""
-if ! git -C "$ROOT_DIR" diff --quiet --binary 2>/dev/null \
-    || [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | head -1)" ]; then
+if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
+   && { ! git -C "$ROOT_DIR" diff --quiet --binary 2>/dev/null \
+        || [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | head -1)" ]; }; then
     FLEET_PATCH_FILE="$(mktemp)"
     bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$FLEET_PATCH_FILE"
 fi
 
 _machine_priv_ip() {  # _machine_priv_ip <machine_id>
-    FLY machines list -a "$APP" --json 2>/dev/null | MID="$1" python3 -c '
+    fleet_machines_json | MID="$1" python3 -c '
 import json,os,sys
 try: d=json.load(sys.stdin) or []
 except Exception: d=[]
@@ -1179,9 +2068,9 @@ for m in d:
 ' 2>/dev/null || true
 }
 
-_box_desired() {  # _box_desired <machine_id> → desired_machine_count or empty
-    FLY ssh console -a "$APP" --machine "$1" -q \
-        -C "bash -c \"curl -s localhost:$BOX_HEALTH_PORT/metrics 2>/dev/null | grep -E '^desired_machine_count ' | awk '{print \\\$2}'\"" 2>/dev/null \
+_box_desired() {  # _box_desired <local-metrics-url> → desired_machine_count or empty
+    curl --noproxy '*' -fsS --max-time 3 "$1/metrics" 2>/dev/null \
+        | awk '/^desired_machine_count / {print $2; exit}' \
         | tr -dc '0-9'
 }
 
@@ -1199,7 +2088,8 @@ _pool_ids() {  # count of tracked worker machines (clean single integer)
 provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <primary_ip> <sim01> <out>
     local bench="$1" ws="$2" primary_id="$3" pip="$4" sim="$5" out="$6"
     local wid
-    if ! wid="$(clone_machine_target "$out/worker-clones.ids" "$primary_id")"; then
+    if ! wid="$(clone_machine_target "$out/worker-clones.ids" "$primary_id" \
+        "$FLEET_WORKER_VM_SIZE" "$FLEET_WORKER_VM_MEMORY")"; then
         echo "  ⚠️ [$bench] worker clone did not appear" >&2
         return 1
     fi
@@ -1220,12 +2110,12 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     } > "$wrapper"
     ( for _ in $(seq 1 40); do
         if machine_storage_ready "$wid"; then
-            FLY machine start "$wid" -a "$APP" >/dev/null 2>&1 || true
+            fly_with_timeout 20 machine start "$wid" -a "$APP" >/dev/null 2>&1 || true
         fi
-        if FLY ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-worker.sh" /data/cloudbench-worker.sh >/dev/null 2>&1 \
-           && FLY ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh >/dev/null 2>&1; then
-            [ -n "$FLEET_PATCH_FILE" ] && FLY ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1 || true
-            FLY ssh console -a "$APP" --machine "$wid" -C "bash -c \"setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
+        if fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-worker.sh" /data/cloudbench-worker.sh >/dev/null 2>&1 \
+           && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh >/dev/null 2>&1; then
+            [ -n "$FLEET_PATCH_FILE" ] && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1 || true
+            fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" -C "bash -c \"setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
             echo "  ✅ [$bench] worker $wid staged + launched"
             break
         fi
@@ -1234,14 +2124,82 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     return 0
 }
 
-bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim01> <out>
-    local bench="$1" cid="$2" ws="$3" sim="$4" out="$5"
-    local pip=""; : > "$out/worker-clones.ids"
+bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim01> <out> <local-port-base>
+    local bench="$1" cid="$2" ws="$3" sim="$4" out="$5" port_base="$6"
+    local pip="" metrics_proxy_pid="" metrics_port="" metrics_url="" offset
+    local metrics_started_at candidate
+    : > "$out/worker-clones.ids"
+    cleanup_autoscaler_jobs() {
+        local job_pid
+        local -a live_jobs
+        live_jobs=()
+        while read -r job_pid; do
+            if [ -n "$job_pid" ] && [ "$job_pid" != "${metrics_proxy_pid:-}" ]; then
+                live_jobs+=("$job_pid")
+            fi
+        done < <(jobs -pr)
+        cloudbench_terminate_and_wait 30 "${live_jobs[@]:-}"
+        cloudbench_terminate_and_wait 5 "${metrics_proxy_pid:-}"
+    }
+    trap cleanup_autoscaler_jobs EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    # One persistent WireGuard tunnel replaces one `flyctl ssh` metrics read per
+    # task every poll interval. At daily width that removes 180 Machines-API SSH
+    # sessions/minute and the rate-limit/launch interference they caused.
+    : > "$out/autoscaler-metrics-proxy.log"
+    start_metrics_proxy() {  # start_metrics_proxy [timeout-seconds]
+        local timeout="${1:-${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}}"
+        metrics_started_at="$(date +%s)"
+        while [ $(( $(date +%s) - metrics_started_at )) -lt "$timeout" ]; do
+            metrics_port=""
+            for offset in $(seq 10 18); do
+                candidate=$((port_base + offset))
+                if ! lsof -tiTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1; then
+                    metrics_port="$candidate"
+                    break
+                fi
+            done
+            [ -n "$metrics_port" ] || { sleep 2; continue; }
+            flyctl proxy "$metrics_port:$BOX_HEALTH_PORT" "${cid}.vm.${APP}.internal" \
+                -a "$APP" --bind-addr 127.0.0.1 -q \
+                >> "$out/autoscaler-metrics-proxy.log" 2>&1 &
+            metrics_proxy_pid=$!
+            # Force flyctl's lazy DNS resolution, then accept the tunnel only if
+            # the process survives that first real data-plane connection.
+            sleep 0.5
+            curl --noproxy '*' -sS --max-time 2 -o /dev/null \
+                "http://127.0.0.1:$metrics_port/metrics" 2>/dev/null || true
+            sleep 0.5
+            if kill -0 "$metrics_proxy_pid" 2>/dev/null; then
+                metrics_url="http://127.0.0.1:$metrics_port"
+                return 0
+            fi
+            wait "$metrics_proxy_pid" 2>/dev/null || true
+            metrics_proxy_pid=""
+            sleep 2
+        done
+        return 1
+    }
+    start_metrics_proxy || {
+        echo "  ⚠️ [$bench] autoscaler: could not bind a data-plane metrics proxy; disabled" >&2
+        return 0
+    }
+    echo "  🛰️ [$bench] autoscaler metrics via data plane :$metrics_port → fly:$BOX_HEALTH_PORT"
     # Wait for the box /metrics to answer (stack up) before scaling.
     for _ in $(seq 1 60); do pip="$(_machine_priv_ip "$cid")"; [ -n "$pip" ] && break; sleep 5; done
     [ -n "$pip" ] || { echo "  ⚠️ [$bench] autoscaler: no primary IP; disabled" >&2; return 0; }
-    while FLY machine status "$cid" -a "$APP" >/dev/null 2>&1; do
-        local desired want cur; desired="$(_box_desired "$cid")"; [ -z "$desired" ] && { sleep "$AUTOSCALE_POLL"; continue; }
+    while fleet_machines_json | grep -q "\"$cid\""; do
+        if [ -z "$metrics_proxy_pid" ] || ! kill -0 "$metrics_proxy_pid" 2>/dev/null; then
+            metrics_proxy_pid=""
+            start_metrics_proxy 30 || {
+                echo "  ⚠️ [$bench] autoscaler metrics proxy died and did not recover; disabled" >&2
+                return 0
+            }
+            echo "  🛰️ [$bench] autoscaler metrics proxy recovered on :$metrics_port"
+        fi
+        local desired want cur; desired="$(_box_desired "$metrics_url")"; [ -z "$desired" ] && { sleep "$AUTOSCALE_POLL"; continue; }
         want=$((desired - 1)); [ "$want" -lt 0 ] && want=0
         [ "$want" -gt $((AUTOSCALE_MAX - 1)) ] && want=$((AUTOSCALE_MAX - 1))
         cur="$(_pool_ids "$out")"
@@ -1273,8 +2231,52 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
 # ── Clone one machine per bench + launch its isolated run ────────────────────
 mkdir -p "$FLEET_DIR"
 : > "$CLAIMED_POOL_FILE"
+machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!
 echo ""
 echo "═══ run-bench-fleet — ${#BENCHES[@]} bench(es), one isolated machine each ═══"
+# ── Phase 1: provision every bench's isolated machine CONCURRENTLY ───────────
+# Cloning 28 fresh volumes-from-snapshot one-at-a-time serialized provisioning
+# into a 30-50min window — the window where every clone hang, volume race, and
+# cross-workspace contention event landed and aborted the batch. Fan the
+# claim/clone out in parallel: each attempt runs in its own subshell and writes
+# its OWN per-bench ledger (primary.ids/.names — reaped by cleanup's globs), so
+# there is no shared-ledger race. The whole fleet is now provisioned in ~one
+# clone's wall-time (target: < 3 min) instead of the sum of 28.
+echo ""
+write_startup_card "provisioning ${#BENCHES[@]} isolated machines"
+echo "⏳ provisioning ${#BENCHES[@]} isolated machine(s) concurrently (claim-or-clone) ..."
+# Reuse the controller-wide provision PID registry so cleanup can terminate
+# precisely these children if the controller is signalled mid-provision.
+for bench in "${BENCHES[@]}"; do
+    out="$FLEET_DIR/$bench"
+    rm -rf "$out" 2>/dev/null || true; mkdir -p "$out"
+    (
+        # Prefer a pre-provisioned pool machine (skips the ~300s volume fork);
+        # fall back to cloning fresh (bounded + retried) if the pool is empty.
+        pcid="$(claim_pool_machine)"
+        if [ -n "$pcid" ]; then
+            printf 'pool %s\n' "$pcid" > "$out/.cid"
+        elif pcid="$(clone_machine_target "$out/primary.ids")"; then
+            printf 'clone %s\n' "$pcid" > "$out/.cid"
+        fi
+    ) &
+    PROVISION_PIDS+=("$!")
+    # Stagger the clone starts so N benches don't hammer the Fly Machines API in
+    # the same instant (the direct cause of `resource_exhausted: rate limit
+    # exceeded` → clones that exhaust their retries and drop from the batch).
+    # Still fully concurrent — every clone stays in flight together — the burst is
+    # just spread across a few seconds instead of fired simultaneously.
+    sleep "${CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS:-0.4}"
+done
+for pp in "${PROVISION_PIDS[@]}"; do wait "$pp" 2>/dev/null || true; done
+# Provision children are fully reaped; retain no stale PIDs across the
+# potentially multi-hour benchmark phase.
+PROVISION_PIDS=()
+
+# ── Phase 2: launch each provisioned bench's isolated run (fast; backgrounded) ─
+BOOT_CONFIG_BARRIER="$FLEET_DIR/.boot-config-barrier"
+rm -rf "$BOOT_CONFIG_BARRIER" 2>/dev/null || true
+mkdir -p "$BOOT_CONFIG_BARRIER/ready"
 i=0
 for bench in "${BENCHES[@]}"; do
     # Default from the catalog's world_model_mode; --sim-on is an explicit override.
@@ -1285,20 +2287,18 @@ for bench in "${BENCHES[@]}"; do
     # viewers live above it (their /open-agent deep-links back the batch rows).
     port=$((DASH_BASE + (i + 1) * 20))
     out="$FLEET_DIR/$bench"
-    rm -rf "$out" 2>/dev/null || true; mkdir -p "$out"
+    src=""; cid=""
+    read -r src cid < "$out/.cid" 2>/dev/null || true
 
     echo ""
-    # Prefer a pre-provisioned pool machine (skips the ~300s volume fork); fall
-    # back to cloning fresh if the pool is empty/exhausted.
-    cid="$(claim_pool_machine)"
-    if [ -n "$cid" ]; then
-        echo "▶️  [$bench] claimed POOL machine $cid (no fork, mode=$mode_label, dash=$port) — starting ..."
+    if [ -z "$cid" ]; then
+        echo "❌ [$bench] provisioning failed (no machine) — skipping"
+        i=$((i + 1)); continue
+    fi
+    if [ "$src" = "pool" ]; then
+        echo "▶️  [$bench] claimed POOL machine $cid (no fork, mode=$mode_label, dash=$port)"
     else
-        echo "▶️  [$bench] pool empty → cloning fresh isolated machine (mode=$mode_label, dash=$port) ..."
-        if ! cid="$(clone_machine_target "$OWNED_CLONES_FILE")"; then
-            echo "   ❌ clone failed for $bench"
-            i=$((i + 1)); continue
-        fi
+        echo "▶️  [$bench] cloned isolated machine $cid (mode=$mode_label, dash=$port)"
     fi
     case " ${CHILD_MACHINE[*]:-} " in
         *" $cid "*) echo "❌ isolation violation: machine $cid was allocated twice" >&2; exit 1 ;;
@@ -1313,10 +2313,15 @@ for bench in "${BENCHES[@]}"; do
     (
         CLOUDBENCH_WORKSPACE_NAME="$local_ws" \
         CLOUDBENCH_ENV_VERIFIED=1 \
+        CLOUDBENCH_STORAGE_READY="$([ "$src" = "pool" ] && printf 1 || printf 0)" \
         CLOUDBENCH_START_BARRIER="$([ "$SYNCHRONIZED_START" = "1" ] && printf '%s' "$RUN_ID")" \
+        CLOUDBENCH_BARRIER_TOKEN="$BARRIER_RELEASE_TOKEN" \
         CLOUDBENCH_START_BARRIER_WAIT_SECONDS="$START_BARRIER_WAIT_SECONDS" \
+        CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS="$FIRST_RUN_STACK_WAIT_SECONDS" \
+        CLOUDBENCH_BOOT_LAUNCH="${CLOUDBENCH_BOOT_LAUNCH:-1}" \
+        CLOUDBENCH_BOOT_CONFIG_BARRIER="$BOOT_CONFIG_BARRIER" \
         NO_OPEN=1 \
-        bash scripts/run-bench-cloud "$bench" \
+        bash "$RUN_BENCH_CLOUD_BIN" "$bench" \
             --machine "$cid" \
             --out-dir "$out" \
             --dash-port "$port" \
@@ -1332,17 +2337,47 @@ for bench in "${BENCHES[@]}"; do
     CHILD_MODE+=("$mode_label")
     CHILD_PORT+=("$port")
     CHILD_MACHINE+=("$cid")
+    # Boot-launch is one bounded update/start pair and has exponential retry; it
+    # no longer performs the old seven-SSH launch sequence. Feed pooled Machines
+    # into that parallel bring-up at four launches/second, so all 30 are submitted
+    # in ~7.5s without an instantaneous control-plane burst. Preserve the slower
+    # legacy-path throttle for explicit non-boot callers.
+    if [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" = "1" ]; then
+        sleep "${CLOUDBENCH_LAUNCH_STAGGER_SECONDS:-0.25}"
+    else
+        sleep "${CLOUDBENCH_LAUNCH_STAGGER_SECONDS:-3.5}"
+    fi
 
     if [ "$AUTOSCALE" = "1" ]; then
         local_sim=0; [ "$mode_label" = "SIM" ] && local_sim=1
         echo "   ⚖️  [$bench] per-bench autoscaler ON (prod params, max=$AUTOSCALE_MAX, queue=navi-agent-tasks-$local_ws)"
-        ( bench_autoscaler "$bench" "$cid" "$local_ws" "$local_sim" "$out" ) >> "$out/autoscaler.log" 2>&1 &
+        ( bench_autoscaler "$bench" "$cid" "$local_ws" "$local_sim" "$out" "$port" ) >> "$out/autoscaler.log" 2>&1 &
         AUTOSCALER_PIDS+=("$!")
     fi
     i=$((i + 1))
 done
 
 [ "${#CHILD_PIDS[@]}" -ge 1 ] || { echo "❌ no benches launched (all clones failed)." >&2; exit 1; }
+
+# Configure the entire stopped fleet before starting any guest. Fly can reserve
+# replacement CPU while applying a machine update; interleaving update/start at
+# width made later config-only updates hit cpu_overcommit_exceeded even though
+# the final 37-machine shape fit. Each child publishes its completed update and
+# waits here; one release then lets every explicit start proceed concurrently.
+if [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" = "1" ]; then
+    boot_config_deadline=$((SECONDS + ${CLOUDBENCH_BOOT_CONFIG_BARRIER_WAIT_SECONDS:-300}))
+    while :; do
+        boot_config_ready="$(find "$BOOT_CONFIG_BARRIER/ready" -type f 2>/dev/null | wc -l | tr -d ' ')"
+        [ "$boot_config_ready" = "${#CHILD_PIDS[@]}" ] && break
+        if [ "$SECONDS" -ge "$boot_config_deadline" ]; then
+            echo "❌ boot config barrier timed out: ${boot_config_ready:-0}/${#CHILD_PIDS[@]} updates ready" >&2
+            exit 1
+        fi
+        sleep 0.2
+    done
+    : > "$BOOT_CONFIG_BARRIER/release"
+    echo "⚙️  ${#CHILD_PIDS[@]}/${#CHILD_PIDS[@]} boot configs applied while stopped; releasing concurrent starts"
+fi
 
 echo ""
 echo "⏳ ${#CHILD_PIDS[@]} isolated bench machine(s) running."
@@ -1495,39 +2530,107 @@ echo ""
 # healthy; only then do we touch every machine's release file in parallel.
 release_start_barrier() {
     [ "$SYNCHRONIZED_START" = "1" ] || return 0
-    local expected="${#CHILD_PIDS[@]}" ready deadline now out p mid
-    deadline=$(( $(date +%s) + START_BARRIER_WAIT_SECONDS ))
-    echo "⏸️  waiting for $expected isolated stacks at synchronized start barrier..."
+    # TOLERANT barrier: at fleet width some isolated stacks sporadically fail on-box
+    # startup (resource/timing races under N concurrent full stacks). An all-or-
+    # nothing barrier turned ONE such infra failure into a whole-batch abort, so a
+    # 30/31-healthy run reported ZERO results. Instead, exclude a stack that dies
+    # before signalling ready (it's an infra failure, not a benchmark verdict),
+    # keep waiting for the live set, and release the barrier for the survivors.
+    # Only fail if EVERY stack dies. The excluded bench's child already exited
+    # non-zero and is reported as such in the aggregate.
+    local total="${#CHILD_PIDS[@]}" ready deadline now out p j live barrier_start per_box
+    local status_port ready_marker_url
+    local -a is_ready=() is_dead=()
+    for j in "${!CHILD_PIDS[@]}"; do is_ready[$j]=0; is_dead[$j]=0; done
+    barrier_start="$(date +%s)"
+    deadline=$(( barrier_start + START_BARRIER_WAIT_SECONDS ))
+    # Per-box ceiling: a single box whose launcher is alive but never reaches the
+    # barrier (e.g. a hung iMessage-relay setup, or a driver dead before the poll
+    # loop where staleness can't see it) otherwise drags the WHOLE barrier until
+    # the global timeout, and every ready box waits idle. Exclude such a holdout
+    # after a generous window (covers the slowest legitimate bring-up).
+    per_box="$PER_BOX_BARRIER_WAIT_SECONDS"
+    echo "⏸️  waiting for $total isolated stacks at synchronized start barrier..."
     while :; do
-        ready=0
-        for out in "${CHILD_OUT[@]}"; do
-            grep -aFq "synchronized start barrier ready: $RUN_ID" "$out/fleet-child.log" 2>/dev/null && ready=$((ready + 1))
-        done
-        [ "$ready" = "$expected" ] && break
-        for p in "${CHILD_PIDS[@]}"; do
-            if ! kill -0 "$p" 2>/dev/null; then
-                echo "❌ isolated runner exited before synchronized start barrier ($ready/$expected ready)" >&2
-                return 1
+        now="$(date +%s)"
+        ready=0; live=0
+        for j in "${!CHILD_PIDS[@]}"; do
+            [ "${is_dead[$j]}" = "1" ] && continue
+            out="${CHILD_OUT[$j]}"; p="${CHILD_PIDS[$j]}"
+            if [ "${is_ready[$j]}" = "0" ]; then
+                # The on-box marker is the readiness source of truth. Console
+                # streaming intentionally tails only a few changed lines, so a
+                # healthy box can write this marker while fleet-child.log omits
+                # the READY line. Observe the durable artifact through the same
+                # data-plane tunnel used for authenticated barrier release.
+                status_port="$(cat "$out/status-proxy.port" 2>/dev/null || true)"
+                case "$status_port" in
+                    ''|*[!0-9]*) ;;
+                    *)
+                        ready_marker_url="http://127.0.0.1:$status_port/cloudbench-start-$RUN_ID.ready"
+                        if curl --noproxy '*' -fsS --max-time 1 -o /dev/null \
+                            "$ready_marker_url" 2>/dev/null; then
+                            is_ready[$j]=1
+                        fi
+                        ;;
+                esac
+                # Retain the emitted line as a compatibility signal for a
+                # tunnel rotating at this instant; it is written only after
+                # the same marker and cannot create an early release.
+                if [ "${is_ready[$j]}" = "0" ] && \
+                   grep -aFq "synchronized start barrier ready: $RUN_ID" "$out/fleet-child.log" 2>/dev/null; then
+                    is_ready[$j]=1
+                fi
+            fi
+            if [ "${is_ready[$j]}" = "1" ]; then
+                ready=$((ready + 1)); live=$((live + 1))
+            elif ! kill -0 "$p" 2>/dev/null; then
+                # exited before signalling ready → infra failure; exclude it.
+                is_dead[$j]=1
+                echo "⚠️  [${CHILD_BENCH[$j]}] isolated stack failed before the start barrier — excluding it (infra) and continuing with the rest" >&2
+            elif [ $(( now - barrier_start )) -ge "$per_box" ]; then
+                # alive but never reached the barrier within the window → holdout.
+                is_dead[$j]=1
+                echo "⚠️  [${CHILD_BENCH[$j]}] did not reach the start barrier within ${per_box}s — excluding it (infra) and continuing with the rest" >&2
+            else
+                live=$((live + 1))
             fi
         done
-        now="$(date +%s)"
+        [ "$live" -eq 0 ] && { echo "❌ every isolated stack failed before the start barrier" >&2; return 1; }
+        [ "$ready" -ge "$live" ] && break
         if [ "$now" -ge "$deadline" ]; then
-            echo "❌ synchronized start barrier timed out ($ready/$expected ready)" >&2
-            return 1
+            echo "⚠️  start barrier timed out ($ready/$live live ready) — releasing the ready set anyway" >&2
+            break
         fi
         sleep 2
     done
-    echo "✅ all $expected isolated stacks reached the synchronized start barrier"
-    echo "🚦 releasing synchronized start barrier on all machines..."
-    local release_pids=()
-    for mid in "${CHILD_MACHINE[@]}"; do
-        ( FLY ssh console -a "$APP" --machine "$mid" -q \
-            -C "touch '/data/cloudbench-start-$RUN_ID.release'" >/dev/null 2>&1 ) &
+    echo "✅ $ready/$total isolated stacks reached the barrier ($(( total - ready )) excluded as infra failures)"
+    echo "🚦 releasing synchronized start barrier on the ready machines..."
+    local release_pids=() release_failed=0 release_port_file
+    for j in "${!CHILD_MACHINE[@]}"; do
+        [ "${is_ready[$j]}" = "1" ] || continue
+        release_port_file="${CHILD_OUT[$j]}/status-proxy.port"
+        (
+            released=0
+            for _release_attempt in $(seq 1 "${CLOUDBENCH_BARRIER_RELEASE_ATTEMPTS:-10}"); do
+                status_port="$(cat "$release_port_file" 2>/dev/null || true)"
+                case "$status_port" in ''|*[!0-9]*) sleep 1; continue ;; esac
+                status_code="$(curl -sS --max-time 3 -o /dev/null -w '%{http_code}' \
+                    -X POST -H "Authorization: Bearer $CLOUDBENCH_BARRIER_TOKEN" \
+                    "http://127.0.0.1:$status_port/release" 2>/dev/null || true)"
+                if [ "$status_code" = "204" ]; then released=1; break; fi
+                sleep 1
+            done
+            [ "$released" = "1" ]
+        ) &
         release_pids+=("$!")
     done
-    for p in "${release_pids[@]}"; do
-        wait "$p" || { echo "❌ failed to release synchronized start barrier" >&2; return 1; }
-    done
+    for p in "${release_pids[@]}"; do wait "$p" || release_failed=1; done
+    if [ "$release_failed" = "1" ]; then
+        echo "❌ could not release synchronized start barrier on every ready stack" >&2
+        return 1
+    fi
+    return 0
 }
 
 if ! release_start_barrier; then
@@ -1549,6 +2652,10 @@ CHILD_PIDS=()
 # One final merge so the batch dashboard reflects terminal results, then stop the aggregator.
 kill "$UNIFIED_AGG_PID" 2>/dev/null || true
 python3 "$ROOT_DIR/scripts/cloudbench-aggregate-runs.py" "$FLEET_DIR" "$UNIFIED_DIR/run.json"
+if [ "$SELF_MANAGED_HUB_RUN" = "1" ]; then
+    python3 "$HUB_UPLOAD_HELPER" --upload-final "$UNIFIED_DIR/run.json" \
+        --run-id "$BENCHMARK_HUB_PARENT_RUN_ID" --source direct-cloud-fleet
+fi
 
 echo ""
 echo "════════════════════ FLEET SUMMARY ════════════════════"

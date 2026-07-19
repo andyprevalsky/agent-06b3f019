@@ -24,10 +24,14 @@ class TaskResult:
     cache_read_input_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_hit_pct: float = 0.0
+    repeatable_cache_read_input_tokens: int = 0
+    repeatable_cache_creation_input_tokens: int = 0
+    repeatable_cache_hit_pct: float = 0.0
     llm_call_count: int = 0
     tree_agent_count: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
+    llm_usage_by_provider: dict = field(default_factory=dict)
     stop_metadata: Optional[dict] = None
     fast_mode_cache_enabled: bool = False
     context_violations: List[dict] = field(default_factory=list)  # [{rule, severity, message}]
@@ -78,6 +82,11 @@ class BenchmarkRun:
             "cache_creation_input_tokens": agg_cache_write,
             "cache_hit_pct": agg_cache_hit_pct,
         }
+        from benchmarks.llm_usage import merge_usage_breakdowns
+
+        result["llm_usage_by_provider"] = merge_usage_breakdowns(
+            r.llm_usage_by_provider for r in self.task_results
+        )
         if scored_world_model:
             result["wmh_scored_tasks"] = len(scored_world_model)
             result["wmh_prediction_accuracy"] = round(
@@ -117,20 +126,25 @@ class BenchmarkRun:
         return path
 
     def _upload_to_hub(self) -> None:
-        """Best-effort push of the bundle to the in-app Benchmark Hub.
+        """Push the terminal bundle to the in-app Benchmark Hub.
 
-        Env-gated (BENCHMARK_HUB_UPLOAD_URL) so manual local runs and on-box
-        cloud drivers appear in the hub without the dispatch poller. Must never
-        fail save() — hub_upload swallows every error.
+        CLI benchmark runs set BENCHMARK_HUB_REQUIRED after their fail-closed
+        startup registration. Fleet children carry BENCHMARK_HUB_PARENT_RUN_ID
+        and leave aggregation/upload to that already-visible parent run.
         """
+        if os.getenv("BENCHMARK_HUB_PARENT_RUN_ID"):
+            return
+        required = os.getenv("BENCHMARK_HUB_REQUIRED") == "1"
         try:
             from benchmarks.hub_upload import hub_upload_enabled, upload_run_bundle
         except Exception as e:
+            if required:
+                raise
             print(f"⚠️  hub upload import failed (non-fatal): {e}")
             return
-        if not hub_upload_enabled():
+        if not required and not hub_upload_enabled():
             return
-        upload_run_bundle(self.to_dict())
+        upload_run_bundle(self.to_dict(), required=required)
 
     def _record_history(self) -> None:
         """Record run stats for every completed task, plus pass-only corpora.

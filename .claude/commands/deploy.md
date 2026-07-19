@@ -60,23 +60,55 @@ Carry this report forward into Phase 2 for use in the commit message and PR body
 
 **`/deploy` ALWAYS ships the ENTIRE worktree — every change present relative to `origin/main`, no exceptions.** This includes work you did not author: changes made by a concurrent agent sharing this worktree, pre-existing uncommitted edits, and any feature intermixed with yours. Do NOT stop to ask "these changes aren't mine / weren't part of my task." Do NOT try to isolate, cherry-pick, or exclude a subset onto a clean branch. The unit of deploy is the worktree, and everything in it is yours to carry through the gates and ship. The only reason to halt is a gate failure you cannot fix or a credential/billing escalation — never change ownership or scope. (Whoever ran `/deploy` is asserting the whole worktree is ready; the gates are what prove it.)
 
-If the branch is behind `origin/main`, sync first (commit the worktree, then `git merge origin/main`), resolve any conflicts keeping every feature, re-sync deps (`npm install` + `npx prisma generate`; `pip install -r requirements.txt`), and re-run the gates on the merged tree — then proceed.
+If the branch is behind `origin/main`, sync first (commit the worktree, then
+`git merge origin/main`). Resolve conflicts keeping every feature, re-sync deps
+(`npm install` + `npx prisma generate`; `pip install -r requirements.txt`), and
+re-run the gates on the merged tree — then proceed. Step 0 derives the latest
+main-sync delta from merge history so shared type changes introduced by either
+this merge or an earlier `/sync` remain lint seeds.
 
 All Phase 1 commands run from the repo root. Compute changed paths from the complete active worktree: committed branch changes, staged/unstaged tracked changes, and untracked non-ignored files. This prevents pre-commit deploy checks from incorrectly treating a dirty branch as unchanged.
 
 ```bash
 BASE_REF="${DEPLOY_BASE_REF:-origin/main}"
+SYNC_MERGES=$(
+  for merge_commit in $(git rev-list --first-parent --merges "$BASE_REF"..HEAD); do
+    second_parent=$(git rev-parse "$merge_commit^2")
+    if git merge-base --is-ancestor "$second_parent" "$BASE_REF"; then
+      echo "$merge_commit"
+    fi
+  done
+)
+SYNC_CHANGED=$(
+  for merge_commit in $SYNC_MERGES; do
+    git diff --name-only "$merge_commit^1" "$merge_commit"
+  done
+)
 CHANGED=$({
+  printf '%s\n' "$SYNC_CHANGED"
   git diff --name-only "$BASE_REF"...HEAD
   git diff --name-only HEAD
   git ls-files --others --exclude-standard
 } | sort -u)
-CHANGED_TS=$(echo "$CHANGED" | grep -E '^back-end/src/.*\.ts$' | sed 's|^back-end/||' || true)
+CHANGED_TS=$(
+  echo "$CHANGED" | grep -E '^back-end/src/.*\.tsx?$' | sed 's|^back-end/||' |
+    while IFS= read -r file; do
+      [ -f "back-end/$file" ] && echo "$file"
+    done || true
+)
 CHANGED_BACKEND=$(echo "$CHANGED" | grep -E '^back-end/' || true)
+CHANGED_BACKEND_LINT_INPUTS=$(echo "$CHANGED" | grep -E \
+  '^(package(-lock)?\.json|back-end/(package(-lock)?\.json|tsconfig[^/]*\.json|eslint\.config\.(mjs|js|cjs|ts)|prisma/schema\.prisma))$' || true)
+LINT_TS="$CHANGED_TS"
+if [ -n "$CHANGED_BACKEND_LINT_INPUTS" ]; then
+  LINT_TS=$(find back-end/src -type f \( -name '*.ts' -o -name '*.tsx' \) -print |
+    sed 's|^back-end/||' | sort)
+fi
 CHANGED_AGENTS=$(echo "$CHANGED" | grep -E '^agents/' || true)
 CHANGED_RESEARCH=$(echo "$CHANGED" | grep -E '^research/' || true)
 CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
 CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
+CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)' || true)
 CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS$CHANGED_RESEARCH" ] && echo "yes" || echo "")
 CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
 ```
@@ -90,6 +122,8 @@ Prompt modifications are high-risk behavior changes. **Any prompt modification M
 1. Examine every flagged hunk and classify it: does it change (or change the construction of) text an LLM ever sees — at compile time or runtime?
 2. If NO hunk changes LLM-visible text: state that determination in the deploy log (per file, one line on why it is code-behavior only), then pass the guard with the mandatory flag WITHOUT waiting for human approval. Record `Prompt Human Approval Guard | Pass | flagged files are code-behavior only (no LLM-visible text changed): <files>` in `TEST_REPORT`.
 3. If ANY hunk changes LLM-visible text — or you are unsure (runtime string construction counts) — stop and request human approval for those hunks. When mixed, list which hunks need review and which are code-behavior-only so the human reviews only what matters.
+
+**Operational gate maintenance is pre-authorized and MUST NOT block for human approval.** Changes limited to `.claude/commands/deploy.md` instructions that detect changed paths, select or invoke tests, record verification evidence, or tighten CI/deploy gates do not alter product or agent prompts. Classify those hunks as operational code behavior, rerun the guard with the mandatory flag immediately, and continue. Never stop an active implementation, RCA, benchmark, or deploy goal to ask permission for test-gate wiring.
 
 Run the guard without the approval flag first:
 
@@ -119,12 +153,14 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisf
    - Step 2b: `eslint` verify (0 errors)
    - Step 3: `tsc --noEmit`
    - Step 4: structural tests (skip if `CHANGED_TS` is empty)
+   - Step 4s: deploy environment + command structural tests (no skip)
    - Step 4a: back-end coverage (skip if `CHANGED_BACKEND` is empty)
    - Step 4b: front-end coverage (skip if `CHANGED_FRONTEND` is empty)
    - Step 4m-lint: mac-app format:check + lint + type-check (skip if `CHANGED_MAC_APP` is empty)
    - Step 4m-coverage: mac-app coverage (skip if `CHANGED_MAC_APP` is empty)
    - Step 4m: mac-app blackbox (skip if `CHANGED_MAC_APP` is empty)
    - Step 4r: research lint + structural (skip if `CHANGED_RESEARCH` is empty)
+   - Step 4cb: cloud benchmark controller regressions (skip if `CHANGED_CLOUDBENCH` is empty)
 
 If any verifier fails, fix and re-run the full Step 0 → verifier flow. Do not proceed until all verifiers are green.
 
@@ -145,23 +181,28 @@ git commit -m "style: auto-format and lint fixes"
 
 ## Step 2: ESLint fix + verify
 
-Using the same `$CHANGED_TS` from Step 1 (skip if empty):
+If `$LINT_TS` is non-empty, lint the changed back-end files and every
+transitive reverse importer. Shared middleware, types, and configuration can
+invalidate consumers that are not in the diff, so changed-file-only linting is
+not a sufficient deploy gate. Changes to package manifests, TypeScript config,
+or ESLint config set `$LINT_TS` to the entire source tree because those inputs
+can change the meaning of every unchanged file.
 
 **Step 2a (mutator — runs before the parallel verifier batch):**
 
 ```bash
-cd back-end && npx eslint --fix $CHANGED_TS
+cd back-end && node scripts/lint-affected.mjs --fix $LINT_TS
 ```
 
 **Step 2b (verifier — runs in parallel with Steps 3, 4, 4a):**
 
 ```bash
-cd back-end && npx eslint $CHANGED_TS
+cd back-end && node scripts/lint-affected.mjs $LINT_TS
 ```
 
-If there are remaining errors, fix them manually. Loop until `npx eslint` reports 0 errors.
+If there are remaining errors, fix them manually. Loop until the affected-file lint reports 0 errors.
 
-**CRITICAL: You must reach 0 errors across ALL files in `$CHANGED_TS`. "Pre-existing" or "this error was already on main" is NOT an excuse to skip it.** If a file is in the diff, you own every error in it. This includes `no-console`, `no-explicit-any`, `strict-boolean-expressions`, `max-lines`, and any other rule. Fix them all.
+**CRITICAL: You must reach 0 errors across every affected file. "Pre-existing" or "this error was already on main" is NOT an excuse to skip it.** This includes `no-console`, `no-explicit-any`, `strict-boolean-expressions`, `max-lines`, and any other rule. Fix them all.
 
 If any files were modified by this step, stage and commit them (can combine with Step 1's commit if both ran together).
 
@@ -184,6 +225,15 @@ cd back-end && npx tsx src/tests/structural/layer-deps.test.ts
 This enforces architectural invariants across all domains: import direction, cross-domain isolation, provider/util boundaries, domain completeness, Prisma/Express encapsulation, and circular import detection.
 
 If any invariant fails, fix the violation. The test output includes remediation guidance (e.g., "Move the needed logic to service.ts or extract to a provider.").
+
+## Step 4s: Deploy environment + command structural tests (no skip)
+
+```bash
+bash scripts/tests/workspace-env.test.sh
+bash scripts/tests/semantic-deploy-gate.test.sh
+```
+
+These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate wired into every run.
 
 ## Step 4a: Code coverage check (skip if no back-end/ changes)
 
@@ -266,6 +316,18 @@ cd research && bash scripts/lint-check.sh
 
 Commit any auto-fix changes before proceeding. "Pre-existing" violations in touched files are your responsibility — the same 0-failure rule from Steps 2/3/4 applies here.
 
+## Step 4cb: Cloud benchmark controller regressions (skip if `$CHANGED_CLOUDBENCH` is empty)
+
+Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barrier release, and durable machine cleanup. When that surface changes, run the fast functional regression plus the focused lifecycle cases before any paid cloud run:
+
+```bash
+bash scripts/tests/cloudbench-env.test.sh
+agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py \
+  -k 'data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or isolated_backend or local_predeploy_skips_wmh'
+```
+
+Both commands must pass. This operational verification wiring is pre-authorized by Step 0p and must never pause for human approval.
+
 ## Step 4c: Credential health check (no skip — always runs)
 
 Before spinning up services or spending money on smoke benchmarks, validate every external credential (E2B, Steel, Parallel.ai, Anthropic, OpenRouter, Supabase). This runs standalone against real provider endpoints — no local backend needed. Finishes in ~3s and fails fast on 401/402/403.
@@ -315,30 +377,24 @@ if [ -z "$CONDUCTOR_PORT" ]; then
   exit 1
 fi
 
-export CONDUCTOR_WORKSPACE_NAME="${CONDUCTOR_WORKSPACE_NAME:-$(basename "$(git rev-parse --show-toplevel)")}"
+DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
+. "$DEPLOY_ROOT/scripts/lib/workspace-env.sh"
+. "$DEPLOY_ROOT/scripts/lib/deploy-local-env.sh"
+configure_deploy_local_env
 
-export SMOKE_BASE_URL="http://localhost:$CONDUCTOR_PORT"
-export SMOKE_HEALTH_URL="http://localhost:$((CONDUCTOR_PORT + 2))"
-export SMOKE_FRONTEND_URL="http://localhost:$((CONDUCTOR_PORT + 1))"
-SEMANTIC_QUEUE_WORKSPACE="${CONDUCTOR_WORKSPACE_NAME:-local}"
-export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMANTIC_QUEUE_WORKSPACE}-deploy-$(date -u +%Y%m%d%H%M%S)-$$"
-
-cd "$(git rev-parse --show-toplevel)"
+cd "$DEPLOY_ROOT"
 ```
 
 **CRITICAL: Start the DB container BEFORE `run.sh` so that `run.sh` treats it as pre-existing and won't stop it on cleanup.** `run.sh` has an EXIT trap that stops all services it started — including the DB container. By pre-starting the DB, `run.sh` sees it as already running and skips DB cleanup, which prevents the DB from dying if `run.sh` exits for any reason (signal, child process exit, timeout, etc.).
 
 ```bash
 # Step 1: Ensure DB is running BEFORE run.sh starts (so run.sh won't own/stop it)
-DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"
-LOCAL_DB_PORT=$((CONDUCTOR_PORT + 5))
-
 if ! docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
   if docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
     docker start "$DB_CONTAINER" >/dev/null
   else
     docker run -d --name "$DB_CONTAINER" -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=victoria \
-      -p "$LOCAL_DB_PORT:5432" -v "victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME:-local}:/var/lib/postgresql/data" \
+      -p "$LOCAL_DB_PORT:5432" -v "$DB_VOLUME:/var/lib/postgresql/data" \
       postgres:16-alpine >/dev/null
     # Wait + push schema + seed for fresh containers
     for i in $(seq 1 30); do docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null && break; sleep 1; done
@@ -359,9 +415,16 @@ echo "DB pre-started: $DB_CONTAINER on port $LOCAL_DB_PORT"
 # Keep all service output redirected so the managed session cannot exhaust its output budget.
 # run.sh will detect the DB as already-running and won't stop it on cleanup.
 # Use run_in_background=true for this command:
-BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=1 TRACE_ARCHIVE_ENABLED=0 \
+BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_REPLAY_OUTBOUND=1 \
+  BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8 TRACE_ARCHIVE_ENABLED=0 \
   bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1
 ```
+
+The replay opt-in is required because Step 5a runs the fixture-backed blackbox
+suite against this existing backend. Benchmark mode otherwise captures outbound
+calls without consuming fixtures, which would make seeded auth cases dial live
+Twilio/Supabase endpoints. This is a local test-stack opt-in only; ordinary
+benchmark stacks keep replay disabled by default.
 
 Poll the background Bash call at least every 30 seconds while Steps 5-6b run. This keeps the managed process session active without streaming the high-volume service logs; use `.context/deploy-smoke.log` only for targeted diagnosis. `BENCHMARK_BUNDLED_FRONTEND=true` builds and serves the frontend so the browser-agent lifecycle gates have a stable target.
 
@@ -725,6 +788,8 @@ After Steps 6a and 6b pass, run the mandatory Step 5 teardown. If either fails, 
 # ║ 3. TypeScript: 0 errors ║
 
 # ║ 4. Structural tests: 100% pass ║
+
+# ║ 4s. Deploy environment + command structural tests: 100% pass ║
 
 # ║ 4a. Code coverage: meets thresholds in .c8rc.json ║
 

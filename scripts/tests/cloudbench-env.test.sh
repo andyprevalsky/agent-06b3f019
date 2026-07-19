@@ -17,6 +17,12 @@ require_text() {
 }
 
 [ -f "$HELPER_SRC" ] || fail "cloud benchmark env helper is missing"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'STACK_SEED_DUMP="${CLOUDBENCH_SEED_DUMP_PATH:-/data/cloudbench-cache/victoria-seed.dump}"' \
+  "cloud benchmark seed-dump freshness proof must retain its persistent default"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  "export BENCHMARK_SEED_DUMP='\$STACK_SEED_DUMP'" \
+  "cloud benchmark process must receive the configured seed-dump freshness proof"
 # shellcheck source=../lib/cloudbench-env.sh
 source "$HELPER_SRC"
 
@@ -85,6 +91,187 @@ cloudbench_terminate_and_wait 5 ""
 termination_elapsed=$((SECONDS - termination_start))
 [ "$termination_elapsed" -lt 2 ] ||
   fail "an empty PID list must return immediately (elapsed=${termination_elapsed}s)"
+
+# A local bind collision is not a remote/DNS readiness failure. The proxy
+# launcher must classify it immediately so its caller can abandon the poisoned
+# lease and choose another port instead of retrying that port until the barrier
+# timeout. Exercise the production function body, not a test-only copy.
+proxy_function_source="$(awk '
+  /^start_data_plane_proxy\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud")"
+[ -n "$proxy_function_source" ] || fail "could not load the production data-plane proxy function"
+eval "$proxy_function_source"
+APP="cloudbench-proxy-regression"
+CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0
+flyctl() {
+  echo "Error: listen tcp 127.0.0.1:61944: bind: address already in use" >&2
+  return 1
+}
+curl() { return 1; }
+proxy_log="$TMP_ROOT/proxy-bind-collision.log"
+proxy_pid=""
+proxy_started="$SECONDS"
+proxy_status=0
+start_data_plane_proxy 61944 3001 occupied.local "$proxy_log" proxy_pid backend 3 \
+  || proxy_status=$?
+proxy_elapsed=$((SECONDS - proxy_started))
+[ "$proxy_status" -eq 98 ] ||
+  fail "a bind collision must return the reallocate signal (exit=$proxy_status)"
+[ "$proxy_elapsed" -lt 2 ] ||
+  fail "a bind collision must fail fast enough to reallocate (elapsed=${proxy_elapsed}s)"
+
+production_function() {
+  awk -v function_name="$1" '
+    $0 ~ "^" function_name "\\(\\)" { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud"
+}
+for function_name in local_port_is_bindable claim_local_port release_local_port_lease \
+    release_local_port_leases publish_status_proxy_port start_leased_data_plane_proxy; do
+  function_source="$(production_function "$function_name")"
+  [ -n "$function_source" ] || fail "could not load production function $function_name"
+  eval "$function_source"
+done
+PORT_LEASE_ROOT="$TMP_ROOT/proxy-port-leases"
+PORT_LEASE_NONCE="proxy-regression-$$"
+PORT_LEASES=()
+OUT_DIR="$TMP_ROOT/proxy-output"
+mkdir -p "$OUT_DIR"
+flyctl() {
+  case "$2" in
+    61944:*)
+      echo "Error: listen tcp 127.0.0.1:61944: bind: address already in use" >&2
+      return 1
+      ;;
+    *)
+      while :; do command sleep 1; done
+      ;;
+  esac
+}
+rotated_port=""
+rotated_pid=""
+start_leased_data_plane_proxy 61944 rotated_port 3001 occupied.local \
+  "$TMP_ROOT/proxy-bind-rotation.log" rotated_pid status 3 ||
+  fail "the proxy launcher must recover from a bind collision"
+[ "$rotated_port" != "61944" ] || fail "the proxy launcher retried the poisoned port"
+[ "$(cat "$OUT_DIR/status-proxy.port" 2>/dev/null || true)" = "$rotated_port" ] ||
+  fail "status proxy rotation was not published atomically for the fleet barrier"
+[ -n "$rotated_pid" ] && kill -0 "$rotated_pid" 2>/dev/null ||
+  fail "the proxy launcher did not preserve the replacement tunnel"
+cloudbench_terminate_and_wait 2 "$rotated_pid"
+release_local_port_leases
+[ ! -d "$PORT_LEASE_ROOT/$rotated_port" ] || fail "replacement proxy lease survived cleanup"
+unset -f flyctl curl start_data_plane_proxy start_leased_data_plane_proxy \
+  local_port_is_bindable claim_local_port release_local_port_lease \
+  release_local_port_leases publish_status_proxy_port production_function
+unset CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS
+
+# Production replay for Fly's cpu_overcommit_exceeded governor response. The
+# provider rejected the 37th inherited shared-cpu-4x primary when prod already
+# held 16 CPU units: 16 + (37 * 4) = 164, beyond the observed 160-unit ceiling.
+# Exercise the real clone command builder and require an explicit capacity-safe
+# primary shape rather than inheriting the oversized warm maintenance machine.
+primary_default_line="$(grep '^FLEET_PRIMARY_VM_SIZE=' "$ROOT_DIR/scripts/run-bench-fleet")"
+primary_memory_line="$(grep '^FLEET_PRIMARY_VM_MEMORY=' "$ROOT_DIR/scripts/run-bench-fleet")"
+[[ "$primary_default_line" = *"shared-cpu-2x"* && "$primary_memory_line" = *"4096"* ]] ||
+  fail "fleet default must fit both Fly's shared-memory matrix and performance-CPU reservation ceiling"
+clone_function_source="$(awk '
+  /^clone_machine_target\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-fleet")"
+[ -n "$clone_function_source" ] || fail "could not load production clone command builder"
+eval "$clone_function_source"
+WARM_ID="warm-source"
+SNAP_ID="snapshot-1"
+REGION="iad"
+APP="navi-whisper-lux-bench"
+FLEET_PRIMARY_VM_SIZE="shared-cpu-2x"
+FLEET_PRIMARY_VM_MEMORY="4096"
+clone_args="$TMP_ROOT/primary-clone.args"
+fleet_registry_record_name() { return 0; }
+fleet_registry_record_id() { return 0; }
+fleet_registry_release_name() { return 0; }
+fly_with_timeout() {
+  shift
+  printf '%s\n' "$*" > "$clone_args"
+  echo "Machine abcdef12345678 has been created..."
+}
+primary_id="$(clone_machine_target "$TMP_ROOT/primary.ids")" ||
+  fail "production clone command builder failed in the capacity replay"
+[ "$primary_id" = "abcdef12345678" ] || fail "capacity replay did not resolve the fake clone"
+require_text "$clone_args" "--vm-size shared-cpu-2x" \
+  "primary clone must avoid both the running CPU ceiling and performance reservation ceiling"
+require_text "$clone_args" "--vm-memory 4096" \
+  "primary clone memory must fit Fly's shared-cpu-2x memory ceiling"
+primary_cpus="$(sed -nE 's/.*--vm-size ([^ ]+).*/\1/p' "$clone_args" | sed -nE 's/.*-([0-9]+)x$/\1/p')"
+[ -n "$primary_cpus" ] || fail "capacity replay could not parse primary CPU allocation"
+[ $((16 + 37 * primary_cpus)) -le 160 ] ||
+  fail "daily fleet primary shape exceeds the observed Fly CPU governor ceiling"
+unset -f clone_machine_target fleet_registry_record_name fleet_registry_record_id \
+  fleet_registry_release_name fly_with_timeout
+
+resize_function_source="$(awk '
+  /^resize_pool_machine\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-fleet")"
+[ -n "$resize_function_source" ] || fail "could not load production pool resizer"
+eval "$resize_function_source"
+FLEET_DIR="$TMP_ROOT/bridge-resize"
+mkdir -p "$FLEET_DIR"
+FLEET_PRIMARY_VM_SIZE="shared-cpu-2x"
+FLEET_PRIMARY_VM_MEMORY="4096"
+APP="navi-whisper-lux-bench"
+CLOUDBENCH_POOL_RESIZE_ATTEMPTS=1
+resize_calls="$TMP_ROOT/resize.calls"
+fly_with_timeout() {
+  shift
+  printf '%s\n' "$*" >> "$resize_calls"
+  return 0
+}
+sleep() { :; }
+resize_pool_machine saturated-shared-machine ||
+  fail "pool resizer must execute under nounset and apply the configured target shape"
+[ "$(wc -l < "$resize_calls" | tr -d ' ')" = "1" ] ||
+  fail "pool resizer must perform one provider update after an immediate success"
+require_text "$resize_calls" "--vm-size shared-cpu-2x" \
+  "pool resizer must apply the configured capacity-safe target"
+unset -f resize_pool_machine fly_with_timeout sleep
+unset CLOUDBENCH_POOL_RESIZE_ATTEMPTS
+
+shape_function_source="$(awk '
+  /^pool_machine_shape_from_json\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-fleet")"
+normalize_function_source="$(awk '
+  /^normalize_current_pool_shape\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$ROOT_DIR/scripts/run-bench-fleet")"
+[ -n "$shape_function_source" ] && [ -n "$normalize_function_source" ] ||
+  fail "could not load production pool shape normalizer"
+eval "$shape_function_source"
+eval "$normalize_function_source"
+POOL_IDS_FILE="$TMP_ROOT/shape-pool.ids"
+printf 'old-shape\ncorrect-shape\n' > "$POOL_IDS_FILE"
+FLEET_DIR="$TMP_ROOT/shape-run"
+FLEET_PRIMARY_VM_SIZE="shared-cpu-2x"
+FLEET_PRIMARY_VM_MEMORY="4096"
+POOL_INVENTORY_JSON='[{"id":"old-shape","state":"stopped","config":{"guest":{"cpu_kind":"performance","cpus":1,"memory_mb":8192}}},{"id":"correct-shape","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":2,"memory_mb":4096}}}]'
+shape_after='[{"id":"old-shape","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":2,"memory_mb":4096}}},{"id":"correct-shape","state":"stopped","config":{"guest":{"cpu_kind":"shared","cpus":2,"memory_mb":4096}}}]'
+resize_calls="$TMP_ROOT/shape-resizes"
+resize_marker="$TMP_ROOT/shape-resized"
+resize_pool_machine() { printf '%s\n' "$1" >> "$resize_calls"; touch "$resize_marker"; }
+FLY() { [ -f "$resize_marker" ] && printf '%s\n' "$shape_after" || printf '%s\n' "$POOL_INVENTORY_JSON"; }
+normalize_current_pool_shape || fail "existing stopped pool shape did not normalize"
+[ "$(cat "$resize_calls")" = "old-shape" ] ||
+  fail "pool normalizer must mutate only the mismatched stopped machine"
+unset -f pool_machine_shape_from_json normalize_current_pool_shape resize_pool_machine FLY
 
 machine_states="$TMP_ROOT/machine-states"
 printf 'created\ncreated\nstopped\n' > "$machine_states"
@@ -180,7 +367,7 @@ if grep -Fq -- 'run-bench-cloud --refresh-secrets;' "$ROOT_DIR/scripts/run-bench
   fail "the fleet run path must not refresh (mutate) the shared environment — verify only"
 fi
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'bash scripts/run-bench-cloud --verify-secrets' \
+  'bash "$RUN_BENCH_CLOUD_BIN" --verify-secrets' \
   "fleet controller must read-only verify the environment before cloning"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'cloudbench_controller_lock_acquire_wait' \

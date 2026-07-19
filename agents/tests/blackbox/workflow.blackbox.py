@@ -52,6 +52,21 @@ def test_task_dag_parallel():
     assert dag.is_complete(), "Should be complete with all 3 done"
 
 
+def test_usage_model_falls_back_when_cache_provenance_is_unknown():
+    """Legacy Fast Mode entries use the literal ``unknown`` provenance value.
+
+    That sentinel must not become an unclassified benchmark usage model; the
+    requested pool alias still identifies the credential path for the replay.
+    """
+    from workflows.agent_workflow import _resolve_usage_model
+
+    requested = "rose-r2-archive-anthropic"
+    assert _resolve_usage_model("unknown", requested) == requested
+    assert _resolve_usage_model("", requested) == requested
+    assert _resolve_usage_model(None, requested) == requested
+    assert _resolve_usage_model("gpt-5.6-sol-gpt", requested) == "gpt-5.6-sol-gpt"
+
+
 def test_task_dag_sequential():
     """3-task sequential chain (0 -> 1 -> 2). Only one ready at a time."""
     plan_data = {
@@ -3227,6 +3242,87 @@ async def test_workflow_run_skips_response_schema_generation_for_subagent():
         _restore_workflow(original_workflow)
 
 
+async def test_workflow_dag_error_never_falls_through_to_run_agent():
+    """A failed DAG is terminal so committed siblings cannot be replayed."""
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": [],
+            "get_model_context_window": 200_000,
+            "get_agent_source": "WEB",
+            "get_user_context": "",
+            "get_user_system_name": "Navi",
+            "get_user_custom_system_prompt": None,
+            "fetch_compute_token_activity": None,
+            "fetch_agent_config": {
+                "response_schema": {"fields": []},
+                "write_lock_enabled": True,
+            },
+        }
+    )
+
+    import workflows.agent_workflow as workflow_module
+
+    original_workflow = _patch_workflow(fake)
+    original_extract_plan = workflow_module.extract_plan_from_context
+    original_execute_dag = workflow_module.execute_dag
+    original_run_agent = workflow_module.run_agent
+    run_agent_calls = []
+    dag_calls = []
+
+    workflow_module.extract_plan_from_context = lambda _context: {
+        "tasks": [{"goal": "Research Tokyo", "tool_name": "spawn_general_purpose_agent"}],
+        "dependencies": {},
+    }
+
+    async def fake_execute_dag(**kwargs):
+        dag_calls.append(kwargs)
+        return {
+            "status": "error",
+            "context": [{"role": "TOOL", "text": "failed", "metadata": {"error": True}}],
+            "message": "Planned task 1 failed during DAG execution.",
+        }
+
+    async def fake_run_agent(**kwargs):
+        run_agent_calls.append(kwargs)
+        raise AssertionError("run_agent must not run after a DAG execution error")
+
+    workflow_module.execute_dag = fake_execute_dag
+    workflow_module.run_agent = fake_run_agent
+    try:
+        result = await wf.run(
+            "agent-dag-error",
+            "user-run-1",
+            "Complete the task",
+            "anthropic/claude-sonnet-4.5",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+            None,
+            None,
+            None,
+            0,
+            None,
+            "execute",
+            25,
+            250,
+            {},
+        )
+
+        assert result == {"status": "failed", "reason": "error", "goal": "Complete the task"}
+        assert len(dag_calls) == 1
+        assert run_agent_calls == []
+        failed_status_updates = [
+            call for call in fake.activity_calls if call[0] == "update_agent_status" and call[1][1] == "FAILED"
+        ]
+        assert len(failed_status_updates) == 1
+    finally:
+        workflow_module.extract_plan_from_context = original_extract_plan
+        workflow_module.execute_dag = original_execute_dag
+        workflow_module.run_agent = original_run_agent
+        _restore_workflow(original_workflow)
+
+
 async def test_workflow_handle_tool_event_forwards_to_helper():
     """_handle_tool_event invokes handle_tool_event helper with our execute_activity."""
     wf = _bare_workflow_instance()
@@ -4550,6 +4646,7 @@ async def run_all_tests():
     r.record("extract_plan_empty", test_extract_plan_from_context_empty)
     r.record("extract_error_simple", test_extract_error_message_simple)
     r.record("extract_error_chained", test_extract_error_message_chained)
+    r.record("usage_model_unknown_fallback", test_usage_model_falls_back_when_cache_provenance_is_unknown)
 
     # AgentWorkflow pure-method tests
     r.record("wf_pending_children_empty", test_workflow_get_pending_child_workflow_ids_empty)
@@ -4707,6 +4804,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_run_skips_response_schema_for_subagent",
         test_workflow_run_skips_response_schema_generation_for_subagent,
+    )
+    await r.record_async(
+        "wf_dag_error_no_run_agent_replay",
+        test_workflow_dag_error_never_falls_through_to_run_agent,
     )
     await r.record_async("wf_handle_tool_event_forwards", test_workflow_handle_tool_event_forwards_to_helper)
     await r.record_async(

@@ -81,6 +81,7 @@ export interface AdminWaitlistInviteResponse {
   id: string;
   invitedAt: string;
   smsSent: boolean;
+  emailSent: boolean;
   flagged: boolean;
   alreadyOffWaitlist: boolean;
   hasAccount: boolean;
