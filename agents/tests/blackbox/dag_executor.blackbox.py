@@ -308,6 +308,22 @@ def test_build_param_population_message_spawn_has_no_tool_specific_context():
     assert "attachments" not in msg
 
 
+def test_build_param_population_message_preserves_spawn_alias_contract():
+    """A resolved spawn alias must retain its subtype contract in the LLM request."""
+    from loop.dag_executor import _build_param_population_message
+
+    msg = _build_param_population_message(
+        2,
+        "Research New York City by spawning an explore agent.",
+        "spawn_agent",
+        "spawn_general_purpose_agent",
+    )
+
+    assert "`spawn_general_purpose_agent` action resolves" in msg
+    assert "spawn_agent(type='general_purpose')" in msg
+    assert "Include output_schema." in msg
+
+
 def test_build_param_population_message_non_spawn_no_extra():
     """Non-spawn tool does not include spawn-specific warnings."""
     from loop.dag_executor import _build_param_population_message
@@ -361,6 +377,7 @@ async def _run_execute_dag(
     reasoning_result=None,
     param_tool_calls=None,
     execute_activity_calls=None,
+    alias_retry_patch_enabled=True,
     **execute_dag_kwargs,
 ):
     """Helper: run execute_dag with mocked execute_activity that returns canned data."""
@@ -404,6 +421,18 @@ async def _run_execute_dag(
         tool_name = args[11] if args and len(args) > 11 else "unknown"
         if param_tool_calls is not None and args and args[8] == "dag_param_populator":
             tool_calls = param_tool_calls(args)
+        elif tool_name == "spawn_agent" and "spawn_agent(type='explore')" in args[10]:
+            tool_calls = [{"tool": "spawn_agent", "type": "explore", "goal": "Explore stuff"}]
+        elif tool_name == "spawn_agent" and "spawn_agent(type='general_purpose')" in args[10]:
+            tool_calls = [
+                {
+                    "tool": "spawn_agent",
+                    "type": "general_purpose",
+                    "goal": "Delegate the implementation",
+                    "start_phase": "EXECUTE",
+                    "output_schema": {"fields": [{"name": "result", "type": "str", "required": True}]},
+                }
+            ]
         else:
             tool_calls = [{"tool": tool_name, "query": "x"}]
         return {
@@ -415,7 +444,10 @@ async def _run_execute_dag(
 
     # Patch workflow.logger (only valid inside workflow event loop) with a stub
     fake_logger = MagicMock()
-    with patch("loop.dag_executor.workflow.logger", fake_logger):
+    with (
+        patch("loop.dag_executor.workflow.logger", fake_logger),
+        patch("loop.dag_executor.workflow.patched", return_value=alias_retry_patch_enabled),
+    ):
         result = await execute_dag(
             dag=dag,
             agent_id="agent-1",
@@ -650,6 +682,140 @@ async def test_execute_dag_general_purpose_spawn_emits_subagent_placeholder():
     assert dag.tasks[0].tool_call_id == recorded[0][2]
 
 
+async def test_execute_dag_retries_captured_wrong_spawn_alias_params():
+    """Replay the smoke failure where a GP alias was populated as explore.
+
+    The task goal tells the general-purpose child to use an explore agent, but
+    that does not make the parent spawn itself an explore agent. The captured
+    first response omitted output_schema because alias resolution had erased
+    this distinction. The executor must reject that hybrid before execution and
+    re-populate one valid general-purpose call without emitting another task.
+    """
+    from utils.tool_schemas import SpawnAgentTool
+
+    plan_data = {
+        "tasks": [
+            {
+                "goal": (
+                    "Find New York City's population. You MUST gather it only by "
+                    "spawning an explore agent, then return nyc_population."
+                ),
+                "tool_name": "spawn_general_purpose_agent",
+            }
+        ],
+        "dependencies": {},
+    }
+    populate_attempts = 0
+    executed = []
+    activity_calls = []
+
+    def param_tool_calls(args):
+        nonlocal populate_attempts
+        populate_attempts += 1
+        if populate_attempts == 1:
+            # Exact malformed shape captured from smoke agent 8e2745be-f31c:
+            # valid direct explore params, invalid after the DAG alias override.
+            return [
+                {
+                    "tool": "spawn_agent",
+                    "type": "explore",
+                    "goal": "Find New York City's current population by web research.",
+                    "depth": "quick",
+                }
+            ]
+        assert "previous tool call violated the planned alias contract" in args[10]
+        return [
+            {
+                "tool": "spawn_agent",
+                "type": "general_purpose",
+                "goal": "Find New York City's current population using an explore agent.",
+                "start_phase": "EXECUTE",
+                "output_schema": {
+                    "fields": [
+                        {
+                            "name": "nyc_population",
+                            "type": "int",
+                            "required": True,
+                            "description": "Current population of New York City",
+                        }
+                    ]
+                },
+            }
+        ]
+
+    async def execute_tool(name, params, tool_call_id):
+        SpawnAgentTool.model_validate({"tool": name, **params})
+        executed.append((name, dict(params), tool_call_id))
+        return {"message": "spawned"}
+
+    result, events, dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=param_tool_calls,
+        execute_activity_calls=activity_calls,
+    )
+
+    assert result["status"] == "completed"
+    assert dag.tasks[0].state.value == "COMPLETED"
+    assert populate_attempts == 2
+    assert len([call for call in activity_calls if call["fn"] == "call_llm_activity"]) == 2
+    assert len(executed) == 1
+    assert executed[0][1]["type"] == "general_purpose"
+    assert executed[0][1]["output_schema"]["fields"][0]["name"] == "nyc_population"
+    placeholders = [
+        event
+        for event in events
+        if event["type"] == "tool_event"
+        and event["tool_name"] == "spawn_general_purpose_agent"
+        and event["status"] == "IN_PROGRESS"
+    ]
+    assert len(placeholders) == 1
+
+
+async def test_execute_dag_preserves_pre_patch_alias_param_history():
+    """Pre-marker workflow histories retain the original single-call path."""
+    plan_data = {
+        "tasks": [
+            {
+                "goal": "Find New York City's population using an explore agent.",
+                "tool_name": "spawn_general_purpose_agent",
+            }
+        ],
+        "dependencies": {},
+    }
+    populate_attempts = 0
+    executed = []
+
+    def param_tool_calls(_args):
+        nonlocal populate_attempts
+        populate_attempts += 1
+        return [
+            {
+                "tool": "spawn_agent",
+                "type": "explore",
+                "goal": "Find New York City's current population.",
+                "depth": "quick",
+            }
+        ]
+
+    async def execute_tool(name, params, tool_call_id):
+        executed.append((name, dict(params), tool_call_id))
+        return {"message": "captured legacy tool execution"}
+
+    result, _events, _dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=param_tool_calls,
+        alias_retry_patch_enabled=False,
+    )
+
+    assert result["status"] == "completed"
+    assert populate_attempts == 1
+    assert len(executed) == 1
+    assert executed[0][1]["type"] == "general_purpose"
+    assert "output_schema" not in executed[0][1]
+
+
 async def test_execute_dag_rejects_multiple_param_tool_calls():
     """DAG execution refuses an ambiguous multi-call param-populator result."""
     plan_data = {
@@ -848,6 +1014,10 @@ async def run_all_tests():
         "build_param_population_message_spawn",
         test_build_param_population_message_spawn_has_no_tool_specific_context,
     )
+    r.record(
+        "build_param_population_message_preserves_spawn_alias_contract",
+        test_build_param_population_message_preserves_spawn_alias_contract,
+    )
     r.record("build_param_population_message_non_spawn", test_build_param_population_message_non_spawn_no_extra)
     r.record(
         "select_param_tool_call_requires_exactly_one_call",
@@ -870,6 +1040,10 @@ async def run_all_tests():
     await r.record_async(
         "execute_dag_general_purpose_spawn_emits_subagent_placeholder",
         test_execute_dag_general_purpose_spawn_emits_subagent_placeholder,
+    )
+    await r.record_async(
+        "execute_dag_retries_captured_wrong_spawn_alias_params",
+        test_execute_dag_retries_captured_wrong_spawn_alias_params,
     )
     await r.record_async(
         "execute_dag_rejects_multiple_param_tool_calls",

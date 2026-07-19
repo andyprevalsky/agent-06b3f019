@@ -34,6 +34,17 @@ function chatIdleTimeoutMs(): number {
     : DEFAULT_CEREBRAS_CHAT_IDLE_TIMEOUT_MS;
 }
 
+/**
+ * Only user-visible output satisfies the chat first-content deadline. This
+ * route requests reasoning_effort 'none', so a reasoning trickle is a
+ * throttled/queued stream (e.g. provider rate-cap queuing), not progress —
+ * counting it kept a silent chat open past the stall guard while the user
+ * saw nothing (web_search lifecycle ratchet breach, 2026-07-19).
+ */
+export function clearsChatStallGuard(kind: RoseStreamChunk['kind']): boolean {
+  return kind === 'content' || kind === 'tool_call';
+}
+
 export function buildCerebrasChatBody(options: CompletionOptions): Record<string, unknown> {
   return {
     model: CEREBRAS_CHAT_MODEL,
@@ -103,7 +114,7 @@ export async function* exclusiveCerebrasCompletion(params: {
       requestId: params.requestId,
       idleTimeoutMs: preTokenTimeoutMs,
     })) {
-      if (chunk.kind === 'content' || chunk.kind === 'reasoning' || chunk.kind === 'tool_call') {
+      if (clearsChatStallGuard(chunk.kind)) {
         emittedMeaningfulChunk = true;
         clearTimeout(preTokenTimer);
       }
