@@ -69,7 +69,7 @@ async function withCommitLock<T>(userId: string, fn: () => Promise<T>): Promise<
   }
 }
 
-interface SupervisorResponse {
+export interface SupervisorResponse {
   reasoning: string;
   tool_calls: ToolCall[];
 }
@@ -640,6 +640,28 @@ async function callSupervisorLlm(
     durationMs: Date.now() - startTime,
   });
 
+  return finalizeSupervisorResponse(accumulatedToolCalls, structuredOutput, accumulatedReasoning);
+}
+
+/**
+ * Shape the consumed supervisor stream into a SupervisorResponse.
+ *
+ * Two response shapes are possible:
+ *   - Native-tool path: the model emitted tool_use blocks → use them directly.
+ *   - Content path: the structured-output JSON envelope arrived as content
+ *     (Codex / waterfall, or claudeAuth when extraction didn't fit the schema).
+ *
+ * When the model emits NEITHER — a reasoning-only or empty stream — the
+ * structured-output extractor cannot select a single item. That extraction is
+ * wrapped in the same try/catch as JSON parsing so a StructuredOutputCardinality
+ * error degrades to the deliberate "never send raw garbage to the user" fallback
+ * instead of throwing out of the supervisor turn.
+ */
+export function finalizeSupervisorResponse(
+  accumulatedToolCalls: ToolCall[],
+  structuredOutput: StructuredOutputAccumulator,
+  accumulatedReasoning: string
+): SupervisorResponse {
   // Native tool path (claudeAuth + response_model extracted to tools): each
   // tool_use block came through as a tool_calls delta. Use those directly.
   if (accumulatedToolCalls.length > 0) {
@@ -652,31 +674,31 @@ async function callSupervisorLlm(
     };
   }
 
-  accumulatedContent = structuredOutput.finalText();
-
-  // Fallback: structured-output JSON envelope arrived as content (Codex /
-  // waterfall path, or claudeAuth when extraction didn't fit the schema shape).
+  // The structured-output JSON envelope arrived as content (Codex / waterfall
+  // path, or claudeAuth when extraction didn't fit the schema shape). finalText()
+  // is INSIDE the try: a reasoning-only / empty / ambiguous stream makes the
+  // extractor throw StructuredOutputCardinalityError — the same "the model gave
+  // us nothing actionable this round" condition as a JSON parse failure.
+  //
+  // On that failure we return NO tool calls rather than throwing (which crashed
+  // the whole turn) or injecting an apology (which gave up on the first empty
+  // round). An empty tool_calls response routes into the supervisor loop's
+  // existing nudge-and-retry ("No tool calls and no attempt_completion" →
+  // re-prompt), so a transient empty stream gets another round to actually
+  // answer. If every round stays empty, the loop's terminal net delivers one
+  // friendly apology. Bounded by MAX_TOOL_ROUNDS.
+  let accumulatedContent = '';
   let parsed: SupervisorResponse;
   try {
+    accumulatedContent = structuredOutput.finalText();
     parsed = JSON.parse(accumulatedContent);
   } catch (error) {
-    log.error('[SmsSupervisorLLM] Failed to parse response JSON', {
+    log.error('[SmsSupervisorLLM] No actionable structured output; nudging for a retry round', {
       error: error instanceof Error ? error.message : String(error),
       rawContent: accumulatedContent.substring(0, 500),
       contentLength: accumulatedContent.length,
     });
-
-    // Never send raw garbage to the user — fall through to a friendly error.
-    parsed = {
-      reasoning: accumulatedReasoning || 'Failed to parse structured response',
-      tool_calls: [
-        {
-          tool: 'send_user_message',
-          arguments: { message: 'Sorry, something went wrong. Please try again.' },
-        },
-        { tool: 'attempt_completion', arguments: {} },
-      ],
-    };
+    return { reasoning: accumulatedReasoning, tool_calls: [] };
   }
 
   log.info('[SmsSupervisorLLM] Parsed response', {
