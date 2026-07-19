@@ -490,6 +490,9 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     explicit = os.environ.get("BENCHMARK_FRONTEND_URL", "").strip()
     if explicit:
         return explicit.rstrip("/")
+    parsed = urlparse(base_url)
+    if parsed.hostname not in {"localhost", "127.0.0.1"}:
+        return "https://roselabs.ai"
     # Stable public URL assigned by run.sh at startup (reserved ngrok domain → frontend port).
     # This is the only URL the cloud browser agent can actually reach, so prefer it over any
     # localhost fallback. run.sh exports PUBLIC_BASE_URL and records it in services.json.
@@ -508,7 +511,6 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     conductor_port = os.environ.get("CONDUCTOR_PORT", "").strip()
     if conductor_port.isdigit():
         return f"http://localhost:{int(conductor_port) + 1}"
-    parsed = urlparse(base_url)
     if parsed.hostname in {"localhost", "127.0.0.1"} and parsed.port:
         return f"{parsed.scheme}://{parsed.hostname}:{parsed.port + 1}"
     return "https://roselabs.ai"
@@ -1254,18 +1256,14 @@ async def get_llm_usage_details(base_url: str, root_agent_id: str, tree_stats: d
     }
     agent_ids.discard("")
     agent_ids.add(root_agent_id)
-    payloads = await asyncio.gather(
-        *(get_agent_tool_usage(base_url, agent_id) for agent_id in sorted(agent_ids))
-    )
+    payloads = await asyncio.gather(*(get_agent_tool_usage(base_url, agent_id) for agent_id in sorted(agent_ids)))
     items: list[dict] = []
     for agent_id, payload in zip(sorted(agent_ids), payloads):
         for usage in payload.get("usages", []):
             usage_items = usage.get("usage_items") if isinstance(usage, dict) else None
             if isinstance(usage_items, list):
                 items.extend(
-                    {**item, "_benchmark_agent_id": agent_id}
-                    for item in usage_items
-                    if isinstance(item, dict)
+                    {**item, "_benchmark_agent_id": agent_id} for item in usage_items if isinstance(item, dict)
                 )
     return aggregate_usage_items(items), aggregate_repeatable_cache_usage(items)
 
@@ -1331,10 +1329,7 @@ async def _wait_for_expected_payment_lifecycle(
                     "Payment lifecycle remained unavailable after "
                     f"{consecutive_fetch_errors} consecutive reads: {error}"
                 ) from error
-            print(
-                "    ⚠ Transient payment lifecycle read failed "
-                f"({consecutive_fetch_errors}/3); retrying: {error}"
-            )
+            print(f"    ⚠ Transient payment lifecycle read failed ({consecutive_fetch_errors}/3); retrying: {error}")
 
 
 async def abandon_test_payment(base_url: str, agent_id: str) -> dict:
@@ -3778,7 +3773,7 @@ def _snapshot_browser_state(ctx: LiveFixtureContext, *, include_passwords: bool)
     user = _sql_literal(ctx.user_id)
     realm = _sql_literal(ctx.auth_realm)
     password_snapshot = (
-        "COALESCE((SELECT json_agg(id) FROM \"BrowserPassword\" "
+        'COALESCE((SELECT json_agg(id) FROM "BrowserPassword" '
         f'WHERE "userId" = {user} AND "disabledAt" IS NULL), \'[]\'::json)'
         if include_passwords
         else "'[]'::json"
@@ -3836,9 +3831,7 @@ def _clear_browser_state(
         ]
     )
     cleanup_sql = (
-        "WITH "
-        + ", ".join(ctes)
-        + " SELECT (SELECT COUNT(*) FROM cookies) + (SELECT COUNT(*) FROM local_storage) + "
+        "WITH " + ", ".join(ctes) + " SELECT (SELECT COUNT(*) FROM cookies) + (SELECT COUNT(*) FROM local_storage) + "
         "(SELECT COUNT(*) FROM indexed_db) + (SELECT COUNT(*) FROM cache_storage) + "
         "(SELECT COUNT(*) FROM permissions) + (SELECT COUNT(*) FROM profiles);"
     )
@@ -3904,9 +3897,9 @@ def _delete_kernel_profile(profile_id: str) -> None:
     api_key = load_env_var("KERNEL_API_KEY", _BACKEND_ENV, _AGENTS_ENV)
     if not api_key:
         raise RuntimeError("KERNEL_API_KEY is required to delete an isolated benchmark profile")
-    base_url = (
-        load_env_var("KERNEL_API_BASE_URL", _BACKEND_ENV, _AGENTS_ENV) or "https://api.onkernel.com"
-    ).rstrip("/")
+    base_url = (load_env_var("KERNEL_API_BASE_URL", _BACKEND_ENV, _AGENTS_ENV) or "https://api.onkernel.com").rstrip(
+        "/"
+    )
     url = f"{base_url}/profiles/{quote(profile_id, safe='')}"
     last_error: Exception | None = None
     for attempt, delay in enumerate((0.0, 0.25, 0.5), start=1):
@@ -5783,9 +5776,7 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
         for candidate in candidates:
             tool_name = candidate.get("toolName") or candidate.get("tool_name")
             agent_class = (
-                candidate.get("agentType")
-                or candidate.get("agent_type")
-                or _AGENT_CLASS_BY_RUNTIME_TOOL.get(tool_name)
+                candidate.get("agentType") or candidate.get("agent_type") or _AGENT_CLASS_BY_RUNTIME_TOOL.get(tool_name)
             )
             if not agent_class:
                 continue
@@ -5836,9 +5827,7 @@ def _agent_class_step_counts(data: dict) -> dict[str, dict[str, int]]:
         agent_class, instance_id = root
         explicit_count = len(grouped_explicit.get(root, set()))
         leaf_count = len(grouped_leaf.get(root, set()))
-        counts.setdefault(agent_class, {})[instance_id] = (
-            explicit_count if explicit_count else leaf_count
-        )
+        counts.setdefault(agent_class, {})[instance_id] = explicit_count if explicit_count else leaf_count
     return counts
 
 
@@ -6439,11 +6428,7 @@ async def run_single_task(
         )
         if min_steps_error:
             passed = False
-            failure_reason = (
-                f"{failure_reason} | {min_steps_error}"
-                if failure_reason
-                else min_steps_error
-            )
+            failure_reason = f"{failure_reason} | {min_steps_error}" if failure_reason else min_steps_error
 
         # Tree agent count check — counts spawn_agent-type sub-agents only
         # (excludes root and explore agents; explore agents have no output_schema)
@@ -6610,12 +6595,8 @@ async def run_single_task(
             cache_read_input_tokens=cache_read_input_tokens,
             cache_creation_input_tokens=cache_creation_input_tokens,
             cache_hit_pct=cache_hit_pct,
-            repeatable_cache_read_input_tokens=int(
-                repeatable_cache_usage["cache_read_input_tokens"]
-            ),
-            repeatable_cache_creation_input_tokens=int(
-                repeatable_cache_usage["cache_creation_input_tokens"]
-            ),
+            repeatable_cache_read_input_tokens=int(repeatable_cache_usage["cache_read_input_tokens"]),
+            repeatable_cache_creation_input_tokens=int(repeatable_cache_usage["cache_creation_input_tokens"]),
             repeatable_cache_hit_pct=float(repeatable_cache_usage["cache_hit_pct"]),
             llm_call_count=llm_call_count,
             tree_agent_count=tree_agent_count,
@@ -6650,10 +6631,7 @@ async def run_single_task(
             print(
                 f"       Cache: read={cache_read_input_tokens} write={cache_creation_input_tokens} hit={cache_hit_pct}%"
             )
-        repeatable_total = (
-            result.repeatable_cache_read_input_tokens
-            + result.repeatable_cache_creation_input_tokens
-        )
+        repeatable_total = result.repeatable_cache_read_input_tokens + result.repeatable_cache_creation_input_tokens
         if repeatable_total > 0:
             print(
                 "       Repeatable cache: "
@@ -7459,10 +7437,7 @@ def cache_ratchet_failures(
         floor = floors.get(result.name)
         if floor is None:
             continue
-        total = (
-            result.repeatable_cache_read_input_tokens
-            + result.repeatable_cache_creation_input_tokens
-        )
+        total = result.repeatable_cache_read_input_tokens + result.repeatable_cache_creation_input_tokens
         if total <= 0:
             if floor > 0:
                 failures.append((result.name, result.agent_id, 0.0, floor))
@@ -7486,10 +7461,7 @@ def enforce_cache_ratchets(task_results: list[TaskResult]) -> None:
         "\n  read/write/hit% and find where the prefix fingerprint is drifting:"
     )
     for name, agent_id, _hit_pct, _floor in failures:
-        print(
-            "    cd agents && source venv/bin/activate && "
-            f"python benchmarks/agent_cache.py {agent_id}  # {name}"
-        )
+        print(f"    cd agents && source venv/bin/activate && python benchmarks/agent_cache.py {agent_id}  # {name}")
     print(
         "\n  Fix the cache miss (e.g. unstable prefix hash, model mix,"
         "\n  claudeAuth fall-through) and re-run until hit% ≥ ratchet."
@@ -7511,9 +7483,7 @@ def _parallel_task_runners(
     of the configured batch concurrency.
     """
     semaphore = (
-        asyncio.Semaphore(max_concurrency)
-        if max_concurrency is not None and max_concurrency < len(tasks)
-        else None
+        asyncio.Semaphore(max_concurrency) if max_concurrency is not None and max_concurrency < len(tasks) else None
     )
     browser_profile_writer = asyncio.Semaphore(1)
 
@@ -7712,10 +7682,7 @@ async def main_async(args):
                 "timestamp": run.timestamp,
                 "suite": run.suite,
                 "source": "benchmark-runner",
-                "tasks": [
-                    {"name": task.name, "status": "starting"}
-                    for task in [*tasks, *skipped_claude_tasks]
-                ],
+                "tasks": [{"name": task.name, "status": "starting"} for task in [*tasks, *skipped_claude_tasks]],
             }
         )
     checkpoint_source_mode = args.checkpoint_source_index is not None
