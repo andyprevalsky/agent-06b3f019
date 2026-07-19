@@ -306,6 +306,19 @@ async function syncComputeTokensWithRetries(): Promise<void> {
       const count = await syncIntegrations();
       const usableGptCodeCount = await countUsableGptCodeIntegrations();
       if (usableGptCodeCount === 0) {
+        // gpt_code (Codex) is only needed by runs that actually spawn a Codex
+        // agent. When a caller knows the run doesn't use Codex — e.g. the
+        // AgentCard browser payment-lifecycle gate — an externally
+        // rate-limited/quota-exhausted Codex integration must not block an
+        // otherwise-healthy compute-token sync (claude tokens still synced).
+        // Default (flag unset) stays strict so Codex regressions still surface.
+        if (process.env.SEED_ALLOW_MISSING_GPT_CODE === '1') {
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, 0 usable gpt_code — ` +
+              `proceeding without Codex (SEED_ALLOW_MISSING_GPT_CODE=1; this run does not use Codex)`
+          );
+          return;
+        }
         throw new Error('No usable gpt_code integrations after sync');
       }
       console.log(
