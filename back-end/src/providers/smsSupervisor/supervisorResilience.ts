@@ -27,19 +27,24 @@ export async function callWithRetries<T>(
     baseDelayMs: number;
     onRetry?: (attempt: number, error: unknown) => void;
     sleep?: (ms: number) => Promise<void>;
+    // When aborted (run superseded by a newer inbound, or /clear), stop
+    // retrying immediately rather than burning the remaining attempts + backoff
+    // on a request whose result will be discarded anyway.
+    signal?: AbortSignal;
   }
 ): Promise<T> {
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   let lastError: unknown;
   for (let attempt = 1; attempt <= opts.attempts; attempt++) {
+    if (opts.signal?.aborted) throw opts.signal.reason ?? new Error('aborted before attempt');
     try {
       return await fn(attempt);
     } catch (error) {
       lastError = error;
-      if (attempt < opts.attempts) {
-        opts.onRetry?.(attempt, error);
-        await sleep(opts.baseDelayMs * 2 ** (attempt - 1));
-      }
+      // Don't retry a run that has already been aborted/superseded.
+      if (opts.signal?.aborted || attempt >= opts.attempts) break;
+      opts.onRetry?.(attempt, error);
+      await sleep(opts.baseDelayMs * 2 ** (attempt - 1));
     }
   }
   throw lastError;

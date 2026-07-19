@@ -260,14 +260,16 @@ export async function handleSmsSupervisorMessage(config: {
       // the user already received (a "real answer + spurious apology" double-send).
       // Record delivery regardless; log the persistence gap.
       let persisted = false;
+      // Mark the inbound as attempted BEFORE awaiting: appendOutboundSms appends
+      // the inbound unconditionally when passed, so if the DB commits but the
+      // client observes an error, a later send in this run must NOT pass the
+      // inbound again (which would duplicate it in the transcript). Attempted-once
+      // is the idempotency guard; a truly-failed append loses the inbound line,
+      // which is strictly better than corrupting the transcript with a duplicate.
+      const inboundForThisSend = inboundStoredForRun ? undefined : inboundMessage;
+      inboundStoredForRun = true;
       try {
-        await appendOutboundSms(
-          userId,
-          message,
-          smsResult.messageSid,
-          inboundStoredForRun ? undefined : inboundMessage
-        );
-        inboundStoredForRun = true;
+        await appendOutboundSms(userId, message, smsResult.messageSid, inboundForThisSend);
         persisted = true;
       } catch (persistError) {
         log.error('[SmsSupervisor] Outbound SMS delivered but persistence failed', {
@@ -308,6 +310,7 @@ export async function handleSmsSupervisorMessage(config: {
       llmResponse = await callWithRetries(() => callSupervisorLlm(messages, computeToken, userId), {
         attempts: SUPERVISOR_LLM_ATTEMPTS,
         baseDelayMs: SUPERVISOR_LLM_RETRY_BASE_DELAY_MS,
+        signal: abortSignal,
         onRetry: (attempt, error) =>
           log.warn('[SmsSupervisor] LLM call threw; retrying round', {
             round,

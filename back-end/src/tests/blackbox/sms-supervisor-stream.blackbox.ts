@@ -216,6 +216,49 @@ async function testLlmRetryRethrowsAfterExhaustion(): Promise<void> {
 }
 
 /**
+ * An aborted/superseded run must not burn its remaining retry attempts + backoff.
+ * callWithRetries stops the instant the signal is aborted: an already-aborted
+ * signal throws before the first attempt; a signal aborted after the first
+ * failure is not retried.
+ */
+async function testLlmRetryStopsOnAbort(): Promise<void> {
+  // (a) already aborted → never even calls fn
+  const pre = new AbortController();
+  pre.abort();
+  let preCalls = 0;
+  await assert.rejects(
+    () =>
+      callWithRetries(
+        async () => {
+          preCalls += 1;
+          return 'unreachable';
+        },
+        { attempts: 3, baseDelayMs: 1, sleep: noSleep, signal: pre.signal }
+      ),
+    'an already-aborted signal must throw before calling fn'
+  );
+  assert.equal(preCalls, 0, 'fn must not run when the signal is already aborted');
+
+  // (b) aborted after the first failure → no retry
+  const mid = new AbortController();
+  let midCalls = 0;
+  await assert.rejects(
+    () =>
+      callWithRetries(
+        async () => {
+          midCalls += 1;
+          mid.abort();
+          throw new Error('transient');
+        },
+        { attempts: 3, baseDelayMs: 1, sleep: noSleep, signal: mid.signal }
+      ),
+    /transient/,
+    'should surface the failure without retrying an aborted run'
+  );
+  assert.equal(midCalls, 1, 'must not retry after the run was aborted');
+}
+
+/**
  * A thrown tool/environment error (e.g. a Prisma blip in refreshEnvironmentSnapshot)
  * must become a failure ToolResult, not escape the loop into the generic apology.
  */
@@ -266,10 +309,11 @@ async function main(): Promise<void> {
   testValidStructuredAnswerPassesThrough();
   await testLlmRetrySucceedsAfterTransientThrows();
   await testLlmRetryRethrowsAfterExhaustion();
+  await testLlmRetryStopsOnAbort();
   await testDispatchToolSafelyConvertsThrowToFailure();
   await testDispatchToolSafelyPassesThroughSuccess();
   testFallbackMessageStaysWarm();
-  console.log('PASS sms-supervisor-stream (10 cases)');
+  console.log('PASS sms-supervisor-stream (11 cases)');
 }
 
 main().catch((error) => {
