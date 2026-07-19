@@ -3629,13 +3629,18 @@ def _seed_sync_error_detail(result: "subprocess.CompletedProcess[str]") -> str:
     return f"{detail[:300]}\n    … [{len(detail) - 1100} chars elided] …\n    {detail[-800:]}"
 
 
-def _sync_compute_tokens() -> bool:
+def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool:
     """Refresh the compute-token integrations (claude_code / gpt_code + pool)
     from prod into the isolated benchmark DB. Returns False on any failure so
     the live-fixture caller can fail closed. A frozen DB
     fixture or whole-DB snapshot restore can leave stale/expired compute tokens,
     which forces the agent's claudeAuth fetch to fail into the paid waterfall.
-    Reads the prod source from back-end/.env; writes to the isolated DB."""
+    Reads the prod source from back-end/.env; writes to the isolated DB.
+
+    ``tolerate_gpt_code_unavailable`` is for the blanket pre-flight only: it lets
+    the sync succeed when Codex (gpt_code) is quota-blocked but a usable
+    claude_code exists, since the agent runtime drives claude_code. Live-fixture
+    syncs never set it, so Codex-dependent tasks still fail closed."""
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Compute-token sync skipped: local Victoria DB not found")
@@ -3643,9 +3648,12 @@ def _sync_compute_tokens() -> bool:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
+    cmd = ["npx", "tsx", "scripts/seed-local.ts", "--compute-tokens-only"]
+    if tolerate_gpt_code_unavailable:
+        cmd.append("--tolerate-gpt-code-unavailable")
     try:
         result = subprocess.run(
-            ["npx", "tsx", "scripts/seed-local.ts", "--compute-tokens-only"],
+            cmd,
             cwd=REPO_ROOT / "back-end",
             env=env,
             capture_output=True,
@@ -3770,7 +3778,10 @@ def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     """
     if not _is_local_base_url(base_url):
         return
-    if not _sync_compute_tokens():
+    # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
+    # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
+    # Codex-dependent tasks keep their own strict credential gates downstream.
+    if not _sync_compute_tokens(tolerate_gpt_code_unavailable=True):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
 
 
