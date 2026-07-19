@@ -17,6 +17,7 @@ DRIVER_SCRIPT = ROOT / "scripts" / "cloudbench-run.sh"
 FLEET_SCRIPT = ROOT / "scripts" / "run-bench-fleet"
 CLOUD_SCRIPT = ROOT / "scripts" / "run-bench-cloud"
 PREDEPLOY_SCRIPT = ROOT / "scripts" / "run-predeploy-cloud"
+LOCAL_PREDEPLOY_SCRIPT = ROOT / "scripts" / "run-predeploy-local"
 DEPLOY_COMMAND = ROOT / ".claude" / "commands" / "deploy.md"
 
 
@@ -351,23 +352,47 @@ def test_predeploy_cloud_runner_selects_the_catalog_smoke_group() -> None:
         "chat-mode",
         "spawn-sub-agents",
         "parallel-tool-calls",
-        "message-person",
         "claude-code-agent",
         "browser-smoke",
         "browser-biometrics-webdecoy",
     ]
 
 
-def test_deploy_smoke_gate_uses_the_visible_cloud_runner() -> None:
+def test_predeploy_local_runner_selects_the_catalog_smoke_group() -> None:
+    result = subprocess.run(
+        ["bash", str(LOCAL_PREDEPLOY_SCRIPT), "--list"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "chat-mode",
+        "spawn-sub-agents",
+        "parallel-tool-calls",
+        "claude-code-agent",
+        "browser-smoke",
+        "browser-biometrics-webdecoy",
+    ]
+
+
+def test_deploy_smoke_gate_uses_local_runner_with_cloud_opt_in() -> None:
     deploy = DEPLOY_COMMAND.read_text()
     step = deploy.split("## Step 6: Smoke benchmarks + fix", 1)[1].split(
         "## Step 6b: Semantic tests + fix", 1
     )[0]
 
+    assert "scripts/run-predeploy-local" in step
     assert "scripts/run-predeploy-cloud" in step
     assert "Benchmarks → Runs" in step
-    assert "7/7" in step
+    assert "6/6" in step
+    assert ".context/predeploy-runs/<run-id>/runner.log" in step
     assert "run_benchmark.py --suite smoke" not in step
+    assert "scripts/run-deploy-stage --start" in deploy
+    assert "scripts/run-deploy-stage smoke -- bash scripts/run-predeploy-local" in step
+    assert "scripts/run-deploy-stage --finish" in deploy
     assert "git diff --name-only HEAD" in deploy
     assert "git ls-files --others --exclude-standard" in deploy
 
