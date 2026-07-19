@@ -298,14 +298,38 @@ def test_build_param_population_message_basic():
     )
 
 
-def test_build_param_population_message_spawn_has_no_tool_specific_context():
-    """Spawn tasks use the same plan-relative prompt without per-tool instructions."""
-    from loop.dag_executor import _build_param_population_message
+def test_build_param_population_message_spawn_preserves_outer_alias_contract():
+    """Every spawn alias reaches the populator with its discriminator and required fields."""
+    from loop.dag_executor import ALIAS_TYPE_OVERRIDES, _build_param_population_message
 
-    msg = _build_param_population_message(2, "Explore competitors", "spawn_agent")
-    assert msg.startswith("Please execute task 2 of the plan: Explore competitors")
-    assert "NO access to your conversation" not in msg
-    assert "attachments" not in msg
+    required_fields = {
+        "spawn_explore_agent": [],
+        "spawn_browser_agent": ["start_url", "output_schema"],
+        "spawn_code_agent": ["output_schema"],
+        "spawn_general_purpose_agent": ["start_phase", "output_schema"],
+        "spawn_general_purpose_agent_for_each": ["start_phase", "output_schema", "items"],
+    }
+    assert set(required_fields) == set(ALIAS_TYPE_OVERRIDES)
+
+    for alias, override in ALIAS_TYPE_OVERRIDES.items():
+        msg = _build_param_population_message(
+            1,
+            (
+                "Find the current population of Tokyo. The general-purpose child MUST use "
+                "an explore agent for web research and return only the numeric population."
+            ),
+            "spawn_agent",
+            planned_tool_name=alias,
+        )
+
+        assert f"outer planned alias `{alias}`" in msg
+        assert f"`type=\"{override['type']}\"`" in msg
+        assert "MUST call exactly one tool: `spawn_agent`" in msg
+        for field_name in required_fields[alias]:
+            assert field_name in msg
+
+        if alias == "spawn_general_purpose_agent":
+            assert "inside the child goal" in msg
 
 
 def test_build_param_population_message_non_spawn_no_extra():
@@ -705,25 +729,29 @@ async def test_execute_dag_general_purpose_spawn_emits_subagent_placeholder():
 
 
 async def test_execute_dag_retries_wrong_spawn_alias_type_before_execution():
-    """A wrong spawn discriminator is retried without duplicating a child side effect."""
+    """The captured nested-explore conflict is repaired using corrective retry text."""
+    captured_goal = (
+        "Find the current population of New York City. The general-purpose child MUST use "
+        "an explore agent for web research and return only the numeric population."
+    )
     plan_data = {
-        "tasks": [{"goal": "Research New York City", "tool_name": "spawn_general_purpose_agent"}],
+        "tasks": [{"goal": captured_goal, "tool_name": "spawn_general_purpose_agent"}],
         "dependencies": {},
     }
 
-    populated_attempts = 0
+    prompts = []
     recorded = []
 
-    def param_tool_calls(_args):
-        nonlocal populated_attempts
-        populated_attempts += 1
-        if populated_attempts == 1:
-            return [{"tool": "spawn_agent", "type": "explore", "goal": "Research New York City"}]
+    def param_tool_calls(args):
+        prompt = args[10]
+        prompts.append(prompt)
+        if "Previous attempt violated the planned tool contract" not in prompt:
+            return [{"tool": "spawn_agent", "type": "explore", "goal": captured_goal}]
         return [
             {
                 "tool": "spawn_agent",
                 "type": "general_purpose",
-                "goal": "Research New York City",
+                "goal": captured_goal,
                 "start_phase": "EXECUTE",
                 "output_schema": {
                     "fields": [{"name": "population", "type": "int", "required": True, "properties": []}]
@@ -742,7 +770,10 @@ async def test_execute_dag_retries_wrong_spawn_alias_type_before_execution():
     )
 
     assert result["status"] == "completed"
-    assert populated_attempts == 2
+    assert len(prompts) == 2
+    assert "outer planned alias `spawn_general_purpose_agent`" in prompts[0]
+    assert "expected spawn_agent type general_purpose, got explore" in prompts[1]
+    assert prompts[0] != prompts[1]
     assert len(recorded) == 1
     assert recorded[0][0] == "spawn_agent"
     assert recorded[0][1]["type"] == "general_purpose"
@@ -1020,7 +1051,7 @@ async def run_all_tests():
     r.record("build_param_population_message_basic", test_build_param_population_message_basic)
     r.record(
         "build_param_population_message_spawn",
-        test_build_param_population_message_spawn_has_no_tool_specific_context,
+        test_build_param_population_message_spawn_preserves_outer_alias_contract,
     )
     r.record("build_param_population_message_non_spawn", test_build_param_population_message_non_spawn_no_extra)
     r.record(

@@ -343,6 +343,27 @@ LONG_GOAL = (
 )
 
 
+def test_spawn_agent_type_description_explains_capability_routing():
+    """The execute LLM can distinguish every unified spawn type by capability."""
+    from utils.tool_schemas import EXECUTE_PHASE_TOOLS, SpawnAgentTool, create_agent_action_model
+
+    description = SpawnAgentTool.model_json_schema()["properties"]["type"]["description"]
+    expected_capabilities = {
+        "browser": "browser session",
+        "code": "coding agent using Claude Code or Codex CLI",
+        "general_purpose": "full autonomous agent",
+        "explore": "read-only research",
+        "for_each": "one general-purpose agent per item",
+    }
+    for agent_type, capability in expected_capabilities.items():
+        assert agent_type in description
+        assert capability in description
+
+    rendered_execute_schema = create_agent_action_model(EXECUTE_PHASE_TOOLS).model_json_schema()
+    rendered_description = rendered_execute_schema["$defs"]["SpawnAgentTool"]["properties"]["type"]["description"]
+    assert rendered_description == description
+
+
 def test_spawn_agent_browser_missing_url_raises():
     """SpawnAgentTool browser without start_url raises."""
     from utils.tool_schemas import (
@@ -809,6 +830,10 @@ async def run_all_tests():
     r.record("web_fetch_fields_url_objective_only", test_web_fetch_tool_fields_are_url_and_objective_only)
     r.record("web_fetch_drops_removed_params", test_web_fetch_tool_drops_removed_params)
     # SpawnAgentTool model_validator
+    r.record(
+        "spawn_agent_type_description_capability_routing",
+        test_spawn_agent_type_description_explains_capability_routing,
+    )
     r.record("spawn_agent_browser_no_url", test_spawn_agent_browser_missing_url_raises)
     r.record("spawn_agent_general_purpose_no_phase", test_spawn_agent_general_purpose_missing_phase_raises)
     r.record("spawn_agent_for_each_both", test_spawn_agent_for_each_items_and_csv_raises)

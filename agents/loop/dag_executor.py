@@ -66,6 +66,16 @@ ALIAS_TYPE_OVERRIDES = {
     "spawn_general_purpose_agent_for_each": {"type": "for_each", "start_phase": "EXECUTE"},
 }
 
+ALIAS_REQUIRED_FIELDS = {
+    "spawn_explore_agent": (),
+    "spawn_browser_agent": ("start_url", "output_schema"),
+    "spawn_code_agent": ("output_schema",),
+    "spawn_general_purpose_agent": ("start_phase", "output_schema"),
+    "spawn_general_purpose_agent_for_each": ("start_phase", "output_schema", "items or items_csv"),
+}
+
+assert set(ALIAS_REQUIRED_FIELDS) == set(ALIAS_TYPE_OVERRIDES)
+
 
 class ParamPopulationContractError(ValueError):
     """The param-populator returned a call that cannot execute the planned DAG node."""
@@ -111,17 +121,48 @@ def _select_param_tool_call(tool_calls: List[Dict[str, Any]], actual_tool: str, 
     return tool_call
 
 
-def _build_param_population_message(task_number: int, goal: str, tool_name: str) -> str:
+def _build_param_population_message(
+    task_number: int,
+    goal: str,
+    tool_name: str,
+    *,
+    planned_tool_name: Optional[str] = None,
+    contract_error: Optional[str] = None,
+) -> str:
     """Build user message that prompts the LLM to call a specific tool.
 
     Appended to the existing agent context so the system prompt, tools, and
     conversation are identical to the main agent loop — giving us cache reads
     on the entire prefix.
     """
-    return (
+    message = (
         f"Please execute task {task_number} of the plan: {goal}\n\n"
         f"You MUST call exactly one tool: `{tool_name}`. Do not respond with text only."
     )
+
+    alias_override = ALIAS_TYPE_OVERRIDES.get(planned_tool_name or "")
+    if not alias_override:
+        return message
+
+    expected_type = alias_override["type"]
+    required_fields = ALIAS_REQUIRED_FIELDS[planned_tool_name or ""]
+    required_text = ", ".join(f"`{field}`" for field in required_fields) or "none beyond `goal` and `type`"
+    message += (
+        f"\n\nThe outer planned alias `{planned_tool_name}` requires `type=\"{expected_type}\"`. "
+        f"Required type-specific fields: {required_text}. "
+        "Instructions to use another agent type for nested work belong inside the child goal; "
+        "they must not change the outer spawn type."
+    )
+
+    if contract_error:
+        bounded_error = " ".join(contract_error.split())[:500]
+        message += (
+            f"\n\nPrevious attempt violated the planned tool contract: {bounded_error}. "
+            f"Retry with exactly one `{tool_name}` call and the required discriminator "
+            f"`type=\"{expected_type}\"`."
+        )
+
+    return message
 
 
 def _build_early_tool_event(
@@ -793,7 +834,12 @@ async def _execute_single_task(
             # Populate tool params by extending the current agent context with a
             # user message that prompts the LLM to call the specific tool.
             # Same system prompt + tools + conversation = cache prefix hit.
-            extra_msg = _build_param_population_message(task.index + 1, task.goal, actual_tool)
+            extra_msg = _build_param_population_message(
+                task.index + 1,
+                task.goal,
+                actual_tool,
+                planned_tool_name=task.tool_name,
+            )
 
             # Store a reusable context snapshot for same-machine activity pickup.
             # call_llm_activity removes the entry after a successful call, so a
@@ -867,15 +913,24 @@ async def _execute_single_task(
                     workflow.logger.warning(f"on_tokens failed for dag_param_populator: {e}")
 
             async def populate_params() -> tuple[Dict[str, Any], Dict[str, Any]]:
+                contract_error: Optional[str] = None
                 for structured_attempt in range(1, STRUCTURED_OUTPUT_MAX_ATTEMPTS + 1):
                     try:
                         # A successful activity consumes the shared pending context
                         # before local alias validation runs. Restore the identical
                         # snapshot so a bounded semantic retry keeps the same prefix.
                         _pending_llm_context[agent_id] = pending_context
+                        attempt_llm_args = list(llm_args)
+                        attempt_llm_args[10] = _build_param_population_message(
+                            task.index + 1,
+                            task.goal,
+                            actual_tool,
+                            planned_tool_name=task.tool_name,
+                            contract_error=contract_error,
+                        )
                         result = await execute_activity(
                             call_llm_activity,
-                            args=llm_args,
+                            args=attempt_llm_args,
                             start_to_close_timeout=timedelta(seconds=600),
                             retry_policy=RetryPolicy(maximum_attempts=2),
                             heartbeat_timeout=timedelta(seconds=180),
@@ -892,6 +947,7 @@ async def _execute_single_task(
                         )
                         if not should_retry or structured_attempt >= STRUCTURED_OUTPUT_MAX_ATTEMPTS:
                             raise
+                        contract_error = extract_error_message(exc)
                         workflow.logger.warning(
                             f"[DAG] Param population contract failed "
                             f"(attempt {structured_attempt}/{STRUCTURED_OUTPUT_MAX_ATTEMPTS}); retrying"
