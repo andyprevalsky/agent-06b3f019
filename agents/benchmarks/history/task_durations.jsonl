@@ -1268,3 +1268,8 @@
 {"task": "parallel-tool-calls", "duration_seconds": 155.5, "cost_cents": 13.0, "timestamp": "2026-07-18T18:23:49.739100+00:00", "agent_id": "9444a9a6-f5d5-4c59-95a2-590ac76169e4"}
 {"task": "browser-smoke", "duration_seconds": 94.5, "cost_cents": 1.0, "timestamp": "2026-07-18T18:23:49.739100+00:00", "agent_id": "4c42ad98-f9a9-4c6f-8011-66576d6848da"}
 {"task": "browser-biometrics-webdecoy", "duration_seconds": 178.2, "cost_cents": 18.0, "timestamp": "2026-07-18T18:23:49.739100+00:00", "agent_id": "4a136527-2101-454c-a8aa-737127de8e62"}
+{"task": "chat-mode", "duration_seconds": 104.8, "cost_cents": 0.0, "timestamp": "2026-07-18T23:51:48.998027+00:00", "agent_id": "f891e938-cad9-4639-897a-fd6b676eb1e6"}
+{"task": "parallel-tool-calls", "duration_seconds": 183.2, "cost_cents": 17.0, "timestamp": "2026-07-18T23:51:48.998027+00:00", "agent_id": "1ebf9e4e-465d-4218-980f-01222e0bedd0"}
+{"task": "claude-code-agent", "duration_seconds": 118.5, "cost_cents": 3.0, "timestamp": "2026-07-18T23:51:48.998027+00:00", "agent_id": "98d542ff-72ca-4777-af38-6d37d53942f7"}
+{"task": "browser-smoke", "duration_seconds": 175.0, "cost_cents": 1.0, "timestamp": "2026-07-18T23:51:48.998027+00:00", "agent_id": "8c8c6e75-579d-4dd5-be78-357bf74599a8"}
+{"task": "browser-biometrics-webdecoy", "duration_seconds": 272.1, "cost_cents": 42.0, "timestamp": "2026-07-18T23:51:48.998027+00:00", "agent_id": "c6dcbe74-75c4-4648-ab06-c6fb8c1c5bc5"}

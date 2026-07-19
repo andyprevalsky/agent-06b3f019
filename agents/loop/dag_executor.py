@@ -435,6 +435,39 @@ def _metadata_matches_task(metadata: Dict[str, Any], task: DAGTask) -> bool:
     return False
 
 
+async def _settle_in_flight_tasks(
+    pending_tasks: Dict[int, asyncio.Task],
+    task_to_index: Dict[asyncio.Task, int],
+    dag: TaskDAG,
+) -> None:
+    """Let already-started sibling tasks reach a durable terminal state.
+
+    Spawn and external-action tools may commit their side effect before their
+    coroutine finishes. Canceling them when a sibling fails hides that committed
+    work from the recovery LLM, which can then repeat it. No new DAG tasks are
+    started here; only the current in-flight batch is drained.
+    """
+    in_flight = list(pending_tasks.items())
+    if not in_flight:
+        return
+
+    workflow.logger.info(f"[DAG] Settling {len(in_flight)} in-flight task(s) before LLM recovery")
+    outcomes = await asyncio.gather(*(future for _, future in in_flight), return_exceptions=True)
+
+    for (task_index, future), outcome in zip(in_flight, outcomes, strict=True):
+        pending_tasks.pop(task_index, None)
+        task_to_index.pop(future, None)
+        if isinstance(outcome, BaseException):
+            workflow.logger.error(f"[DAG] In-flight task {task_index} raised while settling: {outcome}")
+            dag.mark_failed(task_index)
+        elif outcome:
+            dag.mark_completed(task_index)
+            workflow.logger.info(f"[DAG] In-flight task {task_index} completed before recovery")
+        else:
+            dag.mark_failed(task_index)
+            workflow.logger.info(f"[DAG] In-flight task {task_index} failed before recovery")
+
+
 async def execute_dag(
     dag: TaskDAG,
     agent_id: str,
@@ -559,7 +592,10 @@ async def execute_dag(
         # Wait for ANY task to complete
         done, _ = await asyncio.wait(pending_tasks.values(), return_when=asyncio.FIRST_COMPLETED)
 
-        # Process completed tasks
+        # Process every task in this completed batch before deciding whether
+        # recovery is needed. A sibling may have completed in the same event-loop
+        # tick as the failure and its result must remain visible.
+        batch_failed = False
         for completed_future in done:
             task_index = task_to_index[completed_future]
             del pending_tasks[task_index]
@@ -572,23 +608,24 @@ async def execute_dag(
                 success = False
 
             if not success:
-                # Error already posted to context by execute_tool/handle_tool_event
-                workflow.logger.info(
-                    f"[DAG] Task {task_index} failed - canceling remaining and returning for LLM recovery"
-                )
                 dag.mark_failed(task_index)
+                batch_failed = True
+                workflow.logger.info(f"[DAG] Task {task_index} failed")
+            else:
+                dag.mark_completed(task_index)
+                workflow.logger.info(f"[DAG] Task {task_index} completed")
 
-                # Cancel remaining pending tasks
-                for pending in pending_tasks.values():
-                    pending.cancel()
-
-                return {
-                    "status": "needs_llm",
-                    "context": context,
-                }
-
-            dag.mark_completed(task_index)
-            workflow.logger.info(f"[DAG] Task {task_index} completed")
+        if batch_failed:
+            # Do not cancel siblings: a spawn/message/purchase may already have
+            # committed its external side effect. Drain the current batch and
+            # merge its terminal messages so the recovery LLM cannot duplicate it.
+            await _settle_in_flight_tasks(pending_tasks, task_to_index, dag)
+            if poll_messages:
+                last_checked = await poll_and_update_context(poll_messages, context, last_checked)
+            return {
+                "status": "needs_llm",
+                "context": context,
+            }
 
         # Loop continues - get_ready_tasks will now return newly ready dependents
 
@@ -818,6 +855,7 @@ async def _execute_single_task(
                 False,
                 True,
             ]
+
             async def populate_params() -> Dict[str, Any]:
                 for structured_attempt in range(1, STRUCTURED_OUTPUT_MAX_ATTEMPTS + 1):
                     try:

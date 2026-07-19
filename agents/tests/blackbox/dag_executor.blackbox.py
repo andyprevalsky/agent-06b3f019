@@ -739,6 +739,62 @@ async def test_execute_dag_parallel_independent_tasks():
     assert all(t.state.value == "COMPLETED" for t in dag.tasks)
 
 
+async def test_execute_dag_failure_settles_in_flight_siblings_before_recovery():
+    """A failed DAG task must not hide a sibling's committed side effect from recovery.
+
+    Regression for spawn-sub-agents: one general-purpose spawn failed validation
+    after its sibling had already started. Canceling the sibling and returning to
+    the LLM immediately caused the LLM to repeat that already-committed spawn.
+    """
+    plan_data = {
+        "tasks": [
+            {"goal": "fail quickly", "tool_name": "web_search"},
+            {"goal": "finish after the failure", "tool_name": "web_search"},
+        ],
+        "dependencies": {},
+    }
+    sibling_started = asyncio.Event()
+    settled_queries = []
+
+    def param_tool_calls(args):
+        goal = "fail" if "fail quickly" in args[10] else "sibling"
+        return [{"tool": "web_search", "query": goal}]
+
+    async def execute_tool(_name, params, _tool_call_id):
+        if params["query"] == "fail":
+            await sibling_started.wait()
+            return {"error": True, "message": "planned failure"}
+        sibling_started.set()
+        await asyncio.sleep(0.01)
+        settled_queries.append(params["query"])
+        return {"message": "sibling completed"}
+
+    async def poll_messages(_last_checked):
+        assert settled_queries == ["sibling"]
+        return [
+            {
+                "message_id": "sibling-terminal-message",
+                "role": "TOOL",
+                "text": "sibling completed",
+                "timestamp": "2026-07-19T00:00:00Z",
+                "metadata": {"toolName": "web_search", "toolStatus": "FINISHED"},
+            }
+        ]
+
+    result, _events, dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=param_tool_calls,
+        poll_messages=poll_messages,
+    )
+
+    assert result["status"] == "needs_llm"
+    assert dag.tasks[0].state.value == "FAILED"
+    assert dag.tasks[1].state.value == "COMPLETED"
+    assert settled_queries == ["sibling"]
+    assert [message["message_id"] for message in result["context"]] == ["sibling-terminal-message"]
+
+
 async def test_execute_dag_retries_structured_param_failure_once():
     """A non-retryable activity contract failure is retried by the DAG, not Temporal."""
     plan_data = {
@@ -797,9 +853,7 @@ async def run_all_tests():
         "select_param_tool_call_requires_exactly_one_call",
         test_select_param_tool_call_requires_exactly_one_call,
     )
-    r.record(
-        "select_param_tool_call_rejects_wrong_single_tool", test_select_param_tool_call_rejects_wrong_single_tool
-    )
+    r.record("select_param_tool_call_rejects_wrong_single_tool", test_select_param_tool_call_rejects_wrong_single_tool)
     await r.record_async("execute_dag_reasoning_task_succeeds", test_execute_dag_reasoning_task_succeeds)
     await r.record_async("execute_dag_reasoning_forwards_gpt_token", test_execute_dag_reasoning_forwards_gpt_token)
     await r.record_async("execute_dag_tool_task_succeeds", test_execute_dag_tool_task_succeeds)
@@ -826,6 +880,10 @@ async def run_all_tests():
         "execute_dag_exception_in_tool_yields_error_event", test_execute_dag_exception_in_tool_yields_error_event
     )
     await r.record_async("execute_dag_parallel_independent_tasks", test_execute_dag_parallel_independent_tasks)
+    await r.record_async(
+        "execute_dag_failure_settles_in_flight_siblings_before_recovery",
+        test_execute_dag_failure_settles_in_flight_siblings_before_recovery,
+    )
     teardown_mock()
     return r.summary()
 
