@@ -710,6 +710,9 @@ async def _execute_single_task(
     tool_call_id = str(workflow.uuid4())
     reasoning_stream_id: Optional[str] = None
     reasoning_started_at: Optional[str] = None
+    # Name of the early IN_PROGRESS tool chip once emitted (non-reasoning path).
+    # Tracked so a cancellation can terminalize the exact same live chip.
+    early_tool_event_name: Optional[str] = None
     dag.mark_in_progress(task.index, tool_call_id)
 
     try:
@@ -830,6 +833,7 @@ async def _execute_single_task(
             # concrete planned tool while the LLM fills arguments.
             early_tool_name, early_event = _build_early_tool_event(task, actual_tool, tool_call_id)
             await handle_tool_event_fn(early_event, tool_call_id, early_tool_name)
+            early_tool_event_name = early_tool_name
 
             # Populate tool params by extending the current agent context with a
             # user message that prompts the LLM to call the specific tool.
@@ -1017,6 +1021,56 @@ async def _execute_single_task(
                     f"items={len(params.get('items')) if isinstance(params.get('items'), list) else params.get('items')}"
                 )
             return not failed
+
+    except asyncio.CancelledError:
+        # asyncio.CancelledError is NOT an Exception (it is BaseException), so the
+        # broad `except Exception` handler below never runs on cancellation.
+        # execute_dag cancels every remaining task wrapper the moment a sibling
+        # fails; without terminalizing here, the early IN_PROGRESS tool chip
+        # (emitted before param population) and the reasoning stream bubble stay
+        # live forever in the UI as a phantom chip. Emit a terminal event for the
+        # same tool_call_id, then re-raise so the gather-based cancellation drain
+        # in execute_dag still completes.
+        try:
+            if early_tool_event_name is not None:
+                await handle_tool_event_fn(
+                    ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title=task.tool_name,
+                        message="Canceled: a sibling task failed.",
+                        status=MessageStatus.ERROR,
+                        metadata={
+                            "dagTaskIndex": task.index,
+                            "plannedToolName": task.tool_name,
+                            "canceled": True,
+                        },
+                    ),
+                    tool_call_id,
+                    early_tool_event_name,
+                )
+            elif reasoning_stream_id is not None:
+                await handle_tool_event_fn(
+                    ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title=DAG_REASONING_FINISHED_TITLE,
+                        message="Canceled: a sibling task failed.",
+                        status=MessageStatus.ERROR,
+                        metadata={
+                            "dagTaskIndex": task.index,
+                            "plannedToolName": task.tool_name,
+                            "streamId": reasoning_stream_id,
+                            "firstTimestamp": reasoning_started_at,
+                            "startedAt": reasoning_started_at,
+                            "canceled": True,
+                            "error": True,
+                        },
+                    ),
+                    tool_call_id,
+                    DAG_REASONING_UI_TOOL_NAME,
+                )
+        except Exception as terminal_err:  # never mask the cancellation
+            workflow.logger.warning(f"[DAG] Failed to terminalize canceled task {task.index}: {terminal_err}")
+        raise
 
     except Exception as e:
         # Extract actual error message (unwrap Temporal's ActivityError wrapper)

@@ -1026,6 +1026,67 @@ async def test_execute_dag_retries_structured_param_failure_once():
     assert dag.tasks[0].state.value == "COMPLETED"
 
 
+async def test_execute_dag_terminalizes_canceled_sibling_tool_event():
+    """A canceled sibling terminalizes its early IN_PROGRESS tool chip.
+
+    When one DAG task fails, execute_dag cancels the remaining task wrappers.
+    asyncio.CancelledError is not an Exception, so the broad handler that posts a
+    terminal event is bypassed; without an explicit CancelledError handler the
+    early IN_PROGRESS chip stays live forever (phantom chip). This proves the
+    canceled sibling emits a terminal event for the same tool_call_id.
+    """
+    plan_data = {
+        "tasks": [
+            {"goal": "FailFast", "tool_name": "web_search"},
+            {"goal": "SlowSibling", "tool_name": "web_search"},
+        ],
+        "dependencies": {},
+    }
+    block = asyncio.Event()
+
+    def param_tool_calls(args):
+        # args[10] is the param-population message, which embeds the task goal.
+        goal = "SlowSibling" if "SlowSibling" in args[10] else "FailFast"
+        return [{"tool": "web_search", "query": goal}]
+
+    async def execute_tool(name, params, tool_call_id):
+        if params["query"] == "SlowSibling":
+            # Blocks until execute_dag cancels this wrapper after FailFast fails.
+            await block.wait()
+            return {"message": "unreachable"}
+        return {"error": True, "message": "fail fast"}
+
+    result, events, dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=param_tool_calls,
+    )
+
+    assert result["status"] == "error"
+
+    # The SlowSibling (task index 1) emitted an early IN_PROGRESS chip.
+    sibling_in_progress = [
+        e
+        for e in events
+        if e["type"] == "tool_event"
+        and e["status"] == "IN_PROGRESS"
+        and e["metadata"].get("dagTaskIndex") == 1
+    ]
+    assert len(sibling_in_progress) == 1
+    sibling_id = sibling_in_progress[0]["tool_call_id"]
+
+    # A terminal (non-IN_PROGRESS) event must close that exact chip.
+    sibling_terminal = [
+        e
+        for e in events
+        if e["type"] == "tool_event"
+        and e["tool_call_id"] == sibling_id
+        and e["status"] not in (None, "IN_PROGRESS")
+    ]
+    assert len(sibling_terminal) >= 1, f"canceled sibling chip {sibling_id} not terminalized: {events}"
+    assert sibling_terminal[0]["metadata"].get("canceled") is True
+
+
 async def run_all_tests():
     print("dag-executor blackbox tests:")
     r = BlackboxResult()
@@ -1102,6 +1163,10 @@ async def run_all_tests():
         "execute_dag_exception_in_tool_yields_error_event", test_execute_dag_exception_in_tool_yields_error_event
     )
     await r.record_async("execute_dag_parallel_independent_tasks", test_execute_dag_parallel_independent_tasks)
+    await r.record_async(
+        "execute_dag_terminalizes_canceled_sibling_tool_event",
+        test_execute_dag_terminalizes_canceled_sibling_tool_event,
+    )
     teardown_mock()
     return r.summary()
 
