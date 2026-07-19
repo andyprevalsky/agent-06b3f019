@@ -3629,13 +3629,22 @@ def _seed_sync_error_detail(result: "subprocess.CompletedProcess[str]") -> str:
     return f"{detail[:300]}\n    … [{len(detail) - 1100} chars elided] …\n    {detail[-800:]}"
 
 
-def _sync_compute_tokens() -> bool:
+def _sync_compute_tokens(*, allow_missing_gpt_code: bool = True) -> bool:
     """Refresh the compute-token integrations (claude_code / gpt_code + pool)
     from prod into the isolated benchmark DB. Returns False on any failure so
     the live-fixture caller can fail closed. A frozen DB
     fixture or whole-DB snapshot restore can leave stale/expired compute tokens,
     which forces the agent's claudeAuth fetch to fail into the paid waterfall.
-    Reads the prod source from back-end/.env; writes to the isolated DB."""
+    Reads the prod source from back-end/.env; writes to the isolated DB.
+
+    gpt_code (Codex) availability is an EXTERNAL quota/rate-limit condition — a
+    rate-limited Codex token upstream is never a harness regression, and the
+    overwhelming majority of benchmarks (every browser/non-Codex task) never
+    spawn a Codex agent. So a benchmark must NEVER be blocked from running just
+    because gpt_code is unavailable: ``allow_missing_gpt_code`` defaults True and
+    tells seed-local.ts to proceed on 0 usable gpt_code (claude_code sync still
+    hard-fails). A task that genuinely needs Codex will fail at Codex-use time
+    with a clear, task-level reason instead of aborting the whole run at setup."""
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Compute-token sync skipped: local Victoria DB not found")
@@ -3643,6 +3652,8 @@ def _sync_compute_tokens() -> bool:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
+    if allow_missing_gpt_code:
+        env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
     try:
         result = subprocess.run(
             ["npx", "tsx", "scripts/seed-local.ts", "--compute-tokens-only"],

@@ -223,7 +223,7 @@ per_box_barrier_wait_seconds() {
         printf '%s\n' "$CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS"
         return
     fi
-    first_run_stack_wait="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"
+    first_run_stack_wait="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-2160}"
     pre_stack_allowance="${CLOUDBENCH_PRE_STACK_WAIT_SECONDS:-600}"
     case "$first_run_stack_wait:$pre_stack_allowance" in
         *[!0-9:]*|:*|*:)
@@ -234,7 +234,14 @@ per_box_barrier_wait_seconds() {
     printf '%s\n' "$((first_run_stack_wait + pre_stack_allowance))"
 }
 
-FIRST_RUN_STACK_WAIT_SECONDS="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"
+# Cold first-boot budget: a freshly-cloned guest has no cached seed dump and
+# does a full production DB sync (~19 min for the ecommerce/browser slice) that
+# only gets slower as N stacks contend on the sync concurrently. 2160s (= 1800s
+# + 20% headroom) keeps a slow-but-healthy stack from being excluded at the
+# start barrier. The durable fix is to bake the seed dump into the warm snapshot
+# so clones RESTORE instead of re-sync (see cloudbench-run.sh:stack_wait_budget_seconds
+# — the tighter 900s budget applies the moment a seed dump is present).
+FIRST_RUN_STACK_WAIT_SECONDS="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-2160}"
 PER_BOX_BARRIER_WAIT_SECONDS="$(per_box_barrier_wait_seconds)" || exit 2
 START_BARRIER_WAIT_SECONDS="${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}"
 for seconds in "$RUN_TIMEOUT" "$FIRST_RUN_STACK_WAIT_SECONDS" "$PER_BOX_BARRIER_WAIT_SECONDS" "$START_BARRIER_WAIT_SECONDS"; do
