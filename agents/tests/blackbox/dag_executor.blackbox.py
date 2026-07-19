@@ -355,12 +355,42 @@ def test_select_param_tool_call_rejects_wrong_single_tool():
         )
 
 
+def test_select_param_tool_call_rejects_wrong_alias_types():
+    """Every spawn alias rejects a different agent variant before override."""
+    import pytest
+
+    from loop.dag_executor import ALIAS_TYPE_OVERRIDES, DAGTask, _select_param_tool_call
+
+    wrong_types = {
+        "explore": "browser",
+        "browser": "code",
+        "code": "general_purpose",
+        "general_purpose": "explore",
+        "for_each": "explore",
+    }
+    for alias, override in ALIAS_TYPE_OVERRIDES.items():
+        expected_type = override["type"]
+        wrong_type = wrong_types[expected_type]
+        task = DAGTask(index=1, goal=f"Run {alias}.", tool_name=alias)
+        with pytest.raises(
+            ValueError,
+            match=f"expected spawn_agent type {expected_type}, got {wrong_type}",
+        ):
+            _select_param_tool_call(
+                [{"tool": "spawn_agent", "type": wrong_type, "goal": task.goal}],
+                "spawn_agent",
+                task,
+            )
+
+
 async def _run_execute_dag(
     plan_data,
     execute_tool_impl=None,
     reasoning_result=None,
     param_tool_calls=None,
+    param_usage=None,
     execute_activity_calls=None,
+    pending_context_seen=None,
     **execute_dag_kwargs,
 ):
     """Helper: run execute_dag with mocked execute_activity that returns canned data."""
@@ -403,13 +433,19 @@ async def _run_execute_dag(
         # call_llm_activity for param population — return tool_calls format
         tool_name = args[11] if args and len(args) > 11 else "unknown"
         if param_tool_calls is not None and args and args[8] == "dag_param_populator":
+            if pending_context_seen is not None:
+                pending_context_seen.append(args[0] in _pending_llm_context)
+                # Model call_llm_activity's successful cleanup so a local retry
+                # proves the DAG restores the same-machine context snapshot.
+                _pending_llm_context.pop(args[0], None)
             tool_calls = param_tool_calls(args)
         else:
             tool_calls = [{"tool": tool_name, "query": "x"}]
+        usage = param_usage(args) if callable(param_usage) else (param_usage or {})
         return {
             "response": "",
             "tool_calls": tool_calls,
-            "usage": {},
+            "usage": usage,
             "detected_tools_ordered": [],
         }
 
@@ -583,7 +619,13 @@ async def test_execute_dag_alias_resolution_spawn_explore():
         recorded.append((name, dict(params)))
         return {"message": "explored"}
 
-    result, events, dag = await _run_execute_dag(plan_data, execute_tool_impl=execute_tool)
+    result, events, dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=lambda _args: [
+            {"tool": "spawn_agent", "type": "explore", "goal": "Explore stuff", "depth": "quick"}
+        ],
+    )
 
     assert result["status"] == "completed"
     assert recorded[0][0] == "spawn_agent"
@@ -635,7 +677,19 @@ async def test_execute_dag_general_purpose_spawn_emits_subagent_placeholder():
         recorded.append((name, params, tool_call_id))
         return {"message": "spawned"}
 
-    result, events, dag = await _run_execute_dag(plan_data, execute_tool_impl=execute_tool)
+    result, events, dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=lambda _args: [
+            {
+                "tool": "spawn_agent",
+                "type": "general_purpose",
+                "goal": "Delegate the implementation",
+                "start_phase": "EXECUTE",
+                "output_schema": {"fields": [{"name": "result", "type": "str", "required": True, "properties": []}]},
+            }
+        ],
+    )
 
     assert result["status"] == "completed"
     assert recorded[0][0] == "spawn_agent"
@@ -648,6 +702,182 @@ async def test_execute_dag_general_purpose_spawn_emits_subagent_placeholder():
     assert early["metadata"]["spawnGroupId"] == recorded[0][2]
     assert recorded[0][1]["_spawn_group_id"] == recorded[0][2]
     assert dag.tasks[0].tool_call_id == recorded[0][2]
+
+
+async def test_execute_dag_retries_wrong_spawn_alias_type_before_execution():
+    """A wrong spawn discriminator is retried without duplicating a child side effect."""
+    plan_data = {
+        "tasks": [{"goal": "Research New York City", "tool_name": "spawn_general_purpose_agent"}],
+        "dependencies": {},
+    }
+
+    populated_attempts = 0
+    recorded = []
+
+    def param_tool_calls(_args):
+        nonlocal populated_attempts
+        populated_attempts += 1
+        if populated_attempts == 1:
+            return [{"tool": "spawn_agent", "type": "explore", "goal": "Research New York City"}]
+        return [
+            {
+                "tool": "spawn_agent",
+                "type": "general_purpose",
+                "goal": "Research New York City",
+                "start_phase": "EXECUTE",
+                "output_schema": {
+                    "fields": [{"name": "population", "type": "int", "required": True, "properties": []}]
+                },
+            }
+        ]
+
+    async def execute_tool(name, params, tool_call_id):
+        recorded.append((name, dict(params), tool_call_id))
+        return {"message": "spawned"}
+
+    result, events, dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=param_tool_calls,
+    )
+
+    assert result["status"] == "completed"
+    assert populated_attempts == 2
+    assert len(recorded) == 1
+    assert recorded[0][0] == "spawn_agent"
+    assert recorded[0][1]["type"] == "general_purpose"
+    assert recorded[0][1]["_spawn_group_id"] == recorded[0][2]
+    assert dag.tasks[0].state.value == "COMPLETED"
+    early = [e for e in events if e["type"] == "tool_event" and e["status"] == "IN_PROGRESS"]
+    assert len(early) == 1
+
+
+async def test_execute_dag_parallel_spawn_alias_retry_has_exactly_two_side_effects():
+    """Parallel Tokyo/NYC nodes execute once each when NYC needs a contract retry."""
+    plan_data = {
+        "tasks": [
+            {"goal": "Research Tokyo", "tool_name": "spawn_general_purpose_agent"},
+            {"goal": "Research New York City", "tool_name": "spawn_general_purpose_agent"},
+        ],
+        "dependencies": {},
+    }
+    attempts = {"Tokyo": 0, "New York City": 0}
+    recorded = []
+    pending_context_seen = []
+
+    def param_tool_calls(args):
+        city = "Tokyo" if "Tokyo" in args[10] else "New York City"
+        attempts[city] += 1
+        if city == "New York City" and attempts[city] == 1:
+            return [{"tool": "spawn_agent", "type": "explore", "goal": f"Research {city}"}]
+        return [
+            {
+                "tool": "spawn_agent",
+                "type": "general_purpose",
+                "goal": f"Research {city}",
+                "start_phase": "EXECUTE",
+                "output_schema": {
+                    "fields": [{"name": "population", "type": "int", "required": True, "properties": []}]
+                },
+            }
+        ]
+
+    async def execute_tool(name, params, tool_call_id):
+        recorded.append((name, params["goal"], tool_call_id))
+        return {"message": "spawned"}
+
+    result, _events, dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=param_tool_calls,
+        pending_context_seen=pending_context_seen,
+    )
+
+    assert result["status"] == "completed"
+    assert attempts == {"Tokyo": 1, "New York City": 2}
+    assert sorted(goal for _name, goal, _id in recorded) == ["Research New York City", "Research Tokyo"]
+    assert len(recorded) == 2
+    assert all(pending_context_seen)
+    assert all(task.state.value == "COMPLETED" for task in dag.tasks)
+
+
+async def test_execute_dag_exhausted_alias_retry_never_replays_committed_sibling():
+    """An exhausted NYC contract stops after Tokyo's one committed spawn."""
+    plan_data = {
+        "tasks": [
+            {"goal": "Research Tokyo", "tool_name": "spawn_general_purpose_agent"},
+            {"goal": "Research New York City", "tool_name": "spawn_general_purpose_agent"},
+        ],
+        "dependencies": {},
+    }
+    attempts = {"Tokyo": 0, "New York City": 0}
+    recorded = []
+    token_calls = []
+    pending_context_seen = []
+
+    def param_tool_calls(args):
+        city = "Tokyo" if "Tokyo" in args[10] else "New York City"
+        attempts[city] += 1
+        if city == "New York City":
+            return [{"tool": "spawn_agent", "type": "explore", "goal": f"Research {city}"}]
+        return [
+            {
+                "tool": "spawn_agent",
+                "type": "general_purpose",
+                "goal": f"Research {city}",
+                "start_phase": "EXECUTE",
+                "output_schema": {
+                    "fields": [{"name": "population", "type": "int", "required": True, "properties": []}]
+                },
+            }
+        ]
+
+    async def execute_tool(name, params, tool_call_id):
+        recorded.append((name, params["goal"], tool_call_id))
+        return {"message": "spawned"}
+
+    async def on_tokens(prompt_tokens, completion_tokens, model, **kwargs):
+        token_calls.append((prompt_tokens, completion_tokens, model, kwargs["call_site"]))
+
+    result, _events, dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=param_tool_calls,
+        param_usage={"prompt_tokens": 10, "completion_tokens": 2, "actual_model": "test-model"},
+        pending_context_seen=pending_context_seen,
+        on_tokens=on_tokens,
+    )
+
+    assert result["status"] == "error"
+    assert attempts == {"Tokyo": 1, "New York City": 2}
+    assert [(name, goal) for name, goal, _id in recorded] == [("spawn_agent", "Research Tokyo")]
+    assert len(token_calls) == 3
+    assert all(call == (10, 2, "test-model", "dag_param_populator") for call in token_calls)
+    assert all(pending_context_seen)
+    assert dag.tasks[1].state.value == "FAILED"
+
+
+async def test_execute_dag_validates_overridden_spawn_payload_before_execution():
+    """Canonical SpawnAgentTool constraints run after alias override and before spawn."""
+    plan_data = {
+        "tasks": [{"goal": "Research Tokyo", "tool_name": "spawn_general_purpose_agent"}],
+        "dependencies": {},
+    }
+    recorded = []
+
+    async def execute_tool(name, params, tool_call_id):
+        recorded.append((name, params, tool_call_id))
+        return {"message": "spawned"}
+
+    result, _events, dag = await _run_execute_dag(
+        plan_data,
+        execute_tool_impl=execute_tool,
+        param_tool_calls=lambda _args: [{"tool": "spawn_agent", "type": "general_purpose", "goal": "Research Tokyo"}],
+    )
+
+    assert result["status"] == "error"
+    assert recorded == []
+    assert dag.tasks[0].state.value == "FAILED"
 
 
 async def test_execute_dag_rejects_multiple_param_tool_calls():
@@ -680,13 +910,13 @@ async def test_execute_dag_rejects_multiple_param_tool_calls():
         param_tool_calls=param_tool_calls,
     )
 
-    assert result["status"] == "needs_llm"
+    assert result["status"] == "error"
     assert recorded == []
     assert dag.tasks[0].state.value == "FAILED"
 
 
-async def test_execute_dag_tool_failure_returns_needs_llm():
-    """execute_dag returns status=needs_llm when a tool reports error."""
+async def test_execute_dag_tool_failure_returns_error():
+    """execute_dag returns status=error when a tool reports error."""
     plan_data = {
         "tasks": [{"goal": "bad task", "tool_name": "web_search"}],
         "dependencies": {},
@@ -697,7 +927,7 @@ async def test_execute_dag_tool_failure_returns_needs_llm():
 
     result, events, dag = await _run_execute_dag(plan_data, execute_tool_impl=execute_tool)
 
-    assert result["status"] == "needs_llm"
+    assert result["status"] == "error"
     assert dag.tasks[0].state.value == "FAILED"
 
 
@@ -713,7 +943,7 @@ async def test_execute_dag_exception_in_tool_yields_error_event():
 
     result, events, dag = await _run_execute_dag(plan_data, execute_tool_impl=execute_tool)
 
-    assert result["status"] == "needs_llm"
+    assert result["status"] == "error"
     # should have an ERROR tool_event posted via handle_tool_event_fn
     error_events = [e for e in events if e["type"] == "tool_event" and e["tool_name"] == "web_search"]
     assert len(error_events) >= 1
@@ -797,9 +1027,8 @@ async def run_all_tests():
         "select_param_tool_call_requires_exactly_one_call",
         test_select_param_tool_call_requires_exactly_one_call,
     )
-    r.record(
-        "select_param_tool_call_rejects_wrong_single_tool", test_select_param_tool_call_rejects_wrong_single_tool
-    )
+    r.record("select_param_tool_call_rejects_wrong_single_tool", test_select_param_tool_call_rejects_wrong_single_tool)
+    r.record("select_param_tool_call_rejects_wrong_alias_types", test_select_param_tool_call_rejects_wrong_alias_types)
     await r.record_async("execute_dag_reasoning_task_succeeds", test_execute_dag_reasoning_task_succeeds)
     await r.record_async("execute_dag_reasoning_forwards_gpt_token", test_execute_dag_reasoning_forwards_gpt_token)
     await r.record_async("execute_dag_tool_task_succeeds", test_execute_dag_tool_task_succeeds)
@@ -818,10 +1047,26 @@ async def run_all_tests():
         test_execute_dag_general_purpose_spawn_emits_subagent_placeholder,
     )
     await r.record_async(
+        "execute_dag_retries_wrong_spawn_alias_type_before_execution",
+        test_execute_dag_retries_wrong_spawn_alias_type_before_execution,
+    )
+    await r.record_async(
+        "execute_dag_parallel_spawn_alias_retry_has_exactly_two_side_effects",
+        test_execute_dag_parallel_spawn_alias_retry_has_exactly_two_side_effects,
+    )
+    await r.record_async(
+        "execute_dag_exhausted_alias_retry_never_replays_committed_sibling",
+        test_execute_dag_exhausted_alias_retry_never_replays_committed_sibling,
+    )
+    await r.record_async(
+        "execute_dag_validates_overridden_spawn_payload_before_execution",
+        test_execute_dag_validates_overridden_spawn_payload_before_execution,
+    )
+    await r.record_async(
         "execute_dag_rejects_multiple_param_tool_calls",
         test_execute_dag_rejects_multiple_param_tool_calls,
     )
-    await r.record_async("execute_dag_tool_failure_returns_needs_llm", test_execute_dag_tool_failure_returns_needs_llm)
+    await r.record_async("execute_dag_tool_failure_returns_error", test_execute_dag_tool_failure_returns_error)
     await r.record_async(
         "execute_dag_exception_in_tool_yields_error_event", test_execute_dag_exception_in_tool_yields_error_event
     )

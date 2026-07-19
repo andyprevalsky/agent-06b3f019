@@ -4,12 +4,12 @@ DAG Executor - Rigid execution of plans from set_plan.
 Executes the task DAG with maximum parallelism:
 - Tasks fire immediately when their dependencies complete
 - Uses asyncio.wait(FIRST_COMPLETED) for efficient scheduling
-- On error, breaks out to allow LLM recovery via run_agent
+- On error, stops the DAG without unrestricted LLM replay of completed tasks
 
 USAGE:
 - Called from agent_workflow.py at EXECUTE phase start if a plan exists
 - On success: returns completed status
-- On failure: error already in context, returns needs_llm for recovery
+- On failure: error already in context, returns error for terminal handling
 """
 
 import asyncio
@@ -67,6 +67,10 @@ ALIAS_TYPE_OVERRIDES = {
 }
 
 
+class ParamPopulationContractError(ValueError):
+    """The param-populator returned a call that cannot execute the planned DAG node."""
+
+
 def _apply_alias_override(params: Dict[str, Any], tool_name: str) -> Dict[str, Any]:
     """Merge an alias's type/start_phase override into a populated param dict.
 
@@ -90,12 +94,20 @@ def _apply_alias_override(params: Dict[str, Any], tool_name: str) -> Dict[str, A
 def _select_param_tool_call(tool_calls: List[Dict[str, Any]], actual_tool: str, task: "DAGTask") -> Dict[str, Any]:
     """Require the one planned tool call promised by the param-populator prompt."""
     if len(tool_calls) != 1:
-        raise ValueError(f"LLM must return exactly one tool call for task {task.index}; got {len(tool_calls)}")
+        raise ParamPopulationContractError(
+            f"LLM must return exactly one tool call for task {task.index}; got {len(tool_calls)}"
+        )
 
     tool_call = tool_calls[0]
     returned_tool = tool_call.get("tool")
     if returned_tool != actual_tool:
-        raise ValueError(f"LLM expected {actual_tool}, got {returned_tool} for task {task.index}")
+        raise ParamPopulationContractError(f"LLM expected {actual_tool}, got {returned_tool} for task {task.index}")
+
+    expected_type = ALIAS_TYPE_OVERRIDES.get(task.tool_name, {}).get("type")
+    if actual_tool == "spawn_agent" and expected_type and tool_call.get("type") != expected_type:
+        raise ParamPopulationContractError(
+            f"LLM expected {actual_tool} type {expected_type}, got {tool_call.get('type')} for task {task.index}"
+        )
     return tool_call
 
 
@@ -476,7 +488,7 @@ async def execute_dag(
 
     Returns:
         Dict with:
-        - status: "completed" | "needs_llm"
+        - status: "completed" | "error"
         - context: Updated context
     """
     # Import here to avoid circular imports
@@ -550,10 +562,11 @@ async def execute_dag(
 
         if not pending_tasks:
             # No tasks running and none ready - stuck (shouldn't happen with valid DAG)
-            workflow.logger.warning("[DAG] No pending tasks and DAG not complete - returning for LLM recovery")
+            workflow.logger.warning("[DAG] No pending tasks and DAG not complete - returning an execution error")
             return {
-                "status": "needs_llm",
+                "status": "error",
                 "context": context,
+                "message": "DAG execution stalled before all planned tasks completed.",
             }
 
         # Wait for ANY task to complete
@@ -573,18 +586,26 @@ async def execute_dag(
 
             if not success:
                 # Error already posted to context by execute_tool/handle_tool_event
-                workflow.logger.info(
-                    f"[DAG] Task {task_index} failed - canceling remaining and returning for LLM recovery"
-                )
+                workflow.logger.info(f"[DAG] Task {task_index} failed - canceling remaining DAG work")
                 dag.mark_failed(task_index)
 
-                # Cancel remaining pending tasks
-                for pending in pending_tasks.values():
+                # Cancel and drain remaining task wrappers. Awaiting their
+                # cancellation keeps workflow-local cleanup deterministic even
+                # when an underlying activity was already in flight.
+                remaining = list(pending_tasks.values())
+                for pending in remaining:
                     pending.cancel()
+                if remaining:
+                    await asyncio.gather(*remaining, return_exceptions=True)
 
                 return {
-                    "status": "needs_llm",
+                    # Never fall through to unrestricted run_agent recovery here.
+                    # A sibling or an earlier dependency may already have committed
+                    # an external side effect; replaying the whole plan can duplicate
+                    # it (for example, spawning the same child agent twice).
+                    "status": "error",
                     "context": context,
+                    "message": f"Planned task {task_index + 1} failed during DAG execution.",
                 }
 
             dag.mark_completed(task_index)
@@ -774,10 +795,11 @@ async def _execute_single_task(
             # Same system prompt + tools + conversation = cache prefix hit.
             extra_msg = _build_param_population_message(task.index + 1, task.goal, actual_tool)
 
-            # Store context snapshot in shared memory for same-machine activity pickup.
-            # Parallel DAG tasks share the key — same data, and worst case the
-            # second task falls back to backend API after the first cleans up.
-            _pending_llm_context[agent_id] = (list(context), system_prompt_text, None)
+            # Store a reusable context snapshot for same-machine activity pickup.
+            # call_llm_activity removes the entry after a successful call, so a
+            # locally rejected contract attempt must restore it before retrying.
+            pending_context = (list(context), system_prompt_text, None)
+            _pending_llm_context[agent_id] = pending_context
 
             # Keep the exact execute-phase tool schema so every param-populator
             # shares the same system+tools+conversation cache prefix. The
@@ -818,68 +840,80 @@ async def _execute_single_task(
                 False,
                 True,
             ]
-            async def populate_params() -> Dict[str, Any]:
+
+            async def track_param_usage(param_usage: Dict[str, Any]) -> None:
+                if not on_tokens or not param_usage:
+                    return
+                p_in = param_usage.get("prompt_tokens", 0)
+                p_out = param_usage.get("completion_tokens", 0)
+                if p_in <= 0 and p_out <= 0:
+                    return
+                try:
+                    await on_tokens(
+                        p_in,
+                        p_out,
+                        param_usage.get("actual_model"),
+                        cache_read_input_tokens=param_usage.get("cache_read_input_tokens", 0),
+                        cache_creation_input_tokens=param_usage.get("cache_creation_input_tokens", 0),
+                        call_site="dag_param_populator",
+                        claude_token_rotated=param_usage.get("claude_token_rotated", False),
+                        claude_token_error=param_usage.get("claude_token_error"),
+                        gpt_token_error=param_usage.get("gpt_token_error"),
+                        gpt_token_rotated=param_usage.get("gpt_token_rotated", False),
+                        compute_token_used=param_usage.get("compute_token_used"),
+                        from_fast_cache=param_usage.get("from_fast_cache", False),
+                    )
+                except Exception as e:
+                    workflow.logger.warning(f"on_tokens failed for dag_param_populator: {e}")
+
+            async def populate_params() -> tuple[Dict[str, Any], Dict[str, Any]]:
                 for structured_attempt in range(1, STRUCTURED_OUTPUT_MAX_ATTEMPTS + 1):
                     try:
-                        return await execute_activity(
+                        # A successful activity consumes the shared pending context
+                        # before local alias validation runs. Restore the identical
+                        # snapshot so a bounded semantic retry keeps the same prefix.
+                        _pending_llm_context[agent_id] = pending_context
+                        result = await execute_activity(
                             call_llm_activity,
                             args=llm_args,
                             start_to_close_timeout=timedelta(seconds=600),
                             retry_policy=RetryPolicy(maximum_attempts=2),
                             heartbeat_timeout=timedelta(seconds=180),
                         )
+                        usage = result.get("usage", {})
+                        # Account a completed LLM call before local validation can
+                        # reject it. This also covers the final exhausted attempt.
+                        await track_param_usage(usage)
+                        selected_call = _select_param_tool_call(result.get("tool_calls", []), actual_tool, task)
+                        return result, selected_call
                     except Exception as exc:
-                        should_retry = error_chain_has_type(exc, STRUCTURED_OUTPUT_ERROR_TYPE)
+                        should_retry = isinstance(exc, ParamPopulationContractError) or error_chain_has_type(
+                            exc, STRUCTURED_OUTPUT_ERROR_TYPE
+                        )
                         if not should_retry or structured_attempt >= STRUCTURED_OUTPUT_MAX_ATTEMPTS:
                             raise
                         workflow.logger.warning(
-                            f"[DAG] Param population structured output failed "
+                            f"[DAG] Param population contract failed "
                             f"(attempt {structured_attempt}/{STRUCTURED_OUTPUT_MAX_ATTEMPTS}); retrying"
                         )
                 raise RuntimeError("Param population exhausted attempts")
 
-            llm_result: Optional[Dict[str, Any]] = None
+            populated_result: Optional[tuple[Dict[str, Any], Dict[str, Any]]] = None
             if param_cache_seed_event is not None and param_cache_seed_lock is not None:
                 async with param_cache_seed_lock:
                     if not param_cache_seed_event.is_set():
                         try:
-                            llm_result = await populate_params()
+                            populated_result = await populate_params()
                         finally:
                             param_cache_seed_event.set()
 
-            if llm_result is None:
+            if populated_result is None:
                 if param_cache_seed_event is not None:
                     await param_cache_seed_event.wait()
-                llm_result = await populate_params()
+                populated_result = await populate_params()
 
-            # Extract params from the matching tool call
-            tool_calls = llm_result.get("tool_calls", [])
-            tool_call = _select_param_tool_call(tool_calls, actual_tool, task)
+            _, tool_call = populated_result
             params = {k: v for k, v in tool_call.items() if k != "tool"}
-
-            # Track param population LLM cost
-            param_usage = llm_result.get("usage", {})
-            if on_tokens and param_usage:
-                p_in = param_usage.get("prompt_tokens", 0)
-                p_out = param_usage.get("completion_tokens", 0)
-                if p_in > 0 or p_out > 0:
-                    try:
-                        await on_tokens(
-                            p_in,
-                            p_out,
-                            param_usage.get("actual_model"),
-                            cache_read_input_tokens=param_usage.get("cache_read_input_tokens", 0),
-                            cache_creation_input_tokens=param_usage.get("cache_creation_input_tokens", 0),
-                            call_site="dag_param_populator",
-                            claude_token_rotated=param_usage.get("claude_token_rotated", False),
-                            claude_token_error=param_usage.get("claude_token_error"),
-                            gpt_token_error=param_usage.get("gpt_token_error"),
-                            gpt_token_rotated=param_usage.get("gpt_token_rotated", False),
-                            compute_token_used=param_usage.get("compute_token_used"),
-                            from_fast_cache=param_usage.get("from_fast_cache", False),
-                        )
-                    except Exception as e:
-                        workflow.logger.warning(f"on_tokens failed for dag_param_populator: {e}")
 
             # Force correct type for spawn_agent aliases (LLM can't be trusted to pick the right type)
             type_override = ALIAS_TYPE_OVERRIDES.get(task.tool_name)
@@ -901,6 +935,14 @@ async def _execute_single_task(
 
                 if type_override.get("type") in {"general_purpose", "for_each"}:
                     params["_spawn_group_id"] = spawn_group_id(tool_call_id)
+
+            # Validate the final, overridden spawn payload before any external
+            # child workflow can be started. Alias coercion must never bypass the
+            # canonical SpawnAgentTool cross-field constraints.
+            if actual_tool == "spawn_agent":
+                from utils.tool_schemas import SpawnAgentTool
+
+                SpawnAgentTool.model_validate({"tool": actual_tool, **params})
 
             # Execute tool (uses existing flow - posts result to context)
             result = await execute_tool(actual_tool, params, tool_call_id)
