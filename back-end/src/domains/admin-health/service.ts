@@ -5,6 +5,7 @@ import {
   AMPLITUDE_API_KEY,
   AMPLITUDE_SECRET_KEY,
 } from './config';
+import { buildConnectorAdoption } from './connectorAdoption';
 import {
   buildFunnelSteps,
   buildRetentionCohorts,
@@ -80,6 +81,7 @@ async function fetchInputs(periods: AdminHealthPeriod[], retrievalTime: Date) {
     velocity,
     currentAmplitude,
     previousAmplitude,
+    connectedConnectors,
   ] = await Promise.all([
     repo.findRootTasksBetween(startOfWeek(historyStart), historyEnd),
     repo.findFirstRootTasksByUserBetween(startOfWeek(historyStart), historyEnd),
@@ -90,6 +92,7 @@ async function fetchInputs(periods: AdminHealthPeriod[], retrievalTime: Date) {
     fetchVelocityByPeriod(periods),
     fetchAmplitudeFunnel(new Date(current.start), new Date(current.end)),
     fetchAmplitudeFunnel(new Date(previous.start), new Date(previous.end)),
+    repo.findConnectedConnectors(),
   ]);
   return {
     tasks,
@@ -101,6 +104,7 @@ async function fetchInputs(periods: AdminHealthPeriod[], retrievalTime: Date) {
     velocity,
     currentAmplitude,
     previousAmplitude,
+    connectedConnectors,
   };
 }
 
@@ -155,6 +159,7 @@ async function loadAdminHealth(
     series,
     retentionCohorts: buildRetentionCohorts(retentionFirstTasks, retentionTasks, retentionThrough),
     funnel: compareFunnelSteps(currentFunnel, previousFunnel),
+    connectorAdoption: buildConnectorAdoption(verifiedUserIds, input.connectedConnectors),
     velocity: input.velocity.current,
   };
 }

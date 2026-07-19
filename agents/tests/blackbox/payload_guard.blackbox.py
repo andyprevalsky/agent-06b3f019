@@ -81,7 +81,12 @@ async def test_dag_reasoning_oversize_context_fails_fast():
     async def execute_activity(fn, args=None, **_kwargs):
         raise AssertionError("execute_activity must NOT be called when payload is oversize")
 
-    with patch("loop.dag_executor.workflow.logger", MagicMock()):
+    with (
+        patch("loop.dag_executor.workflow.logger", MagicMock()),
+        # Outside a real workflow event loop the patch gates cannot be read;
+        # behave as a new execution (all markers applied).
+        patch("loop.dag_executor.workflow.patched", side_effect=lambda _pid: True),
+    ):
         result = await execute_dag(
             dag=dag,
             agent_id="a",

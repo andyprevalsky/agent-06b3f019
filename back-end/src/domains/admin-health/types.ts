@@ -70,6 +70,19 @@ export interface AdminHealthFunnelStep {
   detail?: string;
 }
 
+export type AdminHealthConnectorSubtypeId =
+  'browsers' | 'passwords' | 'compute' | 'messages' | 'socials' | 'financials';
+
+export interface AdminHealthConnectorAdoption {
+  eligibleUserCount: number;
+  subtypes: Array<{
+    id: AdminHealthConnectorSubtypeId;
+    label: string;
+    connectedUsers: number;
+    connectionRate: number;
+  }>;
+}
+
 export interface AdminWaitlistPerson {
   id: string;
   name: string;
@@ -133,5 +146,6 @@ export interface AdminHealthResponse {
       conversionRateChange: number | null;
     };
   };
+  connectorAdoption: AdminHealthConnectorAdoption;
   velocity: AdminHealthVelocity;
 }

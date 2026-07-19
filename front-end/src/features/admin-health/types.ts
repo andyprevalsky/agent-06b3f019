@@ -51,6 +51,16 @@ export interface AdminHealthFunnelStep {
   detail?: string;
 }
 
+export interface AdminHealthConnectorAdoption {
+  eligibleUserCount: number;
+  subtypes: Array<{
+    id: 'browsers' | 'passwords' | 'compute' | 'messages' | 'socials' | 'financials';
+    label: string;
+    connectedUsers: number;
+    connectionRate: number;
+  }>;
+}
+
 export interface AdminWaitlistPerson {
   id: string;
   name: string;
@@ -107,6 +117,7 @@ export interface AdminHealthData {
       conversionRateChange: number | null;
     };
   };
+  connectorAdoption: AdminHealthConnectorAdoption;
   velocity: {
     dev: {
       linearPointsCompleted: AdminHealthVelocityMetric;
