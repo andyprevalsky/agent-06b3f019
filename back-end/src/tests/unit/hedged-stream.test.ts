@@ -149,19 +149,41 @@ async function main(): Promise<void> {
     assert.equal(h.hedge.aborted(), true, 'losing hedge must be aborted');
   }
 
-  // 4. Primary fails pre-latch: hedge is armed immediately (no delay) and wins.
+  // 4. Primary fails pre-latch BEFORE the hedge starts: the failure surfaces
+  //    immediately (fast provider errors belong to the caller's classified
+  //    fallover chain — e.g. quota -> same-model GLM), hedge never starts.
   {
     const h = harness();
     const result = h.collect();
     await tick();
-    h.primary.fail(new Error('cerebras stall'));
+    const fastError = new Error('cerebras 402 quota');
+    h.primary.fail(fastError);
+    const { items, error } = await result;
+    assert.deepEqual(items, []);
+    assert.equal(error, fastError, 'pre-hedge primary failure must surface unchanged');
+    assert.equal(h.hedge.started(), false, 'a pre-hedge failure must not arm the hedge');
+    // A hedge timer firing AFTER the race settled must not launch an orphaned
+    // provider request.
+    h.fireHedge();
     await tick();
-    assert.equal(h.hedge.started(), true, 'primary failure must arm the hedge immediately');
+    assert.equal(h.hedge.started(), false, 'late hedge timer must not start after settle');
+  }
+
+  // 4b. Primary fails AFTER the hedge started: the race plays out, hedge wins.
+  {
+    const h = harness();
+    const result = h.collect();
+    await tick();
+    h.fireHedge();
+    await tick();
+    h.primary.fail(new Error('cerebras died mid-race'));
+    await tick();
     h.hedge.push({ kind: 'content', text: 'rescued' });
     h.hedge.end();
     const { items, error } = await result;
     assert.equal(error, null);
     assert.deepEqual(items, [{ kind: 'content', text: 'rescued' }]);
+    assert.deepEqual(h.winners, ['waterfall']);
   }
 
   // 5. Every branch fails pre-latch: the primary's failure surfaces to the caller.

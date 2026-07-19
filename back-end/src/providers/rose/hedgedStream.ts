@@ -35,7 +35,10 @@ interface BranchState<T> {
 
 /**
  * Race primary against a delayed hedge; yield only the winning branch's chunks.
- * Throws the primary branch's failure when every started branch fails pre-latch.
+ * A primary failure BEFORE the hedge starts is rethrown immediately (fast
+ * provider errors belong to the caller's classified fallover chain); once the
+ * hedge is racing, the race plays out and an all-fail outcome prefers the
+ * primary's failure.
  */
 export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T> {
   const states: BranchState<T>[] = [];
@@ -84,8 +87,11 @@ export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T>
   };
 
   const primary = startBranch(params.primary);
+  // Once the race settles (winner drained, or a pre-latch failure was thrown),
+  // a late hedge timer must not launch an orphaned provider request.
+  let settled = false;
   const armHedge = (): void => {
-    if (states.length === 1 && winner === null) startBranch(params.hedge);
+    if (!settled && states.length === 1 && winner === null) startBranch(params.hedge);
   };
   void params
     .hedgeAfter()
@@ -113,8 +119,13 @@ export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T>
         continue;
       }
 
+      // A primary that fails BEFORE the hedge exists exits the race
+      // immediately: fast provider errors (402 quota, 429, 5xx) must reach the
+      // caller's error-classified fallover chain (e.g. same-model GLM-4.7 via
+      // OpenRouter for quota) rather than silently racing the generic hedge.
+      // Only silence arms the hedge; once racing, the race is played out.
       const primaryOut = primary.state.done && primary.state.failure !== null;
-      if (primaryOut) armHedge();
+      if (primaryOut && states.length === 1) throw primary.state.failure;
       if (states.length > 1 && states.every((state) => state.done)) {
         // No branch produced content. Prefer the primary failure for the
         // caller's existing error-classified fallover chain; fall back to the
@@ -128,6 +139,7 @@ export async function* hedgeStreams<T>(params: HedgeParams<T>): AsyncIterable<T>
       await changed();
     }
   } finally {
+    settled = true;
     for (const state of states) {
       if (!state.done) state.controller.abort(new Error('chat hedge race settled'));
     }
