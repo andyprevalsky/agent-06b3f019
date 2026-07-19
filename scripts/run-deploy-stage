@@ -30,9 +30,8 @@ if [ "${1:-}" = "--start" ]; then
         exit 2
     }
     RUN_DIR="$RUN_ROOT/$RUN_ID"
-    mkdir -p "$RUN_ROOT" "$RUN_DIR/logs"
-    if ! python3 "$TIMING_SCRIPT" init \
-        --run-dir "$RUN_DIR" \
+    if ! python3 "$TIMING_SCRIPT" lifecycle-start \
+        --run-root "$RUN_ROOT" \
         --run-id "$RUN_ID" \
         --started-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --started-epoch "$(python3 -c 'import time; print(time.time())')" \
@@ -41,9 +40,6 @@ if [ "${1:-}" = "--start" ]; then
         echo "failed to initialize deploy timing run" >&2
         exit 1
     fi
-    CURRENT_TMP="$CURRENT_RUN_FILE.$$"
-    printf '%s\n' "$RUN_ID" > "$CURRENT_TMP"
-    mv "$CURRENT_TMP" "$CURRENT_RUN_FILE"
     echo "Deploy timing run: $RUN_ID"
     echo "Artifacts: $RUN_DIR"
     exit 0
@@ -74,14 +70,10 @@ fi
 
 if [ "${1:-}" = "--finish" ]; then
     [ "$#" -eq 1 ] || { usage; exit 2; }
-    python3 "$TIMING_SCRIPT" finalize \
-        --run-dir "$RUN_DIR" \
-        --finished-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        --finished-epoch "$(python3 -c 'import time; print(time.time())')"
+    python3 "$TIMING_SCRIPT" lifecycle-finish \
+        --run-root "$RUN_ROOT" \
+        --run-id "$RUN_ID"
     FINALIZE_EXIT=$?
-    if [ "$FINALIZE_EXIT" -eq 0 ]; then
-        rm -f "$CURRENT_RUN_FILE"
-    fi
     python3 "$TIMING_SCRIPT" summary --run-dir "$RUN_DIR"
     SUMMARY_EXIT=$?
     if [ "$FINALIZE_EXIT" -ne 0 ]; then
@@ -96,6 +88,16 @@ shift
 [ "${1:-}" = "--" ] || { usage; exit 2; }
 shift
 [ "$#" -gt 0 ] || { usage; exit 2; }
+
+ADMISSION_TOKEN="$STAGE-$$-$RANDOM"
+if ! RUN_ID="$(python3 "$TIMING_SCRIPT" lifecycle-admit \
+    --run-root "$RUN_ROOT" \
+    --token "$ADMISSION_TOKEN" \
+    --pid "$$")"; then
+    echo "could not admit deploy stage: $STAGE" >&2
+    exit 2
+fi
+RUN_DIR="$RUN_ROOT/$RUN_ID"
 
 mkdir -p "$RUN_DIR/logs"
 LOG_NAME="$STAGE-$(date -u +%Y%m%d-%H%M%S)-$$.log"
@@ -112,11 +114,15 @@ forward_signal() {
     signal_name="$1"
     signal_exit="$2"
     SIGNAL_EXIT="$signal_exit"
-    PENDING_SIGNAL="$signal_name"
     trap - HUP INT TERM
-    if [ -n "$SUPERVISOR_PID" ] && kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
-        kill -s "$signal_name" "$SUPERVISOR_PID" 2>/dev/null || true
-        wait "$SUPERVISOR_PID" 2>/dev/null || true
+    if [ -n "$SUPERVISOR_PID" ]; then
+        PENDING_SIGNAL=""
+        if kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
+            kill -s "$signal_name" "$SUPERVISOR_PID" 2>/dev/null || true
+            wait "$SUPERVISOR_PID" 2>/dev/null || true
+        fi
+    else
+        PENDING_SIGNAL="$signal_name"
     fi
 }
 trap 'forward_signal HUP 129' HUP
@@ -126,7 +132,9 @@ trap 'forward_signal TERM 143' TERM
 python3 "$LOGGED_COMMAND" "$LOG_PATH" -- "$@" &
 SUPERVISOR_PID=$!
 if [ -n "$PENDING_SIGNAL" ]; then
-    kill -s "$PENDING_SIGNAL" "$SUPERVISOR_PID" 2>/dev/null || true
+    pending_signal="$PENDING_SIGNAL"
+    PENDING_SIGNAL=""
+    kill -s "$pending_signal" "$SUPERVISOR_PID" 2>/dev/null || true
 fi
 wait "$SUPERVISOR_PID"
 STAGE_EXIT=$?
@@ -147,5 +155,9 @@ python3 "$TIMING_SCRIPT" append \
     --finished-epoch "$FINISHED_EPOCH" \
     --exit-code "$STAGE_EXIT" \
     --log "$LOG_RELATIVE" || echo "warning: could not append deploy stage record" >&2
+python3 "$TIMING_SCRIPT" lifecycle-release \
+    --run-root "$RUN_ROOT" \
+    --run-id "$RUN_ID" \
+    --token "$ADMISSION_TOKEN" || echo "warning: could not release deploy stage admission" >&2
 echo "== deploy stage: $STAGE exit=$STAGE_EXIT log=$LOG_PATH =="
 exit "$STAGE_EXIT"

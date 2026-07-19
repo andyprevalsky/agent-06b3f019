@@ -143,11 +143,15 @@ forward_signal() {
     signal_name="$1"
     signal_exit="$2"
     SIGNAL_EXIT="$signal_exit"
-    PENDING_SIGNAL="$signal_name"
     trap - HUP INT TERM
-    if [ -n "$SUPERVISOR_PID" ] && kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
-        kill -s "$signal_name" "$SUPERVISOR_PID" 2>/dev/null || true
-        wait "$SUPERVISOR_PID" 2>/dev/null || true
+    if [ -n "$SUPERVISOR_PID" ]; then
+        PENDING_SIGNAL=""
+        if kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
+            kill -s "$signal_name" "$SUPERVISOR_PID" 2>/dev/null || true
+            wait "$SUPERVISOR_PID" 2>/dev/null || true
+        fi
+    else
+        PENDING_SIGNAL="$signal_name"
     fi
 }
 trap 'forward_signal HUP 129' HUP
@@ -159,7 +163,9 @@ BENCHMARK_SKIP_WMH_BUILD=1 python3 "$LOGGED_COMMAND" "$RUNNER_LOG" -- \
     --max-concurrency "$LOCAL_CONCURRENCY" &
 SUPERVISOR_PID=$!
 if [ -n "$PENDING_SIGNAL" ]; then
-    kill -s "$PENDING_SIGNAL" "$SUPERVISOR_PID" 2>/dev/null || true
+    pending_signal="$PENDING_SIGNAL"
+    PENDING_SIGNAL=""
+    kill -s "$pending_signal" "$SUPERVISOR_PID" 2>/dev/null || true
 fi
 wait "$SUPERVISOR_PID"
 RUN_EXIT=$?

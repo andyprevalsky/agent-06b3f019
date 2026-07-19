@@ -3,13 +3,73 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import math
 import os
+import re
 import statistics
+import sys
+import time
 from collections import defaultdict
+from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Sequence
+
+
+ACTIVE_STATUSES = {"active", "finishing"}
+
+
+class LifecycleError(RuntimeError):
+    """Raised when a deploy timing lifecycle transition is invalid."""
+
+
+def _validate_identifier(value: str, label: str) -> None:
+    allowed = value not in {"", ".", ".."} and re.fullmatch(r"[A-Za-z0-9._-]+", value)
+    if not allowed:
+        raise LifecycleError(f"invalid {label}: {value}")
+
+
+def _write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, indent=2) + "\n")
+    temporary.replace(path)
+
+
+@contextmanager
+def _lifecycle_lock(run_root: Path) -> Iterator[None]:
+    run_root.mkdir(parents=True, exist_ok=True)
+    lock_path = run_root / ".lifecycle.lock"
+    with lock_path.open("a+") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def _read_metadata(run_dir: Path) -> dict:
+    metadata_path = run_dir / "metadata.json"
+    try:
+        metadata = json.loads(metadata_path.read_text())
+    except (json.JSONDecodeError, OSError) as error:
+        message = f"could not read deploy metadata for {run_dir.name}: {error}"
+        raise LifecycleError(message) from error
+    if not isinstance(metadata, dict):
+        raise LifecycleError(f"invalid deploy metadata for {run_dir.name}")
+    return metadata
+
+
+def _read_current_run_id(run_root: Path) -> str:
+    current_path = run_root / "current"
+    try:
+        run_id = current_path.read_text().splitlines()[0]
+    except (IndexError, OSError) as error:
+        raise LifecycleError("no active deploy timing run") from error
+    _validate_identifier(run_id, "active deploy run id")
+    return run_id
 
 
 def _append_json_line(path: Path, row: dict) -> None:
@@ -41,7 +101,7 @@ def init_run(
         "git_sha": git_sha,
         "branch": branch,
     }
-    (run_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    _write_json_atomic(run_dir / "metadata.json", metadata)
 
 
 def finalize_run(
@@ -59,9 +119,153 @@ def finalize_run(
             "finished_epoch": finished_epoch,
         }
     )
-    temporary = metadata_path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(metadata, indent=2) + "\n")
-    temporary.replace(metadata_path)
+    _write_json_atomic(metadata_path, metadata)
+
+
+def start_lifecycle(
+    run_root: Path,
+    *,
+    run_id: str,
+    started_at: str,
+    started_epoch: float,
+    git_sha: str,
+    branch: str,
+) -> None:
+    """Initialize a run and publish it only after the metadata is durable."""
+
+    _validate_identifier(run_id, "deploy run id")
+    with _lifecycle_lock(run_root):
+        current_path = run_root / "current"
+        if current_path.exists():
+            current_id = _read_current_run_id(run_root)
+            current_metadata = _read_metadata(run_root / current_id)
+            if current_metadata.get("status") in ACTIVE_STATUSES:
+                raise LifecycleError(f"deploy timing run already active: {current_id}")
+            current_path.unlink()
+
+        run_dir = run_root / run_id
+        metadata_path = run_dir / "metadata.json"
+        if metadata_path.exists():
+            raise LifecycleError(f"deploy timing run already exists: {run_id}")
+        (run_dir / "logs").mkdir(parents=True, exist_ok=True)
+        init_run(
+            run_dir,
+            run_id=run_id,
+            started_at=started_at,
+            started_epoch=started_epoch,
+            git_sha=git_sha,
+            branch=branch,
+        )
+        pointer = current_path.with_name(f".{current_path.name}.{os.getpid()}.tmp")
+        pointer.write_text(f"{run_id}\n")
+        pointer.replace(current_path)
+
+
+def admit_stage(run_root: Path, *, token: str, pid: int) -> str:
+    """Admit one stage while the current run is active and return its run ID."""
+
+    _validate_identifier(token, "stage admission token")
+    if pid <= 0:
+        raise LifecycleError(f"invalid stage admission pid: {pid}")
+    with _lifecycle_lock(run_root):
+        run_id = _read_current_run_id(run_root)
+        run_dir = run_root / run_id
+        metadata = _read_metadata(run_dir)
+        if metadata.get("status") != "active":
+            raise LifecycleError(f"deploy timing run is not accepting stages: {run_id}")
+        admission_path = run_dir / "admissions" / f"{token}.json"
+        if admission_path.exists():
+            raise LifecycleError(f"stage admission already exists: {token}")
+        _write_json_atomic(
+            admission_path,
+            {"schema_version": 1, "run_id": run_id, "token": token, "pid": pid},
+        )
+        return run_id
+
+
+def release_stage(run_root: Path, *, run_id: str, token: str) -> None:
+    """Release a stage admission after its timing record has been appended."""
+
+    _validate_identifier(run_id, "deploy run id")
+    _validate_identifier(token, "stage admission token")
+    with _lifecycle_lock(run_root):
+        admission_path = run_root / run_id / "admissions" / f"{token}.json"
+        try:
+            admission_path.unlink()
+        except FileNotFoundError:
+            return
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _active_admissions(run_dir: Path) -> list[str]:
+    active: list[str] = []
+    admissions_dir = run_dir / "admissions"
+    for admission_path in admissions_dir.glob("*.json"):
+        try:
+            admission = json.loads(admission_path.read_text())
+            pid = int(admission["pid"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
+            admission_path.unlink(missing_ok=True)
+            continue
+        if _pid_is_alive(pid):
+            active.append(admission_path.name)
+        else:
+            admission_path.unlink(missing_ok=True)
+    return active
+
+
+def finish_lifecycle(
+    run_root: Path,
+    *,
+    run_id: str,
+) -> None:
+    """Stop stage admission, wait for admitted stages, and finalize atomically."""
+
+    _validate_identifier(run_id, "deploy run id")
+    run_dir = run_root / run_id
+    with _lifecycle_lock(run_root):
+        current_id = _read_current_run_id(run_root)
+        if current_id != run_id:
+            raise LifecycleError(f"active deploy run changed from {run_id} to {current_id}")
+        metadata = _read_metadata(run_dir)
+        status = metadata.get("status")
+        if status == "active":
+            metadata["status"] = "finishing"
+            _write_json_atomic(run_dir / "metadata.json", metadata)
+        elif status != "finishing":
+            raise LifecycleError(f"deploy timing run is not active: {run_id}")
+
+    while True:
+        with _lifecycle_lock(run_root):
+            active = _active_admissions(run_dir)
+        if not active:
+            break
+        time.sleep(0.1)
+
+    with _lifecycle_lock(run_root):
+        current_id = _read_current_run_id(run_root)
+        if current_id != run_id:
+            raise LifecycleError(f"active deploy run changed from {run_id} to {current_id}")
+        metadata = _read_metadata(run_dir)
+        if metadata.get("status") != "finishing":
+            raise LifecycleError(f"deploy timing run is not finishing: {run_id}")
+        finalize_run(
+            run_dir,
+            finished_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            finished_epoch=time.time(),
+        )
+        current_path = run_root / "current"
+        if _read_current_run_id(run_root) == run_id:
+            current_path.unlink()
 
 
 def append_stage(
@@ -260,6 +464,24 @@ def render_history(run_root: Path) -> str:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
+    lifecycle_start = commands.add_parser("lifecycle-start")
+    lifecycle_start.add_argument("--run-root", type=Path, required=True)
+    lifecycle_start.add_argument("--run-id", required=True)
+    lifecycle_start.add_argument("--started-at", required=True)
+    lifecycle_start.add_argument("--started-epoch", type=float, required=True)
+    lifecycle_start.add_argument("--git-sha", required=True)
+    lifecycle_start.add_argument("--branch", required=True)
+    lifecycle_admit = commands.add_parser("lifecycle-admit")
+    lifecycle_admit.add_argument("--run-root", type=Path, required=True)
+    lifecycle_admit.add_argument("--token", required=True)
+    lifecycle_admit.add_argument("--pid", type=int, required=True)
+    lifecycle_release = commands.add_parser("lifecycle-release")
+    lifecycle_release.add_argument("--run-root", type=Path, required=True)
+    lifecycle_release.add_argument("--run-id", required=True)
+    lifecycle_release.add_argument("--token", required=True)
+    lifecycle_finish = commands.add_parser("lifecycle-finish")
+    lifecycle_finish.add_argument("--run-root", type=Path, required=True)
+    lifecycle_finish.add_argument("--run-id", required=True)
     init = commands.add_parser("init")
     init.add_argument("--run-dir", type=Path, required=True)
     init.add_argument("--run-id", required=True)
@@ -291,21 +513,34 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main() -> None:
+def main() -> int:
     args = _parser().parse_args()
     values = vars(args).copy()
     values.pop("command")
-    if args.command == "init":
-        init_run(**values)
-    elif args.command == "append":
-        append_stage(**values)
-    elif args.command == "finalize":
-        finalize_run(**values)
-    elif args.command == "summary":
-        print(render_summary(**values))
-    else:
-        print(render_history(**values))
+    try:
+        if args.command == "lifecycle-start":
+            start_lifecycle(**values)
+        elif args.command == "lifecycle-admit":
+            print(admit_stage(**values))
+        elif args.command == "lifecycle-release":
+            release_stage(**values)
+        elif args.command == "lifecycle-finish":
+            finish_lifecycle(**values)
+        elif args.command == "init":
+            init_run(**values)
+        elif args.command == "append":
+            append_stage(**values)
+        elif args.command == "finalize":
+            finalize_run(**values)
+        elif args.command == "summary":
+            print(render_summary(**values))
+        else:
+            print(render_history(**values))
+    except LifecycleError as error:
+        print(f"deploy timing lifecycle error: {error}", file=sys.stderr)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
