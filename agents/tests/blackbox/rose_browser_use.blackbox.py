@@ -820,6 +820,42 @@ def test_normalize_nested_action_shape():
     assert out["index"] == 7
 
 
+def test_read_network_requests_tool_advertised_and_normalized():
+    """RCA follow-up (Failure 2 / Cloudflare): the browser agent gains a
+    read_network_requests tool (1:1 with Claude Code) so it can detect a
+    403/challenge by status code or find the underlying API instead of fighting
+    an opaque DOM. Guards the multi-file wiring: catalog entry, tool-description
+    generation, and param passthrough for url_pattern/limit/clear.
+    """
+    assert "read_network_requests" in BROWSER_USE_TOOLS
+    desc = generate_tool_descriptions(["read_network_requests"])
+    assert "read_network_requests" in desc
+    # params render without raising (schema dicts, not bare strings)
+    assert "url_pattern" in desc and "limit" in desc and "clear" in desc
+
+    flat = normalize_browser_use_response(
+        {
+            "thinking": "inspect network",
+            "action": [
+                {
+                    "action_name": "read_network_requests",
+                    "url_pattern": "/api/",
+                    "limit": 50,
+                    "clear": True,
+                }
+            ],
+        }
+    )
+    assert flat["action"] == "read_network_requests"
+    assert flat["params"] == {"url_pattern": "/api/", "limit": 50, "clear": True}
+
+    nested = normalize_browser_use_response(
+        {"action": [{"read_network_requests": {"url_pattern": "checkout"}}]}
+    )
+    assert nested["action"] == "read_network_requests"
+    assert nested["params"] == {"url_pattern": "checkout"}
+
+
 def test_normalize_remaps_navigate_to_goto():
     out = normalize_browser_use_response(
         {
@@ -1624,6 +1660,10 @@ async def run_all_tests():
     r.record("params_input_clear_false", test_params_input_text_preserves_clear_false)
     r.record("params_query_to_instruction", test_params_query_to_instruction)
     r.record("params_select_dropdown_text_value", test_params_select_dropdown_text_to_value)
+    r.record(
+        "read_network_requests_advertised_and_normalized",
+        test_read_network_requests_tool_advertised_and_normalized,
+    )
 
     await r.record_async("complete_browser_use_waterfall_only", test_complete_browser_use_waterfall_only_path)
     await r.record_async("complete_browser_use_claude_path", test_complete_browser_use_claude_path_succeeds)

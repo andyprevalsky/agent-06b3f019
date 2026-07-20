@@ -63,6 +63,8 @@ from .config import (
     MAX_CLAUDE_TOKEN_ROTATIONS,
     MAX_CONSECUTIVE_API_FAILURES,
     MAX_ITERATIONS,
+    SESSION_INIT_TRANSIENT_MAX_ATTEMPTS,
+    SESSION_INIT_TRANSIENT_RETRY_SECONDS,
     SESSION_MAX_WAIT_SECONDS,
     SESSION_RETRY_INTERVAL_SECONDS,
     VERIFIER_ULTRA_MODEL,
@@ -2991,9 +2993,35 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             activity.heartbeat("Initializing browser session")
             _session_wait_start = time.monotonic()
             _waiting_msg_sent = False
+            _transient_init_attempts = 0
 
             while True:
                 session_data = await init_browser_session(config, user_id, agent_id, start_url)
+
+                # Transient provider infra failure (e.g. Kernel allocated an
+                # unhealthy proxy: "400 Proxy is marked unavailable"). A fresh init
+                # reallocates a different proxy, so retry a bounded number of times
+                # with a short delay before giving up loudly.
+                if session_data.get("transient_init_failure"):
+                    _transient_init_attempts += 1
+                    if _transient_init_attempts > SESSION_INIT_TRANSIENT_MAX_ATTEMPTS:
+                        raise Exception(
+                            "Browser session init failed after "
+                            f"{_transient_init_attempts} transient-proxy retries: "
+                            f"{session_data.get('detail')}"
+                        )
+                    logger.warning(
+                        "Transient browser session init failure; retrying with a fresh proxy",
+                        agent_id=agent_id,
+                        attempt=_transient_init_attempts,
+                        status_code=session_data.get("status_code"),
+                        detail=session_data.get("detail"),
+                    )
+                    activity.heartbeat(
+                        f"Retrying browser init after transient proxy failure ({_transient_init_attempts})"
+                    )
+                    await asyncio.sleep(SESSION_INIT_TRANSIENT_RETRY_SECONDS)
+                    continue
 
                 if not session_data.get("rate_limited"):
                     break
@@ -3757,6 +3785,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 pending_write_lock_action = None
 
                 activity.heartbeat(f"Step {iteration} - executing pending write lock action")
+                if (
+                    browser_network_recorder is None
+                    and network_recorder_task is not None
+                    and network_recorder_task.done()
+                ):
+                    with contextlib.suppress(Exception):
+                        browser_network_recorder = network_recorder_task.result()
+
                 result = await execute_action(
                     dom_service,
                     action_history,
@@ -3774,6 +3810,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     write_lock_enabled=write_lock_enabled,
                     write_lock_approvals=write_lock_approvals,
                     system_name=system_name,
+                    browser_network_recorder=browser_network_recorder,
                 )
 
                 action_name = unified_action.get("action", "unknown")
@@ -4622,6 +4659,16 @@ Based on this feedback, I need to continue working on the task and address the i
                     },
                 )
 
+            # Resolve the background-attached network recorder so read_network_requests
+            # can query captured traffic (the recorder attaches a few seconds into the run).
+            if (
+                browser_network_recorder is None
+                and network_recorder_task is not None
+                and network_recorder_task.done()
+            ):
+                with contextlib.suppress(Exception):
+                    browser_network_recorder = network_recorder_task.result()
+
             activity.heartbeat(f"Step {iteration} - executing {action_name}")
             try:
                 result = await asyncio.wait_for(
@@ -4642,6 +4689,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         write_lock_enabled=write_lock_enabled,
                         write_lock_approvals=write_lock_approvals,
                         system_name=system_name,
+                        browser_network_recorder=browser_network_recorder,
                     ),
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )

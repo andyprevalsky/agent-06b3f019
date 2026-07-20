@@ -306,6 +306,7 @@ async def execute_action(  # noqa: C901
     write_lock_enabled: bool = True,
     write_lock_approvals: Optional[Dict[str, Dict]] = None,
     system_name: str = "Rose",
+    browser_network_recorder: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -402,6 +403,33 @@ async def execute_action(  # noqa: C901
                 "status": "awaiting_payment_card_approval",
                 "payment_request": params,
                 "current_url": current_url,
+            }
+
+        elif action_name == "read_network_requests":
+            if browser_network_recorder is None:
+                return {
+                    "success": False,
+                    "error": (
+                        "Network request capture is not active for this session, so there is "
+                        "nothing to read. Rely on the DOM tree and screenshots instead."
+                    ),
+                }
+            requests = browser_network_recorder.query_requests(
+                url_pattern=str(params.get("url_pattern") or ""),
+                limit=int(params.get("limit") or 100),
+                clear=bool(params.get("clear")),
+            )
+            await action_history.record_action(
+                dom_service=dom_service,
+                action="read_network_requests",
+                thinking=thinking,
+                params={k: params[k] for k in ("url_pattern", "limit", "clear") if k in params},
+                result={"success": True, "count": len(requests)},
+            )
+            return {
+                "success": True,
+                "message": f"Captured {len(requests)} network request(s).",
+                "requests": requests,
             }
 
         elif action_name == "press_key":

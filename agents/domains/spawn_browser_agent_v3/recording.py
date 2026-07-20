@@ -107,6 +107,47 @@ def browser_recording_output_dir(agent_id: str, task_id: str) -> Path:
     return _recording_root() / agent_id / _safe_task_id(task_id)
 
 
+def _strip_url_query_fragment(value: str) -> str:
+    """Remove everything from the first ``?`` or ``#`` onward."""
+    return value.split("#", 1)[0].split("?", 1)[0]
+
+
+def _redact_url_fallback(value: str) -> str:
+    """Redact a URL without relying on a successfully parsed authority."""
+    stripped = _strip_url_query_fragment(value)
+    if "://" in stripped:
+        scheme, remainder = stripped.split("://", 1)
+        prefix = f"{scheme}://"
+    elif stripped.startswith("//"):
+        prefix = "//"
+        remainder = stripped[2:]
+    else:
+        return stripped
+    authority, separator, path = remainder.partition("/")
+    safe_authority = authority.rsplit("@", 1)[-1]
+    return f"{prefix}{safe_authority}{separator}{path}"
+
+
+def _redact_url_query(url: str) -> str:
+    """Drop query string + fragment from a URL, keeping scheme://host/path.
+
+    Captured request URLs are surfaced to the agent (and its turn history) via
+    read_network_requests; query strings can carry signed URLs, auth tokens, and
+    PII, so only the non-secret locator is exposed. This fails CLOSED: parse
+    failures and authority-less inputs still get their query/fragment stripped,
+    and embedded ``user:pass@`` credentials are dropped from the authority.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return _redact_url_fallback(url)
+    if not parsed.scheme or not parsed.netloc:
+        return _redact_url_fallback(url)
+    # netloc may carry `user:pass@host:port` — keep only host[:port].
+    host = parsed.netloc.rsplit("@", 1)[-1]
+    return f"{parsed.scheme}://{host}{parsed.path}"
+
+
 def _media_extension(url: str, default: str) -> str:
     suffix = Path(urlparse(url).path).suffix
     if suffix and len(suffix) <= 8:
@@ -1228,6 +1269,14 @@ class BrowserNetworkRecorder:
         self.output_dir = output_dir
         self.network_dir = self.output_dir / "network"
         self.entries: Dict[str, Dict[str, Any]] = {}
+        # Request IDs that were in flight when the agent last cleared the buffer
+        # (read_network_requests clear=True). Their late response events must NOT
+        # resurrect a pre-clear entry, or the next read would leak old traffic.
+        self._ignored_request_ids: set[str] = set()
+        # Track every request observed by CDP, including requests dropped when the
+        # capture buffer is full. A clear must ignore all pre-clear traffic, not
+        # only the subset that had room in ``entries``.
+        self._active_request_ids: set[str] = set()
         self._started_at = time.monotonic()
         self._closed = False
         self._tasks: set[asyncio.Task] = set()
@@ -1321,7 +1370,12 @@ class BrowserNetworkRecorder:
             request = event.get("request") or {}
             url = request.get("url") or ""
             resource_type = event.get("type") or ""
-            if not request_id or len(self.entries) >= self._max_entries:
+            if not request_id:
+                return
+            self._active_request_ids.add(request_id)
+            if request_id in self._ignored_request_ids:
+                return
+            if len(self.entries) >= self._max_entries:
                 return
             if not self._should_capture(url, resource_type):
                 return
@@ -1343,9 +1397,23 @@ class BrowserNetworkRecorder:
             url = response.get("url") or ""
             resource_type = event.get("type") or ""
             mime_type = response.get("mimeType") or ""
-            if not request_id or len(self.entries) >= self._max_entries:
+            if not request_id:
                 return
-            if not self._should_capture(url, resource_type, mime_type):
+            self._active_request_ids.add(request_id)
+            if request_id in self._ignored_request_ids:
+                return
+            # Capacity only blocks NEW requests; an already-tracked request must
+            # still receive its status/response update (otherwise a page that
+            # fills the buffer before responses land leaves every status None and
+            # defeats 403/challenge detection).
+            if request_id not in self.entries and len(self.entries) >= self._max_entries:
+                return
+            # Only gate NEW requests on the MIME predicate. An already-tracked
+            # request must still receive its status/response update even when the
+            # response MIME is non-capturable (e.g. application/octet-stream,
+            # protobuf); otherwise it keeps status=None and 403/challenge
+            # detection via read_network_requests fails.
+            if request_id not in self.entries and not self._should_capture(url, resource_type, mime_type):
                 return
             entry = self.entries.setdefault(
                 request_id,
@@ -1371,18 +1439,26 @@ class BrowserNetworkRecorder:
 
     def _on_loading_finished(self, event: Dict[str, Any], session_id: str | None) -> None:
         request_id = event.get("requestId")
+        if request_id:
+            self._ignored_request_ids.discard(request_id)
+            self._active_request_ids.discard(request_id)
         if not request_id or request_id not in self.entries:
             return
         self.entries[request_id]["encoded_data_length"] = event.get("encodedDataLength")
+        self.entries[request_id]["terminal"] = True
         task = asyncio.create_task(self._fetch_response_body(request_id, session_id))
         self._tasks.add(task)
         task.add_done_callback(lambda done: self._tasks.discard(done))
 
     def _on_loading_failed(self, event: Dict[str, Any], session_id: str | None) -> None:
         request_id = event.get("requestId")
+        if request_id:
+            self._ignored_request_ids.discard(request_id)
+            self._active_request_ids.discard(request_id)
         if request_id and request_id in self.entries:
             self.entries[request_id]["failed"] = True
             self.entries[request_id]["failure"] = event.get("errorText")
+            self.entries[request_id]["terminal"] = True
 
     async def _fetch_response_body(self, request_id: str, session_id: str | None) -> None:
         entry = self.entries.get(request_id)
@@ -1436,6 +1512,50 @@ class BrowserNetworkRecorder:
                 url=entry.get("url"),
                 error=str(exc),
             )
+
+    def query_requests(
+        self,
+        *,
+        url_pattern: str = "",
+        limit: int = 100,
+        clear: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return captured network requests for the agent's `read_network_requests`
+        tool. Mirrors Claude Code's tool: newest-first list of
+        url/method/status/resource_type (cross-origin included), optionally filtered
+        by a URL substring. When ``clear`` is set the buffer is emptied after the
+        read so a follow-up call only surfaces new traffic.
+        """
+        pattern = (url_pattern or "").lower().strip()
+        capped_limit = max(1, min(int(limit or 100), self._max_entries))
+        scored: List[tuple[int, Dict[str, Any]]] = []
+        for entry in self.entries.values():
+            url = entry.get("url") or ""
+            if pattern and pattern not in url.lower():
+                continue
+            # Never return raw query strings/fragments to the agent turn history:
+            # they can carry signed URLs, auth tokens, and PII. Path is enough for
+            # challenge detection (status) and endpoint discovery.
+            row: Dict[str, Any] = {
+                "url": _redact_url_query(url),
+                "method": entry.get("method"),
+                "status": entry.get("status"),
+                "resource_type": entry.get("resource_type"),
+            }
+            if entry.get("failed"):
+                row["failed"] = True
+                row["failure"] = entry.get("failure")
+            ts = entry.get("response_ts_ms") or entry.get("request_ts_ms") or 0
+            scored.append((int(ts), row))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        rows = [row for _, row in scored[:capped_limit]]
+        if clear:
+            # Remember every request still in flight, including requests dropped
+            # while the buffer was full, so late response events cannot resurrect
+            # pre-clear traffic. Terminal events remove IDs from both sets.
+            self._ignored_request_ids.update(self._active_request_ids)
+            self.entries.clear()
+        return rows
 
     async def close(self) -> Optional[Path]:
         if self._closed:
