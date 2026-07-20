@@ -5399,14 +5399,17 @@ def test_read_network_requests_tool_is_advertised():
 
 def test_network_recorder_query_requests_filters_and_shapes():
     """BrowserNetworkRecorder.query_requests backs read_network_requests: newest-first
-    url/method/status/resource_type, url_pattern filter, and clear-after-read."""
+    url/method/status/resource_type, url_pattern filter, query-string redaction, and
+    clear-after-read that ignores pre-clear in-flight requests."""
     from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
 
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._max_entries = 300
+    recorder._ignored_request_ids = set()
+    recorder._patterns = []
     recorder.entries = {
         "1": {
-            "url": "https://order.online/api/cart",
+            "url": "https://order.online/api/cart?token=SECRET&sig=abc#frag",
             "method": "POST",
             "status": 403,
             "resource_type": "XHR",
@@ -5421,12 +5424,50 @@ def test_network_recorder_query_requests_filters_and_shapes():
         },
     }
     filtered = recorder.query_requests(url_pattern="/api/", limit=10)
+    # Query string + fragment (token/sig) redacted; path preserved.
     assert filtered == [
         {"url": "https://order.online/api/cart", "method": "POST", "status": 403, "resource_type": "XHR"}
     ]
     assert len(recorder.query_requests(limit=10)) == 2
+
+    # A still-in-flight request (no status) at clear time must be ignored so its
+    # late response event cannot resurrect a pre-clear entry.
+    recorder.entries["3"] = {"url": "https://order.online/api/inflight", "method": "GET", "status": None}
     recorder.query_requests(clear=True)
     assert recorder.entries == {}
+    assert "3" in recorder._ignored_request_ids
+    recorder._on_response_received(
+        {"requestId": "3", "type": "XHR", "response": {"url": "https://order.online/api/inflight", "status": 200}},
+        None,
+    )
+    assert recorder.entries == {}, "pre-clear in-flight request must not reappear"
+    # Its terminal event clears the ignore flag (bounded set).
+    recorder._on_loading_finished({"requestId": "3"}, None)
+    assert "3" not in recorder._ignored_request_ids
+
+
+def test_network_recorder_updates_status_at_capacity():
+    """A request already tracked must still get its status update after the buffer
+    is full, or 403/challenge detection breaks on busy pages (CodeRabbit #1)."""
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._max_entries = 1
+    recorder._ignored_request_ids = set()
+    recorder._patterns = []
+    recorder._started_at = 0.0
+    recorder.entries = {"r1": {"request_id": "r1", "url": "https://x/api", "resource_type": "XHR", "status": None}}
+    recorder._on_response_received(
+        {"requestId": "r1", "type": "XHR", "response": {"url": "https://x/api", "status": 429, "mimeType": "application/json"}},
+        None,
+    )
+    assert recorder.entries["r1"]["status"] == 429
+    # A NEW request is still refused once at capacity.
+    recorder._on_response_received(
+        {"requestId": "r2", "type": "XHR", "response": {"url": "https://x/other", "status": 200, "mimeType": "application/json"}},
+        None,
+    )
+    assert "r2" not in recorder.entries
 
 
 async def test_execute_action_read_network_requests():
@@ -10992,6 +11033,7 @@ async def run_all_tests():
     await r.record_async("execute_action_unknown", test_execute_action_unknown_action)
     r.record("read_network_requests_advertised", test_read_network_requests_tool_is_advertised)
     r.record("network_recorder_query_requests", test_network_recorder_query_requests_filters_and_shapes)
+    r.record("network_recorder_updates_at_capacity", test_network_recorder_updates_status_at_capacity)
     await r.record_async("execute_action_read_network_requests", test_execute_action_read_network_requests)
     await r.record_async(
         "execute_action_request_payment_card",

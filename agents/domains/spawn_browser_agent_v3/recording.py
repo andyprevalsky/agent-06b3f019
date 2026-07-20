@@ -107,6 +107,22 @@ def browser_recording_output_dir(agent_id: str, task_id: str) -> Path:
     return _recording_root() / agent_id / _safe_task_id(task_id)
 
 
+def _redact_url_query(url: str) -> str:
+    """Drop query string + fragment from a URL, keeping scheme://host/path.
+
+    Captured request URLs are surfaced to the agent (and its turn history) via
+    read_network_requests; query strings can carry signed URLs, auth tokens, and
+    PII, so only the non-secret locator is exposed.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return url
+    if not parsed.scheme or not parsed.netloc:
+        return url
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+
 def _media_extension(url: str, default: str) -> str:
     suffix = Path(urlparse(url).path).suffix
     if suffix and len(suffix) <= 8:
@@ -1228,6 +1244,10 @@ class BrowserNetworkRecorder:
         self.output_dir = output_dir
         self.network_dir = self.output_dir / "network"
         self.entries: Dict[str, Dict[str, Any]] = {}
+        # Request IDs that were in flight when the agent last cleared the buffer
+        # (read_network_requests clear=True). Their late response events must NOT
+        # resurrect a pre-clear entry, or the next read would leak old traffic.
+        self._ignored_request_ids: set[str] = set()
         self._started_at = time.monotonic()
         self._closed = False
         self._tasks: set[asyncio.Task] = set()
@@ -1343,7 +1363,13 @@ class BrowserNetworkRecorder:
             url = response.get("url") or ""
             resource_type = event.get("type") or ""
             mime_type = response.get("mimeType") or ""
-            if not request_id or len(self.entries) >= self._max_entries:
+            if not request_id or request_id in self._ignored_request_ids:
+                return
+            # Capacity only blocks NEW requests; an already-tracked request must
+            # still receive its status/response update (otherwise a page that
+            # fills the buffer before responses land leaves every status None and
+            # defeats 403/challenge detection).
+            if request_id not in self.entries and len(self.entries) >= self._max_entries:
                 return
             if not self._should_capture(url, resource_type, mime_type):
                 return
@@ -1371,6 +1397,8 @@ class BrowserNetworkRecorder:
 
     def _on_loading_finished(self, event: Dict[str, Any], session_id: str | None) -> None:
         request_id = event.get("requestId")
+        if request_id:
+            self._ignored_request_ids.discard(request_id)
         if not request_id or request_id not in self.entries:
             return
         self.entries[request_id]["encoded_data_length"] = event.get("encodedDataLength")
@@ -1380,6 +1408,8 @@ class BrowserNetworkRecorder:
 
     def _on_loading_failed(self, event: Dict[str, Any], session_id: str | None) -> None:
         request_id = event.get("requestId")
+        if request_id:
+            self._ignored_request_ids.discard(request_id)
         if request_id and request_id in self.entries:
             self.entries[request_id]["failed"] = True
             self.entries[request_id]["failure"] = event.get("errorText")
@@ -1457,8 +1487,11 @@ class BrowserNetworkRecorder:
             url = entry.get("url") or ""
             if pattern and pattern not in url.lower():
                 continue
+            # Never return raw query strings/fragments to the agent turn history:
+            # they can carry signed URLs, auth tokens, and PII. Path is enough for
+            # challenge detection (status) and endpoint discovery.
             row: Dict[str, Any] = {
-                "url": url,
+                "url": _redact_url_query(url),
                 "method": entry.get("method"),
                 "status": entry.get("status"),
                 "resource_type": entry.get("resource_type"),
@@ -1471,6 +1504,11 @@ class BrowserNetworkRecorder:
         scored.sort(key=lambda item: item[0], reverse=True)
         rows = [row for _, row in scored[:capped_limit]]
         if clear:
+            # Remember requests still in flight so their late response events don't
+            # resurrect a pre-clear entry and leak old traffic into the next read.
+            self._ignored_request_ids.update(
+                rid for rid, entry in self.entries.items() if entry.get("status") is None
+            )
             self.entries.clear()
         return rows
 
