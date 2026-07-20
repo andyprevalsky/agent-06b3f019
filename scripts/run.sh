@@ -607,7 +607,21 @@ _SEED_CACHE_TOKEN="${_SCHEMA_HASH}-$(date -u +%Y%m%d 2>/dev/null || echo undated
 # gate on the file, not the environment. seed-dump-cache.ts loads the .env itself.
 _SEED_CACHE_ENABLED=0
 grep -qE '^R2_BUCKET_TRACE_ARCHIVE=.' back-end/.env 2>/dev/null && _SEED_CACHE_ENABLED=1
-if [ -n "$_SEED_DUMP" ] && [ ! -s "$_SEED_DUMP" ] && [ "$_SEED_CACHE_ENABLED" = 1 ]; then
+# A schema-STALE local dump (present but hash-mismatched) is treated the SAME as
+# an absent one: run.sh cold-syncs it anyway (the restore gate below requires a
+# hash match), so first try the shared R2 cache for a schema-matched dump. Without
+# this, a warm snapshot's stale baked dump forces EVERY clone into the full ~15-min
+# cold-sync even when a current dump is one cache HIT away — and that heavy bulk
+# sync (10k+ upserts on a 4GB guest) sporadically OOMs the local Postgres (P1001
+# "Can't reach database server") or starves stack startup, dropping the box as an
+# infra loss. Discard the stale dump first so a HIT restores the fresh copy.
+_LOCAL_DUMP_FRESH=0
+if [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ] \
+    && [ "$(cat "${_SEED_DUMP}.schemahash" 2>/dev/null || echo x)" = "$_SCHEMA_HASH" ]; then
+    _LOCAL_DUMP_FRESH=1
+fi
+if [ -n "$_SEED_DUMP" ] && [ "$_LOCAL_DUMP_FRESH" = 0 ] && [ "$_SEED_CACHE_ENABLED" = 1 ]; then
+    rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
     echo "🔎 Checking shared seed-dump cache ($_SEED_CACHE_TOKEN)..."
     if (cd back-end && npx tsx scripts/seed-dump-cache.ts get "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") 2>/dev/null && [ -s "$_SEED_DUMP" ]; then
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
