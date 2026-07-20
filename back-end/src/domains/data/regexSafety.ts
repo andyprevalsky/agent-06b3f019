@@ -36,7 +36,15 @@ export function checkPatternSafety(source: string, flags: string): PatternSafety
   try {
     diagnostics = checkSync(source, flags, { timeout: 1000 });
   } catch {
-    return { ok: true }; // analyzer error/timeout — fail open; the length cap is the backstop
+    // A timeout is most likely for the complex patterns this guard exists to
+    // stop, especially when the host is under load. Never let an unclassified
+    // pattern reach Postgres's backtracking regex engine.
+    return {
+      ok: false,
+      reason:
+        'Pattern rejected because ReDoS safety analysis could not complete. ' +
+        'Use a shorter or simpler regular expression.',
+    };
   }
   if (diagnostics.status !== 'vulnerable') return { ok: true };
   const complexity = diagnostics.complexity;
