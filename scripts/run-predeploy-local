@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run the catalog's Pre-Deploy/smoke group on the LOCAL isolated benchmark stack
-# (per-run backend + worker + WMH + Postgres on this machine, concurrency 5) and
+# (per-run backend + worker + WMH + Postgres on this machine, concurrency 2) and
 # require every task to pass. This is the DEFAULT pre-deploy smoke path: the shared
 # cloud fleet (`run-predeploy-cloud`) leaks paid Fly machines when killed and is
 # frequently rate-limited / volume-capacity-starved, so local is the reliable gate.
@@ -13,10 +13,15 @@
 # Usage:
 #   scripts/run-predeploy-local            # run the smoke group locally
 #   scripts/run-predeploy-local --list     # print the smoke task set and exit
+#   scripts/run-predeploy-local --history  # print task + end-to-end timing history
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+METRICS_SCRIPT="$ROOT_DIR/agents/benchmarks/predeploy_metrics.py"
+LOGGED_COMMAND="$ROOT_DIR/scripts/run_logged_command.py"
+HISTORY_FILE="$ROOT_DIR/agents/benchmarks/history/task_durations.jsonl"
+RUN_ROOT="$ROOT_DIR/.context/predeploy-runs"
 
 read_predeploy_tasks() {
     python3 - "$ROOT_DIR/agents/benchmarks/tasks.json" <<'PY'
@@ -31,22 +36,87 @@ for task in tasks:
 PY
 }
 
-if [ "${1:-}" = "--list" ]; then
-    read_predeploy_tasks
-    exit 0
-fi
-if [ "$#" -ne 0 ]; then
-    echo "usage: scripts/run-predeploy-local [--list]" >&2
-    exit 2
-fi
-
 PREDEPLOY_TASKS=()
 while IFS= read -r task; do
     [ -n "$task" ] && PREDEPLOY_TASKS+=("$task")
 done < <(read_predeploy_tasks)
 [ "${#PREDEPLOY_TASKS[@]}" -gt 0 ] || { echo "no smoke-tagged benchmark tasks found" >&2; exit 1; }
 
+# Whether ANY selected smoke task actually exercises Codex (gpt_code). The
+# per-task compute-token seed (seed-local.ts) is strict on a usable gpt_code
+# integration by default so real Codex regressions surface. But when the entire
+# selected set is Codex-free, an externally rate-limited / quota-exhausted Codex
+# integration (a third-party billing state we don't control) must NOT block the
+# smoke gate — the claude tokens the selected tasks DO need still sync fine. In
+# that case we opt into the harness's sanctioned SEED_ALLOW_MISSING_GPT_CODE=1
+# path (same flag run-agentcard-lifecycle-task.sh uses for its Codex-free run).
+# The instant a Codex-using task re-enters the smoke set this flips back to
+# strict, so Codex coverage is never silently dropped.
+smoke_set_uses_codex() {
+    python3 - "$ROOT_DIR/agents/benchmarks/tasks.json" "${PREDEPLOY_TASKS[@]}" <<'PY'
+import json
+import sys
+
+catalog_path = sys.argv[1]
+selected = set(sys.argv[2:])
+with open(catalog_path) as handle:
+    tasks = json.load(handle)
+for task in tasks:
+    if task.get("name") not in selected:
+        continue
+    blob = json.dumps(task).lower()
+    if "codex" in blob or "gpt_code" in blob or "gpt-code" in blob:
+        print("1")
+        break
+else:
+    print("0")
+PY
+}
+
+LOCAL_CONCURRENCY="${PREDEPLOY_LOCAL_CONCURRENCY:-2}"
+
+if [ "${1:-}" = "--list" ]; then
+    printf '%s\n' "${PREDEPLOY_TASKS[@]}"
+    exit 0
+fi
+if [ "${1:-}" = "--history" ]; then
+    python3 "$METRICS_SCRIPT" history \
+        --history-file "$HISTORY_FILE" \
+        --run-root "$RUN_ROOT" \
+        --concurrency "$LOCAL_CONCURRENCY" \
+        "${PREDEPLOY_TASKS[@]}"
+    exit 0
+fi
+if [ "$#" -ne 0 ]; then
+    echo "usage: scripts/run-predeploy-local [--list|--history]" >&2
+    exit 2
+fi
+
+SCHEDULED_TASKS=()
+while IFS= read -r task; do
+    [ -n "$task" ] && SCHEDULED_TASKS+=("$task")
+done < <(
+    python3 "$METRICS_SCRIPT" order \
+        --history-file "$HISTORY_FILE" \
+        "${PREDEPLOY_TASKS[@]}"
+)
+[ "${#SCHEDULED_TASKS[@]}" -eq "${#PREDEPLOY_TASKS[@]}" ] || {
+    echo "pre-deploy scheduler changed the task count" >&2
+    exit 1
+}
+
+if [ "$(smoke_set_uses_codex)" = "0" ]; then
+    export SEED_ALLOW_MISSING_GPT_CODE=1
+    echo "ℹ️  Smoke set is Codex-free — tolerating a missing/rate-limited gpt_code integration (SEED_ALLOW_MISSING_GPT_CODE=1)."
+else
+    # A Codex-using smoke set MUST enforce a usable gpt_code integration. Clear any
+    # value inherited from the caller's environment so it can never leave a
+    # Codex-using run permissively passing without the required credential.
+    unset SEED_ALLOW_MISSING_GPT_CODE
+fi
+
 echo "🧪 Pre-Deploy smoke (LOCAL isolated stack) — ${#PREDEPLOY_TASKS[@]} tasks: ${PREDEPLOY_TASKS[*]}"
+echo "Schedule (longest recent median first, concurrency $LOCAL_CONCURRENCY): ${SCHEDULED_TASKS[*]}"
 
 # `run-bench --local` spins up the per-run isolated stack, runs the tasks, and
 # exits non-zero unless ALL requested tasks pass.
@@ -58,13 +128,91 @@ echo "🧪 Pre-Deploy smoke (LOCAL isolated stack) — ${#PREDEPLOY_TASKS[@]} ta
 # whichever bench is slowest-under-contention overruns its cloud-calibrated
 # timeout — a different bench each run. Capping local concurrency at 2 restores a
 # resource profile close to the calibration (still parallel, ~1 browser task at a
-# time) so the timeouts hold. Override with PREDEPLOY_LOCAL_CONCURRENCY.
-LOCAL_CONCURRENCY="${PREDEPLOY_LOCAL_CONCURRENCY:-2}"
-# None of the smoke-tagged tasks spawn a Codex agent, so a rate-limited or
-# quota-exhausted gpt_code (Codex) integration must not fail the isolated stack's
-# compute-token sync (seed-local hard-requires a usable gpt_code otherwise). The
-# claude tokens the smoke tasks actually need still sync. Codex regressions are
-# caught by the codex-code test that uses Codex, not by this gate.
-export SEED_ALLOW_MISSING_GPT_CODE=1
-BENCHMARK_SKIP_WMH_BUILD=1 exec bash "$ROOT_DIR/scripts/run-bench" --local "${PREDEPLOY_TASKS[@]}" \
-    --max-concurrency "$LOCAL_CONCURRENCY"
+# time) so the timeouts hold. Override with PREDEPLOY_LOCAL_CONCURRENCY. Within
+# that fixed cap, longest-recent-median-first list scheduling targets a shorter
+# idle tail without increasing simultaneous load or changing any benchmark contract.
+PREDEPLOY_RUN_ID="${PREDEPLOY_RUN_ID:-$(date -u +%Y%m%d-%H%M%S)-$$}"
+[[ "$PREDEPLOY_RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] \
+    && [ "$PREDEPLOY_RUN_ID" != "." ] \
+    && [ "$PREDEPLOY_RUN_ID" != ".." ] || {
+    echo "invalid pre-deploy run id: $PREDEPLOY_RUN_ID" >&2
+    exit 2
+}
+ARTIFACT_DIR="$RUN_ROOT/$PREDEPLOY_RUN_ID"
+RUNNER_LOG="$ARTIFACT_DIR/runner.log"
+SUMMARY_PATH="$ARTIFACT_DIR/summary.json"
+STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+STARTED_EPOCH="$(python3 -c 'import time; print(time.time())')"
+GIT_SHA="$(git rev-parse HEAD)"
+mkdir -p "$ARTIFACT_DIR"
+
+record_summary() {
+    exit_code="$1"
+    finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    finished_epoch="$(python3 -c 'import time; print(time.time())')"
+    record_args=(
+        record
+        --output "$SUMMARY_PATH"
+        --run-id "$PREDEPLOY_RUN_ID"
+        --started-at "$STARTED_AT"
+        --finished-at "$finished_at"
+        --started-epoch "$STARTED_EPOCH"
+        --finished-epoch "$finished_epoch"
+        --exit-code "$exit_code"
+        --concurrency "$LOCAL_CONCURRENCY"
+        --git-sha "$GIT_SHA"
+        --runner-log "$RUNNER_LOG"
+    )
+    for task in "${PREDEPLOY_TASKS[@]}"; do
+        record_args+=(--task "$task")
+    done
+    for task in "${SCHEDULED_TASKS[@]}"; do
+        record_args+=(--schedule-task "$task")
+    done
+    python3 "$METRICS_SCRIPT" "${record_args[@]}" || {
+        echo "warning: could not write pre-deploy summary" >&2
+    }
+    echo "Pre-deploy artifacts: $ARTIFACT_DIR"
+}
+trap 'record_summary $?' EXIT
+
+set +e
+SUPERVISOR_PID=""
+SIGNAL_EXIT=0
+PENDING_SIGNAL=""
+forward_signal() {
+    signal_name="$1"
+    signal_exit="$2"
+    SIGNAL_EXIT="$signal_exit"
+    trap - HUP INT TERM
+    if [ -n "$SUPERVISOR_PID" ]; then
+        PENDING_SIGNAL=""
+        if kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
+            kill -s "$signal_name" "$SUPERVISOR_PID" 2>/dev/null || true
+            wait "$SUPERVISOR_PID" 2>/dev/null || true
+        fi
+    else
+        PENDING_SIGNAL="$signal_name"
+    fi
+}
+trap 'forward_signal HUP 129' HUP
+trap 'forward_signal INT 130' INT
+trap 'forward_signal TERM 143' TERM
+
+BENCHMARK_SKIP_WMH_BUILD=1 python3 "$LOGGED_COMMAND" "$RUNNER_LOG" -- \
+    bash "$ROOT_DIR/scripts/run-bench" --local "${SCHEDULED_TASKS[@]}" \
+    --max-concurrency "$LOCAL_CONCURRENCY" &
+SUPERVISOR_PID=$!
+if [ -n "$PENDING_SIGNAL" ]; then
+    pending_signal="$PENDING_SIGNAL"
+    PENDING_SIGNAL=""
+    kill -s "$pending_signal" "$SUPERVISOR_PID" 2>/dev/null || true
+fi
+wait "$SUPERVISOR_PID"
+RUN_EXIT=$?
+if [ "$SIGNAL_EXIT" -ne 0 ]; then
+    RUN_EXIT="$SIGNAL_EXIT"
+fi
+trap - HUP INT TERM
+set -e
+exit "$RUN_EXIT"

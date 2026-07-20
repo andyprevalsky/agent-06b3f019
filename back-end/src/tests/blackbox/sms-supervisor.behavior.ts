@@ -17,6 +17,7 @@ import {
   waitFor,
 } from './sms-supervisor.helpers';
 import { buildSmsContext } from '../../providers/smsSupervisor/contextBuilder';
+import { SUPERVISOR_FALLBACK_MESSAGE } from '../../providers/smsSupervisor';
 
 function buildReplyToAgentFixture(params: {
   agentIdOrPrefix: string;
@@ -295,7 +296,7 @@ export async function testRealLlm_supervisorRoundTrip(prisma: PrismaClient) {
       throw new Error('Expected non-empty outbound SMS body from real LLM');
     }
 
-    if (replyText === 'Sorry, something went wrong. Please try again.') {
+    if (replyText === SUPERVISOR_FALLBACK_MESSAGE) {
       console.warn(
         '  ⚠ pool tokens unavailable (supervisor crashed with fallback) — skipping real-LLM assertions'
       );
@@ -478,7 +479,7 @@ export async function testGrep_failureBlocksCompletionAndFallsBackGracefully(pri
   const blockedReply = 'This reply must never be sent';
   // The blocked-completion path reaches the safety cap without a successful
   // send_user_message, so the runtime sends its failure fallback.
-  const fallbackReply = 'Sorry, I had trouble processing that. Please try again.';
+  const fallbackReply = SUPERVISOR_FALLBACK_MESSAGE;
 
   try {
     // Invalid regex → dispatch fails every round → attempt_completion in the
@@ -521,7 +522,7 @@ export async function testAttemptCompletion_requiresSuccessfulUserMessage(prisma
   const phone = uniqueSmsPhone();
   const userId = await provisionUserWithPhone(prisma, phone);
   const token = captureToken('sms-supervisor-completion-invariant');
-  const fallback = 'Sorry, I had trouble processing that. Please try again.';
+  const fallback = SUPERVISOR_FALLBACK_MESSAGE;
 
   try {
     await setFixtureOverride(

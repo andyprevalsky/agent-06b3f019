@@ -25,16 +25,32 @@ import {
   ToolCall,
   ToolResult,
 } from './supervisorTools';
-import { fetchComputeTokenForUser } from '../computeCredentials';
 import { createLogger } from '../logger';
+import { getComputeToken, type SupervisorComputeToken } from './supervisorComputeToken';
 import { SUPERVISOR_RESPONSE_MODEL } from './schema';
 import { appendOutboundSms } from './sessionStore';
 import * as environment from './environmentMessages';
 import { loadBlackboxSupervisorResponseFixture } from './supervisorFixtures';
+import { callWithRetries, dispatchToolSafely } from './supervisorResilience';
 
 const log = createLogger('SmsSupervisor');
 
 const SMS_SUPERVISOR_MODEL = 'rose-labs/rose-1-lite';
+
+// A single supervisor round's LLM call is retried this many times when the
+// stream *throws* (network blip, peer-closed / [NO END] mid-stream, socket
+// timeout, a single 429 slipping past Rose's internal provider race). Rose
+// already races providers, so the residual throw class is transient; retrying
+// with a short backoff turns "Sorry, something went wrong" into a real answer.
+const SUPERVISOR_LLM_ATTEMPTS = 3;
+const SUPERVISOR_LLM_RETRY_BASE_DELAY_MS = 400;
+
+// User-facing last-resort line when a run genuinely cannot produce a reply after
+// exhausting retries. Deliberately warmer + actionable than a bare "something
+// went wrong", and delivered through the seq-gated deliverUserMessage path so it
+// never double-sends or races a newer inbound.
+export const SUPERVISOR_FALLBACK_MESSAGE =
+  "Sorry — I hit a snag on my end and couldn't get to that one. Please send it again in a moment.";
 
 /**
  * Per-user commit lock. Held while a run flushes pendingWrites + sends SMS +
@@ -69,7 +85,7 @@ async function withCommitLock<T>(userId: string, fn: () => Promise<T>): Promise<
   }
 }
 
-interface SupervisorResponse {
+export interface SupervisorResponse {
   reasoning: string;
   tool_calls: ToolCall[];
 }
@@ -238,15 +254,36 @@ export async function handleSmsSupervisorMessage(config: {
           error: smsResult.error ?? 'SMS delivery failed',
         };
       }
-      await appendOutboundSms(
-        userId,
-        message,
-        smsResult.messageSid,
-        inboundStoredForRun ? undefined : inboundMessage
-      );
+      // The reply is now DELIVERED. Persistence is best-effort: a throw here must
+      // NOT propagate, because an escaped throw would bubble to the webhook's
+      // top-level catch and send SUPERVISOR_FALLBACK_MESSAGE on top of the reply
+      // the user already received (a "real answer + spurious apology" double-send).
+      // Record delivery regardless; log the persistence gap.
+      let persisted = false;
+      // Mark the inbound as attempted BEFORE awaiting: appendOutboundSms appends
+      // the inbound unconditionally when passed, so if the DB commits but the
+      // client observes an error, a later send in this run must NOT pass the
+      // inbound again (which would duplicate it in the transcript). Attempted-once
+      // is the idempotency guard; a truly-failed append loses the inbound line,
+      // which is strictly better than corrupting the transcript with a duplicate.
+      const inboundForThisSend = inboundStoredForRun ? undefined : inboundMessage;
       inboundStoredForRun = true;
+      try {
+        await appendOutboundSms(userId, message, smsResult.messageSid, inboundForThisSend);
+        persisted = true;
+      } catch (persistError) {
+        log.error('[SmsSupervisor] Outbound SMS delivered but persistence failed', {
+          userId,
+          messageSid: smsResult.messageSid,
+          error: persistError instanceof Error ? persistError.message : String(persistError),
+        });
+      }
       sentMessages.push(message);
-      return { tool: 'send_user_message', success: true, result: 'SMS sent and persisted' };
+      return {
+        tool: 'send_user_message',
+        success: true,
+        result: persisted ? 'SMS sent and persisted' : 'SMS sent (persistence failed, logged)',
+      };
     });
 
   for (let round = 0; round < environment.MAX_TOOL_ROUNDS; round++) {
@@ -260,9 +297,36 @@ export async function handleSmsSupervisorMessage(config: {
       ),
     });
 
-    // Call LLM
+    // Call LLM. A thrown stream error (peer-closed mid-stream, socket timeout,
+    // a stray 429) is retried with backoff INSIDE the round so a transient blip
+    // never escapes to the webhook's generic "something went wrong". If every
+    // retry throws, the LLM is genuinely unreachable this round — stop hammering
+    // it across all remaining rounds and fall through to the graceful terminal
+    // net below (which delivers SUPERVISOR_FALLBACK_MESSAGE only if nothing was
+    // sent yet, seq-gated + persisted).
     const llmStart = Date.now();
-    const llmResponse = await callSupervisorLlm(messages, computeToken, userId);
+    let llmResponse: SupervisorResponse;
+    try {
+      llmResponse = await callWithRetries(() => callSupervisorLlm(messages, computeToken, userId), {
+        attempts: SUPERVISOR_LLM_ATTEMPTS,
+        baseDelayMs: SUPERVISOR_LLM_RETRY_BASE_DELAY_MS,
+        signal: abortSignal,
+        onRetry: (attempt, error) =>
+          log.warn('[SmsSupervisor] LLM call threw; retrying round', {
+            round,
+            attempt,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+      });
+    } catch (error) {
+      log.error('[SmsSupervisor] LLM call failed after retries; degrading gracefully', {
+        round,
+        attempts: SUPERVISOR_LLM_ATTEMPTS,
+        alreadySent: sentMessages.length,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      break;
+    }
 
     log.info('[SmsSupervisor] LLM response received', {
       round,
@@ -284,7 +348,10 @@ export async function handleSmsSupervisorMessage(config: {
     let terminalFailureReported = false;
     for (const toolCall of dispatchCalls) {
       const toolStart = Date.now();
-      const result =
+      // dispatchToolSafely converts a THROWN tool/environment error into a
+      // failure result so it feeds back to the model instead of escaping the
+      // loop into the generic top-level apology.
+      const result = await dispatchToolSafely(toolCall.tool, async () =>
         toolCall.tool === 'get_environment'
           ? {
               tool: 'get_environment',
@@ -294,7 +361,8 @@ export async function handleSmsSupervisorMessage(config: {
                 inboundAlreadyPersisted ? mySeq : undefined
               ),
             }
-          : await dispatchToolCall(toolCall, userId, pendingWrites, invocationContext);
+          : await dispatchToolCall(toolCall, userId, pendingWrites, invocationContext)
+      );
       toolResults.push(result);
       allToolsExecuted.push(toolCall.tool);
 
@@ -461,7 +529,7 @@ export async function handleSmsSupervisorMessage(config: {
   }
 
   if (!completionAccepted && sentMessages.length === 0 && !abortSignal?.aborted) {
-    await deliverUserMessage('Sorry, I had trouble processing that. Please try again.');
+    await deliverUserMessage(SUPERVISOR_FALLBACK_MESSAGE);
   }
 
   const committed = sentMessages.length > 0;
@@ -482,44 +550,6 @@ export async function handleSmsSupervisorMessage(config: {
     committed,
     toolsExecuted: allToolsExecuted,
   };
-}
-
-// ============================================
-// Compute Token Fetching
-// ============================================
-
-interface SupervisorComputeToken {
-  type: 'claude' | 'gpt';
-  accessToken: string;
-  accountId?: string;
-}
-
-async function getComputeToken(userId: string): Promise<SupervisorComputeToken | null> {
-  try {
-    const computeToken = await fetchComputeTokenForUser(userId);
-    if (computeToken) {
-      log.info('[SmsSupervisor] Using compute token', {
-        userId,
-        type: computeToken.type,
-        source: computeToken.source,
-        poolTokenId: computeToken.poolTokenId,
-      });
-      return {
-        type: computeToken.type,
-        accessToken: computeToken.accessToken,
-        accountId: computeToken.accountId,
-      };
-    }
-
-    log.info('[SmsSupervisor] No compute token available, will use waterfall', { userId });
-    return null;
-  } catch (error) {
-    log.warn('[SmsSupervisor] Failed to fetch compute token, falling back to waterfall', {
-      userId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return null;
-  }
 }
 
 // ============================================
@@ -640,6 +670,28 @@ async function callSupervisorLlm(
     durationMs: Date.now() - startTime,
   });
 
+  return finalizeSupervisorResponse(accumulatedToolCalls, structuredOutput, accumulatedReasoning);
+}
+
+/**
+ * Shape the consumed supervisor stream into a SupervisorResponse.
+ *
+ * Two response shapes are possible:
+ *   - Native-tool path: the model emitted tool_use blocks → use them directly.
+ *   - Content path: the structured-output JSON envelope arrived as content
+ *     (Codex / waterfall, or claudeAuth when extraction didn't fit the schema).
+ *
+ * When the model emits NEITHER — a reasoning-only or empty stream — the
+ * structured-output extractor cannot select a single item. That extraction is
+ * wrapped in the same try/catch as JSON parsing so a StructuredOutputCardinality
+ * error degrades to the deliberate "never send raw garbage to the user" fallback
+ * instead of throwing out of the supervisor turn.
+ */
+export function finalizeSupervisorResponse(
+  accumulatedToolCalls: ToolCall[],
+  structuredOutput: StructuredOutputAccumulator,
+  accumulatedReasoning: string
+): SupervisorResponse {
   // Native tool path (claudeAuth + response_model extracted to tools): each
   // tool_use block came through as a tool_calls delta. Use those directly.
   if (accumulatedToolCalls.length > 0) {
@@ -652,31 +704,31 @@ async function callSupervisorLlm(
     };
   }
 
-  accumulatedContent = structuredOutput.finalText();
-
-  // Fallback: structured-output JSON envelope arrived as content (Codex /
-  // waterfall path, or claudeAuth when extraction didn't fit the schema shape).
+  // The structured-output JSON envelope arrived as content (Codex / waterfall
+  // path, or claudeAuth when extraction didn't fit the schema shape). finalText()
+  // is INSIDE the try: a reasoning-only / empty / ambiguous stream makes the
+  // extractor throw StructuredOutputCardinalityError — the same "the model gave
+  // us nothing actionable this round" condition as a JSON parse failure.
+  //
+  // On that failure we return NO tool calls rather than throwing (which crashed
+  // the whole turn) or injecting an apology (which gave up on the first empty
+  // round). An empty tool_calls response routes into the supervisor loop's
+  // existing nudge-and-retry ("No tool calls and no attempt_completion" →
+  // re-prompt), so a transient empty stream gets another round to actually
+  // answer. If every round stays empty, the loop's terminal net delivers one
+  // friendly apology. Bounded by MAX_TOOL_ROUNDS.
+  let accumulatedContent = '';
   let parsed: SupervisorResponse;
   try {
+    accumulatedContent = structuredOutput.finalText();
     parsed = JSON.parse(accumulatedContent);
   } catch (error) {
-    log.error('[SmsSupervisorLLM] Failed to parse response JSON', {
+    log.error('[SmsSupervisorLLM] No actionable structured output; nudging for a retry round', {
       error: error instanceof Error ? error.message : String(error),
       rawContent: accumulatedContent.substring(0, 500),
       contentLength: accumulatedContent.length,
     });
-
-    // Never send raw garbage to the user — fall through to a friendly error.
-    parsed = {
-      reasoning: accumulatedReasoning || 'Failed to parse structured response',
-      tool_calls: [
-        {
-          tool: 'send_user_message',
-          arguments: { message: 'Sorry, something went wrong. Please try again.' },
-        },
-        { tool: 'attempt_completion', arguments: {} },
-      ],
-    };
+    return { reasoning: accumulatedReasoning, tool_calls: [] };
   }
 
   log.info('[SmsSupervisorLLM] Parsed response', {

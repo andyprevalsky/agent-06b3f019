@@ -713,8 +713,13 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to resolve Fast Mode cache goal, using workflow input goal: {e}")
 
-        # Send SMS notification for agent_started (root + SMS-source only)
-        if not parent_workflow_id and self.agent_source == "SMS":
+        # Send SMS notification for agent_started to every ROOT agent, regardless
+        # of source, so the user always gets a text with the deep link to any
+        # agent they create (SMS, web, mac-app, API). Sub-agents (parent_workflow_id
+        # set) are intentionally excluded — at 10k agents a per-spawn SMS would
+        # firehose the user's phone. Benchmark/eval runs are suppressed centrally
+        # on the backend (Agent.isBenchmark) so this never texts the operator.
+        if not parent_workflow_id:
             try:
                 await workflow.execute_activity(
                     notify_sms_event_activity,
@@ -1048,10 +1053,12 @@ class AgentWorkflow:
                         tool_names=execute_tools,
                     )
 
-                    # A completed DAG hands off to normal completion. A failed
-                    # DAG is terminal for this run: unrestricted run_agent recovery
-                    # can replay sibling tasks whose external side effects already
-                    # committed (for example, duplicate child-agent spawns).
+                    # A completed DAG hands off to normal completion. A failed or
+                    # stalled DAG recovers via run_agent (the LLM loop), the same
+                    # way the completed-but-unverified branch below does: run_agent
+                    # reads the recorded context from the DB and iterates. It does
+                    # NOT replay the DAG — execute_dag runs exactly once and is
+                    # never re-entered — so completed siblings are not re-executed.
                     # The completed path must use the attempt_completion tool so
                     # the UI and transcript show the same visible completion
                     # attempt as an LLM-initiated finish.
@@ -1088,8 +1095,15 @@ class AgentWorkflow:
                             "— falling through to run_agent for recovery"
                         )
                     else:
-                        workflow.logger.warning("[DAG] Execution failed; stopping before unrestricted replay")
-                        return await self._handle_incomplete(dag_result, "EXECUTE")
+                        # Failed/stalled DAG: recover via the LLM loop, exactly like
+                        # the completed-but-unverified path above. Do NOT return —
+                        # fall through to run_agent, which reads the recorded context
+                        # (completed results + the failure) from the DB and iterates.
+                        # This does not replay the DAG (execute_dag is never re-entered).
+                        workflow.logger.info(
+                            f"[DAG] {dag_result.get('message', 'Execution incomplete')} "
+                            "— falling through to run_agent for recovery"
+                        )
             else:
                 workflow.logger.info("[DAG] No plan found, using LLM-driven execution")
 

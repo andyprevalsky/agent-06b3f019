@@ -128,7 +128,7 @@ process_belongs_to_this_worktree() {
 port_requires_reassign() {
     local port=$1
     local pids
-    pids=$(lsof -ti :"$port" -sTCP:LISTEN 2>/dev/null) || true
+    pids=$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null) || true
     for pid in $pids; do
         local cmd
         cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
@@ -155,10 +155,7 @@ port_requires_reassign() {
 
 port_is_free_for_candidate_range() {
     local port=$1
-    # Only a LISTENER blocks a bind; ignore ephemeral outbound sockets (see
-    # port_requires_reassign) so a sibling workspace's proxy connection does not
-    # make us skip an otherwise-bindable candidate port.
-    if lsof -ti :"$port" -sTCP:LISTEN >/dev/null 2>&1; then
+    if lsof -nP -tiTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
         return 1
     fi
     if docker_ps_ports_quick '{{.Ports}}' | grep -q ":${port}->"; then
@@ -614,6 +611,29 @@ DB_RESTORED=false
 FIRST_RUN_SEEDED=false
 _SEED_DUMP="${BENCHMARK_SEED_DUMP:-}"
 _SCHEMA_HASH="$( (shasum back-end/prisma/schema.prisma 2>/dev/null || sha1sum back-end/prisma/schema.prisma 2>/dev/null) | awk '{print $1}')"
+# Cross-clone seed-dump cache (R2): a freshly-cloned cloud guest's /data has no
+# local dump, so without this it pays the full ~19-min prod cold-sync every time.
+# Pull a schema-matched dump from the SHARED cache first. This is purely additive
+# and neighbor-safe: on any miss/error $_SEED_DUMP stays absent and the block
+# below cold-syncs exactly as before (then repopulates the cache); the schemahash
+# guard + pg_restore fallback catch any mismatch/corruption, so it can never break
+# a boot or disturb a concurrently-running fleet. Token = schema hash (correctness)
+# + UTC day (bounds staleness to 24h). Local dev leaves BENCHMARK_SEED_DUMP unset.
+_SEED_CACHE_TOKEN="${_SCHEMA_HASH}-$(date -u +%Y%m%d 2>/dev/null || echo undated)"
+# R2 creds live in back-end/.env (run.sh does not export them to its shell), so
+# gate on the file, not the environment. seed-dump-cache.ts loads the .env itself.
+_SEED_CACHE_ENABLED=0
+grep -qE '^R2_BUCKET_TRACE_ARCHIVE=.' back-end/.env 2>/dev/null && _SEED_CACHE_ENABLED=1
+if [ -n "$_SEED_DUMP" ] && [ ! -s "$_SEED_DUMP" ] && [ "$_SEED_CACHE_ENABLED" = 1 ]; then
+    echo "🔎 Checking shared seed-dump cache ($_SEED_CACHE_TOKEN)..."
+    if (cd back-end && npx tsx scripts/seed-dump-cache.ts get "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") 2>/dev/null && [ -s "$_SEED_DUMP" ]; then
+        printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
+        echo "   ✅ pulled cached seed dump ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}')) — restoring instead of cold-syncing"
+    else
+        rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
+        echo "   ℹ️ no cached dump for this schema/day — will cold-sync and populate it"
+    fi
+fi
 if [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ] && [ "$(cat "${_SEED_DUMP}.schemahash" 2>/dev/null || echo x)" = "$_SCHEMA_HASH" ]; then
     echo "🗜️  Restoring seeded DB from persistent dump ($_SEED_DUMP) — skipping schema push + seed..."
     if PGPASSWORD=postgres pg_restore -h localhost -U postgres -d victoria --clean --if-exists --no-owner "$_SEED_DUMP" >/dev/null 2>&1; then
@@ -687,6 +707,14 @@ if [ -n "$_SEED_DUMP" ]; then
     if PGPASSWORD=postgres pg_dump -h localhost -U postgres -Fc victoria > "$_SEED_DUMP" 2>/dev/null; then
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
         echo "   ✅ seed dump saved ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}'))"
+        # Publish to the shared cache so the NEXT clone (any workspace — including a
+        # neighbor's daily run) restores in seconds instead of cold-syncing. Best-
+        # effort; a failed upload never blocks the boot.
+        if [ "$_SEED_CACHE_ENABLED" = 1 ]; then
+            if (cd back-end && npx tsx scripts/seed-dump-cache.ts put "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") >/dev/null 2>&1; then
+                echo "   ☁️ published seed dump to shared cache ($_SEED_CACHE_TOKEN)"
+            fi
+        fi
     else
         rm -f "$_SEED_DUMP" 2>/dev/null || true
     fi
@@ -730,10 +758,7 @@ if ! $IS_CLOUD; then
     SERVICE_PORTS=($BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $SDK_METRICS_PORT $NGROK_WEB_PORT)
     $IS_MAC && SERVICE_PORTS+=($MAC_APP_PORT)
     for port in "${SERVICE_PORTS[@]}"; do
-        # Only LISTENERS block our bind; an outbound ESTABLISHED socket that merely
-        # borrowed this ephemeral port (e.g. a sibling workspace's `flyctl proxy`)
-        # is harmless — see port_requires_reassign.
-        for pid in $(lsof -ti :"$port" -sTCP:LISTEN 2>/dev/null); do
+        for pid in $(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null); do
             cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
             echo "$cmd" | grep -qi docker && continue
             if process_belongs_to_this_worktree "$pid"; then
@@ -1314,7 +1339,7 @@ launch_backend_service() {
                     set +e
                     cd back-end || exit 1
                     rm -f "$BACKEND_LOG_FILE"
-                    PORT="$BACKEND_PORT" npx tsx src/server.ts > "$BACKEND_LOG_FILE" 2>&1
+                    PORT="$BACKEND_PORT" npx tsx src/bootstrap.ts > "$BACKEND_LOG_FILE" 2>&1
                     code=$?
                     if [ "$code" -ne 0 ]; then
                         printf "%s\n" back-end > "$FAIL_DIR/failed"
@@ -1325,12 +1350,12 @@ launch_backend_service() {
             BACKEND_PID=$!
             BACKEND_PGID="$BACKEND_PID"
         else
-            run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
+            run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx src/bootstrap.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
             BACKEND_PID=$!
             BACKEND_PGID=""
         fi
     else
-        run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx watch src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
+        run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx watch src/bootstrap.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
         BACKEND_PID=$!
         BACKEND_PGID=""
     fi

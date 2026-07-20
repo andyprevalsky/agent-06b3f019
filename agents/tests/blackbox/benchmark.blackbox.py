@@ -4111,8 +4111,8 @@ async def test_tree_log_collection_fetches_supabase_once():
     ]
 
 
-def test_local_benchmark_args_for_multi_task_exclude_complement():
-    """Multi-task local runs use one run_benchmark invocation with explicit exclusions."""
+def test_local_benchmark_args_for_multi_task_preserve_explicit_order():
+    """Multi-task local runs pass an exact ordered task list to the harness."""
     from benchmarks.local import build_benchmark_args
 
     args = build_benchmark_args(
@@ -4124,16 +4124,34 @@ def test_local_benchmark_args_for_multi_task_exclude_complement():
 
     assert args[0].endswith("python") or Path(args[0]).name.startswith("python")
     assert args[1:3] == ["-u", "benchmarks/run_benchmark.py"]
-    assert "--suite" in args and "all" in args
-    assert "--exclude-task" in args
-    excluded = args[args.index("--exclude-task") + 1].split(",")
-    assert "test-mass-agent-run-0" in excluded
-    assert "chat-mode" not in excluded
-    assert "browser-agent" not in excluded
+    selected = [args[index + 1] for index, value in enumerate(args) if value == "--task"]
+    assert selected == ["chat-mode", "browser-agent"]
+    assert "--suite" not in args
+    assert "--exclude-task" not in args
     assert args[args.index("--port") + 1] == "55120"
     assert "--bootstrap" in args
     assert "--keep-failed-agents" in args
     assert args[args.index("--max-concurrency") + 1] == "5"
+
+
+def test_run_benchmark_resolves_explicit_tasks_in_requested_order():
+    """The harness scheduler receives explicit tasks in wrapper order."""
+    from argparse import Namespace
+
+    from benchmarks.run_benchmark import resolve_tasks
+
+    args = Namespace(
+        task=["browser-biometrics-webdecoy", "spawn-sub-agents", "chat-mode"],
+        suite=None,
+        exclude_task=[],
+        prod=False,
+    )
+
+    assert [task.name for task in resolve_tasks(args)] == [
+        "browser-biometrics-webdecoy",
+        "spawn-sub-agents",
+        "chat-mode",
+    ]
 
 
 def test_local_benchmark_args_pass_anon_to_run_benchmark():
@@ -5966,7 +5984,7 @@ def test_unified_catalog_delineates_bench_axes():
     assert live["environment"]["live_targets"] == ["https://www.amazon.com"]
 
 
-def test_daily_ecommerce_v1_catalog_has_ten_distinct_transaction_flows():
+def test_daily_ecommerce_v1_catalog_has_eleven_distinct_transaction_flows():
     """The daily ecommerce slice stays focused, complete, and stable."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.fixtures import DEFAULT_BASE_IMAGE
@@ -5982,13 +6000,14 @@ def test_daily_ecommerce_v1_catalog_has_ten_distinct_transaction_flows():
         "browser-alchemy-springs-sauna",
         "browser-hotel-booking",
         "browser-event-ticket",
+        "browser-imax-group-tickets",
         "browser-amazon-return",
     }
     tasks = validate_catalog()
     ecommerce = [task for task in tasks if "ecommerce" in task.get("tags", [])]
 
     assert {task["name"] for task in ecommerce} == expected_names
-    assert len(ecommerce) == 10
+    assert len(ecommerce) == 11
     assert all(task.get("group", "").lower() == "daily" for task in ecommerce)
     assert all(task.get("status", "ready") == "ready" for task in ecommerce)
     assert all(task.get("enforce_declared_evaluators") is True for task in ecommerce)
@@ -7179,7 +7198,8 @@ async def run_all_tests():
     r.record("keep_agents_cleanup_policy", test_keep_agents_preserves_passed_and_failed_runs)
     r.record("local_plan_batches_together", test_local_plan_batches_selected_benchmarks_together)
     await r.record_async("tree_log_supabase_once", test_tree_log_collection_fetches_supabase_once)
-    r.record("local_args_multi_exclude", test_local_benchmark_args_for_multi_task_exclude_complement)
+    r.record("local_args_multi_order", test_local_benchmark_args_for_multi_task_preserve_explicit_order)
+    r.record("harness_explicit_task_order", test_run_benchmark_resolves_explicit_tasks_in_requested_order)
     r.record("local_args_anon", test_local_benchmark_args_pass_anon_to_run_benchmark)
     r.record("local_args_single_task", test_local_benchmark_args_for_single_task_not_parallel)
     r.record("local_failed_tasks_from_run", test_local_failed_tasks_from_run_reads_result_json)
@@ -7426,7 +7446,7 @@ async def run_all_tests():
     )
     r.record(
         "daily_ecommerce_v1_catalog",
-        test_daily_ecommerce_v1_catalog_has_ten_distinct_transaction_flows,
+        test_daily_ecommerce_v1_catalog_has_eleven_distinct_transaction_flows,
     )
     r.record(
         "unified_catalog_multiple_evaluators",

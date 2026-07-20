@@ -39,6 +39,7 @@ PORT=""
 LIST=false
 VERBOSE=false
 PROMPT_HUMAN_APPROVAL_RETRIEVED=false
+AGENT_BEHAVIOR_APPROVAL_RETRIEVED=false
 FULL_MAX_CONCURRENCY="${BENCHMARK_PROD_MAX_CONCURRENCY:-5}"
 
 for arg in "$@"; do
@@ -54,9 +55,15 @@ for arg in "$@"; do
     mandatory-human-approval-retrieved=false|--mandatory-human-approval-retrieved=false)
       PROMPT_HUMAN_APPROVAL_RETRIEVED=false
       ;;
+    agent-behavior-approval-retrieved=true|--agent-behavior-approval-retrieved=true)
+      AGENT_BEHAVIOR_APPROVAL_RETRIEVED=true
+      ;;
+    agent-behavior-approval-retrieved=false|--agent-behavior-approval-retrieved=false)
+      AGENT_BEHAVIOR_APPROVAL_RETRIEVED=false
+      ;;
     -*)
       echo "Unknown flag: $arg"
-      echo "Usage: bash scripts/test.sh [repo] [domain] [--full] [--no-smoke] [--port=N] [--list] [-v] [--mandatory-human-approval-retrieved=true]"
+      echo "Usage: bash scripts/test.sh [repo] [domain] [--full] [--no-smoke] [--port=N] [--list] [-v] [--mandatory-human-approval-retrieved=true] [--agent-behavior-approval-retrieved=true]"
       exit 1
       ;;
     *)
@@ -234,6 +241,12 @@ if $PROMPT_HUMAN_APPROVAL_RETRIEVED; then
 else
   run_suite "Prompt Human Approval Guard" bash scripts/check-prompt-human-approval.sh
 fi
+if $AGENT_BEHAVIOR_APPROVAL_RETRIEVED; then
+  run_suite "Agent Behavior Approval Guard" bash scripts/check-agent-behavior-approval.sh mandatory-human-approval-retrieved=true
+else
+  run_suite "Agent Behavior Approval Guard" bash scripts/check-agent-behavior-approval.sh
+fi
+run_suite "Agent Behavior Guard Unit Tests" bash scripts/tests/check-agent-behavior-approval.test.sh
 run_suite "Claude Review Fallback" bash scripts/tests/claude-review-fallback.test.sh
 run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
 run_suite "Existing Backend Replay Gate" bash scripts/tests/blackbox-existing-replay-gate.test.sh
@@ -241,6 +254,7 @@ run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.s
 run_suite "Cloud Benchmark Lifecycle" agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py
 run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh
 run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh
+run_suite "Cloud Benchmark Orphan-Proxy Reaper" bash scripts/tests/fleet-orphan-proxy-reaper.test.sh
 
 # ── Build checks (run in parallel with blackbox tests) ──
 BUILD_PIDS=()

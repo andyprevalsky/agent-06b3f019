@@ -24,6 +24,8 @@ FLEET_SCRIPT = ROOT / "scripts" / "run-bench-fleet"
 CLOUD_SCRIPT = ROOT / "scripts" / "run-bench-cloud"
 PREDEPLOY_SCRIPT = ROOT / "scripts" / "run-predeploy-cloud"
 PREDEPLOY_LOCAL_SCRIPT = ROOT / "scripts" / "run-predeploy-local"
+PREDEPLOY_METRICS_SCRIPT = ROOT / "agents" / "benchmarks" / "predeploy_metrics.py"
+LOGGED_COMMAND_SCRIPT = ROOT / "scripts" / "run_logged_command.py"
 RUN_BENCH_SCRIPT = ROOT / "scripts" / "run-bench"
 STACK_SCRIPT = ROOT / "scripts" / "run.sh"
 LOCAL_RUNNER = ROOT / "agents" / "benchmarks" / "local.py"
@@ -703,6 +705,26 @@ def test_predeploy_cloud_runner_selects_the_catalog_smoke_group() -> None:
     ]
 
 
+def test_predeploy_local_runner_selects_the_catalog_smoke_group() -> None:
+    result = subprocess.run(
+        ["bash", str(PREDEPLOY_LOCAL_SCRIPT), "--list"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "chat-mode",
+        "spawn-sub-agents",
+        "parallel-tool-calls",
+        "claude-code-agent",
+        "browser-smoke",
+        "browser-biometrics-webdecoy",
+    ]
+
+
 def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     # The policy, shell entrypoints, and Python owner form one executable chain.
     # Assert every hop so documentation can delegate without duplicating a
@@ -713,14 +735,24 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
         "## Step 6b: Semantic tests + fix", 1
     )[0]
 
+    assert "scripts/run-predeploy-local" in step
+    assert "scripts/run-predeploy-cloud" in step
+    assert "Benchmarks → Runs" in step
+    assert "6/6" in step
+    assert ".context/predeploy-runs/<run-id>/runner.log" in step
+    assert "run_benchmark.py --suite smoke" not in step
+    assert "scripts/run-deploy-stage --start" in deploy
+    assert "scripts/run-deploy-stage smoke -- bash scripts/run-predeploy-local" in step
+    assert "scripts/run-deploy-stage --finish" in deploy
     assert "bash scripts/run-predeploy-local" in step
     assert "LOCAL isolated benchmark stack" in step
     assert "Use the cloud fleet only as an explicit opt-in" in step
-    assert "7/7" in step
+    assert "6/6" in step
     assert "run_benchmark.py --suite smoke" not in step
 
     predeploy_local = PREDEPLOY_LOCAL_SCRIPT.read_text()
-    assert 'exec bash "$ROOT_DIR/scripts/run-bench" --local' in predeploy_local
+    assert 'bash "$ROOT_DIR/scripts/run-bench" --local' in predeploy_local
+    assert "BENCHMARK_SKIP_WMH_BUILD=1" in predeploy_local
     run_bench = RUN_BENCH_SCRIPT.read_text()
     local_branch = run_bench.split('if [[ "${1:-}" == "--local" ]]', 1)[1].split(
         'if [[ "${1:-}" == "--single-box" ]]', 1
@@ -738,7 +770,6 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     assert stack.workspace_name is not None
     assert stack.base_port == 62000
     assert '["bash", "scripts/run.sh", "--benchmark"]' in LOCAL_RUNNER.read_text()
-
     assert "git diff --name-only HEAD" in deploy
     assert "git ls-files --others --exclude-standard" in deploy
 
@@ -3053,6 +3084,10 @@ def test_local_predeploy_skips_wmh_and_wmh_logs_survive_agent_chdir(tmp_path: Pa
     (fixture / "scripts").mkdir(parents=True)
     (fixture / "agents" / "benchmarks").mkdir(parents=True)
     (fixture / "scripts" / "run-predeploy-local").write_text(predeploy)
+    (fixture / "scripts" / "run_logged_command.py").write_text(LOGGED_COMMAND_SCRIPT.read_text())
+    (fixture / "agents" / "benchmarks" / "predeploy_metrics.py").write_text(
+        PREDEPLOY_METRICS_SCRIPT.read_text()
+    )
     (fixture / "agents" / "benchmarks" / "tasks.json").write_text(
         json.dumps([{"name": "smoke-fixture", "tags": ["smoke"]}])
     )
@@ -3061,6 +3096,13 @@ def test_local_predeploy_skips_wmh_and_wmh_logs_survive_agent_chdir(tmp_path: Pa
         '#!/usr/bin/env bash\nprintf "%s\\n" "${BENCHMARK_SKIP_WMH_BUILD:-unset}" "$*" > "$CAPTURE"\n'
     )
     (fixture / "scripts" / "run-bench").chmod(0o755)
+    subprocess.run(["git", "init", "-q", str(fixture)], check=True)
+    subprocess.run(
+        ["git", "-C", str(fixture), "config", "user.email", "test@example.com"], check=True
+    )
+    subprocess.run(["git", "-C", str(fixture), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(fixture), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(fixture), "commit", "-qm", "fixture"], check=True)
     result = subprocess.run(
         ["bash", str(fixture / "scripts" / "run-predeploy-local")],
         env={**os.environ, "CAPTURE": str(capture)},

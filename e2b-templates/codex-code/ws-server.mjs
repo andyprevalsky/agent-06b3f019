@@ -54,10 +54,15 @@ const clients = new Set();
 
 function isUsageLimitMessage(message) {
   // Restricted to explicit ChatGPT/OpenAI plan-exhaustion wording. Broad terms
-  // like "quota" or a bare "hit your usage" can match unrelated sandbox tooling
+  // like a bare "quota" or "hit your usage" can match unrelated sandbox tooling
   // errors (disk/rate quotas) and would trigger a wasteful funded-key retry that
-  // masks the real failure.
-  return /usage[ _]limit|usage_limit_reached|hit your usage limit|purchase more credits/i.test(
+  // masks the real failure. The billing-exhaustion tells below are all specific
+  // to the OpenAI/ChatGPT plan being out of quota: "insufficient_quota" is the
+  // OpenAI error code, and "Quota exceeded. Check your plan and billing details."
+  // is the plan-exhaustion message returned on the responses API (only "usage
+  // limit"/"purchase more credits" wording was matched before, so this exact
+  // message slipped past and the funded-key fallback never fired).
+  return /usage[ _]limit|usage_limit_reached|hit your usage limit|purchase more credits|insufficient[_ ]quota|check your plan and billing/i.test(
     String(message || ""),
   );
 }

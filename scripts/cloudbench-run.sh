@@ -111,7 +111,7 @@ step() { log "STEP $*"; }
 stack_wait_budget_seconds() {
     local warm_budget first_run_budget
     warm_budget="${CLOUDBENCH_STACK_WAIT_SECONDS:-900}"
-    first_run_budget="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"
+    first_run_budget="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-2160}"
     # A newly cloned replacement guest has no persistent seed dump. Its first
     # production sync is bounded but can legitimately exceed the warm guest's
     # 900-second startup budget; subsequent claims restore the dump and retain
