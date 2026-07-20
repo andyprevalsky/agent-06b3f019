@@ -19,7 +19,9 @@ import type { Message } from '@/lib/api/types';
 
 const NOW = '2026-07-20T10:00:00.000Z';
 
-function mockAgent(partial: Partial<Agent> & Pick<Agent, 'agent_id' | 'goal' | 'status' | 'progress'>): Agent {
+function mockAgent(
+  partial: Partial<Agent> & Pick<Agent, 'agent_id' | 'goal' | 'status' | 'progress'>,
+): Agent {
   return {
     model: 'rose-labs/rose-1-ultra',
     source: 'WEB',
@@ -90,7 +92,11 @@ const MOCK_BROWSER_MESSAGES: Message[] = [
     message_id: 'm3',
     role: 'TOOL',
     text: 'Searching "carhartt knit beanie black"',
-    metadata: { toolName: 'browser', title: 'Search "carhartt knit beanie black"', toolStatus: 'FINISHED' },
+    metadata: {
+      toolName: 'browser',
+      title: 'Search "carhartt knit beanie black"',
+      toolStatus: 'FINISHED',
+    },
   }),
   msg({
     message_id: 'm4',
@@ -136,7 +142,10 @@ export default function MobilePreview() {
         browserUrl={FAKE_PAGE}
         messages={MOCK_BROWSER_MESSAGES}
         outputSchema={undefined}
-        browserSessionMetadata={{ provider: 'steel', proxyLocation: { city: 'Ashburn', country: 'US' } }}
+        browserSessionMetadata={{
+          provider: 'steel',
+          proxyLocation: { city: 'Ashburn', country: 'US' },
+        }}
         stepProgress={{ stepsTaken: 8, totalSteps: 20 }}
         isDisconnected={false}
         isWaitingForAuthAssistance={false}

@@ -255,7 +255,7 @@ describe('Terminal page', () => {
       renderWithProviders(<Terminal />);
 
       const inputArea = await screen.findByTestId('terminal-input-area');
-      expect(inputArea).toHaveClass('pb-1');
+      expect(inputArea).toHaveClass('pb-[calc(0.25rem+var(--safe-area-inset-bottom))]');
       expect(inputArea).toHaveClass('md:pb-6');
     });
 

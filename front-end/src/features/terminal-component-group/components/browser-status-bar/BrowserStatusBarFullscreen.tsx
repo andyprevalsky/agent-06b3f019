@@ -135,10 +135,7 @@ function MobileFrameHeader({
         isDisconnected={isDisconnected}
         isWaitingForAuthAssistance={isWaitingForAuthAssistance}
       />
-      <button
-        onClick={onClose}
-        className="rounded p-1.5 transition-colors hover:bg-muted"
-      >
+      <button onClick={onClose} className="rounded p-1.5 transition-colors hover:bg-muted">
         <X className="h-5 w-5 text-muted-foreground" />
       </button>
     </div>

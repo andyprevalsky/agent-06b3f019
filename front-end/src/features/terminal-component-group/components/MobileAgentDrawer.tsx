@@ -65,7 +65,7 @@ function CountBadge({ count, className }: { count: number; className?: string })
     <span
       className={cn(
         'flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-semibold text-white',
-        className
+        className,
       )}
     >
       {count > 99 ? '99+' : count}
@@ -90,7 +90,9 @@ function TabButton({
       onClick={onClick}
       className={cn(
         'flex flex-1 items-center justify-center gap-2 rounded-lg py-2 text-sm font-medium transition-colors',
-        active ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'
+        active
+          ? 'bg-background text-foreground shadow-sm'
+          : 'text-muted-foreground hover:text-foreground',
       )}
     >
       {label}
@@ -115,7 +117,7 @@ export default function MobileAgentDrawer({
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<DrawerTab>('agents');
 
-  const { requests, refetch } = useAttentionRequests(realtimeReady);
+  const { requests, refetch } = useAttentionRequests(isSignedIn && realtimeReady);
   const notifCount = isSignedIn ? unansweredCount(requests) : 0;
 
   const handleSelectAgent = (agentId: string | null) => {
@@ -144,7 +146,7 @@ export default function MobileAgentDrawer({
         <button
           type="button"
           aria-label="Open menu"
-          className="relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors hover:bg-muted"
+          className="relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors hover:bg-muted md:hidden"
         >
           <Menu className="h-5 w-5 text-foreground" />
           <CountBadge count={notifCount} className="absolute -right-1 -top-1" />
@@ -157,7 +159,11 @@ export default function MobileAgentDrawer({
         {isSignedIn ? (
           <>
             <div className="flex gap-1 border-b border-border bg-muted/50 p-1.5">
-              <TabButton active={tab === 'agents'} onClick={() => setTab('agents')} label="Agents" />
+              <TabButton
+                active={tab === 'agents'}
+                onClick={() => setTab('agents')}
+                label="Agents"
+              />
               <TabButton
                 active={tab === 'notifications'}
                 onClick={() => setTab('notifications')}

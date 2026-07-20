@@ -47,16 +47,22 @@ export function AttentionInboxContent({
     });
   }, []);
 
-  const { loading, actionRequestId, handleRespond, handleSkip, handleReject, handleSendViaIMessage } =
-    useAttentionActions({
-      requests,
-      responses,
-      clearResponse,
-      refetch,
-      setIsOpen: (open: boolean) => {
-        if (!open) onClose();
-      },
-    });
+  const {
+    loading,
+    actionRequestId,
+    handleRespond,
+    handleSkip,
+    handleReject,
+    handleSendViaIMessage,
+  } = useAttentionActions({
+    requests,
+    responses,
+    clearResponse,
+    refetch,
+    setIsOpen: (open: boolean) => {
+      if (!open) onClose();
+    },
+  });
 
   useAttentionKeyboardShortcuts({
     isOpen: isActive,

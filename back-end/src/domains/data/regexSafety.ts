@@ -36,7 +36,13 @@ export function checkPatternSafety(source: string, flags: string): PatternSafety
   try {
     diagnostics = checkSync(source, flags, { timeout: 1000 });
   } catch {
-    return { ok: true }; // analyzer error/timeout — fail open; the length cap is the backstop
+    // This guard protects a backtracking database regex engine. If analysis is
+    // unavailable or times out, accepting the pattern would bypass the only
+    // ReDoS defense, so reject it and let the caller request a simpler query.
+    return {
+      ok: false,
+      reason: 'Pattern safety could not be verified. Use a shorter, simpler expression.',
+    };
   }
   if (diagnostics.status !== 'vulnerable') return { ok: true };
   const complexity = diagnostics.complexity;
