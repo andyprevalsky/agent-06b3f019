@@ -68,6 +68,11 @@ interface BrowserApiResponse {
   resized?: boolean;
   viewport?: { width?: number; height?: number };
   browser_session_metadata?: BrowserMetadataResponse;
+  // rotate_ip response fields
+  proxy_tier?: string;
+  rotations_used?: number;
+  rotations_remaining?: number;
+  rotation_message?: string;
 }
 
 function withProvider(value: string | undefined, test: () => void): void {
@@ -221,6 +226,14 @@ async function runLiveProviderParity(): Promise<void> {
   let profileId: string | undefined;
   let proxyId: string | undefined;
   const headers = { 'content-type': 'application/json', 'x-api-key': apiKey };
+
+  const invalidRotation = await fetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({}),
+  });
+  assert(invalidRotation.status === 400, 'invalid rotate-proxy payload was not rejected');
+
   const post = async (path: string, body?: unknown): Promise<BrowserApiResponse> => {
     const response = await fetch(`${baseUrl}/api/browser-session${path}`, {
       method: 'POST',
@@ -304,6 +317,138 @@ async function runLiveProviderParity(): Promise<void> {
     proxyId = firstRemote.proxy_id ?? undefined;
     assert(proxyId !== undefined, 'Kernel browser did not use the managed proxy');
 
+    // ----- rotate_ip: real IP rotation on the same profile (residential tier) -----
+    const readExitIp = async (wsUrl: string): Promise<string> => {
+      const b = await chromium.connectOverCDP(wsUrl);
+      try {
+        const ctx = b.contexts()[0];
+        const p = ctx.pages()[0] ?? (await ctx.newPage());
+        await navigateKernelPage(p, 'https://api.ipify.org?format=json');
+        const raw = await p.evaluate(() => document.body.innerText);
+        return String((JSON.parse(raw) as { ip?: string }).ip ?? '');
+      } finally {
+        await b.close();
+      }
+    };
+
+    const ipBefore = await readExitIp(String(init.ws_url));
+    assert(ipBefore !== '', 'could not read exit IP before rotation');
+
+    const rotated = await postWithKernelConnectionRetry('/rotate-proxy', { task_id: init.task_id });
+    assert(rotated.proxy_tier === 'residential', 'first rotation must be residential');
+    assert(
+      rotated.rotations_used === 1,
+      `rotations_used should be 1, got ${rotated.rotations_used}`
+    );
+    assert(
+      rotated.rotations_remaining === 3,
+      'rotations_remaining should be 3 after first rotation'
+    );
+    assert(
+      rotated.ws_url !== undefined && rotated.ws_url !== init.ws_url,
+      'rotation must return a new ws_url'
+    );
+    assert(
+      rotated.session_id !== undefined && rotated.session_id !== liveSessionId,
+      'rotation must create a new Kernel session'
+    );
+    // Old browser must have been evicted (no paid-session leak).
+    const evicted = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
+    assert(Boolean(evicted.deleted_at), 'superseded Kernel session was not evicted after rotation');
+    liveSessionId = String(rotated.session_id);
+
+    const ipAfter = await readExitIp(String(rotated.ws_url));
+    // Residential exits vary per session; a rotation should land a different IP.
+    assert(
+      ipAfter !== '' && ipAfter !== ipBefore,
+      `rotation did not change the exit IP (before=${ipBefore}, after=${ipAfter})`
+    );
+
+    // ----- mobile tier: verify the residential->mobile escalation ACTUALLY moves
+    // the exit IP (ground truth via ipify, not the agent's self-report). The ladder
+    // is residential (calls 1-2) -> mobile (calls 3-4); seed the counter to 2 so the
+    // next rotation is call 3 = the mobile band. Gated on the same flag the backend
+    // reads, so a mobile-disabled deploy asserts the residential fallback instead of
+    // silently passing. -----
+    const mobileFlag = (process.env.KERNEL_MOBILE_FALLBACK_ENABLED ?? '').trim().toLowerCase();
+    const mobileOn = ['1', 'true', 'yes', 'on'].includes(mobileFlag);
+    await prisma.browserSession.update({
+      where: { id: String(init.task_id) },
+      data: { proxyRotationCount: 2 },
+    });
+    const residentialIp = ipAfter;
+    const mobileRotated = await postWithKernelConnectionRetry('/rotate-proxy', {
+      task_id: init.task_id,
+    });
+    const expectedTier = mobileOn ? 'mobile' : 'residential';
+    assert(
+      mobileRotated.proxy_tier === expectedTier,
+      `call 3 expected tier ${expectedTier}, got ${mobileRotated.proxy_tier}`
+    );
+    assert(
+      mobileRotated.ws_url !== undefined && mobileRotated.ws_url !== rotated.ws_url,
+      'mobile-band rotation must return a new ws_url'
+    );
+    assert(
+      mobileRotated.session_id !== undefined && mobileRotated.session_id !== liveSessionId,
+      'mobile-band rotation must create a new Kernel session'
+    );
+    const evictedResidential = await kernel.browsers.retrieve(liveSessionId, {
+      include_deleted: true,
+    });
+    assert(
+      Boolean(evictedResidential.deleted_at),
+      'residential session was not evicted before the mobile-band rotation'
+    );
+    liveSessionId = String(mobileRotated.session_id);
+    const mobileIp = await readExitIp(String(mobileRotated.ws_url));
+    // The residential->mobile switch (or a third residential recycle when mobile is
+    // off) must land a genuinely different egress IP. This is the exact claim the
+    // agent run could not prove: that the mobile tier actually rotates the IP.
+    assert(
+      mobileIp !== '' && mobileIp !== residentialIp,
+      `${expectedTier} rotation did not change the exit IP (residential=${residentialIp}, next=${mobileIp})`
+    );
+    // Print the ground-truth IP ladder so the run is a self-documenting repro of
+    // the exit IP actually changing across tiers (baseline -> residential -> mobile).
+    console.log(
+      `[rotate_ip repro] exit IP ladder: baseline(res)=${ipBefore} ` +
+        `-> rotation1(residential)=${ipAfter} ` +
+        `-> rotation3(${mobileRotated.proxy_tier})=${mobileIp}`
+    );
+
+    // ----- rotation cap: seed the row at the cap and expect a 409 -----
+    await prisma.browserSession.update({
+      where: { id: String(init.task_id) },
+      data: { proxyRotationCount: 4 },
+    });
+    const exhaustedResponse = await fetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ task_id: init.task_id }),
+    });
+    assert(
+      exhaustedResponse.status === 409,
+      `expected 409 when rotation budget is exhausted, got ${exhaustedResponse.status}`
+    );
+    const exhaustedBody = (await exhaustedResponse.json()) as { error?: string; message?: string };
+    assert(
+      exhaustedBody.error === 'proxy_rotation_exhausted' &&
+        String(exhaustedBody.message).includes('PROXY_ROTATION_EXHAUSTED'),
+      'exhaustion response missing the structured error the agent reads'
+    );
+
+    // ----- unknown task → 404 -----
+    const notFoundResponse = await fetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ task_id: randomUUID() }),
+    });
+    assert(
+      notFoundResponse.status === 404,
+      `expected 404 for an unknown task, got ${notFoundResponse.status}`
+    );
+
     const taskResponse = await fetch(
       `${baseUrl}/api/browser-session/task/${String(init.task_id)}?validateLive=true`,
       { headers: { 'x-api-key': apiKey } }
@@ -385,6 +530,15 @@ async function runLiveProviderParity(): Promise<void> {
       { method: 'POST', headers: { Authorization: `Bearer ${attackerToken}` } }
     );
     assert(crossTenantScreenshot.status === 404, 'cross-tenant screenshot was not rejected');
+    const crossTenantRotation = await fetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${attackerToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ task_id: init.task_id }),
+    });
+    assert(crossTenantRotation.status === 404, 'cross-tenant proxy rotation was not rejected');
 
     const screenshot = await post(`/${liveSessionId}/screenshot`);
     assert(screenshot.provider === 'kernel', 'Kernel screenshot reported the wrong provider');

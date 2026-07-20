@@ -730,6 +730,98 @@ def _kernel_replay_env():
     return restore
 
 
+class _SessionAwareReplayClient:
+    """Replay REST stub that mints a DISTINCT view URL per session, so a rotation
+    (which stands up a new session) yields a distinguishable replay segment."""
+
+    def __init__(self, calls):
+        self._calls = calls
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    @staticmethod
+    def _session_from_url(url: str) -> str:
+        # .../browsers/<session>/replays[...]
+        return url.split("/browsers/", 1)[1].split("/replays", 1)[0]
+
+    async def post(self, url, headers=None, json=None):
+        self._calls.append(("POST", url))
+        if url.endswith("/stop"):
+            return _FakeReplayResponse({})
+        session = self._session_from_url(url)
+        return _FakeReplayResponse(
+            {"replay_id": f"rep-{session}", "replay_view_url": f"https://kernel.example/view/{session}"}
+        )
+
+    async def get(self, url, headers=None):
+        self._calls.append(("GET", url))
+        session = self._session_from_url(url)
+        return _FakeReplayResponse(
+            [{"replay_id": f"rep-{session}", "replay_view_url": f"https://kernel.example/view/{session}"}]
+        )
+
+
+async def test_browser_agent_kernel_replay_follows_rotation():
+    """rotate_ip evicts the session and stands up a new one on a different exit IP.
+    The recorder must start a fresh replay segment per session so the recording
+    follows the rotation (and shows the IP change) instead of freezing on session 1."""
+    from unittest import mock
+
+    from domains.spawn_browser_agent_v3 import recording as recording_module
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    restore = _kernel_replay_env()
+    calls: list = []
+    try:
+        with mock.patch.object(
+            recording_module.httpx,
+            "AsyncClient",
+            lambda *a, **k: _SessionAwareReplayClient(calls),
+        ):
+            recorder = await BrowserAgentRecorder.create(
+                page=object(),
+                agent_id="agent-1",
+                task_id="task-1",
+                session_id="sess-A",
+                browser_url="https://kernel.example/live/A",
+                session_metadata={"provider": "kernel"},
+            )
+            assert recorder is not None
+            # Baseline segment (session A).
+            assert recorder.replay_view_urls == ["https://kernel.example/view/sess-A"]
+
+            # First rotation -> session B, second rotation -> session C.
+            await recorder.rotate_kernel_replay("sess-B")
+            await recorder.rotate_kernel_replay("sess-C")
+
+            # Three distinct segments in rotation order (baseline first).
+            assert recorder.replay_view_urls == [
+                "https://kernel.example/view/sess-A",
+                "https://kernel.example/view/sess-B",
+                "https://kernel.example/view/sess-C",
+            ]
+            # A fresh replay was started on each rotated session.
+            assert ("POST", "https://kernel.example/browsers/sess-B/replays") in calls
+            assert ("POST", "https://kernel.example/browsers/sess-C/replays") in calls
+            # The outgoing session's replay was best-effort stopped on rotation.
+            assert ("POST", "https://kernel.example/browsers/sess-A/replays/rep-sess-A/stop") in calls
+
+            # Finalize still returns a view URL; segments survive.
+            final = await recorder.stop_kernel_replay()
+            assert final == "https://kernel.example/view/sess-C"
+            assert len(recorder.replay_view_urls) == 3
+
+            # A no-op rotation (same session / empty) adds no segment.
+            await recorder.rotate_kernel_replay("sess-C")
+            await recorder.rotate_kernel_replay("")
+    finally:
+        restore()
+
+
 async def test_browser_agent_kernel_replay_uses_native_recording():
     """Kernel sessions reuse Kernel's native replay: start/stop the replay via
     REST, surface a hosted recording_view_url, and DON'T screenshot every frame."""

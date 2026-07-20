@@ -70,4 +70,7 @@ export const KNOWN_TAGS = [
   'setup',
   'idempotency',
   'settlement',
+  // Browser proxy/IP rotation slice (browser-rotate-ip-escalation in tasks.json).
+  'rotate-ip',
+  'proxy',
 ];
