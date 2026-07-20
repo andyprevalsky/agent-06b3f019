@@ -42,6 +42,11 @@ os.environ.setdefault("TIMEOUT_ScreenshotEvent", str(SCREENSHOT_EVENT_TIMEOUT_SE
 # Session init retry settings
 SESSION_MAX_WAIT_SECONDS = 900  # 15 minutes max
 SESSION_RETRY_INTERVAL_SECONDS = 30
+# Transient provider infra failures (unhealthy proxy allocated) reallocate on a
+# fresh init, so retry quickly a bounded number of times rather than waiting the
+# full rate-limit interval or failing the whole browser run.
+SESSION_INIT_TRANSIENT_MAX_ATTEMPTS = 4
+SESSION_INIT_TRANSIENT_RETRY_SECONDS = 5
 
 # Claude auth rotation
 MAX_CLAUDE_TOKEN_ROTATIONS = 5

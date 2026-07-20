@@ -68,13 +68,36 @@ def _url_token_sequence(value: str) -> list[str]:
     return [token for token in re.split(r"[^a-z0-9]+", _decode_url_component(value).lower()) if token]
 
 
+def _hostname_subdomain_token_sequence(hostname: str) -> list[str]:
+    """Tokens from a hostname's SUBDOMAIN labels only.
+
+    A checkout-ish word is a real routing signal when it names a subdomain
+    (``checkout.example.com``, ``secure-checkout.shop.example.com``) but not
+    when it *is* the registrable domain of a legitimate ordering platform
+    (``order.online``, ``orders.com``, ``pay.com``). Without a public-suffix
+    list we approximate the registrable domain as the final two labels and
+    treat everything to their left as subdomain labels. Hosts with two or
+    fewer labels have no subdomain and therefore contribute no checkout signal.
+    """
+    labels = [label for label in _decode_url_component(hostname).lower().split(".") if label]
+    subdomain_labels = labels[:-2]
+    return [
+        token for label in subdomain_labels for token in re.split(r"[^a-z0-9]+", label) if token
+    ]
+
+
 def _contains_checkout_route(value: str, *, hostname: bool = False) -> bool:
+    if hostname:
+        # Only inspect subdomain labels: the registrable domain of an ordering
+        # platform (order.online) must never be misread as a checkout page.
+        tokens = _hostname_subdomain_token_sequence(value)
+        if set(tokens) & (_CHECKOUT_ROUTE_TOKENS | _CHECKOUT_LEADING_TOKENS):
+            return True
+        return any(pair in _CHECKOUT_TOKEN_PAIRS for pair in zip(tokens, tokens[1:]))
     tokens = _url_token_sequence(value)
     if set(tokens) & _CHECKOUT_ROUTE_TOKENS:
         return True
     if tokens and tokens[0] in _CHECKOUT_LEADING_TOKENS:
-        return True
-    if hostname and set(tokens) & _CHECKOUT_LEADING_TOKENS:
         return True
     return any(pair in _CHECKOUT_TOKEN_PAIRS for pair in zip(tokens, tokens[1:]))
 

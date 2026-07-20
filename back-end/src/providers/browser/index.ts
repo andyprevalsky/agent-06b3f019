@@ -19,8 +19,10 @@ import {
   readKernelSessionFile,
   resizeKernelViewport,
   resumeKernelSession,
+  rotateKernelSession,
   uploadKernelSessionFile,
 } from './kernel';
+import type { KernelProxyType } from './kernelProxy';
 import type {
   BrowserFileInfo,
   BrowserProviderName,
@@ -139,6 +141,26 @@ export async function resumeSession(taskId: string): Promise<BrowserProviderResu
     profileId: session.steelProfileId,
     profileSource: session.profileSource,
   };
+}
+
+export class ProxyRotationUnsupportedError extends Error {
+  constructor(public readonly provider: BrowserProviderName) {
+    super(`Proxy rotation is not supported for the ${provider} browser provider`);
+    this.name = 'ProxyRotationUnsupportedError';
+  }
+}
+
+/**
+ * Rotate the session's outbound IP to a fresh managed proxy of `proxyType`.
+ * Kernel-only (Steel has no per-session managed-proxy swap). Same profile + geo.
+ */
+export async function rotateProxy(
+  taskId: string,
+  proxyType: KernelProxyType
+): Promise<BrowserProviderResumeSession> {
+  const provider = await providerForTask(taskId);
+  if (provider !== 'kernel') throw new ProxyRotationUnsupportedError(provider);
+  return rotateKernelSession(taskId, proxyType);
 }
 
 export async function getSession(sessionId: string) {
