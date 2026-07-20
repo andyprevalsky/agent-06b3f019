@@ -3679,13 +3679,20 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     return True
 
 
-def _sync_browser_credentials() -> bool:
+def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     """Refresh the complete live browser auth graph (context/provider profiles,
     cookies/storage, CookieBundles, Steel sessions, passwords, and passkeys) from
     prod into the isolated benchmark DB. Same pattern as
     _sync_compute_tokens: a one-time setup-db sync goes stale as cookies expire,
     so the live fixture re-pulls them right before the agent starts.
-    Best-effort but loud. Reads the prod source from back-end/.env."""
+    Best-effort but loud. Reads the prod source from back-end/.env.
+
+    When ``cookie_domains`` is given (from the task's environment.live_cookie_domains)
+    the cookie sync is scoped to just those domains — the dominant cost is the full
+    ~22k-cookie graph, so a task that only needs e.g. doordash.com syncs ~100 rows
+    in seconds instead of ~13 min (which blew the old 420s budget on every warm box
+    that skipped run.sh's boot sync). With no domains declared it syncs the full
+    graph under a raised budget (user-approved: generic tasks pay the honest cost)."""
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Credential sync skipped: local Victoria DB not found")
@@ -3693,6 +3700,21 @@ def _sync_browser_credentials() -> bool:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
+    if cookie_domains:
+        # seed-local.ts filters the prod cookie read to these domains (index-backed),
+        # so the sync is bounded by the task's own cookies, not the whole account.
+        env["SEED_COOKIE_DOMAINS"] = ",".join(cookie_domains)
+        cred_timeout = 300
+        print(
+            f"    🍪 scoping browser-credential sync to {len(cookie_domains)} "
+            f"domain(s): {', '.join(cookie_domains)}"
+        )
+    else:
+        # No declared domains → full cookie graph. It legitimately takes several
+        # minutes on a warm box (which skipped run.sh's boot sync), so give it the
+        # honest budget instead of failing the whole task at 420s.
+        cred_timeout = 900
+        print("    🍪 full browser-credential sync (no live_cookie_domains) — raised budget")
     try:
         result = subprocess.run(
             ["npx", "tsx", "scripts/seed-local.ts", "--credentials-only"],
@@ -3700,10 +3722,10 @@ def _sync_browser_credentials() -> bool:
             env=env,
             capture_output=True,
             text=True,
-            # A healthy sync takes ~60-90s; seed-local retries transient DB
-            # failures up to 3x internally (BROWSER_AUTH_SYNC_ATTEMPTS), so the
-            # outer budget must cover multiple attempts, not just one.
-            timeout=420,
+            # A scoped sync takes seconds; the full graph takes minutes. seed-local
+            # retries transient DB failures up to 3x internally, so the budget must
+            # cover multiple attempts of whichever mode this is.
+            timeout=cred_timeout,
         )
     except Exception as exc:
         print(f"    ⚠ Credential sync error: {exc}")
@@ -3752,6 +3774,10 @@ class LiveFixtureContext:
     base_url: str
     user_id: str
     auth_realm: str
+    # When a task declares environment.live_cookie_domains, the browser-credential
+    # sync is scoped to just those cookie domains (seconds, not ~13 min). Empty →
+    # full cookie sync with a raised budget.
+    cookie_domains: tuple[str, ...] = ()
 
 
 def _is_simulate_mode() -> bool:
@@ -3780,7 +3806,7 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     # org-wide Codex quota failed every browser task at the fixture (0/8 ecommerce).
     if not _sync_compute_tokens(tolerate_gpt_code_unavailable=True):
         raise RuntimeError("Live fixture could not refresh compute tokens")
-    if not _sync_browser_credentials():
+    if not _sync_browser_credentials(ctx.cookie_domains):
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
     return {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
 
@@ -4057,7 +4083,14 @@ def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
         # Live fixtures mutate the local isolated DB; never touch a prod base_url.
         return []
     auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
-    ctx = LiveFixtureContext(base_url=base_url, user_id=USER_ID, auth_realm=auth_realm)
+    raw_domains = (task.environment or {}).get("live_cookie_domains") or []
+    cookie_domains = tuple(str(d).strip() for d in raw_domains if str(d).strip())
+    ctx = LiveFixtureContext(
+        base_url=base_url,
+        user_id=USER_ID,
+        auth_realm=auth_realm,
+        cookie_domains=cookie_domains,
+    )
     manifests: list[dict] = []
     for name in fixtures:
         applier = LIVE_FIXTURE_APPLIERS.get(name)

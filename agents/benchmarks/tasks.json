@@ -992,7 +992,10 @@
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. The live fixture refreshes compute tokens and the complete browser-auth graph from prod, including CookieBundles. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie)."
+      "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. The live fixture refreshes compute tokens and the complete browser-auth graph from prod, including CookieBundles. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie).",
+      "live_cookie_domains": [
+        "amazon.com"
+      ]
     },
     "evaluators": [
       {
@@ -1114,7 +1117,10 @@
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "Live Amazon via synced-prod browser auth. The live fixture refreshes compute tokens and the complete browser-auth graph, including the CookieBundle used to complete one auto-approved cart purchase."
+      "context_notes": "Live Amazon via synced-prod browser auth. The live fixture refreshes compute tokens and the complete browser-auth graph, including the CookieBundle used to complete one auto-approved cart purchase.",
+      "live_cookie_domains": [
+        "amazon.com"
+      ]
     },
     "evaluators": [
       {
@@ -1227,7 +1233,10 @@
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "The live fixture refreshes all current credentials. Task-specific passkey isolation then deletes Amazon cookies and origin storage, disables saved-session/password alternatives, and detaches the local Kernel profile mapping so the run proves CDP passkey injection from a fresh profile."
+      "context_notes": "The live fixture refreshes all current credentials. Task-specific passkey isolation then deletes Amazon cookies and origin storage, disables saved-session/password alternatives, and detaches the local Kernel profile mapping so the run proves CDP passkey injection from a fresh profile.",
+      "live_cookie_domains": [
+        "amazon.com"
+      ]
     },
     "evaluators": [
       {
@@ -1371,7 +1380,10 @@
       "live_targets": [
         "https://order.toasttab.com/online/nopafish"
       ],
-      "context_notes": "Live Toast menu and checkout flow. The live fixture explicitly refreshes compute credentials and the complete browser-auth graph before the payment-card approval probe."
+      "context_notes": "Live Toast menu and checkout flow. The live fixture explicitly refreshes compute credentials and the complete browser-auth graph before the payment-card approval probe.",
+      "live_cookie_domains": [
+        "toasttab.com"
+      ]
     },
     "evaluators": [
       {
@@ -1441,7 +1453,10 @@
       "live_targets": [
         "https://www.opentable.com/restaurant/profile/45907/reserve"
       ],
-      "context_notes": "Live OpenTable inventory changes continuously. The task allows a two-hour window while holding restaurant, party size, and date fixed. The single final reservation write-lock is auto-approved."
+      "context_notes": "Live OpenTable inventory changes continuously. The task allows a two-hour window while holding restaurant, party size, and date fixed. The single final reservation write-lock is auto-approved.",
+      "live_cookie_domains": [
+        "opentable.com"
+      ]
     },
     "evaluators": [
       {
@@ -1540,7 +1555,10 @@
       "live_targets": [
         "https://www.instacart.com/grocery-delivery/ca/near-me-in-san-francisco-ca"
       ],
-      "context_notes": "Live Instacart catalog, inventory, pricing, saved delivery address, authentication state, and checkout write-lock."
+      "context_notes": "Live Instacart catalog, inventory, pricing, saved delivery address, authentication state, and checkout write-lock.",
+      "live_cookie_domains": [
+        "instacart.com"
+      ]
     },
     "evaluators": [
       {
@@ -1611,7 +1629,10 @@
       "live_targets": [
         "https://www.doordash.com/products/usbc-cable/ugp_c671cf61-ba10-4433-b46a-3cce19227d69"
       ],
-      "context_notes": "Live DoorDash retail inventory, saved address/auth state, product-spec comparison, delivery timing, and one auto-approved checkout boundary."
+      "context_notes": "Live DoorDash retail inventory, saved address/auth state, product-spec comparison, delivery timing, and one auto-approved checkout boundary.",
+      "live_cookie_domains": [
+        "doordash.com"
+      ]
     },
     "evaluators": [
       {
@@ -1706,7 +1727,10 @@
       "live_targets": [
         "https://www.alchemysprings.com/visit"
       ],
-      "context_notes": "Live Alchemy Springs Sauna Garden inventory and booking checkout for one person at the official 939 Post Street location, with one auto-approved write boundary and a completed confirmation."
+      "context_notes": "Live Alchemy Springs Sauna Garden inventory and booking checkout for one person at the official 939 Post Street location, with one auto-approved write boundary and a completed confirmation.",
+      "live_cookie_domains": [
+        "alchemysprings.com"
+      ]
     },
     "evaluators": [
       {
@@ -1813,7 +1837,10 @@
       "live_targets": [
         "https://www.booking.com"
       ],
-      "context_notes": "Live lodging inventory and rate rules. The benchmark fixes hotel, occupancy, relative dates, refundability, smoking preference, and price cap while allowing room inventory to vary, and auto-approves one write boundary to require a confirmed reservation."
+      "context_notes": "Live lodging inventory and rate rules. The benchmark fixes hotel, occupancy, relative dates, refundability, smoking preference, and price cap while allowing room inventory to vary, and auto-approves one write boundary to require a confirmed reservation.",
+      "live_cookie_domains": [
+        "booking.com"
+      ]
     },
     "evaluators": [
       {
@@ -1920,7 +1947,10 @@
       "live_targets": [
         "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
       ],
-      "context_notes": "Live movie/showtime/seat inventory. The benchmark fixes venue, date, time window, format, genre exclusion, seating heuristic, price cap, and no-add-on constraints, and auto-approves one write boundary to require a confirmed ticket purchase."
+      "context_notes": "Live movie/showtime/seat inventory. The benchmark fixes venue, date, time window, format, genre exclusion, seating heuristic, price cap, and no-add-on constraints, and auto-approves one write boundary to require a confirmed ticket purchase.",
+      "live_cookie_domains": [
+        "amctheatres.com"
+      ]
     },
     "evaluators": [
       {
@@ -2028,7 +2058,10 @@
       "live_targets": [
         "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
       ],
-      "context_notes": "Live IMAX showtime/seat inventory. The benchmark fixes venue, tonight's date, premium format (IMAX, Dolby Cinema fallback), quantity (3 adult tickets), a same-row adjacency constraint across all 3 seats, a per-ticket price cap, and a no-add-on constraint, and auto-approves one write boundary to require a confirmed multi-ticket purchase."
+      "context_notes": "Live IMAX showtime/seat inventory. The benchmark fixes venue, tonight's date, premium format (IMAX, Dolby Cinema fallback), quantity (3 adult tickets), a same-row adjacency constraint across all 3 seats, a per-ticket price cap, and a no-add-on constraint, and auto-approves one write boundary to require a confirmed multi-ticket purchase.",
+      "live_cookie_domains": [
+        "amctheatres.com"
+      ]
     },
     "evaluators": [
       {
@@ -2139,7 +2172,10 @@
       "live_targets": [
         "https://www.amazon.com/gp/your-account/order-history"
       ],
-      "context_notes": "Live Amazon order history with synced account authentication. A deterministic eligible-order fixture is the main stability risk for this post-purchase flow; one write boundary is auto-approved so success requires a completed return confirmation."
+      "context_notes": "Live Amazon order history with synced account authentication. A deterministic eligible-order fixture is the main stability risk for this post-purchase flow; one write boundary is auto-approved so success requires a completed return confirmation.",
+      "live_cookie_domains": [
+        "amazon.com"
+      ]
     },
     "evaluators": [
       {
@@ -2245,7 +2281,10 @@
       "live_targets": [
         "https://m.uber.com"
       ],
-      "context_notes": "Live Uber route, pricing, and checkout state with current account authentication supplied by the single live credential overlay."
+      "context_notes": "Live Uber route, pricing, and checkout state with current account authentication supplied by the single live credential overlay.",
+      "live_cookie_domains": [
+        "uber.com"
+      ]
     },
     "evaluators": [
       {

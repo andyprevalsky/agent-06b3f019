@@ -24,6 +24,7 @@ import {
   syncSteelSessionAuthCredentials,
 } from './seed-local-credentials';
 import { runSyncStep, syncRowsWithConcurrency, syncUserRecord } from './seed-local-helpers';
+import { parseCookieDomains, cookieSyncWhere } from './cookie-domain-scope';
 
 // Parse .env file directly to get remote DB URL
 // (process.env.DATABASE_URL is already overridden to local by run.sh)
@@ -55,6 +56,12 @@ const SKIP_BROWSER_AUTH_SYNC =
 const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
 const PASSKEYS_ONLY = process.argv.includes('--passkeys-only');
 const COMPUTE_TOKEN_SYNC_ATTEMPTS = 5;
+
+// SEED_COOKIE_DOMAINS scopes the cookie sync (the dominant cost — the account can
+// hold ~22k cookies) to just the domains a benchmark task needs. Set by
+// run_benchmark from the task's environment.live_cookie_domains. Empty → full
+// cookie graph. Filter logic lives in cookie-domain-scope.ts (unit-tested).
+const SEED_COOKIE_DOMAINS = parseCookieDomains(process.env.SEED_COOKIE_DOMAINS);
 
 const requestedSeedModes = [
   ['--compute-tokens-only', COMPUTE_TOKENS_ONLY],
@@ -193,13 +200,38 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   await syncRequiredTable(
     'Cookies',
     async () => {
-      const cookies = await remote.cookie.findMany({ where: { userId: DEV_USER_ID } });
-
-      for (let i = 0; i < cookies.length; i += 500) {
-        const batch = cookies.slice(i, i + 500);
-        await syncCookieCredentials(local.cookie, batch);
-        if (cookies.length > 500 && i + 500 < cookies.length) {
-          process.stdout.write(`     ${Math.min(i + 500, cookies.length)}/${cookies.length}...\r`);
+      const cookies = await remote.cookie.findMany({
+        where: cookieSyncWhere(DEV_USER_ID, SEED_COOKIE_DOMAINS) as never,
+      });
+      if (SEED_COOKIE_DOMAINS.length > 0) {
+        process.stdout.write(
+          `     scoped to ${SEED_COOKIE_DOMAINS.length} domain(s) [${SEED_COOKIE_DOMAINS.join(
+            ', '
+          )}] → ${cookies.length} cookies\n`
+        );
+      }
+      // Fresh local table (the benchmark cold path): one bulk createMany instead of
+      // ~N per-row upsert round-trips (the ~780s bottleneck). On an already-populated
+      // table (warm restore / re-sync) fall back to upsert so refreshed cookie values
+      // overwrite stale rows. skipDuplicates makes the bulk path idempotent against
+      // the natural-key unique constraint.
+      const existingLocal = await local.cookie.count({ where: { userId: DEV_USER_ID } });
+      if (existingLocal === 0 && cookies.length > 0) {
+        for (let i = 0; i < cookies.length; i += 1000) {
+          await local.cookie.createMany({
+            data: cookies.slice(i, i + 1000) as never,
+            skipDuplicates: true,
+          });
+        }
+      } else {
+        for (let i = 0; i < cookies.length; i += 500) {
+          const batch = cookies.slice(i, i + 500);
+          await syncCookieCredentials(local.cookie, batch);
+          if (cookies.length > 500 && i + 500 < cookies.length) {
+            process.stdout.write(
+              `     ${Math.min(i + 500, cookies.length)}/${cookies.length}...\r`
+            );
+          }
         }
       }
       return cookies.length;
