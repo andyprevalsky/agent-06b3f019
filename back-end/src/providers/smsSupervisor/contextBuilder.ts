@@ -12,6 +12,7 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '../database';
 import { CompletionMessage, SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../rose';
 import { createLogger } from '../logger';
+import { extractFingerprintTimeZone, formatUserTemporalContext } from './timeContext';
 
 const log = createLogger('SmsContext');
 
@@ -132,22 +133,27 @@ export async function buildSmsContext(
   options: { excludeInboundSeq?: number } = {}
 ): Promise<SmsContext> {
   const startTime = Date.now();
+  const currentInstant = new Date();
 
   log.info('[SmsContext] Building context', { userId });
 
   // Fetch all data in parallel
-  const [rootAgents, attentionRequests, user, session] = await Promise.all([
+  const [rootAgents, attentionRequests, user, session, fingerprintIntegration] = await Promise.all([
     fetchAgentHierarchy(userId),
     fetchPendingAttentionRequests(userId),
     fetchUserProfile(userId),
     fetchSmsSession(userId),
+    fetchBrowserFingerprint(userId),
   ]);
+  const timeZone = extractFingerprintTimeZone(fingerprintIntegration?.config);
 
   log.info('[SmsContext] Fetched data', {
     userId,
     rootAgentCount: rootAgents.length,
     attentionRequestCount: attentionRequests.length,
     hasSession: !!session,
+    hasTimeZone: timeZone !== null,
+    timeZone: timeZone ?? undefined,
     durationMs: Date.now() - startTime,
   });
 
@@ -195,6 +201,8 @@ export async function buildSmsContext(
   const attentionSection = formatAttentionRequests(attentionRequests);
   const messagesSection = formatVisibleMessages(visibleMessages, rootAgents);
   const contextUserMessage = assembleContextUserMessage({
+    currentUtcInstant: currentInstant.toISOString(),
+    temporalContext: formatUserTemporalContext(currentInstant, timeZone),
     hierarchySection,
     attentionSection,
     messagesSection,
@@ -344,6 +352,13 @@ async function fetchUserProfile(userId: string) {
 async function fetchSmsSession(userId: string) {
   return prisma.smsSession.findUnique({
     where: { userId },
+  });
+}
+
+async function fetchBrowserFingerprint(userId: string) {
+  return prisma.integration.findUnique({
+    where: { userId_name: { userId, name: 'browser_fingerprint' } },
+    select: { config: true },
   });
 }
 
@@ -652,16 +667,20 @@ export function assembleSystemPrompt(params: { userContextSection: string }): st
 
 /**
  * DYNAMIC per-SMS state — current datetime, agent hierarchy, pending attention
- * requests, recent visible messages. Injected as a `user`-role message before
- * the inbound user message so the static system prompt stays cache-stable.
+ * requests, recent visible messages. Encoded as a synthetic get_environment
+ * tool result after the inbound user message so the static prompt stays cached.
  */
 function assembleContextUserMessage(params: {
+  currentUtcInstant: string;
+  temporalContext: string;
   hierarchySection: string;
   attentionSection: string;
   messagesSection: string;
 }): string {
-  const { hierarchySection, attentionSection, messagesSection } = params;
-  return `Current state (as of ${new Date().toISOString()}):
+  const { currentUtcInstant, temporalContext, hierarchySection, attentionSection, messagesSection } =
+    params;
+  const stateHeading = `Current state (as of ${currentUtcInstant}):\n\n${temporalContext}`;
+  return `${stateHeading}
 
 ${hierarchySection}
 

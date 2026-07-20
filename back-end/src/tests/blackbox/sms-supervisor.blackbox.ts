@@ -51,6 +51,10 @@ import {
   testRealLlm_voiceNoteRoundTrip,
 } from './sms-supervisor.media.behavior';
 import { replyIntentBlackboxCase } from './sms-supervisor.intent.behavior';
+import {
+  testContext_guardsUnknownTimeZone,
+  testContext_rendersFingerprintTimeZone,
+} from './sms-supervisor.timezone.behavior';
 import { buildToolFailureMessage } from '../../providers/smsSupervisor/supervisorHandler';
 import { commitPendingWrites, PendingOp } from '../../providers/smsSupervisor/supervisorTools';
 const prisma = new PrismaClient();
@@ -602,6 +606,14 @@ async function runAll() {
     {
       name: 'context -- recently completed roots stay in SMS hierarchy for 7 days',
       fn: () => assertRecentCompletedRootStaysInHierarchy(prisma),
+    },
+    {
+      name: 'context -- incident UTC instant renders in the fingerprint IANA zone',
+      fn: () => testContext_rendersFingerprintTimeZone(prisma),
+    },
+    {
+      name: 'context -- invalid or missing fingerprint zone forbids local-time assumptions',
+      fn: () => testContext_guardsUnknownTimeZone(prisma),
     },
     {
       name: 'smoke -- inbound SMS runs supervisor loop and sends SMS response',
