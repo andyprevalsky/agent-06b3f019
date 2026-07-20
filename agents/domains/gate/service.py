@@ -13,7 +13,6 @@ Imports: own repo, own types, external packages, tools.base.
 
 from __future__ import annotations
 
-import os
 from datetime import timedelta
 from typing import Any, Dict, Optional
 
@@ -26,7 +25,7 @@ from tools.base import EventType, MessageStatus, ToolEvent
 from .config import (
     DEFAULT_KYC_URL,
     DEFAULT_SUBSCRIBE_URL,
-    PURCHASE_GATE_TYPES,
+    GATE_SUPPRESSED_SENTINEL,
     REJECTION_SENTINEL,
     TOOL_NAME,
 )
@@ -34,23 +33,6 @@ from .repo import create_gate_request_activity
 from .types import GateRejectedError
 
 logger = structlog.get_logger()
-
-
-def _should_suppress_gate(gate_type: str) -> bool:
-    """Whether a gate of this type must be turned into a non-blocking no-op.
-
-    Purchase gates (``subscription``/``kyc`` — see ``PURCHASE_GATE_TYPES``) always
-    block; they gate real money and are never suppressed. Every other gate type
-    (currently only ``source_connect``, e.g. "connect your Gmail") is temporarily
-    suppressed so the agent proceeds without prompting the user to hook up a data
-    source. Set ``NON_PURCHASE_GATES_ENABLED=1`` to restore all gates.
-
-    Read at call time (not import) so the flag is picked up after ``.env`` loads.
-    """
-    if gate_type in PURCHASE_GATE_TYPES:
-        return False
-    enabled = os.getenv("NON_PURCHASE_GATES_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
-    return not enabled
 
 
 def build_subscription_gate(
@@ -121,20 +103,6 @@ async def raise_gate_direct(workflow_instance: Any, gate: Dict[str, Any], gate_k
     Raises:
         GateRejectedError: If the user declines the gate.
     """
-    # Kill-switch: connection gates (source_connect, ...) are suppressed to a
-    # non-blocking no-op while only purchase gates (subscription/kyc) stay live.
-    # Returns "" as if instantly resolved — the caller proceeds without parking
-    # the workflow. Guarded BEFORE any workflow.* call so the suppressed path
-    # never touches Temporal APIs. Toggle back on with NON_PURCHASE_GATES_ENABLED=1.
-    gate_type = str(gate.get("type") or "")
-    if _should_suppress_gate(gate_type):
-        logger.info(
-            "Gate suppressed by non-purchase kill-switch",
-            gate_key=gate_key,
-            gate_type=gate_type,
-        )
-        return ""
-
     info = workflow.info()
     workflow_id = info.workflow_id
     user_id = workflow_instance.user_id
@@ -156,6 +124,15 @@ async def raise_gate_direct(workflow_instance: Any, gate: Dict[str, Any], gate_k
         start_to_close_timeout=timedelta(seconds=30),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
+
+    # Kill-switch: the activity suppressed this gate (a disabled connection gate)
+    # instead of creating a request. Treat as instantly resolved — return "" so
+    # the caller proceeds without parking the workflow. Branching on the recorded
+    # activity result (not a fresh env read) keeps this deterministic on replay.
+    if request_id == GATE_SUPPRESSED_SENTINEL:
+        logger.info("Gate suppressed — no request created", gate_key=gate_key)
+        return ""
+
     logger.info("Gate raised, awaiting resolution", request_id=request_id, gate_key=gate_key)
 
     # Park until the backend signals this request's resolution (same inbox the
