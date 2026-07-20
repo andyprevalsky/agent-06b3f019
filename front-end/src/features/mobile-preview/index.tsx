@@ -162,6 +162,10 @@ export default function MobilePreview() {
             /* preview */
           }}
           resumingAgentId={null}
+          realtimeReady={false}
+          isSignedIn
+          onLoginClick={noop}
+          onLogout={noop}
         />
         <div className="flex items-center gap-2">
           <div className="h-7 w-7 rounded-lg bg-gradient-to-br from-orange-400 to-purple-500" />

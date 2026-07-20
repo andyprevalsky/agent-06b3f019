@@ -5,14 +5,13 @@
  *
  * Presentation is layout-driven:
  *   desktop -> fixed-width left column beside the iframe (border-r)
- *   mobile  -> full width (rendered inside a full-screen overlay so it never
- *              clips the live iframe to a sliver)
+ *   mobile  -> full width below the aspect-matched live browser in the same
+ *              fixed view, with this panel owning the remaining scroll space
  *
  * STATE MACHINE (presentation branch, driven by the isMobile/onClose props):
  * [DESKTOP]      -> fixed-width left column beside the iframe (no close button)
- * [MOBILE_HIDDEN] --parent "Progress" toggle--> [MOBILE_OPEN]
- * [MOBILE_OPEN]   -> full-width panel in a full-screen overlay + close (X)
- * [MOBILE_OPEN]   --tap X (onClose)--> [MOBILE_HIDDEN]
+ * [MOBILE_STACKED] -> full-width panel always visible below the browser
+ * [LEGACY_OVERLAY] -> optional close affordance only when parent supplies onClose
  */
 
 import { X } from 'lucide-react';

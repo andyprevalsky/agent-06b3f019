@@ -11,6 +11,7 @@
  */
 import type { AgentDetail } from '../hooks';
 import { Button } from '@/components/ui/button';
+import { useIsMobile } from '@/hooks/use-mobile';
 import { attemptMacAppHandoff } from '@/lib/macAppHandoff';
 
 interface StatusBannersProps {
@@ -90,7 +91,11 @@ export function StatusBanners({ agent, onAddCredits, onIncreaseCostLimit }: Stat
 }
 
 export function WebPreviewBanner({ agentId }: { agentId: string }) {
+  const isMobile = useIsMobile();
   const openAppUrl = `roselabs://open?agent-id=${encodeURIComponent(agentId)}`;
+  // The mac-app handoff is desktop-only — a phone can't open the mac app, so the
+  // "Preview Mode / Open Mac App" banner is noise on mobile.
+  if (isMobile) return null;
   const handleOpenApp = (event: React.MouseEvent<HTMLAnchorElement>) => {
     event.preventDefault();
     attemptMacAppHandoff({

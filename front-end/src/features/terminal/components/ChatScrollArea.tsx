@@ -69,7 +69,7 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
         <div className="space-y-6 text-center md:mb-[20vh]">
           <div
             data-testid="terminal-opening-ascii-transform"
-            className="relative translate-y-[5%] scale-95 md:translate-y-0 md:scale-100"
+            className="relative translate-y-[5%] scale-95 max-md:[@media(max-height:720px)]:[zoom:0.72] md:translate-y-0 md:scale-100"
           >
             <AsciiLoader
               showWarmingUp={false}

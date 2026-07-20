@@ -1935,7 +1935,7 @@ describe('BrowserViewPanel (blackbox)', () => {
     expect((iframe as HTMLIFrameElement).src).toContain('https://example.com');
   });
 
-  it('shows control-hint text when no pending write lock approval', () => {
+  it('does not waste browser height on redundant login/captcha helper copy', () => {
     renderWithProviders(
       withAgentCtx(
         [],
@@ -1947,7 +1947,7 @@ describe('BrowserViewPanel (blackbox)', () => {
         />,
       ),
     );
-    expect(screen.getByText(/You can interact with the browser/i)).toBeInTheDocument();
+    expect(screen.queryByText(/You can interact with the browser/i)).not.toBeInTheDocument();
   });
 
   it('clicking fullscreen toggle calls onFullscreenToggle(true)', async () => {

@@ -1,15 +1,15 @@
 /**
- * Presentational overlay chips for BrowserStatusBarFullscreen — the
- * take-control affordance, the auth-assistance handoff, and the disconnected
- * resume overlay. Pure/stateless; extracted to keep the fullscreen container
- * under its size budget.
+ * Presentational controls for BrowserStatusBarFullscreen — desktop overlay
+ * chips plus the mobile control footer. Pure/stateless; extracted to keep the
+ * fullscreen container under its size budget.
  *
  * STATE MACHINE (this file renders the AGENT OVERLAY STATE owned by
  * BrowserStatusBarFullscreen; it holds no state of its own — props select which
  * chip renders):
- * [ACTIVE]                       -> WaitingForAssistanceChip / take-control affordance
- * [WAITING_FOR_AUTH_ASSISTANCE]  -> AuthAssistanceChip (connected handoff)
- * [DISCONNECTED]                 -> DisconnectedResumeOverlay (blurred resume)
+ * [ACTIVE_DESKTOP]      -> TakeControlChip over the browser
+ * [WAITING_DESKTOP]     -> WaitingForAssistanceChip over the browser
+ * [DISCONNECTED_DESKTOP] -> DisconnectedOverlay over the browser
+ * [*_MOBILE]            -> MobileBrowserControlFooter below the browser
  */
 
 import { cn } from '@/lib/utils';
@@ -23,7 +23,7 @@ export function TakeControlChip({
   isResuming: boolean;
 }) {
   return (
-    <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-10">
+    <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-10 max-w-[calc(100vw-24px)]">
       <div className="flex items-center gap-3 pl-4 pr-2 py-2 rounded-full bg-navi-black shadow-2xl">
         <div className="flex items-center gap-2">
           <ThinkingAnimation
@@ -33,19 +33,72 @@ export function TakeControlChip({
             className="w-4 h-4 flex-shrink-0"
             style={{ width: '16px', height: '16px' }}
           />
-          <span className="text-sm font-medium text-navi-white">Agent in progress</span>
+          <span className="whitespace-nowrap text-sm font-medium text-navi-white">
+            Agent in progress
+          </span>
         </div>
         <button
           onClick={onResume}
           disabled={isResuming}
           className={cn(
-            'text-sm font-medium ml-6 px-3 py-1 rounded-full bg-blue-500 text-white hover:bg-blue-400 transition-colors',
-            isResuming && 'opacity-50 cursor-not-allowed',
+            'whitespace-nowrap rounded-full bg-blue-500 px-3 py-1 text-sm font-medium text-white transition-colors hover:bg-blue-400',
+            isResuming && 'cursor-not-allowed opacity-50',
           )}
         >
           {isResuming ? 'Loading...' : 'Take control'}
         </button>
       </div>
+    </div>
+  );
+}
+
+export function MobileBrowserControlFooter({
+  onResume,
+  isResuming,
+  isDisconnected,
+  isWaitingForAuthAssistance,
+  request,
+}: {
+  onResume: () => void;
+  isResuming: boolean;
+  isDisconnected: boolean;
+  isWaitingForAuthAssistance: boolean;
+  request?: string;
+}) {
+  const label = isDisconnected
+    ? 'Browser disconnected'
+    : isWaitingForAuthAssistance
+      ? (request ?? 'Agent waiting for assistance')
+      : 'Agent in progress';
+  const action = isWaitingForAuthAssistance ? 'Start Agent' : 'Take control';
+
+  return (
+    <div
+      data-testid="mobile-browser-control-footer"
+      className="flex w-full flex-none items-center justify-between gap-3 bg-navi-black px-4 py-3"
+    >
+      <div className="flex min-w-0 items-center gap-2">
+        {!isDisconnected && !isWaitingForAuthAssistance && (
+          <ThinkingAnimation
+            dataUrl="/thinking_animations.txt"
+            autoplay
+            loop
+            className="h-4 w-4 flex-shrink-0"
+            style={{ width: '16px', height: '16px' }}
+          />
+        )}
+        <span className="truncate text-sm font-medium text-navi-white">{label}</span>
+      </div>
+      <button
+        onClick={onResume}
+        disabled={isResuming}
+        className={cn(
+          'flex-none whitespace-nowrap rounded-full bg-blue-500 px-4 py-1.5 text-sm font-medium text-white transition-colors hover:bg-blue-400',
+          isResuming && 'cursor-not-allowed opacity-50',
+        )}
+      >
+        {isResuming ? 'Loading...' : action}
+      </button>
     </div>
   );
 }
