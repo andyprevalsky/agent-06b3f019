@@ -656,7 +656,13 @@ if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ] && \
 fi
 if [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ] && [ "$(cat "${_SEED_DUMP}.schemahash" 2>/dev/null || echo x)" = "$_SCHEMA_HASH" ]; then
     echo "🗜️  Restoring seeded DB from persistent dump ($_SEED_DUMP) — skipping schema push + seed..."
-    if PGPASSWORD=postgres pg_restore -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -d "$LOCAL_DB_NAME" --clean --if-exists --no-owner "$_SEED_DUMP" >/dev/null 2>&1; then
+    _SEED_RESTORE_CONTAINER=""
+    if ! $USE_SYSTEM_PG; then
+        _SEED_RESTORE_CONTAINER="$DB_CONTAINER"
+    fi
+    if PGPASSWORD=postgres bash scripts/restore-seed-dump.sh \
+        "$_SEED_DUMP" localhost "$LOCAL_DB_ACTUAL_PORT" postgres "$LOCAL_DB_NAME" \
+        "$_SEED_RESTORE_CONTAINER" >/dev/null; then
         DB_RESTORED=true
         echo "   ✅ DB restored from dump"
     else

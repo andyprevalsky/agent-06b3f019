@@ -4419,10 +4419,9 @@ def test_run_sh_seed_dump_targets_isolated_database_atomically():
     """System-Postgres isolated runs must restore/dump their per-run DB safely."""
     run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
 
-    assert (
-        'pg_restore -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -d "$LOCAL_DB_NAME"'
-        in run_script
-    )
+    assert 'bash scripts/restore-seed-dump.sh' in run_script
+    assert '"$_SEED_RESTORE_CONTAINER" >/dev/null' in run_script
+    assert '"$_SEED_RESTORE_CONTAINER" >/dev/null 2>&1' not in run_script
     assert (
         'pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME"'
         in run_script
@@ -4432,6 +4431,63 @@ def test_run_sh_seed_dump_targets_isolated_database_atomically():
     cold_sync = run_script.index('echo "🌱 Syncing production data to local database (first run)..."')
     assert required_guard < cold_sync
     assert "refusing a slow production cold-sync" in run_script
+
+
+def test_seed_dump_restore_uses_target_container_pg_restore():
+    """A newer host client must not restore into the older per-run DB server."""
+    repo_root = Path(__file__).resolve().parents[3]
+    helper = repo_root / "scripts" / "restore-seed-dump.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        command_log = tmp_path / "commands.log"
+        dump = tmp_path / "seed.dump"
+        dump.write_bytes(b"custom-archive-fixture")
+
+        host_restore = tmp_path / "pg_restore"
+        host_restore.write_text(
+            '#!/bin/sh\n'
+            'echo "host pg_restore $*" >> "$COMMAND_LOG"\n'
+            'echo \'unrecognized configuration parameter "transaction_timeout"\' >&2\n'
+            'exit 1\n'
+        )
+        host_restore.chmod(0o755)
+
+        docker = tmp_path / "docker"
+        docker.write_text(
+            '#!/bin/sh\n'
+            'echo "docker $*" >> "$COMMAND_LOG"\n'
+            'cat >/dev/null\n'
+            'exit 0\n'
+        )
+        docker.chmod(0o755)
+
+        result = subprocess.run(
+            [
+                "bash",
+                str(helper),
+                str(dump),
+                "localhost",
+                "55395",
+                "postgres",
+                "victoria",
+                "victoria-db-owned-run",
+            ],
+            cwd=repo_root,
+            env={
+                **os.environ,
+                "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
+                "COMMAND_LOG": str(command_log),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = command_log.read_text()
+        assert "docker exec -i victoria-db-owned-run pg_restore" in calls
+        assert "host pg_restore" not in calls
 
 
 def test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe():
@@ -7340,6 +7396,10 @@ async def run_all_tests():
     r.record(
         "run_sh_seed_dump_isolated_database",
         test_run_sh_seed_dump_targets_isolated_database_atomically,
+    )
+    r.record(
+        "seed_dump_restore_target_client",
+        test_seed_dump_restore_uses_target_container_pg_restore,
     )
     r.record(
         "run_sh_reuses_reachable_workspace_db",
