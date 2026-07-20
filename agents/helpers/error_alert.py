@@ -15,6 +15,7 @@ alerting must not disrupt the agent failure path, and Temporal's at-least-once
 retries are naturally deduped by the throttle.
 """
 
+import json
 import os
 import re
 import threading
@@ -39,6 +40,7 @@ _SOURCE_LABEL = {
 }
 
 _last_sent: Dict[str, float] = {}
+_in_flight: set[str] = set()
 _lock = threading.Lock()
 
 
@@ -51,20 +53,40 @@ def _fingerprint(source: str, message: str) -> str:
     return f"{source}:{n}"
 
 
-def _throttled(key: str, now: float) -> bool:
+def _acquire_alert_slot(key: str, now: float) -> bool:
     with _lock:
         prev = _last_sent.get(key)
         if prev is not None and now - prev < _THROTTLE_WINDOW_S:
-            return True
+            return False
+        if key in _in_flight:
+            return False
+
+        _in_flight.add(key)
+        stale = [candidate for candidate, sent_at in _last_sent.items() if now - sent_at >= _THROTTLE_WINDOW_S]
+        for candidate in stale:
+            _last_sent.pop(candidate, None)
+        return True
+
+
+def _finish_alert_slot(key: str, delivered: bool, now: float) -> None:
+    with _lock:
+        _in_flight.discard(key)
+        if not delivered:
+            return
+
+        # Refresh insertion order so overflow eviction removes the oldest send.
+        _last_sent.pop(key, None)
         _last_sent[key] = now
-        if len(_last_sent) > _MAX_THROTTLE_ENTRIES:
-            stale = [k for k, t in _last_sent.items() if now - t > _THROTTLE_WINDOW_S]
-            for k in stale:
-                _last_sent.pop(k, None)
-        return False
+        while len(_last_sent) > _MAX_THROTTLE_ENTRIES:
+            _last_sent.pop(next(iter(_last_sent)))
 
 
-def _slack_payload(source: str, message: str, agent_id: Optional[str]) -> Dict[str, Any]:
+def _slack_payload(
+    source: str,
+    message: str,
+    agent_id: Optional[str],
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     label = _SOURCE_LABEL.get(source, "🔴 Failure")
     fields = [{"type": "mrkdwn", "text": f"*Source:*\n{source}"}]
     if agent_id:
@@ -75,23 +97,24 @@ def _slack_payload(source: str, message: str, agent_id: Optional[str]) -> Dict[s
         {"type": "section", "text": {"type": "mrkdwn", "text": "```" + message[:600] + "```"}},
         {"type": "section", "fields": fields},
     ]
+    if context:
+        serialized = json.dumps(context, default=str).replace("```", "''' ")[:500]
+        blocks.append(
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*Context:*\n```{serialized}```"},
+            }
+        )
     if agent_id:
         fe_link = f"{_FE_BASE}/?agent-id={agent_id}"
-        diag = (
-            f"cd agents && python benchmarks/agent_logs.py {agent_id} "
-            f"--url {_PROD_BACKEND} --tree --diagnostics"
-        )
-        blocks.append(
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"<{fe_link}|Open agent in the app>"}}
-        )
+        diag = f"cd agents && python benchmarks/agent_logs.py {agent_id} --url {_PROD_BACKEND} --tree --diagnostics"
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"<{fe_link}|Open agent in the app>"}})
         blocks.append({"type": "context", "elements": [{"type": "mrkdwn", "text": f"`{diag}`"}]})
 
     return {"text": f"{label}: {message[:140]}", "blocks": blocks}
 
 
-async def _post_slack_bot(
-    token: str, channel: str, payload: Dict[str, Any]
-) -> Optional[Dict[str, str]]:
+async def _post_slack_bot(token: str, channel: str, payload: Dict[str, Any]) -> Optional[Dict[str, str]]:
     """Post the initial card via chat.postMessage and return {ts, channel}.
 
     A bot-token post (unlike an incoming webhook) yields an editable message
@@ -118,16 +141,14 @@ async def _post_slack_bot(
 
 async def _dispatch_rca(
     agent_id: str,
-    source: str,
-    message: str,
     slack_ts: str = "",
     slack_channel: str = "",
-) -> None:
+) -> bool:
     token = os.environ.get("GITHUB_DISPATCH_TOKEN")
     repo = os.environ.get("GITHUB_DISPATCH_REPO", "Rose-Ai-Labs/rose")
     if not token:
         activity.logger.warning("AUTO_RCA_ENABLED but GITHUB_DISPATCH_TOKEN unset — RCA not dispatched")
-        return
+        return False
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"https://api.github.com/repos/{repo}/dispatches",
@@ -140,8 +161,6 @@ async def _dispatch_rca(
                 "event_type": "agent-failure",
                 "client_payload": {
                     "agent_id": agent_id,
-                    "source": source,
-                    "title": message[:120],
                     "slack_ts": slack_ts,
                     "slack_channel": slack_channel,
                 },
@@ -150,8 +169,9 @@ async def _dispatch_rca(
         )
         if resp.status_code >= 300:
             activity.logger.warning(f"RCA dispatch non-2xx: {resp.status_code} {resp.text[:200]}")
-        else:
-            activity.logger.info(f"RCA agent dispatched: source={source} agent_id={agent_id}")
+            return False
+        activity.logger.info(f"RCA agent dispatched: agent_id={agent_id}")
+        return True
 
 
 @activity.defn
@@ -165,12 +185,15 @@ async def report_failure_activity(
 
     Best-effort — always returns, never raises. Deduped by the in-memory throttle.
     """
+    key = _fingerprint(source, message)
+    acquired = False
+    delivered = False
     try:
-        now = time.time()
-        if _throttled(_fingerprint(source, message), now):
+        acquired = _acquire_alert_slot(key, time.time())
+        if not acquired:
             return {"alerted": False, "throttled": True}
 
-        payload = _slack_payload(source, message, agent_id)
+        payload = _slack_payload(source, message, agent_id, context)
         bot_token = os.environ.get("SLACK_BOT_TOKEN")
         channel_id = os.environ.get("SLACK_ERROR_CHANNEL_ID")
         webhook = os.environ.get("SLACK_ERROR_WEBHOOK_URL")
@@ -199,10 +222,15 @@ async def report_failure_activity(
                 f"source={source} agent_id={agent_id} message={message[:200]}"
             )
 
+        delivered = alerted
         if os.environ.get("AUTO_RCA_ENABLED") == "1" and agent_id:
-            await _dispatch_rca(agent_id, source, message, slack_ts, slack_channel)
+            delivered = (await _dispatch_rca(agent_id, slack_ts, slack_channel)) or delivered
 
         return {"alerted": alerted}
     except Exception as e:  # never fail the agent because alerting failed
         activity.logger.warning(f"report_failure_activity non-fatal: {e}")
         return {"alerted": False, "error": str(e)}
+    finally:
+        if acquired:
+            # Failed transports remain eligible for the next occurrence to retry.
+            _finish_alert_slot(key, delivered, time.time())

@@ -61,6 +61,8 @@ async function run(): Promise<void> {
       source: 'agent_workflow',
       message: 'db pool timeout after 42ms',
       agentId: 'agent-abc',
+      stack: 'Error: db pool timeout\n    at worker.ts:42',
+      context: { reason: 'pool exhausted', attempts: 3 },
     });
     await sleep(30);
     assert.strictEqual(calls.length, 1, 'should post exactly one Slack alert');
@@ -68,6 +70,10 @@ async function run(): Promise<void> {
     const payload = calls[0].body as { text: string; blocks: unknown[] };
     assert.ok(payload.text.includes('db pool timeout'), 'payload carries the message');
     assert.ok(Array.isArray(payload.blocks) && payload.blocks.length >= 3, 'payload has blocks');
+    const renderedBlocks = JSON.stringify(payload.blocks);
+    assert.ok(renderedBlocks.includes('*Context:*'), 'payload carries diagnostic context');
+    assert.ok(renderedBlocks.includes('pool exhausted'), 'payload serializes context values');
+    assert.ok(renderedBlocks.includes('*Stack:*'), 'payload carries the stack trace');
 
     // --- 2. Identical signature within the window is throttled (deduped) ---
     calls.length = 0;
@@ -98,6 +104,10 @@ async function run(): Promise<void> {
     alertError({ source: 'chat', message: 'no webhook here', agentId: 'a' });
     await sleep(30);
     assert.strictEqual(calls.length, 0, 'no webhook → no outbound call');
+    process.env.SLACK_ERROR_WEBHOOK_URL = 'https://hooks.slack.test/xxx';
+    alertError({ source: 'chat', message: 'no webhook here', agentId: 'a' });
+    await sleep(30);
+    assert.strictEqual(calls.length, 1, 'a missing sink must not spend the throttle slot');
 
     // --- 5. Never throws even when fetch rejects ---
     process.env.SLACK_ERROR_WEBHOOK_URL = 'https://hooks.slack.test/xxx';
@@ -106,6 +116,9 @@ async function run(): Promise<void> {
     failNext = true;
     alertError({ source: 'chat', message: 'fetch will reject', agentId: 'a' });
     await sleep(30); // if this throws unhandled, the process crashes → test fails
+    alertError({ source: 'chat', message: 'fetch will reject', agentId: 'a' });
+    await sleep(30);
+    assert.strictEqual(calls.length, 1, 'a rejected transport remains immediately retryable');
 
     // --- 6. AUTO_RCA_ENABLED=1 with an agentId fires the GitHub dispatch ---
     process.env.AUTO_RCA_ENABLED = '1';
@@ -131,6 +144,10 @@ async function run(): Promise<void> {
       'agent-rca',
       'dispatch carries the agent id'
     );
+    assert.ok(
+      !('source' in dispatchBody.client_payload) && !('title' in dispatchBody.client_payload),
+      'dispatch keeps failure-controlled free text out of the privileged workflow'
+    );
 
     // --- 7. Flag off → never dispatches RCA ---
     delete process.env.AUTO_RCA_ENABLED;
@@ -154,11 +171,18 @@ async function run(): Promise<void> {
     assert.ok(!calls[0].url.includes('api.github.com'), 'missing token → no repository_dispatch');
 
     // --- 9. Slack non-2xx is handled without throwing ---
-    globalThis.fetch = (async () => new Response('nope', { status: 500 })) as typeof fetch;
+    let non2xxCalls = 0;
+    globalThis.fetch = (async () => {
+      non2xxCalls += 1;
+      return new Response('nope', { status: 500 });
+    }) as typeof fetch;
     delete process.env.AUTO_RCA_ENABLED;
     __resetAlertThrottleForTests();
     alertError({ source: 'sms', message: 'slack rejects this one', userId: 'u2' });
     await sleep(30); // must not throw despite the 500
+    alertError({ source: 'sms', message: 'slack rejects this one', userId: 'u2' });
+    await sleep(30);
+    assert.strictEqual(non2xxCalls, 2, 'a non-2xx Slack response remains immediately retryable');
 
     // Restore the JSON-aware mock for the bot-token suite.
     globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {

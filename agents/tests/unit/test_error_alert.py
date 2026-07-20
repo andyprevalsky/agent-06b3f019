@@ -23,9 +23,7 @@ class FakeResponse:
         self.status_code = status_code
         self._json = json_body if json_body is not None else {}
         self.text = text
-        self.headers = (
-            {"content-type": "application/json"} if is_json else {"content-type": "text/plain"}
-        )
+        self.headers = {"content-type": "application/json"} if is_json else {"content-type": "text/plain"}
 
     def json(self):
         return self._json
@@ -48,9 +46,7 @@ class FakeClient:
     async def post(self, url, json=None, headers=None, timeout=None):
         FakeClient.calls.append({"url": url, "json": json})
         if "chat.postMessage" in url:
-            return FakeResponse(
-                200, {"ok": True, "ts": "1700000000.000100", "channel": "C_RESOLVED"}
-            )
+            return FakeResponse(200, {"ok": True, "ts": "1700000000.000100", "channel": "C_RESOLVED"})
         return FakeResponse(200, {}, text="ok")
 
 
@@ -59,6 +55,7 @@ def _isolate(monkeypatch):
     # No Temporal activity context in a unit test — swap the adapter for a plain logger.
     monkeypatch.setattr(error_alert.activity, "logger", logging.getLogger("test-error-alert"))
     error_alert._last_sent.clear()
+    error_alert._in_flight.clear()
     FakeClient.calls = []
     monkeypatch.setattr(error_alert.httpx, "AsyncClient", FakeClient)
     for k in (
@@ -86,9 +83,22 @@ def test_fingerprint_collapses_uuids_numbers_hex():
 
 def test_throttle_dedups_within_window():
     now = 1000.0
-    assert error_alert._throttled("k", now) is False
-    assert error_alert._throttled("k", now + 1) is True
-    assert error_alert._throttled("k", now + error_alert._THROTTLE_WINDOW_S + 1) is False
+    assert error_alert._acquire_alert_slot("k", now) is True
+    assert error_alert._acquire_alert_slot("k", now + 1) is False
+    error_alert._finish_alert_slot("k", True, now + 1)
+    assert error_alert._acquire_alert_slot("k", now + 2) is False
+    assert error_alert._acquire_alert_slot("k", now + error_alert._THROTTLE_WINDOW_S + 2) is True
+    error_alert._finish_alert_slot("k", False, now + error_alert._THROTTLE_WINDOW_S + 2)
+
+
+def test_throttle_map_stays_bounded(monkeypatch):
+    monkeypatch.setattr(error_alert, "_MAX_THROTTLE_ENTRIES", 2)
+    for index in range(3):
+        key = f"key-{index}"
+        assert error_alert._acquire_alert_slot(key, 1000.0 + index) is True
+        error_alert._finish_alert_slot(key, True, 1000.0 + index)
+    assert len(error_alert._last_sent) == 2
+    assert "key-0" not in error_alert._last_sent
 
 
 def test_bot_token_posts_and_dispatch_carries_handle(monkeypatch):
@@ -107,6 +117,25 @@ def test_bot_token_posts_and_dispatch_carries_handle(monkeypatch):
     assert cp["slack_ts"] == "1700000000.000100"
     assert cp["slack_channel"] == "C_RESOLVED"
     assert cp["agent_id"] == "agent-1"
+    assert "source" not in cp
+    assert "title" not in cp
+
+
+def test_context_is_included_in_slack_payload(monkeypatch):
+    monkeypatch.setenv("SLACK_ERROR_WEBHOOK_URL", "https://hooks.slack.test/xxx")
+    result = _run(
+        error_alert.report_failure_activity(
+            "agent-context",
+            "agent_workflow",
+            "context please",
+            {"reason": "verifier rejected", "steps_taken": 4},
+        )
+    )
+    assert result["alerted"] is True
+    post = next(c for c in FakeClient.calls if c["url"] == "https://hooks.slack.test/xxx")
+    rendered = str(post["json"]["blocks"])
+    assert "*Context:*" in rendered
+    assert "verifier rejected" in rendered
 
 
 def test_webhook_fallback_when_no_bot_token(monkeypatch):
@@ -147,3 +176,7 @@ def test_never_raises_on_transport_error(monkeypatch):
     monkeypatch.setattr(error_alert.httpx, "AsyncClient", BoomClient)
     result = _run(error_alert.report_failure_activity("a", "sms", "explodes on send"))
     assert result["alerted"] is False  # swallowed, not raised
+
+    monkeypatch.setattr(error_alert.httpx, "AsyncClient", FakeClient)
+    retry = _run(error_alert.report_failure_activity("a", "sms", "explodes on send"))
+    assert retry["alerted"] is True, "failed delivery must remain immediately retryable"

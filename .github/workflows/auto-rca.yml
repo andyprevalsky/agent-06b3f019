@@ -29,16 +29,6 @@ on:
         description: Failing agent ID to RCA
         required: true
         type: string
-      source:
-        description: Failure source (agent_workflow | chat | sms | agent_watchdog)
-        required: false
-        default: agent_workflow
-        type: string
-      title:
-        description: Short failure title
-        required: false
-        default: ''
-        type: string
 
 concurrency:
   # One RCA run per agent — a re-dispatch supersedes an in-flight run for the
@@ -59,8 +49,10 @@ jobs:
 
     env:
       AGENT_ID: ${{ github.event.client_payload.agent_id || inputs.agent_id }}
-      FAILURE_SOURCE: ${{ github.event.client_payload.source || inputs.source }}
-      FAILURE_TITLE: ${{ github.event.client_payload.title || inputs.title }}
+      # Never promote repository_dispatch free text into the privileged prompt.
+      # These trusted values are generated from the validated UUID below.
+      FAILURE_SOURCE: agent_workflow
+      FAILURE_TITLE: Production agent failure
       GH_TOKEN: ${{ github.token }}
       # Prod evidence.
       BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
@@ -82,29 +74,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${AGENT_ID:-}" ]; then
-            echo "No agent_id provided — nothing to RCA." >&2
+          if ! [[ "${AGENT_ID:-}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+            echo "agent_id must be a UUID — refusing untrusted dispatch payload." >&2
             exit 1
           fi
+          printf 'FAILURE_TITLE=Production agent failure %s\n' "$AGENT_ID" >> "$GITHUB_ENV"
 
       - name: Checkout main
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install flyctl (for full-resource repro via scripts/run-bench)
-        uses: superfly/flyctl-actions/setup-flyctl@master
+        uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # master
 
       - name: Install evidence tooling
         continue-on-error: true
@@ -149,7 +143,7 @@ jobs:
           echo "channel=${channel:-}" >> "$GITHUB_OUTPUT"
 
       - name: Root-cause with Claude Code
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
         with:
           # Dedicated Claude Max subscription for RCA — isolated compute, so its
           # Opus runs don't contend with the review bot or human devs. Minted via
@@ -162,8 +156,6 @@ jobs:
             that same repro PASS, then CEMENT it into the suite /deploy runs.
 
             Agent ID: ${{ env.AGENT_ID }}
-            Failure source: ${{ env.FAILURE_SOURCE }}
-            Failure title: ${{ env.FAILURE_TITLE }}
 
             EVIDENCE FIRST:
               curl -s "$PROD_BACKEND_URL/api/agents/${{ env.AGENT_ID }}" -H "X-API-Key: $BACKEND_API_KEY"

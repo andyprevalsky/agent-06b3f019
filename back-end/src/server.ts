@@ -287,10 +287,12 @@ app.get('/health/deep', async (_req, res) => {
     await prisma.$queryRaw`SELECT 1`;
     res.json({ status: 'ok', db: 'up', timestamp: new Date().toISOString() });
   } catch (err) {
+    log.error('Deep health database check failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
     res.status(503).json({
       status: 'error',
       db: 'down',
-      error: err instanceof Error ? err.message : String(err),
       timestamp: new Date().toISOString(),
     });
   }

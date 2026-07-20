@@ -10,6 +10,7 @@ WORKFLOW="$ROOT_DIR/.github/workflows/chat-lifecycle-ratchet.yml"
 DEPLOY_COMMAND="$ROOT_DIR/.claude/commands/deploy.md"
 DEPLOY_ENV="$ROOT_DIR/scripts/lib/deploy-local-env.sh"
 DESCEND_COMMAND_TEST="$ROOT_DIR/scripts/tests/descend-command.test.sh"
+AUTO_RCA_WORKFLOW_TEST="$ROOT_DIR/scripts/tests/auto-rca-workflow.test.sh"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -23,7 +24,7 @@ require_text() {
   grep -Fq -- "$text" "$file" || fail "$description"
 }
 
-for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$DEPLOY_COMMAND" "$DEPLOY_ENV" "$DESCEND_COMMAND_TEST"; do
+for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$DEPLOY_COMMAND" "$DEPLOY_ENV" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST"; do
   [ -f "$file" ] || fail "required semantic deploy gate file is missing: $file"
 done
 
@@ -109,5 +110,6 @@ grep -Fq 'bash scripts/run.sh --benchmark' <<<"$DEPLOY_STACK_LAUNCH" || \
 # /descend is part of the deploy orchestration surface. Keep its two user gates,
 # parallel deploy handoff, sorting, and rendered response contract cemented.
 bash "$DESCEND_COMMAND_TEST"
+bash "$AUTO_RCA_WORKFLOW_TEST"
 
 echo "All semantic deploy gate checks passed."

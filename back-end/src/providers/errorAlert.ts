@@ -40,6 +40,7 @@ const PROD_BACKEND = 'https://navi-j9a9.onrender.com';
 
 // signature -> last-sent epoch ms. Per-process only, by design (see file header).
 const lastSentAt = new Map<string, number>();
+const inFlight = new Set<string>();
 
 export interface AlertErrorInput {
   source: FailureSource;
@@ -63,16 +64,34 @@ function fingerprint(source: FailureSource, message: string): string {
   return `${source}:${normalized}`;
 }
 
-function throttled(key: string, now: number): boolean {
+function acquireAlertSlot(key: string, now: number): boolean {
   const prev = lastSentAt.get(key);
-  if (prev !== undefined && now - prev < THROTTLE_WINDOW_MS) return true;
-  lastSentAt.set(key, now);
-  if (lastSentAt.size > MAX_THROTTLE_ENTRIES) {
-    for (const [k, t] of lastSentAt) {
-      if (now - t > THROTTLE_WINDOW_MS) lastSentAt.delete(k);
-    }
+  if (prev !== undefined && now - prev < THROTTLE_WINDOW_MS) return false;
+  if (inFlight.has(key)) return false;
+
+  inFlight.add(key);
+  for (const [candidate, sentAt] of lastSentAt) {
+    if (now - sentAt >= THROTTLE_WINDOW_MS) lastSentAt.delete(candidate);
   }
-  return false;
+  return true;
+}
+
+function finishAlertSlot(key: string, delivered: boolean, now: number): void {
+  inFlight.delete(key);
+  if (!delivered) return;
+
+  // Refresh insertion order so overflow eviction always removes the oldest send.
+  lastSentAt.delete(key);
+  lastSentAt.set(key, now);
+  while (lastSentAt.size > MAX_THROTTLE_ENTRIES) {
+    const oldest = lastSentAt.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    lastSentAt.delete(oldest);
+  }
+}
+
+function slackCodeBlock(value: string, limit: number): string {
+  return value.replace(/```/g, "''' ").slice(0, limit);
 }
 
 function buildSlackPayload(input: AlertErrorInput): Record<string, unknown> {
@@ -93,6 +112,24 @@ function buildSlackPayload(input: AlertErrorInput): Record<string, unknown> {
     },
     { type: 'section', fields: fieldParts.map((text) => ({ type: 'mrkdwn', text })) },
   ];
+  if (input.context !== undefined && Object.keys(input.context).length > 0) {
+    let context = '[unserializable context]';
+    try {
+      context = JSON.stringify(input.context);
+    } catch {
+      // Keep alerting best-effort even if a caller supplied a circular object.
+    }
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*Context:*\n\`\`\`${slackCodeBlock(context, 500)}\`\`\`` },
+    });
+  }
+  if (input.stack !== undefined && input.stack !== '') {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `*Stack:*\n\`\`\`${slackCodeBlock(input.stack, 500)}\`\`\`` },
+    });
+  }
   if (feLink) {
     blocks.push({
       type: 'section',
@@ -109,7 +146,10 @@ function buildSlackPayload(input: AlertErrorInput): Record<string, unknown> {
   };
 }
 
-async function postSlackWebhook(webhook: string, payload: Record<string, unknown>): Promise<void> {
+async function postSlackWebhook(
+  webhook: string,
+  payload: Record<string, unknown>
+): Promise<boolean> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OUTBOUND_TIMEOUT_MS);
   try {
@@ -125,6 +165,7 @@ async function postSlackWebhook(webhook: string, payload: Record<string, unknown
         body: (await res.text()).slice(0, 200),
       });
     }
+    return res.ok;
   } finally {
     clearTimeout(timeout);
   }
@@ -181,12 +222,12 @@ async function dispatchRca(
   input: AlertErrorInput,
   slackTs?: string,
   slackChannel?: string
-): Promise<void> {
+): Promise<boolean> {
   const token = process.env.GITHUB_DISPATCH_TOKEN;
   const repo = process.env.GITHUB_DISPATCH_REPO ?? 'Rose-Ai-Labs/rose';
   if (token === undefined || token === '') {
     log.warn('AUTO_RCA_ENABLED but GITHUB_DISPATCH_TOKEN unset — RCA not dispatched');
-    return;
+    return false;
   }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OUTBOUND_TIMEOUT_MS);
@@ -203,8 +244,6 @@ async function dispatchRca(
         event_type: 'agent-failure',
         client_payload: {
           agent_id: input.agentId ?? '',
-          source: input.source,
-          title: input.message.slice(0, 120),
           slack_ts: slackTs ?? '',
           slack_channel: slackChannel ?? '',
         },
@@ -216,43 +255,55 @@ async function dispatchRca(
         status: res.status,
         body: (await res.text()).slice(0, 200),
       });
-    } else {
-      log.info('RCA agent dispatched', { source: input.source, agentId: input.agentId });
+      return false;
     }
+    log.info('RCA agent dispatched', { source: input.source, agentId: input.agentId });
+    return true;
   } finally {
     clearTimeout(timeout);
   }
 }
 
 async function sendAlert(input: AlertErrorInput): Promise<void> {
-  const now = Date.now();
-  if (throttled(fingerprint(input.source, input.message), now)) return;
+  const key = fingerprint(input.source, input.message);
+  if (!acquireAlertSlot(key, Date.now())) return;
 
-  const payload = buildSlackPayload(input);
-  const botToken = process.env.SLACK_BOT_TOKEN;
-  const channelId = process.env.SLACK_ERROR_CHANNEL_ID;
-  const webhook = process.env.SLACK_ERROR_WEBHOOK_URL;
+  let delivered = false;
+  try {
+    const payload = buildSlackPayload(input);
+    const botToken = process.env.SLACK_BOT_TOKEN;
+    const channelId = process.env.SLACK_ERROR_CHANNEL_ID;
+    const webhook = process.env.SLACK_ERROR_WEBHOOK_URL;
 
-  // Prefer the bot token: it yields an editable message handle for the lifecycle
-  // card. Fall back to an incoming webhook (post-only, no lifecycle edits).
-  let slackTs: string | undefined;
-  let slackChannel: string | undefined;
-  if (botToken !== undefined && botToken !== '' && channelId !== undefined && channelId !== '') {
-    const posted = await postSlackBot(botToken, channelId, payload);
-    slackTs = posted.ts;
-    slackChannel = posted.channel ?? channelId;
-  } else if (webhook !== undefined && webhook !== '') {
-    await postSlackWebhook(webhook, payload);
-  } else {
-    log.warn('No Slack sink configured — failure observed but not alerted', {
-      source: input.source,
-      message: input.message.slice(0, 200),
-      agentId: input.agentId,
-    });
-  }
+    // Prefer the bot token: it yields an editable message handle for the lifecycle
+    // card. Fall back to an incoming webhook (post-only, no lifecycle edits).
+    let slackTs: string | undefined;
+    let slackChannel: string | undefined;
+    if (botToken !== undefined && botToken !== '' && channelId !== undefined && channelId !== '') {
+      const posted = await postSlackBot(botToken, channelId, payload);
+      slackTs = posted.ts;
+      slackChannel = posted.channel ?? channelId;
+      delivered = posted.ts !== undefined && posted.ts !== '';
+    } else if (webhook !== undefined && webhook !== '') {
+      delivered = await postSlackWebhook(webhook, payload);
+    } else {
+      log.warn('No Slack sink configured — failure observed but not alerted', {
+        source: input.source,
+        message: input.message.slice(0, 200),
+        agentId: input.agentId,
+      });
+    }
 
-  if (process.env.AUTO_RCA_ENABLED === '1' && input.agentId !== undefined && input.agentId !== '') {
-    await dispatchRca(input, slackTs, slackChannel);
+    if (
+      process.env.AUTO_RCA_ENABLED === '1' &&
+      input.agentId !== undefined &&
+      input.agentId !== ''
+    ) {
+      delivered = (await dispatchRca(input, slackTs, slackChannel)) || delivered;
+    }
+  } finally {
+    // Failed transports remain eligible for the next occurrence to retry.
+    finishAlertSlot(key, delivered, Date.now());
   }
 }
 
@@ -279,4 +330,5 @@ export function alertError(input: AlertErrorInput): void {
 /** Test-only: reset the in-memory throttle between cases. */
 export function __resetAlertThrottleForTests(): void {
   lastSentAt.clear();
+  inFlight.clear();
 }
