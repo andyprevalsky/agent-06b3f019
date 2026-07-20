@@ -174,6 +174,52 @@ function encryptedManifestIndex(artifacts: ManifestArtifact[]): Record<string, u
   };
 }
 
+function benchmarkResultFromInput(
+  input: Pick<AgentFinalizeRequest, 'benchmarkPassed' | 'benchmarkStatus' | 'failureReason'>
+): Record<string, unknown> | null {
+  if (input.benchmarkPassed === undefined && input.benchmarkStatus === undefined) return null;
+  return {
+    passed: input.benchmarkPassed ?? null,
+    status: input.benchmarkStatus ?? null,
+    failure_reason: input.failureReason ?? null,
+  };
+}
+
+/**
+ * Assembles the `manifest.json.gz.enc` value shared by the two lifecycle writes:
+ * the initial manifest written at agent start and the terminal update written at
+ * finalize. The manifest exists from creation so a run that crashes or is killed
+ * mid-flight still has a classifiable, ingestible bundle (its `world_model_mode`
+ * gates world-model eligibility; a missing manifest reads as "unknown" and is
+ * dropped). `finalized` distinguishes the living start manifest from the terminal
+ * one; downstream ingest derives transitions by listing the bundle's actual
+ * artifacts, so a start manifest with a sparse artifact index is still usable.
+ */
+function buildManifestValue(params: {
+  rootAgentId: string;
+  refs: ManifestArtifact[];
+  worldModelMode: string | undefined;
+  benchmarkTaskName?: string;
+  benchmarkResult: Record<string, unknown> | null;
+  run: Record<string, unknown>;
+  correlations: { root_agent_id: string; user_id: string; agent_ids: string[] };
+  finalized: boolean;
+  force: boolean;
+}): Record<string, unknown> {
+  return {
+    ...publicManifest(params.rootAgentId, params.refs, params.benchmarkTaskName),
+    world_model_mode: normalizedWorldModelMode(params.worldModelMode),
+    finalized: params.finalized,
+    benchmark_result: params.benchmarkResult,
+    run: params.run,
+    correlations: params.correlations,
+    sensitive: {
+      ...encryptedManifestIndex(params.refs),
+      force: params.force,
+    },
+  };
+}
+
 function rootStatusFromFixture(fixture: { rows: Record<string, unknown[]>; agent_ids: string[] }) {
   const rootAgentId = fixture.agent_ids[0];
   const root = fixture.rows.Agent.find((row) => (row as { id?: unknown }).id === rootAgentId) as
@@ -239,7 +285,81 @@ export async function archiveAgentStartFixture(
     objectPath: 'db/start.fixture.json.gz.enc',
     value: fixture,
   });
+  // Write the bundle manifest at creation so every started run is immediately a
+  // classifiable, world-model-ingestible bundle — a run that crashes or is
+  // SIGKILLed before it can finalize still has a manifest, so its partial
+  // trajectory is usable rather than silently dropped as "unknown" mode. Best
+  // effort: a manifest failure must never break launch-critical start capture.
+  try {
+    await writeStartManifest(agentId, fixture);
+  } catch (error) {
+    log.warn('Trace archive start manifest unavailable', {
+      agent_id: agentId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
   return { fixture: result };
+}
+
+/** Best-effort public manifest mirror; shared by the start and finalize writes. */
+async function writePublicManifest(
+  rootAgentId: string,
+  refs: ManifestArtifact[],
+  benchmarkTaskName?: string
+): Promise<string | null> {
+  if (!TRACE_ARCHIVE_PUBLIC_MANIFEST) return null;
+  const publicValue = publicManifest(rootAgentId, refs, benchmarkTaskName);
+  const publicManifestRef = await storePlainArtifact({
+    rootAgentId,
+    objectPath: 'manifest.public.json',
+    body: Buffer.from(JSON.stringify(publicValue, null, 2)),
+    contentType: 'application/json',
+  });
+  if (archiveEnabled() && publicManifestRef === null) {
+    throw new Error(`Failed to archive required public manifest for ${rootAgentId}`);
+  }
+  return publicManifestRef;
+}
+
+/**
+ * Writes the initial `manifest.json.gz.enc` at agent start. Only the root agent
+ * owns its bundle manifest (sub-agent artifacts live under the root bundle). The
+ * world-model mode is left at its `real` default here and corrected at finalize
+ * if the run turns out to be shadow/simulate; a crashed real prod run therefore
+ * keeps the correct `real` mode and stays ingestible.
+ */
+async function writeStartManifest(
+  agentId: string,
+  fixture: Awaited<ReturnType<typeof collectFixture>>
+): Promise<void> {
+  if (fixture.agent_ids[0] !== agentId) return;
+  const refs = uniqueArtifacts(await listArchivedObjects(agentId));
+  const manifestValue = buildManifestValue({
+    rootAgentId: agentId,
+    refs,
+    worldModelMode: undefined,
+    benchmarkResult: null,
+    run: encryptedRunMetadata(fixture),
+    correlations: {
+      root_agent_id: agentId,
+      user_id: fixture.user_id,
+      agent_ids: fixture.agent_ids,
+    },
+    finalized: false,
+    force: false,
+  });
+  const manifest = await archiveJson({
+    rootAgentId: agentId,
+    objectPath: 'manifest.json.gz.enc',
+    value: manifestValue,
+  });
+  await writePublicManifest(agentId, refs);
+  if (manifest !== null) {
+    log.info('Trace archive manifest initialized at start', {
+      root_agent_id: agentId,
+      artifact_count: refs.length,
+    });
+  }
 }
 
 type PreparedArchiveTask<TFixture> = {
@@ -373,28 +493,21 @@ async function finalizeAgentOnce(input: AgentFinalizeRequest): Promise<FinalizeA
   }
   const listedRefs = await listArchivedObjects(input.rootAgentId);
   const refs = uniqueArtifacts(fixtureRef === null ? listedRefs : [...listedRefs, fixtureRef]);
-  const manifestValue = {
-    ...publicManifest(input.rootAgentId, refs, input.benchmarkTaskName),
-    world_model_mode: normalizedWorldModelMode(input.worldModelMode),
-    benchmark_result:
-      input.benchmarkPassed === undefined && input.benchmarkStatus === undefined
-        ? null
-        : {
-            passed: input.benchmarkPassed ?? null,
-            status: input.benchmarkStatus ?? null,
-            failure_reason: input.failureReason ?? null,
-          },
+  const manifestValue = buildManifestValue({
+    rootAgentId: input.rootAgentId,
+    refs,
+    worldModelMode: input.worldModelMode,
+    benchmarkTaskName: input.benchmarkTaskName,
+    benchmarkResult: benchmarkResultFromInput(input),
     run: encryptedRunMetadata(endFixture),
     correlations: {
       root_agent_id: input.rootAgentId,
       user_id: endFixture.user_id,
       agent_ids: endFixture.agent_ids,
     },
-    sensitive: {
-      ...encryptedManifestIndex(refs),
-      force: input.force === true,
-    },
-  };
+    finalized: true,
+    force: input.force === true,
+  });
   const manifest = await archiveJson({
     rootAgentId: input.rootAgentId,
     objectPath: 'manifest.json.gz.enc',
@@ -403,19 +516,11 @@ async function finalizeAgentOnce(input: AgentFinalizeRequest): Promise<FinalizeA
   if (archiveEnabled() && manifest === null) {
     throw new Error(`Failed to archive required manifest for ${input.rootAgentId}`);
   }
-  let publicManifestRef: string | null = null;
-  if (TRACE_ARCHIVE_PUBLIC_MANIFEST) {
-    const publicValue = publicManifest(input.rootAgentId, refs, input.benchmarkTaskName);
-    publicManifestRef = await storePlainArtifact({
-      rootAgentId: input.rootAgentId,
-      objectPath: 'manifest.public.json',
-      body: Buffer.from(JSON.stringify(publicValue, null, 2)),
-      contentType: 'application/json',
-    });
-    if (archiveEnabled() && publicManifestRef === null) {
-      throw new Error(`Failed to archive required public manifest for ${input.rootAgentId}`);
-    }
-  }
+  const publicManifestRef = await writePublicManifest(
+    input.rootAgentId,
+    refs,
+    input.benchmarkTaskName
+  );
   log.info('Trace archive finalized', {
     root_agent_id: input.rootAgentId,
     manifest_ref: manifest?.ref ?? null,
