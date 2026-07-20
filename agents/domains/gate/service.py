@@ -13,6 +13,7 @@ Imports: own repo, own types, external packages, tools.base.
 
 from __future__ import annotations
 
+import os
 from datetime import timedelta
 from typing import Any, Dict, Optional
 
@@ -22,11 +23,34 @@ from temporalio.common import RetryPolicy
 
 from tools.base import EventType, MessageStatus, ToolEvent
 
-from .config import DEFAULT_KYC_URL, DEFAULT_SUBSCRIBE_URL, REJECTION_SENTINEL, TOOL_NAME
+from .config import (
+    DEFAULT_KYC_URL,
+    DEFAULT_SUBSCRIBE_URL,
+    PURCHASE_GATE_TYPES,
+    REJECTION_SENTINEL,
+    TOOL_NAME,
+)
 from .repo import create_gate_request_activity
 from .types import GateRejectedError
 
 logger = structlog.get_logger()
+
+
+def _should_suppress_gate(gate_type: str) -> bool:
+    """Whether a gate of this type must be turned into a non-blocking no-op.
+
+    Purchase gates (``subscription``/``kyc`` — see ``PURCHASE_GATE_TYPES``) always
+    block; they gate real money and are never suppressed. Every other gate type
+    (currently only ``source_connect``, e.g. "connect your Gmail") is temporarily
+    suppressed so the agent proceeds without prompting the user to hook up a data
+    source. Set ``NON_PURCHASE_GATES_ENABLED=1`` to restore all gates.
+
+    Read at call time (not import) so the flag is picked up after ``.env`` loads.
+    """
+    if gate_type in PURCHASE_GATE_TYPES:
+        return False
+    enabled = os.getenv("NON_PURCHASE_GATES_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+    return not enabled
 
 
 def build_subscription_gate(
@@ -42,8 +66,7 @@ def build_subscription_gate(
         "severity": "blocking",
         "presentation": {
             "title": title or "Subscribe to let Rose complete purchases",
-            "reason": reason
-            or "You're out of free credit — an active plan lets me finish tasks that cost real money.",
+            "reason": reason or "You're out of free credit — an active plan lets me finish tasks that cost real money.",
             "cta": "Subscribe · $20/mo",
         },
         "action": {"kind": "link", "url": checkout_url or DEFAULT_SUBSCRIBE_URL},
@@ -60,8 +83,7 @@ def build_kyc_gate(kyc_url: Optional[str] = None, reason: Optional[str] = None) 
         "severity": "blocking",
         "presentation": {
             "title": "Verify identity to issue your Rose card",
-            "reason": reason
-            or "A one-time identity check is required before Rose can issue a payment card.",
+            "reason": reason or "A one-time identity check is required before Rose can issue a payment card.",
             "cta": "Verify identity",
         },
         "action": {"kind": "link", "url": kyc_url or DEFAULT_KYC_URL},
@@ -99,6 +121,20 @@ async def raise_gate_direct(workflow_instance: Any, gate: Dict[str, Any], gate_k
     Raises:
         GateRejectedError: If the user declines the gate.
     """
+    # Kill-switch: connection gates (source_connect, ...) are suppressed to a
+    # non-blocking no-op while only purchase gates (subscription/kyc) stay live.
+    # Returns "" as if instantly resolved — the caller proceeds without parking
+    # the workflow. Guarded BEFORE any workflow.* call so the suppressed path
+    # never touches Temporal APIs. Toggle back on with NON_PURCHASE_GATES_ENABLED=1.
+    gate_type = str(gate.get("type") or "")
+    if _should_suppress_gate(gate_type):
+        logger.info(
+            "Gate suppressed by non-purchase kill-switch",
+            gate_key=gate_key,
+            gate_type=gate_type,
+        )
+        return ""
+
     info = workflow.info()
     workflow_id = info.workflow_id
     user_id = workflow_instance.user_id
