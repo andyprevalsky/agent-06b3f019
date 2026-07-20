@@ -31,6 +31,16 @@ normalize_conductor_workspace_env
 RUN_CONTEXT_DIR="$(normalize_run_context_dir "$PWD" "${BENCHMARK_CONTEXT_DIR:-.context}")"
 BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
 
+# Export both benchmark-mode signals so child services (backend + worker) actually
+# see them. Backend code keys benchmark-only behavior off these (purchase KYC
+# simulation, the RLS-free agent preview, and the AgentCard mint cutoff's
+# force-enable of real minting). `--benchmark` sets BENCHMARK_MODE locally; without
+# this export it never reached the backend, so those checks silently read an unset
+# var — e.g. a `run.sh --benchmark` lifecycle stack would hand the agent the static
+# Rose Agent Card instead of minting a real AgentCard. The isolated `run-bench`
+# path already exports BENCHMARK_ISOLATED_RUN; re-exporting here is idempotent.
+export BENCHMARK_MODE BENCHMARK_ISOLATED_RUN
+
 # mac-app is Electron + requires nvm/Node 20.10.0; only runs on macOS.
 IS_MAC=false
 [ "$(uname)" = "Darwin" ] && IS_MAC=true
@@ -108,10 +118,17 @@ process_belongs_to_this_worktree() {
 # Check if a port requires moving this workspace to a different range.
 # Current-worktree processes are handled later as stale/running services; any
 # other listener should trigger reassignment before services or Postgres start.
+#
+# Only LISTENING sockets are considered: a listener bind fails (EADDRINUSE) solely
+# because another LISTENER holds the port. An outbound ESTABLISHED connection that
+# merely borrowed this number as its ephemeral local port (e.g. a concurrent
+# workspace's `flyctl proxy` streaming to Fly) does NOT block our bind, so it must
+# not be mistaken for an occupant — otherwise unlucky ephemeral-port collisions
+# across sibling workspaces spuriously fail strict-Conductor-port startup.
 port_requires_reassign() {
     local port=$1
     local pids
-    pids=$(lsof -ti :"$port" 2>/dev/null) || true
+    pids=$(lsof -ti :"$port" -sTCP:LISTEN 2>/dev/null) || true
     for pid in $pids; do
         local cmd
         cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
@@ -138,7 +155,10 @@ port_requires_reassign() {
 
 port_is_free_for_candidate_range() {
     local port=$1
-    if lsof -ti :"$port" >/dev/null 2>&1; then
+    # Only a LISTENER blocks a bind; ignore ephemeral outbound sockets (see
+    # port_requires_reassign) so a sibling workspace's proxy connection does not
+    # make us skip an otherwise-bindable candidate port.
+    if lsof -ti :"$port" -sTCP:LISTEN >/dev/null 2>&1; then
         return 1
     fi
     if docker_ps_ports_quick '{{.Ports}}' | grep -q ":${port}->"; then
@@ -710,7 +730,10 @@ if ! $IS_CLOUD; then
     SERVICE_PORTS=($BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $SDK_METRICS_PORT $NGROK_WEB_PORT)
     $IS_MAC && SERVICE_PORTS+=($MAC_APP_PORT)
     for port in "${SERVICE_PORTS[@]}"; do
-        for pid in $(lsof -ti :"$port" 2>/dev/null); do
+        # Only LISTENERS block our bind; an outbound ESTABLISHED socket that merely
+        # borrowed this ephemeral port (e.g. a sibling workspace's `flyctl proxy`)
+        # is harmless — see port_requires_reassign.
+        for pid in $(lsof -ti :"$port" -sTCP:LISTEN 2>/dev/null); do
             cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
             echo "$cmd" | grep -qi docker && continue
             if process_belongs_to_this_worktree "$pid"; then
