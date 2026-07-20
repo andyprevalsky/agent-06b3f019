@@ -1033,6 +1033,27 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
             grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
             mv "$names_ledger.tmp" "$names_ledger"
         fi
+        # Fix-from-the-start for the name-only orphan: an AMBIGUOUS clone failure
+        # (non-zero/timed-out, but not a recognized "definitively unallocated"
+        # error) that yields no id would otherwise retain its name record forever.
+        # That id-less orphan later aborts teardown/reconciliation on a single
+        # transient Fly-list read (the `*) return 1` reap arm) and leaks every
+        # already-id'd sibling. So resolve the reserved name AUTHORITATIVELY before
+        # retrying with a fresh name: bind the id if a machine did materialize, and
+        # RELEASE the reservation only on a definite "absent" (Fly list succeeded,
+        # zero matches). An unsafe/ambiguous read (resolve==2) stays fail-closed so
+        # a genuinely late-appearing clone is never orphaned.
+        if [ -z "$target_id" ]; then
+            local reconciled_id reconcile_status
+            reconciled_id="$(registry_resolve_name "$target_name")"; reconcile_status=$?
+            case "$reconcile_status" in
+                0) target_id="$reconciled_id" ;;
+                1) fleet_registry_release_name "$target_name" || return 1
+                   grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
+                   mv "$names_ledger.tmp" "$names_ledger" ;;
+                *) : ;;
+            esac
+        fi
         if [ -n "$target_id" ] && [ "$target_id" != "$source_id" ] && [ "$target_id" != "$WARM_ID" ]; then
             if ! fleet_registry_record_id "$target_name" "$target_id"; then
                 echo "❌ could not persist provider ID $target_id; name ownership remains for teardown" >&2
