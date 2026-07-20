@@ -36,7 +36,10 @@ export function checkPatternSafety(source: string, flags: string): PatternSafety
   try {
     diagnostics = checkSync(source, flags, { timeout: 1000 });
   } catch {
-    return { ok: true }; // analyzer error/timeout — fail open; the length cap is the backstop
+    return {
+      ok: false,
+      reason: 'Pattern could not be verified as safe to evaluate.',
+    };
   }
   if (diagnostics.status !== 'vulnerable') return { ok: true };
   const complexity = diagnostics.complexity;
