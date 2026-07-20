@@ -910,7 +910,12 @@ PY
 echo "PASS: scenario 3 — stopped inventory does not consume active-compute capacity"
 
 # ════════════════════════════════════════════════════════════════════════════
-# Scenario 4 — true active pressure and unknown states remain fail-closed
+# Scenario 4 — the shared-CPU governor blocks an over-ceiling burst, while
+# stopped + performance + unknown-state inventory are classified correctly.
+# The elastic guard gates on shared-CPU UNITS (config.guest.cpu_kind=shared →
+# cpus), NOT a flat machine count: only ACTIVE shared units count toward the
+# governor, stopped inventory is free, performance machines draw a SEPARATE
+# reservation, and a non-stopped UNKNOWN state still consumes its shared units.
 # ═════════════════════════════════════════════════════════════════════════════
 reset_fake_state
 : > "$FAKE_DIR/journal.log"
@@ -921,40 +926,48 @@ import os
 path = os.environ["FAKE_STATE"]
 with open(path) as fh:
     state = json.load(fh)
-for index in range(58):
-    state["machines"].append({
-        "id": f"busy{index:09d}",
-        "name": f"existing-busy-{index}",
-        "state": "started",
+
+
+def machine(mid, name, st, kind, cpus):
+    return {
+        "id": mid,
+        "name": name,
+        "state": st,
         "region": "iad",
-        "private_ip": f"fdaa::{index + 1}",
-        "config": {"mounts": []},
-    })
-state["machines"].append({
-    "id": "unknown0000000",
-    "name": "existing-unknown",
-    "state": "provider-new-state",
-    "region": "iad",
-    "private_ip": "fdaa::ffff",
-    "config": {"mounts": []},
-})
+        "private_ip": "fdaa::1",
+        "config": {"mounts": [], "guest": {"cpu_kind": kind, "cpus": cpus}},
+    }
+
+
+# 71 STARTED shared-cpu-2x → 142 active shared units.
+for index in range(71):
+    state["machines"].append(machine(f"sh{index:09d}", f"active-shared-{index}", "started", "shared", 2))
+# 1 non-stopped UNKNOWN state with a shared guest → still capacity-consuming (+2 = 144).
+state["machines"].append(machine("unknown0000001", "active-unknown-shared", "provider-new-state", "shared", 2))
+# 15 STOPPED shared machines → EXCLUDED (stopped inventory costs no compute).
+for index in range(15):
+    state["machines"].append(machine(f"st{index:09d}", f"stopped-shared-{index}", "stopped", "shared", 2))
+# 5 STARTED performance machines → SEPARATE reservation, never block the shared governor.
+for index in range(5):
+    state["machines"].append(machine(f"pf{index:09d}", f"active-perf-{index}", "started", "performance", 2))
 with open(path, "w") as fh:
     json.dump(state, fh)
 PY
 
+# Default primary shape shared-cpu-2x (2 units/bench); 2 benches = 4 requested units.
+# active_shared = 71*2 + 1*2 = 144; projected = 148 > ceiling 140 → hard block. The
+# 15 stopped + 5 performance machines must NOT contribute (else active_shared > 144).
 capacity_status=0
 run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-active-capacity.log" \
     capacity-h capacity-i --no-autoscale --timeout 240 || capacity_status=$?
 [ "$capacity_status" -eq 1 ] ||
-    fail "true active pressure must remain blocked (exit=$capacity_status)"
-grep -qF "59 active/transitioning machines" "$TMP_ROOT/controller-active-capacity.log" ||
-    fail "unknown machine states must remain capacity-consuming"
-grep -qF "(1 stopped; 60 total) and this run adds 2" "$TMP_ROOT/controller-active-capacity.log" ||
-    fail "active capacity rejection must report the classified machine counts"
+    fail "over-ceiling shared-CPU burst must be blocked (exit=$capacity_status)"
+grep -qF "Shared-CPU capacity governor reached: 144 active shared units" "$TMP_ROOT/controller-active-capacity.log" ||
+    fail "governor rejection must report the active shared-unit count (stopped + perf excluded, unknown counted)"
 if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then
-    fail "an over-capacity active burst must be rejected before cloning"
+    fail "an over-governor burst must be rejected BEFORE cloning"
 fi
-echo "PASS: scenario 4 — active pressure and unknown states remain fail-closed"
+echo "PASS: scenario 4 — shared-CPU governor blocks an over-ceiling burst; stopped + perf excluded"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 5 — SIGKILL recovery survives deletion of the workspace-local ledger
