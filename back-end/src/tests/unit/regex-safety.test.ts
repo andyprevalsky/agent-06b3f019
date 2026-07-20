@@ -7,6 +7,11 @@ import { checkPatternSafety } from '../../domains/data/regexSafety';
 function run(): void {
   assert.equal(checkPatternSafety('(.*a){20}$', '').ok, false);
   assert.equal(checkPatternSafety('meeting.*tomorrow', '').ok, true);
+  assert.equal(
+    checkPatternSafety('Multiline incident START.*incident END', 's', 0).ok,
+    true,
+    'a provably linear single-wildcard pattern must not depend on analyzer scheduling'
+  );
 
   // An invalid runtime value makes recheck throw synchronously, exercising the
   // same fail-closed branch used when its bounded analysis times out.

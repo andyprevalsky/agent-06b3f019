@@ -31,6 +31,32 @@ function unclassifiedPatternRejection(): PatternSafety {
 }
 
 /**
+ * Prove a deliberately narrow subset linear without invoking the heavier
+ * analyzer. Literals, escaped characters, anchors, fixed-width dots, and at
+ * most one `.*` cannot create nested or overlapping repetition. Everything
+ * outside this subset still goes through recheck and fails closed if recheck
+ * cannot classify it.
+ */
+function isClearlyLinearPattern(source: string): boolean {
+  let wildcardCount = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === '\\') {
+      index += 1;
+      continue;
+    }
+    if (char === '.' && source[index + 1] === '*') {
+      wildcardCount += 1;
+      if (wildcardCount > 1) return false;
+      index += 1;
+      continue;
+    }
+    if ('*+?()[]{}|'.includes(char)) return false;
+  }
+  return true;
+}
+
+/**
  * Classify a regex with `recheck` and reject genuinely dangerous shapes
  * (exponential, or polynomial degree > 2). Quadratic patterns like
  * `meeting.*tomorrow` stay allowed so we don't nerf realistic queries.
@@ -46,6 +72,7 @@ export function checkPatternSafety(
       reason: `Pattern too long (${source.length} chars, max ${MAX_PATTERN_LENGTH}).`,
     };
   }
+  if (typeof flags === 'string' && isClearlyLinearPattern(source)) return { ok: true };
   let diagnostics;
   try {
     diagnostics = checkSync(source, flags, { timeout: timeoutMs });
