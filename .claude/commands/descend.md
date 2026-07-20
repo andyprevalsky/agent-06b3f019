@@ -1,248 +1,349 @@
 ---
-description: "Descend on a slice of benchmark tasks and drive it to 100% green with zero reward hacks: run → triage infra → RCA every failure to a local repro + fix → report a compressed RCA card deck → on approval, rerun and async-deploy every confirmed fix. Repeat until the whole slice passes."
-argument-hint: "<slice> — a group name (daily | pre-deploy | rose-bench) OR an explicit list of task names (space/comma separated)"
+description: "Descend on a benchmark slice to 100% green with zero reward hacks: run, fix infra, RCA harness failures in parallel, stop for fix decisions, rerun, and async-deploy confirmed fixes with a second stop only for required admin approval."
+argument-hint: "<slice> — daily | pre-deploy | rose-bench | incomplete, or explicit task names"
 ---
 
 # /descend
 
-**North star: every task in the given slice PASSES, with ZERO reward hacks.**
+**North star: every task in the resolved slice passes on a real, infra-clean
+rerun with zero reward hacks, and every confirmed fix is deployed.**
 
-"Descend" = keep driving the slice downward toward all-green, iteration after
-iteration, RCA'ing and fixing real root causes until nothing fails. You do not
-stop when it's "probably fine" — you stop when the slice is genuinely 100%
-green on a real rerun and every fix is a legitimate root-cause fix.
+This command composes /benchmark, /rca, and /deploy. Read
+benchmark.md, rca.md, and deploy.md completely before starting. This file owns
+their orchestration, state, user-input gates, and response contract.
 
-This command composes three existing commands — [`/benchmark`](benchmark.md)
-(run), [`/rca`](rca.md) (diagnose+fix with a mandatory local repro), and
-[`/deploy`](deploy.md) (ship) — into one autonomous loop. Read those three
-before you start; this file only adds the orchestration around them.
+## Hard rules
 
-`$ARGUMENTS` is the **slice**: either a catalog group (`daily`, `pre-deploy`,
-`rose-bench`) or an explicit list of task names. Resolve a group name to its
-concrete task list before running (see **Resolving the slice** below) and print
-the resolved list so the user can see exactly what you're descending on.
+1. **No reward hacking.** Never change a benchmark definition, prompt, expected
+   tools, pass criteria, load size, timeout, concurrency, price cap, or
+   production behavior merely to make it pass. Never weaken a repro assertion
+   or hide a failed primary path behind a fallback. If a task contract appears
+   wrong, do not edit it; represent that proposal as a HARNESS row at
+   HARNESS_FIX_DECISION.
+2. **No RCA without the hard proof pair.** A completed RCA requires a local
+   repro actually observed failing on the buggy code and the identical repro
+   passing after the fix, with the assertion unchanged. Otherwise its status is
+   Open observability gap.
+3. **Every fix is cemented.** Promote the repro into the consistently-run suite
+   that owns the first-bad boundary.
+4. **Actively drive asynchronous work.** Poll benchmark controllers and deploy
+   workers on the CLAUDE.md cadence. Check both output growth and liveness.
+   Never fire and passively wait.
+5. **Infra is in scope.** RCA and fix every harness, fleet, credential plumbing,
+   capacity, teardown, and control-plane failure. Never kill a benchmark fleet
+   not launched by this session.
+6. **Exactly two planned user-input gates.** The only planned points that may
+   stop for Andy are HARNESS_FIX_DECISION and DEPLOY_ADMIN_APPROVAL. Do not ask
+   Andy to prioritize independent work, choose between safe implementation
+   paths, or approve ordinary infra fixes.
+7. **External blockers are not a third planned gate.** Keep every unaffected
+   RCA, run, and deploy moving. Report BLOCKED only after all safe in-scope
+   alternatives are exhausted and no independent progress remains.
 
----
+## Resolve the slice
 
-## The hard rules (violating any of these fails the whole run)
+For daily, pre-deploy, rose-bench, or incomplete, resolve the exact concrete
+task list using deriveTaskGroup / resolveTaskGroup in
+back-end/src/domains/benchmarks/hubCatalogService.ts against
+agents/benchmarks/tasks.json. Print the resolved list and count before running.
 
-1. **No reward hacking — ever (repo rule 25).** You may NOT change a benchmark's
-   definition, prompt, expected tools, pass criteria, load size, timeout,
-   concurrency, price cap, or any production behavior to make it pass. You may
-   NOT add a fallback path that masks the primary path failing (rule 8). You may
-   NOT weaken a repro's assertion. A "fix" that only moves the goalposts is a
-   FAILURE, not a pass — call it out instead of shipping it. If you believe a
-   task definition is genuinely wrong, STOP and ask the user; do not edit it.
-2. **No diagnosis without a local repro (repo rule 6 / `/rca` hard gate).** For
-   every failing task you report a root cause for, you must have (a) a local
-   reproduction you actually ran and watched FAIL on the buggy code, and (b) a
-   fix that makes that SAME repro pass unchanged. A theory is not a deliverable.
-   If you cannot reproduce it, label it an **open observability gap**, not an RCA.
-3. **Actively drive every background run (repo rule 1 + rule 19).** The bench run
-   is a long cloud fleet. Never fire it and passively wait. Poll on the rule-19
-   cadence (every 10s for the first 60s, then every 60s), check BOTH output
-   growth AND controller liveness (`ps`), and react the instant it dies or
-   finishes. A silently-dead fleet leaks paid Fly machines.
-4. **Fix the infra you trip over (repo rule 1b + 27).** Infra failures (clone
-   races, teardown leaks, stale tokens, pool exhaustion, flaky barriers) are IN
-   SCOPE — RCA and fix them so no future run hits them. But **never** kill a
-   run-bench fleet you did not launch in this session (rule 27).
-5. **Every confirmed fix must land a cemented test.** The repro that proved the
-   bug becomes a checked-in test in the suite that owns that boundary, so the
-   regression can't silently return (repo rule 1).
+For explicit task names, use them verbatim. The reported slice must exactly
+equal the executed slice; never silently add, remove, fold in, or substitute
+another workstream's results.
 
----
+## Persistent state
 
-## Resolving the slice
+Create .context/descend/<run-id>/state.json and update it after every state
+transition. It must contain:
 
-If `$ARGUMENTS` is a group token (`daily` / `pre-deploy` / `rose-bench` /
-`incomplete`), expand it to the concrete task names the backend resolves that
-group to — the source of truth is `deriveTaskGroup` /`resolveTaskGroup` in
-`back-end/src/domains/benchmarks/hubCatalogService.ts` applied to
-`agents/benchmarks/tasks.json` (`status`, `bench`, `tags`, explicit `group`).
-Expand it with a small script over `tasks.json` that mirrors that logic, then
-print the resolved list + count. If `$ARGUMENTS` is already a list of task
-names, use it verbatim. Never silently drop or add tasks — the slice you report
-on must equal the slice you ran.
+- slice name and exact task list;
+- controller PID, dashboard, run artifact, agent IDs, and FE links;
+- current state and epoch;
+- actual benchmark started_at, finished_at, and duration;
+- one lifecycle record per issue/fix;
+- infra RCA ledger across all epochs;
+- Andy decisions and approval snapshot IDs;
+- deploy unit base SHA, exact fix commits, worktree, worker ID, PR, and status.
 
----
+Compaction, session restart, or a sub-agent response must not erase or recreate
+state from memory.
 
-## The loop
+## State machine
 
-Repeat until the slice is 100% green on a real rerun with no reward hacks.
-Track it with the task tools (one tracked item per failing task is helpful).
+~~~text
+RESOLVE_SLICE
+  → RUN_SLICE
+  → CLASSIFY_RESULTS
+      ├─ INFRA found → RCA_INFRA_FIX → VERIFY_LOCAL → RUN_SLICE
+      │                   └─ real rerun confirms fix → ENQUEUE_DEPLOY_UNIT ─┐
+      └─ infra-clean → RCA_HARNESS_FAILURES_IN_PARALLEL → VERIFY_LOCAL  │
+                           → HARNESS_FIX_DECISION              [STOP 1]     │
+                           → APPLY_HARNESS_DECISIONS                        │
+                           → RERUN_FAILED_SUBSET                            │
+                                ├─ still failing → CLASSIFY_RESULTS         │
+                                └─ confirmed fix → ENQUEUE_DEPLOY_UNIT ─────┤
+                                                                            │
+MAIN:   continue every independent RCA and rerun ◀───────────────────────────┘
 
-**Infra-clean gate — the loop is literally `while (infra issues) { RCA + fix; rerun }`.**
-You do NOT report or stop for Andy after a run that had ANY infra failure. Infra
-noise makes TASK triage meaningless, so keep going: every iteration, RCA and fix
-EVERY distinct infra failure to a root cause (Phase C), then rerun (back to Phase
-A). Iterate — fixing new infra failures as fresh reruns surface them — until a run
-completes with **ZERO infra failures**. Only THEN do you triage TASK results and
-report.
+DEPLOY: prepare isolated fix-only worktree → /deploy
+        ├─ no admin approval required → merge → verify production
+        └─ admin approval required → DEPLOY_ADMIN_APPROVAL       [STOP 2]
+                                   → merge → verify production
 
-Keep a running **infra-RCA ledger** across every iteration (append one card per
-distinct infra root cause you fixed — do not drop the ones from earlier reruns).
-The final report (Phase E) presents that full accumulated ledger *plus* the
-non-infra TASK RCAs from the clean run — so Andy sees, in one place, every infra
-bug the descent had to fix to get a trustworthy run, and every real task bug that
-survived it. A run that keeps hitting NEW infra each rerun is expected early;
-that's the loop working, not a reason to stop.
+FULL_SLICE_ACCEPTANCE
+  ├─ any non-pass → CLASSIFY_RESULTS
+  └─ all pass + every deploy merged → DONE → propose/enable cron
+~~~
 
-### Phase A — RUN the slice
+HARNESS_FIX_DECISION pauses the main controller. DEPLOY_ADMIN_APPROVAL pauses only
+the affected deploy unit while the controller continues every independent RCA,
+rerun, and deploy. If no independent work remains, the controller may wait for
+that deploy approval.
 
-Run through the isolated benchmark entrypoint (never hand-roll a stack):
+User input can be injected at any time and is applied at the next safe boundary,
+but the agent deliberately yields for input only in the two states above.
 
-```bash
+## Benchmark and infra-clean loop
+
+Run only through the isolated entrypoint:
+
+~~~bash
 scripts/run-bench <resolved task names...>
-```
+~~~
 
-This delegates to the per-bench cloud fleet (each task gets its own isolated
-machine; per-task REAL/SIM comes from the catalog's `world_model_mode` — do not
-override it). Capture the controller PID + dashboard URL it prints. Monitor per
-rule 19 until every bench reports a terminal result. **Include a valid FE link
-for each agent run** (`http://localhost:<viewer>/?agent-id=<id>`) and verify it
-renders, per CLAUDE.md.
+Capture the controller PID, dashboard, artifact path, actual start/finish
+timestamps, and every agent FE link. Actively monitor until every requested
+benchmark has a terminal result and verify every FE link renders.
 
-### Phase B — TRIAGE every non-pass into exactly one bucket
+Classify every non-pass as exactly one of:
 
-- **INFRA** — the harness/fleet failed, not the agent: clone/volume race,
-  teardown leak, stale secret, pool exhaustion (`EMAXCONN`), barrier/driver
-  death, machine never warmed, control-plane saturation, missing compute-token
-  seed, etc. (See the many `project_cloudbench_*` / `project_daily_*` memories
-  for known signatures.)
-- **TASK** — the agent genuinely failed the task's real pass criteria.
+- **INFRA:** the harness/fleet/runtime environment failed before the agent could
+  receive a trustworthy task verdict.
+- **HARNESS:** the benchmark reached a trustworthy agent/evaluator verdict, but
+  the agent or product path failed the real pass criteria. A fallback or silent
+  substitute that masks the required path is a HARNESS failure.
 
-A "pass" that only passed because a fallback/silent-substitute masked the real
-path (e.g. `actual_model=gemini` when we assert `claude-*`, a test card bypassing
-the Rose card path) is a **TASK failure**, not a pass — bucket it accordingly.
+The infra loop is strict:
 
-### Phase C — FIX all INFRA, then RERUN (do NOT report yet)
+~~~text
+while the latest run contains any INFRA result:
+    RCA every distinct infra issue
+    reproduce locally
+    implement the root-cause fix
+    rerun the identical repro
+    cement the test
+    append/update its lifecycle row
+    rerun the slice
+~~~
 
-`/rca` each distinct infra failure to a local repro + root-cause fix, harden it
-(rule 1b), and cement a guard/test where one exists (many already do —
-`cloudbench_dependency_sync_test.py`, the multi-workstream scenarios, etc.).
-Append each fixed root cause to the **infra-RCA ledger**.
+Do not stop for Andy, issue harness verdicts, or present fix decisions from an
+infra-dirty run. A newly discovered infra failure begins another infra epoch.
+Once a real rerun confirms an infra fix, its deploy unit may start in parallel
+with the remaining descent.
 
-Then **go back to Phase A and rerun** — do NOT advance to Phase D/E while the last
-run had any infra failure. Repeat A→B→C until a run finishes with ZERO infra
-failures. Fix EVERY infra issue you trip over, even a new one a later rerun
-surfaces (clone/registry races, proxy/tunnel death, barrier stalls, teardown
-leaks, stale secrets, pool exhaustion) — that is the job (rules 1b + 24), not
-scope creep. Only a genuinely infra-clean run earns a TASK verdict.
+## HARNESS RCA
 
-### Phase D — RCA every TASK failure to a local repro + fix
+Only after an infra-clean run:
 
-For each TASK failure, run the full `/rca` gate:
+1. Gather runtime evidence first: run artifacts, worker/backend logs,
+   agent_latency.py, agent_logs.py, DB, and relevant HTTP evidence.
+2. Run each independent HARNESS RCA in parallel when file ownership does not
+   conflict. Group dependent failures under one root-cause RCA.
+3. Produce the local failing repro.
+4. Implement the root-cause fix.
+5. Run the identical repro and observe it pass.
+6. Cement the repro.
+7. Update exactly one lifecycle row per issue/fix.
 
-1. Gather runtime evidence first (worker/backend logs, agent_latency.py,
-   agent_logs.py, DB) — never reason from code alone.
-2. Build a **local repro** that fails on the bug. Prefer extending the existing
-   blackbox/eval suite that owns the boundary over a throwaway script (rule 18).
-3. Fix the real root cause. No reward hacks (rule 1 above).
-4. Re-run the identical repro → it passes, assertion unchanged.
-5. Cement the repro in a consistently-run suite (rule 5 above).
+Do not stop to ask which RCA to run first. Use all safe parallel capacity.
 
-Run independent RCAs in parallel sub-agents when they don't touch the same files.
+## Stop 1 — HARNESS_FIX_DECISION
 
-### Phase E — REPORT to Andy (the RCA card deck) — ONLY after an infra-clean run
+Enter this state only when:
 
-Reached only once a run completes with ZERO infra failures (the infra-clean
-gate). Emit the compressed card deck defined in **Report format** below, and make
-it the COMPLETE picture of the descent:
+- the latest benchmark run is infra-clean; and
+- every HARNESS failure has a completed RCA or an honest open observability gap;
+  and
+- all independent RCA workers have returned.
 
-- the full **infra-RCA ledger** — one card per distinct infra root cause you
-  fixed across ALL the reruns it took to reach a clean run (mark them `[INFRA ✓
-  fixed]`), and
-- the **TASK RCAs** from the clean run — the real task bugs that survived a
-  trustworthy, infra-free run.
+Emit the complete sorted lifecycle ledger using the response contract below.
+Andy responds to each HARNESS row with approve, edit, or reject. Infra rows use
+Not required.
 
-This is the decision surface: Andy reads it and says which TASK fixes to accept /
-edit / drop. STOP here for his input — do not self-approve and barrel into a
-rerun. (You did NOT stop for him during the infra loop; you stop now, once the
-run is finally infra-clean and the failures are real.)
+- **approve:** set Approval to Fix approved.
+- **edit:** set Approval to Edit requested, apply the instruction, and
+  return the row through the identical local verification gate.
+- **reject:** set Approval to Rejected and Fix to Dropped; never deploy that fix.
 
-### Phase F — Apply Andy's decisions
+The harness-fix decision does not satisfy any later prompt or terminal-behavior
+admin approval. Those approvals are snapshot-scoped inside /deploy.
 
-Accept the fixes he greenlights; apply any edits he asks for; drop the ones he
-rejects. If his feedback (or a follow-on fix) touches any prompt/instruction/
-command/skill file, re-request prompt approval for those hunks (repo rule 26) —
-approval is snapshot-scoped.
+## Rerun and parallel deploy
 
-### Phase G — RERUN (back to Phase A) + async-deploy confirmed fixes
+Rerun at least the previously failing subset after applying Andy's decisions.
+The final acceptance run covers the entire original slice.
 
-Rerun the slice (targeting at least the previously-failing subset —
-`scripts/run-bench --rerun-failed latest` or the explicit names; never re-run
-passing tasks just to burn time, but the final acceptance rerun must cover the
-whole slice to prove no regressions).
+A fix earns deployment only after:
 
-**For every fix that now makes its task PASS on the real rerun**, ship it
-without slowing the loop: commit that fix on its own branch and fire a
-**background sub-agent** that runs [`/deploy`](deploy.md) for it in an **isolated
-worktree** (`isolation: "worktree"`, `run_in_background: true`). The descend loop
-does NOT block on deploys — it keeps descending on the still-failing tasks while
-deploys run in parallel. Track each deploy sub-agent and surface its outcome
-(merged / blocked) in the next report. A fix only earns a deploy after the real
-bench (not just the local repro) confirms it — local-repro-green alone is not
-enough to ship.
+- its local RCA repro passes unchanged;
+- its test is cemented;
+- Andy accepted it when it is a HARNESS fix; and
+- a real benchmark rerun confirms the affected task or infra boundary.
 
-Loop until the slice is fully green. Then set up the cron only once a clean run
-is reproducible (that's the whole point — stability before scheduling).
+Create one deploy unit per independent fix, or the smallest group of fixes that
+must ship together. Record base_sha and exact fix_commits. Prepare a clean
+isolated worktree containing only that unit, then start a background sub-agent
+running /deploy. This fix-only handoff is mandatory because /deploy ships its
+entire worktree.
 
----
+The main controller does not block on deploys. It continues remaining RCAs and
+reruns, actively tracks every deploy worker, and updates the lifecycle ledger.
+If another deploy merges first, remaining deploy units sync origin/main and
+rerun their required gates.
 
-## Report format (the RCA card deck)
+## Stop 2 — DEPLOY_ADMIN_APPROVAL
 
-Optimize for **minimum tokens Andy must read** and **maximum parseability**.
-One header line, then one compact card per failing task. Passing tasks collapse
-to a single count — do not narrate them.
+Each deploy unit runs /deploy's prompt and agent
+recovery/terminal-behavior guards.
 
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  DESCEND · <slice> · clean run #<n> (after <k> infra reruns) · <P>/<T> ✅  <F> ❌
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+- If neither guard requires approval, preserve Fix approved for accepted HARNESS
+  rows or set Not required for INFRA rows, then continue without stopping.
+- If a guard requires approval, set all affected rows to
+  Deploy approval, show the exact snapshot-scoped diff, and pause only
+  that deploy unit.
+- After Andy approves that exact diff, set the rows to
+  Deploy approved and resume the deploy.
+- If a later change modifies an approval-gated hunk, return the affected deploy
+  unit to Deploy approval with a new snapshot ID.
 
-  INFRA LEDGER — every infra root cause fixed to reach a clean run
-  ────────────────────────────────────────────────────────────────
-✅ <infra-issue>                                     [INFRA ✓ fixed]
-   repro   ✅ <cmd/observation> → FAILED: <one-line signature>
-   fixed   ✅ <same> → PASSED   ·  edit: <file:line>
-   problem <≤1 line root cause>   ·  fix <≤1 line>   ·  cement <test>
-   (⚠️ if no local repro was possible: NO LOCAL REPRO — open gap + evidence)
+Credential, billing, quota, review-service, or provider failures remain scoped
+deploy blockers. Continue unrelated work and show the blocker in Deployed;
+do not turn them into ad hoc prioritization questions.
 
-  TASK RESULTS — the clean, infra-free run
-  ────────────────────────────────────────────────────────────────
-❌ <task-name>                                                [TASK]
-   repro   ✅ <cmd> → FAILED: <one-line observed vs expected>
-   fixed   ✅ <same cmd> → PASSED   ·  edit: <file:line>
-   problem <≤1 line: the first-bad-boundary root cause>
-   fix     <≤1 line: what the fix does>
-   cement  <suite/test the repro now lives in>
-```
+## Response contract
 
-Card rules:
-- `repro`/`fixed` are the two verification lines Andy asked for — each is a
-  literal command + its pass/fail outcome, so the proof is right there and he
-  doesn't have to trust prose. If there's no repro yet, say so plainly (⚠️) and
-  mark it an open gap — never fake a ✅.
-- `problem` and `fix` are ONE line each. No walls of text; link deeper detail by
-  reference (agent-id, log path, PR#) instead of inlining it.
-- Flag every reward-hacking temptation you resisted, so Andy can see the
-  goalposts didn't move: e.g. `⚠️ resisted: raising the 60s timeout — real cause
-  was a retry loop, fixed that instead`.
-- After a rerun, add a `deploy` line per shipped fix: `🚀 deploy #<id>: merged` /
-  `⏳ in review` / `🚫 blocked: <why>`.
-- Keep it pretty and scannable — the whole point is Andy parses it in seconds.
+Every /descend response uses real rendered Markdown. Never put the header,
+lifecycle table, or approval content in a code block. Do not include an ASCII
+banner, an infra 0 field, or a LANES section. Passing tasks collapse into the
+header count. Emit exactly one table row per issue/fix, including the full infra
+ledger and current HARNESS fixes.
 
----
+### Header
 
-## Done means
+Use a Markdown heading and a human-readable status. The only status labels are:
 
-- At least one run reached the **infra-clean gate** — completed with ZERO infra
-  failures — and the full infra-RCA ledger from every rerun it took to get there
-  was reported (not silently dropped).
-- Every task in the slice PASSES on a clean rerun (no infra noise, no reward
-  hacks, no silent-fallback pseudo-passes).
-- Every fix that shipped went through `/deploy` (merged to main) via its
-  background sub-agent, and every repro is cemented in a consistently-run suite.
-- The run is reproducibly green — only then propose/enable the cron for the
-  slice, so we schedule stability rather than scheduling flakiness.
+- 🟢 Descending
+- 🟡 Fix approval needed
+- 🟠 Deploy approval needed
+- ✅ Complete
+- 🔴 Blocked
+
+Put the run result and benchmark timing directly beneath it. Read timing from
+the controller artifact; never estimate it.
+
+For a completed run:
+
+## /descend daily
+### 🟡 Fix approval needed
+
+**Epoch 3** · **39/42 passed** · **42m 46s**
+
+Bench run: **Jul 20, 2026 · 10:14:22–10:57:08 PDT**
+
+For an active run, show the actual start timestamp and elapsed duration:
+
+Bench run: **Started Jul 20, 2026 · 10:14:22 PDT** · **18m 42s elapsed**
+
+### Ledger order
+
+Re-sort the entire ledger on every response:
+
+1. Rows with ⏳ Deploy approval first, ordered by row ID.
+2. Rows with ⏳ Fix approval next, ordered by row ID.
+3. All other rows not yet deployed next, ordered by row ID.
+4. Rows with ✅ Deployed #<PR> last, ordered by deployment completion timestamp.
+
+### Lifecycle table
+
+The Issue cell is one line and at most 100 characters. It states the concrete
+observed failure, not the benchmark's goal. Prefer boundary-specific summaries
+such as "Browser agent failed to start because proxy generation returned HTTP
+400." Render the ledger as a real Markdown table. Andy and Admin are the same
+person, so there is exactly one Approval column.
+
+| ID | Kind | Issue (≤100 chars) | RCA | Fix | Test | Approval | Real rerun | Deploy |
+|---|---|---|---|---|---|---|---|---|
+| H-01 | HARNESS | Browser agent failed to start because proxy generation returned HTTP 400 | ✅ Complete | ✅ Passes | ✅ Cemented | ⏳ Fix approval | ⏳ Pending | — Not queued |
+
+Lifecycle values:
+
+- **RCA:** ✅ Complete | ⚠️ Open gap
+- **Fix:** ✅ Passes | ⏳ In progress | 🗑 Dropped
+- **Test:** ✅ Cemented | ⏳ Pending | — Not applicable for an open gap
+- **Approval:** ⏳ Fix approval | ✅ Fix approved | ✏️ Edit requested |
+  ❌ Rejected | ⏳ Deploy approval | ✅ Deploy approved | — Not required
+- **Real rerun:** ⏳ Pending | ✅ Confirmed | ❌ Failed
+- **Deploy:** — Not queued | ⏳ Testing | 🔎 Review |
+  🚫 Blocked: <reason> | ✅ Deployed #<PR>
+
+RCA, Fix, and Test cells may link to compact evidence, but may not contain logs
+or multi-line explanations.
+
+### Stop 1 content — fix approval
+
+After the lifecycle table, include one section per HARNESS row with
+⏳ Fix approval. Use this exact five-part narrative and keep every value
+concrete:
+
+### <row ID> · <issue summary>
+
+The issue is **<root cause at the first-bad boundary>**. I reproduced it with
+**<minimal local test and exact command>**, where we measured **<measurement>**
+and observed **<wrong result>** instead of **<expected result>**. I fixed it by
+**<specific implementation change>**. The unchanged local repro now
+**<exact passing result>**, and the regression is cemented in
+**<permanent test name>**.
+
+**Is this fix approved?**
+
+- **Approve:** <row ID> approve
+- **Request an edit:** <row ID> edit: <instruction>
+- **Reject:** <row ID> reject
+
+Do not replace the reproduction measurement with vague language such as
+“the test failed.” State what was measured, the wrong observed value, and the
+expected value.
+
+### Stop 2 content — deploy approval
+
+After the affected lifecycle rows, include:
+
+## Deploy approval needed
+
+### A-<id> · <row IDs>
+
+This deploy changes **<one-line prompt or terminal-behavior effect>**. The exact
+snapshot-scoped diff is **<diff reference or displayed hunk>**.
+
+**Is this deploy change approved?**
+
+- **Approve:** A-<id> approve
+- **Reject:** A-<id> reject: <reason>
+
+For non-blocking progress, use 🟢 Descending and omit all approval questions.
+For either stop, use the corresponding approval-needed status. Never end a
+running response with a question. Put any resisted reward-hacking note directly
+below the affected approval narrative.
+
+## Done
+
+Done requires all of:
+
+- at least one real run completed with zero infra failures;
+- every original task passed on a full-slice acceptance rerun;
+- every RCA repro is cemented in a consistently-run suite;
+- every accepted and real-rerun-confirmed fix is deployed and production-verified;
+- no deploy unit remains testing, in review, blocked, or awaiting approval;
+- the full lifecycle ledger and actual benchmark duration were reported.
+
+Only then propose or enable the cron.
