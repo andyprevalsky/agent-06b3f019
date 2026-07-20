@@ -5696,8 +5696,6 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 
 def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
     """Return distinct browser attempts and grounded failed lifecycle events."""
-    browser_call_ids: set[str] = set()
-    browser_session_ids: set[str] = set()
     failures: list[str] = []
     for message in data.get("messages", []) or []:
         metadata = message.get("metadata") if isinstance(message, dict) else None
@@ -5714,11 +5712,15 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
             if not is_browser:
                 continue
             call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
-            if call_id:
-                browser_call_ids.add(str(call_id))
-            session_id = candidate.get("browser_session_id") or candidate.get("browser_url")
-            if session_id:
-                browser_session_ids.add(str(session_id))
+            session_id = (
+                candidate.get("task_id")
+                or candidate.get("taskId")
+                or candidate.get("subAgentId")
+                or candidate.get("sub_agent_id")
+                or candidate.get("world_model_session_id")
+                or candidate.get("browser_session_id")
+                or candidate.get("browser_url")
+            )
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
             if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
@@ -5726,7 +5728,12 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                     f"{tool_name or 'browser agent'} {call_id or session_id or 'unknown'} "
                     f"status={status or 'unsuccessful'}"
                 )
-    return max(len(browser_call_ids), len(browser_session_ids)), failures
+    # Browser actions have their own tool-call IDs. Counting those IDs directly
+    # turns one seven-step browser into seven "sessions". Reuse the trajectory
+    # grouper, which unions orchestration IDs, task IDs, and sub-agent IDs into
+    # the stable browser instance while retaining separate browser attempts.
+    browser_instances = _agent_class_step_counts(data).get("browser", {})
+    return len(browser_instances), failures
 
 
 _AGENT_CLASS_BY_RUNTIME_TOOL = {

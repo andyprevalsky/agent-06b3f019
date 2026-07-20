@@ -9,6 +9,7 @@ import tempfile
 import types
 import importlib.util
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 
@@ -1124,6 +1125,35 @@ async def test_wmh_http_client_matches_upstream_serving_routes():
         teardown_mock()
 
 
+def test_wmh_http_clients_allow_slow_grounded_transitions():
+    from benchmarks.world_model_harness import WMHHttpClient as BenchmarkClient
+    from helpers.world_model_runtime import WMHHttpClient as RuntimeClient
+
+    old_timeout = os.environ.get("WMH_HTTP_TIMEOUT_SECONDS")
+    try:
+        os.environ.pop("WMH_HTTP_TIMEOUT_SECONDS", None)
+        for client_type in (BenchmarkClient, RuntimeClient):
+            assert client_type("https://wmh.example.test").timeout == 180
+            assert client_type("https://wmh.example.test", timeout=12).timeout == 12
+
+        os.environ["WMH_HTTP_TIMEOUT_SECONDS"] = "95"
+        for client_type in (BenchmarkClient, RuntimeClient):
+            assert client_type("https://wmh.example.test").timeout == 95
+
+        os.environ["WMH_HTTP_TIMEOUT_SECONDS"] = "0"
+        for client_type in (BenchmarkClient, RuntimeClient):
+            try:
+                client_type("https://wmh.example.test")
+                raise AssertionError("non-positive WMH timeout must fail")
+            except ValueError as exc:
+                assert "greater than zero" in str(exc)
+    finally:
+        if old_timeout is None:
+            os.environ.pop("WMH_HTTP_TIMEOUT_SECONDS", None)
+        else:
+            os.environ["WMH_HTTP_TIMEOUT_SECONDS"] = old_timeout
+
+
 async def test_evaluate_archive_with_world_model_scores_dimensions_and_redacts_public_result():
     from benchmarks.world_model_harness import evaluate_archive_with_world_model, public_json_has_secret
 
@@ -1388,59 +1418,703 @@ def test_world_model_observation_decodes_real_server_json_content():
         assert result["world_model_simulated"] is True
 
 
-def test_browser_world_model_contract_rejects_spawn_ack_and_requires_output():
+def test_simulated_browser_transition_contract_requires_one_grounded_action():
     from domains.spawn_browser_agent_v3.handler import (
-        _browser_world_model_contract,
-        _validate_simulated_browser_result,
+        _ground_simulated_browser_approval_question,
+        _simulated_browser_frame_from_result,
+        _simulated_browser_message_metadata,
+        _simulated_browser_state_from_result,
+        _simulated_browser_transition_contract,
     )
+    from domains.spawn_browser_agent_v3.recording import normalize_simulated_browser_frame
+    from providers.rose.browser_use import build_browser_state_message_content
 
-    schema = {
-        "fields": [
-            {"name": "order_confirmation_id", "required": True},
-            {"name": "purchase_completed", "required": True},
-        ]
-    }
-    contract = _browser_world_model_contract(
-        is_resume=False,
+    contract = _simulated_browser_transition_contract(
+        action_name="click",
+        approved=False,
         write_lock_enabled=True,
-        output_schema=schema,
     )
-    assert contract["boundary"] == "synchronous_activity_result"
-    assert "spawned" in contract["instructions"]
-    assert contract["required_terminal_output_fields"] == [
-        "order_confirmation_id",
-        "purchase_completed",
-    ]
+    assert contract["boundary"] == "browser_environment_transition"
+    assert contract["action_name"] == "click"
+    assert "exactly this one action" in contract["instructions"]
+    assert "Never return a whole browser-agent outcome" in contract["instructions"]
 
-    invalid = _validate_simulated_browser_result(
-        {"status": "spawned", "success": True, "world_model_simulated": True},
-        output_schema=schema,
-    )
-    assert invalid["status"] == "failed"
-    assert invalid["success"] is False
-    assert "synchronous" in invalid["message"]
-
-    completed = _validate_simulated_browser_result(
-        {
-            "status": "completed",
-            "success": True,
-            "world_model_simulated": True,
-            "order_confirmation_id": "111-2222222-3333333",
-            "purchase_completed": True,
+    result = {
+        "browser_state": {
+            "url": "https://shop.example.test/cart",
+            "title": "Cart",
+            "dom_tree": "[1]<button>Checkout</button>",
+            "recent_events": [
+                {"type": "navigation", "url": "https://shop.example.test/cart"},
+                "Cart loaded",
+            ],
+            "tabs": ["https://shop.example.test/cart"],
+            "screenshot": {"unexpected": "object"},
         },
-        output_schema=schema,
+        "frame": {"html": "<main>Cart</main>", "width": 1440, "height": 900},
+    }
+    state = _simulated_browser_state_from_result(result)
+    frame = _simulated_browser_frame_from_result(result, state)
+    metadata = _simulated_browser_message_metadata(
+        frame=frame,
+        world_model_session_id="wmh-session-1",
+        world_model_name="rose-amazon",
     )
-    assert completed["structured_response"] == {
-        "order_confirmation_id": "111-2222222-3333333",
-        "purchase_completed": True,
+    assert state["dom_tree"] == "[1]<button>Checkout</button>"
+    assert state["viewport"] == {"width": 1440, "height": 900}
+    assert state["recent_events"] == [
+        '{"type":"navigation","url":"https://shop.example.test/cart"}',
+        "Cart loaded",
+    ]
+    assert state["tabs"] == [{"id": 0, "url": "https://shop.example.test/cart", "title": ""}]
+    assert "screenshot" not in state
+    assert "Recent Events:" in build_browser_state_message_content(
+        task="Checkout",
+        browser_state=state,
+    )
+    approval_question = _ground_simulated_browser_approval_question(
+        transition={"question": "Rose wants to perform a payment action. Approve?"},
+        browser_state={
+            "dom_tree": (
+                "<div>Carhartt Men's Knit Cuffed Beanie</div>"
+                "<span class='price'>$19.99</span><div>Order total: $21.74</div>"
+            )
+        },
+        system_name="Rose",
+        approval_type="payment",
+    )
+    assert approval_question == "Approve purchasing the beanie for $19.99?"
+    assert frame == {"kind": "html", "html": "<main>Cart</main>", "width": 1440, "height": 900}
+    assert metadata["world_model_simulated"] is True
+    assert metadata["simulated_browser_frame"] == frame
+
+    # Production WMH returns an accessibility-tree object and a data:text/html
+    # website frame. Both are normalized losslessly at the simulator boundary.
+    production_result = {
+        "browser_state": {
+            "url": "about:blank",
+            "title": "",
+            "dom_tree": {"role": "WebArea", "name": "", "children": []},
+            "viewport": {"width": 1280, "height": 800},
+            "scroll_position": {"x": 0, "y": 0},
+            "page_stats": {"total_elements": 0, "interactive_elements": 0},
+            "tabs": [{"tab_id": 1, "url": "about:blank", "active": True}],
+            "recent_events": [{"event": "navigation", "url": "about:blank", "status": 0}],
+        },
+        "frame": "data:text/html,%3Cmain%3EAmazon%20ready%3C%2Fmain%3E",
+    }
+    production_state = _simulated_browser_state_from_result(production_result)
+    assert json.loads(production_state["dom_tree"]) == production_result["browser_state"]["dom_tree"]
+    assert _simulated_browser_frame_from_result(production_result, production_state) == {
+        "kind": "html",
+        "html": "<main>Amazon ready</main>",
+    }
+    assert normalize_simulated_browser_frame("data:text/html;base64,PG1haW4+UmVhZHk8L21haW4+") == {
+        "kind": "html",
+        "html": "<main>Ready</main>",
+    }
+    assert normalize_simulated_browser_frame("https://www.amazon.com/dp/B002HLLM4C") is None
+    assert normalize_simulated_browser_frame("https://frames.example.test/browser/step-1.png") == {
+        "kind": "image",
+        "src": "https://frames.example.test/browser/step-1.png",
+    }
+    synthesized = _simulated_browser_frame_from_result(
+        {**production_result, "frame": "https://www.amazon.com/dp/B002HLLM4C"}, production_state
+    )
+    assert synthesized and synthesized["kind"] == "html"
+    assert "Amazon ready" not in synthesized["html"]
+    assert "about:blank" in synthesized["html"]
+    assert "href=" not in synthesized["html"]
+
+
+async def test_simulated_browser_transition_calls_wmh_once_and_forbids_real_fallback():
+    from domains.spawn_browser_agent_v3.handler import _execute_simulated_browser_transition
+
+    class FakeWorldModel:
+        world_model_name = "rose-amazon"
+
+        def __init__(self):
+            self.calls = []
+
+        async def execute(
+            self,
+            tool_name,
+            tool_args,
+            tool_call_id,
+            real_executor,
+            *,
+            allow_real_fallback=True,
+        ):
+            self.calls.append((tool_name, tool_args, tool_call_id, allow_real_fallback))
+            assert allow_real_fallback is False
+            assert tool_name == "browser_action"
+            return {
+                "success": True,
+                "world_model_simulated": True,
+                "world_model_session_id": "wmh-session-1",
+                "browser_state": {
+                    "url": "https://shop.example.test/cart",
+                    "title": "Cart",
+                    "dom_tree": "[1]<button>Checkout</button>",
+                },
+                "frame": {"kind": "html", "html": "<main>Cart</main>"},
+            }
+
+    world_model = FakeWorldModel()
+    result, state, frame = await _execute_simulated_browser_transition(
+        world_model=world_model,
+        goal="Buy the saved item",
+        action={"action": "click", "index": 1, "thinking": "Open checkout"},
+        browser_state={"url": "https://shop.example.test", "dom_tree": "[1]<button>Cart</button>"},
+        tool_call_id="browser-step-1",
+        write_lock_enabled=True,
+    )
+    assert result["world_model_session_id"] == "wmh-session-1"
+    assert state["url"].endswith("/cart")
+    assert frame == {"kind": "html", "html": "<main>Cart</main>"}
+    assert len(world_model.calls) == 1
+    assert world_model.calls[0][1]["action"] == "click"
+    assert world_model.calls[0][1]["params"] == {"index": 1}
+
+
+async def test_simulated_browser_transition_retries_when_wmh_omits_browser_state():
+    # RCA'd from a real cloud sim run: the WMH (an LLM) returned a transition missing
+    # browser_state at step 3, which hard-failed the whole browser session; the root agent
+    # then stalled in a wait_for loop until the timeout. A single malformed transition must
+    # be retried, not fatal.
+    from domains.spawn_browser_agent_v3.handler import _execute_simulated_browser_transition
+
+    class FlakyWorldModel:
+        world_model_name = "rose-amazon"
+
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, tool_name, tool_args, tool_call_id, real_executor, *, allow_real_fallback=True):
+            self.calls.append((tool_call_id, tool_args["simulation_contract"]["instructions"]))
+            if len(self.calls) == 1:
+                # Malformed: omit browser_state entirely.
+                return {"success": True, "world_model_simulated": True, "world_model_session_id": "wmh-1"}
+            return {
+                "success": True,
+                "world_model_simulated": True,
+                "world_model_session_id": "wmh-1",
+                "browser_state": {
+                    "url": "https://shop.example.test/results",
+                    "title": "Results",
+                    "dom_tree": "[1]<a>Product</a>",
+                },
+                "frame": {"kind": "html", "html": "<main>Results</main>"},
+            }
+
+    world_model = FlakyWorldModel()
+    _result, state, _frame = await _execute_simulated_browser_transition(
+        world_model=world_model,
+        goal="Find a black beanie",
+        action={"action": "search", "text": "black beanie", "thinking": "search"},
+        browser_state={"url": "https://shop.example.test", "dom_tree": "[1]<input>"},
+        tool_call_id="browser-step-3",
+        write_lock_enabled=False,
+    )
+    # Recovered instead of aborting the trajectory.
+    assert state["url"].endswith("/results")
+    assert len(world_model.calls) == 2
+    # Retry must use a DISTINCT tool_call_id so a cached malformed transition is not replayed.
+    assert world_model.calls[0][0] != world_model.calls[1][0]
+    assert world_model.calls[1][0] == "browser-step-3:retry2"
+    # And the retry contract must carry the corrective reminder.
+    assert "RETRY" in world_model.calls[1][1]
+
+
+async def test_simulated_browser_transition_retries_repeated_approval_after_grant():
+    # RCA from Amazon WMH run 20260720-143503-46570: after the write lock was
+    # approved, WMH repeated the same approval boundary. The workflow treated
+    # each repetition as a fresh write and requested approval forever.
+    from domains.spawn_browser_agent_v3.handler import _execute_simulated_browser_transition
+
+    class FlakyApprovalWorldModel:
+        world_model_name = "rose-amazon"
+
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, tool_name, tool_args, tool_call_id, real_executor, *, allow_real_fallback=True):
+            del tool_name, real_executor, allow_real_fallback
+            self.calls.append((tool_call_id, tool_args))
+            if len(self.calls) == 1:
+                return {
+                    "success": True,
+                    "status": "awaiting_write_approval",
+                    "requires_approval": True,
+                    "approval_type": "purchase",
+                    "world_model_simulated": True,
+                    "world_model_session_id": "wmh-approval",
+                    "browser_state": {
+                        "url": "https://www.amazon.com/gp/buy/spc/handlers/display.html",
+                        "title": "Checkout",
+                        "dom_tree": "[1]<button>Place your order</button>",
+                    },
+                }
+            return {
+                "success": True,
+                "status": "completed",
+                "requires_approval": False,
+                "world_model_simulated": True,
+                "world_model_session_id": "wmh-approval",
+                "browser_state": {
+                    "url": "https://www.amazon.com/gp/buy/thankyou/handlers/display.html",
+                    "title": "Order placed",
+                    "dom_tree": "Order #111-2222222-3333333",
+                },
+            }
+
+    world_model = FlakyApprovalWorldModel()
+    result, state, _frame = await _execute_simulated_browser_transition(
+        world_model=world_model,
+        goal="Complete the Amazon order",
+        action={"action": "click", "index": 1, "thinking": "Place the approved order"},
+        browser_state={
+            "url": "https://www.amazon.com/gp/buy/spc/handlers/display.html",
+            "dom_tree": "[1]<button>Place your order</button>",
+        },
+        tool_call_id="place-order:approved",
+        write_lock_enabled=True,
+        approved=True,
+        approval_type="purchase",
+    )
+
+    assert result["status"] == "completed"
+    assert state["url"].endswith("/thankyou/handlers/display.html")
+    assert len(world_model.calls) == 2
+    assert world_model.calls[1][0] == "place-order:approved:retry2"
+    assert "repeated approval" in world_model.calls[1][1]["simulation_contract"]["instructions"]
+
+
+async def test_simulated_browser_transition_raises_after_exhausting_retries():
+    from domains.spawn_browser_agent_v3.handler import _execute_simulated_browser_transition
+
+    class BrokenWorldModel:
+        world_model_name = "rose-amazon"
+
+        def __init__(self):
+            self.calls = 0
+
+        async def execute(self, tool_name, tool_args, tool_call_id, real_executor, *, allow_real_fallback=True):
+            self.calls += 1
+            return {"success": True, "world_model_simulated": True, "world_model_session_id": "s"}
+
+    world_model = BrokenWorldModel()
+    raised = False
+    try:
+        await _execute_simulated_browser_transition(
+            world_model=world_model,
+            goal="g",
+            action={"action": "click", "index": 1},
+            browser_state={"url": "u", "dom_tree": "[1]<button>"},
+            tool_call_id="browser-step-9",
+            write_lock_enabled=False,
+        )
+    except ValueError as exc:
+        raised = True
+        assert "browser_state" in str(exc)
+    assert raised
+    # Bounded: exactly 3 attempts, no infinite loop.
+    assert world_model.calls == 3
+
+
+async def test_spawn_browser_routes_simulation_without_calling_real_browser():
+    from domains.spawn_browser_agent_v3 import handler as browser_handler
+
+    fake_world_model = types.SimpleNamespace(
+        should_simulate=lambda tool_name: tool_name == "browser_action",
+    )
+    simulated_result = {
+        "status": "completed",
+        "world_model_simulated": True,
+        "simulated_browser_steps": 6,
+    }
+    simulated = AsyncMock(return_value=simulated_result)
+    real = AsyncMock(side_effect=AssertionError("real browser must not be connected in simulator mode"))
+    from_env = Mock(return_value=fake_world_model)
+    with (
+        patch.object(browser_handler.WorldModelToolExecutionAdapter, "from_env", from_env),
+        patch.object(browser_handler, "_spawn_browser_agent_activity_v3_simulated", simulated),
+        patch.object(browser_handler, "_spawn_browser_agent_activity_v3_real", real),
+    ):
+        result = await browser_handler.spawn_browser_agent_activity_v3(
+            "user-1",
+            "agent-1",
+            "Buy the saved item",
+            "tool-browser",
+            output_schema={
+                "fields": [
+                    {
+                        "name": "order_id",
+                        "type": "string",
+                        "description": "Amazon order confirmation ID",
+                        "required": True,
+                    }
+                ]
+            },
+        )
+    assert result == simulated_result
+    from_env.assert_called_once_with(
+        agent_id="agent-1:browser:tool-browser",
+        inherit_explicit_session=False,
+    )
+    simulated.assert_awaited_once()
+    real.assert_not_awaited()
+
+
+async def test_simulated_browser_recorder_exports_scriptless_wmh_frame_replay():
+    from domains.spawn_browser_agent_v3 import recording
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with (
+            patch.object(recording, "browser_recordings_enabled", return_value=True),
+            patch.object(recording, "archive_enabled", return_value=False),
+            patch.object(recording, "_recording_root", return_value=Path(tmp)),
+        ):
+            recorder = await recording.SimulatedBrowserRecorder.create(
+                agent_id="agent-1",
+                task_id="task-1",
+                session_id="wmh-session-1",
+            )
+            assert recorder is not None
+            await recorder.record_frame(
+                {"html": "<main>Checkout</main><script>window.BAD=true</script>"},
+                iteration=1,
+                label="Checkout loaded",
+                action="click",
+                browser_state={"url": "https://shop.example.test/checkout", "title": "Checkout"},
+            )
+            html_bytes = recorder.export_inline_html_bytes()
+            assert html_bytes is not None
+            replay = html_bytes.decode("utf-8")
+            assert "el.sandbox=''" in replay
+            assert "el.srcdoc=frameCsp+(frame.html||'')" in replay
+            assert "default-src 'none'" in replay
+            assert "allow-scripts" not in replay
+            output = await recorder.close()
+            assert output is not None and output.exists()
+            manifest = json.loads((output.parent / "manifest.json").read_text(encoding="utf-8"))
+            assert manifest["recording_source"] == "wmh_frames"
+            assert manifest["frame_count"] == 1
+
+
+async def test_simulated_browser_runs_five_policy_steps_then_verified_completion():
+    from domains.spawn_browser_agent_v3 import handler as browser_handler
+
+    class FakeWorldModel:
+        world_model_name = "rose-amazon"
+        session_id = None
+
+        def __init__(self):
+            self.actions = []
+            self.session_tasks = []
+
+        async def ensure_session(self, *, task=None, seed_state=None):
+            self.session_tasks.append((task, seed_state))
+            self.session_id = "wmh-session-trajectory"
+            return self.session_id
+
+        async def execute(
+            self,
+            tool_name,
+            tool_args,
+            tool_call_id,
+            real_executor,
+            *,
+            allow_real_fallback=True,
+        ):
+            del real_executor
+            assert tool_name == "browser_action"
+            assert allow_real_fallback is False
+            action_name = tool_args["action"]
+            self.actions.append(action_name)
+            step = len(self.actions)
+            return {
+                "success": True,
+                "world_model_simulated": True,
+                "world_model_session_id": "wmh-session-trajectory",
+                "browser_state": {
+                    "url": f"https://amazon.example.test/step-{step}",
+                    "title": f"Checkout step {step}",
+                    "dom_tree": f"[{step + 1}]<button>Continue</button>",
+                },
+                "frame": {"kind": "html", "html": f"<main>Checkout step {step}</main>"},
+            }
+
+    class FakeStream:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def start(self):
+            return None
+
+        async def finish(self):
+            return None
+
+        async def finish_tools(self, status):
+            return status
+
+    class FakeRoseClient:
+        def set_thinking_stream(self, stream):
+            self.stream = stream
+
+    policy_results = [
+        {
+            "action": {"action": "click", "index": index, "thinking": f"Complete step {index}"},
+            "tool_call_id": f"policy-step-{index}",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        }
+        for index in range(1, 6)
+    ]
+    policy_results.append(
+        {
+            "action": {"action": "attempt_completion", "thinking": "The order is visibly confirmed"},
+            "tool_call_id": "policy-complete",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        }
+    )
+    policy = AsyncMock(side_effect=policy_results)
+    verifier = AsyncMock(
+        return_value={
+            "score": 1,
+            "reasoning": "The final WMH state shows the order confirmation.",
+            "structured_response": {"order_id": "111-2222222-3333333"},
+        }
+    )
+    world_model = FakeWorldModel()
+    with (
+        patch.object(browser_handler, "load_config", return_value=types.SimpleNamespace()),
+        patch.object(
+            browser_handler,
+            "get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch.object(browser_handler, "BrowserThinkingStream", FakeStream),
+        patch.object(browser_handler, "BrowserStreamingRoseClient", FakeRoseClient),
+        patch.object(browser_handler, "_call_browser_use_with_rotation", policy),
+        patch.object(browser_handler, "_verify_simulated_browser_completion", verifier),
+        patch.object(browser_handler, "save_browser_action_message", AsyncMock()),
+        patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
+        patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
+        patch.object(browser_handler, "ACTION_LOOP_DELAY_SECONDS", 0),
+    ):
+        result = await browser_handler._spawn_browser_agent_activity_v3_simulated(
+            user_id="user-1",
+            agent_id="agent-1",
+            goal="Complete the Amazon order",
+            tool_call_id="tool-browser",
+            task_id="browser-task",
+            session_id=None,
+            cdp_url=None,
+            is_resume=False,
+            output_schema={
+                "fields": [
+                    {
+                        "name": "order_id",
+                        "type": "string",
+                        "description": "Amazon order confirmation ID",
+                        "required": True,
+                    }
+                ]
+            },
+            attachments=None,
+            write_lock_enabled=True,
+            start_url="https://amazon.example.test",
+            write_lock_resume_state=None,
+            system_name="Rose",
+            use_claude_mode=False,
+            gpt_token=None,
+            gpt_account_id=None,
+            gpt_token_source=None,
+            gpt_token_pool_id=None,
+            world_model=world_model,
+        )
+
+    assert result["status"] == "completed"
+    assert result["world_model_simulated"] is True
+    assert result["simulated_browser_steps"] == 6
+    assert result["structured_response"]["order_id"] == "111-2222222-3333333"
+    assert len(world_model.session_tasks) == 1
+    session_task, session_seed = world_model.session_tasks[0]
+    assert session_task == "Complete the Amazon order"
+    assert session_seed["url"] == "https://amazon.example.test"
+    assert session_seed["title"] == "Amazon.com"
+    assert "Initial page loaded" in session_seed["dom_tree"]
+    assert world_model.actions == ["click", "click", "click", "click", "click"]
+    assert policy.await_count == 6
+    verifier.assert_awaited_once()
+    verifier_actions = verifier.await_args.kwargs["action_entries"]
+    assert [entry["step"] for entry in verifier_actions] == [1, 2, 3, 4, 5, 6]
+
+
+async def test_simulated_browser_persists_post_approval_confirmation_state():
+    from domains.spawn_browser_agent_v3 import handler as browser_handler
+
+    confirmation_url = "https://amazon.example.test/gp/buy/thankyou/handlers/display.html"
+
+    class FakeWorldModel:
+        world_model_name = "rose-amazon"
+        session_id = None
+
+        async def execute(
+            self,
+            tool_name,
+            tool_args,
+            tool_call_id,
+            real_executor,
+            *,
+            allow_real_fallback=True,
+        ):
+            del real_executor
+            assert tool_name == "browser_action"
+            assert allow_real_fallback is False
+            assert tool_args["action"] == "evaluate"
+            assert tool_args["approval"]["granted"] is True
+            assert tool_call_id == "place-order:approved"
+            return {
+                "success": True,
+                "status": "completed",
+                "world_model_simulated": True,
+                "world_model_session_id": "wmh-session-approval",
+                "browser_state": {
+                    "url": confirmation_url,
+                    "title": "Amazon.com Order Confirmation",
+                    "dom_tree": {
+                        "role": "WebArea",
+                        "name": "Order placed, thanks Aman!",
+                        "children": [{"role": "text", "name": "Order #111-2222222-3333333"}],
+                    },
+                    "recent_events": [{"type": "order_placed", "order_id": "111-2222222-3333333"}],
+                },
+                "frame": {"kind": "html", "html": "<main>Order placed, thanks Aman!</main>"},
+            }
+
+    class FakeStream:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def start(self):
+            return None
+
+        async def finish(self):
+            return None
+
+        async def finish_tools(self, status):
+            return status
+
+    class FakeRoseClient:
+        def set_thinking_stream(self, stream):
+            self.stream = stream
+
+    policy = AsyncMock(
+        return_value={
+            "action": {"action": "attempt_completion", "thinking": "Confirmation is visible"},
+            "tool_call_id": "policy-complete",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        }
+    )
+    verifier = AsyncMock(
+        return_value={
+            "score": 1,
+            "reasoning": "The WMH confirmation state grounds the completed order.",
+            "structured_response": {"order_id": "111-2222222-3333333"},
+        }
+    )
+    saved_actions = AsyncMock()
+    checkout_state = {
+        "url": "https://amazon.example.test/gp/buy/spc/handlers/display.html",
+        "title": "Checkout",
+        "dom_tree": "[1]<button>Place your order</button>",
+    }
+    resume_state = {
+        "pending_action": {
+            "action": "evaluate",
+            "params": {"expression": "document.querySelector('#place-order').click()"},
+        },
+        "approval_type": "payment",
+        "step_count": 6,
+        "task_id": "browser-task",
+        "world_model_session_id": "wmh-session-approval",
+        "simulated_pending_tool_call_id": "place-order",
+        "simulated_browser_state": checkout_state,
+        "simulated_action_entries": [
+            {
+                "step": 6,
+                "action": "evaluate",
+                "result": {"requires_approval": True},
+                "approval_required": True,
+            }
+        ],
+        "simulated_turn_messages": [],
+        "simulated_frames": [],
+        "simulated_visited_urls": [checkout_state["url"]],
+        "simulated_reasoning_messages": [],
+        "simulated_action_summary": ["evaluate: place order"],
     }
 
-    missing = _validate_simulated_browser_result(
-        {"status": "completed", "success": True, "world_model_simulated": True},
-        output_schema=schema,
+    with (
+        patch.object(browser_handler, "load_config", return_value=types.SimpleNamespace()),
+        patch.object(
+            browser_handler,
+            "get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch.object(browser_handler, "BrowserThinkingStream", FakeStream),
+        patch.object(browser_handler, "BrowserStreamingRoseClient", FakeRoseClient),
+        patch.object(browser_handler, "_call_browser_use_with_rotation", policy),
+        patch.object(browser_handler, "_verify_simulated_browser_completion", verifier),
+        patch.object(browser_handler, "save_browser_action_message", saved_actions),
+        patch.object(browser_handler, "save_browser_assistant_message", AsyncMock()),
+        patch.object(browser_handler.SimulatedBrowserRecorder, "create", AsyncMock(return_value=None)),
+        patch.object(browser_handler, "ACTION_LOOP_DELAY_SECONDS", 0),
+    ):
+        result = await browser_handler._spawn_browser_agent_activity_v3_simulated(
+            user_id="user-1",
+            agent_id="agent-1",
+            goal="Complete the Amazon order",
+            tool_call_id="tool-browser",
+            task_id="browser-task",
+            session_id=None,
+            cdp_url=None,
+            is_resume=True,
+            output_schema={
+                "fields": [
+                    {
+                        "name": "order_id",
+                        "type": "string",
+                        "description": "Amazon order confirmation ID",
+                        "required": True,
+                    }
+                ]
+            },
+            attachments=None,
+            write_lock_enabled=True,
+            start_url="https://amazon.example.test",
+            write_lock_resume_state=resume_state,
+            system_name="Rose",
+            use_claude_mode=False,
+            gpt_token=None,
+            gpt_account_id=None,
+            gpt_token_source=None,
+            gpt_token_pool_id=None,
+            world_model=FakeWorldModel(),
+        )
+
+    assert result["status"] == "completed"
+    assert result["current_url"] == confirmation_url
+    assert confirmation_url in result["message"]
+    approval_event = next(
+        call for call in saved_actions.await_args_list if call.kwargs.get("tool_call_id") == "place-order:approved"
     )
-    assert missing["status"] == "failed"
-    assert "order_confirmation_id" in missing["message"]
+    approval_evidence = json.loads(approval_event.kwargs["message"])
+    assert approval_evidence["approved"] is True
+    assert approval_evidence["browser_state"]["url"] == confirmation_url
+    assert "Order placed, thanks Aman!" in approval_evidence["browser_state"]["dom_tree"]
+    assert approval_event.kwargs["steps_taken"] == 6
 
 
 async def test_runtime_world_model_session_uses_first_tool_goal_as_task():
@@ -1479,7 +2153,7 @@ async def test_runtime_world_model_session_uses_first_tool_goal_as_task():
             agent_id="agent-goal-test",
         )
         result = await adapter.execute(
-            "spawn_browser_agent",
+            "browser_action",
             {"goal": "Complete the Amazon checkout"},
             "tool-browser",
             real_executor,
@@ -1489,6 +2163,80 @@ async def test_runtime_world_model_session_uses_first_tool_goal_as_task():
     finally:
         runtime._WMH_SESSION_CACHE.pop(("agent-goal-test", "rose-golden"), None)
         teardown_mock()
+
+
+async def test_runtime_world_model_session_forwards_seed_state():
+    from helpers import world_model_runtime as runtime
+
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(200, json={"session_id": "session-seeded"})
+
+    seed_state = {
+        "url": "https://www.amazon.com/s?k=black+beanie",
+        "title": "Amazon.com",
+        "dom_tree": '{"role":"webarea","name":"Amazon.com"}',
+    }
+    runtime._WMH_SESSION_CACHE.pop(("agent-seed-test", "rose-golden"), None)
+    setup_mock_fn(handler)
+    try:
+        adapter = runtime.WorldModelToolExecutionAdapter(
+            mode="simulate",
+            client=runtime.WMHHttpClient("https://wmh.example.test"),
+            world_model_name="rose-golden",
+            agent_id="agent-seed-test",
+        )
+        session_id = await adapter.ensure_session(
+            task="Complete the Amazon checkout",
+            seed_state=seed_state,
+        )
+
+        assert session_id == "session-seeded"
+        assert requests == [
+            {
+                "task": "Complete the Amazon checkout",
+                "seed_state": seed_state,
+            }
+        ]
+    finally:
+        runtime._WMH_SESSION_CACHE.pop(("agent-seed-test", "rose-golden"), None)
+        teardown_mock()
+
+
+def test_browser_adapter_can_ignore_run_wide_world_model_session():
+    """Browser simulation must not inherit unrelated run-wide WMH history."""
+
+    from helpers.world_model_runtime import WorldModelToolExecutionAdapter
+
+    keys = [
+        "BENCHMARK_WORLD_MODEL_MODE",
+        "WMH_BASE_URL",
+        "WMH_MODEL_NAME",
+        "WMH_SESSION_ID",
+        "WORLD_MODEL_SESSION_ID",
+    ]
+    old_env = {key: os.environ.get(key) for key in keys}
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "simulate"
+        os.environ["WMH_BASE_URL"] = "https://wmh.example.test"
+        os.environ["WMH_MODEL_NAME"] = "rose-golden"
+        os.environ["WMH_SESSION_ID"] = "run-wide-session"
+        os.environ.pop("WORLD_MODEL_SESSION_ID", None)
+
+        adapter = WorldModelToolExecutionAdapter.from_env(
+            agent_id="browser-agent",
+            inherit_explicit_session=False,
+        )
+
+        assert adapter.session_id is None
+    finally:
+        for key, value in old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 async def test_world_model_tool_execution_adapter_simulate_and_shadow_modes():
@@ -1539,7 +2287,8 @@ async def test_world_model_tool_execution_adapter_simulate_and_shadow_modes():
         assert is_world_model_environment_boundary("web_fetch") is True
         assert is_world_model_environment_boundary("people_search") is True
         assert is_world_model_environment_boundary("spawn_agent") is False
-        assert is_world_model_environment_boundary("spawn_browser_agent") is True
+        assert is_world_model_environment_boundary("spawn_browser_agent") is False
+        assert is_world_model_environment_boundary("browser_action") is True
         assert is_world_model_environment_boundary("call_phone_number") is True
         assert is_world_model_environment_boundary("payment_mint") is True
         assert is_world_model_environment_boundary("send_direct_sms") is True
@@ -1625,6 +2374,17 @@ async def test_world_model_simulate_can_fallback_on_unavailable_observation():
         assert result["result"] == {"live": True}
         assert result["world_model_unavailable_fallback"] is True
         assert real_calls == [("web_search", {"query": "Lisbon climate"}, "tool-web")]
+
+        no_fallback = await simulate.execute(
+            "web_search",
+            {"query": "Lisbon climate"},
+            "tool-web-no-fallback",
+            real_executor,
+            allow_real_fallback=False,
+        )
+        assert no_fallback["world_model_simulated"] is True
+        assert no_fallback.get("world_model_unavailable_fallback") is None
+        assert real_calls == [("web_search", {"query": "Lisbon climate"}, "tool-web")]
     finally:
         if old_env is None:
             os.environ.pop("BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE", None)
@@ -1636,7 +2396,6 @@ async def test_world_model_simulate_can_fallback_on_unavailable_observation():
 async def test_simulated_provider_activities_call_wmh_instead_of_live_services():
     from domains.call_phone_number.handler import call_phone_number_activity
     from domains.request_payment_card.repo import lookup_purchase_activity, mint_purchase_card_activity
-    from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
     from domains.web_fetch.handler import web_fetch_activity
     from helpers.sms_activities import notify_sms_event_activity, send_direct_sms_activity
     from tools.people_search.handler import people_search_activity
@@ -1699,10 +2458,6 @@ async def test_simulated_provider_activities_call_wmh_instead_of_live_services()
         assert (await notify_sms_event_activity("user-1", "completion", "agent-1", {"summary": "done"}))[
             "sms"
         ] == "sent"
-        assert (await spawn_browser_agent_activity_v3("user-1", "agent-1", "inspect site", "tool-browser"))[
-            "status"
-        ] == "completed"
-
         assert actions == [
             "web_search",
             "web_fetch",
@@ -1712,7 +2467,6 @@ async def test_simulated_provider_activities_call_wmh_instead_of_live_services()
             "payment_mint",
             "send_direct_sms",
             "notify_sms_event",
-            "spawn_browser_agent",
         ]
     finally:
         teardown_mock()
@@ -1817,8 +2571,16 @@ async def run_all_tests():
         test_world_model_observation_decodes_real_server_json_content,
     )
     r.record(
-        "browser_world_model_contract_rejects_spawn_ack_and_requires_output",
-        test_browser_world_model_contract_rejects_spawn_ack_and_requires_output,
+        "simulated_browser_transition_contract_requires_one_grounded_action",
+        test_simulated_browser_transition_contract_requires_one_grounded_action,
+    )
+    r.record(
+        "browser_adapter_can_ignore_run_wide_world_model_session",
+        test_browser_adapter_can_ignore_run_wide_world_model_session,
+    )
+    r.record(
+        "wmh_http_clients_allow_slow_grounded_transitions",
+        test_wmh_http_clients_allow_slow_grounded_transitions,
     )
     r.record("write_eval_suite_matches_wmh_examples_shape", test_write_eval_suite_matches_wmh_examples_shape)
     await r.record_async(
@@ -1841,8 +2603,44 @@ async def run_all_tests():
         test_runtime_world_model_session_uses_first_tool_goal_as_task,
     )
     await r.record_async(
+        "runtime_world_model_session_forwards_seed_state",
+        test_runtime_world_model_session_forwards_seed_state,
+    )
+    await r.record_async(
         "world_model_simulate_can_fallback_on_unavailable_observation",
         test_world_model_simulate_can_fallback_on_unavailable_observation,
+    )
+    await r.record_async(
+        "simulated_browser_transition_calls_wmh_once_and_forbids_real_fallback",
+        test_simulated_browser_transition_calls_wmh_once_and_forbids_real_fallback,
+    )
+    await r.record_async(
+        "simulated_browser_transition_retries_when_wmh_omits_browser_state",
+        test_simulated_browser_transition_retries_when_wmh_omits_browser_state,
+    )
+    await r.record_async(
+        "simulated_browser_transition_retries_repeated_approval_after_grant",
+        test_simulated_browser_transition_retries_repeated_approval_after_grant,
+    )
+    await r.record_async(
+        "simulated_browser_transition_raises_after_exhausting_retries",
+        test_simulated_browser_transition_raises_after_exhausting_retries,
+    )
+    await r.record_async(
+        "spawn_browser_routes_simulation_without_calling_real_browser",
+        test_spawn_browser_routes_simulation_without_calling_real_browser,
+    )
+    await r.record_async(
+        "simulated_browser_recorder_exports_scriptless_wmh_frame_replay",
+        test_simulated_browser_recorder_exports_scriptless_wmh_frame_replay,
+    )
+    await r.record_async(
+        "simulated_browser_runs_five_policy_steps_then_verified_completion",
+        test_simulated_browser_runs_five_policy_steps_then_verified_completion,
+    )
+    await r.record_async(
+        "simulated_browser_persists_post_approval_confirmation_state",
+        test_simulated_browser_persists_post_approval_confirmation_state,
     )
     await r.record_async(
         "simulated_provider_activities_call_wmh_instead_of_live_services",

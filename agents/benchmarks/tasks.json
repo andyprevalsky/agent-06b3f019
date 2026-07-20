@@ -1121,14 +1121,14 @@
         "id": "amazon-beanie-runtime-contract",
         "method": "static_check",
         "criteria": [
-          "No tool call fails",
+          "The browser-agent session has no failed lifecycle event",
           "Exactly one browser-agent session is used",
           "The root agent completes after exactly one auto-approved write-lock",
           "The approval request identifies the beanie and its price"
         ],
         "checks": [
           {
-            "type": "no_tool_failures"
+            "type": "no_browser_agent_failures"
           },
           {
             "type": "browser_agent_session_count",

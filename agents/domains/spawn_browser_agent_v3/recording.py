@@ -20,7 +20,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote_to_bytes, urljoin, urlparse
 
 import httpx
 import structlog
@@ -33,6 +33,7 @@ logger = structlog.get_logger()
 
 FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
 TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
+STATIC_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
 
 
 def browser_recordings_enabled() -> bool:
@@ -217,6 +218,207 @@ def _sanitize_observation_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize_observation_value(item) for item in value]
     return value
+
+
+def normalize_simulated_browser_frame(value: Any) -> Optional[Dict[str, Any]]:
+    """Normalize WMH visual output for scriptless live/replay rendering."""
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.lower().startswith("data:text/html"):
+            header, separator, encoded_html = stripped.partition(",")
+            if not separator:
+                return None
+            try:
+                if ";base64" in header.lower():
+                    html_value = base64.b64decode(encoded_html, validate=True).decode("utf-8")
+                else:
+                    html_value = unquote_to_bytes(encoded_html).decode("utf-8")
+            except (UnicodeDecodeError, ValueError):
+                return None
+            return {"kind": "html", "html": html_value} if html_value.strip() else None
+        if stripped.startswith("data:image/") or _looks_like_static_image_url(stripped):
+            return {"kind": "image", "src": stripped}
+        if stripped.startswith(("https://", "http://")):
+            return None
+        return {"kind": "html", "html": stripped} if stripped else None
+    if not isinstance(value, dict):
+        return None
+
+    dimensions = {
+        key: int(number)
+        for key, number in (("width", value.get("width")), ("height", value.get("height")))
+        if isinstance(number, (int, float)) and not isinstance(number, bool) and number > 0
+    }
+    html_value = value.get("html") or value.get("srcdoc") or value.get("src_doc")
+    if isinstance(html_value, str) and html_value.strip():
+        return {"kind": "html", "html": html_value, **dimensions}
+
+    source = value.get("src") or value.get("data_url") or value.get("image_url") or value.get("url")
+    if isinstance(source, str) and (
+        source.strip().startswith("data:image/") or _looks_like_static_image_url(source.strip())
+    ):
+        return {"kind": "image", "src": source.strip(), **dimensions}
+
+    encoded = value.get("base64") or value.get("data")
+    mime_type = str(value.get("mime_type") or value.get("mimeType") or "image/png")
+    if (
+        isinstance(encoded, str)
+        and encoded.strip()
+        and mime_type
+        in {
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/gif",
+        }
+    ):
+        return {"kind": "image", "src": f"data:{mime_type};base64,{encoded.strip()}", **dimensions}
+    return None
+
+
+def _looks_like_static_image_url(value: str) -> bool:
+    """Reject ordinary page URLs so a WMH frame can never fetch a live website."""
+
+    if not value.startswith(("https://", "http://")):
+        return False
+    return Path(urlparse(value).path).suffix.lower() in STATIC_IMAGE_SUFFIXES
+
+
+class SimulatedBrowserRecorder:
+    """Self-contained WMH frame recorder; never owns a browser or CDP session."""
+
+    uses_kernel_replay = False
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        task_id: str,
+        session_id: str,
+        frames: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        self.agent_id = agent_id
+        self.task_id = task_id
+        self.session_id = session_id
+        self.browser_url = ""
+        self.session_metadata = {"provider": "wmh", "simulated": True}
+        self.output_dir = browser_recording_output_dir(agent_id, task_id)
+        self.frames = list(frames or [])
+        self.observations: List[Dict[str, Any]] = []
+        self.cursor_events: List[Dict[str, int]] = []
+
+    @classmethod
+    async def create(
+        cls,
+        *,
+        agent_id: str,
+        task_id: str,
+        session_id: str,
+        frames: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional["SimulatedBrowserRecorder"]:
+        if not browser_recordings_enabled():
+            return None
+        recorder = cls(agent_id=agent_id, task_id=task_id, session_id=session_id, frames=frames)
+        recorder.output_dir.mkdir(parents=True, exist_ok=True)
+        return recorder
+
+    async def record_frame(
+        self,
+        frame: Any,
+        *,
+        iteration: int,
+        label: str,
+        action: str,
+        browser_state: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        normalized = normalize_simulated_browser_frame(frame)
+        if normalized is None:
+            return None
+        entry = {
+            **normalized,
+            "ts_ms": max(0, int(iteration)) * 500,
+            "label": label,
+            "action": action,
+            "metadata": {
+                "step": iteration,
+                "url": str((browser_state or {}).get("url") or ""),
+                "title": str((browser_state or {}).get("title") or ""),
+                "world_model_simulated": True,
+            },
+        }
+        self.frames.append(entry)
+        return entry
+
+    async def record_observation(
+        self,
+        *,
+        iteration: int,
+        browser_state: Dict[str, Any],
+        action_entries: List[Dict[str, Any]],
+    ) -> None:
+        self.observations.append(
+            {
+                "iteration": iteration,
+                "browser_state": _sanitize_observation_value(browser_state),
+                "action_count": len(action_entries),
+            }
+        )
+
+    async def close(self, *, include_steel_media: bool = False) -> Optional[Path]:
+        del include_steel_media
+        if not self.frames:
+            return None
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = self.output_dir / "manifest.json"
+        html_path = self.output_dir / "index.html"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "agent_id": self.agent_id,
+                    "task_id": self.task_id,
+                    "session_id": self.session_id,
+                    "browser_session_metadata": self.session_metadata,
+                    "recording_source": "wmh_frames",
+                    "frame_count": len(self.frames),
+                    "frames": self.frames,
+                    "observations": self.observations,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        html_path.write_bytes(self.export_inline_html_bytes() or b"")
+        await self._archive_recording_artifacts()
+        return html_path
+
+    def export_inline_html_bytes(self) -> Optional[bytes]:
+        if not self.frames:
+            return None
+        frames_json = json.dumps(self.frames, ensure_ascii=False).replace("</", "<\\/")
+        title = html.escape(f"Simulated browser recording {self.task_id}")
+        return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>{title}</title>
+<style>html,body{{margin:0;height:100%;background:#09090b;color:#eee;font:13px sans-serif}}#app{{display:flex;flex-direction:column;height:100%}}header{{display:flex;gap:10px;padding:10px;background:#18181b}}#timeline{{flex:1}}#stage{{position:relative;flex:1;background:white}}#stage img,#stage iframe{{position:absolute;inset:0;width:100%;height:100%;border:0;object-fit:contain}}</style></head>
+<body><div id="app"><header><button id="play">Play</button><input id="timeline" type="range" min="0" value="0"><span id="meta"></span></header><div id="stage"></div></div>
+<script>const frames={frames_json};let index=0,timer=null;const stage=document.getElementById('stage'),range=document.getElementById('timeline'),meta=document.getElementById('meta'),play=document.getElementById('play'),frameCsp='<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: blob:; style-src \'unsafe-inline\'; font-src data:">';range.max=Math.max(0,frames.length-1);function render(i){{index=Math.max(0,Math.min(frames.length-1,Number(i)||0));range.value=String(index);stage.replaceChildren();const frame=frames[index];if(!frame)return;if(frame.kind==='html'){{const el=document.createElement('iframe');el.sandbox='';el.srcdoc=frameCsp+(frame.html||'');stage.appendChild(el)}}else{{const el=document.createElement('img');el.src=frame.src||'';stage.appendChild(el)}}meta.textContent=`${{index+1}}/${{frames.length}} · ${{frame.label||frame.action||'step'}}`;}}range.oninput=()=>render(range.value);play.onclick=()=>{{if(timer){{clearInterval(timer);timer=null;play.textContent='Play';return}}play.textContent='Pause';timer=setInterval(()=>{{if(index>=frames.length-1){{clearInterval(timer);timer=null;play.textContent='Play';return}}render(index+1)}},500)}};render(0);</script></body></html>""".encode()
+
+    async def _archive_recording_artifacts(self) -> None:
+        if not archive_enabled():
+            return
+        root_agent_id = current_root_agent_id() or self.agent_id
+        for file_path in self.output_dir.rglob("*"):
+            if file_path.is_file():
+                archive_bytes(
+                    root_agent_id=root_agent_id,
+                    path=f"media/browser/{self.task_id}/{file_path.relative_to(self.output_dir).as_posix()}",
+                    body=file_path.read_bytes(),
+                    content_type=mimetypes.guess_type(file_path.name)[0] or "application/octet-stream",
+                )
+
+    def cleanup_local_artifacts(self, *, persisted: bool = False, force: bool = False) -> None:
+        if (persisted or force) and cleanup_local_recording_artifacts_enabled():
+            shutil.rmtree(self.output_dir, ignore_errors=True)
 
 
 class BrowserAgentRecorder:
@@ -587,9 +789,7 @@ class BrowserAgentRecorder:
                             task_id=self.task_id,
                             error=str(exc)[:300],
                         )
-                response = await client.get(
-                    f"{base}/browsers/{self.session_id}/replays", headers=headers
-                )
+                response = await client.get(f"{base}/browsers/{self.session_id}/replays", headers=headers)
                 response.raise_for_status()
                 replays = response.json() or []
             # Match ONLY this run's replay by id — never substitute replays[0], which
