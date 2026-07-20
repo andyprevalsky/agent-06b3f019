@@ -28,6 +28,7 @@ PREDEPLOY_METRICS_SCRIPT = ROOT / "agents" / "benchmarks" / "predeploy_metrics.p
 LOGGED_COMMAND_SCRIPT = ROOT / "scripts" / "run_logged_command.py"
 RUN_BENCH_SCRIPT = ROOT / "scripts" / "run-bench"
 STACK_SCRIPT = ROOT / "scripts" / "run.sh"
+SEED_CACHE_LIB = ROOT / "scripts" / "lib" / "seed-cache.sh"
 LOCAL_RUNNER = ROOT / "agents" / "benchmarks" / "local.py"
 DEPLOY_COMMAND = ROOT / ".claude" / "commands" / "deploy.md"
 
@@ -626,7 +627,16 @@ def test_freshly_seeded_database_gets_cold_backend_health_budget() -> None:
     warm databases retain the fast budget, and operator overrides still win.
     """
     stack = STACK_SCRIPT.read_text()
-    helper = _extract_fleet_function(stack, "isolated_backend_ready_attempts() {")
+    # run.sh sources scripts/lib/seed-cache.sh, so isolated_backend_ready_attempts
+    # delegates the actual number to backend_ready_budget() living in that lib.
+    # Reproduce the same composition here (budget helper + attempts wrapper) plus
+    # the DB_RESTORED=false default run.sh sets before calling it.
+    budget = _extract_fleet_function(
+        SEED_CACHE_LIB.read_text(), "backend_ready_budget() {"
+    )
+    helper = (
+        budget + "\n" + _extract_fleet_function(stack, "isolated_backend_ready_attempts() {")
+    )
 
     def attempts(*, cold: bool, override: str | None = None) -> int:
         env = os.environ.copy()
@@ -638,7 +648,7 @@ def test_freshly_seeded_database_gets_cold_backend_health_budget() -> None:
             [
                 "bash",
                 "-c",
-                f"{helper}\nFIRST_RUN_SEEDED=$1\nisolated_backend_ready_attempts",
+                f"{helper}\nFIRST_RUN_SEEDED=$1\nDB_RESTORED=false\nisolated_backend_ready_attempts",
                 "attempts",
                 "true" if cold else "false",
             ],
@@ -2937,7 +2947,12 @@ def test_refresh_deps_rejects_invalid_ref_before_fly(tmp_path: Path) -> None:
 def test_isolated_backend_startup_retries_one_hung_process(tmp_path: Path) -> None:
     """A live-but-never-listening first backend cannot abort the whole fleet slot."""
     stack = STACK_SCRIPT.read_text()
-    helpers = "".join(
+    # isolated_backend_ready_attempts() delegates to backend_ready_budget(), which
+    # run.sh sources from scripts/lib/seed-cache.sh — prepend it so the extracted
+    # snippet is self-contained just like the sourced production stack.
+    helpers = _extract_fleet_function(
+        SEED_CACHE_LIB.read_text(), "backend_ready_budget() {"
+    ) + "".join(
         _extract_fleet_function(stack, signature)
         for signature in (
             "launch_backend_service() {",
@@ -2981,6 +2996,8 @@ PIDS=("")
 NAMES=()
 BENCHMARK_MODE=true
 BENCHMARK_ISOLATED_RUN=true
+FIRST_RUN_SEEDED=false
+DB_RESTORED=false
 SCRIPT_DIR="$SCRIPT_DIR"
 curl() {{ [ "$(cat "$LAUNCHES")" -ge 2 ]; }}
 {helpers}

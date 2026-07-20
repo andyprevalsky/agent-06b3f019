@@ -1788,8 +1788,11 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
     raised = False
     try:
         os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
-        bench._sync_compute_tokens = lambda: True
-        bench._sync_browser_credentials = lambda: False
+        # Mirror the real signatures: _apply_live_fixture calls
+        # _sync_compute_tokens(tolerate_gpt_code_unavailable=True) and
+        # _sync_browser_credentials(ctx.cookie_domains).
+        bench._sync_compute_tokens = lambda **_: True
+        bench._sync_browser_credentials = lambda *_a, **_k: False
         bench._apply_live_fixture(
             bench.LiveFixtureContext(
                 base_url="http://localhost:54121",
