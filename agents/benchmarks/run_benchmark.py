@@ -1042,7 +1042,14 @@ async def create_agent(
     task: BenchmarkTask,
 ) -> str:
     """Create a benchmark agent. Returns agent_id."""
-    headers = await _api_headers()
+    # Flag the created root agent as a benchmark run so admin-health metrics strip it
+    # out. Benchmarks run under a real operator account (e.g. Andy) via JWT or API key;
+    # echoing the internal backend key here proves the marker came from a benchmark
+    # (external clients never have it) independent of the create's auth mode. See
+    # back-end agents/routes.ts and admin-health/repo.ts.
+    headers = {**(await _api_headers())}
+    if API_KEY:
+        headers["X-Benchmark-Run"] = API_KEY
     goal = os.environ.get("BENCHMARK_GOAL_OVERRIDE") or _prod_user_data_prompt_override(task) or task.prompt
     goal = goal.replace("{frontend_url}", _frontend_url_for_benchmark(base_url))
     goal = resolve_callee_prompt(goal, getattr(task, "_callee_phone_number", ""), task.name)

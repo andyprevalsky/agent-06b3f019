@@ -9,6 +9,33 @@ import { prisma, runTransactionWithRetry } from '../../providers/database';
 // Agent mutations
 // ---------------------------------------------------------------------------
 
+/**
+ * Optional Agent columns that are only written when the caller supplied a value,
+ * so DB-level defaults stand otherwise. Kept out of createAgentTransaction to keep
+ * that function under the line budget.
+ */
+function optionalAgentCreateFields(params: {
+  temporalWorkflowId?: string | null;
+  priceLimitCents?: number;
+  writeLockEnabled?: boolean;
+  fastModeCacheEnabled?: boolean;
+  isBenchmark?: boolean;
+}): Partial<Prisma.AgentUncheckedCreateInput> {
+  return {
+    ...(params.temporalWorkflowId !== undefined && params.temporalWorkflowId !== null
+      ? { temporalWorkflowId: params.temporalWorkflowId }
+      : {}),
+    ...(params.priceLimitCents !== undefined && params.priceLimitCents !== 0
+      ? { priceLimitCents: params.priceLimitCents }
+      : {}),
+    ...(params.writeLockEnabled !== undefined ? { writeLockEnabled: params.writeLockEnabled } : {}),
+    ...(params.fastModeCacheEnabled !== undefined
+      ? { fastModeCacheEnabled: params.fastModeCacheEnabled }
+      : {}),
+    ...(params.isBenchmark === true ? { isBenchmark: true } : {}),
+  };
+}
+
 async function createAttachmentMessages(
   tx: Prisma.TransactionClient,
   agentId: string,
@@ -50,6 +77,7 @@ export async function createAgentTransaction(params: {
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
   verifierType: string;
+  isBenchmark?: boolean;
   attachments?: Array<Record<string, unknown>>;
   temporalWorkflowId?: string | null;
 }) {
@@ -80,18 +108,7 @@ export async function createAgentTransaction(params: {
         proxyCountry: params.proxyCountry,
         proxyState: params.proxyState,
         proxyCity: params.proxyCity,
-        ...(params.temporalWorkflowId !== undefined && params.temporalWorkflowId !== null
-          ? { temporalWorkflowId: params.temporalWorkflowId }
-          : {}),
-        ...(params.priceLimitCents !== undefined && params.priceLimitCents !== 0
-          ? { priceLimitCents: params.priceLimitCents }
-          : {}),
-        ...(params.writeLockEnabled !== undefined
-          ? { writeLockEnabled: params.writeLockEnabled }
-          : {}),
-        ...(params.fastModeCacheEnabled !== undefined
-          ? { fastModeCacheEnabled: params.fastModeCacheEnabled }
-          : {}),
+        ...optionalAgentCreateFields(params),
       },
     });
 

@@ -1,6 +1,7 @@
 import { createLogger } from '../../providers/logger';
 import { getVerifiedStripeMetricsClient } from '../../providers/stripe';
 import type { AmplitudeFunnelResult, AmplitudeFunnelStepId } from './amplitude';
+import { dedupeInternalRepeatTasks } from './benchmarkDedup';
 import { STRIPE_REVENUE_EXCLUDED_CHARGE_IDS } from './config';
 import type * as repo from './repo';
 import type { SubscriberSeriesPoint } from './subscriberMetrics';
@@ -298,8 +299,8 @@ export function buildSeries(
   const emptySubscriber: SubscriberSeriesPoint = { userCount: 0, newUsers: 0, userIds: new Set() };
   return periods.map((period, index) => {
     const subscriberPoint = subscribers[index] ?? emptySubscriber;
-    const periodTasks = tasksByPeriod[index].filter((task) =>
-      subscriberPoint.userIds.has(task.userId)
+    const periodTasks = dedupeInternalRepeatTasks(
+      tasksByPeriod[index].filter((task) => subscriberPoint.userIds.has(task.userId))
     );
     return {
       ...period,

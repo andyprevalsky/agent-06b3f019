@@ -11,7 +11,7 @@ import { getClientIP } from '../../providers/geoip';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
 import { createAgentSchema, updateAgentSchema, updateStatusSchema } from './types';
-import { rejectAnonymousCreate, rejectGatedCreate } from './routes.guards';
+import { isBenchmarkRequest, rejectAnonymousCreate, rejectGatedCreate } from './routes.guards';
 import * as lifecycleService from './agentLifecycleService';
 import * as controlService from './agentControlService';
 import * as queryService from './agentQueryService';
@@ -166,7 +166,8 @@ router.post(
         body,
         userId,
         req.isInternal === true,
-        clientIP
+        clientIP,
+        isBenchmarkRequest(req)
       );
       res.status(201).json(result);
     } catch (error) {

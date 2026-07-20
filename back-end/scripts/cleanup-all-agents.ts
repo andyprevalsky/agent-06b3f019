@@ -309,6 +309,7 @@ async function cleanupDatabase(
       updatedAt: true,
       deletedAt: true,
       temporalWorkflowId: true,
+      isBenchmark: true,
     } as const;
     try {
       agents = await prisma.agent.findMany({
@@ -378,6 +379,7 @@ async function cleanupDatabase(
                   agentCreatedAt: agent.createdAt,
                   agentUpdatedAt: agent.updatedAt,
                   agentDeletedAt: agent.deletedAt,
+                  isBenchmark: agent.isBenchmark,
                 },
               });
               console.log(

@@ -5,6 +5,20 @@
 import type { Response } from 'express';
 import type { HybridAuthRequest } from '../../providers/hybridAuth';
 import { isUserGated } from '../../providers/inviteGate';
+import { getBenchmarkRunSecret } from './config';
+
+/**
+ * Benchmark/eval runs create real root agents under an operator's account (e.g. Andy
+ * for prod/live-fixture evals — often via a real user JWT, not the internal API-key
+ * path). They prove the run is a benchmark by echoing the internal backend key in the
+ * X-Benchmark-Run header; external clients never possess it, so a plain boolean would
+ * let any authenticated user self-exclude from admin-health metrics. Matching the
+ * secret marks the run regardless of the create's auth mode. See admin-health/repo.ts.
+ */
+export function isBenchmarkRequest(req: HybridAuthRequest): boolean {
+  const secret = getBenchmarkRunSecret();
+  return secret !== undefined && req.header('X-Benchmark-Run') === secret;
+}
 
 export function rejectAnonymousCreate(
   req: HybridAuthRequest,

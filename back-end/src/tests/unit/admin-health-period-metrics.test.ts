@@ -23,9 +23,10 @@ const periods: AdminHealthPeriod[] = [
   },
 ];
 
-const task = (id: string, createdAt: string, userId = 'subscriber-user') => ({
+const task = (id: string, createdAt: string, userId = 'subscriber-user', goal = `goal-${id}`) => ({
   taskId: id,
   userId,
+  goal,
   createdAt: new Date(createdAt),
   tokensOut: 100,
   status: 'COMPLETED' as AgentStatus,
@@ -77,6 +78,41 @@ assert.deepStrictEqual(
 );
 assert.strictEqual(parseTimeSlice(undefined), 'monthly');
 assert.strictEqual(parseTimeSlice('weekly'), 'weekly');
+
+// Benchmark stripping: an internal operator account (Andy) replaying the SAME goal
+// string many times per period — the signature of pre-`isBenchmark` benchmark runs —
+// must collapse to one counted task, while a real customer's repeated goals and every
+// distinct internal goal are counted in full.
+const ANDY_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+const benchmarkSeries = buildSeries(
+  periods,
+  [
+    // Andy runs the same benchmark goal 3× in May → counts once.
+    task('bench-1', '2026-05-02T00:00:00.000Z', ANDY_USER_ID, 'party checkout benchmark'),
+    task('bench-2', '2026-05-04T00:00:00.000Z', ANDY_USER_ID, 'party checkout benchmark'),
+    task('bench-3', '2026-05-06T00:00:00.000Z', ANDY_USER_ID, 'party checkout benchmark'),
+    // A genuine, distinct Andy task in May → still counted.
+    task('andy-real', '2026-05-08T00:00:00.000Z', ANDY_USER_ID, 'book me a flight'),
+    // A real customer repeating an identical goal → NOT deduped, both count.
+    task('cust-1', '2026-05-10T00:00:00.000Z', 'subscriber-user', 'summarize my inbox'),
+    task('cust-2', '2026-05-11T00:00:00.000Z', 'subscriber-user', 'summarize my inbox'),
+  ],
+  [],
+  [
+    { userCount: 2, newUsers: 2, userIds: new Set([ANDY_USER_ID, 'subscriber-user']) },
+    { userCount: 0, newUsers: 0, userIds: new Set() },
+  ],
+  [{ revenueCents: 0 }, { revenueCents: 0 }],
+  [
+    { andyLinearPoints: 0, githubCommits: 0, tamaraLinearPoints: 0 },
+    { andyLinearPoints: 0, githubCommits: 0, tamaraLinearPoints: 0 },
+  ]
+);
+assert.strictEqual(
+  benchmarkSeries[0]?.taskCount,
+  4,
+  'Repeated internal benchmark goals collapse to one; distinct internal + all customer tasks count'
+);
 
 const retention = buildRetentionCohorts(
   [{ userId: 'retained-user', firstTaskAt: new Date('2026-06-29T10:00:00.000Z') }],

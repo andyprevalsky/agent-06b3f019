@@ -117,9 +117,10 @@ assert.deepStrictEqual(series, [
 ]);
 
 assert.ok(ADMIN_USER_IDS.has('1f85ff25-6e29-4c1b-8739-f917bd101a30'));
-assert.ok(!ADMIN_HEALTH_ADDITIONAL_USER_IDS.has('1f85ff25-6e29-4c1b-8739-f917bd101a30'));
+// Andy and Tamara are both counted in the task-completion (subscriber-scoped) metrics.
+assert.ok(ADMIN_HEALTH_ADDITIONAL_USER_IDS.has('1f85ff25-6e29-4c1b-8739-f917bd101a30'));
 assert.ok(ADMIN_HEALTH_ADDITIONAL_USER_IDS.has('43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9'));
-assert.ok(ADMIN_HEALTH_EXCLUDED_USER_IDS.has('1f85ff25-6e29-4c1b-8739-f917bd101a30'));
+assert.ok(!ADMIN_HEALTH_EXCLUDED_USER_IDS.has('1f85ff25-6e29-4c1b-8739-f917bd101a30'));
 assert.ok(!ADMIN_HEALTH_EXCLUDED_USER_IDS.has('43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9'));
 
 async function assertStripeRecoveryConcurrency(): Promise<void> {

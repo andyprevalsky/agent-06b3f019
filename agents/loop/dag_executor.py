@@ -4,12 +4,14 @@ DAG Executor - Rigid execution of plans from set_plan.
 Executes the task DAG with maximum parallelism:
 - Tasks fire immediately when their dependencies complete
 - Uses asyncio.wait(FIRST_COMPLETED) for efficient scheduling
-- On error, stops the DAG without unrestricted LLM replay of completed tasks
+- On a task failure, stops the DAG and hands recovery to the LLM loop (run_agent)
 
 USAGE:
 - Called from agent_workflow.py at EXECUTE phase start if a plan exists
-- On success: returns completed status
-- On failure: error already in context, returns error for terminal handling
+- On success: returns "completed" status
+- On failure: error already in context, returns "needs_llm" so run_agent can
+  recover (execute_dag runs exactly once and is never re-entered, so this does
+  NOT replay the plan or its already-completed siblings)
 """
 
 import asyncio
@@ -148,7 +150,7 @@ def _build_param_population_message(
     required_fields = ALIAS_REQUIRED_FIELDS[planned_tool_name or ""]
     required_text = ", ".join(f"`{field}`" for field in required_fields) or "none beyond `goal` and `type`"
     message += (
-        f"\n\nThe outer planned alias `{planned_tool_name}` requires `type=\"{expected_type}\"`. "
+        f'\n\nThe outer planned alias `{planned_tool_name}` requires `type="{expected_type}"`. '
         f"Required type-specific fields: {required_text}. "
         "Instructions to use another agent type for nested work belong inside the child goal; "
         "they must not change the outer spawn type."
@@ -159,7 +161,7 @@ def _build_param_population_message(
         message += (
             f"\n\nPrevious attempt violated the planned tool contract: {bounded_error}. "
             f"Retry with exactly one `{tool_name}` call and the required discriminator "
-            f"`type=\"{expected_type}\"`."
+            f'`type="{expected_type}"`.'
         )
 
     return message
@@ -529,8 +531,10 @@ async def execute_dag(
 
     Returns:
         Dict with:
-        - status: "completed" | "error"
+        - status: "completed" | "needs_llm"  ("needs_llm" => a task failed or the
+          DAG stalled; the caller falls through to run_agent for LLM recovery)
         - context: Updated context
+        - message: present on the "needs_llm" path, describing the failure
     """
     # Import here to avoid circular imports
 
@@ -603,9 +607,9 @@ async def execute_dag(
 
         if not pending_tasks:
             # No tasks running and none ready - stuck (shouldn't happen with valid DAG)
-            workflow.logger.warning("[DAG] No pending tasks and DAG not complete - returning an execution error")
+            workflow.logger.warning("[DAG] No pending tasks and DAG not complete - handing off to run_agent recovery")
             return {
-                "status": "error",
+                "status": "needs_llm",
                 "context": context,
                 "message": "DAG execution stalled before all planned tasks completed.",
             }
@@ -640,11 +644,24 @@ async def execute_dag(
                     await asyncio.gather(*remaining, return_exceptions=True)
 
                 return {
-                    # Never fall through to unrestricted run_agent recovery here.
-                    # A sibling or an earlier dependency may already have committed
-                    # an external side effect; replaying the whole plan can duplicate
-                    # it (for example, spawning the same child agent twice).
-                    "status": "error",
+                    # Recover via the LLM loop (run_agent), NOT by replaying the DAG.
+                    # execute_dag is invoked exactly once and is never re-entered, so
+                    # returning here does not replay siblings: run_agent reads the
+                    # recorded context (completed TOOL results + this failure) from
+                    # the DB and iterates, exactly like the completed-but-unverified
+                    # DAG path. Completed siblings are already-successful results, so
+                    # the LLM sees them as done.
+                    #
+                    # NARROW KNOWN GAP (pre-existing, tracked): if a for_each/
+                    # general_purpose task committed a batch spawn and *then* failed
+                    # during drain, an LLM-chosen re-spawn uses a fresh tool_call_id
+                    # that the existing _spawn_group_id dedup does not cover, so it can
+                    # duplicate children. This predates the DAG-terminal change and is
+                    # bounded by LLM judgment; closing it needs spawn idempotency keyed
+                    # on the DAG task identity + its own repro. Do NOT re-add a blanket
+                    # terminal here to "fix" it — that kills all recovery (the
+                    # regression this restores).
+                    "status": "needs_llm",
                     "context": context,
                     "message": f"Planned task {task_index + 1} failed during DAG execution.",
                 }
