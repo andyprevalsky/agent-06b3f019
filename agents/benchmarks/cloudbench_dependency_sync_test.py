@@ -3742,6 +3742,10 @@ def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
         release_fn = _extract_fleet_function(
             FLEET_SCRIPT.read_text(), "release_start_barrier() {"
         )
+        # Thirty concurrent curl subprocesses can be scheduler-delayed on a
+        # shared CI host. Keep the production curl/attempt deadlines unchanged,
+        # but give the enclosing test process enough wall time to observe them.
+        subprocess_timeout_seconds = 20
         quoted_roots = " ".join(shlex.quote(str(root)) for root in roots)
         script = f"""set +e
 SYNCHRONIZED_START=1
@@ -3758,7 +3762,11 @@ CHILD_MACHINE=({' '.join(f'machine-{i}' for i in range(30))})
 release_start_barrier
 """
         success = subprocess.run(
-            ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=8
+            ["bash", "-c", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=subprocess_timeout_seconds,
         )
         assert success.returncode == 0, success.stderr
         assert all(
@@ -3781,7 +3789,7 @@ release_start_barrier
             text=True,
             capture_output=True,
             check=False,
-            timeout=8,
+            timeout=subprocess_timeout_seconds,
         )
         assert failed.returncode == 1
         assert "could not release synchronized start barrier" in failed.stderr
