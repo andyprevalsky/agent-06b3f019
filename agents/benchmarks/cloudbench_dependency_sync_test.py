@@ -3031,7 +3031,10 @@ exit "$rc"
         ["bash", "-c", script],
         cwd=ROOT,
         env=harness_env,
-        text=True, capture_output=True, check=False, timeout=25,
+        # The harness deliberately waits through TERM and KILL windows twice.
+        # Coverage runs 30 domains concurrently, so leave headroom for scheduler
+        # contention while still bounding a genuinely stuck cleanup.
+        text=True, capture_output=True, check=False, timeout=60,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
