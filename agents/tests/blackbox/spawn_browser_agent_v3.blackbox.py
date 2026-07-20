@@ -195,6 +195,46 @@ def test_verifier_activity_timeout_allows_llm_call():
     assert VERIFIER_ULTRA_TIMEOUT_SECONDS == STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
 
+def test_network_recorder_query_requests_filters_limits_and_clears():
+    """RCA follow-up: the read_network_requests tool reads captured traffic via
+    BrowserNetworkRecorder.query_requests. Guards newest-first ordering, the
+    url_pattern substring filter, the result cap, and clear-after-read.
+    """
+    from pathlib import Path
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder(
+        browser_session=object(),
+        agent_id="a",
+        task_id="t",
+        session_id="s",
+        output_dir=Path("/tmp/_rnr_test"),
+    )
+    recorder.entries = {
+        "1": {"url": "https://shop.com/", "method": "GET", "status": 200, "resource_type": "Document", "response_ts_ms": 10},
+        "2": {"url": "https://shop.com/api/cart", "method": "POST", "status": 403, "resource_type": "XHR", "response_ts_ms": 30},
+        "3": {"url": "https://shop.com/api/items", "method": "GET", "status": 200, "resource_type": "Fetch", "response_ts_ms": 20},
+    }
+
+    # Newest-first (by response_ts_ms), full set.
+    rows = recorder.query_requests()
+    assert [r["url"] for r in rows] == [
+        "https://shop.com/api/cart",
+        "https://shop.com/api/items",
+        "https://shop.com/",
+    ]
+    # url_pattern substring filter.
+    api = recorder.query_requests(url_pattern="/api/")
+    assert {r["url"] for r in api} == {"https://shop.com/api/cart", "https://shop.com/api/items"}
+    assert any(r["status"] == 403 and r["method"] == "POST" for r in api)
+    # limit cap.
+    assert len(recorder.query_requests(limit=1)) == 1
+    # clear empties the buffer after reading.
+    assert recorder.query_requests(clear=True)  # returns rows this call
+    assert recorder.entries == {}
+    assert recorder.query_requests() == []
+
+
 def test_transient_session_init_failure_classification():
     """RCA (agent 53feac08): the first two browser spawns died on Kernel's
     `400 Proxy is marked unavailable from the last health check` because
@@ -11622,6 +11662,10 @@ async def run_all_tests():
     r.record(
         "transient_session_init_failure_classification",
         test_transient_session_init_failure_classification,
+    )
+    r.record(
+        "network_recorder_query_requests",
+        test_network_recorder_query_requests_filters_limits_and_clears,
     )
 
     teardown_mock()
