@@ -2735,7 +2735,8 @@ def _simulated_browser_transition_contract(
     retry_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     instructions = (
-        "Apply exactly this one action to the simulated website state. Return browser_state "
+        "Apply exactly this one action to the simulated website state. The WMH response envelope "
+        "requires an output string: set output to a JSON-encoded object containing browser_state "
         "with url, title, dom_tree, viewport, scroll_position, page_stats, tabs, and recent_events. "
         "Also return frame as either static HTML or a raster image data URL/URL when supported. "
         "Do not narrate actions the browser agent did not request and do not complete future steps. "
@@ -2827,13 +2828,42 @@ def _simulated_browser_state_from_result(
     candidates = [
         result.get("browser_state"),
         result.get("state"),
+        result if "dom_tree" in result else None,
         observation.get("browser_state") if isinstance(observation, dict) else None,
         observation.get("state") if isinstance(observation, dict) else None,
+        observation if isinstance(observation, dict) and "dom_tree" in observation else None,
         metadata.get("browser_state") if isinstance(metadata, dict) else None,
+        metadata if isinstance(metadata, dict) and "dom_tree" in metadata else None,
     ]
     state = next((dict(value) for value in candidates if isinstance(value, dict)), None)
     if state is None:
-        raise ValueError("WMH browser transition omitted browser_state")
+        # WMH's generic Observation contract asks the model for an ``output``
+        # string.  Some real models therefore return the website observation as
+        # text instead of echoing our nested browser_state extension.  That text
+        # is still the authoritative environment result: expose it as the next
+        # accessibility-tree observation while preserving stable browser fields.
+        raw_observation_text = None
+        for candidate in (
+            observation.get("content") if isinstance(observation, dict) else None,
+            result.get("message"),
+            result.get("output"),
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                raw_observation_text = candidate.strip()
+                break
+            if isinstance(candidate, (dict, list)) and candidate:
+                raw_observation_text = json.dumps(
+                    candidate, sort_keys=True, separators=(",", ":"), default=str
+                )
+                break
+        if not raw_observation_text:
+            raise ValueError("WMH browser transition omitted browser_state")
+        state = dict(previous_state or {})
+        state["dom_tree"] = raw_observation_text
+        prior_events = state.get("recent_events") or state.get("events") or []
+        if not isinstance(prior_events, (list, tuple)):
+            prior_events = [prior_events]
+        state["recent_events"] = [*prior_events, raw_observation_text[:2000]]
     dom_tree = state.get("dom_tree")
     if isinstance(dom_tree, (dict, list)):
         # The production WMH emits a structured accessibility tree while older

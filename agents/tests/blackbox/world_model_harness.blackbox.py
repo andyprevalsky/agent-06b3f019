@@ -1527,6 +1527,54 @@ def test_simulated_browser_transition_contract_requires_one_grounded_action():
     assert "href=" not in synthesized["html"]
 
 
+def test_simulated_browser_transition_normalizes_real_wmh_observation_shapes():
+    """RCA for cloud run 20260720-163450-76118.
+
+    The real WMH emitted the environment observation directly instead of nesting
+    it under ``browser_state``.  The browser boundary retried three times, then
+    rejected every otherwise-successful step as "omitted browser_state".
+    """
+
+    from domains.spawn_browser_agent_v3.handler import _simulated_browser_state_from_result
+
+    previous = {
+        "url": "https://www.amazon.com/s?k=black+beanie",
+        "title": "Amazon.com",
+        "dom_tree": "Initial page",
+        "recent_events": ["initial_page_loaded"],
+    }
+    direct_state = _simulated_browser_state_from_result(
+        {
+            "success": True,
+            "url": "https://www.amazon.com/s?k=black+beanie",
+            "title": "Amazon.com : black beanie",
+            "dom_tree": {
+                "role": "main",
+                "children": [{"role": "link", "name": "Carhartt Knit Cuffed Beanie $19.99"}],
+            },
+        },
+        previous_state=previous,
+    )
+    assert direct_state["title"] == "Amazon.com : black beanie"
+    assert "Carhartt Knit Cuffed Beanie $19.99" in direct_state["dom_tree"]
+
+    text_state = _simulated_browser_state_from_result(
+        {
+            "success": True,
+            "message": "Amazon search results: Carhartt Knit Cuffed Beanie, black, $19.99, 4.7 stars.",
+            "world_model_observation": {
+                "content": "Amazon search results: Carhartt Knit Cuffed Beanie, black, $19.99, 4.7 stars.",
+                "is_error": False,
+                "metadata": {},
+            },
+        },
+        previous_state=previous,
+    )
+    assert text_state["url"] == previous["url"]
+    assert "Carhartt Knit Cuffed Beanie" in text_state["dom_tree"]
+    assert text_state["recent_events"][-1].startswith("Amazon search results")
+
+
 async def test_simulated_browser_transition_calls_wmh_once_and_forbids_real_fallback():
     from domains.spawn_browser_agent_v3.handler import _execute_simulated_browser_transition
 
@@ -2573,6 +2621,10 @@ async def run_all_tests():
     r.record(
         "simulated_browser_transition_contract_requires_one_grounded_action",
         test_simulated_browser_transition_contract_requires_one_grounded_action,
+    )
+    r.record(
+        "simulated_browser_transition_normalizes_real_wmh_observation_shapes",
+        test_simulated_browser_transition_normalizes_real_wmh_observation_shapes,
     )
     r.record(
         "browser_adapter_can_ignore_run_wide_world_model_session",
