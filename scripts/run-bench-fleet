@@ -835,6 +835,28 @@ acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-d
     return 1
 }
 
+reap_orphaned_fleet_proxies() {
+    # A controller reaps its `flyctl proxy` (WireGuard data-plane) children via an
+    # EXIT trap — but SIGKILL / a laptop sleep-crash bypasses that trap, orphaning
+    # the proxies to init (ppid 1). They tunnel to long-dead machines yet hold FDs
+    # and WireGuard sessions forever; left unreaped they accumulate across days
+    # (observed: 100+ two-day-old orphans) until new runs' data-plane tunnels can't
+    # connect (all status proxies http 000, the relay freezes, the start barrier
+    # never sees readiness). Reap ONLY app-scoped proxies whose parent is dead
+    # (ppid == 1); a concurrently running fleet's proxies have a LIVE parent and are
+    # never touched, so this is safe under cross-workspace concurrency (rule 27).
+    local pids
+    pids="$(ps -o pid,ppid,command -ax 2>/dev/null \
+        | grep "flyctl proxy" | grep -F -- "-a $APP" \
+        | awk '$2==1{print $1}')" || return 0
+    [ -n "$pids" ] || return 0
+    printf '%s\n' "$pids" | while read -r pid; do [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null; done
+    sleep 1
+    printf '%s\n' "$pids" | while read -r pid; do [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null; done
+    local n; n="$(printf '%s\n' "$pids" | grep -c .)"
+    echo "🧹 reaped $n orphaned data-plane proxy tunnel(s) leaked by a dead controller"
+}
+
 reconcile_stale_fleet_registries() {
     local registry meta version app policy host owner_status recovery_lock_status
     mkdir -p "$FLEET_OWNERSHIP_ROOT"
@@ -2018,6 +2040,9 @@ fi
 # identity is definitively dead. Any active runner, unreadable probe, malformed
 # ownership, or transitional provider state blocks new provisioning.
 reconcile_stale_fleet_registries || exit 1
+# Reap data-plane proxy tunnels leaked by SIGKILLed/crashed controllers before
+# provisioning, so a backlog of orphaned tunnels can't starve this run's proxies.
+reap_orphaned_fleet_proxies
 # Recovery may have removed active machines. Capacity must classify the
 # post-reconciliation provider state, not the earlier warm-source lookup.
 warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
