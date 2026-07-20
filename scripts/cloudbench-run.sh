@@ -113,8 +113,17 @@ step() { log "STEP $*"; }
 # schema-STALE dump (present but hash-mismatched) gets the long cold-sync budget
 # instead of the tight warm one — run.sh cold-syncs it, and the former "dump file
 # exists?" check killed the box mid-sync. See scripts/tests/cloudbench-seed-budget.test.sh.
+# run-bench-cloud sftp's this lib to /data/ and overrides CLOUDBENCH_SEED_BUDGET_LIB,
+# exactly like cloudbench-fetch-ref.sh / cloudbench-sync-deps.sh: at driver start the
+# /data/repo checkout is still at the OLD ref (the driver git-fetches the ref later),
+# so the lib must come from the controller-staged /data copy, not /data/repo.
+SEED_BUDGET_LIB="${CLOUDBENCH_SEED_BUDGET_LIB:-$REPO_DIR/scripts/lib/cloudbench-seed-budget.sh}"
+if [ ! -f "$SEED_BUDGET_LIB" ]; then
+    echo "[cloudbench] FATAL: seed-budget lib missing: $SEED_BUDGET_LIB" >&2
+    exit 1
+fi
 # shellcheck source=lib/cloudbench-seed-budget.sh
-source "$REPO_DIR/scripts/lib/cloudbench-seed-budget.sh"
+source "$SEED_BUDGET_LIB"
 
 run_with_heartbeat() {
     local label="$1" command_pid interval

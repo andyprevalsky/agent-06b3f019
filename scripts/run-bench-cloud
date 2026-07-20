@@ -1985,6 +1985,9 @@ fi
 for helper in cloudbench-fetch-ref.sh cloudbench-sync-deps.sh cloudbench-current-run-artifact.py; do
     [ -f "$ROOT_DIR/scripts/$helper" ] || { echo "❌ Missing scripts/$helper locally." >&2; exit 1; }
 done
+# The on-box driver sources this lib from the controller-staged /data copy (the
+# /data/repo checkout is still at the old ref when the driver starts).
+[ -f "$ROOT_DIR/scripts/lib/cloudbench-seed-budget.sh" ] || { echo "❌ Missing scripts/lib/cloudbench-seed-budget.sh locally." >&2; exit 1; }
 STAGED_LOCAL_FILES=()
 cleanup_staged_local_files() {
     for p in "${STAGED_LOCAL_FILES[@]}"; do
@@ -2021,6 +2024,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export CLOUDBENCH_FETCH_REF_SCRIPT=/data/cloudbench-fetch-ref.sh"
     echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
     echo "export CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT=/data/cloudbench-current-run-artifact.py"
+    echo "export CLOUDBENCH_SEED_BUDGET_LIB=/data/cloudbench-seed-budget.sh"
     echo "export CLOUDBENCH_RUN_TOKEN=$(printf '%q' "$RUN_LOG_TOKEN")"
     echo "export CLOUDBENCH_START_BARRIER=$(printf '%q' "${CLOUDBENCH_START_BARRIER:-}")"
     echo "export CLOUDBENCH_BARRIER_TOKEN=$(printf '%q' "${CLOUDBENCH_BARRIER_TOKEN:-}")"
@@ -2076,10 +2080,11 @@ STAGED_LOCAL_FILES+=("$stage_err")
 STAGE_ATTEMPTS="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"
 for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
     : > "$stage_err"
-    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-current-run-artifact.py '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
+    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-seed-budget.sh /data/cloudbench-current-run-artifact.py '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
     if FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/$REMOTE_RUN_SCRIPT" /data/cloudbench-run.sh >"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" /data/cloudbench-sync-deps.sh >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/lib/cloudbench-seed-budget.sh" /data/cloudbench-seed-budget.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-current-run-artifact.py" /data/cloudbench-current-run-artifact.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$WRAPPER_LOCAL" "$REMOTE_TMP_SCRIPT" >>"$stage_err" 2>&1; then
         if [ -n "$LOCAL_PATCH_FILE" ]; then
