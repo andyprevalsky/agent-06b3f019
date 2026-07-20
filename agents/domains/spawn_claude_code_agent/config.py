@@ -39,6 +39,15 @@ FATAL_ERROR_PATTERNS: Final[list[tuple[str, str]]] = [
         "Claude Code OAuth credentials are rate-limited. The credential must be rotated instead of waiting in the sandbox.",
     ),
     (
+        # Anthropic emits this exact wording ("...is too low") in the CLI banner and
+        # API error body ("Your credit balance is too low to access the Anthropic API").
+        # The substring "Credit balance is too low" covers both; an earlier pattern
+        # without "is" silently never matched, so the sandbox looped instead of aborting.
+        "redit balance is too low",
+        "Claude Code API billing credit balance is too low. Configure healthy Claude Code OAuth credentials "
+        "or refill the shared Anthropic API billing account.",
+    ),
+    (
         "Credit balance too low",
         "Claude Code API billing credit balance is too low. Configure healthy Claude Code OAuth credentials "
         "or refill the shared Anthropic API billing account.",
