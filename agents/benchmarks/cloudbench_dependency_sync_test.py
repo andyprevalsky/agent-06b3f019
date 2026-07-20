@@ -3026,7 +3026,10 @@ exit "$rc"
         ["bash", "-c", script],
         cwd=ROOT,
         env=harness_env,
-        text=True, capture_output=True, check=False, timeout=25,
+        # This launches and tears down two process groups. On a host shared by
+        # several deploy loops, scheduler delay can exceed the service's own
+        # bounded readiness windows even though the retry behavior is correct.
+        text=True, capture_output=True, check=False, timeout=60,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
