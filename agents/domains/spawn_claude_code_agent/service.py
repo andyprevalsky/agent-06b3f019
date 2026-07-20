@@ -55,7 +55,7 @@ def check_fatal_errors(output: str) -> Optional[str]:
     Returns an error message if a fatal error is detected, None otherwise.
     """
     for pattern, message in FATAL_ERROR_PATTERNS:
-        if pattern.casefold() in output.casefold():
+        if pattern in output:
             return message
     return None
 

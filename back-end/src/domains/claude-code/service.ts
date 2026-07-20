@@ -15,7 +15,6 @@ import {
   markPoolTokenRateLimited,
   markUserTokenRateLimited,
 } from '../../providers/claudeCredentials';
-import { markAnthropicApiKeyOnCooldown } from '../../providers/computeCredentials';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';
@@ -243,7 +242,7 @@ const AUTH_FAILURE_PATTERNS: readonly RegExp[] = [
   /Please run \/login/i,
   /Not logged in/i,
   /Invalid authentication credentials/i,
-  /Credit balance (?:is )?too low/i,
+  /Credit balance too low/i,
   /Add funds:\s*https:\/\/platform\.claude\.com\/settings\/billing/i,
 ];
 
@@ -262,18 +261,11 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
   );
   const isRateLimited = /You've hit your limit/i.test(output);
   const authFailure = AUTH_FAILURE_PATTERNS.some((re) => re.test(output));
-  const outOfCredits = /Credit balance (?:is )?too low/i.test(output);
   if (!isRateLimited && !authFailure) return;
 
   const session = await repo.findSessionById(taskId);
   const tokenSource = session?.claudeTokenSource ?? '';
   if (tokenSource === '') {
-    if (outOfCredits) {
-      await markAnthropicApiKeyOnCooldown(
-        'Claude Code reported that the shared API key is out of credits'
-      );
-      return;
-    }
     log.warn(
       `Claude Code credential failure detected for ${taskId} but no credential source recorded — cannot rotate`
     );

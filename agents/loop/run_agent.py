@@ -1492,18 +1492,6 @@ async def run_agent(  # noqa: C901
                                 "error": True,
                             },
                         }
-                        if result.get("fatal_external_error"):
-                            return {
-                                "status": "error",
-                                "context": context,
-                                "tokens_in": tokens_in,
-                                "tokens_out": tokens_out,
-                                "token_count": token_count,
-                                "context_size": context_size,
-                                "cache_read_input_tokens": cache_read_total,
-                                "cache_creation_input_tokens": cache_write_total,
-                                "message": result_message,
-                            }
                     else:
                         new_msg = {
                             "role": "TOOL",
