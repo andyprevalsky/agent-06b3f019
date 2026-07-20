@@ -4632,6 +4632,19 @@ def test_get_browser_system_prompt_is_static_across_calls():
 # ========================================
 
 
+def test_browser_prompt_cache_namespace_is_stable_and_isolated():
+    from domains.spawn_browser_agent_v3.handler import _browser_prompt_cache_namespace
+
+    step_one = _browser_prompt_cache_namespace("task-a", "browser_use_step_1")
+    step_two = _browser_prompt_cache_namespace("task-a", "browser_use_step_2")
+    sibling = _browser_prompt_cache_namespace("task-b", "browser_use_step_1")
+    fork = _browser_prompt_cache_namespace("task-a", "write_lock_notification_fork_2")
+
+    assert step_one == step_two, "Browser steps in one task must share a stable provider cache lane"
+    assert step_one != sibling, "Sibling browser tasks must use isolated provider cache lanes"
+    assert step_one != fork, "Forked browser prompts must not overwrite the main browser cache lane"
+
+
 class _FakeRoseClient:
     def __init__(self, responses):
         self.responses = list(responses)
@@ -4661,6 +4674,7 @@ async def test_call_browser_use_with_rotation_uses_gpt_auth():
         config=_fake_config(),
         user_id="u1",
         agent_id="a1",
+        browser_task_id="browser-task-1",
         iteration=3,
         token_state=token_state,
         gpt_token="gpt-token",
@@ -4676,6 +4690,7 @@ async def test_call_browser_use_with_rotation_uses_gpt_auth():
     assert client.calls[0]["gpt_auth"].token == "gpt-token"
     assert client.calls[0]["gpt_auth"].account_id == "acct-1"
     assert client.calls[0]["gpt_auth"].pool_token_id == "pool-gpt"
+    assert client.calls[0]["cache_namespace"] == "browser-task:browser-task-1:browser_use"
     assert client.calls[0]["browser_state"]["_extra_user_messages"] == [
         {"role": "user", "content": "resume from current live state"}
     ]
@@ -6776,9 +6791,7 @@ async def test_execute_input_text_element_humanizer_refreshes_dom_when_coords_mi
     hu.press_key = AsyncMock()
     hu.type_text = AsyncMock()
 
-    with patch(
-        "browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)
-    ):
+    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)):
         out = await service_actions._execute_input_text(
             session=session,
             dom_service=dom,
@@ -7005,11 +7018,14 @@ async def test_execute_input_text_payment_secret_ref_waits_for_page_ready_before
     hu.press_key = AsyncMock()
     hu.type_text = AsyncMock()
 
-    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)), patch.object(
-        service_actions,
-        "wait_for_navigation_ready",
-        AsyncMock(return_value={"ready": True, "reason": "content_present"}),
-    ) as wait_ready:
+    with (
+        patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)),
+        patch.object(
+            service_actions,
+            "wait_for_navigation_ready",
+            AsyncMock(return_value={"ready": True, "reason": "content_present"}),
+        ) as wait_ready,
+    ):
         out = await service_actions._execute_input_text(
             session=session,
             dom_service=dom,
@@ -7058,7 +7074,7 @@ async def test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_withou
                     "filled": True,
                     "x": 444,
                     "y": 555,
-                    "selector": 'input#card-name',
+                    "selector": "input#card-name",
                     "valueLength": 9,
                 }
             }
@@ -7115,10 +7131,7 @@ async def test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_withou
     assert evaluate_kwargs["session_id"] == "cdp-1"
     assert '"refName": "card_name"' in evaluate_kwargs["params"]["expression"]
     assert '"value": "Rose Labs"' in evaluate_kwargs["params"]["expression"]
-    expressions = [
-        call.kwargs["params"]["expression"]
-        for call in cdp_client.send.Runtime.evaluate.await_args_list
-    ]
+    expressions = [call.kwargs["params"]["expression"] for call in cdp_client.send.Runtime.evaluate.await_args_list]
     assert any('"refName": "card_number"' in expression for expression in expressions)
     assert any('"refName": "card_expiry"' in expression for expression in expressions)
     assert any('"refName": "card_cvv"' in expression for expression in expressions)
@@ -7485,14 +7498,16 @@ async def test_wait_for_navigation_ready_reloads_blank_spa_shell_once():
         async def evaluate(self, _code):
             self.evaluations += 1
             if self.reloads == 0:
-                return json.dumps({
-                    "hasAppRoot": True,
-                    "appRootReady": False,
-                    "plainPageReady": False,
-                    "bodyTextLength": 677,
-                    "rootChildren": 0,
-                    "blankSpaShell": True,
-                })
+                return json.dumps(
+                    {
+                        "hasAppRoot": True,
+                        "appRootReady": False,
+                        "plainPageReady": False,
+                        "bodyTextLength": 677,
+                        "rootChildren": 0,
+                        "blankSpaShell": True,
+                    }
+                )
             return {
                 "hasAppRoot": True,
                 "appRootReady": True,
@@ -10310,7 +10325,9 @@ async def _drive_payment_card_gate(*, mint_results, reject_gate=False, agentcard
         patch("domains.spawn_browser_agent_v3.handler.workflow.execute_activity", side_effect=fake_execute_activity),
         patch("domains.spawn_browser_agent_v3.handler.workflow.now", side_effect=fake_now),
         patch("domains.spawn_browser_agent_v3.handler.workflow.sleep", AsyncMock(return_value=None)),
-        patch("tools.request_user_approval.request_user_approval_direct", side_effect=fake_request_user_approval_direct),
+        patch(
+            "tools.request_user_approval.request_user_approval_direct", side_effect=fake_request_user_approval_direct
+        ),
         patch(
             "tools.request_user_approval.request_user_attention_direct",
             side_effect=fake_request_user_attention_direct,
@@ -10330,7 +10347,11 @@ async def _drive_payment_card_gate(*, mint_results, reject_gate=False, agentcard
 async def test_manager_payment_gate_agentcard_setup_required_prompts_and_retries():
     events, activity_calls, _ = await _drive_payment_card_gate(
         mint_results=[
-            {"status": "agentcard_setup_required", "setupAction": "connect_agentcard", "connectUrl": "https://x/connect"},
+            {
+                "status": "agentcard_setup_required",
+                "setupAction": "connect_agentcard",
+                "connectUrl": "https://x/connect",
+            },
             {"status": "agentcard_setup_required", "connectUrl": "https://x/connect"},
         ],
         agentcard_connected=True,
@@ -10962,12 +10983,8 @@ async def run_all_tests():
         "execute_click_element_humanizer_refreshes_stale_coordinates",
         test_execute_click_with_element_humanizer_refreshes_stale_coordinates,
     )
-    await r.record_async(
-        "execute_click_coords_no_humanizer", test_execute_click_with_coords_no_humanizer
-    )
-    await r.record_async(
-        "execute_click_no_target", test_execute_click_no_element_no_coords
-    )
+    await r.record_async("execute_click_coords_no_humanizer", test_execute_click_with_coords_no_humanizer)
+    await r.record_async("execute_click_no_target", test_execute_click_no_element_no_coords)
     await r.record_async(
         "execute_click_write_lock_purchase",
         test_execute_click_write_lock_purchase_triggers_approval,
@@ -11050,9 +11067,7 @@ async def run_all_tests():
         "execute_input_text_payment_secret_ref_selector_recovery",
         test_execute_input_text_payment_secret_ref_recovers_dead_backend_node_with_selector,
     )
-    await r.record_async(
-        "execute_input_text_secret_redacts", test_execute_input_text_secret_redacts
-    )
+    await r.record_async("execute_input_text_secret_redacts", test_execute_input_text_secret_redacts)
     await r.record_async(
         "execute_input_text_credential_ref",
         test_execute_input_text_secret_returns_credential_ref,
@@ -11330,6 +11345,10 @@ async def run_all_tests():
         test_append_new_otp_user_messages_skips_stale_codes,
     )
     await r.record_async("call_browser_use_gpt_auth", test_call_browser_use_with_rotation_uses_gpt_auth)
+    r.record(
+        "browser_prompt_cache_namespace_stable_and_isolated",
+        test_browser_prompt_cache_namespace_is_stable_and_isolated,
+    )
     await r.record_async(
         "browser_thinking_stream_routes_chunks",
         test_browser_thinking_stream_routes_chunks_to_browser_message_list,
