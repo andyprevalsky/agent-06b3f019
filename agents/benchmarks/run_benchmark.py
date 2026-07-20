@@ -3644,11 +3644,13 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     which forces the agent's claudeAuth fetch to fail into the paid waterfall.
     Reads the prod source from back-end/.env; writes to the isolated DB.
 
-    ``tolerate_gpt_code_unavailable`` is for the blanket pre-flight only: it sets
-    the seed's ``SEED_ALLOW_MISSING_GPT_CODE`` opt-in so the sync succeeds when
-    Codex (gpt_code) is quota-blocked (rateLimitedUntil set), since the agent
-    runtime drives claude_code. Live-fixture syncs never set it, so
-    Codex-dependent tasks still fail closed."""
+    ``tolerate_gpt_code_unavailable`` sets the seed's ``SEED_ALLOW_MISSING_GPT_CODE``
+    opt-in so the sync succeeds when Codex (gpt_code) is quota-blocked
+    (rateLimitedUntil set), since the agent runtime drives claude_code. Both the
+    blanket pre-flight AND the live-fixture overlay pass it: browser/credential
+    tasks never touch Codex, so an exhausted gpt_code must not abort them here.
+    Codex-dependent tasks fail closed at their own strict credential gate
+    downstream, not at this shared compute-token sync."""
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Compute-token sync skipped: local Victoria DB not found")
@@ -3769,7 +3771,14 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     if _is_simulate_mode():
         print("    🌍 simulate mode — skipping the live credential overlay")
         return {"fixture": "live", "skipped": True, "reason": "simulate"}
-    if not _sync_compute_tokens():
+    # Tolerate a quota-blocked Codex (gpt_code) exactly like the blanket pre-flight
+    # (_refresh_local_compute_tokens_for_run): the live overlay serves browser/
+    # credential tasks whose agents drive claude_code, so a rate-limited gpt_code
+    # ("No usable gpt_code integrations after sync") must not fail closed here and
+    # abort the whole run before an agent is ever created. Codex-dependent tasks
+    # keep their own strict credential gates downstream. Without this, an exhausted
+    # org-wide Codex quota failed every browser task at the fixture (0/8 ecommerce).
+    if not _sync_compute_tokens(tolerate_gpt_code_unavailable=True):
         raise RuntimeError("Live fixture could not refresh compute tokens")
     if not _sync_browser_credentials():
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
