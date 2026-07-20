@@ -81,7 +81,7 @@ with workflow.unsafe.imports_passed_through():
     from tools.wait_for import wait_for
     from tools.web_fetch import web_fetch
     from tools.web_search import web_search
-    from utils.error_utils import extract_error_message
+    from utils.error_utils import error_chain_has_type, extract_error_message
     from utils.format_tool_display import format_tool_display
     from utils.prompts import (
         build_system_prompt,
@@ -2127,6 +2127,7 @@ class AgentWorkflow:
 
         except Exception as e:
             error_msg = extract_error_message(e)
+            fatal_external_error = error_chain_has_type(e, "CLAUDE_CODE_FATAL")
 
             # Include user's rejection feedback in the error message
             if isinstance(e, UserRejectedError) and e.rejection_message:
@@ -2166,7 +2167,11 @@ class AgentWorkflow:
                 tool_call_id,
                 tool_name,
             )
-            return {"error": True, "message": error_msg}
+            return {
+                "error": True,
+                "message": error_msg,
+                "fatal_external_error": fatal_external_error,
+            }
         finally:
             # Remove tool from in-use and broadcast tree state
             self.tools_in_use.discard(tool_display)

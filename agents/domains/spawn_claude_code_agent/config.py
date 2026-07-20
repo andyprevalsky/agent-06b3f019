@@ -39,7 +39,7 @@ FATAL_ERROR_PATTERNS: Final[list[tuple[str, str]]] = [
         "Claude Code OAuth credentials are rate-limited. The credential must be rotated instead of waiting in the sandbox.",
     ),
     (
-        "Credit balance too low",
+        "Credit balance is too low",
         "Claude Code API billing credit balance is too low. Configure healthy Claude Code OAuth credentials "
         "or refill the shared Anthropic API billing account.",
     ),

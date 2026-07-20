@@ -144,9 +144,10 @@ def test_check_fatal_errors_credit_balance():
     """Claude Code API billing banner aborts immediately instead of looping."""
     from domains.spawn_claude_code_agent.service import check_fatal_errors
 
-    msg = check_fatal_errors("Credit balance too low · Add funds: https://platform.claude.com/settings/billing")
+    msg = check_fatal_errors("[Claude] Credit balance is too low")
     assert msg is not None
     assert "billing" in msg.lower()
+    assert check_fatal_errors("CREDIT BALANCE IS TOO LOW") == msg
 
 
 def test_check_fatal_errors_rate_limit_options():
@@ -2047,6 +2048,28 @@ async def test_cc_execute_tool_generic_exception_yields_error():
     assert error.metadata["code_provider"] == "claude"
 
 
+async def test_cc_execute_tool_reraises_fatal_provider_error():
+    """Fatal provider failures reach the workflow instead of becoming retryable tool output."""
+    from temporalio.exceptions import ApplicationError
+
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+
+    handle = _FakeActivityHandle(
+        raise_exc=ApplicationError("credits exhausted", type="CLAUDE_CODE_FATAL", non_retryable=True)
+    )
+    fake = _FakeCCWorkflow(handle)
+    restore = _patch_cc_workflow(fake)
+    try:
+        manager = SpawnClaudeCodeAgentManager()
+        try:
+            await _collect_cc_events(manager.execute_tool(_FakeCCWorkflowInstance(), {"goal": "g"}, "tc-fatal"))
+            raise AssertionError("expected fatal provider error")
+        except ApplicationError as exc:
+            assert exc.type == "CLAUDE_CODE_FATAL"
+    finally:
+        restore()
+
+
 async def test_cc_execute_tool_paused_cancels_activity():
     """is_paused=True triggers activity_handle.cancel() and cancelled path."""
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
@@ -2187,6 +2210,7 @@ async def run_all_tests():
     await r.record_async("cc_exec_cancel_status", test_cc_execute_tool_cancelled_status_yields_error)
     await r.record_async("cc_exec_cancel_error", test_cc_execute_tool_cancelled_error_path)
     await r.record_async("cc_exec_generic_exc", test_cc_execute_tool_generic_exception_yields_error)
+    await r.record_async("cc_exec_fatal_reraises", test_cc_execute_tool_reraises_fatal_provider_error)
     await r.record_async("cc_exec_paused", test_cc_execute_tool_paused_cancels_activity)
     teardown_mock()
     return r.all_passed
