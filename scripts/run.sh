@@ -1322,7 +1322,7 @@ launch_backend_service() {
                     set +e
                     cd back-end || exit 1
                     rm -f "$BACKEND_LOG_FILE"
-                    PORT="$BACKEND_PORT" npx tsx src/server.ts > "$BACKEND_LOG_FILE" 2>&1
+                    PORT="$BACKEND_PORT" npx tsx src/bootstrap.ts > "$BACKEND_LOG_FILE" 2>&1
                     code=$?
                     if [ "$code" -ne 0 ]; then
                         printf "%s\n" back-end > "$FAIL_DIR/failed"
@@ -1333,12 +1333,12 @@ launch_backend_service() {
             BACKEND_PID=$!
             BACKEND_PGID="$BACKEND_PID"
         else
-            run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
+            run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx src/bootstrap.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
             BACKEND_PID=$!
             BACKEND_PGID=""
         fi
     else
-        run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx watch src/server.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
+        run_service "back-end" bash -c 'set -eo pipefail; cd back-end && rm -f "$BACKEND_LOG_FILE" && PORT=$BACKEND_PORT npx tsx watch src/bootstrap.ts 2>&1 | tee "$BACKEND_LOG_FILE"' &
         BACKEND_PID=$!
         BACKEND_PGID=""
     fi
