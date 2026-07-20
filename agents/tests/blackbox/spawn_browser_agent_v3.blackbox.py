@@ -5409,6 +5409,7 @@ def test_network_recorder_query_requests_filters_and_shapes():
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._max_entries = 300
     recorder._ignored_request_ids = set()
+    recorder._active_request_ids = set()
     recorder._patterns = []
     recorder.entries = {
         "1": {
@@ -5437,11 +5438,13 @@ def test_network_recorder_query_requests_filters_and_shapes():
     # embedded basic-auth credentials, authority-less URLs, and parse failures.
     assert _redact_url_query("https://user:pass@shop.test/path?token=SECRET#frag") == "https://shop.test/path"
     assert _redact_url_query("relative/path?token=SECRET#frag") == "relative/path"
-    assert _redact_url_query("https://[broken?token=SECRET#frag") == "https://[broken"
+    assert _redact_url_query("https://user:pass@[broken?token=SECRET#frag") == "https://[broken"
+    assert _redact_url_query("//user:pass@shop.test/path?token=SECRET#frag") == "//shop.test/path"
 
     # A still-in-flight request (no status) at clear time must be ignored so its
     # late response event cannot resurrect a pre-clear entry.
     recorder.entries["3"] = {"url": "https://order.online/api/inflight", "method": "GET", "status": None}
+    recorder._active_request_ids.add("3")
     recorder.query_requests(clear=True)
     assert recorder.entries == {}
     assert "3" in recorder._ignored_request_ids
@@ -5463,6 +5466,7 @@ def test_network_recorder_updates_status_at_capacity():
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._max_entries = 1
     recorder._ignored_request_ids = set()
+    recorder._active_request_ids = set()
     recorder._patterns = []
     recorder._started_at = 0.0
     recorder.entries = {"r1": {"request_id": "r1", "url": "https://x/api", "resource_type": "XHR", "status": None}}
@@ -5486,6 +5490,25 @@ def test_network_recorder_updates_status_at_capacity():
     )
     assert "r2" not in recorder.entries
 
+    # Even a request dropped at capacity remains active. Clearing must ignore its
+    # late response so pre-clear traffic cannot refill the now-empty buffer.
+    recorder._on_request_will_be_sent(
+        {"requestId": "r3", "type": "XHR", "request": {"url": "https://x/dropped", "method": "GET"}},
+        None,
+    )
+    assert "r3" in recorder._active_request_ids
+    assert "r3" not in recorder.entries
+    recorder.query_requests(clear=True)
+    assert "r3" in recorder._ignored_request_ids
+    recorder._on_response_received(
+        {"requestId": "r3", "type": "XHR", "response": {"url": "https://x/dropped", "status": 200}},
+        None,
+    )
+    assert recorder.entries == {}
+    recorder._on_loading_finished({"requestId": "r3"}, None)
+    assert "r3" not in recorder._active_request_ids
+    assert "r3" not in recorder._ignored_request_ids
+
 
 async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear():
     """Finished and failed requests are terminal, not in flight. Repeated clears
@@ -5495,6 +5518,7 @@ async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear(
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._max_entries = 300
     recorder._ignored_request_ids = set()
+    recorder._active_request_ids = {"failed", "finished"}
     recorder._tasks = set()
     recorder._fetch_response_body = AsyncMock()
     recorder.entries = {

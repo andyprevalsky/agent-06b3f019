@@ -112,6 +112,22 @@ def _strip_url_query_fragment(value: str) -> str:
     return value.split("#", 1)[0].split("?", 1)[0]
 
 
+def _redact_url_fallback(value: str) -> str:
+    """Redact a URL without relying on a successfully parsed authority."""
+    stripped = _strip_url_query_fragment(value)
+    if "://" in stripped:
+        scheme, remainder = stripped.split("://", 1)
+        prefix = f"{scheme}://"
+    elif stripped.startswith("//"):
+        prefix = "//"
+        remainder = stripped[2:]
+    else:
+        return stripped
+    authority, separator, path = remainder.partition("/")
+    safe_authority = authority.rsplit("@", 1)[-1]
+    return f"{prefix}{safe_authority}{separator}{path}"
+
+
 def _redact_url_query(url: str) -> str:
     """Drop query string + fragment from a URL, keeping scheme://host/path.
 
@@ -124,9 +140,9 @@ def _redact_url_query(url: str) -> str:
     try:
         parsed = urlparse(url)
     except Exception:
-        return _strip_url_query_fragment(url)
+        return _redact_url_fallback(url)
     if not parsed.scheme or not parsed.netloc:
-        return _strip_url_query_fragment(url)
+        return _redact_url_fallback(url)
     # netloc may carry `user:pass@host:port` — keep only host[:port].
     host = parsed.netloc.rsplit("@", 1)[-1]
     return f"{parsed.scheme}://{host}{parsed.path}"
@@ -1257,6 +1273,10 @@ class BrowserNetworkRecorder:
         # (read_network_requests clear=True). Their late response events must NOT
         # resurrect a pre-clear entry, or the next read would leak old traffic.
         self._ignored_request_ids: set[str] = set()
+        # Track every request observed by CDP, including requests dropped when the
+        # capture buffer is full. A clear must ignore all pre-clear traffic, not
+        # only the subset that had room in ``entries``.
+        self._active_request_ids: set[str] = set()
         self._started_at = time.monotonic()
         self._closed = False
         self._tasks: set[asyncio.Task] = set()
@@ -1350,7 +1370,12 @@ class BrowserNetworkRecorder:
             request = event.get("request") or {}
             url = request.get("url") or ""
             resource_type = event.get("type") or ""
-            if not request_id or len(self.entries) >= self._max_entries:
+            if not request_id:
+                return
+            self._active_request_ids.add(request_id)
+            if request_id in self._ignored_request_ids:
+                return
+            if len(self.entries) >= self._max_entries:
                 return
             if not self._should_capture(url, resource_type):
                 return
@@ -1372,7 +1397,10 @@ class BrowserNetworkRecorder:
             url = response.get("url") or ""
             resource_type = event.get("type") or ""
             mime_type = response.get("mimeType") or ""
-            if not request_id or request_id in self._ignored_request_ids:
+            if not request_id:
+                return
+            self._active_request_ids.add(request_id)
+            if request_id in self._ignored_request_ids:
                 return
             # Capacity only blocks NEW requests; an already-tracked request must
             # still receive its status/response update (otherwise a page that
@@ -1413,6 +1441,7 @@ class BrowserNetworkRecorder:
         request_id = event.get("requestId")
         if request_id:
             self._ignored_request_ids.discard(request_id)
+            self._active_request_ids.discard(request_id)
         if not request_id or request_id not in self.entries:
             return
         self.entries[request_id]["encoded_data_length"] = event.get("encodedDataLength")
@@ -1425,6 +1454,7 @@ class BrowserNetworkRecorder:
         request_id = event.get("requestId")
         if request_id:
             self._ignored_request_ids.discard(request_id)
+            self._active_request_ids.discard(request_id)
         if request_id and request_id in self.entries:
             self.entries[request_id]["failed"] = True
             self.entries[request_id]["failure"] = event.get("errorText")
@@ -1520,16 +1550,10 @@ class BrowserNetworkRecorder:
         scored.sort(key=lambda item: item[0], reverse=True)
         rows = [row for _, row in scored[:capped_limit]]
         if clear:
-            # Remember requests still in flight so their late response events don't
-            # resurrect a pre-clear entry and leak old traffic into the next read.
-            # Terminal requests (loadingFinished/loadingFailed already fired) get
-            # no further events, so excluding them keeps _ignored_request_ids from
-            # growing unbounded across repeated clears.
-            self._ignored_request_ids.update(
-                rid
-                for rid, entry in self.entries.items()
-                if entry.get("status") is None and not entry.get("terminal")
-            )
+            # Remember every request still in flight, including requests dropped
+            # while the buffer was full, so late response events cannot resurrect
+            # pre-clear traffic. Terminal events remove IDs from both sets.
+            self._ignored_request_ids.update(self._active_request_ids)
             self.entries.clear()
         return rows
 
