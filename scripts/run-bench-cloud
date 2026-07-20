@@ -92,6 +92,14 @@ POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"
 GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/.git")"
 case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
 APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"
+# Cross-workspace app-environment lock primitive (acquire/release/assert). Its
+# wait budget must outlast a peer's warm-dep refresh so concurrent fleets queue
+# rather than abort — see scripts/tests/cloudbench-app-env-lock.test.sh. Prefer
+# the immutable per-invocation script snapshot (set by run-bench-fleet) so a
+# mid-run edit to the live lib can't shift bytes under an in-flight controller;
+# fall back to the live lib dir for direct run-bench-cloud invocations.
+# shellcheck source=lib/cloudbench-app-env-lock.sh
+source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-app-env-lock.sh"
 
 # On-box paths (mirror scripts/cloudbench-run.sh).
 REMOTE_REPO="/data/repo"
@@ -618,15 +626,6 @@ activate_owned_machine_images() {  # activate_owned_machine_images <image_ref>
     done <<< "$activation_targets"
 }
 
-assert_app_environment_lock_ownership() {
-    local actual_owner
-    actual_owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
-    if [ "$actual_owner" != "$$" ] || ! kill -0 "$$" 2>/dev/null; then
-        echo "❌ Lost ownership of shared benchmark app environment lock." >&2
-        return 1
-    fi
-}
-
 # Inject the two base64 .env blobs + GITHUB_TOKEN as active Fly secrets (present
 # on machine init + in ssh sessions). The benchmark app uses the Machines API,
 # not Fly Launch releases: stage app secrets, then update each stopped machine
@@ -700,28 +699,6 @@ with open(path, "w") as handle:
     handle.write("\n")
 PY
     echo "✅ Secrets set (active)"
-}
-
-acquire_app_environment_lock() {
-    local attempt owner
-    command -v shlock >/dev/null 2>&1 || {
-        echo "❌ shlock is required for cross-workspace benchmark environment locking." >&2
-        return 1
-    }
-    for attempt in $(seq 1 60); do
-        shlock -p "$$" -f "$APP_ENV_LOCK_FILE" && return 0
-        owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
-        [ "$attempt" -eq 1 ] && echo "⏳ waiting for shared benchmark app environment lock (owner=${owner:-unknown})..."
-        sleep 2
-    done
-    echo "❌ Timed out waiting for shared benchmark app environment lock." >&2
-    return 1
-}
-
-release_app_environment_lock() {
-    local owner
-    owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
-    [ "$owner" = "$$" ] && rm -f "$APP_ENV_LOCK_FILE" 2>/dev/null || true
 }
 
 inject_secrets() {

@@ -63,6 +63,7 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
     cp "$ROOT_DIR/scripts/run-bench-fleet" \
        "$ROOT_DIR/scripts/run-bench-cloud" \
        "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
+       "$ROOT_DIR/scripts/lib/cloudbench-app-env-lock.sh" \
        "$CLOUDBENCH_SCRIPT_SNAPSHOT/"
     export CLOUDBENCH_SCRIPT_SNAPSHOT CLOUDBENCH_FLEET_ROOT="$ROOT_DIR"
     exec bash "$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-fleet" "$@"
