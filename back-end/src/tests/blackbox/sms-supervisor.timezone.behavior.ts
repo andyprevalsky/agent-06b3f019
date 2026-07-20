@@ -109,3 +109,16 @@ export async function testContext_guardsUnknownTimeZone(prisma: PrismaClient): P
     await prisma.user.deleteMany({ where: { userId } });
   }
 }
+
+export function smsTimezoneBehaviorCases(prisma: PrismaClient) {
+  return [
+    {
+      name: 'context -- incident UTC instant renders in the fingerprint IANA zone',
+      fn: () => testContext_rendersFingerprintTimeZone(prisma),
+    },
+    {
+      name: 'context -- invalid or missing fingerprint zone forbids local-time assumptions',
+      fn: () => testContext_guardsUnknownTimeZone(prisma),
+    },
+  ];
+}

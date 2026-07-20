@@ -677,8 +677,13 @@ function assembleContextUserMessage(params: {
   attentionSection: string;
   messagesSection: string;
 }): string {
-  const { currentUtcInstant, temporalContext, hierarchySection, attentionSection, messagesSection } =
-    params;
+  const {
+    currentUtcInstant,
+    temporalContext,
+    hierarchySection,
+    attentionSection,
+    messagesSection,
+  } = params;
   const stateHeading = `Current state (as of ${currentUtcInstant}):\n\n${temporalContext}`;
   return `${stateHeading}
 
