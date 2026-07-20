@@ -12,13 +12,10 @@ export { AgentCardProviderError } from './errors';
 export { AgentCardOrgMcpProvider } from './agentcard-org-mcp';
 export { AgentCardRoutingProvider } from './agentcard-routing';
 export { AgentCardUserMcpProvider } from './agentcard-user-mcp';
-export {
-  agentCardMintEnabled,
-  ROSE_AGENT_CARD_DEFAULTS,
-  roseAgentCard,
-  StaticRoseAgentCardProvider,
-  type RoseAgentCard,
-} from './static-card';
+// Export ONLY the gate and the provider — never the credential accessors
+// (`roseAgentCard`/PAN/CVV). Those stay internal to `static-card.ts`; anything
+// that needs raw card values imports them from there directly (e.g. tests).
+export { agentCardMintEnabled, StaticRoseAgentCardProvider } from './static-card';
 
 /**
  * Resolve the card provider for a user. HARD CUTOFF: until AgentCard minting is enabled
