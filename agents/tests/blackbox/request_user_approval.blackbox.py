@@ -14,12 +14,14 @@ from _test_utils import (
 
 
 def _setup():
-    setup_mock({
-        "/api/attention-requests": {
-            "status": 200,
-            "json": {"id": "req-abc123", "status": "pending"},
-        },
-    })
+    setup_mock(
+        {
+            "/api/attention-requests": {
+                "status": 200,
+                "json": {"id": "req-abc123", "status": "pending"},
+            },
+        }
+    )
 
 
 async def test_create_approval_happy_path():
@@ -88,12 +90,14 @@ async def test_create_approval_minimal_params():
 
 async def test_resolve_attention_request_boundary():
     """resolve_attention_request_activity marks an existing attention request answered."""
-    setup_mock({
-        "/api/attention-requests/req-setup/respond": {
-            "status": 200,
-            "json": {"success": True, "request_id": "req-setup"},
-        },
-    })
+    setup_mock(
+        {
+            "/api/attention-requests/req-setup/respond": {
+                "status": 200,
+                "json": {"success": True, "request_id": "req-setup"},
+            },
+        }
+    )
     with patch("temporalio.activity.heartbeat"):
         from tools.request_user_approval import resolve_attention_request_activity
 
@@ -281,9 +285,7 @@ async def test_manager_create_request_failure_yields_error():
     from domains.request_user_approval.service import RequestUserApprovalManager
     from tools.base import MessageStatus
 
-    fake = _FakeWFModule(
-        activity_results={"create_approval_request_activity": RuntimeError("db down")}
-    )
+    fake = _FakeWFModule(activity_results={"create_approval_request_activity": RuntimeError("db down")})
     restore = _patch_service_workflow(fake)
     try:
         events = await _collect(
@@ -427,9 +429,7 @@ async def test_direct_create_failure_propagates():
     """Create-request failure posts error event and re-raises."""
     from domains.request_user_approval.service import request_user_approval_direct
 
-    fake = _FakeWFModule(
-        activity_results={"create_approval_request_activity": RuntimeError("db error")}
-    )
+    fake = _FakeWFModule(activity_results={"create_approval_request_activity": RuntimeError("db error")})
     restore = _patch_service_workflow(fake)
 
     wf = _WFInstance()
@@ -486,6 +486,73 @@ async def test_direct_sms_source_attempts_sms_notify():
     notify_call = next(c for c in fake.activity_calls if c["name"] == "notify_sms_event_activity")
     payload = notify_call["args"][3]
     assert payload["metadata"]["writeLockNotification"]["action"] == "Buy item"
+
+
+async def test_direct_web_source_also_fires_sms_notify():
+    """Root agents of ANY source (here WEB) fire the write_lock SMS so FE-created
+    purchase agents also reach the user. Previously gated to SMS-source only."""
+    from domains.request_user_approval.service import request_user_approval_direct
+
+    wf = _WFInstance()
+    wf.agent_source = "WEB"
+    wf.parent_workflow_id = None
+    wf._signal_responses["req-web"] = "ok"
+    wf.context.append({"role": "USER", "text": "Yes"})
+
+    activity_calls = []
+
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": "req-web",
+            "notify_sms_event_activity": lambda: activity_calls.append("notify") or None,
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        await request_user_approval_direct(
+            workflow_instance=wf,
+            question="Approve a $56.24 purchase?",
+            metadata={"requestPaymentCard": {"merchant": "Nopa Fish"}},
+        )
+    finally:
+        restore()
+
+    assert "notify" in activity_calls
+    notify_call = next(c for c in fake.activity_calls if c["name"] == "notify_sms_event_activity")
+    assert notify_call["args"][1] == "write_lock"
+
+
+async def test_direct_subagent_does_not_fire_sms_notify():
+    """Sub-agents (parent_workflow_id set) never fire the write_lock SMS — at 10k
+    agents a per-spawn SMS would firehose the user's phone."""
+    from domains.request_user_approval.service import request_user_approval_direct
+
+    wf = _WFInstance()
+    wf.agent_source = "WEB"
+    wf.parent_workflow_id = "parent-wf-1"
+    wf._signal_responses["req-sub"] = "ok"
+    wf.context.append({"role": "USER", "text": "Yes"})
+
+    activity_calls = []
+
+    fake = _FakeWFModule(
+        activity_results={
+            "create_approval_request_activity": "req-sub",
+            "notify_sms_event_activity": lambda: activity_calls.append("notify") or None,
+        },
+    )
+    restore = _patch_service_workflow(fake)
+    try:
+        await request_user_approval_direct(
+            workflow_instance=wf,
+            question="Approve?",
+            metadata={"requestPaymentCard": {"merchant": "Nopa Fish"}},
+        )
+    finally:
+        restore()
+
+    assert "notify" not in activity_calls
+    assert not any(c["name"] == "notify_sms_event_activity" for c in fake.activity_calls)
 
 
 async def test_direct_attention_returns_without_waiting_and_emits_attention_metadata():
@@ -577,6 +644,8 @@ async def run_all_tests():
     await r.record_async("direct_approval_legacy_replay", test_direct_approval_replays_legacy_message_poll_path)
     await r.record_async("direct_create_fail", test_direct_create_failure_propagates)
     await r.record_async("direct_sms_notify", test_direct_sms_source_attempts_sms_notify)
+    await r.record_async("direct_web_notify", test_direct_web_source_also_fires_sms_notify)
+    await r.record_async("direct_subagent_no_notify", test_direct_subagent_does_not_fire_sms_notify)
     await r.record_async("direct_attention", test_direct_attention_returns_without_waiting_and_emits_attention_metadata)
     await r.record_async("direct_attention_sms", test_direct_attention_sms_source_sends_agentcard_setup_notify)
     teardown_mock()

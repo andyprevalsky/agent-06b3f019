@@ -1,34 +1,48 @@
 /**
  * BrowserStatusBarFullscreen — the portaled fullscreen variant of
- * BrowserStatusBar. Renders the actions panel on the left (MessageList +
- * schema chip + optional approval chip) and the live iframe + take-control
- * affordances on the right.
+ * BrowserStatusBar.
  *
- * Pure presentational — all state is owned by BrowserStatusBar and handed
- * in via props.
+ * DESKTOP LAYOUT (>= md): the task-progress panel sits as a fixed-width left
+ * column beside the live iframe (horizontal split).
+ *
+ * MOBILE LAYOUT (< md): the fixed-width panel would clip the iframe to a
+ * sliver, so it is NOT rendered inline — the iframe pane takes the FULL
+ * viewport width, and the task progress is reachable behind a header toggle
+ * that opens it as a full-screen overlay (stacked / tabbed presentation).
+ *
+ * Presentational — agent/session state is owned by BrowserStatusBar; only the
+ * mobile progress-panel visibility is local state here.
  *
  * AGENT OVERLAY STATE:
  * [ACTIVE] -> border glow + cursor stitch + "Agent in progress" chip
  * [WAITING_FOR_AUTH_ASSISTANCE] -> connected request + "Agent waiting for assistance" handoff
  * [DISCONNECTED] -> blurred resume overlay
  *
+ * MOBILE PROGRESS PANEL STATE:
+ * [HIDDEN] --tap Progress toggle--> [OPEN overlay]
+ * [OPEN overlay] --tap close--> [HIDDEN]
+ *
  * VIEWPORT STATE:
  * [MOUNTED] -> observe browser pane -> debounce dimensions -> resize remote provider viewport
+ * (derives from the pane element size, so a full-width mobile pane resizes the
+ *  remote session to full width automatically)
  */
 
 import { createPortal } from 'react-dom';
-import { useRef, type MouseEvent } from 'react';
-import { X } from 'lucide-react';
+import { useRef, useState, type MouseEvent, type RefObject } from 'react';
+import { PanelRightOpen, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import ThinkingAnimation from '@/components/ThinkingAnimation';
-import { MessageList } from '../MessageList';
+import { useIsMobile } from '@/hooks/use-mobile';
 import BrowserBorderGlow from '../BrowserBorderGlow';
 import BrowserCursorOverlay from '../BrowserCursorOverlay';
-import { SchemaChip } from '../SchemaChip';
 import type { Message } from '../../hooks';
+import {
+  DisconnectedOverlay,
+  TakeControlChip,
+  WaitingForAssistanceChip,
+} from './BrowserFullscreenOverlays';
+import { TaskProgressSidebar } from './BrowserTaskProgressPanel';
 import { BrowserProxyLocationChip } from './BrowserProxyLocationChip';
-import { BrowserWriteLockApproval } from './BrowserWriteLockApproval';
-import { StepProgressBar } from './StepProgressBar';
 import { useBrowserViewportSync } from './useBrowserViewportSync';
 import type {
   BrowserSessionMetadata,
@@ -81,101 +95,20 @@ function ActiveIndicator({
   );
 }
 
-function TakeControlChip({ onResume, isResuming }: { onResume: () => void; isResuming: boolean }) {
-  return (
-    <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-10">
-      <div className="flex items-center gap-3 pl-4 pr-2 py-2 rounded-full bg-navi-black shadow-2xl">
-        <div className="flex items-center gap-2">
-          <ThinkingAnimation
-            dataUrl="/thinking_animations.txt"
-            autoplay
-            loop
-            className="w-4 h-4 flex-shrink-0"
-            style={{ width: '16px', height: '16px' }}
-          />
-          <span className="text-sm font-medium text-navi-white">Agent in progress</span>
-        </div>
-        <button
-          onClick={onResume}
-          disabled={isResuming}
-          className={cn(
-            'text-sm font-medium ml-6 px-3 py-1 rounded-full bg-blue-500 text-white hover:bg-blue-400 transition-colors',
-            isResuming && 'opacity-50 cursor-not-allowed',
-          )}
-        >
-          {isResuming ? 'Loading...' : 'Take control'}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function WaitingForAssistanceChip({
-  onResume,
-  isResuming,
-  request,
-}: {
-  onResume: () => void;
-  isResuming: boolean;
-  request: string;
-}) {
-  return (
-    <div className="absolute bottom-10 left-1/2 -translate-x-1/2 z-10">
-      <div className="flex w-max max-w-[calc(100vw-352px)] flex-col items-stretch overflow-hidden rounded-[20px] border border-white/10 bg-navi-black/90 shadow-2xl backdrop-blur-md">
-        <div className="px-4 py-2.5 text-center">
-          <span className="whitespace-nowrap text-sm font-medium text-navi-white">{request}</span>
-        </div>
-        <div className="flex items-center justify-between gap-3 border-t border-white/10 py-2 pl-4 pr-2">
-          <span className="text-sm font-medium text-navi-white">Agent waiting for assistance</span>
-          <button
-            onClick={onResume}
-            disabled={isResuming}
-            className={cn(
-              'text-sm font-medium ml-2 px-3 py-1 rounded-full bg-blue-500 text-white hover:bg-blue-400 transition-colors',
-              isResuming && 'opacity-50 cursor-not-allowed',
-            )}
-          >
-            {isResuming ? 'Loading...' : 'Start Agent'}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DisconnectedOverlay({
-  onResume,
-  isResuming,
-}: {
-  onResume: () => void;
-  isResuming: boolean;
-}) {
-  return (
-    <div className="absolute inset-0 backdrop-blur-md flex items-center justify-center">
-      <button
-        onClick={onResume}
-        disabled={isResuming}
-        className={cn(
-          'px-4 py-2 rounded-lg border border-foreground/20 bg-foreground/10 text-foreground',
-          isResuming ? 'opacity-50' : 'hover:bg-foreground/20',
-        )}
-      >
-        {isResuming ? 'Loading...' : 'Take Control'}
-      </button>
-    </div>
-  );
-}
-
 function BrowserFrameHeader({
   isDisconnected,
   isWaitingForAuthAssistance,
   browserSessionMetadata,
   onClose,
+  isMobile,
+  onToggleProgress,
 }: {
   isDisconnected: boolean;
   isWaitingForAuthAssistance: boolean;
   browserSessionMetadata: BrowserSessionMetadata | null;
   onClose: (e: MouseEvent) => void;
+  isMobile: boolean;
+  onToggleProgress: () => void;
 }) {
   return (
     <div className="flex items-center justify-between p-4 border-b border-border">
@@ -185,6 +118,16 @@ function BrowserFrameHeader({
       />
       <div className="flex items-center gap-2">
         <BrowserProxyLocationChip metadata={browserSessionMetadata} tooltipPosition="bottom" />
+        {isMobile && (
+          <button
+            onClick={onToggleProgress}
+            aria-label="Show task progress"
+            className="flex items-center gap-1.5 rounded px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-muted transition-colors"
+          >
+            <PanelRightOpen className="h-4 w-4" />
+            Progress
+          </button>
+        )}
         <button onClick={onClose} className="p-2 rounded hover:bg-muted transition-colors">
           <X className="h-5 w-5 text-muted-foreground" />
         </button>
@@ -193,57 +136,84 @@ function BrowserFrameHeader({
   );
 }
 
-function TaskProgressSidebar({
-  taskId,
-  outputSchema,
-  stepProgress,
-  isDisconnected,
-  isWaitingForAuthAssistance,
-  pendingWriteLockApproval,
-}: Pick<
+type BrowserColumnProps = Pick<
   FullscreenProps,
+  | 'agentId'
   | 'taskId'
-  | 'outputSchema'
-  | 'stepProgress'
+  | 'browserUrl'
+  | 'messages'
+  | 'browserSessionMetadata'
   | 'isDisconnected'
   | 'isWaitingForAuthAssistance'
-  | 'pendingWriteLockApproval'
->) {
+  | 'authAssistanceRequest'
+  | 'isResuming'
+  | 'onClose'
+  | 'onResume'
+> & {
+  paneRef: RefObject<HTMLDivElement>;
+  isMobile: boolean;
+  onToggleProgress: () => void;
+};
+
+/** The live-iframe column: frame header, pane + agent overlays, and hint footer. */
+function FullscreenBrowserColumn({
+  paneRef,
+  agentId,
+  taskId,
+  browserUrl,
+  messages,
+  browserSessionMetadata,
+  isDisconnected,
+  isWaitingForAuthAssistance,
+  authAssistanceRequest,
+  isResuming,
+  isMobile,
+  onClose,
+  onResume,
+  onToggleProgress,
+}: BrowserColumnProps) {
   return (
-    <div
-      className="w-[min(320px,calc(100vw-60px))] h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col overflow-hidden"
-      style={{ backdropFilter: 'blur(8px)', WebkitBackdropFilter: 'blur(8px)' }}
-    >
-      <div className="p-3 border-b border-border">
-        <div className="flex items-center justify-between">
-          <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-            Task progress
-          </h4>
-          <SchemaChip outputSchema={outputSchema} size="sm" tooltipPosition="top" />
-        </div>
-        {stepProgress && (
-          <div className="mt-1">
-            <StepProgressBar progress={stepProgress} />
-          </div>
+    <div className="flex-1 flex flex-col min-w-0">
+      <BrowserFrameHeader
+        isDisconnected={isDisconnected}
+        isWaitingForAuthAssistance={isWaitingForAuthAssistance}
+        browserSessionMetadata={browserSessionMetadata}
+        onClose={onClose}
+        isMobile={isMobile}
+        onToggleProgress={onToggleProgress}
+      />
+      <div ref={paneRef} className="flex-1 relative bg-white">
+        <iframe
+          src={browserUrl}
+          className="w-full h-full border-0"
+          allow="clipboard-read; clipboard-write"
+          sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
+          title="Browser"
+        />
+        {!isWaitingForAuthAssistance && <BrowserBorderGlow />}
+        {!isWaitingForAuthAssistance && (
+          <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
+        )}
+        {!isDisconnected && !isWaitingForAuthAssistance && (
+          <TakeControlChip onResume={onResume} isResuming={isResuming} />
+        )}
+        {isWaitingForAuthAssistance && (
+          <WaitingForAssistanceChip
+            onResume={onResume}
+            isResuming={isResuming}
+            request={authAssistanceRequest ?? 'Complete the sign-in so I can continue'}
+            isMobile={isMobile}
+          />
+        )}
+        {isDisconnected && !isWaitingForAuthAssistance && (
+          <DisconnectedOverlay onResume={onResume} isResuming={isResuming} />
         )}
       </div>
-      <div className="flex-1 overflow-y-auto overflow-x-hidden p-3">
-        <div className="pb-[80vh]">
-          <MessageList
-            subAgentId={taskId}
-            containerClassName="flex flex-col gap-1.5 overflow-x-hidden"
-            showStatusBanners={false}
-            showThinkingIndicator={!isDisconnected && !isWaitingForAuthAssistance}
-            compact
-          />
-        </div>
+      <div className="px-4 py-2 border-t border-border bg-muted/20">
+        <p className="text-xs text-muted-foreground italic">
+          You can interact with the browser to handle logins or captchas
+        </p>
       </div>
-      {pendingWriteLockApproval && (
-        <BrowserWriteLockApproval
-          attentionRequestId={pendingWriteLockApproval.attentionRequestId}
-          question={pendingWriteLockApproval.question}
-        />
-      )}
     </div>
   );
 }
@@ -266,58 +236,54 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
     onResume,
   } = props;
   const browserPaneRef = useRef<HTMLDivElement>(null);
+  const isMobile = useIsMobile();
+  const [showMobileProgress, setShowMobileProgress] = useState(false);
   useBrowserViewportSync(taskId, browserPaneRef);
 
   return createPortal(
     <div className="fixed inset-0 z-50 bg-background flex flex-row">
-      <TaskProgressSidebar
-        taskId={taskId}
-        outputSchema={outputSchema}
-        stepProgress={stepProgress}
-        isDisconnected={isDisconnected}
-        isWaitingForAuthAssistance={isWaitingForAuthAssistance}
-        pendingWriteLockApproval={pendingWriteLockApproval}
-      />
-
-      <div className="flex-1 flex flex-col">
-        <BrowserFrameHeader
+      {!isMobile && (
+        <TaskProgressSidebar
+          taskId={taskId}
+          outputSchema={outputSchema}
+          stepProgress={stepProgress}
           isDisconnected={isDisconnected}
           isWaitingForAuthAssistance={isWaitingForAuthAssistance}
-          browserSessionMetadata={browserSessionMetadata}
-          onClose={onClose}
+          pendingWriteLockApproval={pendingWriteLockApproval}
         />
-        <div ref={browserPaneRef} className="flex-1 relative bg-white">
-          <iframe
-            src={browserUrl}
-            className="w-full h-full border-0"
-            allow="clipboard-read; clipboard-write"
-            sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
-            title="Browser"
+      )}
+
+      <FullscreenBrowserColumn
+        paneRef={browserPaneRef}
+        agentId={agentId}
+        taskId={taskId}
+        browserUrl={browserUrl}
+        messages={messages}
+        browserSessionMetadata={browserSessionMetadata}
+        isDisconnected={isDisconnected}
+        isWaitingForAuthAssistance={isWaitingForAuthAssistance}
+        authAssistanceRequest={authAssistanceRequest}
+        isResuming={isResuming}
+        isMobile={isMobile}
+        onClose={onClose}
+        onResume={onResume}
+        onToggleProgress={() => setShowMobileProgress((prev) => !prev)}
+      />
+
+      {isMobile && showMobileProgress && (
+        <div className="absolute inset-0 z-20 flex flex-col bg-background">
+          <TaskProgressSidebar
+            taskId={taskId}
+            outputSchema={outputSchema}
+            stepProgress={stepProgress}
+            isDisconnected={isDisconnected}
+            isWaitingForAuthAssistance={isWaitingForAuthAssistance}
+            pendingWriteLockApproval={pendingWriteLockApproval}
+            isMobile
+            onClose={() => setShowMobileProgress(false)}
           />
-          {!isWaitingForAuthAssistance && <BrowserBorderGlow />}
-          {!isWaitingForAuthAssistance && (
-            <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
-          )}
-          {!isDisconnected && !isWaitingForAuthAssistance && (
-            <TakeControlChip onResume={onResume} isResuming={isResuming} />
-          )}
-          {isWaitingForAuthAssistance && (
-            <WaitingForAssistanceChip
-              onResume={onResume}
-              isResuming={isResuming}
-              request={authAssistanceRequest ?? 'Complete the sign-in so I can continue'}
-            />
-          )}
-          {isDisconnected && !isWaitingForAuthAssistance && (
-            <DisconnectedOverlay onResume={onResume} isResuming={isResuming} />
-          )}
         </div>
-        <div className="px-4 py-2 border-t border-border bg-muted/20">
-          <p className="text-xs text-muted-foreground italic">
-            You can interact with the browser to handle logins or captchas
-          </p>
-        </div>
-      </div>
+      )}
     </div>,
     document.body,
   );

@@ -155,6 +155,11 @@ function TerminalLayout(props: TerminalLayoutProps) {
           isSignedIn={agents.isFullySignedIn}
           clientSource={agents.clientSource}
           realtimeReady={agents.realtimeReady}
+          agents={agents.agents}
+          isLoadingAgents={agents.isLoadingAgents}
+          selectedAgentId={agents.selectedAgentId}
+          onResumeAgent={agents.handleResumeAgent}
+          resumingAgentId={agents.resumingAgentId}
           dripStyles={drip.dripStyles}
           blur={drip.blur}
           backgroundColors={drip.backgroundColors}
