@@ -356,9 +356,39 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": (
             "Take a screenshot of the visible page viewport. Coordinates in this image match click_coordinates. "
             "The screenshot is saved and returned to the orchestrating agent. "
-            "Use this for visual confirmation of the current visible page state."
+            "Use this for visual confirmation of the current visible page state. "
+            "IMPORTANT: if you are attempting to interact with the DOM but progress is not being made "
+            "(repeated clicks/waits with no state change), take a screenshot to view components that may be "
+            "hidden from the DOM, e.g. a CAPTCHA, Cloudflare 'verify you are human' challenge, or other "
+            "content rendered inside a cross-origin iframe that the DOM tree cannot see."
         ),
         "params": {},
+    },
+    "read_network_requests": {
+        "description": (
+            "Read HTTP network requests (XHR, Fetch, documents, etc.) made by the current page, "
+            "including cross-origin requests. Use this to detect a blocked or challenge response "
+            "(e.g. a 403, 429, or a Cloudflare 'verify you are human' challenge) by its status code "
+            "when the DOM/screenshot alone is ambiguous, or to discover the underlying API a page "
+            "calls so you can navigate or interact more directly instead of fighting the UI. "
+            "Returns a newest-first list of {url, method, status, resource_type}. Optional params: "
+            "'url_pattern' (substring filter, e.g. '/api/'), 'limit' (max results, default 100), and "
+            "'clear' (when true, empties the buffer after reading so the next call only shows new traffic)."
+        ),
+        "params": {
+            "url_pattern": {
+                "type": "string",
+                "description": "Optional substring to filter request URLs (e.g. '/api/', 'checkout').",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of requests to return (default 100).",
+            },
+            "clear": {
+                "type": "boolean",
+                "description": "When true, clear the captured buffer after reading.",
+            },
+        },
     },
 }
 
@@ -845,6 +875,7 @@ _VALID_ACTIONS = frozenset(
         # allowlist or normalize_browser_use_response() rejects the model's call and
         # the browser step aborts before the handler can rotate the proxy.
         "rotate_ip",
+        "read_network_requests",
     }
 )
 
@@ -953,6 +984,16 @@ def _normalize_action_params(
 ) -> Dict[str, Any]:
     if normalized_action == "generate_write_lock_notification":
         return dict(params)
+
+    if normalized_action == "read_network_requests":
+        network_params: Dict[str, Any] = {}
+        if params.get("url_pattern") is not None:
+            network_params["url_pattern"] = str(params["url_pattern"])
+        if params.get("limit") is not None:
+            network_params["limit"] = params["limit"]
+        if params.get("clear") is not None:
+            network_params["clear"] = bool(params["clear"])
+        return network_params
 
     out: Dict[str, Any] = {}
 

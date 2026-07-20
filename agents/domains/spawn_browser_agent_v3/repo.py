@@ -383,6 +383,32 @@ async def download_session_file(config: Any, session_id: str, file_path: str) ->
 # BROWSER SESSION INIT / CLOSE / TASK
 # ========================================
 
+# Substrings that mark a browser-provider (Kernel/Steel) session-init failure as
+# TRANSIENT — an unhealthy proxy/machine was allocated, and a fresh init request
+# reallocates a different one. These are infra hiccups, not bad requests, so they
+# are retried (bounded) rather than surfaced to the agent as a fatal failure.
+_TRANSIENT_INIT_FAILURE_MARKERS = (
+    "proxy is marked unavailable",
+    "health check",
+    "no healthy",
+    "temporarily unavailable",
+    "try again",
+)
+
+
+def is_transient_session_init_failure(status_code: int, body: str) -> bool:
+    """Classify a non-2xx/429 init response as retryable-transient vs. fatal.
+
+    5xx from the provider is always transient. A 4xx is transient only when its
+    body matches a known infra-hiccup marker (e.g. Kernel's
+    ``400 Proxy is marked unavailable from the last health check``); an ordinary
+    4xx (bad request) stays fatal so real errors are not masked by retries.
+    """
+    if status_code >= 500:
+        return True
+    text = (body or "").lower()
+    return any(marker in text for marker in _TRANSIENT_INIT_FAILURE_MARKERS)
+
 
 async def init_browser_session(
     config: Any,
@@ -401,6 +427,12 @@ async def init_browser_session(
         return response.json()
     if response.status_code == 429:
         return {"rate_limited": True, "status_code": 429}
+    if is_transient_session_init_failure(response.status_code, response.text):
+        return {
+            "transient_init_failure": True,
+            "status_code": response.status_code,
+            "detail": response.text[:300],
+        }
     raise Exception(f"Failed to init session: {response.text}")
 
 

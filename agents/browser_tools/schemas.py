@@ -37,6 +37,17 @@ class ExtractTool(BaseModel):
     instruction: str = Field(description="Clear instruction describing what data to extract from the page")
 
 
+class ReadNetworkRequestsBrowserTool(BaseModel):
+    """Read captured HTTP network requests (XHR/Fetch/documents) made by the current page."""
+
+    tool: Literal["read_network_requests"]
+    url_pattern: Optional[str] = Field(
+        default=None, description="Optional substring to filter request URLs (e.g. '/api/')."
+    )
+    limit: Optional[int] = Field(default=None, description="Maximum number of requests to return (default 100).")
+    clear: Optional[bool] = Field(default=None, description="When true, clear the captured buffer after reading.")
+
+
 # ============================================================================
 # ACTION TOOLS (Index-Based - Matching browser-use format)
 # ============================================================================
@@ -647,6 +658,7 @@ class GenerateWriteLockNotificationTool(BaseModel):
 BROWSER_TOOL_MODELS = {
     # Observation
     "screenshot": ScreenshotTool,
+    "read_network_requests": ReadNetworkRequestsBrowserTool,
     # Index-based actions
     "click": ClickTool,
     "input_text": InputTextTool,
