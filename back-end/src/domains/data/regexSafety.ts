@@ -14,10 +14,20 @@ const MAX_PATTERN_LENGTH = 1000;
 // Quadratic (degree 2) regex is harmless over a single bounded DB row; degree ≥ 3
 // or exponential can hang Postgres for seconds-to-minutes, so reject those.
 const MAX_SAFE_POLYNOMIAL_DEGREE = 2;
+const RECHECK_TIMEOUT_MS = 1000;
 
 export interface PatternSafety {
   ok: boolean;
   reason?: string;
+}
+
+function unclassifiedPatternRejection(): PatternSafety {
+  return {
+    ok: false,
+    reason:
+      'Pattern rejected because ReDoS safety analysis could not complete. ' +
+      'Use a shorter or simpler regular expression.',
+  };
 }
 
 /**
@@ -25,7 +35,11 @@ export interface PatternSafety {
  * (exponential, or polynomial degree > 2). Quadratic patterns like
  * `meeting.*tomorrow` stay allowed so we don't nerf realistic queries.
  */
-export function checkPatternSafety(source: string, flags: string): PatternSafety {
+export function checkPatternSafety(
+  source: string,
+  flags: string,
+  timeoutMs = RECHECK_TIMEOUT_MS
+): PatternSafety {
   if (source.length > MAX_PATTERN_LENGTH) {
     return {
       ok: false,
@@ -34,18 +48,14 @@ export function checkPatternSafety(source: string, flags: string): PatternSafety
   }
   let diagnostics;
   try {
-    diagnostics = checkSync(source, flags, { timeout: 1000 });
+    diagnostics = checkSync(source, flags, { timeout: timeoutMs });
   } catch {
     // A timeout is most likely for the complex patterns this guard exists to
     // stop, especially when the host is under load. Never let an unclassified
     // pattern reach Postgres's backtracking regex engine.
-    return {
-      ok: false,
-      reason:
-        'Pattern rejected because ReDoS safety analysis could not complete. ' +
-        'Use a shorter or simpler regular expression.',
-    };
+    return unclassifiedPatternRejection();
   }
+  if (diagnostics.status === 'unknown') return unclassifiedPatternRejection();
   if (diagnostics.status !== 'vulnerable') return { ok: true };
   const complexity = diagnostics.complexity;
   const tooComplex =

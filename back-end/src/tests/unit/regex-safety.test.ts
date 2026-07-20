@@ -14,6 +14,10 @@ function run(): void {
   assert.equal(analyzerFailure.ok, false, 'analyzer failures must reject the unclassified pattern');
   assert.match(analyzerFailure.reason ?? '', /safety analysis could not complete/);
 
+  const analyzerTimeout = checkPatternSafety('(.*a){20}$', '', 0);
+  assert.equal(analyzerTimeout.ok, false, 'unknown timeout diagnostics must fail closed');
+  assert.match(analyzerTimeout.reason ?? '', /safety analysis could not complete/);
+
   process.stdout.write('PASS regex safety rejects dangerous and unclassified patterns\n');
 }
 
