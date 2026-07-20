@@ -389,13 +389,18 @@ fi
 # ── Pre-flight: ensure Postgres is available ──
 # Prefer Docker (per-workspace container), fall back to system Postgres when
 # the Docker daemon isn't available (sandboxed containers, CI without --privileged).
+DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
+DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
 DOCKER_OK=false
-if docker_info_quick; then
+if docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' 2>/dev/null | grep -q .; then
+    # /deploy pre-starts this exact workspace container. Prefer that direct,
+    # authoritative check even when a busy Docker Desktop daemon makes the
+    # broader `docker info` probe miss its bounded response window.
+    DOCKER_OK=true
+elif docker_info_quick; then
     DOCKER_OK=true
 fi
 
-DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
-DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
 DB_OWNED_BY_US=false  # Track whether this run started/created the DB.
 DB_OWNED_CONTAINER_ID=""
 USE_SYSTEM_PG=false
