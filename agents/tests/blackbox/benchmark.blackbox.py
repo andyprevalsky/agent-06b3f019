@@ -4369,6 +4369,134 @@ def test_local_manifest_uses_isolated_system_database_identity():
     )
 
 
+def test_local_isolated_stack_opts_into_fast_seed_dump():
+    """An empty per-run DB must restore a cached seed instead of cold-syncing prod."""
+    from benchmarks import local as local_bench
+
+    captured = {}
+
+    class FakeProcess:
+        pass
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["env"] = kwargs["env"]
+        return FakeProcess()
+
+    original_popen = local_bench.subprocess.Popen
+    original_wait = local_bench.wait_for_services
+    prior_seed_dump = os.environ.pop("BENCHMARK_SEED_DUMP", None)
+    try:
+        local_bench.subprocess.Popen = fake_popen
+        local_bench.wait_for_services = lambda *_args, **_kwargs: {"ports": {}}
+        with tempfile.TemporaryDirectory() as tmp:
+            context_dir = Path(tmp) / "isolated-run"
+            stack = local_bench.ServiceStack(
+                run_id="isolated-run",
+                context_dir=context_dir,
+                manifest_path=context_dir / "services.json",
+                service_log=context_dir / "services.log",
+                isolated=True,
+                workspace_name="blackbox-bench-isolated-run",
+                base_port=55120,
+            )
+            local_bench.start_services(stack, clean_first=False)
+
+            seed_dump = Path(captured["env"]["BENCHMARK_SEED_DUMP"])
+            assert seed_dump.parent == local_bench.BENCHMARK_CONTEXT_ROOT / "seed-cache"
+            assert seed_dump.name.endswith(".dump")
+            assert seed_dump.parent.is_dir()
+            assert captured["env"]["BENCHMARK_REQUIRE_SEED_DUMP"] == "1"
+            assert captured["command"] == ["bash", "scripts/run.sh", "--benchmark"]
+    finally:
+        local_bench.subprocess.Popen = original_popen
+        local_bench.wait_for_services = original_wait
+        if prior_seed_dump is not None:
+            os.environ["BENCHMARK_SEED_DUMP"] = prior_seed_dump
+
+
+def test_run_sh_seed_dump_targets_isolated_database_atomically():
+    """System-Postgres isolated runs must restore/dump their per-run DB safely."""
+    run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
+
+    assert (
+        'pg_restore -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -d "$LOCAL_DB_NAME"'
+        in run_script
+    )
+    assert (
+        'pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME"'
+        in run_script
+    )
+    assert 'mv "$_SEED_DUMP_TMP" "$_SEED_DUMP"' in run_script
+    required_guard = run_script.index('if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]')
+    cold_sync = run_script.index('echo "🌱 Syncing production data to local database (first run)..."')
+    assert required_guard < cold_sync
+    assert "refusing a slow production cold-sync" in run_script
+
+
+def test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe():
+    """A healthy workspace DB must not become shared system PG when Docker is busy."""
+    run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
+
+    reachable_probe = 'pg_isready -h localhost -p "$LOCAL_DB_PORT" -U postgres -d victoria -q'
+    assert reachable_probe in run_script
+    assert run_script.index(reachable_probe) < run_script.index("docker_info_quick; then")
+    assert "if $PRESTARTED_WORKSPACE_DB; then" in run_script
+
+
+def test_run_sh_required_seed_failure_cleans_exact_owned_database():
+    """Fail-fast seed preflight must reap only the DB resource this run created."""
+    run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
+    function_start = run_script.index("cleanup_seed_bootstrap_database() {")
+    function_end = run_script.index("\n}\n", function_start) + 3
+    cleanup_function = run_script[function_start:function_end]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        command_log = tmp_path / "commands.log"
+        for command in ("docker", "dropdb"):
+            executable = tmp_path / command
+            executable.write_text(f'#!/bin/sh\necho "{command} $*" >> "$COMMAND_LOG"\n')
+            executable.chmod(0o755)
+
+        common_env = {
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
+            "COMMAND_LOG": str(command_log),
+        }
+        subprocess.run(
+            [
+                "bash",
+                "-c",
+                cleanup_function
+                + "\nUSE_SYSTEM_PG=true\nSYSTEM_DB_OWNED_BY_US=true\n"
+                + "DB_OWNED_CONTAINER_ID=''\nLOCAL_DB_NAME=victoria_bench_owned\n"
+                + "cleanup_seed_bootstrap_database\n",
+            ],
+            env=common_env,
+            check=True,
+        )
+        subprocess.run(
+            [
+                "bash",
+                "-c",
+                cleanup_function
+                + "\nUSE_SYSTEM_PG=false\nSYSTEM_DB_OWNED_BY_US=false\n"
+                + "DB_OWNED_CONTAINER_ID=owned-id\nDB_CONTAINER=victoria-db-owned\n"
+                + "DB_VOLUME=victoria-pgdata-owned\ncleanup_seed_bootstrap_database\n",
+            ],
+            env=common_env,
+            check=True,
+        )
+
+        commands = command_log.read_text().splitlines()
+        assert commands == [
+            "dropdb -h localhost -p 5432 -U postgres --if-exists victoria_bench_owned",
+            "docker rm -f victoria-db-owned",
+            "docker volume rm victoria-pgdata-owned",
+        ]
+
+
 def test_local_extract_results_path_and_diagnostic_commands():
     """Local wrapper finds runner result paths and builds all three diagnostics."""
     from benchmarks.local import diagnostic_commands, extract_results_path
@@ -7207,6 +7335,19 @@ async def run_all_tests():
     r.record(
         "local_manifest_system_database_identity",
         test_local_manifest_uses_isolated_system_database_identity,
+    )
+    r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
+    r.record(
+        "run_sh_seed_dump_isolated_database",
+        test_run_sh_seed_dump_targets_isolated_database_atomically,
+    )
+    r.record(
+        "run_sh_reuses_reachable_workspace_db",
+        test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe,
+    )
+    r.record(
+        "run_sh_required_seed_cleanup",
+        test_run_sh_required_seed_failure_cleans_exact_owned_database,
     )
     r.record("run_sh_manifest_publishes_wmh", test_run_sh_manifest_writer_publishes_wmh_when_served)
     r.record("apply_manifest_env_injects_wmh", test_apply_manifest_environment_injects_wmh_base_url_and_model)

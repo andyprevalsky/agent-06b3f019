@@ -385,13 +385,23 @@ fi
 # ── Pre-flight: ensure Postgres is available ──
 # Prefer Docker (per-workspace container), fall back to system Postgres when
 # the Docker daemon isn't available (sandboxed containers, CI without --privileged).
+DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
+DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
+PRESTARTED_WORKSPACE_DB=false
+# Probe the workspace-scoped database service itself before asking the whole
+# Docker daemon for global state. Under concurrent deploy load `docker info`
+# can miss its one-second responsiveness budget even while this already-started
+# Postgres is healthy. A reachable workspace port is all run.sh needs; later DB
+# operations can use the host port directly without falling onto shared :5432.
+if [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && \
+   PGPASSWORD=postgres pg_isready -h localhost -p "$LOCAL_DB_PORT" -U postgres -d victoria -q 2>/dev/null; then
+    PRESTARTED_WORKSPACE_DB=true
+fi
 DOCKER_OK=false
-if docker_info_quick; then
+if ! $PRESTARTED_WORKSPACE_DB && docker_info_quick; then
     DOCKER_OK=true
 fi
 
-DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
-DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
 DB_OWNED_BY_US=false  # Track whether this run started/created the DB.
 DB_OWNED_CONTAINER_ID=""
 USE_SYSTEM_PG=false
@@ -402,7 +412,30 @@ if [ "${ROSE_USE_SYSTEM_PG:-false}" = "true" ]; then
     USE_SYSTEM_PG=true
 fi
 
-if $DOCKER_OK && ! $USE_SYSTEM_PG; then
+cleanup_seed_bootstrap_database() {
+    if $USE_SYSTEM_PG && $SYSTEM_DB_OWNED_BY_US; then
+        PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$LOCAL_DB_NAME" >/dev/null 2>&1 || true
+        SYSTEM_DB_OWNED_BY_US=false
+        DB_OWNED_BY_US=false
+    elif [ -n "$DB_OWNED_CONTAINER_ID" ]; then
+        docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
+        docker volume rm "$DB_VOLUME" >/dev/null 2>&1 || true
+        DB_OWNED_CONTAINER_ID=""
+        DB_OWNED_BY_US=false
+    fi
+}
+
+fail_required_seed_dump() {
+    echo "❌ $1" >&2
+    echo "   Expected cache token: $_SEED_CACHE_TOKEN" >&2
+    cleanup_seed_bootstrap_database
+    exit 1
+}
+
+if $PRESTARTED_WORKSPACE_DB; then
+    LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
+    echo "🐘 Reusing healthy workspace Postgres on port $LOCAL_DB_PORT (Docker daemon probe not required)"
+elif $DOCKER_OK && ! $USE_SYSTEM_PG; then
     # ── Docker path (macOS / Linux with working Docker) ──
     if ! docker ps &>/dev/null 2>&1; then
         if [ -d "/Applications/Docker.app" ]; then
@@ -617,13 +650,20 @@ if [ -n "$_SEED_DUMP" ] && [ ! -s "$_SEED_DUMP" ] && [ "$_SEED_CACHE_ENABLED" = 
         echo "   ℹ️ no cached dump for this schema/day — will cold-sync and populate it"
     fi
 fi
+if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ] && \
+   { [ -z "$_SEED_DUMP" ] || [ ! -s "$_SEED_DUMP" ] || [ "$(cat "${_SEED_DUMP}.schemahash" 2>/dev/null || echo x)" != "$_SCHEMA_HASH" ]; }; then
+    fail_required_seed_dump "Isolated local benchmarks require a schema-matched seed dump; refusing a slow production cold-sync."
+fi
 if [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ] && [ "$(cat "${_SEED_DUMP}.schemahash" 2>/dev/null || echo x)" = "$_SCHEMA_HASH" ]; then
     echo "🗜️  Restoring seeded DB from persistent dump ($_SEED_DUMP) — skipping schema push + seed..."
-    if PGPASSWORD=postgres pg_restore -h localhost -U postgres -d victoria --clean --if-exists --no-owner "$_SEED_DUMP" >/dev/null 2>&1; then
+    if PGPASSWORD=postgres pg_restore -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -d "$LOCAL_DB_NAME" --clean --if-exists --no-owner "$_SEED_DUMP" >/dev/null 2>&1; then
         DB_RESTORED=true
         echo "   ✅ DB restored from dump"
     else
         echo "   ⚠️ restore failed — falling back to push + seed"
+        if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]; then
+            fail_required_seed_dump "Required isolated benchmark seed dump could not be restored; refusing a slow production cold-sync."
+        fi
     fi
 fi
 
@@ -687,7 +727,11 @@ fi
 # instead of re-seeding. Best-effort; the schemahash guards against schema drift.
 if [ -n "$_SEED_DUMP" ]; then
     echo "🗜️  Saving seed dump for fast future warm-starts ($_SEED_DUMP)..."
-    if PGPASSWORD=postgres pg_dump -h localhost -U postgres -Fc victoria > "$_SEED_DUMP" 2>/dev/null; then
+    mkdir -p "$(dirname "$_SEED_DUMP")"
+    _SEED_DUMP_TMP="${_SEED_DUMP}.tmp.$$"
+    rm -f "$_SEED_DUMP_TMP" 2>/dev/null || true
+    if PGPASSWORD=postgres pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME" > "$_SEED_DUMP_TMP" 2>/dev/null; then
+        mv "$_SEED_DUMP_TMP" "$_SEED_DUMP"
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
         echo "   ✅ seed dump saved ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}'))"
         # Publish to the shared cache so the NEXT clone (any workspace — including a
@@ -699,7 +743,7 @@ if [ -n "$_SEED_DUMP" ]; then
             fi
         fi
     else
-        rm -f "$_SEED_DUMP" 2>/dev/null || true
+        rm -f "$_SEED_DUMP_TMP" 2>/dev/null || true
     fi
 fi
 
