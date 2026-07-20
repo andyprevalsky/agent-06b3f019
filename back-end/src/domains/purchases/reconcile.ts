@@ -10,29 +10,10 @@ import {
 import { AGENTCARD_WEBHOOK_SECRET } from './config';
 import { PurchaseError } from './errors';
 import * as repo from './repo';
-import {
-  PurchaseSpendStatus,
-  PurchaseWalletFundingStatus,
-  type AgentCardWebhookEvent,
-} from './types';
-import {
-  beginPurchaseWalletReclaim,
-  consumePurchaseWalletFunding,
-  reclaimPurchaseWalletFunding,
-} from './walletFunding';
+import { PurchaseSpendStatus, type AgentCardWebhookEvent } from './types';
+import { beginPurchaseWalletReclaim, reclaimPurchaseWalletFunding } from './walletFunding';
 
 const log = createLogger('Purchases');
-
-// Funding states that mean an abandon/reclaim already owns this purchase. Once a
-// reclaim is underway (or done), a `transaction.cleared` must not settle the
-// purchase — the card read as not-live because Rose closed it, not because a
-// merchant captured the charge. Mirrors purchaseCleanup's spent-vs-reclaimed
-// guard so the two reconcilers agree.
-const RECLAIM_IN_PROGRESS_FUNDING_STATUSES = new Set<PurchaseWalletFundingStatus>([
-  PurchaseWalletFundingStatus.RECLAIMING,
-  PurchaseWalletFundingStatus.RECLAIMED,
-  PurchaseWalletFundingStatus.RECLAIM_FAILED,
-]);
 
 function extractWebhookCardId(event: AgentCardWebhookEvent): string | undefined {
   return (
@@ -202,24 +183,14 @@ export async function handleAgentCardWebhook(event: AgentCardWebhookEvent): Prom
   }
 
   if (event.type === 'transaction.cleared') {
-    // An in-flight or completed abandon owns this purchase: its reclaim marks the
-    // wallet funding RECLAIMING/RECLAIMED/RECLAIM_FAILED *before* it flips the
-    // purchase to VOIDED. The terminal-status guard above is evaluated on the row
-    // read at the top of this handler, so a `transaction.cleared` that raced the
-    // abandon can slip past it and clobber the purchase to CLEARED — leaving the
-    // inconsistent (funding RECLAIMED + Stripe refunded, purchase CLEARED) state
-    // observed on the live AgentCard abandonment path. Defer to the reclaim.
-    const funding = await repo.findWalletFundingByPurchaseId(purchase.id);
-    if (funding !== null && RECLAIM_IN_PROGRESS_FUNDING_STATUSES.has(funding.status)) {
+    const result = await repo.settlePurchaseAfterTransactionCleared(purchase.id);
+    if (result.outcome === 'ignored') {
       log.warn('Ignoring transaction.cleared for a purchase already being reclaimed', {
         purchase_id: purchase.id,
         card_id: cardId,
-        funding_status: funding.status,
+        funding_status: result.fundingStatus,
       });
-      return { ok: true };
     }
-    await consumePurchaseWalletFunding(purchase.id);
-    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
   } else if (event.type === 'transaction.voided') {
     if (purchase.status === PurchaseSpendStatus.CLEARED) {
       // The hold was already captured, then the card transaction reversed → refund the charge.
