@@ -107,20 +107,29 @@ def browser_recording_output_dir(agent_id: str, task_id: str) -> Path:
     return _recording_root() / agent_id / _safe_task_id(task_id)
 
 
+def _strip_url_query_fragment(value: str) -> str:
+    """Remove everything from the first ``?`` or ``#`` onward."""
+    return value.split("#", 1)[0].split("?", 1)[0]
+
+
 def _redact_url_query(url: str) -> str:
     """Drop query string + fragment from a URL, keeping scheme://host/path.
 
     Captured request URLs are surfaced to the agent (and its turn history) via
     read_network_requests; query strings can carry signed URLs, auth tokens, and
-    PII, so only the non-secret locator is exposed.
+    PII, so only the non-secret locator is exposed. This fails CLOSED: parse
+    failures and authority-less inputs still get their query/fragment stripped,
+    and embedded ``user:pass@`` credentials are dropped from the authority.
     """
     try:
         parsed = urlparse(url)
     except Exception:
-        return url
+        return _strip_url_query_fragment(url)
     if not parsed.scheme or not parsed.netloc:
-        return url
-    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        return _strip_url_query_fragment(url)
+    # netloc may carry `user:pass@host:port` — keep only host[:port].
+    host = parsed.netloc.rsplit("@", 1)[-1]
+    return f"{parsed.scheme}://{host}{parsed.path}"
 
 
 def _media_extension(url: str, default: str) -> str:
@@ -1371,7 +1380,12 @@ class BrowserNetworkRecorder:
             # defeats 403/challenge detection).
             if request_id not in self.entries and len(self.entries) >= self._max_entries:
                 return
-            if not self._should_capture(url, resource_type, mime_type):
+            # Only gate NEW requests on the MIME predicate. An already-tracked
+            # request must still receive its status/response update even when the
+            # response MIME is non-capturable (e.g. application/octet-stream,
+            # protobuf); otherwise it keeps status=None and 403/challenge
+            # detection via read_network_requests fails.
+            if request_id not in self.entries and not self._should_capture(url, resource_type, mime_type):
                 return
             entry = self.entries.setdefault(
                 request_id,
@@ -1402,6 +1416,7 @@ class BrowserNetworkRecorder:
         if not request_id or request_id not in self.entries:
             return
         self.entries[request_id]["encoded_data_length"] = event.get("encodedDataLength")
+        self.entries[request_id]["terminal"] = True
         task = asyncio.create_task(self._fetch_response_body(request_id, session_id))
         self._tasks.add(task)
         task.add_done_callback(lambda done: self._tasks.discard(done))
@@ -1413,6 +1428,7 @@ class BrowserNetworkRecorder:
         if request_id and request_id in self.entries:
             self.entries[request_id]["failed"] = True
             self.entries[request_id]["failure"] = event.get("errorText")
+            self.entries[request_id]["terminal"] = True
 
     async def _fetch_response_body(self, request_id: str, session_id: str | None) -> None:
         entry = self.entries.get(request_id)
@@ -1506,8 +1522,13 @@ class BrowserNetworkRecorder:
         if clear:
             # Remember requests still in flight so their late response events don't
             # resurrect a pre-clear entry and leak old traffic into the next read.
+            # Terminal requests (loadingFinished/loadingFailed already fired) get
+            # no further events, so excluding them keeps _ignored_request_ids from
+            # growing unbounded across repeated clears.
             self._ignored_request_ids.update(
-                rid for rid, entry in self.entries.items() if entry.get("status") is None
+                rid
+                for rid, entry in self.entries.items()
+                if entry.get("status") is None and not entry.get("terminal")
             )
             self.entries.clear()
         return rows

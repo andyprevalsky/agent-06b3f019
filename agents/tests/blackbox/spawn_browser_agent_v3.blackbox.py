@@ -195,46 +195,6 @@ def test_verifier_activity_timeout_allows_llm_call():
     assert VERIFIER_ULTRA_TIMEOUT_SECONDS == STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
 
-def test_network_recorder_query_requests_filters_limits_and_clears():
-    """RCA follow-up: the read_network_requests tool reads captured traffic via
-    BrowserNetworkRecorder.query_requests. Guards newest-first ordering, the
-    url_pattern substring filter, the result cap, and clear-after-read.
-    """
-    from pathlib import Path
-    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
-
-    recorder = BrowserNetworkRecorder(
-        browser_session=object(),
-        agent_id="a",
-        task_id="t",
-        session_id="s",
-        output_dir=Path("/tmp/_rnr_test"),
-    )
-    recorder.entries = {
-        "1": {"url": "https://shop.com/", "method": "GET", "status": 200, "resource_type": "Document", "response_ts_ms": 10},
-        "2": {"url": "https://shop.com/api/cart", "method": "POST", "status": 403, "resource_type": "XHR", "response_ts_ms": 30},
-        "3": {"url": "https://shop.com/api/items", "method": "GET", "status": 200, "resource_type": "Fetch", "response_ts_ms": 20},
-    }
-
-    # Newest-first (by response_ts_ms), full set.
-    rows = recorder.query_requests()
-    assert [r["url"] for r in rows] == [
-        "https://shop.com/api/cart",
-        "https://shop.com/api/items",
-        "https://shop.com/",
-    ]
-    # url_pattern substring filter.
-    api = recorder.query_requests(url_pattern="/api/")
-    assert {r["url"] for r in api} == {"https://shop.com/api/cart", "https://shop.com/api/items"}
-    assert any(r["status"] == 403 and r["method"] == "POST" for r in api)
-    # limit cap.
-    assert len(recorder.query_requests(limit=1)) == 1
-    # clear empties the buffer after reading.
-    assert recorder.query_requests(clear=True)  # returns rows this call
-    assert recorder.entries == {}
-    assert recorder.query_requests() == []
-
-
 def test_transient_session_init_failure_classification():
     """RCA (agent 53feac08): the first two browser spawns died on Kernel's
     `400 Proxy is marked unavailable from the last health check` because
@@ -5441,7 +5401,10 @@ def test_network_recorder_query_requests_filters_and_shapes():
     """BrowserNetworkRecorder.query_requests backs read_network_requests: newest-first
     url/method/status/resource_type, url_pattern filter, query-string redaction, and
     clear-after-read that ignores pre-clear in-flight requests."""
-    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _redact_url_query,
+    )
 
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._max_entries = 300
@@ -5469,6 +5432,12 @@ def test_network_recorder_query_requests_filters_and_shapes():
         {"url": "https://order.online/api/cart", "method": "POST", "status": 403, "resource_type": "XHR"}
     ]
     assert len(recorder.query_requests(limit=10)) == 2
+
+    # Redaction fails closed for every URL shape that can reach agent history:
+    # embedded basic-auth credentials, authority-less URLs, and parse failures.
+    assert _redact_url_query("https://user:pass@shop.test/path?token=SECRET#frag") == "https://shop.test/path"
+    assert _redact_url_query("relative/path?token=SECRET#frag") == "relative/path"
+    assert _redact_url_query("https://[broken?token=SECRET#frag") == "https://[broken"
 
     # A still-in-flight request (no status) at clear time must be ignored so its
     # late response event cannot resurrect a pre-clear entry.
@@ -5498,7 +5467,15 @@ def test_network_recorder_updates_status_at_capacity():
     recorder._started_at = 0.0
     recorder.entries = {"r1": {"request_id": "r1", "url": "https://x/api", "resource_type": "XHR", "status": None}}
     recorder._on_response_received(
-        {"requestId": "r1", "type": "XHR", "response": {"url": "https://x/api", "status": 429, "mimeType": "application/json"}},
+        {
+            "requestId": "r1",
+            "type": "XHR",
+            "response": {
+                "url": "https://x/api",
+                "status": 429,
+                "mimeType": "application/octet-stream",
+            },
+        },
         None,
     )
     assert recorder.entries["r1"]["status"] == 429
@@ -5508,6 +5485,32 @@ def test_network_recorder_updates_status_at_capacity():
         None,
     )
     assert "r2" not in recorder.entries
+
+
+async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear():
+    """Finished and failed requests are terminal, not in flight. Repeated clears
+    must not retain their IDs forever in the pre-clear ignore set."""
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._max_entries = 300
+    recorder._ignored_request_ids = set()
+    recorder._tasks = set()
+    recorder._fetch_response_body = AsyncMock()
+    recorder.entries = {
+        "failed": {"url": "https://x/failed", "status": None},
+        "finished": {"url": "https://x/finished", "status": None},
+    }
+
+    recorder._on_loading_failed({"requestId": "failed", "errorText": "blocked"}, None)
+    recorder._on_loading_finished({"requestId": "finished", "encodedDataLength": 0}, None)
+    await asyncio.sleep(0)
+
+    assert recorder.entries["failed"]["terminal"] is True
+    assert recorder.entries["finished"]["terminal"] is True
+    recorder.query_requests(clear=True)
+    recorder.query_requests(clear=True)
+    assert recorder._ignored_request_ids == set()
 
 
 async def test_execute_action_read_network_requests():
@@ -11074,6 +11077,10 @@ async def run_all_tests():
     r.record("read_network_requests_advertised", test_read_network_requests_tool_is_advertised)
     r.record("network_recorder_query_requests", test_network_recorder_query_requests_filters_and_shapes)
     r.record("network_recorder_updates_at_capacity", test_network_recorder_updates_status_at_capacity)
+    await r.record_async(
+        "network_recorder_terminal_requests_bounded",
+        test_network_recorder_terminal_requests_do_not_accumulate_after_clear,
+    )
     await r.record_async("execute_action_read_network_requests", test_execute_action_read_network_requests)
     await r.record_async(
         "execute_action_request_payment_card",
@@ -11663,11 +11670,6 @@ async def run_all_tests():
         "transient_session_init_failure_classification",
         test_transient_session_init_failure_classification,
     )
-    r.record(
-        "network_recorder_query_requests",
-        test_network_recorder_query_requests_filters_limits_and_clears,
-    )
-
     teardown_mock()
     return r.all_passed
 
