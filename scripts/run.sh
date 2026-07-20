@@ -577,7 +577,22 @@ if [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
     exit 1
 fi
 echo "🧠 Ensuring Fast Mode cache schema..."
-(cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts)
+# This ensure connects to FAST_MODE_CACHE_DATABASE_URL — the SHARED prod pooler by
+# default (see above). When a cloud fleet boots concurrently (plus any neighbor
+# fleet on the same app), the pooler briefly saturates and this single query dies
+# with "Timed out fetching a new connection from the connection pool" → under
+# `set -e` the WHOLE stack aborts before the barrier (observed: 8/8 boxes lost to a
+# transient pooler spike while a 50-machine neighbor fleet held connections). The
+# op is idempotent (CREATE TABLE/INDEX IF NOT EXISTS), so retry with backoff and
+# let the transient saturation drain — same resilience the seed/cred syncs already have.
+_fmc_ok=0
+for _fmc_try in 1 2 3 4 5; do
+    if (cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts); then _fmc_ok=1; break; fi
+    _fmc_rc=$?
+    echo "   ⚠️ Fast Mode cache schema attempt ${_fmc_try}/5 failed (rc=${_fmc_rc}) — shared pooler contention? retrying..." >&2
+    sleep $(( _fmc_try * 3 ))
+done
+[ "$_fmc_ok" = 1 ] || { echo "❌ Fast Mode cache schema ensure failed after 5 attempts (shared prod pooler saturated)" >&2; exit 1; }
 
 # Larger Prisma pool: Fast Mode adds cache get/set on every LLM call, which under
 # sub-agent fan-out competes with the agent's own writes for the connection pool
