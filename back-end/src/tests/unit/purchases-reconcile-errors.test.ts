@@ -266,32 +266,29 @@ async function main(): Promise<void> {
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.CLEARED);
   });
 
-  await test(
-    'handleAgentCardWebhook does not clobber a reclaimed purchase with a late transaction.cleared',
-    async () => {
-      const userId = await seedUser();
-      const cardId = `card-${randomUUID()}`;
-      // The abandon flow marks funding RECLAIMED before flipping the purchase to
-      // VOIDED. A late/duplicate transaction.cleared that raced the abandon
-      // (read the row while still HELD) must NOT settle the purchase to CLEARED,
-      // or it ends up CLEARED while the funding is already reclaimed + refunded.
-      const purchaseId = await seedPurchase(userId, cardId, PurchaseSpendStatus.HELD);
-      await prisma.purchaseWalletFunding.create({
-        data: {
-          purchaseId,
-          userId,
-          amountCents: 1080,
-          status: PurchaseWalletFundingStatus.RECLAIMED,
-          idempotencyKey: `idem-${randomUUID()}`,
-        },
-      });
-      await reconcile.handleAgentCardWebhook({
-        type: 'transaction.cleared',
-        data: { card: { id: cardId } },
-      });
-      assert.notEqual(await statusOf(purchaseId), PurchaseSpendStatus.CLEARED);
-    }
-  );
+  await test('handleAgentCardWebhook does not clobber a reclaimed purchase with a late transaction.cleared', async () => {
+    const userId = await seedUser();
+    const cardId = `card-${randomUUID()}`;
+    // The abandon flow marks funding RECLAIMED before flipping the purchase to
+    // VOIDED. A late/duplicate transaction.cleared that raced the abandon
+    // (read the row while still HELD) must NOT settle the purchase to CLEARED,
+    // or it ends up CLEARED while the funding is already reclaimed + refunded.
+    const purchaseId = await seedPurchase(userId, cardId, PurchaseSpendStatus.HELD);
+    await prisma.purchaseWalletFunding.create({
+      data: {
+        purchaseId,
+        userId,
+        amountCents: 1080,
+        status: PurchaseWalletFundingStatus.RECLAIMED,
+        idempotencyKey: `idem-${randomUUID()}`,
+      },
+    });
+    await reconcile.handleAgentCardWebhook({
+      type: 'transaction.cleared',
+      data: { card: { id: cardId } },
+    });
+    assert.notEqual(await statusOf(purchaseId), PurchaseSpendStatus.CLEARED);
+  });
 
   await test('handleAgentCardWebhook voids a HELD purchase on transaction.voided', async () => {
     const userId = await seedUser();
