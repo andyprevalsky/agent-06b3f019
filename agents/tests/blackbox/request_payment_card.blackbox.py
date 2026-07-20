@@ -104,6 +104,10 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
         "https://example.com/check%6fut/session/123",
         "https://example.com/check-out/session/123",
         "https://example.com",
+        # RCA: a checkout token in a real subdomain/path is still rejected even
+        # when the registrable domain is an ordering platform (order.online).
+        "https://order.online/business/156787/checkout/3ebc87b0-5761-4afc-9bfd",
+        "https://checkout.order.online/products/desk-lamp",
     )
     for product_url in invalid_product_urls:
         try:
@@ -124,6 +128,18 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
         "product_url": "https://example.com/products/desk-lamp?utm_campaign=payment_reminder&route=checkout",
     }
     assert PaymentLineItem.model_validate(tracked_item).product_url == tracked_item["product_url"]
+
+    # RCA (agent 53feac08): request_payment_card was impossible on order.online
+    # (DoorDash's white-label storefront) because the registrable domain's
+    # "order" label tripped the checkout-route guard. A genuine product-detail
+    # URL on an ordering-platform domain must be accepted.
+    ordering_platform_items = (
+        "https://order.online/store/BlueBottleCoffee-218854/item/44409624976",
+        "https://orders.co/products/latte",
+    )
+    for product_url in ordering_platform_items:
+        parsed_item = PaymentLineItem.model_validate({**valid_item, "product_url": product_url})
+        assert parsed_item.product_url == product_url, product_url
 
     invalid_reviews = (
         ("rating", "N/A"),

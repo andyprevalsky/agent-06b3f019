@@ -195,6 +195,28 @@ def test_verifier_activity_timeout_allows_llm_call():
     assert VERIFIER_ULTRA_TIMEOUT_SECONDS == STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
 
+def test_transient_session_init_failure_classification():
+    """RCA (agent 53feac08): the first two browser spawns died on Kernel's
+    `400 Proxy is marked unavailable from the last health check` because
+    init_browser_session treated every non-2xx/429 as fatal. That transient
+    infra failure must now be classified retryable, while a genuine bad request
+    stays fatal so real errors are not masked.
+    """
+    from domains.spawn_browser_agent_v3.repo import is_transient_session_init_failure
+
+    # The exact production failure — transient, must retry.
+    assert is_transient_session_init_failure(
+        400, '{"error":"400 Proxy is marked unavailable from the last health check"}'
+    )
+    # Any 5xx from the provider is transient.
+    assert is_transient_session_init_failure(502, "Bad Gateway")
+    assert is_transient_session_init_failure(503, "temporarily unavailable")
+    # An ordinary 4xx bad request stays fatal (not retried).
+    assert not is_transient_session_init_failure(400, '{"error":"invalid start_url"}')
+    assert not is_transient_session_init_failure(401, "Unauthorized")
+    assert not is_transient_session_init_failure(404, "Not Found")
+
+
 # ============================================================================
 # RCA repro — browser agent returns BEST-EFFORT results at max steps
 # ----------------------------------------------------------------------------
@@ -4046,10 +4068,36 @@ async def test_init_browser_session_rate_limited():
     assert out["status_code"] == 429
 
 
-async def test_init_browser_session_error_raises():
+async def test_init_browser_session_transient_failure_returns_retryable():
+    """A provider infra hiccup (5xx, or the Kernel `400 Proxy is marked
+    unavailable` health-check error) is classified retryable-transient so the
+    init loop reallocates a fresh proxy instead of failing the browser run."""
     from domains.spawn_browser_agent_v3.repo import init_browser_session
 
     setup_mock({"/api/browser-session/init": {"status": 500, "text": "oops"}})
+    cfg = _fake_config()
+    out = await init_browser_session(cfg, "u", "a", "")
+    assert out["transient_init_failure"] is True
+    assert out["status_code"] == 500
+
+    setup_mock(
+        {
+            "/api/browser-session/init": {
+                "status": 400,
+                "text": '{"error":"400 Proxy is marked unavailable from the last health check"}',
+            }
+        }
+    )
+    out = await init_browser_session(cfg, "u", "a", "")
+    assert out["transient_init_failure"] is True
+    assert out["status_code"] == 400
+
+
+async def test_init_browser_session_error_raises():
+    from domains.spawn_browser_agent_v3.repo import init_browser_session
+
+    # A genuine bad request (not an infra hiccup) stays fatal — not masked by retries.
+    setup_mock({"/api/browser-session/init": {"status": 400, "text": "invalid start_url"}})
     cfg = _fake_config()
     try:
         await init_browser_session(cfg, "u", "a", "")
@@ -5331,6 +5379,84 @@ async def test_execute_action_unknown_action():
     out = await execute_action(dom, ah, {"action": "totally_unknown"})
     assert out["success"] is False
     assert "Unknown action" in out["error"]
+
+
+def test_read_network_requests_tool_is_advertised():
+    """The read_network_requests tool (1:1 with Claude Code's) is exposed to the
+    browser model so it can detect a 403/Cloudflare challenge by status code or
+    find an underlying API instead of fighting the UI."""
+    from providers.rose.browser_use import (
+        BROWSER_USE_TOOLS,
+        build_browser_use_tools,
+        generate_tool_descriptions,
+    )
+
+    assert "read_network_requests" in BROWSER_USE_TOOLS
+    desc = generate_tool_descriptions(sorted(BROWSER_USE_TOOLS))
+    assert "read_network_requests" in desc
+    assert any("read_network_requests" in str(s) for s in build_browser_use_tools(sorted(BROWSER_USE_TOOLS)))
+
+
+def test_network_recorder_query_requests_filters_and_shapes():
+    """BrowserNetworkRecorder.query_requests backs read_network_requests: newest-first
+    url/method/status/resource_type, url_pattern filter, and clear-after-read."""
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._max_entries = 300
+    recorder.entries = {
+        "1": {
+            "url": "https://order.online/api/cart",
+            "method": "POST",
+            "status": 403,
+            "resource_type": "XHR",
+            "response_ts_ms": 200,
+        },
+        "2": {
+            "url": "https://order.online/img.png",
+            "method": "GET",
+            "status": 200,
+            "resource_type": "Image",
+            "request_ts_ms": 100,
+        },
+    }
+    filtered = recorder.query_requests(url_pattern="/api/", limit=10)
+    assert filtered == [
+        {"url": "https://order.online/api/cart", "method": "POST", "status": 403, "resource_type": "XHR"}
+    ]
+    assert len(recorder.query_requests(limit=10)) == 2
+    recorder.query_requests(clear=True)
+    assert recorder.entries == {}
+
+
+async def test_execute_action_read_network_requests():
+    """execute_action returns captured traffic when a recorder is present, and a
+    clear error when network capture is inactive (never a silent success)."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = MagicMock()
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    recorder = MagicMock()
+    recorder.query_requests = MagicMock(
+        return_value=[{"url": "https://x/api", "method": "GET", "status": 429, "resource_type": "Fetch"}]
+    )
+    out = await execute_action(
+        dom,
+        ah,
+        {"action": "read_network_requests", "params": {"url_pattern": "/api/", "limit": 5, "clear": True}},
+        browser_network_recorder=recorder,
+    )
+    assert out["success"] is True
+    assert out["requests"][0]["status"] == 429
+    recorder.query_requests.assert_called_once_with(url_pattern="/api/", limit=5, clear=True)
+
+    out_none = await execute_action(dom, ah, {"action": "read_network_requests", "params": {}})
+    assert out_none["success"] is False
+    assert "not active" in out_none["error"]
 
 
 async def test_execute_action_request_payment_card_requests_workflow_approval():
@@ -10727,6 +10853,10 @@ async def run_all_tests():
 
     await r.record_async("init_browser_session_success", test_init_browser_session_success)
     await r.record_async("init_browser_session_rate_limited", test_init_browser_session_rate_limited)
+    await r.record_async(
+        "init_browser_session_transient_retryable",
+        test_init_browser_session_transient_failure_returns_retryable,
+    )
     await r.record_async("init_browser_session_error", test_init_browser_session_error_raises)
     await r.record_async("fetch_session_info_success", test_fetch_session_info_success)
     await r.record_async(
@@ -10860,6 +10990,9 @@ async def run_all_tests():
     await r.record_async("execute_action_no_session", test_execute_action_no_session)
     await r.record_async("execute_action_element_not_found", test_execute_action_element_not_found)
     await r.record_async("execute_action_unknown", test_execute_action_unknown_action)
+    r.record("read_network_requests_advertised", test_read_network_requests_tool_is_advertised)
+    r.record("network_recorder_query_requests", test_network_recorder_query_requests_filters_and_shapes)
+    await r.record_async("execute_action_read_network_requests", test_execute_action_read_network_requests)
     await r.record_async(
         "execute_action_request_payment_card",
         test_execute_action_request_payment_card_requests_workflow_approval,
@@ -11443,6 +11576,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_payment_gate_kyc_still_incomplete",
         test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks,
+    )
+    r.record(
+        "transient_session_init_failure_classification",
+        test_transient_session_init_failure_classification,
     )
 
     teardown_mock()

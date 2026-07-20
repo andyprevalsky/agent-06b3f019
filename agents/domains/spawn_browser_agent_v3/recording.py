@@ -1437,6 +1437,43 @@ class BrowserNetworkRecorder:
                 error=str(exc),
             )
 
+    def query_requests(
+        self,
+        *,
+        url_pattern: str = "",
+        limit: int = 100,
+        clear: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return captured network requests for the agent's `read_network_requests`
+        tool. Mirrors Claude Code's tool: newest-first list of
+        url/method/status/resource_type (cross-origin included), optionally filtered
+        by a URL substring. When ``clear`` is set the buffer is emptied after the
+        read so a follow-up call only surfaces new traffic.
+        """
+        pattern = (url_pattern or "").lower().strip()
+        capped_limit = max(1, min(int(limit or 100), self._max_entries))
+        scored: List[tuple[int, Dict[str, Any]]] = []
+        for entry in self.entries.values():
+            url = entry.get("url") or ""
+            if pattern and pattern not in url.lower():
+                continue
+            row: Dict[str, Any] = {
+                "url": url,
+                "method": entry.get("method"),
+                "status": entry.get("status"),
+                "resource_type": entry.get("resource_type"),
+            }
+            if entry.get("failed"):
+                row["failed"] = True
+                row["failure"] = entry.get("failure")
+            ts = entry.get("response_ts_ms") or entry.get("request_ts_ms") or 0
+            scored.append((int(ts), row))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        rows = [row for _, row in scored[:capped_limit]]
+        if clear:
+            self.entries.clear()
+        return rows
+
     async def close(self) -> Optional[Path]:
         if self._closed:
             return self.network_dir / "index.json" if self.entries else None
