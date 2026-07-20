@@ -63,7 +63,12 @@ from providers.rose.schema import (
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
 )
-from providers.rose.transport import ANTHROPIC_FAST_MODE_BETA, OPENAI_RESPONSES_API_URL, _with_fast_mode_beta
+from providers.rose.transport import (
+    ANTHROPIC_FAST_MODE_BETA,
+    OPENAI_RESPONSES_API_URL,
+    _codex_extra_headers_from_body,
+    _with_fast_mode_beta,
+)
 from providers.rose.transforms import (
     apply_anthropic_tool_config,
     get_messages_for_model,
@@ -2280,6 +2285,18 @@ def test_build_codex_responses_body_contract():
         request_id="max-effort",
     )
     assert max_effort_body["reasoning"]["effort"] == "xhigh"
+
+
+def test_codex_cache_scope_uses_canonical_session_headers():
+    """Codex cache affinity must use the HTTP header names its client sends."""
+    scope = "rose:7c4fd924ea17566d159427d8"
+
+    assert _codex_extra_headers_from_body({"prompt_cache_key": scope}) == {
+        "session-id": scope,
+        "thread-id": scope,
+        "x-client-request-id": scope,
+    }
+    assert _codex_extra_headers_from_body({"prompt_cache_key": "  "}) == {}
 
 
 async def test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes():
@@ -4914,6 +4931,7 @@ async def run_all_tests():
         test_parse_responses_sse_failed_context_length_is_invalid_request,
     )
     r.record("codex_responses_body_contract", test_build_codex_responses_body_contract)
+    r.record("codex_cache_scope_session_headers", test_codex_cache_scope_uses_canonical_session_headers)
     await r.record_async(
         "gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes",
         test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes,

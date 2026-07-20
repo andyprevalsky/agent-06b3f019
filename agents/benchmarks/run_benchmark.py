@@ -3287,17 +3287,38 @@ def _local_victoria_db_container() -> Optional[str]:
     return container if container in ps.stdout.splitlines() else None
 
 
+def _services_manifest_is_active(services: dict) -> bool:
+    """Return whether a running services manifest still owns a live run.sh."""
+    if services.get("status") != "running":
+        return False
+    run_sh_pid = services.get("run_sh_pid")
+    if not isinstance(run_sh_pid, int) or run_sh_pid <= 1:
+        return False
+    try:
+        os.kill(run_sh_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _local_victoria_database_url() -> Optional[str]:
     candidates: list[str] = []
     services_path = _benchmark_context_path() / "services.json"
     if services_path.exists():
         try:
             services = json.loads(services_path.read_text())
-            if (services.get("database") or {}).get("use_system_postgres") is True:
-                candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
-            port = (services.get("ports") or {}).get("local_db")
-            if port:
-                candidates.append(f"postgresql://postgres:postgres@localhost:{port}/victoria")
+            if _services_manifest_is_active(services):
+                database = services.get("database") or {}
+                database_name = quote(str(database.get("name") or "victoria"), safe="")
+                port = (
+                    database.get("runtime_port")
+                    or database.get("port")
+                    or (services.get("ports") or {}).get("local_db")
+                )
+                if port:
+                    candidates.append(f"postgresql://postgres:postgres@localhost:{port}/{database_name}")
         except Exception:
             pass
     env_database_url = os.environ.get("DIRECT_URL") or os.environ.get("DATABASE_URL")
