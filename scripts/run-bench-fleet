@@ -159,7 +159,15 @@ while [ $# -gt 0 ]; do
         --provision-pool) PROVISION_POOL="${2:-}"; shift 2 ;;   # one-time: create N stopped clones, then exit
         -h|--help)        sed -n '2,47p' "$0"; exit 0 ;;
         --*)              echo "❌ Unknown flag: $1" >&2; exit 2 ;;
-        *)                BENCHES+=("$1"); shift ;;
+        *)                # Split each positional token on whitespace so a single
+                          # space-joined arg ("a b c") still yields multiple
+                          # benches. Bench names are [a-z0-9-] and never contain
+                          # spaces, so this is lossless — and it guards the common
+                          # footgun of passing an unquoted variable from zsh (the
+                          # default interactive shell here), which does NOT
+                          # word-split, collapsing `run-bench $LIST` into one bench.
+                          for _tok in $1; do BENCHES+=("$_tok"); done
+                          shift ;;
     esac
 done
 # Dedupe bench names (preserve first-seen order). Each bench gets ONE isolated
@@ -1984,22 +1992,54 @@ warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
     exit 1
 }
 
-# ── App-wide capacity guard (not a lock) ─────────────────────────────────────
-# Concurrent workstreams multiply active compute (N fleets × benches ×
-# autoscale). Stopped warm/pool inventory costs no compute, so it must not
-# consume this burst ceiling. Every unknown or transitioning state remains
-# capacity-consuming (fail closed); raise the ceiling only for an intentional
-# larger active burst.
-MAX_APP_MACHINES="${CLOUDBENCH_APP_MAX_MACHINES:-60}"
+# ── App-wide capacity guard — ELASTIC, shared-CPU-unit based ─────────────────
+# The real Fly constraint is NOT a flat machine count: it is the org-wide
+# shared-CPU OVERCOMMIT GOVERNOR (~160 units — Fly rejected the 37th
+# shared-cpu-4x primary at 148 + prod's ~16 = 164 > 160). Primaries are
+# shared-cpu-2x (2 shared units each); workers are performance-1x, which draw a
+# SEPARATE performance reservation and do NOT count against the shared governor.
+#
+# So instead of a conservative flat count (the old CLOUDBENCH_APP_MAX_MACHINES=60,
+# which blocked legitimate concurrent workstreams long before Fly would), we gate
+# PRIMARY provisioning on shared-CPU units and let a run auto-expand into ALL
+# available shared capacity — enough to hold many concurrent daily-scale
+# workstreams. Stopped warm/pool inventory costs no compute and is excluded.
+# Unknown/transitioning states stay capacity-consuming (fail closed). Below the
+# governor we NEVER block: a new workstream auto-reserves the capacity it needs.
+# The ONLY hard block is the true physical governor — past it no script can
+# conjure capacity; that requires actually raising the Fly org reservation and
+# then bumping CLOUDBENCH_SHARED_CPU_GOVERNOR to match.
+SHARED_CPU_GOVERNOR="${CLOUDBENCH_SHARED_CPU_GOVERNOR:-160}"
+# Governor is org-wide but this guard only sees the bench app; reserve headroom
+# for prod's active shared units + a safety margin.
+SHARED_CPU_HEADROOM="${CLOUDBENCH_SHARED_CPU_HEADROOM:-20}"
+SHARED_CPU_CEILING=$(( SHARED_CPU_GOVERNOR - SHARED_CPU_HEADROOM ))
+# Shared units per newly-provisioned primary, parsed from the primary shape
+# (shared-cpu-Nx → N); default 2 if the shape is non-standard.
+_primary_nx="${FLEET_PRIMARY_VM_SIZE##*-}"; _primary_nx="${_primary_nx%x}"
+case "$_primary_nx" in ''|*[!0-9]*) PRIMARY_SHARED_UNITS=2 ;; *) PRIMARY_SHARED_UNITS="$_primary_nx" ;; esac
 requested_machines="${PROVISION_POOL:-${#BENCHES[@]}}"
+requested_shared=$(( requested_machines * PRIMARY_SHARED_UNITS ))
 capacity_counts="$(printf '%s' "$warm_json" | python3 -c '
 import json, sys
 try:
     machines = json.load(sys.stdin)
-    if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+    if not isinstance(machines, list) or any(not isinstance(m, dict) for m in machines):
         raise ValueError("invalid machine list")
-    stopped = sum(machine.get("state") == "stopped" for machine in machines)
-    print(len(machines) - stopped, stopped, len(machines))
+    active_shared = active_perf = running = stopped = 0
+    for m in machines:
+        if m.get("state") == "stopped":
+            stopped += 1
+            continue
+        running += 1
+        guest = (m.get("config") or {}).get("guest") or {}
+        cpus = guest.get("cpus")
+        cpus = cpus if isinstance(cpus, int) and cpus > 0 else 1
+        if guest.get("cpu_kind") == "shared":
+            active_shared += cpus
+        else:
+            active_perf += cpus
+    print(active_shared, active_perf, running, stopped)
 except Exception:
     print("")
 ' 2>/dev/null || true)"
@@ -2007,13 +2047,26 @@ if [ -z "$capacity_counts" ]; then
     echo "❌ App capacity guard could not classify current machine states; refusing to provision." >&2
     exit 1
 fi
-read -r active_machines stopped_machines total_machines <<< "$capacity_counts"
-if [ $((active_machines + requested_machines)) -gt "$MAX_APP_MACHINES" ]; then
-    echo "❌ App active-compute capacity guard: $active_machines active/transitioning machines" >&2
-    echo "   ($stopped_machines stopped; $total_machines total) and this run adds $requested_machines" >&2
-    echo "   (ceiling CLOUDBENCH_APP_MAX_MACHINES=$MAX_APP_MACHINES). Another workstream may be running large;" >&2
-    echo "   finish/teardown other runs or sweep proven active zombies (flyctl machines list -a $APP)." >&2
+read -r active_shared active_perf running_machines stopped_machines <<< "$capacity_counts"
+projected_shared=$(( active_shared + requested_shared ))
+if [ "$projected_shared" -gt "$SHARED_CPU_CEILING" ]; then
+    # The only hard block: at the physical Fly shared-CPU governor. Provisioning
+    # more primaries here would be rejected by Fly (resource_exhausted) anyway.
+    echo "❌ Shared-CPU capacity governor reached: $active_shared active shared units" >&2
+    echo "   + this run's $requested_machines primaries ($requested_shared units) = $projected_shared" >&2
+    echo "   > ceiling $SHARED_CPU_CEILING (governor $SHARED_CPU_GOVERNOR − headroom $SHARED_CPU_HEADROOM)." >&2
+    echo "   Auto-reserve cannot exceed the org's Fly shared-CPU reservation. To lift it:" >&2
+    echo "   raise the Fly org reservation, then set CLOUDBENCH_SHARED_CPU_GOVERNOR to match." >&2
+    echo "   (Or wait for another workstream to drain: flyctl machines list -a $APP.)" >&2
     exit 1
+fi
+# Elastic auto-reserve: below the governor we never block a legitimate workstream.
+# Announce when we dip into the top quarter of shared capacity so concurrent runs
+# stay visible.
+_soft_line=$(( SHARED_CPU_CEILING * 3 / 4 ))
+if [ "$projected_shared" -gt "$_soft_line" ]; then
+    echo "🧵 auto-reserving shared capacity for this workstream: $projected_shared/$SHARED_CPU_CEILING units" >&2
+    echo "   ($active_shared active shared + $requested_shared requested; $active_perf perf units; running=$running_machines stopped=$stopped_machines) — proceeding." >&2
 fi
 
 # --provision-pool: one-time pre-provision of N stopped clones, then exit.
