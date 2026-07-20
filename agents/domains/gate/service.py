@@ -22,7 +22,13 @@ from temporalio.common import RetryPolicy
 
 from tools.base import EventType, MessageStatus, ToolEvent
 
-from .config import DEFAULT_KYC_URL, DEFAULT_SUBSCRIBE_URL, REJECTION_SENTINEL, TOOL_NAME
+from .config import (
+    DEFAULT_KYC_URL,
+    DEFAULT_SUBSCRIBE_URL,
+    GATE_SUPPRESSED_SENTINEL,
+    REJECTION_SENTINEL,
+    TOOL_NAME,
+)
 from .repo import create_gate_request_activity
 from .types import GateRejectedError
 
@@ -42,8 +48,7 @@ def build_subscription_gate(
         "severity": "blocking",
         "presentation": {
             "title": title or "Subscribe to let Rose complete purchases",
-            "reason": reason
-            or "You're out of free credit — an active plan lets me finish tasks that cost real money.",
+            "reason": reason or "You're out of free credit — an active plan lets me finish tasks that cost real money.",
             "cta": "Subscribe · $20/mo",
         },
         "action": {"kind": "link", "url": checkout_url or DEFAULT_SUBSCRIBE_URL},
@@ -60,8 +65,7 @@ def build_kyc_gate(kyc_url: Optional[str] = None, reason: Optional[str] = None) 
         "severity": "blocking",
         "presentation": {
             "title": "Verify identity to issue your Rose card",
-            "reason": reason
-            or "A one-time identity check is required before Rose can issue a payment card.",
+            "reason": reason or "A one-time identity check is required before Rose can issue a payment card.",
             "cta": "Verify identity",
         },
         "action": {"kind": "link", "url": kyc_url or DEFAULT_KYC_URL},
@@ -120,6 +124,15 @@ async def raise_gate_direct(workflow_instance: Any, gate: Dict[str, Any], gate_k
         start_to_close_timeout=timedelta(seconds=30),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
+
+    # Kill-switch: the activity suppressed this gate (a disabled connection gate)
+    # instead of creating a request. Treat as instantly resolved — return "" so
+    # the caller proceeds without parking the workflow. Branching on the recorded
+    # activity result (not a fresh env read) keeps this deterministic on replay.
+    if request_id == GATE_SUPPRESSED_SENTINEL:
+        logger.info("Gate suppressed — no request created", gate_key=gate_key)
+        return ""
+
     logger.info("Gate raised, awaiting resolution", request_id=request_id, gate_key=gate_key)
 
     # Park until the backend signals this request's resolution (same inbox the
