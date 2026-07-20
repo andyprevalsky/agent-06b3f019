@@ -108,20 +108,13 @@ log() { echo "[cloudbench $(date -u +%H:%M:%S)] $*"; }
 # scripts/cloudbench-bring-up-report.py — isolate each bring-up step's cost.
 step() { log "STEP $*"; }
 
-stack_wait_budget_seconds() {
-    local warm_budget first_run_budget
-    warm_budget="${CLOUDBENCH_STACK_WAIT_SECONDS:-900}"
-    first_run_budget="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-2160}"
-    # A newly cloned replacement guest has no persistent seed dump. Its first
-    # production sync is bounded but can legitimately exceed the warm guest's
-    # 900-second startup budget; subsequent claims restore the dump and retain
-    # the tighter deadline.
-    if [ ! -s "$STACK_SEED_DUMP" ] && [ "$first_run_budget" -gt "$warm_budget" ]; then
-        printf '%s\n' "$first_run_budget"
-    else
-        printf '%s\n' "$warm_budget"
-    fi
-}
+# stack_wait_budget_seconds + cloudbench_seed_dump_restorable: the box's
+# stack-health-wait budget, aligned with run.sh's seed-dump restore gate so that a
+# schema-STALE dump (present but hash-mismatched) gets the long cold-sync budget
+# instead of the tight warm one — run.sh cold-syncs it, and the former "dump file
+# exists?" check killed the box mid-sync. See scripts/tests/cloudbench-seed-budget.test.sh.
+# shellcheck source=lib/cloudbench-seed-budget.sh
+source "$REPO_DIR/scripts/lib/cloudbench-seed-budget.sh"
 
 run_with_heartbeat() {
     local label="$1" command_pid interval
