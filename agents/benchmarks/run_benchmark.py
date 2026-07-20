@@ -3644,11 +3644,16 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     which forces the agent's claudeAuth fetch to fail into the paid waterfall.
     Reads the prod source from back-end/.env; writes to the isolated DB.
 
-    ``tolerate_gpt_code_unavailable`` is for the blanket pre-flight only: it sets
-    the seed's ``SEED_ALLOW_MISSING_GPT_CODE`` opt-in so the sync succeeds when
-    Codex (gpt_code) is quota-blocked (rateLimitedUntil set), since the agent
-    runtime drives claude_code. Live-fixture syncs never set it, so
-    Codex-dependent tasks still fail closed."""
+    ``tolerate_gpt_code_unavailable`` sets the seed's ``SEED_ALLOW_MISSING_GPT_CODE``
+    opt-in so the sync succeeds when there is no bench-usable Codex (gpt_code) —
+    quota-blocked (rateLimitedUntil set) or structurally absent (usable rows are
+    non-DEV / pooling-off) — since the agent runtime for these tasks drives
+    claude_code, not Codex. BOTH callers set it: the run-level pre-flight
+    (``_refresh_local_compute_tokens_for_run``) AND the per-task live fixture
+    (``_apply_live_fixture``). Gating the live overlay on gpt_code was a false
+    infra failure that dropped every live task (browser/payment) the pre-flight
+    for the same run already tolerated; a genuinely Codex-dependent task instead
+    fails at runtime when its Codex call fails."""
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Compute-token sync skipped: local Victoria DB not found")
@@ -3765,11 +3770,20 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     omitting browser auth made the old ``base`` fixture neither reproducible nor
     truthful, and allowed later site-specific fixtures to fail before an agent
     was created.
+
+    ``tolerate_gpt_code_unavailable=True`` matches the run-level pre-flight
+    (``_refresh_local_compute_tokens_for_run``): prod can have zero *bench-usable*
+    gpt_code (Codex) integrations (the usable rows are non-DEV / pooling-off, or
+    Codex is quota-blocked). The live-mode tasks that take this overlay (browser,
+    payment) run on claude_code, not Codex, so gating them on gpt_code is a FALSE
+    infra failure — it dropped every live task while the pre-flight for the same
+    run already tolerated the exact same absence. A genuinely Codex-dependent task
+    still fails at runtime when its Codex call fails, not falsely here.
     """
     if _is_simulate_mode():
         print("    🌍 simulate mode — skipping the live credential overlay")
         return {"fixture": "live", "skipped": True, "reason": "simulate"}
-    if not _sync_compute_tokens():
+    if not _sync_compute_tokens(tolerate_gpt_code_unavailable=True):
         raise RuntimeError("Live fixture could not refresh compute tokens")
     if not _sync_browser_credentials():
         raise RuntimeError("Live fixture could not refresh complete browser auth state")

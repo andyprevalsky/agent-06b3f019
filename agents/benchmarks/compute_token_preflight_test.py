@@ -1,11 +1,16 @@
-"""Compute-token pre-flight tolerance wiring.
+"""Compute-token tolerance wiring.
 
-The blanket local pre-flight (`_refresh_local_compute_tokens_for_run`) must
-tolerate a quota-blocked Codex (gpt_code) when claude_code is healthy, because
-the agent runtime drives claude_code. It opts in via the seed's
-``SEED_ALLOW_MISSING_GPT_CODE`` env var (owned by seed-local.ts). Live-fixture
-syncs (`_apply_live_fixture`) never set it, so Codex-dependent tasks still fail
-closed. These tests pin that split without needing a live DB.
+Both compute-token sync paths must tolerate a missing bench-usable Codex
+(gpt_code) when claude_code is healthy, because the agent runtime for these
+tasks drives claude_code, not Codex:
+  - the run-level pre-flight (`_refresh_local_compute_tokens_for_run`), and
+  - the per-task live fixture (`_apply_live_fixture`).
+They opt in via the seed's ``SEED_ALLOW_MISSING_GPT_CODE`` env var (owned by
+seed-local.ts). Gating the live overlay on gpt_code was a FALSE infra failure:
+prod can have zero bench-usable Codex (usable rows non-DEV / pooling-off, or
+Codex quota-blocked), and it dropped every live task (browser/payment) even
+though the pre-flight for the same run already tolerated the exact same absence.
+These tests pin that both paths tolerate it, without needing a live DB.
 """
 
 from unittest.mock import patch
@@ -61,7 +66,7 @@ def test_blanket_preflight_uses_tolerant_sync():
     assert captured["tolerant"] is True
 
 
-def test_live_fixture_sync_stays_strict():
+def test_live_fixture_sync_tolerates_missing_gpt_code():
     captured: dict[str, bool] = {}
 
     def fake_sync(*, tolerate_gpt_code_unavailable: bool = False) -> bool:
@@ -80,8 +85,27 @@ def test_live_fixture_sync_stays_strict():
     ):
         rb._apply_live_fixture(ctx)
 
-    # Live fixtures must NOT tolerate a missing Codex token — default (strict).
-    assert captured["tolerant"] is False
+    # The live overlay must tolerate a missing bench-usable Codex, same as the
+    # run-level pre-flight — browser/payment tasks run on claude_code, not Codex,
+    # so gating them on gpt_code is a false infra failure.
+    assert captured["tolerant"] is True
+
+
+def test_live_fixture_raises_when_sync_fails():
+    ctx = rb.LiveFixtureContext(
+        base_url="http://localhost:3001",
+        user_id="u",
+        auth_realm="local",
+    )
+    with (
+        patch.object(rb, "_is_simulate_mode", return_value=False),
+        patch.object(rb, "_sync_compute_tokens", return_value=False),
+    ):
+        try:
+            rb._apply_live_fixture(ctx)
+            raise AssertionError("expected RuntimeError when compute-token sync fails")
+        except RuntimeError as exc:
+            assert "compute tokens" in str(exc).lower()
 
 
 def test_preflight_raises_when_sync_fails():
