@@ -29,6 +29,8 @@ from providers.rose import POOL_REGISTRY, RoseClient, claude_auth_from_token, ge
 from providers.fast_cache.context import FastCacheContext, reset_context, set_context
 from providers.rose.browser_use import (
     BROWSER_USE_TOOLS,
+    _ACTION_NAME_MAP,
+    _VALID_ACTIONS,
     _normalize_action_params,
     build_browser_use_messages,
     build_browser_use_system_prompt,
@@ -97,6 +99,36 @@ def test_browser_use_tool_catalog_completeness():
     assert must_have.issubset(set(BROWSER_USE_TOOLS.keys()))
     assert "extract" not in BROWSER_USE_TOOLS
     assert "restart_auth_with_cookie_bundle" not in BROWSER_USE_TOOLS
+
+
+def test_every_advertised_tool_is_normalizable():
+    # Regression guard: every tool advertised in BROWSER_USE_TOOLS is put in
+    # the model's system prompt, so the model can and will emit it. If a tool
+    # is advertised but missing from _VALID_ACTIONS (after _ACTION_NAME_MAP
+    # remapping), normalize_browser_use_response() raises "Unknown action" and
+    # the browser step aborts 5x -> the whole browser agent dies. This is
+    # exactly how rotate_ip shipped broken. Keep the allowlist in sync.
+    for tool_name in BROWSER_USE_TOOLS:
+        normalized = _ACTION_NAME_MAP.get(tool_name, tool_name)
+        assert normalized in _VALID_ACTIONS, (
+            f"Tool {tool_name!r} is advertised in BROWSER_USE_TOOLS but is not in "
+            f"_VALID_ACTIONS (normalized: {normalized!r}). The model will emit it and "
+            f"normalize_browser_use_response() will reject it, aborting the browser agent. "
+            f"Add it to _VALID_ACTIONS or _ACTION_NAME_MAP in providers/rose/browser_use.py."
+        )
+
+
+def test_rotate_ip_normalizes_and_preserves_reason():
+    # rotate_ip backs the mid-session IP-rotation tool. It must normalize (be in
+    # the allowlist) and carry its `reason` param through to the handler, which
+    # reads params.reason for telemetry.
+    for completion in (
+        {"thinking": "captcha wall", "action": [{"rotate_ip": {"reason": "captcha wall reappears"}}]},
+        {"thinking": "429s", "action": [{"action_name": "rotate_ip", "reason": "repeated 429s on search"}]},
+    ):
+        result = normalize_browser_use_response(completion)
+        assert result["action"] == "rotate_ip", result
+        assert result["params"].get("reason"), result
 
 
 def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
@@ -818,6 +850,42 @@ def test_normalize_nested_action_shape():
     )
     assert out["action"] == "click"
     assert out["index"] == 7
+
+
+def test_read_network_requests_tool_advertised_and_normalized():
+    """RCA follow-up (Failure 2 / Cloudflare): the browser agent gains a
+    read_network_requests tool (1:1 with Claude Code) so it can detect a
+    403/challenge by status code or find the underlying API instead of fighting
+    an opaque DOM. Guards the multi-file wiring: catalog entry, tool-description
+    generation, and param passthrough for url_pattern/limit/clear.
+    """
+    assert "read_network_requests" in BROWSER_USE_TOOLS
+    desc = generate_tool_descriptions(["read_network_requests"])
+    assert "read_network_requests" in desc
+    # params render without raising (schema dicts, not bare strings)
+    assert "url_pattern" in desc and "limit" in desc and "clear" in desc
+
+    flat = normalize_browser_use_response(
+        {
+            "thinking": "inspect network",
+            "action": [
+                {
+                    "action_name": "read_network_requests",
+                    "url_pattern": "/api/",
+                    "limit": 50,
+                    "clear": True,
+                }
+            ],
+        }
+    )
+    assert flat["action"] == "read_network_requests"
+    assert flat["params"] == {"url_pattern": "/api/", "limit": 50, "clear": True}
+
+    nested = normalize_browser_use_response(
+        {"action": [{"read_network_requests": {"url_pattern": "checkout"}}]}
+    )
+    assert nested["action"] == "read_network_requests"
+    assert nested["params"] == {"url_pattern": "checkout"}
 
 
 def test_normalize_remaps_navigate_to_goto():
@@ -1624,6 +1692,10 @@ async def run_all_tests():
     r.record("params_input_clear_false", test_params_input_text_preserves_clear_false)
     r.record("params_query_to_instruction", test_params_query_to_instruction)
     r.record("params_select_dropdown_text_value", test_params_select_dropdown_text_to_value)
+    r.record(
+        "read_network_requests_advertised_and_normalized",
+        test_read_network_requests_tool_advertised_and_normalized,
+    )
 
     await r.record_async("complete_browser_use_waterfall_only", test_complete_browser_use_waterfall_only_path)
     await r.record_async("complete_browser_use_claude_path", test_complete_browser_use_claude_path_succeeds)

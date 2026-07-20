@@ -139,4 +139,73 @@ TS
 git -C "$ordinary_code_repo" add src/usage.ts
 expect_pass "$ordinary_code_repo" "ordinary token usage fields are not prompt edits"
 
+bench_add_repo="$(new_repo bench-task-add)"
+mkdir -p "$bench_add_repo/agents/benchmarks"
+cat >"$bench_add_repo/agents/benchmarks/tasks.json" <<'JSON'
+[
+  { "name": "existing-task", "prompt": "Do the existing thing." }
+]
+JSON
+git -C "$bench_add_repo" add agents/benchmarks/tasks.json
+git -C "$bench_add_repo" commit -q -m "seed catalog"
+cat >"$bench_add_repo/agents/benchmarks/tasks.json" <<'JSON'
+[
+  { "name": "existing-task", "prompt": "Do the existing thing." },
+  { "name": "brand-new-task", "prompt": "You are a new benchmark eval. Do a new thing." }
+]
+JSON
+git -C "$bench_add_repo" add agents/benchmarks/tasks.json
+expect_pass "$bench_add_repo" "adding a benchmark task (a strict ADD) does not require approval"
+
+bench_delete_repo="$(new_repo bench-task-delete)"
+mkdir -p "$bench_delete_repo/agents/benchmarks"
+cat >"$bench_delete_repo/agents/benchmarks/tasks.json" <<'JSON'
+[
+  { "name": "keep-task", "prompt": "Keep me." },
+  { "name": "doomed-task", "prompt": "Delete me." }
+]
+JSON
+git -C "$bench_delete_repo" add agents/benchmarks/tasks.json
+git -C "$bench_delete_repo" commit -q -m "seed catalog"
+cat >"$bench_delete_repo/agents/benchmarks/tasks.json" <<'JSON'
+[
+  { "name": "keep-task", "prompt": "Keep me." }
+]
+JSON
+git -C "$bench_delete_repo" add agents/benchmarks/tasks.json
+expect_fail "$bench_delete_repo" "deleting a benchmark task requires approval"
+expect_flag_pass "$bench_delete_repo" "approval flag permits a benchmark task deletion"
+
+test_delete_repo="$(new_repo test-file-delete)"
+mkdir -p "$test_delete_repo/back-end/src/tests/blackbox"
+cat >"$test_delete_repo/back-end/src/tests/blackbox/widget.blackbox.ts" <<'TS'
+export const test = "covers the widget route";
+TS
+git -C "$test_delete_repo" add back-end/src/tests/blackbox/widget.blackbox.ts
+git -C "$test_delete_repo" commit -q -m "seed test"
+git -C "$test_delete_repo" rm -q back-end/src/tests/blackbox/widget.blackbox.ts
+expect_fail "$test_delete_repo" "deleting a blackbox test file requires approval"
+expect_flag_pass "$test_delete_repo" "approval flag permits a test-file deletion"
+
+embedded_test_delete_repo="$(new_repo embedded-test-file-delete)"
+mkdir -p "$embedded_test_delete_repo/src"
+cat >"$embedded_test_delete_repo/src/mytest_helpers.ts" <<'TS'
+export const helper = "covers a prompt-adjacent path";
+TS
+git -C "$embedded_test_delete_repo" add src/mytest_helpers.ts
+git -C "$embedded_test_delete_repo" commit -q -m "seed embedded-name test"
+git -C "$embedded_test_delete_repo" rm -q src/mytest_helpers.ts
+expect_fail "$embedded_test_delete_repo" "deleting a filename containing test requires approval"
+expect_flag_pass "$embedded_test_delete_repo" "approval flag permits an embedded-name test deletion"
+
+semantic_delete_repo="$(new_repo semantic-spec-delete)"
+mkdir -p "$semantic_delete_repo/front-end/tests-e2e"
+cat >"$semantic_delete_repo/front-end/tests-e2e/login.spec.ts" <<'TS'
+export const spec = "login lifecycle";
+TS
+git -C "$semantic_delete_repo" add front-end/tests-e2e/login.spec.ts
+git -C "$semantic_delete_repo" commit -q -m "seed semantic spec"
+git -C "$semantic_delete_repo" rm -q front-end/tests-e2e/login.spec.ts
+expect_fail "$semantic_delete_repo" "deleting a semantic (e2e) spec requires approval"
+
 echo "All prompt guard tests passed."

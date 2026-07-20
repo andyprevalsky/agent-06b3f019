@@ -74,15 +74,27 @@ export interface SpawnBrowserAgentMetadata extends BaseToolMetadata {
   error?: boolean;
   /** Output schema for init message */
   output_schema?: OutputSchema;
-  /** Self-contained replay HTML uploaded to Supabase Storage on the `recording`
-   * message. The front-end resolves this FilePointer to a signed URL and iframes
-   * it so the recording is viewable after the run (the live debugUrl is gone). */
+  /** Uploaded replay artifact on the `recording` message, resolved by the FE to a
+   * signed URL so the recording is viewable after the run (the live debugUrl is
+   * gone). Two shapes by `mime_type`: a `video/*` pointer is the `rotate_ip`
+   * per-session segments stitched server-side into ONE continuous MP4 (FE plays a
+   * single <video>); a `text/html` pointer is the legacy self-contained screenshot
+   * player (FE iframes it). Preferred over `recording_view_url(s)`. */
   recording_file_pointer?: FilePointer | null;
   /** Kernel-native session replay: a hosted, self-contained video player URL
    * (JWT baked in, iframe-embeddable). When present the front-end iframes it
    * directly, skipping the Supabase FilePointer fetch. Preferred over
    * `recording_file_pointer` when both exist. */
   recording_view_url?: string | null;
+  /** Ordered Kernel replay segments, one per browser session in the run. The
+   * `rotate_ip` tool evicts the current session and stands up a new one on a
+   * different exit IP, so a single replay would only ever show the first IP. Each
+   * entry is a hosted, iframe-embeddable player URL; segment 0 is the baseline and
+   * each subsequent entry is a post-rotation session (a new IP). Fallback only:
+   * emitted when the segments could not be stitched into one MP4 (no ffmpeg /
+   * download failure); the FE then plays the segment URLs back-to-back as one
+   * continuous player. `recording_view_url` points at segment 0 for back-compat. */
+  recording_view_urls?: string[] | null;
   /** Browser provider and proxy metadata captured for this browser session. */
   browser_session_metadata?: {
     provider?: string;

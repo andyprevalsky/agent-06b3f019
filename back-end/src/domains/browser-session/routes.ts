@@ -4,6 +4,7 @@
  * POST /api/browser-session/init                     - Initialize browser session
  * POST /api/browser-session/close                    - Close/pause browser session
  * POST /api/browser-session/resume                   - Resume paused browser task
+ * POST /api/browser-session/rotate-proxy             - Rotate outbound IP (rotate_ip tool)
  * GET  /api/browser-session/task/:taskId             - Get task info
  * POST /api/browser-session/task/:taskId/viewport    - Match remote viewport to live-view pane
  * GET  /api/browser-session/context/:userId          - Get user's browser context
@@ -45,6 +46,7 @@ import {
   injectLocalStorageSchema,
 } from './types';
 import { registerBrowserDataRoutes } from './routes.files';
+import { registerBrowserRotationRoute } from './routes.rotation';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -359,6 +361,7 @@ router.get(
 );
 
 registerBrowserDataRoutes(router);
+registerBrowserRotationRoute(router);
 
 /**
  * POST /api/browser-session/:sessionId/inject-localStorage

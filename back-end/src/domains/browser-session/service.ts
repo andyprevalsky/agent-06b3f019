@@ -18,7 +18,12 @@ import {
   type BrowserViewport,
   getFingerprintInjectionData,
 } from '../../providers/browser';
-import { resumeBrowserSession as resumeBrowserSessionProvider } from '../../providers/browserSessionResume';
+import {
+  resumeBrowserSession as resumeBrowserSessionProvider,
+  rotateBrowserProxy,
+  ProxyRotationExhaustedError,
+  RotationSessionNotFoundError,
+} from '../../providers/browserSessionResume';
 import { canonicalAuthRealm } from '../../providers/authRealm';
 import * as repo from './repo';
 import {
@@ -207,6 +212,10 @@ export async function closeBrowserSession(sessionId: string, pause: boolean, cur
 // ---------------------------------------------------------------------------
 
 export const resumeBrowserSession = resumeBrowserSessionProvider;
+
+// rotate_ip tool — swap the browser session's outbound IP (see
+// providers/browserSessionResume.ts and docs/plans/active/rotate-ip-tool.md).
+export { rotateBrowserProxy, ProxyRotationExhaustedError, RotationSessionNotFoundError };
 /* c8 ignore stop */
 
 // ---------------------------------------------------------------------------

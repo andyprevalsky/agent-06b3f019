@@ -37,6 +37,17 @@ class ExtractTool(BaseModel):
     instruction: str = Field(description="Clear instruction describing what data to extract from the page")
 
 
+class ReadNetworkRequestsBrowserTool(BaseModel):
+    """Read captured HTTP network requests (XHR/Fetch/documents) made by the current page."""
+
+    tool: Literal["read_network_requests"]
+    url_pattern: Optional[str] = Field(
+        default=None, description="Optional substring to filter request URLs (e.g. '/api/')."
+    )
+    limit: Optional[int] = Field(default=None, description="Maximum number of requests to return (default 100).")
+    clear: Optional[bool] = Field(default=None, description="When true, clear the captured buffer after reading.")
+
+
 # ============================================================================
 # ACTION TOOLS (Index-Based - Matching browser-use format)
 # ============================================================================
@@ -220,6 +231,15 @@ class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
     """Ask the user to sign in after all automated auth paths are exhausted."""
 
     tool: Literal["request_user_assistance_for_authentication"]
+
+
+class RotateIpBrowserTool(BaseModel):
+    """Rotate the browser session's outbound IP when it is blocked/rate-limited."""
+
+    tool: Literal["rotate_ip"]
+    reason: str = Field(
+        description="One line on why the current IP appears blocked or rate-limited"
+    )
 
 
 class PaymentLineItem(BaseModel):
@@ -638,6 +658,7 @@ class GenerateWriteLockNotificationTool(BaseModel):
 BROWSER_TOOL_MODELS = {
     # Observation
     "screenshot": ScreenshotTool,
+    "read_network_requests": ReadNetworkRequestsBrowserTool,
     # Index-based actions
     "click": ClickTool,
     "input_text": InputTextTool,
@@ -665,6 +686,7 @@ BROWSER_TOOL_MODELS = {
     "attempt_completion": AttemptCompletionBrowserTool,
     # "send_message_to_user": SendMessageToUserBrowserTool,
     "request_user_assistance_for_authentication": RequestUserAssistanceForAuthenticationBrowserTool,
+    "rotate_ip": RotateIpBrowserTool,
     "request_payment_card": RequestPaymentCardBrowserTool,
     # Internal write-lock approval metadata. Kept in the stable tool surface
     # so a forked request can append only a user message and preserve cache reads.

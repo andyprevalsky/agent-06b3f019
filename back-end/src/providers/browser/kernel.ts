@@ -15,6 +15,7 @@ import {
   isKernelProxyAvailabilityError,
   kernelProxyCandidates,
   resolveKernelProxyMode,
+  type KernelProxyType,
   type ResolvedKernelProxy,
 } from './kernelProxy';
 import {
@@ -147,7 +148,12 @@ async function createProfile(contextId: string): Promise<{
 async function createRemoteSession(
   contextId: string,
   agentId: string,
-  proxyLocation: ProxyGeoLocation
+  proxyLocation: ProxyGeoLocation,
+  // When set, the explicit/disabled proxy short-circuits are skipped and a fresh
+  // managed proxy of this tier is resolved. Used by rotateKernelSession so
+  // rotate_ip deterministically lands on residential/mobile instead of inheriting
+  // the deployment's default proxy mode.
+  forceManagedProxyType?: KernelProxyType
 ): Promise<{
   sessionId: string;
   debugUrl: string;
@@ -235,7 +241,8 @@ async function createRemoteSession(
   ): ReturnType<typeof createValidatedSession> => {
     const candidate = candidates[index];
     if (candidate === undefined) {
-      throw new Error(`Kernel has no available residential proxy for ${proxyLocation.country}`);
+      const proxyType = forceManagedProxyType ?? candidates[0]?.type ?? 'residential';
+      throw new Error(`Kernel has no available ${proxyType} proxy for ${proxyLocation.country}`);
     }
 
     let resolved: ResolvedKernelProxy | undefined;
@@ -259,6 +266,12 @@ async function createRemoteSession(
   };
 
   try {
+    if (forceManagedProxyType !== undefined) {
+      return await createWithManagedProxy(
+        kernelProxyCandidates(proxyLocation, forceManagedProxyType),
+        0
+      );
+    }
     const proxyMode = resolveKernelProxyMode();
     if (proxyMode.kind === 'explicit') {
       return await createValidatedSession({
@@ -356,7 +369,16 @@ export async function closeKernelSession(
   });
 }
 
-export async function resumeKernelSession(taskId: string): Promise<BrowserProviderResumeSession> {
+/**
+ * Recreate a Kernel browser session on the SAME persistent profile (cookies/login
+ * survive), re-navigating to the last URL. Shared by resume (paused → active) and
+ * rotate_ip (swap the egress IP mid-run). `forceManagedProxyType` pins the new
+ * session to a residential/mobile tier; `proxyTier` records that on the row.
+ */
+async function recreateKernelSession(
+  taskId: string,
+  opts: { forceManagedProxyType?: KernelProxyType; proxyTier?: string } = {}
+): Promise<BrowserProviderResumeSession> {
   const oldSession = await prisma.browserSession.findUnique({
     where: { id: taskId },
     include: { context: true },
@@ -375,7 +397,14 @@ export async function resumeKernelSession(taskId: string): Promise<BrowserProvid
       }
     : DEFAULT_GEOLOCATION;
 
-  const remote = await createRemoteSession(oldSession.contextId, oldSession.agentId, proxyLocation);
+  const previousSessionId = oldSession.sessionId;
+
+  const remote = await createRemoteSession(
+    oldSession.contextId,
+    oldSession.agentId,
+    proxyLocation,
+    opts.forceManagedProxyType
+  );
   await remote.validationBrowser.close().catch(() => {});
 
   await prisma.browserSession.update({
@@ -387,8 +416,21 @@ export async function resumeKernelSession(taskId: string): Promise<BrowserProvid
       status: 'ACTIVE',
       closedAt: null,
       provider: 'kernel',
+      ...(opts.proxyTier !== undefined ? { proxyTier: opts.proxyTier } : {}),
     },
   });
+
+  // Evict the superseded Kernel browser so we never leak a paid session. On the
+  // resume path the old browser was already deleted at pause time (delete
+  // tolerates 404); on the rotate path it is still live and must be reaped.
+  if (previousSessionId !== '' && previousSessionId !== remote.sessionId) {
+    await deleteKernelBrowser(previousSessionId).catch((error) => {
+      log.warn('Failed to evict superseded Kernel session after recreate', {
+        previousSessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }
 
   const savedUrl = oldSession.currentUrl || oldSession.startUrl || undefined;
   if (savedUrl && (await validateSessionConnection(remote.wsUrl))) {
@@ -411,6 +453,25 @@ export async function resumeKernelSession(taskId: string): Promise<BrowserProvid
     profileId: remote.profileId,
     profileSource: remote.profileSource,
   };
+}
+
+export async function resumeKernelSession(taskId: string): Promise<BrowserProviderResumeSession> {
+  return recreateKernelSession(taskId);
+}
+
+/**
+ * Rotate the session's outbound IP by recreating it on a fresh managed proxy of
+ * the given tier (residential → new exit IP, mobile → carrier IP). Same profile,
+ * same geo. Backs the rotate_ip browser tool.
+ */
+export async function rotateKernelSession(
+  taskId: string,
+  proxyType: KernelProxyType
+): Promise<BrowserProviderResumeSession> {
+  return recreateKernelSession(taskId, {
+    forceManagedProxyType: proxyType,
+    proxyTier: proxyType,
+  });
 }
 
 export async function getKernelSessionHealth(sessionId: string): Promise<BrowserSessionHealth> {

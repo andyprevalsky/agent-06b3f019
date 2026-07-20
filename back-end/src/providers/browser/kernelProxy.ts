@@ -2,17 +2,20 @@ import type Kernel from '@onkernel/sdk';
 import { prisma } from '../database';
 import type { ProxyGeoLocation } from '../geoip';
 
+export type KernelProxyType = 'residential' | 'mobile';
+
 export interface KernelProxyCandidate {
   proxyKey: string;
   name: string;
-  type: 'residential';
+  type: KernelProxyType;
   config: {
     country: string;
     state?: string;
     city?: string;
   };
   location: ProxyGeoLocation;
-  source: 'kernel_residential_city' | 'kernel_residential_state' | 'kernel_residential_country';
+  // `kernel_<type>_<city|state|country>` — the geo-specificity level that resolved.
+  source: string;
 }
 
 export type KernelProxyMode = { kind: 'explicit'; proxyId: string } | { kind: 'managed' };
@@ -20,7 +23,7 @@ export type KernelProxyMode = { kind: 'explicit'; proxyId: string } | { kind: 'm
 export interface ResolvedKernelProxy {
   proxyId: string;
   proxyKey: string;
-  proxyType: 'residential';
+  proxyType: KernelProxyType;
   source: KernelProxyCandidate['source'];
   location: ProxyGeoLocation;
 }
@@ -45,7 +48,10 @@ function normalizeCity(city: string | undefined): string | undefined {
   return normalized !== undefined && normalized !== '' ? normalized : undefined;
 }
 
-export function kernelProxyCandidates(location: ProxyGeoLocation): KernelProxyCandidate[] {
+export function kernelProxyCandidates(
+  location: ProxyGeoLocation,
+  proxyType: KernelProxyType = 'residential'
+): KernelProxyCandidate[] {
   const country = location.country.trim().toUpperCase();
   if (country === '') throw new Error('Kernel proxy country is required');
 
@@ -58,37 +64,37 @@ export function kernelProxyCandidates(location: ProxyGeoLocation): KernelProxyCa
 
   if (city !== undefined) {
     const config = { country, ...(state !== undefined ? { state } : {}), city };
-    const proxyKey = ['residential', country, state, city].filter(Boolean).join(':');
+    const proxyKey = [proxyType, country, state, city].filter(Boolean).join(':');
     candidates.push({
       proxyKey,
       name: `rose-${proxyKey.toLowerCase().replace(/:/g, '-')}`,
-      type: 'residential',
+      type: proxyType,
       config,
       location: { country, ...(state !== undefined ? { state } : {}), city },
-      source: 'kernel_residential_city',
+      source: `kernel_${proxyType}_city`,
     });
   }
 
   if (state !== undefined) {
-    const proxyKey = `residential:${country}:${state}`;
+    const proxyKey = `${proxyType}:${country}:${state}`;
     candidates.push({
       proxyKey,
       name: `rose-${proxyKey.toLowerCase().replace(/:/g, '-')}`,
-      type: 'residential',
+      type: proxyType,
       config: { country, state },
       location: { country, state },
-      source: 'kernel_residential_state',
+      source: `kernel_${proxyType}_state`,
     });
   }
 
-  const proxyKey = `residential:${country}`;
+  const proxyKey = `${proxyType}:${country}`;
   candidates.push({
     proxyKey,
     name: `rose-${proxyKey.toLowerCase().replace(/:/g, '-')}`,
-    type: 'residential',
+    type: proxyType,
     config: { country },
     location: { country },
-    source: 'kernel_residential_country',
+    source: `kernel_${proxyType}_country`,
   });
 
   return candidates;
@@ -105,7 +111,7 @@ export async function getOrCreateKernelProxy(
     return {
       proxyId: existing.proxyId,
       proxyKey: existing.proxyKey,
-      proxyType: 'residential',
+      proxyType: candidate.type,
       source: candidate.source,
       location: candidate.location,
     };
@@ -133,7 +139,7 @@ export async function getOrCreateKernelProxy(
     return {
       proxyId: stored.proxyId,
       proxyKey: stored.proxyKey,
-      proxyType: 'residential',
+      proxyType: candidate.type,
       source: candidate.source,
       location: candidate.location,
     };
@@ -146,7 +152,7 @@ export async function getOrCreateKernelProxy(
       return {
         proxyId: winner.proxyId,
         proxyKey: winner.proxyKey,
-        proxyType: 'residential',
+        proxyType: candidate.type,
         source: candidate.source,
         location: candidate.location,
       };
