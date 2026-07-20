@@ -59,7 +59,11 @@ docker_ps_ports_quick() {
     tmp=$(mktemp)
     docker ps --format "$1" >"$tmp" 2>/dev/null &
     pid=$!
-    for _ in 1 2 3 4 5; do
+    # Docker Desktop can take more than one second to answer while other
+    # workspaces are active. Falling back to the shared system database in that
+    # case defeats per-workspace isolation and can expose a concurrently changed
+    # schema, so allow a bounded five-second health probe.
+    for _ in $(seq 1 25); do
         if ! kill -0 "$pid" 2>/dev/null; then
             status=0
             wait "$pid" || status=$?
