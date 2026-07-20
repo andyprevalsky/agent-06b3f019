@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+DESCEND_COMMAND="$ROOT_DIR/.claude/commands/descend.md"
+
+fail() {
+  echo "FAIL: $1" >&2
+  exit 1
+}
+
+require_text() {
+  local text="$1"
+  local description="$2"
+  grep -Fq -- "$text" "$DESCEND_COMMAND" || fail "$description"
+}
+
+[ -f "$DESCEND_COMMAND" ] || fail "/descend command is missing"
+
+require_text "Exactly two planned user-input gates." "/descend must define two planned user gates"
+require_text "HARNESS_FIX_DECISION" "/descend must stop for harness-fix approval"
+require_text "DEPLOY_ADMIN_APPROVAL" "/descend must stop for required deploy approval"
+require_text "pause only" "deploy approval must not freeze independent RCA work"
+require_text "Prepare a clean" "/descend must use a fix-only isolated deploy worktree"
+require_text "Bench run:" "/descend header must show benchmark timing"
+require_text "Rows with ⏳ Deploy approval first" "deploy approvals must sort first"
+require_text "Rows with ✅ Deployed #<PR> last" "deployed rows must sort last"
+require_text "**INFRA:**" "/descend must classify infrastructure failures"
+require_text "**HARNESS:**" "/descend must classify trustworthy benchmark failures as harness"
+require_text "| ID | Kind | Issue (≤100 chars) | RCA | Fix | Test | Approval | Real rerun | Deploy |" "/descend must use an issue-oriented lifecycle table"
+require_text "Browser agent failed to start because proxy generation returned HTTP 400" "/descend issue rows must state the concrete observed failure"
+require_text "The issue is **<root cause at the first-bad boundary>**" "fix approval must explain the RCA"
+require_text "where we measured **<measurement>**" "fix approval must report the repro measurement"
+require_text "The unchanged local repro now" "fix approval must report post-fix proof"
+require_text "**Is this fix approved?**" "fix approval must ask a clear decision question"
+
+RESPONSE_CONTRACT=$(sed -n '/^## Response contract/,$p' "$DESCEND_COMMAND")
+grep -Fq '~~~text' <<<"$RESPONSE_CONTRACT" && fail "response examples must not use code blocks"
+grep -Fq '━' <<<"$RESPONSE_CONTRACT" && fail "response header must not use an ASCII banner"
+grep -Fq '| Andy decision |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
+grep -Fq '| Admin approval |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
+grep -Fq '| Benchmark |' <<<"$RESPONSE_CONTRACT" && fail "real rerun must replace the ambiguous Benchmark column"
+
+echo "All /descend command checks passed."
