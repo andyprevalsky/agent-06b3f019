@@ -215,9 +215,10 @@ Backend: `BrowserSession.proxyRotationCount` + `proxyTier` (migration
 resume + `rotateKernelSession`, **evicting the superseded live Kernel browser so a
 rotation never leaks a paid session**; `index.ts` `rotateProxy` +
 `ProxyRotationUnsupportedError`; `browserSessionResume.ts` `rotateBrowserProxy`
-(atomic cap in a `$transaction`, `selectRotationTier`, escalation message);
-`POST /rotate-proxy` split into `routes.rotation.ts` (keeps `routes.ts` under the
-max-lines cap) with the Zod `rotateProxySchema`.
+(ownership-scoped atomic conditional reservation, provider-failure rollback,
+`selectRotationTier`, escalation message); `POST /rotate-proxy` split into
+`routes.rotation.ts` (keeps `routes.ts` under the max-lines cap) with the Zod
+`rotateProxySchema` and explicit 400 validation handling.
 
 Agents: `rotate_ip` in `BROWSER_USE_TOOLS` (canonical description) + `RotateIpBrowserTool`
 in `BROWSER_TOOL_MODELS`; `repo.rotate_browser_proxy`; handler dispatch +
