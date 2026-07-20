@@ -216,6 +216,24 @@ def _scan_runs(runs_dir: Path) -> list[dict]:
     return out
 
 
+def _derive_run_name(run: dict) -> str:
+    """Human-readable label for a run, shown next to the opaque run id so the
+    hub reads semantically instead of as a wall of `<date>-<pid>` ids. Derived
+    from the run's (deduped) bench names — 1 shows its name, <=3 join with
+    commas, longer slices summarize as "first, second +N more". Mirrors the
+    frontend deriveRunName (front-end/src/features/benchmarks/RunsPane.tsx)."""
+    names: list[str] = []
+    for b in run.get("benches") or []:
+        n = str(b.get("name") or "").strip()
+        if n and n not in names:
+            names.append(n)
+    if not names:
+        return "run"
+    if len(names) <= 3:
+        return ", ".join(names)
+    return f"{', '.join(names[:2])} +{len(names) - 2} more"
+
+
 def _run_index_page(runs: list[dict]) -> bytes:
     """The central hub landing page: every run at a glance, click into any run."""
     rows = []
@@ -240,7 +258,8 @@ def _run_index_page(runs: list[dict]) -> bytes:
             badge = '<span class="b idle">—</span>'
         rows.append(
             f'<tr onclick="location.href=\'/run/{urllib.parse.quote(r["id"])}/dashboard.html\'">'
-            f'<td class="id">{html_escape(r["id"])}</td>'
+            f'<td class="run"><span class="rn">{html_escape(_derive_run_name(r))}</span>'
+            f'<span class="id">{html_escape(r["id"])}</span></td>'
             f"<td>{badge}</td>"
             f'<td class="n">{r["total"]}</td>'
             f'<td class="fl">{flags}</td>'
@@ -277,7 +296,9 @@ th{text-align:left;padding:10px 16px;color:#6f6f7b;font-weight:600;font-size:12p
    text-transform:uppercase;letter-spacing:.4px;border-bottom:1px solid #ececf0}
 td{padding:13px 16px;border-bottom:1px solid #f2f2f5}
 tr[onclick]{cursor:pointer}tr[onclick]:hover td{background:#f6f6f9}
-td.id{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#121218}
+td.run .rn{display:block;font-size:14px;font-weight:600;color:#121218}
+td.run .id{display:block;margin-top:2px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+   font-size:11px;color:#8a8a94}
 td.n{color:#6f6f7b}td.bn{color:#3a3a44}.fl{font-size:13px}.bf{margin-right:5px}
 .b{display:inline-block;padding:3px 9px;border-radius:999px;font-size:12px;font-weight:600}
 .b.live{background:#fff2e8;color:#c8590a}.b.pass{background:#e9f7ec;color:#1a7f37}

@@ -72,6 +72,22 @@ on must equal the slice you ran.
 Repeat until the slice is 100% green on a real rerun with no reward hacks.
 Track it with the task tools (one tracked item per failing task is helpful).
 
+**Infra-clean gate — the loop is literally `while (infra issues) { RCA + fix; rerun }`.**
+You do NOT report or stop for Andy after a run that had ANY infra failure. Infra
+noise makes TASK triage meaningless, so keep going: every iteration, RCA and fix
+EVERY distinct infra failure to a root cause (Phase C), then rerun (back to Phase
+A). Iterate — fixing new infra failures as fresh reruns surface them — until a run
+completes with **ZERO infra failures**. Only THEN do you triage TASK results and
+report.
+
+Keep a running **infra-RCA ledger** across every iteration (append one card per
+distinct infra root cause you fixed — do not drop the ones from earlier reruns).
+The final report (Phase E) presents that full accumulated ledger *plus* the
+non-infra TASK RCAs from the clean run — so Andy sees, in one place, every infra
+bug the descent had to fix to get a trustworthy run, and every real task bug that
+survived it. A run that keeps hitting NEW infra each rerun is expected early;
+that's the loop working, not a reason to stop.
+
 ### Phase A — RUN the slice
 
 Run through the isolated benchmark entrypoint (never hand-roll a stack):
@@ -100,12 +116,19 @@ A "pass" that only passed because a fallback/silent-substitute masked the real
 path (e.g. `actual_model=gemini` when we assert `claude-*`, a test card bypassing
 the Rose card path) is a **TASK failure**, not a pass — bucket it accordingly.
 
-### Phase C — FIX all INFRA first (so the next run gives a clean signal)
+### Phase C — FIX all INFRA, then RERUN (do NOT report yet)
 
 `/rca` each distinct infra failure to a local repro + root-cause fix, harden it
 (rule 1b), and cement a guard/test where one exists (many already do —
 `cloudbench_dependency_sync_test.py`, the multi-workstream scenarios, etc.).
-Infra noise makes TASK triage unreliable, so clear it before trusting failures.
+Append each fixed root cause to the **infra-RCA ledger**.
+
+Then **go back to Phase A and rerun** — do NOT advance to Phase D/E while the last
+run had any infra failure. Repeat A→B→C until a run finishes with ZERO infra
+failures. Fix EVERY infra issue you trip over, even a new one a later rerun
+surfaces (clone/registry races, proxy/tunnel death, barrier stalls, teardown
+leaks, stale secrets, pool exhaustion) — that is the job (rules 1b + 24), not
+scope creep. Only a genuinely infra-clean run earns a TASK verdict.
 
 ### Phase D — RCA every TASK failure to a local repro + fix
 
@@ -121,11 +144,22 @@ For each TASK failure, run the full `/rca` gate:
 
 Run independent RCAs in parallel sub-agents when they don't touch the same files.
 
-### Phase E — REPORT to Andy (the RCA card deck)
+### Phase E — REPORT to Andy (the RCA card deck) — ONLY after an infra-clean run
 
-Emit the compressed card deck defined in **Report format** below. This is the
-decision surface: Andy reads it and says which fixes to accept / edit / drop.
-STOP here for his input — do not self-approve and barrel into a rerun.
+Reached only once a run completes with ZERO infra failures (the infra-clean
+gate). Emit the compressed card deck defined in **Report format** below, and make
+it the COMPLETE picture of the descent:
+
+- the full **infra-RCA ledger** — one card per distinct infra root cause you
+  fixed across ALL the reruns it took to reach a clean run (mark them `[INFRA ✓
+  fixed]`), and
+- the **TASK RCAs** from the clean run — the real task bugs that survived a
+  trustworthy, infra-free run.
+
+This is the decision surface: Andy reads it and says which TASK fixes to accept /
+edit / drop. STOP here for his input — do not self-approve and barrel into a
+rerun. (You did NOT stop for him during the infra loop; you stop now, once the
+run is finally infra-clean and the failures are real.)
 
 ### Phase F — Apply Andy's decisions
 
@@ -164,20 +198,25 @@ to a single count — do not narrate them.
 
 ```
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  DESCEND · <slice> · run #<n> · <P>/<T> ✅   <F> ❌
+  DESCEND · <slice> · clean run #<n> (after <k> infra reruns) · <P>/<T> ✅  <F> ❌
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-❌ <task-name>                                        [TASK | INFRA]
+  INFRA LEDGER — every infra root cause fixed to reach a clean run
+  ────────────────────────────────────────────────────────────────
+✅ <infra-issue>                                     [INFRA ✓ fixed]
+   repro   ✅ <cmd/observation> → FAILED: <one-line signature>
+   fixed   ✅ <same> → PASSED   ·  edit: <file:line>
+   problem <≤1 line root cause>   ·  fix <≤1 line>   ·  cement <test>
+   (⚠️ if no local repro was possible: NO LOCAL REPRO — open gap + evidence)
+
+  TASK RESULTS — the clean, infra-free run
+  ────────────────────────────────────────────────────────────────
+❌ <task-name>                                                [TASK]
    repro   ✅ <cmd> → FAILED: <one-line observed vs expected>
    fixed   ✅ <same cmd> → PASSED   ·  edit: <file:line>
    problem <≤1 line: the first-bad-boundary root cause>
    fix     <≤1 line: what the fix does>
    cement  <suite/test the repro now lives in>
-
-❌ <task-name>                                             [INFRA]
-   repro   ⚠️ NO LOCAL REPRO — open observability gap
-   note    <what evidence exists + what capture is missing>
-   ...
 ```
 
 Card rules:
@@ -198,6 +237,9 @@ Card rules:
 
 ## Done means
 
+- At least one run reached the **infra-clean gate** — completed with ZERO infra
+  failures — and the full infra-RCA ledger from every rerun it took to get there
+  was reported (not silently dropped).
 - Every task in the slice PASSES on a clean rerun (no infra noise, no reward
   hacks, no silent-fallback pseudo-passes).
 - Every fix that shipped went through `/deploy` (merged to main) via its

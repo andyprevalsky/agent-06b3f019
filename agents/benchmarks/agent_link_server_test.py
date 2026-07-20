@@ -105,6 +105,37 @@ def test_run_index_empty_state(tmp_path: Path) -> None:
     assert "No runs yet" in page
 
 
+def test_derive_run_name_summarizes_benches() -> None:
+    # 1 bench → its name; ≤3 → joined; >3 → "first, second +N more"; dedupes.
+    assert als._derive_run_name({"benches": [{"name": "browser-amazon-return"}]}) == (
+        "browser-amazon-return"
+    )
+    assert als._derive_run_name({"benches": [{"name": "a"}, {"name": "b"}, {"name": "c"}]}) == (
+        "a, b, c"
+    )
+    assert als._derive_run_name(
+        {"benches": [{"name": "a"}, {"name": "b"}, {"name": "a"}, {"name": "c"}, {"name": "d"}]}
+    ) == "a, b +2 more"
+    assert als._derive_run_name({"benches": []}) == "run"
+
+
+def test_run_index_page_shows_semantic_name_beside_id(tmp_path: Path) -> None:
+    _make_run(
+        tmp_path,
+        "20260719-131303-17378",
+        [
+            {"name": "browser-amazon-return", "status": "passed"},
+            {"name": "browser-hotel-booking", "status": "passed"},
+        ],
+    )
+    page = als._run_index_page(als._scan_runs(tmp_path)).decode()
+    # semantic name rendered prominently...
+    assert "browser-amazon-return, browser-hotel-booking" in page
+    # ...alongside (not instead of) the opaque run id
+    assert "20260719-131303-17378" in page
+    assert 'class="rn"' in page and 'class="id"' in page
+
+
 def test_resolve_hub_prefers_static_over_live(tmp_path: Path) -> None:
     # newer run has the agent only as LIVE; older run has it as STATIC (durable).
     old = _make_run(tmp_path, "20260710-100000-1", [{"name": "b", "status": "failed"}])

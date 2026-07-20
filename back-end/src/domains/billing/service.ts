@@ -5,7 +5,6 @@ import {
   RETURN_URL_PRODUCTION,
   RETURN_URL_DEVELOPMENT,
   STRIPE_SUBSCRIPTION_PRICE_ID,
-  SUBSCRIBE_FALLBACK_URL,
 } from './config';
 
 export class NotFoundError extends Error {
@@ -38,10 +37,7 @@ export async function createSubscriptionCheckoutSession(userId: string): Promise
   const returnUrl = IS_PRODUCTION ? RETURN_URL_PRODUCTION : RETURN_URL_DEVELOPMENT;
 
   if (STRIPE_SUBSCRIPTION_PRICE_ID === '') {
-    const url = new URL(SUBSCRIBE_FALLBACK_URL);
-    url.searchParams.set('client_reference_id', userId);
-    url.searchParams.set('return_url', returnUrl);
-    return { url: url.toString() };
+    throw new Error('STRIPE_SUBSCRIPTION_PRICE_ID is required');
   }
 
   const session = await stripe.checkout.sessions.create(

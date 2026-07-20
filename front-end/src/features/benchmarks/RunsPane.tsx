@@ -18,6 +18,7 @@ import { useState } from 'react';
 import { ChevronDown, ChevronRight, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { HubRun, HubRunRequest } from '@/lib/api/benchmarksHub';
+import { deriveRunName } from './runName';
 
 interface StatusCounts {
   passed: number;
@@ -190,8 +191,16 @@ export function RunsPane({ runs, requests, loading, error, onOpenRun }: RunsPane
           >
             <RunStatusBar {...runCounts(run)} live={run.live} />
             <StatusCountsLabel {...runCounts(run)} />
-            <span className="text-sm font-medium truncate flex-1">{run.run_id}</span>
-            <span className="text-[11px] text-muted-foreground shrink-0">
+            <span className="flex min-w-0 flex-1 flex-col" data-testid={`run-label-${run.run_id}`}>
+              <span className="text-sm font-medium truncate">{deriveRunName(run)}</span>
+              <span
+                className="text-[11px] text-muted-foreground truncate font-mono"
+                data-testid={`run-id-${run.run_id}`}
+              >
+                {run.run_id}
+              </span>
+            </span>
+            <span className="text-[11px] text-muted-foreground shrink-0 text-right">
               {run.tasks.length} task{run.tasks.length === 1 ? '' : 's'} ·{' '}
               {new Date(run.timestamp || run.uploaded_at).toLocaleString()}
             </span>

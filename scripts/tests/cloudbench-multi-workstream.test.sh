@@ -1494,4 +1494,60 @@ grep -qiF "parallel-safe" "$guard_single" ||
     fail "scenario 14: --single-box rejection must explain the parallel-safety hazard"
 echo "PASS: scenario 14 — the shared-warm-box run footgun is closed (fleet + escape-hatch exempt by guard condition)"
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Scenario 15 — an AGED-OUT phantom name-only record must be discarded so a dead
+# owner's never-materialized clone cannot block provisioning forever.
+#
+# Scenario 7 proves a FRESH name-only record fails closed (a real clone may still
+# be lagging provider visibility — don't orphan it). But a clone REQUEST that
+# never materialized leaves a name-only record that stays absent forever; failing
+# closed on it permanently, deterministically aborts EVERY future run on the host
+# (the real incident: a finished neighbor fleet's dead-owner registry with a
+# ~45-min-old phantom blocked the ecommerce slice run after run). Once the record
+# has been absent far longer than any visibility gap it is a confirmed phantom and
+# recovery must discard it and keep provisioning.
+# ═════════════════════════════════════════════════════════════════════════════
+reset_fake_state
+rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership" "$SANDBOX/.git/cloudbench-pools" \
+    "$SANDBOX/.git/cloudbench-pool-claims" "$FAKE_DIR/markers"
+mkdir -p "$FAKE_DIR/markers"
+: > "$FAKE_DIR/journal.log"
+owner_host="$(hostname 2>/dev/null || uname -n)"
+phantom_name="cloudbench-phantom-never-materialized"
+write_dead_registry phantom-aged reap "$owner_host" "$phantom_name"
+phantom_record="$SANDBOX/.git/cloudbench-fleet-ownership/phantom-aged/clones/$phantom_name"
+# Age the record far beyond the phantom TTL; the machine is intentionally NEVER
+# added to the fake fly state, so it stays confirmed-absent (resolve == 1).
+touch -t 200001010000 "$phantom_record" 2>/dev/null || fail "scenario 15: could not backdate phantom record"
+phantom_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-phantom-aged.log" \
+    --provision-pool 1 || phantom_status=$?
+[ "$phantom_status" -eq 0 ] ||
+    fail "scenario 15: aged-out phantom must not block provisioning (exit=$phantom_status)"
+grep -qF "discarding aged-out phantom name-only clone '$phantom_name'" "$TMP_ROOT/controller-phantom-aged.log" ||
+    fail "scenario 15: aged-out phantom discard was not reported"
+[ -f "$phantom_record" ] && fail "scenario 15: aged-out phantom record was not removed"
+pool_phantom_id="$(head -1 "$POOL_A" 2>/dev/null)"
+[ -n "$pool_phantom_id" ] ||
+    fail "scenario 15: provisioning did not proceed after the phantom was discarded"
+# A FRESH name-only phantom (default TTL) must still fail closed — the age gate,
+# not blanket discard, is what protects a real lagging clone (Scenario 7).
+reset_fake_state
+rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership" "$SANDBOX/.git/cloudbench-pools" \
+    "$SANDBOX/.git/cloudbench-pool-claims" "$FAKE_DIR/markers"
+mkdir -p "$FAKE_DIR/markers"
+: > "$FAKE_DIR/journal.log"
+fresh_name="cloudbench-fresh-visibility-gap"
+write_dead_registry phantom-fresh reap "$owner_host" "$fresh_name"
+fresh_status=0
+CLOUDBENCH_CLONE_LOOKUP_SECONDS=1 CLOUDBENCH_TEST_BARRIER_MIN=1 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-phantom-fresh.log" \
+    --provision-pool 1 || fresh_status=$?
+[ "$fresh_status" -eq 1 ] ||
+    fail "scenario 15: a FRESH name-only record must still fail closed (exit=$fresh_status)"
+[ -f "$SANDBOX/.git/cloudbench-fleet-ownership/phantom-fresh/clones/$fresh_name" ] ||
+    fail "scenario 15: a fresh name-only record must be retained, not discarded"
+echo "PASS: scenario 15 — aged-out phantom is discarded (provisioning proceeds); fresh gap still fails closed"
+
 echo "PASS: two workstreams ran cloud benchmarks concurrently, isolated end to end"
