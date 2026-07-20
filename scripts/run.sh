@@ -758,13 +758,7 @@ fi   # end: if $DB_RESTORED / else (push + seed + dump)
 # ── Pre-flight: ensure node_modules exist for all JS services ──
 JS_SVC_DIRS=(back-end front-end)
 $IS_MAC && JS_SVC_DIRS+=(mac-app)
-for svc_dir in "${JS_SVC_DIRS[@]}"; do
-    if [ -f "$svc_dir/package.json" ] && [ ! -d "$svc_dir/node_modules" ]; then
-        echo "📦 Installing $svc_dir dependencies..."
-        (cd "$svc_dir" && npm install)
-        echo "📦 $svc_dir deps ready"
-    fi
-done
+bash "$SCRIPT_DIR/ensure-workspace-dependencies.sh" "${JS_SVC_DIRS[@]}"
 
 # ── Pre-flight: ensure agents venv exists with deps installed ──
 if [ ! -f agents/venv/bin/activate ] || ! agents/venv/bin/python -c "import temporalio" 2>/dev/null; then

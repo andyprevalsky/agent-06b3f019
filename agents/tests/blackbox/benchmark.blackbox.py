@@ -4490,6 +4490,66 @@ def test_seed_dump_restore_uses_target_container_pg_restore():
         assert "host pg_restore" not in calls
 
 
+def test_workspace_dependency_preflight_respects_hoisted_installs():
+    """A healthy hoisted npm workspace must not reinstall on every stack boot."""
+    repo_root = Path(__file__).resolve().parents[3]
+    helper = repo_root / "scripts" / "ensure-workspace-dependencies.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        workspace = tmp_path / "back-end"
+        workspace.mkdir()
+        (workspace / "package.json").write_text('{"name":"test-back-end"}\n')
+        command_log = tmp_path / "commands.log"
+        installed_marker = tmp_path / "installed"
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        npm = fake_bin / "npm"
+        npm.write_text(
+            '#!/bin/sh\n'
+            'echo "$*" >> "$COMMAND_LOG"\n'
+            'if [ "$1" = "ls" ]; then [ "${NPM_GRAPH_READY:-0}" = 1 ] || [ -f "$INSTALLED_MARKER" ]; exit; fi\n'
+            'if [ "$1" = "install" ]; then touch "$INSTALLED_MARKER"; exit 0; fi\n'
+            'exit 1\n'
+        )
+        npm.chmod(0o755)
+        common_env = {
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+            "COMMAND_LOG": str(command_log),
+            "INSTALLED_MARKER": str(installed_marker),
+        }
+
+        ready = subprocess.run(
+            ["bash", str(helper), "back-end"],
+            cwd=tmp_path,
+            env={**common_env, "NPM_GRAPH_READY": "1"},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert ready.returncode == 0, ready.stdout + ready.stderr
+        assert command_log.read_text().splitlines() == [
+            "ls --workspace=back-end --depth=0 --silent"
+        ]
+
+        command_log.write_text("")
+        missing = subprocess.run(
+            ["bash", str(helper), "back-end"],
+            cwd=tmp_path,
+            env={**common_env, "NPM_GRAPH_READY": "0"},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert missing.returncode == 0, missing.stdout + missing.stderr
+        assert command_log.read_text().splitlines() == [
+            "ls --workspace=back-end --depth=0 --silent",
+            "install --workspace=back-end --no-audit --no-fund",
+            "ls --workspace=back-end --depth=0 --silent",
+        ]
+
+
 def test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe():
     """A healthy workspace DB must not become shared system PG when Docker is busy."""
     run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
@@ -7400,6 +7460,10 @@ async def run_all_tests():
     r.record(
         "seed_dump_restore_target_client",
         test_seed_dump_restore_uses_target_container_pg_restore,
+    )
+    r.record(
+        "workspace_dependency_preflight",
+        test_workspace_dependency_preflight_respects_hoisted_installs,
     )
     r.record(
         "run_sh_reuses_reachable_workspace_db",
