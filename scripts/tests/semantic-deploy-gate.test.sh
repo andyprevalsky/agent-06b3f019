@@ -9,6 +9,7 @@ LIFECYCLE_SPEC="$ROOT_DIR/front-end/tests-e2e/chat-lifecycle-latency.spec.ts"
 WORKFLOW="$ROOT_DIR/.github/workflows/chat-lifecycle-ratchet.yml"
 DEPLOY_COMMAND="$ROOT_DIR/.claude/commands/deploy.md"
 DEPLOY_ENV="$ROOT_DIR/scripts/lib/deploy-local-env.sh"
+DESCEND_COMMAND_TEST="$ROOT_DIR/scripts/tests/descend-command.test.sh"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -22,7 +23,7 @@ require_text() {
   grep -Fq -- "$text" "$file" || fail "$description"
 }
 
-for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$DEPLOY_COMMAND" "$DEPLOY_ENV"; do
+for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$DEPLOY_COMMAND" "$DEPLOY_ENV" "$DESCEND_COMMAND_TEST"; do
   [ -f "$file" ] || fail "required semantic deploy gate file is missing: $file"
 done
 
@@ -97,5 +98,9 @@ grep -Fq 'BLACKBOX_TEST_REPLAY_OUTBOUND=1' <<<"$DEPLOY_STACK_LAUNCH" || \
   fail "/deploy run.sh launch must opt the existing-backend blackbox stack into fixture replay"
 grep -Fq 'bash scripts/run.sh --benchmark' <<<"$DEPLOY_STACK_LAUNCH" || \
   fail "/deploy replay assertion must be bound to the run.sh benchmark launch"
+
+# /descend is part of the deploy orchestration surface. Keep its two user gates,
+# parallel deploy handoff, sorting, and rendered response contract cemented.
+bash "$DESCEND_COMMAND_TEST"
 
 echo "All semantic deploy gate checks passed."
