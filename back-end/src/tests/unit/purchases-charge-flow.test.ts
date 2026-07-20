@@ -19,6 +19,7 @@ import {
   FundingInProgressCardProvider,
   withFakeStripe,
 } from '../blackbox/purchases.testkit';
+import { ROSE_AGENT_CARD_DEFAULTS } from '../../providers/card-provider';
 
 const createdUserIds: string[] = [];
 let passed = 0;
@@ -149,6 +150,46 @@ async function main(): Promise<void> {
       () => mintPurchaseCard(mintInput(userId, { totalCents: 5_000_000 })),
       (error: unknown) => error instanceof PurchaseError && error.statusCode === 402
     );
+  });
+
+  await test('AGENTCARD MINT CUTOFF: real charge flow hands back the static Brex card (no injected provider)', async () => {
+    const userId = await seedSubscribedUser();
+    const wallet = new FakeWalletFundingProvider();
+    const input = mintInput(userId, { totalCents: 4396 });
+    // Cutoff active: flag off AND benchmark mode off (benchmark mode force-enables real minting).
+    const prevEnv = {
+      AGENTCARD_MINT_ENABLED: process.env.AGENTCARD_MINT_ENABLED,
+      BENCHMARK_MODE: process.env.BENCHMARK_MODE,
+      BENCHMARK_ISOLATED_RUN: process.env.BENCHMARK_ISOLATED_RUN,
+    };
+    delete process.env.AGENTCARD_MINT_ENABLED;
+    delete process.env.BENCHMARK_MODE;
+    delete process.env.BENCHMARK_ISOLATED_RUN;
+    try {
+      const result = await withFakeStripe(async (calls) => {
+        // NO card provider injected -> service resolves the REAL createCardProvider(), which
+        // under the cutoff returns the static Rose Agent Card, exercising the full mint path.
+        const outcome = await mintPurchaseCard(input, undefined, wallet);
+        // Current funding behavior under the cutoff: the user's Stripe hold is still captured.
+        // Pinned here so any change to the static-card funding model surfaces as a test diff.
+        assert.equal(calls.charges.length, 1, 'one manual-capture hold');
+        assert.equal(calls.captures.length, 1, 'the hold is captured');
+        return outcome;
+      });
+      assert.equal(result.status, PurchaseSpendStatus.HELD);
+      assert.equal(result.cardId, ROSE_AGENT_CARD_DEFAULTS.cardId, 'static card id');
+      assert.equal(result.pan, ROSE_AGENT_CARD_DEFAULTS.pan, 'static Brex PAN reaches the caller');
+      assert.equal(result.cvv, ROSE_AGENT_CARD_DEFAULTS.cvv, 'static Brex CVV reaches the caller');
+      assert.equal(result.expiry, ROSE_AGENT_CARD_DEFAULTS.expiry, 'static expiry');
+      assert.equal(result.last4, ROSE_AGENT_CARD_DEFAULTS.pan.slice(-4), 'last4 = static PAN tail');
+      assert.equal(await latestStatus(userId, input.fingerprint), PurchaseSpendStatus.HELD);
+      assert.equal(wallet.reclaimCalls.length, 0, 'static mint does not fail/roll back');
+    } finally {
+      for (const [name, value] of Object.entries(prevEnv)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
   });
 
   process.stdout.write(
