@@ -383,6 +383,32 @@ async def download_session_file(config: Any, session_id: str, file_path: str) ->
 # BROWSER SESSION INIT / CLOSE / TASK
 # ========================================
 
+# Substrings that mark a browser-provider (Kernel/Steel) session-init failure as
+# TRANSIENT — an unhealthy proxy/machine was allocated, and a fresh init request
+# reallocates a different one. These are infra hiccups, not bad requests, so they
+# are retried (bounded) rather than surfaced to the agent as a fatal failure.
+_TRANSIENT_INIT_FAILURE_MARKERS = (
+    "proxy is marked unavailable",
+    "health check",
+    "no healthy",
+    "temporarily unavailable",
+    "try again",
+)
+
+
+def is_transient_session_init_failure(status_code: int, body: str) -> bool:
+    """Classify a non-2xx/429 init response as retryable-transient vs. fatal.
+
+    5xx from the provider is always transient. A 4xx is transient only when its
+    body matches a known infra-hiccup marker (e.g. Kernel's
+    ``400 Proxy is marked unavailable from the last health check``); an ordinary
+    4xx (bad request) stays fatal so real errors are not masked by retries.
+    """
+    if status_code >= 500:
+        return True
+    text = (body or "").lower()
+    return any(marker in text for marker in _TRANSIENT_INIT_FAILURE_MARKERS)
+
 
 async def init_browser_session(
     config: Any,
@@ -401,6 +427,12 @@ async def init_browser_session(
         return response.json()
     if response.status_code == 429:
         return {"rate_limited": True, "status_code": 429}
+    if is_transient_session_init_failure(response.status_code, response.text):
+        return {
+            "transient_init_failure": True,
+            "status_code": response.status_code,
+            "detail": response.text[:300],
+        }
     raise Exception(f"Failed to init session: {response.text}")
 
 
@@ -417,6 +449,30 @@ async def resume_browser_session(config: Any, task_id: str) -> Dict[str, Any]:
     if response.status_code == 429:
         return {"rate_limited": True, "status_code": 429}
     raise Exception(f"Failed to resume session: {response.text}")
+
+
+async def rotate_browser_proxy(config: Any, task_id: str) -> Dict[str, Any]:
+    """Rotate the browser session's outbound IP (rotate_ip tool).
+
+    Returns the resume-shaped session (new ws_url on the same profile) plus
+    escalation state (proxy_tier, rotations_used, rotations_remaining,
+    rotation_message). On a 409 the rotation budget is exhausted — surfaced to the
+    caller as {"exhausted": True, ...} so the agent can stop rotating.
+    """
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/browser-session/rotate-proxy",
+            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            json={"task_id": task_id},
+        )
+    if response.status_code in [200, 201]:
+        return response.json()
+    if response.status_code == 409:
+        body = response.json()
+        return {"exhausted": True, "status_code": 409, "message": body.get("message", ""), **body}
+    if response.status_code == 429:
+        return {"rate_limited": True, "status_code": 429}
+    raise Exception(f"Failed to rotate proxy: {response.text}")
 
 
 async def fetch_auth_options(config: Any, user_id: str, realm: str) -> Dict[str, Any]:

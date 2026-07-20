@@ -222,11 +222,12 @@ async def request_user_approval_direct(
             "requestUserApproval": metadata_payload,
         }
 
-        # Send SMS write_lock notification (root + SMS-source agents only)
-        if (
-            getattr(workflow_instance, "parent_workflow_id", None) is None
-            and getattr(workflow_instance, "agent_source", "WEB") == "SMS"
-        ):
+        # Send SMS write_lock notification to every ROOT agent regardless of
+        # source so payment approvals reach the user (with the enriched
+        # merchant/reviews/cost breakdown + agent link) whether the run started
+        # from SMS, web, or mac-app. Sub-agents are excluded (scale); benchmark
+        # runs are suppressed centrally on the backend (Agent.isBenchmark).
+        if getattr(workflow_instance, "parent_workflow_id", None) is None:
             try:
                 from helpers.sms_activities import notify_sms_event_activity
 
@@ -389,11 +390,9 @@ async def request_user_attention_direct(
         "attentionMessage": question,
     }
 
-    if (
-        sms_event_type
-        and getattr(workflow_instance, "parent_workflow_id", None) is None
-        and getattr(workflow_instance, "agent_source", "WEB") == "SMS"
-    ):
+    # Root agents of any source get the handoff SMS (login/card-setup). Benchmark
+    # runs are suppressed centrally on the backend (Agent.isBenchmark).
+    if sms_event_type and getattr(workflow_instance, "parent_workflow_id", None) is None:
         try:
             from helpers.sms_activities import notify_sms_event_activity
 

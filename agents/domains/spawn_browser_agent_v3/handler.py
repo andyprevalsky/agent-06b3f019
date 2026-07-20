@@ -63,6 +63,8 @@ from .config import (
     MAX_CLAUDE_TOKEN_ROTATIONS,
     MAX_CONSECUTIVE_API_FAILURES,
     MAX_ITERATIONS,
+    SESSION_INIT_TRANSIENT_MAX_ATTEMPTS,
+    SESSION_INIT_TRANSIENT_RETRY_SECONDS,
     SESSION_MAX_WAIT_SECONDS,
     SESSION_RETRY_INTERVAL_SECONDS,
     VERIFIER_ULTRA_MODEL,
@@ -84,6 +86,7 @@ from .repo import (
     propagate_browser_run_credentials,
     report_claude_token_rate_limited,
     resume_browser_session,
+    rotate_browser_proxy,
     save_browser_action_message,
     save_browser_assistant_message,
     save_browser_credential_ref_message,
@@ -915,6 +918,78 @@ async def _reap_playwright_driver_process(process: Optional[Any], agent_id: str)
         return
     except Exception as e:
         logger.warning("Failed to kill Playwright driver process", agent_id=agent_id, error=str(e))
+
+
+async def _reconnect_browser_stack_after_rotation(
+    *,
+    new_cdp_url: str,
+    old_dom_service: Any,
+    old_playwright_browser: Optional[Any],
+    old_playwright_instance: Optional[Any],
+    old_driver_pid: Optional[int],
+    fingerprint_injection: Optional[Any],
+    agent_id: str,
+) -> Dict[str, Any]:
+    """Tear down the current CDP/Playwright stack and reattach to `new_cdp_url`.
+
+    Backs the rotate_ip tool: the backend recreates the browser session on a fresh
+    proxy (same persistent profile → cookies/login survive) and returns a new
+    ws_url; the agent must drop its live connection and reconnect to it. Fingerprint
+    injection is re-applied so the rotated IP does not pair with a fresh device
+    fingerprint. Returns the new dom_service/pages/playwright handles + driver pid.
+    """
+    from browser_tools.dom_service import DOMService
+
+    # 1. Tear down the old connection first so the previous Kernel session's CDP
+    #    sockets + local Playwright driver are released before we attach anew.
+    with contextlib.suppress(Exception):
+        await old_dom_service.disconnect()
+    await _stop_playwright_resources(
+        old_playwright_browser,
+        old_playwright_instance,
+        agent_id,
+        driver_pid=old_driver_pid,
+    )
+
+    # 2. Attach DOMService + Playwright to the rotated session.
+    _disable_cdp_websocket_proxy()
+    dom_service = DOMService(cdp_url=new_cdp_url)
+    await dom_service.connect()
+    dom_page = await dom_service.session.get_current_page()
+
+    from playwright.async_api import async_playwright
+
+    pw_instance = await async_playwright().start()
+    driver_pid = getattr(_playwright_driver_process(pw_instance), "pid", None)
+    try:
+        pw_browser = await pw_instance.chromium.connect_over_cdp(new_cdp_url)
+    except BaseException:
+        driver_process = _playwright_driver_process(pw_instance)
+        with contextlib.suppress(Exception):
+            await pw_instance.stop()
+        await _reap_playwright_driver_process(driver_process, agent_id)
+        with contextlib.suppress(Exception):
+            await dom_service.disconnect()
+        raise
+    pw_context = pw_browser.contexts[0]
+    pw_page = pw_context.pages[0]
+
+    # 3. Re-apply the device fingerprint (anti-bot essential on the new IP).
+    if fingerprint_injection and _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True):
+        from helpers.fingerprint_injection import apply_fingerprint_injection
+
+        with contextlib.suppress(Exception):
+            await apply_fingerprint_injection(pw_page, fingerprint_injection)
+
+    logger.info("Reconnected browser stack after proxy rotation", agent_id=agent_id)
+    return {
+        "dom_service": dom_service,
+        "dom_page": dom_page,
+        "input_page": pw_page,
+        "playwright_browser": pw_browser,
+        "playwright_instance": pw_instance,
+        "playwright_driver_pid": driver_pid,
+    }
 
 
 def _playwright_driver_command_matches(command: str) -> bool:
@@ -2155,24 +2230,65 @@ async def _finalize_kernel_replay_for_fe(
     browser_recorder: BrowserAgentRecorder,
     agent_id: str,
     task_id: str,
+    user_id: Optional[str],
     browser_url: Optional[str],
     browser_session_metadata: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
     """Stop Kernel's native replay and write the FE-visible recording message.
 
     System context:
-    Kernel replay (start at session setup) -> stop + hosted view URL -> DB tool
-    message -> BrowserAgentChip Recording tab. No screenshot frames, no Supabase
-    upload: the video is stored by Kernel and the FE iframes `recording_view_url`.
+    Kernel replay (one per session; rotate_ip records a fresh segment per rotation)
+    -> stop -> stitch every segment into ONE continuous MP4 -> upload -> DB tool
+    message -> BrowserAgentChip Recording tab. The FE plays a single stitched video
+    of the exit IP changing across rotations. With only one segment (no rotation),
+    or when the stitch can't run (no ffmpeg / download failure), we fall back to the
+    Kernel-hosted view URL — no re-encode, no upload.
     """
     view_url = await browser_recorder.stop_kernel_replay()
-    if not view_url:
+    # One replay segment per session. After rotate_ip runs, there are multiple
+    # segments (baseline + one per rotation); each shows a different exit IP.
+    segment_urls = list(getattr(browser_recorder, "replay_view_urls", []) or [])
+    if not segment_urls and view_url:
+        segment_urls = [view_url]
+    if not segment_urls:
         logger.warning(
             "Kernel replay finalized without a view URL; no recording message",
             agent_id=agent_id,
             task_id=task_id,
         )
         return None
+
+    # Multiple rotation segments -> stitch into ONE continuous MP4 and upload it, so
+    # the FE plays a single video player (not a playlist) of the IP changing.
+    extra_metadata: Dict[str, Any] = {"browser_session_metadata": browser_session_metadata}
+    stitched_pointer = None
+    if len(segment_urls) > 1 and user_id:
+        try:
+            stitched_mp4 = await browser_recorder.stitch_segments_to_mp4()
+            if stitched_mp4:
+                stitched_pointer = await upload_to_storage(
+                    user_id=user_id,
+                    file_content=stitched_mp4,
+                    filename=f"browser-recording-{task_id}.mp4",
+                    mime_type="video/mp4",
+                )
+        except Exception as exc:  # noqa: BLE001 — stitch/upload is best-effort
+            logger.warning(
+                "Replay stitch/upload failed; falling back to segment URLs",
+                agent_id=agent_id,
+                task_id=task_id,
+                error=repr(exc)[:300],
+            )
+
+    if stitched_pointer:
+        # One stitched video is the entire recording; the FE plays it directly.
+        extra_metadata["recording_file_pointer"] = stitched_pointer
+    else:
+        # Fallback: hand the FE the Kernel-hosted segment URL(s). Baseline first.
+        extra_metadata["recording_view_url"] = segment_urls[0]
+        if len(segment_urls) > 1:
+            extra_metadata["recording_view_urls"] = segment_urls
+
     await save_browser_action_message(
         agent_id=agent_id,
         title="Browser recording saved",
@@ -2182,18 +2298,19 @@ async def _finalize_kernel_replay_for_fe(
         browser_url=browser_url or "",
         action_type="recording",
         tool_call_id=str(uuid_module.uuid4()),
-        extra_metadata={
-            "recording_view_url": view_url,
-            "browser_session_metadata": browser_session_metadata,
-        },
+        extra_metadata=extra_metadata,
     )
     logger.info(
         "Kernel replay recording message saved",
         agent_id=agent_id,
         task_id=task_id,
-        has_view_url=bool(view_url),
+        segment_count=len(segment_urls),
+        stitched=bool(stitched_pointer),
     )
-    return {"recording_view_url": view_url}
+    return {
+        "recording_file_pointer": stitched_pointer,
+        "recording_view_urls": segment_urls,
+    }
 
 
 async def _finalize_browser_recording_for_fe(
@@ -2224,6 +2341,7 @@ async def _finalize_browser_recording_for_fe(
             browser_recorder=browser_recorder,
             agent_id=agent_id,
             task_id=task_id,
+            user_id=user_id,
             browser_url=browser_url,
             browser_session_metadata=browser_session_metadata,
         )
@@ -2991,9 +3109,35 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             activity.heartbeat("Initializing browser session")
             _session_wait_start = time.monotonic()
             _waiting_msg_sent = False
+            _transient_init_attempts = 0
 
             while True:
                 session_data = await init_browser_session(config, user_id, agent_id, start_url)
+
+                # Transient provider infra failure (e.g. Kernel allocated an
+                # unhealthy proxy: "400 Proxy is marked unavailable"). A fresh init
+                # reallocates a different proxy, so retry a bounded number of times
+                # with a short delay before giving up loudly.
+                if session_data.get("transient_init_failure"):
+                    _transient_init_attempts += 1
+                    if _transient_init_attempts > SESSION_INIT_TRANSIENT_MAX_ATTEMPTS:
+                        raise Exception(
+                            "Browser session init failed after "
+                            f"{_transient_init_attempts} transient-proxy retries: "
+                            f"{session_data.get('detail')}"
+                        )
+                    logger.warning(
+                        "Transient browser session init failure; retrying with a fresh proxy",
+                        agent_id=agent_id,
+                        attempt=_transient_init_attempts,
+                        status_code=session_data.get("status_code"),
+                        detail=session_data.get("detail"),
+                    )
+                    activity.heartbeat(
+                        f"Retrying browser init after transient proxy failure ({_transient_init_attempts})"
+                    )
+                    await asyncio.sleep(SESSION_INIT_TRANSIENT_RETRY_SECONDS)
+                    continue
 
                 if not session_data.get("rate_limited"):
                     break
@@ -3757,6 +3901,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 pending_write_lock_action = None
 
                 activity.heartbeat(f"Step {iteration} - executing pending write lock action")
+                if (
+                    browser_network_recorder is None
+                    and network_recorder_task is not None
+                    and network_recorder_task.done()
+                ):
+                    with contextlib.suppress(Exception):
+                        browser_network_recorder = network_recorder_task.result()
+
                 result = await execute_action(
                     dom_service,
                     action_history,
@@ -3774,6 +3926,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     write_lock_enabled=write_lock_enabled,
                     write_lock_approvals=write_lock_approvals,
                     system_name=system_name,
+                    browser_network_recorder=browser_network_recorder,
                 )
 
                 action_name = unified_action.get("action", "unknown")
@@ -4225,6 +4378,140 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     "usage_items": usage_items,
                 }
 
+            if action_name == "rotate_ip":
+                rotate_reason = unified_action.get("params", {}).get("reason", "")
+                rotate_call_id = str(uuid_module.uuid4())
+                logger.info("Browser agent requested IP rotation", reason=rotate_reason)
+                await save_browser_action_message(
+                    agent_id=agent_id,
+                    title="Rotating IP",
+                    task_id=task_id,
+                    message=rotate_reason,
+                    status=MessageStatus.IN_PROGRESS,
+                    browser_url=browser_url,
+                    action_type="browser",
+                    tool_call_id=rotate_call_id,
+                )
+
+                rotate_result = await rotate_browser_proxy(config, task_id)
+
+                # Budget exhausted or provider busy: surface the error to the run and
+                # let the model decide to stop — never tear down the live session.
+                if rotate_result.get("exhausted") or rotate_result.get("rate_limited"):
+                    err_msg = rotate_result.get("message") or (
+                        "Browser slots are busy; IP rotation could not complete. Retry shortly."
+                        if rotate_result.get("rate_limited")
+                        else "PROXY_ROTATION_EXHAUSTED"
+                    )
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="IP rotation unavailable",
+                        task_id=task_id,
+                        message=err_msg,
+                        status=MessageStatus.ERROR,
+                        browser_url=browser_url,
+                        action_type="browser",
+                        tool_call_id=rotate_call_id,
+                    )
+                    action_result = {"success": False, "error": err_msg}
+                    await action_history.record_action(
+                        dom_service=dom_service,
+                        action="rotate_ip",
+                        thinking=thinking,
+                        params={"reason": rotate_reason},
+                        result=action_result,
+                    )
+                    _append_browser_turn_messages(
+                        browser_turn_messages,
+                        task=task_prompt,
+                        browser_state=browser_state,
+                        include_screenshot=False,
+                        unified_action=unified_action,
+                        result=action_result,
+                        tool_call_id=rotate_call_id,
+                    )
+                    await browser_stream.finish_tools(status="ERROR")
+                    continue
+
+                # Success: swap the live CDP/Playwright stack to the rotated session
+                # (same profile → login preserved) and re-land on the current URL.
+                new_cdp_url = rotate_result.get("ws_url")
+                reconnected = await _reconnect_browser_stack_after_rotation(
+                    new_cdp_url=new_cdp_url,
+                    old_dom_service=dom_service,
+                    old_playwright_browser=playwright_browser,
+                    old_playwright_instance=playwright_instance,
+                    old_driver_pid=playwright_driver_pid,
+                    fingerprint_injection=fingerprint_injection,
+                    agent_id=agent_id,
+                )
+                dom_service = reconnected["dom_service"]
+                dom_page = reconnected["dom_page"]
+                input_page = reconnected["input_page"]
+                playwright_browser = reconnected["playwright_browser"]
+                playwright_instance = reconnected["playwright_instance"]
+                playwright_driver_pid = reconnected["playwright_driver_pid"]
+                session_id = rotate_result.get("session_id", session_id)
+                browser_url = rotate_result.get("debug_url", browser_url)
+                cdp_url = new_cdp_url
+
+                # Follow the rotation in the recording: rebind to the new page and
+                # start a fresh replay segment on the rotated session, so the saved
+                # recording actually shows the exit IP changing across rotations
+                # instead of freezing on the first (now-evicted) session's IP.
+                if browser_recorder is not None:
+                    browser_recorder.page = input_page
+                    with contextlib.suppress(Exception):
+                        await browser_recorder.rotate_kernel_replay(session_id)
+
+                # Rebuild the humanizer against the new pages (input events must
+                # target the live page, not the torn-down one).
+                if _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
+                    humanizer = BrowserHumanizer(dom_page=dom_page, input_page=input_page, fast=False)
+                    await humanizer.initialize_cursor(start_pos=(640, 400))
+                else:
+                    humanizer = None
+
+                browser_state = await dom_service.get_browser_state(include_screenshot=False)
+                current_url = browser_state.get("url", current_url)
+
+                rotation_message = rotate_result.get("rotation_message", "Rotated to a fresh IP.")
+                await save_browser_action_message(
+                    agent_id=agent_id,
+                    title="IP rotated",
+                    task_id=task_id,
+                    message=rotation_message,
+                    status=MessageStatus.FINISHED,
+                    browser_url=browser_url,
+                    action_type="browser",
+                    tool_call_id=rotate_call_id,
+                )
+
+                action_result = {
+                    "success": True,
+                    "message": rotation_message,
+                    "proxy_tier": rotate_result.get("proxy_tier", "residential"),
+                    "rotations_remaining": rotate_result.get("rotations_remaining"),
+                }
+                await action_history.record_action(
+                    dom_service=dom_service,
+                    action="rotate_ip",
+                    thinking=thinking,
+                    params={"reason": rotate_reason},
+                    result=action_result,
+                )
+                _append_browser_turn_messages(
+                    browser_turn_messages,
+                    task=task_prompt,
+                    browser_state=browser_state,
+                    include_screenshot=False,
+                    unified_action=unified_action,
+                    result=action_result,
+                    tool_call_id=rotate_call_id,
+                )
+                await browser_stream.finish_tools(status="FINISHED")
+                continue
+
             if action_name == "send_message_to_user":
                 message = unified_action.get("params", {}).get("message", "")
                 reason = unified_action.get("params", {}).get("reason", "other")
@@ -4622,6 +4909,16 @@ Based on this feedback, I need to continue working on the task and address the i
                     },
                 )
 
+            # Resolve the background-attached network recorder so read_network_requests
+            # can query captured traffic (the recorder attaches a few seconds into the run).
+            if (
+                browser_network_recorder is None
+                and network_recorder_task is not None
+                and network_recorder_task.done()
+            ):
+                with contextlib.suppress(Exception):
+                    browser_network_recorder = network_recorder_task.result()
+
             activity.heartbeat(f"Step {iteration} - executing {action_name}")
             try:
                 result = await asyncio.wait_for(
@@ -4642,6 +4939,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         write_lock_enabled=write_lock_enabled,
                         write_lock_approvals=write_lock_approvals,
                         system_name=system_name,
+                        browser_network_recorder=browser_network_recorder,
                     ),
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )

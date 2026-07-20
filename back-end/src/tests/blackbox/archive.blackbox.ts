@@ -306,6 +306,34 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
       return;
     }
     assert((start.data as { fixture?: { ref?: string } }).fixture?.ref);
+
+    // The manifest is written at creation so a run that crashes before finalize
+    // still has a classifiable, world-model-ingestible bundle. Read it back
+    // immediately after start — before any artifacts or finalize exist.
+    const startManifestArtifact = await readArchivedArtifact({
+      rootAgentId: seed.rootAgentId,
+      objectPath: 'manifest.json.gz.enc',
+    });
+    assert(startManifestArtifact, 'expected a manifest to exist immediately after agent start');
+    const startManifest = JSON.parse(
+      decryptAndValidateArtifact(startManifestArtifact).toString('utf8')
+    ) as {
+      world_model_mode: string;
+      finalized: boolean;
+      correlations: { root_agent_id: string; agent_ids: string[] };
+    };
+    assert.strictEqual(
+      startManifest.world_model_mode,
+      'real',
+      'start manifest must be classifiable (real mode) so the bundle is ingestible'
+    );
+    assert.strictEqual(
+      startManifest.finalized,
+      false,
+      'start manifest must be marked not-yet-finalized'
+    );
+    assert.strictEqual(startManifest.correlations.root_agent_id, seed.rootAgentId);
+
     const invalidArtifact = await request(`${BASE_URL}/api/archive/artifact`, {
       method: 'POST',
       headers,
@@ -369,6 +397,7 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
       media_count: number;
       llm_trace_count: number;
       world_model_mode: string;
+      finalized: boolean;
       correlations: { root_agent_id: string; user_id: string; agent_ids: string[] };
       sensitive: {
         fixture_refs: { path: string }[];
@@ -382,6 +411,11 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
       manifest.world_model_mode,
       'real',
       'finalize without worldModelMode must record a real run'
+    );
+    assert.strictEqual(
+      manifest.finalized,
+      true,
+      'finalize must update the start manifest to finalized=true'
     );
     assert.strictEqual(manifest.correlations.root_agent_id, seed.rootAgentId);
     assert.strictEqual(manifest.correlations.user_id, seed.userId);
@@ -406,6 +440,14 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
     );
     assert(
       manifest.sensitive.llm_trace_refs.some((ref) => ref.path === 'llm/test-dump.json.gz.enc')
+    );
+    // The manifest is written at start, so listArchivedObjects() sees it during
+    // finalize. It must never index its own control files.
+    assert(
+      !manifest.sensitive.artifact_refs.some(
+        (ref) => ref.path === 'manifest.json.gz.enc' || ref.path === 'manifest.public.json'
+      ),
+      'finalize manifest must not index the manifest control files'
     );
   } finally {
     await cleanup(seed);

@@ -713,8 +713,13 @@ class AgentWorkflow:
             except Exception as e:
                 workflow.logger.warning(f"Failed to resolve Fast Mode cache goal, using workflow input goal: {e}")
 
-        # Send SMS notification for agent_started (root + SMS-source only)
-        if not parent_workflow_id and self.agent_source == "SMS":
+        # Send SMS notification for agent_started to every ROOT agent, regardless
+        # of source, so the user always gets a text with the deep link to any
+        # agent they create (SMS, web, mac-app, API). Sub-agents (parent_workflow_id
+        # set) are intentionally excluded — at 10k agents a per-spawn SMS would
+        # firehose the user's phone. Benchmark/eval runs are suppressed centrally
+        # on the backend (Agent.isBenchmark) so this never texts the operator.
+        if not parent_workflow_id:
             try:
                 await workflow.execute_activity(
                     notify_sms_event_activity,

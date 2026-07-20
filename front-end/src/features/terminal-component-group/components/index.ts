@@ -5,6 +5,7 @@ export { default as AgentSettingsDialog } from './AgentSettingsDialog';
 export * from './AppSidebar';
 export { default as AppSidebar } from './AppSidebar';
 export { default as SidebarAgentList } from './SidebarAgentList';
+export { default as MobileAgentDrawer } from './MobileAgentDrawer';
 export { default as SidebarBottomNav } from './SidebarBottomNav';
 export { default as SidebarCreditIndicator } from './SidebarCreditIndicator';
 export { default as SidebarFeedbackButton } from './SidebarFeedbackButton';

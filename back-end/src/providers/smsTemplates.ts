@@ -33,9 +33,11 @@ export const SMS_TEMPLATES = {
     `Sorry, we don't recognize this phone number. Please sign up at roselabs.ai first.`,
 
   /* c8 ignore start -- SMS Supervisor templates only called from excluded smsSupervisor module */
-  // SMS Supervisor templates. Keep routing identifiers out of user-facing copy.
-  agentStarted: (_prefix: string, goal: string, _url: string) =>
-    `Started: "${goal}"\nTrack in Rose: ${ROSE_LABS_URL}`,
+  // SMS Supervisor templates. Every lifecycle SMS carries the per-agent deep
+  // link (getAgentUrl → roselabs.ai?agent-id=…) so the user can open the exact
+  // run from their phone. `url` is the deep link, not the bare site root.
+  agentStarted: (_prefix: string, goal: string, url: string) =>
+    `Started: "${goal}"\nView agent: ${url || ROSE_LABS_URL}`,
 
   plannerQuestion: (_prefix: string, question: string) => `Rose asks: ${question}`,
 
@@ -44,14 +46,14 @@ export const SMS_TEMPLATES = {
   writeLock: (_prefix: string, question: string, _shortcode?: string) =>
     `Approval needed: ${question}`,
 
-  authAssistance: (_prefix: string, authRealm: string, _url: string) =>
-    `Login needed for ${authRealm}.\nOpen Rose to sign in: ${ROSE_LABS_URL}`,
+  authAssistance: (_prefix: string, authRealm: string, url: string) =>
+    `Login needed for ${authRealm}.\nOpen Rose to sign in: ${url || ROSE_LABS_URL}`,
 
   agentCardSetup: (_prefix: string, setupUrl: string) =>
     `One Time Agent Payment Setup needed before I can issue this payment card.\nOpen: ${setupUrl || ROSE_LABS_URL}`,
 
-  agentCompleted: (_prefix: string, summary: string, _url: string) =>
-    `Done: ${summary}\n\nFull report: ${ROSE_LABS_URL}`,
+  agentCompleted: (_prefix: string, summary: string, url: string) =>
+    `Done: ${summary}\n\nView agent: ${url || ROSE_LABS_URL}`,
 
   costLimit: (_prefix: string, taskLabel: string, costCents: number, limitCents: number) =>
     `I hit the $${(limitCents / 100).toFixed(2)} budget limit for "${taskLabel}". Reply with the amount to add if you want me to continue.`,

@@ -42,6 +42,11 @@ function renderHeader(overrides: Partial<ComponentProps<typeof TerminalHeader>> 
     isSignedIn: false,
     clientSource: 'WEB',
     realtimeReady: true,
+    agents: [],
+    isLoadingAgents: false,
+    selectedAgentId: null,
+    onResumeAgent: vi.fn().mockResolvedValue(undefined),
+    resumingAgentId: null,
     dripStyles,
     blur: 0,
     backgroundColors: 0,
@@ -79,5 +84,20 @@ describe('TerminalHeader responsive auth action', () => {
 
     expect(screen.queryByRole('button', { name: 'Login' })).not.toBeInTheDocument();
     expect(screen.getByTestId('attention-inbox').parentElement).not.toHaveClass('hidden');
+  });
+
+  it('shows a mobile-only agents drawer trigger when signed in', () => {
+    renderHeader({ isSignedIn: true });
+
+    const trigger = screen.getByRole('button', { name: 'Open agents menu' });
+    expect(trigger).toBeInTheDocument();
+    // Mobile-only: the desktop AppSidebar owns the agent list at >= md.
+    expect(trigger).toHaveClass('md:hidden');
+  });
+
+  it('does not render the agents drawer trigger when signed out', () => {
+    renderHeader({ isSignedIn: false });
+
+    expect(screen.queryByRole('button', { name: 'Open agents menu' })).not.toBeInTheDocument();
   });
 });
