@@ -33,6 +33,12 @@ require_text "$HELPERS" "expectInjectedSessionRecognized" "semantic helpers must
 require_text "$RUN_SH" 'resolve_temporal_task_queue "$CONDUCTOR_WORKSPACE_NAME"' "run.sh must derive its queue through the tested isolation boundary"
 require_text "$RUN_SH" 'export BACKEND_LOG_FILE="${BACKEND_LOG_FILE:-$PWD/back-end/backend-logs.log}"' "semantic stack must retain backend evidence"
 require_text "$RUN_SH" 'export FRONTEND_LOG_FILE="${FRONTEND_LOG_FILE:-$PWD/front-end/frontend-logs.log}"' "semantic stack must retain frontend evidence"
+require_text "$RUN_SH" 'Building bundled frontend before starting runtime services' "bundled frontend must build before memory-heavy runtime services start"
+require_text "$RUN_SH" 'npx vite preview --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE"' "bundled frontend service must only serve the completed production build"
+
+BUNDLED_BUILD_LINE=$(grep -n 'Building bundled frontend before starting runtime services' "$RUN_SH" | head -1 | cut -d: -f1)
+BACKEND_LAUNCH_LINE=$(grep -n '^launch_backend_service$' "$RUN_SH" | head -1 | cut -d: -f1)
+[ "$BUNDLED_BUILD_LINE" -lt "$BACKEND_LAUNCH_LINE" ] || fail "bundled frontend build must finish before backend and worker launch"
 
 # The lifecycle ratchet is a browser blackbox over every chat route.
 require_text "$LIFECYCLE_SPEC" "const SAMPLE_COUNT = 5;" "lifecycle ratchet must take five samples per path"

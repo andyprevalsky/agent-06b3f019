@@ -1427,12 +1427,21 @@ if $BENCHMARK_MODE; then
     export VITE_DEV_AUTO_LOGIN_OTP="${VITE_DEV_AUTO_LOGIN_OTP:-191919}"
 
 fi
+
+# Build the benchmark frontend before launching the backend and worker. Building
+# alongside eight worker processes can starve Vite long enough for the public
+# tunnel readiness check to fail even though the application is healthy.
+if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
+    echo "📦 Building bundled frontend before starting runtime services..."
+    (cd front-end && rm -f "$FRONTEND_LOG_FILE" && \
+        VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" npx vite build > "$FRONTEND_LOG_FILE" 2>&1)
+fi
 launch_backend_service
 
 # Front-end is always launched. Public payment benchmarks use a production bundle
 # so the cloud browser does not fetch the Vite development module graph over ngrok.
 if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
-    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_BACKEND_API_URL=$PUBLIC_BASE_URL npx vite build > "$FRONTEND_LOG_FILE" 2>&1 && npx vite preview --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE" 2>&1' &
+    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && npx vite preview --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE" 2>&1' &
 elif [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
     run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_DEV_PORT=$FRONTEND_PORT npx vite > "$FRONTEND_LOG_FILE" 2>&1' &
 else
