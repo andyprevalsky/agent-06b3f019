@@ -193,14 +193,15 @@ async function createNotifyAgent(goal: string) {
   });
 }
 
-function assertNoInternalRoutingTokens(message: string, agentId: string): void {
+/**
+ * Internal routing identifiers must never leak into SMS copy — even now that we
+ * intentionally embed the per-agent deep link. The bracketed prefix, raw
+ * attention id, and approval shortcode are all opaque routing tokens; the
+ * `agent-id=` deep link is the one URL we DO want (asserted separately).
+ */
+function assertNoRoutingLeaks(message: string, agentId: string): void {
   const prefix = agentId.substring(0, 6);
-  assert(!message.includes(agentId), `Expected no full agent id in SMS, got: ${message}`);
   assert(!message.includes(`[${prefix}]`), `Expected no agent prefix in SMS, got: ${message}`);
-  assert(
-    !message.includes(`agent-id=${agentId}`),
-    `Expected no agent-id URL in SMS, got: ${message}`
-  );
   assert(
     !/\battn[_-][a-z0-9-]+/i.test(message),
     `Expected no attention id in SMS, got: ${message}`
@@ -208,6 +209,27 @@ function assertNoInternalRoutingTokens(message: string, agentId: string): void {
   assert(
     !/\b(?:reply\s+)?approve\s+[A-Z0-9]{5}\b/i.test(message),
     `Expected no approval shortcode instruction in SMS, got: ${message}`
+  );
+}
+
+/** The per-agent deep link (roselabs.ai?agent-id=…) must be present. */
+function assertAgentLinkPresent(message: string, agentId: string): void {
+  assert(
+    message.includes(`agent-id=${agentId}`),
+    `Expected per-agent deep link (agent-id=${agentId}) in SMS, got: ${message}`
+  );
+}
+
+/**
+ * The agent deep link is the ONLY URL allowed to survive sanitization; all
+ * merchant/product/page URLs must still be stripped for carrier deliverability.
+ */
+function assertOnlyAgentLinkUrl(message: string, agentId: string): void {
+  assertAgentLinkPresent(message, agentId);
+  const withoutAgentLink = message.replace(/https?:\/\/\S*agent-id=\S+/gi, '');
+  assert(
+    !/https?:\/\//i.test(withoutAgentLink),
+    `Expected no non-agent URL in SMS body, got: ${message}`
   );
 }
 
@@ -960,7 +982,8 @@ async function testBoundary_notifyCompletionCallsSurgeApi() {
       body.body.includes('boundary test completed'),
       `Expected completion summary in SMS, got: ${body.body.substring(0, 100)}`
     );
-    assertNoInternalRoutingTokens(body.body, agent.id);
+    assertNoRoutingLeaks(body.body, agent.id);
+    assertAgentLinkPresent(body.body, agent.id);
     const archiveAfter = await listSmsArchivePaths(agent.id);
     const newEncryptedArtifacts = archiveAfter.filter(
       (entry) =>
@@ -1041,7 +1064,8 @@ async function testBoundary_notifyAgentStartedCallsSurgeApi() {
       body.body.includes('boundary test goal'),
       `Expected started message to include goal, got: ${body.body.substring(0, 100)}`
     );
-    assertNoInternalRoutingTokens(body.body, agent.id);
+    assertNoRoutingLeaks(body.body, agent.id);
+    assertAgentLinkPresent(body.body, agent.id);
   } finally {
     await prisma.agent.deleteMany({ where: { id: agent.id } });
   }
@@ -1082,7 +1106,7 @@ async function testBoundary_notifyCostLimitIncludesTaskGoal() {
       !body.body.includes('after spending'),
       `Expected cost-limit spend details, got: ${body.body.substring(0, 160)}`
     );
-    assertNoInternalRoutingTokens(body.body, agent.id);
+    assertNoRoutingLeaks(body.body, agent.id);
   } finally {
     await prisma.agent.deleteMany({ where: { id: agent.id } });
   }
@@ -1121,7 +1145,8 @@ async function testBoundary_notifyWriteLockNaturalLanguageOnly() {
     const body = JSON.parse(call.requestBody!);
     assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
     assert(body.body.includes(question), `Expected write-lock question in SMS, got: ${body.body}`);
-    assertNoInternalRoutingTokens(body.body, agent.id);
+    assertNoRoutingLeaks(body.body, agent.id);
+    assertAgentLinkPresent(body.body, agent.id);
     assert(
       !body.body.includes(attentionRequestId),
       `Expected no attention request id in SMS, got: ${body.body}`
@@ -1167,7 +1192,7 @@ async function testBoundary_notifyAgentCardSetupIncludesSetupLink() {
       `Expected setup label, got: ${body.body}`
     );
     assert(body.body.includes(setupUrl), `Expected setup link in SMS, got: ${body.body}`);
-    assertNoInternalRoutingTokens(body.body, agent.id);
+    assertNoRoutingLeaks(body.body, agent.id);
   } finally {
     await prisma.agent.deleteMany({ where: { id: agent.id } });
   }
@@ -1257,10 +1282,9 @@ async function testBoundary_notifyWriteLockStructuredMms() {
     );
     assert(body.body?.includes('Total: $21.74') === true, `Expected total in MMS: ${body.body}`);
     assert(!body.body?.includes('Page:'), `Expected no page URL in carrier SMS body: ${body.body}`);
-    assert(
-      !/https?:\/\//i.test(body.body ?? ''),
-      `Expected no URL in carrier SMS body: ${body.body}`
-    );
+    // The per-agent deep link is the only URL allowed to survive; the merchant
+    // product/checkout URLs must still be stripped for carrier deliverability.
+    assertOnlyAgentLinkUrl(body.body ?? '', agent.id);
     assert(
       !/\bAmazon\.com\b/i.test(body.body ?? ''),
       `Expected no bare domain in SMS body: ${body.body}`
@@ -1271,7 +1295,136 @@ async function testBoundary_notifyWriteLockStructuredMms() {
         body.attachments[0].url !== imageUrl,
       `Expected rehosted MMS attachment, got: ${JSON.stringify(body.attachments)}`
     );
-    assertNoInternalRoutingTokens(body.body ?? '', agent.id);
+    assertNoRoutingLeaks(body.body ?? '', agent.id);
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
+/**
+ * write_lock with a requestPaymentCard payload (the normalized, always-populated
+ * source) must render merchant, rating, reviews, and cost totals plus the agent
+ * deep link — even when writeLockNotification is absent. This is the fix for
+ * payment-approval SMS silently dropping reviews/costs.
+ */
+async function testBoundary_notifyWriteLockPaymentCardEnriched() {
+  const token = captureToken('notify-write-lock-card');
+  const agent = await createNotifyAgent('boundary payment card agent');
+  const itemName = 'Handmade Ceramic Pour-Over Dripper';
+  try {
+    const res = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        event_type: 'write_lock',
+        agent_id: agent.id,
+        payload: {
+          question: 'Approve a $56.24 purchase?',
+          attention_request_id: `attn-bb-${crypto.randomUUID()}`,
+          workflow_id: 'wf-boundary-write-lock-card',
+          metadata: {
+            requestPaymentCard: {
+              merchant: 'Nopa Fish',
+              currency: 'USD',
+              lineItems: [
+                {
+                  name: itemName,
+                  productUrl: 'https://shop.example.com/dripper?ref=agent',
+                  imageUrl: '',
+                  rating: 4.7,
+                  reviewCount: '1,284',
+                  unitPriceCents: 4999,
+                  quantity: 1,
+                  lineTotalCents: 4999,
+                },
+              ],
+              fees: [{ label: 'Tax', amountCents: 625 }],
+              subtotalCents: 4999,
+              totalCents: 5624,
+            },
+          },
+        },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const calls = await readCapturesForToken(token);
+    const surgeCalls = filterSurgeCalls(calls, itemName);
+    if (surgeCalls.length === 0) {
+      console.log('    [skipped] No Surge calls -- Surge may not be configured');
+      return;
+    }
+    assert(surgeCalls.length === 1, `Expected 1 Surge call, got ${surgeCalls.length}`);
+    const call = surgeCalls[0];
+    assert(call.requestBody !== null, 'Expected non-null request body');
+    const body = JSON.parse(call.requestBody!) as { to?: string; body?: string };
+    assert(body.to === TEST_PHONE, `Expected to=${TEST_PHONE}`);
+    const text = body.body ?? '';
+    assert(
+      text.includes('Rose needs your approval for Nopa Fish checkout.'),
+      `Expected merchant in payment-card SMS: ${text}`
+    );
+    assert(text.includes(itemName), `Expected item name: ${text}`);
+    assert(text.includes('Price: $49.99'), `Expected line price: ${text}`);
+    assert(text.includes('Rating: 4.7'), `Expected rating from card: ${text}`);
+    assert(text.includes('Reviews: 1,284'), `Expected review count from card: ${text}`);
+    assert(text.includes('Subtotal: $49.99'), `Expected subtotal: ${text}`);
+    assert(text.includes('Tax: $6.25'), `Expected fee line: ${text}`);
+    assert(text.includes('Total: $56.24'), `Expected total: ${text}`);
+    // Deep link present; merchant product URL stripped.
+    assertOnlyAgentLinkUrl(text, agent.id);
+    assertNoRoutingLeaks(text, agent.id);
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
+/**
+ * Benchmark/eval runs create real root agents under the operator's own phone.
+ * The dispatcher must suppress ALL lifecycle SMS for them (Agent.isBenchmark)
+ * so relaxing the workflow-side source guards never texts the operator during
+ * benchmark runs.
+ */
+async function testBoundary_notifyAgentStartedSuppressedForBenchmark() {
+  const token = captureToken('notify-started-benchmark');
+  const goal = 'boundary benchmark suppressed goal';
+  const agent = await prisma.agent.create({
+    data: {
+      userId: TEST_USER_ID,
+      goal,
+      status: 'ACTIVE',
+      source: 'WEB',
+      progress: 0.25,
+      isBenchmark: true,
+    },
+  });
+  try {
+    const res = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        event_type: 'agent_started',
+        agent_id: agent.id,
+        payload: { goal },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const result = res.data as { success?: boolean; skipped?: boolean; reason?: string };
+    assert(
+      result.skipped === true,
+      `Expected benchmark SMS to be skipped, got: ${JSON.stringify(result)}`
+    );
+    assert(
+      result.reason === 'benchmark_agent',
+      `Expected reason=benchmark_agent, got: ${JSON.stringify(result)}`
+    );
+    const calls = await readCapturesForToken(token);
+    const surgeCalls = filterSurgeCalls(calls, goal);
+    assert(
+      surgeCalls.length === 0,
+      `Expected NO Surge call for benchmark agent, got ${surgeCalls.length}`
+    );
   } finally {
     await prisma.agent.deleteMany({ where: { id: agent.id } });
   }
@@ -1569,6 +1722,14 @@ async function runAll() {
         {
           name: 'notify write_lock sends structured MMS with image',
           fn: testBoundary_notifyWriteLockStructuredMms,
+        },
+        {
+          name: 'notify write_lock renders payment card (merchant/reviews/cost/link)',
+          fn: testBoundary_notifyWriteLockPaymentCardEnriched,
+        },
+        {
+          name: 'notify agent_started suppressed for benchmark agent',
+          fn: testBoundary_notifyAgentStartedSuppressedForBenchmark,
         },
       ],
     });

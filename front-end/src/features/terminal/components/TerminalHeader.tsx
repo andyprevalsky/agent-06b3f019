@@ -2,12 +2,18 @@
  * STATE MACHINE: TerminalHeader
  *
  * STATIC: Floating blur header with Rose branding, research button, and responsive auth action.
- *         No internal state — purely prop-driven.
+ *         No internal state — purely prop-driven (the mobile agents drawer owns its own
+ *         open/closed state internally).
  *
  * RESPONSIVE AUTH ACTION:
  * [DESKTOP] -----------------------------> AttentionInbox
- * [MOBILE_SIGNED_IN] --------------------> AttentionInbox
+ * [MOBILE_SIGNED_IN] --------------------> agents drawer trigger + AttentionInbox
  * [MOBILE_SIGNED_OUT] -- tap Login -----> parent PhoneAuthModal opens
+ *
+ * MOBILE AGENTS DRAWER:
+ * [DESKTOP] -----------------------------> trigger hidden (>= md); desktop AppSidebar owns the list
+ * [MOBILE_SIGNED_IN] -- tap menu -------> MobileAgentDrawer slide-over over the same SidebarAgentList
+ * [MOBILE_SIGNED_OUT] -------------------> no trigger (no agents to show)
  *
  * SYSTEM CONTEXT:
  * mobile user tap -> TerminalHeader.onLoginClick -> useTerminalAgents.handleLoginClick
@@ -21,7 +27,8 @@
 import { useNavigate } from 'react-router-dom';
 import type { CSSProperties } from 'react';
 
-import { AttentionInbox } from '@/features/terminal-component-group';
+import { AttentionInbox, MobileAgentDrawer } from '@/features/terminal-component-group';
+import type { Agent } from '@/features/terminal-component-group';
 import { cn } from '@/lib/utils';
 
 import type { DripStyles } from '../types';
@@ -33,6 +40,11 @@ interface TerminalHeaderProps {
   isSignedIn: boolean;
   clientSource: string;
   realtimeReady: boolean;
+  agents: Agent[];
+  isLoadingAgents: boolean;
+  selectedAgentId: string | null;
+  onResumeAgent: (agentId: string) => Promise<void>;
+  resumingAgentId: string | null;
   dripStyles: DripStyles;
   blur: number;
   backgroundColors: number;
@@ -155,6 +167,11 @@ export function TerminalHeader({
   isSignedIn,
   clientSource,
   realtimeReady,
+  agents,
+  isLoadingAgents,
+  selectedAgentId,
+  onResumeAgent,
+  resumingAgentId,
   dripStyles,
   blur,
   backgroundColors,
@@ -167,7 +184,20 @@ export function TerminalHeader({
       style={buildHeaderStyle({ dripStyles, blur, backgroundColors, borderColor, shadowIntensity })}
     >
       <MarbleBackground backgroundColors={backgroundColors} dripStyles={dripStyles} />
-      <BrandButton onCreateNewAgent={onCreateNewAgent} />
+      <div className="flex items-center gap-1">
+        {isSignedIn && (
+          <MobileAgentDrawer
+            agents={agents}
+            isLoadingAgents={isLoadingAgents}
+            selectedAgentId={selectedAgentId}
+            onSelectAgent={onSelectAgent}
+            onCreateAgent={onCreateNewAgent}
+            onResumeAgent={onResumeAgent}
+            resumingAgentId={resumingAgentId}
+          />
+        )}
+        <BrandButton onCreateNewAgent={onCreateNewAgent} />
+      </div>
       <ResearchButton clientSource={clientSource} />
       <HeaderAuthAction
         isSignedIn={isSignedIn}
