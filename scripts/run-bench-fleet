@@ -707,11 +707,28 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale>
             case $? in
                 0) id="$resolved"; printf 'id=%s\n' "$id" >> "$record" ;;
                 1)
-                    # A successful Fly clone request may become list-visible
-                    # only after our lookup deadline.  The name-only ledger is
-                    # the sole durable ownership proof during that gap: keep it
-                    # and fail closed so a late-visible clone cannot be orphaned
-                    # while a successor provisions another fleet.
+                    # A successful Fly clone request may become list-visible only
+                    # after our lookup deadline. For the CURRENT (live-owner)
+                    # registry the name-only ledger is the sole durable ownership
+                    # proof during that gap, so keep it and fail closed — a
+                    # late-visible clone must not be orphaned while a successor
+                    # provisions another fleet.
+                    #
+                    # For a STALE registry the owner is already PROVEN DEAD
+                    # (registry_owner_alive returned dead before we got here), so a
+                    # name-only clone STILL confirmed absent from Fly never
+                    # materialized (or was already destroyed) and can never appear.
+                    # Failing closed here permanently blocks EVERY future run on
+                    # this host (observed: a dead neighbor's finished-run registry
+                    # with a phantom name-only record aborted all provisioning,
+                    # deterministically, run after run). Discard the phantom and
+                    # continue reaping. (resolve==2/unsafe-read still fails closed
+                    # via the '*' arm below — only a confirmed absence is dropped.)
+                    if [ "$mode" = "stale" ]; then
+                        echo "🧹 discarding phantom name-only clone '$clone_name' (confirmed absent from Fly; owner proven dead)"
+                        rm -f "$record"
+                        continue
+                    fi
                     echo "❌ owned clone name '$clone_name' is not provider-visible yet; retaining ownership and refusing to provision" >&2
                     return 1
                     ;;
