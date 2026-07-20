@@ -3,6 +3,13 @@
  * take-control affordance, the auth-assistance handoff, and the disconnected
  * resume overlay. Pure/stateless; extracted to keep the fullscreen container
  * under its size budget.
+ *
+ * STATE MACHINE (this file renders the AGENT OVERLAY STATE owned by
+ * BrowserStatusBarFullscreen; it holds no state of its own — props select which
+ * chip renders):
+ * [ACTIVE]                       -> WaitingForAssistanceChip / take-control affordance
+ * [WAITING_FOR_AUTH_ASSISTANCE]  -> AuthAssistanceChip (connected handoff)
+ * [DISCONNECTED]                 -> DisconnectedResumeOverlay (blurred resume)
  */
 
 import { cn } from '@/lib/utils';

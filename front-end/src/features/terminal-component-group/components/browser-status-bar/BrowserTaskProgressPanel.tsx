@@ -7,6 +7,12 @@
  *   desktop -> fixed-width left column beside the iframe (border-r)
  *   mobile  -> full width (rendered inside a full-screen overlay so it never
  *              clips the live iframe to a sliver)
+ *
+ * STATE MACHINE (presentation branch, driven by the isMobile/onClose props):
+ * [DESKTOP]      -> fixed-width left column beside the iframe (no close button)
+ * [MOBILE_HIDDEN] --parent "Progress" toggle--> [MOBILE_OPEN]
+ * [MOBILE_OPEN]   -> full-width panel in a full-screen overlay + close (X)
+ * [MOBILE_OPEN]   --tap X (onClose)--> [MOBILE_HIDDEN]
  */
 
 import { X } from 'lucide-react';
