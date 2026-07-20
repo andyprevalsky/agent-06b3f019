@@ -637,6 +637,14 @@ def test_payment_benchmark_enables_bundled_frontend_before_stack_start():
         assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
 
 
+def test_isolated_benchmark_services_allow_slow_first_sync():
+    """System-Postgres fallback must outlive a cold production-data sync."""
+    from benchmarks import local
+
+    timeout = local.wait_for_services.__kwdefaults__["timeout_seconds"]
+    assert timeout >= 600
+
+
 async def test_edge_warmup_requires_explicit_research_port():
     """Retired research ports must not add a failing warmup to every local benchmark."""
     import os
@@ -7388,6 +7396,10 @@ async def run_all_tests():
     r.record(
         "payment_benchmark_bundled_frontend",
         test_payment_benchmark_enables_bundled_frontend_before_stack_start,
+    )
+    r.record(
+        "isolated_benchmark_slow_first_sync",
+        test_isolated_benchmark_services_allow_slow_first_sync,
     )
     await r.record_async(
         "edge_warmup_explicit_research_port",

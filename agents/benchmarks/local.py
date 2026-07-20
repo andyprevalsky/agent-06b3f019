@@ -626,7 +626,7 @@ def wait_for_services(
     *,
     process: subprocess.Popen | None = None,
     service_log: Path = SERVICE_LOG,
-    timeout_seconds: int = 180,
+    timeout_seconds: int = 600,
 ) -> dict:
     deadline = time.time() + timeout_seconds
     last_error = ""
