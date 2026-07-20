@@ -102,6 +102,18 @@ docker_info_quick() {
     return 1
 }
 
+docker_available_for_workspace_db() {
+    local db_container=$1
+    if docker_info_quick; then
+        return 0
+    fi
+    # /deploy pre-starts the worktree-owned DB. A busy Docker Desktop can make
+    # `docker info` exceed the one-second startup budget even while this known
+    # container is healthy; preserve isolation instead of falling through to
+    # the shared system Postgres in that case.
+    docker_ps_ports_quick '{{.Names}}' | grep -Fxq "$db_container"
+}
+
 # Check cwd first because many service command lines are just "node" or
 # "python3" and do not include the worktree path.
 process_belongs_to_this_worktree() {
@@ -402,13 +414,13 @@ fi
 # ── Pre-flight: ensure Postgres is available ──
 # Prefer Docker (per-workspace container), fall back to system Postgres when
 # the Docker daemon isn't available (sandboxed containers, CI without --privileged).
+DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
+DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
 DOCKER_OK=false
-if docker_info_quick; then
+if docker_available_for_workspace_db "$DB_CONTAINER"; then
     DOCKER_OK=true
 fi
 
-DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
-DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
 DB_OWNED_BY_US=false  # Track whether this run started/created the DB.
 DB_OWNED_CONTAINER_ID=""
 USE_SYSTEM_PG=false

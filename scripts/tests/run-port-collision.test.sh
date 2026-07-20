@@ -22,6 +22,22 @@ export CONDUCTOR_WORKSPACE_NAME=port-collision-test
 export RUN_SH_SOURCE_ONLY=true
 source "$ROOT_DIR/scripts/run.sh"
 
+docker_info_quick() {
+    return 1
+}
+docker_ps_ports_quick() {
+    printf '%s\n' 'victoria-db-port-collision-test'
+}
+if ! docker_available_for_workspace_db 'victoria-db-port-collision-test'; then
+    echo "FAIL: a pre-started workspace DB must keep Docker selected when docker info is slow" >&2
+    exit 1
+fi
+if docker_available_for_workspace_db 'victoria-db-another-workspace'; then
+    echo "FAIL: another workspace's DB must not make Docker available for this workspace" >&2
+    exit 1
+fi
+echo "PASS: a pre-started workspace DB survives a slow docker info probe"
+
 find_free_port() {
     local port
     for port in $(seq 61000 62000); do
