@@ -26,6 +26,7 @@ interface WaterfallOptions {
   responseFormat?: ResponseFormat;
   temperature?: number;
   maxTokens?: number;
+  reasoningEffort?: string;
   openrouterKey: string;
   requestId: string;
   callSite?: string;
@@ -43,6 +44,7 @@ export function buildOpenRouterBody(opts: {
   responseFormat?: ResponseFormat;
   temperature?: number;
   maxTokens?: number;
+  reasoningEffort?: string;
   providerFastMode?: boolean;
   tools?: Array<Record<string, unknown>>;
   toolChoice?: unknown;
@@ -56,6 +58,9 @@ export function buildOpenRouterBody(opts: {
   if (opts.responseFormat) body.response_format = opts.responseFormat;
   if (opts.temperature !== undefined) body.temperature = opts.temperature;
   if (opts.maxTokens !== undefined) body.max_tokens = opts.maxTokens;
+  if (opts.reasoningEffort !== undefined) {
+    body.reasoning = { effort: opts.reasoningEffort };
+  }
   if (opts.providerFastMode === true) body.speed = 'fast';
   if (opts.tools) body.tools = opts.tools;
   if (opts.toolChoice !== undefined) body.tool_choice = opts.toolChoice;
@@ -83,6 +88,7 @@ export async function* waterfallComplete(opts: WaterfallOptions): AsyncIterable<
       responseFormat: opts.responseFormat,
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
+      reasoningEffort: opts.reasoningEffort,
       providerFastMode: opts.providerFastMode,
       tools: opts.tools,
       toolChoice: opts.toolChoice,
