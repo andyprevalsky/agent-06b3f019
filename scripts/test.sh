@@ -255,6 +255,7 @@ run_suite "Cloud Benchmark Lifecycle" agents/venv/bin/python -m pytest -q agents
 run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh
 run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh
 run_suite "Cloud Benchmark Orphan-Proxy Reaper" bash scripts/tests/fleet-orphan-proxy-reaper.test.sh
+run_suite "Seed-Dump Cache Decision" bash scripts/tests/seed-cache-decision.test.sh
 
 # ── Build checks (run in parallel with blackbox tests) ──
 BUILD_PIDS=()

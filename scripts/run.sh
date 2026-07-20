@@ -27,6 +27,7 @@ normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
 . "$SCRIPT_DIR/lib/ngrok-tunnel.sh"
 . "$SCRIPT_DIR/lib/run-context.sh"
+. "$SCRIPT_DIR/lib/seed-cache.sh"
 
 RUN_CONTEXT_DIR="$(normalize_run_context_dir "$PWD" "${BENCHMARK_CONTEXT_DIR:-.context}")"
 BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
@@ -607,17 +608,25 @@ _SEED_CACHE_TOKEN="${_SCHEMA_HASH}-$(date -u +%Y%m%d 2>/dev/null || echo undated
 # gate on the file, not the environment. seed-dump-cache.ts loads the .env itself.
 _SEED_CACHE_ENABLED=0
 grep -qE '^R2_BUCKET_TRACE_ARCHIVE=.' back-end/.env 2>/dev/null && _SEED_CACHE_ENABLED=1
-if [ -n "$_SEED_DUMP" ] && [ ! -s "$_SEED_DUMP" ] && [ "$_SEED_CACHE_ENABLED" = 1 ]; then
+# Decide where the seeded DB comes from (scripts/lib/seed-cache.sh). A stale dump
+# baked into the warm snapshot must fall through to the shared cache, NOT shadow
+# it — the old `[ ! -s ]` guard skipped the download whenever ANY dump existed, so
+# a hash-mismatched snapshot dump cold-synced every clone and starved the barrier.
+_SEED_DECISION="$(seed_cache_decision "$_SEED_DUMP" "$_SCHEMA_HASH" "$_SEED_CACHE_ENABLED")"
+if [ "$_SEED_DECISION" = "consult-remote" ]; then
+    # Drop any stale local dump so a clean cache object lands in its place.
+    rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
     echo "🔎 Checking shared seed-dump cache ($_SEED_CACHE_TOKEN)..."
     if (cd back-end && npx tsx scripts/seed-dump-cache.ts get "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") 2>/dev/null && [ -s "$_SEED_DUMP" ]; then
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
+        _SEED_DECISION="restore-local"
         echo "   ✅ pulled cached seed dump ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}')) — restoring instead of cold-syncing"
     else
         rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
         echo "   ℹ️ no cached dump for this schema/day — will cold-sync and populate it"
     fi
 fi
-if [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ] && [ "$(cat "${_SEED_DUMP}.schemahash" 2>/dev/null || echo x)" = "$_SCHEMA_HASH" ]; then
+if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ]; then
     echo "🗜️  Restoring seeded DB from persistent dump ($_SEED_DUMP) — skipping schema push + seed..."
     if PGPASSWORD=postgres pg_restore -h localhost -U postgres -d victoria --clean --if-exists --no-owner "$_SEED_DUMP" >/dev/null 2>&1; then
         DB_RESTORED=true
