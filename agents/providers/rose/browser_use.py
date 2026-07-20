@@ -176,6 +176,35 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         ),
         "params": {},
     },
+    "rotate_ip": {
+        "description": (
+            "Replace the browser's outbound IP address when the current one is being blocked or "
+            "rate-limited by the site. Use this ONLY when you have concrete evidence the IP itself is "
+            "the problem — a 'too many requests' / rate-limit page, an 'unusual traffic detected' or "
+            "'access denied' interstitial, a CAPTCHA wall that keeps reappearing, or repeated 429 "
+            "responses. Do NOT use it for ordinary failures — wrong credentials, a 404, a genuine "
+            "out-of-stock, a form validation error, or a page that simply didn't load — rotating won't "
+            "fix those and it burns a limited budget. Escalation path (the tool advances automatically "
+            "each call, up to 4 rotations per browser run): calls 1-2 give a fresh residential IP in the "
+            "same region (login and cookies preserved); calls 3-4 escalate to a mobile-carrier IP (the "
+            "strongest, hardest-to-block tier), same region. After 4 rotations the tool returns an error, "
+            "which means the site is hard-blocking our entire proxy pool for this session — stop retrying "
+            "this route and either try a different approach or report the target as unreachable. Each "
+            "rotation takes a few seconds and discards any unsubmitted form data on the current page, but "
+            "keeps you logged in and returns you to the current URL. The result tells you which tier you "
+            "landed on and how many rotations remain."
+        ),
+        "params": {
+            "reason": {
+                "type": "string",
+                "description": (
+                    "One line on why you believe the current IP is blocked or rate-limited "
+                    "(e.g. 'repeated 429s on search', 'captcha wall reappears after solving')."
+                ),
+                "required": True,
+            },
+        },
+    },
     "request_payment_card": {
         "description": (
             "Request a one-time virtual payment card for the current checkout. Call this when you reach a "
@@ -812,6 +841,10 @@ _VALID_ACTIONS = frozenset(
         "request_user_assistance_for_authentication",
         "request_payment_card",
         "generate_write_lock_notification",
+        # rotate_ip is advertised in BROWSER_USE_TOOLS (see above); keep it in the
+        # allowlist or normalize_browser_use_response() rejects the model's call and
+        # the browser step aborts before the handler can rotate the proxy.
+        "rotate_ip",
     }
 )
 

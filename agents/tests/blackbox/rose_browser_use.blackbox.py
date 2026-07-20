@@ -29,6 +29,8 @@ from providers.rose import POOL_REGISTRY, RoseClient, claude_auth_from_token, ge
 from providers.fast_cache.context import FastCacheContext, reset_context, set_context
 from providers.rose.browser_use import (
     BROWSER_USE_TOOLS,
+    _ACTION_NAME_MAP,
+    _VALID_ACTIONS,
     _normalize_action_params,
     build_browser_use_messages,
     build_browser_use_system_prompt,
@@ -97,6 +99,36 @@ def test_browser_use_tool_catalog_completeness():
     assert must_have.issubset(set(BROWSER_USE_TOOLS.keys()))
     assert "extract" not in BROWSER_USE_TOOLS
     assert "restart_auth_with_cookie_bundle" not in BROWSER_USE_TOOLS
+
+
+def test_every_advertised_tool_is_normalizable():
+    # Regression guard: every tool advertised in BROWSER_USE_TOOLS is put in
+    # the model's system prompt, so the model can and will emit it. If a tool
+    # is advertised but missing from _VALID_ACTIONS (after _ACTION_NAME_MAP
+    # remapping), normalize_browser_use_response() raises "Unknown action" and
+    # the browser step aborts 5x -> the whole browser agent dies. This is
+    # exactly how rotate_ip shipped broken. Keep the allowlist in sync.
+    for tool_name in BROWSER_USE_TOOLS:
+        normalized = _ACTION_NAME_MAP.get(tool_name, tool_name)
+        assert normalized in _VALID_ACTIONS, (
+            f"Tool {tool_name!r} is advertised in BROWSER_USE_TOOLS but is not in "
+            f"_VALID_ACTIONS (normalized: {normalized!r}). The model will emit it and "
+            f"normalize_browser_use_response() will reject it, aborting the browser agent. "
+            f"Add it to _VALID_ACTIONS or _ACTION_NAME_MAP in providers/rose/browser_use.py."
+        )
+
+
+def test_rotate_ip_normalizes_and_preserves_reason():
+    # rotate_ip backs the mid-session IP-rotation tool. It must normalize (be in
+    # the allowlist) and carry its `reason` param through to the handler, which
+    # reads params.reason for telemetry.
+    for completion in (
+        {"thinking": "captcha wall", "action": [{"rotate_ip": {"reason": "captcha wall reappears"}}]},
+        {"thinking": "429s", "action": [{"action_name": "rotate_ip", "reason": "repeated 429s on search"}]},
+    ):
+        result = normalize_browser_use_response(completion)
+        assert result["action"] == "rotate_ip", result
+        assert result["params"].get("reason"), result
 
 
 def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():

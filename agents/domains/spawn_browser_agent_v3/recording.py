@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import html
 import json
 import mimetypes
@@ -207,6 +208,12 @@ class BrowserAgentRecorder:
         )
         self._kernel_replay_id: Optional[str] = None
         self.recording_view_url: Optional[str] = None
+        # One replay per Kernel session. rotate_ip evicts the current session and
+        # stands up a new one, so a single replay would only ever capture the first
+        # session (and its IP). We record ONE replay segment per session and hand
+        # the FE the full ordered list, so the recording follows every rotation and
+        # visibly shows the exit IP changing across segments.
+        self._replay_segments: List[Dict[str, Any]] = []
         self.output_dir = browser_recording_output_dir(agent_id, task_id)
         self.frames_dir = self.output_dir / "frames"
         self.media_dir = self.output_dir / "media"
@@ -319,12 +326,24 @@ class BrowserAgentRecorder:
                 data = response.json()
             self._kernel_replay_id = data.get("replay_id")
             self.recording_view_url = data.get("replay_view_url")
+            # Record this session's segment. The start-time view URL is valid even
+            # before stop and survives session eviction, so a segment stays playable
+            # after rotate_ip tears its session down. Segment order == rotation order.
+            if self.recording_view_url:
+                self._replay_segments.append(
+                    {
+                        "session_id": self.session_id,
+                        "replay_id": self._kernel_replay_id,
+                        "view_url": self.recording_view_url,
+                    }
+                )
             logger.info(
                 "Kernel replay recording started",
                 agent_id=self.agent_id,
                 task_id=self.task_id,
                 session_id=self.session_id,
                 replay_id=self._kernel_replay_id,
+                segment_index=len(self._replay_segments) - 1,
             )
         except Exception as exc:  # noqa: BLE001 — surface to create(), which returns None
             logger.warning(
@@ -338,6 +357,164 @@ class BrowserAgentRecorder:
             self._kernel_replay_id = None
             self.recording_view_url = None
             raise
+
+    async def rotate_kernel_replay(self, new_session_id: str) -> None:
+        """Follow a rotate_ip session swap: finalize the current session's replay
+        segment and start a fresh one on the rotated session.
+
+        rotate_ip evicts the current Kernel session and stands up a new one on a
+        different exit IP. A single replay pinned to the original session would
+        only ever show the first IP — the recording would look like the IP never
+        changed. We therefore keep one replay per session: the old segment's
+        start-time view URL is already captured (and survives eviction), so we just
+        start a new replay on ``new_session_id`` and append its segment. Best-effort
+        throughout — recording must never break the browser run."""
+        if not self.uses_kernel_replay or not new_session_id or new_session_id == self.session_id:
+            return
+        # Best-effort stop of the outgoing session's replay so Kernel finalizes it
+        # promptly. The session is usually already evicted by the backend rotation;
+        # its persisted replay (and the start-time URL we saved) survive regardless.
+        headers = _kernel_replay_headers()
+        if headers is not None and self._kernel_replay_id:
+            with contextlib.suppress(Exception):
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.post(
+                        f"{_kernel_api_base()}/browsers/{self.session_id}"
+                        f"/replays/{self._kernel_replay_id}/stop",
+                        headers=headers,
+                    )
+        # Rebind to the new session and start a fresh replay segment.
+        self.session_id = new_session_id
+        self._kernel_replay_id = None
+        self.recording_view_url = None
+        try:
+            await self._start_kernel_replay()
+        except Exception as exc:  # noqa: BLE001 — a failed segment must not break the run
+            logger.warning(
+                "Kernel replay failed to start on rotated session; recording will "
+                "miss this segment",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                session_id=new_session_id,
+                error=str(exc)[:300],
+            )
+            # Keep uses_kernel_replay True: earlier segments are still valid and must
+            # be finalized. _start_kernel_replay flipped it off on failure; restore.
+            self.uses_kernel_replay = True
+
+    @property
+    def replay_view_urls(self) -> List[str]:
+        """All per-session replay view URLs in rotation order (baseline first)."""
+        return [seg["view_url"] for seg in self._replay_segments if seg.get("view_url")]
+
+    async def _run_ffmpeg_concat(
+        self, ffmpeg_path: str, list_file: Path, out_path: Path, *, copy: bool
+    ) -> bool:
+        args = [
+            ffmpeg_path,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_file),
+        ]
+        # -c copy is instant but needs uniform codecs across segments; the re-encode
+        # fallback guarantees one clean stream regardless of per-segment timebase.
+        args += ["-c", "copy"] if copy else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-an"]
+        args += ["-movflags", "+faststart", str(out_path)]
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            cwd=str(list_file.parent),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            logger.debug(
+                "ffmpeg replay concat failed",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                copy=copy,
+                error=stderr.decode("utf-8", errors="replace")[:500],
+            )
+            return False
+        return out_path.exists() and out_path.stat().st_size > 0
+
+    async def stitch_segments_to_mp4(self) -> Optional[bytes]:
+        """Concatenate every per-session replay segment into ONE continuous MP4.
+
+        rotate_ip records one Kernel replay per session (baseline + one per
+        rotation), each on a different exit IP. This downloads them all and stitches
+        them into a single video so the FE plays one continuous recording of the IP
+        changing — not a playlist. Returns the stitched bytes, or None (ffmpeg
+        missing / a download or concat failure) so the caller can fall back to the
+        per-segment URL list."""
+        urls = self.replay_view_urls
+        if len(urls) < 2:
+            return None
+        ffmpeg_path = shutil.which("ffmpeg")
+        if not ffmpeg_path:
+            logger.warning(
+                "ffmpeg unavailable; cannot stitch replay segments into one video",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                segment_count=len(urls),
+            )
+            return None
+        with tempfile.TemporaryDirectory(prefix="rose-replay-stitch-") as tmp:
+            tmp_dir = Path(tmp)
+            seg_paths: List[Path] = []
+            try:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+                    for index, url in enumerate(urls):
+                        # The freshly-stopped last segment can lag S3 availability;
+                        # retry briefly so the final rotation isn't dropped.
+                        last_exc: Optional[Exception] = None
+                        for attempt in range(3):
+                            try:
+                                response = await client.get(url)
+                                response.raise_for_status()
+                                if not response.content:
+                                    raise RuntimeError("empty replay body")
+                                break
+                            except Exception as exc:  # noqa: BLE001 — retry transient S3 lag
+                                last_exc = exc
+                                await asyncio.sleep(1.5 * (attempt + 1))
+                        else:
+                            raise last_exc or RuntimeError("segment download failed")
+                        seg_path = tmp_dir / f"seg_{index:03d}.mp4"
+                        seg_path.write_bytes(response.content)
+                        seg_paths.append(seg_path)
+            except Exception as exc:  # noqa: BLE001 — fall back to the segment URL list
+                logger.warning(
+                    "Replay segment download failed; skipping stitch",
+                    agent_id=self.agent_id,
+                    task_id=self.task_id,
+                    error=str(exc)[:300],
+                )
+                return None
+            list_file = tmp_dir / "segments.txt"
+            list_file.write_text("".join(f"file '{p.name}'\n" for p in seg_paths), encoding="utf-8")
+            out_path = tmp_dir / "stitched.mp4"
+            stitched = await self._run_ffmpeg_concat(ffmpeg_path, list_file, out_path, copy=True)
+            if not stitched:
+                stitched = await self._run_ffmpeg_concat(ffmpeg_path, list_file, out_path, copy=False)
+            if not stitched:
+                return None
+            data = out_path.read_bytes()
+            logger.info(
+                "Replay segments stitched into one video",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                segment_count=len(seg_paths),
+                bytes=len(data),
+            )
+            return data
 
     async def stop_kernel_replay(self) -> Optional[str]:
         """Stop the Kernel replay and return the (finalized) hosted view URL.
@@ -383,6 +560,11 @@ class BrowserAgentRecorder:
             )
             if match and match.get("replay_view_url"):
                 self.recording_view_url = match["replay_view_url"]
+                # Keep the current (last) segment's URL in sync with the finalized one.
+                for seg in reversed(self._replay_segments):
+                    if seg.get("replay_id") == self._kernel_replay_id:
+                        seg["view_url"] = match["replay_view_url"]
+                        break
         except Exception as exc:  # noqa: BLE001 — fall back to start-time view URL
             logger.warning(
                 "Kernel replay list failed; using start-time view URL",

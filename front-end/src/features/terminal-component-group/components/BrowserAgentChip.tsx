@@ -45,6 +45,10 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
   const [recordingState, setRecordingState] = useState<'idle' | 'loading' | 'ready' | 'error'>(
     'idle',
   );
+  // Which Kernel replay segment (one per session/rotation) is currently playing.
+  // The segments auto-advance into one continuous recording (baseline -> each
+  // rotation), so this is the playhead, not a manual tab selection.
+  const [segmentIndex, setSegmentIndex] = useState(0);
 
   const toolCallId = message.metadata?.toolCallId as string | undefined;
 
@@ -111,13 +115,30 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
   // (Kernel view URL OR Supabase pointer) — scanning the two independently could
   // surface an older session's view URL over the latest retry's pointer.
   const recordingSource = useMemo<
-    { kind: 'view'; url: string } | { kind: 'pointer'; pointer: FilePointer } | null
+    | { kind: 'video'; pointer: FilePointer }
+    | { kind: 'view'; urls: string[] }
+    | { kind: 'pointer'; pointer: FilePointer }
+    | null
   >(() => {
     for (let i = taskMessages.length - 1; i >= 0; i--) {
       const md = taskMessages[i].metadata;
-      const url = md?.recording_view_url as string | null | undefined;
-      if (url) return { kind: 'view', url };
       const fp = md?.recording_file_pointer as FilePointer | null | undefined;
+      // Preferred: rotate_ip's per-session replay segments stitched server-side into
+      // ONE continuous MP4 (a video/* pointer). The FE plays it as a single video of
+      // the exit IP changing across rotations — no playlist, no manual switching.
+      if (fp?.storage_path && (fp.mime_type ?? '').startsWith('video/')) {
+        return { kind: 'video', pointer: fp };
+      }
+      // Fallback (ffmpeg/stitch unavailable): the raw Kernel-hosted segment URLs,
+      // played back-to-back. A single URL is just a one-segment list.
+      const urls = md?.recording_view_urls as string[] | null | undefined;
+      if (Array.isArray(urls)) {
+        const clean = urls.filter((u): u is string => typeof u === 'string' && u.length > 0);
+        if (clean.length) return { kind: 'view', urls: clean };
+      }
+      const url = md?.recording_view_url as string | null | undefined;
+      if (url) return { kind: 'view', urls: [url] };
+      // Legacy screenshot replay: a self-contained HTML player pointer.
       if (fp?.storage_path) return { kind: 'pointer', pointer: fp };
     }
     return null;
@@ -129,7 +150,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
   // of pinning the stale URL/state.
   const recordingKey =
     recordingSource?.kind === 'view'
-      ? recordingSource.url
+      ? recordingSource.urls.join('|')
       : (recordingSource?.pointer.storage_path ?? null);
   // Monotonic generation of the selected recording. Bumping it on every source
   // change invalidates any in-flight async load so a stale fetch can't overwrite
@@ -139,6 +160,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     recordingLoadGeneration.current += 1;
     setRecordingState('idle');
     setRecordingUrl(null);
+    setSegmentIndex(0);
   }, [recordingKey]);
 
   const trajectory = useMemo(
@@ -159,25 +181,31 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
   async function openRecording() {
     setTab('recording');
     if (recordingState !== 'idle' || !recordingSource) return;
-    // Kernel replay: the view URL is a ready-to-iframe hosted player — no fetch.
+    // Kernel replay: each segment's view URL streams that session's MP4 directly.
+    // Multiple segments (one per rotation) auto-advance into one continuous video
+    // (see the <video> playlist below) — no fetch, no manual tab switching.
     if (recordingSource.kind === 'view') {
-      setRecordingUrl(recordingSource.url);
+      setSegmentIndex(0);
       setRecordingState('ready');
       return;
     }
     if (!selectedAgentId) return;
     const { pointer } = recordingSource;
+    const isVideo = recordingSource.kind === 'video';
     const loadGeneration = recordingLoadGeneration.current;
     setRecordingState('loading');
     try {
       const url = await getAttachmentUrl(selectedAgentId, pointer.id, pointer.storage_path);
-      // Supabase serves stored files as text/plain + nosniff (XSS safety), so an
-      // <iframe src> would show raw HTML. Fetch the bytes and load them via a
-      // text/html Blob URL so the recording actually renders.
+      // Supabase serves stored files as text/plain + nosniff (XSS safety), so a
+      // direct <video>/<iframe> src won't play/render. Fetch the bytes and load them
+      // via a typed Blob URL: video/mp4 for the stitched replay, text/html for the
+      // legacy screenshot player.
       const res = await fetch(url);
       if (!res.ok) throw new Error(`recording fetch ${res.status}`);
-      const html = await res.text();
-      const blobUrl = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
+      const blob = isVideo
+        ? new Blob([await res.arrayBuffer()], { type: pointer.mime_type || 'video/mp4' })
+        : new Blob([await res.text()], { type: 'text/html' });
+      const blobUrl = URL.createObjectURL(blob);
       // A newer recording was selected while this load was in flight — discard
       // this result (and its Blob URL) instead of clobbering the current one.
       if (loadGeneration !== recordingLoadGeneration.current) {
@@ -289,13 +317,78 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                 {hasRecording && recordingState === 'error' && (
                   <p className="text-xs text-red-500">Failed to load recording.</p>
                 )}
-                {hasRecording && recordingState === 'ready' && recordingUrl && (
-                  <iframe
-                    title="Browser recording"
-                    src={recordingUrl}
-                    className="aspect-[16/10] max-h-[75vh] w-full rounded border border-border bg-black"
-                  />
+                {/* Stitched replay: rotate_ip's per-session segments were
+                    concatenated server-side into ONE continuous MP4, so the whole
+                    run (baseline -> each rotation, IP changing) plays in a single
+                    video player. */}
+                {hasRecording &&
+                  recordingState === 'ready' &&
+                  recordingSource?.kind === 'video' &&
+                  recordingUrl && (
+                    <video
+                      title="Browser recording"
+                      src={recordingUrl}
+                      controls
+                      autoPlay
+                      muted
+                      playsInline
+                      className="aspect-[16/10] max-h-[75vh] w-full rounded border border-border bg-black"
+                    />
+                  )}
+                {/* Fallback (stitch unavailable): play the raw per-rotation segment
+                    URLs back-to-back. On each segment end we advance the playhead so
+                    baseline -> rotation 1 -> ... still streams without manual
+                    switching. A slim marker strip shows where each rotation begins. */}
+                {hasRecording && recordingState === 'ready' && recordingSource?.kind === 'view' && (
+                  <div>
+                    {recordingSource.urls.length > 1 && (
+                      <div data-testid="recording-segments" className="mb-2">
+                        <p className="mb-1 text-xs text-muted-foreground">
+                          Continuous replay — now showing{' '}
+                          <span className="font-medium text-foreground">
+                            {segmentIndex === 0 ? 'baseline IP' : `rotation ${segmentIndex}`}
+                          </span>{' '}
+                          ({segmentIndex + 1} of {recordingSource.urls.length} IPs)
+                        </p>
+                        <div className="flex h-1 w-full gap-0.5 overflow-hidden rounded">
+                          {recordingSource.urls.map((url, i) => (
+                            <div
+                              key={url}
+                              className={`h-full flex-1 rounded-full ${
+                                i <= segmentIndex ? 'bg-foreground/70' : 'bg-muted'
+                              }`}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <video
+                      key={recordingSource.urls[segmentIndex]}
+                      title="Browser recording"
+                      src={recordingSource.urls[segmentIndex]}
+                      controls
+                      autoPlay
+                      muted
+                      playsInline
+                      onEnded={() => {
+                        setSegmentIndex((i) =>
+                          i + 1 < recordingSource.urls.length ? i + 1 : i,
+                        );
+                      }}
+                      className="aspect-[16/10] max-h-[75vh] w-full rounded border border-border bg-black"
+                    />
+                  </div>
                 )}
+                {hasRecording &&
+                  recordingState === 'ready' &&
+                  recordingSource?.kind === 'pointer' &&
+                  recordingUrl && (
+                    <iframe
+                      title="Browser recording"
+                      src={recordingUrl}
+                      className="aspect-[16/10] max-h-[75vh] w-full rounded border border-border bg-black"
+                    />
+                  )}
               </div>
             )}
           </div>

@@ -419,6 +419,30 @@ async def resume_browser_session(config: Any, task_id: str) -> Dict[str, Any]:
     raise Exception(f"Failed to resume session: {response.text}")
 
 
+async def rotate_browser_proxy(config: Any, task_id: str) -> Dict[str, Any]:
+    """Rotate the browser session's outbound IP (rotate_ip tool).
+
+    Returns the resume-shaped session (new ws_url on the same profile) plus
+    escalation state (proxy_tier, rotations_used, rotations_remaining,
+    rotation_message). On a 409 the rotation budget is exhausted — surfaced to the
+    caller as {"exhausted": True, ...} so the agent can stop rotating.
+    """
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/browser-session/rotate-proxy",
+            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            json={"task_id": task_id},
+        )
+    if response.status_code in [200, 201]:
+        return response.json()
+    if response.status_code == 409:
+        body = response.json()
+        return {"exhausted": True, "status_code": 409, "message": body.get("message", ""), **body}
+    if response.status_code == 429:
+        return {"rate_limited": True, "status_code": 429}
+    raise Exception(f"Failed to rotate proxy: {response.text}")
+
+
 async def fetch_auth_options(config: Any, user_id: str, realm: str) -> Dict[str, Any]:
     """Fetch single-realm authentication options for a browser agent spawn."""
     async with httpx.AsyncClient(timeout=15.0) as client:
