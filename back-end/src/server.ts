@@ -58,6 +58,7 @@ import archiveRouter from './domains/archive/routes';
 import worldModelsRouter from './domains/world-models/routes';
 import { anthropicProxyRouter, codexProxyRouter } from './domains/fast-cache/routes.proxy';
 import { prisma } from './providers/database';
+import { alertError } from './providers/errorAlert';
 import { createLogger } from './providers/logger';
 import { installFetchCapture, captureTokenMiddleware } from './providers/fetchCapture';
 import { tracingMiddleware } from './providers/tracing';
@@ -281,6 +282,24 @@ if (process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1') {
 // Health check endpoint (no auth required)
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Deep health check — actually touches the DB so an EXTERNAL uptime monitor
+// (BetterStack/UptimeRobot) can detect "DB is down" and page #errors. The
+// in-process alerters can't self-report a dead DB/backend; this is the pull
+// surface an external watcher hits. Returns 503 when the DB is unreachable.
+app.get('/health/deep', async (_req, res) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    res.json({ status: 'ok', db: 'up', timestamp: new Date().toISOString() });
+  } catch (err) {
+    res.status(503).json({
+      status: 'error',
+      db: 'down',
+      error: err instanceof Error ? err.message : String(err),
+      timestamp: new Date().toISOString(),
+    });
+  }
 });
 
 // Dev-only: Frontend console log capture endpoint
@@ -594,4 +613,8 @@ process.on('unhandledRejection', (reason) => {
 });
 process.on('uncaughtException', (err) => {
   log.error(`Uncaught exception: ${err.message}\n${err.stack}`);
+  // Best-effort last gasp: the backend may be dying. A hard SIGKILL/OOM won't
+  // reach this (that's what the external /health/deep monitor is for), but a
+  // recoverable uncaught throw still gets surfaced to #errors.
+  alertError({ source: 'backend_crash', message: err.message, stack: err.stack });
 });

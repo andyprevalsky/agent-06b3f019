@@ -16,6 +16,7 @@ import {
   type ResponseSchemaDirectAuth,
 } from '../../providers/setResponseSchema';
 import { createLogger } from '../../providers/logger';
+import { alertError } from '../../providers/errorAlert';
 import type { PostMessageBody } from './types';
 import * as repo from './repo';
 
@@ -120,6 +121,13 @@ async function routeUserMessage(agentId: string, messageText: string): Promise<v
       log.error('Chat handler error in message route', {
         agent_id: agentId,
         error: err instanceof Error ? err.message : String(err),
+      });
+      alertError({
+        source: 'chat',
+        message: err instanceof Error ? err.message : String(err),
+        agentId,
+        userId: agentForChat.userId,
+        stack: err instanceof Error ? err.stack : undefined,
       });
       // Fail loud, not silent: without this the user gets a 201 and then nothing
       // (the prod symptom). Surface an assistant message so the UI shows the

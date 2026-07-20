@@ -104,6 +104,7 @@ from helpers import (
     update_agent_status,
 )
 from helpers.attachments import fetch_parent_attachments_activity, resolve_attachments_activity
+from helpers.error_alert import report_failure_activity
 from helpers.llm import (
     call_planner_llm_activity,
     fetch_claude_max_token_activity,
@@ -1128,6 +1129,8 @@ async def main():
             query_parent_state_activity,
             # World-model runtime shim
             world_model_step_activity,
+            # Failure alerting (direct-to-Slack, no backend hop)
+            report_failure_activity,
         ],
         tuner=tuner,
         max_cached_workflows=config.temporal.max_cached_workflows,
