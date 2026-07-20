@@ -5,7 +5,13 @@
  */
 
 import { z } from 'zod';
-import { createStreamingCompletion, markCacheable, type CompletionChunk } from '../rose';
+import {
+  createStreamingCompletion,
+  markCacheable,
+  type CompletionChunk,
+  type CompletionMessage,
+  type CompletionOptions,
+} from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { agentFastMode, cacheGet, cacheSet } from '../fastCacheStore';
 import { goalHash } from '../fastCacheNormalizeCore';
@@ -292,6 +298,36 @@ function extractStreamableReasoning(
 // ============================================
 // Router LLM Call with Streaming
 // ============================================
+export function buildRouterCompletionOptions(params: {
+  model: string;
+  messages: CompletionMessage[];
+  providerRoute: ChatProviderRoute;
+  providerFastMode: boolean;
+  abortSignal?: AbortSignal;
+}): CompletionOptions {
+  return {
+    model: params.model,
+    messages: params.messages,
+    temperature: 0.3,
+    // The router is a small structured classification step. Gemini 3.5 Flash
+    // enables medium reasoning by default on OpenRouter, which can consume most
+    // of the synchronous chat latency budget after a Cerebras stall. Keep its
+    // mandatory reasoning at the provider's minimum, just like the generator.
+    effort: 'minimal',
+    response_format: {
+      type: 'json_schema',
+      json_schema: {
+        name: 'router_decision',
+        strict: true,
+        schema: ROUTER_JSON_SCHEMA,
+      },
+    },
+    provider_fast_mode: params.providerFastMode,
+    provider_route: params.providerRoute,
+    abort_signal: params.abortSignal,
+  };
+}
+
 export async function callRouterLlm(params: {
   agentId: string;
   messages: ChatMessage[];
@@ -374,6 +410,7 @@ export async function callRouterLlm(params: {
     fcKey = contentKey(fastMode.goal, 'chat_router', {
       model: params.model,
       temperature: 0.3,
+      effort: 'minimal',
       response_format: {
         type: 'json_schema',
         name: 'router_decision',
@@ -397,22 +434,15 @@ export async function callRouterLlm(params: {
   }
 
   const createLiveStream = (abortSignal?: AbortSignal) =>
-    createStreamingCompletion({
-      model: params.model,
-      messages: openaiMessages,
-      temperature: 0.3,
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'router_decision',
-          strict: true,
-          schema: ROUTER_JSON_SCHEMA,
-        },
-      },
-      provider_fast_mode: providerFastMode,
-      provider_route: params.providerRoute,
-      abort_signal: abortSignal,
-    });
+    createStreamingCompletion(
+      buildRouterCompletionOptions({
+        model: params.model,
+        messages: openaiMessages,
+        providerRoute: params.providerRoute,
+        providerFastMode,
+        abortSignal,
+      })
+    );
 
   let stream: AsyncIterable<CompletionChunk>;
   if (fcKey && fastModeRead) {
