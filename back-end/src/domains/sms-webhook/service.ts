@@ -16,7 +16,10 @@ import type { SurgeAttachment } from './types';
 import { getTemporalClient } from '../../providers/temporal';
 import { sendSms } from '../../providers/smsQueue';
 import { createSignupBonusCredit } from '../../providers/credits';
-import { handleSmsSupervisorMessage } from '../../providers/smsSupervisor';
+import {
+  handleSmsSupervisorMessage,
+  SUPERVISOR_FALLBACK_MESSAGE,
+} from '../../providers/smsSupervisor';
 import { createLogger } from '../../providers/logger';
 import { alertError } from '../../providers/errorAlert';
 import { recordInboundSms } from '../../providers/smsSupervisor/sessionStore';
@@ -234,7 +237,7 @@ async function handleSupervisorFailure(input: SupervisorFailureInput): Promise<v
       log.info('Error path: seq advanced, suppressing fallback SMS', { userId, mySeq, currentSeq });
       return;
     }
-    await sendSms(fromPhone, 'Sorry, something went wrong. Please try again.');
+    await sendSms(fromPhone, SUPERVISOR_FALLBACK_MESSAGE);
   } catch (smsError) {
     log.error('Failed to send error SMS', {
       error: smsError instanceof Error ? smsError.message : String(smsError),

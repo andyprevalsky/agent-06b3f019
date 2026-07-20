@@ -1,7 +1,3 @@
-// Load environment variables FIRST, before any other imports
-import dotenv from 'dotenv';
-dotenv.config();
-
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
@@ -79,9 +75,7 @@ const httpLog = createLogger('HTTP');
 if (!process.env.BACKEND_API_KEY) {
   log.warn('BACKEND_API_KEY not found in environment - internal API calls from workers will fail');
 } else {
-  log.info('BACKEND_API_KEY loaded', {
-    key_prefix: process.env.BACKEND_API_KEY.substring(0, 20) + '...',
-  });
+  log.info('BACKEND_API_KEY loaded');
 }
 
 // Wire the data domain's grep into the provider-side bridge so the SMS

@@ -10,10 +10,17 @@
  *
  * [DISCONNECTED]
  *   - iframe + blurred Take Control overlay
+ *
+ * SIZING:
+ *   fullscreen -> flex-1 (fills the fullscreen column)
+ *   inline desktop -> aspect-video (16:9)
+ *   inline mobile -> h-[60vh] (a fixed 16:9 letterbox is a tiny sliver on a
+ *     narrow portrait phone, so use available viewport height instead)
  */
 
 import { useRef } from 'react';
 import { cn } from '@/lib/utils';
+import { useIsMobile } from '@/hooks/use-mobile';
 import BrowserBorderGlow from '../BrowserBorderGlow';
 import BrowserCursorOverlay from '../BrowserCursorOverlay';
 import { StatusOverlay } from './StatusOverlay';
@@ -43,12 +50,13 @@ export function BrowserIframe({
   onResume,
 }: BrowserIframeProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const isMobile = useIsMobile();
 
   return (
     <div
       className={cn(
         'bg-white border-x border-b border-border w-full relative',
-        isFullscreen ? 'flex-1' : 'aspect-video',
+        isFullscreen ? 'flex-1' : isMobile ? 'h-[60vh]' : 'aspect-video',
       )}
     >
       <iframe

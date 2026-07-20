@@ -14,6 +14,7 @@ echo "🧹 Tearing down workspace: $WORKSPACE (dir: $WORKTREE_DIR)"
 echo "   Killing processes..."
 KILLED=false
 for pattern in \
+    "$WORKTREE_DIR/back-end/src/bootstrap.ts" \
     "$WORKTREE_DIR/back-end/src/server.ts" \
     "$WORKTREE_DIR/front-end.*vite" \
     "$WORKTREE_DIR/mac-app/node_modules" \

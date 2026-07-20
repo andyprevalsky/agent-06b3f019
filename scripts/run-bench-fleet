@@ -159,7 +159,15 @@ while [ $# -gt 0 ]; do
         --provision-pool) PROVISION_POOL="${2:-}"; shift 2 ;;   # one-time: create N stopped clones, then exit
         -h|--help)        sed -n '2,47p' "$0"; exit 0 ;;
         --*)              echo "❌ Unknown flag: $1" >&2; exit 2 ;;
-        *)                BENCHES+=("$1"); shift ;;
+        *)                # Split each positional token on whitespace so a single
+                          # space-joined arg ("a b c") still yields multiple
+                          # benches. Bench names are [a-z0-9-] and never contain
+                          # spaces, so this is lossless — and it guards the common
+                          # footgun of passing an unquoted variable from zsh (the
+                          # default interactive shell here), which does NOT
+                          # word-split, collapsing `run-bench $LIST` into one bench.
+                          for _tok in $1; do BENCHES+=("$_tok"); done
+                          shift ;;
     esac
 done
 # Dedupe bench names (preserve first-seen order). Each bench gets ONE isolated
@@ -223,7 +231,7 @@ per_box_barrier_wait_seconds() {
         printf '%s\n' "$CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS"
         return
     fi
-    first_run_stack_wait="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"
+    first_run_stack_wait="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-2160}"
     pre_stack_allowance="${CLOUDBENCH_PRE_STACK_WAIT_SECONDS:-600}"
     case "$first_run_stack_wait:$pre_stack_allowance" in
         *[!0-9:]*|:*|*:)
@@ -234,7 +242,14 @@ per_box_barrier_wait_seconds() {
     printf '%s\n' "$((first_run_stack_wait + pre_stack_allowance))"
 }
 
-FIRST_RUN_STACK_WAIT_SECONDS="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"
+# Cold first-boot budget: a freshly-cloned guest has no cached seed dump and
+# does a full production DB sync (~19 min for the ecommerce/browser slice) that
+# only gets slower as N stacks contend on the sync concurrently. 2160s (= 1800s
+# + 20% headroom) keeps a slow-but-healthy stack from being excluded at the
+# start barrier. The durable fix is to bake the seed dump into the warm snapshot
+# so clones RESTORE instead of re-sync (see cloudbench-run.sh:stack_wait_budget_seconds
+# — the tighter 900s budget applies the moment a seed dump is present).
+FIRST_RUN_STACK_WAIT_SECONDS="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-2160}"
 PER_BOX_BARRIER_WAIT_SECONDS="$(per_box_barrier_wait_seconds)" || exit 2
 START_BARRIER_WAIT_SECONDS="${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}"
 for seconds in "$RUN_TIMEOUT" "$FIRST_RUN_STACK_WAIT_SECONDS" "$PER_BOX_BARRIER_WAIT_SECONDS" "$START_BARRIER_WAIT_SECONDS"; do
@@ -684,6 +699,21 @@ registry_runner_count() {  # registry_runner_count <started-machine-id>; exact i
     printf '%s' "$count"
 }
 
+registry_record_is_stale_phantom() {  # <record-file>; 0 = absent long enough to be a confirmed phantom
+    # A name-only clone record that is STILL absent from Fly is either a real
+    # clone lagging provider visibility (seconds–minutes) or a request that never
+    # materialized (a permanent phantom). Only elapsed time tells them apart, so a
+    # record is a confirmed phantom only once it has outlived any plausible
+    # visibility gap. Default TTL (900s) is far beyond CLOUDBENCH_CLONE_LOOKUP_SECONDS
+    # (20s) + Fly list eventual-consistency, so a lagging clone is never discarded.
+    local record="$1" ttl now mt
+    ttl="${CLOUDBENCH_PHANTOM_RECORD_TTL_SECONDS:-900}"
+    case "$ttl" in ''|*[!0-9]*) ttl=900 ;; esac
+    now="$(date +%s)"
+    mt="$(stat -f %m "$record" 2>/dev/null || stat -c %Y "$record" 2>/dev/null || echo "$now")"
+    [ $(( now - mt )) -ge "$ttl" ]
+}
+
 reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale>
     local registry="${1%/}" root="${FLEET_OWNERSHIP_ROOT%/}" mode="$2" record clone_name id resolved details detail_status state actual_name runner_count
     [ "$registry" != "$root" ] \
@@ -700,11 +730,30 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale>
             case $? in
                 0) id="$resolved"; printf 'id=%s\n' "$id" >> "$record" ;;
                 1)
-                    # A successful Fly clone request may become list-visible
-                    # only after our lookup deadline.  The name-only ledger is
-                    # the sole durable ownership proof during that gap: keep it
-                    # and fail closed so a late-visible clone cannot be orphaned
-                    # while a successor provisions another fleet.
+                    # A successful Fly clone request may become list-visible only
+                    # after our lookup deadline. For the CURRENT (live-owner)
+                    # registry the name-only ledger is the sole durable ownership
+                    # proof during that gap, so keep it and fail closed — a
+                    # late-visible clone must not be orphaned while a successor
+                    # provisions another fleet.
+                    #
+                    # For a STALE registry the owner is already PROVEN DEAD
+                    # (registry_owner_alive returned dead before we got here). Such
+                    # a name-only record is retained fail-closed while it is still
+                    # young enough to be a real clone lagging provider visibility
+                    # (Scenario 7) — orphaning that would leak a paid machine. But
+                    # once it has been absent far longer than any visibility gap it
+                    # is a confirmed phantom whose request never materialized, and
+                    # keeping it permanently blocks EVERY future run on this host
+                    # (observed: a finished neighbor fleet's dead-owner registry
+                    # with a ~45-min-old phantom aborted all provisioning, run after
+                    # run). Discard only the aged-out phantom; a fresh gap or an
+                    # unsafe read (resolve==2, the '*' arm) still fails closed.
+                    if [ "$mode" = "stale" ] && registry_record_is_stale_phantom "$record"; then
+                        echo "🧹 discarding aged-out phantom name-only clone '$clone_name' (absent from Fly > ${CLOUDBENCH_PHANTOM_RECORD_TTL_SECONDS:-900}s; owner proven dead)"
+                        rm -f "$record"
+                        continue
+                    fi
                     echo "❌ owned clone name '$clone_name' is not provider-visible yet; retaining ownership and refusing to provision" >&2
                     return 1
                     ;;
@@ -792,6 +841,28 @@ acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-d
     done
     echo "❌ timed out waiting for stale fleet recovery lock: $registry" >&2
     return 1
+}
+
+reap_orphaned_fleet_proxies() {
+    # A controller reaps its `flyctl proxy` (WireGuard data-plane) children via an
+    # EXIT trap — but SIGKILL / a laptop sleep-crash bypasses that trap, orphaning
+    # the proxies to init (ppid 1). They tunnel to long-dead machines yet hold FDs
+    # and WireGuard sessions forever; left unreaped they accumulate across days
+    # (observed: 100+ two-day-old orphans) until new runs' data-plane tunnels can't
+    # connect (all status proxies http 000, the relay freezes, the start barrier
+    # never sees readiness). Reap ONLY app-scoped proxies whose parent is dead
+    # (ppid == 1); a concurrently running fleet's proxies have a LIVE parent and are
+    # never touched, so this is safe under cross-workspace concurrency (rule 27).
+    local pids
+    pids="$(ps -o pid,ppid,command -ax 2>/dev/null \
+        | grep "flyctl proxy" | grep -F -- "-a $APP" \
+        | awk '$2==1{print $1}')" || return 0
+    [ -n "$pids" ] || return 0
+    printf '%s\n' "$pids" | while read -r pid; do [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null; done
+    sleep 1
+    printf '%s\n' "$pids" | while read -r pid; do [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null; done
+    local n; n="$(printf '%s\n' "$pids" | grep -c .)"
+    echo "🧹 reaped $n orphaned data-plane proxy tunnel(s) leaked by a dead controller"
 }
 
 reconcile_stale_fleet_registries() {
@@ -1977,6 +2048,9 @@ fi
 # identity is definitively dead. Any active runner, unreadable probe, malformed
 # ownership, or transitional provider state blocks new provisioning.
 reconcile_stale_fleet_registries || exit 1
+# Reap data-plane proxy tunnels leaked by SIGKILLed/crashed controllers before
+# provisioning, so a backlog of orphaned tunnels can't starve this run's proxies.
+reap_orphaned_fleet_proxies
 # Recovery may have removed active machines. Capacity must classify the
 # post-reconciliation provider state, not the earlier warm-source lookup.
 warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
@@ -1984,22 +2058,54 @@ warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
     exit 1
 }
 
-# ── App-wide capacity guard (not a lock) ─────────────────────────────────────
-# Concurrent workstreams multiply active compute (N fleets × benches ×
-# autoscale). Stopped warm/pool inventory costs no compute, so it must not
-# consume this burst ceiling. Every unknown or transitioning state remains
-# capacity-consuming (fail closed); raise the ceiling only for an intentional
-# larger active burst.
-MAX_APP_MACHINES="${CLOUDBENCH_APP_MAX_MACHINES:-60}"
+# ── App-wide capacity guard — ELASTIC, shared-CPU-unit based ─────────────────
+# The real Fly constraint is NOT a flat machine count: it is the org-wide
+# shared-CPU OVERCOMMIT GOVERNOR (~160 units — Fly rejected the 37th
+# shared-cpu-4x primary at 148 + prod's ~16 = 164 > 160). Primaries are
+# shared-cpu-2x (2 shared units each); workers are performance-1x, which draw a
+# SEPARATE performance reservation and do NOT count against the shared governor.
+#
+# So instead of a conservative flat count (the old CLOUDBENCH_APP_MAX_MACHINES=60,
+# which blocked legitimate concurrent workstreams long before Fly would), we gate
+# PRIMARY provisioning on shared-CPU units and let a run auto-expand into ALL
+# available shared capacity — enough to hold many concurrent daily-scale
+# workstreams. Stopped warm/pool inventory costs no compute and is excluded.
+# Unknown/transitioning states stay capacity-consuming (fail closed). Below the
+# governor we NEVER block: a new workstream auto-reserves the capacity it needs.
+# The ONLY hard block is the true physical governor — past it no script can
+# conjure capacity; that requires actually raising the Fly org reservation and
+# then bumping CLOUDBENCH_SHARED_CPU_GOVERNOR to match.
+SHARED_CPU_GOVERNOR="${CLOUDBENCH_SHARED_CPU_GOVERNOR:-160}"
+# Governor is org-wide but this guard only sees the bench app; reserve headroom
+# for prod's active shared units + a safety margin.
+SHARED_CPU_HEADROOM="${CLOUDBENCH_SHARED_CPU_HEADROOM:-20}"
+SHARED_CPU_CEILING=$(( SHARED_CPU_GOVERNOR - SHARED_CPU_HEADROOM ))
+# Shared units per newly-provisioned primary, parsed from the primary shape
+# (shared-cpu-Nx → N); default 2 if the shape is non-standard.
+_primary_nx="${FLEET_PRIMARY_VM_SIZE##*-}"; _primary_nx="${_primary_nx%x}"
+case "$_primary_nx" in ''|*[!0-9]*) PRIMARY_SHARED_UNITS=2 ;; *) PRIMARY_SHARED_UNITS="$_primary_nx" ;; esac
 requested_machines="${PROVISION_POOL:-${#BENCHES[@]}}"
+requested_shared=$(( requested_machines * PRIMARY_SHARED_UNITS ))
 capacity_counts="$(printf '%s' "$warm_json" | python3 -c '
 import json, sys
 try:
     machines = json.load(sys.stdin)
-    if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+    if not isinstance(machines, list) or any(not isinstance(m, dict) for m in machines):
         raise ValueError("invalid machine list")
-    stopped = sum(machine.get("state") == "stopped" for machine in machines)
-    print(len(machines) - stopped, stopped, len(machines))
+    active_shared = active_perf = running = stopped = 0
+    for m in machines:
+        if m.get("state") == "stopped":
+            stopped += 1
+            continue
+        running += 1
+        guest = (m.get("config") or {}).get("guest") or {}
+        cpus = guest.get("cpus")
+        cpus = cpus if isinstance(cpus, int) and cpus > 0 else 1
+        if guest.get("cpu_kind") == "shared":
+            active_shared += cpus
+        else:
+            active_perf += cpus
+    print(active_shared, active_perf, running, stopped)
 except Exception:
     print("")
 ' 2>/dev/null || true)"
@@ -2007,13 +2113,26 @@ if [ -z "$capacity_counts" ]; then
     echo "❌ App capacity guard could not classify current machine states; refusing to provision." >&2
     exit 1
 fi
-read -r active_machines stopped_machines total_machines <<< "$capacity_counts"
-if [ $((active_machines + requested_machines)) -gt "$MAX_APP_MACHINES" ]; then
-    echo "❌ App active-compute capacity guard: $active_machines active/transitioning machines" >&2
-    echo "   ($stopped_machines stopped; $total_machines total) and this run adds $requested_machines" >&2
-    echo "   (ceiling CLOUDBENCH_APP_MAX_MACHINES=$MAX_APP_MACHINES). Another workstream may be running large;" >&2
-    echo "   finish/teardown other runs or sweep proven active zombies (flyctl machines list -a $APP)." >&2
+read -r active_shared active_perf running_machines stopped_machines <<< "$capacity_counts"
+projected_shared=$(( active_shared + requested_shared ))
+if [ "$projected_shared" -gt "$SHARED_CPU_CEILING" ]; then
+    # The only hard block: at the physical Fly shared-CPU governor. Provisioning
+    # more primaries here would be rejected by Fly (resource_exhausted) anyway.
+    echo "❌ Shared-CPU capacity governor reached: $active_shared active shared units" >&2
+    echo "   + this run's $requested_machines primaries ($requested_shared units) = $projected_shared" >&2
+    echo "   > ceiling $SHARED_CPU_CEILING (governor $SHARED_CPU_GOVERNOR − headroom $SHARED_CPU_HEADROOM)." >&2
+    echo "   Auto-reserve cannot exceed the org's Fly shared-CPU reservation. To lift it:" >&2
+    echo "   raise the Fly org reservation, then set CLOUDBENCH_SHARED_CPU_GOVERNOR to match." >&2
+    echo "   (Or wait for another workstream to drain: flyctl machines list -a $APP.)" >&2
     exit 1
+fi
+# Elastic auto-reserve: below the governor we never block a legitimate workstream.
+# Announce when we dip into the top quarter of shared capacity so concurrent runs
+# stay visible.
+_soft_line=$(( SHARED_CPU_CEILING * 3 / 4 ))
+if [ "$projected_shared" -gt "$_soft_line" ]; then
+    echo "🧵 auto-reserving shared capacity for this workstream: $projected_shared/$SHARED_CPU_CEILING units" >&2
+    echo "   ($active_shared active shared + $requested_shared requested; $active_perf perf units; running=$running_machines stopped=$stopped_machines) — proceeding." >&2
 fi
 
 # --provision-pool: one-time pre-provision of N stopped clones, then exit.

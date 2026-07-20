@@ -155,6 +155,17 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
     });
     return { success: true, skipped: true, reason: 'agent_deleted' };
   }
+  // Benchmark/eval runs create real root agents under the operator's own phone.
+  // Lifecycle SMS (agent_started, write_lock, completion, …) fire on any source
+  // now, so without this central gate every benchmark run would text the
+  // operator. Suppress here so the workflow-side source guards can safely relax.
+  if (agent.isBenchmark) {
+    log.info('Agent is a benchmark run, skipping SMS', {
+      agentId: data.agent_id,
+      eventType: data.event_type,
+    });
+    return { success: true, skipped: true, reason: 'benchmark_agent' };
+  }
 
   const payload = data.payload ?? {};
 
