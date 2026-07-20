@@ -32,3 +32,23 @@ seed_cache_decision() {
     fi
     printf 'cold-sync\n'
 }
+
+# How many 1-second /health probes to allow the isolated benchmark backend before
+# declaring it hung. A box that just materialised the FULL production DB needs a
+# long budget to initialise it — and it does so WHETHER the DB arrived via a cold
+# prod seed (FIRST_RUN_SEEDED) or by RESTORING the cached dump (DB_RESTORED). The
+# two paths leave the backend an identical amount of state to warm. The original
+# code granted the long budget only to the cold-seed path, so once the seed-dump
+# cache actually started warm-restoring boxes, every warm box was capped at 60s,
+# timed out both supervised backend attempts, and was excluded before the start
+# barrier → 0/8. Restore must get the same budget as a cold seed.
+# backend_ready_budget <first_run_seeded 0|1> <db_restored 0|1> [override]
+backend_ready_budget() {
+    local first_run_seeded="$1" db_restored="$2" override="${3:-}"
+    local cold_budget="${CLOUDBENCH_COLD_BACKEND_START_READY_ATTEMPTS:-180}"
+    if [ -n "$override" ]; then printf '%s\n' "$override"; return 0; fi
+    if [ "$first_run_seeded" = 1 ] || [ "$db_restored" = 1 ]; then
+        printf '%s\n' "$cold_budget"; return 0
+    fi
+    printf '%s\n' 60
+}

@@ -73,6 +73,31 @@ else
     PASS=$((PASS+1)); echo "  ✅ run.sh no longer gates the R2 download on '! -s dump'"
 fi
 
+echo
+echo "backend_ready_budget — warm-restored boxes must get the same startup budget"
+echo "as cold-seeded boxes (both hold the full prod DB). Capping restore at 60s"
+echo "timed out every warm box and starved the barrier once the seed cache landed."
+# Cold prod seed → long budget (default 180).
+check "cold seed (frs=1,dbr=0) → 180" "180" "$(backend_ready_budget 1 0)"
+# THE BUG: warm restore (dbr=1) previously fell through to 60. Must now be 180.
+check "warm restore (frs=0,dbr=1) → 180 (was the 60s barrier-starve bug)" "180" "$(backend_ready_budget 0 1)"
+# Neither → the short 60 budget (small/empty DB, nothing to warm).
+check "neither seeded nor restored → 60" "60" "$(backend_ready_budget 0 0)"
+# Both flags set → long budget (still one full DB).
+check "both flags → 180" "180" "$(backend_ready_budget 1 1)"
+# Explicit override wins regardless of DB state.
+check "explicit override wins" "42" "$(backend_ready_budget 0 1 42)"
+# Cold-budget env override is honoured for the restore path.
+check "restore honours COLD env override" "240" "$(CLOUDBENCH_COLD_BACKEND_START_READY_ATTEMPTS=240 backend_ready_budget 0 1)"
+# Wiring guard: run.sh must call backend_ready_budget with DB_RESTORED, not gate
+# the long budget on FIRST_RUN_SEEDED alone.
+if grep -q 'backend_ready_budget' "$ROOT_DIR/scripts/run.sh" \
+   && grep -qE '\$DB_RESTORED && _dbr=1' "$ROOT_DIR/scripts/run.sh"; then
+    PASS=$((PASS+1)); echo "  ✅ run.sh routes DB_RESTORED into backend_ready_budget"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ run.sh does not give warm-restored boxes the long backend budget"
+fi
+
 echo "RESULTS: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
 echo "PASS: seed-cache decision routes stale/absent dumps to the shared cache; valid dumps restore locally"

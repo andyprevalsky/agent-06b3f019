@@ -1383,16 +1383,14 @@ restart_backend_service() {
     launch_backend_service
 }
 isolated_backend_ready_attempts() {
-    if [ -n "${CLOUDBENCH_BACKEND_START_READY_ATTEMPTS:-}" ]; then
-        printf '%s\n' "$CLOUDBENCH_BACKEND_START_READY_ATTEMPTS"
-    elif $FIRST_RUN_SEEDED; then
-        # The first backend launch after a full production seed has substantially
-        # more database state to initialize. Do not kill a live process at the
-        # warm guest's 60-second boundary and thereby restart all of that work.
-        printf '%s\n' "${CLOUDBENCH_COLD_BACKEND_START_READY_ATTEMPTS:-180}"
-    else
-        printf '%s\n' 60
-    fi
+    # The long budget applies to ANY box that just materialised the full prod DB —
+    # a cold seed (FIRST_RUN_SEEDED) OR a cache/dump restore (DB_RESTORED). Both
+    # leave the backend the same large state to warm; capping restore at 60s timed
+    # out every warm box and starved the barrier. See backend_ready_budget().
+    local _frs=0 _dbr=0
+    $FIRST_RUN_SEEDED && _frs=1
+    $DB_RESTORED && _dbr=1
+    backend_ready_budget "$_frs" "$_dbr" "${CLOUDBENCH_BACKEND_START_READY_ATTEMPTS:-}"
 }
 wait_for_isolated_backend_ready() {
     local launch_attempt probe_attempt
