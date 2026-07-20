@@ -256,6 +256,7 @@ run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.te
 run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh
 run_suite "Cloud Benchmark App-Env Lock" bash scripts/tests/cloudbench-app-env-lock.test.sh
 run_suite "Cloud Benchmark Seed Budget" bash scripts/tests/cloudbench-seed-budget.test.sh
+run_suite "Cloud Benchmark Restore Readiness" bash scripts/tests/cloudbench-restore-readiness.test.sh
 run_suite "Cloud Benchmark Orphan-Proxy Reaper" bash scripts/tests/fleet-orphan-proxy-reaper.test.sh
 
 # ── Build checks (run in parallel with blackbox tests) ──

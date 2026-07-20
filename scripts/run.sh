@@ -618,8 +618,15 @@ if [ -n "$_SEED_DUMP" ] && [ ! -s "$_SEED_DUMP" ] && [ "$_SEED_CACHE_ENABLED" = 
     fi
 fi
 if [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ] && [ "$(cat "${_SEED_DUMP}.schemahash" 2>/dev/null || echo x)" = "$_SCHEMA_HASH" ]; then
-    echo "🗜️  Restoring seeded DB from persistent dump ($_SEED_DUMP) — skipping schema push + seed..."
-    if PGPASSWORD=postgres pg_restore -h localhost -U postgres -d victoria --clean --if-exists --no-owner "$_SEED_DUMP" >/dev/null 2>&1; then
+    echo "🗜️  Restoring seeded DB from persistent dump ($_SEED_DUMP) into $LOCAL_DB_NAME — skipping schema push + seed..."
+    # Restore into the SAME database the backend's DATABASE_URL points at
+    # ($LOCAL_DB_NAME, which is victoria_bench_<run-id> for an isolated benchmark
+    # run — see the BENCHMARK_RUN_ID branch above). A hardcoded `victoria` here
+    # would populate the wrong DB and hand the app an empty one. Keep pg_restore's
+    # stderr on the stack log (only stdout → /dev/null): pg_restore continues past
+    # per-object errors and still exits 0 without `-e`, so a swallowed 2>&1 would
+    # report "✅ DB restored" over a PARTIAL, backend-unusable DB with no trace.
+    if PGPASSWORD=postgres pg_restore -h localhost -U postgres -d "$LOCAL_DB_NAME" --clean --if-exists --no-owner "$_SEED_DUMP" >/dev/null; then
         DB_RESTORED=true
         echo "   ✅ DB restored from dump"
     else
@@ -628,7 +635,13 @@ if [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ] && [ "$(cat "${_SEED_DUMP}.schem
 fi
 
 if $DB_RESTORED; then
-    :
+    # A restored dump USUALLY already carries the Message trgm/grep indexes, but a
+    # dump published by an older box (before this step existed) or a partially-
+    # applied restore can lack them — so re-ensure idempotently. This gives the
+    # fast-restore path the SAME backend-ready schema as the cold-sync (else) path,
+    # which runs this same step, rather than a subtly different DB.
+    echo "🔎 Ensuring agent-network grep indexes (post-restore)..."
+    (cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts)
 else
 
 # Sync Prisma schema to local DB (idempotent, dev-only)
@@ -687,7 +700,7 @@ fi
 # instead of re-seeding. Best-effort; the schemahash guards against schema drift.
 if [ -n "$_SEED_DUMP" ]; then
     echo "🗜️  Saving seed dump for fast future warm-starts ($_SEED_DUMP)..."
-    if PGPASSWORD=postgres pg_dump -h localhost -U postgres -Fc victoria > "$_SEED_DUMP" 2>/dev/null; then
+    if PGPASSWORD=postgres pg_dump -h localhost -U postgres -Fc "$LOCAL_DB_NAME" > "$_SEED_DUMP" 2>/dev/null; then
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
         echo "   ✅ seed dump saved ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}'))"
         # Publish to the shared cache so the NEXT clone (any workspace — including a
