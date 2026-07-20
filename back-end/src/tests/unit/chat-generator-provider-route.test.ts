@@ -112,14 +112,18 @@ async function testDirectFailureFallsThroughToWaterfall(): Promise<void> {
   process.env.CEREBRAS_API_KEY = 'direct-cerebras';
   process.env.OPENROUTER_API_KEY = 'openrouter-waterfall';
   const calls: string[] = [];
-  globalThis.fetch = (async (input: string | URL | Request) => {
+  let waterfallBody: Record<string, unknown> = {};
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     calls.push(url);
     // Direct Cerebras attempt fails fast, pre-content...
     if (url === CEREBRAS_API_URL) return new Response('provider unavailable', { status: 503 });
     // ...so chat must fall through to the multi-provider OpenRouter waterfall
     // instead of going silent (reproduces prod agent 6d19b666).
-    if (url === OPENROUTER_API_URL) return sseResponse(GENERATOR_SSE);
+    if (url === OPENROUTER_API_URL) {
+      waterfallBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return sseResponse(GENERATOR_SSE);
+    }
     throw new Error(`Unexpected route ${url}`);
   }) as typeof fetch;
   try {
@@ -133,6 +137,11 @@ async function testDirectFailureFallsThroughToWaterfall(): Promise<void> {
     assert.ok(
       calls.includes(OPENROUTER_API_URL),
       'chat must fall through to the OpenRouter waterfall after Cerebras fails pre-content'
+    );
+    assert.deepEqual(
+      waterfallBody.reasoning,
+      { effort: 'minimal' },
+      'generator fallback must not inherit Gemini default medium reasoning'
     );
   } finally {
     globalThis.fetch = originalFetch;

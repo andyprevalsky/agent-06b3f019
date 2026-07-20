@@ -25,6 +25,7 @@ export function exclusiveOpenRouterWaterfall(params: {
     responseFormat: params.options.response_format,
     temperature: params.options.temperature,
     maxTokens: params.options.max_tokens,
+    reasoningEffort: params.options.effort,
     openrouterKey,
     requestId: params.requestId,
     callSite: params.callSite,

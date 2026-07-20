@@ -667,6 +667,7 @@ async function* wrapStream(opts: WrapOptions): AsyncIterable<CompletionChunk> {
           responseFormat: opts.options.response_format,
           temperature: opts.options.temperature,
           maxTokens: opts.options.max_tokens,
+          reasoningEffort: opts.options.effort,
           openrouterKey: requiredEnv(OPENROUTER_API_KEY_ENV),
           requestId: opts.requestId,
           callSite: opts.callSite,
