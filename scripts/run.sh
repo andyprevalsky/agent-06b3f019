@@ -27,6 +27,7 @@ normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
 . "$SCRIPT_DIR/lib/ngrok-tunnel.sh"
 . "$SCRIPT_DIR/lib/run-context.sh"
+. "$SCRIPT_DIR/lib/run-service-readiness.sh"
 
 RUN_CONTEXT_DIR="$(normalize_run_context_dir "$PWD" "${BENCHMARK_CONTEXT_DIR:-.context}")"
 BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
@@ -1467,7 +1468,8 @@ elif [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
 else
     run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee "$FRONTEND_LOG_FILE"' &
 fi
-PIDS+=($!); NAMES+=("front-end")
+FRONTEND_PID=$!
+PIDS+=("$FRONTEND_PID"); NAMES+=("front-end")
 
 # mac-app is skipped in benchmark mode (Electron is heavy and smoke doesn't touch it).
 if ! $BENCHMARK_MODE && $IS_MAC; then
@@ -1502,6 +1504,8 @@ if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
         exit 1
     }
 fi
+
+wait_for_frontend_ready "$FRONTEND_PID" "$FRONTEND_PORT" "$FRONTEND_LOG_FILE" || exit 1
 
 SERVICE_STATUS=running
 write_services_manifest

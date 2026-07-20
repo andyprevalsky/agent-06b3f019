@@ -76,6 +76,54 @@ wait_for_connection() {
     exit 1
 }
 
+wait_for_frontend_test_port="$(find_free_port)"
+wait_for_frontend_test_root="$TMP_ROOT/frontend-ready"
+wait_for_frontend_test_log="$TMP_ROOT/frontend-ready.log"
+mkdir -p "$wait_for_frontend_test_root"
+printf '%s\n' 'ready' > "$wait_for_frontend_test_root/test_payment"
+(
+    sleep 0.4
+    cd "$wait_for_frontend_test_root"
+    python3 -m http.server "$wait_for_frontend_test_port" --bind 127.0.0.1 \
+        >"$wait_for_frontend_test_log" 2>&1
+) &
+frontend_test_pid=$!
+PIDS+=("$frontend_test_pid")
+
+if ! FRONTEND_START_READY_ATTEMPTS=30 RUN_SERVICE_READY_SLEEP_SECONDS=0.1 \
+    wait_for_frontend_ready "$frontend_test_pid" "$wait_for_frontend_test_port" "$wait_for_frontend_test_log"; then
+    echo "FAIL: frontend readiness must wait for a slow bundled build before tunnel smoke" >&2
+    exit 1
+fi
+echo "PASS: frontend readiness waits for a delayed local frontend"
+
+failed_frontend_log="$TMP_ROOT/frontend-failed.log"
+printf '%s\n' 'synthetic frontend build failure' > "$failed_frontend_log"
+(
+    sleep 0.1
+    exit 1
+) &
+failed_frontend_pid=$!
+PIDS+=("$failed_frontend_pid")
+if FRONTEND_START_READY_ATTEMPTS=30 RUN_SERVICE_READY_SLEEP_SECONDS=0.1 \
+    wait_for_frontend_ready "$failed_frontend_pid" "$(find_free_port)" "$failed_frontend_log" >/dev/null 2>&1; then
+    echo "FAIL: frontend readiness must fail when the frontend process exits" >&2
+    exit 1
+fi
+echo "PASS: frontend readiness fails when the frontend process exits"
+
+RUN_SH_PATH="$ROOT_DIR/scripts/run.sh" python3 - <<'PY'
+import os
+from pathlib import Path
+
+text = Path(os.environ["RUN_SH_PATH"]).read_text()
+ready = text.find('wait_for_frontend_ready "$FRONTEND_PID"')
+tunnel = text.find("bash scripts/test-public-tunnel.sh")
+if ready < 0 or tunnel < 0 or ready > tunnel:
+    raise SystemExit("frontend readiness must run before the public tunnel smoke")
+PY
+echo "PASS: run.sh gates public tunnel smoke on local frontend readiness"
+
 foreign_dir="$TMP_ROOT/foreign"
 mkdir -p "$foreign_dir"
 foreign_port="$(find_free_port)"
