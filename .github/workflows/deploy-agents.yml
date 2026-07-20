@@ -26,7 +26,11 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
         run: |
-          MIN=2
+          # Derive the floor from the deployed fly.toml MIN_MACHINES so this step
+          # tracks the real autoscaler floor instead of dipping to a stale literal.
+          MIN=$(grep -E '^\s*MIN_MACHINES\s*=' agents/fly.toml | head -1 | sed -E 's/.*"([0-9]+)".*/\1/')
+          MIN=${MIN:-2}
+          echo "Scaling back to MIN_MACHINES=$MIN (from agents/fly.toml)"
           APP="navi-whisper-lux"
           STARTED=$(flyctl machines list -a "$APP" --json | jq -r '[.[] | select(.state == "started")] | sort_by(.id) | .[].id')
           COUNT=0

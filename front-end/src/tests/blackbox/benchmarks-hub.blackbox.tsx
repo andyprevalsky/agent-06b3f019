@@ -17,6 +17,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { renderWithProviders } from './test-wrapper';
 import { BenchmarksView } from '@/features/benchmarks';
+import { deriveRunName } from '@/features/benchmarks/runName';
+import type { HubRun } from '@/lib/api/benchmarksHub';
 
 // Authenticated session for getAuthHeaders()
 const SESSION = { access_token: 'test-token', user: { id: 'admin-1' } };
@@ -391,6 +393,9 @@ describe('BenchmarksView (in-app hub)', () => {
     expect(runRow.textContent).toContain('1✓');
     // the old text badges are gone
     expect(within(runRow).queryByText('pass')).not.toBeInTheDocument();
+    // semantic name (derived from the single task) shows ALONGSIDE the opaque id
+    expect(within(runRow).getByText('chat-mode')).toBeInTheDocument();
+    expect(within(runRow).getByTestId('run-id-run-abc')).toHaveTextContent('run-abc');
   });
 
   it('opens a run into the run view; Open agent goes to the MAIN panel', async () => {
@@ -561,6 +566,9 @@ describe('BenchmarksView edge states', () => {
     expect(runRow.textContent).toContain('1✓');
     expect(runRow.textContent).toContain('1✗');
     expect(runRow.textContent).toContain('1⋯');
+    // 3 distinct tasks → semantic name joins them, still beside the opaque id
+    expect(within(runRow).getByText('t-pass, t-fail, t-run')).toBeInTheDocument();
+    expect(within(runRow).getByTestId('run-id-run-mixed')).toHaveTextContent('run-mixed');
   });
 
   it('hides cancelled requests from the Runs pane (C5)', async () => {
@@ -597,5 +605,59 @@ describe('BenchmarksView edge states', () => {
     fireEvent.click(screen.getByTestId('run-selected'));
     await waitFor(() => expect(screen.getByTestId('dispatch-error')).toBeInTheDocument());
     expect(screen.getByTestId('dispatch-error').textContent).toContain('dispatch exploded');
+  });
+});
+
+describe('deriveRunName (semantic run label)', () => {
+  const mkRun = (over: Partial<HubRun>): HubRun => ({
+    run_id: '20260719-131303-17378',
+    timestamp: '2026-07-19T20:13:03Z',
+    suite: 'cloud-fleet',
+    source: 'cloud-fleet',
+    live: false,
+    uploaded_at: '2026-07-19T20:40:00Z',
+    tasks: [],
+    ...over,
+  });
+  const task = (name: string): HubRun['tasks'][number] => ({
+    name,
+    passed: null,
+    status: 'queued',
+    agent_id: null,
+    duration_seconds: null,
+    cost_cents: null,
+    world_model_mode: null,
+    fast_mode: false,
+    tree_agent_count: null,
+    failure_reason: null,
+  });
+
+  it('prefers an explicit bundle name over derivation', () => {
+    expect(deriveRunName(mkRun({ name: 'ecommerce slice', tasks: [task('a'), task('b')] }))).toBe(
+      'ecommerce slice',
+    );
+  });
+
+  it('uses the single task name for a one-task run', () => {
+    expect(deriveRunName(mkRun({ tasks: [task('browser-amazon-return')] }))).toBe(
+      'browser-amazon-return',
+    );
+  });
+
+  it('joins up to three distinct task names', () => {
+    expect(deriveRunName(mkRun({ tasks: [task('a'), task('b'), task('c')] }))).toBe('a, b, c');
+  });
+
+  it('summarizes longer slices as "first, second +N more" and dedupes', () => {
+    const tasks = [task('a'), task('b'), task('a'), task('c'), task('d')]; // 4 distinct
+    expect(deriveRunName(mkRun({ tasks }))).toBe('a, b +2 more');
+  });
+
+  it('falls back to suite/source when there are no tasks', () => {
+    expect(deriveRunName(mkRun({ tasks: [] }))).toBe('cloud-fleet');
+    expect(deriveRunName(mkRun({ tasks: [], suite: null, source: 'manual-run' }))).toBe(
+      'manual-run',
+    );
+    expect(deriveRunName(mkRun({ tasks: [], suite: null, source: null }))).toBe('run');
   });
 });

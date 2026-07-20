@@ -20,7 +20,7 @@ primary_region = "iad"  # Ashburn, Virginia
   
   # Temporal Worker Configuration
   # These control concurrency and resource usage
-  MIN_MACHINES = "15"
+  MIN_MACHINES = "8"
   MAX_MACHINES = "40"
   MAX_CONCURRENT_ACTIVITIES = "250"
   MAX_CONCURRENT_WORKFLOWS = "100"
@@ -76,7 +76,7 @@ primary_region = "iad"  # Ashburn, Virginia
   # Both must be false — auto_start fights the autoscaler by restarting stopped machines.
   auto_stop_machines = false
   auto_start_machines = false
-  min_machines_running = 15
+  min_machines_running = 8
   processes = ["app"]
 
   [http_service.concurrency]

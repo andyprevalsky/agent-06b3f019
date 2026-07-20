@@ -1,15 +1,26 @@
+import { cn } from '@/lib/utils';
 import { MessageList } from '../MessageList';
 import type { ActionsPanelPosition } from './hooks';
 
 interface FullscreenActionsPanelProps {
   taskId: string;
+  /**
+   * Mobile stacked/overlay presentation: fill the width instead of the fixed
+   * 320px left column, which would clip the iframe to a sliver on a phone.
+   */
+  fullWidth?: boolean;
 }
 
 /** Left-side actions panel shown when the browser is fullscreen. */
-export function FullscreenActionsPanel({ taskId }: FullscreenActionsPanelProps) {
+export function FullscreenActionsPanel({ taskId, fullWidth = false }: FullscreenActionsPanelProps) {
   return (
     <div
-      className="w-[min(320px,calc(100vw-60px))] h-full bg-muted/10 border-r border-border flex-shrink-0 flex flex-col overflow-hidden"
+      className={cn(
+        'h-full bg-muted/10 flex flex-col overflow-hidden',
+        fullWidth
+          ? 'w-full'
+          : 'w-[min(320px,calc(100vw-60px))] border-r border-border flex-shrink-0',
+      )}
       style={{
         backdropFilter: 'blur(8px)',
         WebkitBackdropFilter: 'blur(8px)',
