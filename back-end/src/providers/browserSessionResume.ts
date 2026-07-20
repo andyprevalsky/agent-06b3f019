@@ -291,22 +291,41 @@ function buildRotationMessage(tier: KernelProxyType, used: number, remaining: nu
  * session on that proxy, and returns the resume-shaped response plus escalation
  * state the agent reasons over.
  */
-export async function rotateBrowserProxy(taskId: string) {
-  // Atomic read-check-increment so the cap holds under concurrent calls / retries.
-  const rotationsUsed = await prisma.$transaction(async (tx) => {
-    const s = await tx.browserSession.findUnique({
-      where: { id: taskId },
+export async function rotateBrowserProxy(taskId: string, userId?: string) {
+  // Reserve one rotation atomically. UPDATE ... RETURNING both enforces the cap
+  // under concurrent calls and returns the exact ladder position this request
+  // reserved. User calls also constrain the write to their BrowserContext; an
+  // ownership mismatch deliberately looks the same as a missing task.
+  const ownerUserId = userId ?? null;
+  const reserved = await prisma.$queryRaw<Array<{ proxyRotationCount: number }>>`
+    UPDATE "BrowserSession"
+       SET "proxyRotationCount" = "proxyRotationCount" + 1
+     WHERE "id" = ${taskId}
+       AND "proxyRotationCount" < ${ROTATION_CAP}
+       AND (
+         ${ownerUserId}::text IS NULL
+         OR EXISTS (
+           SELECT 1
+             FROM "BrowserContext"
+            WHERE "BrowserContext"."id" = "BrowserSession"."contextId"
+              AND "BrowserContext"."userId" = ${ownerUserId}
+         )
+       )
+    RETURNING "proxyRotationCount"
+  `;
+
+  const rotationsUsed = reserved[0]?.proxyRotationCount;
+  if (rotationsUsed === undefined) {
+    const session = await prisma.browserSession.findFirst({
+      where: {
+        id: taskId,
+        ...(userId === undefined ? {} : { context: { userId } }),
+      },
       select: { proxyRotationCount: true },
     });
-    if (s === null) throw new RotationSessionNotFoundError(taskId);
-    if (s.proxyRotationCount >= ROTATION_CAP) throw new ProxyRotationExhaustedError(ROTATION_CAP);
-    const updated = await tx.browserSession.update({
-      where: { id: taskId },
-      data: { proxyRotationCount: { increment: 1 } },
-      select: { proxyRotationCount: true },
-    });
-    return updated.proxyRotationCount;
-  });
+    if (session === null) throw new RotationSessionNotFoundError(taskId);
+    throw new ProxyRotationExhaustedError(ROTATION_CAP);
+  }
 
   // Calls 1-2 → residential; 3-4 → mobile (gated). When mobile is disabled the
   // later rotations stay residential — still a fresh exit IP, just not carrier.
@@ -315,7 +334,19 @@ export async function rotateBrowserProxy(taskId: string) {
 
   log.info('Rotating browser proxy', { taskId, rotationsUsed, proxyType, mobileEnabled });
 
-  const result = await rotateProxy(taskId, proxyType);
+  let result: Awaited<ReturnType<typeof rotateProxy>>;
+  try {
+    result = await rotateProxy(taskId, proxyType);
+  } catch (error) {
+    // A transient provider failure did not deliver a new IP, so return its
+    // reservation to the shared budget. The decrement is atomic and composes
+    // with concurrent successful or failed reservations.
+    await prisma.browserSession.updateMany({
+      where: { id: taskId, proxyRotationCount: { gt: 0 } },
+      data: { proxyRotationCount: { decrement: 1 } },
+    });
+    throw error;
+  }
   const response = await assembleResumeResponse(taskId, result);
   const rotationsRemaining = ROTATION_CAP - rotationsUsed;
 

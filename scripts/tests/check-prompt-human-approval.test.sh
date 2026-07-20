@@ -187,6 +187,17 @@ git -C "$test_delete_repo" rm -q back-end/src/tests/blackbox/widget.blackbox.ts
 expect_fail "$test_delete_repo" "deleting a blackbox test file requires approval"
 expect_flag_pass "$test_delete_repo" "approval flag permits a test-file deletion"
 
+embedded_test_delete_repo="$(new_repo embedded-test-file-delete)"
+mkdir -p "$embedded_test_delete_repo/src"
+cat >"$embedded_test_delete_repo/src/mytest_helpers.ts" <<'TS'
+export const helper = "covers a prompt-adjacent path";
+TS
+git -C "$embedded_test_delete_repo" add src/mytest_helpers.ts
+git -C "$embedded_test_delete_repo" commit -q -m "seed embedded-name test"
+git -C "$embedded_test_delete_repo" rm -q src/mytest_helpers.ts
+expect_fail "$embedded_test_delete_repo" "deleting a filename containing test requires approval"
+expect_flag_pass "$embedded_test_delete_repo" "approval flag permits an embedded-name test deletion"
+
 semantic_delete_repo="$(new_repo semantic-spec-delete)"
 mkdir -p "$semantic_delete_repo/front-end/tests-e2e"
 cat >"$semantic_delete_repo/front-end/tests-e2e/login.spec.ts" <<'TS'

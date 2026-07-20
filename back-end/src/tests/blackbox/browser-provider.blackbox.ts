@@ -226,6 +226,14 @@ async function runLiveProviderParity(): Promise<void> {
   let profileId: string | undefined;
   let proxyId: string | undefined;
   const headers = { 'content-type': 'application/json', 'x-api-key': apiKey };
+
+  const invalidRotation = await fetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({}),
+  });
+  assert(invalidRotation.status === 400, 'invalid rotate-proxy payload was not rejected');
+
   const post = async (path: string, body?: unknown): Promise<BrowserApiResponse> => {
     const response = await fetch(`${baseUrl}/api/browser-session${path}`, {
       method: 'POST',
@@ -522,6 +530,15 @@ async function runLiveProviderParity(): Promise<void> {
       { method: 'POST', headers: { Authorization: `Bearer ${attackerToken}` } }
     );
     assert(crossTenantScreenshot.status === 404, 'cross-tenant screenshot was not rejected');
+    const crossTenantRotation = await fetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${attackerToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ task_id: init.task_id }),
+    });
+    assert(crossTenantRotation.status === 404, 'cross-tenant proxy rotation was not rejected');
 
     const screenshot = await post(`/${liveSessionId}/screenshot`);
     assert(screenshot.provider === 'kernel', 'Kernel screenshot reported the wrong provider');

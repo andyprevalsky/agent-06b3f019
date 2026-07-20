@@ -157,6 +157,11 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
   // the newly selected recording (and leak its Blob URL).
   const recordingLoadGeneration = useRef(0);
   useEffect(() => {
+    return () => {
+      if (recordingUrl?.startsWith('blob:')) URL.revokeObjectURL(recordingUrl);
+    };
+  }, [recordingUrl]);
+  useEffect(() => {
     recordingLoadGeneration.current += 1;
     setRecordingState('idle');
     setRecordingUrl(null);
@@ -371,9 +376,7 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
                       muted
                       playsInline
                       onEnded={() => {
-                        setSegmentIndex((i) =>
-                          i + 1 < recordingSource.urls.length ? i + 1 : i,
-                        );
+                        setSegmentIndex((i) => (i + 1 < recordingSource.urls.length ? i + 1 : i));
                       }}
                       className="aspect-[16/10] max-h-[75vh] w-full rounded border border-border bg-black"
                     />

@@ -241,7 +241,8 @@ async function createRemoteSession(
   ): ReturnType<typeof createValidatedSession> => {
     const candidate = candidates[index];
     if (candidate === undefined) {
-      throw new Error(`Kernel has no available residential proxy for ${proxyLocation.country}`);
+      const proxyType = forceManagedProxyType ?? candidates[0]?.type ?? 'residential';
+      throw new Error(`Kernel has no available ${proxyType} proxy for ${proxyLocation.country}`);
     }
 
     let resolved: ResolvedKernelProxy | undefined;

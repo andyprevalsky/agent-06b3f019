@@ -133,7 +133,7 @@ DELETED_FILES="$(
 
 DELETED_TEST_FILES="$(
   printf '%s\n' "$DELETED_FILES" | grep -E \
-    '(^|/)(tests?|__tests__)/|\.blackbox\.(py|ts|tsx)$|\.(test|spec)\.(py|ts|tsx)$|(^|/)test_[^/]*\.py$|(^|/)tests-e2e/.*\.spec\.ts$' \
+    '(^|/)(tests?|__tests__)/|(^|/)[^/]*(test|spec|blackbox)[^/]*\.(py|ts|tsx|js|jsx)$' \
     | sed 's/$/ (deleted test file)/' || true
 )"
 

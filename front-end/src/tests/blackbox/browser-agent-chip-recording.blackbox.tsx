@@ -136,7 +136,7 @@ describe('BrowserAgentChip recording', () => {
     const createObjSpy = vi
       .spyOn(URL, 'createObjectURL')
       .mockReturnValue('blob:stitched-recording');
-    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
+    const revokeObjSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {});
     const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue({
       ok: true,
       arrayBuffer: async () => new ArrayBuffer(64),
@@ -154,7 +154,7 @@ describe('BrowserAgentChip recording', () => {
         recording_view_urls: [`${KERNEL_VIEW_URL}&seg=0`, `${KERNEL_VIEW_URL}&seg=1`],
       }),
     ];
-    renderChip(messages, anchorMsg);
+    const { unmount } = renderChip(messages, anchorMsg);
 
     await openRecordingTab();
 
@@ -165,7 +165,11 @@ describe('BrowserAgentChip recording', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId('recording-segments')).not.toBeInTheDocument();
 
+    unmount();
+    expect(revokeObjSpy).toHaveBeenCalledWith('blob:stitched-recording');
+
     createObjSpy.mockRestore();
+    revokeObjSpy.mockRestore();
     fetchSpy.mockRestore();
   });
 
