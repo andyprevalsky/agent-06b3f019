@@ -34,6 +34,7 @@ import {
 import { delayedCacheStreamHedge, type CacheLookupResult } from './delayedCacheStreamHedge';
 import type { ChatProviderRoute } from './phaseModels';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
+import { ROUTER_JSON_SCHEMA } from './routerDecisionJsonSchema';
 
 const log = createLogger('RouterLLM');
 const ROUTER_CACHE_GRACE_MS = 25;
@@ -78,50 +79,6 @@ export interface RouterResponse {
   webSearchToolCallId?: string;
   usage: ChatLlmUsage;
 }
-
-// ============================================
-// JSON Schema for structured output (universal compatibility)
-// Flat object with all fields required - works across OpenAI, Anthropic, and Gemini
-// Action-specific fields use empty string when not applicable
-// ============================================
-const ROUTER_JSON_SCHEMA = {
-  type: 'object',
-  properties: {
-    reasoning: {
-      type: 'string',
-      description: 'Brief explanation of why this action was chosen',
-    },
-    action: {
-      type: 'string',
-      enum: ['direct_answer', 'web_search', 'start_superintelligence'],
-      description: 'The action to take',
-    },
-    query: {
-      type: 'string',
-      description: 'Search query. Required for web_search, empty string for other actions.',
-    },
-    goal: {
-      type: 'string',
-      description:
-        'Task goal for the agent. Required for start_superintelligence, empty string for other actions.',
-    },
-    mode: {
-      type: 'string',
-      // Enum constraint mirrors the Zod discriminated-union (z.enum(['plan',
-      // 'execute']) above) so structured-output validation rejects any
-      // out-of-band value (e.g. "research") instead of silently coercing to
-      // 'plan' at the `raw.mode || 'plan'` fallback below. The runtime only
-      // reads `mode` when action === 'start_superintelligence'; for the other
-      // two actions, the value is ignored, so the LLM may pick either of the
-      // enum members without effect.
-      enum: ['plan', 'execute'],
-      description:
-        'Execution mode: "plan" for 3+ tool calls, "execute" for 1-2 tool calls. Required for start_superintelligence; ignored for other actions (pick either enum value).',
-    },
-  },
-  required: ['reasoning', 'action', 'query', 'goal', 'mode'],
-  additionalProperties: false,
-};
 
 import { downloadFromStorage } from '../storage';
 
