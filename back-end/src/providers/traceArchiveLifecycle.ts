@@ -136,6 +136,18 @@ function uniqueArtifacts(artifacts: ManifestArtifact[]): ManifestArtifact[] {
   return unique;
 }
 
+// The manifest itself is now written at agent start, so listArchivedObjects()
+// returns the manifest control files on every subsequent write. Exclude them so
+// a bundle's manifest never indexes itself (which would inflate artifact counts
+// and self-reference the manifest).
+const CONTROL_ARTIFACT_PATHS = new Set(['manifest.json.gz.enc', 'manifest.public.json']);
+function excludeControlArtifacts(artifacts: ManifestArtifact[]): ManifestArtifact[] {
+  return artifacts.filter((artifact) => {
+    const path = artifactPath(artifact);
+    return path === null || !CONTROL_ARTIFACT_PATHS.has(path);
+  });
+}
+
 function encryptedRunMetadata(fixture: {
   rows: Record<string, unknown[]>;
   user_id: string;
@@ -321,23 +333,42 @@ async function writePublicManifest(
   return publicManifestRef;
 }
 
+/** Non-eligible placeholder mode for a bundle whose true mode isn't known yet. */
+const PENDING_WORLD_MODEL_MODE = 'pending';
+
+/**
+ * The creation-time world-model mode for a root agent. Prod agents are always
+ * real, so a crashed prod run keeps `real` and stays ingestible. Benchmark runs
+ * can be shadow/simulate and their true mode is only known at finalize; marking
+ * them `pending` (a non-real mode) keeps a crashed benchmark run OUT of the
+ * real-world corpus until finalize stamps the actual mode — a simulate run that
+ * dies before finalize can never be mistaken for real signal.
+ */
+function startWorldModelMode(
+  agentId: string,
+  fixture: Awaited<ReturnType<typeof collectFixture>>
+): string {
+  const root = fixture.rows.Agent?.find((row) => (row as { id?: unknown }).id === agentId) as
+    { isBenchmark?: unknown } | undefined;
+  return root?.isBenchmark === true ? PENDING_WORLD_MODEL_MODE : 'real';
+}
+
 /**
  * Writes the initial `manifest.json.gz.enc` at agent start. Only the root agent
- * owns its bundle manifest (sub-agent artifacts live under the root bundle). The
- * world-model mode is left at its `real` default here and corrected at finalize
- * if the run turns out to be shadow/simulate; a crashed real prod run therefore
- * keeps the correct `real` mode and stays ingestible.
+ * owns its bundle manifest (sub-agent artifacts live under the root bundle). See
+ * `startWorldModelMode` for how the creation-time mode avoids misclassifying a
+ * crashed benchmark/simulate run as real while keeping crashed prod runs usable.
  */
 async function writeStartManifest(
   agentId: string,
   fixture: Awaited<ReturnType<typeof collectFixture>>
 ): Promise<void> {
   if (fixture.agent_ids[0] !== agentId) return;
-  const refs = uniqueArtifacts(await listArchivedObjects(agentId));
+  const refs = uniqueArtifacts(excludeControlArtifacts(await listArchivedObjects(agentId)));
   const manifestValue = buildManifestValue({
     rootAgentId: agentId,
     refs,
-    worldModelMode: undefined,
+    worldModelMode: startWorldModelMode(agentId, fixture),
     benchmarkResult: null,
     run: encryptedRunMetadata(fixture),
     correlations: {
@@ -492,7 +523,9 @@ async function finalizeAgentOnce(input: AgentFinalizeRequest): Promise<FinalizeA
     throw new Error(`Failed to archive required end fixture for ${input.rootAgentId}`);
   }
   const listedRefs = await listArchivedObjects(input.rootAgentId);
-  const refs = uniqueArtifacts(fixtureRef === null ? listedRefs : [...listedRefs, fixtureRef]);
+  const refs = uniqueArtifacts(
+    excludeControlArtifacts(fixtureRef === null ? listedRefs : [...listedRefs, fixtureRef])
+  );
   const manifestValue = buildManifestValue({
     rootAgentId: input.rootAgentId,
     refs,

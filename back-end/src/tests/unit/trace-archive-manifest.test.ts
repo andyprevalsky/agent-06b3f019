@@ -21,7 +21,8 @@ const { test, finish } = createTestHarness('trace-archive manifest-at-creation u
 
 function startFixture(
   rootAgentId: string,
-  agentIds: string[]
+  agentIds: string[],
+  isBenchmark = false
 ): Parameters<typeof archiveAgentStartFixture>[1] {
   return {
     schema_version: 1,
@@ -40,6 +41,7 @@ function startFixture(
           id: rootAgentId,
           goal: 'do a thing',
           status: 'STARTING_UP',
+          isBenchmark,
           createdAt: new Date(0).toISOString(),
           updatedAt: new Date(0).toISOString(),
         },
@@ -91,6 +93,45 @@ async function main(): Promise<void> {
           objectPath: 'manifest.json.gz.enc',
         });
         assert.strictEqual(subManifest, null, 'sub-agent must not own a bundle manifest');
+      }
+    )
+  );
+
+  await test(
+    'a benchmark run is marked non-eligible (pending) at start, not real',
+    withEnv(
+      {
+        TRACE_ARCHIVE_ENABLED: '1',
+        TRACE_ARCHIVE_BACKEND: 'local',
+        TRACE_ARCHIVE_ENCRYPTION_KEY_B64: undefined,
+        TRACE_ARCHIVE_LOCAL_DIR: undefined,
+        TRACE_ARCHIVE_PUBLIC_MANIFEST: 'false',
+      },
+      async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'trace-archive-bench-manifest-'));
+        process.env.TRACE_ARCHIVE_LOCAL_DIR = dir;
+
+        // A benchmark run can be shadow/simulate; its true mode is only known at
+        // finalize. If it crashes first, the creation manifest must NOT read as
+        // real — otherwise a simulate run would poison the real-world corpus.
+        const benchId = 'bench-root';
+        await archiveAgentStartFixture(benchId, startFixture(benchId, [benchId], true));
+        const stored = await readArchivedArtifact({
+          rootAgentId: benchId,
+          objectPath: 'manifest.json.gz.enc',
+        });
+        assert.ok(stored, 'benchmark start must still write a manifest');
+        const parsed = JSON.parse(decryptAndValidateArtifact(stored).toString('utf8')) as {
+          world_model_mode: string;
+          finalized: boolean;
+        };
+        assert.strictEqual(
+          parsed.world_model_mode,
+          'pending',
+          'benchmark start manifest must be non-real (pending), not real'
+        );
+        assert.notStrictEqual(parsed.world_model_mode, 'real');
+        assert.strictEqual(parsed.finalized, false);
       }
     )
   );

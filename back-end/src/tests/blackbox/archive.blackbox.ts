@@ -441,6 +441,14 @@ async function testArchiveEndpointsWriteFixtureAndManifest(): Promise<void> {
     assert(
       manifest.sensitive.llm_trace_refs.some((ref) => ref.path === 'llm/test-dump.json.gz.enc')
     );
+    // The manifest is written at start, so listArchivedObjects() sees it during
+    // finalize. It must never index its own control files.
+    assert(
+      !manifest.sensitive.artifact_refs.some(
+        (ref) => ref.path === 'manifest.json.gz.enc' || ref.path === 'manifest.public.json'
+      ),
+      'finalize manifest must not index the manifest control files'
+    );
   } finally {
     await cleanup(seed);
   }
