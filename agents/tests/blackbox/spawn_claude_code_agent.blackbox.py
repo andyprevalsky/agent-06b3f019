@@ -149,6 +149,20 @@ def test_check_fatal_errors_credit_balance():
     assert "billing" in msg.lower()
 
 
+def test_check_fatal_errors_credit_balance_real_wording():
+    """Regression: Anthropic's real banner says "Credit balance is too low" (with "is")
+    and often arrives WITHOUT the "Add funds" URL on the same line. The exact
+    production output below (agent 6d048fcf, /deploy smoke) previously matched no
+    fatal pattern, so the sandbox looped through 4 retries over 333s instead of
+    aborting immediately.
+    """
+    from domains.spawn_claude_code_agent.service import check_fatal_errors
+
+    msg = check_fatal_errors("[Claude] Session started in /home/user\n[Claude] Credit balance is too low")
+    assert msg is not None
+    assert "billing" in msg.lower()
+
+
 def test_check_fatal_errors_rate_limit_options():
     """Claude Code rate-limit prompts abort so the exhausted token can rotate."""
     from domains.spawn_claude_code_agent.service import check_fatal_errors
@@ -2084,6 +2098,7 @@ async def run_all_tests():
     r.record("check_fatal_401", test_check_fatal_errors_api_401)
     r.record("check_fatal_login", test_check_fatal_errors_login_request)
     r.record("check_fatal_credit_balance", test_check_fatal_errors_credit_balance)
+    r.record("check_fatal_credit_balance_real_wording", test_check_fatal_errors_credit_balance_real_wording)
     r.record("check_fatal_rate_limit_options", test_check_fatal_errors_rate_limit_options)
     r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
     r.record("safe_time_ok", test_safe_time_returns_float)

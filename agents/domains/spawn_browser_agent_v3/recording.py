@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import html
 import json
 import mimetypes
@@ -105,6 +106,47 @@ def _safe_task_id(task_id: str) -> str:
 
 def browser_recording_output_dir(agent_id: str, task_id: str) -> Path:
     return _recording_root() / agent_id / _safe_task_id(task_id)
+
+
+def _strip_url_query_fragment(value: str) -> str:
+    """Remove everything from the first ``?`` or ``#`` onward."""
+    return value.split("#", 1)[0].split("?", 1)[0]
+
+
+def _redact_url_fallback(value: str) -> str:
+    """Redact a URL without relying on a successfully parsed authority."""
+    stripped = _strip_url_query_fragment(value)
+    if "://" in stripped:
+        scheme, remainder = stripped.split("://", 1)
+        prefix = f"{scheme}://"
+    elif stripped.startswith("//"):
+        prefix = "//"
+        remainder = stripped[2:]
+    else:
+        return stripped
+    authority, separator, path = remainder.partition("/")
+    safe_authority = authority.rsplit("@", 1)[-1]
+    return f"{prefix}{safe_authority}{separator}{path}"
+
+
+def _redact_url_query(url: str) -> str:
+    """Drop query string + fragment from a URL, keeping scheme://host/path.
+
+    Captured request URLs are surfaced to the agent (and its turn history) via
+    read_network_requests; query strings can carry signed URLs, auth tokens, and
+    PII, so only the non-secret locator is exposed. This fails CLOSED: parse
+    failures and authority-less inputs still get their query/fragment stripped,
+    and embedded ``user:pass@`` credentials are dropped from the authority.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return _redact_url_fallback(url)
+    if not parsed.scheme or not parsed.netloc:
+        return _redact_url_fallback(url)
+    # netloc may carry `user:pass@host:port` — keep only host[:port].
+    host = parsed.netloc.rsplit("@", 1)[-1]
+    return f"{parsed.scheme}://{host}{parsed.path}"
 
 
 def _media_extension(url: str, default: str) -> str:
@@ -207,6 +249,12 @@ class BrowserAgentRecorder:
         )
         self._kernel_replay_id: Optional[str] = None
         self.recording_view_url: Optional[str] = None
+        # One replay per Kernel session. rotate_ip evicts the current session and
+        # stands up a new one, so a single replay would only ever capture the first
+        # session (and its IP). We record ONE replay segment per session and hand
+        # the FE the full ordered list, so the recording follows every rotation and
+        # visibly shows the exit IP changing across segments.
+        self._replay_segments: List[Dict[str, Any]] = []
         self.output_dir = browser_recording_output_dir(agent_id, task_id)
         self.frames_dir = self.output_dir / "frames"
         self.media_dir = self.output_dir / "media"
@@ -319,12 +367,24 @@ class BrowserAgentRecorder:
                 data = response.json()
             self._kernel_replay_id = data.get("replay_id")
             self.recording_view_url = data.get("replay_view_url")
+            # Record this session's segment. The start-time view URL is valid even
+            # before stop and survives session eviction, so a segment stays playable
+            # after rotate_ip tears its session down. Segment order == rotation order.
+            if self.recording_view_url:
+                self._replay_segments.append(
+                    {
+                        "session_id": self.session_id,
+                        "replay_id": self._kernel_replay_id,
+                        "view_url": self.recording_view_url,
+                    }
+                )
             logger.info(
                 "Kernel replay recording started",
                 agent_id=self.agent_id,
                 task_id=self.task_id,
                 session_id=self.session_id,
                 replay_id=self._kernel_replay_id,
+                segment_index=len(self._replay_segments) - 1,
             )
         except Exception as exc:  # noqa: BLE001 — surface to create(), which returns None
             logger.warning(
@@ -338,6 +398,164 @@ class BrowserAgentRecorder:
             self._kernel_replay_id = None
             self.recording_view_url = None
             raise
+
+    async def rotate_kernel_replay(self, new_session_id: str) -> None:
+        """Follow a rotate_ip session swap: finalize the current session's replay
+        segment and start a fresh one on the rotated session.
+
+        rotate_ip evicts the current Kernel session and stands up a new one on a
+        different exit IP. A single replay pinned to the original session would
+        only ever show the first IP — the recording would look like the IP never
+        changed. We therefore keep one replay per session: the old segment's
+        start-time view URL is already captured (and survives eviction), so we just
+        start a new replay on ``new_session_id`` and append its segment. Best-effort
+        throughout — recording must never break the browser run."""
+        if not self.uses_kernel_replay or not new_session_id or new_session_id == self.session_id:
+            return
+        # Best-effort stop of the outgoing session's replay so Kernel finalizes it
+        # promptly. The session is usually already evicted by the backend rotation;
+        # its persisted replay (and the start-time URL we saved) survive regardless.
+        headers = _kernel_replay_headers()
+        if headers is not None and self._kernel_replay_id:
+            with contextlib.suppress(Exception):
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.post(
+                        f"{_kernel_api_base()}/browsers/{self.session_id}"
+                        f"/replays/{self._kernel_replay_id}/stop",
+                        headers=headers,
+                    )
+        # Rebind to the new session and start a fresh replay segment.
+        self.session_id = new_session_id
+        self._kernel_replay_id = None
+        self.recording_view_url = None
+        try:
+            await self._start_kernel_replay()
+        except Exception as exc:  # noqa: BLE001 — a failed segment must not break the run
+            logger.warning(
+                "Kernel replay failed to start on rotated session; recording will "
+                "miss this segment",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                session_id=new_session_id,
+                error=str(exc)[:300],
+            )
+            # Keep uses_kernel_replay True: earlier segments are still valid and must
+            # be finalized. _start_kernel_replay flipped it off on failure; restore.
+            self.uses_kernel_replay = True
+
+    @property
+    def replay_view_urls(self) -> List[str]:
+        """All per-session replay view URLs in rotation order (baseline first)."""
+        return [seg["view_url"] for seg in self._replay_segments if seg.get("view_url")]
+
+    async def _run_ffmpeg_concat(
+        self, ffmpeg_path: str, list_file: Path, out_path: Path, *, copy: bool
+    ) -> bool:
+        args = [
+            ffmpeg_path,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_file),
+        ]
+        # -c copy is instant but needs uniform codecs across segments; the re-encode
+        # fallback guarantees one clean stream regardless of per-segment timebase.
+        args += ["-c", "copy"] if copy else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-an"]
+        args += ["-movflags", "+faststart", str(out_path)]
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            cwd=str(list_file.parent),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            logger.debug(
+                "ffmpeg replay concat failed",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                copy=copy,
+                error=stderr.decode("utf-8", errors="replace")[:500],
+            )
+            return False
+        return out_path.exists() and out_path.stat().st_size > 0
+
+    async def stitch_segments_to_mp4(self) -> Optional[bytes]:
+        """Concatenate every per-session replay segment into ONE continuous MP4.
+
+        rotate_ip records one Kernel replay per session (baseline + one per
+        rotation), each on a different exit IP. This downloads them all and stitches
+        them into a single video so the FE plays one continuous recording of the IP
+        changing — not a playlist. Returns the stitched bytes, or None (ffmpeg
+        missing / a download or concat failure) so the caller can fall back to the
+        per-segment URL list."""
+        urls = self.replay_view_urls
+        if len(urls) < 2:
+            return None
+        ffmpeg_path = shutil.which("ffmpeg")
+        if not ffmpeg_path:
+            logger.warning(
+                "ffmpeg unavailable; cannot stitch replay segments into one video",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                segment_count=len(urls),
+            )
+            return None
+        with tempfile.TemporaryDirectory(prefix="rose-replay-stitch-") as tmp:
+            tmp_dir = Path(tmp)
+            seg_paths: List[Path] = []
+            try:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+                    for index, url in enumerate(urls):
+                        # The freshly-stopped last segment can lag S3 availability;
+                        # retry briefly so the final rotation isn't dropped.
+                        last_exc: Optional[Exception] = None
+                        for attempt in range(3):
+                            try:
+                                response = await client.get(url)
+                                response.raise_for_status()
+                                if not response.content:
+                                    raise RuntimeError("empty replay body")
+                                break
+                            except Exception as exc:  # noqa: BLE001 — retry transient S3 lag
+                                last_exc = exc
+                                await asyncio.sleep(1.5 * (attempt + 1))
+                        else:
+                            raise last_exc or RuntimeError("segment download failed")
+                        seg_path = tmp_dir / f"seg_{index:03d}.mp4"
+                        seg_path.write_bytes(response.content)
+                        seg_paths.append(seg_path)
+            except Exception as exc:  # noqa: BLE001 — fall back to the segment URL list
+                logger.warning(
+                    "Replay segment download failed; skipping stitch",
+                    agent_id=self.agent_id,
+                    task_id=self.task_id,
+                    error=str(exc)[:300],
+                )
+                return None
+            list_file = tmp_dir / "segments.txt"
+            list_file.write_text("".join(f"file '{p.name}'\n" for p in seg_paths), encoding="utf-8")
+            out_path = tmp_dir / "stitched.mp4"
+            stitched = await self._run_ffmpeg_concat(ffmpeg_path, list_file, out_path, copy=True)
+            if not stitched:
+                stitched = await self._run_ffmpeg_concat(ffmpeg_path, list_file, out_path, copy=False)
+            if not stitched:
+                return None
+            data = out_path.read_bytes()
+            logger.info(
+                "Replay segments stitched into one video",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                segment_count=len(seg_paths),
+                bytes=len(data),
+            )
+            return data
 
     async def stop_kernel_replay(self) -> Optional[str]:
         """Stop the Kernel replay and return the (finalized) hosted view URL.
@@ -383,6 +601,11 @@ class BrowserAgentRecorder:
             )
             if match and match.get("replay_view_url"):
                 self.recording_view_url = match["replay_view_url"]
+                # Keep the current (last) segment's URL in sync with the finalized one.
+                for seg in reversed(self._replay_segments):
+                    if seg.get("replay_id") == self._kernel_replay_id:
+                        seg["view_url"] = match["replay_view_url"]
+                        break
         except Exception as exc:  # noqa: BLE001 — fall back to start-time view URL
             logger.warning(
                 "Kernel replay list failed; using start-time view URL",
@@ -1228,6 +1451,14 @@ class BrowserNetworkRecorder:
         self.output_dir = output_dir
         self.network_dir = self.output_dir / "network"
         self.entries: Dict[str, Dict[str, Any]] = {}
+        # Request IDs that were in flight when the agent last cleared the buffer
+        # (read_network_requests clear=True). Their late response events must NOT
+        # resurrect a pre-clear entry, or the next read would leak old traffic.
+        self._ignored_request_ids: set[str] = set()
+        # Track every request observed by CDP, including requests dropped when the
+        # capture buffer is full. A clear must ignore all pre-clear traffic, not
+        # only the subset that had room in ``entries``.
+        self._active_request_ids: set[str] = set()
         self._started_at = time.monotonic()
         self._closed = False
         self._tasks: set[asyncio.Task] = set()
@@ -1321,7 +1552,12 @@ class BrowserNetworkRecorder:
             request = event.get("request") or {}
             url = request.get("url") or ""
             resource_type = event.get("type") or ""
-            if not request_id or len(self.entries) >= self._max_entries:
+            if not request_id:
+                return
+            self._active_request_ids.add(request_id)
+            if request_id in self._ignored_request_ids:
+                return
+            if len(self.entries) >= self._max_entries:
                 return
             if not self._should_capture(url, resource_type):
                 return
@@ -1343,9 +1579,23 @@ class BrowserNetworkRecorder:
             url = response.get("url") or ""
             resource_type = event.get("type") or ""
             mime_type = response.get("mimeType") or ""
-            if not request_id or len(self.entries) >= self._max_entries:
+            if not request_id:
                 return
-            if not self._should_capture(url, resource_type, mime_type):
+            self._active_request_ids.add(request_id)
+            if request_id in self._ignored_request_ids:
+                return
+            # Capacity only blocks NEW requests; an already-tracked request must
+            # still receive its status/response update (otherwise a page that
+            # fills the buffer before responses land leaves every status None and
+            # defeats 403/challenge detection).
+            if request_id not in self.entries and len(self.entries) >= self._max_entries:
+                return
+            # Only gate NEW requests on the MIME predicate. An already-tracked
+            # request must still receive its status/response update even when the
+            # response MIME is non-capturable (e.g. application/octet-stream,
+            # protobuf); otherwise it keeps status=None and 403/challenge
+            # detection via read_network_requests fails.
+            if request_id not in self.entries and not self._should_capture(url, resource_type, mime_type):
                 return
             entry = self.entries.setdefault(
                 request_id,
@@ -1371,18 +1621,26 @@ class BrowserNetworkRecorder:
 
     def _on_loading_finished(self, event: Dict[str, Any], session_id: str | None) -> None:
         request_id = event.get("requestId")
+        if request_id:
+            self._ignored_request_ids.discard(request_id)
+            self._active_request_ids.discard(request_id)
         if not request_id or request_id not in self.entries:
             return
         self.entries[request_id]["encoded_data_length"] = event.get("encodedDataLength")
+        self.entries[request_id]["terminal"] = True
         task = asyncio.create_task(self._fetch_response_body(request_id, session_id))
         self._tasks.add(task)
         task.add_done_callback(lambda done: self._tasks.discard(done))
 
     def _on_loading_failed(self, event: Dict[str, Any], session_id: str | None) -> None:
         request_id = event.get("requestId")
+        if request_id:
+            self._ignored_request_ids.discard(request_id)
+            self._active_request_ids.discard(request_id)
         if request_id and request_id in self.entries:
             self.entries[request_id]["failed"] = True
             self.entries[request_id]["failure"] = event.get("errorText")
+            self.entries[request_id]["terminal"] = True
 
     async def _fetch_response_body(self, request_id: str, session_id: str | None) -> None:
         entry = self.entries.get(request_id)
@@ -1436,6 +1694,50 @@ class BrowserNetworkRecorder:
                 url=entry.get("url"),
                 error=str(exc),
             )
+
+    def query_requests(
+        self,
+        *,
+        url_pattern: str = "",
+        limit: int = 100,
+        clear: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return captured network requests for the agent's `read_network_requests`
+        tool. Mirrors Claude Code's tool: newest-first list of
+        url/method/status/resource_type (cross-origin included), optionally filtered
+        by a URL substring. When ``clear`` is set the buffer is emptied after the
+        read so a follow-up call only surfaces new traffic.
+        """
+        pattern = (url_pattern or "").lower().strip()
+        capped_limit = max(1, min(int(limit or 100), self._max_entries))
+        scored: List[tuple[int, Dict[str, Any]]] = []
+        for entry in self.entries.values():
+            url = entry.get("url") or ""
+            if pattern and pattern not in url.lower():
+                continue
+            # Never return raw query strings/fragments to the agent turn history:
+            # they can carry signed URLs, auth tokens, and PII. Path is enough for
+            # challenge detection (status) and endpoint discovery.
+            row: Dict[str, Any] = {
+                "url": _redact_url_query(url),
+                "method": entry.get("method"),
+                "status": entry.get("status"),
+                "resource_type": entry.get("resource_type"),
+            }
+            if entry.get("failed"):
+                row["failed"] = True
+                row["failure"] = entry.get("failure")
+            ts = entry.get("response_ts_ms") or entry.get("request_ts_ms") or 0
+            scored.append((int(ts), row))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        rows = [row for _, row in scored[:capped_limit]]
+        if clear:
+            # Remember every request still in flight, including requests dropped
+            # while the buffer was full, so late response events cannot resurrect
+            # pre-clear traffic. Terminal events remove IDs from both sets.
+            self._ignored_request_ids.update(self._active_request_ids)
+            self.entries.clear()
+        return rows
 
     async def close(self) -> Optional[Path]:
         if self._closed:
