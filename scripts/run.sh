@@ -1147,9 +1147,16 @@ start_world_model_harness() {
     WMH_PID=$!
     PIDS+=($WMH_PID); NAMES+=("wmh")
 
-    # Health-wait on GET /healthz (short timeout — check the log if it never comes up).
+    # Cold model loading on a freshly restored cloud volume can legitimately take
+    # longer than 30 seconds before Uvicorn binds. Keep waiting while the owned
+    # process is alive, with a bounded budget aligned to WMH inference startup.
+    local health_timeout="${WMH_HEALTH_TIMEOUT_SECONDS:-180}"
+    if ! [[ "$health_timeout" =~ ^[1-9][0-9]*$ ]]; then
+        echo "⚠️  Invalid WMH_HEALTH_TIMEOUT_SECONDS=$health_timeout; using 180s."
+        health_timeout=180
+    fi
     local ready=false
-    for _ in $(seq 1 30); do
+    for _ in $(seq 1 "$health_timeout"); do
         if ! kill -0 "$WMH_PID" 2>/dev/null; then
             echo "⚠️  WMH server exited before becoming ready — not served this run (see $wmh_log)."
             tail -20 "$wmh_log" || true
@@ -1162,7 +1169,7 @@ start_world_model_harness() {
         sleep 1
     done
     if ! $ready; then
-        echo "⚠️  WMH server did not answer /healthz on port $WMH_PORT within 30s — not served this run (see $wmh_log)."
+        echo "⚠️  WMH server did not answer /healthz on port $WMH_PORT within ${health_timeout}s — not served this run (see $wmh_log)."
         tail -20 "$wmh_log" || true
         return 0
     fi
