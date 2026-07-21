@@ -330,6 +330,7 @@ export function Confirmation({ confirmation }: { confirmation: TestPaymentConfir
           <p className="text-muted-foreground">
             Order {confirmation.orderId} was paid successfully.
           </p>
+          <p className="text-sm text-muted-foreground">Merchant: {TEST_PAYMENT_MERCHANT_NAME}</p>
         </div>
 
         <div data-testid="payment-confirmation-receipt" className="space-y-3 border-t pt-5">
