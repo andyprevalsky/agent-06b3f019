@@ -61,6 +61,7 @@ from benchmarks.benchmark_tasks import (
 from benchmarks.context_validator import validate_context
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES, resolve_live_fixtures
 from benchmarks.llm_usage import aggregate_repeatable_cache_usage, aggregate_usage_items
+from benchmarks.local import manifest_database_url
 from benchmarks.logs import (
     collect_logs,
     collect_tree_messages,
@@ -1293,6 +1294,35 @@ async def get_test_payment_lifecycle(base_url: str, agent_id: str) -> dict:
         if resp.status_code != 200:
             raise Exception(f"Failed to get payment lifecycle: {resp.status_code} {resp.text[:300]}")
         return resp.json()
+
+
+async def _get_initial_payment_lifecycle_with_retry(
+    base_url: str,
+    agent_id: str,
+    *,
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 2,
+    fetch_lifecycle: Callable[[str, str], Awaitable[dict]] = get_test_payment_lifecycle,
+) -> dict:
+    """Bound transient provider failures while assembling the first lifecycle snapshot."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await fetch_lifecycle(base_url, agent_id)
+        except Exception as error:
+            last_error = error
+            if attempt >= max_attempts:
+                break
+            print(
+                "    ⚠ Transient initial payment lifecycle read failed "
+                f"({attempt}/{max_attempts}); retrying: {error}"
+            )
+            await asyncio.sleep(retry_delay_seconds)
+    raise RuntimeError(
+        f"Initial payment lifecycle remained unavailable after {max_attempts} reads: {last_error}"
+    ) from last_error
 
 
 async def _wait_for_expected_payment_lifecycle(
@@ -3293,20 +3323,17 @@ def _local_victoria_database_url() -> Optional[str]:
     if services_path.exists():
         try:
             services = json.loads(services_path.read_text())
-            if (services.get("database") or {}).get("use_system_postgres") is True:
-                candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
-            port = (services.get("ports") or {}).get("local_db")
-            if port:
-                candidates.append(f"postgresql://postgres:postgres@localhost:{port}/victoria")
-        except Exception:
-            pass
-    env_database_url = os.environ.get("DIRECT_URL") or os.environ.get("DATABASE_URL")
-    if env_database_url:
-        candidates.append(_psql_compatible_database_url(env_database_url))
-    candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
-    configured_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
-    if configured_url:
-        candidates.append(_psql_compatible_database_url(configured_url))
+            candidates.append(manifest_database_url(services))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Invalid benchmark services manifest at {services_path}: {exc}") from exc
+    else:
+        env_database_url = os.environ.get("DIRECT_URL") or os.environ.get("DATABASE_URL")
+        if env_database_url:
+            candidates.append(_psql_compatible_database_url(env_database_url))
+        candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
+        configured_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+        if configured_url:
+            candidates.append(_psql_compatible_database_url(configured_url))
 
     seen: set[str] = set()
     for database_url in candidates:
@@ -6364,7 +6391,10 @@ async def run_single_task(
 
         if task.expected_payment_lifecycle:
             try:
-                payment_lifecycle = await get_test_payment_lifecycle(base_url, agent_id)
+                payment_lifecycle = await _get_initial_payment_lifecycle_with_retry(
+                    base_url,
+                    agent_id,
+                )
                 data["_benchmark"] = {
                     **data.get("_benchmark", {}),
                     "payment_lifecycle": payment_lifecycle,

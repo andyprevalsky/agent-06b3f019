@@ -386,7 +386,7 @@ fi
 # Prefer Docker (per-workspace container), fall back to system Postgres when
 # the Docker daemon isn't available (sandboxed containers, CI without --privileged).
 DOCKER_OK=false
-if docker_info_quick; then
+if [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && docker_info_quick; then
     DOCKER_OK=true
 fi
 

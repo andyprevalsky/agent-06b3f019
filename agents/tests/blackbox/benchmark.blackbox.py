@@ -942,6 +942,53 @@ async def test_abandonment_surfaces_three_consecutive_lifecycle_read_failures():
         )
 
 
+async def test_initial_payment_lifecycle_retries_one_transient_provider_failure():
+    """The terminal snapshot gets the same bounded transient tolerance as cleanup reads."""
+    from benchmarks.run_benchmark import _get_initial_payment_lifecycle_with_retry
+
+    reads = 0
+
+    async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError('500 {"error":"Failed to read test payment lifecycle"}')
+        return {"purchase": {"status": "CLEARED"}}
+
+    result = await _get_initial_payment_lifecycle_with_retry(
+        "http://localhost:55120",
+        "agent-123",
+        retry_delay_seconds=0,
+        fetch_lifecycle=fetch_lifecycle,
+    )
+
+    assert result["purchase"]["status"] == "CLEARED"
+    assert reads == 2
+
+
+async def test_initial_payment_lifecycle_bounds_persistent_provider_failure():
+    """A real provider outage still fails closed after the bounded retry budget."""
+    import pytest
+
+    from benchmarks.run_benchmark import _get_initial_payment_lifecycle_with_retry
+
+    reads = 0
+
+    async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal reads
+        reads += 1
+        raise RuntimeError("upstream unavailable")
+
+    with pytest.raises(RuntimeError, match="unavailable after 3 reads"):
+        await _get_initial_payment_lifecycle_with_retry(
+            "http://localhost:55120",
+            "agent-123",
+            retry_delay_seconds=0,
+            fetch_lifecycle=fetch_lifecycle,
+        )
+    assert reads == 3
+
+
 def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     """Checkout text alone cannot pass the AgentCard lifecycle benchmark."""
     from benchmarks.benchmark_tasks import get_task_by_name, get_tasks_by_tag, suite_tasks
@@ -4292,6 +4339,7 @@ def test_apply_manifest_environment_injects_wmh_base_url_and_model():
         apply_manifest_environment(
             {
                 "ports": {"backend": 55020, "health": 55022, "local_db": 55025, "wmh": 55026},
+                "database": {"name": "victoria_test_manifest"},
                 "urls": {"wmh": "http://localhost:55026/"},
                 "wmh_model_name": "rose-archive",
             }
@@ -4367,6 +4415,124 @@ def test_local_manifest_uses_isolated_system_database_identity():
     assert manifest_database_url(manifest) == (
         "postgresql://postgres:postgres@localhost:5432/victoria_bench_1783809252_85375_82461"
     )
+
+
+def test_runner_fixtures_use_isolated_system_database_identity():
+    """Fixture SQL must target the same isolated DB named by the service stack."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from benchmarks import run_benchmark
+
+    manifest = {
+        "ports": {"local_db": 55435},
+        "database": {
+            "use_system_postgres": True,
+            "port": 5432,
+            "runtime_port": 5432,
+            "name": "victoria_bench_1784586845_71851_68350",
+        },
+    }
+    prior_context = os.environ.get("BENCHMARK_CONTEXT_DIR")
+    try:
+        with tempfile.TemporaryDirectory() as context_dir:
+            Path(context_dir, "services.json").write_text(json.dumps(manifest), encoding="utf-8")
+            os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            with patch.object(
+                run_benchmark.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0, stdout="1\n", stderr=""),
+            ):
+                assert run_benchmark._local_victoria_database_url() == (
+                    "postgresql://postgres:postgres@localhost:5432/"
+                    "victoria_bench_1784586845_71851_68350"
+                )
+    finally:
+        if prior_context is None:
+            os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
+        else:
+            os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
+
+
+def test_runner_fixtures_fail_closed_when_isolated_database_is_unavailable():
+    """An unreachable isolated DB must never redirect fixture writes to a shared DB."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from benchmarks import run_benchmark
+
+    manifest = {
+        "ports": {"local_db": 55435},
+        "database": {
+            "use_system_postgres": True,
+            "port": 5432,
+            "name": "victoria_bench_unavailable",
+        },
+    }
+    probed_urls = []
+
+    def probe(command, **_kwargs):
+        database_url = command[1]
+        probed_urls.append(database_url)
+        return SimpleNamespace(
+            returncode=1 if database_url.endswith("/victoria_bench_unavailable") else 0,
+            stdout="",
+            stderr="connection failed",
+        )
+
+    prior_context = os.environ.get("BENCHMARK_CONTEXT_DIR")
+    try:
+        with tempfile.TemporaryDirectory() as context_dir:
+            Path(context_dir, "services.json").write_text(json.dumps(manifest), encoding="utf-8")
+            os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            with patch.object(run_benchmark.subprocess, "run", side_effect=probe):
+                assert run_benchmark._local_victoria_database_url() is None
+        assert probed_urls == [
+            "postgresql://postgres:postgres@localhost:5432/victoria_bench_unavailable"
+        ]
+    finally:
+        if prior_context is None:
+            os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
+        else:
+            os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
+
+
+def test_runner_fixtures_reject_manifest_without_database_identity():
+    """A partial manifest must not default destructive fixture writes to `victoria`."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from benchmarks import run_benchmark
+
+    manifest = {
+        "ports": {"local_db": 55435},
+        "database": {
+            "use_system_postgres": True,
+            "port": 5432,
+        },
+    }
+    prior_context = os.environ.get("BENCHMARK_CONTEXT_DIR")
+    try:
+        with tempfile.TemporaryDirectory() as context_dir:
+            Path(context_dir, "services.json").write_text(json.dumps(manifest), encoding="utf-8")
+            os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            with patch.object(
+                run_benchmark.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0, stdout="1\n", stderr=""),
+            ) as probe:
+                try:
+                    run_benchmark._local_victoria_database_url()
+                except RuntimeError as exc:
+                    assert "database name" in str(exc).lower()
+                else:
+                    raise AssertionError("partial manifest was allowed to target a default database")
+                probe.assert_not_called()
+    finally:
+        if prior_context is None:
+            os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
+        else:
+            os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
 
 
 def test_local_extract_results_path_and_diagnostic_commands():
@@ -7208,6 +7374,18 @@ async def run_all_tests():
         "local_manifest_system_database_identity",
         test_local_manifest_uses_isolated_system_database_identity,
     )
+    r.record(
+        "runner_fixture_system_database_identity",
+        test_runner_fixtures_use_isolated_system_database_identity,
+    )
+    r.record(
+        "runner_fixture_isolated_database_fail_closed",
+        test_runner_fixtures_fail_closed_when_isolated_database_is_unavailable,
+    )
+    r.record(
+        "runner_fixture_manifest_database_identity_required",
+        test_runner_fixtures_reject_manifest_without_database_identity,
+    )
     r.record("run_sh_manifest_publishes_wmh", test_run_sh_manifest_writer_publishes_wmh_when_served)
     r.record("apply_manifest_env_injects_wmh", test_apply_manifest_environment_injects_wmh_base_url_and_model)
     r.record("local_results_and_diagnostics", test_local_extract_results_path_and_diagnostic_commands)
@@ -7340,6 +7518,14 @@ async def run_all_tests():
     await r.record_async(
         "abandonment_bounds_persistent_lifecycle_outage",
         test_abandonment_surfaces_three_consecutive_lifecycle_read_failures,
+    )
+    await r.record_async(
+        "initial_payment_lifecycle_tolerates_transient_read",
+        test_initial_payment_lifecycle_retries_one_transient_provider_failure,
+    )
+    await r.record_async(
+        "initial_payment_lifecycle_bounds_persistent_outage",
+        test_initial_payment_lifecycle_bounds_persistent_provider_failure,
     )
     r.record(
         "agent_payment_requires_lifecycle_evidence",
