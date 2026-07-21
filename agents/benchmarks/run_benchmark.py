@@ -339,6 +339,9 @@ def _attention_request_kind(req: dict) -> str:
 
 
 def _expected_attention_kind(task: BenchmarkTask, observed_count: int) -> Optional[str]:
+    alternatives = getattr(task, "expected_attention_kind_any_of", [])
+    if alternatives:
+        return f"exactly one of {alternatives}"
     sequence = task.expected_attention_kinds
     if sequence:
         return sequence[observed_count] if observed_count < len(sequence) else None
@@ -352,6 +355,9 @@ def _attention_request_matches_task(
 ) -> bool:
     if task.expected_gate:
         return _gate_request_matches_task(task, req)
+    alternatives = getattr(task, "expected_attention_kind_any_of", [])
+    if alternatives:
+        return observed_count == 0 and _attention_request_kind(req) in alternatives
     expected_kind = _expected_attention_kind(task, observed_count)
     if not expected_kind:
         return True
@@ -2624,6 +2630,19 @@ async def poll_agent(
                                     "expected_attention_kind": expected_kind,
                                     "unexpected_attention_request_id": req_id,
                                 }
+                                if task.expected_attention_kind_any_of:
+                                    observed = [*seen_attention_kinds, observed_kind]
+                                    data["_benchmark"]["expected_attention_kind_any_of"] = list(
+                                        task.expected_attention_kind_any_of
+                                    )
+                                    data["_benchmark"]["attention_kinds_observed"] = observed
+                                    return (
+                                        data,
+                                        approvals_triggered,
+                                        approvals_resolved,
+                                        f"Expected exactly one attention request of kind one of "
+                                        f"{task.expected_attention_kind_any_of}, observed {observed}",
+                                    )
                                 if task.expected_gate:
                                     return (
                                         data,
@@ -2660,6 +2679,15 @@ async def poll_agent(
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
                                     "expected_attention_kind_seen": task.expected_attention_kind,
+                                    "expected_attention_request_id": req_id,
+                                }
+                            if task.expected_attention_kind_any_of:
+                                data["_benchmark"] = {
+                                    **data.get("_benchmark", {}),
+                                    "expected_attention_kind_seen": observed_kind,
+                                    "expected_attention_kind_any_of": list(
+                                        task.expected_attention_kind_any_of
+                                    ),
                                     "expected_attention_request_id": req_id,
                                 }
                             if task.expected_attention_kinds:
@@ -3180,6 +3208,15 @@ def evaluate_task(
             return True, None
         return False, "Expected approval requests but none were triggered"
 
+    if task.expected_attention_kind_any_of and approvals_triggered > 0:
+        observed_kind = data.get("_benchmark", {}).get("attention_request_kind_seen")
+        if observed_kind not in task.expected_attention_kind_any_of:
+            return (
+                False,
+                f"Expected exactly one attention request of kind one of "
+                f"{task.expected_attention_kind_any_of}, observed {observed_kind}",
+            )
+
     if (
         task.approval_handling != "count_only"
         and task.expected_approval_count is not None
@@ -3359,16 +3396,36 @@ def _local_victoria_db_container() -> Optional[str]:
     return container if container in ps.stdout.splitlines() else None
 
 
+def _services_manifest_is_active(services: dict) -> bool:
+    """Return whether a services manifest is authoritative for fixture SQL."""
+    status = services.get("status")
+    if status in {"failed", "stopped"}:
+        return False
+    run_sh_pid = services.get("run_sh_pid")
+    if run_sh_pid is None:
+        return True
+    if not isinstance(run_sh_pid, int) or run_sh_pid <= 1:
+        return False
+    try:
+        os.kill(run_sh_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _local_victoria_database_url() -> Optional[str]:
     candidates: list[str] = []
     services_path = _benchmark_context_path() / "services.json"
     if services_path.exists():
         try:
             services = json.loads(services_path.read_text())
-            candidates.append(manifest_database_url(services))
+            if _services_manifest_is_active(services):
+                candidates.append(manifest_database_url(services))
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"Invalid benchmark services manifest at {services_path}: {exc}") from exc
-    else:
+    if not candidates:
         env_database_url = os.environ.get("DIRECT_URL") or os.environ.get("DATABASE_URL")
         if env_database_url:
             candidates.append(_psql_compatible_database_url(env_database_url))

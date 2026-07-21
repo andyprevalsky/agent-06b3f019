@@ -44,6 +44,56 @@ their orchestration, state, user-input gates, and response contract.
    benchmark rerun, and every deploy-unit handoff. Do not start the next action
    until the main merge, conflict resolution, local DB resync, and affected
    regression gates are complete.
+9. **Pin one issue cluster per row.** Classify at the proven first-bad boundary
+   using the taxonomy below. If two independent clusters caused one task
+   failure, split them into separate lifecycle rows. Never use a downstream
+   symptom such as “timeout” when the RCA proves a deeper cluster.
+
+## Issue clusters
+
+Every lifecycle row has exactly one `issue_cluster`, rendered verbatim in the
+Cluster column. This is the user-facing core claim; the deeper RCA problem
+bucket may remain more technical.
+
+| Issue cluster | Use when the proven first-bad boundary is… |
+|---|---|
+| **Faulty Evaluator** | Evaluator code, checks, criteria, rubric, or verifier-scoring instructions disagree with the authoritative task contract—including task-versus-evaluator conflicts—or accept an outcome that contract forbids. |
+| **Prompting Inconsistency** | Two instructions governing the acting agent before evaluation—task, system/tool prompt, or tool/response schema—contradict each other. Evaluator-only scoring conflicts are excluded. |
+| **Underspecified Task** | A requirement or preference needed for a unique correct outcome is absent from the task contract. |
+| **Context Drift** | Relevant context becomes stale, truncated, overwritten, cross-contaminated, or detached from the action it should govern. |
+| **Lacking Tool** | No available tool or capability can observe or perform a required action. |
+| **Broken Tool** | The required tool exists, but errors, stalls, returns invalid data, or violates its contract. |
+| **Product Defect** | Owned application, service, workflow, or state-transition logic violates a valid contract after inputs and tool delivery are correct. |
+| **Agent Reasoning Failure** | Prompt, context, tools, data, and evaluator are valid, but the agent chooses or reports the wrong action or result. |
+| **Fixture/Data Mismatch** | Seed data, identity, account state, credentials, or the benchmark environment contradicts the task contract. |
+| **Resource/Performance Failure** | Owned context growth, cost, memory, concurrency, or timeout policy prevents otherwise valid progress. |
+| **External Blocker** | A third-party outage, policy block, CAPTCHA, or rate limit prevents completion after owned recovery behavior works correctly. |
+| **Infrastructure Failure** | Fleet, queue, port, build, credential plumbing, teardown, or control-plane behavior prevents a trustworthy verdict. |
+| **Observability Gap** | Required evidence is not captured, so no deeper completed classification is yet supportable. |
+| **Other** | None fits after proof; name the proposed new reusable cluster in the RCA so this taxonomy can be extended. |
+
+Boundary rules resolve overlaps: every evaluator-side disagreement with the
+authoritative task—including criteria later injected into a verifier prompt—is
+Faulty Evaluator. Prompting Inconsistency is reserved for contradictory
+instructions governing the acting agent before evaluation. A missing
+requirement is Underspecified Task; an absent capability is Lacking Tool; and an
+existing malfunctioning capability is Broken Tool. If a tool successfully
+delivers valid input but owned application state changes incorrectly, use
+Product Defect. Do not call an owned broken recovery path an External Blocker
+merely because a third party triggered it.
+
+Map the deeper `/rca` problem buckets into the one-glance clusters as follows:
+
+| `/rca` problem bucket | `/descend` issue cluster |
+|---|---|
+| Timeout too aggressive | Resource/Performance Failure |
+| Logical inconsistency in harness prompts/contracts | Faulty Evaluator for every evaluator-versus-task scoring conflict; Prompting Inconsistency only for contradictory instructions governing the acting agent before evaluation |
+| Uncaptured user preference/spec | Underspecified Task |
+| New tool/capability required | Lacking Tool |
+| Concurrency inefficiency | Resource/Performance Failure |
+| Fixture/environment/data mismatch | Fixture/Data Mismatch, or Infrastructure Failure when no trustworthy task verdict exists |
+| Observability/trace capture gap | Observability Gap |
+| Other | Reclassify from the proven first-bad boundary, normally Product Defect, Broken Tool, Agent Reasoning Failure, External Blocker, or Infrastructure Failure; retain Other only when proposing a new reusable cluster |
 
 ## Resolve the slice
 
@@ -66,6 +116,7 @@ transition. It must contain:
 - current state and epoch;
 - actual benchmark started_at, finished_at, and duration;
 - one lifecycle record per issue/fix;
+- the exact issue_cluster for every lifecycle record;
 - infra RCA ledger across all epochs;
 - `/sync` checkpoint timestamp, pre/post base SHA, origin/main SHA, DB-resync
   result, conflicts resolved, and affected regression gates;
@@ -190,6 +241,8 @@ Only after an infra-clean run:
 5. Run the identical repro and observe it pass.
 6. Cement the repro.
 7. Update exactly one lifecycle row per issue/fix.
+8. Assign exactly one issue cluster from the pinned taxonomy and record the
+   exact, untruncated `task.prompt` for every HARNESS row.
 
 Do not stop to ask which RCA to run first. Use all safe parallel capacity.
 
@@ -312,9 +365,9 @@ such as "Browser agent failed to start because proxy generation returned HTTP
 400." Render the ledger as a real Markdown table. Andy and Admin are the same
 person, so there is exactly one Approval column.
 
-| ID | Kind | Issue (≤100 chars) | RCA | Fix | Test | Approval | Real rerun | Deploy |
-|---|---|---|---|---|---|---|---|---|
-| H-01 | HARNESS | Browser agent failed to start because proxy generation returned HTTP 400 | ✅ Complete | ✅ Passes | ✅ Cemented | ⏳ Fix approval | ⏳ Pending | — Not queued |
+| ID | Kind | Cluster | Issue (≤100 chars) | RCA | Fix | Test | Approval | Real rerun | Deploy |
+|---|---|---|---|---|---|---|---|---|---|
+| H-01 | HARNESS | Broken Tool | Browser agent failed to start because proxy generation returned HTTP 400 | ✅ Complete | ✅ Passes | ✅ Cemented | ⏳ Fix approval | ⏳ Pending | — Not queued |
 
 Lifecycle values:
 
@@ -333,10 +386,19 @@ or multi-line explanations.
 ### Stop 1 content — fix approval
 
 After the lifecycle table, include one section per HARNESS row with
-⏳ Fix approval. Use this exact five-part narrative and keep every value
-concrete:
+⏳ Fix approval. Lead with the complete benchmark task and the one-glance core
+claim, then use the exact five-part RCA narrative. Never truncate, summarize,
+or paraphrase `task.prompt`, even when it is long or multiline:
 
 ### <row ID> · <issue summary>
+
+**Exact benchmark task (`task.prompt`, verbatim):**
+
+> <full exact task.prompt with every line and character preserved>
+
+**Core claim:** This task failed because **<issue cluster>**. <One or two plain
+sentences describing the exact mismatch or failure; expand internal names such
+as write_lock into ordinary language.>
 
 The issue is **<root cause at the first-bad boundary>**. I reproduced it with
 **<minimal local test and exact command>**, where we measured **<measurement>**

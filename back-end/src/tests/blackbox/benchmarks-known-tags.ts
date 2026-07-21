@@ -12,6 +12,7 @@ export const KNOWN_TAGS = [
   'smoke',
   'approval',
   'browser',
+  'proxy-rotation',
   'claude-code',
   'attachment',
   'for-each',

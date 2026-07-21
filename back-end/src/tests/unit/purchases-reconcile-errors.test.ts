@@ -13,7 +13,7 @@
 
 import assert from 'node:assert/strict';
 import crypto, { randomUUID } from 'node:crypto';
-import { PurchaseSpendStatus } from '@prisma/client';
+import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { AgentCardProviderError } from '../../providers/card-provider';
 import { WalletFundingProviderError } from '../../providers/wallet-funding';
@@ -259,11 +259,54 @@ async function main(): Promise<void> {
     const userId = await seedUser();
     const cardId = `card-${randomUUID()}`;
     const purchaseId = await seedPurchase(userId, cardId, PurchaseSpendStatus.HELD);
+    await prisma.purchaseWalletFunding.create({
+      data: {
+        purchaseId,
+        userId,
+        amountCents: 1080,
+        status: PurchaseWalletFundingStatus.FUNDED,
+        idempotencyKey: `idem-${randomUUID()}`,
+      },
+    });
     await reconcile.handleAgentCardWebhook({
       type: 'transaction.cleared',
       data: { card: { id: cardId } },
     });
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.CLEARED);
+    assert.equal(
+      (await prisma.purchaseWalletFunding.findUnique({ where: { purchaseId } }))?.status,
+      PurchaseWalletFundingStatus.CONSUMED
+    );
+  });
+
+  await test('handleAgentCardWebhook never settles after wallet reclaim starts', async () => {
+    const userId = await seedUser();
+    for (const fundingStatus of [
+      PurchaseWalletFundingStatus.RECLAIMING,
+      PurchaseWalletFundingStatus.RECLAIMED,
+      PurchaseWalletFundingStatus.RECLAIM_FAILED,
+    ]) {
+      const cardId = `card-${randomUUID()}`;
+      const purchaseId = await seedPurchase(userId, cardId, PurchaseSpendStatus.HELD);
+      await prisma.purchaseWalletFunding.create({
+        data: {
+          purchaseId,
+          userId,
+          amountCents: 1080,
+          status: fundingStatus,
+          idempotencyKey: `idem-${randomUUID()}`,
+        },
+      });
+      await reconcile.handleAgentCardWebhook({
+        type: 'transaction.cleared',
+        data: { card: { id: cardId } },
+      });
+      assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.HELD);
+      assert.equal(
+        (await prisma.purchaseWalletFunding.findUnique({ where: { purchaseId } }))?.status,
+        fundingStatus
+      );
+    }
   });
 
   await test('handleAgentCardWebhook voids a HELD purchase on transaction.voided', async () => {

@@ -38,6 +38,11 @@ assert.doesNotMatch(
   /for attempt in \$\(seq 1 600\)/,
   'coverage readiness must not use a fixed attempt-count timeout'
 );
+assert.match(
+  coverageScript,
+  /export AMPLITUDE_API_KEY=""\s+export AMPLITUDE_SECRET_KEY=""/,
+  'coverage must not consume the live Amplitude chart-query budget'
+);
 
 for (const [name, harness] of [
   ['coverage', coverageScript],

@@ -1189,6 +1189,14 @@ async def _fetch_and_append_recent_otp_user_messages(
     )
 
 
+def _browser_prompt_cache_namespace(task_id: Optional[str], call_site: str) -> Optional[str]:
+    """Return one stable provider cache lane per browser task and logical call path."""
+    if not task_id:
+        return None
+    logical_lane = re.sub(r"_(?:step|fork)_\d+$", "", call_site)
+    return f"browser-task:{task_id}:{logical_lane}"
+
+
 async def _call_browser_use_with_rotation(  # noqa: C901
     *,
     rose_client: RoseClient,
@@ -1207,6 +1215,7 @@ async def _call_browser_use_with_rotation(  # noqa: C901
     gpt_token_source: Optional[str],
     gpt_token_pool_id: Optional[str],
     browser_use_mode: Optional[str],
+    browser_task_id: Optional[str] = None,
     extra_user_messages: Optional[List[Dict[str, str]]] = None,
     call_site: Optional[str] = None,
     skip_cache_write: bool = False,
@@ -1224,6 +1233,7 @@ async def _call_browser_use_with_rotation(  # noqa: C901
     if extra_user_messages:
         browser_state_for_llm["_extra_user_messages"] = extra_user_messages
 
+    effective_call_site = call_site or f"browser_use_step_{iteration}"
     rose_kwargs = dict(
         task=task,
         browser_state=browser_state_for_llm,
@@ -1232,7 +1242,8 @@ async def _call_browser_use_with_rotation(  # noqa: C901
         dynamic_system_context=dynamic_system_context,
         turn_messages=turn_messages,
         agent_id=agent_id,
-        call_site=call_site or f"browser_use_step_{iteration}",
+        call_site=effective_call_site,
+        cache_namespace=_browser_prompt_cache_namespace(browser_task_id, effective_call_site),
         skip_cache_write=skip_cache_write,
         dump_extra=dump_extra,
     )
@@ -2065,6 +2076,7 @@ async def _generate_write_lock_notification(
     config: Any,
     user_id: str,
     agent_id: str,
+    browser_task_id: Optional[str] = None,
     iteration: int,
     token_state: ClaudeTokenState,
     gpt_token: Optional[str],
@@ -2098,6 +2110,7 @@ async def _generate_write_lock_notification(
         config=config,
         user_id=user_id,
         agent_id=agent_id,
+        browser_task_id=browser_task_id,
         iteration=iteration,
         token_state=token_state,
         gpt_token=gpt_token,
@@ -5125,6 +5138,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         config=config,
                         user_id=user_id,
                         agent_id=agent_id,
+                        browser_task_id=task_id,
                         iteration=iteration_snapshot,
                         token_state=token_state,
                         gpt_token=gpt_token,
@@ -6108,6 +6122,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         config=config,
                         user_id=user_id,
                         agent_id=agent_id,
+                        browser_task_id=task_id,
                         iteration=iteration,
                         token_state=token_state,
                         gpt_token=gpt_token,
@@ -6235,6 +6250,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         config=config,
                         user_id=user_id,
                         agent_id=agent_id,
+                        browser_task_id=task_id,
                         iteration=iteration,
                         token_state=token_state,
                         gpt_token=gpt_token,

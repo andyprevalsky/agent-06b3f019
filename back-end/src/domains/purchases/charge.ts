@@ -38,6 +38,12 @@ interface ChargeState {
   activeWalletFundingProvider?: WalletFundingProvider;
   activeCardProvider?: CardProvider;
   issuedCardId?: string;
+  /**
+   * True when the issued card is the static, company-funded Rose Agent Card (mint cutoff active).
+   * It has no AgentCard company transfer and is reusable, so there is nothing to wallet-fund or
+   * reclaim — but the user's Stripe hold is still captured normally.
+   */
+  issuedStaticCard: boolean;
 }
 
 function sanitizeDescriptorSuffix(merchant: string): string {
@@ -107,22 +113,29 @@ async function mintCaptureAndIssue(
     state.activeWalletFundingProvider
   );
   const transferId = minted.providerTransferId ?? providerTransferId;
+  const isStaticCard = minted.metadata?.staticCard === true;
   state.issuedCardId = minted.cardId;
+  state.issuedStaticCard = isStaticCard;
   // Persist the issued card id immediately, before capture or any later failure point. A crash
   // between minting and the HELD write would otherwise orphan the funded card with no durable
   // pointer for reconcilers to close it and reclaim its funding.
   await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.CHARGING, {
     cardId: minted.cardId,
   });
-  if (transferId === undefined || transferId.trim() === '') {
-    throw new PurchaseError(
-      'AgentCard issued a card without a company transfer id',
-      502,
-      'agentcard_company_transfer_missing'
-    );
+  // The static Rose Agent Card (mint cutoff) is company-funded out-of-band: no AgentCard company
+  // transfer exists, so there is nothing to require or wallet-fund. Real AgentCard cards MUST carry
+  // a company transfer id. Either way the user's Stripe hold is captured below.
+  if (!isStaticCard) {
+    if (transferId === undefined || transferId.trim() === '') {
+      throw new PurchaseError(
+        'AgentCard issued a card without a company transfer id',
+        502,
+        'agentcard_company_transfer_missing'
+      );
+    }
+    state.walletWasFunded = true;
+    await recordPurchaseWalletFunding(purchase, 'usd', transferId, minted.metadata);
   }
-  state.walletWasFunded = true;
-  await recordPurchaseWalletFunding(purchase, 'usd', transferId, minted.metadata);
   await captureAuthorizedHold(paymentIntent.id);
   state.paymentIntentCaptured = true;
   const details = await state.activeCardProvider.getDetails(minted.cardId);
@@ -158,6 +171,10 @@ async function closeIssuedCardOnFailure(
   purchase: PurchaseSpend
 ): Promise<void> {
   if (state.issuedCardId === undefined || state.activeCardProvider === undefined) return;
+  // The static Rose Agent Card is reusable and company-funded: never close it and there is no
+  // wallet funding to reclaim. Return early so reverseStripePaymentOnFailure still refunds the
+  // user's captured hold (a reclaim error would otherwise set walletReclaimFailed and block it).
+  if (state.issuedStaticCard) return;
   try {
     await state.activeCardProvider.closeCard(state.issuedCardId);
     await reclaimPurchaseWalletFunding(
@@ -263,6 +280,7 @@ export async function chargeAndIssueCard(
     paymentReversalFailed: false,
     walletWasFunded: false,
     walletReclaimFailed: false,
+    issuedStaticCard: false,
   };
   try {
     const paymentIntent = await authorizeStripeHold(state, purchase, input, stripeCustomerId);
