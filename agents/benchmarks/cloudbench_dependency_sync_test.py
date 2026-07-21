@@ -1,6 +1,8 @@
 import importlib.util
+import inspect
 import json
 import os
+import re
 import signal
 import shlex
 import socket
@@ -606,10 +608,18 @@ def test_fleet_barrier_budget_covers_cold_guest_bootstrap() -> None:
         'CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS="$FIRST_RUN_STACK_WAIT_SECONDS"'
         in fleet
     )
-    assert (
-        '--env "CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS=${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"'
-        in cloud
+    cold_default_pattern = re.compile(
+        r"CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-([0-9]+)"
     )
+    fleet_defaults = cold_default_pattern.findall(fleet)
+    cloud_defaults = cold_default_pattern.findall(cloud)
+    driver_defaults = cold_default_pattern.findall(DRIVER_SCRIPT.read_text())
+    assert len(fleet_defaults) == 2
+    assert len(cloud_defaults) == 2
+    assert len(driver_defaults) == 1
+    cold_defaults = fleet_defaults + cloud_defaults + driver_defaults
+    assert len(set(cold_defaults)) == 1
+    assert int(cold_defaults[0]) >= 1800
     assert (
         '"$START_BARRIER_WAIT_SECONDS" -lt "$PER_BOX_BARRIER_WAIT_SECONDS"'
         in fleet
@@ -761,6 +771,10 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
 
     from benchmarks import local as local_runner
 
+    assert local_runner.SERVICE_START_TIMEOUT_SECONDS == 600
+    assert inspect.signature(local_runner.wait_for_services).parameters[
+        "timeout_seconds"
+    ].default == 600
     monkeypatch.setattr(local_runner, "allocate_port_range", lambda _preferred: 62000)
     args = local_runner.parse_args(
         ["single-creator-arm", "--run-id", "predeploy-contract", "--base-port", "62000"]
@@ -2966,6 +2980,7 @@ def test_isolated_backend_startup_retries_one_hung_process(tmp_path: Path) -> No
         "#!/usr/bin/env bash\n"
         'count=$(cat "$LAUNCHES")\n'
         'count=$((count + 1))\n'
+        '[ "$count" -lt 2 ] || sleep 3\n'
         'echo "$count" > "$LAUNCHES"\n'
         'exec python3 "$LAUNCHER" "$CHILD_DIR/child-$count"\n'
     )
@@ -2975,7 +2990,9 @@ BACKEND_PORT=3001
 BACKEND_LOG_FILE="$CHILD_DIR/backend.log"
 FAIL_DIR="$CHILD_DIR/fail"
 mkdir -p "$FAIL_DIR"
-CLOUDBENCH_BACKEND_START_READY_ATTEMPTS=2
+# Keep this below the production warm-start budget (60), but large enough to
+# cover the deterministic delayed second launch in the fake npx wrapper.
+CLOUDBENCH_BACKEND_START_READY_ATTEMPTS=10
 BACKEND_INDEX=0
 PIDS=("")
 NAMES=()
@@ -3026,7 +3043,10 @@ exit "$rc"
         ["bash", "-c", script],
         cwd=ROOT,
         env=harness_env,
-        text=True, capture_output=True, check=False, timeout=25,
+        # The harness deliberately waits through TERM and KILL windows twice.
+        # Coverage runs 30 domains concurrently, so leave headroom for scheduler
+        # contention while still bounding a genuinely stuck cleanup.
+        text=True, capture_output=True, check=False, timeout=60,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
