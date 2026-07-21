@@ -1,8 +1,8 @@
 """Unit tests for the direct-to-Slack failure emitter (helpers/error_alert.py).
 
-Mirrors back-end/src/tests/unit/error-alert.test.ts: bot-token post yields an
-editable handle that rides the RCA dispatch payload, webhook is the fallback,
-the throttle dedups by normalized signature, and the activity NEVER raises.
+Auto RCA dispatch owns its Slack lifecycle, ordinary alerts keep direct Slack
+fallbacks, the throttle never merges distinct agents, and the activity NEVER
+raises.
 """
 
 import asyncio
@@ -101,7 +101,7 @@ def test_throttle_map_stays_bounded(monkeypatch):
     assert "key-0" not in error_alert._last_sent
 
 
-def test_bot_token_posts_and_dispatch_carries_handle(monkeypatch):
+def test_auto_rca_dispatch_owns_slack_card(monkeypatch):
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("SLACK_ERROR_CHANNEL_ID", "C_INPUT")
     monkeypatch.setenv("AUTO_RCA_ENABLED", "1")
@@ -110,12 +110,12 @@ def test_bot_token_posts_and_dispatch_carries_handle(monkeypatch):
     result = _run(error_alert.report_failure_activity("agent-1", "agent_workflow", "boom failed"))
 
     assert result["alerted"] is True
-    post = next(c for c in FakeClient.calls if "chat.postMessage" in c["url"])
-    assert post["json"]["channel"] == "C_INPUT"
+    assert result["rca_dispatched"] is True
+    assert not any("chat.postMessage" in c["url"] for c in FakeClient.calls)
     disp = next(c for c in FakeClient.calls if "api.github.com" in c["url"])
     cp = disp["json"]["client_payload"]
-    assert cp["slack_ts"] == "1700000000.000100"
-    assert cp["slack_channel"] == "C_RESOLVED"
+    assert "slack_ts" not in cp
+    assert cp["slack_channel"] == "C_INPUT"
     assert cp["agent_id"] == "agent-1"
     assert "source" not in cp
     assert "title" not in cp
@@ -162,9 +162,37 @@ def test_flag_off_never_dispatches(monkeypatch):
 def test_second_identical_signature_is_throttled(monkeypatch):
     monkeypatch.setenv("SLACK_ERROR_WEBHOOK_URL", "https://hooks.slack.test/xxx")
     r1 = _run(error_alert.report_failure_activity("a", "sms", "same failure text"))
-    r2 = _run(error_alert.report_failure_activity("b", "sms", "same failure text"))
+    r2 = _run(error_alert.report_failure_activity("a", "sms", "same failure text"))
     assert r1["alerted"] is True
     assert r2.get("throttled") is True
+
+
+def test_same_incident_text_does_not_throttle_distinct_agents(monkeypatch):
+    monkeypatch.setenv("SLACK_ERROR_WEBHOOK_URL", "https://hooks.slack.test/xxx")
+    r1 = _run(error_alert.report_failure_activity("a", "sms", "same failure text"))
+    r2 = _run(error_alert.report_failure_activity("b", "sms", "same failure text"))
+    assert r1["alerted"] is True
+    assert r2["alerted"] is True
+    assert len([c for c in FakeClient.calls if "hooks.slack.test" in c["url"]]) == 2
+
+
+def test_temporal_replay_dispatches_but_never_duplicates_worker_slack(monkeypatch):
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
+    monkeypatch.setenv("SLACK_ERROR_CHANNEL_ID", "C_INPUT")
+    monkeypatch.setenv("AUTO_RCA_ENABLED", "1")
+    monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "ghp_test")
+
+    first = _run(error_alert.report_failure_activity("agent-replay", "agent_workflow", "boom"))
+    # Simulate a new worker after the external dispatch landed but Temporal lost
+    # the activity completion. In-memory throttle state is gone.
+    error_alert._last_sent.clear()
+    error_alert._in_flight.clear()
+    second = _run(error_alert.report_failure_activity("agent-replay", "agent_workflow", "boom"))
+
+    assert first["rca_dispatched"] is True
+    assert second["rca_dispatched"] is True
+    assert len([c for c in FakeClient.calls if "api.github.com" in c["url"]]) == 2
+    assert not any("chat.postMessage" in c["url"] for c in FakeClient.calls)
 
 
 def test_never_raises_on_transport_error(monkeypatch):
