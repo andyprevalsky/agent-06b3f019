@@ -7014,6 +7014,12 @@ def _validate_task_target(task: BenchmarkTask, base_url: str) -> None:
 
 
 def _agentcard_setup_fixture_action(task: BenchmarkTask, base_url: str) -> Optional[str]:
+    # Production-only lifecycles must exercise the user's real AgentCard
+    # integration. Completing the benchmark setup fixture against production
+    # replaces that path with a sandbox cardholder, making every provider
+    # transfer report livemode=false and defeating this gate's purpose.
+    if task.production_only:
+        return None
     if task.agentcard_setup_action == "complete":
         return "reset"
     if task.expected_payment_lifecycle:
