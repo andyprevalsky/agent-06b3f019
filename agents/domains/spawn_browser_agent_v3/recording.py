@@ -308,6 +308,40 @@ class SimulatedBrowserRecorder:
         self.observations: List[Dict[str, Any]] = []
         self.cursor_events: List[Dict[str, int]] = []
 
+    @property
+    def checkpoint_path(self) -> Path:
+        """Return the compact resume reference for frames persisted on shared scratch storage."""
+
+        return self.output_dir / "frames.checkpoint.json"
+
+    def _load_checkpoint_frames(self) -> List[Dict[str, Any]]:
+        if not self.checkpoint_path.exists():
+            return []
+        try:
+            payload = json.loads(self.checkpoint_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return []
+        if payload.get("session_id") != self.session_id:
+            return []
+        checkpoint_frames = payload.get("frames")
+        return list(checkpoint_frames) if isinstance(checkpoint_frames, list) else []
+
+    def _write_checkpoint(self) -> None:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.checkpoint_path.with_suffix(".tmp")
+        temporary_path.write_text(
+            json.dumps(
+                {
+                    "session_id": self.session_id,
+                    "frame_count": len(self.frames),
+                    "frames": self.frames,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        temporary_path.replace(self.checkpoint_path)
+
     @classmethod
     async def create(
         cls,
@@ -321,6 +355,8 @@ class SimulatedBrowserRecorder:
             return None
         recorder = cls(agent_id=agent_id, task_id=task_id, session_id=session_id, frames=frames)
         recorder.output_dir.mkdir(parents=True, exist_ok=True)
+        if not recorder.frames:
+            recorder.frames = recorder._load_checkpoint_frames()
         return recorder
 
     async def record_frame(
@@ -348,6 +384,7 @@ class SimulatedBrowserRecorder:
             },
         }
         self.frames.append(entry)
+        await asyncio.to_thread(self._write_checkpoint)
         return entry
 
     async def record_observation(

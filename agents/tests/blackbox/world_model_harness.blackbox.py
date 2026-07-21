@@ -1834,18 +1834,69 @@ async def test_simulated_browser_recorder_exports_scriptless_wmh_frame_replay():
                 action="click",
                 browser_state={"url": "https://shop.example.test/checkout", "title": "Checkout"},
             )
-            html_bytes = recorder.export_inline_html_bytes()
+            resumed_recorder = await recording.SimulatedBrowserRecorder.create(
+                agent_id="agent-1",
+                task_id="task-1",
+                session_id="wmh-session-1",
+            )
+            assert resumed_recorder is not None
+            assert len(resumed_recorder.frames) == 1
+            await resumed_recorder.record_frame(
+                {"html": "<main>Order confirmed</main>"},
+                iteration=2,
+                label="Order confirmed",
+                action="evaluate",
+                browser_state={"url": "https://shop.example.test/confirmation", "title": "Confirmed"},
+            )
+            html_bytes = resumed_recorder.export_inline_html_bytes()
             assert html_bytes is not None
             replay = html_bytes.decode("utf-8")
             assert "el.sandbox=''" in replay
             assert "el.srcdoc=frameCsp+(frame.html||'')" in replay
             assert "default-src 'none'" in replay
             assert "allow-scripts" not in replay
-            output = await recorder.close()
+            output = await resumed_recorder.close()
             assert output is not None and output.exists()
             manifest = json.loads((output.parent / "manifest.json").read_text(encoding="utf-8"))
             assert manifest["recording_source"] == "wmh_frames"
-            assert manifest["frame_count"] == 1
+            assert manifest["frame_count"] == 2
+
+
+def test_simulated_browser_resume_payload_is_compact_and_media_free():
+    from domains.spawn_browser_agent_v3.handler import _simulated_browser_resume_payload
+
+    oversized_media = "data:image/png;base64," + ("A" * 1_000_000)
+    payload = _simulated_browser_resume_payload(
+        browser_state={
+            "url": "https://shop.example.test/checkout",
+            "dom_tree": "D" * 100_000,
+            "screenshot": oversized_media,
+            "frame": {"src": oversized_media},
+        },
+        action_entries=[
+            {"step": step, "result": {"image_url": oversized_media, "ok": True}} for step in range(50)
+        ],
+        turn_messages=[{"role": "TOOL", "content": oversized_media} for _ in range(40)],
+        recording_ref="/tmp/recordings/agent/task/frames.checkpoint.json",
+        frame_count=51,
+        visited_urls=[f"https://shop.example.test/{step}" for step in range(80)],
+        reasoning_messages=[f"reason-{step}" for step in range(30)],
+        action_summary=[f"action-{step}" for step in range(30)],
+        world_model_session_id="wmh-session-1",
+        total_input_tokens=123,
+        total_output_tokens=45,
+    )
+
+    encoded = json.dumps(payload)
+    assert "simulated_frames" not in payload
+    assert "simulated_latest_frame" not in payload
+    assert "data:image" not in encoded
+    assert len(payload["simulated_action_entries"]) == 30
+    assert len(payload["simulated_turn_messages"]) == 24
+    assert len(payload["simulated_visited_urls"]) == 50
+    assert payload["simulated_recording_frame_count"] == 51
+    assert payload["simulated_action_entry_count"] == 50
+    assert len(encoded) < 100_000
 
 
 async def test_simulated_browser_runs_five_policy_steps_then_verified_completion():
@@ -2683,6 +2734,10 @@ async def run_all_tests():
     await r.record_async(
         "simulated_browser_recorder_exports_scriptless_wmh_frame_replay",
         test_simulated_browser_recorder_exports_scriptless_wmh_frame_replay,
+    )
+    r.record(
+        "simulated_browser_resume_payload_is_compact_and_media_free",
+        test_simulated_browser_resume_payload_is_compact_and_media_free,
     )
     await r.record_async(
         "simulated_browser_runs_five_policy_steps_then_verified_completion",

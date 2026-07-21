@@ -3088,13 +3088,14 @@ BENCHMARK_MODE=true
 BENCHMARK_SKIP_WMH_DELTA=1
 curl_attempts=0
 curl() {{
+    curl_args="$*"
     curl_attempts=$((curl_attempts + 1))
     [ "$curl_attempts" -ge 31 ]
 }}
 sleep() {{ :; }}
 {wmh}
 start_world_model_harness
-printf 'attempts=%s base=%s\n' "$curl_attempts" "${{WMH_BASE_URL:-}}"
+printf 'attempts=%s base=%s args=%s\n' "$curl_attempts" "${{WMH_BASE_URL:-}}" "$curl_args"
 kill "$WMH_PID" 2>/dev/null || true
 wait "$WMH_PID" 2>/dev/null || true
 """
@@ -3107,6 +3108,58 @@ wait "$WMH_PID" 2>/dev/null || true
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "attempts=31 base=http://localhost:39999" in result.stdout
+    assert "--connect-timeout 1 --max-time 1" in result.stdout
+
+
+def test_wmh_health_wait_caps_untrusted_timeout_without_expanding_seq(tmp_path: Path) -> None:
+    """An extreme readiness timeout must fall back to the bounded default."""
+    stack = STACK_SCRIPT.read_text()
+    wmh = _extract_fleet_function(stack, "start_world_model_harness() {")
+
+    wmh_root = tmp_path / "wmh"
+    activate = wmh_root / "agents" / "venv" / "bin" / "activate"
+    fake_bin = wmh_root / "fake-bin"
+    model_root = wmh_root / ".context" / "model"
+    (model_root / "models" / "fixture").mkdir(parents=True)
+    (model_root / "build.manifest.json").write_text("{}")
+    activate.parent.mkdir(parents=True)
+    fake_bin.mkdir()
+    activate.write_text(f'export PATH="{fake_bin}:$PATH"\n')
+    fake_python = fake_bin / "python"
+    fake_python.write_text("#!/usr/bin/env bash\ntrap 'exit 0' TERM INT\nwhile :; do /bin/sleep 60; done\n")
+    fake_python.chmod(0o755)
+
+    harness = f"""set -uo pipefail
+cd "$WMH_ROOT"
+should_serve_world_model() {{ return 0; }}
+PIDS=()
+NAMES=()
+RUN_CONTEXT_DIR=.context/isolated
+WMH_BUILD_DIR=.context/model
+WMH_MODEL_NAME=fixture
+WMH_PORT=39999
+WMH_HEALTH_TIMEOUT_SECONDS=999999999
+BENCHMARK_MODE=true
+BENCHMARK_SKIP_WMH_DELTA=1
+curl_attempts=0
+curl() {{ curl_attempts=$((curl_attempts + 1)); return 1; }}
+sleep() {{ :; }}
+{wmh}
+start_world_model_harness
+printf 'attempts=%s\n' "$curl_attempts"
+kill "$WMH_PID" 2>/dev/null || true
+wait "$WMH_PID" 2>/dev/null || true
+"""
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        env={**os.environ, "WMH_ROOT": str(wmh_root)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Invalid WMH_HEALTH_TIMEOUT_SECONDS=999999999; using 180s" in result.stdout
+    assert "attempts=180" in result.stdout
 
 
 def test_refresh_deps_mode_contract() -> None:

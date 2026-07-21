@@ -3115,11 +3115,12 @@ _SIMULATED_BROWSER_RESUME_FIELDS = (
     "simulated_browser_state",
     "simulated_action_entries",
     "simulated_turn_messages",
-    "simulated_frames",
     "simulated_visited_urls",
     "simulated_reasoning_messages",
     "simulated_action_summary",
-    "simulated_latest_frame",
+    "simulated_recording_ref",
+    "simulated_recording_frame_count",
+    "simulated_action_entry_count",
     "simulated_pending_tool_call_id",
     "world_model_session_id",
     "simulated_total_input_tokens",
@@ -3140,7 +3141,8 @@ def _simulated_browser_resume_payload(
     browser_state: Dict[str, Any],
     action_entries: List[Dict[str, Any]],
     turn_messages: List[Dict[str, Any]],
-    frames: List[Dict[str, Any]],
+    recording_ref: Optional[str],
+    frame_count: int,
     visited_urls: List[str],
     reasoning_messages: List[str],
     action_summary: List[str],
@@ -3148,18 +3150,57 @@ def _simulated_browser_resume_payload(
     total_input_tokens: int,
     total_output_tokens: int,
 ) -> Dict[str, Any]:
+    compact_state = _compact_simulated_resume_value(browser_state)
+    compact_actions = [_compact_simulated_resume_value(entry) for entry in action_entries[-30:]]
+    compact_turns = [_compact_simulated_resume_value(message) for message in turn_messages[-24:]]
     return {
-        "simulated_browser_state": browser_state,
-        "simulated_action_entries": action_entries,
-        "simulated_turn_messages": turn_messages,
-        "simulated_frames": frames,
-        "simulated_visited_urls": visited_urls,
-        "simulated_reasoning_messages": reasoning_messages,
-        "simulated_action_summary": action_summary,
+        "simulated_browser_state": compact_state,
+        "simulated_action_entries": compact_actions,
+        "simulated_turn_messages": compact_turns,
+        "simulated_visited_urls": visited_urls[-50:],
+        "simulated_reasoning_messages": reasoning_messages[-20:],
+        "simulated_action_summary": action_summary[-20:],
+        "simulated_recording_ref": recording_ref,
+        "simulated_recording_frame_count": max(0, int(frame_count)),
+        "simulated_action_entry_count": len(action_entries),
         "world_model_session_id": world_model_session_id,
         "simulated_total_input_tokens": total_input_tokens,
         "simulated_total_output_tokens": total_output_tokens,
     }
+
+
+_SIMULATED_RESUME_MEDIA_KEYS = {
+    "base64",
+    "data_url",
+    "frame",
+    "image",
+    "image_url",
+    "screenshot",
+    "screenshot_b64",
+    "simulated_browser_frame",
+    "src",
+    "website_frame",
+}
+_SIMULATED_RESUME_MAX_TEXT_CHARS = 4_000
+
+
+def _compact_simulated_resume_value(value: Any) -> Any:
+    """Bound Temporal resume payloads while retaining policy and verifier context."""
+
+    if isinstance(value, dict):
+        return {
+            key: _compact_simulated_resume_value(nested)
+            for key, nested in value.items()
+            if key not in _SIMULATED_RESUME_MEDIA_KEYS
+        }
+    if isinstance(value, list):
+        return [_compact_simulated_resume_value(item) for item in value]
+    if isinstance(value, str):
+        if value.lstrip().startswith("data:image/"):
+            return "[image omitted from Temporal resume]"
+        if len(value) > _SIMULATED_RESUME_MAX_TEXT_CHARS:
+            return value[:_SIMULATED_RESUME_MAX_TEXT_CHARS] + "…[truncated for Temporal resume]"
+    return value
 
 
 def _simulated_browser_verifier_context(
@@ -3318,7 +3359,7 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
     browser_state = dict(resume.get("simulated_browser_state") or {})
     action_entries = list(resume.get("simulated_action_entries") or [])
     turn_messages = list(resume.get("simulated_turn_messages") or [])
-    frames = list(resume.get("simulated_frames") or [])
+    frames: List[Dict[str, Any]] = []
     visited_urls = list(resume.get("simulated_visited_urls") or [])
     reasoning_messages = list(resume.get("simulated_reasoning_messages") or [])
     action_summary = list(resume.get("simulated_action_summary") or [])
@@ -3327,7 +3368,7 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
     iteration = int(resume.get("step_count") or 0)
     payment_card_last4 = _normalize_payment_card_last4(resume.get("payment_card_last4"))
     write_lock_approvals = dict(resume.get("write_lock_approvals") or {})
-    latest_frame = normalize_simulated_browser_frame(resume.get("simulated_latest_frame"))
+    latest_frame: Optional[Dict[str, Any]] = None
     restored_session = resume.get("world_model_session_id")
     if isinstance(restored_session, str) and restored_session:
         world_model.session_id = restored_session
@@ -3360,7 +3401,8 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
             browser_state=browser_state,
             action_entries=action_entries,
             turn_messages=turn_messages,
-            frames=recorder.frames if recorder else frames,
+            recording_ref=str(recorder.checkpoint_path) if recorder else resume.get("simulated_recording_ref"),
+            frame_count=len(recorder.frames) if recorder else int(resume.get("simulated_recording_frame_count") or 0),
             visited_urls=visited_urls,
             reasoning_messages=reasoning_messages,
             action_summary=action_summary,
@@ -3444,6 +3486,9 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
                 session_id=world_model_session_id,
                 frames=frames,
             )
+            if recorder and recorder.frames:
+                frames = recorder.frames
+                latest_frame = normalize_simulated_browser_frame(recorder.frames[-1])
             await remember_frame(init_frame, step=0, label="Simulated website initialized", action_name="initialize")
             if browser_state.get("url"):
                 visited_urls.append(str(browser_state["url"]))
@@ -3613,7 +3658,6 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
                     "session_id": world_model_session_id,
                     "task_id": task_id,
                     "world_model_simulated": True,
-                    "simulated_latest_frame": latest_frame,
                     **resume_payload(),
                 }
 
@@ -3801,7 +3845,6 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
                     "session_id": world_model_session_id,
                     "task_id": task_id,
                     "world_model_simulated": True,
-                    "simulated_latest_frame": latest_frame,
                     **resume_payload(),
                 }
             await save_step(
