@@ -10,8 +10,13 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
-import { mintPurchaseCard, PurchaseError } from '../../domains/purchases/service';
+import { lookupPurchase, mintPurchaseCard, PurchaseError } from '../../domains/purchases/service';
 import type { MintPurchaseInput } from '../../domains/purchases/types';
+import {
+  AgentCardRoutingProvider,
+  createCardProviderForAgent,
+  StaticRoseAgentCardProvider,
+} from '../../providers/card-provider';
 import {
   FailingDetailsCardProvider,
   FakeCardProvider,
@@ -160,6 +165,76 @@ async function main(): Promise<void> {
     );
   });
 
+  await test('lookupPurchase preserves a held card when benchmark routing lookup fails', async () => {
+    const userId = await seedSubscribedUser();
+    const agent = await prisma.agent.create({
+      data: { userId, goal: 'benchmark routing failure boundary' },
+    });
+    const fingerprint = `fp-${randomUUID()}`;
+    const purchase = await prisma.purchaseSpend.create({
+      data: {
+        userId,
+        agentId: agent.id,
+        fingerprint,
+        merchant: 'Routing Failure Merchant',
+        lineItemsJson: { totalCents: 1080 },
+        totalCents: 1080,
+        status: PurchaseSpendStatus.HELD,
+        cardId: `card-${randomUUID()}`,
+      },
+    });
+    const agentDelegate = prisma.agent as unknown as {
+      findUnique: typeof prisma.agent.findUnique;
+    };
+    const originalFindUnique = agentDelegate.findUnique;
+    agentDelegate.findUnique = (async () => {
+      throw new Error('benchmark lookup unavailable');
+    }) as typeof prisma.agent.findUnique;
+    try {
+      await assert.rejects(
+        () => lookupPurchase(userId, fingerprint),
+        /benchmark lookup unavailable/
+      );
+    } finally {
+      agentDelegate.findUnique = originalFindUnique;
+    }
+    assert.equal(await latestStatus(userId, fingerprint), PurchaseSpendStatus.HELD);
+    assert.equal(
+      (await prisma.purchaseSpend.findUnique({ where: { id: purchase.id } }))?.status,
+      PurchaseSpendStatus.HELD
+    );
+  });
+
+  await test('durable benchmark agents bypass the static-card cutoff request by request', async () => {
+    const userId = await seedSubscribedUser();
+    const benchmarkAgent = await prisma.agent.create({
+      data: { userId, goal: 'benchmark provider routing', isBenchmark: true },
+    });
+    const ordinaryAgent = await prisma.agent.create({
+      data: { userId, goal: 'ordinary provider routing' },
+    });
+    const envKeys = ['AGENTCARD_MINT_ENABLED', 'BENCHMARK_MODE', 'BENCHMARK_ISOLATED_RUN'];
+    const prevEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+    for (const key of envKeys) delete process.env[key];
+    try {
+      assert.ok(
+        (await createCardProviderForAgent(userId, benchmarkAgent.id)) instanceof
+          AgentCardRoutingProvider,
+        'the persisted benchmark bit selects live AgentCard minting'
+      );
+      assert.ok(
+        (await createCardProviderForAgent(userId, ordinaryAgent.id)) instanceof
+          StaticRoseAgentCardProvider,
+        'an ordinary agent in the same process remains on the static card'
+      );
+    } finally {
+      for (const [name, value] of Object.entries(prevEnv)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
   await test('AGENTCARD MINT CUTOFF: real charge flow hands back the static Brex card (no injected provider)', async () => {
     const userId = await seedSubscribedUser();
     const wallet = new FakeWalletFundingProvider();
@@ -231,6 +306,7 @@ async function cleanup(): Promise<void> {
   for (const userId of createdUserIds) {
     await prisma.purchaseSpend.deleteMany({ where: { userId } });
     await prisma.subscription.deleteMany({ where: { userId } });
+    await prisma.agent.deleteMany({ where: { userId } });
     await prisma.user.deleteMany({ where: { userId } });
   }
   await prisma.$disconnect();

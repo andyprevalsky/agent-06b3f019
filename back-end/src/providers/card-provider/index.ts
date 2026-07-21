@@ -1,6 +1,7 @@
 import { AgentCardRoutingProvider } from './agentcard-routing';
 import { agentCardMintEnabled, StaticRoseAgentCardProvider } from './static-card';
 import type { CardProvider, CardProviderDetailsResult } from './types';
+import { isBenchmarkAgent } from '../benchmarkAgent';
 
 export type {
   CardProvider,
@@ -27,6 +28,27 @@ export function createCardProvider(userId: string): CardProvider {
     return new StaticRoseAgentCardProvider();
   }
   return new AgentCardRoutingProvider(userId);
+}
+
+interface BenchmarkAgentResolver {
+  isBenchmarkAgent: (agentId: string | null | undefined) => Promise<boolean>;
+}
+
+/**
+ * Resolve a provider for one agent request. Production shares one backend process between normal
+ * users and the benchmark harness, so process-level BENCHMARK_MODE cannot identify a production
+ * benchmark. The durable Agent.isBenchmark bit keeps the override request-scoped: evals exercise
+ * real AgentCard lifecycle behavior while ordinary users remain behind the static-card cutoff.
+ */
+export async function createCardProviderForAgent(
+  userId: string,
+  agentId: string | null | undefined,
+  resolver: BenchmarkAgentResolver = { isBenchmarkAgent }
+): Promise<CardProvider> {
+  if (agentCardMintEnabled() || (await resolver.isBenchmarkAgent(agentId))) {
+    return new AgentCardRoutingProvider(userId);
+  }
+  return new StaticRoseAgentCardProvider();
 }
 
 /** Card statuses (from the provider) where the card is still live and can be reused. */
