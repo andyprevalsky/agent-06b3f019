@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
-import { mintPurchaseCard, PurchaseError } from '../../domains/purchases/service';
+import { lookupPurchase, mintPurchaseCard, PurchaseError } from '../../domains/purchases/service';
 import type { MintPurchaseInput } from '../../domains/purchases/types';
 import {
   AgentCardRoutingProvider,
@@ -162,6 +162,46 @@ async function main(): Promise<void> {
     await assert.rejects(
       () => mintPurchaseCard(mintInput(userId, { totalCents: 5_000_000 })),
       (error: unknown) => error instanceof PurchaseError && error.statusCode === 402
+    );
+  });
+
+  await test('lookupPurchase preserves a held card when benchmark routing lookup fails', async () => {
+    const userId = await seedSubscribedUser();
+    const agent = await prisma.agent.create({
+      data: { userId, goal: 'benchmark routing failure boundary' },
+    });
+    const fingerprint = `fp-${randomUUID()}`;
+    const purchase = await prisma.purchaseSpend.create({
+      data: {
+        userId,
+        agentId: agent.id,
+        fingerprint,
+        merchant: 'Routing Failure Merchant',
+        lineItemsJson: { totalCents: 1080 },
+        totalCents: 1080,
+        status: PurchaseSpendStatus.HELD,
+        cardId: `card-${randomUUID()}`,
+      },
+    });
+    const agentDelegate = prisma.agent as unknown as {
+      findUnique: typeof prisma.agent.findUnique;
+    };
+    const originalFindUnique = agentDelegate.findUnique;
+    agentDelegate.findUnique = (async () => {
+      throw new Error('benchmark lookup unavailable');
+    }) as typeof prisma.agent.findUnique;
+    try {
+      await assert.rejects(
+        () => lookupPurchase(userId, fingerprint),
+        /benchmark lookup unavailable/
+      );
+    } finally {
+      agentDelegate.findUnique = originalFindUnique;
+    }
+    assert.equal(await latestStatus(userId, fingerprint), PurchaseSpendStatus.HELD);
+    assert.equal(
+      (await prisma.purchaseSpend.findUnique({ where: { id: purchase.id } }))?.status,
+      PurchaseSpendStatus.HELD
     );
   });
 

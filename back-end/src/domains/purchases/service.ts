@@ -84,8 +84,10 @@ async function tryGetLiveCardDetails(
   cardId: string,
   cardProvider?: CardProvider
 ): Promise<CardProviderDetailsResult | null> {
+  // Provider selection may perform a database lookup. Let those errors propagate so a transient
+  // benchmark-classification failure cannot be mistaken for a consumed card and trigger billing.
+  const activeCardProvider = cardProvider ?? (await createCardProviderForAgent(userId, agentId));
   try {
-    const activeCardProvider = cardProvider ?? (await createCardProviderForAgent(userId, agentId));
     const details = await activeCardProvider.getDetails(cardId);
     return isCardLive(details) ? details : null;
   } catch (error) {
