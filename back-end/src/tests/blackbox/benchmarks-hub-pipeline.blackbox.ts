@@ -647,7 +647,10 @@ async function legHubOutageSpool(tmp: string): Promise<void> {
   const address = proxy.address();
   const proxyUrl = `http://127.0.0.1:${typeof address === 'object' && address !== null ? address.port : 0}`;
 
-  const spoolDir = path.join(REPO_ROOT, '.context', 'hub-upload-spool');
+  // Isolate this poller's recovery queue from any developer poller already
+  // running in the same worktree. Otherwise that healthy poller can consume
+  // the outage record before this leg observes it.
+  const spoolEnv = { HUB_UPLOAD_SPOOL_DIR: path.join(tmp, 'hub-upload-spool') };
   try {
     const request = await dispatchRequest(['chat-mode']);
     runId = request.runId;
@@ -655,14 +658,14 @@ async function legHubOutageSpool(tmp: string): Promise<void> {
     // This leg exercises the production poller's long-running recovery mode.
     // A one-shot poller intentionally exits after one empty/transient queue
     // read, which can make the proxy setup—not outage recovery—the assertion.
-    poller = startPoller(stub, path.join(tmp, 'poller-outage.log'), proxyUrl, true);
+    poller = startPoller(stub, path.join(tmp, 'poller-outage.log'), proxyUrl, true, spoolEnv);
     await awaitStatus(request.id, 'claimed (via proxy)', 25_000, 'running');
 
     // OUTAGE: kill the hub from the poller's perspective mid-run
     await new Promise<void>((resolve) => proxy.close(() => resolve()));
 
     // the poller must SURVIVE and spool the completion
-    const spoolFile = path.join(spoolDir, `${request.id}.json`);
+    const spoolFile = path.join(spoolEnv.HUB_UPLOAD_SPOOL_DIR, `${request.id}.json`);
     await within('completion spooled during outage', 60_000, async () =>
       fs.existsSync(spoolFile) ? true : null
     );
@@ -670,7 +673,7 @@ async function legHubOutageSpool(tmp: string): Promise<void> {
     assert(midOutage.status === 'running', 'request should still be running while spooled');
 
     // hub is back (BASE_URL was healthy all along) — a fresh poller tick flushes
-    flusher = startPoller(stub, path.join(tmp, 'poller-flush.log'));
+    flusher = startPoller(stub, path.join(tmp, 'poller-flush.log'), BASE_URL, false, spoolEnv);
     await awaitStatus(request.id, 'spool flushed after recovery', 40_000, 'completed');
     assert(!fs.existsSync(spoolFile), 'spool file should be removed after flush');
   } finally {

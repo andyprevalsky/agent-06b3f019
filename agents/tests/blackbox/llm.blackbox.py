@@ -2759,6 +2759,7 @@ async def test_check_progress_accepts_completed_code_task_structured_response():
                 "toolName": "spawn_claude_code_agent",
                 "toolStatus": "FINISHED",
                 "action_type": "task_complete",
+                "success": True,
                 "structured_response": structured_response,
             },
         },
@@ -2781,6 +2782,38 @@ async def test_check_progress_accepts_completed_code_task_structured_response():
     assert result["score"] == 1.0
     assert result["structured_response"] == structured_response
     assert result["usage"]["actual_model"] == "structured_response"
+
+
+def test_completed_code_task_rejects_failed_placeholder_structured_response():
+    """A failed code child cannot satisfy the parent with schema-shaped defaults."""
+    from helpers.llm import _completed_child_task_structured_response, _structured_response_satisfies_schema
+
+    schema = {
+        "fields": [
+            {"name": "python_source", "type": "object"},
+            {"name": "printed_output", "type": "str"},
+            {"name": "collatz_step_count", "type": "int"},
+            {"name": "collatz_sequence_from_27", "type": "list[int]"},
+        ]
+    }
+    placeholder = {
+        "python_source": {"path": "", "storage_path": ""},
+        "printed_output": "",
+        "collatz_step_count": 0,
+        "collatz_sequence_from_27": [],
+    }
+    assert _structured_response_satisfies_schema(placeholder, schema) is True
+
+    for success_value in (False, None):
+        metadata = {
+            "toolName": "spawn_claude_code_agent",
+            "toolStatus": "FINISHED",
+            "action_type": "task_complete",
+            "structured_response": placeholder,
+        }
+        if success_value is not None:
+            metadata["success"] = success_value
+        assert _completed_child_task_structured_response([{"role": "TOOL", "metadata": metadata}], schema) is None
 
 
 async def test_check_progress_accepts_completed_browser_task_structured_response():
@@ -5820,6 +5853,10 @@ async def run_all_tests():
     await r.record_async(
         "check_progress_accepts_completed_code_task_structured_response",
         test_check_progress_accepts_completed_code_task_structured_response,
+    )
+    r.record(
+        "completed_code_task_rejects_failed_placeholder_structured_response",
+        test_completed_code_task_rejects_failed_placeholder_structured_response,
     )
     await r.record_async(
         "check_progress_accepts_completed_browser_task_structured_response",

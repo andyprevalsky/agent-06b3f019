@@ -1034,6 +1034,27 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
             grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
             mv "$names_ledger.tmp" "$names_ledger"
         fi
+        # Fix-from-the-start for the name-only orphan: an AMBIGUOUS clone failure
+        # (non-zero/timed-out, but not a recognized "definitively unallocated"
+        # error) that yields no id would otherwise retain its name record forever.
+        # That id-less orphan later aborts teardown/reconciliation on a single
+        # transient Fly-list read (the `*) return 1` reap arm) and leaks every
+        # already-id'd sibling. So resolve the reserved name AUTHORITATIVELY before
+        # retrying with a fresh name: bind the id if a machine did materialize, and
+        # RELEASE the reservation only on a definite "absent" (Fly list succeeded,
+        # zero matches). An unsafe/ambiguous read (resolve==2) stays fail-closed so
+        # a genuinely late-appearing clone is never orphaned.
+        if [ -z "$target_id" ]; then
+            local reconciled_id reconcile_status
+            reconciled_id="$(registry_resolve_name "$target_name")"; reconcile_status=$?
+            case "$reconcile_status" in
+                0) target_id="$reconciled_id" ;;
+                1) fleet_registry_release_name "$target_name" || return 1
+                   grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
+                   mv "$names_ledger.tmp" "$names_ledger" ;;
+                *) : ;;
+            esac
+        fi
         if [ -n "$target_id" ] && [ "$target_id" != "$source_id" ] && [ "$target_id" != "$WARM_ID" ]; then
             if ! fleet_registry_record_id "$target_name" "$target_id"; then
                 echo "❌ could not persist provider ID $target_id; name ownership remains for teardown" >&2
@@ -1045,7 +1066,10 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
         else
             target_id=""
         fi
-        if [ "$clone_status" -eq 0 ] && [ -n "$target_id" ]; then
+        # An authoritative ID is success even when flyctl itself timed out or
+        # returned non-zero after allocation. Retrying here would provision a
+        # duplicate clone despite already owning the recovered target.
+        if [ -n "$target_id" ]; then
             printf '%s' "$target_id"
             return 0
         fi
@@ -1532,19 +1556,54 @@ json.dump(card, open(sys.argv[1], "w"), indent=1)
 PY
 }
 start_central_hub() {
+    local preferred_dash_base selected_dash_base attempt launch_pid wait_attempt
     mkdir -p "$HUB_CTX_DIR"
-    if lsof -tiTCP:"$DASH_BASE" -sTCP:LISTEN >/dev/null 2>&1; then
-        echo "📊 reusing the central hub already open on :$DASH_BASE (no new window)"
-    else
+    preferred_dash_base="$DASH_BASE"
+    for attempt in $(seq 1 20); do
+        selected_dash_base="$(cloudbench_select_central_hub_port "$preferred_dash_base" "$RUNS_ROOT")" || return 1
+        if [ "$selected_dash_base" != "$DASH_BASE" ]; then
+            echo "⚠️  central hub port :$DASH_BASE is foreign or busy; using :$selected_dash_base without stopping its owner"
+            DASH_BASE="$selected_dash_base"
+        fi
+        if cloudbench_central_hub_matches "$DASH_BASE" "$RUNS_ROOT"; then
+            UNIFIED_DASH_PID=""
+            echo "📊 reusing the central hub already open on :$DASH_BASE (no new window)"
+            echo "🖥️  local benchmark diagnostics: http://localhost:$DASH_BASE/ — run visible as STARTING"
+            return 0
+        fi
+
         python3 "$ROOT_DIR/agents/benchmarks/agent_link_server.py" \
             --root "$RUNS_ROOT" --host 127.0.0.1 --port "$DASH_BASE" \
             --repo-root "$ROOT_DIR" --context-dir "$HUB_CTX_DIR" \
             --frontend-dir "$ROOT_DIR/front-end" --hub-runs-dir "$RUNS_ROOT" \
             --preferred-archive-port "$((DASH_BASE + 200))" \
-            > "$HUB_CTX_DIR/hub.log" 2>&1 & UNIFIED_DASH_PID=$!
-        printf '%s\n' "$UNIFIED_DASH_PID" > "$HUB_CTX_DIR/agent-link-server.pid"
-    fi
-    echo "🖥️  local benchmark diagnostics: http://localhost:$DASH_BASE/ — run visible as STARTING"
+            > "$HUB_CTX_DIR/hub.log" 2>&1 & launch_pid=$!
+        for wait_attempt in $(seq 1 50); do
+            if cloudbench_central_hub_matches "$DASH_BASE" "$RUNS_ROOT"; then
+                if kill -0 "$launch_pid" 2>/dev/null; then
+                    UNIFIED_DASH_PID="$launch_pid"
+                    printf '%s\n' "$UNIFIED_DASH_PID" > "$HUB_CTX_DIR/agent-link-server.pid"
+                else
+                    UNIFIED_DASH_PID=""
+                fi
+                echo "🖥️  local benchmark diagnostics: http://localhost:$DASH_BASE/ — run visible as STARTING"
+                return 0
+            fi
+            kill -0 "$launch_pid" 2>/dev/null || break
+            sleep 0.1
+        done
+
+        # A concurrent workspace may have won the check-then-bind race. Stop only
+        # the process we launched (never an unidentified listener), then select
+        # again; the winner's runs-root identity will make us skip its port.
+        if kill -0 "$launch_pid" 2>/dev/null; then
+            kill "$launch_pid" 2>/dev/null || true
+            wait "$launch_pid" 2>/dev/null || true
+        fi
+        UNIFIED_DASH_PID=""
+    done
+    echo "❌ failed to bind or reuse a central benchmark hub after 20 attempts" >&2
+    return 1
 }
 require_central_hub_visibility() {
     local attempt page
@@ -1593,7 +1652,7 @@ require_in_app_hub_visibility() {
 if [ -z "$PROVISION_POOL" ]; then
     mkdir -p "$FLEET_DIR"
     write_startup_card "controller starting"
-    start_central_hub
+    start_central_hub || exit 1
     require_central_hub_visibility || exit 1
     require_in_app_hub_visibility || exit 1
 fi
@@ -2524,6 +2583,13 @@ cp -f "$ROOT_DIR/agents/benchmarks/dashboard.html" "$UNIFIED_DIR/dashboard.html"
     done
     printf ']'
 } > "$UNIFIED_DIR/benches.json"
+# Revalidate/restart the identity-owned hub BEFORE the aggregator captures
+# DASH_BASE. If the early hub disappeared and a foreign workspace took its
+# port, every generated agent URL must use the newly selected port.
+start_central_hub || exit 1
+require_central_hub_visibility || exit 1
+HUB_URL="http://localhost:$DASH_BASE/"
+RUN_URL="http://localhost:$DASH_BASE/run/$RUN_ID/dashboard.html"
 (
     while :; do
         env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE" \
@@ -2614,33 +2680,6 @@ PY
         sleep 1
     done
 ) & UNIFIED_AGG_PID=$!
-# The CENTRAL HUB is the durable open-agent resolver (agent_link_server --hub):
-# ONE persistent server over the runs-root that serves a run-index at /, each
-# run's dashboard at /run/<id>/, and resolves any agent from any run's local data
-# on demand. It PERSISTS across runs + past fleet exit (see cleanup), so it is the
-# single dashboard, "open" is never a dead link, and we never clutter the screen
-# with a new window per run. Start it ONLY if it isn't already up.
-mkdir -p "$HUB_CTX_DIR"
-HUB_URL="http://localhost:$DASH_BASE/"
-RUN_URL="http://localhost:$DASH_BASE/run/$RUN_ID/dashboard.html"
-HUB_WAS_UP=0
-if curl -fsS "$HUB_URL" 2>/dev/null | grep -q "Benchmark runs"; then
-    HUB_WAS_UP=1
-    echo "📊 reusing the central hub already open on :$DASH_BASE (no new window)"
-else
-    for pp in $(lsof -tiTCP:"$DASH_BASE" -sTCP:LISTEN 2>/dev/null || true); do kill "$pp" 2>/dev/null || true; done
-    python3 "$ROOT_DIR/agents/benchmarks/agent_link_server.py" \
-        --root "$RUNS_ROOT" --host 127.0.0.1 --port "$DASH_BASE" \
-        --repo-root "$ROOT_DIR" --context-dir "$HUB_CTX_DIR" \
-        --frontend-dir "$ROOT_DIR/front-end" --hub-runs-dir "$RUNS_ROOT" \
-        --preferred-archive-port "$((DASH_BASE + 200))" \
-        > "$HUB_CTX_DIR/hub.log" 2>&1 & UNIFIED_DASH_PID=$!
-    printf '%s\n' "$UNIFIED_DASH_PID" > "$HUB_CTX_DIR/agent-link-server.pid"
-    for _ in $(seq 1 20); do curl -fsS "$HUB_URL" >/dev/null 2>&1 && break; sleep 1; done
-fi
-if [ "$HUB_WAS_UP" = "0" ]; then
-    echo "📊 central hub: $HUB_URL (in-app: Benchmarks tab)"
-fi
 echo "   this run: $RUN_URL"
 echo "   per-bench viewers: $(for j in "${!CHILD_PORT[@]}"; do printf '%s→:%s ' "${CHILD_BENCH[$j]}" "${CHILD_PORT[$j]}"; done)"
 echo ""

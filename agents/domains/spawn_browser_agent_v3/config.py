@@ -11,7 +11,7 @@ from utils.llm_timeouts import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
 STEEL_API_KEY = os.environ.get("STEEL_API_KEY", "")
 
 # Agent loop limits
-MAX_ITERATIONS = 30
+MAX_ITERATIONS = 50
 MAX_CONSECUTIVE_API_FAILURES = 5
 ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES = 15
 HEARTBEAT_TIMEOUT_SECONDS = 120
@@ -42,6 +42,11 @@ os.environ.setdefault("TIMEOUT_ScreenshotEvent", str(SCREENSHOT_EVENT_TIMEOUT_SE
 # Session init retry settings
 SESSION_MAX_WAIT_SECONDS = 900  # 15 minutes max
 SESSION_RETRY_INTERVAL_SECONDS = 30
+# Transient provider infra failures (unhealthy proxy allocated) reallocate on a
+# fresh init, so retry quickly a bounded number of times rather than waiting the
+# full rate-limit interval or failing the whole browser run.
+SESSION_INIT_TRANSIENT_MAX_ATTEMPTS = 4
+SESSION_INIT_TRANSIENT_RETRY_SECONDS = 5
 
 # Claude auth rotation
 MAX_CLAUDE_TOKEN_ROTATIONS = 5

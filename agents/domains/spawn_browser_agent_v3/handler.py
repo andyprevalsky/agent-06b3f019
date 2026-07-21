@@ -10,6 +10,7 @@ import asyncio
 import base64
 import contextlib
 import gc
+import html as html_module
 import importlib
 import inspect
 import json
@@ -63,6 +64,8 @@ from .config import (
     MAX_CLAUDE_TOKEN_ROTATIONS,
     MAX_CONSECUTIVE_API_FAILURES,
     MAX_ITERATIONS,
+    SESSION_INIT_TRANSIENT_MAX_ATTEMPTS,
+    SESSION_INIT_TRANSIENT_RETRY_SECONDS,
     SESSION_MAX_WAIT_SECONDS,
     SESSION_RETRY_INTERVAL_SECONDS,
     VERIFIER_ULTRA_MODEL,
@@ -71,7 +74,9 @@ from .config import (
 from .recording import (
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
+    SimulatedBrowserRecorder,
     browser_recording_output_dir,
+    normalize_simulated_browser_frame,
 )
 from .repo import (
     close_browser_session,
@@ -84,6 +89,7 @@ from .repo import (
     propagate_browser_run_credentials,
     report_claude_token_rate_limited,
     resume_browser_session,
+    rotate_browser_proxy,
     save_browser_action_message,
     save_browser_assistant_message,
     save_browser_credential_ref_message,
@@ -915,6 +921,78 @@ async def _reap_playwright_driver_process(process: Optional[Any], agent_id: str)
         return
     except Exception as e:
         logger.warning("Failed to kill Playwright driver process", agent_id=agent_id, error=str(e))
+
+
+async def _reconnect_browser_stack_after_rotation(
+    *,
+    new_cdp_url: str,
+    old_dom_service: Any,
+    old_playwright_browser: Optional[Any],
+    old_playwright_instance: Optional[Any],
+    old_driver_pid: Optional[int],
+    fingerprint_injection: Optional[Any],
+    agent_id: str,
+) -> Dict[str, Any]:
+    """Tear down the current CDP/Playwright stack and reattach to `new_cdp_url`.
+
+    Backs the rotate_ip tool: the backend recreates the browser session on a fresh
+    proxy (same persistent profile → cookies/login survive) and returns a new
+    ws_url; the agent must drop its live connection and reconnect to it. Fingerprint
+    injection is re-applied so the rotated IP does not pair with a fresh device
+    fingerprint. Returns the new dom_service/pages/playwright handles + driver pid.
+    """
+    from browser_tools.dom_service import DOMService
+
+    # 1. Tear down the old connection first so the previous Kernel session's CDP
+    #    sockets + local Playwright driver are released before we attach anew.
+    with contextlib.suppress(Exception):
+        await old_dom_service.disconnect()
+    await _stop_playwright_resources(
+        old_playwright_browser,
+        old_playwright_instance,
+        agent_id,
+        driver_pid=old_driver_pid,
+    )
+
+    # 2. Attach DOMService + Playwright to the rotated session.
+    _disable_cdp_websocket_proxy()
+    dom_service = DOMService(cdp_url=new_cdp_url)
+    await dom_service.connect()
+    dom_page = await dom_service.session.get_current_page()
+
+    from playwright.async_api import async_playwright
+
+    pw_instance = await async_playwright().start()
+    driver_pid = getattr(_playwright_driver_process(pw_instance), "pid", None)
+    try:
+        pw_browser = await pw_instance.chromium.connect_over_cdp(new_cdp_url)
+    except BaseException:
+        driver_process = _playwright_driver_process(pw_instance)
+        with contextlib.suppress(Exception):
+            await pw_instance.stop()
+        await _reap_playwright_driver_process(driver_process, agent_id)
+        with contextlib.suppress(Exception):
+            await dom_service.disconnect()
+        raise
+    pw_context = pw_browser.contexts[0]
+    pw_page = pw_context.pages[0]
+
+    # 3. Re-apply the device fingerprint (anti-bot essential on the new IP).
+    if fingerprint_injection and _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True):
+        from helpers.fingerprint_injection import apply_fingerprint_injection
+
+        with contextlib.suppress(Exception):
+            await apply_fingerprint_injection(pw_page, fingerprint_injection)
+
+    logger.info("Reconnected browser stack after proxy rotation", agent_id=agent_id)
+    return {
+        "dom_service": dom_service,
+        "dom_page": dom_page,
+        "input_page": pw_page,
+        "playwright_browser": pw_browser,
+        "playwright_instance": pw_instance,
+        "playwright_driver_pid": driver_pid,
+    }
 
 
 def _playwright_driver_command_matches(command: str) -> bool:
@@ -2155,24 +2233,65 @@ async def _finalize_kernel_replay_for_fe(
     browser_recorder: BrowserAgentRecorder,
     agent_id: str,
     task_id: str,
+    user_id: Optional[str],
     browser_url: Optional[str],
     browser_session_metadata: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
     """Stop Kernel's native replay and write the FE-visible recording message.
 
     System context:
-    Kernel replay (start at session setup) -> stop + hosted view URL -> DB tool
-    message -> BrowserAgentChip Recording tab. No screenshot frames, no Supabase
-    upload: the video is stored by Kernel and the FE iframes `recording_view_url`.
+    Kernel replay (one per session; rotate_ip records a fresh segment per rotation)
+    -> stop -> stitch every segment into ONE continuous MP4 -> upload -> DB tool
+    message -> BrowserAgentChip Recording tab. The FE plays a single stitched video
+    of the exit IP changing across rotations. With only one segment (no rotation),
+    or when the stitch can't run (no ffmpeg / download failure), we fall back to the
+    Kernel-hosted view URL — no re-encode, no upload.
     """
     view_url = await browser_recorder.stop_kernel_replay()
-    if not view_url:
+    # One replay segment per session. After rotate_ip runs, there are multiple
+    # segments (baseline + one per rotation); each shows a different exit IP.
+    segment_urls = list(getattr(browser_recorder, "replay_view_urls", []) or [])
+    if not segment_urls and view_url:
+        segment_urls = [view_url]
+    if not segment_urls:
         logger.warning(
             "Kernel replay finalized without a view URL; no recording message",
             agent_id=agent_id,
             task_id=task_id,
         )
         return None
+
+    # Multiple rotation segments -> stitch into ONE continuous MP4 and upload it, so
+    # the FE plays a single video player (not a playlist) of the IP changing.
+    extra_metadata: Dict[str, Any] = {"browser_session_metadata": browser_session_metadata}
+    stitched_pointer = None
+    if len(segment_urls) > 1 and user_id:
+        try:
+            stitched_mp4 = await browser_recorder.stitch_segments_to_mp4()
+            if stitched_mp4:
+                stitched_pointer = await upload_to_storage(
+                    user_id=user_id,
+                    file_content=stitched_mp4,
+                    filename=f"browser-recording-{task_id}.mp4",
+                    mime_type="video/mp4",
+                )
+        except Exception as exc:  # noqa: BLE001 — stitch/upload is best-effort
+            logger.warning(
+                "Replay stitch/upload failed; falling back to segment URLs",
+                agent_id=agent_id,
+                task_id=task_id,
+                error=repr(exc)[:300],
+            )
+
+    if stitched_pointer:
+        # One stitched video is the entire recording; the FE plays it directly.
+        extra_metadata["recording_file_pointer"] = stitched_pointer
+    else:
+        # Fallback: hand the FE the Kernel-hosted segment URL(s). Baseline first.
+        extra_metadata["recording_view_url"] = segment_urls[0]
+        if len(segment_urls) > 1:
+            extra_metadata["recording_view_urls"] = segment_urls
+
     await save_browser_action_message(
         agent_id=agent_id,
         title="Browser recording saved",
@@ -2182,18 +2301,19 @@ async def _finalize_kernel_replay_for_fe(
         browser_url=browser_url or "",
         action_type="recording",
         tool_call_id=str(uuid_module.uuid4()),
-        extra_metadata={
-            "recording_view_url": view_url,
-            "browser_session_metadata": browser_session_metadata,
-        },
+        extra_metadata=extra_metadata,
     )
     logger.info(
         "Kernel replay recording message saved",
         agent_id=agent_id,
         task_id=task_id,
-        has_view_url=bool(view_url),
+        segment_count=len(segment_urls),
+        stitched=bool(stitched_pointer),
     )
-    return {"recording_view_url": view_url}
+    return {
+        "recording_file_pointer": stitched_pointer,
+        "recording_view_urls": segment_urls,
+    }
 
 
 async def _finalize_browser_recording_for_fe(
@@ -2224,6 +2344,7 @@ async def _finalize_browser_recording_for_fe(
             browser_recorder=browser_recorder,
             agent_id=agent_id,
             task_id=task_id,
+            user_id=user_id,
             browser_url=browser_url,
             browser_session_metadata=browser_session_metadata,
         )
@@ -2548,8 +2669,19 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
 ) -> Dict[str, Any]:
-    async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
-        return await _spawn_browser_agent_activity_v3_real(
+    # A browser is its own stateful environment. Do not inherit either the
+    # benchmark runner's explicit session or the parent agent's module-cached
+    # session. The latter uses ``agent_id`` as its cache key and can be created
+    # by a provider boundary before this activity starts; sharing it makes WMH
+    # answer browser actions using the parent's whole-agent output contract.
+    # The tool-call namespace remains stable across write-lock resumes, whose
+    # payload also restores the exact browser session id.
+    world_model = WorldModelToolExecutionAdapter.from_env(
+        agent_id=f"{agent_id}:browser:{tool_call_id}",
+        inherit_explicit_session=False,
+    )
+    if world_model.should_simulate("browser_action"):
+        return await _spawn_browser_agent_activity_v3_simulated(
             user_id=user_id,
             agent_id=agent_id,
             goal=goal,
@@ -2569,126 +2701,1198 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
             gpt_account_id=gpt_account_id,
             gpt_token_source=gpt_token_source,
             gpt_token_pool_id=gpt_token_pool_id,
-            fast_mode_cache_enabled=fast_mode_cache_enabled,
+            world_model=world_model,
         )
-
-    result = await WorldModelToolExecutionAdapter.from_env(agent_id=agent_id).execute(
-        "spawn_browser_agent",
-        {
-            "user_id": user_id,
-            "agent_id": agent_id,
-            "goal": goal,
-            "task_id": task_id,
-            "session_id": session_id,
-            "is_resume": is_resume,
-            "output_schema": output_schema,
-            "attachments": attachments,
-            "write_lock_enabled": write_lock_enabled,
-            "start_url": start_url,
-            "system_name": system_name,
-            "use_claude_mode": use_claude_mode,
-            "simulation_contract": _browser_world_model_contract(
-                is_resume=is_resume,
-                write_lock_enabled=write_lock_enabled,
-                output_schema=output_schema,
-            ),
-        },
-        tool_call_id,
-        real_executor,
+    return await _spawn_browser_agent_activity_v3_real(
+        user_id=user_id,
+        agent_id=agent_id,
+        goal=goal,
+        tool_call_id=tool_call_id,
+        task_id=task_id,
+        session_id=session_id,
+        cdp_url=cdp_url,
+        is_resume=is_resume,
+        output_schema=output_schema,
+        attachments=attachments,
+        write_lock_enabled=write_lock_enabled,
+        start_url=start_url,
+        write_lock_resume_state=write_lock_resume_state,
+        system_name=system_name,
+        use_claude_mode=use_claude_mode,
+        gpt_token=gpt_token,
+        gpt_account_id=gpt_account_id,
+        gpt_token_source=gpt_token_source,
+        gpt_token_pool_id=gpt_token_pool_id,
+        fast_mode_cache_enabled=fast_mode_cache_enabled,
     )
-    return _validate_simulated_browser_result(result, output_schema=output_schema)
 
 
-def _browser_world_model_contract(
+def _simulated_browser_transition_contract(
     *,
-    is_resume: bool,
+    action_name: str,
+    approved: bool,
     write_lock_enabled: bool,
-    output_schema: Optional[Dict[str, Any]],
+    retry_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Describe the synchronous activity boundary the simulator must model."""
-
-    required_fields = [
-        str(field.get("name"))
-        for field in (output_schema or {}).get("fields", [])
-        if isinstance(field, dict) and field.get("name")
-    ]
+    instructions = (
+        "Apply exactly this one action to the simulated website state. The WMH response envelope "
+        "requires an output string: set output to a JSON-encoded object containing browser_state "
+        "with url, title, dom_tree, viewport, scroll_position, page_stats, tabs, and recent_events. "
+        "Also return frame as either static HTML or a raster image data URL/URL when supported. "
+        "Do not narrate actions the browser agent did not request and do not complete future steps. "
+        "If this action would cause an irreversible write and approved is false, do not mutate state; "
+        "return requires_approval=true, approval_type, and a grounded question. If approved is true, "
+        "apply only the previously requested action. Never return a whole browser-agent outcome."
+    )
+    if retry_reason:
+        # The prior attempt for THIS action returned a malformed transition (an LLM
+        # simulator occasionally omits required fields). Re-emit the same single
+        # transition, this time with the mandatory structure, instead of failing the
+        # whole trajectory.
+        instructions = (
+            f"RETRY — your previous response for this exact action was rejected: {retry_reason}. "
+            "You MUST return a JSON object containing a top-level 'browser_state' object whose "
+            "'dom_tree' is present (structured accessibility tree or serialized string). Do not omit "
+            "browser_state or dom_tree. Re-apply only this one action to the same prior state. " + instructions
+        )
     return {
-        "boundary": "synchronous_activity_result",
-        "is_resume": is_resume,
+        "boundary": "browser_environment_transition",
+        "action_name": action_name,
+        "approved": approved,
         "write_lock_enabled": write_lock_enabled,
-        "instructions": (
-            "Return the result of this whole synchronous browser activity invocation, not an "
-            "acknowledgement that a browser was spawned. Never return spawned, active, pending, "
-            "or in_progress as the final status. Before an irreversible browser write, return "
-            "status awaiting_write_approval with question, approval_type, current_url, and "
-            "resume identifiers. On a resumed approved invocation, perform the pending action "
-            "and return a terminal completed or failed result."
-        ),
-        "allowed_statuses": [
-            "awaiting_write_approval",
-            "awaiting_payment_card_approval",
-            "awaiting_auth_assistance",
-            "completed",
-            "failed",
-            "cancelled",
-        ],
-        "required_terminal_output_fields": required_fields,
+        "instructions": instructions,
     }
 
 
-def _validate_simulated_browser_result(
+def _initial_simulated_browser_state(start_url: str) -> Dict[str, Any]:
+    """Create the neutral, pre-action browser state for a new WMH session.
+
+    Initialization is orchestration, not an environment action. Asking the LLM
+    world model to simulate it can accidentally advance the goal all the way to
+    completion before the browser policy takes its first action.
+    """
+
+    from urllib.parse import parse_qs, urlparse
+
+    url = str(start_url or "about:blank")
+    parsed = urlparse(url)
+    host = parsed.netloc or "simulated website"
+    query = parse_qs(parsed.query).get("k", [""])[0].strip()
+    title = "Amazon.com" if "amazon." in host.lower() else host
+    main_name = f'Search results page for "{query}"' if query else "Website start page"
+    tree = {
+        "role": "webarea",
+        "name": title,
+        "children": [
+            {
+                "role": "banner",
+                "name": title,
+                "children": [
+                    {"role": "link", "name": "Home"},
+                    {"role": "searchbox", "name": "Search", "value": query},
+                    {"role": "link", "name": "Cart"},
+                ],
+            },
+            {
+                "role": "main",
+                "name": main_name,
+                "children": [
+                    {
+                        "role": "text",
+                        "name": "Initial page loaded. Inspect or search to load grounded product results.",
+                    }
+                ],
+            },
+        ],
+    }
+    return {
+        "url": url,
+        "title": title,
+        "dom_tree": json.dumps(tree, sort_keys=True, separators=(",", ":")),
+        "viewport": {"width": 1440, "height": 900},
+        "scroll_position": {"pages_above": 0, "pages_below": 0, "total_pages": 1},
+        "page_stats": {"initialized": True},
+        "tabs": [{"id": 0, "url": url, "title": title}],
+        "recent_events": ["initial_page_loaded"],
+    }
+
+
+def _simulated_browser_state_from_result(
     result: Dict[str, Any],
     *,
-    output_schema: Optional[Dict[str, Any]],
+    previous_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Fail fast when WMH returns an async acknowledgement at a sync boundary."""
+    observation = result.get("world_model_observation")
+    metadata = observation.get("metadata") if isinstance(observation, dict) else None
+    candidates = [
+        result.get("browser_state"),
+        result.get("state"),
+        result if "dom_tree" in result else None,
+        observation.get("browser_state") if isinstance(observation, dict) else None,
+        observation.get("state") if isinstance(observation, dict) else None,
+        observation if isinstance(observation, dict) and "dom_tree" in observation else None,
+        metadata.get("browser_state") if isinstance(metadata, dict) else None,
+        metadata if isinstance(metadata, dict) and "dom_tree" in metadata else None,
+    ]
+    state = next((dict(value) for value in candidates if isinstance(value, dict)), None)
+    if state is None:
+        # WMH's generic Observation contract asks the model for an ``output``
+        # string.  Some real models therefore return the website observation as
+        # text instead of echoing our nested browser_state extension.  That text
+        # is still the authoritative environment result: expose it as the next
+        # accessibility-tree observation while preserving stable browser fields.
+        raw_observation_text = None
+        for candidate in (
+            observation.get("content") if isinstance(observation, dict) else None,
+            result.get("message"),
+            result.get("output"),
+        ):
+            if isinstance(candidate, str) and candidate.strip():
+                raw_observation_text = candidate.strip()
+                break
+            if isinstance(candidate, (dict, list)) and candidate:
+                raw_observation_text = json.dumps(candidate, sort_keys=True, separators=(",", ":"), default=str)
+                break
+        if not raw_observation_text:
+            raise ValueError("WMH browser transition omitted browser_state")
+        state = dict(previous_state or {})
+        state["dom_tree"] = raw_observation_text
+        prior_events = state.get("recent_events") or state.get("events") or []
+        if not isinstance(prior_events, (list, tuple)):
+            prior_events = [prior_events]
+        state["recent_events"] = [*prior_events, raw_observation_text[:2000]]
+    dom_tree = state.get("dom_tree")
+    if isinstance(dom_tree, (dict, list)):
+        # The production WMH emits a structured accessibility tree while older
+        # traces and the browser-use prompt use the serialized tree form. Keep
+        # the environment contract lossless and normalize at this boundary.
+        state["dom_tree"] = json.dumps(dom_tree, sort_keys=True, separators=(",", ":"), default=str)
+    elif not isinstance(dom_tree, str):
+        raise ValueError("WMH browser transition browser_state omitted dom_tree")
+    if not isinstance(state.get("url"), str):
+        state["url"] = str((previous_state or {}).get("url") or "")
+    state["title"] = str(state.get("title") or "")
+    if not isinstance(state.get("viewport"), dict):
+        state["viewport"] = {"width": 1440, "height": 900}
+    if not isinstance(state.get("scroll_position"), dict):
+        state["scroll_position"] = {"pages_above": 0, "pages_below": 0, "total_pages": 1}
+    if not isinstance(state.get("page_stats"), dict):
+        state["page_stats"] = {}
+    raw_tabs = state.get("tabs") or []
+    if not isinstance(raw_tabs, (list, tuple)):
+        raw_tabs = [raw_tabs]
+    state["tabs"] = [
+        dict(tab) if isinstance(tab, dict) else {"id": index, "url": str(tab), "title": ""}
+        for index, tab in enumerate(raw_tabs)
+        if tab is not None
+    ]
+    raw_events = state.get("recent_events") or state.get("events") or []
+    if not isinstance(raw_events, (list, tuple)):
+        raw_events = [raw_events]
+    state["recent_events"] = [
+        event.strip()
+        if isinstance(event, str)
+        else json.dumps(event, sort_keys=True, separators=(",", ":"), default=str)
+        for event in raw_events
+        if event is not None and (not isinstance(event, str) or event.strip())
+    ]
+    if "screenshot" in state and not isinstance(state["screenshot"], str):
+        state.pop("screenshot")
+    return state
 
-    if not result.get("world_model_simulated"):
-        return result
 
-    status = str(result.get("status") or "").strip().lower()
-    if status in {"spawned", "active", "pending", "in_progress", "running"}:
+def _simulated_browser_frame_from_result(
+    result: Dict[str, Any], browser_state: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    observation = result.get("world_model_observation")
+    metadata = observation.get("metadata") if isinstance(observation, dict) else None
+    candidates = [
+        result.get("frame"),
+        result.get("website_frame"),
+        browser_state.get("frame"),
+        observation.get("frame") if isinstance(observation, dict) else None,
+        metadata.get("frame") if isinstance(metadata, dict) else None,
+    ]
+    for candidate in candidates:
+        normalized = normalize_simulated_browser_frame(candidate)
+        if normalized is not None:
+            return normalized
+    screenshot = browser_state.get("screenshot")
+    if isinstance(screenshot, str) and screenshot.strip():
+        normalized_screenshot = normalize_simulated_browser_frame(
+            screenshot if screenshot.startswith("data:image/") else {"base64": screenshot}
+        )
+        if normalized_screenshot is not None:
+            return normalized_screenshot
+    return _static_simulated_browser_frame(browser_state)
+
+
+def _static_simulated_browser_frame(browser_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Render a network-free website frame from WMH's accessibility tree."""
+
+    raw_tree = browser_state.get("dom_tree")
+    if isinstance(raw_tree, str):
+        try:
+            tree = json.loads(raw_tree)
+        except json.JSONDecodeError:
+            tree = raw_tree
+    else:
+        tree = raw_tree
+    if not tree:
+        return None
+
+    remaining_nodes = 500
+
+    def render_node(node: Any) -> str:
+        nonlocal remaining_nodes
+        if remaining_nodes <= 0:
+            return ""
+        remaining_nodes -= 1
+        if not isinstance(node, dict):
+            return f'<div class="text">{html_module.escape(str(node)[:500])}</div>'
+        role = str(node.get("role") or "generic").lower()
+        name = html_module.escape(str(node.get("name") or "")[:500])
+        children = node.get("children") if isinstance(node.get("children"), list) else []
+        rendered_children = "".join(render_node(child) for child in children)
+        if role == "heading":
+            return f"<h2>{name}</h2>{rendered_children}"
+        if role == "button":
+            return f'<button type="button" disabled>{name or "Button"}</button>{rendered_children}'
+        if role == "link":
+            return f'<span class="link">{name or "Link"}</span>{rendered_children}'
+        if role in {"combobox", "textbox", "searchbox"}:
+            return f'<div class="input">{name or "Input"}</div>{rendered_children}'
+        if role == "alert":
+            return f'<div class="alert">{name}</div>{rendered_children}'
+        tag = "header" if role == "banner" else "main" if role == "main" else "section"
+        label = f'<div class="label">{name}</div>' if name and role not in {"webarea", "generic"} else ""
+        return f'<{tag} class="role-{html_module.escape(role)}">{label}{rendered_children}</{tag}>'
+
+    rendered_tree = render_node(tree)
+    if not rendered_tree:
+        return None
+    title = html_module.escape(str(browser_state.get("title") or "Simulated website")[:300])
+    url = html_module.escape(str(browser_state.get("url") or "about:blank")[:1000])
+    viewport = browser_state.get("viewport") if isinstance(browser_state.get("viewport"), dict) else {}
+    dimensions = {
+        key: int(value)
+        for key, value in (("width", viewport.get("width")), ("height", viewport.get("height")))
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+    }
+    static_html = f"""<!doctype html><html><head><meta charset="utf-8"><title>{title}</title>
+<style>*{{box-sizing:border-box}}body{{margin:0;background:#fff;color:#111;font:14px Arial,sans-serif}}.location{{padding:9px 14px;background:#f3f3f3;border-bottom:1px solid #ccc;color:#555;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}header{{background:#131921;color:#fff;padding:14px}}main{{padding:20px;max-width:1180px;margin:auto}}section{{margin:8px 0}}h2{{font-size:22px;margin:12px 0}}button{{margin:6px;padding:9px 16px;border:1px solid #f0c14b;border-radius:18px;background:#ffd814;color:#111}}.link{{display:inline-block;margin:5px;color:#007185;font-weight:600}}.input{{display:inline-block;min-width:220px;margin:5px;padding:9px;border:1px solid #888;border-radius:4px;background:#fff;color:#555}}.alert{{margin:8px;padding:10px;border:1px solid #70a85b;background:#edf8e8}}.label{{margin:6px 0;font-weight:600}}.text{{margin:4px}}</style></head><body><div class="location">{url}</div>{rendered_tree}</body></html>"""
+    return {"kind": "html", "html": static_html, **dimensions}
+
+
+def _ground_simulated_browser_approval_question(
+    *,
+    transition: Dict[str, Any],
+    browser_state: Dict[str, Any],
+    system_name: str,
+    approval_type: str,
+) -> str:
+    """Ground irreversible simulated writes in the item and amount visible in WMH state."""
+
+    fallback = str(
+        transition.get("question") or f"{system_name} wants to perform a {approval_type} action. Approve?"
+    ).strip()
+    dom_text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(browser_state.get("dom_tree") or ""))).strip()
+    amounts = re.findall(r"\$\s*\d+(?:,\d{3})*(?:\.\d{2})?", dom_text)
+    if not amounts:
+        return fallback
+    item_label = "the beanie" if "beanie" in dom_text.lower() else "this item"
+    amount = amounts[0].replace(" ", "")
+    if item_label.lower() in fallback.lower() and amount in fallback:
+        return fallback
+    return f"Approve purchasing {item_label} for {amount}?"
+
+
+async def _execute_simulated_browser_transition(
+    *,
+    world_model: WorldModelToolExecutionAdapter,
+    goal: str,
+    action: Dict[str, Any],
+    browser_state: Optional[Dict[str, Any]],
+    tool_call_id: str,
+    write_lock_enabled: bool,
+    approved: bool = False,
+    approval_type: Optional[str] = None,
+    payment_card_last4: Optional[str] = None,
+) -> tuple[Dict[str, Any], Dict[str, Any], Optional[Dict[str, Any]]]:
+    action_name = str(action.get("action") or "unknown")
+
+    async def forbidden_real_browser(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
+        raise RuntimeError("Simulator mode forbids launching or connecting to a real browser")
+
+    # The WMH is an LLM: it occasionally emits a transition missing browser_state/dom_tree.
+    # A single malformed step must not kill the whole trajectory (that stalls the agent into
+    # a wait_for death-spiral and a timeout). Retry the SAME single action with a strengthened
+    # contract and a fresh tool_call_id (so a cached bad transition isn't replayed) before
+    # surfacing the error. This is environment-boundary resilience, not a benchmark change.
+    _MAX_TRANSITION_ATTEMPTS = 3
+    last_error: Optional[ValueError] = None
+    for attempt in range(1, _MAX_TRANSITION_ATTEMPTS + 1):
+        attempt_tool_call_id = tool_call_id if attempt == 1 else f"{tool_call_id}:retry{attempt}"
+        result = await world_model.execute(
+            "browser_action",
+            {
+                "goal": goal,
+                "action": action_name,
+                "params": _browser_tool_arguments(action),
+                "thinking": action.get("thinking") or "",
+                "current_browser_state": {
+                    key: value
+                    for key, value in (browser_state or {}).items()
+                    if key not in {"screenshot", "frame", "website_frame"}
+                },
+                "approval": {
+                    "granted": approved,
+                    "type": approval_type,
+                    "payment_card_last4": payment_card_last4,
+                },
+                "simulation_contract": _simulated_browser_transition_contract(
+                    action_name=action_name,
+                    approved=approved,
+                    write_lock_enabled=write_lock_enabled,
+                    retry_reason=str(last_error) if last_error else None,
+                ),
+            },
+            attempt_tool_call_id,
+            forbidden_real_browser,
+            allow_real_fallback=False,
+        )
+        if not result.get("world_model_simulated"):
+            raise RuntimeError("Simulated browser transition omitted world_model_simulated provenance")
+        result_status = str(result.get("status") or "").lower()
+        repeated_approval = bool(
+            result.get("requires_approval") or result.get("approval_required")
+        ) or result_status in {"awaiting_write_approval", "needs_write_approval"}
+        if approved and repeated_approval:
+            last_error = ValueError("WMH repeated approval boundary after approval was granted")
+            logger.warning(
+                "simulated_browser_transition_malformed",
+                action=action_name,
+                attempt=attempt,
+                max_attempts=_MAX_TRANSITION_ATTEMPTS,
+                error=str(last_error),
+            )
+            continue
+        try:
+            next_state = _simulated_browser_state_from_result(result, previous_state=browser_state)
+        except ValueError as exc:
+            last_error = exc
+            logger.warning(
+                "simulated_browser_transition_malformed",
+                action=action_name,
+                attempt=attempt,
+                max_attempts=_MAX_TRANSITION_ATTEMPTS,
+                error=str(exc),
+            )
+            continue
+        return result, next_state, _simulated_browser_frame_from_result(result, next_state)
+    raise last_error if last_error else ValueError("WMH browser transition omitted browser_state")
+
+
+def _simulated_browser_message_metadata(
+    *, frame: Optional[Dict[str, Any]], world_model_session_id: str, world_model_name: Optional[str]
+) -> Dict[str, Any]:
+    metadata: Dict[str, Any] = {
+        "world_model_simulated": True,
+        "world_model_session_id": world_model_session_id,
+        "world_model_name": world_model_name,
+        "browser_session_metadata": {
+            "provider": "wmh",
+            "simulated": True,
+            "world_model_name": world_model_name,
+        },
+    }
+    if frame is not None:
+        metadata["simulated_browser_frame"] = frame
+    return metadata
+
+
+_SIMULATED_BROWSER_RESUME_FIELDS = (
+    "simulated_browser_state",
+    "simulated_action_entries",
+    "simulated_turn_messages",
+    "simulated_visited_urls",
+    "simulated_reasoning_messages",
+    "simulated_action_summary",
+    "simulated_recording_ref",
+    "simulated_recording_frame_count",
+    "simulated_action_entry_count",
+    "simulated_pending_tool_call_id",
+    "world_model_session_id",
+    "simulated_total_input_tokens",
+    "simulated_total_output_tokens",
+)
+
+
+def _copy_simulated_browser_resume_fields(source: Dict[str, Any], target: Dict[str, Any]) -> None:
+    if not source.get("world_model_simulated"):
+        return
+    for key in _SIMULATED_BROWSER_RESUME_FIELDS:
+        if key in source:
+            target[key] = source[key]
+
+
+def _simulated_browser_resume_payload(
+    *,
+    browser_state: Dict[str, Any],
+    action_entries: List[Dict[str, Any]],
+    turn_messages: List[Dict[str, Any]],
+    recording_ref: Optional[str],
+    frame_count: int,
+    visited_urls: List[str],
+    reasoning_messages: List[str],
+    action_summary: List[str],
+    world_model_session_id: str,
+    total_input_tokens: int,
+    total_output_tokens: int,
+) -> Dict[str, Any]:
+    compact_state = _compact_simulated_resume_value(browser_state)
+    compact_actions = [_compact_simulated_resume_value(entry) for entry in action_entries[-30:]]
+    compact_turns = [_compact_simulated_resume_value(message) for message in turn_messages[-24:]]
+    return {
+        "simulated_browser_state": compact_state,
+        "simulated_action_entries": compact_actions,
+        "simulated_turn_messages": compact_turns,
+        "simulated_visited_urls": visited_urls[-50:],
+        "simulated_reasoning_messages": reasoning_messages[-20:],
+        "simulated_action_summary": action_summary[-20:],
+        "simulated_recording_ref": recording_ref,
+        "simulated_recording_frame_count": max(0, int(frame_count)),
+        "simulated_action_entry_count": len(action_entries),
+        "world_model_session_id": world_model_session_id,
+        "simulated_total_input_tokens": total_input_tokens,
+        "simulated_total_output_tokens": total_output_tokens,
+    }
+
+
+_SIMULATED_RESUME_MEDIA_KEYS = {
+    "base64",
+    "data_url",
+    "frame",
+    "image",
+    "image_url",
+    "screenshot",
+    "screenshot_b64",
+    "simulated_browser_frame",
+    "src",
+    "website_frame",
+}
+_SIMULATED_RESUME_MAX_TEXT_CHARS = 4_000
+
+
+def _compact_simulated_resume_value(value: Any) -> Any:
+    """Bound Temporal resume payloads while retaining policy and verifier context."""
+
+    if isinstance(value, dict):
         return {
-            **result,
+            key: _compact_simulated_resume_value(nested)
+            for key, nested in value.items()
+            if key not in _SIMULATED_RESUME_MEDIA_KEYS
+        }
+    if isinstance(value, list):
+        return [_compact_simulated_resume_value(item) for item in value]
+    if isinstance(value, str):
+        if value.lstrip().startswith("data:image/"):
+            return "[image omitted from Temporal resume]"
+        if len(value) > _SIMULATED_RESUME_MAX_TEXT_CHARS:
+            return value[:_SIMULATED_RESUME_MAX_TEXT_CHARS] + "…[truncated for Temporal resume]"
+    return value
+
+
+def _simulated_browser_verifier_context(
+    *,
+    goal: str,
+    browser_state: Dict[str, Any],
+    action_entries: List[Dict[str, Any]],
+    frame: Optional[Dict[str, Any]],
+    payment_card_last4: Optional[str],
+) -> List[Dict[str, Any]]:
+    state_text = json.dumps(
+        {k: v for k, v in browser_state.items() if k not in {"screenshot", "frame", "website_frame"}},
+        ensure_ascii=False,
+        default=str,
+    )
+    screenshot_b64 = ""
+    if frame and frame.get("kind") == "image":
+        source = str(frame.get("src") or "")
+        if source.startswith("data:image/") and ";base64," in source:
+            screenshot_b64 = source.split(";base64,", 1)[1]
+    context: List[Dict[str, Any]] = [
+        {
+            "role": "USER",
+            "text": (
+                f"Goal: {goal}\n\n## Simulated Browser Ground Truth (FINAL STATE)\n"
+                "Judge completion only from this WMH environment state and the recorded trajectory.\n\n"
+                f"{state_text}"
+            ),
+        },
+        {
+            "role": "TOOL",
+            "text": f"Browser Agent Execution Log ({len(action_entries)} actions):\n\n"
+            + json.dumps(action_entries[-30:], ensure_ascii=False, default=str),
+            "metadata": {"toolName": "action_history", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "TOOL",
+            "text": "WMH-generated final website frame attached." if screenshot_b64 else "No raster frame attached.",
+            "metadata": {
+                "toolName": "final_screenshot",
+                "toolStatus": "FINISHED",
+                "screenshot_b64": screenshot_b64,
+            },
+        },
+    ]
+    payment_evidence = _build_payment_card_verifier_evidence(payment_card_last4)
+    if payment_evidence:
+        context.append(payment_evidence)
+    return context
+
+
+async def _verify_simulated_browser_completion(
+    *,
+    goal: str,
+    output_schema: Dict[str, Any],
+    browser_state: Dict[str, Any],
+    action_entries: List[Dict[str, Any]],
+    frame: Optional[Dict[str, Any]],
+    payment_card_last4: Optional[str],
+    token_state: ClaudeTokenState,
+    agent_id: str,
+    user_id: str,
+    gpt_token: Optional[str],
+    gpt_account_id: Optional[str],
+    gpt_token_source: Optional[str],
+    gpt_token_pool_id: Optional[str],
+) -> Dict[str, Any]:
+    from helpers.llm import check_progress
+
+    remote_schema = transform_schema_for_remote_session(output_schema)
+    return await call_temporal_activity_from_activity(
+        check_progress,
+        args=[
+            _simulated_browser_verifier_context(
+                goal=goal,
+                browser_state=browser_state,
+                action_entries=action_entries,
+                frame=frame,
+                payment_card_last4=payment_card_last4,
+            ),
+            build_verifier_prompt(response_schema=remote_schema),
+            VERIFIER_ULTRA_MODEL,
+            remote_schema,
+            token_state.access_token,
+            "verifier_browser_simulated",
+            agent_id,
+            None,
+            None,
+            user_id,
+            gpt_token,
+            gpt_account_id,
+            gpt_token_source,
+            gpt_token_pool_id,
+            user_id,
+            None,
+            None,
+            {"browser_session_metadata": {"provider": "wmh", "simulated": True}},
+        ],
+        start_to_close_timeout=timedelta(seconds=VERIFIER_ULTRA_TIMEOUT_SECONDS),
+    )
+
+
+def _simulated_browser_usage_items(
+    total_input_tokens: int, total_output_tokens: int, model_pricing: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    return [
+        {
+            "type": "llm",
+            "cost_cents": round(
+                (total_input_tokens / 1000) * model_pricing.get("input_cents_per_1k", 0)
+                + (total_output_tokens / 1000) * model_pricing.get("output_cents_per_1k", 0),
+                4,
+            ),
+            "provider": "Rose 1 Browser Use",
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
+        },
+        {"type": "service", "cost_cents": 0, "provider": "World Model Harness"},
+    ]
+
+
+async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
+    *,
+    user_id: str,
+    agent_id: str,
+    goal: str,
+    tool_call_id: str,
+    task_id: Optional[str],
+    session_id: Optional[str],
+    cdp_url: Optional[str],
+    is_resume: bool,
+    output_schema: Optional[Dict[str, Any]],
+    attachments: Optional[List[Dict[str, Any]]],
+    write_lock_enabled: bool,
+    start_url: str,
+    write_lock_resume_state: Optional[Dict[str, Any]],
+    system_name: str,
+    use_claude_mode: bool,
+    gpt_token: Optional[str],
+    gpt_account_id: Optional[str],
+    gpt_token_source: Optional[str],
+    gpt_token_pool_id: Optional[str],
+    world_model: WorldModelToolExecutionAdapter,
+) -> Dict[str, Any]:
+    """Run the real browser-use policy against WMH state without creating a browser."""
+
+    del session_id, cdp_url, is_resume, attachments
+    if not output_schema:
+        raise ValueError("output_schema is required for browser agent")
+    structlog.contextvars.bind_contextvars(agent_id=agent_id)
+    config = load_config()
+    started_at = safe_time()
+    resume = write_lock_resume_state or {}
+    task_id = str(task_id or resume.get("task_id") or f"wmh-browser-{tool_call_id}")
+    browser_url = "about:blank"
+    browser_state = dict(resume.get("simulated_browser_state") or {})
+    action_entries = list(resume.get("simulated_action_entries") or [])
+    turn_messages = list(resume.get("simulated_turn_messages") or [])
+    frames: List[Dict[str, Any]] = []
+    visited_urls = list(resume.get("simulated_visited_urls") or [])
+    reasoning_messages = list(resume.get("simulated_reasoning_messages") or [])
+    action_summary = list(resume.get("simulated_action_summary") or [])
+    total_input_tokens = int(resume.get("simulated_total_input_tokens") or 0)
+    total_output_tokens = int(resume.get("simulated_total_output_tokens") or 0)
+    iteration = int(resume.get("step_count") or 0)
+    payment_card_last4 = _normalize_payment_card_last4(resume.get("payment_card_last4"))
+    write_lock_approvals = dict(resume.get("write_lock_approvals") or {})
+    latest_frame: Optional[Dict[str, Any]] = None
+    restored_session = resume.get("world_model_session_id")
+    if isinstance(restored_session, str) and restored_session:
+        world_model.session_id = restored_session
+    world_model_session_id = str(restored_session or "")
+
+    browser_use_mode = "gpt" if gpt_token else ("claude" if use_claude_mode else None)
+    token_state = ClaudeTokenState()
+    if browser_use_mode == "claude":
+        token_data = await fetch_claude_token(config, user_id)
+        if token_data:
+            token_state.access_token = token_data.get("accessToken")
+            token_state.source = token_data.get("source")
+            token_state.pool_token_id = token_data.get("poolTokenId")
+        else:
+            browser_use_mode = None
+
+    model_pricing = await get_model_pricing_with_fallback("rose-1-browser-use")
+    task_prompt = build_browser_task_prompt(goal)
+    dynamic_system_context = build_browser_dynamic_system_context(
+        "# Simulated Browser Runtime\n"
+        "Operate the stateful simulated website one concrete action per turn. Continue until the requested "
+        "outcome is actually visible in state. Do not claim actions you did not take.",
+        response_schema=output_schema,
+    )
+    rose_client = BrowserStreamingRoseClient()
+    recorder: Optional[SimulatedBrowserRecorder] = None
+
+    def resume_payload() -> Dict[str, Any]:
+        return _simulated_browser_resume_payload(
+            browser_state=browser_state,
+            action_entries=action_entries,
+            turn_messages=turn_messages,
+            recording_ref=str(recorder.checkpoint_path) if recorder else resume.get("simulated_recording_ref"),
+            frame_count=len(recorder.frames) if recorder else int(resume.get("simulated_recording_frame_count") or 0),
+            visited_urls=visited_urls,
+            reasoning_messages=reasoning_messages,
+            action_summary=action_summary,
+            world_model_session_id=world_model_session_id,
+            total_input_tokens=total_input_tokens,
+            total_output_tokens=total_output_tokens,
+        )
+
+    async def remember_frame(frame: Optional[Dict[str, Any]], *, step: int, label: str, action_name: str) -> None:
+        nonlocal latest_frame, frames
+        if frame is None:
+            return
+        latest_frame = frame
+        if recorder:
+            await recorder.record_frame(
+                frame,
+                iteration=step,
+                label=label,
+                action=action_name,
+                browser_state=browser_state,
+            )
+            frames = recorder.frames
+        else:
+            frames.append({**frame, "ts_ms": step * 500, "label": label, "action": action_name})
+
+    async def save_step(
+        *,
+        title: str,
+        action_name: str,
+        action_call_id: str,
+        step: int,
+        status: MessageStatus = MessageStatus.FINISHED,
+        message: str = "",
+    ) -> None:
+        await save_browser_action_message(
+            agent_id=agent_id,
+            title=title,
+            task_id=task_id,
+            message=message,
+            status=status,
+            browser_url=browser_url,
+            action_type=action_name,
+            tool_call_id=action_call_id,
+            steps_taken=step,
+            total_steps=MAX_ITERATIONS,
+            extra_metadata=_simulated_browser_message_metadata(
+                frame=latest_frame,
+                world_model_session_id=world_model_session_id,
+                world_model_name=world_model.world_model_name,
+            ),
+        )
+
+    async def finalize_recording() -> None:
+        if recorder:
+            await _finalize_browser_recording_for_fe_resilient(
+                browser_recorder=recorder,  # type: ignore[arg-type]
+                agent_id=agent_id,
+                task_id=task_id,
+                user_id=user_id,
+                browser_url=browser_url,
+                browser_session_metadata={"provider": "wmh", "simulated": True},
+            )
+
+    try:
+        if not browser_state:
+            # Seed the server-side WMH session with the same neutral start page
+            # shown to the browser policy. Merely constructing this state on the
+            # client leaves WMH's internal state blank, which can make its first
+            # transition emit a whole terminal browser result instead of applying
+            # the requested action. Initialization is orchestration, not an LLM
+            # action, so no synthetic "initialize" step is sent.
+            browser_state = _initial_simulated_browser_state(start_url)
+            world_model_session_id = str(await world_model.ensure_session(task=goal, seed_state=browser_state))
+            if not world_model_session_id:
+                raise RuntimeError("WMH browser initialization omitted world_model_session_id")
+            world_model.session_id = world_model_session_id
+            init_frame = _static_simulated_browser_frame(browser_state)
+            recorder = await SimulatedBrowserRecorder.create(
+                agent_id=agent_id,
+                task_id=task_id,
+                session_id=world_model_session_id,
+                frames=frames,
+            )
+            if recorder and recorder.frames:
+                frames = recorder.frames
+                latest_frame = normalize_simulated_browser_frame(recorder.frames[-1])
+            await remember_frame(init_frame, step=0, label="Simulated website initialized", action_name="initialize")
+            if browser_state.get("url"):
+                visited_urls.append(str(browser_state["url"]))
+            await save_browser_action_message(
+                agent_id=agent_id,
+                title=BROWSER_PROGRESS_TITLE,
+                task_id=task_id,
+                message="",
+                status=MessageStatus.IN_PROGRESS,
+                browser_url=browser_url,
+                action_type="browser",
+                tool_call_id=tool_call_id,
+                is_init_message=True,
+                output_schema=output_schema,
+                extra_metadata=_simulated_browser_message_metadata(
+                    frame=latest_frame,
+                    world_model_session_id=world_model_session_id,
+                    world_model_name=world_model.world_model_name,
+                ),
+            )
+        else:
+            if not world_model_session_id:
+                raise RuntimeError("Simulated browser resume omitted world_model_session_id")
+            recorder = await SimulatedBrowserRecorder.create(
+                agent_id=agent_id,
+                task_id=task_id,
+                session_id=world_model_session_id,
+                frames=frames,
+            )
+
+        pending_action = resume.get("pending_action")
+        if isinstance(pending_action, dict):
+            pending_call_id = str(resume.get("simulated_pending_tool_call_id") or uuid_module.uuid4())
+            approved_action_name = str(pending_action.get("action") or "unknown")
+            approved_result, browser_state, approved_frame = await _execute_simulated_browser_transition(
+                world_model=world_model,
+                goal=goal,
+                action=pending_action,
+                browser_state=browser_state,
+                tool_call_id=f"{pending_call_id}:approved",
+                write_lock_enabled=write_lock_enabled,
+                approved=True,
+                approval_type=str(resume.get("approval_type") or "unknown"),
+                payment_card_last4=payment_card_last4,
+            )
+            history_result = _browser_tool_result_for_history(approved_action_name, approved_result)
+            if action_entries and action_entries[-1].get("step") == iteration:
+                action_entries[-1].update(result=history_result, approved=True)
+            current_url = str(browser_state.get("url") or "")
+            if current_url and (not visited_urls or visited_urls[-1] != current_url):
+                visited_urls.append(current_url)
+            await remember_frame(
+                approved_frame,
+                step=iteration,
+                label="Approved action applied",
+                action_name=approved_action_name,
+            )
+            # The approval boundary pauses and resumes the Temporal activity. Persist
+            # the resulting WMH state as its own trajectory event so evaluators,
+            # recordings, and live clients can see that the approved action actually
+            # executed. Without this event the policy saw the confirmation state, but
+            # the durable trajectory ended at the pre-approval checkout page.
+            await save_step(
+                title=f"Approved {approved_action_name} applied",
+                action_name=approved_action_name,
+                action_call_id=f"{pending_call_id}:approved",
+                step=iteration,
+                message=json.dumps(
+                    {
+                        "action": approved_action_name,
+                        "approved": True,
+                        "browser_state": browser_state,
+                        "success": approved_result.get("success", True),
+                        "status": approved_result.get("status"),
+                    },
+                    ensure_ascii=False,
+                    default=str,
+                ),
+            )
+
+        while iteration < MAX_ITERATIONS:
+            iteration += 1
+            with contextlib.suppress(Exception):
+                activity.heartbeat(f"Simulated browser step {iteration}")
+            if recorder:
+                await recorder.record_observation(
+                    iteration=iteration,
+                    browser_state=browser_state,
+                    action_entries=action_entries,
+                )
+            browser_stream = BrowserThinkingStream(agent_id=agent_id, task_id=task_id, iteration=iteration)
+            await browser_stream.start()
+            rose_client.set_thinking_stream(browser_stream)
+            try:
+                llm_result = await _call_browser_use_with_rotation(
+                    rose_client=rose_client,
+                    task=task_prompt,
+                    dynamic_system_context=dynamic_system_context,
+                    turn_messages=turn_messages,
+                    browser_state=browser_state,
+                    action_entries=action_entries,
+                    config=config,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    iteration=iteration,
+                    token_state=token_state,
+                    gpt_token=gpt_token,
+                    gpt_account_id=gpt_account_id,
+                    gpt_token_source=gpt_token_source,
+                    gpt_token_pool_id=gpt_token_pool_id,
+                    browser_use_mode=browser_use_mode,
+                    call_site=f"browser_use_simulated_step_{iteration}",
+                    dump_extra={"browser_session_metadata": {"provider": "wmh", "simulated": True}},
+                )
+            finally:
+                rose_client.set_thinking_stream(None)
+                await browser_stream.finish()
+
+            usage = llm_result.get("usage") or {}
+            total_input_tokens += int(usage.get("prompt_tokens") or 0)
+            total_output_tokens += int(usage.get("completion_tokens") or 0)
+            action = dict(llm_result.get("action") or {})
+            action_name = str(action.get("action") or "")
+            thinking = str(action.get("thinking") or "")
+            action_call_id = str(llm_result.get("tool_call_id") or uuid_module.uuid4())
+            if not action_name:
+                await browser_stream.finish_tools(status="ERROR")
+                raise RuntimeError("Browser-use policy returned no action")
+            if thinking:
+                reasoning_messages.append(thinking)
+                await save_browser_assistant_message(agent_id, thinking, task_id)
+            action_summary.append(_summarize_browser_action_history_entry(action_name, action))
+            action_summary[:] = action_summary[-20:]
+            title_progress, title_done, resolved_name = build_action_titles(
+                action_name, action, None, action.get("coordinates"), None
+            )
+            await save_step(
+                title=title_progress,
+                action_name=resolved_name,
+                action_call_id=action_call_id,
+                step=iteration,
+                status=MessageStatus.IN_PROGRESS,
+            )
+
+            if action_name == "request_payment_card":
+                from browser_tools.schemas import RequestPaymentCardBrowserTool
+
+                params = dict(action.get("params") or {})
+                RequestPaymentCardBrowserTool.model_validate({"tool": action_name, **params})
+                result = {"success": True, "status": "awaiting_payment_card_approval"}
+                action_entries.append(
+                    {"step": iteration, "action": action_name, "thinking": thinking, "params": params, "result": result}
+                )
+                await save_step(
+                    title=title_done,
+                    action_name=action_name,
+                    action_call_id=action_call_id,
+                    step=iteration,
+                )
+                await browser_stream.finish_tools(status="FINISHED")
+                return {
+                    "status": "awaiting_payment_card_approval",
+                    "payment_request": params,
+                    "current_url": browser_state.get("url", ""),
+                    "write_lock_approvals": write_lock_approvals,
+                    "step_count": iteration,
+                    "session_id": world_model_session_id,
+                    "task_id": task_id,
+                    "world_model_simulated": True,
+                    **resume_payload(),
+                }
+
+            if action_name in {"attempt_completion", "done"}:
+                completion_entry = {
+                    "step": iteration,
+                    "action": "attempt_completion",
+                    "thinking": thinking,
+                    "params": _browser_tool_arguments(action),
+                    "result": {"success": True, "verification_requested": True},
+                }
+                action_entries.append(completion_entry)
+                progress = await _verify_simulated_browser_completion(
+                    goal=goal,
+                    output_schema=output_schema,
+                    browser_state=browser_state,
+                    action_entries=action_entries,
+                    frame=latest_frame,
+                    payment_card_last4=payment_card_last4,
+                    token_state=token_state,
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    gpt_token=gpt_token,
+                    gpt_account_id=gpt_account_id,
+                    gpt_token_source=gpt_token_source,
+                    gpt_token_pool_id=gpt_token_pool_id,
+                )
+                structured = progress.get("structured_response")
+                required = [
+                    str(field.get("name"))
+                    for field in output_schema.get("fields", [])
+                    if isinstance(field, dict) and field.get("required") and field.get("name")
+                ]
+                missing = [name for name in required if not isinstance(structured, dict) or name not in structured]
+                score = float(progress.get("score") or 0)
+                reasoning = str(progress.get("reasoning") or "")
+                if missing:
+                    score = 0
+                    reasoning = f"Verifier omitted required output fields: {', '.join(missing)}. {reasoning}".strip()
+                if score >= 1:
+                    completion_entry["result"] = {"success": True, "score": score}
+                    await save_step(
+                        title=title_done,
+                        action_name="attempt_completion",
+                        action_call_id=action_call_id,
+                        step=iteration,
+                        message=reasoning,
+                    )
+                    await browser_stream.finish_tools(status="FINISHED")
+                    context_message = append_completion_evidence(
+                        build_context_summary(
+                            success=True,
+                            close_reasoning=reasoning,
+                            visited_urls=visited_urls,
+                            reasoning_messages=reasoning_messages,
+                            action_summary=action_summary,
+                        ),
+                        browser_url=str(browser_state.get("url") or ""),
+                        structured_response=structured,
+                    )
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="✓ Task Completed",
+                        task_id=task_id,
+                        message=context_message,
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url,
+                        action_type="task_complete",
+                        tool_call_id=tool_call_id,
+                        is_completion_message=True,
+                        output_schema=output_schema,
+                        extra_metadata={
+                            **_simulated_browser_message_metadata(
+                                frame=latest_frame,
+                                world_model_session_id=world_model_session_id,
+                                world_model_name=world_model.world_model_name,
+                            ),
+                            "structured_response": structured,
+                            "steps_taken": iteration,
+                        },
+                    )
+                    await finalize_recording()
+                    return {
+                        "status": "completed",
+                        "success": True,
+                        "message": context_message,
+                        "browser_url": browser_url,
+                        "current_url": browser_state.get("url", ""),
+                        "task_id": task_id,
+                        "session_id": world_model_session_id,
+                        "world_model_session_id": world_model_session_id,
+                        "world_model_name": world_model.world_model_name,
+                        "world_model_simulated": True,
+                        "simulated_browser_steps": iteration,
+                        "simulated_latest_frame": latest_frame,
+                        "structured_response": structured,
+                        "execution_time_ms": (safe_time() - started_at) * 1000,
+                        "usage_items": _simulated_browser_usage_items(
+                            total_input_tokens, total_output_tokens, model_pricing
+                        ),
+                    }
+                rejection = {"success": False, "score": score, "reasoning": reasoning}
+                completion_entry["result"] = rejection
+                _append_browser_turn_messages(
+                    turn_messages,
+                    task=task_prompt,
+                    browser_state=browser_state,
+                    include_screenshot=False,
+                    unified_action=action,
+                    result=rejection,
+                    tool_call_id=action_call_id,
+                )
+                await save_step(
+                    title=f"⚖️ Verifier rejected ({score:.0%}) — continue task",
+                    action_name="attempt_completion",
+                    action_call_id=action_call_id,
+                    step=iteration,
+                    message=reasoning,
+                )
+                await browser_stream.finish_tools(status="ERROR")
+                continue
+
+            transition, next_state, next_frame = await _execute_simulated_browser_transition(
+                world_model=world_model,
+                goal=goal,
+                action=action,
+                browser_state=browser_state,
+                tool_call_id=action_call_id,
+                write_lock_enabled=write_lock_enabled,
+                payment_card_last4=payment_card_last4,
+            )
+            requires_approval = bool(transition.get("requires_approval")) or str(
+                transition.get("status") or ""
+            ).lower() in {"awaiting_write_approval", "needs_write_approval"}
+            history_result = _browser_tool_result_for_history(action_name, transition)
+            action_entries.append(
+                {
+                    "step": iteration,
+                    "action": action_name,
+                    "thinking": thinking,
+                    "params": _browser_tool_arguments(action),
+                    "result": history_result,
+                    "approval_required": requires_approval,
+                }
+            )
+            _append_browser_turn_messages(
+                turn_messages,
+                task=task_prompt,
+                browser_state=browser_state,
+                include_screenshot=False,
+                unified_action=action,
+                result=history_result,
+                tool_call_id=action_call_id,
+            )
+            browser_state = next_state
+            current_url = str(browser_state.get("url") or "")
+            if current_url and (not visited_urls or visited_urls[-1] != current_url):
+                visited_urls.append(current_url)
+            await remember_frame(next_frame, step=iteration, label=title_done, action_name=action_name)
+            if requires_approval:
+                approval_type = str(transition.get("approval_type") or "generic_write")
+                question = _ground_simulated_browser_approval_question(
+                    transition=transition,
+                    browser_state=browser_state,
+                    system_name=system_name,
+                    approval_type=approval_type,
+                )
+                await save_step(
+                    title=f"Approval required for {action_name}",
+                    action_name=action_name,
+                    action_call_id=action_call_id,
+                    step=iteration,
+                    message=question,
+                )
+                await browser_stream.finish_tools(status="FINISHED")
+                return {
+                    "status": "awaiting_write_approval",
+                    "question": question,
+                    "approval_type": approval_type,
+                    "current_url": current_url,
+                    "pending_action": action,
+                    "simulated_pending_tool_call_id": action_call_id,
+                    "write_lock_approvals": write_lock_approvals,
+                    "step_count": iteration,
+                    "session_id": world_model_session_id,
+                    "task_id": task_id,
+                    "world_model_simulated": True,
+                    **resume_payload(),
+                }
+            await save_step(
+                title=title_done,
+                action_name=resolved_name,
+                action_call_id=action_call_id,
+                step=iteration,
+                message=str(transition.get("message") or ""),
+                status=MessageStatus.FINISHED if transition.get("success", True) else MessageStatus.ERROR,
+            )
+            await browser_stream.finish_tools(status="FINISHED" if transition.get("success", True) else "ERROR")
+            if ACTION_LOOP_DELAY_SECONDS > 0:
+                await asyncio.sleep(ACTION_LOOP_DELAY_SECONDS)
+
+        await finalize_recording()
+        return {
+            "status": "max_iterations",
+            "success": False,
+            "message": f"Max iterations ({MAX_ITERATIONS}) reached",
+            "task_id": task_id,
+            "session_id": world_model_session_id,
+            "world_model_simulated": True,
+            "simulated_browser_steps": iteration,
+            "simulated_latest_frame": latest_frame,
+        }
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.error(
+            "Simulated browser automation failed",
+            agent_id=agent_id,
+            task_id=task_id,
+            error=extract_error_message(exc),
+            traceback=traceback.format_exc(),
+        )
+        with contextlib.suppress(Exception):
+            await finalize_recording()
+        return {
             "status": "failed",
             "success": False,
             "error": True,
-            "message": (
-                "World Model simulator contract violation: spawn_browser_agent is synchronous "
-                f"and returned non-terminal status {status!r}."
-            ),
+            "message": f"Simulated browser automation failed: {extract_error_message(exc)}",
+            "task_id": task_id,
+            "session_id": world_model_session_id or None,
+            "world_model_simulated": True,
+            "simulated_browser_steps": iteration,
+            "simulated_latest_frame": latest_frame,
         }
-
-    approval_statuses = {
-        "awaiting_write_approval",
-        "awaiting_payment_card_approval",
-        "awaiting_auth_assistance",
-    }
-    if output_schema and status not in approval_statuses | {"failed", "cancelled"}:
-        required_fields = [
-            str(field.get("name"))
-            for field in output_schema.get("fields", [])
-            if isinstance(field, dict) and field.get("name") and field.get("required", False)
-        ]
-        structured = result.get("structured_response")
-        if not isinstance(structured, dict):
-            top_level = {field: result[field] for field in required_fields if field in result}
-            if len(top_level) == len(required_fields):
-                structured = top_level
-                result = {**result, "structured_response": structured}
-        missing = [field for field in required_fields if not isinstance(structured, dict) or field not in structured]
-        if missing:
-            return {
-                **result,
-                "status": "failed",
-                "success": False,
-                "error": True,
-                "message": (
-                    "World Model simulator contract violation: completed browser result omitted "
-                    f"required output fields: {', '.join(missing)}."
-                ),
-            }
-    return result
 
 
 async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
@@ -2991,9 +4195,35 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             activity.heartbeat("Initializing browser session")
             _session_wait_start = time.monotonic()
             _waiting_msg_sent = False
+            _transient_init_attempts = 0
 
             while True:
                 session_data = await init_browser_session(config, user_id, agent_id, start_url)
+
+                # Transient provider infra failure (e.g. Kernel allocated an
+                # unhealthy proxy: "400 Proxy is marked unavailable"). A fresh init
+                # reallocates a different proxy, so retry a bounded number of times
+                # with a short delay before giving up loudly.
+                if session_data.get("transient_init_failure"):
+                    _transient_init_attempts += 1
+                    if _transient_init_attempts > SESSION_INIT_TRANSIENT_MAX_ATTEMPTS:
+                        raise Exception(
+                            "Browser session init failed after "
+                            f"{_transient_init_attempts} transient-proxy retries: "
+                            f"{session_data.get('detail')}"
+                        )
+                    logger.warning(
+                        "Transient browser session init failure; retrying with a fresh proxy",
+                        agent_id=agent_id,
+                        attempt=_transient_init_attempts,
+                        status_code=session_data.get("status_code"),
+                        detail=session_data.get("detail"),
+                    )
+                    activity.heartbeat(
+                        f"Retrying browser init after transient proxy failure ({_transient_init_attempts})"
+                    )
+                    await asyncio.sleep(SESSION_INIT_TRANSIENT_RETRY_SECONDS)
+                    continue
 
                 if not session_data.get("rate_limited"):
                     break
@@ -3757,6 +4987,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 pending_write_lock_action = None
 
                 activity.heartbeat(f"Step {iteration} - executing pending write lock action")
+                if (
+                    browser_network_recorder is None
+                    and network_recorder_task is not None
+                    and network_recorder_task.done()
+                ):
+                    with contextlib.suppress(Exception):
+                        browser_network_recorder = network_recorder_task.result()
+
                 result = await execute_action(
                     dom_service,
                     action_history,
@@ -3774,6 +5012,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     write_lock_enabled=write_lock_enabled,
                     write_lock_approvals=write_lock_approvals,
                     system_name=system_name,
+                    browser_network_recorder=browser_network_recorder,
                 )
 
                 action_name = unified_action.get("action", "unknown")
@@ -4225,6 +5464,140 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     "usage_items": usage_items,
                 }
 
+            if action_name == "rotate_ip":
+                rotate_reason = unified_action.get("params", {}).get("reason", "")
+                rotate_call_id = str(uuid_module.uuid4())
+                logger.info("Browser agent requested IP rotation", reason=rotate_reason)
+                await save_browser_action_message(
+                    agent_id=agent_id,
+                    title="Rotating IP",
+                    task_id=task_id,
+                    message=rotate_reason,
+                    status=MessageStatus.IN_PROGRESS,
+                    browser_url=browser_url,
+                    action_type="browser",
+                    tool_call_id=rotate_call_id,
+                )
+
+                rotate_result = await rotate_browser_proxy(config, task_id)
+
+                # Budget exhausted or provider busy: surface the error to the run and
+                # let the model decide to stop — never tear down the live session.
+                if rotate_result.get("exhausted") or rotate_result.get("rate_limited"):
+                    err_msg = rotate_result.get("message") or (
+                        "Browser slots are busy; IP rotation could not complete. Retry shortly."
+                        if rotate_result.get("rate_limited")
+                        else "PROXY_ROTATION_EXHAUSTED"
+                    )
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="IP rotation unavailable",
+                        task_id=task_id,
+                        message=err_msg,
+                        status=MessageStatus.ERROR,
+                        browser_url=browser_url,
+                        action_type="browser",
+                        tool_call_id=rotate_call_id,
+                    )
+                    action_result = {"success": False, "error": err_msg}
+                    await action_history.record_action(
+                        dom_service=dom_service,
+                        action="rotate_ip",
+                        thinking=thinking,
+                        params={"reason": rotate_reason},
+                        result=action_result,
+                    )
+                    _append_browser_turn_messages(
+                        browser_turn_messages,
+                        task=task_prompt,
+                        browser_state=browser_state,
+                        include_screenshot=False,
+                        unified_action=unified_action,
+                        result=action_result,
+                        tool_call_id=rotate_call_id,
+                    )
+                    await browser_stream.finish_tools(status="ERROR")
+                    continue
+
+                # Success: swap the live CDP/Playwright stack to the rotated session
+                # (same profile → login preserved) and re-land on the current URL.
+                new_cdp_url = rotate_result.get("ws_url")
+                reconnected = await _reconnect_browser_stack_after_rotation(
+                    new_cdp_url=new_cdp_url,
+                    old_dom_service=dom_service,
+                    old_playwright_browser=playwright_browser,
+                    old_playwright_instance=playwright_instance,
+                    old_driver_pid=playwright_driver_pid,
+                    fingerprint_injection=fingerprint_injection,
+                    agent_id=agent_id,
+                )
+                dom_service = reconnected["dom_service"]
+                dom_page = reconnected["dom_page"]
+                input_page = reconnected["input_page"]
+                playwright_browser = reconnected["playwright_browser"]
+                playwright_instance = reconnected["playwright_instance"]
+                playwright_driver_pid = reconnected["playwright_driver_pid"]
+                session_id = rotate_result.get("session_id", session_id)
+                browser_url = rotate_result.get("debug_url", browser_url)
+                cdp_url = new_cdp_url
+
+                # Follow the rotation in the recording: rebind to the new page and
+                # start a fresh replay segment on the rotated session, so the saved
+                # recording actually shows the exit IP changing across rotations
+                # instead of freezing on the first (now-evicted) session's IP.
+                if browser_recorder is not None:
+                    browser_recorder.page = input_page
+                    with contextlib.suppress(Exception):
+                        await browser_recorder.rotate_kernel_replay(session_id)
+
+                # Rebuild the humanizer against the new pages (input events must
+                # target the live page, not the torn-down one).
+                if _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
+                    humanizer = BrowserHumanizer(dom_page=dom_page, input_page=input_page, fast=False)
+                    await humanizer.initialize_cursor(start_pos=(640, 400))
+                else:
+                    humanizer = None
+
+                browser_state = await dom_service.get_browser_state(include_screenshot=False)
+                current_url = browser_state.get("url", current_url)
+
+                rotation_message = rotate_result.get("rotation_message", "Rotated to a fresh IP.")
+                await save_browser_action_message(
+                    agent_id=agent_id,
+                    title="IP rotated",
+                    task_id=task_id,
+                    message=rotation_message,
+                    status=MessageStatus.FINISHED,
+                    browser_url=browser_url,
+                    action_type="browser",
+                    tool_call_id=rotate_call_id,
+                )
+
+                action_result = {
+                    "success": True,
+                    "message": rotation_message,
+                    "proxy_tier": rotate_result.get("proxy_tier", "residential"),
+                    "rotations_remaining": rotate_result.get("rotations_remaining"),
+                }
+                await action_history.record_action(
+                    dom_service=dom_service,
+                    action="rotate_ip",
+                    thinking=thinking,
+                    params={"reason": rotate_reason},
+                    result=action_result,
+                )
+                _append_browser_turn_messages(
+                    browser_turn_messages,
+                    task=task_prompt,
+                    browser_state=browser_state,
+                    include_screenshot=False,
+                    unified_action=unified_action,
+                    result=action_result,
+                    tool_call_id=rotate_call_id,
+                )
+                await browser_stream.finish_tools(status="FINISHED")
+                continue
+
             if action_name == "send_message_to_user":
                 message = unified_action.get("params", {}).get("message", "")
                 reason = unified_action.get("params", {}).get("reason", "other")
@@ -4622,6 +5995,12 @@ Based on this feedback, I need to continue working on the task and address the i
                     },
                 )
 
+            # Resolve the background-attached network recorder so read_network_requests
+            # can query captured traffic (the recorder attaches a few seconds into the run).
+            if browser_network_recorder is None and network_recorder_task is not None and network_recorder_task.done():
+                with contextlib.suppress(Exception):
+                    browser_network_recorder = network_recorder_task.result()
+
             activity.heartbeat(f"Step {iteration} - executing {action_name}")
             try:
                 result = await asyncio.wait_for(
@@ -4642,6 +6021,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         write_lock_enabled=write_lock_enabled,
                         write_lock_approvals=write_lock_approvals,
                         system_name=system_name,
+                        browser_network_recorder=browser_network_recorder,
                     ),
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )
@@ -5518,6 +6898,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "task_id": result.get("task_id"),
                             "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                         }
+                        _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
 
                         logger.info(
                             "Write lock approval granted, resuming browser activity",
@@ -5671,6 +7052,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             metadata={
                                 "attentionKind": f"agentcard_user_{agentcard_status}",
                                 "toolName": "spawn_browser_agent",
+                                # The outer browser tool emits the same setup state on
+                                # its own tool-call id, then supersedes it with the
+                                # resumed checkout result. Keep this standalone row
+                                # visible to the user without leaving stale setup work
+                                # in the parent model's context after checkout succeeds.
+                                "excludeFromModel": True,
                                 "task_id": result.get("task_id"),
                                 "action_type": f"agentcard_user_{agentcard_status}",
                                 "agentCardSetup": {
@@ -5934,6 +7321,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "payment_card_last4": _normalize_payment_card_last4(card.get("last4")),
                         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
+                    _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
 
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,
@@ -6032,6 +7420,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "auth_realm": result.get("auth_realm"),
                         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
+                    _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
 
                     yield ToolEvent(
                         type=EventType.POST_MESSAGE,
@@ -6084,6 +7473,16 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             output_files = result.get("output_files", [])
             final_status = MessageStatus.FINISHED if result.get("success", True) else MessageStatus.ERROR
             final_metadata = {"toolName": "spawn_browser_agent"}
+            for key in (
+                "task_id",
+                "world_model_simulated",
+                "world_model_session_id",
+                "world_model_name",
+                "simulated_browser_steps",
+                "simulated_latest_frame",
+            ):
+                if result.get(key) is not None:
+                    final_metadata[key] = result[key]
             if output_schema:
                 final_metadata["output_schema"] = output_schema
             if result.get("structured_response") is not None:

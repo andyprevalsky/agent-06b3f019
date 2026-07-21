@@ -10,6 +10,7 @@ WORKFLOW="$ROOT_DIR/.github/workflows/chat-lifecycle-ratchet.yml"
 DEPLOY_COMMAND="$ROOT_DIR/.claude/commands/deploy.md"
 DEPLOY_ENV="$ROOT_DIR/scripts/lib/deploy-local-env.sh"
 DESCEND_COMMAND_TEST="$ROOT_DIR/scripts/tests/descend-command.test.sh"
+AUTO_RCA_WORKFLOW_TEST="$ROOT_DIR/scripts/tests/auto-rca-workflow.test.sh"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -23,7 +24,7 @@ require_text() {
   grep -Fq -- "$text" "$file" || fail "$description"
 }
 
-for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$DEPLOY_COMMAND" "$DEPLOY_ENV" "$DESCEND_COMMAND_TEST"; do
+for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$DEPLOY_COMMAND" "$DEPLOY_ENV" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST"; do
   [ -f "$file" ] || fail "required semantic deploy gate file is missing: $file"
 done
 
@@ -34,6 +35,15 @@ require_text "$HELPERS" "expectInjectedSessionRecognized" "semantic helpers must
 require_text "$RUN_SH" 'resolve_temporal_task_queue "$CONDUCTOR_WORKSPACE_NAME"' "run.sh must derive its queue through the tested isolation boundary"
 require_text "$RUN_SH" 'export BACKEND_LOG_FILE="${BACKEND_LOG_FILE:-$PWD/back-end/backend-logs.log}"' "semantic stack must retain backend evidence"
 require_text "$RUN_SH" 'export FRONTEND_LOG_FILE="${FRONTEND_LOG_FILE:-$PWD/front-end/frontend-logs.log}"' "semantic stack must retain frontend evidence"
+require_text "$RUN_SH" 'Building bundled frontend before starting runtime services' "bundled frontend must build before memory-heavy runtime services start"
+require_text "$RUN_SH" 'npx vite preview --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE"' "bundled frontend service must only serve the completed production build"
+require_text "$RUN_SH" 'for _ in $(seq 1 25); do' "Docker health detection must tolerate a busy Desktop daemon before falling back to the shared system database"
+require_text "$RUN_SH" 'docker ps --filter "name=^${DB_CONTAINER}$"' "deploy-prestarted workspace database must bypass a slow broad Docker health probe"
+require_text "$RUN_SH" 'workspace_db_container_owns_port &&' "deploy-prestarted database reuse must verify the exact workspace container owns the configured port"
+
+BUNDLED_BUILD_LINE=$(grep -n 'Building bundled frontend before starting runtime services' "$RUN_SH" | head -1 | cut -d: -f1)
+BACKEND_LAUNCH_LINE=$(grep -n '^launch_backend_service$' "$RUN_SH" | head -1 | cut -d: -f1)
+[ "$BUNDLED_BUILD_LINE" -lt "$BACKEND_LAUNCH_LINE" ] || fail "bundled frontend build must finish before backend and worker launch"
 
 # The lifecycle ratchet is a browser blackbox over every chat route.
 require_text "$LIFECYCLE_SPEC" "const SAMPLE_COUNT = 5;" "lifecycle ratchet must take five samples per path"
@@ -80,6 +90,7 @@ require_text "$DEPLOY_ENV" 'export LOCAL_DB_PORT=$((conductor_port + 5))' "/depl
 require_text "$DEPLOY_ENV" 'export RUN_SH_STRICT_CONDUCTOR_PORT=1' "/deploy must reject silent runtime port reassignment"
 require_text "$RUN_SH" 'if ! port_range_can_reassign; then' "run.sh must honor strict deploy port mode"
 require_text "$RUN_SH" '[ "${RUN_SH_STRICT_CONDUCTOR_PORT:-0}" = "1" ] || { $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]' "bundled deploy stacks must preserve strict ports across shell boundaries"
+require_text "$RUN_SH" 'VITE_REALTIME_PRIVATE=false npx vite build' "bundled local frontends must not request production-only private realtime authorization"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_BUNDLED_FRONTEND=true' "/deploy launch must carry strict-port mode across shell boundaries"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8' "/deploy stack must run enough benchmark workers (8) for the blackbox agent suite it also serves — a single worker saturates under the full-domain load"
 require_text "$DEPLOY_COMMAND" 'TRACE_ARCHIVE_ENABLED=0' "/deploy lifecycle measurements must disable the out-of-band trace recorder"
@@ -101,5 +112,6 @@ grep -Fq 'bash scripts/run.sh --benchmark' <<<"$DEPLOY_STACK_LAUNCH" || \
 # /descend is part of the deploy orchestration surface. Keep its two user gates,
 # parallel deploy handoff, sorting, and rendered response contract cemented.
 bash "$DESCEND_COMMAND_TEST"
+bash "$AUTO_RCA_WORKFLOW_TEST"
 
 echo "All semantic deploy gate checks passed."

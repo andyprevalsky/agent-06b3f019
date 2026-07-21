@@ -10,10 +10,19 @@ seed-local.ts). Gating the live overlay on gpt_code was a FALSE infra failure:
 prod can have zero bench-usable Codex (usable rows non-DEV / pooling-off, or
 Codex quota-blocked), and it dropped every live task (browser/payment) even
 though the pre-flight for the same run already tolerated the exact same absence.
-These tests pin that both paths tolerate it, without needing a live DB.
+Regression: the live-fixture path used to sync STRICT, so an exhausted org-wide
+Codex quota ("No usable gpt_code integrations after sync") failed every browser
+task at the fixture before an agent was created — 0/8 on the ecommerce slice.
+These tests pin the tolerance on both paths without needing a live DB.
 """
 
+import subprocess
+import sys
+import time
+from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 import benchmarks.run_benchmark as rb
 
@@ -34,7 +43,8 @@ def _captured_seed_env(**kwargs) -> dict[str, str]:
 
     with (
         patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
-        patch.object(rb.subprocess, "run", side_effect=fake_run),
+        patch.object(rb, "_shared_workspace_database_url", return_value=None),
+        patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
     ):
         rb._sync_compute_tokens(**kwargs)
     return seen["env"]
@@ -48,6 +58,24 @@ def test_default_sync_does_not_opt_into_missing_gpt_code():
 def test_tolerant_sync_sets_the_seed_env_opt_in():
     env = _captured_seed_env(tolerate_gpt_code_unavailable=True)
     assert env.get("SEED_ALLOW_MISSING_GPT_CODE") == "1"
+
+
+def test_sync_uses_verified_shared_workspace_as_compute_token_source():
+    seen: dict[str, dict[str, str]] = {}
+
+    def fake_run(_cmd, **kw):
+        seen["env"] = kw.get("env", {})
+        return _Result(0)
+
+    with (
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_shared_workspace_database_url", return_value="postgresql://shared/victoria"),
+        patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
+    ):
+        assert rb._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is True
+
+    assert seen["env"]["DATABASE_URL"] == "postgresql://local/victoria"
+    assert seen["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://shared/victoria"
 
 
 def test_blanket_preflight_uses_tolerant_sync():
@@ -89,12 +117,12 @@ def test_live_fixture_sync_tolerates_missing_gpt_code():
     # run-level pre-flight — browser/payment tasks run on claude_code, not Codex,
     # so gating them on gpt_code is a false infra failure.
     assert captured["tolerant"] is True
-
-
-def test_live_fixture_raises_when_sync_fails():
+def test_live_fixture_still_fails_closed_when_claude_code_sync_fails():
+    # Tolerance is only about gpt_code; a genuine sync failure (claude_code missing,
+    # DB unreachable, etc.) still aborts the fixture so we never run a token-starved agent.
     ctx = rb.LiveFixtureContext(
         base_url="http://localhost:3001",
-        user_id="u",
+        user_id=rb.USER_ID if hasattr(rb, "USER_ID") else "u",
         auth_realm="local",
     )
     with (
@@ -118,3 +146,43 @@ def test_preflight_raises_when_sync_fails():
             raise AssertionError("expected RuntimeError when compute-token sync fails")
         except RuntimeError as exc:
             assert "compute tokens" in str(exc).lower()
+
+
+def test_timed_out_seed_kills_its_process_group_and_preserves_partial_output(
+    tmp_path: Path,
+):
+    started = tmp_path / "child-started"
+    escaped_marker = repr(str(tmp_path / "orphan-finished"))
+    escaped_started = repr(str(started))
+    child = (
+        "import pathlib,time; "
+        f"pathlib.Path({escaped_started}).write_text('started'); "
+        "time.sleep(3); "
+        f"pathlib.Path({escaped_marker}).write_text('survived')"
+    )
+    parent = (
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+        "print('credential-step-before-timeout', flush=True); "
+        "print('npx-warning-before-timeout', file=sys.stderr, flush=True); "
+        "time.sleep(10)"
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        rb._run_seed_subprocess(
+            [sys.executable, "-c", parent],
+            cwd=tmp_path,
+            env=None,
+            timeout=2,
+        )
+
+    output = caught.value.stdout or ""
+    if isinstance(output, bytes):
+        output = output.decode()
+    assert "credential-step-before-timeout" in output
+    detail = rb._seed_sync_error_detail(caught.value)
+    assert "credential-step-before-timeout" in detail
+    assert "npx-warning-before-timeout" in detail
+    assert started.exists()
+    time.sleep(3.2)
+    assert not (tmp_path / "orphan-finished").exists()

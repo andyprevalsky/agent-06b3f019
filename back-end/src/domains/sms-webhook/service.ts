@@ -21,6 +21,7 @@ import {
   SUPERVISOR_FALLBACK_MESSAGE,
 } from '../../providers/smsSupervisor';
 import { createLogger } from '../../providers/logger';
+import { alertError } from '../../providers/errorAlert';
 import { recordInboundSms } from '../../providers/smsSupervisor/sessionStore';
 
 const log = createLogger('SMS Webhook');
@@ -177,50 +178,71 @@ export async function routeToSupervisor(
         totalDurationMs: Date.now() - requestStart,
       });
     })
-    .catch((error) => {
-      // Don't send error SMS if we were aborted (e.g. by /clear)
-      if (abortController.signal.aborted) {
-        log.info('Supervisor aborted (session cleared)', {
-          userId,
-          mySeq,
-          durationMs: Date.now() - requestStart,
-        });
-        return;
-      }
-
-      log.error('Supervisor failed', {
-        userId,
-        mySeq,
-        error: error instanceof Error ? error.message : String(error),
-        stack: error instanceof Error ? error.stack : undefined,
-        durationMs: Date.now() - requestStart,
-      });
-
-      // Send error SMS as fallback. Gate on the same seq the run captured:
-      // if a newer SMS arrived during our run, stay silent — the newer run
-      // is responsible for the user reply.
-      repo
-        .getInboundSeq(userId)
-        .then(async (currentSeq) => {
-          if ((currentSeq ?? 0) > mySeq) {
-            log.info('Error path: seq advanced, suppressing fallback SMS', {
-              userId,
-              mySeq,
-              currentSeq,
-            });
-            return;
-          }
-          await sendSms(fromPhone, SUPERVISOR_FALLBACK_MESSAGE);
-        })
-        .catch((smsError) => {
-          log.error('Failed to send error SMS', {
-            error: smsError instanceof Error ? smsError.message : String(smsError),
-          });
-        });
-    })
+    .catch((error) =>
+      handleSupervisorFailure({ userId, fromPhone, mySeq, requestStart, abortController, error })
+    )
     .finally(() => {
       unregisterSupervisorRun(userId, abortController);
     });
+}
+
+interface SupervisorFailureInput {
+  userId: string;
+  fromPhone: string;
+  mySeq: number;
+  requestStart: number;
+  abortController: AbortController;
+  error: unknown;
+}
+
+/**
+ * SMS supervisor failure handler: log → alert #errors → best-effort fallback SMS
+ * (gated on sequence so a superseded run stays silent). Aborted runs (e.g.
+ * /clear) are treated as clean, not failures.
+ */
+async function handleSupervisorFailure(input: SupervisorFailureInput): Promise<void> {
+  const { userId, fromPhone, mySeq, requestStart, abortController, error } = input;
+
+  if (abortController.signal.aborted) {
+    log.info('Supervisor aborted (session cleared)', {
+      userId,
+      mySeq,
+      durationMs: Date.now() - requestStart,
+    });
+    return;
+  }
+
+  log.error('Supervisor failed', {
+    userId,
+    mySeq,
+    error: error instanceof Error ? error.message : String(error),
+    stack: error instanceof Error ? error.stack : undefined,
+    durationMs: Date.now() - requestStart,
+  });
+
+  alertError({
+    source: 'sms',
+    message: error instanceof Error ? error.message : String(error),
+    userId,
+    stack: error instanceof Error ? error.stack : undefined,
+    context: { mySeq },
+  });
+
+  // Send error SMS as fallback. Gate on the same seq the run captured: if a
+  // newer SMS arrived during our run, stay silent — the newer run is
+  // responsible for the user reply.
+  try {
+    const currentSeq = await repo.getInboundSeq(userId);
+    if ((currentSeq ?? 0) > mySeq) {
+      log.info('Error path: seq advanced, suppressing fallback SMS', { userId, mySeq, currentSeq });
+      return;
+    }
+    await sendSms(fromPhone, SUPERVISOR_FALLBACK_MESSAGE);
+  } catch (smsError) {
+    log.error('Failed to send error SMS', {
+      error: smsError instanceof Error ? smsError.message : String(smsError),
+    });
+  }
 }
 /* c8 ignore stop */
 

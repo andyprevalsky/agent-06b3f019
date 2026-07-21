@@ -9,7 +9,6 @@ import re
 
 import pyte
 
-
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 

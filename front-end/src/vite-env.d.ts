@@ -1,5 +1,9 @@
 /// <reference types="vite/client" />
 
+interface ImportMetaEnv {
+  readonly VITE_REALTIME_PRIVATE?: 'true' | 'false';
+}
+
 interface ElectronAuthBridge {
   check: () => Promise<unknown>;
   save: (session: unknown) => Promise<{ success: boolean }>;

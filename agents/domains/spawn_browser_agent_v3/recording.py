@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import html
 import json
 import mimetypes
@@ -19,7 +20,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote_to_bytes, urljoin, urlparse
 
 import httpx
 import structlog
@@ -32,6 +33,7 @@ logger = structlog.get_logger()
 
 FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
 TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
+STATIC_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
 
 
 def browser_recordings_enabled() -> bool:
@@ -107,6 +109,47 @@ def browser_recording_output_dir(agent_id: str, task_id: str) -> Path:
     return _recording_root() / agent_id / _safe_task_id(task_id)
 
 
+def _strip_url_query_fragment(value: str) -> str:
+    """Remove everything from the first ``?`` or ``#`` onward."""
+    return value.split("#", 1)[0].split("?", 1)[0]
+
+
+def _redact_url_fallback(value: str) -> str:
+    """Redact a URL without relying on a successfully parsed authority."""
+    stripped = _strip_url_query_fragment(value)
+    if "://" in stripped:
+        scheme, remainder = stripped.split("://", 1)
+        prefix = f"{scheme}://"
+    elif stripped.startswith("//"):
+        prefix = "//"
+        remainder = stripped[2:]
+    else:
+        return stripped
+    authority, separator, path = remainder.partition("/")
+    safe_authority = authority.rsplit("@", 1)[-1]
+    return f"{prefix}{safe_authority}{separator}{path}"
+
+
+def _redact_url_query(url: str) -> str:
+    """Drop query string + fragment from a URL, keeping scheme://host/path.
+
+    Captured request URLs are surfaced to the agent (and its turn history) via
+    read_network_requests; query strings can carry signed URLs, auth tokens, and
+    PII, so only the non-secret locator is exposed. This fails CLOSED: parse
+    failures and authority-less inputs still get their query/fragment stripped,
+    and embedded ``user:pass@`` credentials are dropped from the authority.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return _redact_url_fallback(url)
+    if not parsed.scheme or not parsed.netloc:
+        return _redact_url_fallback(url)
+    # netloc may carry `user:pass@host:port` — keep only host[:port].
+    host = parsed.netloc.rsplit("@", 1)[-1]
+    return f"{parsed.scheme}://{host}{parsed.path}"
+
+
 def _media_extension(url: str, default: str) -> str:
     suffix = Path(urlparse(url).path).suffix
     if suffix and len(suffix) <= 8:
@@ -177,6 +220,244 @@ def _sanitize_observation_value(value: Any) -> Any:
     return value
 
 
+def normalize_simulated_browser_frame(value: Any) -> Optional[Dict[str, Any]]:
+    """Normalize WMH visual output for scriptless live/replay rendering."""
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.lower().startswith("data:text/html"):
+            header, separator, encoded_html = stripped.partition(",")
+            if not separator:
+                return None
+            try:
+                if ";base64" in header.lower():
+                    html_value = base64.b64decode(encoded_html, validate=True).decode("utf-8")
+                else:
+                    html_value = unquote_to_bytes(encoded_html).decode("utf-8")
+            except (UnicodeDecodeError, ValueError):
+                return None
+            return {"kind": "html", "html": html_value} if html_value.strip() else None
+        if stripped.startswith("data:image/") or _looks_like_static_image_url(stripped):
+            return {"kind": "image", "src": stripped}
+        if stripped.startswith(("https://", "http://")):
+            return None
+        return {"kind": "html", "html": stripped} if stripped else None
+    if not isinstance(value, dict):
+        return None
+
+    dimensions = {
+        key: int(number)
+        for key, number in (("width", value.get("width")), ("height", value.get("height")))
+        if isinstance(number, (int, float)) and not isinstance(number, bool) and number > 0
+    }
+    html_value = value.get("html") or value.get("srcdoc") or value.get("src_doc")
+    if isinstance(html_value, str) and html_value.strip():
+        return {"kind": "html", "html": html_value, **dimensions}
+
+    source = value.get("src") or value.get("data_url") or value.get("image_url") or value.get("url")
+    if isinstance(source, str) and (
+        source.strip().startswith("data:image/") or _looks_like_static_image_url(source.strip())
+    ):
+        return {"kind": "image", "src": source.strip(), **dimensions}
+
+    encoded = value.get("base64") or value.get("data")
+    mime_type = str(value.get("mime_type") or value.get("mimeType") or "image/png")
+    if (
+        isinstance(encoded, str)
+        and encoded.strip()
+        and mime_type
+        in {
+            "image/png",
+            "image/jpeg",
+            "image/webp",
+            "image/gif",
+        }
+    ):
+        return {"kind": "image", "src": f"data:{mime_type};base64,{encoded.strip()}", **dimensions}
+    return None
+
+
+def _looks_like_static_image_url(value: str) -> bool:
+    """Reject ordinary page URLs so a WMH frame can never fetch a live website."""
+
+    if not value.startswith(("https://", "http://")):
+        return False
+    return Path(urlparse(value).path).suffix.lower() in STATIC_IMAGE_SUFFIXES
+
+
+class SimulatedBrowserRecorder:
+    """Self-contained WMH frame recorder; never owns a browser or CDP session."""
+
+    uses_kernel_replay = False
+
+    def __init__(
+        self,
+        *,
+        agent_id: str,
+        task_id: str,
+        session_id: str,
+        frames: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        self.agent_id = agent_id
+        self.task_id = task_id
+        self.session_id = session_id
+        self.browser_url = ""
+        self.session_metadata = {"provider": "wmh", "simulated": True}
+        self.output_dir = browser_recording_output_dir(agent_id, task_id)
+        self.frames = list(frames or [])
+        self.observations: List[Dict[str, Any]] = []
+        self.cursor_events: List[Dict[str, int]] = []
+
+    @property
+    def checkpoint_path(self) -> Path:
+        """Return the compact resume reference for frames persisted on shared scratch storage."""
+
+        return self.output_dir / "frames.checkpoint.json"
+
+    def _load_checkpoint_frames(self) -> List[Dict[str, Any]]:
+        if not self.checkpoint_path.exists():
+            return []
+        try:
+            payload = json.loads(self.checkpoint_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return []
+        if payload.get("session_id") != self.session_id:
+            return []
+        checkpoint_frames = payload.get("frames")
+        return list(checkpoint_frames) if isinstance(checkpoint_frames, list) else []
+
+    def _write_checkpoint(self) -> None:
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        temporary_path = self.checkpoint_path.with_suffix(".tmp")
+        temporary_path.write_text(
+            json.dumps(
+                {
+                    "session_id": self.session_id,
+                    "frame_count": len(self.frames),
+                    "frames": self.frames,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        temporary_path.replace(self.checkpoint_path)
+
+    @classmethod
+    async def create(
+        cls,
+        *,
+        agent_id: str,
+        task_id: str,
+        session_id: str,
+        frames: Optional[List[Dict[str, Any]]] = None,
+    ) -> Optional["SimulatedBrowserRecorder"]:
+        if not browser_recordings_enabled():
+            return None
+        recorder = cls(agent_id=agent_id, task_id=task_id, session_id=session_id, frames=frames)
+        recorder.output_dir.mkdir(parents=True, exist_ok=True)
+        if not recorder.frames:
+            recorder.frames = recorder._load_checkpoint_frames()
+        return recorder
+
+    async def record_frame(
+        self,
+        frame: Any,
+        *,
+        iteration: int,
+        label: str,
+        action: str,
+        browser_state: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        normalized = normalize_simulated_browser_frame(frame)
+        if normalized is None:
+            return None
+        entry = {
+            **normalized,
+            "ts_ms": max(0, int(iteration)) * 500,
+            "label": label,
+            "action": action,
+            "metadata": {
+                "step": iteration,
+                "url": str((browser_state or {}).get("url") or ""),
+                "title": str((browser_state or {}).get("title") or ""),
+                "world_model_simulated": True,
+            },
+        }
+        self.frames.append(entry)
+        await asyncio.to_thread(self._write_checkpoint)
+        return entry
+
+    async def record_observation(
+        self,
+        *,
+        iteration: int,
+        browser_state: Dict[str, Any],
+        action_entries: List[Dict[str, Any]],
+    ) -> None:
+        self.observations.append(
+            {
+                "iteration": iteration,
+                "browser_state": _sanitize_observation_value(browser_state),
+                "action_count": len(action_entries),
+            }
+        )
+
+    async def close(self, *, include_steel_media: bool = False) -> Optional[Path]:
+        del include_steel_media
+        if not self.frames:
+            return None
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = self.output_dir / "manifest.json"
+        html_path = self.output_dir / "index.html"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "agent_id": self.agent_id,
+                    "task_id": self.task_id,
+                    "session_id": self.session_id,
+                    "browser_session_metadata": self.session_metadata,
+                    "recording_source": "wmh_frames",
+                    "frame_count": len(self.frames),
+                    "frames": self.frames,
+                    "observations": self.observations,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        html_path.write_bytes(self.export_inline_html_bytes() or b"")
+        await self._archive_recording_artifacts()
+        return html_path
+
+    def export_inline_html_bytes(self) -> Optional[bytes]:
+        if not self.frames:
+            return None
+        frames_json = json.dumps(self.frames, ensure_ascii=False).replace("</", "<\\/")
+        title = html.escape(f"Simulated browser recording {self.task_id}")
+        return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>{title}</title>
+<style>html,body{{margin:0;height:100%;background:#09090b;color:#eee;font:13px sans-serif}}#app{{display:flex;flex-direction:column;height:100%}}header{{display:flex;gap:10px;padding:10px;background:#18181b}}#timeline{{flex:1}}#stage{{position:relative;flex:1;background:white}}#stage img,#stage iframe{{position:absolute;inset:0;width:100%;height:100%;border:0;object-fit:contain}}</style></head>
+<body><div id="app"><header><button id="play">Play</button><input id="timeline" type="range" min="0" value="0"><span id="meta"></span></header><div id="stage"></div></div>
+<script>const frames={frames_json};let index=0,timer=null;const stage=document.getElementById('stage'),range=document.getElementById('timeline'),meta=document.getElementById('meta'),play=document.getElementById('play'),frameCsp='<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: blob:; style-src \'unsafe-inline\'; font-src data:">';range.max=Math.max(0,frames.length-1);function render(i){{index=Math.max(0,Math.min(frames.length-1,Number(i)||0));range.value=String(index);stage.replaceChildren();const frame=frames[index];if(!frame)return;if(frame.kind==='html'){{const el=document.createElement('iframe');el.sandbox='';el.srcdoc=frameCsp+(frame.html||'');stage.appendChild(el)}}else{{const el=document.createElement('img');el.src=frame.src||'';stage.appendChild(el)}}meta.textContent=`${{index+1}}/${{frames.length}} · ${{frame.label||frame.action||'step'}}`;}}range.oninput=()=>render(range.value);play.onclick=()=>{{if(timer){{clearInterval(timer);timer=null;play.textContent='Play';return}}play.textContent='Pause';timer=setInterval(()=>{{if(index>=frames.length-1){{clearInterval(timer);timer=null;play.textContent='Play';return}}render(index+1)}},500)}};render(0);</script></body></html>""".encode()
+
+    async def _archive_recording_artifacts(self) -> None:
+        if not archive_enabled():
+            return
+        root_agent_id = current_root_agent_id() or self.agent_id
+        for file_path in self.output_dir.rglob("*"):
+            if file_path.is_file():
+                archive_bytes(
+                    root_agent_id=root_agent_id,
+                    path=f"media/browser/{self.task_id}/{file_path.relative_to(self.output_dir).as_posix()}",
+                    body=file_path.read_bytes(),
+                    content_type=mimetypes.guess_type(file_path.name)[0] or "application/octet-stream",
+                )
+
+    def cleanup_local_artifacts(self, *, persisted: bool = False, force: bool = False) -> None:
+        if (persisted or force) and cleanup_local_recording_artifacts_enabled():
+            shutil.rmtree(self.output_dir, ignore_errors=True)
+
+
 class BrowserAgentRecorder:
     def __init__(
         self,
@@ -207,6 +488,12 @@ class BrowserAgentRecorder:
         )
         self._kernel_replay_id: Optional[str] = None
         self.recording_view_url: Optional[str] = None
+        # One replay per Kernel session. rotate_ip evicts the current session and
+        # stands up a new one, so a single replay would only ever capture the first
+        # session (and its IP). We record ONE replay segment per session and hand
+        # the FE the full ordered list, so the recording follows every rotation and
+        # visibly shows the exit IP changing across segments.
+        self._replay_segments: List[Dict[str, Any]] = []
         self.output_dir = browser_recording_output_dir(agent_id, task_id)
         self.frames_dir = self.output_dir / "frames"
         self.media_dir = self.output_dir / "media"
@@ -319,12 +606,24 @@ class BrowserAgentRecorder:
                 data = response.json()
             self._kernel_replay_id = data.get("replay_id")
             self.recording_view_url = data.get("replay_view_url")
+            # Record this session's segment. The start-time view URL is valid even
+            # before stop and survives session eviction, so a segment stays playable
+            # after rotate_ip tears its session down. Segment order == rotation order.
+            if self.recording_view_url:
+                self._replay_segments.append(
+                    {
+                        "session_id": self.session_id,
+                        "replay_id": self._kernel_replay_id,
+                        "view_url": self.recording_view_url,
+                    }
+                )
             logger.info(
                 "Kernel replay recording started",
                 agent_id=self.agent_id,
                 task_id=self.task_id,
                 session_id=self.session_id,
                 replay_id=self._kernel_replay_id,
+                segment_index=len(self._replay_segments) - 1,
             )
         except Exception as exc:  # noqa: BLE001 — surface to create(), which returns None
             logger.warning(
@@ -338,6 +637,160 @@ class BrowserAgentRecorder:
             self._kernel_replay_id = None
             self.recording_view_url = None
             raise
+
+    async def rotate_kernel_replay(self, new_session_id: str) -> None:
+        """Follow a rotate_ip session swap: finalize the current session's replay
+        segment and start a fresh one on the rotated session.
+
+        rotate_ip evicts the current Kernel session and stands up a new one on a
+        different exit IP. A single replay pinned to the original session would
+        only ever show the first IP — the recording would look like the IP never
+        changed. We therefore keep one replay per session: the old segment's
+        start-time view URL is already captured (and survives eviction), so we just
+        start a new replay on ``new_session_id`` and append its segment. Best-effort
+        throughout — recording must never break the browser run."""
+        if not self.uses_kernel_replay or not new_session_id or new_session_id == self.session_id:
+            return
+        # Best-effort stop of the outgoing session's replay so Kernel finalizes it
+        # promptly. The session is usually already evicted by the backend rotation;
+        # its persisted replay (and the start-time URL we saved) survive regardless.
+        headers = _kernel_replay_headers()
+        if headers is not None and self._kernel_replay_id:
+            with contextlib.suppress(Exception):
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    await client.post(
+                        f"{_kernel_api_base()}/browsers/{self.session_id}/replays/{self._kernel_replay_id}/stop",
+                        headers=headers,
+                    )
+        # Rebind to the new session and start a fresh replay segment.
+        self.session_id = new_session_id
+        self._kernel_replay_id = None
+        self.recording_view_url = None
+        try:
+            await self._start_kernel_replay()
+        except Exception as exc:  # noqa: BLE001 — a failed segment must not break the run
+            logger.warning(
+                "Kernel replay failed to start on rotated session; recording will miss this segment",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                session_id=new_session_id,
+                error=str(exc)[:300],
+            )
+            # Keep uses_kernel_replay True: earlier segments are still valid and must
+            # be finalized. _start_kernel_replay flipped it off on failure; restore.
+            self.uses_kernel_replay = True
+
+    @property
+    def replay_view_urls(self) -> List[str]:
+        """All per-session replay view URLs in rotation order (baseline first)."""
+        return [seg["view_url"] for seg in self._replay_segments if seg.get("view_url")]
+
+    async def _run_ffmpeg_concat(self, ffmpeg_path: str, list_file: Path, out_path: Path, *, copy: bool) -> bool:
+        args = [
+            ffmpeg_path,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_file),
+        ]
+        # -c copy is instant but needs uniform codecs across segments; the re-encode
+        # fallback guarantees one clean stream regardless of per-segment timebase.
+        args += ["-c", "copy"] if copy else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-an"]
+        args += ["-movflags", "+faststart", str(out_path)]
+        process = await asyncio.create_subprocess_exec(
+            *args,
+            cwd=str(list_file.parent),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            logger.debug(
+                "ffmpeg replay concat failed",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                copy=copy,
+                error=stderr.decode("utf-8", errors="replace")[:500],
+            )
+            return False
+        return out_path.exists() and out_path.stat().st_size > 0
+
+    async def stitch_segments_to_mp4(self) -> Optional[bytes]:
+        """Concatenate every per-session replay segment into ONE continuous MP4.
+
+        rotate_ip records one Kernel replay per session (baseline + one per
+        rotation), each on a different exit IP. This downloads them all and stitches
+        them into a single video so the FE plays one continuous recording of the IP
+        changing — not a playlist. Returns the stitched bytes, or None (ffmpeg
+        missing / a download or concat failure) so the caller can fall back to the
+        per-segment URL list."""
+        urls = self.replay_view_urls
+        if len(urls) < 2:
+            return None
+        ffmpeg_path = shutil.which("ffmpeg")
+        if not ffmpeg_path:
+            logger.warning(
+                "ffmpeg unavailable; cannot stitch replay segments into one video",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                segment_count=len(urls),
+            )
+            return None
+        with tempfile.TemporaryDirectory(prefix="rose-replay-stitch-") as tmp:
+            tmp_dir = Path(tmp)
+            seg_paths: List[Path] = []
+            try:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
+                    for index, url in enumerate(urls):
+                        # The freshly-stopped last segment can lag S3 availability;
+                        # retry briefly so the final rotation isn't dropped.
+                        last_exc: Optional[Exception] = None
+                        for attempt in range(3):
+                            try:
+                                response = await client.get(url)
+                                response.raise_for_status()
+                                if not response.content:
+                                    raise RuntimeError("empty replay body")
+                                break
+                            except Exception as exc:  # noqa: BLE001 — retry transient S3 lag
+                                last_exc = exc
+                                await asyncio.sleep(1.5 * (attempt + 1))
+                        else:
+                            raise last_exc or RuntimeError("segment download failed")
+                        seg_path = tmp_dir / f"seg_{index:03d}.mp4"
+                        seg_path.write_bytes(response.content)
+                        seg_paths.append(seg_path)
+            except Exception as exc:  # noqa: BLE001 — fall back to the segment URL list
+                logger.warning(
+                    "Replay segment download failed; skipping stitch",
+                    agent_id=self.agent_id,
+                    task_id=self.task_id,
+                    error=str(exc)[:300],
+                )
+                return None
+            list_file = tmp_dir / "segments.txt"
+            list_file.write_text("".join(f"file '{p.name}'\n" for p in seg_paths), encoding="utf-8")
+            out_path = tmp_dir / "stitched.mp4"
+            stitched = await self._run_ffmpeg_concat(ffmpeg_path, list_file, out_path, copy=True)
+            if not stitched:
+                stitched = await self._run_ffmpeg_concat(ffmpeg_path, list_file, out_path, copy=False)
+            if not stitched:
+                return None
+            data = out_path.read_bytes()
+            logger.info(
+                "Replay segments stitched into one video",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                segment_count=len(seg_paths),
+                bytes=len(data),
+            )
+            return data
 
     async def stop_kernel_replay(self) -> Optional[str]:
         """Stop the Kernel replay and return the (finalized) hosted view URL.
@@ -369,9 +822,7 @@ class BrowserAgentRecorder:
                             task_id=self.task_id,
                             error=str(exc)[:300],
                         )
-                response = await client.get(
-                    f"{base}/browsers/{self.session_id}/replays", headers=headers
-                )
+                response = await client.get(f"{base}/browsers/{self.session_id}/replays", headers=headers)
                 response.raise_for_status()
                 replays = response.json() or []
             # Match ONLY this run's replay by id — never substitute replays[0], which
@@ -383,6 +834,11 @@ class BrowserAgentRecorder:
             )
             if match and match.get("replay_view_url"):
                 self.recording_view_url = match["replay_view_url"]
+                # Keep the current (last) segment's URL in sync with the finalized one.
+                for seg in reversed(self._replay_segments):
+                    if seg.get("replay_id") == self._kernel_replay_id:
+                        seg["view_url"] = match["replay_view_url"]
+                        break
         except Exception as exc:  # noqa: BLE001 — fall back to start-time view URL
             logger.warning(
                 "Kernel replay list failed; using start-time view URL",
@@ -1228,6 +1684,14 @@ class BrowserNetworkRecorder:
         self.output_dir = output_dir
         self.network_dir = self.output_dir / "network"
         self.entries: Dict[str, Dict[str, Any]] = {}
+        # Request IDs that were in flight when the agent last cleared the buffer
+        # (read_network_requests clear=True). Their late response events must NOT
+        # resurrect a pre-clear entry, or the next read would leak old traffic.
+        self._ignored_request_ids: set[str] = set()
+        # Track every request observed by CDP, including requests dropped when the
+        # capture buffer is full. A clear must ignore all pre-clear traffic, not
+        # only the subset that had room in ``entries``.
+        self._active_request_ids: set[str] = set()
         self._started_at = time.monotonic()
         self._closed = False
         self._tasks: set[asyncio.Task] = set()
@@ -1321,7 +1785,12 @@ class BrowserNetworkRecorder:
             request = event.get("request") or {}
             url = request.get("url") or ""
             resource_type = event.get("type") or ""
-            if not request_id or len(self.entries) >= self._max_entries:
+            if not request_id:
+                return
+            self._active_request_ids.add(request_id)
+            if request_id in self._ignored_request_ids:
+                return
+            if len(self.entries) >= self._max_entries:
                 return
             if not self._should_capture(url, resource_type):
                 return
@@ -1343,9 +1812,23 @@ class BrowserNetworkRecorder:
             url = response.get("url") or ""
             resource_type = event.get("type") or ""
             mime_type = response.get("mimeType") or ""
-            if not request_id or len(self.entries) >= self._max_entries:
+            if not request_id:
                 return
-            if not self._should_capture(url, resource_type, mime_type):
+            self._active_request_ids.add(request_id)
+            if request_id in self._ignored_request_ids:
+                return
+            # Capacity only blocks NEW requests; an already-tracked request must
+            # still receive its status/response update (otherwise a page that
+            # fills the buffer before responses land leaves every status None and
+            # defeats 403/challenge detection).
+            if request_id not in self.entries and len(self.entries) >= self._max_entries:
+                return
+            # Only gate NEW requests on the MIME predicate. An already-tracked
+            # request must still receive its status/response update even when the
+            # response MIME is non-capturable (e.g. application/octet-stream,
+            # protobuf); otherwise it keeps status=None and 403/challenge
+            # detection via read_network_requests fails.
+            if request_id not in self.entries and not self._should_capture(url, resource_type, mime_type):
                 return
             entry = self.entries.setdefault(
                 request_id,
@@ -1371,18 +1854,26 @@ class BrowserNetworkRecorder:
 
     def _on_loading_finished(self, event: Dict[str, Any], session_id: str | None) -> None:
         request_id = event.get("requestId")
+        if request_id:
+            self._ignored_request_ids.discard(request_id)
+            self._active_request_ids.discard(request_id)
         if not request_id or request_id not in self.entries:
             return
         self.entries[request_id]["encoded_data_length"] = event.get("encodedDataLength")
+        self.entries[request_id]["terminal"] = True
         task = asyncio.create_task(self._fetch_response_body(request_id, session_id))
         self._tasks.add(task)
         task.add_done_callback(lambda done: self._tasks.discard(done))
 
     def _on_loading_failed(self, event: Dict[str, Any], session_id: str | None) -> None:
         request_id = event.get("requestId")
+        if request_id:
+            self._ignored_request_ids.discard(request_id)
+            self._active_request_ids.discard(request_id)
         if request_id and request_id in self.entries:
             self.entries[request_id]["failed"] = True
             self.entries[request_id]["failure"] = event.get("errorText")
+            self.entries[request_id]["terminal"] = True
 
     async def _fetch_response_body(self, request_id: str, session_id: str | None) -> None:
         entry = self.entries.get(request_id)
@@ -1436,6 +1927,50 @@ class BrowserNetworkRecorder:
                 url=entry.get("url"),
                 error=str(exc),
             )
+
+    def query_requests(
+        self,
+        *,
+        url_pattern: str = "",
+        limit: int = 100,
+        clear: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Return captured network requests for the agent's `read_network_requests`
+        tool. Mirrors Claude Code's tool: newest-first list of
+        url/method/status/resource_type (cross-origin included), optionally filtered
+        by a URL substring. When ``clear`` is set the buffer is emptied after the
+        read so a follow-up call only surfaces new traffic.
+        """
+        pattern = (url_pattern or "").lower().strip()
+        capped_limit = max(1, min(int(limit or 100), self._max_entries))
+        scored: List[tuple[int, Dict[str, Any]]] = []
+        for entry in self.entries.values():
+            url = entry.get("url") or ""
+            if pattern and pattern not in url.lower():
+                continue
+            # Never return raw query strings/fragments to the agent turn history:
+            # they can carry signed URLs, auth tokens, and PII. Path is enough for
+            # challenge detection (status) and endpoint discovery.
+            row: Dict[str, Any] = {
+                "url": _redact_url_query(url),
+                "method": entry.get("method"),
+                "status": entry.get("status"),
+                "resource_type": entry.get("resource_type"),
+            }
+            if entry.get("failed"):
+                row["failed"] = True
+                row["failure"] = entry.get("failure")
+            ts = entry.get("response_ts_ms") or entry.get("request_ts_ms") or 0
+            scored.append((int(ts), row))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        rows = [row for _, row in scored[:capped_limit]]
+        if clear:
+            # Remember every request still in flight, including requests dropped
+            # while the buffer was full, so late response events cannot resurrect
+            # pre-clear traffic. Terminal events remove IDs from both sets.
+            self._ignored_request_ids.update(self._active_request_ids)
+            self.entries.clear()
+        return rows
 
     async def close(self) -> Optional[Path]:
         if self._closed:

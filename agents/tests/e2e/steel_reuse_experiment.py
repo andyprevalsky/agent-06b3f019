@@ -50,18 +50,22 @@ STATE_JS = """() => {
 }"""
 
 
-def log(*a): print(*a, file=sys.stderr, flush=True)
+def log(*a):
+    print(*a, file=sys.stderr, flush=True)
 
 
 def _key():
     if not (os.environ.get("STEEL_API_KEY") or os.environ.get("BROWSERBASE_API_KEY")):
         try:
-            from dotenv import load_dotenv; load_dotenv(override=False)
+            from dotenv import load_dotenv
+
+            load_dotenv(override=False)
         except Exception:
             pass
     k = os.environ.get("STEEL_API_KEY") or os.environ.get("BROWSERBASE_API_KEY") or ""
     if not k:
-        log("ERROR: STEEL_API_KEY not set"); sys.exit(2)
+        log("ERROR: STEEL_API_KEY not set")
+        sys.exit(2)
     return k
 
 
@@ -72,9 +76,12 @@ def _proxy(spec):
         s = os.environ.get("STEEL_PROXY_SERVER", "").strip()
         return {"server": s} if s else False
     if spec.startswith("geo:"):
-        p = spec[4:].split("/"); g = {"country": p[0]}
-        if len(p) > 1 and p[1]: g["state"] = p[1]
-        if len(p) > 2 and p[2]: g["city"] = p[2]
+        p = spec[4:].split("/")
+        g = {"country": p[0]}
+        if len(p) > 1 and p[1]:
+            g["state"] = p[1]
+        if len(p) > 2 and p[2]:
+            g["city"] = p[2]
         return {"geolocation": g}
     if spec == "fixed":
         return {"type": "fixed"}
@@ -84,9 +91,13 @@ def _proxy(spec):
 
 
 def _body(a, profile_id):
-    b = {"useProxy": _proxy(a.proxy), "solveCaptcha": a.solve_captcha,
-         "stealthConfig": {"humanizeInteractions": a.humanize, "skipFingerprintInjection": a.skip_fingerprint},
-         "timeout": 900000, "dimensions": {"width": 1288, "height": 891}}
+    b = {
+        "useProxy": _proxy(a.proxy),
+        "solveCaptcha": a.solve_captcha,
+        "stealthConfig": {"humanizeInteractions": a.humanize, "skipFingerprintInjection": a.skip_fingerprint},
+        "timeout": 900000,
+        "dimensions": {"width": 1288, "height": 891},
+    }
     if getattr(a, "experimental", None):
         b["experimentalFeatures"] = [x for x in a.experimental.split(",") if x]
     if a.user_agent and a.user_agent != "default":
@@ -123,75 +134,102 @@ async def _load_once(page, pcdp, bcdp, url, expect, budget, wait_until="commit")
     except Exception:
         pass
     while time.monotonic() - t0 < budget:
-        frozen = False; state = None
+        frozen = False
+        state = None
         try:
-            r = await asyncio.wait_for(pcdp.send("Runtime.evaluate", {"expression": f"({STATE_JS})()", "returnByValue": True}), timeout=4)
+            r = await asyncio.wait_for(
+                pcdp.send("Runtime.evaluate", {"expression": f"({STATE_JS})()", "returnByValue": True}), timeout=4
+            )
             state = r.get("result", {}).get("value", {}) or {}
         except Exception:
             frozen = True
         if frozen:
-            if freeze_start is None: freeze_start = time.monotonic() - t0
+            if freeze_start is None:
+                freeze_start = time.monotonic() - t0
             freeze_end = time.monotonic() - t0
         else:
             is_ch = state.get("challengeTitle") or state.get("cfFrame")
             kw = (not expect) or any(k in state.get("text", "") for k in expect)
             if state.get("bodyLen", 0) > 500 and kw and not is_ch:
-                return round(time.monotonic() - t0, 1), round((freeze_end - freeze_start) if freeze_start is not None else 0.0, 1)
+                return round(time.monotonic() - t0, 1), round(
+                    (freeze_end - freeze_start) if freeze_start is not None else 0.0, 1
+                )
         await asyncio.sleep(1.5)
     return None, round((freeze_end - freeze_start) if freeze_start is not None else 0.0, 1)
 
 
 async def run(a):
     key = _key()
-    out = {"label": a.label, "mode": a.mode, "warm_t2u": None, "warm_freeze": None,
-           "reuse_times": [], "reuse_usable_all": False, "consistent": False,
-           "proxy": a.proxy, "ua": a.user_agent, "error": None}
+    out = {
+        "label": a.label,
+        "mode": a.mode,
+        "warm_t2u": None,
+        "warm_freeze": None,
+        "reuse_times": [],
+        "reuse_usable_all": False,
+        "consistent": False,
+        "proxy": a.proxy,
+        "ua": a.user_agent,
+        "error": None,
+    }
     sid = None
     profile_id = a.profile_id
     async with async_playwright() as pw:
         try:
             if a.mode == "same-session":
                 # one session: warm, then re-navigate within it
-                sess = await _create(key, _body(a, None)); sid = sess["id"]
+                sess = await _create(key, _body(a, None))
+                sid = sess["id"]
                 log(f"[{a.label}] session {sid}")
                 br = await pw.chromium.connect_over_cdp(f"wss://connect.steel.dev?apiKey={key}&sessionId={sid}")
                 ctx = br.contexts[0] if br.contexts else await br.new_context()
                 page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-                pcdp = await ctx.new_cdp_session(page); bcdp = await br.new_browser_cdp_session()
+                pcdp = await ctx.new_cdp_session(page)
+                bcdp = await br.new_browser_cdp_session()
                 wt, wf = await _load_once(page, pcdp, bcdp, a.url, a.expect, a.budget)
                 out["warm_t2u"], out["warm_freeze"] = wt, wf
                 log(f"[{a.label}] warm={wt}s freeze={wf}s")
                 for i in range(a.reloads):
                     try:
-                        await page.goto("about:blank"); await asyncio.sleep(1.0)
+                        await page.goto("about:blank")
+                        await asyncio.sleep(1.0)
                     except Exception:
                         pass
                     rt, _ = await _load_once(page, pcdp, bcdp, a.url, a.expect, a.budget)
                     out["reuse_times"].append(rt)
-                    log(f"[{a.label}] reuse#{i+1}={rt}s")
+                    log(f"[{a.label}] reuse#{i + 1}={rt}s")
             else:
                 # warm in its own session (persist profile and/or save cookies)
                 warm_body = _body(a, None)
                 if a.mode == "same-profile":
                     warm_body["persistProfile"] = True
-                sess = await _create(key, warm_body); sid = sess["id"]
+                sess = await _create(key, warm_body)
+                sid = sess["id"]
                 profile_id = sess.get("profileId") or profile_id
                 log(f"[{a.label}] warm session {sid} profile={profile_id}")
                 br = await pw.chromium.connect_over_cdp(f"wss://connect.steel.dev?apiKey={key}&sessionId={sid}")
                 ctx = br.contexts[0] if br.contexts else await br.new_context()
                 page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-                pcdp = await ctx.new_cdp_session(page); bcdp = await br.new_browser_cdp_session()
+                pcdp = await ctx.new_cdp_session(page)
+                bcdp = await br.new_browser_cdp_session()
                 wt, wf = await _load_once(page, pcdp, bcdp, a.url, a.expect, a.budget)
                 out["warm_t2u"], out["warm_freeze"] = wt, wf
                 saved_cookies = []
                 if a.mode == "cookie-sticky":
                     try:
                         ck = await ctx.cookies()
-                        saved_cookies = [c for c in ck if "toasttab" in c.get("domain", "") or c.get("name") in ("cf_clearance", "__cf_bm")]
+                        saved_cookies = [
+                            c
+                            for c in ck
+                            if "toasttab" in c.get("domain", "") or c.get("name") in ("cf_clearance", "__cf_bm")
+                        ]
                     except Exception:
                         pass
-                await _release(key, sid); sid = None
-                log(f"[{a.label}] warm={wt}s; reusing via {a.mode} ({len(saved_cookies)} cookies, profile={profile_id})")
+                await _release(key, sid)
+                sid = None
+                log(
+                    f"[{a.label}] warm={wt}s; reusing via {a.mode} ({len(saved_cookies)} cookies, profile={profile_id})"
+                )
                 # N fresh sessions reusing identity
                 for i in range(a.reloads):
                     s2 = None
@@ -199,27 +237,37 @@ async def run(a):
                         b2 = _body(a, profile_id if a.mode == "same-profile" else None)
                         s2 = await _create(key, b2)
                         sid = s2["id"]
-                        br2 = await pw.chromium.connect_over_cdp(f"wss://connect.steel.dev?apiKey={key}&sessionId={s2['id']}")
+                        br2 = await pw.chromium.connect_over_cdp(
+                            f"wss://connect.steel.dev?apiKey={key}&sessionId={s2['id']}"
+                        )
                         ctx2 = br2.contexts[0] if br2.contexts else await br2.new_context()
                         if a.mode == "cookie-sticky" and saved_cookies:
-                            try: await ctx2.add_cookies(saved_cookies)
-                            except Exception as e: log(f"  cookie inject fail: {e}")
+                            try:
+                                await ctx2.add_cookies(saved_cookies)
+                            except Exception as e:
+                                log(f"  cookie inject fail: {e}")
                         p2 = ctx2.pages[0] if ctx2.pages else await ctx2.new_page()
-                        pc2 = await ctx2.new_cdp_session(p2); bc2 = await br2.new_browser_cdp_session()
+                        pc2 = await ctx2.new_cdp_session(p2)
+                        bc2 = await br2.new_browser_cdp_session()
                         rt, _ = await _load_once(p2, pc2, bc2, a.url, a.expect, a.budget)
                         out["reuse_times"].append(rt)
-                        log(f"[{a.label}] reuse#{i+1}={rt}s")
+                        log(f"[{a.label}] reuse#{i + 1}={rt}s")
                     except Exception as e:
-                        out["reuse_times"].append(None); log(f"  reuse#{i+1} err {e}")
+                        out["reuse_times"].append(None)
+                        log(f"  reuse#{i + 1} err {e}")
                     finally:
-                        if sid: await _release(key, sid); sid = None
+                        if sid:
+                            await _release(key, sid)
+                            sid = None
             rts = out["reuse_times"]
             out["reuse_usable_all"] = len(rts) > 0 and all(t is not None for t in rts)
             out["consistent"] = out["reuse_usable_all"] and all((t is not None and t < a.fast_threshold) for t in rts)
         except Exception as e:
-            out["error"] = str(e)[:200]; log(f"[{a.label}] ERROR {out['error']}")
+            out["error"] = str(e)[:200]
+            log(f"[{a.label}] ERROR {out['error']}")
         finally:
-            if sid: await _release(key, sid)
+            if sid:
+                await _release(key, sid)
     print(json.dumps(out))
 
 

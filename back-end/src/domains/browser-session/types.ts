@@ -24,6 +24,12 @@ export const resumeSessionSchema = z.object({
   task_id: z.string().uuid(), // Use stable task ID instead of session_id
 });
 
+// rotate_ip tool → swap the browser session's outbound IP for the sub-agent run
+// identified by task_id (the stable BrowserSession row id / escalation key).
+export const rotateProxySchema = z.object({
+  task_id: z.string().uuid(),
+});
+
 export const injectLocalStorageSchema = z.object({
   origin: z.string().url(),
 });
@@ -35,6 +41,7 @@ export const injectLocalStorageSchema = z.object({
 export type InitSessionInput = z.infer<typeof initSessionSchema>;
 export type CloseSessionInput = z.infer<typeof closeSessionSchema>;
 export type ResumeSessionInput = z.infer<typeof resumeSessionSchema>;
+export type RotateProxyInput = z.infer<typeof rotateProxySchema>;
 export type InjectLocalStorageInput = z.infer<typeof injectLocalStorageSchema>;
 
 // ---------------------------------------------------------------------------

@@ -168,7 +168,7 @@ function InputArea({
     <div
       data-testid="terminal-input-area"
       data-chat-mode={a.isChatMode ? 'true' : 'false'}
-      className="pb-1 transition-opacity duration-300 ease-in-out relative md:pb-6"
+      className="relative pb-[calc(0.25rem+var(--safe-area-inset-bottom))] transition-opacity duration-300 ease-in-out md:pb-6"
       style={{
         // A pending gate is actionable (the agent is waiting on the user), so
         // keep it crisp even if the agent row shows FAILED — only dim a truly

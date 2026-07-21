@@ -77,8 +77,7 @@ _FAST_CACHE_TOOLS = {"fast_cache_read", "fast_cache_write"}
 # entries by the world-model scope segment in every cache key
 # (fast_cache/normalize.py:world_model_cache_scope).
 _ENVIRONMENT_BOUNDARY_TOOLS = (
-    _BROWSER_ORCHESTRATION_TOOLS
-    | _BROWSER_BOUNDARY_TOOLS
+    _BROWSER_BOUNDARY_TOOLS
     | _VAPI_ORCHESTRATION_TOOLS
     | _VAPI_BOUNDARY_TOOLS
     | {
@@ -1736,9 +1735,14 @@ def compare_real_vs_world_model_benchmark(
 class WMHHttpClient:
     """Small client for WMH's local HTTP serving API."""
 
-    def __init__(self, base_url: str, *, timeout: float = 30.0) -> None:
+    def __init__(self, base_url: str, *, timeout: float | None = None) -> None:
         self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
+        configured_timeout = timeout
+        if configured_timeout is None:
+            configured_timeout = float(os.environ.get("WMH_HTTP_TIMEOUT_SECONDS", "180"))
+        if configured_timeout <= 0:
+            raise ValueError("WMH HTTP timeout must be greater than zero")
+        self.timeout = configured_timeout
 
     async def list_world_models(self) -> list[str]:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -1827,6 +1831,8 @@ class WorldModelToolExecutionAdapter:
         tool_args: JsonObject,
         tool_call_id: str,
         real_executor: ToolExecutor,
+        *,
+        allow_real_fallback: bool = True,
     ) -> JsonObject:
         if self.mode == "real" or not is_world_model_environment_boundary(tool_name):
             return await real_executor(tool_name, tool_args, tool_call_id)
@@ -1847,7 +1853,10 @@ class WorldModelToolExecutionAdapter:
                 simulated=True,
                 wall_elapsed_ms=wall_elapsed_ms,
             )
-            if _wmh_fallback_on_unavailable_enabled() and _wmh_result_unavailable(result):
+            result.setdefault("world_model_session_id", self.session_id)
+            result.setdefault("world_model_name", self.world_model_name)
+            result.setdefault("world_model_boundary", tool_name)
+            if allow_real_fallback and _wmh_fallback_on_unavailable_enabled() and _wmh_result_unavailable(result):
                 real_result = await real_executor(tool_name, tool_args, tool_call_id)
                 if isinstance(real_result, dict):
                     real_result.setdefault("world_model_unavailable_fallback", True)

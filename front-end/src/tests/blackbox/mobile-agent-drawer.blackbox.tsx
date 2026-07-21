@@ -1,6 +1,6 @@
 /**
  * Blackbox tests for MobileAgentDrawer — the mobile-only slide-over that makes
- * the agent list reachable below the md breakpoint (the desktop AppSidebar is
+ * the mobile menu reachable below the md breakpoint (the desktop AppSidebar is
  * `hidden md:flex`). Verifies the trigger is mobile-scoped, opening surfaces
  * the shared SidebarAgentList, and selecting/creating closes the drawer.
  */
@@ -48,6 +48,10 @@ function defaultProps(overrides: Partial<React.ComponentProps<typeof MobileAgent
     onCreateAgent: vi.fn(),
     onResumeAgent: vi.fn().mockResolvedValue(undefined),
     resumingAgentId: null,
+    realtimeReady: false,
+    isSignedIn: true,
+    onLoginClick: vi.fn(),
+    onLogout: vi.fn(),
     ...overrides,
   };
 }
@@ -55,7 +59,7 @@ function defaultProps(overrides: Partial<React.ComponentProps<typeof MobileAgent
 describe('MobileAgentDrawer', () => {
   it('renders a mobile-only trigger (hidden at >= md)', () => {
     renderWithProviders(<MobileAgentDrawer {...defaultProps()} />);
-    const trigger = screen.getByRole('button', { name: 'Open agents menu' });
+    const trigger = screen.getByRole('button', { name: 'Open menu' });
     expect(trigger).toBeInTheDocument();
     expect(trigger).toHaveClass('md:hidden');
   });
@@ -72,7 +76,7 @@ describe('MobileAgentDrawer', () => {
     // List is not visible until the drawer is opened.
     expect(screen.queryByText('First goal')).not.toBeInTheDocument();
 
-    await u.click(screen.getByRole('button', { name: 'Open agents menu' }));
+    await u.click(screen.getByRole('button', { name: 'Open menu' }));
 
     const first = await screen.findByText('First goal');
     expect(screen.getByText('Second goal')).toBeInTheDocument();
@@ -91,7 +95,7 @@ describe('MobileAgentDrawer', () => {
     const onCreateAgent = vi.fn();
     renderWithProviders(<MobileAgentDrawer {...defaultProps({ onCreateAgent })} />);
 
-    await u.click(screen.getByRole('button', { name: 'Open agents menu' }));
+    await u.click(screen.getByRole('button', { name: 'Open menu' }));
     const createButton = await screen.findByRole('button', { name: /Create Agent/ });
     await u.click(createButton);
 
@@ -104,7 +108,7 @@ describe('MobileAgentDrawer', () => {
   it('shows an empty-state placeholder when there are no agents', async () => {
     const u = userEvent.setup();
     renderWithProviders(<MobileAgentDrawer {...defaultProps({ agents: [] })} />);
-    await u.click(screen.getByRole('button', { name: 'Open agents menu' }));
+    await u.click(screen.getByRole('button', { name: 'Open menu' }));
     expect(await screen.findByText('No agents yet')).toBeInTheDocument();
   });
 });

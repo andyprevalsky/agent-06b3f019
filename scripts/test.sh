@@ -249,6 +249,7 @@ fi
 run_suite "Agent Behavior Guard Unit Tests" bash scripts/tests/check-agent-behavior-approval.test.sh
 run_suite "Claude Review Fallback" bash scripts/tests/claude-review-fallback.test.sh
 run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
+run_suite "Descend Command" bash scripts/tests/descend-command.test.sh
 run_suite "Existing Backend Replay Gate" bash scripts/tests/blackbox-existing-replay-gate.test.sh
 run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.sh
 run_suite "Cloud Benchmark Lifecycle" agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py
@@ -258,6 +259,8 @@ run_suite "Cloud Benchmark App-Env Lock" bash scripts/tests/cloudbench-app-env-l
 run_suite "Cloud Benchmark Seed Budget" bash scripts/tests/cloudbench-seed-budget.test.sh
 run_suite "Cloud Benchmark Restore Readiness" bash scripts/tests/cloudbench-restore-readiness.test.sh
 run_suite "Cloud Benchmark Orphan-Proxy Reaper" bash scripts/tests/fleet-orphan-proxy-reaper.test.sh
+run_suite "Seed-Dump Cache Decision" bash scripts/tests/seed-cache-decision.test.sh
+run_suite "Fast-Mode Cache Schema Retry" bash scripts/tests/fast-mode-cache-schema-retry.test.sh
 
 # ── Build checks (run in parallel with blackbox tests) ──
 BUILD_PIDS=()

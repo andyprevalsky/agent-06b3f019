@@ -1044,6 +1044,124 @@ async def test_run_verifier_dynamic_schema_getter():
     assert len(schema_calls) == 1
 
 
+async def test_completed_browser_output_forces_parent_completion_instead_of_second_browser():
+    """A verified browser result covering the parent schema must not be re-run.
+
+    Regression: the simulated Amazon checkout browser returned a terminal,
+    schema-complete result, but the unrestricted next root turn spawned a second
+    browser session instead of calling attempt_completion. The parent verifier
+    already accepts this exact child output, so the only legal next tool is the
+    completion boundary.
+    """
+    from helpers.llm import call_llm_activity, check_progress
+    from loop import run_agent as run_mod
+
+    response_schema = {
+        "fields": [
+            {"name": "purchase_completed", "type": "bool", "required": True},
+            {"name": "order_confirmation_id", "type": "str", "required": True},
+        ]
+    }
+    context = [
+        {"role": "USER", "text": "Buy the item", "timestamp": "2026-07-21T00:00:00Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-07-21T00:00:01Z",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "tool_call_id": "browser-one",
+                        "type": "browser",
+                        "goal": "Complete checkout",
+                        "output_schema": response_schema,
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Browser automation complete",
+            "timestamp": "2026-07-21T00:00:02Z",
+            "metadata": {
+                "toolCallId": "browser-one",
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "title": "Browser automation complete",
+                "structured_response": {
+                    "purchase_completed": True,
+                    "order_confirmation_id": "111-2222222-3333333",
+                },
+            },
+        },
+    ]
+    llm_calls = []
+    executed_tools = []
+
+    async def mock_execute_activity(fn, args=None, **_kwargs):
+        if fn is call_llm_activity:
+            llm_calls.append(args)
+            required_tool = args[11]
+            # Reproduce the observed model choice unless orchestration narrows
+            # this schema-complete handoff to the completion boundary.
+            tool_name = "attempt_completion" if required_tool == "attempt_completion" else "spawn_agent"
+            tool_call = {"tool": tool_name}
+            if tool_name == "spawn_agent":
+                tool_call.update(
+                    {
+                        "type": "browser",
+                        "goal": "Complete checkout again",
+                        "start_url": "https://www.amazon.com",
+                        "output_schema": response_schema,
+                    }
+                )
+            return {
+                "response": "",
+                "tool_calls": [tool_call],
+                "detected_tools_ordered": [(tool_name, "next-tool", 1.0)],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
+        if fn is check_progress:
+            return {
+                "score": 1.0,
+                "reasoning": "The completed browser child supplied every required field.",
+                "structured_response": context[-1]["metadata"]["structured_response"],
+                "usage": {},
+            }
+        raise AssertionError(f"Unexpected activity: {fn}")
+
+    async def execute_tool(tool_name, _tool_args, _tool_call_id):
+        executed_tools.append(tool_name)
+        return {"message": f"{tool_name} complete"}
+
+    async def prompt():
+        return "System prompt"
+
+    with patch.object(run_mod.workflow, "execute_activity", new=AsyncMock(side_effect=mock_execute_activity)):
+        result = await run_mod.run_agent(
+            agent_id="amazon-parent",
+            user_id="user-test",
+            system_prompt=prompt,
+            verifier_prompt_generator=prompt,
+            model="rose-labs/rose-1-lite",
+            tools=["spawn_agent", "attempt_completion"],
+            initial_context=context,
+            is_inside_temporal_activity=False,
+            post_message=AsyncMock(),
+            execute_tool=execute_tool,
+            max_iterations=1,
+            skip_status_updates=True,
+            response_schema=response_schema,
+        )
+
+    assert result["status"] == "completed"
+    assert executed_tools == ["attempt_completion"]
+    assert llm_calls[0][2] == ["attempt_completion"]
+    assert llm_calls[0][11] == "attempt_completion"
+    assert "already completed" in llm_calls[0][10]
+
+
 async def test_max_iterations_runs_final_verifier():
     """When max_iterations reached, final verifier runs and result includes verifier_progress."""
     tool_calls = [{"tool": "web_search", "query": "x"}]
@@ -1275,6 +1393,10 @@ async def run_all_tests():
         "run_verifier_posts_in_progress_and_finished", test_run_verifier_posts_in_progress_and_finished
     )
     await r.record_async("run_verifier_dynamic_schema_getter", test_run_verifier_dynamic_schema_getter)
+    await r.record_async(
+        "completed_browser_output_forces_parent_completion",
+        test_completed_browser_output_forces_parent_completion_instead_of_second_browser,
+    )
     await r.record_async("max_iterations_runs_final_verifier", test_max_iterations_runs_final_verifier)
     await r.record_async("winddown_injects_one_message_near_cap", test_winddown_injects_one_message_near_cap)
     await r.record_async("winddown_disabled_by_default", test_winddown_disabled_by_default)

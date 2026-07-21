@@ -152,6 +152,9 @@ function TerminalLayout(props: TerminalLayoutProps) {
           onCreateNewAgent={agents.handleCreateNewAgent}
           onSelectAgent={agents.handleSelectAgent}
           onLoginClick={agents.handleLoginClick}
+          onLogout={() => {
+            void agents.handleLogout();
+          }}
           isSignedIn={agents.isFullySignedIn}
           clientSource={agents.clientSource}
           realtimeReady={agents.realtimeReady}

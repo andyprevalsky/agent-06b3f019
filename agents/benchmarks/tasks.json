@@ -992,7 +992,10 @@
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. The live fixture refreshes compute tokens and the complete browser-auth graph from prod, including CookieBundles. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie)."
+      "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. The live fixture refreshes compute tokens and the complete browser-auth graph from prod, including CookieBundles. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie).",
+      "live_cookie_domains": [
+        "amazon.com"
+      ]
     },
     "evaluators": [
       {
@@ -1114,7 +1117,10 @@
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "Live Amazon via synced-prod browser auth. The live fixture refreshes compute tokens and the complete browser-auth graph, including the CookieBundle used to complete one auto-approved cart purchase."
+      "context_notes": "Live Amazon via synced-prod browser auth. The live fixture refreshes compute tokens and the complete browser-auth graph, including the CookieBundle used to complete one auto-approved cart purchase.",
+      "live_cookie_domains": [
+        "amazon.com"
+      ]
     },
     "evaluators": [
       {
@@ -1227,7 +1233,10 @@
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "The live fixture refreshes all current credentials. Task-specific passkey isolation then deletes Amazon cookies and origin storage, disables saved-session/password alternatives, and detaches the local Kernel profile mapping so the run proves CDP passkey injection from a fresh profile."
+      "context_notes": "The live fixture refreshes all current credentials. Task-specific passkey isolation then deletes Amazon cookies and origin storage, disables saved-session/password alternatives, and detaches the local Kernel profile mapping so the run proves CDP passkey injection from a fresh profile.",
+      "live_cookie_domains": [
+        "amazon.com"
+      ]
     },
     "evaluators": [
       {
@@ -1371,7 +1380,10 @@
       "live_targets": [
         "https://order.toasttab.com/online/nopafish"
       ],
-      "context_notes": "Live Toast menu and checkout flow. The live fixture explicitly refreshes compute credentials and the complete browser-auth graph before the payment-card approval probe."
+      "context_notes": "Live Toast menu and checkout flow. The live fixture explicitly refreshes compute credentials and the complete browser-auth graph before the payment-card approval probe.",
+      "live_cookie_domains": [
+        "toasttab.com"
+      ]
     },
     "evaluators": [
       {
@@ -1441,7 +1453,10 @@
       "live_targets": [
         "https://www.opentable.com/restaurant/profile/45907/reserve"
       ],
-      "context_notes": "Live OpenTable inventory changes continuously. The task allows a two-hour window while holding restaurant, party size, and date fixed. The single final reservation write-lock is auto-approved."
+      "context_notes": "Live OpenTable inventory changes continuously. The task allows a two-hour window while holding restaurant, party size, and date fixed. The single final reservation write-lock is auto-approved.",
+      "live_cookie_domains": [
+        "opentable.com"
+      ]
     },
     "evaluators": [
       {
@@ -1540,7 +1555,10 @@
       "live_targets": [
         "https://www.instacart.com/grocery-delivery/ca/near-me-in-san-francisco-ca"
       ],
-      "context_notes": "Live Instacart catalog, inventory, pricing, saved delivery address, authentication state, and checkout write-lock."
+      "context_notes": "Live Instacart catalog, inventory, pricing, saved delivery address, authentication state, and checkout write-lock.",
+      "live_cookie_domains": [
+        "instacart.com"
+      ]
     },
     "evaluators": [
       {
@@ -1611,7 +1629,10 @@
       "live_targets": [
         "https://www.doordash.com/products/usbc-cable/ugp_c671cf61-ba10-4433-b46a-3cce19227d69"
       ],
-      "context_notes": "Live DoorDash retail inventory, saved address/auth state, product-spec comparison, delivery timing, and one auto-approved checkout boundary."
+      "context_notes": "Live DoorDash retail inventory, saved address/auth state, product-spec comparison, delivery timing, and one auto-approved checkout boundary.",
+      "live_cookie_domains": [
+        "doordash.com"
+      ]
     },
     "evaluators": [
       {
@@ -1706,7 +1727,10 @@
       "live_targets": [
         "https://www.alchemysprings.com/visit"
       ],
-      "context_notes": "Live Alchemy Springs Sauna Garden inventory and booking checkout for one person at the official 939 Post Street location, with one auto-approved write boundary and a completed confirmation."
+      "context_notes": "Live Alchemy Springs Sauna Garden inventory and booking checkout for one person at the official 939 Post Street location, with one auto-approved write boundary and a completed confirmation.",
+      "live_cookie_domains": [
+        "alchemysprings.com"
+      ]
     },
     "evaluators": [
       {
@@ -1813,7 +1837,10 @@
       "live_targets": [
         "https://www.booking.com"
       ],
-      "context_notes": "Live lodging inventory and rate rules. The benchmark fixes hotel, occupancy, relative dates, refundability, smoking preference, and price cap while allowing room inventory to vary, and auto-approves one write boundary to require a confirmed reservation."
+      "context_notes": "Live lodging inventory and rate rules. The benchmark fixes hotel, occupancy, relative dates, refundability, smoking preference, and price cap while allowing room inventory to vary, and auto-approves one write boundary to require a confirmed reservation.",
+      "live_cookie_domains": [
+        "booking.com"
+      ]
     },
     "evaluators": [
       {
@@ -1920,7 +1947,10 @@
       "live_targets": [
         "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
       ],
-      "context_notes": "Live movie/showtime/seat inventory. The benchmark fixes venue, date, time window, format, genre exclusion, seating heuristic, price cap, and no-add-on constraints, and auto-approves one write boundary to require a confirmed ticket purchase."
+      "context_notes": "Live movie/showtime/seat inventory. The benchmark fixes venue, date, time window, format, genre exclusion, seating heuristic, price cap, and no-add-on constraints, and auto-approves one write boundary to require a confirmed ticket purchase.",
+      "live_cookie_domains": [
+        "amctheatres.com"
+      ]
     },
     "evaluators": [
       {
@@ -2028,7 +2058,10 @@
       "live_targets": [
         "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
       ],
-      "context_notes": "Live IMAX showtime/seat inventory. The benchmark fixes venue, tonight's date, premium format (IMAX, Dolby Cinema fallback), quantity (3 adult tickets), a same-row adjacency constraint across all 3 seats, a per-ticket price cap, and a no-add-on constraint, and auto-approves one write boundary to require a confirmed multi-ticket purchase."
+      "context_notes": "Live IMAX showtime/seat inventory. The benchmark fixes venue, tonight's date, premium format (IMAX, Dolby Cinema fallback), quantity (3 adult tickets), a same-row adjacency constraint across all 3 seats, a per-ticket price cap, and a no-add-on constraint, and auto-approves one write boundary to require a confirmed multi-ticket purchase.",
+      "live_cookie_domains": [
+        "amctheatres.com"
+      ]
     },
     "evaluators": [
       {
@@ -2139,7 +2172,10 @@
       "live_targets": [
         "https://www.amazon.com/gp/your-account/order-history"
       ],
-      "context_notes": "Live Amazon order history with synced account authentication. A deterministic eligible-order fixture is the main stability risk for this post-purchase flow; one write boundary is auto-approved so success requires a completed return confirmation."
+      "context_notes": "Live Amazon order history with synced account authentication. A deterministic eligible-order fixture is the main stability risk for this post-purchase flow; one write boundary is auto-approved so success requires a completed return confirmation.",
+      "live_cookie_domains": [
+        "amazon.com"
+      ]
     },
     "evaluators": [
       {
@@ -2245,7 +2281,10 @@
       "live_targets": [
         "https://m.uber.com"
       ],
-      "context_notes": "Live Uber route, pricing, and checkout state with current account authentication supplied by the single live credential overlay."
+      "context_notes": "Live Uber route, pricing, and checkout state with current account authentication supplied by the single live credential overlay.",
+      "live_cookie_domains": [
+        "uber.com"
+      ]
     },
     "evaluators": [
       {
@@ -3836,6 +3875,64 @@
     "source": [
       "phone-benchmark:payment",
       "user-label:daily-phone-payment"
+    ]
+  },
+  {
+    "name": "browser-rotate-ip-escalation",
+    "title": "Browser rotate_ip escalation ladder (residential → mobile)",
+    "prompt": "Use a browser to verify our IP-rotation tool end to end. Open https://api.ipify.org?format=json and read your current public IP address. Then use the rotate_ip tool to change your IP; after each rotation, reload https://api.ipify.org?format=json and read the new IP. Rotate repeatedly — after each rotation report the rotation number, the tier the tool says you landed on (residential or mobile), and the new IP — and keep going until the rotate_ip tool returns an error saying the rotation budget is exhausted. Do NOT open a second browser session or start over; everything must happen in one continuous browser session. Finish with a summary that lists, in order, every IP you observed and its tier, states whether each IP was different from the previous one, confirms you reached the mobile tier before exhaustion, and confirms you stayed in a single browser session the whole time.",
+    "timeout_seconds": 600,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "rotate-ip",
+      "browser",
+      "proxy"
+    ],
+    "price_limit_cents": 100,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "execute",
+    "min_tool_counts": {
+      "rotate_ip": 4
+    },
+    "status": "incomplete",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "description": "Drives the browser sub-agent through every branch of the rotate_ip tool in a single browser session: two residential rotations, two mobile-carrier rotations, then the exhaustion error at the cap — asserting a fresh exit IP is assigned at each step, that the mobile tier is actually reached, and that the live CDP session is reconnected in place (no re-spawn, login preserved).",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [],
+      "secrets": [
+        "KERNEL_API_KEY"
+      ],
+      "live_targets": [
+        "api.ipify.org"
+      ],
+      "context_notes": "INCOMPLETE until the worker runs with KERNEL_MOBILE_FALLBACK_ENABLED=1 and a Kernel plan that includes mobile-carrier proxies — the residential rotations (calls 1-2), the fresh-IP-per-rotation assertion, the single-session/in-place-reconnect assertion, and the cap-exhaustion error are all exercised today by the backend browser-provider blackbox (real rotation: new ws_url + new session_id + changed exit IP + old session evicted + 409 at cap). Promote to 'ready' once mobile is provisioned so calls 3-4 return true carrier IPs. Exit IP is read via api.ipify.org before/after each rotation. FE non-jank is covered by the browser action chips the tool emits (Rotating IP → IP rotated), which the message-stream drives without tearing down the live-view."
+    },
+    "evaluators": [
+      {
+        "id": "rotate_ip_all_branches",
+        "method": "agentic_llm_judge",
+        "judge_prompt": "You are grading a browser agent that was asked to verify our rotate_ip tool end to end in ONE continuous browser session by repeatedly reading its public IP from api.ipify.org and rotating until the rotation budget is exhausted. Using the agent's transcript and final summary, decide PASS only if ALL of the following hold: (1) at least three DISTINCT public exit IP addresses are observed across the rotations (a fresh IP each time); (2) the rotate_ip tool returns an exhaustion error after the 4th successful rotation (the cap of 4 holds — it does not keep rotating); (3) the agent reached the mobile tier (calls 3-4 reported as mobile) before exhaustion; and (4) the final summary correctly lists the observed IPs and their tiers in order and states whether each IP changed from the previous one. Fail if the agent opened a second browser session, fabricated IPs, or never reached exhaustion.",
+        "criteria": [
+          "At least three distinct public exit IP addresses are observed across the rotations (a fresh IP is assigned each time)",
+          "The rotate_ip tool returns an exhaustion error after the 4th successful rotation (the cap holds)",
+          "The agent reached the mobile tier before exhaustion and stayed in a single browser session",
+          "The agent's final summary correctly lists the observed IPs and tiers and confirms the IP changed at each rotation"
+        ]
+      }
+    ],
+    "source": [
+      "feature:rotate-ip-tool",
+      "plan:docs/plans/active/rotate-ip-tool.md"
     ]
   }
 ]

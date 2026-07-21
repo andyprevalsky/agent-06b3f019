@@ -7,7 +7,6 @@ dispatches to the activity, and yields ToolEvents for the workflow.
 from __future__ import annotations
 
 import asyncio
-import os
 from datetime import timedelta
 from typing import Any, AsyncGenerator, Dict, Optional
 
@@ -17,7 +16,10 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 
-from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
+from domains.spawn_claude_code_agent.service import (
+    resolve_code_agent_provider_activity,
+    spawn_claude_code_activity,
+)
 from helpers.attachments import extract_attachments_from_context
 from helpers.tracing import span
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
@@ -68,12 +70,6 @@ class SpawnClaudeCodeAgentManager(ToolManager):
         code_provider = "unknown"
         try:
             model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
-            active_claude_token = getattr(workflow_instance, "_active_claude_token", None)
-            claude_token = (
-                active_claude_token()
-                if callable(active_claude_token)
-                else getattr(workflow_instance, "claude_max_token", None)
-            )
             active_gpt_token = getattr(workflow_instance, "_active_gpt_token", None)
             gpt_token = (
                 active_gpt_token()
@@ -99,7 +95,13 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                 else getattr(workflow_instance, "gpt_code_token_pool_id", None)
             )
             fast_mode_cache_enabled = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
-            code_provider = _select_code_provider(workflow_instance, gpt_token)
+            default_code_provider = _select_code_provider(workflow_instance, gpt_token)
+            code_provider = await workflow.execute_activity(
+                resolve_code_agent_provider_activity,
+                args=[default_code_provider],
+                start_to_close_timeout=timedelta(seconds=20),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
             logger.info(
                 "[ClaudeCode] Selected code sandbox provider",
                 agent_id=agent_id,
@@ -127,7 +129,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                         attachments if attachments else None,
                         model,
                         github_repo_url,
-                        claude_token,
+                        None,  # Reserved legacy credential slot; secrets are resolved inside the activity.
                         code_provider,
                         gpt_token,
                         gpt_account_id,
@@ -192,16 +194,19 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                             }
                         )
 
+            code_provider = result.get("code_provider") or code_provider
+            success = result.get("success") is True
             output_files = result.get("output_files", [])
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
-                title="✓ Task Completed" if result.get("success") else "Task Incomplete",
+                title="✓ Task Completed" if success else "Task Incomplete",
                 message=result.get("message", ""),
                 status=MessageStatus.FINISHED,
                 metadata={
                     "toolName": "spawn_claude_code_agent",
                     "task_id": result.get("task_id"),
                     "action_type": "task_complete",
+                    "success": success,
                     "structured_response": result.get("structured_response"),
                     "code_provider": code_provider,
                     "completed_turns": result.get("completed_turns"),
@@ -299,16 +304,8 @@ def _resolve_attachments(
     return attachments
 
 
-def _forced_code_provider() -> Optional[str]:
-    value = os.getenv("ROSE_CODE_AGENT_PROVIDER", "").strip().lower()
-    return value if value in {"claude", "codex"} else None
-
-
 def _select_code_provider(workflow_instance: Any, gpt_token: Optional[str]) -> str:
     """Use Codex for GPT compute tokens; keep Claude Code for Claude tokens."""
-    forced = _forced_code_provider()
-    if forced is not None:
-        return forced
     provider = getattr(workflow_instance, "compute_token_provider", None)
     if provider == "gpt" and gpt_token:
         return "codex"

@@ -3,7 +3,9 @@ import threading
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import quote
 
+from benchmarks import archive_api
 from benchmarks.archive_api import (
     ArchiveHandler,
     configure_archive_handler,
@@ -133,6 +135,109 @@ def _get(base: str, path: str) -> tuple[int, dict]:
             return resp.status, json.loads(resp.read())
     except urllib.error.HTTPError as err:
         return err.code, json.loads(err.read() or b"{}")
+
+
+def test_archive_signer_resolves_supabase_storage_relative_url(monkeypatch):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return json.dumps({"signedURL": "/object/sign/attachments/user/replay.html?token=t"}).encode()
+
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append((request, timeout))
+        return Response()
+
+    monkeypatch.setenv("SUPABASE_URL", "https://project.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-key")
+    monkeypatch.setattr(archive_api.urllib.request, "urlopen", fake_urlopen)
+
+    signed_url = archive_api._create_attachment_signed_url("user/replay.html")
+
+    assert signed_url == ("https://project.supabase.co/storage/v1/object/sign/attachments/user/replay.html?token=t")
+    request, timeout = requests[0]
+    assert request.full_url == ("https://project.supabase.co/storage/v1/object/sign/attachments/user/replay.html")
+    assert timeout == 30
+
+
+def test_static_archive_signs_captured_wmh_recording_pointer(tmp_path, monkeypatch):
+    """A finished run must keep its generated-frame recording playable.
+
+    This pointer shape comes from the captured WMH ecommerce run. The live
+    backend is intentionally absent: archive playback has to survive teardown.
+    """
+    pointer = {
+        "id": "61990e52-54cf-421d-adae-4a495089703e",
+        "storage_path": (
+            "1f85ff25-6e29-4c1b-8739-f917bd101a30/"
+            "61990e52-54cf-421d-adae-4a495089703e_browser-recording-"
+            "wmh-browser-call_YOZsYPXbhIGlcAopZAC3jbqk.html"
+        ),
+        "original_filename": "browser-recording-wmh-browser-call_YOZsYPXbhIGlcAopZAC3jbqk.html",
+        "mime_type": "text/html",
+        "size_bytes": 8236,
+    }
+    run_path = tmp_path / "run.json"
+    run_path.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-07-20T18:07:34Z",
+                "tasks": [
+                    {
+                        "name": "wmh-browser-call_YOZsYPXbhIGlcAopZAC3jbqk",
+                        "passed": True,
+                        "agent_id": "2ad9c417-b556-40a7-ab37-02ebf60554ab",
+                        "logs": {
+                            "messages": [
+                                {
+                                    "role": "ASSISTANT",
+                                    "message": "Browser recording saved",
+                                    "metadata": {"recording_file_pointer": pointer},
+                                }
+                            ]
+                        },
+                    }
+                ],
+            }
+        )
+    )
+    signed_paths: list[str] = []
+
+    def fake_sign(storage_path: str) -> str:
+        signed_paths.append(storage_path)
+        return "https://storage.example/signed/wmh-recording.html?token=test"
+
+    monkeypatch.setattr(archive_api, "_create_attachment_signed_url", fake_sign, raising=False)
+    configure_archive_handler(run_path)
+    archive, archive_url = _serve(ArchiveHandler)
+    try:
+        path = (
+            "/api/agents/2ad9c417-b556-40a7-ab37-02ebf60554ab/attachments/"
+            f"{pointer['id']}/url?storage_path={quote(pointer['storage_path'], safe='')}"
+        )
+        status, body = _get(archive_url, path)
+        assert status == 200
+        assert body == {
+            "signed_url": "https://storage.example/signed/wmh-recording.html?token=test",
+            "expires_in": 3600,
+        }
+        assert signed_paths == [pointer["storage_path"]]
+
+        wrong_path = path.split("?", 1)[0] + f"?storage_path={quote('another-user/private.html', safe='')}"
+        status, body = _get(archive_url, wrong_path)
+        assert status == 404
+        assert body == {"error": "Archived attachment not found"}
+        assert signed_paths == [pointer["storage_path"]]
+    finally:
+        archive.shutdown()
+        configure_archive_handler(None)
+
 
 
 def test_upstream_proxy_forwards_agent_reads_with_auth(tmp_path):
@@ -319,4 +424,3 @@ def test_run_json_hot_reload_promotes_new_agents(tmp_path):
     finally:
         archive.shutdown()
         configure_archive_handler(None)
-

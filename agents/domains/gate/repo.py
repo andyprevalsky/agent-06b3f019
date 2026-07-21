@@ -18,6 +18,8 @@ from temporalio import activity
 
 from config import load_config
 
+from .config import GATE_SUPPRESSED_SENTINEL, gate_is_suppressed
+
 logger = structlog.get_logger()
 
 CREATE_GATE_TIMEOUT_SECONDS = 30.0
@@ -32,7 +34,25 @@ async def create_gate_request_activity(
     gate: Dict[str, Any],
     gate_key: str,
 ) -> str:
-    """Create (or dedup onto) a Gate attention request. Returns the request id."""
+    """Create (or dedup onto) a Gate attention request. Returns the request id.
+
+    Kill-switch: when a suppressible connection gate (e.g. ``source_connect``) is
+    disabled via ``NON_PURCHASE_GATES_ENABLED``, short-circuit WITHOUT creating a
+    request and return ``GATE_SUPPRESSED_SENTINEL``. The env flag is read here in
+    activity scope (non-determinism is allowed) so ``raise_gate_direct`` can
+    branch on the recorded activity result deterministically. Purchase and
+    unknown gate types are never suppressed (fail-closed).
+    """
+    gate_type = str(gate.get("type") or "")
+    if gate_is_suppressed(gate_type):
+        logger.info(
+            "Gate suppressed by non-purchase kill-switch",
+            gate_key=gate_key,
+            gate_type=gate_type,
+            agent_id=agent_id,
+        )
+        return GATE_SUPPRESSED_SENTINEL
+
     config = load_config()
     backend_url = config.backend.api_url
 

@@ -17,7 +17,10 @@ import {
   useRealtimeSubscription,
   type RealtimeSubscriptionDeps,
 } from '@/features/agent-context/hooks/useRealtimeSubscription';
-import { DISCONNECTED_BACKFILL_POLL_MS } from '@/features/agent-context/config';
+import {
+  CONNECTED_COMPLETION_BACKFILL_POLL_MS,
+  DISCONNECTED_BACKFILL_POLL_MS,
+} from '@/features/agent-context/config';
 import * as RealtimeMod from '@/lib/realtime';
 
 /** Minimal ACTIVE agent-detail payload for MSW agent-detail responses. */
@@ -348,6 +351,58 @@ describe('useRealtimeSubscription', () => {
     // The stranded answer must be reconciled from the API on the cold-start join.
     await waitFor(() => expect(deps.setMessages).toHaveBeenCalled());
     expect(deps.setAgent).toHaveBeenCalled();
+  });
+
+  // Regression (production semantic run 29807459093): the first authoritative
+  // snapshot succeeded after the router/tool messages but before the canonical
+  // final answer was persisted. The connected realtime channel then lost that
+  // final INSERT, so the answer remained in the DB while the UI waited forever.
+  // A successful but incomplete snapshot must keep reconciling until the latest
+  // user turn has its canonical answer.
+  it('continues connected backfill after an incomplete successful snapshot', async () => {
+    let calls = 0;
+    server.use(
+      http.get(`${API_BASE}/agents/agent-1`, () => {
+        calls += 1;
+        const messages: Array<Record<string, unknown>> = [
+          { message_id: 'user', timestamp: '1', text: 'search', role: 'USER' },
+          {
+            message_id: 'search',
+            timestamp: '2',
+            text: '',
+            role: 'TOOL',
+            metadata: { toolName: 'web_search', toolStatus: 'FINISHED' },
+          },
+        ];
+        if (calls >= 2) {
+          messages.push({
+            message_id: 'answer',
+            timestamp: '3',
+            text: 'RECOVERED FINAL',
+            role: 'TOOL',
+            metadata: {
+              toolName: 'send_message_to_user',
+              toolStatus: 'FINISHED',
+              isUserAttentionMessage: true,
+            },
+          });
+        }
+        return HttpResponse.json(agentDetailJson(messages));
+      }),
+    );
+    vi.mocked(RealtimeMod.subscribeToAgent).mockResolvedValue(fakeChannel());
+    mockSession();
+    const deps = makeDeps();
+    vi.useFakeTimers();
+    try {
+      renderHook(() => useRealtimeSubscription(deps as never));
+      await vi.advanceTimersByTimeAsync(CONNECTED_COMPLETION_BACKFILL_POLL_MS + 250);
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(calls).toBeGreaterThanOrEqual(2);
+    expect(deps.setMessages).toHaveBeenCalledTimes(2);
+    expect(deps.initialLoadDoneRef.current).toBe('agent-1');
   });
 
   // Regression: prod chat stalled on "Thinking" because the agent:<id> private

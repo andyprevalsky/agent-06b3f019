@@ -1,4 +1,4 @@
-"""Browser-use sub-flow — message build + tool-call extraction.
+"""Browser-use sub-flow - message build + tool-call extraction.
 
 Browser-use rides the same claudeAuth -> waterfall machinery as rose-1-lite
 and rose-1-ultra (see `pools.py:rose-1-browser-use`). What's specific:
@@ -176,6 +176,35 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         ),
         "params": {},
     },
+    "rotate_ip": {
+        "description": (
+            "Replace the browser's outbound IP address when the current one is being blocked or "
+            "rate-limited by the site. Use this ONLY when you have concrete evidence the IP itself is "
+            "the problem - a 'too many requests' / rate-limit page, an 'unusual traffic detected' or "
+            "'access denied' interstitial, a CAPTCHA wall that keeps reappearing, or repeated 429 "
+            "responses. Do NOT use it for ordinary failures - wrong credentials, a 404, a genuine "
+            "out-of-stock, a form validation error, or a page that simply didn't load - rotating won't "
+            "fix those and it burns a limited budget. Escalation path (the tool advances automatically "
+            "each call, up to 4 rotations per browser run): calls 1-2 give a fresh residential IP in the "
+            "same region (login and cookies preserved); calls 3-4 escalate to a mobile-carrier IP (the "
+            "strongest, hardest-to-block tier), same region. After 4 rotations the tool returns an error, "
+            "which means the site is hard-blocking our entire proxy pool for this session - stop retrying "
+            "this route and either try a different approach or report the target as unreachable. Each "
+            "rotation takes a few seconds and discards any unsubmitted form data on the current page, but "
+            "keeps you logged in and returns you to the current URL. The result tells you which tier you "
+            "landed on and how many rotations remain."
+        ),
+        "params": {
+            "reason": {
+                "type": "string",
+                "description": (
+                    "One line on why you believe the current IP is blocked or rate-limited "
+                    "(e.g. 'repeated 429s on search', 'captcha wall reappears after solving')."
+                ),
+                "required": True,
+            },
+        },
+    },
     "request_payment_card": {
         "description": (
             "Request a one-time virtual payment card for the current checkout. Call this when you reach a "
@@ -327,9 +356,39 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "description": (
             "Take a screenshot of the visible page viewport. Coordinates in this image match click_coordinates. "
             "The screenshot is saved and returned to the orchestrating agent. "
-            "Use this for visual confirmation of the current visible page state."
+            "Use this for visual confirmation of the current visible page state. "
+            "IMPORTANT: if you are attempting to interact with the DOM but progress is not being made "
+            "(repeated clicks/waits with no state change), take a screenshot to view components that may be "
+            "hidden from the DOM, e.g. a CAPTCHA, Cloudflare 'verify you are human' challenge, or other "
+            "content rendered inside a cross-origin iframe that the DOM tree cannot see."
         ),
         "params": {},
+    },
+    "read_network_requests": {
+        "description": (
+            "Read HTTP network requests (XHR, Fetch, documents, etc.) made by the current page, "
+            "including cross-origin requests. Use this to detect a blocked or challenge response "
+            "(e.g. a 403, 429, or a Cloudflare 'verify you are human' challenge) by its status code "
+            "when the DOM/screenshot alone is ambiguous, or to discover the underlying API a page "
+            "calls so you can navigate or interact more directly instead of fighting the UI. "
+            "Returns a newest-first list of {url, method, status, resource_type}. Optional params: "
+            "'url_pattern' (substring filter, e.g. '/api/'), 'limit' (max results, default 100), and "
+            "'clear' (when true, empties the buffer after reading so the next call only shows new traffic)."
+        ),
+        "params": {
+            "url_pattern": {
+                "type": "string",
+                "description": "Optional substring to filter request URLs (e.g. '/api/', 'checkout').",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "Maximum number of requests to return (default 100).",
+            },
+            "clear": {
+                "type": "boolean",
+                "description": "When true, clear the captured buffer after reading.",
+            },
+        },
     },
 }
 
@@ -812,6 +871,11 @@ _VALID_ACTIONS = frozenset(
         "request_user_assistance_for_authentication",
         "request_payment_card",
         "generate_write_lock_notification",
+        # rotate_ip is advertised in BROWSER_USE_TOOLS (see above); keep it in the
+        # allowlist or normalize_browser_use_response() rejects the model's call and
+        # the browser step aborts before the handler can rotate the proxy.
+        "rotate_ip",
+        "read_network_requests",
     }
 )
 
@@ -920,6 +984,16 @@ def _normalize_action_params(
 ) -> Dict[str, Any]:
     if normalized_action == "generate_write_lock_notification":
         return dict(params)
+
+    if normalized_action == "read_network_requests":
+        network_params: Dict[str, Any] = {}
+        if params.get("url_pattern") is not None:
+            network_params["url_pattern"] = str(params["url_pattern"])
+        if params.get("limit") is not None:
+            network_params["limit"] = params["limit"]
+        if params.get("clear") is not None:
+            network_params["clear"] = bool(params["clear"])
+        return network_params
 
     out: Dict[str, Any] = {}
 
