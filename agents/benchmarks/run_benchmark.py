@@ -3294,11 +3294,16 @@ def _local_victoria_database_url() -> Optional[str]:
     if services_path.exists():
         try:
             services = json.loads(services_path.read_text())
-            if (services.get("database") or {}).get("use_system_postgres") is True:
-                candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
-            port = (services.get("ports") or {}).get("local_db")
+            database = services.get("database") or {}
+            ports = services.get("ports") or {}
+            database_name = str(database.get("name") or "victoria")
+            port = database.get("port")
+            if not port:
+                port = 5432 if database.get("use_system_postgres") is True else ports.get("local_db")
             if port:
-                candidates.append(f"postgresql://postgres:postgres@localhost:{port}/victoria")
+                candidates.append(
+                    f"postgresql://postgres:postgres@localhost:{port}/{database_name}"
+                )
         except Exception:
             pass
     env_database_url = os.environ.get("DIRECT_URL") or os.environ.get("DATABASE_URL")

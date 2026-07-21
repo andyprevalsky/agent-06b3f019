@@ -4404,6 +4404,49 @@ def test_local_manifest_uses_isolated_system_database_identity():
     )
 
 
+def test_run_benchmark_sql_uses_isolated_manifest_database_identity():
+    """Direct fixture SQL must target the same isolated DB as the benchmark backend."""
+    import json
+    import os
+    import tempfile
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from benchmarks import run_benchmark as bench
+
+    manifest = {
+        "ports": {"local_db": 60245},
+        "database": {
+            "use_system_postgres": True,
+            "port": 5432,
+            "name": "victoria_bench_1783809252_85375_82461",
+        },
+    }
+    saved_context = os.environ.get("BENCHMARK_CONTEXT_DIR")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            context_dir = Path(tmp)
+            (context_dir / "services.json").write_text(json.dumps(manifest))
+            os.environ["BENCHMARK_CONTEXT_DIR"] = str(context_dir)
+            calls = []
+
+            def fake_run(command, **_kwargs):
+                calls.append(command)
+                return type("Result", (), {"returncode": 0})()
+
+            with patch.object(bench.subprocess, "run", side_effect=fake_run):
+                database_url = bench._local_victoria_database_url()
+    finally:
+        if saved_context is None:
+            os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
+        else:
+            os.environ["BENCHMARK_CONTEXT_DIR"] = saved_context
+
+    expected = "postgresql://postgres:postgres@localhost:5432/victoria_bench_1783809252_85375_82461"
+    assert database_url == expected
+    assert calls[0][1] == expected
+
+
 def test_local_extract_results_path_and_diagnostic_commands():
     """Local wrapper finds runner result paths and builds all three diagnostics."""
     from benchmarks.local import diagnostic_commands, extract_results_path
@@ -7154,6 +7197,10 @@ async def run_all_tests():
     r.record(
         "webdecoy_fresh_browser_state",
         test_webdecoy_biometrics_uses_fresh_isolated_browser_state,
+    )
+    r.record(
+        "isolated_fixture_database_identity",
+        test_run_benchmark_sql_uses_isolated_manifest_database_identity,
     )
     r.record(
         "anon_benchmark_mode_disables_saved_auth",
