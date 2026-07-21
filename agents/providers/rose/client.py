@@ -612,6 +612,12 @@ class RoseClient:
         chunk, then exactly one `done` chunk. All failures raise typed
         `RoseError`s; callers never see error chunks.
         """
+        # Allow a process owner to prove that a maintenance or benchmark run
+        # cannot consume Anthropic credit. This complements the existing
+        # call-scoped flag and covers nested browser/evaluator calls as well.
+        _exclude_anthropic_family = _exclude_anthropic_family or os.getenv(
+            "ROSE_EXCLUDE_ANTHROPIC_FAMILY", ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
         pool_spec = get_pool(pool)
         rid = request_id or uuid.uuid4().hex[:12]
         started = time.monotonic()
