@@ -1,5 +1,5 @@
 import { API_BASE_WITH_PATH, getAuthHeaders } from './client';
-import type { Agent, AgentDetail, CreateAgentPayload, Message, Tool } from './types';
+import type { Agent, AgentDetail, AgentDetailResponse, CreateAgentPayload, Tool } from './types';
 
 export function benchmarkAgentPreviewEnabled(): boolean {
   return import.meta.env.DEV === true || Boolean(import.meta.env.VITEST);
@@ -22,17 +22,7 @@ export async function getAllAgents(): Promise<Agent[]> {
 }
 
 // Get agent details with messages
-export async function getAgent(
-  agentId: string,
-  before?: string,
-): Promise<{
-  agent: AgentDetail;
-  messages: Message[];
-  pagination: {
-    has_more: boolean;
-    oldest_timestamp: string | null;
-  };
-}> {
+export async function getAgent(agentId: string, before?: string): Promise<AgentDetailResponse> {
   const headers = getAuthHeaders();
   const url = before
     ? `${API_BASE_WITH_PATH}/agents/${agentId}?before=${before}`
@@ -49,14 +39,7 @@ export async function getAgent(
   return await response.json();
 }
 
-export async function getBenchmarkAgentPreview(agentId: string): Promise<{
-  agent: AgentDetail;
-  messages: Message[];
-  pagination: {
-    has_more: boolean;
-    oldest_timestamp: string | null;
-  };
-}> {
+export async function getBenchmarkAgentPreview(agentId: string): Promise<AgentDetailResponse> {
   if (!benchmarkAgentPreviewEnabled()) {
     throw new Error('Benchmark agent preview is disabled');
   }

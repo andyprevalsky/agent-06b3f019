@@ -1,5 +1,5 @@
 import type React from 'react';
-import type { AgentDetail, Message } from '@/lib/api';
+import type { AgentDetail, InspectionContext, Message } from '@/lib/api';
 
 export interface StreamingBubble {
   text: string;
@@ -71,6 +71,7 @@ export interface AgentContextValue {
   // Agent data
   agent: AgentDetail | null;
   setAgent: React.Dispatch<React.SetStateAction<AgentDetail | null>>;
+  inspectionContext: InspectionContext | null;
   selectedAgentId: string | null;
   setSelectedAgentId: (id: string | null) => void;
   stagePendingAgentCreation: (input: PendingAgentCreationInput) => void;
