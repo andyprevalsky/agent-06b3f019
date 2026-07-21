@@ -4508,6 +4508,7 @@ def test_workspace_dependency_preflight_respects_hoisted_installs():
         npm.write_text(
             '#!/bin/sh\n'
             'echo "$*" >> "$COMMAND_LOG"\n'
+            'if [ "$1" = "pkg" ]; then exit 0; fi\n'
             'if [ "$1" = "ls" ]; then [ "${NPM_GRAPH_READY:-0}" = 1 ] || [ -f "$INSTALLED_MARKER" ]; exit; fi\n'
             'if [ "$1" = "install" ]; then touch "$INSTALLED_MARKER"; exit 0; fi\n'
             'exit 1\n'
@@ -4530,7 +4531,8 @@ def test_workspace_dependency_preflight_respects_hoisted_installs():
         )
         assert ready.returncode == 0, ready.stdout + ready.stderr
         assert command_log.read_text().splitlines() == [
-            "ls --workspace=back-end --depth=0 --silent"
+            "pkg get name --workspace=back-end --silent",
+            "ls --workspace=back-end --depth=0 --silent",
         ]
 
         command_log.write_text("")
@@ -4544,10 +4546,81 @@ def test_workspace_dependency_preflight_respects_hoisted_installs():
         )
         assert missing.returncode == 0, missing.stdout + missing.stderr
         assert command_log.read_text().splitlines() == [
+            "pkg get name --workspace=back-end --silent",
             "ls --workspace=back-end --depth=0 --silent",
             "install --workspace=back-end --no-audit --no-fund",
             "ls --workspace=back-end --depth=0 --silent",
         ]
+
+
+def test_workspace_dependency_preflight_supports_standalone_packages():
+    """A package outside root workspaces must run npm in its own directory."""
+    repo_root = Path(__file__).resolve().parents[3]
+    helper = repo_root / "scripts" / "ensure-workspace-dependencies.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "package.json").write_text(
+            '{"name":"test-root","workspaces":["back-end"]}\n'
+        )
+        standalone = tmp_path / "mac-app"
+        standalone.mkdir()
+        (standalone / "package.json").write_text('{"name":"test-mac-app"}\n')
+        command_log = tmp_path / "commands.log"
+        installed_marker = tmp_path / "installed"
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        npm = fake_bin / "npm"
+        npm.write_text(
+            '#!/bin/sh\n'
+            'echo "$PWD::$*" >> "$COMMAND_LOG"\n'
+            'if [ "$1" = "pkg" ]; then exit 1; fi\n'
+            'if [ "$1" = "ls" ]; then [ -f "$INSTALLED_MARKER" ]; exit; fi\n'
+            'if [ "$1" = "install" ]; then touch "$INSTALLED_MARKER"; exit 0; fi\n'
+            'exit 1\n'
+        )
+        npm.chmod(0o755)
+
+        result = subprocess.run(
+            ["bash", str(helper), "mac-app"],
+            cwd=tmp_path,
+            env={
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+                "COMMAND_LOG": str(command_log),
+                "INSTALLED_MARKER": str(installed_marker),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        commands = command_log.read_text().splitlines()
+        assert commands == [
+            f"{tmp_path.resolve()}::pkg get name --workspace=mac-app --silent",
+            f"{standalone.resolve()}::ls --depth=0 --silent",
+            f"{standalone.resolve()}::install --no-audit --no-fund",
+            f"{standalone.resolve()}::ls --depth=0 --silent",
+        ], commands
+
+
+def test_workspace_dependency_preflight_rejects_missing_package_manifest():
+    """A misspelled package path must fail instead of bypassing preflight."""
+    repo_root = Path(__file__).resolve().parents[3]
+    helper = repo_root / "scripts" / "ensure-workspace-dependencies.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result = subprocess.run(
+            ["bash", str(helper), "does-not-exist"],
+            cwd=tmp,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode != 0
+        assert "does-not-exist/package.json" in result.stderr
 
 
 def test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe():
@@ -7464,6 +7537,14 @@ async def run_all_tests():
     r.record(
         "workspace_dependency_preflight",
         test_workspace_dependency_preflight_respects_hoisted_installs,
+    )
+    r.record(
+        "standalone_dependency_preflight",
+        test_workspace_dependency_preflight_supports_standalone_packages,
+    )
+    r.record(
+        "missing_package_dependency_preflight",
+        test_workspace_dependency_preflight_rejects_missing_package_manifest,
     )
     r.record(
         "run_sh_reuses_reachable_workspace_db",

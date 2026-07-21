@@ -13,14 +13,25 @@ if [ "$#" -eq 0 ]; then
 fi
 
 for workspace in "$@"; do
-    [ -f "$workspace/package.json" ] || continue
-
-    if npm ls --workspace="$workspace" --depth=0 --silent >/dev/null 2>&1; then
-        continue
+    if [ ! -f "$workspace/package.json" ]; then
+        echo "dependency preflight: missing $workspace/package.json" >&2
+        exit 1
     fi
 
-    echo "📦 Installing $workspace dependencies..."
-    npm install --workspace="$workspace" --no-audit --no-fund
-    npm ls --workspace="$workspace" --depth=0 --silent >/dev/null
+    if npm pkg get name --workspace="$workspace" --silent >/dev/null 2>&1; then
+        if npm ls --workspace="$workspace" --depth=0 --silent >/dev/null 2>&1; then
+            continue
+        fi
+        echo "📦 Installing $workspace dependencies..."
+        npm install --workspace="$workspace" --no-audit --no-fund
+        npm ls --workspace="$workspace" --depth=0 --silent >/dev/null
+    else
+        if (cd "$workspace" && npm ls --depth=0 --silent >/dev/null 2>&1); then
+            continue
+        fi
+        echo "📦 Installing $workspace dependencies..."
+        (cd "$workspace" && npm install --no-audit --no-fund)
+        (cd "$workspace" && npm ls --depth=0 --silent >/dev/null)
+    fi
     echo "📦 $workspace deps ready"
 done
