@@ -39,6 +39,7 @@ require_text "$RUN_SH" 'Building bundled frontend before starting runtime servic
 require_text "$RUN_SH" 'npx vite preview --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE"' "bundled frontend service must only serve the completed production build"
 require_text "$RUN_SH" 'for _ in $(seq 1 25); do' "Docker health detection must tolerate a busy Desktop daemon before falling back to the shared system database"
 require_text "$RUN_SH" 'docker ps --filter "name=^${DB_CONTAINER}$"' "deploy-prestarted workspace database must bypass a slow broad Docker health probe"
+require_text "$RUN_SH" 'workspace_db_container_owns_port &&' "deploy-prestarted database reuse must verify the exact workspace container owns the configured port"
 
 BUNDLED_BUILD_LINE=$(grep -n 'Building bundled frontend before starting runtime services' "$RUN_SH" | head -1 | cut -d: -f1)
 BACKEND_LAUNCH_LINE=$(grep -n '^launch_backend_service$' "$RUN_SH" | head -1 | cut -d: -f1)
