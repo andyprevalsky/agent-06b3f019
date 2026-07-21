@@ -131,7 +131,10 @@ def _prior_explore_agent_count(workflow_instance) -> int:
             continue
         if metadata.get("agentType") != "explore":
             continue
-        if metadata.get("toolStatus") not in {"IN_PROGRESS", "FINISHED"}:
+        # Only successful children satisfy a one-per-city instruction. Counting
+        # IN_PROGRESS here also counted calls that later ended in ERROR, which
+        # prevented the parent from replacing an evidence-free explore child.
+        if metadata.get("toolStatus") != "FINISHED":
             continue
         tool_call_id = metadata.get("toolCallId")
         if tool_call_id:
@@ -408,6 +411,7 @@ class SpawnAgentManager(ToolManager):
             # connected. When present the explore is a FAILED sub-agent, and the
             # parent (spawn_agent) raises one blocking source_connect gate each.
             unavailable_sources = result.get("unavailable_sources") or []
+            explore_failed = result.get("status") not in {None, "completed"}
 
             # Hand raw tool-call traces to any caller that asked for them
             # (wait_for's condition-judge). Keeping this out of the persisted
@@ -428,7 +432,7 @@ class SpawnAgentManager(ToolManager):
                 type=EventType.POST_MESSAGE,
                 title=ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
                 message=explore_result,
-                status=MessageStatus.ERROR if unavailable_sources else MessageStatus.FINISHED,
+                status=MessageStatus.ERROR if unavailable_sources or explore_failed else MessageStatus.FINISHED,
                 data={
                     "usage": {
                         "llm": combined_llm,

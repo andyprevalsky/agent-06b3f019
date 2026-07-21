@@ -555,7 +555,17 @@ async def spawn_explore_agent_activity(  # noqa: C901
     unavailable_names = ", ".join(
         str(u.get("source")) for u in unavailable_sources_collected
     )
-    run_completed = result.get("status") == "completed"
+    # A tool-free explore completion is not grounded research. Models can
+    # occasionally call attempt_completion immediately and claim that search
+    # was unavailable even though the tools were present. Treat that as a
+    # failed child so the parent can replace it instead of accepting an empty
+    # evidence payload and looping on verifier feedback. Attachment-backed
+    # explores may legitimately summarize the supplied content without another
+    # tool call, so preserve that path.
+    completed_without_tool_evidence = (
+        result.get("status") == "completed" and not tool_call_results and not attachment_texts
+    )
+    run_completed = result.get("status") == "completed" and not completed_without_tool_evidence
     result_payload = {
         "status": "error" if has_unavailable else ("completed" if run_completed else "error"),
         "result": final_response,
@@ -565,7 +575,11 @@ async def spawn_explore_agent_activity(  # noqa: C901
         "error_reason": (
             f"required data source(s) not connected: {unavailable_names}"
             if has_unavailable
-            else (None if run_completed else (result.get("message") or result.get("status")))
+            else (
+                "explore completed without tool evidence"
+                if completed_without_tool_evidence
+                else (None if run_completed else (result.get("message") or result.get("status")))
+            )
         ),
         "unavailable_sources": unavailable_sources_collected,
         "partial_structured_response": result.get("partial_structured_response"),

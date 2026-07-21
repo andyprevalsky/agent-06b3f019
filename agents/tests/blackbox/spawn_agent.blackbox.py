@@ -671,6 +671,37 @@ async def test_handler_explore_capture_tool_results():
     assert captured == sub_agent_trace, "collector must receive the raw trace out-of-band"
 
 
+async def test_handler_explore_failed_result_yields_error():
+    """A non-completed explore activity must remain retryable by its parent."""
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from tools.base import MessageStatus
+
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        start_activity_result=_Activity(
+            result={
+                "status": "error",
+                "result": "Web search was unavailable.",
+                "accumulated_usage": [],
+                "llm_iteration_usage": [],
+            }
+        ),
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        events = await _collect(
+            SpawnAgentManager()._spawn_explore(
+                workflow_instance=_FakeWFInstance(),
+                tool_call={"type": "explore", "goal": "g"},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    assert any(event.status == MessageStatus.ERROR for event in events)
+
+
 async def test_handler_explore_cancelled_yields_error():
     """Explore activity CancelledError -> ERROR event."""
     import asyncio as _a
@@ -1025,6 +1056,45 @@ async def test_handler_caps_root_explore_for_one_per_city_task():
     assert len(events) == 1
     assert events[0].status == MessageStatus.ERROR
     assert "already has 3 explore agents" in events[0].message
+
+
+def test_prior_explore_agent_count_ignores_failed_and_in_progress_children():
+    """Only FINISHED explore calls consume the one-per-city success budget."""
+    from types import SimpleNamespace
+
+    from domains.spawn_agent.handler import _prior_explore_agent_count
+
+    context = [
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolCallId": "failed-child",
+                "toolName": "spawn_agent",
+                "toolStatus": "IN_PROGRESS",
+                "agentType": "explore",
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolCallId": "failed-child",
+                "toolName": "spawn_agent",
+                "toolStatus": "ERROR",
+                "agentType": "explore",
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolCallId": "successful-child",
+                "toolName": "spawn_agent",
+                "toolStatus": "FINISHED",
+                "agentType": "explore",
+            },
+        },
+    ]
+
+    assert _prior_explore_agent_count(SimpleNamespace(context=context)) == 1
 
 
 async def test_handler_allows_general_purpose_when_explicitly_required():
@@ -1656,6 +1726,35 @@ async def test_spawn_explore_agent_activity_error_status_returned():
     assert result["structured_response"] == {"topic": "partial"}
 
 
+async def test_spawn_explore_agent_activity_rejects_tool_free_completion():
+    """A child cannot report successful research without any tool evidence."""
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    async def fake_run_agent(**kwargs):
+        return {
+            "status": "completed",
+            "final_response": "Web search was unavailable.",
+            "tokens_in": 1,
+            "tokens_out": 1,
+        }
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a",
+            user_id="u",
+            goal="Research current city data",
+            model="m",
+        )
+
+    assert result["status"] == "error"
+    assert result["error_reason"] == "explore completed without tool evidence"
+
+
 async def test_spawn_explore_agent_activity_inner_callbacks_work():
     """Verify the on_tokens callback and explore_post_message reach DB save."""
     from unittest.mock import AsyncMock, patch
@@ -2037,6 +2136,10 @@ async def run_all_tests():
     r.record("resolve_phase_default", test_resolve_start_phase_default)
     r.record("resolve_phase_execute", test_resolve_start_phase_execute)
     r.record("resolve_phase_invalid", test_resolve_start_phase_invalid_defaults_plan)
+    r.record(
+        "handler_counts_only_finished_explore_children",
+        test_prior_explore_agent_count_ignores_failed_and_in_progress_children,
+    )
     # coerce_for_each_items
     r.record("coerce_items_list", test_coerce_for_each_items_list)
     r.record("coerce_items_empty", test_coerce_for_each_items_empty)
@@ -2057,6 +2160,7 @@ async def run_all_tests():
     )
     await r.record_async("handler_explore_gates_off", test_handler_explore_gates_off_skips_fetch)
     await r.record_async("handler_explore_capture", test_handler_explore_capture_tool_results)
+    await r.record_async("handler_explore_failed_result", test_handler_explore_failed_result_yields_error)
     await r.record_async("handler_explore_cancelled", test_handler_explore_cancelled_yields_error)
     await r.record_async("handler_explore_exception", test_handler_explore_exception_yields_error)
     await r.record_async("handler_browser_delegates", test_handler_browser_delegates)
@@ -2112,6 +2216,10 @@ async def run_all_tests():
     # service.py
     await r.record_async("explore_activity_happy", test_spawn_explore_agent_activity_runs_run_agent_and_returns_result)
     await r.record_async("explore_activity_error", test_spawn_explore_agent_activity_error_status_returned)
+    await r.record_async(
+        "explore_activity_rejects_tool_free_completion",
+        test_spawn_explore_agent_activity_rejects_tool_free_completion,
+    )
     await r.record_async("explore_activity_callbacks", test_spawn_explore_agent_activity_inner_callbacks_work)
     await r.record_async("explore_activity_dispatch", test_spawn_explore_agent_activity_execute_tool_dispatch)
     # handler.py
