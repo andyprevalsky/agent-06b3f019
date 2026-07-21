@@ -1,0 +1,43 @@
+name: Auto RCA — shipped notice
+
+# Closes the lifecycle card: when an auto-RCA PR is MERGED (the human hard gate),
+# edit its Slack message to "shipped". The Slack handle travels in a hidden marker
+# in the PR body (embedded by auto-rca.yml), so this needs no DB and no shared
+# state — it reads the handle straight off the merged PR.
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  shipped:
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.base.ref == 'main' &&
+      startsWith(github.event.pull_request.head.ref, 'auto-rca/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Edit the Slack card to shipped
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -uo pipefail
+          if [ -z "${SLACK_BOT_TOKEN:-}" ]; then
+            echo "SLACK_BOT_TOKEN unset — nothing to update."; exit 0
+          fi
+          marker="$(printf '%s' "$PR_BODY" | grep -oE '<!-- rca-slack ts=[^ ]+ channel=[^ ]+ -->' | head -1 || true)"
+          if [ -z "$marker" ]; then
+            echo "No rca-slack marker in PR body — skipping."; exit 0
+          fi
+          ts="$(printf '%s' "$marker" | sed -E 's/.*ts=([^ ]+).*/\1/')"
+          channel="$(printf '%s' "$marker" | sed -E 's/.*channel=([^ ]+) -->/\1/')"
+          if [ -z "$ts" ] || [ -z "$channel" ]; then
+            echo "Incomplete marker — skipping."; exit 0
+          fi
+          text="✅ *Shipped* — merged to main"$'\n'"<${PR_URL}|PR>"
+          curl -sS -X POST https://slack.com/api/chat.update \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" -H 'Content-Type: application/json; charset=utf-8' \
+            --data "$(jq -n --arg c "$channel" --arg ts "$ts" --arg t "$text" '{channel:$c,ts:$ts,text:$t}')" >/dev/null || true

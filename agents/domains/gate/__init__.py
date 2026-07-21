@@ -5,18 +5,18 @@ approval pause/resume machinery. The backend owns the gate object, dedup, fan-in
 resume, minimal-SMS, and the in-stream card.
 """
 
+from .handler import (
+    build_kyc_gate,
+    build_source_connect_gate,
+    build_subscription_gate,
+    raise_gate_direct,
+)
 from .repo import (
     create_gate_request_activity,
     has_message_corpus_activity,
     mint_gmail_connect_activity,
     mint_subscription_checkout_activity,
     source_status_activity,
-)
-from .handler import (
-    build_kyc_gate,
-    build_source_connect_gate,
-    build_subscription_gate,
-    raise_gate_direct,
 )
 from .types import GateRejectedError
 
