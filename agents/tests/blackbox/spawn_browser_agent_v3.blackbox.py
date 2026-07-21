@@ -358,6 +358,43 @@ def test_max_steps_return_declares_best_effort_and_final_verifier():
     assert '"best_effort_response": best_effort_response' in tail
 
 
+def test_browser_step_budget_extends_beyond_productive_step_30_capture():
+    """The configured budget must extend beyond a productive captured boundary.
+
+    Production agent 62734899-ddd8-472a-a8b2-ddef79c74e44 captured several
+    independent browser tasks whose 30th action succeeded while the checkout
+    was still advancing. The handler then returned ``max_iterations`` before
+    the agent could observe the result or complete the next required action.
+
+    This is deliberately a narrow budget invariant tied to the observed
+    first-bad boundary, not a replay of the checkout or proof of a sufficient
+    total step count. A proposed cap of 50 satisfies the invariant without
+    pretending that this capture alone proves every checkout finishes by 50.
+    """
+    from domains.spawn_browser_agent_v3.config import MAX_ITERATIONS
+
+    production_boundary_captures = (
+        {
+            "task_id": "46155ddc-01d9-4c51-bb51-755802a377c5",
+            "step": 30,
+            "action": "click",
+            "result": "Continue to Payment clicked successfully",
+        },
+        {
+            "task_id": "de9f32ad-5297-4727-9965-500bddc71a13",
+            "step": 30,
+            "action": "input_text",
+            "result": "contactNumber entered successfully",
+        },
+    )
+
+    for capture in production_boundary_captures:
+        assert capture["step"] < MAX_ITERATIONS, (
+            "Browser step budget terminated a still-productive production run "
+            f"at its boundary: {capture} (MAX_ITERATIONS={MAX_ITERATIONS})"
+        )
+
+
 def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
     """Outer watchdogs must not cancel queued browser-use EventBus requests."""
     from domains.spawn_browser_agent_v3.config import (
@@ -10786,6 +10823,10 @@ async def run_all_tests():
     )
     r.record(
         "max_steps_return_wires_best_effort_and_verifier", test_max_steps_return_declares_best_effort_and_final_verifier
+    )
+    r.record(
+        "browser_step_budget_extends_beyond_productive_step_30_capture",
+        test_browser_step_budget_extends_beyond_productive_step_30_capture,
     )
     r.record(
         "browser_supervisor_timeout_ordering",

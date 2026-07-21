@@ -39,6 +39,10 @@ TUNNEL_LOG = REPO_ROOT / ".context" / "local-benchmark-ngrok.log"
 BENCHMARK_CONTEXT_ROOT = REPO_ROOT / ".context" / "benchmarks"
 CHECKPOINT_ROOT = REPO_ROOT / ".context" / "benchmark-checkpoints"
 RUNS_DIR = AGENTS_DIR / "benchmarks" / "runs"
+# A fresh isolated stack syncs the production-backed benchmark fixture before
+# run.sh can publish services.json. That fixture currently includes 10k messages
+# and 20k+ browser cookies, so a healthy first start can exceed three minutes.
+SERVICE_START_TIMEOUT_SECONDS = 600
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 AGENT_PAYMENT_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
@@ -626,7 +630,7 @@ def wait_for_services(
     *,
     process: subprocess.Popen | None = None,
     service_log: Path = SERVICE_LOG,
-    timeout_seconds: int = 180,
+    timeout_seconds: int = SERVICE_START_TIMEOUT_SECONDS,
 ) -> dict:
     deadline = time.time() + timeout_seconds
     last_error = ""

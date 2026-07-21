@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 import json
 import os
 import signal
@@ -761,6 +762,10 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
 
     from benchmarks import local as local_runner
 
+    assert local_runner.SERVICE_START_TIMEOUT_SECONDS == 600
+    assert inspect.signature(local_runner.wait_for_services).parameters[
+        "timeout_seconds"
+    ].default == 600
     monkeypatch.setattr(local_runner, "allocate_port_range", lambda _preferred: 62000)
     args = local_runner.parse_args(
         ["single-creator-arm", "--run-id", "predeploy-contract", "--base-port", "62000"]
@@ -3026,9 +3031,9 @@ exit "$rc"
         ["bash", "-c", script],
         cwd=ROOT,
         env=harness_env,
-        # This launches and tears down two process groups. On a host shared by
-        # several deploy loops, scheduler delay can exceed the service's own
-        # bounded readiness windows even though the retry behavior is correct.
+        # The harness launches and tears down two process groups, waiting through
+        # TERM and KILL windows twice. Concurrent coverage/deploy loops can delay
+        # scheduling, so leave headroom while still bounding a stuck cleanup.
         text=True, capture_output=True, check=False, timeout=60,
     )
 
