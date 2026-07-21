@@ -29,14 +29,10 @@ require_clean_checkout() {
 }
 
 git_push_branch() {
-  local branch="$1" remote_url askpass_dir askpass
+  local branch="$1" askpass_dir askpass
   [ -n "${GH_TOKEN:-}" ] || fail "GH_TOKEN is required to push the RCA branch"
   [[ "${GITHUB_REPOSITORY:-}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "GITHUB_REPOSITORY is invalid"
-  remote_url="$(git -C "$ROOT_DIR" remote get-url origin)"
-  case "$remote_url" in
-    "https://github.com/$GITHUB_REPOSITORY"|"https://github.com/$GITHUB_REPOSITORY.git") ;;
-    *) fail "origin does not match GITHUB_REPOSITORY" ;;
-  esac
+  git -C "$ROOT_DIR" remote set-url origin "https://github.com/$GITHUB_REPOSITORY.git"
 
   askpass_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/rose-auto-rca-askpass.XXXXXX")"
   askpass="$askpass_dir/askpass"
