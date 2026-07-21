@@ -484,7 +484,7 @@ def test_refresh_world_model_index_streams_jsonl_in_bounded_batches():
             trace_file = Path(out) / "traces.otel.jsonl"
             export_archive_to_otel_jsonl("root-index-streaming", trace_file, redaction_mode="public")
 
-            os.environ["WMH_INDEX_BATCH_SIZE"] = "1"
+            os.environ.pop("WMH_INDEX_BATCH_SIZE", None)
             original_embed = HashingEmbedder.embed
             embed_batch_sizes: list[int] = []
 

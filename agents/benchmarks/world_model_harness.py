@@ -1055,7 +1055,10 @@ def refresh_world_model_index(
             "or keep .context/reference/world-model-harness with its dependencies available"
         ) from exc
 
-    batch_size = int(os.environ.get("WMH_INDEX_BATCH_SIZE", "64") or "64")
+    # Archived browser states vary by orders of magnitude, so a step-count batch larger than one
+    # is not a memory bound. Keep the safe default at one; operators may explicitly raise it for a
+    # known-small corpus.
+    batch_size = int(os.environ.get("WMH_INDEX_BATCH_SIZE", "1") or "1")
     if batch_size <= 0:
         raise ValueError(f"WMH_INDEX_BATCH_SIZE must be positive, got {batch_size}")
 
