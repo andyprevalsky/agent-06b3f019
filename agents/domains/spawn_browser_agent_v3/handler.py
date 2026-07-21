@@ -2753,8 +2753,7 @@ def _simulated_browser_transition_contract(
             f"RETRY — your previous response for this exact action was rejected: {retry_reason}. "
             "You MUST return a JSON object containing a top-level 'browser_state' object whose "
             "'dom_tree' is present (structured accessibility tree or serialized string). Do not omit "
-            "browser_state or dom_tree. Re-apply only this one action to the same prior state. "
-            + instructions
+            "browser_state or dom_tree. Re-apply only this one action to the same prior state. " + instructions
         )
     return {
         "boundary": "browser_environment_transition",
@@ -2852,9 +2851,7 @@ def _simulated_browser_state_from_result(
                 raw_observation_text = candidate.strip()
                 break
             if isinstance(candidate, (dict, list)) and candidate:
-                raw_observation_text = json.dumps(
-                    candidate, sort_keys=True, separators=(",", ":"), default=str
-                )
+                raw_observation_text = json.dumps(candidate, sort_keys=True, separators=(",", ":"), default=str)
                 break
         if not raw_observation_text:
             raise ValueError("WMH browser transition omitted browser_state")
@@ -3071,9 +3068,7 @@ async def _execute_simulated_browser_transition(
             result.get("requires_approval") or result.get("approval_required")
         ) or result_status in {"awaiting_write_approval", "needs_write_approval"}
         if approved and repeated_approval:
-            last_error = ValueError(
-                "WMH repeated approval boundary after approval was granted"
-            )
+            last_error = ValueError("WMH repeated approval boundary after approval was granted")
             logger.warning(
                 "simulated_browser_transition_malformed",
                 action=action_name,
@@ -3438,9 +3433,7 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
             # the requested action. Initialization is orchestration, not an LLM
             # action, so no synthetic "initialize" step is sent.
             browser_state = _initial_simulated_browser_state(start_url)
-            world_model_session_id = str(
-                await world_model.ensure_session(task=goal, seed_state=browser_state)
-            )
+            world_model_session_id = str(await world_model.ensure_session(task=goal, seed_state=browser_state))
             if not world_model_session_id:
                 raise RuntimeError("WMH browser initialization omitted world_model_session_id")
             world_model.session_id = world_model_session_id
@@ -3496,9 +3489,7 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
                 approval_type=str(resume.get("approval_type") or "unknown"),
                 payment_card_last4=payment_card_last4,
             )
-            history_result = _browser_tool_result_for_history(
-                approved_action_name, approved_result
-            )
+            history_result = _browser_tool_result_for_history(approved_action_name, approved_result)
             if action_entries and action_entries[-1].get("step") == iteration:
                 action_entries[-1].update(result=history_result, approved=True)
             current_url = str(browser_state.get("url") or "")
@@ -5963,11 +5954,7 @@ Based on this feedback, I need to continue working on the task and address the i
 
             # Resolve the background-attached network recorder so read_network_requests
             # can query captured traffic (the recorder attaches a few seconds into the run).
-            if (
-                browser_network_recorder is None
-                and network_recorder_task is not None
-                and network_recorder_task.done()
-            ):
+            if browser_network_recorder is None and network_recorder_task is not None and network_recorder_task.done():
                 with contextlib.suppress(Exception):
                     browser_network_recorder = network_recorder_task.result()
 

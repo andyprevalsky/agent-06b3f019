@@ -416,9 +416,7 @@ def test_bundle_signature_r2_rejects_enumerated_ciphertext_without_metadata():
         try:
             signature = _bundle_signature(root_agent_id)
             encrypted_keys = [
-                key
-                for key in objects
-                if key.startswith(f"trace-archive/{root_agent_id}/") and key.endswith(".enc")
+                key for key in objects if key.startswith(f"trace-archive/{root_agent_id}/") and key.endswith(".enc")
             ]
             assert signature["artifact_count"] == len(encrypted_keys)
 

@@ -622,8 +622,7 @@ class BrowserAgentRecorder:
             with contextlib.suppress(Exception):
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     await client.post(
-                        f"{_kernel_api_base()}/browsers/{self.session_id}"
-                        f"/replays/{self._kernel_replay_id}/stop",
+                        f"{_kernel_api_base()}/browsers/{self.session_id}/replays/{self._kernel_replay_id}/stop",
                         headers=headers,
                     )
         # Rebind to the new session and start a fresh replay segment.
@@ -634,8 +633,7 @@ class BrowserAgentRecorder:
             await self._start_kernel_replay()
         except Exception as exc:  # noqa: BLE001 — a failed segment must not break the run
             logger.warning(
-                "Kernel replay failed to start on rotated session; recording will "
-                "miss this segment",
+                "Kernel replay failed to start on rotated session; recording will miss this segment",
                 agent_id=self.agent_id,
                 task_id=self.task_id,
                 session_id=new_session_id,
@@ -650,9 +648,7 @@ class BrowserAgentRecorder:
         """All per-session replay view URLs in rotation order (baseline first)."""
         return [seg["view_url"] for seg in self._replay_segments if seg.get("view_url")]
 
-    async def _run_ffmpeg_concat(
-        self, ffmpeg_path: str, list_file: Path, out_path: Path, *, copy: bool
-    ) -> bool:
+    async def _run_ffmpeg_concat(self, ffmpeg_path: str, list_file: Path, out_path: Path, *, copy: bool) -> bool:
         args = [
             ffmpeg_path,
             "-y",
