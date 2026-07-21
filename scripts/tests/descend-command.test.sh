@@ -22,6 +22,11 @@ require_text "HARNESS_FIX_DECISION" "/descend must stop for harness-fix approval
 require_text "DEPLOY_ADMIN_APPROVAL" "/descend must stop for required deploy approval"
 require_text "every HARNESS failure has a completed RCA; and" "/descend must require every harness RCA to be complete before stopping"
 require_text "Never enter HARNESS_FIX_DECISION with an open observability gap." "/descend must keep investigating open observability gaps instead of stopping"
+require_text '## `/sync` checkpoints' "/descend must define durable sync checkpoints"
+require_text 'including each RCA' "/descend must sync every parallel RCA worker"
+require_text 'Run `/sync` before every subset or full-slice rerun.' "/descend must sync before benchmark reruns"
+require_text 'Before syncing a dirty controller workspace' "/descend must preserve dirty work across sync checkpoints"
+require_text 'before preparing each isolated deploy-unit worktree' "/descend must sync before deploy handoff"
 require_text "pause only" "deploy approval must not freeze independent RCA work"
 require_text "Prepare a clean" "/descend must use a fix-only isolated deploy worktree"
 require_text "Bench run:" "/descend header must show benchmark timing"
@@ -38,6 +43,12 @@ require_text "**Is this fix approved?**" "fix approval must ask a clear decision
 
 RESPONSE_CONTRACT=$(sed -n '/^## Response contract/,$p' "$DESCEND_COMMAND")
 STOP_ONE_CONTRACT=$(sed -n '/^## Stop 1 — HARNESS_FIX_DECISION/,/^## Rerun and parallel deploy/p' "$DESCEND_COMMAND")
+SYNC_CONTRACT=$(sed -n '/^## `\/sync` checkpoints/,/^## State machine/p' "$DESCEND_COMMAND")
+INFRA_LOOP=$(sed -n '/^The infra loop is strict:/,/^Do not stop for Andy/p' "$DESCEND_COMMAND")
+HARNESS_RCA=$(sed -n '/^## HARNESS RCA/,/^## Stop 1/p' "$DESCEND_COMMAND")
+grep -Fq 'each distinct `/RCA` invocation' <<<"$SYNC_CONTRACT" || fail "sync checkpoints must run before each distinct RCA"
+grep -Fq 'run /sync immediately before each distinct /RCA' <<<"$INFRA_LOOP" || fail "infra RCA loop must sync before every RCA"
+grep -Fq 'Run `/sync` immediately before every distinct `/RCA`' <<<"$HARNESS_RCA" || fail "harness RCA loop must sync before every RCA"
 grep -Fq 'or an honest open observability gap' <<<"$STOP_ONE_CONTRACT" && fail "open observability gaps must not qualify for the harness-fix decision stop"
 grep -Fq '~~~text' <<<"$RESPONSE_CONTRACT" && fail "response examples must not use code blocks"
 grep -Fq '━' <<<"$RESPONSE_CONTRACT" && fail "response header must not use an ASCII banner"

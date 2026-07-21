@@ -39,6 +39,11 @@ their orchestration, state, user-input gates, and response contract.
 7. **External blockers are not a third planned gate.** Keep every unaffected
    RCA, run, and deploy moving. Report BLOCKED only after all safe in-scope
    alternatives are exhausted and no independent progress remains.
+8. **Sync at every safe execution boundary.** Run `/sync` after resolving the
+   slice and immediately before every distinct `/RCA` invocation, every
+   benchmark rerun, and every deploy-unit handoff. Do not start the next action
+   until the main merge, conflict resolution, local DB resync, and affected
+   regression gates are complete.
 
 ## Resolve the slice
 
@@ -62,24 +67,51 @@ transition. It must contain:
 - actual benchmark started_at, finished_at, and duration;
 - one lifecycle record per issue/fix;
 - infra RCA ledger across all epochs;
+- `/sync` checkpoint timestamp, pre/post base SHA, origin/main SHA, DB-resync
+  result, conflicts resolved, and affected regression gates;
 - Andy decisions and approval snapshot IDs;
 - deploy unit base SHA, exact fix commits, worktree, worker ID, PR, and status.
 
 Compaction, session restart, or a sub-agent response must not erase or recreate
 state from memory.
 
+## `/sync` checkpoints
+
+Run the first `/sync` checkpoint after `RESOLVE_SLICE` and before the initial
+benchmark. After that, checkpoint at these boundaries:
+
+- immediately before **each distinct `/RCA` invocation**, including each RCA
+  worker started in parallel;
+- after local verification and before every benchmark subset or full-slice
+  rerun; and
+- before preparing each isolated deploy-unit worktree.
+
+One checkpoint may satisfy adjacent boundaries only when no commit, working-tree
+change, or origin/main advance occurred between them. For parallel RCAs, sync
+each isolated worktree immediately before its worker starts; a controller sync
+does not substitute for workers on a different base SHA.
+
+Before syncing a dirty controller workspace, persist `state.json` and preserve
+all in-progress work reversibly. Never discard it to make the merge succeed.
+Resolve conflicts by retaining current main behavior and integrating the descent
+changes on top, restore the preserved work, run the tests that own every touched
+boundary, then record the checkpoint evidence in `state.json`. A failed or
+incomplete `/sync` blocks that RCA, rerun, or handoff—not unrelated active work.
+
 ## State machine
 
 ~~~text
 RESOLVE_SLICE
-  → RUN_SLICE
+  → SYNC_CHECKPOINT → RUN_SLICE
   → CLASSIFY_RESULTS
-      ├─ INFRA found → RCA_INFRA_FIX → VERIFY_LOCAL → RUN_SLICE
+      ├─ INFRA found → SYNC_CHECKPOINT_PER_RCA → RCA_INFRA_FIX
+      │                   → VERIFY_LOCAL → SYNC_CHECKPOINT → RUN_SLICE
       │                   └─ real rerun confirms fix → ENQUEUE_DEPLOY_UNIT ─┐
-      └─ infra-clean → RCA_HARNESS_FAILURES_IN_PARALLEL → VERIFY_LOCAL  │
+      └─ infra-clean → SYNC_CHECKPOINT_PER_RCA                        │
+                           → RCA_HARNESS_FAILURES_IN_PARALLEL → VERIFY_LOCAL
                            → HARNESS_FIX_DECISION              [STOP 1]     │
                            → APPLY_HARNESS_DECISIONS                        │
-                           → RERUN_FAILED_SUBSET                            │
+                           → SYNC_CHECKPOINT → RERUN_FAILED_SUBSET          │
                                 ├─ still failing → CLASSIFY_RESULTS         │
                                 └─ confirmed fix → ENQUEUE_DEPLOY_UNIT ─────┤
                                                                             │
@@ -127,12 +159,14 @@ The infra loop is strict:
 
 ~~~text
 while the latest run contains any INFRA result:
+    run /sync immediately before each distinct /RCA
     RCA every distinct infra issue
     reproduce locally
     implement the root-cause fix
     rerun the identical repro
     cement the test
     append/update its lifecycle row
+    run /sync before rerunning the slice
     rerun the slice
 ~~~
 
@@ -147,8 +181,10 @@ Only after an infra-clean run:
 
 1. Gather runtime evidence first: run artifacts, worker/backend logs,
    agent_latency.py, agent_logs.py, DB, and relevant HTTP evidence.
-2. Run each independent HARNESS RCA in parallel when file ownership does not
-   conflict. Group dependent failures under one root-cause RCA.
+2. Run `/sync` immediately before every distinct `/RCA`, then run independent
+   HARNESS RCAs in parallel when file ownership does not conflict. Sync each
+   isolated RCA worktree before its worker starts. Group dependent failures
+   under one root-cause RCA.
 3. Produce the local failing repro.
 4. Implement the root-cause fix.
 5. Run the identical repro and observe it pass.
@@ -186,7 +222,8 @@ admin approval. Those approvals are snapshot-scoped inside /deploy.
 ## Rerun and parallel deploy
 
 Rerun at least the previously failing subset after applying Andy's decisions.
-The final acceptance run covers the entire original slice.
+Run `/sync` before every subset or full-slice rerun. The final acceptance run
+covers the entire original slice.
 
 A fix earns deployment only after:
 
@@ -196,10 +233,10 @@ A fix earns deployment only after:
 - a real benchmark rerun confirms the affected task or infra boundary.
 
 Create one deploy unit per independent fix, or the smallest group of fixes that
-must ship together. Record base_sha and exact fix_commits. Prepare a clean
-isolated worktree containing only that unit, then start a background sub-agent
-running /deploy. This fix-only handoff is mandatory because /deploy ships its
-entire worktree.
+must ship together. Run `/sync`, then record base_sha and exact fix_commits.
+Prepare a clean isolated worktree containing only that unit and start a
+background sub-agent running /deploy. This fix-only handoff is mandatory because
+/deploy ships its entire worktree.
 
 The main controller does not block on deploys. It continues remaining RCAs and
 reruns, actively tracks every deploy worker, and updates the lifecycle ledger.
