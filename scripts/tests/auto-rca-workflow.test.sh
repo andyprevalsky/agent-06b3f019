@@ -53,6 +53,7 @@ require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool evidence' "auto-RCA 
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool publish-draft' "auto-RCA prompt must publish through the immutable command broker"
 require_text "$WORKFLOW" 'name: Ensure preliminary RCA draft' "auto-RCA must create a preliminary draft when Claude does not publish one"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool ensure-draft' "the trusted workflow must enforce the preliminary draft fallback"
+require_text "$WORKFLOW" "AUTO_RCA_PR_TOKEN: ${LITERAL_DOLLAR}{{ secrets.GH_UPDATE_TOKEN }}" "only the trusted fallback step must receive the PR-capable token"
 require_absent "$WORKFLOW" 'Bash(/usr/local/bin/rose-auto-rca-tool ensure-draft)' "Claude must not be allowed to invoke the trusted draft fallback"
 require_text "$WORKFLOW" 'name: Require RCA pull request' "auto-RCA must reject a successful Claude step that produced no PR"
 require_text "$WORKFLOW" 'No RCA pull request was created' "missing PR must be a visible workflow failure"
@@ -66,8 +67,13 @@ require_absent "$RCA_TOOL" 'remote get-url origin' "the broker must not trust th
 require_absent "$RCA_TOOL" 'gh auth setup-git' "the broker must not rely on gh auth setup-git for ephemeral GITHUB_TOKEN authentication"
 require_absent "$RCA_TOOL" "${LITERAL_DOLLAR}{GH_TOKEN}@github.com" "the broker must not place the GitHub token in a remote URL"
 require_absent "$RCA_TOOL" 'extraheader' "the broker must not persist a derived credential in repository config"
+require_text "$RCA_TOOL" "GH_TOKEN=\"${LITERAL_DOLLAR}AUTO_RCA_PR_TOKEN\" gh pr create" "draft creation must use the dedicated PR-capable token"
 
+claude_line="$(grep -nF 'name: Root-cause with Claude Code' "$WORKFLOW" | cut -d: -f1)"
 ensure_line="$(grep -nF 'name: Ensure preliminary RCA draft' "$WORKFLOW" | cut -d: -f1)"
+sed -n "${claude_line},${ensure_line}p" "$WORKFLOW" | grep -Fq 'continue-on-error: true' || \
+  fail "the trusted fallback, not the model process exit, must determine whether a draft lifecycle fails"
+
 require_line="$(grep -nF 'name: Require RCA pull request' "$WORKFLOW" | cut -d: -f1)"
 [ -n "$ensure_line" ] && [ -n "$require_line" ] && [ "$ensure_line" -lt "$require_line" ] || \
   fail "the preliminary draft fallback must run before the PR postcondition"

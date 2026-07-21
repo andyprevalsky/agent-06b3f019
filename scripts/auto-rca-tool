@@ -222,6 +222,7 @@ ensure_draft() {
   git_push_branch "$branch"
   run_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id"
   agent_url="https://roselabs.ai/?agent-id=$AGENT_ID"
+  [ -n "${AUTO_RCA_PR_TOKEN:-}" ] || fail "AUTO_RCA_PR_TOKEN is required to create the RCA pull request"
   body="$(printf '%s\n\n%s\n\n%s\n%s\n\n%s\n\n<!-- rca-slack ts=%s channel=%s -->' \
     'Status: preliminary + observability gap' \
     'The automated investigator completed without publishing a draft. This fallback preserves a reviewable incident artifact; do not merge until the RCA, reproduction, and fix are complete.' \
@@ -229,7 +230,7 @@ ensure_draft() {
     "Workflow run: $run_url" \
     'Required follow-up: add the evidence, first-bad boundary, failing/passing reproduction, cemented test, and deploy-gate results.' \
     "${SLACK_TS:-}" "${SLACK_CHANNEL:-}")"
-  gh pr create \
+  GH_TOKEN="$AUTO_RCA_PR_TOKEN" gh pr create \
     --repo "$GITHUB_REPOSITORY" \
     --draft \
     --base main \
