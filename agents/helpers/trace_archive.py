@@ -608,6 +608,7 @@ def _submit_archive_job(
     if not safe_path:
         return None
 
+    drain_backend_outbox_after_success = _use_r2_archive()
     _ARCHIVE_SLOTS.acquire()
 
     def _job() -> None:
@@ -629,7 +630,7 @@ def _submit_archive_job(
                 content_type=content_type,
                 compress=compress,
             )
-            if result is not None and _use_r2_archive():
+            if result is not None and drain_backend_outbox_after_success:
                 _drain_backend_outbox()
         except Exception as exc:
             logger.warning("trace_archive.async_write_error", root_agent_id=safe_root, path=safe_path, error=str(exc)[:200])
