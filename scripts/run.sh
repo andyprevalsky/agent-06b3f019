@@ -1232,22 +1232,40 @@ start_world_model_harness() {
     WMH_PID=$!
     PIDS+=($WMH_PID); NAMES+=("wmh")
 
-    # Health-wait on GET /healthz (short timeout — check the log if it never comes up).
+    # Cold model loading on a freshly restored cloud volume can legitimately take
+    # longer than 30 seconds before Uvicorn binds. Keep waiting while the owned
+    # process is alive, with a bounded budget aligned to WMH inference startup.
+    local health_timeout_default=180
+    local health_timeout_max=600
+    local health_timeout="${WMH_HEALTH_TIMEOUT_SECONDS:-$health_timeout_default}"
+    local health_timeout_max_digits=${#health_timeout_max}
+    if ! [[ "$health_timeout" =~ ^[1-9][0-9]*$ ]] || \
+        (( ${#health_timeout} > health_timeout_max_digits )) || \
+        (( health_timeout > health_timeout_max )); then
+        echo "⚠️  Invalid WMH_HEALTH_TIMEOUT_SECONDS=$health_timeout; using 180s."
+        health_timeout=$health_timeout_default
+    fi
     local ready=false
-    for _ in $(seq 1 30); do
+    local health_attempt=0
+    local health_deadline=$((SECONDS + health_timeout))
+    while (( health_attempt < health_timeout && SECONDS <= health_deadline )); do
+        health_attempt=$((health_attempt + 1))
         if ! kill -0 "$WMH_PID" 2>/dev/null; then
             echo "⚠️  WMH server exited before becoming ready — not served this run (see $wmh_log)."
             tail -20 "$wmh_log" || true
             return 0
         fi
-        if curl -fsS "http://localhost:$WMH_PORT/healthz" >/dev/null 2>&1; then
+        if curl -fsS --connect-timeout 1 --max-time 1 \
+            "http://localhost:$WMH_PORT/healthz" >/dev/null 2>&1; then
             ready=true
             break
         fi
-        sleep 1
+        if (( health_attempt < health_timeout && SECONDS < health_deadline )); then
+            sleep 1
+        fi
     done
     if ! $ready; then
-        echo "⚠️  WMH server did not answer /healthz on port $WMH_PORT within 30s — not served this run (see $wmh_log)."
+        echo "⚠️  WMH server did not answer /healthz on port $WMH_PORT within ${health_timeout}s — not served this run (see $wmh_log)."
         tail -20 "$wmh_log" || true
         return 0
     fi

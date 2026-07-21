@@ -155,6 +155,35 @@ test('seed-local rejects conflicting exclusive sync modes before creating databa
   );
 });
 
+test('compute-token-only sync fails closed without an explicit source database', async () => {
+  const source = readSeedLocalSource();
+  const modeFlag = source.indexOf("process.argv.includes('--compute-tokens-only')");
+  const sourceVariable = source.indexOf('const COMPUTE_TOKEN_SOURCE_DATABASE_URL');
+  const failClosed = source.indexOf(
+    'if (COMPUTE_TOKENS_ONLY && !COMPUTE_TOKEN_SOURCE_DATABASE_URL)'
+  );
+  const envRead = source.indexOf('dotenv.parse(readFileSync(envPath))');
+  const clients = source.indexOf('const remote = new PrismaClient');
+
+  assert(sourceVariable > modeFlag, 'expected the explicit compute-token source variable');
+  assert(failClosed > sourceVariable, 'expected compute-token mode to reject a missing source');
+  assert(failClosed < envRead, 'expected rejection before any .env fallback can be read');
+  assert(failClosed < clients, 'expected rejection before database clients are created');
+  assert(
+    source.includes('refusing to fall back to .env'),
+    'expected the failure to explain the protected boundary'
+  );
+});
+
+test('missing-Codex bypass warning reports the usable Claude count', async () => {
+  const source = readSeedLocalSource();
+  const bypass = source.indexOf("process.env.SEED_ALLOW_MISSING_GPT_CODE === '1'");
+  const warning = source.indexOf('usable claude_code, 0 usable gpt_code', bypass);
+
+  assert(bypass > 0, 'expected the explicit missing-Codex bypass');
+  assert(warning > bypass, 'expected its warning to report the usable Claude count');
+});
+
 (async () => {
   let failed = 0;
   for (const { name, fn } of tests) {

@@ -3393,6 +3393,45 @@ def _local_victoria_database_url() -> Optional[str]:
     return None
 
 
+def _shared_workspace_database_url() -> Optional[str]:
+    """Return the healthy top-level workspace DB when a run uses an isolated DB."""
+    shared_context = REPO_ROOT / ".context"
+    try:
+        if _benchmark_context_path().resolve() == shared_context.resolve():
+            return None
+    except OSError:
+        return None
+
+    services_path = shared_context / "services.json"
+    try:
+        services = json.loads(services_path.read_text())
+    except (OSError, ValueError):
+        return None
+    if services.get("status") in {"failed", "stopped"}:
+        return None
+
+    database = services.get("database") or {}
+    ports = services.get("ports") or {}
+    if database.get("use_system_postgres") is True:
+        database_url = "postgresql://postgres:postgres@localhost:5432/victoria"
+    else:
+        port = database.get("port") or ports.get("local_db")
+        if not port:
+            return None
+        database_url = f"postgresql://postgres:postgres@localhost:{port}/victoria"
+
+    try:
+        result = subprocess.run(
+            ["psql", database_url, "-t", "-A", "-c", "SELECT 1;"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    return database_url if result.returncode == 0 else None
+
+
 def _psql_compatible_database_url(database_url: str) -> str:
     """Drop Prisma-only query params before passing a URL to the psql CLI."""
     parsed = urlparse(database_url)
@@ -3783,6 +3822,9 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
     env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
+    shared_source = _shared_workspace_database_url()
+    if shared_source and shared_source != database_url:
+        env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = shared_source
     if tolerate_gpt_code_unavailable:
         env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
     try:
@@ -3804,7 +3846,8 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     if result.returncode != 0:
         print(f"    ⚠ Compute-token sync failed: {_seed_sync_error_detail(result)}")
         return False
-    print("    🔑 Refreshed compute tokens from prod")
+    source_label = "shared workspace" if shared_source else "prod"
+    print(f"    🔑 Refreshed compute tokens from {source_label}")
     return True
 
 
@@ -5874,8 +5917,6 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 
 def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
     """Return distinct browser attempts and grounded failed lifecycle events."""
-    browser_call_ids: set[str] = set()
-    browser_session_ids: set[str] = set()
     failures: list[str] = []
     for message in data.get("messages", []) or []:
         metadata = message.get("metadata") if isinstance(message, dict) else None
@@ -5892,11 +5933,15 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
             if not is_browser:
                 continue
             call_id = candidate.get("toolCallId") or candidate.get("tool_call_id")
-            if call_id:
-                browser_call_ids.add(str(call_id))
-            session_id = candidate.get("browser_session_id") or candidate.get("browser_url")
-            if session_id:
-                browser_session_ids.add(str(session_id))
+            session_id = (
+                candidate.get("task_id")
+                or candidate.get("taskId")
+                or candidate.get("subAgentId")
+                or candidate.get("sub_agent_id")
+                or candidate.get("world_model_session_id")
+                or candidate.get("browser_session_id")
+                or candidate.get("browser_url")
+            )
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
             if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
@@ -5904,7 +5949,12 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                     f"{tool_name or 'browser agent'} {call_id or session_id or 'unknown'} "
                     f"status={status or 'unsuccessful'}"
                 )
-    return max(len(browser_call_ids), len(browser_session_ids)), failures
+    # Browser actions have their own tool-call IDs. Counting those IDs directly
+    # turns one seven-step browser into seven "sessions". Reuse the trajectory
+    # grouper, which unions orchestration IDs, task IDs, and sub-agent IDs into
+    # the stable browser instance while retaining separate browser attempts.
+    browser_instances = _agent_class_step_counts(data).get("browser", {})
+    return len(browser_instances), failures
 
 
 _AGENT_CLASS_BY_RUNTIME_TOOL = {
