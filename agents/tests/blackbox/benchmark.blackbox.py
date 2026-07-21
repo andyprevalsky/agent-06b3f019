@@ -7727,10 +7727,6 @@ async def run_all_tests():
         test_webdecoy_biometrics_uses_fresh_isolated_browser_state,
     )
     r.record(
-        "isolated_fixture_database_identity",
-        test_run_benchmark_sql_uses_isolated_manifest_database_identity,
-    )
-    r.record(
         "anon_benchmark_mode_disables_saved_auth",
         test_anon_benchmark_mode_disables_saved_auth_material,
     )
