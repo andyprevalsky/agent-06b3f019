@@ -34,10 +34,34 @@ interface SettledGenerator<T> {
   reason?: unknown;
 }
 
+interface SpeculativeChatMessage {
+  role: string;
+  text: string;
+}
+
+const NON_DIRECT_INTENT =
+  /\b(?:search\s+(?:the\s+)?web|browse\s+(?:the\s+)?web|look\s+up|latest|today(?:'s)?|current\s+(?:news|events?|prices?)|research|autonomous\s+agent|agent\s+mode|plan\s+mode|execute\s+mode)\b/i;
+
 export interface EarlyDirectGeneratorCoordinator<T> {
   start(): void;
   commitDirectAnswer(): Promise<T | null>;
   discard(): Promise<void>;
+}
+
+/**
+ * Avoid spending a speculative Generator slot on an obviously non-direct turn.
+ *
+ * This is only a load-shedding hint: the Router remains authoritative, and a
+ * false negative merely starts the canonical Generator after routing. Keeping
+ * web/agent turns out of the speculative lane prevents their discarded calls
+ * from starving the latency-sensitive Router under concurrent chat load.
+ */
+export function shouldStartEarlyDirectGenerator(
+  messages: readonly SpeculativeChatMessage[]
+): boolean {
+  const latestUserMessage = [...messages].reverse().find((message) => message.role === 'USER');
+  if (!latestUserMessage?.text.trim()) return false;
+  return !NON_DIRECT_INTENT.test(latestUserMessage.text);
 }
 
 export function createTransactionalStreamGate(): TransactionalStreamGate {
