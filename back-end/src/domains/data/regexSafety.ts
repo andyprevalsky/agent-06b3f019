@@ -20,12 +20,18 @@ export interface PatternSafety {
   reason?: string;
 }
 
+type PatternAnalyzer = typeof checkSync;
+
 /**
  * Classify a regex with `recheck` and reject genuinely dangerous shapes
  * (exponential, or polynomial degree > 2). Quadratic patterns like
  * `meeting.*tomorrow` stay allowed so we don't nerf realistic queries.
  */
-export function checkPatternSafety(source: string, flags: string): PatternSafety {
+export function checkPatternSafety(
+  source: string,
+  flags: string,
+  analyze: PatternAnalyzer = checkSync
+): PatternSafety {
   if (source.length > MAX_PATTERN_LENGTH) {
     return {
       ok: false,
@@ -34,7 +40,7 @@ export function checkPatternSafety(source: string, flags: string): PatternSafety
   }
   let diagnostics;
   try {
-    diagnostics = checkSync(source, flags, { timeout: 1000 });
+    diagnostics = analyze(source, flags, { timeout: 1000 });
   } catch {
     // This guard protects a backtracking database regex engine. If analysis is
     // unavailable or times out, accepting the pattern would bypass the only
