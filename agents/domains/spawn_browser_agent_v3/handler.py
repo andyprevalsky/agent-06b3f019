@@ -7052,6 +7052,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             metadata={
                                 "attentionKind": f"agentcard_user_{agentcard_status}",
                                 "toolName": "spawn_browser_agent",
+                                # The outer browser tool emits the same setup state on
+                                # its own tool-call id, then supersedes it with the
+                                # resumed checkout result. Keep this standalone row
+                                # visible to the user without leaving stale setup work
+                                # in the parent model's context after checkout succeeds.
+                                "excludeFromModel": True,
                                 "task_id": result.get("task_id"),
                                 "action_type": f"agentcard_user_{agentcard_status}",
                                 "agentCardSetup": {
