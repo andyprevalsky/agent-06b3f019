@@ -21,6 +21,7 @@ import structlog
 
 from providers.fast_cache import client as cache_client
 from providers.fast_cache.context import current_context
+from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import get_pool
 
 if TYPE_CHECKING:
@@ -168,7 +169,9 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
         "thinking": complete_kwargs.get("thinking"),
         "effort": complete_kwargs.get("effort"),
         "provider_fast_mode": complete_kwargs.get("provider_fast_mode"),
-        "exclude_anthropic_family": bool(complete_kwargs.get("_exclude_anthropic_family", False)),
+        "exclude_anthropic_family": anthropic_family_excluded(
+            bool(complete_kwargs.get("_exclude_anthropic_family", False))
+        ),
         "response_schema": response_schema,
         "env_fingerprint": os.getenv("FAST_MODE_AGENT_ENV_FINGERPRINT", "default"),
     }

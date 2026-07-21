@@ -550,7 +550,11 @@ async def run_agent(  # noqa: C901
         turn_tools = tools
         required_turn_tool = None
         if completed_child_output is not None:
-            turn_tools = ["attempt_completion"]
+            # Keep the native tool schema byte-identical to earlier execute turns.
+            # Provider prompt caches fingerprint tool definitions before the
+            # conversation tail, so narrowing this list invalidates an otherwise
+            # stable prefix. ``required_turn_tool`` enforces the completion-only
+            # contract after parsing without changing the request schema.
             required_turn_tool = "attempt_completion"
             completion_instruction = (
                 "A previously delegated browser or code task already completed and returned verified structured "

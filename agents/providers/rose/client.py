@@ -54,6 +54,7 @@ from providers.rose.errors import (
 )
 from providers.rose.gpt_auth import gpt_auth_complete, openai_api_key_complete
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
+from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import PoolName, get_pool
 from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
@@ -93,15 +94,6 @@ _DEFAULT_TTFT_TIMEOUT_S = 90.0
 _DEFAULT_IDLE_TIMEOUT_S: Optional[float] = 120.0
 _HEARTBEAT_INTERVAL_S = 10.0
 _STALL_TOKEN_COOLDOWN_S = 10 * 60
-
-
-def _anthropic_family_excluded(requested: bool = False) -> bool:
-    return requested or os.getenv("ROSE_EXCLUDE_ANTHROPIC_FAMILY", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
 
 # Errors from claude_auth that mean "try the waterfall next" — as long as
 # they fire before the first non-metadata chunk reaches the caller.
@@ -548,7 +540,7 @@ class RoseClient:
         agent_id = kwargs.get("agent_id")
         messages = kwargs.get("messages")
         pool = kwargs.get("pool")
-        exclude_anthropic_family = _anthropic_family_excluded(
+        exclude_anthropic_family = anthropic_family_excluded(
             bool(kwargs.get("_exclude_anthropic_family", False))
         )
         if exclude_anthropic_family != bool(kwargs.get("_exclude_anthropic_family", False)):
@@ -629,7 +621,7 @@ class RoseClient:
         # Allow a process owner to prove that a maintenance or benchmark run
         # cannot consume Anthropic credit. This complements the existing
         # call-scoped flag and covers nested browser/evaluator calls as well.
-        _exclude_anthropic_family = _anthropic_family_excluded(_exclude_anthropic_family)
+        _exclude_anthropic_family = anthropic_family_excluded(_exclude_anthropic_family)
         pool_spec = get_pool(pool)
         rid = request_id or uuid.uuid4().hex[:12]
         started = time.monotonic()

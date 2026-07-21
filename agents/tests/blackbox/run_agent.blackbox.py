@@ -1050,8 +1050,9 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
     Regression: the simulated Amazon checkout browser returned a terminal,
     schema-complete result, but the unrestricted next root turn spawned a second
     browser session instead of calling attempt_completion. The parent verifier
-    already accepts this exact child output, so the only legal next tool is the
-    completion boundary.
+    already accepts this exact child output, so orchestration requires the
+    completion boundary while retaining the full native tool schema. Keeping
+    the schema stable lets provider prompt caching reuse the first-turn prefix.
     """
     from helpers.llm import call_llm_activity, check_progress
     from loop import run_agent as run_mod
@@ -1157,7 +1158,7 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
 
     assert result["status"] == "completed"
     assert executed_tools == ["attempt_completion"]
-    assert llm_calls[0][2] == ["attempt_completion"]
+    assert llm_calls[0][2] == ["spawn_agent", "attempt_completion"]
     assert llm_calls[0][11] == "attempt_completion"
     assert "already completed" in llm_calls[0][10]
 

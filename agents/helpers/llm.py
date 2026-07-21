@@ -61,6 +61,7 @@ from providers.rose import (
     gpt_auth_from_token,
     pool_for_model,
 )
+from providers.rose.policy import anthropic_family_excluded
 from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
     build_openai_response_format,
@@ -5291,6 +5292,8 @@ async def fetch_compute_token_activity(
                 params["rootAgentId"] = root_agent_id
             if fast_cache_affinity_key:
                 params["fastCacheAffinityKey"] = fast_cache_affinity_key
+            if anthropic_family_excluded():
+                params["tokenType"] = "gpt"
             response = await client.get(
                 f"{config.backend.api_url}/api/integrations/compute-code/credentials/token",
                 headers={

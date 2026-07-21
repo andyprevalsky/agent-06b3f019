@@ -4180,6 +4180,66 @@ async function testComputeTokenFastCacheAffinity_pinsProviderFamily() {
   }
 }
 
+async function testComputeTokenProviderConstraint_overridesClaudeAffinity() {
+  const existingPoolIds = await existingComputePoolIds();
+  const caller = await createAnonSession();
+  const gptOwner = await createAnonSession();
+  const claudeOwner = await createAnonSession();
+  await completeOnboarding(caller.userId);
+  await completeOnboarding(gptOwner.userId);
+  await completeOnboarding(claudeOwner.userId);
+
+  const affinityKey = `test-provider-constraint-affinity-${crypto.randomUUID()}`;
+  const lineageKey = `test-provider-constraint-lineage-${crypto.randomUUID()}`;
+  const gptPool = await seedGptIntegration(gptOwner.userId, {
+    poolingEnabled: true,
+    lastUsedAt: new Date(Date.now() - 60_000),
+  });
+  const claudePool = await seedClaudeIntegration(claudeOwner.userId, {
+    poolingEnabled: true,
+    lastUsedAt: new Date(Date.now() - 120_000),
+  });
+
+  await prisma.computeTokenFastCacheAffinity.create({
+    data: { affinityKey, userId: caller.userId, tokenType: 'claude' },
+  });
+
+  try {
+    const excluded = existingPoolIds.filter((id) => id !== gptPool.id && id !== claudePool.id);
+    const headers: Record<string, string> = {
+      ...apiKeyHeaders(caller.userId),
+      'X-Force-Pool': 'true',
+    };
+    if (excluded.length > 0) headers['X-Exclude-Pool-Tokens'] = excluded.join(',');
+    const params = new URLSearchParams({
+      lineageKey,
+      agentId: lineageKey,
+      rootAgentId: lineageKey,
+      fastCacheAffinityKey: affinityKey,
+      tokenType: 'gpt',
+    });
+    const response = await request(
+      `${BASE_URL}/api/integrations/compute-code/credentials/token?${params}`,
+      { headers }
+    );
+    assertStatus(response.status, 200, response.data);
+    const body = response.data as { type: string; poolTokenId?: string; lineageKey?: string };
+    assert(body.type === 'gpt', `Expected GPT-only lease, got ${JSON.stringify(body)}`);
+    assert(
+      body.poolTokenId === gptPool.id,
+      `Expected GPT pool ${gptPool.id}, got ${body.poolTokenId}`
+    );
+    assert(
+      body.lineageKey === lineageKey,
+      `Expected lineage ${lineageKey}, got ${body.lineageKey}`
+    );
+  } finally {
+    await prisma.computeTokenLineageLease.deleteMany({ where: { lineageKey } });
+    await prisma.computeTokenFastCacheAffinity.deleteMany({ where: { affinityKey } });
+    await cleanupIntegrations([gptPool.id, claudePool.id]);
+  }
+}
+
 async function testRotation_poolAuthErrorDisablesToken() {
   const caller = await createAnonSession();
   const poolOwnerA = await createAnonSession();
@@ -5732,6 +5792,10 @@ async function runAll() {
     {
       name: 'compute token fast-cache affinity -- pins provider family',
       fn: testComputeTokenFastCacheAffinity_pinsProviderFamily,
+    },
+    {
+      name: 'compute token provider constraint -- overrides Claude affinity',
+      fn: testComputeTokenProviderConstraint_overridesClaudeAffinity,
     },
     {
       name: 'rotation -- auto-expires after cooldown (time-windowed)',
