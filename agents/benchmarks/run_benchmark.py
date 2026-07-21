@@ -62,6 +62,7 @@ from benchmarks.benchmark_tasks import (
 from benchmarks.context_validator import validate_context
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES, resolve_live_fixtures
 from benchmarks.llm_usage import aggregate_repeatable_cache_usage, aggregate_usage_items
+from benchmarks.local import manifest_database_url
 from benchmarks.logs import (
     collect_logs,
     collect_tree_messages,
@@ -1296,6 +1297,35 @@ async def get_test_payment_lifecycle(base_url: str, agent_id: str) -> dict:
         return resp.json()
 
 
+async def _get_initial_payment_lifecycle_with_retry(
+    base_url: str,
+    agent_id: str,
+    *,
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 2,
+    fetch_lifecycle: Callable[[str, str], Awaitable[dict]] = get_test_payment_lifecycle,
+) -> dict:
+    """Bound transient provider failures while assembling the first lifecycle snapshot."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await fetch_lifecycle(base_url, agent_id)
+        except Exception as error:
+            last_error = error
+            if attempt >= max_attempts:
+                break
+            print(
+                "    ⚠ Transient initial payment lifecycle read failed "
+                f"({attempt}/{max_attempts}); retrying: {error}"
+            )
+            await asyncio.sleep(retry_delay_seconds)
+    raise RuntimeError(
+        f"Initial payment lifecycle remained unavailable after {max_attempts} reads: {last_error}"
+    ) from last_error
+
+
 async def _wait_for_expected_payment_lifecycle(
     base_url: str,
     agent_id: str,
@@ -1411,6 +1441,37 @@ async def get_attention_requests(base_url: str) -> list:
         if resp.status_code == 200:
             return _normalize_attention_requests_response(resp.json())
         return []
+
+
+async def _agentcard_setup_attention_still_open_after_terminal(
+    base_url: str,
+    request_id: str,
+    *,
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 0.25,
+    fetch_requests: Callable[[str], Awaitable[list]] = get_attention_requests,
+) -> bool:
+    """Refresh setup attention after terminal status instead of trusting a stale parallel poll."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            pending = await fetch_requests(base_url)
+            setup_still_open = any(
+                req.get("id") == request_id and _attention_request_is_open(req)
+                for req in pending
+            )
+            if not setup_still_open or attempt >= max_attempts:
+                return setup_still_open
+        except Exception as error:
+            last_error = error
+            if attempt >= max_attempts:
+                break
+        await asyncio.sleep(retry_delay_seconds)
+    raise RuntimeError(
+        f"Terminal AgentCard setup attention remained unreadable after {max_attempts} reads: {last_error}"
+    ) from last_error
 
 
 async def respond_to_attention_request(base_url: str, request_id: str, response: str) -> None:
@@ -2152,6 +2213,7 @@ async def poll_agent(
     seen_attention_ids: set[str] = set()
     seen_attention_kinds: List[str] = []
     agentcard_setup_attention_seen = False
+    agentcard_setup_attention_id: Optional[str] = None
     attention_requests_seen: list[dict] = []
     chat_assistant_seen_at: Optional[float] = None
     payment_card_action_completed = False
@@ -2315,11 +2377,12 @@ async def poll_agent(
         # Agent mode: done on terminal status
         if status in TERMINAL_STATUSES:
             if task.agentcard_setup_action == "complete":
-                setup_kind = "agentcard_user_cardholder_onboarding_required"
-                setup_still_open = any(
-                    _attention_request_is_open(req) and _attention_request_kind(req) == setup_kind
-                    for req in _pending_attention
-                )
+                setup_still_open = False
+                if agentcard_setup_attention_seen and agentcard_setup_attention_id:
+                    setup_still_open = await _agentcard_setup_attention_still_open_after_terminal(
+                        base_url,
+                        agentcard_setup_attention_id,
+                    )
                 data["_benchmark"] = {
                     **data.get("_benchmark", {}),
                     "expected_attention_kinds_seen": list(seen_attention_kinds),
@@ -2646,6 +2709,7 @@ async def poll_agent(
                             ):
                                 await configure_benchmark_agentcard_setup(base_url, "complete")
                                 agentcard_setup_attention_seen = True
+                                agentcard_setup_attention_id = req_id
                                 print(f"    ✅ Completed one-time AgentCard setup for attention {req_id[:8]}")
                                 continue
                         if task.name == CALENDLY_TASK_NAME and _contains_calendly_link(req):
@@ -3300,20 +3364,17 @@ def _local_victoria_database_url() -> Optional[str]:
     if services_path.exists():
         try:
             services = json.loads(services_path.read_text())
-            if (services.get("database") or {}).get("use_system_postgres") is True:
-                candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
-            port = (services.get("ports") or {}).get("local_db")
-            if port:
-                candidates.append(f"postgresql://postgres:postgres@localhost:{port}/victoria")
-        except Exception:
-            pass
-    env_database_url = os.environ.get("DIRECT_URL") or os.environ.get("DATABASE_URL")
-    if env_database_url:
-        candidates.append(_psql_compatible_database_url(env_database_url))
-    candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
-    configured_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
-    if configured_url:
-        candidates.append(_psql_compatible_database_url(configured_url))
+            candidates.append(manifest_database_url(services))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Invalid benchmark services manifest at {services_path}: {exc}") from exc
+    else:
+        env_database_url = os.environ.get("DIRECT_URL") or os.environ.get("DATABASE_URL")
+        if env_database_url:
+            candidates.append(_psql_compatible_database_url(env_database_url))
+        candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
+        configured_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+        if configured_url:
+            candidates.append(_psql_compatible_database_url(configured_url))
 
     seen: set[str] = set()
     for database_url in candidates:
@@ -3720,6 +3781,7 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
+    env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
     if tolerate_gpt_code_unavailable:
         env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
     try:
@@ -6479,7 +6541,10 @@ async def run_single_task(
 
         if task.expected_payment_lifecycle:
             try:
-                payment_lifecycle = await get_test_payment_lifecycle(base_url, agent_id)
+                payment_lifecycle = await _get_initial_payment_lifecycle_with_retry(
+                    base_url,
+                    agent_id,
+                )
                 data["_benchmark"] = {
                     **data.get("_benchmark", {}),
                     "payment_lifecycle": payment_lifecycle,

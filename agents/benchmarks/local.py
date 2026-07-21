@@ -957,12 +957,14 @@ def manifest_frontend_url(manifest: dict) -> str:
 def manifest_database_url(manifest: dict) -> str:
     ports = manifest.get("ports") if isinstance(manifest, dict) else {}
     database = manifest.get("database") if isinstance(manifest, dict) else {}
+    name = database.get("name") if isinstance(database, dict) else None
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("Services manifest is missing database name")
     port = database.get("port") if isinstance(database, dict) else None
     if not port:
         port = 5432 if isinstance(database, dict) and database.get("use_system_postgres") else ports.get("local_db")
     if not port:
         raise ValueError("Services manifest is missing local_db port")
-    name = database.get("name", "victoria") if isinstance(database, dict) else "victoria"
     return f"postgresql://postgres:postgres@localhost:{port}/{name}"
 
 
