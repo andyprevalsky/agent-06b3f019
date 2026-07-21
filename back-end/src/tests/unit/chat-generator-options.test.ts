@@ -25,6 +25,7 @@ async function run(): Promise<void> {
   assert.strictEqual(options.provider_fast_mode, true);
   assert.strictEqual(options.abort_signal, abortController.signal);
   assert.strictEqual(options.temperature, 0.7);
+  assert.strictEqual(options.effort, 'minimal');
   assert.strictEqual(options.response_format?.json_schema.name, 'generator_response');
   assert.strictEqual(options.response_format?.json_schema.strict, true);
   for (const property of ['claude_token', 'gpt_token', 'gpt_account_id', 'disable_waterfall']) {
