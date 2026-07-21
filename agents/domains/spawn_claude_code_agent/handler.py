@@ -209,6 +209,7 @@ class SpawnClaudeCodeAgentManager(ToolManager):
                     "toolName": "spawn_claude_code_agent",
                     "task_id": result.get("task_id"),
                     "action_type": "task_complete",
+                    "success": result.get("success") is True,
                     "structured_response": result.get("structured_response"),
                     "code_provider": code_provider,
                     "completed_turns": result.get("completed_turns"),

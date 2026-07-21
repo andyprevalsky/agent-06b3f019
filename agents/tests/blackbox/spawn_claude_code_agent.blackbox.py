@@ -1918,6 +1918,7 @@ async def test_cc_execute_tool_happy_path_yields_finished():
     finished = [e for e in events if getattr(e, "status", None) == MessageStatus.FINISHED][0]
     assert finished.title.startswith("\u2713")  # Checkmark
     assert finished.metadata["task_id"] == "t-1"
+    assert finished.metadata["success"] is True
     assert finished.data["usage"]["llm"][0]["tokens_in"] == 100
     assert finished.data["usage"]["service"][0]["cost_cents"] == 0.05
 
@@ -1987,6 +1988,7 @@ async def test_cc_execute_tool_incomplete_success_false_title():
 
     finished = [e for e in events if getattr(e, "status", None) == MessageStatus.FINISHED][0]
     assert finished.title == "Task Incomplete"
+    assert finished.metadata["success"] is False
 
 
 async def test_cc_execute_tool_emits_assistant_events_for_files():

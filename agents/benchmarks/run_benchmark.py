@@ -3324,6 +3324,45 @@ def _local_victoria_database_url() -> Optional[str]:
     return None
 
 
+def _shared_workspace_database_url() -> Optional[str]:
+    """Return the healthy top-level workspace DB when a run uses an isolated DB."""
+    shared_context = REPO_ROOT / ".context"
+    try:
+        if _benchmark_context_path().resolve() == shared_context.resolve():
+            return None
+    except OSError:
+        return None
+
+    services_path = shared_context / "services.json"
+    try:
+        services = json.loads(services_path.read_text())
+    except (OSError, ValueError):
+        return None
+    if services.get("status") in {"failed", "stopped"}:
+        return None
+
+    database = services.get("database") or {}
+    ports = services.get("ports") or {}
+    if database.get("use_system_postgres") is True:
+        database_url = "postgresql://postgres:postgres@localhost:5432/victoria"
+    else:
+        port = database.get("port") or ports.get("local_db")
+        if not port:
+            return None
+        database_url = f"postgresql://postgres:postgres@localhost:{port}/victoria"
+
+    try:
+        result = subprocess.run(
+            ["psql", database_url, "-t", "-A", "-c", "SELECT 1;"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    return database_url if result.returncode == 0 else None
+
+
 def _psql_compatible_database_url(database_url: str) -> str:
     """Drop Prisma-only query params before passing a URL to the psql CLI."""
     parsed = urlparse(database_url)
@@ -3656,6 +3695,9 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
+    shared_source = _shared_workspace_database_url()
+    if shared_source and shared_source != database_url:
+        env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = shared_source
     if tolerate_gpt_code_unavailable:
         env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
     try:
@@ -3673,7 +3715,8 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     if result.returncode != 0:
         print(f"    ⚠ Compute-token sync failed: {_seed_sync_error_detail(result)}")
         return False
-    print("    🔑 Refreshed compute tokens from prod")
+    source_label = "shared workspace" if shared_source else "prod"
+    print(f"    🔑 Refreshed compute tokens from {source_label}")
     return True
 
 

@@ -25,11 +25,19 @@ import {
 } from './seed-local-credentials';
 import { runSyncStep, syncRowsWithConcurrency, syncUserRecord } from './seed-local-helpers';
 
+const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
+
 // Parse .env file directly to get remote DB URL
-// (process.env.DATABASE_URL is already overridden to local by run.sh)
+// (process.env.DATABASE_URL is already overridden to local by run.sh). Isolated
+// benchmark runs may explicitly source compute tokens from the already-verified
+// shared workspace DB so a production-side cooldown cannot invalidate a local
+// deploy gate.
 const envPath = resolve(__dirname, '..', '.env');
 const envVars = dotenv.parse(readFileSync(envPath));
-const REMOTE_URL = envVars.DIRECT_DATABASE_URL || envVars.DATABASE_URL;
+const REMOTE_URL =
+  (COMPUTE_TOKENS_ONLY && process.env.SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL) ||
+  envVars.DIRECT_DATABASE_URL ||
+  envVars.DATABASE_URL;
 
 if (!REMOTE_URL) {
   console.error('❌ No remote DATABASE_URL found in .env');
@@ -52,7 +60,6 @@ const SKIP_BROWSER_AUTH_SYNC =
 // leave the isolated DB with a stale/expired compute token — otherwise the
 // agent's claudeAuth fetch fails and every LLM call falls through to the paid
 // waterfall.
-const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
 const PASSKEYS_ONLY = process.argv.includes('--passkeys-only');
 const COMPUTE_TOKEN_SYNC_ATTEMPTS = 5;
 
@@ -298,12 +305,37 @@ async function countUsableGptCodeIntegrations(): Promise<number> {
   }).length;
 }
 
+async function countUsableClaudeCodeIntegrations(): Promise<number> {
+  const now = new Date();
+  const integrations = await local.integration.findMany({
+    where: {
+      name: 'claude_code',
+      status: 'CONNECTED',
+      OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
+    },
+    select: {
+      userId: true,
+      poolingEnabled: true,
+      config: true,
+    },
+  });
+
+  return integrations.filter((integration) => {
+    const isAvailableToBench = integration.userId === DEV_USER_ID || integration.poolingEnabled;
+    return isAvailableToBench && hasEncryptedCredentials(integration.config);
+  }).length;
+}
+
 async function syncComputeTokensWithRetries(): Promise<void> {
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= COMPUTE_TOKEN_SYNC_ATTEMPTS; attempt++) {
     try {
       const count = await syncIntegrations();
+      const usableClaudeCodeCount = await countUsableClaudeCodeIntegrations();
+      if (usableClaudeCodeCount === 0) {
+        throw new Error('No usable claude_code integrations after sync');
+      }
       const usableGptCodeCount = await countUsableGptCodeIntegrations();
       if (usableGptCodeCount === 0) {
         // gpt_code (Codex) is only needed by runs that actually spawn a Codex
@@ -322,7 +354,8 @@ async function syncComputeTokensWithRetries(): Promise<void> {
         throw new Error('No usable gpt_code integrations after sync');
       }
       console.log(
-        `  ✅ Compute Tokens (integrations): ${count} synced, ${usableGptCodeCount} usable gpt_code`
+        `  ✅ Compute Tokens (integrations): ${count} synced, ` +
+          `${usableClaudeCodeCount} usable claude_code, ${usableGptCodeCount} usable gpt_code`
       );
       return;
     } catch (err) {

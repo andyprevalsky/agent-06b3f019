@@ -4004,6 +4004,8 @@ def _completed_child_task_structured_response(
             continue
         if tool_name == "spawn_claude_code_agent" and metadata.get("action_type") != "task_complete":
             continue
+        if tool_name == "spawn_claude_code_agent" and metadata.get("success") is not True:
+            continue
         structured_response = metadata.get("structured_response")
         if isinstance(structured_response, dict) and isinstance(structured_response.get("output"), dict):
             structured_response = structured_response["output"]
