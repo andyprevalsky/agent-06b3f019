@@ -1776,7 +1776,8 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
     assert task.prompt == approved_prompt
     assert get_task_by_name("browser-agent").prompt == approved_prompt
     assert task.approval_handling == "auto_approve"
-    assert task.expected_attention_kind == "write_lock"
+    assert task.expected_attention_kind is None
+    assert task.expected_attention_kind_any_of == ["payment_approval", "write_lock"]
     assert task.expected_approval_count == 1
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.min_steps == {"browser": 5}
@@ -1812,9 +1813,180 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
     )
     assert approval_check["required_strings"] == ["beanie"]
     assert approval_check["require_amount"] is True
+    runtime_criteria = " ".join(task.evaluators[0]["criteria"]).lower()
+    assert "payment-card approval or final write approval" in runtime_criteria
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    assert "payment-card approval or final write approval" in semantic_criteria
     for requirement in ("black", "under $35", "well-made", "buy now", "completed"):
         assert requirement in semantic_criteria
+
+
+def test_amazon_beanie_accepts_exactly_one_payment_or_write_lock():
+    """Either purchase approval is valid, but unrelated or duplicate approvals fail."""
+    from dataclasses import replace
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _attention_request_matches_task, evaluate_task
+
+    task = replace(
+        get_task_by_name("browser-agent-amazon-cookie-payment"),
+        expected_tools=[],
+        expected_tool_counts=None,
+        enforce_declared_evaluators=False,
+        evaluators=[],
+    )
+    payment = {"metadata": {"requestPaymentCard": {}}}
+    write_lock = {"metadata": {"requestUserApproval": {"writePermission": True}}}
+    auth = {"metadata": {"attentionKind": "auth_assistance"}}
+
+    assert _attention_request_matches_task(task, payment) is True
+    assert _attention_request_matches_task(task, write_lock) is True
+    assert _attention_request_matches_task(task, auth) is False
+    assert _attention_request_matches_task(task, write_lock, observed_count=1) is False
+
+    payment_only = {
+        "agent": {"status": "COMPLETED", "progress": 1.0},
+        "messages": [],
+        "_benchmark": {"attention_request_kind_seen": "payment_approval"},
+    }
+    write_lock_only = {
+        "agent": {"status": "COMPLETED", "progress": 1.0},
+        "messages": [],
+        "_benchmark": {"attention_request_kind_seen": "write_lock"},
+    }
+    assert evaluate_task(task, payment_only, approvals_triggered=1) == (True, None)
+    assert evaluate_task(task, write_lock_only, approvals_triggered=1) == (True, None)
+    passed, reason = evaluate_task(task, payment_only, approvals_triggered=2)
+    assert passed is False
+    assert reason == "Expected exactly 1 approval request(s), observed 2"
+
+
+def _amazon_attention_poll_task():
+    from dataclasses import replace
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    return replace(
+        get_task_by_name("browser-agent-amazon-cookie-payment"),
+        expected_tools=[],
+        expected_tool_counts=None,
+        enforce_declared_evaluators=False,
+        evaluators=[],
+        timeout_seconds=5,
+    )
+
+
+async def _run_amazon_attention_poll(requests: list[dict]):
+    import benchmarks.run_benchmark as bench
+
+    agent_reads = 0
+    attention_reads = 0
+    responses: list[tuple[str, str]] = []
+    agent_id = "agent-amazon"
+
+    async def fake_get_agent(_base_url: str, _agent_id: str) -> dict:
+        nonlocal agent_reads
+        agent_reads += 1
+        status = "COMPLETED" if agent_reads > len(requests) else "ACTIVE"
+        return {
+            "agent": {"status": status, "progress": 1.0},
+            "messages": [],
+        }
+
+    async def fake_get_attention_requests(_base_url: str) -> list[dict]:
+        nonlocal attention_reads
+        attention_reads += 1
+        if attention_reads <= len(requests):
+            return [requests[attention_reads - 1]]
+        return []
+
+    async def fake_respond(_base_url: str, request_id: str, response: str) -> None:
+        responses.append((request_id, response))
+
+    async def fake_tree_stats(_base_url: str, _agent_id: str) -> dict:
+        return {
+            "total_messages": 0,
+            "agent_count": 1,
+            "total_cost_cents": 0,
+            "active_count": 1,
+            "failed_count": 0,
+            "error_agents": [],
+            "all_agents": [
+                {
+                    "agent_id": agent_id,
+                    "status": "ACTIVE",
+                    "message_count": 0,
+                }
+            ],
+        }
+
+    async def fake_message_counts(_base_url: str, _agent_ids: list[str]) -> dict[str, int]:
+        return {}
+
+    originals = {
+        "get_agent": bench.get_agent,
+        "get_attention_requests": bench.get_attention_requests,
+        "respond_to_attention_request": bench.respond_to_attention_request,
+        "_fetch_tree_stats": bench._fetch_tree_stats,
+        "_fetch_message_counts": bench._fetch_message_counts,
+        "_detect_infra_errors_from_fly": bench._detect_infra_errors_from_fly,
+        "validate_context": bench.validate_context,
+        "POLL_INTERVAL": bench.POLL_INTERVAL,
+    }
+    try:
+        bench.get_agent = fake_get_agent
+        bench.get_attention_requests = fake_get_attention_requests
+        bench.respond_to_attention_request = fake_respond
+        bench._fetch_tree_stats = fake_tree_stats
+        bench._fetch_message_counts = fake_message_counts
+        bench._detect_infra_errors_from_fly = lambda _agent_ids: []
+        bench.validate_context = lambda _messages: []
+        bench.POLL_INTERVAL = 0
+        result = await bench.poll_agent(
+            "http://localhost:55120",
+            agent_id,
+            _amazon_attention_poll_task(),
+        )
+    finally:
+        for name, value in originals.items():
+            setattr(bench, name, value)
+    return result, responses
+
+
+async def test_amazon_beanie_poll_rejects_second_or_unrelated_approval_without_resolving_it():
+    """The live poll boundary approves one allowed kind and fails closed on every other request."""
+    payment = {
+        "id": "payment-approval",
+        "agentId": "agent-amazon",
+        "metadata": {"requestPaymentCard": {}},
+    }
+    write_lock = {
+        "id": "write-lock",
+        "agentId": "agent-amazon",
+        "metadata": {"requestUserApproval": {"writePermission": True}},
+    }
+    auth = {
+        "id": "auth-assistance",
+        "agentId": "agent-amazon",
+        "metadata": {"attentionKind": "auth_assistance"},
+    }
+
+    (data, triggered, resolved, failure), responses = await _run_amazon_attention_poll(
+        [payment, write_lock]
+    )
+    assert failure is not None and "Expected exactly one attention request" in failure
+    assert data["_benchmark"]["attention_kinds_observed"] == [
+        "payment_approval",
+        "write_lock",
+    ]
+    assert (triggered, resolved) == (1, 1)
+    assert responses == [("payment-approval", "approved")]
+
+    (data, triggered, resolved, failure), responses = await _run_amazon_attention_poll([auth])
+    assert failure is not None and "auth_assistance" in failure
+    assert data["_benchmark"]["attention_kinds_observed"] == ["auth_assistance"]
+    assert (triggered, resolved) == (0, 0)
+    assert responses == []
 
 
 def test_alchemy_sauna_catalog_requires_single_clean_completed_booking():
@@ -8222,6 +8394,14 @@ async def run_all_tests():
     r.record(
         "amazon_beanie_clean_completed_purchase",
         test_amazon_beanie_catalog_requires_clean_completed_cart_purchase,
+    )
+    r.record(
+        "amazon_beanie_exactly_one_payment_or_write_lock",
+        test_amazon_beanie_accepts_exactly_one_payment_or_write_lock,
+    )
+    await r.record_async(
+        "amazon_beanie_poll_rejects_second_or_unrelated_approval",
+        test_amazon_beanie_poll_rejects_second_or_unrelated_approval_without_resolving_it,
     )
     r.record(
         "alchemy_sauna_clean_completed_booking",
