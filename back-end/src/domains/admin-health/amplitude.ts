@@ -1,4 +1,5 @@
 import { createLogger } from '../../providers/logger';
+import { retryWithBackoff } from '../../providers/retry';
 import { AMPLITUDE_API_BASE_URL, AMPLITUDE_API_KEY, AMPLITUDE_SECRET_KEY } from './config';
 
 const log = createLogger('AdminHealth');
@@ -52,11 +53,21 @@ const MAX_CONCURRENT_REQUESTS = 1;
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FUNNEL_QUERY_COST_PER_DAY = FUNNEL_EVENTS.length * 2;
 const MAX_FUNNEL_QUERY_COST_PER_FIVE_MINUTES = 1000;
+const AMPLITUDE_CONCURRENCY_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
 const funnelCache = new Map<string, { expiresAt: number; value: AmplitudeFunnelResult }>();
 let knownEventsCache: { expiresAt: number; value: Set<string> } | null = null;
 let knownEventsRequest: Promise<Set<string>> | null = null;
 let activeRequests = 0;
 const requestWaiters: Array<() => void> = [];
+
+class AmplitudeHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly detail: string
+  ) {
+    super(`Amplitude ${status}: ${detail}`);
+  }
+}
 
 function emptyCounts(value: number | null): Record<AmplitudeFunnelStepId, number | null> {
   return Object.fromEntries(FUNNEL_EVENTS.map((event) => [event.id, value])) as Record<
@@ -85,14 +96,32 @@ async function withRequestSlot<T>(request: () => Promise<T>): Promise<T> {
 async function amplitudeGet<T>(path: string, query?: URLSearchParams): Promise<T> {
   const url = new URL(path, AMPLITUDE_API_BASE_URL);
   if (query !== undefined) url.search = query.toString();
-  return withRequestSlot(async () => {
-    const response = await fetch(url, { headers: { Authorization: authHeader() } });
-    if (!response.ok) {
-      const detail = (await response.text()).slice(0, 500);
-      throw new Error(`Amplitude ${response.status}: ${detail}`);
-    }
-    return (await response.json()) as T;
-  });
+  return withRequestSlot(() =>
+    retryWithBackoff(
+      async () => {
+        const response = await fetch(url, { headers: { Authorization: authHeader() } });
+        if (!response.ok) {
+          const detail = (await response.text()).slice(0, 500);
+          throw new AmplitudeHttpError(response.status, detail);
+        }
+        return (await response.json()) as T;
+      },
+      {
+        maxRetries: AMPLITUDE_CONCURRENCY_RETRY_DELAYS_MS.length + 1,
+        fixedDelays: AMPLITUDE_CONCURRENCY_RETRY_DELAYS_MS,
+        isRetryable: isRetryableAmplitudeError,
+        component: 'Amplitude',
+      }
+    )
+  );
+}
+
+export function isRetryableAmplitudeError(error: unknown): boolean {
+  return (
+    error instanceof AmplitudeHttpError &&
+    error.status === 429 &&
+    /exceeded concurrent limit/i.test(error.detail)
+  );
 }
 
 async function fetchKnownEvents(): Promise<Set<string>> {
