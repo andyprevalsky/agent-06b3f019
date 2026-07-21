@@ -259,6 +259,34 @@ mark_ready() {
   gh pr ready --repo "$GITHUB_REPOSITORY" "$pr_url"
 }
 
+slack_message() {
+  local affected_user_name state fe_url pr_url run_url
+  require_agent_id
+  affected_user_name="${AFFECTED_USER_NAME:-}"
+  state="${RCA_STATE:-}"
+  fe_url="${RCA_FE_URL:-}"
+  pr_url="${RCA_PR_URL:-}"
+  run_url="${RCA_RUN_URL:-}"
+
+  [ -n "$affected_user_name" ] || fail "AFFECTED_USER_NAME is required"
+  [ "${#affected_user_name}" -le 160 ] || fail "AFFECTED_USER_NAME is too long"
+  [[ "$affected_user_name" != *$'\n'* && "$affected_user_name" != *$'\r'* ]] || \
+    fail "AFFECTED_USER_NAME must be one line"
+  case "$state" in
+    '🟢 Ready for review — approve to ship'|'🔵 Draft PR open (needs attention)') ;;
+    *) fail "RCA_STATE is invalid" ;;
+  esac
+  [ "$fe_url" = "https://roselabs.ai/?agent-id=$AGENT_ID" ] || fail "RCA_FE_URL is invalid"
+  [[ "$pr_url" =~ ^https://github\.com/Rose-Ai-Labs/rose/pull/[0-9]+$ ]] || fail "RCA_PR_URL is invalid"
+  [[ "$run_url" =~ ^https://github\.com/Rose-Ai-Labs/rose/actions/runs/[0-9]+$ ]] || \
+    fail "RCA_RUN_URL is invalid"
+
+  printf '*Affected user:* %s\n' "$affected_user_name"
+  printf '*Current state:* %s\n' "$state"
+  printf '*Links:* <%s|FE View> · <%s|PR> · <%s|GH Action RCA Run>\n' "$fe_url" "$pr_url" "$run_url"
+  printf '%s\n' "*Agent ID:* \`$AGENT_ID\`"
+}
+
 case "${1:-}" in
   evidence) [ "$#" -eq 1 ] || fail "evidence takes no arguments"; evidence ;;
   benchmark) [ "$#" -eq 1 ] || fail "benchmark takes no arguments"; benchmark ;;
@@ -267,5 +295,6 @@ case "${1:-}" in
   publish-draft) [ "$#" -eq 1 ] || fail "publish-draft takes no arguments"; publish_draft ;;
   mark-ready) [ "$#" -eq 1 ] || fail "mark-ready takes no arguments"; mark_ready ;;
   ensure-draft) [ "$#" -eq 1 ] || fail "ensure-draft takes no arguments"; ensure_draft ;;
-  *) fail "usage: scripts/auto-rca-tool {evidence|benchmark|offline-gates|smoke-gates|publish-draft|mark-ready|ensure-draft}" ;;
+  slack-message) [ "$#" -eq 1 ] || fail "slack-message takes no arguments"; slack_message ;;
+  *) fail "usage: scripts/auto-rca-tool {evidence|benchmark|offline-gates|smoke-gates|publish-draft|mark-ready|ensure-draft|slack-message}" ;;
 esac

@@ -15,7 +15,10 @@ set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FLEET="$ROOT_DIR/scripts/run-bench-fleet"
-APP="navi-whisper-lux-bench"
+# Keep the fake app scope unique. Other workspaces may run this same test (or
+# the real startup reaper) concurrently, and the production app name would let
+# their correctly scoped reaper kill this fixture before its parent is read.
+APP="navi-whisper-lux-bench-reaper-test-$$"
 TMP="$(mktemp -d)"
 LIVE_PID=""
 cleanup() {
@@ -44,15 +47,17 @@ chmod +x "$TMP/flyctl"
 LIVE_PID=$!
 sleep 1
 
-orphan_ppid="$(ps -o ppid= -p "$(pgrep -f 'proxy 65001' | head -1)" 2>/dev/null | tr -d ' ')"
+orphan_ppid="$(ps -o ppid= -p "$(pgrep -f "dead.vm.$APP.internal" | head -1)" 2>/dev/null | tr -d ' ')"
 [ "$orphan_ppid" = "1" ] || fail "test setup: planted orphan is not reparented to init (ppid=$orphan_ppid)"
 
 # Exact selection+kill the reaper uses.
+# This intentionally mirrors the production ps selector.
+# shellcheck disable=SC2009
 ps -o pid,ppid,command -ax 2>/dev/null | grep "flyctl proxy" | grep -F -- "-a $APP" \
     | awk '$2==1{print $1}' | while read -r pid; do [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null; done
 sleep 1
 
-pgrep -f 'proxy 65001' >/dev/null && fail "orphaned proxy was NOT reaped"
+pgrep -f "dead.vm.$APP.internal" >/dev/null && fail "orphaned proxy was NOT reaped"
 kill -0 "$LIVE_PID" 2>/dev/null || fail "a LIVE run's proxy was wrongly reaped (rule 27 violation)"
 
 echo "PASS: orphaned data-plane proxies are reaped; live-run proxies are preserved"
