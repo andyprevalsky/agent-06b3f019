@@ -1,6 +1,6 @@
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import {
-  createCardProvider,
+  createCardProviderForAgent,
   isCardLive,
   type CardProvider,
   type CardProviderDetailsResult,
@@ -117,7 +117,8 @@ export async function cleanupAgentPurchaseCards(
   for (const purchase of openPurchases) {
     const cardId = purchase.cardId;
     if (cardId === null) continue;
-    const activeCardProvider = cardProvider ?? createCardProvider(purchase.userId);
+    const activeCardProvider =
+      cardProvider ?? (await createCardProviderForAgent(purchase.userId, purchase.agentId));
     try {
       let cardWasUsed: boolean;
       try {
@@ -364,7 +365,8 @@ export async function reconcileDissolvedPurchaseHolds(
     }
     if (!hasDissolvedHold(paymentIntent)) continue;
 
-    const activeCardProvider = cardProvider ?? createCardProvider(purchase.userId);
+    const activeCardProvider =
+      cardProvider ?? (await createCardProviderForAgent(purchase.userId, purchase.agentId));
     let cardWasUsed: boolean;
     try {
       const details = await activeCardProvider.getDetails(cardId);
