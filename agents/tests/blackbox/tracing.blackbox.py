@@ -267,18 +267,25 @@ def test_trace_and_rose_headers_use_context_then_fallbacks():
 def test_rss_snapshot_reads_process_memory_and_caches():
     from helpers import tracing
 
-    # Reset the TTL cache so the psutil branch executes.
-    tracing._rss_cache = {}
-    tracing._rss_cache_at = -1e9
-    snapshot = tracing._rss_snapshot()
-    assert snapshot["process_rss_bytes"] > 0
-    assert snapshot["tree_rss_bytes"] >= snapshot["process_rss_bytes"]
+    original_ttl = tracing._RSS_CACHE_TTL_S
+    try:
+        # A process-tree walk can exceed the production one-second TTL when the
+        # coverage runner executes 30 domains at once. Widen only this test's
+        # observation window so it deterministically exercises the cache hit.
+        tracing._RSS_CACHE_TTL_S = 60.0
+        tracing._rss_cache = {}
+        tracing._rss_cache_at = -1e9
+        snapshot = tracing._rss_snapshot()
+        assert snapshot["process_rss_bytes"] > 0
+        assert snapshot["tree_rss_bytes"] >= snapshot["process_rss_bytes"]
 
-    # Second call within the TTL returns the cached object identity.
-    assert tracing._rss_snapshot() is snapshot
+        # Second call within the TTL returns the cached object identity.
+        assert tracing._rss_snapshot() is snapshot
 
-    metadata = tracing._memory_metadata("start", snapshot)
-    assert metadata["memory_process_rss_start_bytes"] == snapshot["process_rss_bytes"]
+        metadata = tracing._memory_metadata("start", snapshot)
+        assert metadata["memory_process_rss_start_bytes"] == snapshot["process_rss_bytes"]
+    finally:
+        tracing._RSS_CACHE_TTL_S = original_ttl
 
 
 def test_temporal_activity_metadata_empty_outside_activity():
