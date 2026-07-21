@@ -59,7 +59,11 @@ require_text "$WORKFLOW" 'No RCA pull request was created' "missing PR must be a
 require_text "$RCA_TOOL" "sudo tee \"${LITERAL_DOLLAR}GATE_STATE_DIR/${LITERAL_DOLLAR}{gate}.sha\"" "gate attestations must be written through the root-owned broker state"
 require_text "$RCA_TOOL" "sudo cat \"${LITERAL_DOLLAR}marker\"" "gate attestations must be read from the root-owned broker state"
 require_absent "$RCA_TOOL" "\"${LITERAL_DOLLAR}CONTEXT_DIR/${LITERAL_DOLLAR}{gate}.sha\"" "gate attestations must not live in the agent-writable context directory"
-require_text "$RCA_TOOL" 'gh auth setup-git' "the broker must configure Git authentication before pushing"
+require_text "$RCA_TOOL" "GIT_ASKPASS=\"${LITERAL_DOLLAR}askpass\" GIT_TERMINAL_PROMPT=0" "the broker must authenticate pushes through an ephemeral askpass helper"
+require_text "$RCA_TOOL" "git_push_branch \"${LITERAL_DOLLAR}branch\"" "all RCA pushes must use the authenticated broker path"
+require_absent "$RCA_TOOL" 'gh auth setup-git' "the broker must not rely on gh auth setup-git for ephemeral GITHUB_TOKEN authentication"
+require_absent "$RCA_TOOL" "${LITERAL_DOLLAR}{GH_TOKEN}@github.com" "the broker must not place the GitHub token in a remote URL"
+require_absent "$RCA_TOOL" 'extraheader' "the broker must not persist a derived credential in repository config"
 
 ensure_line="$(grep -nF 'name: Ensure preliminary RCA draft' "$WORKFLOW" | cut -d: -f1)"
 require_line="$(grep -nF 'name: Require RCA pull request' "$WORKFLOW" | cut -d: -f1)"

@@ -28,6 +28,38 @@ require_clean_checkout() {
   fi
 }
 
+git_push_branch() {
+  local branch="$1" remote_url askpass_dir askpass
+  [ -n "${GH_TOKEN:-}" ] || fail "GH_TOKEN is required to push the RCA branch"
+  [[ "${GITHUB_REPOSITORY:-}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "GITHUB_REPOSITORY is invalid"
+  remote_url="$(git -C "$ROOT_DIR" remote get-url origin)"
+  case "$remote_url" in
+    "https://github.com/$GITHUB_REPOSITORY"|"https://github.com/$GITHUB_REPOSITORY.git") ;;
+    *) fail "origin does not match GITHUB_REPOSITORY" ;;
+  esac
+
+  askpass_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/rose-auto-rca-askpass.XXXXXX")"
+  askpass="$askpass_dir/askpass"
+  {
+    printf '%s\n' '#!/usr/bin/env sh'
+    # The generated helper expands $1 when Git invokes it.
+    # shellcheck disable=SC2016
+    printf '%s\n' 'case "$1" in'
+    printf '%s\n' '  *Username*) printf "%s\n" x-access-token ;;'
+    # The generated helper reads the inherited token at invocation time.
+    # shellcheck disable=SC2016
+    printf '%s\n' '  *Password*) printf "%s\n" "$GH_TOKEN" ;;'
+    printf '%s\n' '  *) exit 1 ;;'
+    printf '%s\n' 'esac'
+  } > "$askpass"
+  chmod 0700 "$askpass_dir" "$askpass"
+  (
+    trap 'rm -f "$askpass"; rmdir "$askpass_dir"' EXIT
+    GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 \
+      git -C "$ROOT_DIR" push --set-upstream origin "$branch"
+  )
+}
+
 require_gate_state_dir() {
   [[ "$GATE_STATE_DIR" =~ ^/var/lib/rose-auto-rca/[0-9]+$ ]] || \
     fail "AUTO_RCA_GATE_STATE_DIR must be the workflow's root-owned run directory"
@@ -118,8 +150,7 @@ publish_draft() {
     fail "RCA must commit a fix or a scaffolded reproduction before publishing"
   fi
 
-  gh auth setup-git
-  git -C "$ROOT_DIR" push --set-upstream origin "$branch"
+  git_push_branch "$branch"
   existing_pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json url --jq '.[0].url // empty')"
   if [ -n "$existing_pr" ]; then
     printf '%s\n' "$existing_pr"
@@ -192,8 +223,7 @@ ensure_draft() {
     git -C "$ROOT_DIR" commit -m "auto-RCA: scaffold investigation for $AGENT_ID"
   fi
 
-  gh auth setup-git
-  git -C "$ROOT_DIR" push --set-upstream origin "$branch"
+  git_push_branch "$branch"
   run_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id"
   agent_url="https://roselabs.ai/?agent-id=$AGENT_ID"
   body="$(printf '%s\n\n%s\n\n%s\n%s\n\n%s\n\n<!-- rca-slack ts=%s channel=%s -->' \
