@@ -49,6 +49,7 @@ export function useAgentProvider({
   return {
     agent: state.agent,
     setAgent: state.setAgent,
+    inspectionContext: state.inspectionContext,
     selectedAgentId: state.selectedAgentId,
     setSelectedAgentId: selection.setSelectedAgentId,
     stagePendingAgentCreation: selection.stagePendingAgentCreation,

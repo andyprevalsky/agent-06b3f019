@@ -130,28 +130,37 @@ export async function getBenchmarkArchivedTree(busId: string) {
   return { agents: archived };
 }
 
-export async function getAgentDetail(
-  agentId: string,
-  userId?: string,
-  since?: Date,
-  allowBenchmarkArchive = false
-) {
-  const agent = await repo.findAgentWithRelations(agentId, userId);
+interface AgentDetailOptions {
+  userId?: string;
+  since?: Date;
+  allowBenchmarkArchive?: boolean;
+  inspectionViewerUserId?: string;
+}
+
+async function getInspectionContext(agentUserId: string, viewerUserId?: string) {
+  if (viewerUserId === undefined || viewerUserId === agentUserId) return null;
+  const identity = await repo.findUserInspectionIdentity(agentUserId);
+  return {
+    user_id: agentUserId,
+    name: identity?.name ?? null,
+    phone: identity?.phone ?? null,
+    email: identity?.email ?? null,
+  };
+}
+
+export async function getAgentDetail(agentId: string, options: AgentDetailOptions = {}) {
+  const agent = await repo.findAgentWithRelations(agentId, options.userId);
 
   if (!agent) {
-    return allowBenchmarkArchive ? getBenchmarkArchivedDetail(agentId) : null;
+    return options.allowBenchmarkArchive === true ? getBenchmarkArchivedDetail(agentId) : null;
   }
 
-  const messages = await repo.findMessages(agentId, since);
-
-  // Fetch parent goal if this is a sub-agent
-  let parentGoal: string | null = null;
-  if (agent.parentAgentId !== null) {
-    parentGoal = await repo.findParentGoal(agent.parentAgentId);
-  }
-
-  // Fetch tool usage summary
-  const toolUsages = await repo.findToolUsages(agentId);
+  const [messages, parentGoal, toolUsages, inspectionContext] = await Promise.all([
+    repo.findMessages(agentId, options.since),
+    agent.parentAgentId === null ? Promise.resolve(null) : repo.findParentGoal(agent.parentAgentId),
+    repo.findToolUsages(agentId),
+    getInspectionContext(agent.userId, options.inspectionViewerUserId),
+  ]);
   const { toolTokensIn, toolTokensOut, totalCostCents } = computeToolTokens(toolUsages);
 
   return {
@@ -212,6 +221,7 @@ export async function getAgentDetail(
       has_more: false,
       oldest_timestamp: null,
     },
+    inspection_context: inspectionContext,
   };
 }
 

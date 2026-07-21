@@ -84,6 +84,23 @@ export interface AgentDetail extends Agent {
   response_schema?: ResponseSchema | null;
 }
 
+export interface InspectionContext {
+  user_id: string;
+  name: string | null;
+  phone: string | null;
+  email: string | null;
+}
+
+export interface AgentDetailResponse {
+  agent: AgentDetail;
+  messages: Message[];
+  pagination: {
+    has_more: boolean;
+    oldest_timestamp: string | null;
+  };
+  inspection_context?: InspectionContext | null;
+}
+
 export interface Message {
   message_id: string;
   timestamp: string;
