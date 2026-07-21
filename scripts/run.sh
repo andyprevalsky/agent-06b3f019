@@ -1238,7 +1238,10 @@ start_world_model_harness() {
     local health_timeout_default=180
     local health_timeout_max=600
     local health_timeout="${WMH_HEALTH_TIMEOUT_SECONDS:-$health_timeout_default}"
-    if ! [[ "$health_timeout" =~ ^[1-9][0-9]*$ ]] || (( health_timeout > health_timeout_max )); then
+    local health_timeout_max_digits=${#health_timeout_max}
+    if ! [[ "$health_timeout" =~ ^[1-9][0-9]*$ ]] || \
+        (( ${#health_timeout} > health_timeout_max_digits )) || \
+        (( health_timeout > health_timeout_max )); then
         echo "⚠️  Invalid WMH_HEALTH_TIMEOUT_SECONDS=$health_timeout; using 180s."
         health_timeout=$health_timeout_default
     fi

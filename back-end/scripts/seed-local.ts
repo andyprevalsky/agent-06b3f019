@@ -32,6 +32,14 @@ import {
 import { selectRemoteDatabaseUrl } from './seed-remote-database-url';
 
 const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
+const COMPUTE_TOKEN_SOURCE_DATABASE_URL =
+  process.env.SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL?.trim();
+
+if (COMPUTE_TOKENS_ONLY && !COMPUTE_TOKEN_SOURCE_DATABASE_URL) {
+  throw new Error(
+    '--compute-tokens-only requires SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL; refusing to fall back to .env'
+  );
+}
 
 // Parse .env file directly to get remote DB URL
 // (process.env.DATABASE_URL is already overridden to local by run.sh). Isolated
@@ -39,10 +47,10 @@ const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
 // shared workspace DB so a production-side cooldown cannot invalidate a local
 // deploy gate.
 const envPath = resolve(__dirname, '..', '.env');
-const envVars = dotenv.parse(readFileSync(envPath));
-const REMOTE_URL =
-  (COMPUTE_TOKENS_ONLY && process.env.SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL) ||
-  selectRemoteDatabaseUrl(envVars);
+const envVars = COMPUTE_TOKENS_ONLY ? {} : dotenv.parse(readFileSync(envPath));
+const REMOTE_URL = COMPUTE_TOKENS_ONLY
+  ? COMPUTE_TOKEN_SOURCE_DATABASE_URL
+  : selectRemoteDatabaseUrl(envVars);
 
 if (!REMOTE_URL) {
   console.error('❌ No remote DATABASE_URL found in .env');
@@ -395,7 +403,8 @@ async function syncComputeTokensWithRetries(): Promise<void> {
         // Default (flag unset) stays strict so Codex regressions still surface.
         if (process.env.SEED_ALLOW_MISSING_GPT_CODE === '1') {
           console.warn(
-            `  ⚠️  Compute Tokens (integrations): ${count} synced, 0 usable gpt_code — ` +
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, ` +
+              `${usableClaudeCodeCount} usable claude_code, 0 usable gpt_code — ` +
               `proceeding without Codex (SEED_ALLOW_MISSING_GPT_CODE=1; this run does not use Codex)`
           );
           return;

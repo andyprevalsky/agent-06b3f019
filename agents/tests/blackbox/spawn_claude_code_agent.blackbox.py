@@ -1056,20 +1056,31 @@ def test_handler_select_code_provider_uses_codex_for_gpt_compute():
     assert _select_code_provider(wf, "gpt-token") == "codex"
 
 
-def test_handler_select_code_provider_env_override_forces_claude():
-    """Benchmark/local verification can force the real Claude Code path."""
+def test_handler_select_code_provider_is_independent_of_process_environment():
+    """Workflow provider selection must not change when an env override changes."""
     from domains.spawn_claude_code_agent.handler import _select_code_provider
 
     previous = os.environ.get("ROSE_CODE_AGENT_PROVIDER")
     os.environ["ROSE_CODE_AGENT_PROVIDER"] = "claude"
     try:
         wf = SimpleNamespace(compute_token_provider="gpt")
-        assert _select_code_provider(wf, "gpt-token") == "claude"
+        assert _select_code_provider(wf, "gpt-token") == "codex"
     finally:
         if previous is None:
             os.environ.pop("ROSE_CODE_AGENT_PROVIDER", None)
         else:
             os.environ["ROSE_CODE_AGENT_PROVIDER"] = previous
+
+
+def test_activity_provider_resolver_applies_valid_environment_override():
+    """Activity-local resolution snapshots a valid provider override."""
+    from domains.spawn_claude_code_agent.service import resolve_code_agent_provider
+
+    with patch.dict(os.environ, {"ROSE_CODE_AGENT_PROVIDER": "claude"}):
+        assert resolve_code_agent_provider("codex") == "claude"
+
+    with patch.dict(os.environ, {"ROSE_CODE_AGENT_PROVIDER": "invalid"}):
+        assert resolve_code_agent_provider("codex") == "codex"
 
 
 def test_handler_select_code_provider_keeps_claude_without_gpt_token():
@@ -1599,6 +1610,30 @@ def test_codex_completed_turn_count_counts_unique_turn_completed_events():
 # ── spawn_claude_code_activity ───────────────────────────────────────
 
 
+async def test_spawn_activity_resolves_claude_credential_inside_activity():
+    """Claude OAuth is fetched at the activity boundary, not supplied by workflow args."""
+    from domains.spawn_claude_code_agent import service
+
+    fetch = AsyncMock(return_value={"accessToken": "activity-secret", "source": "pool"})
+    with patch("helpers.llm.fetch_claude_max_token", fetch):
+        token = await service._resolve_claude_token_for_activity("u", "claude")
+
+    assert token == "activity-secret"
+    fetch.assert_awaited_once_with("u")
+
+
+async def test_spawn_activity_does_not_fetch_claude_credential_for_codex():
+    """Codex sessions never fetch or receive Claude OAuth material."""
+    from domains.spawn_claude_code_agent import service
+
+    fetch = AsyncMock(return_value={"accessToken": "unexpected"})
+    with patch("helpers.llm.fetch_claude_max_token", fetch):
+        token = await service._resolve_claude_token_for_activity("u", "codex")
+
+    assert token is None
+    fetch.assert_not_awaited()
+
+
 async def test_spawn_activity_requires_output_schema():
     """Missing output_schema raises ValueError before any sandbox work."""
     from domains.spawn_claude_code_agent import service
@@ -1643,7 +1678,10 @@ async def test_spawn_activity_happy_path_end_to_end():
     async def fake_verifier(**kwargs):
         return (1.0, "great", {"out": {"path": "/home/user/output/a.txt"}}, 10, 4)
 
+    seen_loop = {}
+
     async def fake_loop(**kwargs):
+        seen_loop.update(kwargs)
         return (0, False, [], 5, 3, [{"version": 1, "provider": "claude", "type": "session"}])
 
     async def fake_persist(*a, **kw):
@@ -1669,6 +1707,11 @@ async def test_spawn_activity_happy_path_end_to_end():
         patch.object(service, "_run_verifier", side_effect=fake_verifier),
         patch.object(service, "persist_terminal_output", side_effect=fake_persist),
         patch.object(service, "close_e2b_session", side_effect=fake_close),
+        patch.object(
+            service,
+            "_resolve_claude_token_for_activity",
+            AsyncMock(return_value="activity-local-claude-token"),
+        ),
         patch(
             "helpers.model_pricing.get_model_pricing_with_fallback",
             AsyncMock(return_value=fake_pricing),
@@ -1698,7 +1741,9 @@ async def test_spawn_activity_happy_path_end_to_end():
     assert any(u["type"] == "llm" for u in result["usage_items"])
     assert any(u["type"] == "service" for u in result["usage_items"])
     assert result["output_files"] == [{"id": "f1", "path": "/home/user/output/a.txt"}]
+    assert result["code_provider"] == "claude"
     assert seen_create_session["fast_mode_cache_enabled"] is True
+    assert seen_loop["claude_token"] == "activity-local-claude-token"
     fake_collector.start.assert_awaited()
     fake_collector.stop.assert_awaited()
 
@@ -1734,6 +1779,7 @@ async def test_spawn_activity_cancelled_cleanup():
         patch.object(service, "_run_agentic_loop", side_effect=fake_loop),
         patch.object(service, "close_e2b_session", side_effect=fake_close),
         patch.object(service, "persist_terminal_output", AsyncMock()),
+        patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value=None)),
         patch(
             "helpers.model_pricing.get_model_pricing_with_fallback",
             AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
@@ -1782,6 +1828,7 @@ async def test_spawn_activity_error_reraises_after_cleanup():
         patch.object(service, "create_e2b_session", side_effect=fake_create_session),
         patch.object(service, "_run_agentic_loop", side_effect=fake_loop),
         patch.object(service, "close_e2b_session", side_effect=fake_close),
+        patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value=None)),
         patch(
             "helpers.model_pricing.get_model_pricing_with_fallback",
             AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
@@ -1844,6 +1891,10 @@ class _FakeCCWorkflow:
 
     async def wait_condition(self, predicate):
         return None
+
+    async def execute_activity(self, fn, args=None, **kwargs):
+        assert fn.__name__ == "resolve_code_agent_provider_activity"
+        return args[0]
 
 
 def _patch_cc_workflow(fake):
@@ -1923,22 +1974,29 @@ async def test_cc_execute_tool_happy_path_yields_finished():
     assert finished.data["usage"]["service"][0]["cost_cents"] == 0.05
 
 
-async def test_cc_execute_tool_forced_claude_fetches_matching_credential():
-    """Forced Claude must not send a GPT-only workflow through shared API billing."""
+async def test_cc_execute_tool_records_forced_provider_without_serializing_credential():
+    """Forced Claude is recorded while OAuth material stays out of workflow history."""
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
 
-    handle = _FakeActivityHandle(result={"success": True, "message": "ok", "output_files": []})
+    handle = _FakeActivityHandle(
+        result={
+            "success": True,
+            "message": "ok",
+            "output_files": [],
+            "code_provider": "claude",
+        }
+    )
 
     class _ForcedClaudeWorkflow(_FakeCCWorkflow):
         def __init__(self):
             super().__init__(handle)
-            self.credential_fetches = 0
+            self.provider_resolutions = 0
 
         async def execute_activity(self, fn, args=None, **kwargs):
-            self.credential_fetches += 1
-            assert fn.__name__ == "fetch_claude_max_token_activity"
-            assert args == ["u-1"]
-            return {"accessToken": "fresh-claude-token", "source": "pool"}
+            self.provider_resolutions += 1
+            assert fn.__name__ == "resolve_code_agent_provider_activity"
+            assert args == ["codex"]
+            return "claude"
 
     fake = _ForcedClaudeWorkflow()
     restore = _patch_cc_workflow(fake)
@@ -1953,20 +2011,21 @@ async def test_cc_execute_tool_forced_claude_fetches_matching_credential():
     finally:
         restore()
 
-    assert fake.credential_fetches == 1
-    assert fake.started_activity_args[8] == "fresh-claude-token"
+    assert fake.provider_resolutions == 1
+    assert fake.started_activity_args[8] is None
     assert fake.started_activity_args[9] == "claude"
     assert fake.started_activity_args[10] == "active-gpt-token"
+    assert "fresh-claude-token" not in repr(fake.started_activity_args)
 
 
-async def test_cc_execute_tool_incomplete_success_false_title():
-    """success=False yields 'Task Incomplete' title."""
+async def test_cc_execute_tool_non_boolean_success_is_incomplete():
+    """Only the boolean True can yield a completed title and success metadata."""
     from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
     from tools.base import MessageStatus
 
     handle = _FakeActivityHandle(
         result={
-            "success": False,
+            "success": "false",
             "message": "Couldn't finish",
             "task_id": "t-2",
             "output_files": [],
@@ -2204,7 +2263,14 @@ async def run_all_tests():
     r.record("handler_resolve_match_by_id", test_handler_resolve_attachments_match_by_id)
     r.record("handler_get_manager_singleton", test_handler_get_manager_singleton)
     r.record("handler_select_codex_for_gpt", test_handler_select_code_provider_uses_codex_for_gpt_compute)
-    r.record("handler_select_env_forces_claude", test_handler_select_code_provider_env_override_forces_claude)
+    r.record(
+        "handler_select_ignores_process_env",
+        test_handler_select_code_provider_is_independent_of_process_environment,
+    )
+    r.record(
+        "activity_provider_resolver_env_override",
+        test_activity_provider_resolver_applies_valid_environment_override,
+    )
     r.record("handler_select_claude_without_gpt", test_handler_select_code_provider_keeps_claude_without_gpt_token)
     # _handle_reconnect_exhausted
     await r.record_async("handle_reconnect_alive", test_handle_reconnect_exhausted_alive_sandbox)
@@ -2231,6 +2297,14 @@ async def run_all_tests():
     r.record("log_codex_fast_cache_event", test_log_code_agent_event_promotes_codex_fast_cache_request)
     r.record("codex_completed_turn_count", test_codex_completed_turn_count_counts_unique_turn_completed_events)
     # spawn_claude_code_activity
+    await r.record_async(
+        "spawn_activity_resolves_claude_credential",
+        test_spawn_activity_resolves_claude_credential_inside_activity,
+    )
+    await r.record_async(
+        "spawn_activity_skips_claude_credential_for_codex",
+        test_spawn_activity_does_not_fetch_claude_credential_for_codex,
+    )
     await r.record_async("spawn_activity_requires_schema", test_spawn_activity_requires_output_schema)
     await r.record_async("spawn_activity_happy", test_spawn_activity_happy_path_end_to_end)
     await r.record_async("spawn_activity_cancelled", test_spawn_activity_cancelled_cleanup)
@@ -2238,10 +2312,10 @@ async def run_all_tests():
     # SpawnClaudeCodeAgentManager.execute_tool
     await r.record_async("cc_exec_happy", test_cc_execute_tool_happy_path_yields_finished)
     await r.record_async(
-        "cc_exec_forced_claude_credential",
-        test_cc_execute_tool_forced_claude_fetches_matching_credential,
+        "cc_exec_forced_claude_no_serialized_credential",
+        test_cc_execute_tool_records_forced_provider_without_serializing_credential,
     )
-    await r.record_async("cc_exec_incomplete", test_cc_execute_tool_incomplete_success_false_title)
+    await r.record_async("cc_exec_incomplete", test_cc_execute_tool_non_boolean_success_is_incomplete)
     await r.record_async("cc_exec_files", test_cc_execute_tool_emits_assistant_events_for_files)
     await r.record_async("cc_exec_cancel_status", test_cc_execute_tool_cancelled_status_yields_error)
     await r.record_async("cc_exec_cancel_error", test_cc_execute_tool_cancelled_error_path)

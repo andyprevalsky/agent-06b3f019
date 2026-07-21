@@ -5181,8 +5181,7 @@ async def set_response_schema_activity(
         return None
 
 
-@activity.defn
-async def fetch_claude_max_token_activity(user_id: str) -> Optional[Dict[str, Any]]:
+async def fetch_claude_max_token(user_id: str) -> Optional[Dict[str, Any]]:
     """
     Fetch Claude Max OAuth token for a user from the backend.
 
@@ -5191,7 +5190,6 @@ async def fetch_claude_max_token_activity(user_id: str) -> Optional[Dict[str, An
     - poolTokenId: integration ID for pool tokens (used to mark rate-limited on failure)
     """
     config = load_config()
-    _safe_heartbeat("Fetching Claude Max token")
 
     try:
         async with httpx.AsyncClient() as client:
@@ -5223,6 +5221,13 @@ async def fetch_claude_max_token_activity(user_id: str) -> Optional[Dict[str, An
         logger.warning(f"Failed to fetch Claude Max token: {e}")
 
     return None
+
+
+@activity.defn
+async def fetch_claude_max_token_activity(user_id: str) -> Optional[Dict[str, Any]]:
+    """Temporal wrapper for fetching Claude Max OAuth credentials."""
+    _safe_heartbeat("Fetching Claude Max token")
+    return await fetch_claude_max_token(user_id)
 
 
 @activity.defn

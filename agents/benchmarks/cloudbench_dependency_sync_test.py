@@ -3178,7 +3178,7 @@ RUN_CONTEXT_DIR=.context/isolated
 WMH_BUILD_DIR=.context/model
 WMH_MODEL_NAME=fixture
 WMH_PORT=39999
-WMH_HEALTH_TIMEOUT_SECONDS=999999999
+WMH_HEALTH_TIMEOUT_SECONDS=999999999999999999999999999999999999999999999999999999999999
 BENCHMARK_MODE=true
 BENCHMARK_SKIP_WMH_DELTA=1
 curl_attempts=0
@@ -3198,7 +3198,11 @@ wait "$WMH_PID" 2>/dev/null || true
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Invalid WMH_HEALTH_TIMEOUT_SECONDS=999999999; using 180s" in result.stdout
+    assert (
+        "Invalid WMH_HEALTH_TIMEOUT_SECONDS="
+        "999999999999999999999999999999999999999999999999999999999999; using 180s"
+        in result.stdout
+    )
     assert "attempts=180" in result.stdout
 
 
