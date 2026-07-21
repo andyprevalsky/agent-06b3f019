@@ -231,7 +231,7 @@ export async function syncBrowserPasswordCredentials(
 }
 
 type PasskeyCredentialModel = {
-  findMany(args: { where: { userId: string } }): Promise<PasskeyRecord[]>;
+  findMany(args: { where: Prisma.PasskeyCredentialWhereInput }): Promise<PasskeyRecord[]>;
   findUnique(args: {
     where: {
       userId_rpId_credentialId: {
@@ -248,9 +248,17 @@ type PasskeyCredentialModel = {
 export async function syncPasskeyCredentials(
   remotePasskeyCredential: PasskeyCredentialModel,
   localPasskeyCredential: PasskeyCredentialModel,
-  userId: string
+  userId: string,
+  remoteWhere: Prisma.PasskeyCredentialWhereInput = { userId }
 ): Promise<number> {
-  const passkeys = await remotePasskeyCredential.findMany({ where: { userId } });
+  const passkeys = await remotePasskeyCredential.findMany({ where: remoteWhere });
+  return syncPasskeyCredentialRows(localPasskeyCredential, passkeys);
+}
+
+export async function syncPasskeyCredentialRows(
+  localPasskeyCredential: PasskeyCredentialModel,
+  passkeys: PasskeyRecord[]
+): Promise<number> {
   for (const pk of passkeys) {
     const where = {
       userId_rpId_credentialId: {

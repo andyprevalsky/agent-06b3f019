@@ -105,6 +105,11 @@ export interface UseAttentionRequestsResult {
   refetch: () => Promise<void>;
 }
 
+/** Count of unanswered requests — drives the notification badge trail. */
+export function unansweredCount(requests: AttentionRequest[]): number {
+  return requests.filter((r) => !r.answered).length;
+}
+
 export function useAttentionRequests(realtimeReady: boolean): UseAttentionRequestsResult {
   const [requests, setRequests] = useState<AttentionRequest[]>([]);
   const channelRef = useRef<RealtimeChannel | null>(null);

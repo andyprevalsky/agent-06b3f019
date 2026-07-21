@@ -25,8 +25,8 @@ function unclassifiedPatternRejection(): PatternSafety {
   return {
     ok: false,
     reason:
-      'Pattern rejected because ReDoS safety analysis could not complete. ' +
-      'Use a shorter or simpler regular expression.',
+      'Pattern safety analysis did not complete. ' +
+      'Use a simpler expression without nested quantifiers or stacked wildcards.',
   };
 }
 
@@ -56,6 +56,9 @@ function isClearlyLinearPattern(source: string): boolean {
   return true;
 }
 
+type PatternAnalyzer = typeof checkSync;
+type PatternSafetyControl = number | PatternAnalyzer;
+
 /**
  * Classify a regex with `recheck` and reject genuinely dangerous shapes
  * (exponential, or polynomial degree > 2). Quadratic patterns like
@@ -64,7 +67,7 @@ function isClearlyLinearPattern(source: string): boolean {
 export function checkPatternSafety(
   source: string,
   flags: string,
-  timeoutMs = RECHECK_TIMEOUT_MS
+  control: PatternSafetyControl = RECHECK_TIMEOUT_MS
 ): PatternSafety {
   if (source.length > MAX_PATTERN_LENGTH) {
     return {
@@ -72,10 +75,20 @@ export function checkPatternSafety(
       reason: `Pattern too long (${source.length} chars, max ${MAX_PATTERN_LENGTH}).`,
     };
   }
-  if (typeof flags === 'string' && isClearlyLinearPattern(source)) return { ok: true };
+  const analyze = typeof control === 'function' ? control : checkSync;
+  const timeoutMs = typeof control === 'number' ? control : RECHECK_TIMEOUT_MS;
+  // An explicitly supplied analyzer is a test seam for fail-closed behavior,
+  // so it must run even when the pattern is in the locally proven subset.
+  if (
+    typeof control !== 'function' &&
+    typeof flags === 'string' &&
+    isClearlyLinearPattern(source)
+  ) {
+    return { ok: true };
+  }
   let diagnostics;
   try {
-    diagnostics = checkSync(source, flags, { timeout: timeoutMs });
+    diagnostics = analyze(source, flags, { timeout: timeoutMs });
   } catch {
     // A timeout is most likely for the complex patterns this guard exists to
     // stop, especially when the host is under load. Never let an unclassified

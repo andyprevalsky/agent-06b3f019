@@ -225,16 +225,20 @@ describe('Terminal page', () => {
       expect(openingMessage).toHaveClass('md:min-h-8');
     });
 
-    it('keeps the mobile opening loader below the floating header', async () => {
+    it('keeps the mobile opening content below the full safe-area-aware header', async () => {
       setViewport(390, 844);
 
       renderWithProviders(<Terminal />);
 
       const openingLoader = await screen.findByTestId('terminal-opening-loader');
-      expect(openingLoader).toHaveClass('top-16');
+      expect(openingLoader).toHaveClass('top-[var(--mobile-terminal-header-height)]');
       expect(openingLoader).toHaveClass('bottom-0');
       expect(openingLoader).toHaveClass('md:inset-0');
       expect(openingLoader).toHaveClass('md:h-[100dvh]');
+      expect(openingLoader.previousElementSibling).toHaveClass(
+        'h-[var(--mobile-terminal-header-height)]',
+        'md:h-24',
+      );
     });
 
     it('applies only a visual mobile transform to the opening ASCII art', async () => {
@@ -255,7 +259,7 @@ describe('Terminal page', () => {
       renderWithProviders(<Terminal />);
 
       const inputArea = await screen.findByTestId('terminal-input-area');
-      expect(inputArea).toHaveClass('pb-1');
+      expect(inputArea).toHaveClass('pb-[calc(0.25rem+var(--safe-area-inset-bottom))]');
       expect(inputArea).toHaveClass('md:pb-6');
     });
 

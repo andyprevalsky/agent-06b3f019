@@ -91,8 +91,24 @@ test('browser-auth sync includes every durable credential reference', async () =
   const browserStateEnd = source.indexOf('function sleep', browserStateStart);
   const browserState = source.slice(browserStateStart, browserStateEnd);
 
-  for (const model of ['browserProviderProfile', 'cookieBundle', 'steelSessionAuth']) {
-    assert(browserState.includes(`remote.${model}`), `expected production ${model} read`);
+  assert(
+    browserState.includes('remote.browserProviderProfile'),
+    'expected production browserProviderProfile read'
+  );
+  assert(
+    browserState.includes('tx.browserProviderProfile'),
+    'expected local browserProviderProfile write'
+  );
+
+  for (const model of ['cookieBundle', 'steelSessionAuth']) {
+    assert(
+      source.includes(`${model}: (where) => remote.${model}.findMany`),
+      `expected production ${model} reader`
+    );
+    assert(
+      browserState.includes(`scopedRemoteBrowserAuth.${model}()`),
+      `expected scoped production ${model} read`
+    );
     assert(
       browserState.includes(`local.${model}`) || browserState.includes(`tx.${model}`),
       `expected local ${model} write`

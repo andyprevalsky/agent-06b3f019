@@ -1,6 +1,7 @@
 /**
  * REMOTE VIEWPORT SYNC STATE:
- * [OBSERVING_PANE] -- dimensions change --> [DEBOUNCING]
+ * [DISABLED] -- mobile live view --> preserve provider desktop viewport
+ * [OBSERVING_PANE] -- desktop dimensions change --> [DEBOUNCING]
  * [DEBOUNCING] -- 150ms stable --> [SYNCING_REMOTE_VIEWPORT]
  * [SYNCING_REMOTE_VIEWPORT] -- complete/fail --> [OBSERVING_PANE]
  */
@@ -10,8 +11,13 @@ import { resizeBrowserSessionViewport } from '@/lib/api/browser-session';
 
 const RESIZE_DEBOUNCE_MS = 150;
 
-export function useBrowserViewportSync(taskId: string, paneRef: RefObject<HTMLElement>) {
+export function useBrowserViewportSync(
+  taskId: string,
+  paneRef: RefObject<HTMLElement>,
+  enabled = true,
+) {
   useEffect(() => {
+    if (!enabled) return;
     const pane = paneRef.current;
     if (!pane) return;
 
@@ -44,5 +50,5 @@ export function useBrowserViewportSync(taskId: string, paneRef: RefObject<HTMLEl
       window.clearTimeout(timeoutId);
       observer.disconnect();
     };
-  }, [paneRef, taskId]);
+  }, [enabled, paneRef, taskId]);
 }

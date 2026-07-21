@@ -1,27 +1,26 @@
 /**
  * STATE MACHINE: TerminalHeader
  *
- * STATIC: Floating blur header with Rose branding, research button, and responsive auth action.
- *         No internal state — purely prop-driven (the mobile agents drawer owns its own
- *         open/closed state internally).
+ * LAYOUT (by viewport):
+ * [DESKTOP >= md] --> floating blur PILL, centered: brand + AttentionInbox bell
+ * [MOBILE  <  md] --> full-width FLUSH bar at y=0:
+ *                        left   = brand (logo + Rose)
+ *                        center = Research
+ *                        right  = hamburger drawer (signed in) OR Login (signed out)
  *
- * RESPONSIVE AUTH ACTION:
- * [DESKTOP] -----------------------------> AttentionInbox
- * [MOBILE_SIGNED_IN] --------------------> agents drawer trigger + AttentionInbox
- * [MOBILE_SIGNED_OUT] -- tap Login -----> parent PhoneAuthModal opens
+ * MOBILE RIGHT ACTION:
+ * [SIGNED_IN]  -- tap hamburger --> MobileAgentDrawer (opens from RIGHT; Agents +
+ *                                   Notifications tabs; unanswered-notif badge
+ *                                   trails on the hamburger AND the tab)
+ * [SIGNED_OUT] -- tap Login ------> parent PhoneAuthModal opens
  *
- * MOBILE AGENTS DRAWER:
- * [DESKTOP] -----------------------------> trigger hidden (>= md); desktop AppSidebar owns the list
- * [MOBILE_SIGNED_IN] -- tap menu -------> MobileAgentDrawer slide-over over the same SidebarAgentList
- * [MOBILE_SIGNED_OUT] -------------------> no trigger (no agents to show)
+ * Notifications live in the desktop AttentionInbox bell OR the mobile drawer's
+ * Notifications tab — never both mount (viewport-branched), so a single
+ * useAttentionRequests subscription is active.
  *
  * SYSTEM CONTEXT:
- * mobile user tap -> TerminalHeader.onLoginClick -> useTerminalAgents.handleLoginClick
+ * mobile tap Login -> onLoginClick -> useTerminalAgents.handleLoginClick
  * -> TerminalModals.loginModalOpen -> PhoneAuthModal -> useAuth.refreshAuthState
- *
- * HEADER SPACING:
- * The shell owns edge padding so the logo block and login action have matching
- * top, left/right, and bottom inset on mobile.
  */
 
 import { useNavigate } from 'react-router-dom';
@@ -29,6 +28,7 @@ import type { CSSProperties } from 'react';
 
 import { AttentionInbox, MobileAgentDrawer } from '@/features/terminal-component-group';
 import type { Agent } from '@/features/terminal-component-group';
+import { useIsMobile } from '@/hooks/use-mobile';
 import { cn } from '@/lib/utils';
 
 import type { DripStyles } from '../types';
@@ -37,6 +37,7 @@ interface TerminalHeaderProps {
   onCreateNewAgent: () => void;
   onSelectAgent: (agentId: string | null) => void;
   onLoginClick: () => void;
+  onLogout: () => void;
   isSignedIn: boolean;
   clientSource: string;
   realtimeReady: boolean;
@@ -129,7 +130,7 @@ function ResearchButton({ clientSource }: Pick<TerminalHeaderProps, 'clientSourc
   return (
     <button
       onClick={() => navigate('/research')}
-      className="md:hidden absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-sm text-muted-foreground hover:text-foreground transition-colors z-10"
+      className="text-sm text-muted-foreground transition-colors hover:text-foreground"
     >
       Research
     </button>
@@ -160,45 +161,17 @@ function HeaderAuthAction({
   );
 }
 
-export function TerminalHeader({
-  onCreateNewAgent,
-  onSelectAgent,
-  onLoginClick,
-  isSignedIn,
-  clientSource,
-  realtimeReady,
-  agents,
-  isLoadingAgents,
-  selectedAgentId,
-  onResumeAgent,
-  resumingAgentId,
-  dripStyles,
-  blur,
-  backgroundColors,
-  borderColor,
-  shadowIntensity,
-}: TerminalHeaderProps) {
+/** Desktop (>= md): the original floating blur pill — brand + AttentionInbox bell. */
+function DesktopHeaderPill(props: TerminalHeaderProps) {
+  const { onCreateNewAgent, onSelectAgent, onLoginClick, isSignedIn, realtimeReady } = props;
+  const { dripStyles, blur, backgroundColors, borderColor, shadowIntensity } = props;
   return (
     <header
       className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center justify-between p-2 rounded-2xl border border-border/50 dark:border-navi-light-black/50 shadow-lg"
       style={buildHeaderStyle({ dripStyles, blur, backgroundColors, borderColor, shadowIntensity })}
     >
       <MarbleBackground backgroundColors={backgroundColors} dripStyles={dripStyles} />
-      <div className="flex items-center gap-1">
-        {isSignedIn && (
-          <MobileAgentDrawer
-            agents={agents}
-            isLoadingAgents={isLoadingAgents}
-            selectedAgentId={selectedAgentId}
-            onSelectAgent={onSelectAgent}
-            onCreateAgent={onCreateNewAgent}
-            onResumeAgent={onResumeAgent}
-            resumingAgentId={resumingAgentId}
-          />
-        )}
-        <BrandButton onCreateNewAgent={onCreateNewAgent} />
-      </div>
-      <ResearchButton clientSource={clientSource} />
+      <BrandButton onCreateNewAgent={onCreateNewAgent} />
       <HeaderAuthAction
         isSignedIn={isSignedIn}
         onLoginClick={onLoginClick}
@@ -207,4 +180,56 @@ export function TerminalHeader({
       />
     </header>
   );
+}
+
+/**
+ * Mobile (< md): full-width flush bar at y=0.
+ * left = brand · center = Research · right = hamburger drawer (agents +
+ * notifications + login/logout), driving all mobile navigation.
+ */
+function MobileHeaderBar(props: TerminalHeaderProps) {
+  const {
+    onCreateNewAgent,
+    onSelectAgent,
+    onLoginClick,
+    onLogout,
+    isSignedIn,
+    clientSource,
+    realtimeReady,
+    agents,
+    isLoadingAgents,
+    selectedAgentId,
+    onResumeAgent,
+    resumingAgentId,
+  } = props;
+  return (
+    <header className="fixed inset-x-0 top-0 z-50 grid h-[var(--mobile-terminal-header-height)] grid-cols-3 items-center border-b border-border/60 bg-background/85 px-4 pt-[var(--safe-area-inset-top)] backdrop-blur-md">
+      <div className="justify-self-start">
+        <BrandButton onCreateNewAgent={onCreateNewAgent} />
+      </div>
+      <div className="justify-self-center">
+        <ResearchButton clientSource={clientSource} />
+      </div>
+      <div className="flex items-center justify-self-end">
+        <MobileAgentDrawer
+          agents={agents}
+          isLoadingAgents={isLoadingAgents}
+          selectedAgentId={selectedAgentId}
+          onSelectAgent={onSelectAgent}
+          onCreateAgent={onCreateNewAgent}
+          onResumeAgent={onResumeAgent}
+          resumingAgentId={resumingAgentId}
+          realtimeReady={realtimeReady}
+          isSignedIn={isSignedIn}
+          onLoginClick={onLoginClick}
+          onLogout={onLogout}
+        />
+      </div>
+    </header>
+  );
+}
+
+export function TerminalHeader(props: TerminalHeaderProps) {
+  const isMobile = useIsMobile();
+  return isMobile ? <MobileHeaderBar {...props} /> : <DesktopHeaderPill {...props} />;
 }

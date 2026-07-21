@@ -17,11 +17,20 @@ function run(): void {
   // same fail-closed branch used when its bounded analysis times out.
   const analyzerFailure = checkPatternSafety('ordinary text', null as unknown as string);
   assert.equal(analyzerFailure.ok, false, 'analyzer failures must reject the unclassified pattern');
-  assert.match(analyzerFailure.reason ?? '', /safety analysis could not complete/);
+  assert.match(analyzerFailure.reason ?? '', /safety analysis did not complete/);
 
   const analyzerTimeout = checkPatternSafety('(.*a){20}$', '', 0);
   assert.equal(analyzerTimeout.ok, false, 'unknown timeout diagnostics must fail closed');
-  assert.match(analyzerTimeout.reason ?? '', /safety analysis could not complete/);
+  assert.match(analyzerTimeout.reason ?? '', /safety analysis did not complete/);
+
+  const injectedAnalyzerFailure = checkPatternSafety('safe-looking-pattern', '', () => {
+    throw new Error('simulated analyzer timeout');
+  });
+  assert.deepEqual(injectedAnalyzerFailure, {
+    ok: false,
+    reason:
+      'Pattern safety analysis did not complete. Use a simpler expression without nested quantifiers or stacked wildcards.',
+  });
 
   process.stdout.write('PASS regex safety rejects dangerous and unclassified patterns\n');
 }

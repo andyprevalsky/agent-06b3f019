@@ -1,18 +1,19 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
 import path from 'node:path';
 
-import { objectKey } from '../../../scripts/seed-dump-cache';
+import { cacheRequestTimeoutMs, objectKey } from '../../../scripts/seed-dump-cache';
 
 function test(name: string, fn: () => void): void {
   try {
     fn();
-    console.log(`  ✅ ${name}`);
+    process.stdout.write(`  ✅ ${name}\n`);
   } catch (error) {
-    console.error(`  ❌ ${name}`);
+    process.stderr.write(`  ❌ ${name}\n`);
     throw error;
   }
 }
@@ -37,6 +38,12 @@ test('strips path-traversal and unsafe characters (no escaping the prefix)', () 
 test('schema-hash + day token round-trips unchanged', () => {
   const token = 'e3b0c44298fc1c149afbf4c8996fb924-20260719';
   assert.equal(objectKey(token), `benchmark-seed-dumps/${token}.dump`);
+});
+
+test('request deadline defaults below the benchmark service readiness window', () => {
+  assert.equal(cacheRequestTimeoutMs({}), 30_000);
+  assert.equal(cacheRequestTimeoutMs({ SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '250' }), 250);
+  assert.ok(cacheRequestTimeoutMs({}) < 180_000);
 });
 
 test('CLI fails closed (exit 1) when R2 is unconfigured — caller cold-syncs', () => {
@@ -72,4 +79,46 @@ test('CLI fails closed (exit 1) on a missing subcommand argument', () => {
   assert.equal(code, 1);
 });
 
-console.log('seed-dump-cache: all tests passed');
+async function testHangingEndpointIsBounded(): Promise<void> {
+  const server = createServer(() => {
+    // Intentionally leave the response open: the client deadline must abort it.
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert(address && typeof address !== 'string');
+
+  const script = path.resolve(__dirname, '../../../scripts/seed-dump-cache.ts');
+  const child = spawn('npx', ['tsx', script, 'get', 'tok', '/tmp/seed-dump-cache-hang.out'], {
+    env: {
+      ...process.env,
+      R2_BUCKET_TRACE_ARCHIVE: 'test-bucket',
+      R2_ACCOUNT_ID: 'test-account',
+      R2_ACCESS_KEY_ID: 'test-access',
+      R2_SECRET_ACCESS_KEY: 'test-secret',
+      R2_ENDPOINT: `http://127.0.0.1:${address.port}`,
+      SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '250',
+    },
+    stdio: 'pipe',
+  });
+  let killedByWatchdog = false;
+  const watchdog = setTimeout(() => {
+    killedByWatchdog = true;
+    child.kill('SIGKILL');
+  }, 2_000);
+  const [code] = (await once(child, 'close')) as [number | null];
+  clearTimeout(watchdog);
+  server.closeAllConnections();
+  server.close();
+
+  assert.equal(killedByWatchdog, false, 'R2 request exceeded its client-owned deadline');
+  assert.equal(code, 1, 'timed-out cache lookup must fail closed');
+}
+
+testHangingEndpointIsBounded()
+  .then(() => process.stdout.write('  ✅ hanging R2 endpoint respects request deadline\n'))
+  .then(() => process.stdout.write('seed-dump-cache: all tests passed\n'))
+  .catch((error: unknown) => {
+    process.stderr.write(`  ❌ hanging R2 endpoint respects request deadline\n${String(error)}\n`);
+    process.exit(1);
+  });

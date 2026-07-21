@@ -27,6 +27,8 @@ normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
 . "$SCRIPT_DIR/lib/ngrok-tunnel.sh"
 . "$SCRIPT_DIR/lib/run-context.sh"
+. "$SCRIPT_DIR/lib/seed-cache.sh"
+. "$SCRIPT_DIR/lib/fast-mode-cache-schema.sh"
 
 RUN_CONTEXT_DIR="$(normalize_run_context_dir "$PWD" "${BENCHMARK_CONTEXT_DIR:-.context}")"
 BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
@@ -391,13 +393,24 @@ fi
 # the Docker daemon isn't available (sandboxed containers, CI without --privileged).
 DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
 DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
+PRESTARTED_WORKSPACE_DB=false
+# Probe the workspace-scoped database service itself before asking the whole
+# Docker daemon for global state. Under concurrent deploy load `docker info`
+# can miss its one-second responsiveness budget even while this already-started
+# Postgres is healthy. A reachable workspace port is all run.sh needs; later DB
+# operations can use the host port directly without falling onto shared :5432.
+if [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && \
+   PGPASSWORD=postgres pg_isready -h localhost -p "$LOCAL_DB_PORT" -U postgres -d victoria -q 2>/dev/null; then
+    PRESTARTED_WORKSPACE_DB=true
+fi
 DOCKER_OK=false
-if docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' 2>/dev/null | grep -q .; then
+if ! $PRESTARTED_WORKSPACE_DB && \
+   docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' 2>/dev/null | grep -q .; then
     # /deploy pre-starts this exact workspace container. Prefer that direct,
     # authoritative check even when a busy Docker Desktop daemon makes the
     # broader `docker info` probe miss its bounded response window.
     DOCKER_OK=true
-elif docker_info_quick; then
+elif ! $PRESTARTED_WORKSPACE_DB && docker_info_quick; then
     DOCKER_OK=true
 fi
 
@@ -411,7 +424,30 @@ if [ "${ROSE_USE_SYSTEM_PG:-false}" = "true" ]; then
     USE_SYSTEM_PG=true
 fi
 
-if $DOCKER_OK && ! $USE_SYSTEM_PG; then
+cleanup_seed_bootstrap_database() {
+    if $USE_SYSTEM_PG && $SYSTEM_DB_OWNED_BY_US; then
+        PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$LOCAL_DB_NAME" >/dev/null 2>&1 || true
+        SYSTEM_DB_OWNED_BY_US=false
+        DB_OWNED_BY_US=false
+    elif [ -n "$DB_OWNED_CONTAINER_ID" ]; then
+        docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
+        docker volume rm "$DB_VOLUME" >/dev/null 2>&1 || true
+        DB_OWNED_CONTAINER_ID=""
+        DB_OWNED_BY_US=false
+    fi
+}
+
+fail_required_seed_dump() {
+    echo "❌ $1" >&2
+    echo "   Expected cache token: $_SEED_CACHE_TOKEN" >&2
+    cleanup_seed_bootstrap_database
+    exit 1
+}
+
+if $PRESTARTED_WORKSPACE_DB; then
+    LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
+    echo "🐘 Reusing healthy workspace Postgres on port $LOCAL_DB_PORT (Docker daemon probe not required)"
+elif $DOCKER_OK && ! $USE_SYSTEM_PG; then
     # ── Docker path (macOS / Linux with working Docker) ──
     if ! docker ps &>/dev/null 2>&1; then
         if [ -d "/Applications/Docker.app" ]; then
@@ -585,7 +621,18 @@ if [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
     exit 1
 fi
 echo "🧠 Ensuring Fast Mode cache schema..."
-(cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts)
+# This ensure connects to FAST_MODE_CACHE_DATABASE_URL — the SHARED prod pooler by
+# default (see above). When a cloud fleet boots concurrently (plus any neighbor
+# fleet on the same app), the pooler briefly saturates and this single query dies
+# with "Timed out fetching a new connection from the connection pool" → under
+# `set -e` the WHOLE stack aborts before the barrier (observed: 8/8 boxes lost to a
+# transient pooler spike while a 50-machine neighbor fleet held connections). The
+# op is idempotent (CREATE TABLE/INDEX IF NOT EXISTS), so retry with backoff and
+# let the transient saturation drain — same resilience the seed/cred syncs already have.
+if ! ensure_fast_mode_cache_schema bash -c \
+    'cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts'; then
+    exit 1
+fi
 
 # Larger Prisma pool: Fast Mode adds cache get/set on every LLM call, which under
 # sub-agent fan-out competes with the agent's own writes for the connection pool
@@ -616,23 +663,43 @@ _SEED_CACHE_TOKEN="${_SCHEMA_HASH}-$(date -u +%Y%m%d 2>/dev/null || echo undated
 # gate on the file, not the environment. seed-dump-cache.ts loads the .env itself.
 _SEED_CACHE_ENABLED=0
 grep -qE '^R2_BUCKET_TRACE_ARCHIVE=.' back-end/.env 2>/dev/null && _SEED_CACHE_ENABLED=1
-if [ -n "$_SEED_DUMP" ] && [ ! -s "$_SEED_DUMP" ] && [ "$_SEED_CACHE_ENABLED" = 1 ]; then
+# Decide where the seeded DB comes from (scripts/lib/seed-cache.sh). A stale dump
+# baked into the warm snapshot must fall through to the shared cache, NOT shadow
+# it — the old `[ ! -s ]` guard skipped the download whenever ANY dump existed, so
+# a hash-mismatched snapshot dump cold-synced every clone and starved the barrier.
+_SEED_DECISION="$(seed_cache_decision "$_SEED_DUMP" "$_SCHEMA_HASH" "$_SEED_CACHE_ENABLED")"
+if [ "$_SEED_DECISION" = "consult-remote" ]; then
+    # Drop any stale local dump so a clean cache object lands in its place.
+    rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
     echo "🔎 Checking shared seed-dump cache ($_SEED_CACHE_TOKEN)..."
     if (cd back-end && npx tsx scripts/seed-dump-cache.ts get "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") 2>/dev/null && [ -s "$_SEED_DUMP" ]; then
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
+        _SEED_DECISION="restore-local"
         echo "   ✅ pulled cached seed dump ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}')) — restoring instead of cold-syncing"
     else
         rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
         echo "   ℹ️ no cached dump for this schema/day — will cold-sync and populate it"
     fi
 fi
-if [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ] && [ "$(cat "${_SEED_DUMP}.schemahash" 2>/dev/null || echo x)" = "$_SCHEMA_HASH" ]; then
+if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ] && [ "$_SEED_DECISION" != "restore-local" ]; then
+    fail_required_seed_dump "Isolated local benchmarks require a schema-matched seed dump; refusing a slow production cold-sync."
+fi
+if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ]; then
     echo "🗜️  Restoring seeded DB from persistent dump ($_SEED_DUMP) — skipping schema push + seed..."
-    if PGPASSWORD=postgres pg_restore -h localhost -U postgres -d victoria --clean --if-exists --no-owner "$_SEED_DUMP" >/dev/null 2>&1; then
+    _SEED_RESTORE_CONTAINER=""
+    if ! $USE_SYSTEM_PG; then
+        _SEED_RESTORE_CONTAINER="$DB_CONTAINER"
+    fi
+    if PGPASSWORD=postgres bash scripts/restore-seed-dump.sh \
+        "$_SEED_DUMP" localhost "$LOCAL_DB_ACTUAL_PORT" postgres "$LOCAL_DB_NAME" \
+        "$_SEED_RESTORE_CONTAINER" >/dev/null; then
         DB_RESTORED=true
         echo "   ✅ DB restored from dump"
     else
         echo "   ⚠️ restore failed — falling back to push + seed"
+        if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]; then
+            fail_required_seed_dump "Required isolated benchmark seed dump could not be restored; refusing a slow production cold-sync."
+        fi
     fi
 fi
 
@@ -696,7 +763,11 @@ fi
 # instead of re-seeding. Best-effort; the schemahash guards against schema drift.
 if [ -n "$_SEED_DUMP" ]; then
     echo "🗜️  Saving seed dump for fast future warm-starts ($_SEED_DUMP)..."
-    if PGPASSWORD=postgres pg_dump -h localhost -U postgres -Fc victoria > "$_SEED_DUMP" 2>/dev/null; then
+    mkdir -p "$(dirname "$_SEED_DUMP")"
+    _SEED_DUMP_TMP="${_SEED_DUMP}.tmp.$$"
+    rm -f "$_SEED_DUMP_TMP" 2>/dev/null || true
+    if PGPASSWORD=postgres pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME" > "$_SEED_DUMP_TMP" 2>/dev/null; then
+        mv "$_SEED_DUMP_TMP" "$_SEED_DUMP"
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
         echo "   ✅ seed dump saved ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}'))"
         # Publish to the shared cache so the NEXT clone (any workspace — including a
@@ -708,7 +779,7 @@ if [ -n "$_SEED_DUMP" ]; then
             fi
         fi
     else
-        rm -f "$_SEED_DUMP" 2>/dev/null || true
+        rm -f "$_SEED_DUMP_TMP" 2>/dev/null || true
     fi
 fi
 
@@ -717,13 +788,7 @@ fi   # end: if $DB_RESTORED / else (push + seed + dump)
 # ── Pre-flight: ensure node_modules exist for all JS services ──
 JS_SVC_DIRS=(back-end front-end)
 $IS_MAC && JS_SVC_DIRS+=(mac-app)
-for svc_dir in "${JS_SVC_DIRS[@]}"; do
-    if [ -f "$svc_dir/package.json" ] && [ ! -d "$svc_dir/node_modules" ]; then
-        echo "📦 Installing $svc_dir dependencies..."
-        (cd "$svc_dir" && npm install)
-        echo "📦 $svc_dir deps ready"
-    fi
-done
+bash "$SCRIPT_DIR/ensure-workspace-dependencies.sh" "${JS_SVC_DIRS[@]}"
 
 # ── Pre-flight: ensure agents venv exists with deps installed ──
 if [ ! -f agents/venv/bin/activate ] || ! agents/venv/bin/python -c "import temporalio" 2>/dev/null; then
@@ -1383,16 +1448,14 @@ restart_backend_service() {
     launch_backend_service
 }
 isolated_backend_ready_attempts() {
-    if [ -n "${CLOUDBENCH_BACKEND_START_READY_ATTEMPTS:-}" ]; then
-        printf '%s\n' "$CLOUDBENCH_BACKEND_START_READY_ATTEMPTS"
-    elif $FIRST_RUN_SEEDED; then
-        # The first backend launch after a full production seed has substantially
-        # more database state to initialize. Do not kill a live process at the
-        # warm guest's 60-second boundary and thereby restart all of that work.
-        printf '%s\n' "${CLOUDBENCH_COLD_BACKEND_START_READY_ATTEMPTS:-180}"
-    else
-        printf '%s\n' 60
-    fi
+    # The long budget applies to ANY box that just materialised the full prod DB —
+    # a cold seed (FIRST_RUN_SEEDED) OR a cache/dump restore (DB_RESTORED). Both
+    # leave the backend the same large state to warm; capping restore at 60s timed
+    # out every warm box and starved the barrier. See backend_ready_budget().
+    local _frs=0 _dbr=0
+    $FIRST_RUN_SEEDED && _frs=1
+    $DB_RESTORED && _dbr=1
+    backend_ready_budget "$_frs" "$_dbr" "${CLOUDBENCH_BACKEND_START_READY_ATTEMPTS:-}"
 }
 wait_for_isolated_backend_ready() {
     local launch_attempt probe_attempt

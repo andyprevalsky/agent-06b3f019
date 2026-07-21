@@ -48,6 +48,7 @@ import { useAgentContext } from '../hooks';
 import { BrowserStatusBarExpanded } from './browser-status-bar/BrowserStatusBarExpanded';
 import { BrowserStatusBarFullscreen } from './browser-status-bar/BrowserStatusBarFullscreen';
 import { BrowserStatusBarMinimized } from './browser-status-bar/BrowserStatusBarMinimized';
+import { resolveBrowserControlState } from './browserControlState';
 import { useBrowserStatusBarState } from './browser-status-bar/useBrowserStatusBarState';
 import { useBrowserStatusBarUi } from './browser-status-bar/useBrowserStatusBarUi';
 import { useRefreshedAuthAssistanceUrl } from './browser-status-bar/useRefreshedAuthAssistanceUrl';
@@ -65,13 +66,18 @@ function BrowserStatusBarImpl({
   const refreshedAuthUrl = useRefreshedAuthAssistanceUrl(vm.pendingAuthAssistance);
   const activeBrowserUrl = refreshedAuthUrl ?? vm.pendingAuthAssistance?.liveViewUrl ?? browserUrl;
   const isWaitingForAuthAssistance = vm.pendingAuthAssistance !== null;
-  const handleResume = isWaitingForAuthAssistance
-    ? () => {
-        if (vm.pendingAuthAssistance) {
-          void ui.onCompleteAuthAssistance(vm.pendingAuthAssistance.requestId);
+  const controlState = resolveBrowserControlState({
+    isDisconnected: vm.isDisconnected,
+    isWaitingForAuthAssistance,
+  });
+  const handleResume =
+    controlState === 'waiting'
+      ? () => {
+          if (vm.pendingAuthAssistance) {
+            void ui.onCompleteAuthAssistance(vm.pendingAuthAssistance.requestId);
+          }
         }
-      }
-    : ui.onResume;
+      : ui.onResume;
 
   if (ui.isFullscreen) {
     return (
@@ -101,7 +107,7 @@ function BrowserStatusBarImpl({
         forceMinimized={forceMinimized}
         lastActionType={vm.lastActionType}
         lastActionTitle={vm.lastActionTitle}
-        isWaitingForAuthAssistance={isWaitingForAuthAssistance}
+        controlState={controlState}
         outputSchema={vm.outputSchema}
         browserSessionMetadata={vm.browserSessionMetadata}
         onExpand={ui.onExpand}

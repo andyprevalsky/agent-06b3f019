@@ -14,6 +14,7 @@ import { ChevronDown, Maximize2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { MessageList } from '../MessageList';
 import { SchemaChip } from '../SchemaChip';
+import { resolveBrowserControlState, type BrowserControlState } from '../browserControlState';
 import { BrowserProxyLocationChip } from './BrowserProxyLocationChip';
 import { BrowserThumbnail } from './BrowserThumbnail';
 import { StepProgressBar } from './StepProgressBar';
@@ -34,8 +35,7 @@ interface ExpandedProps {
 
 function ExpandedHeader({
   browserUrl,
-  isDisconnected,
-  isWaitingForAuthAssistance,
+  controlState,
   outputSchema,
   browserSessionMetadata,
   onThumbnailClick,
@@ -43,19 +43,19 @@ function ExpandedHeader({
   onCollapse,
 }: {
   browserUrl: string;
-  isDisconnected: boolean;
-  isWaitingForAuthAssistance: boolean;
+  controlState: BrowserControlState;
   outputSchema: OutputSchemaRef | undefined;
   browserSessionMetadata: BrowserSessionMetadata | null;
   onThumbnailClick: (e: MouseEvent) => void;
   onFullscreenToggle: (e: MouseEvent) => void;
   onCollapse: () => void;
 }) {
-  const statusLabel = isDisconnected
-    ? 'Disconnected'
-    : isWaitingForAuthAssistance
-      ? 'Agent waiting for assistance'
-      : 'Agent is using Browser';
+  const statusLabel =
+    controlState === 'disconnected'
+      ? 'Disconnected'
+      : controlState === 'waiting'
+        ? 'Agent waiting for assistance'
+        : 'Agent is using Browser';
 
   return (
     <div className="relative flex items-center gap-3 p-3 pl-3 sm:pl-40 border-b border-border">
@@ -75,9 +75,7 @@ function ExpandedHeader({
           <div
             className={cn(
               'h-1.5 w-1.5 rounded-full',
-              isDisconnected || isWaitingForAuthAssistance
-                ? 'bg-yellow-500'
-                : 'bg-green-500 animate-pulse',
+              controlState === 'active' ? 'bg-green-500 animate-pulse' : 'bg-yellow-500',
             )}
           />
           <span className="text-xs text-muted-foreground">{statusLabel}</span>
@@ -117,14 +115,17 @@ export function BrowserStatusBarExpanded(props: ExpandedProps) {
     onFullscreenToggle,
     onCollapse,
   } = props;
+  const controlState = resolveBrowserControlState({
+    isDisconnected,
+    isWaitingForAuthAssistance,
+  });
 
   return (
     <div className="w-full">
       <div className="rounded-xl border border-border bg-card/50 backdrop-blur-sm overflow-visible">
         <ExpandedHeader
           browserUrl={browserUrl}
-          isDisconnected={isDisconnected}
-          isWaitingForAuthAssistance={isWaitingForAuthAssistance}
+          controlState={controlState}
           outputSchema={outputSchema}
           browserSessionMetadata={browserSessionMetadata}
           onThumbnailClick={onThumbnailClick}
@@ -145,7 +146,7 @@ export function BrowserStatusBarExpanded(props: ExpandedProps) {
               subAgentId={taskId}
               containerClassName="flex flex-col gap-1.5 overflow-x-hidden"
               showStatusBanners={false}
-              showThinkingIndicator={!isDisconnected && !isWaitingForAuthAssistance}
+              showThinkingIndicator={controlState === 'active'}
               compact
             />
           </div>
