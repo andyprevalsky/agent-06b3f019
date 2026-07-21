@@ -54,6 +54,7 @@ import archiveRouter from './domains/archive/routes';
 import worldModelsRouter from './domains/world-models/routes';
 import { anthropicProxyRouter, codexProxyRouter } from './domains/fast-cache/routes.proxy';
 import { prisma } from './providers/database';
+import { createDeepHealthHandler } from './providers/deepHealth';
 import { alertError } from './providers/errorAlert';
 import { createLogger } from './providers/logger';
 import { installFetchCapture, captureTokenMiddleware } from './providers/fetchCapture';
@@ -282,21 +283,7 @@ app.get('/health', (req, res) => {
 // (BetterStack/UptimeRobot) can detect "DB is down" and page #errors. The
 // in-process alerters can't self-report a dead DB/backend; this is the pull
 // surface an external watcher hits. Returns 503 when the DB is unreachable.
-app.get('/health/deep', async (_req, res) => {
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-    res.json({ status: 'ok', db: 'up', timestamp: new Date().toISOString() });
-  } catch (err) {
-    log.error('Deep health database check failed', {
-      error: err instanceof Error ? err.message : String(err),
-    });
-    res.status(503).json({
-      status: 'error',
-      db: 'down',
-      timestamp: new Date().toISOString(),
-    });
-  }
-});
+app.get('/health/deep', createDeepHealthHandler());
 
 // Dev-only: Frontend console log capture endpoint
 if (process.env.NODE_ENV !== 'production') {

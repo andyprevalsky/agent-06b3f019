@@ -66,11 +66,11 @@ jobs:
       # its handle here so we edit that SAME message through the lifecycle.
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
       SLACK_ERROR_CHANNEL_ID: ${{ secrets.SLACK_ERROR_CHANNEL_ID }}
-      SLACK_TS: ${{ github.event.client_payload.slack_ts }}
-      SLACK_CHANNEL: ${{ github.event.client_payload.slack_channel }}
+      DISPATCH_SLACK_TS: ${{ github.event.client_payload.slack_ts }}
+      DISPATCH_SLACK_CHANNEL: ${{ github.event.client_payload.slack_channel }}
 
     steps:
-      - name: Validate agent id
+      - name: Validate dispatch payload
         shell: bash
         run: |
           set -euo pipefail
@@ -78,7 +78,17 @@ jobs:
             echo "agent_id must be a UUID — refusing untrusted dispatch payload." >&2
             exit 1
           fi
+          if [ -n "${DISPATCH_SLACK_TS:-}" ] && ! [[ "$DISPATCH_SLACK_TS" =~ ^[0-9]{10,}\.[0-9]{6}$ ]]; then
+            echo "slack_ts must be a Slack message timestamp." >&2
+            exit 1
+          fi
+          if [ -n "${DISPATCH_SLACK_CHANNEL:-}" ] && ! [[ "$DISPATCH_SLACK_CHANNEL" =~ ^[A-Z0-9]{9,32}$ ]]; then
+            echo "slack_channel must be a Slack channel ID." >&2
+            exit 1
+          fi
           printf 'FAILURE_TITLE=Production agent failure %s\n' "$AGENT_ID" >> "$GITHUB_ENV"
+          printf 'SLACK_TS=%s\n' "${DISPATCH_SLACK_TS:-}" >> "$GITHUB_ENV"
+          printf 'SLACK_CHANNEL=%s\n' "${DISPATCH_SLACK_CHANNEL:-}" >> "$GITHUB_ENV"
 
       - name: Checkout main
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -139,8 +149,17 @@ jobs:
           else
             ts=""
           fi
-          echo "ts=${ts:-}" >> "$GITHUB_OUTPUT"
-          echo "channel=${channel:-}" >> "$GITHUB_OUTPUT"
+          if [ -n "${ts:-}" ] && ! [[ "$ts" =~ ^[0-9]{10,}\.[0-9]{6}$ ]]; then
+            echo "Slack returned an invalid message timestamp; lifecycle updates disabled." >&2
+            ts=""
+          fi
+          if [ -n "${channel:-}" ] && ! [[ "$channel" =~ ^[A-Z0-9]{9,32}$ ]]; then
+            echo "Slack returned an invalid channel ID; lifecycle updates disabled." >&2
+            channel=""
+            ts=""
+          fi
+          printf 'ts=%s\n' "${ts:-}" >> "$GITHUB_OUTPUT"
+          printf 'channel=%s\n' "${channel:-}" >> "$GITHUB_OUTPUT"
 
       - name: Root-cause with Claude Code
         uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
@@ -203,10 +222,12 @@ jobs:
       - name: Slack — reflect PR outcome
         if: always() && env.SLACK_BOT_TOKEN != '' && steps.slack.outputs.ts != ''
         shell: bash
+        env:
+          SLACK_OUTPUT_TS: ${{ steps.slack.outputs.ts }}
         run: |
           set -uo pipefail
           channel="${SLACK_CHANNEL:-$SLACK_ERROR_CHANNEL_ID}"
-          ts="${{ steps.slack.outputs.ts }}"
+          ts="$SLACK_OUTPUT_TS"
           run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
           pr_url="$(gh pr list --head "$RCA_BRANCH" --state open --json url --jq '.[0].url // empty' 2>/dev/null || true)"
           is_draft="$(gh pr list --head "$RCA_BRANCH" --state open --json isDraft --jq '.[0].isDraft // empty' 2>/dev/null || true)"

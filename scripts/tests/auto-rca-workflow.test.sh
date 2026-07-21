@@ -33,6 +33,10 @@ require_absent "$WORKFLOW" 'github.event.client_payload.source' "dispatch source
 require_absent "$WORKFLOW" 'github.event.client_payload.title' "dispatch title must not reach the privileged prompt"
 require_absent "$WORKFLOW" 'Failure source: ${{ env.FAILURE_SOURCE }}' "failure source must not be interpolated into the privileged prompt"
 require_absent "$WORKFLOW" 'Failure title: ${{ env.FAILURE_TITLE }}' "failure title must not be interpolated into the privileged prompt"
+require_text "$WORKFLOW" 'slack_ts must be a Slack message timestamp' "dispatch Slack timestamp must be validated"
+require_text "$WORKFLOW" 'slack_channel must be a Slack channel ID' "dispatch Slack channel must be validated"
+require_text "$WORKFLOW" 'SLACK_OUTPUT_TS: ${{ steps.slack.outputs.ts }}' "step output must enter shell through the environment"
+require_absent "$WORKFLOW" 'ts="${{ steps.slack.outputs.ts }}"' "step output must not be interpolated directly into shell source"
 require_text "$WORKFLOW" 'persist-credentials: false' "checkout credentials must not persist into RCA tools"
 require_text "$SHIPPED_WORKFLOW" "github.event.pull_request.base.ref == 'main'" "shipped notice must require a merge into main"
 

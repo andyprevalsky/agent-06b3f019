@@ -29,13 +29,13 @@ test, so a human can review a ready solution instead of a blank page.
 
 ## Capture surfaces
 
-| Surface | Insertion point | Emitter |
-| --- | --- | --- |
-| Agent breaks (root only) | `agents/workflows/agent_workflow.py` `_mark_failed` | `report_failure_activity` → Slack |
-| Chat loop error | `back-end/src/domains/agents/agentMessageService.ts` chat `.catch` | `alertError({source:'chat'})` |
-| SMS agent error | `back-end/src/domains/sms-webhook/service.ts` `handleSupervisorFailure` | `alertError({source:'sms'})` |
-| Backend crashing | `back-end/src/server.ts` `uncaughtException` | `alertError({source:'backend_crash'})` (best-effort) |
-| DB / backend fully dead | external monitor → `GET /health/deep` (does `SELECT 1`, 503 on DB down) | Slack via monitor |
+| Surface                  | Insertion point                                                         | Emitter                                              |
+| ------------------------ | ----------------------------------------------------------------------- | ---------------------------------------------------- |
+| Agent breaks (root only) | `agents/workflows/agent_workflow.py` `_mark_failed`                     | `report_failure_activity` → Slack                    |
+| Chat loop error          | `back-end/src/domains/agents/agentMessageService.ts` chat `.catch`      | `alertError({source:'chat'})`                        |
+| SMS agent error          | `back-end/src/domains/sms-webhook/service.ts` `handleSupervisorFailure` | `alertError({source:'sms'})`                         |
+| Backend crashing         | `back-end/src/server.ts` `uncaughtException`                            | `alertError({source:'backend_crash'})` (best-effort) |
+| DB / backend fully dead  | external monitor → `GET /health/deep` (does `SELECT 1`, 503 on DB down) | Slack via monitor                                    |
 
 Sub-agent failures are intentionally NOT alerted (parents recover them); a
 sub-failure that breaks the whole run propagates to the root and alerts there.
@@ -64,6 +64,9 @@ sub-failure that breaks the whole run propagates to the root and alerts there.
   RCA dispatch when flag on, no dispatch when flag off.
 - Python: `report_failure_activity` swallows all errors and is registered in
   `worker.py`; `agent_workflow.py` calls it only for root agents.
+- `back-end/src/tests/blackbox/health.blackbox.ts` cements both deep-health
+  branches: the live database returns 200/up, while an injected database failure
+  returns a generic 503/down response without leaking the detailed error.
 
 ## Manual setup (one-time, requires user)
 
@@ -81,7 +84,7 @@ sub-failure that breaks the whole run propagates to the root and alerts there.
    in **GitHub Actions via `anthropics/claude-code-action@v1`** — the same harness
    `claude-code-review-fallback.yml` already uses. We do NOT build/host an agent
    harness; this is a solved, in-repo primitive.
-2. **The full-resource reproduction** is a *backend the harness calls*, not a
+2. **The full-resource reproduction** is a _backend the harness calls_, not a
    place the harness lives. `auto-rca.yml` sets `FLY_API_TOKEN`, so `/rca` can run
    **`scripts/run-bench <task>`** — the existing fleet clones a credentialed warm
    Fly box (Temporal Cloud + LLM/compute + full `run.sh` stack), runs a real agent
