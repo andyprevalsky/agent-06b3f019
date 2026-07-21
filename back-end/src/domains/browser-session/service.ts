@@ -26,7 +26,7 @@ import {
   RotationSessionNotFoundError,
 } from '../../providers/browserSessionResume';
 import { canonicalAuthRealm } from '../../providers/authRealm';
-import { getAuthOptions } from '../auth-options/service';
+import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
 import {
   injectLocalStorage,
