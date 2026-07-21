@@ -204,10 +204,23 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     expected_attention_kinds = raw.get("expected_attention_kinds")
     if expected_attention_kinds is not None:
         _require_string_list(raw, "expected_attention_kinds", item_id)
-        if raw.get("expected_attention_kind"):
+    expected_attention_kind_any_of = raw.get("expected_attention_kind_any_of")
+    if expected_attention_kind_any_of is not None:
+        _require_string_list(raw, "expected_attention_kind_any_of", item_id)
+        if raw.get("expected_approval_count") != 1:
             raise ValueError(
-                f"{item_id}: use expected_attention_kind or expected_attention_kinds, not both"
+                f"{item_id}: expected_attention_kind_any_of requires expected_approval_count=1"
             )
+    attention_contracts = [
+        bool(raw.get("expected_attention_kind")),
+        bool(expected_attention_kinds),
+        bool(expected_attention_kind_any_of),
+    ]
+    if sum(attention_contracts) > 1:
+        raise ValueError(
+            f"{item_id}: use exactly one of expected_attention_kind, "
+            "expected_attention_kinds, or expected_attention_kind_any_of"
+        )
     world_model_mode = raw.get("world_model_mode")
     if world_model_mode is not None and world_model_mode not in WORLD_MODEL_MODES:
         raise ValueError(f"{item_id}: world_model_mode must be one of {sorted(WORLD_MODEL_MODES)}")
