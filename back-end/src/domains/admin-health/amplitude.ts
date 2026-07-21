@@ -49,6 +49,9 @@ const FUNNEL_EVENTS: FunnelEvent[] = [
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const MAX_CONCURRENT_REQUESTS = 1;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const FUNNEL_QUERY_COST_PER_DAY = FUNNEL_EVENTS.length * 2;
+const MAX_FUNNEL_QUERY_COST_PER_FIVE_MINUTES = 1000;
 const funnelCache = new Map<string, { expiresAt: number; value: AmplitudeFunnelResult }>();
 let knownEventsCache: { expiresAt: number; value: Set<string> } | null = null;
 let knownEventsRequest: Promise<Set<string>> | null = null;
@@ -123,6 +126,15 @@ function formatDate(date: Date): string {
   ].join('');
 }
 
+export function amplitudeFunnelQueryCost(start: Date, end: Date): number {
+  const dayCount = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / DAY_MS));
+  return dayCount * FUNNEL_QUERY_COST_PER_DAY;
+}
+
+export function isAmplitudeFunnelQueryWithinBudget(start: Date, end: Date): boolean {
+  return amplitudeFunnelQueryCost(start, end) <= MAX_FUNNEL_QUERY_COST_PER_FIVE_MINUTES;
+}
+
 function eventQuery(event: FunnelEvent): { event_type: string; filters: FunnelEvent['filters'] } {
   // These are raw event types returned by /events/list. Amplitude's `ce:` prefix is only for
   // dashboard-defined Custom Events (composite definitions), not ordinary instrumented events.
@@ -178,6 +190,13 @@ export async function fetchAmplitudeFunnel(start: Date, end: Date): Promise<Ampl
   if (cached !== undefined && cached.expiresAt > Date.now()) return cached.value;
   try {
     const effectiveEnd = new Date(Math.min(end.getTime(), Date.now()));
+    if (!isAmplitudeFunnelQueryWithinBudget(start, effectiveEnd)) {
+      return {
+        counts: emptyCounts(null),
+        detail:
+          'Amplitude funnel data is unavailable because this period exceeds the query budget.',
+      };
+    }
     const knownEvents = await fetchKnownEvents();
     const missingEvents = FUNNEL_EVENTS.filter((event) => !knownEvents.has(event.eventType));
     if (missingEvents.length > 0) {
