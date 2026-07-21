@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import subprocess
 import urllib.error
@@ -18,13 +19,92 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 
 @dataclass(frozen=True)
 class ArchivedAgent:
     agent: dict[str, Any]
     messages: list[dict[str, Any]]
+    attachments: dict[str, dict[str, Any]]
+
+
+def _attachment_pointers(messages: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Index file pointers embedded anywhere in archived message metadata.
+
+    Recordings use ``metadata.recording_file_pointer`` while ordinary message
+    attachments use ``file_pointer``. Walking the already-bounded transcript
+    handles both without coupling the archive adapter to every metadata key.
+    """
+    attachments: dict[str, dict[str, Any]] = {}
+    pending: list[Any] = list(messages)
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            file_id = value.get("id")
+            storage_path = value.get("storage_path")
+            if isinstance(file_id, str) and file_id and isinstance(storage_path, str) and storage_path:
+                attachments.setdefault(file_id, dict(value))
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+    return attachments
+
+
+def _load_env_value(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if value:
+        return value
+    repo_root = Path(__file__).resolve().parents[2]
+    for env_path in (repo_root / "agents" / ".env", repo_root / "back-end" / ".env"):
+        try:
+            lines = env_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, raw_value = stripped.split("=", 1)
+            if key.strip() != name:
+                continue
+            parsed = raw_value.strip().strip('"').strip("'")
+            if " #" in parsed:
+                parsed = parsed.split(" #", 1)[0].rstrip()
+            if parsed:
+                return parsed
+    return ""
+
+
+def _create_attachment_signed_url(storage_path: str, expires_in: int = 3600) -> str:
+    """Create a Supabase Storage URL without exposing the service-role key."""
+    supabase_url = _load_env_value("SUPABASE_URL").rstrip("/")
+    service_key = _load_env_value("SUPABASE_SERVICE_ROLE_KEY")
+    if not supabase_url or not service_key:
+        raise RuntimeError("Supabase archive attachment credentials are unavailable")
+
+    encoded_path = quote(storage_path, safe="/")
+    request = urllib.request.Request(
+        f"{supabase_url}/storage/v1/object/sign/attachments/{encoded_path}",
+        data=json.dumps({"expiresIn": expires_in}).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {service_key}",
+            "apikey": service_key,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        payload = json.loads(response.read())
+    signed_url = payload.get("signedURL") or payload.get("signedUrl")
+    if not isinstance(signed_url, str) or not signed_url:
+        raise RuntimeError("Supabase did not return a signed attachment URL")
+    if signed_url.startswith("/"):
+        # Supabase Storage returns paths relative to its ``/storage/v1`` API
+        # (for example ``/object/sign/...``), not necessarily to the host root.
+        storage_prefix = "" if signed_url.startswith("/storage/v1/") else "/storage/v1"
+        return f"{supabase_url}{storage_prefix}{signed_url}"
+    return signed_url
 
 
 def _first_user_message(messages: list[dict[str, Any]], fallback: str) -> str:
@@ -163,7 +243,11 @@ def load_archive(run_path: Path) -> dict[str, ArchivedAgent]:
         raw_messages = (task.get("logs") or {}).get("messages") or []
         messages = [_frontend_message(agent_id, i, raw) for i, raw in enumerate(raw_messages)]
         agent = _agent_summary(task, messages, run_timestamp)
-        agents[agent_id] = ArchivedAgent(agent=agent, messages=messages)
+        agents[agent_id] = ArchivedAgent(
+            agent=agent,
+            messages=messages,
+            attachments=_attachment_pointers(messages),
+        )
         # Index every spawned sub-agent in the tree so the archive renders the full
         # fan-out (not just the root). Each carries busId=<root> + parent_agent_id so
         # GET /api/agents/tree?busId=<root> returns the whole tree.
@@ -175,7 +259,11 @@ def load_archive(run_path: Path) -> dict[str, ArchivedAgent]:
             raw = info.get("messages") or []
             sub_messages = [_frontend_message(sub_id, i, r) for i, r in enumerate(raw)]
             sub_agent = _subagent_summary(sub_id, info, agent_id, task, run_timestamp, sub_messages)
-            agents[sub_id] = ArchivedAgent(agent=sub_agent, messages=sub_messages)
+            agents[sub_id] = ArchivedAgent(
+                agent=sub_agent,
+                messages=sub_messages,
+                attachments=_attachment_pointers(sub_messages),
+            )
     return agents
 
 
@@ -360,14 +448,14 @@ class ArchiveHandler(BaseHTTPRequestHandler):
             _json_response(self, 200, {"agents": tree_agents})
             return
         if path.startswith("/api/agents/"):
-            self._handle_agent_path(path)
+            self._handle_agent_path(path, parsed.query)
             return
         _json_response(self, 404, {"error": "not found"})
 
-    def _handle_agent_path(self, path: str) -> None:
+    def _handle_agent_path(self, path: str, query: str) -> None:
         rest = path.removeprefix("/api/agents/")
         parts = rest.split("/")
-        agent_id = parts[0]
+        agent_id = unquote(parts[0])
         entry = self.agents.get(agent_id)
         if entry is None:
             _json_response(self, 404, {"error": "Agent not found"})
@@ -378,6 +466,20 @@ class ArchiveHandler(BaseHTTPRequestHandler):
             return
         if suffix == ["ancestors"]:
             _json_response(self, 200, {"ancestors": []})
+            return
+        if len(suffix) == 3 and suffix[0] == "attachments" and suffix[2] == "url":
+            file_id = unquote(suffix[1])
+            storage_path = (parse_qs(query).get("storage_path") or [""])[0]
+            pointer = entry.attachments.get(file_id)
+            if pointer is None or pointer.get("storage_path") != storage_path:
+                _json_response(self, 404, {"error": "Archived attachment not found"})
+                return
+            try:
+                signed_url = _create_attachment_signed_url(storage_path)
+            except Exception:
+                _json_response(self, 502, {"error": "Could not sign archived attachment"})
+                return
+            _json_response(self, 200, {"signed_url": signed_url, "expires_in": 3600})
             return
         if suffix:
             _json_response(self, 404, {"error": "not found"})
