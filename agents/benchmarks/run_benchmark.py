@@ -33,6 +33,7 @@ import csv
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -61,6 +62,7 @@ from benchmarks.benchmark_tasks import (
 from benchmarks.context_validator import validate_context
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES, resolve_live_fixtures
 from benchmarks.llm_usage import aggregate_repeatable_cache_usage, aggregate_usage_items
+from benchmarks.local import manifest_database_url
 from benchmarks.logs import (
     collect_logs,
     collect_tree_messages,
@@ -125,8 +127,9 @@ MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
 AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
 # Tasks whose fixtures destructively mutate shared benchmark DB state. The
-# parallel scheduler runs these serially after the batch drains so they cannot
-# corrupt an in-flight sibling task. Each fixture must also restore its state.
+# parallel scheduler runs these serially before starting any ordinary task so a
+# retained failed agent tree cannot mutate their fixtures. Each fixture must
+# also restore its state.
 EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     GREP_EXPLORE_STRESS_TASK_NAME,
     AMAZON_PASSKEY_TASK_NAME,
@@ -1295,6 +1298,35 @@ async def get_test_payment_lifecycle(base_url: str, agent_id: str) -> dict:
         return resp.json()
 
 
+async def _get_initial_payment_lifecycle_with_retry(
+    base_url: str,
+    agent_id: str,
+    *,
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 2,
+    fetch_lifecycle: Callable[[str, str], Awaitable[dict]] = get_test_payment_lifecycle,
+) -> dict:
+    """Bound transient provider failures while assembling the first lifecycle snapshot."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await fetch_lifecycle(base_url, agent_id)
+        except Exception as error:
+            last_error = error
+            if attempt >= max_attempts:
+                break
+            print(
+                "    ⚠ Transient initial payment lifecycle read failed "
+                f"({attempt}/{max_attempts}); retrying: {error}"
+            )
+            await asyncio.sleep(retry_delay_seconds)
+    raise RuntimeError(
+        f"Initial payment lifecycle remained unavailable after {max_attempts} reads: {last_error}"
+    ) from last_error
+
+
 async def _wait_for_expected_payment_lifecycle(
     base_url: str,
     agent_id: str,
@@ -1321,10 +1353,16 @@ async def _wait_for_expected_payment_lifecycle(
         purchase = lifecycle.get("purchase") if isinstance(lifecycle, dict) else None
         status = purchase.get("status") if isinstance(purchase, dict) else None
         wallet_funding = lifecycle.get("walletFunding") if isinstance(lifecycle, dict) else None
-        release_pending = (
-            status == "HELD" and isinstance(wallet_funding, dict) and wallet_funding.get("status") == "RECLAIMING"
+        # Reconciliation commits the durable funding reclaim before it refunds Stripe and marks
+        # the purchase VOIDED. A lifecycle read can therefore observe HELD + RECLAIMED in that
+        # short persistence window. Keep polling both in-flight states instead of treating the
+        # internally consistent recovery race as a terminal benchmark mismatch.
+        compensation_pending = (
+            status == "HELD"
+            and isinstance(wallet_funding, dict)
+            and wallet_funding.get("status") in {"RECLAIMING", "RECLAIMED"}
         )
-        if (status not in retryable_statuses and not release_pending) or time.monotonic() >= deadline:
+        if (status not in retryable_statuses and not compensation_pending) or time.monotonic() >= deadline:
             return lifecycle
         await asyncio.sleep(poll_interval_seconds)
         try:
@@ -1404,6 +1442,37 @@ async def get_attention_requests(base_url: str) -> list:
         if resp.status_code == 200:
             return _normalize_attention_requests_response(resp.json())
         return []
+
+
+async def _agentcard_setup_attention_still_open_after_terminal(
+    base_url: str,
+    request_id: str,
+    *,
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 0.25,
+    fetch_requests: Callable[[str], Awaitable[list]] = get_attention_requests,
+) -> bool:
+    """Refresh setup attention after terminal status instead of trusting a stale parallel poll."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            pending = await fetch_requests(base_url)
+            setup_still_open = any(
+                req.get("id") == request_id and _attention_request_is_open(req)
+                for req in pending
+            )
+            if not setup_still_open or attempt >= max_attempts:
+                return setup_still_open
+        except Exception as error:
+            last_error = error
+            if attempt >= max_attempts:
+                break
+        await asyncio.sleep(retry_delay_seconds)
+    raise RuntimeError(
+        f"Terminal AgentCard setup attention remained unreadable after {max_attempts} reads: {last_error}"
+    ) from last_error
 
 
 async def respond_to_attention_request(base_url: str, request_id: str, response: str) -> None:
@@ -2145,6 +2214,7 @@ async def poll_agent(
     seen_attention_ids: set[str] = set()
     seen_attention_kinds: List[str] = []
     agentcard_setup_attention_seen = False
+    agentcard_setup_attention_id: Optional[str] = None
     attention_requests_seen: list[dict] = []
     chat_assistant_seen_at: Optional[float] = None
     payment_card_action_completed = False
@@ -2308,11 +2378,12 @@ async def poll_agent(
         # Agent mode: done on terminal status
         if status in TERMINAL_STATUSES:
             if task.agentcard_setup_action == "complete":
-                setup_kind = "agentcard_user_cardholder_onboarding_required"
-                setup_still_open = any(
-                    _attention_request_is_open(req) and _attention_request_kind(req) == setup_kind
-                    for req in _pending_attention
-                )
+                setup_still_open = False
+                if agentcard_setup_attention_seen and agentcard_setup_attention_id:
+                    setup_still_open = await _agentcard_setup_attention_still_open_after_terminal(
+                        base_url,
+                        agentcard_setup_attention_id,
+                    )
                 data["_benchmark"] = {
                     **data.get("_benchmark", {}),
                     "expected_attention_kinds_seen": list(seen_attention_kinds),
@@ -2639,6 +2710,7 @@ async def poll_agent(
                             ):
                                 await configure_benchmark_agentcard_setup(base_url, "complete")
                                 agentcard_setup_attention_seen = True
+                                agentcard_setup_attention_id = req_id
                                 print(f"    ✅ Completed one-time AgentCard setup for attention {req_id[:8]}")
                                 continue
                         if task.name == CALENDLY_TASK_NAME and _contains_calendly_link(req):
@@ -3293,20 +3365,17 @@ def _local_victoria_database_url() -> Optional[str]:
     if services_path.exists():
         try:
             services = json.loads(services_path.read_text())
-            if (services.get("database") or {}).get("use_system_postgres") is True:
-                candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
-            port = (services.get("ports") or {}).get("local_db")
-            if port:
-                candidates.append(f"postgresql://postgres:postgres@localhost:{port}/victoria")
-        except Exception:
-            pass
-    env_database_url = os.environ.get("DIRECT_URL") or os.environ.get("DATABASE_URL")
-    if env_database_url:
-        candidates.append(_psql_compatible_database_url(env_database_url))
-    candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
-    configured_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
-    if configured_url:
-        candidates.append(_psql_compatible_database_url(configured_url))
+            candidates.append(manifest_database_url(services))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Invalid benchmark services manifest at {services_path}: {exc}") from exc
+    else:
+        env_database_url = os.environ.get("DIRECT_URL") or os.environ.get("DATABASE_URL")
+        if env_database_url:
+            candidates.append(_psql_compatible_database_url(env_database_url))
+        candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
+        configured_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+        if configured_url:
+            candidates.append(_psql_compatible_database_url(configured_url))
 
     seen: set[str] = set()
     for database_url in candidates:
@@ -3662,17 +3731,72 @@ def _run_gate_fixture(task_name: str, action: str) -> dict:
     return _parse_last_json_line(result.stdout)
 
 
-def _seed_sync_error_detail(result: "subprocess.CompletedProcess[str]") -> str:
+def _seed_output_text(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value if isinstance(value, str) else ""
+
+
+def _seed_sync_error_detail(result: object) -> str:
     """Render a failed seed-local subprocess's output without destroying the
     diagnosis. Prisma errors put the actual reason (error code / constraint /
     timeout) at the END of the message, after the invocation header — a naive
     head truncation reduced the 2026-07-18 claude-code-agent smoke failure to
     an unusable 'Invalid `localCookie.upsert()` invocation in <file>' stub.
     Keep the head for context and the tail for the root cause."""
-    detail = (result.stderr or result.stdout or "").strip()
+    stderr = _seed_output_text(getattr(result, "stderr", None))
+    stdout = _seed_output_text(
+        getattr(result, "stdout", None) or getattr(result, "output", None)
+    )
+    streams = []
+    if stderr.strip():
+        streams.append(f"[stderr]\n{stderr.strip()}")
+    if stdout.strip():
+        streams.append(f"[stdout]\n{stdout.strip()}")
+    detail = "\n".join(streams)
     if len(detail) <= 1200:
         return detail
     return f"{detail[:300]}\n    … [{len(detail) - 1100} chars elided] …\n    {detail[-800:]}"
+
+
+def _run_seed_subprocess(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str] | None,
+    timeout: float,
+) -> "subprocess.CompletedProcess[str]":
+    """Run a seed command in its own process group.
+
+    ``npx`` launches a child Node process. Killing only the wrapper on timeout
+    leaves that child syncing production credentials after the benchmark has
+    already failed and teardown has begun. A dedicated session lets the timeout
+    path terminate the complete seed tree and retain its partial diagnostics.
+    """
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(
+            exc.cmd,
+            exc.timeout,
+            output=stdout or exc.output,
+            stderr=stderr or exc.stderr,
+        ) from None
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool:
@@ -3683,11 +3807,13 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     which forces the agent's claudeAuth fetch to fail into the paid waterfall.
     Reads the prod source from back-end/.env; writes to the isolated DB.
 
-    ``tolerate_gpt_code_unavailable`` is for the blanket pre-flight only: it sets
-    the seed's ``SEED_ALLOW_MISSING_GPT_CODE`` opt-in so the sync succeeds when
-    Codex (gpt_code) is quota-blocked (rateLimitedUntil set), since the agent
-    runtime drives claude_code. Live-fixture syncs never set it, so
-    Codex-dependent tasks still fail closed."""
+    ``tolerate_gpt_code_unavailable`` sets the seed's ``SEED_ALLOW_MISSING_GPT_CODE``
+    opt-in so the sync succeeds when Codex (gpt_code) is quota-blocked
+    (rateLimitedUntil set), since the agent runtime drives claude_code. Both the
+    blanket pre-flight AND the live-fixture overlay pass it: browser/credential
+    tasks never touch Codex, so an exhausted gpt_code must not abort them here.
+    Codex-dependent tasks fail closed at their own strict credential gate
+    downstream, not at this shared compute-token sync."""
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Compute-token sync skipped: local Victoria DB not found")
@@ -3695,20 +3821,25 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
+    env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
     shared_source = _shared_workspace_database_url()
     if shared_source and shared_source != database_url:
         env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = shared_source
     if tolerate_gpt_code_unavailable:
         env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
     try:
-        result = subprocess.run(
+        result = _run_seed_subprocess(
             ["npx", "tsx", "scripts/seed-local.ts", "--compute-tokens-only"],
             cwd=REPO_ROOT / "back-end",
             env=env,
-            capture_output=True,
-            text=True,
             timeout=120,
         )
+    except subprocess.TimeoutExpired as exc:
+        print(
+            f"    ⚠ Compute-token sync timed out after {exc.timeout}s: "
+            f"{_seed_sync_error_detail(exc)}"
+        )
+        return False
     except Exception as exc:
         print(f"    ⚠ Compute-token sync error: {exc}")
         return False
@@ -3720,13 +3851,21 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     return True
 
 
-def _sync_browser_credentials() -> bool:
+def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     """Refresh the complete live browser auth graph (context/provider profiles,
     cookies/storage, CookieBundles, Steel sessions, passwords, and passkeys) from
     prod into the isolated benchmark DB. Same pattern as
     _sync_compute_tokens: a one-time setup-db sync goes stale as cookies expire,
     so the live fixture re-pulls them right before the agent starts.
-    Best-effort but loud. Reads the prod source from back-end/.env."""
+    Best-effort but loud. Reads the prod source from back-end/.env.
+
+    When ``cookie_domains`` is given (from the task's environment.live_cookie_domains),
+    every domain-bearing browser-auth table is scoped to those domains: cookies,
+    bundles, origin storage, permissions, passwords, Steel sessions, and passkeys.
+    A task that only needs e.g. doordash.com therefore avoids both the full ~22k
+    cookie graph and thousands of unrelated durable-auth rows. With no domains
+    declared it syncs the full graph under a raised budget (generic tasks pay the
+    honest cost)."""
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Credential sync skipped: local Victoria DB not found")
@@ -3734,18 +3873,37 @@ def _sync_browser_credentials() -> bool:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
+    if cookie_domains:
+        # seed-local.ts filters every domain-bearing browser-auth read, so the
+        # sync is bounded by the task's auth state, not the whole account.
+        env["SEED_COOKIE_DOMAINS"] = ",".join(cookie_domains)
+        cred_timeout = 300
+        print(
+            f"    🍪 scoping browser-credential sync to {len(cookie_domains)} "
+            f"domain(s): {', '.join(cookie_domains)}"
+        )
+    else:
+        # No declared domains → full browser-auth graph. It legitimately takes several
+        # minutes on a warm box (which skipped run.sh's boot sync), so give it the
+        # honest budget instead of failing the whole task at 420s.
+        cred_timeout = 900
+        print("    🍪 full browser-credential sync (no live_cookie_domains) — raised budget")
     try:
-        result = subprocess.run(
+        result = _run_seed_subprocess(
             ["npx", "tsx", "scripts/seed-local.ts", "--credentials-only"],
             cwd=REPO_ROOT / "back-end",
             env=env,
-            capture_output=True,
-            text=True,
-            # A healthy sync takes ~60-90s; seed-local retries transient DB
-            # failures up to 3x internally (BROWSER_AUTH_SYNC_ATTEMPTS), so the
-            # outer budget must cover multiple attempts, not just one.
-            timeout=420,
+            # A scoped sync takes seconds; the full graph takes minutes. seed-local
+            # retries transient DB failures up to 3x internally, so the budget must
+            # cover multiple attempts of whichever mode this is.
+            timeout=cred_timeout,
         )
+    except subprocess.TimeoutExpired as exc:
+        print(
+            f"    ⚠ Credential sync timed out after {exc.timeout}s: "
+            f"{_seed_sync_error_detail(exc)}"
+        )
+        return False
     except Exception as exc:
         print(f"    ⚠ Credential sync error: {exc}")
         return False
@@ -3771,14 +3929,16 @@ def _sync_passkeys() -> None:
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
     try:
-        result = subprocess.run(
+        result = _run_seed_subprocess(
             ["npx", "tsx", "scripts/seed-local.ts", "--passkeys-only"],
             cwd=REPO_ROOT / "back-end",
             env=env,
-            capture_output=True,
-            text=True,
             timeout=120,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Passkey-only sync timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}"
+        ) from exc
     except Exception as exc:
         raise RuntimeError(f"Passkey-only sync failed: {exc}") from exc
     if result.returncode != 0:
@@ -3793,6 +3953,10 @@ class LiveFixtureContext:
     base_url: str
     user_id: str
     auth_realm: str
+    # When a task declares environment.live_cookie_domains, the browser-credential
+    # sync is scoped to just those cookie domains (seconds, not ~13 min). Empty →
+    # full cookie sync with a raised budget.
+    cookie_domains: tuple[str, ...] = ()
 
 
 def _is_simulate_mode() -> bool:
@@ -3812,9 +3976,16 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     if _is_simulate_mode():
         print("    🌍 simulate mode — skipping the live credential overlay")
         return {"fixture": "live", "skipped": True, "reason": "simulate"}
-    if not _sync_compute_tokens():
+    # Tolerate a quota-blocked Codex (gpt_code) exactly like the blanket pre-flight
+    # (_refresh_local_compute_tokens_for_run): the live overlay serves browser/
+    # credential tasks whose agents drive claude_code, so a rate-limited gpt_code
+    # ("No usable gpt_code integrations after sync") must not fail closed here and
+    # abort the whole run before an agent is ever created. Codex-dependent tasks
+    # keep their own strict credential gates downstream. Without this, an exhausted
+    # org-wide Codex quota failed every browser task at the fixture (0/8 ecommerce).
+    if not _sync_compute_tokens(tolerate_gpt_code_unavailable=True):
         raise RuntimeError("Live fixture could not refresh compute tokens")
-    if not _sync_browser_credentials():
+    if not _sync_browser_credentials(ctx.cookie_domains):
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
     return {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
 
@@ -4091,7 +4262,14 @@ def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
         # Live fixtures mutate the local isolated DB; never touch a prod base_url.
         return []
     auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
-    ctx = LiveFixtureContext(base_url=base_url, user_id=USER_ID, auth_realm=auth_realm)
+    raw_domains = (task.environment or {}).get("live_cookie_domains") or []
+    cookie_domains = tuple(str(d).strip() for d in raw_domains if str(d).strip())
+    ctx = LiveFixtureContext(
+        base_url=base_url,
+        user_id=USER_ID,
+        auth_realm=auth_realm,
+        cookie_domains=cookie_domains,
+    )
     manifests: list[dict] = []
     for name in fixtures:
         applier = LIVE_FIXTURE_APPLIERS.get(name)
@@ -6414,7 +6592,10 @@ async def run_single_task(
 
         if task.expected_payment_lifecycle:
             try:
-                payment_lifecycle = await get_test_payment_lifecycle(base_url, agent_id)
+                payment_lifecycle = await _get_initial_payment_lifecycle_with_retry(
+                    base_url,
+                    agent_id,
+                )
                 data["_benchmark"] = {
                     **data.get("_benchmark", {}),
                     "payment_lifecycle": payment_lifecycle,
@@ -6883,6 +7064,12 @@ def _validate_task_target(task: BenchmarkTask, base_url: str) -> None:
 
 
 def _agentcard_setup_fixture_action(task: BenchmarkTask, base_url: str) -> Optional[str]:
+    # Production-only lifecycles must exercise the user's real AgentCard
+    # integration. Completing the benchmark setup fixture against production
+    # replaces that path with a sandbox cardholder, making every provider
+    # transfer report livemode=false and defeating this gate's purpose.
+    if task.production_only:
+        return None
     if task.agentcard_setup_action == "complete":
         return "reset"
     if task.expected_payment_lifecycle:
@@ -7578,6 +7765,22 @@ def _parallel_task_runners(
     return [run_limited(task) for task in tasks]
 
 
+def _parallel_task_phases(
+    tasks: list[BenchmarkTask],
+) -> list[tuple[str, list[BenchmarkTask]]]:
+    """Order destructive fixture tasks ahead of agent trees that may outlive a root.
+
+    A timed-out task can be intentionally retained for diagnostics while one of
+    its descendants continues working. Running a destructive fixture after the
+    root future settles therefore is not isolated: the descendant can recreate
+    shared rows during the fixture. Starting the exclusive phase first makes the
+    clean-stack boundary real without sacrificing failed-tree diagnostics.
+    """
+    exclusive = [task for task in tasks if task.name in EXCLUSIVE_SHARED_DB_TASK_NAMES]
+    parallel = [task for task in tasks if task.name not in EXCLUSIVE_SHARED_DB_TASK_NAMES]
+    return [("exclusive", exclusive), ("parallel", parallel)]
+
+
 async def main_async(args):
     if args.list:
         print("\nBenchmark Tasks:")
@@ -7915,14 +8118,15 @@ async def main_async(args):
             if max_concurrency is not None and max_concurrency < 1:
                 raise ValueError("--max-concurrency must be >= 1")
 
-            # Destructive shared-DB fixtures must never overlap in-flight tasks.
-            # Run them serially after the normal parallel batch drains.
-            exclusive_db_tasks = [t for t in tasks if t.name in EXCLUSIVE_SHARED_DB_TASK_NAMES]
-            parallel_batch = [t for t in tasks if t.name not in EXCLUSIVE_SHARED_DB_TASK_NAMES]
+            # Destructive shared-DB fixtures must never overlap any agent tree.
+            # Run them before ordinary roots can leave retained descendants.
+            phases = _parallel_task_phases(tasks)
+            exclusive_db_tasks = phases[0][1]
+            parallel_batch = phases[1][1]
             if exclusive_db_tasks:
                 names = ", ".join(t.name for t in exclusive_db_tasks)
                 print(
-                    f"\n  Deferring {len(exclusive_db_tasks)} destructive DB fixture task(s) to a serial phase: {names}"
+                    f"\n  Running {len(exclusive_db_tasks)} destructive DB fixture task(s) before the parallel phase: {names}"
                 )
 
             if max_concurrency is None or max_concurrency >= len(parallel_batch):
@@ -7938,18 +8142,33 @@ async def main_async(args):
                     on_agent_created=_remember_live_agent,
                 )
 
-            task_runners = _parallel_task_runners(
-                parallel_batch,
-                max_concurrency,
-                run_parallel_task,
-            )
-
-            pending_results: dict[asyncio.Task, BenchmarkTask] = {
-                asyncio.create_task(runner, name=f"benchmark-{task.name}"): task
-                for task, runner in zip(parallel_batch, task_runners)
-            }
-            pending = set(pending_results)
+            pending_results: dict[asyncio.Task, BenchmarkTask] = {}
+            pending: set[asyncio.Task] = set()
             try:
+                for task in exclusive_db_tasks:
+                    print(f"\n  Running destructive DB fixture task serially: {task.name}")
+                    _report_running.clear()
+                    _report_running.add(task.name)
+                    result = await run_single_task(
+                        base_url,
+                        task,
+                        args.keep_failed_agents,
+                        on_agent_created=_remember_live_agent,
+                    )
+                    run.task_results.append(result)
+                    _report_running.discard(task.name)
+                    _emit_report(set())
+
+                task_runners = _parallel_task_runners(
+                    parallel_batch,
+                    max_concurrency,
+                    run_parallel_task,
+                )
+                pending_results = {
+                    asyncio.create_task(runner, name=f"benchmark-{task.name}"): task
+                    for task, runner in zip(parallel_batch, task_runners)
+                }
+                pending = set(pending_results)
                 while pending:
                     _report_running.clear()
                     _report_running.update(pending_results[future].name for future in pending)
@@ -7975,19 +8194,6 @@ async def main_async(args):
                         else:
                             run.task_results.append(result)
                     _emit_report({pending_results[future].name for future in pending})
-                for task in exclusive_db_tasks:
-                    print(f"\n  Running destructive DB fixture task serially: {task.name}")
-                    _report_running.clear()
-                    _report_running.add(task.name)
-                    result = await run_single_task(
-                        base_url,
-                        task,
-                        args.keep_failed_agents,
-                        on_agent_created=_remember_live_agent,
-                    )
-                    run.task_results.append(result)
-                    _report_running.discard(task.name)
-                    _emit_report(set())
             except asyncio.CancelledError:
                 for task_future in pending:
                     task_future.cancel()

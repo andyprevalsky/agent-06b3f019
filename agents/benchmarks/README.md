@@ -35,7 +35,7 @@ Declare it only on tasks that exercise current credentials:
 }
 ```
 
-- **`live`** — syncs fresh compute tokens plus the complete browser-auth graph from production (`seed-local.ts --compute-tokens-only` and `--credentials-only`). In simulator mode the overlay is skipped as a unit because environment-boundary tools are simulated.
+- **`live`** — syncs fresh compute tokens plus the browser-auth graph from production (`seed-local.ts --compute-tokens-only` and `--credentials-only`). Tasks with `environment.live_cookie_domains` scope every domain-bearing browser-auth table to those domains; tasks without it retain the complete account-wide graph. In simulator mode the overlay is skipped as a unit because environment-boundary tools are simulated.
 - Omitted `live_fixtures` resolve to `[]`; using a live website does not implicitly import production credentials.
 - Site-specific setup is task scenario logic, not another live fixture. For example, the Amazon passkey probe applies `live`, then temporarily removes competing cookie/password paths and restores them in cleanup.
 

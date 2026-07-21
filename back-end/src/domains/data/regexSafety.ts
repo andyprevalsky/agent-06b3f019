@@ -14,30 +14,88 @@ const MAX_PATTERN_LENGTH = 1000;
 // Quadratic (degree 2) regex is harmless over a single bounded DB row; degree ≥ 3
 // or exponential can hang Postgres for seconds-to-minutes, so reject those.
 const MAX_SAFE_POLYNOMIAL_DEGREE = 2;
+const RECHECK_TIMEOUT_MS = 1000;
 
 export interface PatternSafety {
   ok: boolean;
   reason?: string;
 }
 
+function unclassifiedPatternRejection(): PatternSafety {
+  return {
+    ok: false,
+    reason:
+      'Pattern safety analysis did not complete. ' +
+      'Use a simpler expression without nested quantifiers or stacked wildcards.',
+  };
+}
+
+/**
+ * Prove a deliberately narrow subset linear without invoking the heavier
+ * analyzer. Literals, escaped characters, anchors, fixed-width dots, and at
+ * most one `.*` cannot create nested or overlapping repetition. Everything
+ * outside this subset still goes through recheck and fails closed if recheck
+ * cannot classify it.
+ */
+function isClearlyLinearPattern(source: string): boolean {
+  let wildcardCount = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === '\\') {
+      index += 1;
+      continue;
+    }
+    if (char === '.' && source[index + 1] === '*') {
+      wildcardCount += 1;
+      if (wildcardCount > 1) return false;
+      index += 1;
+      continue;
+    }
+    if ('*+?()[]{}|'.includes(char)) return false;
+  }
+  return true;
+}
+
+type PatternAnalyzer = typeof checkSync;
+type PatternSafetyControl = number | PatternAnalyzer;
+
 /**
  * Classify a regex with `recheck` and reject genuinely dangerous shapes
  * (exponential, or polynomial degree > 2). Quadratic patterns like
  * `meeting.*tomorrow` stay allowed so we don't nerf realistic queries.
  */
-export function checkPatternSafety(source: string, flags: string): PatternSafety {
+export function checkPatternSafety(
+  source: string,
+  flags: string,
+  control: PatternSafetyControl = RECHECK_TIMEOUT_MS
+): PatternSafety {
   if (source.length > MAX_PATTERN_LENGTH) {
     return {
       ok: false,
       reason: `Pattern too long (${source.length} chars, max ${MAX_PATTERN_LENGTH}).`,
     };
   }
+  const analyze = typeof control === 'function' ? control : checkSync;
+  const timeoutMs = typeof control === 'number' ? control : RECHECK_TIMEOUT_MS;
+  // An explicitly supplied analyzer is a test seam for fail-closed behavior,
+  // so it must run even when the pattern is in the locally proven subset.
+  if (
+    typeof control !== 'function' &&
+    typeof flags === 'string' &&
+    isClearlyLinearPattern(source)
+  ) {
+    return { ok: true };
+  }
   let diagnostics;
   try {
-    diagnostics = checkSync(source, flags, { timeout: 1000 });
+    diagnostics = analyze(source, flags, { timeout: timeoutMs });
   } catch {
-    return { ok: true }; // analyzer error/timeout — fail open; the length cap is the backstop
+    // A timeout is most likely for the complex patterns this guard exists to
+    // stop, especially when the host is under load. Never let an unclassified
+    // pattern reach Postgres's backtracking regex engine.
+    return unclassifiedPatternRejection();
   }
+  if (diagnostics.status === 'unknown') return unclassifiedPatternRejection();
   if (diagnostics.status !== 'vulnerable') return { ok: true };
   const complexity = diagnostics.complexity;
   const tooComplex =

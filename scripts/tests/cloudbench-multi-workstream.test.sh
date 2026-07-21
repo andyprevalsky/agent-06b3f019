@@ -330,6 +330,20 @@ elif args[:3] == ["volume", "snapshots", "list"]:
         print(json.dumps(state["snapshots"]))
 elif args[:2] == ["machine", "clone"]:
     name = flag_value("--name")
+    # Fault injection (RCA #6): make the FIRST clone attempt fail AMBIGUOUSLY —
+    # non-zero exit, NO Machine allocated, and an error that is NOT a recognized
+    # "definitively unallocated" string — so the controller's provision loop must
+    # reconcile the already-reserved name AUTHORITATIVELY (resolve -> absent ->
+    # release) rather than leaving a name-only orphan that later aborts teardown
+    # and leaks its id'd siblings. Later attempts proceed normally.
+    if os.environ.get("CLOUDBENCH_FAKE_CLONE_FAIL_ONCE") == "1":
+        fail_once_marker = os.path.join(FAKE_DIR, "clone-failed-once")
+        if not os.path.exists(fail_once_marker):
+            with open(fail_once_marker, "w") as fh:
+                fh.write(name or "")
+            print("Error: an unexpected error occurred (request timed out)",
+                  file=sys.stderr)
+            sys.exit(1)
     machine_id = uuid.uuid4().hex[:14]
     vm_size = flag_value("--vm-size") or "shared-cpu-4x"
     vm_memory = int(flag_value("--vm-memory") or "8192")
@@ -642,6 +656,9 @@ PY
 # non-hub listener sitting on it. The test must therefore only ever point the
 # fleets at ports it PROBED free and then occupied with its own hub stubs —
 # never at a well-known port that could carry a real process on a dev machine.
+# Derive a process-specific search window from this run's random tmp root so
+# concurrent copies of this regression (for example, two Conductor workspaces)
+# do not both probe 42000 free and then race to own the same listener.
 find_free_port() {  # find_free_port <start>
     local start="$1" port
     for port in $(seq "$start" $((start + 500))); do
@@ -652,7 +669,15 @@ find_free_port() {  # find_free_port <start>
     done
     return 1
 }
-HUB_PORT_A="$(find_free_port 42000)" || fail "could not find a free test port for workstream A"
+PORT_WINDOW_START="$(TMP_ROOT="$TMP_ROOT" python3 - <<'PY'
+import hashlib
+import os
+
+digest = hashlib.sha256(os.environ["TMP_ROOT"].encode()).digest()
+print(40000 + int.from_bytes(digest[:4], "big") % 15000)
+PY
+)"
+HUB_PORT_A="$(find_free_port "$PORT_WINDOW_START")" || fail "could not find a free test port for workstream A"
 HUB_PORT_B="$(find_free_port $((HUB_PORT_A + 1)))" || fail "could not find a free test port for workstream B"
 CONDUCTOR_PORT_A=$((HUB_PORT_A - 5764))
 CONDUCTOR_PORT_B=$((HUB_PORT_B - 5764))
@@ -706,6 +731,14 @@ registered = {}
 class Hub(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/hub-meta.json":
+            body = json.dumps({"hub_runs_dir": str(runs_root.resolve())}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path.startswith("/api/benchmarks/runs/"):
             run_id = path.rsplit("/", 1)[-1]
             if run_id not in registered:
@@ -910,7 +943,17 @@ PY
 echo "PASS: scenario 3 — stopped inventory does not consume active-compute capacity"
 
 # ════════════════════════════════════════════════════════════════════════════
-# Scenario 4 — true active pressure and unknown states remain fail-closed
+# Scenario 4 — true active SHARED-CPU pressure and unknown states remain fail-closed
+#
+# #815 replaced the flat machine-count cap with an ELASTIC shared-CPU-unit governor
+# (ceiling = governor − headroom = 160 − 20 = 140 units). Only RUNNING machines
+# with a shared-CPU guest consume the governor; stopped machines and the separate
+# performance reservation do not. A machine in an unknown/transitioning (non-
+# stopped) state still counts as running, so it stays capacity-consuming. Stack 69
+# running shared-cpu-2x machines (138 shared units — one in a provider-unknown
+# state) so a 2-primary run (4 units) projects to 142 > 140 and MUST be rejected
+# before any clone. (Machines WITHOUT a shared guest draw the separate perf
+# reservation and would never trip this governor — the old count-based setup.)
 # ═════════════════════════════════════════════════════════════════════════════
 reset_fake_state
 : > "$FAKE_DIR/journal.log"
@@ -921,40 +964,46 @@ import os
 path = os.environ["FAKE_STATE"]
 with open(path) as fh:
     state = json.load(fh)
-for index in range(58):
+for index in range(68):
     state["machines"].append({
         "id": f"busy{index:09d}",
         "name": f"existing-busy-{index}",
         "state": "started",
         "region": "iad",
         "private_ip": f"fdaa::{index + 1}",
-        "config": {"mounts": []},
+        "config": {"mounts": [], "guest": {"cpu_kind": "shared", "cpus": 2}},
     })
+# A provider-unknown (non-stopped) state must STILL count as a running shared unit.
 state["machines"].append({
     "id": "unknown0000000",
     "name": "existing-unknown",
     "state": "provider-new-state",
     "region": "iad",
     "private_ip": "fdaa::ffff",
-    "config": {"mounts": []},
+    "config": {"mounts": [], "guest": {"cpu_kind": "shared", "cpus": 2}},
 })
 with open(path, "w") as fh:
     json.dump(state, fh)
 PY
 
 capacity_status=0
-run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-active-capacity.log" \
+CLOUDBENCH_SHARED_CPU_GOVERNOR=160 CLOUDBENCH_SHARED_CPU_HEADROOM=20 \
+CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=shared-cpu-2x \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-active-capacity.log" \
     capacity-h capacity-i --no-autoscale --timeout 240 || capacity_status=$?
 [ "$capacity_status" -eq 1 ] ||
-    fail "true active pressure must remain blocked (exit=$capacity_status)"
-grep -qF "59 active/transitioning machines" "$TMP_ROOT/controller-active-capacity.log" ||
-    fail "unknown machine states must remain capacity-consuming"
-grep -qF "(1 stopped; 60 total) and this run adds 2" "$TMP_ROOT/controller-active-capacity.log" ||
-    fail "active capacity rejection must report the classified machine counts"
+    fail "true active shared-CPU pressure must remain blocked (exit=$capacity_status)"
+grep -qF "Shared-CPU capacity governor reached: 138 active shared units" \
+    "$TMP_ROOT/controller-active-capacity.log" ||
+    fail "unknown/transitioning shared-CPU machines must remain capacity-consuming (expected 138 active units)"
+grep -qF "this run's 2 primaries (4 units) = 142" "$TMP_ROOT/controller-active-capacity.log" ||
+    fail "active capacity rejection must report the projected shared-unit total"
+grep -qF "ceiling 140 (governor 160" "$TMP_ROOT/controller-active-capacity.log" ||
+    fail "active capacity rejection must report the governor ceiling"
 if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then
     fail "an over-capacity active burst must be rejected before cloning"
 fi
-echo "PASS: scenario 4 — active pressure and unknown states remain fail-closed"
+echo "PASS: scenario 4 — active shared-CPU pressure and unknown states remain fail-closed"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 5 — SIGKILL recovery survives deletion of the workspace-local ledger
@@ -1549,5 +1598,47 @@ CLOUDBENCH_CLONE_LOOKUP_SECONDS=1 CLOUDBENCH_TEST_BARRIER_MIN=1 \
 [ -f "$SANDBOX/.git/cloudbench-fleet-ownership/phantom-fresh/clones/$fresh_name" ] ||
     fail "scenario 15: a fresh name-only record must be retained, not discarded"
 echo "PASS: scenario 15 — aged-out phantom is discarded (provisioning proceeds); fresh gap still fails closed"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Scenario 16 — an AMBIGUOUS clone failure must not leave a name-only orphan.
+#
+# RCA #6 (real incident: 7 leaked paid machines). The provision loop reserves the
+# clone name durably BEFORE asking Fly to allocate (so a SIGKILL mid-clone can't
+# orphan a late-appearing machine). If that attempt then fails AMBIGUOUSLY — a
+# non-zero/timed-out clone that yields no id and is NOT a recognized "definitively
+# unallocated" error — the original code retained the name record forever. That
+# id-less orphan later hit the `*) return 1` reap arm on a single transient
+# Fly-list read and aborted the whole teardown, leaking every already-id'd sibling
+# (glob order put the orphan first → 0 siblings destroyed). The fix resolves the
+# reserved name AUTHORITATIVELY after a failed attempt: bind the id if a machine
+# materialized, RELEASE the reservation on a definite "absent". This drives the
+# real controller through exactly that ambiguous failure and proves no orphan
+# survives while provisioning still succeeds on retry.
+# ═════════════════════════════════════════════════════════════════════════════
+reset_fake_state
+rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership" "$SANDBOX/.git/cloudbench-pools" \
+    "$SANDBOX/.git/cloudbench-pool-claims" "$FAKE_DIR/markers" "$FAKE_DIR/clone-failed-once"
+mkdir -p "$FAKE_DIR/markers"
+: > "$FAKE_DIR/journal.log"
+amb_status=0
+CLOUDBENCH_FAKE_CLONE_FAIL_ONCE=1 CLOUDBENCH_CLONE_LOOKUP_SECONDS=1 CLOUDBENCH_TEST_BARRIER_MIN=1 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-amb-clone.log" \
+    --provision-pool 1 || amb_status=$?
+[ "$amb_status" -eq 0 ] ||
+    fail "scenario 16: provisioning must recover from an ambiguous clone failure (exit=$amb_status)"
+# The retry must have produced a real pool machine (the failure was survivable).
+amb_pool_id="$(head -1 "$POOL_A" 2>/dev/null)"
+[ -n "$amb_pool_id" ] ||
+    fail "scenario 16: provisioning did not proceed after the ambiguous clone failure"
+# CRITICAL: no name-only (id-less) orphan may remain — that is the exact record
+# that poisons teardown and leaks siblings.
+amb_orphans=0
+for reg in "$SANDBOX"/.git/cloudbench-fleet-ownership/*/clones/*; do
+    [ -f "$reg" ] || continue
+    grep -q '^id=' "$reg" || amb_orphans=$((amb_orphans + 1))
+done
+[ "$amb_orphans" -eq 0 ] ||
+    fail "scenario 16: ambiguous clone failure left $amb_orphans name-only orphan record(s) — RCA #6 regression"
+echo "PASS: scenario 16 — ambiguous clone failure releases its reserved name (no orphan); retry provisions"
 
 echo "PASS: two workstreams ran cloud benchmarks concurrently, isolated end to end"

@@ -153,8 +153,11 @@ flyctl() {
 }
 rotated_port=""
 rotated_pid=""
+# The replacement tunnel is a background child. On a shared CI host its shell
+# can be scheduler-delayed even though the production collision classification
+# above remains immediate, so give this observation window enough wall time.
 start_leased_data_plane_proxy 61944 rotated_port 3001 occupied.local \
-  "$TMP_ROOT/proxy-bind-rotation.log" rotated_pid status 3 ||
+  "$TMP_ROOT/proxy-bind-rotation.log" rotated_pid status 10 ||
   fail "the proxy launcher must recover from a bind collision"
 [ "$rotated_port" != "61944" ] || fail "the proxy launcher retried the poisoned port"
 [ "$(cat "$OUT_DIR/status-proxy.port" 2>/dev/null || true)" = "$rotated_port" ] ||

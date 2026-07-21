@@ -25,6 +25,7 @@ HUB_URL="${HUB_URL:-http://localhost:3001}"
 RUN_BENCH_BIN="${RUN_BENCH_BIN:-scripts/run-bench}"   # test hook: stub the runner
 POLL_INTERVAL="${POLL_INTERVAL:-10}"
 HUB_CAPACITY_RETRY_SECONDS="${HUB_CAPACITY_RETRY_SECONDS:-$POLL_INTERVAL}"
+HUB_UPLOAD_SPOOL_DIR="${HUB_UPLOAD_SPOOL_DIR:-.context/hub-upload-spool}"
 LOCAL_RUNNER=0
 ONCE=0
 for arg in "$@"; do
@@ -367,11 +368,11 @@ post(f"/api/benchmarks/run-requests/{req_id}", body, method="PATCH")
 print(f"request {req_id} → {action} (run {run_id})")
 PY
         then
-            mkdir -p .context/hub-upload-spool
+            mkdir -p "$HUB_UPLOAD_SPOOL_DIR"
             printf '{"req_id":"%s","run_id":"%s","bundle":"%s","exit_code":"%s"}\n' \
                 "$req_id" "$hub_run_id" "$final" "$exit_code" \
-                > ".context/hub-upload-spool/$req_id.json"
-            echo "   ⚠ hub unreachable — completion spooled to .context/hub-upload-spool/$req_id.json"
+                > "$HUB_UPLOAD_SPOOL_DIR/$req_id.json"
+            echo "   ⚠ hub unreachable — completion spooled to $HUB_UPLOAD_SPOOL_DIR/$req_id.json"
         fi
     else
         echo "   ⚠ no run bundle found after exit=$exit_code"
@@ -382,7 +383,7 @@ PY
 
 flush_spool() {
     local f
-    for f in .context/hub-upload-spool/*.json; do
+    for f in "$HUB_UPLOAD_SPOOL_DIR"/*.json; do
         [ -f "$f" ] || return 0
         if python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$f" <<'PY'
 import json, sys, urllib.request
