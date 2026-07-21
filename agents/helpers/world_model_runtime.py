@@ -42,8 +42,7 @@ _FAST_CACHE_TOOLS = {"fast_cache_read", "fast_cache_write"}
 # entries by the world-model scope segment in every cache key
 # (fast_cache/normalize.py:world_model_cache_scope).
 _ENVIRONMENT_BOUNDARY_TOOLS = (
-    _BROWSER_ORCHESTRATION_TOOLS
-    | _BROWSER_BOUNDARY_TOOLS
+    _BROWSER_BOUNDARY_TOOLS
     | _VAPI_ORCHESTRATION_TOOLS
     | _VAPI_BOUNDARY_TOOLS
     | {
@@ -114,9 +113,14 @@ class CanonicalAction:
 class WMHHttpClient:
     """Small client for the upstream World Model Harness HTTP runtime."""
 
-    def __init__(self, base_url: str, *, timeout: float = 30.0) -> None:
+    def __init__(self, base_url: str, *, timeout: float | None = None) -> None:
         self.base_url = base_url.rstrip("/")
-        self.timeout = timeout
+        configured_timeout = timeout
+        if configured_timeout is None:
+            configured_timeout = float(os.environ.get("WMH_HTTP_TIMEOUT_SECONDS", "180"))
+        if configured_timeout <= 0:
+            raise ValueError("WMH HTTP timeout must be greater than zero")
+        self.timeout = configured_timeout
 
     async def list_world_models(self) -> list[JsonObject]:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -265,6 +269,7 @@ async def ensure_world_model_session(
     agent_id: str | None,
     *,
     task: str | None = None,
+    seed_state: JsonObject | None = None,
 ) -> str:
     """Return a cached WMH session for (agent_id, world_model), creating one if absent."""
     key = (agent_id or "default", world_model_name)
@@ -275,7 +280,11 @@ async def ensure_world_model_session(
         cached = _WMH_SESSION_CACHE.get(key)
         if cached:
             return cached
-        session_id = await client.create_session(world_model_name, task=task)
+        session_id = await client.create_session(
+            world_model_name,
+            task=task,
+            seed_state=seed_state,
+        )
         _WMH_SESSION_CACHE[key] = session_id
         return session_id
 
@@ -301,11 +310,18 @@ class WorldModelToolExecutionAdapter:
         self.agent_id = agent_id
 
     @classmethod
-    def from_env(cls, *, agent_id: str | None = None) -> "WorldModelToolExecutionAdapter":
+    def from_env(
+        cls,
+        *,
+        agent_id: str | None = None,
+        inherit_explicit_session: bool = True,
+    ) -> "WorldModelToolExecutionAdapter":
         mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real").strip().lower() or "real"
         base_url = os.environ.get("WMH_BASE_URL") or os.environ.get("WORLD_MODEL_HARNESS_URL")
         model_name = os.environ.get("WMH_MODEL_NAME") or os.environ.get("WORLD_MODEL_NAME")
-        session_id = os.environ.get("WMH_SESSION_ID") or os.environ.get("WORLD_MODEL_SESSION_ID")
+        session_id = None
+        if inherit_explicit_session:
+            session_id = os.environ.get("WMH_SESSION_ID") or os.environ.get("WORLD_MODEL_SESSION_ID")
         client = WMHHttpClient(base_url) if base_url else None
         return cls(
             mode=mode,
@@ -326,12 +342,35 @@ class WorldModelToolExecutionAdapter:
     def should_simulate(self, tool_name: str) -> bool:
         return self.mode == "simulate" and is_world_model_environment_boundary(tool_name)
 
+    async def ensure_session(
+        self,
+        *,
+        task: str | None = None,
+        seed_state: JsonObject | None = None,
+    ) -> str:
+        """Resolve this adapter's stateful WMH session without taking an action."""
+
+        if self.session_id:
+            return self.session_id
+        if not self.client or not self.world_model_name:
+            raise RuntimeError("WMH simulation requires WMH_BASE_URL and WMH_MODEL_NAME")
+        self.session_id = await ensure_world_model_session(
+            self.client,
+            self.world_model_name,
+            self.agent_id,
+            task=task,
+            seed_state=seed_state,
+        )
+        return self.session_id
+
     async def execute(
         self,
         tool_name: str,
         tool_args: JsonObject,
         tool_call_id: str,
         real_executor: ToolExecutor,
+        *,
+        allow_real_fallback: bool = True,
     ) -> JsonObject:
         if self.mode == "real" or not is_world_model_environment_boundary(tool_name):
             return await real_executor(tool_name, tool_args, tool_call_id)
@@ -339,10 +378,7 @@ class WorldModelToolExecutionAdapter:
             raise RuntimeError("WMH simulation requires WMH_BASE_URL and WMH_MODEL_NAME")
         # Session is created lazily on first boundary tool and cached per (agent, model);
         # an explicit WMH_SESSION_ID (if set) still wins.
-        session_id = self.session_id or await ensure_world_model_session(
-            self.client,
-            self.world_model_name,
-            self.agent_id,
+        session_id = await self.ensure_session(
             task=_world_model_task_for_tool(tool_name, tool_args),
         )
         action = self.action_for_tool(tool_name, tool_args, tool_call_id)
@@ -355,7 +391,10 @@ class WorldModelToolExecutionAdapter:
                 simulated=True,
                 wall_elapsed_ms=wall_elapsed_ms,
             )
-            if _wmh_fallback_on_unavailable_enabled() and _wmh_result_unavailable(result):
+            result.setdefault("world_model_session_id", session_id)
+            result.setdefault("world_model_name", self.world_model_name)
+            result.setdefault("world_model_boundary", tool_name)
+            if allow_real_fallback and _wmh_fallback_on_unavailable_enabled() and _wmh_result_unavailable(result):
                 real_result = await real_executor(tool_name, tool_args, tool_call_id)
                 if isinstance(real_result, dict):
                     real_result.setdefault("world_model_unavailable_fallback", True)

@@ -60,6 +60,29 @@ class ReclaimErrorWalletProvider extends FakeWalletFundingProvider {
   }
 }
 
+class ConcurrentlyVoidedWalletProvider extends FakeWalletFundingProvider {
+  async reclaimUserWalletFunding(
+    request: WalletFundingReclaimRequest
+  ): Promise<WalletFundingResult> {
+    this.reclaimCalls.push(request);
+    await prisma.$transaction([
+      prisma.purchaseWalletFunding.update({
+        where: { purchaseId: request.purchaseId },
+        data: { status: PurchaseWalletFundingStatus.RECLAIMED },
+      }),
+      prisma.purchaseSpend.update({
+        where: { id: request.purchaseId },
+        data: { status: PurchaseSpendStatus.VOIDED },
+      }),
+    ]);
+    throw new WalletFundingProviderError(
+      'stale concurrent reclaim result',
+      409,
+      'agentcard_company_transfer_consumed_during_reclaim'
+    );
+  }
+}
+
 async function seedUser(): Promise<string> {
   const userId = `cleanup-unit-${randomUUID()}`;
   await prisma.user.create({ data: { userId, isAnonymous: true } });
@@ -177,6 +200,21 @@ async function main(): Promise<void> {
       );
     });
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.CLEARED);
+  });
+
+  await test('cleanup never overwrites a concurrently voided purchase as cleared', async () => {
+    const userId = await seedUser();
+    const agentId = await seedAgent(userId, 'COMPLETED');
+    const purchaseId = await seedHeld(userId, { agentId });
+    await seedFunding(purchaseId, userId, PurchaseWalletFundingStatus.FUNDED);
+    await withFakeStripe(async () => {
+      await cleanupAgentPurchaseCards(
+        agentId,
+        new StubCardStateProvider({ status: 'OPEN', balanceCents: 1080 }),
+        new ConcurrentlyVoidedWalletProvider()
+      );
+    });
+    assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.VOIDED);
   });
 
   await test('cleanup leaves the purchase HELD when release is pending', async () => {

@@ -198,10 +198,20 @@ export async function reclaimPurchaseWalletFunding(
     allowConsumed: opts.allowConsumed === true,
   });
   if (reclaiming.count === 0) {
+    const current = await repo.findWalletFundingByPurchaseId(purchase.id);
+    // Another cleanup can finish the same idempotent reclaim between our initial read and CAS.
+    // That is success, not evidence that a merchant consumed the transfer.
+    if (current?.status === PurchaseWalletFundingStatus.RECLAIMED) return;
+    const consumed = current?.status === PurchaseWalletFundingStatus.CONSUMED;
     throw new WalletFundingProviderError(
-      'AgentCard company transfer was consumed while reclaim started',
+      consumed
+        ? 'AgentCard company transfer was consumed while reclaim started'
+        : 'AgentCard company transfer changed state while reclaim started',
       409,
-      'agentcard_company_transfer_consumed_during_reclaim'
+      consumed
+        ? 'agentcard_company_transfer_consumed_during_reclaim'
+        : 'agentcard_company_transfer_reclaim_conflict',
+      { fundingStatus: current?.status }
     );
   }
   const activeProvider = walletFundingProvider ?? createWalletFundingProvider();
@@ -221,10 +231,20 @@ export async function reclaimPurchaseWalletFunding(
     });
     const reclaimed = await repo.markWalletFundingReclaimed(funding.id, result);
     if (reclaimed.count === 0) {
+      const current = await repo.findWalletFundingByPurchaseId(purchase.id);
+      // Concurrent reconcilers may both observe the provider release. The winner has already
+      // persisted the exact terminal state this call wanted, so the loser is an idempotent success.
+      if (current?.status === PurchaseWalletFundingStatus.RECLAIMED) return;
+      const consumed = current?.status === PurchaseWalletFundingStatus.CONSUMED;
       throw new WalletFundingProviderError(
-        'AgentCard company transfer was consumed while reclaim completed',
+        consumed
+          ? 'AgentCard company transfer was consumed while reclaim completed'
+          : 'AgentCard company transfer changed state while reclaim completed',
         409,
-        'agentcard_company_transfer_consumed_during_reclaim'
+        consumed
+          ? 'agentcard_company_transfer_consumed_during_reclaim'
+          : 'agentcard_company_transfer_reclaim_conflict',
+        { fundingStatus: current?.status }
       );
     }
   } catch (error) {

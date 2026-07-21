@@ -19,17 +19,38 @@ import {
   syncCookieCredentials,
   syncIntegrationCredentials,
   syncOriginCredentials,
-  syncPasskeyCredentials,
+  syncPasskeyCredentialRows,
   syncRequiredCredentialTable,
   syncSteelSessionAuthCredentials,
 } from './seed-local-credentials';
 import { runSyncStep, syncRowsWithConcurrency, syncUserRecord } from './seed-local-helpers';
+import {
+  createScopedBrowserAuthReaders,
+  parseCookieDomains,
+  passkeySyncWhere,
+} from './cookie-domain-scope';
+import { selectRemoteDatabaseUrl } from './seed-remote-database-url';
+
+const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
+const COMPUTE_TOKEN_SOURCE_DATABASE_URL =
+  process.env.SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL?.trim();
+
+if (COMPUTE_TOKENS_ONLY && !COMPUTE_TOKEN_SOURCE_DATABASE_URL) {
+  throw new Error(
+    '--compute-tokens-only requires SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL; refusing to fall back to .env'
+  );
+}
 
 // Parse .env file directly to get remote DB URL
-// (process.env.DATABASE_URL is already overridden to local by run.sh)
+// (process.env.DATABASE_URL is already overridden to local by run.sh). Isolated
+// benchmark runs may explicitly source compute tokens from the already-verified
+// shared workspace DB so a production-side cooldown cannot invalidate a local
+// deploy gate.
 const envPath = resolve(__dirname, '..', '.env');
-const envVars = dotenv.parse(readFileSync(envPath));
-const REMOTE_URL = envVars.DIRECT_DATABASE_URL || envVars.DATABASE_URL;
+const envVars = COMPUTE_TOKENS_ONLY ? {} : dotenv.parse(readFileSync(envPath));
+const REMOTE_URL = COMPUTE_TOKENS_ONLY
+  ? COMPUTE_TOKEN_SOURCE_DATABASE_URL
+  : selectRemoteDatabaseUrl(envVars);
 
 if (!REMOTE_URL) {
   console.error('❌ No remote DATABASE_URL found in .env');
@@ -52,9 +73,14 @@ const SKIP_BROWSER_AUTH_SYNC =
 // leave the isolated DB with a stale/expired compute token — otherwise the
 // agent's claudeAuth fetch fails and every LLM call falls through to the paid
 // waterfall.
-const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
 const PASSKEYS_ONLY = process.argv.includes('--passkeys-only');
 const COMPUTE_TOKEN_SYNC_ATTEMPTS = 5;
+
+// SEED_COOKIE_DOMAINS scopes every domain-bearing browser-auth table to the
+// domains a benchmark task needs. Set by run_benchmark from the task's
+// environment.live_cookie_domains. Empty → full browser-auth graph. Filter
+// logic lives in cookie-domain-scope.ts and is pinned by blackbox coverage.
+const SEED_COOKIE_DOMAINS = parseCookieDomains(process.env.SEED_COOKIE_DOMAINS);
 
 const requestedSeedModes = [
   ['--compute-tokens-only', COMPUTE_TOKENS_ONLY],
@@ -71,6 +97,21 @@ if (requestedSeedModes.length > 1) {
 
 const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
 const local = new PrismaClient(); // uses process.env.DATABASE_URL (local)
+const scopedRemoteBrowserAuth = createScopedBrowserAuthReaders(
+  {
+    cookie: (where) => remote.cookie.findMany({ where: where as never }),
+    cookieBundle: (where) => remote.cookieBundle.findMany({ where: where as never }),
+    steelSessionAuth: (where) => remote.steelSessionAuth.findMany({ where: where as never }),
+    localStorageOrigin: (where) => remote.localStorageOrigin.findMany({ where: where as never }),
+    indexedDBOrigin: (where) => remote.indexedDBOrigin.findMany({ where: where as never }),
+    browserPermission: (where) => remote.browserPermission.findMany({ where: where as never }),
+    cacheStorageOrigin: (where) => remote.cacheStorageOrigin.findMany({ where: where as never }),
+    browserPassword: (where) => remote.browserPassword.findMany({ where: where as never }),
+    passkeyCredential: (where) => remote.passkeyCredential.findMany({ where: where as never }),
+  },
+  DEV_USER_ID,
+  SEED_COOKIE_DOMAINS
+);
 
 async function syncTable(name: string, fn: () => Promise<number>): Promise<void> {
   await runSyncStep(name, fn);
@@ -193,13 +234,36 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   await syncRequiredTable(
     'Cookies',
     async () => {
-      const cookies = await remote.cookie.findMany({ where: { userId: DEV_USER_ID } });
-
-      for (let i = 0; i < cookies.length; i += 500) {
-        const batch = cookies.slice(i, i + 500);
-        await syncCookieCredentials(local.cookie, batch);
-        if (cookies.length > 500 && i + 500 < cookies.length) {
-          process.stdout.write(`     ${Math.min(i + 500, cookies.length)}/${cookies.length}...\r`);
+      const cookies = await scopedRemoteBrowserAuth.cookie();
+      if (SEED_COOKIE_DOMAINS.length > 0) {
+        process.stdout.write(
+          `     scoped to ${SEED_COOKIE_DOMAINS.length} domain(s) [${SEED_COOKIE_DOMAINS.join(
+            ', '
+          )}] → ${cookies.length} cookies\n`
+        );
+      }
+      // Fresh local table (the benchmark cold path): one bulk createMany instead of
+      // ~N per-row upsert round-trips (the ~780s bottleneck). On an already-populated
+      // table (warm restore / re-sync) fall back to upsert so refreshed cookie values
+      // overwrite stale rows. skipDuplicates makes the bulk path idempotent against
+      // the natural-key unique constraint.
+      const existingLocal = await local.cookie.count({ where: { userId: DEV_USER_ID } });
+      if (existingLocal === 0 && cookies.length > 0) {
+        for (let i = 0; i < cookies.length; i += 1000) {
+          await local.cookie.createMany({
+            data: cookies.slice(i, i + 1000) as never,
+            skipDuplicates: true,
+          });
+        }
+      } else {
+        for (let i = 0; i < cookies.length; i += 500) {
+          const batch = cookies.slice(i, i + 500);
+          await syncCookieCredentials(local.cookie, batch);
+          if (cookies.length > 500 && i + 500 < cookies.length) {
+            process.stdout.write(
+              `     ${Math.min(i + 500, cookies.length)}/${cookies.length}...\r`
+            );
+          }
         }
       }
       return cookies.length;
@@ -211,7 +275,7 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   await syncRequiredTable(
     'Cookie Bundles',
     async () => {
-      const bundles = await remote.cookieBundle.findMany({ where: { userId: DEV_USER_ID } });
+      const bundles = await scopedRemoteBrowserAuth.cookieBundle();
       return syncCookieBundleCredentials(local.cookieBundle, bundles);
     },
     failures
@@ -220,7 +284,7 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   await syncRequiredTable(
     'Steel Session Auth',
     async () => {
-      const sessions = await remote.steelSessionAuth.findMany({ where: { userId: DEV_USER_ID } });
+      const sessions = await scopedRemoteBrowserAuth.steelSessionAuth();
       return syncSteelSessionAuthCredentials(local.steelSessionAuth, sessions);
     },
     failures
@@ -230,7 +294,7 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   await syncRequiredTable(
     'LocalStorage',
     async () => {
-      const origins = await remote.localStorageOrigin.findMany({ where: { userId: DEV_USER_ID } });
+      const origins = await scopedRemoteBrowserAuth.localStorageOrigin();
       return syncOriginCredentials(local.localStorageOrigin, origins);
     },
     failures
@@ -240,7 +304,7 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   await syncRequiredTable(
     'IndexedDB',
     async () => {
-      const origins = await remote.indexedDBOrigin.findMany({ where: { userId: DEV_USER_ID } });
+      const origins = await scopedRemoteBrowserAuth.indexedDBOrigin();
       return syncOriginCredentials(local.indexedDBOrigin, origins);
     },
     failures
@@ -250,7 +314,7 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   await syncRequiredTable(
     'Browser Permissions',
     async () => {
-      const perms = await remote.browserPermission.findMany({ where: { userId: DEV_USER_ID } });
+      const perms = await scopedRemoteBrowserAuth.browserPermission();
       return syncBrowserPermissionCredentials(local.browserPermission, perms);
     },
     failures
@@ -260,7 +324,7 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   await syncRequiredTable(
     'Cache Storage',
     async () => {
-      const caches = await remote.cacheStorageOrigin.findMany({ where: { userId: DEV_USER_ID } });
+      const caches = await scopedRemoteBrowserAuth.cacheStorageOrigin();
       return syncOriginCredentials(local.cacheStorageOrigin, caches);
     },
     failures
@@ -314,12 +378,37 @@ async function inspectGptCodeIntegrations(): Promise<GptCodeAvailability> {
   return { usable, rateLimited };
 }
 
+async function countUsableClaudeCodeIntegrations(): Promise<number> {
+  const now = new Date();
+  const integrations = await local.integration.findMany({
+    where: {
+      name: 'claude_code',
+      status: 'CONNECTED',
+      OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
+    },
+    select: {
+      userId: true,
+      poolingEnabled: true,
+      config: true,
+    },
+  });
+
+  return integrations.filter((integration) => {
+    const isAvailableToBench = integration.userId === DEV_USER_ID || integration.poolingEnabled;
+    return isAvailableToBench && hasEncryptedCredentials(integration.config);
+  }).length;
+}
+
 async function syncComputeTokensWithRetries(): Promise<void> {
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= COMPUTE_TOKEN_SYNC_ATTEMPTS; attempt++) {
     try {
       const count = await syncIntegrations();
+      const usableClaudeCodeCount = await countUsableClaudeCodeIntegrations();
+      if (usableClaudeCodeCount === 0) {
+        throw new Error('No usable claude_code integrations after sync');
+      }
       const { usable: usableGptCodeCount, rateLimited: rateLimitedGptCodeCount } =
         await inspectGptCodeIntegrations();
       if (usableGptCodeCount === 0) {
@@ -345,7 +434,8 @@ async function syncComputeTokensWithRetries(): Promise<void> {
         // Default (flag unset) stays strict so Codex regressions still surface.
         if (process.env.SEED_ALLOW_MISSING_GPT_CODE === '1') {
           console.warn(
-            `  ⚠️  Compute Tokens (integrations): ${count} synced, 0 usable gpt_code — ` +
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, ` +
+              `${usableClaudeCodeCount} usable claude_code, 0 usable gpt_code — ` +
               `proceeding without Codex (SEED_ALLOW_MISSING_GPT_CODE=1; this run does not use Codex)`
           );
           return;
@@ -353,7 +443,8 @@ async function syncComputeTokensWithRetries(): Promise<void> {
         throw new Error('No usable gpt_code integrations after sync');
       }
       console.log(
-        `  ✅ Compute Tokens (integrations): ${count} synced, ${usableGptCodeCount} usable gpt_code`
+        `  ✅ Compute Tokens (integrations): ${count} synced, ` +
+          `${usableClaudeCodeCount} usable claude_code, ${usableGptCodeCount} usable gpt_code`
       );
       return;
     } catch (err) {
@@ -380,7 +471,7 @@ async function syncBrowserCredentials(failures?: Error[]): Promise<void> {
   await syncRequiredTable(
     'Browser Passwords',
     async () => {
-      const passwords = await remote.browserPassword.findMany({ where: { userId: DEV_USER_ID } });
+      const passwords = await scopedRemoteBrowserAuth.browserPassword();
       return syncBrowserPasswordCredentials(local.browserPassword, passwords);
     },
     failures
@@ -397,7 +488,8 @@ async function syncPasskeysOnly(
   await syncRequiredTable(
     'Passkey Credentials',
     async () => {
-      return syncPasskeyCredentials(remote.passkeyCredential, local.passkeyCredential, DEV_USER_ID);
+      const passkeys = await scopedRemoteBrowserAuth.passkeyCredential();
+      return syncPasskeyCredentialRows(local.passkeyCredential, passkeys);
     },
     failures
   );
@@ -407,14 +499,14 @@ async function syncPasskeysOnly(
       'Stale Local Passkeys',
       async () => {
         const remoteKeys = await remote.passkeyCredential.findMany({
-          where: { userId: DEV_USER_ID },
+          where: passkeySyncWhere(DEV_USER_ID, SEED_COOKIE_DOMAINS),
           select: { rpId: true, credentialId: true },
         });
         const liveKeys = new Set(
           remoteKeys.map(({ rpId, credentialId }) => `${rpId}\u0000${credentialId}`)
         );
         const localKeys = await local.passkeyCredential.findMany({
-          where: { userId: DEV_USER_ID },
+          where: passkeySyncWhere(DEV_USER_ID, SEED_COOKIE_DOMAINS),
           select: { id: true, rpId: true, credentialId: true },
         });
         const staleIds = localKeys
@@ -513,7 +605,9 @@ async function sync() {
 
   if (CREDENTIALS_ONLY) {
     console.log(
-      '  ℹ️  Refreshing the complete production browser-auth graph while preserving local-only rows'
+      SEED_COOKIE_DOMAINS.length > 0
+        ? `  ℹ️  Refreshing production browser auth for ${SEED_COOKIE_DOMAINS.join(', ')} while preserving local-only rows`
+        : '  ℹ️  Refreshing the complete production browser-auth graph while preserving local-only rows'
     );
     await syncBrowserAuthWithRetries();
     console.log('\n🔄 Credential sync complete.');

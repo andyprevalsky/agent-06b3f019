@@ -10656,7 +10656,8 @@ async def _drive_payment_card_gate(*, mint_results, reject_gate=False, agentcard
     async def fake_request_user_approval_direct(*_args, **_kwargs):
         return {"attention_request_id": "approval-1"}
 
-    async def fake_request_user_attention_direct(*_args, **_kwargs):
+    async def fake_request_user_attention_direct(*_args, **kwargs):
+        assert kwargs["metadata"]["excludeFromModel"] is True
         return {"attention_request_id": "setup-1"}
 
     async def fake_raise_gate_direct(_wf, _gate, *, gate_key):

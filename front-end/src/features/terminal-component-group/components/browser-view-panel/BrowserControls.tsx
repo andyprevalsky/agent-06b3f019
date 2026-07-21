@@ -8,6 +8,7 @@
 
 import { Maximize2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { resolveBrowserControlState } from '../browserControlState';
 
 interface BrowserControlsProps {
   isFullscreen: boolean;
@@ -22,11 +23,16 @@ export function BrowserControls({
   isWaitingForAuthAssistance,
   onToggleFullscreen,
 }: BrowserControlsProps) {
-  const label = isDisconnected
-    ? 'Browser Session Disconnected'
-    : isWaitingForAuthAssistance
-      ? 'Agent waiting for assistance'
-      : 'Browser Session Active';
+  const controlState = resolveBrowserControlState({
+    isDisconnected,
+    isWaitingForAuthAssistance,
+  });
+  const label =
+    controlState === 'disconnected'
+      ? 'Browser Session Disconnected'
+      : controlState === 'waiting'
+        ? 'Agent waiting for assistance'
+        : 'Browser Session Active';
 
   return (
     <div
@@ -39,9 +45,7 @@ export function BrowserControls({
         <div
           className={cn(
             'h-2 w-2 rounded-full',
-            isDisconnected || isWaitingForAuthAssistance
-              ? 'bg-yellow-500'
-              : 'bg-green-500 animate-pulse',
+            controlState === 'active' ? 'bg-green-500 animate-pulse' : 'bg-yellow-500',
           )}
         />
         <span className="text-xs font-medium text-muted-foreground">{label}</span>

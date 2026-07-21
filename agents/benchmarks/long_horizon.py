@@ -120,6 +120,14 @@ def _validate_environment(env: dict[str, Any], item_id: str) -> dict[str, Any]:
                 f"{item_id}: synthetic evals must not declare live_fixtures "
                 f"(live credentials have no meaning for a fully synthetic task)"
             )
+    # live_cookie_domains scopes the browser-credential live-fixture sync to only
+    # the cookies a task actually needs (e.g. ["doordash.com"]) so it syncs ~100
+    # rows in seconds instead of the full ~22k-cookie graph (~13 min, > the sync
+    # budget). Optional and opt-in: when omitted the sync pulls every cookie with a
+    # raised budget. Only meaningful when the browser-credential live_fixture runs.
+    cookie_domains = env.get("live_cookie_domains")
+    if cookie_domains is not None:
+        _require_string_list(env, "live_cookie_domains", item_id, allow_empty=False)
     return env
 
 

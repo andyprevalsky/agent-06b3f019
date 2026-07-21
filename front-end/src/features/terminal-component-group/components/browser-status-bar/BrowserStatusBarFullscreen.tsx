@@ -3,41 +3,38 @@
  * BrowserStatusBar.
  *
  * DESKTOP LAYOUT (>= md): the task-progress panel sits as a fixed-width left
- * column beside the live iframe (horizontal split).
+ * column beside the live iframe (horizontal split); the frame header lives above
+ * the iframe.
  *
- * MOBILE LAYOUT (< md): the fixed-width panel would clip the iframe to a
- * sliver, so it is NOT rendered inline — the iframe pane takes the FULL
- * viewport width, and the task progress is reachable behind a header toggle
- * that opens it as a full-screen overlay (stacked / tabbed presentation).
+ * MOBILE LAYOUT (< md): one fixed view stacks the header, a full-width 8:5
+ * desktop browser, its control footer, then the always-visible task-progress
+ * panel. There is no mode toggle and the browser stays mounted while progress
+ * scrolls below it.
  *
- * Presentational — agent/session state is owned by BrowserStatusBar; only the
- * mobile progress-panel visibility is local state here.
+ * Presentational — agent/session state is owned by BrowserStatusBar.
  *
- * AGENT OVERLAY STATE:
- * [ACTIVE] -> border glow + cursor stitch + "Agent in progress" chip
- * [WAITING_FOR_AUTH_ASSISTANCE] -> connected request + "Agent waiting for assistance" handoff
- * [DISCONNECTED] -> blurred resume overlay
- *
- * MOBILE PROGRESS PANEL STATE:
- * [HIDDEN] --tap Progress toggle--> [OPEN overlay]
- * [OPEN overlay] --tap close--> [HIDDEN]
+ * AGENT CONTROL STATE:
+ * [DESKTOP_ACTIVE|WAITING|DISCONNECTED] -> controls overlay the browser
+ * [MOBILE_ACTIVE|WAITING|DISCONNECTED] -> controls render in the footer below it
  *
  * VIEWPORT STATE:
- * [MOUNTED] -> observe browser pane -> debounce dimensions -> resize remote provider viewport
- * (derives from the pane element size, so a full-width mobile pane resizes the
- *  remote session to full width automatically)
+ * [DESKTOP] -> observe browser pane -> debounce dimensions -> resize remote provider viewport
+ * [MOBILE] -> preserve the provider's desktop viewport and scale it into the
+ * aspect-matched full-width pane
  */
 
 import { createPortal } from 'react-dom';
-import { useRef, useState, type MouseEvent, type RefObject } from 'react';
-import { PanelRightOpen, X } from 'lucide-react';
+import { useRef, type MouseEvent, type ReactNode, type RefObject } from 'react';
+import { X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-mobile';
 import BrowserBorderGlow from '../BrowserBorderGlow';
 import BrowserCursorOverlay from '../BrowserCursorOverlay';
+import { resolveBrowserControlState, type BrowserControlState } from '../browserControlState';
 import type { Message } from '../../hooks';
 import {
   DisconnectedOverlay,
+  MobileBrowserControlFooter,
   TakeControlChip,
   WaitingForAssistanceChip,
 } from './BrowserFullscreenOverlays';
@@ -68,67 +65,42 @@ interface FullscreenProps {
   onResume: () => void;
 }
 
-function ActiveIndicator({
-  isDisconnected,
-  isWaitingForAuthAssistance,
-}: {
-  isDisconnected: boolean;
-  isWaitingForAuthAssistance: boolean;
-}) {
-  const label = isDisconnected
-    ? 'Disconnected'
-    : isWaitingForAuthAssistance
-      ? 'Waiting for assistance'
-      : 'Active';
+function ActiveIndicator({ controlState }: { controlState: BrowserControlState }) {
+  const label =
+    controlState === 'disconnected'
+      ? 'Disconnected'
+      : controlState === 'waiting'
+        ? 'Waiting for assistance'
+        : 'Active';
   return (
-    <div className="flex items-center gap-2">
+    <div className="flex min-w-0 items-center gap-2">
       <div
         className={cn(
-          'h-2 w-2 rounded-full',
-          isDisconnected || isWaitingForAuthAssistance
-            ? 'bg-yellow-500'
-            : 'bg-green-500 animate-pulse',
+          'h-2 w-2 flex-shrink-0 rounded-full',
+          controlState === 'active' ? 'bg-green-500 animate-pulse' : 'bg-yellow-500',
         )}
       />
-      <span className="text-sm font-medium">{label}</span>
+      <span className="truncate text-sm font-medium">{label}</span>
     </div>
   );
 }
 
-function BrowserFrameHeader({
-  isDisconnected,
-  isWaitingForAuthAssistance,
+/** Desktop frame header: Active state + proxy chip + close. */
+function DesktopFrameHeader({
+  controlState,
   browserSessionMetadata,
   onClose,
-  isMobile,
-  onToggleProgress,
 }: {
-  isDisconnected: boolean;
-  isWaitingForAuthAssistance: boolean;
+  controlState: BrowserControlState;
   browserSessionMetadata: BrowserSessionMetadata | null;
   onClose: (e: MouseEvent) => void;
-  isMobile: boolean;
-  onToggleProgress: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between p-4 border-b border-border">
-      <ActiveIndicator
-        isDisconnected={isDisconnected}
-        isWaitingForAuthAssistance={isWaitingForAuthAssistance}
-      />
+    <div className="flex items-center justify-between border-b border-border p-4">
+      <ActiveIndicator controlState={controlState} />
       <div className="flex items-center gap-2">
         <BrowserProxyLocationChip metadata={browserSessionMetadata} tooltipPosition="bottom" />
-        {isMobile && (
-          <button
-            onClick={onToggleProgress}
-            aria-label="Show task progress"
-            className="flex items-center gap-1.5 rounded px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-muted transition-colors"
-          >
-            <PanelRightOpen className="h-4 w-4" />
-            Progress
-          </button>
-        )}
-        <button onClick={onClose} className="p-2 rounded hover:bg-muted transition-colors">
+        <button onClick={onClose} className="rounded p-2 transition-colors hover:bg-muted">
           <X className="h-5 w-5 text-muted-foreground" />
         </button>
       </div>
@@ -136,68 +108,78 @@ function BrowserFrameHeader({
   );
 }
 
-type BrowserColumnProps = Pick<
+/** Fixed mobile header: Active state + close. */
+function MobileFrameHeader({
+  controlState,
+  onClose,
+}: {
+  controlState: BrowserControlState;
+  onClose: (e: MouseEvent) => void;
+}) {
+  return (
+    <div className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-border p-3">
+      <ActiveIndicator controlState={controlState} />
+      <button onClick={onClose} className="rounded p-1.5 transition-colors hover:bg-muted">
+        <X className="h-5 w-5 text-muted-foreground" />
+      </button>
+    </div>
+  );
+}
+
+type PaneProps = Pick<
   FullscreenProps,
   | 'agentId'
   | 'taskId'
   | 'browserUrl'
   | 'messages'
-  | 'browserSessionMetadata'
-  | 'isDisconnected'
-  | 'isWaitingForAuthAssistance'
   | 'authAssistanceRequest'
   | 'isResuming'
-  | 'onClose'
   | 'onResume'
 > & {
   paneRef: RefObject<HTMLDivElement>;
   isMobile: boolean;
-  onToggleProgress: () => void;
+  controlState: BrowserControlState;
 };
 
-/** The live-iframe column: frame header, pane + agent overlays, and hint footer. */
-function FullscreenBrowserColumn({
+/** Live-iframe pane + agent overlays. No header or redundant helper footer. */
+function BrowserPaneBody({
   paneRef,
   agentId,
   taskId,
   browserUrl,
   messages,
-  browserSessionMetadata,
-  isDisconnected,
-  isWaitingForAuthAssistance,
+  controlState,
   authAssistanceRequest,
   isResuming,
   isMobile,
-  onClose,
   onResume,
-  onToggleProgress,
-}: BrowserColumnProps) {
+}: PaneProps) {
   return (
-    <div className="flex-1 flex flex-col min-w-0">
-      <BrowserFrameHeader
-        isDisconnected={isDisconnected}
-        isWaitingForAuthAssistance={isWaitingForAuthAssistance}
-        browserSessionMetadata={browserSessionMetadata}
-        onClose={onClose}
-        isMobile={isMobile}
-        onToggleProgress={onToggleProgress}
-      />
-      <div ref={paneRef} className="flex-1 relative bg-white">
+    <div
+      className={cn(
+        'flex min-h-0 flex-col',
+        isMobile ? 'w-full flex-none overflow-hidden' : 'flex-1',
+      )}
+      // Kernel streams at 1280x800 (8:5). An explicit aspect ratio keeps the
+      // cross-origin player edge-to-edge without depending on generated CSS.
+      style={isMobile ? { aspectRatio: '8 / 5' } : undefined}
+    >
+      <div ref={paneRef} className="relative flex-1 bg-white">
         <iframe
           src={browserUrl}
-          className="w-full h-full border-0"
+          className="h-full w-full border-0"
           allow="clipboard-read; clipboard-write"
           sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
           title="Browser"
         />
-        {!isWaitingForAuthAssistance && <BrowserBorderGlow />}
-        {!isWaitingForAuthAssistance && (
+        {controlState === 'active' && <BrowserBorderGlow />}
+        {controlState === 'active' && (
           <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
         )}
-        {!isDisconnected && !isWaitingForAuthAssistance && (
+        {!isMobile && controlState === 'active' && (
           <TakeControlChip onResume={onResume} isResuming={isResuming} />
         )}
-        {isWaitingForAuthAssistance && (
+        {!isMobile && controlState === 'waiting' && (
           <WaitingForAssistanceChip
             onResume={onResume}
             isResuming={isResuming}
@@ -205,86 +187,115 @@ function FullscreenBrowserColumn({
             isMobile={isMobile}
           />
         )}
-        {isDisconnected && !isWaitingForAuthAssistance && (
+        {!isMobile && controlState === 'disconnected' && (
           <DisconnectedOverlay onResume={onResume} isResuming={isResuming} />
         )}
-      </div>
-      <div className="px-4 py-2 border-t border-border bg-muted/20">
-        <p className="text-xs text-muted-foreground italic">
-          You can interact with the browser to handle logins or captchas
-        </p>
       </div>
     </div>
   );
 }
 
-export function BrowserStatusBarFullscreen(props: FullscreenProps) {
-  const {
-    agentId,
-    taskId,
-    browserUrl,
-    messages,
-    outputSchema,
-    browserSessionMetadata,
-    stepProgress,
-    isDisconnected,
-    isWaitingForAuthAssistance,
-    authAssistanceRequest,
-    isResuming,
-    pendingWriteLockApproval,
-    onClose,
-    onResume,
-  } = props;
-  const browserPaneRef = useRef<HTMLDivElement>(null);
-  const isMobile = useIsMobile();
-  const [showMobileProgress, setShowMobileProgress] = useState(false);
-  useBrowserViewportSync(taskId, browserPaneRef);
-
+function MobileFullscreen({
+  props,
+  controlState,
+  pane,
+  progressPanel,
+}: {
+  props: FullscreenProps;
+  controlState: BrowserControlState;
+  pane: ReactNode;
+  progressPanel: ReactNode;
+}) {
   return createPortal(
-    <div className="fixed inset-0 z-50 bg-background flex flex-row">
-      {!isMobile && (
-        <TaskProgressSidebar
-          taskId={taskId}
-          outputSchema={outputSchema}
-          stepProgress={stepProgress}
-          isDisconnected={isDisconnected}
-          isWaitingForAuthAssistance={isWaitingForAuthAssistance}
-          pendingWriteLockApproval={pendingWriteLockApproval}
+    <div className="fixed inset-0 z-50 flex flex-col bg-background">
+      <MobileFrameHeader controlState={controlState} onClose={props.onClose} />
+      <div className="flex min-h-0 flex-1 flex-col">
+        {pane}
+        <MobileBrowserControlFooter
+          onResume={props.onResume}
+          isResuming={props.isResuming}
+          controlState={controlState}
+          request={props.authAssistanceRequest}
         />
-      )}
-
-      <FullscreenBrowserColumn
-        paneRef={browserPaneRef}
-        agentId={agentId}
-        taskId={taskId}
-        browserUrl={browserUrl}
-        messages={messages}
-        browserSessionMetadata={browserSessionMetadata}
-        isDisconnected={isDisconnected}
-        isWaitingForAuthAssistance={isWaitingForAuthAssistance}
-        authAssistanceRequest={authAssistanceRequest}
-        isResuming={isResuming}
-        isMobile={isMobile}
-        onClose={onClose}
-        onResume={onResume}
-        onToggleProgress={() => setShowMobileProgress((prev) => !prev)}
-      />
-
-      {isMobile && showMobileProgress && (
-        <div className="absolute inset-0 z-20 flex flex-col bg-background">
-          <TaskProgressSidebar
-            taskId={taskId}
-            outputSchema={outputSchema}
-            stepProgress={stepProgress}
-            isDisconnected={isDisconnected}
-            isWaitingForAuthAssistance={isWaitingForAuthAssistance}
-            pendingWriteLockApproval={pendingWriteLockApproval}
-            isMobile
-            onClose={() => setShowMobileProgress(false)}
-          />
-        </div>
-      )}
+        <div className="min-h-0 flex-1 border-t border-border bg-background">{progressPanel}</div>
+      </div>
     </div>,
     document.body,
+  );
+}
+
+function DesktopFullscreen({
+  props,
+  controlState,
+  pane,
+  progressPanel,
+}: {
+  props: FullscreenProps;
+  controlState: BrowserControlState;
+  pane: ReactNode;
+  progressPanel: ReactNode;
+}) {
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex flex-row bg-background">
+      {progressPanel}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <DesktopFrameHeader
+          controlState={controlState}
+          browserSessionMetadata={props.browserSessionMetadata}
+          onClose={props.onClose}
+        />
+        {pane}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+export function BrowserStatusBarFullscreen(props: FullscreenProps) {
+  const browserPaneRef = useRef<HTMLDivElement>(null);
+  const isMobile = useIsMobile();
+  const controlState = resolveBrowserControlState(props);
+  useBrowserViewportSync(props.taskId, browserPaneRef, !isMobile);
+
+  const pane = (
+    <BrowserPaneBody
+      paneRef={browserPaneRef}
+      agentId={props.agentId}
+      taskId={props.taskId}
+      browserUrl={props.browserUrl}
+      messages={props.messages}
+      controlState={controlState}
+      authAssistanceRequest={props.authAssistanceRequest}
+      isResuming={props.isResuming}
+      isMobile={isMobile}
+      onResume={props.onResume}
+    />
+  );
+
+  const progressPanel = (
+    <TaskProgressSidebar
+      taskId={props.taskId}
+      outputSchema={props.outputSchema}
+      stepProgress={props.stepProgress}
+      controlState={controlState}
+      pendingWriteLockApproval={props.pendingWriteLockApproval}
+      isMobile={isMobile}
+    />
+  );
+
+  return isMobile ? (
+    <MobileFullscreen
+      props={props}
+      controlState={controlState}
+      pane={pane}
+      progressPanel={progressPanel}
+    />
+  ) : (
+    <DesktopFullscreen
+      props={props}
+      controlState={controlState}
+      pane={pane}
+      progressPanel={progressPanel}
+    />
   );
 }

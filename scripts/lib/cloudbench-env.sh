@@ -38,6 +38,43 @@ cloudbench_env_sha256() {
   fi
 }
 
+cloudbench_central_hub_runs_root() {  # <port>
+  curl --noproxy '*' -fsS --max-time 2 \
+    "http://127.0.0.1:$1/hub-meta.json" 2>/dev/null \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("hub_runs_dir", ""))' \
+      2>/dev/null
+}
+
+cloudbench_central_hub_matches() {  # <port> <expected-runs-root>
+  local actual_root expected_root
+  expected_root="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$2")"
+  actual_root="$(cloudbench_central_hub_runs_root "$1" || true)"
+  [ -n "$actual_root" ] && [ "$actual_root" = "$expected_root" ]
+}
+
+cloudbench_select_central_hub_port() {  # <preferred-port> <expected-runs-root>
+  local preferred="$1" expected_root="$2" candidate
+
+  # A Conductor port can be reused while another workspace's persistent hub is
+  # still alive. Reuse a listener only when it identifies the same runs root;
+  # otherwise leave that workspace untouched and select the first free/matching
+  # port. The identity endpoint also makes a previously rebased hub reusable by
+  # later runs from this workspace.
+  for candidate in $(seq "$preferred" $((preferred + 500))); do
+    if ! lsof -tiTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+    if cloudbench_central_hub_matches "$candidate" "$expected_root"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  echo "FATAL: no free central benchmark hub port in ${preferred}..$((preferred + 500))" >&2
+  return 1
+}
+
 cloudbench_verify_env_file() {
   local path="$1" expected="$2" label="$3" actual
   [ -n "$expected" ] || {
