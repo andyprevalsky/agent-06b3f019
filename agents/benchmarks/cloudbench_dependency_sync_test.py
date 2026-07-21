@@ -3062,9 +3062,9 @@ exit "$rc"
         ["bash", "-c", script],
         cwd=ROOT,
         env=harness_env,
-        # The harness deliberately waits through TERM and KILL windows twice.
-        # Coverage runs 30 domains concurrently, so leave headroom for scheduler
-        # contention while still bounding a genuinely stuck cleanup.
+        # The harness launches and tears down two process groups, waiting through
+        # TERM and KILL windows twice. Concurrent coverage/deploy loops can delay
+        # scheduling, so leave headroom while still bounding a stuck cleanup.
         text=True, capture_output=True, check=False, timeout=60,
     )
 
@@ -4088,6 +4088,10 @@ def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
         release_fn = _extract_fleet_function(
             FLEET_SCRIPT.read_text(), "release_start_barrier() {"
         )
+        # Thirty concurrent curl subprocesses can be scheduler-delayed on a
+        # shared CI host. Keep the production curl/attempt deadlines unchanged,
+        # but give the enclosing test process enough wall time to observe them.
+        subprocess_timeout_seconds = 20
         quoted_roots = " ".join(shlex.quote(str(root)) for root in roots)
         script = f"""set +e
 SYNCHRONIZED_START=1
@@ -4104,7 +4108,11 @@ CHILD_MACHINE=({' '.join(f'machine-{i}' for i in range(30))})
 release_start_barrier
 """
         success = subprocess.run(
-            ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=8
+            ["bash", "-c", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=subprocess_timeout_seconds,
         )
         assert success.returncode == 0, success.stderr
         assert all(
@@ -4127,7 +4135,7 @@ release_start_barrier
             text=True,
             capture_output=True,
             check=False,
-            timeout=8,
+            timeout=subprocess_timeout_seconds,
         )
         assert failed.returncode == 1
         assert "could not release synchronized start barrier" in failed.stderr

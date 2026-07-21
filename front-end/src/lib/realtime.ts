@@ -1,5 +1,6 @@
 import { supabase, getSession, ensureFreshRealtimeAuth } from './supabase';
 import { RealtimeChannel } from '@supabase/supabase-js';
+import { USE_PRIVATE_REALTIME_CHANNELS } from './realtimeConfig';
 
 // Import and re-export all types from realtime-types.ts
 export {
@@ -144,10 +145,11 @@ export async function subscribeToChannel(
   // signs with a live token. See: https://github.com/supabase/realtime-js/pull/126
   await ensureFreshRealtimeAuth();
 
-  // Private channels in production (RLS checks Supabase managed DB).
-  // In dev, use public channels since agents live in a local DB.
+  // Private channels are the production default (RLS checks the Supabase
+  // managed DB). Dev and explicitly-local production bundles use public
+  // channels because their agents live only in the workspace Postgres DB.
   const channel = supabase.channel(channelName, {
-    config: { private: !import.meta.env.DEV },
+    config: { private: USE_PRIVATE_REALTIME_CHANNELS },
   });
 
   // Attach all event handlers

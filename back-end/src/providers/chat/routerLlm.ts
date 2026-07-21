@@ -5,7 +5,13 @@
  */
 
 import { z } from 'zod';
-import { createStreamingCompletion, markCacheable, type CompletionChunk } from '../rose';
+import {
+  createStreamingCompletion,
+  markCacheable,
+  type CompletionChunk,
+  type CompletionMessage,
+  type CompletionOptions,
+} from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { agentFastMode, cacheGet, cacheSet } from '../fastCacheStore';
 import { goalHash } from '../fastCacheNormalizeCore';
@@ -28,6 +34,7 @@ import {
 import { delayedCacheStreamHedge, type CacheLookupResult } from './delayedCacheStreamHedge';
 import type { ChatProviderRoute } from './phaseModels';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
+import { ROUTER_JSON_SCHEMA } from './routerDecisionJsonSchema';
 
 const log = createLogger('RouterLLM');
 const ROUTER_CACHE_GRACE_MS = 25;
@@ -72,50 +79,6 @@ export interface RouterResponse {
   webSearchToolCallId?: string;
   usage: ChatLlmUsage;
 }
-
-// ============================================
-// JSON Schema for structured output (universal compatibility)
-// Flat object with all fields required - works across OpenAI, Anthropic, and Gemini
-// Action-specific fields use empty string when not applicable
-// ============================================
-const ROUTER_JSON_SCHEMA = {
-  type: 'object',
-  properties: {
-    reasoning: {
-      type: 'string',
-      description: 'Brief explanation of why this action was chosen',
-    },
-    action: {
-      type: 'string',
-      enum: ['direct_answer', 'web_search', 'start_superintelligence'],
-      description: 'The action to take',
-    },
-    query: {
-      type: 'string',
-      description: 'Search query. Required for web_search, empty string for other actions.',
-    },
-    goal: {
-      type: 'string',
-      description:
-        'Task goal for the agent. Required for start_superintelligence, empty string for other actions.',
-    },
-    mode: {
-      type: 'string',
-      // Enum constraint mirrors the Zod discriminated-union (z.enum(['plan',
-      // 'execute']) above) so structured-output validation rejects any
-      // out-of-band value (e.g. "research") instead of silently coercing to
-      // 'plan' at the `raw.mode || 'plan'` fallback below. The runtime only
-      // reads `mode` when action === 'start_superintelligence'; for the other
-      // two actions, the value is ignored, so the LLM may pick either of the
-      // enum members without effect.
-      enum: ['plan', 'execute'],
-      description:
-        'Execution mode: "plan" for 3+ tool calls, "execute" for 1-2 tool calls. Required for start_superintelligence; ignored for other actions (pick either enum value).',
-    },
-  },
-  required: ['reasoning', 'action', 'query', 'goal', 'mode'],
-  additionalProperties: false,
-};
 
 import { downloadFromStorage } from '../storage';
 
@@ -292,6 +255,36 @@ function extractStreamableReasoning(
 // ============================================
 // Router LLM Call with Streaming
 // ============================================
+export function buildRouterCompletionOptions(params: {
+  model: string;
+  messages: CompletionMessage[];
+  providerRoute: ChatProviderRoute;
+  providerFastMode: boolean;
+  abortSignal?: AbortSignal;
+}): CompletionOptions {
+  return {
+    model: params.model,
+    messages: params.messages,
+    temperature: 0.3,
+    // The router is a small structured classification step. Gemini 3.5 Flash
+    // enables medium reasoning by default on OpenRouter, which can consume most
+    // of the synchronous chat latency budget after a Cerebras stall. Keep its
+    // mandatory reasoning at the provider's minimum, just like the generator.
+    effort: 'minimal',
+    response_format: {
+      type: 'json_schema',
+      json_schema: {
+        name: 'router_decision',
+        strict: true,
+        schema: ROUTER_JSON_SCHEMA,
+      },
+    },
+    provider_fast_mode: params.providerFastMode,
+    provider_route: params.providerRoute,
+    abort_signal: params.abortSignal,
+  };
+}
+
 export async function callRouterLlm(params: {
   agentId: string;
   messages: ChatMessage[];
@@ -374,6 +367,7 @@ export async function callRouterLlm(params: {
     fcKey = contentKey(fastMode.goal, 'chat_router', {
       model: params.model,
       temperature: 0.3,
+      effort: 'minimal',
       response_format: {
         type: 'json_schema',
         name: 'router_decision',
@@ -397,22 +391,15 @@ export async function callRouterLlm(params: {
   }
 
   const createLiveStream = (abortSignal?: AbortSignal) =>
-    createStreamingCompletion({
-      model: params.model,
-      messages: openaiMessages,
-      temperature: 0.3,
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'router_decision',
-          strict: true,
-          schema: ROUTER_JSON_SCHEMA,
-        },
-      },
-      provider_fast_mode: providerFastMode,
-      provider_route: params.providerRoute,
-      abort_signal: abortSignal,
-    });
+    createStreamingCompletion(
+      buildRouterCompletionOptions({
+        model: params.model,
+        messages: openaiMessages,
+        providerRoute: params.providerRoute,
+        providerFastMode,
+        abortSignal,
+      })
+    );
 
   let stream: AsyncIterable<CompletionChunk>;
   if (fcKey && fastModeRead) {
