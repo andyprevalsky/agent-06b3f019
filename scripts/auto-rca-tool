@@ -80,6 +80,16 @@ require_gate_for_head() {
   [ "$attested_head" = "$head" ] || fail "$gate did not pass for HEAD $head"
 }
 
+gate_passed_for_head() {
+  local gate="$1" marker head attested_head
+  require_gate_state_dir
+  marker="$GATE_STATE_DIR/${gate}.sha"
+  sudo test -f "$marker" || return 1
+  head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  attested_head="$(sudo cat "$marker")"
+  [ "$attested_head" = "$head" ]
+}
+
 evidence() {
   require_agent_id
   [ -n "${BACKEND_API_KEY:-}" ] || fail "BACKEND_API_KEY is required"
@@ -169,17 +179,11 @@ marker = f"<!-- rca-slack ts={slack_ts} channel={slack_channel} -->"
 pathlib.Path(target).write_text(f"{body}\n\n{marker}\n", encoding="utf-8")
 PY
 
-  gh pr create \
-    --repo "$GITHUB_REPOSITORY" \
-    --draft \
-    --base main \
-    --head "$branch" \
-    --title "auto-RCA: Production agent failure $AGENT_ID" \
-    --body-file "$final_body"
+  printf 'RCA branch published; the trusted workflow step will create the draft PR.\n'
 }
 
 ensure_draft() {
-  local branch existing_pr run_id report_dir report_file run_url agent_url body
+  local branch existing_pr run_id report_dir report_file run_url agent_url body pr_url
   require_agent_id
   branch="${RCA_BRANCH:-}"
   [[ "$branch" =~ ^auto-rca/[A-Za-z0-9._/-]+$ ]] || fail "RCA_BRANCH is invalid"
@@ -230,13 +234,17 @@ ensure_draft() {
     "Workflow run: $run_url" \
     'Required follow-up: add the evidence, first-bad boundary, failing/passing reproduction, cemented test, and deploy-gate results.' \
     "${SLACK_TS:-}" "${SLACK_CHANNEL:-}")"
-  GH_TOKEN="$AUTO_RCA_PR_TOKEN" gh pr create \
+  pr_url="$(GH_TOKEN="$AUTO_RCA_PR_TOKEN" gh pr create \
     --repo "$GITHUB_REPOSITORY" \
     --draft \
     --base main \
     --head "$branch" \
     --title "auto-RCA: Production agent failure $AGENT_ID" \
-    --body "$body"
+    --body "$body")"
+  if gate_passed_for_head offline-gates && gate_passed_for_head smoke-gates; then
+    GH_TOKEN="$AUTO_RCA_PR_TOKEN" gh pr ready --repo "$GITHUB_REPOSITORY" "$pr_url"
+  fi
+  printf '%s\n' "$pr_url"
 }
 
 mark_ready() {
