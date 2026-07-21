@@ -3663,7 +3663,7 @@ def _seed_sync_error_detail(result: "subprocess.CompletedProcess[str]") -> str:
     return f"{detail[:300]}\n    … [{len(detail) - 1100} chars elided] …\n    {detail[-800:]}"
 
 
-def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool:
+def _sync_compute_tokens() -> bool:
     """Refresh the compute-token integrations (claude_code / gpt_code + pool)
     from prod into the isolated benchmark DB. Returns False on any failure so
     the live-fixture caller can fail closed. A frozen DB
@@ -3671,11 +3671,9 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     which forces the agent's claudeAuth fetch to fail into the paid waterfall.
     Reads the prod source from back-end/.env; writes to the isolated DB.
 
-    ``tolerate_gpt_code_unavailable`` is for the blanket pre-flight only: it sets
-    the seed's ``SEED_ALLOW_MISSING_GPT_CODE`` opt-in so the sync succeeds when
-    Codex (gpt_code) is quota-blocked (rateLimitedUntil set), since the agent
-    runtime drives claude_code. Live-fixture syncs never set it, so
-    Codex-dependent tasks still fail closed."""
+    The seed must fail closed when gpt_code is unavailable: ordinary Rose agent
+    calls use that integration as a direct-auth route even when a task does not
+    invoke the Codex code tool."""
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Compute-token sync skipped: local Victoria DB not found")
@@ -3683,8 +3681,7 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
-    if tolerate_gpt_code_unavailable:
-        env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
+    env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
     try:
         result = subprocess.run(
             ["npx", "tsx", "scripts/seed-local.ts", "--compute-tokens-only"],
@@ -3812,10 +3809,9 @@ def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     """
     if not _is_local_base_url(base_url):
         return
-    # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
-    # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
-    # Codex-dependent tasks keep their own strict credential gates downstream.
-    if not _sync_compute_tokens(tolerate_gpt_code_unavailable=True):
+    # Rose agent calls use gpt_code as a direct-auth route independently of the
+    # Codex code tool, so every real local run must fail closed without it.
+    if not _sync_compute_tokens():
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
 
 

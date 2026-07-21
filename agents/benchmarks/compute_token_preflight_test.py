@@ -1,12 +1,4 @@
-"""Compute-token pre-flight tolerance wiring.
-
-The blanket local pre-flight (`_refresh_local_compute_tokens_for_run`) must
-tolerate a quota-blocked Codex (gpt_code) when claude_code is healthy, because
-the agent runtime drives claude_code. It opts in via the seed's
-``SEED_ALLOW_MISSING_GPT_CODE`` env var (owned by seed-local.ts). Live-fixture
-syncs (`_apply_live_fixture`) never set it, so Codex-dependent tasks still fail
-closed. These tests pin that split without needing a live DB.
-"""
+"""Compute-token pre-flight fail-closed wiring."""
 
 from unittest.mock import patch
 
@@ -40,16 +32,17 @@ def test_default_sync_does_not_opt_into_missing_gpt_code():
     assert env.get("SEED_ALLOW_MISSING_GPT_CODE") is None
 
 
-def test_tolerant_sync_sets_the_seed_env_opt_in():
-    env = _captured_seed_env(tolerate_gpt_code_unavailable=True)
-    assert env.get("SEED_ALLOW_MISSING_GPT_CODE") == "1"
+def test_default_sync_removes_inherited_missing_gpt_code_opt_in():
+    with patch.dict("os.environ", {"SEED_ALLOW_MISSING_GPT_CODE": "1"}):
+        env = _captured_seed_env()
+    assert env.get("SEED_ALLOW_MISSING_GPT_CODE") is None
 
 
-def test_blanket_preflight_uses_tolerant_sync():
+def test_blanket_preflight_uses_strict_sync():
     captured: dict[str, bool] = {}
 
-    def fake_sync(*, tolerate_gpt_code_unavailable: bool = False) -> bool:
-        captured["tolerant"] = tolerate_gpt_code_unavailable
+    def fake_sync() -> bool:
+        captured["called"] = True
         return True
 
     with (
@@ -58,14 +51,14 @@ def test_blanket_preflight_uses_tolerant_sync():
     ):
         rb._refresh_local_compute_tokens_for_run("http://localhost:3001")
 
-    assert captured["tolerant"] is True
+    assert captured["called"] is True
 
 
 def test_live_fixture_sync_stays_strict():
     captured: dict[str, bool] = {}
 
-    def fake_sync(*, tolerate_gpt_code_unavailable: bool = False) -> bool:
-        captured["tolerant"] = tolerate_gpt_code_unavailable
+    def fake_sync() -> bool:
+        captured["called"] = True
         return True
 
     ctx = rb.LiveFixtureContext(
@@ -80,8 +73,7 @@ def test_live_fixture_sync_stays_strict():
     ):
         rb._apply_live_fixture(ctx)
 
-    # Live fixtures must NOT tolerate a missing Codex token — default (strict).
-    assert captured["tolerant"] is False
+    assert captured["called"] is True
 
 
 def test_preflight_raises_when_sync_fails():

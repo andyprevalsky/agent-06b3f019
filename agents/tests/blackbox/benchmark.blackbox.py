@@ -3505,6 +3505,54 @@ async def test_code_agent_preflight_rejects_missing_compute_token():
         bench._has_anthropic_api_key_fallback_configured = original_has_fallback
 
 
+def test_local_agent_preflight_requires_gpt_compute_token():
+    """Rose agents need gpt_code direct auth even when no Codex code tool is requested."""
+    from types import SimpleNamespace
+
+    import benchmarks.run_benchmark as bench
+
+    captured: dict[str, object] = {}
+    original_is_local = bench._is_local_base_url
+    original_sync = bench._sync_compute_tokens
+    original_database_url = bench._local_victoria_database_url
+    original_run = bench.subprocess.run
+    previous_opt_in = os.environ.get("SEED_ALLOW_MISSING_GPT_CODE")
+    try:
+        def fake_sync(*, tolerate_gpt_code_unavailable: bool = False) -> bool:
+            captured["tolerant"] = tolerate_gpt_code_unavailable
+            return True
+
+        bench._is_local_base_url = lambda _base_url: True
+        bench._sync_compute_tokens = fake_sync
+        bench._refresh_local_compute_tokens_for_run("http://localhost:55120")
+        assert captured["tolerant"] is False
+
+        os.environ["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
+        bench._sync_compute_tokens = original_sync
+        bench._local_victoria_database_url = lambda: "postgresql://local/victoria"
+
+        def fake_run(_cmd, **kwargs):
+            captured["seed_env"] = kwargs["env"]
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        bench.subprocess.run = fake_run
+        assert bench._sync_compute_tokens() is True
+        assert "SEED_ALLOW_MISSING_GPT_CODE" not in captured["seed_env"]
+    finally:
+        bench._is_local_base_url = original_is_local
+        bench._sync_compute_tokens = original_sync
+        bench._local_victoria_database_url = original_database_url
+        bench.subprocess.run = original_run
+        if previous_opt_in is None:
+            os.environ.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
+        else:
+            os.environ["SEED_ALLOW_MISSING_GPT_CODE"] = previous_opt_in
+
+    predeploy = (Path(__file__).resolve().parents[3] / "scripts" / "run-predeploy-local").read_text()
+    assert "smoke_set_uses_codex" not in predeploy
+    assert "export SEED_ALLOW_MISSING_GPT_CODE=1" not in predeploy
+
+
 async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
     """Code-agent benchmarks run when the Claude Code API-key fallback is configured and clear."""
     import benchmarks.run_benchmark as bench
@@ -7327,6 +7375,10 @@ async def run_all_tests():
     )
     await r.record_async(
         "code_agent_preflight_rejects_missing_compute", test_code_agent_preflight_rejects_missing_compute_token
+    )
+    r.record(
+        "local_agent_preflight_requires_gpt_compute",
+        test_local_agent_preflight_requires_gpt_compute_token,
     )
     await r.record_async(
         "code_agent_preflight_accepts_anthropic_api_key_fallback",
