@@ -480,6 +480,28 @@ async def test_parallel_benchmark_scheduler_serializes_browser_profile_writers()
     )
 
 
+def test_destructive_db_fixtures_run_before_parallel_agent_trees():
+    """A retained failed tree must not outlive the boundary for destructive fixtures."""
+    from benchmarks import run_benchmark as bench
+
+    class Task:
+        def __init__(self, name: str):
+            self.name = name
+
+    phases = bench._parallel_task_phases(
+        [
+            Task("claude-code-agent"),
+            Task("browser-biometrics-webdecoy"),
+            Task("chat-mode"),
+        ]
+    )
+
+    assert [(mode, [task.name for task in tasks]) for mode, tasks in phases] == [
+        ("exclusive", ["browser-biometrics-webdecoy"]),
+        ("parallel", ["claude-code-agent", "chat-mode"]),
+    ]
+
+
 def test_response_schema_feedback_benchmark_declares_real_mid_run_message():
     """The regression benchmark must inject non-goal feedback into a live agent run."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -7144,6 +7166,10 @@ async def run_all_tests():
     await r.record_async(
         "parallel_scheduler_serializes_browser_profiles",
         test_parallel_benchmark_scheduler_serializes_browser_profile_writers,
+    )
+    r.record(
+        "destructive_fixtures_precede_parallel_trees",
+        test_destructive_db_fixtures_run_before_parallel_agent_trees,
     )
     r.record(
         "browser_agent_cookie_bundle_bootstrap_local_only",
