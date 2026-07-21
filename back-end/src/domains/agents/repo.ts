@@ -174,6 +174,14 @@ export async function findAgentAlertContext(agentId: string) {
   return { ...agent, userName: user?.name ?? null };
 }
 
+/** Resolve the account identity displayed while an administrator inspects a run. */
+export async function findUserInspectionIdentity(userId: string) {
+  return prisma.user.findUnique({
+    where: { userId },
+    select: { name: true, phone: true, email: true },
+  });
+}
+
 /** Fetch agent by ID (unique). */
 export async function findAgentUnique(agentId: string) {
   return prisma.agent.findUnique({

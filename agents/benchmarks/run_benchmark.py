@@ -3390,16 +3390,36 @@ def _local_victoria_db_container() -> Optional[str]:
     return container if container in ps.stdout.splitlines() else None
 
 
+def _services_manifest_is_active(services: dict) -> bool:
+    """Return whether a services manifest is authoritative for fixture SQL."""
+    status = services.get("status")
+    if status in {"failed", "stopped"}:
+        return False
+    run_sh_pid = services.get("run_sh_pid")
+    if run_sh_pid is None:
+        return True
+    if not isinstance(run_sh_pid, int) or run_sh_pid <= 1:
+        return False
+    try:
+        os.kill(run_sh_pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _local_victoria_database_url() -> Optional[str]:
     candidates: list[str] = []
     services_path = _benchmark_context_path() / "services.json"
     if services_path.exists():
         try:
             services = json.loads(services_path.read_text())
-            candidates.append(manifest_database_url(services))
+            if _services_manifest_is_active(services):
+                candidates.append(manifest_database_url(services))
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"Invalid benchmark services manifest at {services_path}: {exc}") from exc
-    else:
+    if not candidates:
         env_database_url = os.environ.get("DIRECT_URL") or os.environ.get("DATABASE_URL")
         if env_database_url:
             candidates.append(_psql_compatible_database_url(env_database_url))

@@ -48,6 +48,11 @@ assert.doesNotMatch(
   /ENV_DATABASE_URL=.*DATABASE_URL/,
   'coverage must not derive its Fast Mode cache database from the production .env'
 );
+assert.match(
+  coverageScript,
+  /export AMPLITUDE_API_KEY=""\s+export AMPLITUDE_SECRET_KEY=""/,
+  'coverage must not consume the live Amplitude chart-query budget'
+);
 
 for (const [name, harness] of [
   ['coverage', coverageScript],

@@ -10,8 +10,13 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
-import { mintPurchaseCard, PurchaseError } from '../../domains/purchases/service';
+import { lookupPurchase, mintPurchaseCard, PurchaseError } from '../../domains/purchases/service';
 import type { MintPurchaseInput } from '../../domains/purchases/types';
+import {
+  AgentCardRoutingProvider,
+  createCardProviderForAgent,
+  StaticRoseAgentCardProvider,
+} from '../../providers/card-provider';
 import {
   FailingDetailsCardProvider,
   FakeCardProvider,
@@ -19,6 +24,15 @@ import {
   FundingInProgressCardProvider,
   withFakeStripe,
 } from '../blackbox/purchases.testkit';
+import { ROSE_AGENT_CARD_ID } from '../../providers/card-provider/static-card';
+
+// Test-only Rose Agent Card credentials, injected via env (never a real card).
+const STATIC_CARD_ENV = {
+  ROSE_AGENT_CARD_PAN: '4111111111111111',
+  ROSE_AGENT_CARD_CVV: '321',
+  ROSE_AGENT_CARD_EXPIRY: '11/30',
+  ROSE_AGENT_CARD_PIN: '4242',
+};
 
 const createdUserIds: string[] = [];
 let passed = 0;
@@ -151,6 +165,137 @@ async function main(): Promise<void> {
     );
   });
 
+  await test('lookupPurchase preserves a held card when benchmark routing lookup fails', async () => {
+    const userId = await seedSubscribedUser();
+    const agent = await prisma.agent.create({
+      data: { userId, goal: 'benchmark routing failure boundary' },
+    });
+    const fingerprint = `fp-${randomUUID()}`;
+    const purchase = await prisma.purchaseSpend.create({
+      data: {
+        userId,
+        agentId: agent.id,
+        fingerprint,
+        merchant: 'Routing Failure Merchant',
+        lineItemsJson: { totalCents: 1080 },
+        totalCents: 1080,
+        status: PurchaseSpendStatus.HELD,
+        cardId: `card-${randomUUID()}`,
+      },
+    });
+    const agentDelegate = prisma.agent as unknown as {
+      findUnique: typeof prisma.agent.findUnique;
+    };
+    const originalFindUnique = agentDelegate.findUnique;
+    agentDelegate.findUnique = (async () => {
+      throw new Error('benchmark lookup unavailable');
+    }) as typeof prisma.agent.findUnique;
+    try {
+      await assert.rejects(
+        () => lookupPurchase(userId, fingerprint),
+        /benchmark lookup unavailable/
+      );
+    } finally {
+      agentDelegate.findUnique = originalFindUnique;
+    }
+    assert.equal(await latestStatus(userId, fingerprint), PurchaseSpendStatus.HELD);
+    assert.equal(
+      (await prisma.purchaseSpend.findUnique({ where: { id: purchase.id } }))?.status,
+      PurchaseSpendStatus.HELD
+    );
+  });
+
+  await test('durable benchmark agents bypass the static-card cutoff request by request', async () => {
+    const userId = await seedSubscribedUser();
+    const benchmarkAgent = await prisma.agent.create({
+      data: { userId, goal: 'benchmark provider routing', isBenchmark: true },
+    });
+    const ordinaryAgent = await prisma.agent.create({
+      data: { userId, goal: 'ordinary provider routing' },
+    });
+    const envKeys = ['AGENTCARD_MINT_ENABLED', 'BENCHMARK_MODE', 'BENCHMARK_ISOLATED_RUN'];
+    const prevEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+    for (const key of envKeys) delete process.env[key];
+    try {
+      assert.ok(
+        (await createCardProviderForAgent(userId, benchmarkAgent.id)) instanceof
+          AgentCardRoutingProvider,
+        'the persisted benchmark bit selects live AgentCard minting'
+      );
+      assert.ok(
+        (await createCardProviderForAgent(userId, ordinaryAgent.id)) instanceof
+          StaticRoseAgentCardProvider,
+        'an ordinary agent in the same process remains on the static card'
+      );
+    } finally {
+      for (const [name, value] of Object.entries(prevEnv)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
+  await test('AGENTCARD MINT CUTOFF: real charge flow hands back the static Brex card (no injected provider)', async () => {
+    const userId = await seedSubscribedUser();
+    const wallet = new FakeWalletFundingProvider();
+    const input = mintInput(userId, { totalCents: 4396 });
+    // Cutoff active: flag + benchmark mode OFF (benchmark mode force-enables real minting), and the
+    // card credentials injected via env (never hardcoded).
+    const envKeys = [
+      'AGENTCARD_MINT_ENABLED',
+      'BENCHMARK_MODE',
+      'BENCHMARK_ISOLATED_RUN',
+      ...Object.keys(STATIC_CARD_ENV),
+    ];
+    const prevEnv = Object.fromEntries(envKeys.map((k) => [k, process.env[k]]));
+    delete process.env.AGENTCARD_MINT_ENABLED;
+    delete process.env.BENCHMARK_MODE;
+    delete process.env.BENCHMARK_ISOLATED_RUN;
+    Object.assign(process.env, STATIC_CARD_ENV);
+    try {
+      const result = await withFakeStripe(async (calls) => {
+        // NO card provider injected -> service resolves the REAL createCardProvider(), which
+        // under the cutoff returns the static Rose Agent Card, exercising the full mint path.
+        const outcome = await mintPurchaseCard(input, undefined, wallet);
+        // The user's Stripe hold is STILL captured under the cutoff (only the mint side changes).
+        assert.equal(calls.charges.length, 1, 'one manual-capture hold');
+        assert.equal(calls.captures.length, 1, 'the hold is captured');
+        return outcome;
+      });
+      assert.equal(result.status, PurchaseSpendStatus.HELD);
+      assert.equal(result.cardId, ROSE_AGENT_CARD_ID, 'static card id');
+      assert.equal(
+        result.pan,
+        STATIC_CARD_ENV.ROSE_AGENT_CARD_PAN,
+        'injected PAN reaches the caller'
+      );
+      assert.equal(
+        result.cvv,
+        STATIC_CARD_ENV.ROSE_AGENT_CARD_CVV,
+        'injected CVV reaches the caller'
+      );
+      assert.equal(result.expiry, STATIC_CARD_ENV.ROSE_AGENT_CARD_EXPIRY, 'injected expiry');
+      assert.equal(
+        result.last4,
+        STATIC_CARD_ENV.ROSE_AGENT_CARD_PAN.slice(-4),
+        'last4 = injected PAN tail'
+      );
+      assert.equal(await latestStatus(userId, input.fingerprint), PurchaseSpendStatus.HELD);
+      assert.equal(wallet.reclaimCalls.length, 0, 'static mint does not fail/roll back');
+      // The static card is company-funded out-of-band: NO AgentCard wallet-funding row is recorded
+      // (a fabricated transfer would otherwise be reclaimed against a nonexistent object).
+      const funding = await prisma.purchaseWalletFunding.findUnique({
+        where: { purchaseId: result.purchaseId },
+      });
+      assert.equal(funding, null, 'no wallet funding recorded for the static company card');
+    } finally {
+      for (const [name, value] of Object.entries(prevEnv)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
+
   process.stdout.write(
     `\nPurchases charge-flow unit tests: ${passed} passed, ${failures.length} failed\n`
   );
@@ -161,6 +306,7 @@ async function cleanup(): Promise<void> {
   for (const userId of createdUserIds) {
     await prisma.purchaseSpend.deleteMany({ where: { userId } });
     await prisma.subscription.deleteMany({ where: { userId } });
+    await prisma.agent.deleteMany({ where: { userId } });
     await prisma.user.deleteMany({ where: { userId } });
   }
   await prisma.$disconnect();

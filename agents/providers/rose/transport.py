@@ -114,7 +114,15 @@ def _codex_extra_headers_from_body(body: Dict[str, Any]) -> Dict[str, str]:
     cache_scope = body.get("prompt_cache_key")
     if isinstance(cache_scope, str) and cache_scope.strip():
         scope = cache_scope.strip()
-        return {"session_id": scope, "x-client-request-id": scope}
+        # Match Codex's HTTP Responses transport. The hyphenated session and
+        # thread headers provide backend affinity; `session_id` is not a
+        # recognized wire header and left repeatable turns vulnerable to
+        # landing on a cold cache shard.
+        return {
+            "session-id": scope,
+            "thread-id": scope,
+            "x-client-request-id": scope,
+        }
     return {}
 
 

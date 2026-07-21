@@ -7,6 +7,8 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import structlog.contextvars
@@ -698,6 +700,59 @@ async def test_backend_failure_spools_encrypted_outbox_and_async_drain():
             restore()
 
 
+async def test_async_local_submission_does_not_adopt_later_r2_config():
+    import helpers.trace_archive as trace_archive
+    from helpers.trace_archive import archive_json
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(str(Path(tmp) / "archive"))
+        old_flag = os.environ.get("TRACE_ARCHIVE_ASYNC_WRITES")
+        old_archive_now = trace_archive._archive_bytes_now
+        old_drain = trace_archive._drain_backend_outbox
+        old_executor = trace_archive._ARCHIVE_EXECUTOR
+        stored = threading.Event()
+        release = threading.Event()
+        drain_calls: list[bool] = []
+        executor = ThreadPoolExecutor(max_workers=1)
+
+        def controlled_archive_now(**kwargs):
+            result = old_archive_now(**kwargs)
+            stored.set()
+            assert release.wait(timeout=2)
+            return result
+
+        try:
+            os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = "1"
+            trace_archive._ARCHIVE_EXECUTOR = executor
+            trace_archive._archive_bytes_now = controlled_archive_now
+            trace_archive._drain_backend_outbox = lambda limit=8: drain_calls.append(True)
+
+            result = archive_json(
+                root_agent_id="agent-config-snapshot",
+                path="llm/local.json.gz.enc",
+                payload={"local": True},
+            )
+            assert result is not None
+            assert await asyncio.to_thread(stored.wait, 2)
+
+            os.environ["TRACE_ARCHIVE_BACKEND"] = "r2"
+            release.set()
+            await asyncio.to_thread(executor.shutdown, True)
+
+            assert drain_calls == []
+        finally:
+            release.set()
+            executor.shutdown(wait=True)
+            trace_archive._ARCHIVE_EXECUTOR = old_executor
+            trace_archive._archive_bytes_now = old_archive_now
+            trace_archive._drain_backend_outbox = old_drain
+            if old_flag is None:
+                os.environ.pop("TRACE_ARCHIVE_ASYNC_WRITES", None)
+            else:
+                os.environ["TRACE_ARCHIVE_ASYNC_WRITES"] = old_flag
+            restore()
+
+
 def test_prod_backend_failure_outbox_avoids_filesystem_root_context():
     import shutil
 
@@ -895,6 +950,10 @@ async def run_all_tests():
     await r.record_async(
         "backend_failure_spools_encrypted_outbox_and_async_drain",
         test_backend_failure_spools_encrypted_outbox_and_async_drain,
+    )
+    await r.record_async(
+        "async_local_submission_does_not_adopt_later_r2_config",
+        test_async_local_submission_does_not_adopt_later_r2_config,
     )
     r.record(
         "prod_backend_failure_outbox_avoids_filesystem_root_context",

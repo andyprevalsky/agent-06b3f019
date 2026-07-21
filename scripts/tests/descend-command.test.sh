@@ -29,7 +29,7 @@ require_text "Rows with ⏳ Deploy approval first" "deploy approvals must sort f
 require_text "Rows with ✅ Deployed #<PR> last" "deployed rows must sort last"
 require_text "**INFRA:**" "/descend must classify infrastructure failures"
 require_text "**HARNESS:**" "/descend must classify trustworthy benchmark failures as harness"
-require_text "| ID | Kind | Cluster | Issue (≤100 chars) | RCA | Fix | Test | Approval | Real rerun | Deploy |" "/descend must use an issue-oriented lifecycle table"
+require_text "| ID | Kind | Cluster | Issue (≤100 chars) | RCA | Fix | Test | Approval | Real rerun | Deploy |" "/descend must use an issue-oriented lifecycle table with a pinned issue cluster"
 require_text "Browser agent failed to start because proxy generation returned HTTP 400" "/descend issue rows must state the concrete observed failure"
 require_text "The issue is **<root cause at the first-bad boundary>**" "fix approval must explain the RCA"
 require_text "where we measured **<measurement>**" "fix approval must report the repro measurement"

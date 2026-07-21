@@ -130,7 +130,10 @@ export function createEarlyDirectGeneratorCoordinator<T>(
       explicitlyDiscarded = true;
       abortController.abort();
       await streamGate.discard();
-      if (outcome) await outcome;
+      // The provider may not honor AbortSignal until its own request timeout.
+      // The settled wrapper already absorbs rejection and the discarded gate
+      // prevents every buffered frame and side effect from committing, so the
+      // canonical route must not wait for speculative provider cleanup.
     },
   };
 }

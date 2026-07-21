@@ -3,6 +3,7 @@
  */
 
 import type { Response } from 'express';
+import { isAdminUser } from '../../utils/adminAccess';
 import type { HybridAuthRequest } from '../../providers/hybridAuth';
 import { isUserGated } from '../../providers/inviteGate';
 import { getBenchmarkRunSecret } from './config';
@@ -18,6 +19,16 @@ import { getBenchmarkRunSecret } from './config';
 export function isBenchmarkRequest(req: HybridAuthRequest): boolean {
   const secret = getBenchmarkRunSecret();
   return secret !== undefined && req.header('X-Benchmark-Run') === secret;
+}
+
+/** Resolve the ownership filter and optional admin-inspection identity for a detail read. */
+export function resolveAgentReadAccess(req: HybridAuthRequest) {
+  const inspectionViewerUserId = isAdminUser(req.userId) ? req.userId : undefined;
+  return {
+    userId:
+      req.isInternal === true || inspectionViewerUserId !== undefined ? undefined : req.userId,
+    inspectionViewerUserId,
+  };
 }
 
 export function rejectAnonymousCreate(

@@ -659,6 +659,14 @@ def test_payment_benchmark_enables_bundled_frontend_before_stack_start():
         assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
 
 
+def test_isolated_benchmark_services_allow_slow_first_sync():
+    """System-Postgres fallback must outlive a cold production-data sync."""
+    from benchmarks import local
+
+    timeout = local.wait_for_services.__kwdefaults__["timeout_seconds"]
+    assert timeout >= 600
+
+
 def test_claude_code_benchmark_forces_real_claude_provider_before_stack_start():
     """A task that requires Claude Code must not silently run through Codex."""
     import os
@@ -1150,6 +1158,94 @@ def test_production_frontend_url_ignores_stale_local_services_manifest():
 
             assert _frontend_url_for_benchmark("https://navi-j9a9.onrender.com") == "https://roselabs.ai"
     finally:
+        for name, value in prior.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def test_system_postgres_fixture_sql_targets_manifest_database_name():
+    """Fixture mutations must hit the isolated DB that serves the benchmark stack."""
+    from benchmarks import run_benchmark as bench
+
+    environment_names = ("BENCHMARK_CONTEXT_DIR", "DIRECT_URL", "DATABASE_URL")
+    prior = {name: os.environ.get(name) for name in environment_names}
+    original_run = bench.subprocess.run
+    try:
+        with tempfile.TemporaryDirectory() as context_dir:
+            Path(context_dir, "services.json").write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "run_sh_pid": os.getpid(),
+                        "database": {
+                            "name": "victoria_bench_isolated_123",
+                            "runtime_port": 5432,
+                            "use_system_postgres": True,
+                        },
+                        "ports": {"local_db": 58145},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            os.environ.pop("DIRECT_URL", None)
+            os.environ.pop("DATABASE_URL", None)
+
+            probed_urls = []
+
+            def fake_run(args, **_kwargs):
+                probed_urls.append(args[1])
+                return subprocess.CompletedProcess(args, 0, stdout="1\n", stderr="")
+
+            bench.subprocess.run = fake_run
+            assert bench._local_victoria_database_url() == (
+                "postgresql://postgres:postgres@localhost:5432/victoria_bench_isolated_123"
+            )
+            assert probed_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_bench_isolated_123"]
+
+            probed_urls.clear()
+            Path(context_dir, "services.json").write_text(
+                json.dumps(
+                    {
+                        "status": "stopped",
+                        "database": {
+                            "name": "victoria_bench_stale_456",
+                            "runtime_port": 5432,
+                            "use_system_postgres": True,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.environ["DATABASE_URL"] = "postgresql://postgres:postgres@localhost:5432/victoria_env_explicit"
+            assert bench._local_victoria_database_url() == (
+                "postgresql://postgres:postgres@localhost:5432/victoria_env_explicit"
+            )
+            assert probed_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_env_explicit"]
+
+            probed_urls.clear()
+            Path(context_dir, "services.json").write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "run_sh_pid": 999_999_999,
+                        "database": {
+                            "name": "victoria_bench_orphaned_789",
+                            "runtime_port": 5432,
+                            "use_system_postgres": True,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            assert bench._local_victoria_database_url() == (
+                "postgresql://postgres:postgres@localhost:5432/victoria_env_explicit"
+            )
+            assert probed_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_env_explicit"]
+    finally:
+        bench.subprocess.run = original_run
         for name, value in prior.items():
             if value is None:
                 os.environ.pop(name, None)
@@ -8259,6 +8355,10 @@ async def run_all_tests():
         test_payment_benchmark_enables_bundled_frontend_before_stack_start,
     )
     r.record(
+        "isolated_benchmark_slow_first_sync",
+        test_isolated_benchmark_services_allow_slow_first_sync,
+    )
+    r.record(
         "claude_code_benchmark_real_provider",
         test_claude_code_benchmark_forces_real_claude_provider_before_stack_start,
     )
@@ -8325,6 +8425,10 @@ async def run_all_tests():
     r.record(
         "production_frontend_ignores_stale_local_manifest",
         test_production_frontend_url_ignores_stale_local_services_manifest,
+    )
+    r.record(
+        "system_postgres_fixture_targets_manifest_db",
+        test_system_postgres_fixture_sql_targets_manifest_database_name,
     )
     r.record(
         "agentcard_setup_fixture_skips_production_lifecycle",
