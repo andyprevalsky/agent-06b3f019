@@ -79,10 +79,67 @@ function withBranchAbort(options: CompletionOptions, branchSignal: AbortSignal):
 }
 
 /**
+ * Race the same-model OpenRouter GLM spill against the generic model
+ * waterfall. This branch is entered only after direct Cerebras has remained
+ * silent long enough to arm the outer hedge, so the normal fast path still
+ * makes one provider request. Individual OpenRouter providers can have long
+ * generation tails; racing the two existing fallbacks keeps either tail from
+ * serializing a synchronous chat turn.
+ */
+export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
+  poolSpec: PoolSpec;
+  options: CompletionOptions;
+  requestId: string;
+  callSite?: string;
+}): AsyncIterable<RoseStreamChunk> {
+  const openrouterKey = process.env.OPENROUTER_API_KEY;
+  if (!openrouterKey) {
+    yield* exclusiveOpenRouterWaterfall(params);
+    return;
+  }
+
+  let winnerName = '';
+  const raced = hedgeStreams<RoseStreamChunk>({
+    primary: {
+      name: 'openrouter-glm',
+      produce: (signal) =>
+        exclusiveOpenRouterCerebrasCompletion({
+          options: withBranchAbort(params.options, signal),
+          openrouterKey,
+          requestId: params.requestId,
+          callSite: params.callSite,
+          allowProviderFallback: true,
+        }),
+    },
+    hedge: {
+      name: 'waterfall',
+      produce: (signal) =>
+        exclusiveOpenRouterWaterfall({
+          ...params,
+          options: withBranchAbort(params.options, signal),
+        }),
+    },
+    // Both branches are already delayed behind the outer Cerebras hedge. Start
+    // them together so neither provider's long tail becomes the chat deadline.
+    hedgeAfter: () => Promise.resolve(),
+    isContent: (chunk) => clearsChatStallGuard(chunk.kind),
+    onWinner: (name) => {
+      winnerName = name;
+    },
+  });
+
+  for await (const chunk of raced) yield chunk;
+  log.info('cerebras_chat.openrouter_fallback_race_done', {
+    request_id: params.requestId,
+    winner: winnerName,
+  });
+}
+
+/**
  * Run the low-latency Cerebras chat route, and if it produces no caller-visible
- * content before its deadline, fall through to the REAL multi-provider
- * OpenRouter waterfall (different models) — never a same-model/same-provider
- * retry. A slow or empty Cerebras must never silence the whole chat turn.
+ * content before its deadline, race the same-model OpenRouter spill against the
+ * REAL multi-provider OpenRouter waterfall. Neither fallback is pinned to the
+ * stalled Cerebras host, so a slow or empty provider cannot silence the turn.
  *
  * Once any content has been emitted a new provider cannot be spliced in, so a
  * post-content failure is surfaced to the caller unchanged.
@@ -125,12 +182,19 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
         hedge: {
           name: 'waterfall',
           produce: (signal) =>
-            exclusiveOpenRouterWaterfall({
-              poolSpec: params.poolSpec,
-              options: withBranchAbort(params.options, signal),
-              requestId: params.requestId,
-              callSite: params.callSite,
-            }),
+            params.options.provider_route === 'direct-cerebras'
+              ? raceDirectCerebrasOpenRouterFallbacks({
+                  poolSpec: params.poolSpec,
+                  options: withBranchAbort(params.options, signal),
+                  requestId: params.requestId,
+                  callSite: params.callSite,
+                })
+              : exclusiveOpenRouterWaterfall({
+                  poolSpec: params.poolSpec,
+                  options: withBranchAbort(params.options, signal),
+                  requestId: params.requestId,
+                  callSite: params.callSite,
+                }),
         },
         hedgeAfter: () => sleep(hedgeMs),
         isContent: (chunk) => clearsChatStallGuard(chunk.kind),

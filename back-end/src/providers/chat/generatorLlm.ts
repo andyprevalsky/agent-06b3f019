@@ -321,11 +321,10 @@ export function buildGeneratorCompletionOptions(params: {
     model: params.model,
     messages: params.messages,
     temperature: 0.7,
-    // Gemini 3.5 Flash enables medium reasoning by default on OpenRouter. The
-    // synchronous chat fallback only needs to synthesize the already-routed
-    // answer, so keep its mandatory reasoning at the provider's minimum. This
-    // prevents hidden thinking tokens from consuming the five-second chat
-    // lifecycle budget when Cerebras is rate-capped or stalls.
+    // Keep synchronous chat fallbacks latency-bounded. Cerebras disables
+    // reasoning at its provider boundary; OpenRouter models such as Gemini
+    // require reasoning, so request their smallest supported budget instead
+    // of accepting the provider's slower default.
     effort: 'minimal',
     response_format: {
       type: 'json_schema',

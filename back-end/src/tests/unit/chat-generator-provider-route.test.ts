@@ -31,6 +31,20 @@ function sseResponse(lines: string[]): Response {
   return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
 }
 
+function stallingResponse(signal?: AbortSignal | null): Response {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      if (!signal) return;
+      if (signal.aborted) {
+        controller.error(signal.reason);
+        return;
+      }
+      signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+    },
+  });
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
+}
+
 async function collect(stream: AsyncIterable<CompletionChunk>): Promise<CompletionChunk[]> {
   const chunks: CompletionChunk[] = [];
   for await (const chunk of stream) chunks.push(chunk);
@@ -141,7 +155,7 @@ async function testDirectFailureFallsThroughToWaterfall(): Promise<void> {
     assert.deepEqual(
       waterfallBody.reasoning,
       { effort: 'minimal' },
-      'generator fallback must not inherit Gemini default medium reasoning'
+      'generator fallback must preserve its latency-bounded reasoning effort'
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -194,6 +208,134 @@ async function testDirectPreHeaderStallFallsThroughToWaterfall(): Promise<void> 
     else process.env.OPENROUTER_API_KEY = oldOpenRouterKey;
     if (oldIdleTimeout === undefined) delete process.env.CEREBRAS_CHAT_IDLE_TIMEOUT_MS;
     else process.env.CEREBRAS_CHAT_IDLE_TIMEOUT_MS = oldIdleTimeout;
+  }
+}
+
+async function testSilentDirectRouteRacesBothOpenRouterFallbacks(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const saved = {
+    cerebrasKey: process.env.CEREBRAS_API_KEY,
+    openrouterKey: process.env.OPENROUTER_API_KEY,
+    hedgeMs: process.env.CEREBRAS_CHAT_HEDGE_MS,
+    idleTimeoutMs: process.env.CEREBRAS_CHAT_IDLE_TIMEOUT_MS,
+  };
+  process.env.CEREBRAS_API_KEY = 'direct-cerebras';
+  process.env.OPENROUTER_API_KEY = 'openrouter-fallbacks';
+  process.env.CEREBRAS_CHAT_HEDGE_MS = '5';
+  process.env.CEREBRAS_CHAT_IDLE_TIMEOUT_MS = '500';
+
+  const openRouterBodies: Record<string, unknown>[] = [];
+  let directSignal: AbortSignal | null | undefined;
+  let glmSignal: AbortSignal | null | undefined;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (url === CEREBRAS_API_URL) {
+      directSignal = init?.signal;
+      return stallingResponse(init?.signal);
+    }
+    if (url === OPENROUTER_API_URL) {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      openRouterBodies.push(body);
+      if (body.model === 'z-ai/glm-4.7') {
+        glmSignal = init?.signal;
+        return stallingResponse(init?.signal);
+      }
+      return sseResponse(GENERATOR_SSE);
+    }
+    throw new Error(`Unexpected route ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const chunks = await collect(await createStreamingCompletion(directGeneratorOptions()));
+    const text = chunks.map((chunk) => chunk.choices?.[0]?.delta?.content ?? '').join('');
+    assert.ok(text.length > 0, 'the generic fallback must rescue both silent GLM routes');
+
+    const glmBody = openRouterBodies.find((body) => body.model === 'z-ai/glm-4.7');
+    const genericBody = openRouterBodies.find((body) => body.model === 'google/gemini-3.5-flash');
+    assert.ok(glmBody, 'a silent direct route must arm the same-model OpenRouter GLM spill');
+    assert.ok(genericBody, 'the GLM spill must race the generic OpenRouter fallback');
+    assert.equal(
+      (glmBody.provider as { allow_fallbacks?: boolean }).allow_fallbacks,
+      true,
+      'the GLM race branch must be allowed to spill beyond Cerebras'
+    );
+    assert.deepEqual(genericBody.reasoning, { effort: 'minimal' });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(
+      directSignal?.aborted,
+      true,
+      'the winning generic branch must abort direct Cerebras'
+    );
+    assert.equal(
+      glmSignal?.aborted,
+      true,
+      'the winning generic branch must abort the slow GLM spill'
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [name, value] of [
+      ['CEREBRAS_API_KEY', saved.cerebrasKey],
+      ['OPENROUTER_API_KEY', saved.openrouterKey],
+      ['CEREBRAS_CHAT_HEDGE_MS', saved.hedgeMs],
+      ['CEREBRAS_CHAT_IDLE_TIMEOUT_MS', saved.idleTimeoutMs],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+async function testLosingWaterfallStopsBeforeItsNextModel(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const saved = {
+    cerebrasKey: process.env.CEREBRAS_API_KEY,
+    openrouterKey: process.env.OPENROUTER_API_KEY,
+    hedgeMs: process.env.CEREBRAS_CHAT_HEDGE_MS,
+    idleTimeoutMs: process.env.CEREBRAS_CHAT_IDLE_TIMEOUT_MS,
+  };
+  process.env.CEREBRAS_API_KEY = 'direct-cerebras';
+  process.env.OPENROUTER_API_KEY = 'openrouter-fallbacks';
+  process.env.CEREBRAS_CHAT_HEDGE_MS = '5';
+  process.env.CEREBRAS_CHAT_IDLE_TIMEOUT_MS = '500';
+
+  const openRouterModels: string[] = [];
+  let genericSignal: AbortSignal | null | undefined;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString();
+    if (url === CEREBRAS_API_URL) return stallingResponse(init?.signal);
+    if (url === OPENROUTER_API_URL) {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const model = String(body.model);
+      openRouterModels.push(model);
+      if (model === 'z-ai/glm-4.7') return sseResponse(GENERATOR_SSE);
+      genericSignal = init?.signal;
+      return stallingResponse(init?.signal);
+    }
+    throw new Error(`Unexpected route ${url}`);
+  }) as typeof fetch;
+
+  try {
+    const chunks = await collect(await createStreamingCompletion(directGeneratorOptions()));
+    assert.ok(chunks.length > 0, 'the winning GLM spill must produce a reply');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(
+      openRouterModels,
+      ['z-ai/glm-4.7', 'google/gemini-3.5-flash'],
+      'an aborted losing waterfall must not advance to Kimi'
+    );
+    assert.equal(genericSignal?.aborted, true, 'the losing generic waterfall must be aborted');
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [name, value] of [
+      ['CEREBRAS_API_KEY', saved.cerebrasKey],
+      ['OPENROUTER_API_KEY', saved.openrouterKey],
+      ['CEREBRAS_CHAT_HEDGE_MS', saved.hedgeMs],
+      ['CEREBRAS_CHAT_IDLE_TIMEOUT_MS', saved.idleTimeoutMs],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   }
 }
 
@@ -280,6 +422,8 @@ async function run(): Promise<void> {
   await testPhaseUsesDirectCerebras();
   await testDirectFailureFallsThroughToWaterfall();
   await testDirectPreHeaderStallFallsThroughToWaterfall();
+  await testSilentDirectRouteRacesBothOpenRouterFallbacks();
+  await testLosingWaterfallStopsBeforeItsNextModel();
   await testDirectQuotaFallsOverToOpenRouterGlm();
   process.stdout.write(
     'PASS Chat Generator provider routes fall through on Cerebras stalls and rate caps\n'
