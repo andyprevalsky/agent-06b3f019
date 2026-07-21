@@ -24,7 +24,11 @@ import {
   syncSteelSessionAuthCredentials,
 } from './seed-local-credentials';
 import { runSyncStep, syncRowsWithConcurrency, syncUserRecord } from './seed-local-helpers';
-import { createScopedBrowserAuthReaders, parseCookieDomains } from './cookie-domain-scope';
+import {
+  createScopedBrowserAuthReaders,
+  parseCookieDomains,
+  passkeySyncWhere,
+} from './cookie-domain-scope';
 import { selectRemoteDatabaseUrl } from './seed-remote-database-url';
 
 // Parse .env file directly to get remote DB URL
@@ -423,14 +427,14 @@ async function syncPasskeysOnly(
       'Stale Local Passkeys',
       async () => {
         const remoteKeys = await remote.passkeyCredential.findMany({
-          where: { userId: DEV_USER_ID },
+          where: passkeySyncWhere(DEV_USER_ID, SEED_COOKIE_DOMAINS),
           select: { rpId: true, credentialId: true },
         });
         const liveKeys = new Set(
           remoteKeys.map(({ rpId, credentialId }) => `${rpId}\u0000${credentialId}`)
         );
         const localKeys = await local.passkeyCredential.findMany({
-          where: { userId: DEV_USER_ID },
+          where: passkeySyncWhere(DEV_USER_ID, SEED_COOKIE_DOMAINS),
           select: { id: true, rpId: true, credentialId: true },
         });
         const staleIds = localKeys

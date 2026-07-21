@@ -1065,7 +1065,10 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
         else
             target_id=""
         fi
-        if [ "$clone_status" -eq 0 ] && [ -n "$target_id" ]; then
+        # An authoritative ID is success even when flyctl itself timed out or
+        # returned non-zero after allocation. Retrying here would provision a
+        # duplicate clone despite already owning the recovered target.
+        if [ -n "$target_id" ]; then
             printf '%s' "$target_id"
             return 0
         fi

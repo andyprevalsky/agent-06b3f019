@@ -9,10 +9,10 @@ ensure_fast_mode_cache_schema() {
     local attempt rc=1
 
     case "$max_attempts" in
-        ''|*[!0-9]*|0) echo "❌ FAST_MODE_CACHE_SCHEMA_MAX_ATTEMPTS must be a positive integer" >&2; return 2 ;;
+        ''|*[!0-9]*|0|0[0-9]*) echo "❌ FAST_MODE_CACHE_SCHEMA_MAX_ATTEMPTS must be a positive integer without leading zeros" >&2; return 2 ;;
     esac
     case "$retry_base_seconds" in
-        ''|*[!0-9]*) echo "❌ FAST_MODE_CACHE_SCHEMA_RETRY_BASE_SECONDS must be a non-negative integer" >&2; return 2 ;;
+        ''|*[!0-9]*|0[0-9]*) echo "❌ FAST_MODE_CACHE_SCHEMA_RETRY_BASE_SECONDS must be a non-negative integer without leading zeros" >&2; return 2 ;;
     esac
 
     for attempt in $(seq 1 "$max_attempts"); do

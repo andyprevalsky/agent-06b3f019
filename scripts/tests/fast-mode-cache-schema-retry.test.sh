@@ -34,6 +34,20 @@ FAST_MODE_CACHE_SCHEMA_RETRY_BASE_SECONDS=0 \
 check "persistent failure returns non-zero" "17" "$?"
 check "persistent failure stops at the configured bound" "4" "$ATTEMPTS"
 
+ATTEMPTS=0
+FAST_MODE_CACHE_SCHEMA_MAX_ATTEMPTS=00 \
+FAST_MODE_CACHE_SCHEMA_RETRY_BASE_SECONDS=0 \
+    ensure_fast_mode_cache_schema always_fail >/dev/null 2>&1
+check "zero-padded max attempts are rejected" "2" "$?"
+check "invalid max attempts never invoke the ensure command" "0" "$ATTEMPTS"
+
+ATTEMPTS=0
+FAST_MODE_CACHE_SCHEMA_MAX_ATTEMPTS=1 \
+FAST_MODE_CACHE_SCHEMA_RETRY_BASE_SECONDS=08 \
+    ensure_fast_mode_cache_schema always_fail >/dev/null 2>&1
+check "zero-padded retry delays are rejected" "2" "$?"
+check "invalid retry delays never invoke the ensure command" "0" "$ATTEMPTS"
+
 if grep -q 'lib/fast-mode-cache-schema.sh' "$ROOT_DIR/scripts/run.sh" \
    && grep -q 'ensure_fast_mode_cache_schema bash -c' "$ROOT_DIR/scripts/run.sh"; then
     PASS=$((PASS + 1)); echo "  ✅ run.sh executes the cache-schema ensure through the retry helper"

@@ -1923,7 +1923,7 @@ clone_machine_target "$LEDGER"
         0,
         target_id,
     )
-    failed_after_create, failed_target_ledger = allocate(
+    recovered_after_create, recovered_target_ledger = allocate(
         f"Cloning Machine {source_id} into region ord\nError: monitor failed",
         1,
         target_id,
@@ -1942,10 +1942,10 @@ clone_machine_target "$LEDGER"
     assert created_target.stdout == target_id
     assert target_ledger.read_text().splitlines() == [target_id]
     assert target_ledger.with_suffix(".names").read_text() == ""
-    assert failed_after_create.returncode == 1
-    assert failed_after_create.stdout == ""
-    assert failed_target_ledger.read_text().splitlines() == [target_id]
-    assert failed_target_ledger.with_suffix(".names").read_text() == ""
+    assert recovered_after_create.returncode == 0, recovered_after_create.stderr
+    assert recovered_after_create.stdout == target_id
+    assert recovered_target_ledger.read_text().splitlines() == [target_id]
+    assert recovered_target_ledger.with_suffix(".names").read_text() == ""
     assert "--detach" in clone_function
     assert "--name" in clone_function
     # Exactly one clone-from-source call site, and it is bounded by the
