@@ -1,10 +1,12 @@
 import numpy as np
+
 from .controller import Controller
+
 
 class Plant:
     """
-    A class representing a plant in a control system. The plant generates model values using a controller and 
-    converts velocities to time values using a formula. The controller can be custom designed using the 
+    A class representing a plant in a control system. The plant generates model values using a controller and
+    converts velocities to time values using a formula. The controller can be custom designed using the
     `default_design_controller` method.
     """
 
@@ -15,7 +17,7 @@ class Plant:
         Parameters:
         - Controller: The controller class for the keycap.
         """
-        if (controller is None):
+        if controller is None:
             self.controller = Controller()
         else:
             self.controller = controller
@@ -24,10 +26,10 @@ class Plant:
         """
         Convert an array of velocities to time values using the formula: time = 1/velocity.
         This is the time pressed between each keypress.
-        
+
         Parameters:
         - velocities (array-like): An array of velocity values.
-        
+
         Returns:
         - (array-like): An array of time values.
         """

@@ -19,14 +19,13 @@ from providers.rose.errors import (
     RoseAuthError,
     RoseError,
     RoseInvalidRequest,
-    RoseRefusalError,
     RoseRateLimitError,
+    RoseRefusalError,
     RoseServerError,
     RoseStallError,
 )
 from providers.rose.pools import PoolName
 from providers.rose.types import ClaudeAuthContext, GptAuthContext
-
 
 # Map of every legacy model string the agent passes for "I want a Rose pool".
 # The TS edge function accepted any of these and routed by pool name; we

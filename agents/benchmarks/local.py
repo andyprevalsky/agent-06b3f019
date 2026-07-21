@@ -601,6 +601,9 @@ def needs_payment_fixture(tasks: Sequence[str]) -> bool:
 def configure_task_environment(tasks: Sequence[str]) -> None:
     if needs_frontend_tunnel(tasks):
         os.environ["BENCHMARK_BUNDLED_FRONTEND"] = "true"
+    selected = set(tasks)
+    if any(task.name in selected and task.requires_claude_code for task in all_tasks()):
+        os.environ["ROSE_CODE_AGENT_PROVIDER"] = "claude"
 
 
 def seed_payment_fixture(manifest: dict) -> None:
