@@ -19,6 +19,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Optional
 
@@ -40,7 +41,7 @@ _LOCAL_ARCHIVE_ROOT = _REPO_ROOT / ".context" / "trace-archive"
 _WMH_REFERENCE_ROOT = _REPO_ROOT / ".context" / "reference" / "world-model-harness"
 _DEFAULT_WMH_BUILD_ROOT = _REPO_ROOT / ".context" / "world-model"
 # Increment whenever cached per-bundle OTel/session output changes independently of archive bytes.
-_WMH_EXPORT_SCHEMA_VERSION = 2
+_WMH_EXPORT_SCHEMA_VERSION = 3
 
 _SECRET_KEY_RE = re.compile(
     r"(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret|"
@@ -102,6 +103,25 @@ _ENVIRONMENT_BOUNDARY_TOOLS = (
         "payment_provider_response",
     }
 )
+_BROWSER_OBSERVATION_PATH_RE = re.compile(
+    r"^media/browser/(?P<task_id>[^/]+)/observations/iteration_(?P<iteration>\d+)\.json$"
+)
+_BROWSER_NON_ACTION_EVENTS = {
+    "auth_assistance",
+    "browser",
+    "credential_propagation",
+    "diagnostics",
+    "error",
+    "network_recording",
+    "recording",
+    "request_user_assistance_for_authentication",
+    "session_paused",
+    "supervisor_recovery",
+    "system",
+    "task_complete",
+    "task_started",
+    "write_lock_rejected",
+}
 
 
 @dataclass
@@ -752,6 +772,401 @@ def _transitions_from_llm_dumps(
     return transitions
 
 
+def _row_timestamp_ms(row: JsonObject) -> int | None:
+    for key in ("createdAt", "created_at", "timestamp", "updatedAt", "updated_at"):
+        value = row.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        return int(parsed.timestamp() * 1000)
+    return None
+
+
+def _compact_browser_state(value: Any, redaction_mode: str) -> JsonObject:
+    if not isinstance(value, dict):
+        return {}
+    state = {
+        key: inner
+        for key, inner in value.items()
+        if key not in {"frame", "screenshot", "website_frame"}
+    }
+    dom_tree = state.get("dom_tree")
+    if isinstance(dom_tree, str) and len(dom_tree) > 24_000:
+        state["dom_tree"] = dom_tree[:24_000] + "\n[truncated]"
+    return _maybe_redact(state, redaction_mode)
+
+
+def _browser_action_arguments_from_entry(
+    entry: JsonObject,
+    *,
+    root_goal: str,
+    previous_state: JsonObject,
+    redaction_mode: str,
+) -> JsonObject:
+    params = dict(entry.get("params") or {}) if isinstance(entry.get("params"), dict) else {}
+    for key in ("index", "coordinates", "element_description"):
+        if entry.get(key) is not None:
+            params[key] = entry[key]
+    return _maybe_redact(
+        {
+            "goal": root_goal,
+            "action": str(entry.get("action") or "unknown"),
+            "params": params,
+            "thinking": str(entry.get("thinking") or ""),
+            "current_browser_state": previous_state,
+            "approval": {"granted": False, "type": None, "payment_card_last4": None},
+        },
+        redaction_mode,
+    )
+
+
+def _transitions_from_browser_observations(
+    root_agent_id: str,
+    redaction_mode: str,
+    initial_state: JsonObject,
+) -> tuple[list[RoseTransition], set[str]]:
+    """Build grounded browser transitions from recorder DOM observations.
+
+    Recorder observations are real post-action website states and include the
+    exact cumulative action entries that produced them. An observation for
+    iteration N is the state after the final action in its action_entries list;
+    retaining that final action avoids falsely assigning one future state to
+    every intermediate action when the recorder sampled multiple steps apart.
+    """
+
+    retrieval_state = _retrieval_state_from_initial_state(initial_state)
+    root_goal = str(initial_state.get("root_goal") or "")
+    grouped: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    for archive_agent_id in bundle_agent_ids(root_agent_id):
+        for path in archive_artifact_paths(archive_agent_id):
+            match = _BROWSER_OBSERVATION_PATH_RE.match(path)
+            if not match:
+                continue
+            key = (archive_agent_id, match.group("task_id"))
+            grouped.setdefault(key, []).append((int(match.group("iteration")), path))
+
+    transitions: list[RoseTransition] = []
+    grounded_task_ids: set[str] = set()
+    for (archive_agent_id, task_id), observation_paths in sorted(grouped.items()):
+        previous_browser_state: JsonObject = {}
+        seen_actions: set[tuple[Any, str]] = set()
+        for iteration, path in sorted(observation_paths):
+            try:
+                payload = read_archive_json(archive_agent_id, path)
+            except (FileNotFoundError, ValueError):
+                continue
+            browser_state = _compact_browser_state(payload.get("browser_state"), redaction_mode)
+            action_entries = payload.get("action_entries")
+            if isinstance(action_entries, list) and action_entries:
+                raw_entry = action_entries[-1]
+                if isinstance(raw_entry, dict):
+                    entry = raw_entry
+                    action_name = str(entry.get("action") or "unknown")
+                    action_key = (entry.get("step", iteration - 1), action_name)
+                    if action_key not in seen_actions and browser_state:
+                        seen_actions.add(action_key)
+                        grounded_task_ids.add(task_id)
+                        artifact_ref = (
+                            path if archive_agent_id == root_agent_id else f"{archive_agent_id}/{path}"
+                        )
+                        action_result = (
+                            entry.get("result") if isinstance(entry.get("result"), dict) else {}
+                        )
+                        observation_payload = _maybe_redact(
+                            {
+                                "browser_state": browser_state,
+                                "action_result": action_result,
+                            },
+                            redaction_mode,
+                        )
+                        timestamp_ms = (
+                            int(payload["ts_ms"])
+                            if isinstance(payload.get("ts_ms"), (int, float))
+                            and not isinstance(payload.get("ts_ms"), bool)
+                            else None
+                        )
+                        state_before = dict(retrieval_state)
+                        if previous_browser_state:
+                            state_before["browser_state"] = previous_browser_state
+                        transitions.append(
+                            RoseTransition(
+                                state_before=state_before,
+                                scratchpad=str(entry.get("thinking") or ""),
+                                action=CanonicalAction(
+                                    category="browser",
+                                    name="browser_action",
+                                    arguments=_browser_action_arguments_from_entry(
+                                        entry,
+                                        root_goal=root_goal,
+                                        previous_state=previous_browser_state,
+                                        redaction_mode=redaction_mode,
+                                    ),
+                                    agent_id=archive_agent_id,
+                                    tool_call_id=f"archive:{task_id}:{action_key[0]}",
+                                    artifact_refs=[artifact_ref],
+                                    timestamp_ms=timestamp_ms,
+                                ),
+                                observation=CanonicalObservation(
+                                    category="browser_state",
+                                    content=json.dumps(
+                                        observation_payload,
+                                        ensure_ascii=False,
+                                        sort_keys=True,
+                                    ),
+                                    is_error=bool(action_result.get("success") is False),
+                                    metadata={
+                                        "source": "browser_observation",
+                                        "task_id": task_id,
+                                        "iteration": iteration,
+                                        "action_step": action_key[0],
+                                        "result_unavailable": False,
+                                    },
+                                    artifact_refs=[artifact_ref],
+                                    timestamp_ms=timestamp_ms,
+                                ),
+                            )
+                        )
+            if browser_state:
+                previous_browser_state = browser_state
+    return transitions, grounded_task_ids
+
+
+def _browser_params_from_message(metadata: JsonObject, title: str) -> JsonObject:
+    params = dict(metadata.get("auxiliary") or {}) if isinstance(metadata.get("auxiliary"), dict) else {}
+    action_type = str(metadata.get("action_type") or "")
+    if action_type == "goto" and "→" in title:
+        params["url"] = title.split("→", 1)[1].strip()
+    elif action_type == "input_text":
+        match = re.search(r"Typed '([^']*)'", title)
+        if match:
+            params["text"] = match.group(1)
+    elif action_type == "press_key" and title.startswith("Pressed "):
+        params["key"] = title[len("Pressed ") :].strip()
+    elif action_type.startswith("scroll_"):
+        params["direction"] = action_type.removeprefix("scroll_")
+        match = re.search(r"(\d+)px", title)
+        if match:
+            params["amount"] = int(match.group(1))
+    elif action_type == "wait":
+        match = re.search(r"(\d+)ms", title)
+        if match:
+            params["time_ms"] = int(match.group(1))
+    if title:
+        params["grounded_event"] = title
+    return params
+
+
+def _browser_state_from_message(title: str, message: str, action_type: str) -> JsonObject:
+    content = message.strip() or title.strip()
+    url = ""
+    if action_type == "goto" and "→" in title:
+        url = title.split("→", 1)[1].strip()
+    return {
+        "url": url,
+        "title": title,
+        "dom_tree": content,
+        "viewport": {"width": 1280, "height": 800},
+        "scroll_position": {"pages_above": 0, "pages_below": 0, "total_pages": 1},
+        "page_stats": {},
+        "tabs": ([{"id": 0, "url": url, "title": title}] if url else []),
+        "recent_events": [content] if content else [],
+    }
+
+
+def _transitions_from_message_fixture(
+    root_agent_id: str,
+    redaction_mode: str,
+    initial_state: JsonObject,
+    *,
+    skip_browser_task_ids: set[str],
+) -> list[RoseTransition]:
+    """Recover real completed environment calls from the archived DB fixture."""
+
+    try:
+        fixture = read_archive_json(root_agent_id, "db/end.fixture.json.gz.enc")
+    except (FileNotFoundError, ValueError):
+        return []
+    rows = fixture.get("rows") if isinstance(fixture.get("rows"), dict) else {}
+    raw_messages = rows.get("Message") if isinstance(rows, dict) else []
+    if not isinstance(raw_messages, list):
+        return []
+    messages = [row for row in raw_messages if isinstance(row, dict)]
+    messages.sort(key=lambda row: (_row_timestamp_ms(row) or 0, str(row.get("id") or "")))
+
+    assistant_args: dict[str, JsonObject] = {}
+    for row in messages:
+        if str(row.get("role") or "").upper() != "ASSISTANT":
+            continue
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        tool_calls = metadata.get("tool_calls") if isinstance(metadata.get("tool_calls"), list) else []
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            call_id = str(call.get("tool_call_id") or call.get("id") or "")
+            if not call_id:
+                continue
+            assistant_args[call_id] = {
+                key: value
+                for key, value in call.items()
+                if key not in {"tool", "name", "tool_call_id", "id"}
+            }
+
+    retrieval_state = _retrieval_state_from_initial_state(initial_state)
+    root_goal = str(initial_state.get("root_goal") or "")
+    previous_browser_states: dict[str, JsonObject] = {}
+    last_observations: dict[str, str] = {}
+    transitions: list[RoseTransition] = []
+    for row in messages:
+        if str(row.get("role") or "").upper() != "TOOL":
+            continue
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if str(metadata.get("toolStatus") or "").upper() != "FINISHED":
+            continue
+        if metadata.get("world_model_simulated") is True:
+            continue
+        tool_name = str(metadata.get("toolName") or "")
+        tool_call_id = str(metadata.get("toolCallId") or "")
+        title = str(metadata.get("title") or "").strip()
+        message = str(row.get("message") or row.get("content") or "").strip()
+        timestamp_ms = _row_timestamp_ms(row)
+
+        if tool_name in _BROWSER_ORCHESTRATION_TOOLS:
+            action_type = str(metadata.get("action_type") or "").strip()
+            task_id = str(metadata.get("task_id") or metadata.get("subAgentId") or "")
+            if (
+                not action_type
+                or action_type in _BROWSER_NON_ACTION_EVENTS
+                or action_type.startswith(("agentcard_", "purchase_"))
+                or task_id in skip_browser_task_ids
+            ):
+                continue
+            previous_state = previous_browser_states.get(task_id, {})
+            next_state = _browser_state_from_message(title, message, action_type)
+            action_args = {
+                "goal": root_goal,
+                "action": action_type,
+                "params": _browser_params_from_message(metadata, title),
+                "thinking": "",
+                "current_browser_state": previous_state,
+                "approval": {"granted": False, "type": None, "payment_card_last4": None},
+            }
+            state_before = dict(retrieval_state)
+            if previous_state:
+                state_before["browser_state"] = previous_state
+            result_payload = {
+                "browser_state": next_state,
+                "action_result": {"success": not bool(metadata.get("error")), "message": message},
+            }
+            transitions.append(
+                RoseTransition(
+                    state_before=_maybe_redact(state_before, redaction_mode),
+                    scratchpad="",
+                    action=CanonicalAction(
+                        category="browser",
+                        name="browser_action",
+                        arguments=_maybe_redact(action_args, redaction_mode),
+                        agent_id=str(row.get("agentId") or root_agent_id),
+                        tool_call_id=tool_call_id,
+                        artifact_refs=["db/end.fixture.json.gz.enc"],
+                        timestamp_ms=timestamp_ms,
+                    ),
+                    observation=CanonicalObservation(
+                        category="browser_state",
+                        content=json.dumps(
+                            _maybe_redact(result_payload, redaction_mode),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        is_error=bool(metadata.get("error")),
+                        metadata={
+                            "source": "message_fixture",
+                            "task_id": task_id,
+                            "title": _maybe_redact(title, redaction_mode),
+                            "result_unavailable": False,
+                        },
+                        artifact_refs=["db/end.fixture.json.gz.enc"],
+                        timestamp_ms=timestamp_ms,
+                    ),
+                )
+            )
+            previous_browser_states[task_id] = _maybe_redact(next_state, redaction_mode)
+            continue
+
+        if not is_world_model_environment_boundary(tool_name):
+            continue
+        content = message or title
+        state_before = dict(retrieval_state)
+        if last_observations.get(tool_name):
+            state_before["previous_observation"] = last_observations[tool_name]
+        args = assistant_args.get(tool_call_id) or (
+            dict(metadata.get("auxiliary")) if isinstance(metadata.get("auxiliary"), dict) else {}
+        )
+        transitions.append(
+            RoseTransition(
+                state_before=_maybe_redact(state_before, redaction_mode),
+                scratchpad="",
+                action=CanonicalAction(
+                    category=canonical_category_for_tool(tool_name),
+                    name=tool_name,
+                    arguments=_maybe_redact(args, redaction_mode),
+                    agent_id=str(row.get("agentId") or root_agent_id),
+                    tool_call_id=tool_call_id,
+                    artifact_refs=["db/end.fixture.json.gz.enc"],
+                    timestamp_ms=timestamp_ms,
+                ),
+                observation=CanonicalObservation(
+                    category=f"{canonical_category_for_tool(tool_name)}_result",
+                    content=str(_maybe_redact(content, redaction_mode)),
+                    is_error=bool(metadata.get("error")),
+                    metadata={
+                        "source": "message_fixture",
+                        "title": _maybe_redact(title, redaction_mode),
+                        "result_unavailable": False,
+                    },
+                    artifact_refs=["db/end.fixture.json.gz.enc"],
+                    timestamp_ms=timestamp_ms,
+                ),
+            )
+        )
+        last_observations[tool_name] = content
+    return transitions
+
+
+def load_grounded_transitions(
+    root_agent_id: str,
+    *,
+    redaction_mode: str = "public",
+) -> list[RoseTransition]:
+    """Load only actions paired with real archived environment observations."""
+
+    initial_state = reconstruct_initial_state(root_agent_id, redaction_mode=redaction_mode)
+    explicit = _transitions_from_trace_artifact(root_agent_id, redaction_mode)
+    if explicit:
+        return [
+            transition
+            for transition in explicit
+            if transition.action.category != "llm_tool_call"
+            and transition.observation.metadata.get("result_unavailable") is not True
+        ]
+    browser, grounded_task_ids = _transitions_from_browser_observations(
+        root_agent_id,
+        redaction_mode,
+        initial_state,
+    )
+    messages = _transitions_from_message_fixture(
+        root_agent_id,
+        redaction_mode,
+        initial_state,
+        skip_browser_task_ids=grounded_task_ids,
+    )
+    return [*browser, *messages]
+
+
 def load_transitions(root_agent_id: str, *, redaction_mode: str = "public") -> list[RoseTransition]:
     initial_state = reconstruct_initial_state(root_agent_id, redaction_mode=redaction_mode)
     transitions = _transitions_from_trace_artifact(root_agent_id, redaction_mode)
@@ -1293,7 +1708,7 @@ def export_archive_to_otel_jsonl(
     run = manifest.get("run") if isinstance(manifest.get("run"), dict) else {}
     task_name = benchmark_task_name or manifest.get("benchmark_task_name")
     root_goal = task or run.get("root_goal") or task_name
-    transitions = load_transitions(root_agent_id, redaction_mode=redaction_mode)
+    transitions = load_grounded_transitions(root_agent_id, redaction_mode=redaction_mode)
     spans = transitions_to_otel_spans(
         root_agent_id,
         transitions,
@@ -1410,7 +1825,7 @@ async def evaluate_archive_with_world_model(
     if not wmh_base_url or not model_name:
         return {"status": "not_configured", "reason": "WMH_BASE_URL and WMH_MODEL_NAME are required"}
 
-    transitions = load_transitions(root_agent_id, redaction_mode=redaction_mode)
+    transitions = load_grounded_transitions(root_agent_id, redaction_mode=redaction_mode)
     if not transitions:
         return {"status": "no_steps", "reason": "archive contains no transitions"}
     initial_state = reconstruct_initial_state(root_agent_id, redaction_mode=redaction_mode)
@@ -1536,7 +1951,7 @@ def build_replay_corpus(
 
 
 def _build_replay_session(root_agent_id: str, split: str) -> JsonObject:
-    transitions = load_transitions(root_agent_id, redaction_mode="public")
+    transitions = load_grounded_transitions(root_agent_id, redaction_mode="public")
     state = reconstruct_initial_state(root_agent_id, redaction_mode="public")
     keys = []
     for transition in transitions:

@@ -1456,6 +1456,47 @@ def test_browser_agent_recording_inline_export_uses_source_frames_once():
     assert html_text.count("c2Vjb25k") == 1
 
 
+def test_simulated_browser_recording_player_script_is_valid_javascript():
+    import re
+    import subprocess
+
+    from domains.spawn_browser_agent_v3.recording import SimulatedBrowserRecorder
+
+    recorder = SimulatedBrowserRecorder(
+        agent_id="agent-1",
+        task_id="task-1",
+        session_id="session-1",
+        frames=[
+            {
+                "kind": "html",
+                "html": "<!doctype html><title>Checkout</title><p>Order complete</p>",
+                "width": 1440,
+                "height": 900,
+                "ts_ms": 0,
+                "label": "Order complete",
+                "action": "evaluate",
+                "metadata": {},
+            }
+        ],
+    )
+
+    html_bytes = recorder.export_inline_html_bytes()
+    assert html_bytes is not None
+    html_text = html_bytes.decode("utf-8")
+    scripts = re.findall(r"<script>(.*?)</script>", html_text, flags=re.DOTALL)
+    assert len(scripts) == 1
+    parsed = subprocess.run(
+        ["node", "--check", "-"],
+        input=scripts[0],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert parsed.returncode == 0, parsed.stderr
+    assert 'default-src \'none\'' in html_text
+    assert 'style-src \'unsafe-inline\'' in html_text
+
+
 def test_browser_agent_recording_steel_video_player_uses_debug_recording_and_window_offsets():
     from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
 
@@ -11490,6 +11531,10 @@ async def run_all_tests():
     r.record(
         "browser_agent_recording_inline_export_source_frames",
         test_browser_agent_recording_inline_export_uses_source_frames_once,
+    )
+    r.record(
+        "simulated_browser_recording_player_javascript",
+        test_simulated_browser_recording_player_script_is_valid_javascript,
     )
     await r.record_async(
         "browser_agent_recording_active_tab_url",

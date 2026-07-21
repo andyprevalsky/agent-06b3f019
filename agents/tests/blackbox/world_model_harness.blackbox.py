@@ -431,6 +431,203 @@ def test_bundle_signature_r2_rejects_enumerated_ciphertext_without_metadata():
             r2_restore()
 
 
+def test_grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_fallbacks():
+    from benchmarks.world_model_harness import (
+        export_archive_to_otel_jsonl,
+        load_grounded_transitions,
+        load_transitions,
+    )
+    from helpers.trace_archive import archive_json
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+        restore = _with_archive_env(tmp)
+        try:
+            root = "root-grounded-fixtures"
+            start_fixture = {
+                "root_agent_id": root,
+                "user_id": "user",
+                "agent_ids": [root],
+                "rows": {"Agent": [{"id": root, "goal": "Complete checkout"}]},
+            }
+            archive_json(
+                root_agent_id=root,
+                path="db/start.fixture.json.gz.enc",
+                payload=start_fixture,
+            )
+            archive_json(
+                root_agent_id=root,
+                path="db/end.fixture.json.gz.enc",
+                payload={
+                    **start_fixture,
+                    "rows": {
+                        **start_fixture["rows"],
+                        "Message": [
+                            {
+                                "id": "rich-finished",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "createdAt": "2026-07-20T00:00:02Z",
+                                "metadata": {
+                                    "toolName": "spawn_browser_agent",
+                                    "toolCallId": "rich-call",
+                                    "toolStatus": "FINISHED",
+                                    "action_type": "click",
+                                    "task_id": "task-rich",
+                                    "title": "Clicked Place your order",
+                                },
+                            },
+                            {
+                                "id": "legacy-progress",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "createdAt": "2026-07-20T00:00:03Z",
+                                "metadata": {
+                                    "toolName": "spawn_browser_agent",
+                                    "toolCallId": "legacy-call",
+                                    "toolStatus": "IN_PROGRESS",
+                                    "action_type": "goto",
+                                    "task_id": "task-legacy",
+                                    "title": "Navigating → https://amazon.com",
+                                },
+                            },
+                            {
+                                "id": "legacy-finished",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "createdAt": "2026-07-20T00:00:04Z",
+                                "metadata": {
+                                    "toolName": "spawn_browser_agent",
+                                    "toolCallId": "legacy-call",
+                                    "toolStatus": "FINISHED",
+                                    "action_type": "goto",
+                                    "task_id": "task-legacy",
+                                    "title": "Navigated → https://amazon.com",
+                                },
+                            },
+                            {
+                                "id": "simulated-finished",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "createdAt": "2026-07-20T00:00:05Z",
+                                "metadata": {
+                                    "toolName": "spawn_browser_agent",
+                                    "toolCallId": "simulated-call",
+                                    "toolStatus": "FINISHED",
+                                    "action_type": "click",
+                                    "task_id": "task-simulated",
+                                    "title": "Clicked synthetic result",
+                                    "world_model_simulated": True,
+                                },
+                            },
+                            {
+                                "id": "lifecycle-finished",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "createdAt": "2026-07-20T00:00:06Z",
+                                "metadata": {
+                                    "toolName": "spawn_browser_agent",
+                                    "toolCallId": "lifecycle-call",
+                                    "toolStatus": "FINISHED",
+                                    "action_type": "task_complete",
+                                    "task_id": "task-legacy",
+                                    "title": "Task complete",
+                                },
+                            },
+                        ],
+                    },
+                },
+            )
+            archive_json(
+                root_agent_id=root,
+                path="manifest.json.gz.enc",
+                payload={
+                    "root_agent_id": root,
+                    "world_model_mode": "real",
+                    "run": {"root_goal": "Complete checkout", "agent_ids": [root]},
+                },
+            )
+            archive_json(
+                root_agent_id=root,
+                path="llm/dump.json.gz.enc",
+                payload={
+                    "agent_id": root,
+                    "dump_id": "dump",
+                    "messages": [],
+                    "output": {
+                        "tool_calls": [
+                            {"id": "call", "name": "web_search", "arguments": {"q": "unavailable"}}
+                        ]
+                    },
+                },
+            )
+            archive_json(
+                root_agent_id=root,
+                path="media/browser/task-rich/observations/iteration_0001.json",
+                payload={
+                    "iteration": 1,
+                    "ts_ms": 1000,
+                    "browser_state": {
+                        "url": "https://amazon.com/checkout",
+                        "title": "Checkout",
+                        "dom_tree": "Place your order",
+                    },
+                    "action_entries": [],
+                },
+            )
+            archive_json(
+                root_agent_id=root,
+                path="media/browser/task-rich/observations/iteration_0002.json",
+                payload={
+                    "iteration": 2,
+                    "ts_ms": 2000,
+                    "browser_state": {
+                        "url": "https://amazon.com/confirmation",
+                        "title": "Order confirmation",
+                        "dom_tree": "Thank you, your order has been placed.",
+                    },
+                    "action_entries": [
+                        {
+                            "step": 1,
+                            "action": "click",
+                            "thinking": "Submit the visible checkout",
+                            "index": 42,
+                            "element_description": "Place your order button",
+                            "result": {"success": True},
+                        }
+                    ],
+                },
+            )
+
+            assert load_transitions(root)[0].action.category == "llm_tool_call"
+            grounded = load_grounded_transitions(root)
+            assert len(grounded) == 2
+            assert all(step.action.to_wmh_tool_name() == "rose.browser.browser_action" for step in grounded)
+            rich = next(step for step in grounded if step.observation.metadata["source"] == "browser_observation")
+            legacy = next(step for step in grounded if step.observation.metadata["source"] == "message_fixture")
+            assert rich.action.arguments["action"] == "click"
+            assert rich.action.arguments["params"]["index"] == 42
+            assert "Thank you, your order has been placed" in rich.observation.content
+            assert legacy.action.arguments["action"] == "goto"
+            assert legacy.action.arguments["params"]["url"] == "https://amazon.com"
+            assert "synthetic result" not in json.dumps([step.observation.content for step in grounded])
+
+            trace_path = Path(out) / "traces.otel.jsonl"
+            export_archive_to_otel_jsonl(root, trace_path)
+            exported = trace_path.read_text(encoding="utf-8")
+            assert "rose.browser.browser_action" in exported
+            assert "rose.llm_tool_call" not in exported
+            exported_spans = [json.loads(line) for line in exported.splitlines() if line]
+            outputs = []
+            for span in exported_spans:
+                for attribute in span.get("attributes", []):
+                    if attribute.get("key") == "gen_ai.tool.output":
+                        outputs.append(json.loads(attribute["value"]["stringValue"]))
+            assert outputs
+            assert all(output["metadata"]["result_unavailable"] is False for output in outputs)
+        finally:
+            restore()
+
+
 def test_refresh_world_model_index_persists_retriever_index_without_gepa():
     OtelGenAIAdapter = _load_upstream_otel_adapter_class()  # skip when upstream wmh is unavailable
     from benchmarks.world_model_harness import export_archive_to_otel_jsonl, refresh_world_model_index
@@ -1092,11 +1289,9 @@ def test_compare_real_vs_world_model_benchmark_outcomes():
     assert failed["checks"]["pass_outcome_match"] is False
 
 
-def test_root_export_includes_child_agent_llm_dumps_when_manifest_lists_tree():
-    _load_upstream_otel_adapter_class()
-    from benchmarks.world_model_harness import export_archive_to_otel_jsonl
+def test_root_loader_keeps_child_llm_dumps_for_diagnostics_but_grounded_export_excludes_them():
+    from benchmarks.world_model_harness import export_archive_to_otel_jsonl, load_transitions
     from helpers.trace_archive import archive_json
-    from wmh.ingest.otel_genai import OtelGenAIAdapter
 
     with tempfile.TemporaryDirectory() as tmp:
         restore = _with_archive_env(tmp)
@@ -1152,22 +1347,16 @@ def test_root_export_includes_child_agent_llm_dumps_when_manifest_lists_tree():
                     },
                 },
             )
+            diagnostic = load_transitions(root_agent_id, redaction_mode="public")
+            assert len(diagnostic) == 1
+            assert diagnostic[0].action.to_wmh_tool_name() == "rose.llm_tool_call.spawn_browser_agent"
+            assert diagnostic[0].action.agent_id == child_agent_id
+            assert "child-wmh-tree/llm/child-dump.json.gz.enc" in diagnostic[0].action.artifact_refs
+            assert diagnostic[0].observation.metadata["result_unavailable"] is True
+
             out = Path(tmp) / "tree.otel.jsonl"
             export_archive_to_otel_jsonl(root_agent_id, out, redaction_mode="public")
-            traces = OtelGenAIAdapter().from_file(str(out))
-            assert len(traces) == 1
-            assert len(traces[0].steps) == 1
-            step = traces[0].steps[0]
-            assert step.action.name == "rose.llm_tool_call.spawn_browser_agent"
-            assert step.action.arguments["agent_id"] == child_agent_id
-            assert "child-wmh-tree/llm/child-dump.json.gz.enc" in step.action.arguments["artifact_refs"]
-            # Full DB rows belong in the replay session, not in every retrieval example.
-            # Retaining only provenance + counts keeps embeddings and few-shot prompts grounded
-            # without multiplying a multi-megabyte fixture by every LLM tool call.
-            structured = step.state_before.structured
-            assert "db_fixture" not in structured
-            assert structured["db_fixture_ref"]["path"] == "db/start.fixture.json.gz.enc"
-            assert structured["row_counts"] == {"Agent": 2}
+            assert not out.read_text(encoding="utf-8").strip()
         finally:
             restore()
 
@@ -2732,6 +2921,10 @@ async def run_all_tests():
         test_world_model_bundle_cap_preserves_existing_index_entries,
     )
     r.record(
+        "grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_fallbacks",
+        test_grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_fallbacks,
+    )
+    r.record(
         "load_transitions_drops_fast_cache_replays_from_corpus",
         test_load_transitions_drops_fast_cache_replays_from_corpus,
     )
@@ -2744,8 +2937,8 @@ async def run_all_tests():
         test_compare_real_vs_world_model_benchmark_outcomes,
     )
     r.record(
-        "root_export_includes_child_agent_llm_dumps_when_manifest_lists_tree",
-        test_root_export_includes_child_agent_llm_dumps_when_manifest_lists_tree,
+        "root_loader_keeps_child_llm_dumps_for_diagnostics_but_grounded_export_excludes_them",
+        test_root_loader_keeps_child_llm_dumps_for_diagnostics_but_grounded_export_excludes_them,
     )
     r.record(
         "canonical_action_categories_cover_agent_tool_families",
