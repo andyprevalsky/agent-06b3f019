@@ -457,6 +457,61 @@ def test_refresh_world_model_index_persists_retriever_index_without_gepa():
             restore()
 
 
+def test_refresh_world_model_index_streams_jsonl_in_bounded_batches():
+    """Regression: a corpus refresh must not materialize the aggregate trace in memory.
+
+    The upstream adapter's ``from_file`` reads the entire JSONL file and constructs every
+    parsed span, trace, step, rendered embedding input, and vector before persistence. That
+    multiplication OOM-killed the 8 GiB cloud maintenance machine for a 20-bundle delta refresh.
+    """
+    _load_upstream_otel_adapter_class()
+    from benchmarks.world_model_harness import export_archive_to_otel_jsonl, refresh_world_model_index
+    from wmh.ingest.otel_genai import OtelGenAIAdapter
+    from wmh.retrieval import HashingEmbedder
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+        restore = _with_archive_env(tmp)
+        old_batch_size = os.environ.get("WMH_INDEX_BATCH_SIZE")
+        try:
+            _write_golden_bundle("root-index-streaming")
+            trace_file = Path(out) / "traces.otel.jsonl"
+            export_archive_to_otel_jsonl("root-index-streaming", trace_file, redaction_mode="public")
+
+            os.environ["WMH_INDEX_BATCH_SIZE"] = "1"
+            original_embed = HashingEmbedder.embed
+            embed_batch_sizes: list[int] = []
+
+            def bounded_embed(self, texts):
+                embed_batch_sizes.append(len(texts))
+                assert len(texts) <= 1
+                return original_embed(self, texts)
+
+            with (
+                patch.object(
+                    OtelGenAIAdapter,
+                    "from_file",
+                    side_effect=MemoryError("bulk aggregate loader crossed the memory boundary"),
+                ),
+                patch.object(HashingEmbedder, "embed", bounded_embed),
+            ):
+                result = refresh_world_model_index(
+                    trace_file,
+                    Path(out) / "models" / "rose-streaming",
+                    embed_dim=64,
+                )
+
+            assert result["indexed_traces"] == 1
+            assert result["indexed_steps"] == 2
+            assert result["batch_size"] == 1
+            assert embed_batch_sizes == [1, 1]
+        finally:
+            restore()
+            if old_batch_size is None:
+                os.environ.pop("WMH_INDEX_BATCH_SIZE", None)
+            else:
+                os.environ["WMH_INDEX_BATCH_SIZE"] = old_batch_size
+
+
 def test_exported_otel_jsonl_reads_trace_bundle_from_r2_backend():
     OtelGenAIAdapter = _load_upstream_otel_adapter_class()
     from benchmarks.world_model_harness import export_archive_to_otel_jsonl, list_archive_bundle_ids
@@ -2622,6 +2677,10 @@ async def run_all_tests():
     r.record(
         "refresh_world_model_index_persists_retriever_index_without_gepa",
         test_refresh_world_model_index_persists_retriever_index_without_gepa,
+    )
+    r.record(
+        "refresh_world_model_index_streams_jsonl_in_bounded_batches",
+        test_refresh_world_model_index_streams_jsonl_in_bounded_batches,
     )
     r.record(
         "update_world_model_excludes_simulated_bundles_from_corpus",

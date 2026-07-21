@@ -1037,25 +1037,120 @@ def refresh_world_model_index(
 
     _ensure_wmh_importable()
     try:
-        # Import the adapter class directly (not via get_adapter) so this works even when
-        # wmh.ingest was partially loaded without its registration side effects.
-        from wmh.ingest.otel_genai import OtelGenAIAdapter
-        from wmh.retrieval import EmbeddingRetriever, HashingEmbedder
+        import numpy as np
+        from wmh.core.render import encode_state_action
+        # These parser helpers let us preserve upstream's exact OTel -> Trace mapping while
+        # consuming Rose's trace-contiguous JSONL one trace at a time. OtelGenAIAdapter.from_file
+        # reads the complete corpus into memory, which multiplies peak RSS across raw text,
+        # parsed spans, pydantic traces, rendered inputs, Python vectors, and the final matrix.
+        from wmh.ingest.otel_genai import _collect_spans, _spans_to_traces
+        from wmh.retrieval import HashingEmbedder
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "world-model-harness is not importable; install agents/requirements.txt "
             "or keep .context/reference/world-model-harness with its dependencies available"
         ) from exc
 
-    traces = OtelGenAIAdapter().from_file(str(trace_file))
-    retriever = EmbeddingRetriever(HashingEmbedder(dim=embed_dim))
-    retriever.index(traces)
+    batch_size = int(os.environ.get("WMH_INDEX_BATCH_SIZE", "64") or "64")
+    if batch_size <= 0:
+        raise ValueError(f"WMH_INDEX_BATCH_SIZE must be positive, got {batch_size}")
+
+    trace_path = Path(trace_file)
+
+    def iter_traces():
+        """Yield traces from Rose's trace-contiguous OTel JSONL without loading the corpus."""
+        current_trace_id: str | None = None
+        current_spans = []
+        with trace_path.open("r", encoding="utf-8") as source:
+            for line in source:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    parsed_spans = _collect_spans(json.loads(stripped))
+                except json.JSONDecodeError:
+                    # Match upstream's JSONL behavior: a truncated/corrupt line is skipped while
+                    # every complete line remains usable.
+                    continue
+                for span in parsed_spans:
+                    if current_trace_id is not None and span.trace_id != current_trace_id:
+                        yield from _spans_to_traces(
+                            current_spans,
+                            source=f"file:{trace_path}",
+                        )
+                        current_spans = []
+                    current_trace_id = span.trace_id
+                    current_spans.append(span)
+        if current_spans:
+            yield from _spans_to_traces(current_spans, source=f"file:{trace_path}")
+
+    # Count in a bounded first pass so the final .npy can be opened as a disk-backed array with
+    # its correct header. The second pass only retains one trace and one embedding batch.
+    indexed_traces = 0
+    indexed_steps = 0
+    for trace in iter_traces():
+        indexed_traces += 1
+        indexed_steps += len(trace.steps)
+
     index_path = Path(model_root) / "index"
-    retriever.save(index_path)
+    index_path.mkdir(parents=True, exist_ok=True)
+    embedder = HashingEmbedder(dim=embed_dim)
+    peak_batch_steps = 0
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="index-refresh-", dir=str(index_path.parent)) as tmp:
+        tmp_path = Path(tmp)
+        tmp_matrix_path = tmp_path / "embeddings.npy"
+        tmp_steps_path = tmp_path / "steps.jsonl"
+        if indexed_steps:
+            matrix = np.lib.format.open_memmap(
+                tmp_matrix_path,
+                mode="w+",
+                dtype=np.float64,
+                shape=(indexed_steps, embed_dim),
+            )
+        else:
+            matrix = None
+            np.save(tmp_matrix_path, np.empty((0, 0), dtype=np.float64))
+
+        row = 0
+        with tmp_steps_path.open("w", encoding="utf-8") as steps_output:
+            for trace in iter_traces():
+                for start in range(0, len(trace.steps), batch_size):
+                    steps = trace.steps[start : start + batch_size]
+                    if not steps:
+                        continue
+                    peak_batch_steps = max(peak_batch_steps, len(steps))
+                    texts = [encode_state_action(step.state_before, step.action) for step in steps]
+                    vectors = np.asarray(embedder.embed(texts), dtype=np.float64)
+                    expected_shape = (len(steps), embed_dim)
+                    if vectors.shape != expected_shape:
+                        raise ValueError(
+                            f"embedder returned shape {vectors.shape}, expected {expected_shape}"
+                        )
+                    assert matrix is not None
+                    matrix[row : row + len(steps)] = vectors
+                    for step in steps:
+                        steps_output.write(step.model_dump_json() + "\n")
+                    row += len(steps)
+
+        if row != indexed_steps:
+            raise RuntimeError(
+                f"trace corpus changed during index refresh: counted {indexed_steps} steps, wrote {row}"
+            )
+        if matrix is not None:
+            matrix.flush()
+            del matrix
+        os.replace(tmp_matrix_path, index_path / "embeddings.npy")
+        os.replace(tmp_steps_path, index_path / "steps.jsonl")
+
     return {
-        "indexed_traces": len(traces),
-        "indexed_steps": sum(len(trace.steps) for trace in traces),
+        "indexed_traces": indexed_traces,
+        "indexed_steps": indexed_steps,
         "index_path": str(index_path),
+        "batch_size": batch_size,
+        "peak_batch_steps": peak_batch_steps,
     }
 
 
