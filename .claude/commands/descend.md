@@ -162,9 +162,14 @@ Do not stop to ask which RCA to run first. Use all safe parallel capacity.
 Enter this state only when:
 
 - the latest benchmark run is infra-clean; and
-- every HARNESS failure has a completed RCA or an honest open observability gap;
-  and
+- every HARNESS failure has a completed RCA; and
 - all independent RCA workers have returned.
+
+Never enter HARNESS_FIX_DECISION with an open observability gap. If evidence is
+incomplete, remain in RCA_HARNESS_FAILURES_IN_PARALLEL and keep gathering it
+autonomously until every RCA has the unchanged failing/passing proof pair and a
+cemented regression test. An exhausted external blocker follows Hard rule 7;
+it does not become a user-response gate.
 
 Emit the complete sorted lifecycle ledger using the response contract below.
 Andy responds to each HARNESS row with approve, edit, or reject. Infra rows use

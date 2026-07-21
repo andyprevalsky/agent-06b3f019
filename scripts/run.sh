@@ -27,6 +27,8 @@ normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
 . "$SCRIPT_DIR/lib/ngrok-tunnel.sh"
 . "$SCRIPT_DIR/lib/run-context.sh"
+. "$SCRIPT_DIR/lib/seed-cache.sh"
+. "$SCRIPT_DIR/lib/fast-mode-cache-schema.sh"
 
 RUN_CONTEXT_DIR="$(normalize_run_context_dir "$PWD" "${BENCHMARK_CONTEXT_DIR:-.context}")"
 BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
@@ -585,7 +587,18 @@ if [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
     exit 1
 fi
 echo "🧠 Ensuring Fast Mode cache schema..."
-(cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts)
+# This ensure connects to FAST_MODE_CACHE_DATABASE_URL — the SHARED prod pooler by
+# default (see above). When a cloud fleet boots concurrently (plus any neighbor
+# fleet on the same app), the pooler briefly saturates and this single query dies
+# with "Timed out fetching a new connection from the connection pool" → under
+# `set -e` the WHOLE stack aborts before the barrier (observed: 8/8 boxes lost to a
+# transient pooler spike while a 50-machine neighbor fleet held connections). The
+# op is idempotent (CREATE TABLE/INDEX IF NOT EXISTS), so retry with backoff and
+# let the transient saturation drain — same resilience the seed/cred syncs already have.
+if ! ensure_fast_mode_cache_schema bash -c \
+    'cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts'; then
+    exit 1
+fi
 
 # Larger Prisma pool: Fast Mode adds cache get/set on every LLM call, which under
 # sub-agent fan-out competes with the agent's own writes for the connection pool
@@ -616,17 +629,25 @@ _SEED_CACHE_TOKEN="${_SCHEMA_HASH}-$(date -u +%Y%m%d 2>/dev/null || echo undated
 # gate on the file, not the environment. seed-dump-cache.ts loads the .env itself.
 _SEED_CACHE_ENABLED=0
 grep -qE '^R2_BUCKET_TRACE_ARCHIVE=.' back-end/.env 2>/dev/null && _SEED_CACHE_ENABLED=1
-if [ -n "$_SEED_DUMP" ] && [ ! -s "$_SEED_DUMP" ] && [ "$_SEED_CACHE_ENABLED" = 1 ]; then
+# Decide where the seeded DB comes from (scripts/lib/seed-cache.sh). A stale dump
+# baked into the warm snapshot must fall through to the shared cache, NOT shadow
+# it — the old `[ ! -s ]` guard skipped the download whenever ANY dump existed, so
+# a hash-mismatched snapshot dump cold-synced every clone and starved the barrier.
+_SEED_DECISION="$(seed_cache_decision "$_SEED_DUMP" "$_SCHEMA_HASH" "$_SEED_CACHE_ENABLED")"
+if [ "$_SEED_DECISION" = "consult-remote" ]; then
+    # Drop any stale local dump so a clean cache object lands in its place.
+    rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
     echo "🔎 Checking shared seed-dump cache ($_SEED_CACHE_TOKEN)..."
     if (cd back-end && npx tsx scripts/seed-dump-cache.ts get "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") 2>/dev/null && [ -s "$_SEED_DUMP" ]; then
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
+        _SEED_DECISION="restore-local"
         echo "   ✅ pulled cached seed dump ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}')) — restoring instead of cold-syncing"
     else
         rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
         echo "   ℹ️ no cached dump for this schema/day — will cold-sync and populate it"
     fi
 fi
-if [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ] && [ "$(cat "${_SEED_DUMP}.schemahash" 2>/dev/null || echo x)" = "$_SCHEMA_HASH" ]; then
+if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ]; then
     echo "🗜️  Restoring seeded DB from persistent dump ($_SEED_DUMP) — skipping schema push + seed..."
     if PGPASSWORD=postgres pg_restore -h localhost -U postgres -d victoria --clean --if-exists --no-owner "$_SEED_DUMP" >/dev/null 2>&1; then
         DB_RESTORED=true
@@ -1383,16 +1404,14 @@ restart_backend_service() {
     launch_backend_service
 }
 isolated_backend_ready_attempts() {
-    if [ -n "${CLOUDBENCH_BACKEND_START_READY_ATTEMPTS:-}" ]; then
-        printf '%s\n' "$CLOUDBENCH_BACKEND_START_READY_ATTEMPTS"
-    elif $FIRST_RUN_SEEDED; then
-        # The first backend launch after a full production seed has substantially
-        # more database state to initialize. Do not kill a live process at the
-        # warm guest's 60-second boundary and thereby restart all of that work.
-        printf '%s\n' "${CLOUDBENCH_COLD_BACKEND_START_READY_ATTEMPTS:-180}"
-    else
-        printf '%s\n' 60
-    fi
+    # The long budget applies to ANY box that just materialised the full prod DB —
+    # a cold seed (FIRST_RUN_SEEDED) OR a cache/dump restore (DB_RESTORED). Both
+    # leave the backend the same large state to warm; capping restore at 60s timed
+    # out every warm box and starved the barrier. See backend_ready_budget().
+    local _frs=0 _dbr=0
+    $FIRST_RUN_SEEDED && _frs=1
+    $DB_RESTORED && _dbr=1
+    backend_ready_budget "$_frs" "$_dbr" "${CLOUDBENCH_BACKEND_START_READY_ATTEMPTS:-}"
 }
 wait_for_isolated_backend_ready() {
     local launch_attempt probe_attempt

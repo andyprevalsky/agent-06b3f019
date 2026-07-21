@@ -542,6 +542,15 @@ def _make_handler(args: argparse.Namespace):
             path = parsed.path
 
             if hub:
+                if path == "/hub-meta.json":
+                    payload = json.dumps(
+                        {
+                            "hub_runs_dir": str(hub.resolve()),
+                            "repo_root": str(args.repo_root.resolve()),
+                        }
+                    ).encode("utf-8")
+                    self._send_bytes(payload, "application/json")
+                    return
                 if path in ("/", "/index.html"):
                     self._send_bytes(_run_index_page(_scan_runs(hub)), "text/html; charset=utf-8")
                     return
