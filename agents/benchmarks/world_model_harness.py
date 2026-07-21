@@ -49,9 +49,7 @@ _SECRET_VALUE_RE = re.compile(
     r"(sk-[A-Za-z0-9_-]{12,}|sk-ant-[A-Za-z0-9_-]+|Bearer\s+[A-Za-z0-9._-]+|"
     r"[A-Za-z0-9+/]{32,}={0,2})"
 )
-_HIGH_CONFIDENCE_SECRET_VALUE_RE = re.compile(
-    r"(sk-[A-Za-z0-9_-]{12,}|sk-ant-[A-Za-z0-9_-]+|Bearer\s+[A-Za-z0-9._-]+)"
-)
+_HIGH_CONFIDENCE_SECRET_VALUE_RE = re.compile(r"(sk-[A-Za-z0-9_-]{12,}|sk-ant-[A-Za-z0-9_-]+|Bearer\s+[A-Za-z0-9._-]+)")
 
 
 JsonObject = dict[str, Any]
@@ -63,39 +61,12 @@ _FIDELITY_DIMENSIONS = (
     "error_behavior",
     "artifact_refs",
 )
-_BROWSER_ORCHESTRATION_TOOLS = {
-    "spawn_browser_agent",
-    "spawn_browser_agent_activity_v3",
-    "browser",
-}
-_BROWSER_BOUNDARY_TOOLS = {
-    "browser_action",
-    "browser_click",
-    "browser_type",
-    "browser_http",
-}
+_BROWSER_ORCHESTRATION_TOOLS = {"spawn_browser_agent", "spawn_browser_agent_activity_v3", "browser"}
+_BROWSER_BOUNDARY_TOOLS = {"browser_action", "browser_click", "browser_type", "browser_http"}
 _BROWSER_TOOLS = _BROWSER_ORCHESTRATION_TOOLS | _BROWSER_BOUNDARY_TOOLS
-_CODE_TOOLS = {
-    "spawn_claude_code_agent",
-    "spawn_codex_code_agent",
-    "claude_code",
-    "codex_code",
-}
-_MESSAGE_TOOLS = {
-    "message_person",
-    "send_message_to_user",
-    "send_sms",
-    "send_direct_sms",
-    "notify_sms_event",
-}
-_PAYMENT_TOOLS = {
-    "request_payment_card",
-    "payment_lookup",
-    "payment_mint",
-    "x402",
-    "purchase",
-    "purchase_item",
-}
+_CODE_TOOLS = {"spawn_claude_code_agent", "spawn_codex_code_agent", "claude_code", "codex_code"}
+_MESSAGE_TOOLS = {"message_person", "send_message_to_user", "send_sms", "send_direct_sms", "notify_sms_event"}
+_PAYMENT_TOOLS = {"request_payment_card", "payment_lookup", "payment_mint", "x402", "purchase", "purchase_item"}
 _VAPI_ORCHESTRATION_TOOLS = {"call_phone_number", "vapi"}
 _VAPI_BOUNDARY_TOOLS = {"vapi_create_call", "vapi_poll_call", "vapi_recording_fetch"}
 _VAPI_TOOLS = _VAPI_ORCHESTRATION_TOOLS | _VAPI_BOUNDARY_TOOLS
@@ -276,9 +247,7 @@ def bundle_world_model_mode(root_agent_id: str) -> str:
     return mode.strip().lower()
 
 
-def partition_real_world_bundles(
-    bundle_ids: list[str],
-) -> tuple[list[str], dict[str, str]]:
+def partition_real_world_bundles(bundle_ids: list[str]) -> tuple[list[str], dict[str, str]]:
     """Split bundles into real-interaction bundles vs excluded (simulated/unknown).
 
     Simulated trajectories contain world-model-emulated observations; feeding
@@ -317,11 +286,7 @@ def bundle_agent_ids(root_agent_id: str) -> list[str]:
     except FileNotFoundError:
         return [root_agent_id]
     run = manifest.get("run") if isinstance(manifest.get("run"), dict) else {}
-    correlations = (
-        manifest.get("correlations")
-        if isinstance(manifest.get("correlations"), dict)
-        else {}
-    )
+    correlations = manifest.get("correlations") if isinstance(manifest.get("correlations"), dict) else {}
     agent_ids = correlations.get("agent_ids") or run.get("agent_ids")
     if not isinstance(agent_ids, list):
         return [root_agent_id]
@@ -385,11 +350,7 @@ def canonical_category_for_tool(tool_name: str) -> str:
         return "code"
     if tool_name in _MESSAGE_TOOLS or tool_name.startswith("message_"):
         return "message"
-    if (
-        tool_name in _PAYMENT_TOOLS
-        or "payment" in tool_name
-        or "write_lock" in tool_name
-    ):
+    if tool_name in _PAYMENT_TOOLS or "payment" in tool_name or "write_lock" in tool_name:
         return "payment"
     if tool_name in _VAPI_TOOLS or tool_name.startswith("vapi_"):
         return "vapi"
@@ -397,11 +358,7 @@ def canonical_category_for_tool(tool_name: str) -> str:
         return "grep"
     if tool_name in _FAST_CACHE_TOOLS or "cache" in tool_name:
         return "fast_cache"
-    if tool_name in {
-        "request_user_approval",
-        "request_user_signup",
-        "request_user_auth",
-    }:
+    if tool_name in {"request_user_approval", "request_user_signup", "request_user_auth"}:
         return "auth_approval"
     return "tool"
 
@@ -429,11 +386,7 @@ def canonical_action_from_tool_call(
         agent_id=agent_id,
         span_id=span_id,
         tool_call_id=tool_call_id,
-        timestamp_ms=(
-            timestamp_ms
-            if timestamp_ms is not None
-            else current_world_model_timestamp_ms()
-        ),
+        timestamp_ms=timestamp_ms if timestamp_ms is not None else current_world_model_timestamp_ms(),
     )
 
 
@@ -451,9 +404,7 @@ def current_world_model_timestamp_ms() -> int:
         try:
             return int(raw)
         except ValueError as exc:
-            raise ValueError(
-                f"{env_name} must be an integer millisecond timestamp"
-            ) from exc
+            raise ValueError(f"{env_name} must be an integer millisecond timestamp") from exc
     return int(time.time() * 1000)
 
 
@@ -482,13 +433,7 @@ def _otel_attr(key: str, value: Any) -> JsonObject:
     elif isinstance(value, float):
         encoded = {"doubleValue": value}
     else:
-        encoded = {
-            "stringValue": (
-                value
-                if isinstance(value, str)
-                else json.dumps(value, ensure_ascii=False)
-            )
-        }
+        encoded = {"stringValue": value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)}
     return {"key": key, "value": encoded}
 
 
@@ -539,12 +484,7 @@ def _artifact_category(path: str, content_type: Any = None) -> str:
         return "media"
     if lower.startswith("provider/") or "/provider/" in lower or "vapi" in lower:
         return "provider"
-    if (
-        lower.startswith("browser/")
-        or "/browser/" in lower
-        or "dom" in lower
-        or "screenshot" in lower
-    ):
+    if lower.startswith("browser/") or "/browser/" in lower or "dom" in lower or "screenshot" in lower:
         return "browser"
     if lower.startswith("db/"):
         return "db_fixture"
@@ -579,21 +519,13 @@ def _initial_trace_state(root_agent_id: str, redaction_mode: str) -> JsonObject:
     if not isinstance(first, dict):
         return {}
     state_before = first.get("state_before")
-    return (
-        _maybe_redact(state_before, redaction_mode)
-        if isinstance(state_before, dict)
-        else {}
-    )
+    return _maybe_redact(state_before, redaction_mode) if isinstance(state_before, dict) else {}
 
 
-def reconstruct_initial_state(
-    root_agent_id: str, *, redaction_mode: str = "public"
-) -> JsonObject:
+def reconstruct_initial_state(root_agent_id: str, *, redaction_mode: str = "public") -> JsonObject:
     start = read_archive_json(root_agent_id, "db/start.fixture.json.gz.enc")
     rows = start.get("rows") if isinstance(start.get("rows"), dict) else {}
-    row_counts = {
-        table: len(values) for table, values in rows.items() if isinstance(values, list)
-    }
+    row_counts = {table: len(values) for table, values in rows.items() if isinstance(values, list)}
     root_agent_rows = rows.get("Agent") if isinstance(rows, dict) else []
     root_goal = None
     if isinstance(root_agent_rows, list):
@@ -603,11 +535,7 @@ def reconstruct_initial_state(
                 break
     initial_trace_state = _initial_trace_state(root_agent_id, redaction_mode)
     refs = ["db/start.fixture.json.gz.enc", *_json_ref_paths(initial_trace_state)]
-    artifact_refs = [
-        ref
-        for ref in (_artifact_meta_ref(root_agent_id, path) for path in refs)
-        if ref is not None
-    ]
+    artifact_refs = [ref for ref in (_artifact_meta_ref(root_agent_id, path) for path in refs) if ref is not None]
     state = {
         "schema": "rose.initial_state.v1",
         "root_agent_id": root_agent_id,
@@ -617,34 +545,22 @@ def reconstruct_initial_state(
         "root_goal": root_goal,
         "db_fixture_ref": _fixture_ref(root_agent_id, "db/start.fixture.json.gz.enc"),
         "db_fixture": {
-            "restore": (
-                start.get("restore") if isinstance(start.get("restore"), dict) else {}
-            ),
+            "restore": start.get("restore") if isinstance(start.get("restore"), dict) else {},
             "rows": rows,
         },
         "row_counts": row_counts,
         "state_before_first_action": initial_trace_state,
         "artifact_refs": artifact_refs,
-        "provider_artifacts": [
-            ref for ref in artifact_refs if ref.get("category") == "provider"
-        ],
-        "media_artifacts": [
-            ref for ref in artifact_refs if ref.get("category") == "media"
-        ],
+        "provider_artifacts": [ref for ref in artifact_refs if ref.get("category") == "provider"],
+        "media_artifacts": [ref for ref in artifact_refs if ref.get("category") == "media"],
     }
     return _maybe_redact(state, redaction_mode)
 
 
-def _transition_from_raw(
-    raw: JsonObject, root_agent_id: str, redaction_mode: str
-) -> RoseTransition:
+def _transition_from_raw(raw: JsonObject, root_agent_id: str, redaction_mode: str) -> RoseTransition:
     action_raw = raw.get("action") if isinstance(raw.get("action"), dict) else {}
-    observation_raw = (
-        raw.get("observation") if isinstance(raw.get("observation"), dict) else {}
-    )
-    state_raw = (
-        raw.get("state_before") if isinstance(raw.get("state_before"), dict) else {}
-    )
+    observation_raw = raw.get("observation") if isinstance(raw.get("observation"), dict) else {}
+    state_raw = raw.get("state_before") if isinstance(raw.get("state_before"), dict) else {}
     action = CanonicalAction(
         category=str(action_raw.get("category") or "tool"),
         name=str(action_raw.get("name") or action_raw.get("tool_name") or "unknown"),
@@ -653,25 +569,17 @@ def _transition_from_raw(
         span_id=str(action_raw.get("span_id") or raw.get("span_id") or ""),
         tool_call_id=str(action_raw.get("tool_call_id") or ""),
         artifact_refs=list(action_raw.get("artifact_refs") or []),
-        timestamp_ms=(
-            action_raw.get("timestamp_ms")
-            if isinstance(action_raw.get("timestamp_ms"), int)
-            else None
-        ),
+        timestamp_ms=action_raw.get("timestamp_ms") if isinstance(action_raw.get("timestamp_ms"), int) else None,
     )
     observation = CanonicalObservation(
         category=str(observation_raw.get("category") or action.category),
-        content=str(
-            _maybe_redact(observation_raw.get("content") or "", redaction_mode)
-        ),
+        content=str(_maybe_redact(observation_raw.get("content") or "", redaction_mode)),
         is_error=bool(observation_raw.get("is_error")),
         metadata=_maybe_redact(observation_raw.get("metadata") or {}, redaction_mode),
         artifact_refs=list(observation_raw.get("artifact_refs") or []),
-        timestamp_ms=(
-            observation_raw.get("timestamp_ms")
-            if isinstance(observation_raw.get("timestamp_ms"), int)
-            else None
-        ),
+        timestamp_ms=observation_raw.get("timestamp_ms")
+        if isinstance(observation_raw.get("timestamp_ms"), int)
+        else None,
     )
     return RoseTransition(
         state_before=_maybe_redact(state_raw, redaction_mode),
@@ -699,18 +607,14 @@ def _is_fast_cache_replay_transition(raw: JsonObject) -> bool:
     return False
 
 
-def _transitions_from_trace_artifact(
-    root_agent_id: str, redaction_mode: str
-) -> list[RoseTransition]:
+def _transitions_from_trace_artifact(root_agent_id: str, redaction_mode: str) -> list[RoseTransition]:
     try:
         payload = read_archive_json(root_agent_id, "trace/transitions.json.gz.enc")
     except FileNotFoundError:
         return []
     raw_transitions = payload.get("transitions")
     if not isinstance(raw_transitions, list):
-        raise ValueError(
-            "trace/transitions.json.gz.enc must contain a transitions array"
-        )
+        raise ValueError("trace/transitions.json.gz.enc must contain a transitions array")
     raw_dicts = [raw for raw in raw_transitions if isinstance(raw, dict)]
     replay_count = sum(1 for raw in raw_dicts if _is_fast_cache_replay_transition(raw))
     if replay_count:
@@ -750,22 +654,15 @@ def _transitions_from_llm_dumps(
         for path in archive_artifact_paths(archive_agent_id):
             if not path.startswith("llm/") or not path.endswith(".json.gz.enc"):
                 continue
-            artifact_ref = (
-                path
-                if archive_agent_id == root_agent_id
-                else f"{archive_agent_id}/{path}"
-            )
+            artifact_ref = path if archive_agent_id == root_agent_id else f"{archive_agent_id}/{path}"
             base = read_archive_json(archive_agent_id, path)
             base_payload = (
                 base.get("payload")
-                if base.get("kind") == "legacy-llm-dump"
-                and isinstance(base.get("payload"), dict)
+                if base.get("kind") == "legacy-llm-dump" and isinstance(base.get("payload"), dict)
                 else base
             )
             payload = updates.get(str(base_payload.get("dump_id")), base_payload)
-            output = (
-                payload.get("output") if isinstance(payload.get("output"), dict) else {}
-            )
+            output = payload.get("output") if isinstance(payload.get("output"), dict) else {}
             usage = output.get("usage") if isinstance(output.get("usage"), dict) else {}
             if usage.get("from_fast_cache"):
                 # Replayed responses duplicate a fresh interaction already in the
@@ -774,22 +671,12 @@ def _transitions_from_llm_dumps(
                 # future refactor starts dumping them.
                 replay_dump_count += 1
                 continue
-            tool_calls = (
-                output.get("tool_calls")
-                if isinstance(output.get("tool_calls"), list)
-                else []
-            )
+            tool_calls = output.get("tool_calls") if isinstance(output.get("tool_calls"), list) else []
             if not tool_calls:
                 content = str(output.get("content") or "")
                 if not content:
                     continue
-                tool_calls = [
-                    {
-                        "name": "assistant_message",
-                        "arguments": {"content": content},
-                        "id": "",
-                    }
-                ]
+                tool_calls = [{"name": "assistant_message", "arguments": {"content": content}, "id": ""}]
             for index, call in enumerate(tool_calls):
                 if not isinstance(call, dict):
                     continue
@@ -805,13 +692,9 @@ def _transitions_from_llm_dumps(
                     args = {"value": args}
                 timestamp_ms = None
                 metadata = (
-                    payload.get("archive", {}).get("metadata")
-                    if isinstance(payload.get("archive"), dict)
-                    else {}
+                    payload.get("archive", {}).get("metadata") if isinstance(payload.get("archive"), dict) else {}
                 )
-                if isinstance(metadata, dict) and isinstance(
-                    metadata.get("created_at_ms"), int
-                ):
+                if isinstance(metadata, dict) and isinstance(metadata.get("created_at_ms"), int):
                     timestamp_ms = metadata["created_at_ms"] + index
                 action = CanonicalAction(
                     category="llm_tool_call",
@@ -854,12 +737,8 @@ def _transitions_from_llm_dumps(
     return transitions
 
 
-def load_transitions(
-    root_agent_id: str, *, redaction_mode: str = "public"
-) -> list[RoseTransition]:
-    initial_state = reconstruct_initial_state(
-        root_agent_id, redaction_mode=redaction_mode
-    )
+def load_transitions(root_agent_id: str, *, redaction_mode: str = "public") -> list[RoseTransition]:
+    initial_state = reconstruct_initial_state(root_agent_id, redaction_mode=redaction_mode)
     transitions = _transitions_from_trace_artifact(root_agent_id, redaction_mode)
     if transitions:
         return transitions
@@ -914,26 +793,16 @@ def provider_abstraction_decision() -> JsonObject:
         "schema": "rose.wmh_provider_abstraction.v1",
         "route": os.environ.get("ROSE_WMH_PROVIDER_ROUTE", "upstream"),
         "default": "upstream",
-        "upstream_providers": [
-            "anthropic",
-            "bedrock",
-            "azure",
-            "openai",
-            "openai_responses",
-        ],
+        "upstream_providers": ["anthropic", "bedrock", "azure", "openai", "openai_responses"],
         "rose_role": "trace_provenance_costs_and_attempt_trails",
     }
 
 
-def _emit_progress(
-    progress: ProgressCallback | None, title: str, status: str, **metadata: Any
-) -> None:
+def _emit_progress(progress: ProgressCallback | None, title: str, status: str, **metadata: Any) -> None:
     event: JsonObject = {
         "title": title,
         "status": status,
-        "metadata": {
-            key: value for key, value in metadata.items() if value is not None
-        },
+        "metadata": {key: value for key, value in metadata.items() if value is not None},
     }
     if progress:
         progress(event)
@@ -966,9 +835,7 @@ def _bundle_signature(root_agent_id: str) -> JsonObject:
     # Archive listings also contain intentionally plaintext public projections
     # (for example manifest.public.json). Only encrypted artifacts participate
     # in this signature and therefore carry the metadata read below.
-    paths = [
-        path for path in archive_artifact_paths(root_agent_id) if path.endswith(".enc")
-    ]
+    paths = [path for path in archive_artifact_paths(root_agent_id) if path.endswith(".enc")]
     artifacts: list[JsonObject] = []
     plaintext_bytes = 0
     ciphertext_bytes = 0
@@ -1027,9 +894,7 @@ def build_world_model_from_archives(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     trace_file = out_dir / "traces.otel.jsonl"
-    real_bundle_ids, excluded_bundles = partition_real_world_bundles(
-        list(root_agent_ids)
-    )
+    real_bundle_ids, excluded_bundles = partition_real_world_bundles(list(root_agent_ids))
     if excluded_bundles:
         print(
             f"[WorldModel] Excluded {len(excluded_bundles)} non-real bundle(s) from corpus build "
@@ -1039,9 +904,7 @@ def build_world_model_from_archives(
     with trace_file.open("w", encoding="utf-8") as combined:
         for root_agent_id in real_bundle_ids:
             per_trace = out_dir / f"{root_agent_id}.otel.jsonl"
-            export_archive_to_otel_jsonl(
-                root_agent_id, per_trace, redaction_mode="public"
-            )
+            export_archive_to_otel_jsonl(root_agent_id, per_trace, redaction_mode="public")
             text = per_trace.read_text(encoding="utf-8")
             if text.strip():
                 combined.write(text.rstrip() + "\n")
@@ -1153,9 +1016,7 @@ def build_world_model_from_otel_jsonl(
         "metrics": metrics_value,
     }
     manifest_path = out_dir / "build.manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
-    )
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     manifest["manifest_path"] = str(manifest_path)
     return manifest
 
@@ -1176,129 +1037,25 @@ def refresh_world_model_index(
 
     _ensure_wmh_importable()
     try:
-        import numpy as np
-        from wmh.core.render import encode_state_action
-
-        # These parser helpers let us preserve upstream's exact OTel -> Trace mapping while
-        # consuming Rose's trace-contiguous JSONL one trace at a time. OtelGenAIAdapter.from_file
-        # reads the complete corpus into memory, which multiplies peak RSS across raw text,
-        # parsed spans, pydantic traces, rendered inputs, Python vectors, and the final matrix.
-        from wmh.ingest.otel_genai import _collect_spans, _spans_to_traces
-        from wmh.retrieval import HashingEmbedder
+        # Import the adapter class directly (not via get_adapter) so this works even when
+        # wmh.ingest was partially loaded without its registration side effects.
+        from wmh.ingest.otel_genai import OtelGenAIAdapter
+        from wmh.retrieval import EmbeddingRetriever, HashingEmbedder
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "world-model-harness is not importable; install agents/requirements.txt "
             "or keep .context/reference/world-model-harness with its dependencies available"
         ) from exc
 
-    batch_size = int(os.environ.get("WMH_INDEX_BATCH_SIZE", "64") or "64")
-    if batch_size <= 0:
-        raise ValueError(f"WMH_INDEX_BATCH_SIZE must be positive, got {batch_size}")
-
-    trace_path = Path(trace_file)
-
-    def iter_traces():
-        """Yield traces from Rose's trace-contiguous OTel JSONL without loading the corpus."""
-        current_trace_id: str | None = None
-        current_spans = []
-        with trace_path.open("r", encoding="utf-8") as source:
-            for line in source:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    parsed_spans = _collect_spans(json.loads(stripped))
-                except json.JSONDecodeError:
-                    # Match upstream's JSONL behavior: a truncated/corrupt line is skipped while
-                    # every complete line remains usable.
-                    continue
-                for span in parsed_spans:
-                    if (
-                        current_trace_id is not None
-                        and span.trace_id != current_trace_id
-                    ):
-                        yield from _spans_to_traces(
-                            current_spans,
-                            source=f"file:{trace_path}",
-                        )
-                        current_spans = []
-                    current_trace_id = span.trace_id
-                    current_spans.append(span)
-        if current_spans:
-            yield from _spans_to_traces(current_spans, source=f"file:{trace_path}")
-
-    # Count in a bounded first pass so the final .npy can be opened as a disk-backed array with
-    # its correct header. The second pass only retains one trace and one embedding batch.
-    indexed_traces = 0
-    indexed_steps = 0
-    for trace in iter_traces():
-        indexed_traces += 1
-        indexed_steps += len(trace.steps)
-
+    traces = OtelGenAIAdapter().from_file(str(trace_file))
+    retriever = EmbeddingRetriever(HashingEmbedder(dim=embed_dim))
+    retriever.index(traces)
     index_path = Path(model_root) / "index"
-    index_path.mkdir(parents=True, exist_ok=True)
-    embedder = HashingEmbedder(dim=embed_dim)
-    peak_batch_steps = 0
-
-    import tempfile
-
-    with tempfile.TemporaryDirectory(
-        prefix="index-refresh-", dir=str(index_path.parent)
-    ) as tmp:
-        tmp_path = Path(tmp)
-        tmp_matrix_path = tmp_path / "embeddings.npy"
-        tmp_steps_path = tmp_path / "steps.jsonl"
-        if indexed_steps:
-            matrix = np.lib.format.open_memmap(
-                tmp_matrix_path,
-                mode="w+",
-                dtype=np.float64,
-                shape=(indexed_steps, embed_dim),
-            )
-        else:
-            matrix = None
-            np.save(tmp_matrix_path, np.empty((0, 0), dtype=np.float64))
-
-        row = 0
-        with tmp_steps_path.open("w", encoding="utf-8") as steps_output:
-            for trace in iter_traces():
-                for start in range(0, len(trace.steps), batch_size):
-                    steps = trace.steps[start : start + batch_size]
-                    if not steps:
-                        continue
-                    peak_batch_steps = max(peak_batch_steps, len(steps))
-                    texts = [
-                        encode_state_action(step.state_before, step.action)
-                        for step in steps
-                    ]
-                    vectors = np.asarray(embedder.embed(texts), dtype=np.float64)
-                    expected_shape = (len(steps), embed_dim)
-                    if vectors.shape != expected_shape:
-                        raise ValueError(
-                            f"embedder returned shape {vectors.shape}, expected {expected_shape}"
-                        )
-                    assert matrix is not None
-                    matrix[row : row + len(steps)] = vectors
-                    for step in steps:
-                        steps_output.write(step.model_dump_json() + "\n")
-                    row += len(steps)
-
-        if row != indexed_steps:
-            raise RuntimeError(
-                f"trace corpus changed during index refresh: counted {indexed_steps} steps, wrote {row}"
-            )
-        if matrix is not None:
-            matrix.flush()
-            del matrix
-        os.replace(tmp_matrix_path, index_path / "embeddings.npy")
-        os.replace(tmp_steps_path, index_path / "steps.jsonl")
-
+    retriever.save(index_path)
     return {
-        "indexed_traces": indexed_traces,
-        "indexed_steps": indexed_steps,
+        "indexed_traces": len(traces),
+        "indexed_steps": sum(len(trace.steps) for trace in traces),
         "index_path": str(index_path),
-        "batch_size": batch_size,
-        "peak_batch_steps": peak_batch_steps,
     }
 
 
@@ -1320,12 +1077,8 @@ def transitions_to_otel_spans(
 
     spans: list[JsonObject] = []
     for index, transition in enumerate(transitions):
-        action_id = _stable_hex(
-            f"{root_agent_id}:{index}:action:{transition.action.tool_call_id}", 16
-        )
-        obs_id = _stable_hex(
-            f"{root_agent_id}:{index}:observation:{transition.action.tool_call_id}", 16
-        )
+        action_id = _stable_hex(f"{root_agent_id}:{index}:action:{transition.action.tool_call_id}", 16)
+        obs_id = _stable_hex(f"{root_agent_id}:{index}:observation:{transition.action.tool_call_id}", 16)
         base_ms = transition.action.timestamp_ms or transition.observation.timestamp_ms
         action_attrs = [
             _otel_attr("gen_ai.operation.name", "chat"),
@@ -1350,12 +1103,8 @@ def transitions_to_otel_spans(
         if transition.action.span_id:
             action_attrs.append(_otel_attr("rose.span_id", transition.action.span_id))
         if transition.action.tool_call_id:
-            action_attrs.append(
-                _otel_attr("rose.tool_call_id", transition.action.tool_call_id)
-            )
-            obs_attrs.append(
-                _otel_attr("rose.tool_call_id", transition.action.tool_call_id)
-            )
+            action_attrs.append(_otel_attr("rose.tool_call_id", transition.action.tool_call_id))
+            obs_attrs.append(_otel_attr("rose.tool_call_id", transition.action.tool_call_id))
         spans.append(
             {
                 "traceId": trace_id,
@@ -1405,23 +1154,15 @@ def export_archive_to_otel_jsonl(
         task=str(root_goal or ""),
         metadata={
             "benchmark_task_name": task_name,
-            "db_start_fixture_ref": _fixture_ref(
-                root_agent_id, "db/start.fixture.json.gz.enc"
-            ),
-            "db_end_fixture_ref": _fixture_ref(
-                root_agent_id, "db/end.fixture.json.gz.enc"
-            ),
+            "db_start_fixture_ref": _fixture_ref(root_agent_id, "db/start.fixture.json.gz.enc"),
+            "db_end_fixture_ref": _fixture_ref(root_agent_id, "db/end.fixture.json.gz.enc"),
             "artifact_paths": archive_artifact_paths_for_tree(root_agent_id),
         },
     )
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
-        "\n".join(
-            json.dumps(span, ensure_ascii=False, sort_keys=True) for span in spans
-        )
-        + "\n",
-        encoding="utf-8",
+        "\n".join(json.dumps(span, ensure_ascii=False, sort_keys=True) for span in spans) + "\n", encoding="utf-8"
     )
     return out
 
@@ -1439,9 +1180,7 @@ def score_observation_prediction(
 
     schema_validity = 1.0 if isinstance(predicted.get("content"), str) else 0.0
     predicted_content = str(predicted.get("content") or "")
-    predicted_metadata = (
-        predicted.get("metadata") if isinstance(predicted.get("metadata"), dict) else {}
-    )
+    predicted_metadata = predicted.get("metadata") if isinstance(predicted.get("metadata"), dict) else {}
     content_accuracy = _token_f1(actual.content, predicted_content)
     actual_note = actual.metadata.get("state_note")
     predicted_note = predicted_metadata.get("state_note")
@@ -1449,9 +1188,7 @@ def score_observation_prediction(
         state_transition = 1.0
     else:
         state_transition = _token_f1(str(actual_note), str(predicted_note or ""))
-    predicted_is_error = (
-        bool(predicted.get("is_error")) if "is_error" in predicted else False
-    )
+    predicted_is_error = bool(predicted.get("is_error")) if "is_error" in predicted else False
     error_behavior = 1.0 if predicted_is_error == actual.is_error else 0.0
     artifact_refs = _artifact_ref_score(actual, predicted_content, predicted_metadata)
     dimensions = {
@@ -1462,9 +1199,7 @@ def score_observation_prediction(
         "artifact_refs": artifact_refs,
     }
     score = sum(dimensions.values()) / len(dimensions)
-    critique = "; ".join(
-        f"{name}={value:.2f}" for name, value in dimensions.items() if value < 1.0
-    )
+    critique = "; ".join(f"{name}={value:.2f}" for name, value in dimensions.items() if value < 1.0)
     return score, dimensions, critique
 
 
@@ -1495,17 +1230,9 @@ def _tokens(value: str) -> list[str]:
     return re.findall(r"[a-z0-9_.$:/-]+", value.lower())
 
 
-def _artifact_ref_score(
-    actual: CanonicalObservation, predicted_content: str, predicted_metadata: JsonObject
-) -> float:
+def _artifact_ref_score(actual: CanonicalObservation, predicted_content: str, predicted_metadata: JsonObject) -> float:
     refs = set(actual.artifact_refs)
-    for key in (
-        "dom_ref",
-        "screenshot_ref",
-        "recording_ref",
-        "provider_ref",
-        "fixture_ref",
-    ):
+    for key in ("dom_ref", "screenshot_ref", "recording_ref", "provider_ref", "fixture_ref"):
         value = actual.metadata.get(key)
         if isinstance(value, str):
             refs.add(value)
@@ -1529,36 +1256,18 @@ async def evaluate_archive_with_world_model(
     WMH server/model is configured, the result is explicit rather than silently skipped.
     """
 
-    wmh_base_url = (
-        base_url
-        or os.environ.get("WMH_BASE_URL")
-        or os.environ.get("WORLD_MODEL_HARNESS_URL")
-    )
-    model_name = (
-        world_model_name
-        or os.environ.get("WMH_MODEL_NAME")
-        or os.environ.get("WORLD_MODEL_NAME")
-    )
-    enabled = os.environ.get("BENCHMARK_WMH_EVAL", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
+    wmh_base_url = base_url or os.environ.get("WMH_BASE_URL") or os.environ.get("WORLD_MODEL_HARNESS_URL")
+    model_name = world_model_name or os.environ.get("WMH_MODEL_NAME") or os.environ.get("WORLD_MODEL_NAME")
+    enabled = os.environ.get("BENCHMARK_WMH_EVAL", "").strip().lower() in {"1", "true", "yes", "on"}
     if not enabled:
         return {"status": "disabled", "reason": "BENCHMARK_WMH_EVAL is not enabled"}
     if not wmh_base_url or not model_name:
-        return {
-            "status": "not_configured",
-            "reason": "WMH_BASE_URL and WMH_MODEL_NAME are required",
-        }
+        return {"status": "not_configured", "reason": "WMH_BASE_URL and WMH_MODEL_NAME are required"}
 
     transitions = load_transitions(root_agent_id, redaction_mode=redaction_mode)
     if not transitions:
         return {"status": "no_steps", "reason": "archive contains no transitions"}
-    initial_state = reconstruct_initial_state(
-        root_agent_id, redaction_mode=redaction_mode
-    )
+    initial_state = reconstruct_initial_state(root_agent_id, redaction_mode=redaction_mode)
     client = WMHHttpClient(wmh_base_url)
     session_id = await client.start_session(
         model_name,
@@ -1569,9 +1278,7 @@ async def evaluate_archive_with_world_model(
     step_scores: list[FidelityStepScore] = []
     for index, transition in enumerate(transitions):
         predicted = await client.step(model_name, session_id, transition.action)
-        score, dimensions, critique = score_observation_prediction(
-            transition.observation, predicted
-        )
+        score, dimensions, critique = score_observation_prediction(transition.observation, predicted)
         step_scores.append(
             FidelityStepScore(
                 trace_id=trace_id,
@@ -1586,8 +1293,7 @@ async def evaluate_archive_with_world_model(
         )
     mean_score = sum(step.score for step in step_scores) / len(step_scores)
     dimension_means = {
-        name: sum(step.dimensions[name] for step in step_scores) / len(step_scores)
-        for name in _FIDELITY_DIMENSIONS
+        name: sum(step.dimensions[name] for step in step_scores) / len(step_scores) for name in _FIDELITY_DIMENSIONS
     }
     result: JsonObject = {
         "status": "scored",
@@ -1602,9 +1308,7 @@ async def evaluate_archive_with_world_model(
     if redaction_mode == "public":
         result = _redact(result)
         if public_json_has_secret(result):
-            raise ValueError(
-                "WMH fidelity result contains unredacted secret-looking content"
-            )
+            raise ValueError("WMH fidelity result contains unredacted secret-looking content")
     return result
 
 
@@ -1617,11 +1321,7 @@ async def evaluate_archives_with_world_model(
 ) -> JsonObject:
     """Score every requested local archive bundle and return aggregate fidelity."""
 
-    bundle_ids = (
-        list(root_agent_ids)
-        if root_agent_ids is not None
-        else list_archive_bundle_ids()
-    )
+    bundle_ids = list(root_agent_ids) if root_agent_ids is not None else list_archive_bundle_ids()
     results: list[JsonObject] = []
     scored: list[JsonObject] = []
     for root_agent_id in bundle_ids:
@@ -1646,37 +1346,24 @@ async def evaluate_archives_with_world_model(
     }
     if scored:
         total_steps = sum(int(item.get("n_steps") or 0) for item in scored)
-        weighted = sum(
-            float(item.get("mean_score") or 0) * int(item.get("n_steps") or 0)
-            for item in scored
-        )
+        weighted = sum(float(item.get("mean_score") or 0) * int(item.get("n_steps") or 0) for item in scored)
         aggregate["mean_score"] = weighted / total_steps if total_steps > 0 else None
         dimensions: dict[str, float] = {}
         for name in _FIDELITY_DIMENSIONS:
             numerator = 0.0
             for item in scored:
-                item_dimensions = (
-                    item.get("dimensions")
-                    if isinstance(item.get("dimensions"), dict)
-                    else {}
-                )
-                numerator += float(item_dimensions.get(name) or 0) * int(
-                    item.get("n_steps") or 0
-                )
+                item_dimensions = item.get("dimensions") if isinstance(item.get("dimensions"), dict) else {}
+                numerator += float(item_dimensions.get(name) or 0) * int(item.get("n_steps") or 0)
             dimensions[name] = numerator / total_steps if total_steps > 0 else 0.0
         aggregate["dimensions"] = dimensions
     if redaction_mode == "public":
         aggregate = _redact(aggregate)
         if public_json_has_secret(aggregate):
-            raise ValueError(
-                "WMH batch fidelity result contains unredacted secret-looking content"
-            )
+            raise ValueError("WMH batch fidelity result contains unredacted secret-looking content")
     return aggregate
 
 
-def deterministic_split(
-    trace_ids: Iterable[str], *, heldout_fraction: float = 0.2
-) -> dict[str, str]:
+def deterministic_split(trace_ids: Iterable[str], *, heldout_fraction: float = 0.2) -> dict[str, str]:
     if heldout_fraction <= 0 or heldout_fraction >= 1:
         raise ValueError("heldout_fraction must be between 0 and 1")
     split: dict[str, str] = {}
@@ -1698,9 +1385,7 @@ def build_replay_corpus(
     for root_agent_id in bundle_ids:
         sessions.append(_build_replay_session(root_agent_id, split[root_agent_id]))
     corpus = {"schema": "rose.wmh_replay_corpus.v1", "sessions": sessions}
-    (out_dir / "sessions.json").write_text(
-        json.dumps(corpus, indent=2, sort_keys=True), encoding="utf-8"
-    )
+    (out_dir / "sessions.json").write_text(json.dumps(corpus, indent=2, sort_keys=True), encoding="utf-8")
     return corpus
 
 
@@ -1719,12 +1404,8 @@ def _build_replay_session(root_agent_id: str, split: str) -> JsonObject:
                 "arguments_hash": hashlib.sha256(
                     json.dumps(transition.action.arguments, sort_keys=True).encode()
                 ).hexdigest(),
-                "environment_fixture_hash": (state.get("db_fixture_ref") or {}).get(
-                    "plaintext_sha256"
-                ),
-                "provider_domain": transition.observation.metadata.get(
-                    "provider_domain"
-                ),
+                "environment_fixture_hash": (state.get("db_fixture_ref") or {}).get("plaintext_sha256"),
+                "provider_domain": transition.observation.metadata.get("provider_domain"),
             }
         )
     return {
@@ -1765,27 +1446,10 @@ def update_world_model_for_simulation(
     """
 
     started = time.time()
-    out_dir = Path(
-        output_dir or os.environ.get("WMH_BUILD_DIR") or _DEFAULT_WMH_BUILD_ROOT
-    )
-    name = (
-        name
-        or os.environ.get("WMH_MODEL_NAME")
-        or os.environ.get("WORLD_MODEL_NAME")
-        or "rose-archive"
-    )
-    provider = (
-        provider
-        or os.environ.get("WMH_BUILD_PROVIDER")
-        or os.environ.get("WMH_PROVIDER")
-        or "anthropic"
-    )
-    model = (
-        model
-        or os.environ.get("WMH_BUILD_MODEL")
-        or os.environ.get("WMH_SERVE_MODEL")
-        or "claude-opus-4-8"
-    )
+    out_dir = Path(output_dir or os.environ.get("WMH_BUILD_DIR") or _DEFAULT_WMH_BUILD_ROOT)
+    name = name or os.environ.get("WMH_MODEL_NAME") or os.environ.get("WORLD_MODEL_NAME") or "rose-archive"
+    provider = provider or os.environ.get("WMH_BUILD_PROVIDER") or os.environ.get("WMH_PROVIDER") or "anthropic"
+    model = model or os.environ.get("WMH_BUILD_MODEL") or os.environ.get("WMH_SERVE_MODEL") or "claude-opus-4-8"
     if gepa_budget is None:
         gepa_budget = int(os.environ.get("WMH_GEPA_BUDGET", "10"))
     index_path = out_dir / "delta-index.json"
@@ -1805,11 +1469,7 @@ def update_world_model_for_simulation(
         archive_backend=os.environ.get("TRACE_ARCHIVE_BACKEND", "local"),
     )
 
-    all_bundle_ids = sorted(
-        list(root_agent_ids)
-        if root_agent_ids is not None
-        else list_archive_bundle_ids()
-    )
+    all_bundle_ids = sorted(list(root_agent_ids) if root_agent_ids is not None else list_archive_bundle_ids())
     index = _read_delta_index(index_path)
     old_bundles = index.get("bundles") if isinstance(index.get("bundles"), dict) else {}
     # Corpus cap for fast benchmark/cloud builds. The full R2 archive is large and
@@ -1825,22 +1485,12 @@ def update_world_model_for_simulation(
         # happen before partition_real_world_bundles: classification reads each
         # encrypted manifest from R2 and was the uncapped refresh bottleneck.
         available = set(candidate_bundle_ids)
-        retained = sorted(
-            bundle_id for bundle_id in old_bundles if bundle_id in available
-        )
-        new = [
-            bundle_id
-            for bundle_id in candidate_bundle_ids
-            if bundle_id not in old_bundles
-        ]
+        retained = sorted(bundle_id for bundle_id in old_bundles if bundle_id in available)
+        new = [bundle_id for bundle_id in candidate_bundle_ids if bundle_id not in old_bundles]
         limit = max(_wmh_max_bundles, len(retained))
         candidate_bundle_ids = (retained + new)[:limit]
     bundle_ids, excluded_bundles = partition_real_world_bundles(candidate_bundle_ids)
-    split = (
-        deterministic_split(bundle_ids, heldout_fraction=heldout_fraction)
-        if bundle_ids
-        else {}
-    )
+    split = deterministic_split(bundle_ids, heldout_fraction=heldout_fraction) if bundle_ids else {}
     changed: list[str] = []
     unchanged: list[str] = []
     signatures: dict[str, JsonObject] = {}
@@ -1856,16 +1506,9 @@ def update_world_model_for_simulation(
         total_artifacts += int(signature["artifact_count"])
         otel_path = otel_dir / f"{root_agent_id}.otel.jsonl"
         session_path = session_dir / f"{root_agent_id}.session.json"
-        previous = (
-            old_bundles.get(root_agent_id) if isinstance(old_bundles, dict) else None
-        )
+        previous = old_bundles.get(root_agent_id) if isinstance(old_bundles, dict) else None
         previous_sha = previous.get("sha256") if isinstance(previous, dict) else None
-        if (
-            force
-            or previous_sha != signature["sha256"]
-            or not otel_path.exists()
-            or not session_path.exists()
-        ):
+        if force or previous_sha != signature["sha256"] or not otel_path.exists() or not session_path.exists():
             changed.append(root_agent_id)
         else:
             unchanged.append(root_agent_id)
@@ -1889,11 +1532,7 @@ def update_world_model_for_simulation(
     for root_agent_id in changed:
         otel_path = otel_dir / f"{root_agent_id}.otel.jsonl"
         export_archive_to_otel_jsonl(root_agent_id, otel_path, redaction_mode="public")
-        exported_spans += sum(
-            1
-            for line in otel_path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        )
+        exported_spans += sum(1 for line in otel_path.read_text(encoding="utf-8").splitlines() if line.strip())
         session = _build_replay_session(root_agent_id, split[root_agent_id])
         (session_dir / f"{root_agent_id}.session.json").write_text(
             json.dumps(session, indent=2, sort_keys=True) + "\n",
@@ -1927,23 +1566,12 @@ def update_world_model_for_simulation(
                 if isinstance(session, dict):
                     sessions.append(session)
     aggregate_sessions_file.write_text(
-        json.dumps(
-            {"schema": "rose.wmh_replay_corpus.v1", "sessions": sessions},
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
+        json.dumps({"schema": "rose.wmh_replay_corpus.v1", "sessions": sessions}, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
 
-    aggregate_bytes = (
-        aggregate_trace_file.stat().st_size if aggregate_trace_file.exists() else 0
-    )
-    session_bytes = (
-        aggregate_sessions_file.stat().st_size
-        if aggregate_sessions_file.exists()
-        else 0
-    )
+    aggregate_bytes = aggregate_trace_file.stat().st_size if aggregate_trace_file.exists() else 0
+    session_bytes = aggregate_sessions_file.stat().st_size if aggregate_sessions_file.exists() else 0
     manifest_path = out_dir / "build.manifest.json"
     needs_build = force or not manifest_path.exists()
     needs_index_refresh = bool(changed) and not needs_build
@@ -1987,9 +1615,7 @@ def update_world_model_for_simulation(
         build_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         build_manifest["build_skipped"] = True
         if needs_index_refresh:
-            build_manifest["skip_reason"] = (
-                "index-only refresh (GEPA runs on first build or force)"
-            )
+            build_manifest["skip_reason"] = "index-only refresh (GEPA runs on first build or force)"
             refresh = index_refresher or refresh_world_model_index
             index_refresh = refresh(
                 aggregate_trace_file,
@@ -2082,15 +1708,12 @@ def compare_real_vs_world_model_benchmark(
         fidelity_score = float(fidelity.get("mean_score") or 0)
     checks = {
         "task_name_match": real_name == simulated_name,
-        "pass_outcome_match": bool(real_result.get("passed"))
-        == bool(world_model_result.get("passed")),
-        "terminal_status_match": str(real_result.get("status") or "")
-        == str(world_model_result.get("status") or ""),
+        "pass_outcome_match": bool(real_result.get("passed")) == bool(world_model_result.get("passed")),
+        "terminal_status_match": str(real_result.get("status") or "") == str(world_model_result.get("status") or ""),
         "progress_within_delta": progress_delta <= max_progress_delta,
         "fidelity_above_threshold": fidelity_score >= min_fidelity_score,
         "world_model_mode_recorded": bool(
-            world_model_result.get("world_model_mode")
-            or world_model_result.get("world_model_fidelity")
+            world_model_result.get("world_model_mode") or world_model_result.get("world_model_fidelity")
         ),
     }
     comparison: JsonObject = {
@@ -2105,9 +1728,7 @@ def compare_real_vs_world_model_benchmark(
     }
     redacted = _redact(comparison)
     if public_json_has_secret(redacted):
-        raise ValueError(
-            "WMH benchmark comparison contains unredacted secret-looking content"
-        )
+        raise ValueError("WMH benchmark comparison contains unredacted secret-looking content")
     return redacted
 
 
@@ -2118,9 +1739,7 @@ class WMHHttpClient:
         self.base_url = base_url.rstrip("/")
         configured_timeout = timeout
         if configured_timeout is None:
-            configured_timeout = float(
-                os.environ.get("WMH_HTTP_TIMEOUT_SECONDS", "180")
-            )
+            configured_timeout = float(os.environ.get("WMH_HTTP_TIMEOUT_SECONDS", "180"))
         if configured_timeout <= 0:
             raise ValueError("WMH HTTP timeout must be greater than zero")
         self.timeout = configured_timeout
@@ -2134,17 +1753,11 @@ class WMHHttpClient:
         return models if isinstance(models, list) else []
 
     async def start_session(
-        self,
-        world_model: str,
-        *,
-        task: str | None = None,
-        seed_state: JsonObject | None = None,
+        self, world_model: str, *, task: str | None = None, seed_state: JsonObject | None = None
     ) -> str:
         body: JsonObject = {"task": task, "seed_state": seed_state}
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(
-                f"{self.base_url}/world_models/{world_model}/sessions", json=body
-            )
+            response = await client.post(f"{self.base_url}/world_models/{world_model}/sessions", json=body)
             response.raise_for_status()
             data = response.json()
         session_id = data.get("session_id")
@@ -2152,9 +1765,7 @@ class WMHHttpClient:
             raise ValueError("WMH session response did not include session_id")
         return session_id
 
-    async def step(
-        self, world_model: str, session_id: str, action: CanonicalAction | JsonObject
-    ) -> JsonObject:
+    async def step(self, world_model: str, session_id: str, action: CanonicalAction | JsonObject) -> JsonObject:
         if isinstance(action, CanonicalAction):
             wmh_action = {
                 "kind": "tool_call",
@@ -2197,27 +1808,14 @@ class WorldModelToolExecutionAdapter:
         self.agent_id = agent_id
 
     def should_simulate(self, tool_name: str) -> bool:
-        return self.mode == "simulate" and is_world_model_environment_boundary(
-            tool_name
-        )
+        return self.mode == "simulate" and is_world_model_environment_boundary(tool_name)
 
     @classmethod
-    def from_env(
-        cls, *, agent_id: str | None = None
-    ) -> "WorldModelToolExecutionAdapter":
-        mode = (
-            os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real").strip().lower()
-            or "real"
-        )
-        base_url = os.environ.get("WMH_BASE_URL") or os.environ.get(
-            "WORLD_MODEL_HARNESS_URL"
-        )
-        model_name = os.environ.get("WMH_MODEL_NAME") or os.environ.get(
-            "WORLD_MODEL_NAME"
-        )
-        session_id = os.environ.get("WMH_SESSION_ID") or os.environ.get(
-            "WORLD_MODEL_SESSION_ID"
-        )
+    def from_env(cls, *, agent_id: str | None = None) -> "WorldModelToolExecutionAdapter":
+        mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real").strip().lower() or "real"
+        base_url = os.environ.get("WMH_BASE_URL") or os.environ.get("WORLD_MODEL_HARNESS_URL")
+        model_name = os.environ.get("WMH_MODEL_NAME") or os.environ.get("WORLD_MODEL_NAME")
+        session_id = os.environ.get("WMH_SESSION_ID") or os.environ.get("WORLD_MODEL_SESSION_ID")
         client = WMHHttpClient(base_url) if base_url else None
         return cls(
             mode=mode,
@@ -2239,9 +1837,7 @@ class WorldModelToolExecutionAdapter:
         if self.mode == "real" or not is_world_model_environment_boundary(tool_name):
             return await real_executor(tool_name, tool_args, tool_call_id)
         if not self.client or not self.world_model_name or not self.session_id:
-            raise RuntimeError(
-                "WMH simulation requires WMH_BASE_URL, WMH_MODEL_NAME, and WMH_SESSION_ID"
-            )
+            raise RuntimeError("WMH simulation requires WMH_BASE_URL, WMH_MODEL_NAME, and WMH_SESSION_ID")
         action = canonical_action_from_tool_call(
             tool_name,
             tool_args,
@@ -2250,9 +1846,7 @@ class WorldModelToolExecutionAdapter:
         )
         if self.mode == "simulate":
             started = time.monotonic()
-            observation = await self.client.step(
-                self.world_model_name, self.session_id, action
-            )
+            observation = await self.client.step(self.world_model_name, self.session_id, action)
             wall_elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
             result = world_model_observation_to_tool_result(
                 observation,
@@ -2262,40 +1856,28 @@ class WorldModelToolExecutionAdapter:
             result.setdefault("world_model_session_id", self.session_id)
             result.setdefault("world_model_name", self.world_model_name)
             result.setdefault("world_model_boundary", tool_name)
-            if (
-                allow_real_fallback
-                and _wmh_fallback_on_unavailable_enabled()
-                and _wmh_result_unavailable(result)
-            ):
+            if allow_real_fallback and _wmh_fallback_on_unavailable_enabled() and _wmh_result_unavailable(result):
                 real_result = await real_executor(tool_name, tool_args, tool_call_id)
                 if isinstance(real_result, dict):
                     real_result.setdefault("world_model_unavailable_fallback", True)
-                    real_result.setdefault(
-                        "world_model_unavailable_observation", observation
-                    )
+                    real_result.setdefault("world_model_unavailable_observation", observation)
                 return real_result
             return result
         real_result = await real_executor(tool_name, tool_args, tool_call_id)
         started = time.monotonic()
         try:
-            observation = await self.client.step(
-                self.world_model_name, self.session_id, action
-            )
+            observation = await self.client.step(self.world_model_name, self.session_id, action)
         except Exception as exc:
             observation = {"error": str(exc)[:300], "is_error": True}
         wall_elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
         if isinstance(real_result, dict):
             real_result.setdefault("world_model_shadow", observation)
-            real_result.setdefault(
-                "world_model_shadow_wall_elapsed_ms", wall_elapsed_ms
-            )
+            real_result.setdefault("world_model_shadow_wall_elapsed_ms", wall_elapsed_ms)
         return real_result
 
 
 def _wmh_fallback_on_unavailable_enabled() -> bool:
-    return os.environ.get(
-        "BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE", ""
-    ).strip().lower() in {
+    return os.environ.get("BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE", "").strip().lower() in {
         "1",
         "true",
         "yes",
@@ -2349,21 +1931,8 @@ def _coerce_non_negative_int(value: Any) -> int | None:
 def predicted_latency_ms_from_observation(observation: JsonObject) -> int | None:
     """Extract the WMH-predicted action duration from common envelope fields."""
 
-    for source in (
-        observation,
-        (
-            observation.get("metadata")
-            if isinstance(observation.get("metadata"), dict)
-            else {}
-        ),
-    ):
-        for key in (
-            "predicted_latency_ms",
-            "sim_latency_ms",
-            "latency_ms",
-            "duration_ms",
-            "elapsed_ms",
-        ):
+    for source in (observation, observation.get("metadata") if isinstance(observation.get("metadata"), dict) else {}):
+        for key in ("predicted_latency_ms", "sim_latency_ms", "latency_ms", "duration_ms", "elapsed_ms"):
             coerced = _coerce_non_negative_int(source.get(key))
             if coerced is not None:
                 return coerced
@@ -2401,9 +1970,7 @@ def world_model_observation_to_tool_result(
         result["predicted_latency_ms"] = predicted_latency_ms
     if wall_elapsed_ms is not None:
         result["world_model_wall_elapsed_ms"] = max(0, int(wall_elapsed_ms))
-        result["simulated_elapsed_ms"] = max(0, int(wall_elapsed_ms)) + (
-            predicted_latency_ms or 0
-        )
+        result["simulated_elapsed_ms"] = max(0, int(wall_elapsed_ms)) + (predicted_latency_ms or 0)
     return result
 
 
