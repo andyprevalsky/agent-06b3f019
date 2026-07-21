@@ -432,7 +432,7 @@ def test_bundle_signature_r2_rejects_enumerated_ciphertext_without_metadata():
 
 
 def test_refresh_world_model_index_persists_retriever_index_without_gepa():
-    _load_upstream_otel_adapter_class()  # skip when upstream wmh is unavailable
+    OtelGenAIAdapter = _load_upstream_otel_adapter_class()  # skip when upstream wmh is unavailable
     from benchmarks.world_model_harness import export_archive_to_otel_jsonl, refresh_world_model_index
 
     with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
@@ -453,6 +453,12 @@ def test_refresh_world_model_index_persists_retriever_index_without_gepa():
             assert (index_dir / "steps.jsonl").exists()
             steps_lines = (index_dir / "steps.jsonl").read_text(encoding="utf-8").strip().splitlines()
             assert len(steps_lines) == 2
+            expected_steps = [
+                step.model_dump(mode="json")
+                for trace in OtelGenAIAdapter().from_file(str(trace_file))
+                for step in trace.steps
+            ]
+            assert [json.loads(line) for line in steps_lines] == expected_steps
         finally:
             restore()
 
@@ -466,6 +472,7 @@ def test_refresh_world_model_index_streams_jsonl_in_bounded_batches():
     """
     _load_upstream_otel_adapter_class()
     from benchmarks.world_model_harness import export_archive_to_otel_jsonl, refresh_world_model_index
+    import wmh.ingest.otel_genai as otel_genai
     from wmh.ingest.otel_genai import OtelGenAIAdapter
     from wmh.retrieval import HashingEmbedder
 
@@ -491,6 +498,11 @@ def test_refresh_world_model_index_streams_jsonl_in_bounded_batches():
                     OtelGenAIAdapter,
                     "from_file",
                     side_effect=MemoryError("bulk aggregate loader crossed the memory boundary"),
+                ),
+                patch.object(
+                    otel_genai,
+                    "_spans_to_traces",
+                    side_effect=MemoryError("one oversized trace crossed the memory boundary"),
                 ),
                 patch.object(HashingEmbedder, "embed", bounded_embed),
             ):

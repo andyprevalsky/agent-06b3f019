@@ -1039,11 +1039,15 @@ def refresh_world_model_index(
     try:
         import numpy as np
         from wmh.core.render import encode_state_action
-        # These parser helpers let us preserve upstream's exact OTel -> Trace mapping while
-        # consuming Rose's trace-contiguous JSONL one trace at a time. OtelGenAIAdapter.from_file
-        # reads the complete corpus into memory, which multiplies peak RSS across raw text,
-        # parsed spans, pydantic traces, rendered inputs, Python vectors, and the final matrix.
-        from wmh.ingest.otel_genai import _collect_spans, _spans_to_traces
+        # These parser helpers preserve upstream's exact OTel span -> Step mapping while consuming
+        # Rose's ordered JSONL one transition at a time. OtelGenAIAdapter.from_file reads the
+        # complete corpus into memory, and even one archived trace can contain hundreds of MiB.
+        from wmh.ingest.otel_genai import (
+            _build_steps,
+            _collect_spans,
+            _is_llm_span,
+            _is_tool_span,
+        )
         from wmh.retrieval import HashingEmbedder
     except ModuleNotFoundError as exc:
         raise RuntimeError(
@@ -1057,10 +1061,16 @@ def refresh_world_model_index(
 
     trace_path = Path(trace_file)
 
-    def iter_traces():
-        """Yield traces from Rose's trace-contiguous OTel JSONL without loading the corpus."""
+    def iter_step_events():
+        """Yield ``(trace_id, step-or-None)`` without materializing a trace or corpus.
+
+        The ``None`` event marks the start of each contiguous trace so zero-step traces are still
+        counted. Rose exports ordered action/tool-observation pairs, which lets upstream's
+        ``_build_steps`` normalize one transition at a time instead of retaining every span in a
+        potentially huge trace.
+        """
         current_trace_id: str | None = None
-        current_spans = []
+        pending_spans = []
         with trace_path.open("r", encoding="utf-8") as source:
             for line in source:
                 stripped = line.strip()
@@ -1074,23 +1084,37 @@ def refresh_world_model_index(
                     continue
                 for span in parsed_spans:
                     if current_trace_id is not None and span.trace_id != current_trace_id:
-                        yield from _spans_to_traces(
-                            current_spans,
-                            source=f"file:{trace_path}",
-                        )
-                        current_spans = []
-                    current_trace_id = span.trace_id
-                    current_spans.append(span)
-        if current_spans:
-            yield from _spans_to_traces(current_spans, source=f"file:{trace_path}")
+                        for step in _build_steps(pending_spans):
+                            yield current_trace_id, step
+                        pending_spans = []
+                        current_trace_id = None
+                    if current_trace_id is None:
+                        current_trace_id = span.trace_id
+                        yield current_trace_id, None
+
+                    if _is_llm_span(span):
+                        # A second LLM action means the prior one had no tool observation.
+                        for step in _build_steps(pending_spans):
+                            yield current_trace_id, step
+                        pending_spans = [span]
+                    elif _is_tool_span(span):
+                        pending_spans.append(span)
+                        for step in _build_steps(pending_spans):
+                            yield current_trace_id, step
+                        pending_spans = []
+        if current_trace_id is not None:
+            for step in _build_steps(pending_spans):
+                yield current_trace_id, step
 
     # Count in a bounded first pass so the final .npy can be opened as a disk-backed array with
-    # its correct header. The second pass only retains one trace and one embedding batch.
+    # its correct header. The second pass only retains one transition and one embedding batch.
     indexed_traces = 0
     indexed_steps = 0
-    for trace in iter_traces():
-        indexed_traces += 1
-        indexed_steps += len(trace.steps)
+    for _trace_id, step in iter_step_events():
+        if step is None:
+            indexed_traces += 1
+        else:
+            indexed_steps += 1
 
     index_path = Path(model_root) / "index"
     index_path.mkdir(parents=True, exist_ok=True)
@@ -1116,24 +1140,33 @@ def refresh_world_model_index(
 
         row = 0
         with tmp_steps_path.open("w", encoding="utf-8") as steps_output:
-            for trace in iter_traces():
-                for start in range(0, len(trace.steps), batch_size):
-                    steps = trace.steps[start : start + batch_size]
-                    if not steps:
-                        continue
-                    peak_batch_steps = max(peak_batch_steps, len(steps))
-                    texts = [encode_state_action(step.state_before, step.action) for step in steps]
-                    vectors = np.asarray(embedder.embed(texts), dtype=np.float64)
-                    expected_shape = (len(steps), embed_dim)
-                    if vectors.shape != expected_shape:
-                        raise ValueError(
-                            f"embedder returned shape {vectors.shape}, expected {expected_shape}"
-                        )
-                    assert matrix is not None
-                    matrix[row : row + len(steps)] = vectors
-                    for step in steps:
-                        steps_output.write(step.model_dump_json() + "\n")
-                    row += len(steps)
+            steps = []
+
+            def write_batch() -> None:
+                nonlocal row, peak_batch_steps
+                if not steps:
+                    return
+                peak_batch_steps = max(peak_batch_steps, len(steps))
+                texts = [encode_state_action(step.state_before, step.action) for step in steps]
+                vectors = np.asarray(embedder.embed(texts), dtype=np.float64)
+                expected_shape = (len(steps), embed_dim)
+                if vectors.shape != expected_shape:
+                    raise ValueError(
+                        f"embedder returned shape {vectors.shape}, expected {expected_shape}"
+                    )
+                assert matrix is not None
+                matrix[row : row + len(steps)] = vectors
+                for step in steps:
+                    steps_output.write(step.model_dump_json() + "\n")
+                row += len(steps)
+                steps.clear()
+
+            for _trace_id, step in iter_step_events():
+                if step is not None:
+                    steps.append(step)
+                    if len(steps) >= batch_size:
+                        write_batch()
+            write_batch()
 
         if row != indexed_steps:
             raise RuntimeError(
