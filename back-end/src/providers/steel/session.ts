@@ -154,12 +154,21 @@ export function rememberRejectedProxyCity(geolocation: ProxyGeoLocation): void {
   log.info(`  🌎 Remembering unsupported proxy city: ${proxyCityKey(geolocation)}`);
 }
 
+export function isInvalidSteelProxyConfiguration(error: unknown): boolean {
+  const status =
+    (error as Record<string, unknown>)?.status ?? (error as Record<string, unknown>)?.statusCode;
+  const message =
+    error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return status === 400 || message.includes('invalid proxy configuration');
+}
+
 export function buildSteelProxySettings(
   geolocation: ProxyGeoLocation,
-  dropCity = false
+  dropCity = false,
+  forceManagedRotation = false
 ): SteelProxySettings {
   const byopProxyServer = process.env.STEEL_PROXY_SERVER?.trim();
-  if (byopProxyServer) {
+  if (byopProxyServer && !forceManagedRotation) {
     log.info(`  Using BYOP proxy server: ${redactProxyServerForLog(byopProxyServer)}`);
     return { config: { server: byopProxyServer }, source: 'byop' };
   }
@@ -168,7 +177,7 @@ export function buildSteelProxySettings(
   // a per-user profileId, Steel pins one IP to each user's profile on first use,
   // giving every user a stable egress identity (and making cf_clearance reuse
   // work). An explicit STEEL_DEDICATED_IP_ID pins one shared IP instead.
-  if (envEnabled('BROWSER_AGENT_STEEL_DEDICATED_IP_ENABLED', false)) {
+  if (!forceManagedRotation && envEnabled('BROWSER_AGENT_STEEL_DEDICATED_IP_ENABLED', false)) {
     const pinnedId = process.env.STEEL_DEDICATED_IP_ID?.trim();
     log.info(
       `  Using Steel dedicated IP${pinnedId ? ` (pinned ${pinnedId})` : ' (auto-pin to profile)'}`
@@ -179,7 +188,8 @@ export function buildSteelProxySettings(
     };
   }
 
-  const useSteelProxy = envEnabled('BROWSER_AGENT_STEEL_PROXY_ENABLED', true);
+  const useSteelProxy =
+    forceManagedRotation || envEnabled('BROWSER_AGENT_STEEL_PROXY_ENABLED', true);
   if (!useSteelProxy) {
     return { config: false, source: 'none' };
   }
@@ -465,8 +475,7 @@ export async function createSessionWithContext(
       // Steel rejects city-level proxies it can't fulfill ("400 Invalid proxy
       // configuration"). Drop the city and retry with country+state, which Steel
       // always supports — otherwise every retry repeats the same bad config.
-      const msg = (lastError.message || '').toLowerCase();
-      if (!dropProxyCity && (status === 400 || msg.includes('invalid proxy'))) {
+      if (!dropProxyCity && isInvalidSteelProxyConfiguration(error)) {
         dropProxyCity = true;
         rememberRejectedProxyCity(geolocation);
         log.info('  🌎 Dropping unsupported proxy city; retrying with country+state only');
@@ -519,6 +528,11 @@ export async function closeSession(
   } else {
     log.info(`  ⚠️ No currentUrl to save`);
   }
+}
+
+/** Release only the remote Steel browser without mutating BrowserSession. */
+export async function releaseSteelRemoteSession(sessionId: string): Promise<void> {
+  await steel.sessions.release(sessionId);
 }
 
 /**

@@ -70,6 +70,7 @@ from .config import (
     VERIFIER_ULTRA_MODEL,
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
 )
+from .credential_runtime import build_realm_credential_state
 from .recording import (
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
@@ -82,7 +83,7 @@ from .repo import (
     fetch_claude_token,
     fetch_session_info,
     init_browser_session,
-    inject_local_storage,
+    prepare_browser_auth,
     propagate_browser_run_credentials,
     report_claude_token_rate_limited,
     resume_browser_session,
@@ -116,7 +117,7 @@ from .service_actions import (
 from .service_crypto import (
     ExtractedOTP,
     auth_realm_from_url,
-    build_auth_options_prompt_section,
+    auth_realm_matches_url,
     build_autopay_prompt_section,
     build_payment_card_resume_prompt_section,
     decrypt_payment_info,
@@ -918,6 +919,122 @@ async def _reap_playwright_driver_process(process: Optional[Any], agent_id: str)
         return
     except Exception as e:
         logger.warning("Failed to kill Playwright driver process", agent_id=agent_id, error=str(e))
+
+
+async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[str, Any]]:
+    """Capture browser auth/storage before rotate_ip replaces the remote browser.
+
+    Kernel profile persistence handles Kernel-to-Kernel rotations, but profiles
+    are provider-specific. Capturing Playwright storage here lets the later
+    Kernel-to-Steel recovery retain the same cookies, localStorage, and IndexedDB.
+    """
+    if page is None or getattr(page, "context", None) is None:
+        return None
+    try:
+        return await page.context.storage_state(indexed_db=True)
+    except Exception as exc:
+        logger.warning("Failed to capture browser storage before IP rotation", error=str(exc))
+        return None
+
+
+def _rotation_storage_restore_script(storage_state: Dict[str, Any]) -> str:
+    """Return an init script that restores origin-scoped browser storage."""
+    origins_json = json.dumps(storage_state.get("origins") or [], separators=(",", ":"))
+    return f"""
+(() => {{
+  const originStates = {origins_json};
+  const restoreCurrentOrigin = async () => {{
+    const state = originStates.find((entry) => entry.origin === location.origin);
+    if (!state) return;
+    for (const item of state.localStorage || []) localStorage.setItem(item.name, item.value);
+    for (const database of state.indexedDB || []) {{
+      await new Promise((resolve, reject) => {{
+        const request = indexedDB.open(database.name, database.version);
+        request.onupgradeneeded = () => {{
+          const db = request.result;
+          for (const store of database.stores || []) {{
+            if (!db.objectStoreNames.contains(store.name)) {{
+              db.createObjectStore(store.name, {{
+                keyPath: store.keyPath === undefined ? null : store.keyPath,
+                autoIncrement: Boolean(store.autoIncrement),
+              }});
+            }}
+          }}
+        }};
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => {{
+          const db = request.result;
+          const storeNames = (database.stores || [])
+            .map((store) => store.name)
+            .filter((name) => db.objectStoreNames.contains(name));
+          if (storeNames.length === 0) {{ db.close(); resolve(); return; }}
+          const transaction = db.transaction(storeNames, "readwrite");
+          for (const storeState of database.stores || []) {{
+            if (!storeNames.includes(storeState.name)) continue;
+            const store = transaction.objectStore(storeState.name);
+            store.clear();
+            for (const record of storeState.records || []) {{
+              // IndexedDB rejects an explicit key for stores that derive it from
+              // an inline keyPath. Playwright includes each record's resolved key
+              // in storage_state, so only pass that key for out-of-line stores.
+              if (store.keyPath === null && Object.prototype.hasOwnProperty.call(record, "key")) {{
+                store.put(record.value, record.key);
+              }} else {{
+                store.put(record.value);
+              }}
+            }}
+          }}
+          transaction.oncomplete = () => {{ db.close(); resolve(); }};
+          transaction.onerror = () => {{ db.close(); reject(transaction.error); }};
+          transaction.onabort = () => {{ db.close(); reject(transaction.error); }};
+        }};
+      }});
+    }}
+  }};
+  globalThis.__naviRestoreRotationStorage = restoreCurrentOrigin;
+  void restoreCurrentOrigin().catch(() => undefined);
+}})();
+"""
+
+
+async def _restore_rotation_storage_state(
+    page: Optional[Any],
+    storage_state: Optional[Dict[str, Any]],
+    *,
+    current_url: str,
+) -> None:
+    """Restore captured auth/storage into a replacement provider session."""
+    if page is None or not storage_state or getattr(page, "context", None) is None:
+        return
+
+    context = page.context
+    cookies = storage_state.get("cookies") or []
+    if cookies:
+        await context.add_cookies(cookies)
+
+    origins = storage_state.get("origins") or []
+    if origins:
+        await context.add_init_script(script=_rotation_storage_restore_script(storage_state))
+
+    if current_url:
+        await page.goto(current_url, wait_until="domcontentloaded", timeout=15_000)
+
+    if origins:
+        await page.evaluate(
+            "async () => { if (globalThis.__naviRestoreRotationStorage) "
+            "await globalThis.__naviRestoreRotationStorage(); }"
+        )
+
+
+def _updated_rotation_session_metadata(
+    current: Optional[Dict[str, Any]], rotate_result: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Merge the backend's replacement-session metadata into run state."""
+    updated = dict(current or {})
+    replacement = rotate_result.get("browser_session_metadata")
+    if isinstance(replacement, dict):
+        updated.update(replacement)
+    return updated
 
 
 async def _reconnect_browser_stack_after_rotation(
@@ -2989,12 +3106,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         t_session = time.monotonic()
         fingerprint_injection = None
         user_profile = {}
-        # Fresh sessions never carry auth_options in the init response, so the
-        # realm lookup can run concurrently with the browser provider session
-        # creation instead of serially after it.
+        # Current backends return auth_options from the same realm-preparation
+        # boundary as cookies/passwords/passkeys. Keep the fallback below for a
+        # rolling deployment where an older backend response omits it.
         auth_options_prefetch: Optional[asyncio.Task] = None
-        if not (is_resume and task_id) and auth_realm:
-            auth_options_prefetch = asyncio.create_task(fetch_auth_options(config, user_id, auth_realm))
         logger.info(
             "Session init check",
             is_resume=is_resume,
@@ -3352,8 +3467,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
         async def _process_data():
             """Save init messages + process user data (no browser needed)."""
-            from .service_crypto import decrypt_password_with_key
-
             if not is_resume:
                 t = time.monotonic()
                 await save_browser_action_message(
@@ -3421,17 +3534,23 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             _record_timing("parallel.data.user_profile", t)
 
             t = time.monotonic()
-            _ref_to_encrypted: Dict[str, str] = {}
-            _password_origins: Dict[str, str] = {}
-            _credential_refs_by_secret_ref: Dict[str, Dict[str, str]] = {}
             if session_passwords:
                 logger.info(f"Loaded {len(session_passwords)} passwords from session response")
-            (
-                _auth_options_section,
-                _ref_to_encrypted,
-                _password_origins,
-                _credential_refs_by_secret_ref,
-            ) = build_auth_options_prompt_section(auth_options, session_passwords)
+            _realm_credential_state = await build_realm_credential_state(
+                {
+                    "auth_realm": auth_realm,
+                    "auth_options": auth_options,
+                    "passwords": session_passwords,
+                    "passkeys": session_passkeys,
+                    "auth_credential_ref": session_credential_ref,
+                },
+                decryption_key=config.payment.decryption_key,
+            )
+            _auth_options_section = _realm_credential_state.auth_options_section
+            _password_origins = _realm_credential_state.password_origins
+            _credential_refs_by_secret_ref = (
+                _realm_credential_state.credential_refs_by_secret_ref
+            )
 
             _secret_refs: Dict[str, str] = {}
             payment_card_refs = (write_lock_resume_state or {}).get("payment_card_refs") or {}
@@ -3442,42 +3561,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             _payment_card_resume_section = build_payment_card_resume_prompt_section(payment_card_refs)
             if _payment_card_resume_section:
                 _user_context_sections.append(_payment_card_resume_section.strip())
-
-            if config.payment.decryption_key and _ref_to_encrypted:
-                from cryptography.hazmat.backends import default_backend
-                from cryptography.hazmat.primitives import serialization
-
-                private_key_pem = base64.b64decode(config.payment.decryption_key)
-                private_key = serialization.load_pem_private_key(
-                    private_key_pem, password=None, backend=default_backend()
-                )
-                logger.info(f"Pre-loaded RSA key, decrypting {len(_ref_to_encrypted)} passwords in parallel...")
-
-                async def decrypt_one(short_ref: str, encrypted: str) -> tuple[str, Optional[str]]:
-                    decrypted = await asyncio.to_thread(decrypt_password_with_key, encrypted, private_key)
-                    return (short_ref, decrypted)
-
-                decrypt_tasks = [
-                    decrypt_one(short_ref, encrypted) for short_ref, encrypted in _ref_to_encrypted.items()
-                ]
-                decrypt_results = await asyncio.gather(*decrypt_tasks)
-
-                for short_ref, decrypted in decrypt_results:
-                    if decrypted:
-                        _secret_refs[short_ref] = decrypted
-
-            attemptable_password_ids = {
-                str(credential_ref.get("id"))
-                for ref, credential_ref in _credential_refs_by_secret_ref.items()
-                if ref in _secret_refs and credential_ref.get("kind") == "password" and credential_ref.get("id")
-            }
-            auth_runtime_state.restrict_password_ids_to_attemptable(attemptable_password_ids)
+            _secret_refs.update(_realm_credential_state.password_secret_refs)
 
             logger.info(
                 "Built secret refs for type interception",
                 card_refs_count=len(payment_card_refs),
                 password_refs_count=len([k for k in _secret_refs if k not in payment_card_refs]),
-                attemptable_password_count=len(attemptable_password_ids),
+                attemptable_password_count=len(_realm_credential_state.password_secret_refs),
             )
             _record_timing("parallel.data.passwords", t)
 
@@ -3503,12 +3593,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 _autopay_section,
                 payment_card_refs,
                 _auth_options_section,
-                _ref_to_encrypted,
                 _credential_refs_by_secret_ref,
                 _secret_refs,
                 _password_origins,
                 _base_custom_instructions,
                 _model_pricing,
+                _realm_credential_state,
             )
 
         browser_result, data_result = await asyncio.gather(
@@ -3617,64 +3707,32 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         interaction_layer_task = asyncio.create_task(_setup_interaction_layer())
 
         (
-            shipping_section,
+            user_context_section,
             autopay_section,
             card_refs,
             auth_options_section,
-            ref_to_encrypted,
             credential_refs_by_secret_ref,
             secret_refs,
             password_origins,
             base_custom_instructions,
             model_pricing,
+            initial_realm_credential_state,
         ) = data_result
 
-        # Cloud-custody passkeys: decrypt the private keys server-side (never to
-        # the LLM) and seed a CDP virtual authenticator on the browser session.
-        # passkey_ref_by_credential_id lets us record a passkey credential_ref
-        # as soon as the relying party actually exercises the credential.
-        if session_passkeys and config.payment.decryption_key:
-            from cryptography.hazmat.backends import default_backend
-            from cryptography.hazmat.primitives import serialization
-
-            from .service_crypto import decrypt_password_with_key
-
-            _pk_private_key = serialization.load_pem_private_key(
-                base64.b64decode(config.payment.decryption_key),
-                password=None,
-                backend=default_backend(),
+        # Use the same fail-closed worker hydration path at session start and
+        # on every later realm transition.
+        auth_options = initial_realm_credential_state.auth_options
+        auth_runtime_state = initial_realm_credential_state.auth_runtime_state
+        passkey_ref_by_credential_id.update(
+            initial_realm_credential_state.passkey_ref_by_credential_id
+        )
+        if initial_realm_credential_state.decrypted_passkeys:
+            injected_passkey_count = await dom_service.inject_passkeys(
+                initial_realm_credential_state.decrypted_passkeys
             )
-
-            async def _decrypt_passkey(pk: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-                decrypted = await asyncio.to_thread(
-                    decrypt_password_with_key,
-                    pk.get("encryptedPrivateKey", ""),
-                    _pk_private_key,
-                )
-                if not decrypted:
-                    return None
-                return {
-                    "credentialId": pk.get("credentialId"),
-                    "privateKey": decrypted,
-                    "rpId": pk.get("rpId"),
-                    "userHandle": pk.get("userHandle"),
-                    "signCount": pk.get("signCount") or 0,
-                }
-
-            _decrypted_passkeys = [
-                pk for pk in await asyncio.gather(*[_decrypt_passkey(p) for p in session_passkeys]) if pk
-            ]
-            for src in session_passkeys:
-                cid = src.get("credentialId")
-                if cid and src.get("id"):
-                    passkey_ref_by_credential_id[cid] = {
-                        "kind": "passkey",
-                        "id": str(src.get("id")),
-                    }
-            await dom_service.inject_passkeys(_decrypted_passkeys)
             logger.info(
                 "Injected cloud-custody passkeys into browser virtual authenticator",
-                count=len(_decrypted_passkeys),
+                count=injected_passkey_count,
             )
 
         # ===== PHASE 3: POST-SETUP =====
@@ -3755,22 +3813,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 ),
             )
 
-            async def _inject_start_url_local_storage():
-                t = time.monotonic()
-                try:
-                    from urllib.parse import urlparse
-
-                    parsed = urlparse(nav_url)
-                    origin = f"{parsed.scheme}://{parsed.netloc}"
-                    result_data = await inject_local_storage(config, session_id, origin)
-                    if result_data and result_data.get("injected"):
-                        logger.info(
-                            f"\U0001f4be Injected {result_data.get('count', 0)} localStorage entries for {origin}"
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to inject localStorage for {nav_url}: {e}")
-                _record_timing("navigation.inject_localStorage", t)
-
             async def _mark_navigated():
                 if browser_recorder:
                     await browser_recorder.mark(f"Navigated -> {nav_url[:80]}", action="goto")
@@ -3781,7 +3823,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 _record_timing("navigation.wait_ready", t)
 
             await asyncio.gather(
-                _inject_start_url_local_storage(),
                 _wait_for_start_url_ready(),
                 save_browser_action_message(
                     agent_id=agent_id,
@@ -3863,6 +3904,137 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             response_schema=response_schema,
         )
 
+        async def _prepare_credentials_for_url(target_url: str) -> Optional[Dict[str, Any]]:
+            """Atomically activate every saved credential type for a new realm."""
+            nonlocal auth_realm
+            nonlocal auth_options
+            nonlocal auth_options_section
+            nonlocal auth_runtime_state
+            nonlocal base_custom_instructions
+            nonlocal credential_refs_by_secret_ref
+            nonlocal dynamic_system_context
+            nonlocal minted_account_label
+            nonlocal minted_account_labels
+            nonlocal minted_credential_ref
+            nonlocal minted_option
+            nonlocal minted_phone_label
+            nonlocal minted_primary_label
+            nonlocal password_origins
+            nonlocal secret_refs
+            nonlocal session_passkeys
+            nonlocal session_passwords
+
+            target_realm = auth_realm_from_url(target_url)
+            if not target_realm or auth_realm_matches_url(auth_realm, target_url):
+                return None
+            if not session_id:
+                raise RuntimeError(f"Cannot prepare credentials for {target_realm} without a browser session")
+
+            activity.heartbeat(f"Preparing saved credentials for {target_realm}")
+            payload = await prepare_browser_auth(
+                config,
+                user_id=user_id,
+                session_id=session_id,
+                target_url=target_url,
+            )
+            realm_state = await build_realm_credential_state(
+                payload,
+                decryption_key=config.payment.decryption_key,
+            )
+            if (
+                realm_state.auth_realm != target_realm
+                and not auth_realm_matches_url(realm_state.auth_realm, target_url)
+            ):
+                raise RuntimeError(
+                    f"Credential realm mismatch: requested {target_realm}, got {realm_state.auth_realm}"
+                )
+
+            injected_passkey_count = await dom_service.inject_passkeys(
+                realm_state.decrypted_passkeys
+            )
+            passkey_ref_by_credential_id.update(realm_state.passkey_ref_by_credential_id)
+
+            retained_non_password_refs = {
+                key: value
+                for key, value in credential_refs_by_secret_ref.items()
+                if value.get("kind") not in {"password", "minted", "minted_account"}
+            }
+            auth_realm = realm_state.auth_realm
+            auth_options = realm_state.auth_options
+            auth_options_section = realm_state.auth_options_section
+            auth_runtime_state = realm_state.auth_runtime_state
+            credential_refs_by_secret_ref = {
+                **retained_non_password_refs,
+                **realm_state.credential_refs_by_secret_ref,
+            }
+            password_origins = realm_state.password_origins
+            secret_refs = {**card_refs, **realm_state.password_secret_refs}
+            session_passwords = list(payload.get("passwords") or [])
+            session_passkeys = list(payload.get("passkeys") or [])
+            base_custom_instructions = user_context_section + "\n\n" + auth_options_section
+            dynamic_system_context = build_browser_dynamic_system_context(
+                base_custom_instructions,
+                available_files=(list(available_file_paths.keys()) if available_file_paths else None),
+                response_schema=response_schema,
+            )
+
+            minted_option = auth_options.get("minted") or {}
+            minted_account_label = (
+                minted_option.get("email")
+                or minted_option.get("agentEmail")
+                or minted_option.get("agent_email")
+                or minted_option.get("accountLabel")
+                or minted_option.get("account_label")
+            )
+            minted_phone_label = (
+                minted_option.get("phone")
+                or minted_option.get("agentPhone")
+                or minted_option.get("agent_phone")
+            )
+            minted_account_labels = {
+                str(label).strip().lower()
+                for label in (minted_account_label, minted_phone_label)
+                if label
+            }
+            minted_primary_label = minted_account_label or minted_phone_label
+            minted_credential_ref = (
+                {
+                    "kind": "minted_account",
+                    "id": str(minted_option.get("id") or minted_primary_label),
+                }
+                if minted_option and minted_primary_label
+                else None
+            )
+
+            if realm_state.auth_credential_ref and task_id:
+                await save_browser_credential_ref_message(
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    message=f"Browser session credential applied for {auth_realm}.",
+                    role="TOOL",
+                    tool_name="browser_session_auth",
+                    credential_ref=realm_state.auth_credential_ref,
+                    browser_url=browser_url or "",
+                )
+
+            logger.info(
+                "Prepared credentials for browser realm transition",
+                previous_realm=current_url and auth_realm_from_url(current_url),
+                auth_realm=auth_realm,
+                password_count=len(realm_state.password_secret_refs),
+                passkey_count=len(realm_state.decrypted_passkeys),
+                passkeys_newly_injected=injected_passkey_count,
+                cookie_source=payload.get("auth_source"),
+                cookies_injected=payload.get("cookies_injected"),
+            )
+            return {
+                "auth_realm": auth_realm,
+                "cookies_injected": int(payload.get("cookies_injected") or 0),
+                "password_count": len(realm_state.password_secret_refs),
+                "passkey_count": len(realm_state.decrypted_passkeys),
+                "passkeys_newly_injected": injected_passkey_count,
+            }
+
         async def _recover_browser_step(reason: str, *, reload_page: bool) -> bool:
             nonlocal supervisor_recovery_count
             if supervisor_recovery_count >= BROWSER_SUPERVISOR_MAX_RECOVERIES:
@@ -3927,6 +4099,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     write_lock_approvals=write_lock_approvals,
                     system_name=system_name,
                     browser_network_recorder=browser_network_recorder,
+                    current_auth_realm=auth_realm,
+                    prepare_credentials_for_url=_prepare_credentials_for_url,
                 )
 
                 action_name = unified_action.get("action", "unknown")
@@ -3994,6 +4168,29 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 raise
             current_url = browser_state.get("url", "")
             await record_passkey_usage_once()
+
+            # Clicks, form submissions, and server redirects can cross an auth
+            # realm without a goto tool call. Prepare that realm before the
+            # model observes or interacts with it, then reload once so newly
+            # injected cookies and origin state participate in the first page
+            # request the agent acts on.
+            observed_auth_realm = auth_realm_from_url(current_url)
+            if observed_auth_realm and not auth_realm_matches_url(auth_realm, current_url):
+                await _prepare_credentials_for_url(current_url)
+                from browser_use.browser.events import NavigateToUrlEvent
+
+                reload_event = dom_service.session.event_bus.dispatch(
+                    NavigateToUrlEvent(url=current_url, wait_until="commit")
+                )
+                await reload_event
+                await reload_event.event_result(raise_if_any=True, raise_if_none=False)
+                await wait_for_navigation_ready(dom_service, url=current_url)
+                logger.info(
+                    "Reloaded page after redirected realm credential preparation",
+                    auth_realm=auth_realm,
+                    current_url=current_url,
+                )
+                continue
 
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
                 visited_urls.append(current_url)
@@ -4393,7 +4590,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     tool_call_id=rotate_call_id,
                 )
 
-                rotate_result = await rotate_browser_proxy(config, task_id)
+                rotation_storage_state = await _capture_rotation_storage_state(input_page)
+                rotate_result = await rotate_browser_proxy(config, task_id, current_url)
 
                 # Budget exhausted or provider busy: surface the error to the run and
                 # let the model decide to stop — never tear down the live session.
@@ -4433,9 +4631,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     await browser_stream.finish_tools(status="ERROR")
                     continue
 
-                # Success: swap the live CDP/Playwright stack to the rotated session
-                # (same profile → login preserved) and re-land on the current URL.
+                # Success: swap the live CDP/Playwright stack to the replacement
+                # session; captured storage preserves login across provider profiles.
                 new_cdp_url = rotate_result.get("ws_url")
+                if not isinstance(new_cdp_url, str) or not new_cdp_url:
+                    raise RuntimeError("rotate_ip succeeded without a replacement ws_url")
                 reconnected = await _reconnect_browser_stack_after_rotation(
                     new_cdp_url=new_cdp_url,
                     old_dom_service=dom_service,
@@ -4454,6 +4654,22 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 session_id = rotate_result.get("session_id", session_id)
                 browser_url = rotate_result.get("debug_url", browser_url)
                 cdp_url = new_cdp_url
+                browser_session_metadata = _updated_rotation_session_metadata(
+                    browser_session_metadata,
+                    rotate_result,
+                )
+                try:
+                    await _restore_rotation_storage_state(
+                        input_page,
+                        rotation_storage_state,
+                        current_url=current_url,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to restore browser storage after IP rotation",
+                        provider=rotate_result.get("provider"),
+                        error=str(exc),
+                    )
 
                 # Follow the rotation in the recording: rebind to the new page and
                 # start a fresh replay segment on the rotated session, so the saved
@@ -4462,7 +4678,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 if browser_recorder is not None:
                     browser_recorder.page = input_page
                     with contextlib.suppress(Exception):
-                        await browser_recorder.rotate_kernel_replay(session_id)
+                        if rotate_result.get("provider") == "kernel":
+                            await browser_recorder.rotate_kernel_replay(session_id)
+                        elif getattr(browser_recorder, "uses_kernel_replay", False):
+                            await browser_recorder.stop_kernel_replay()
 
                 # Rebuild the humanizer against the new pages (input events must
                 # target the live page, not the torn-down one).
@@ -4476,9 +4695,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 current_url = browser_state.get("url", current_url)
 
                 rotation_message = rotate_result.get("rotation_message", "Rotated to a fresh IP.")
+                recovery_action = rotate_result.get("recovery_action", "ip_rotated")
                 await save_browser_action_message(
                     agent_id=agent_id,
-                    title="IP rotated",
+                    title=(
+                        "Browser provider switched"
+                        if recovery_action == "provider_switched"
+                        else "IP rotated"
+                    ),
                     task_id=task_id,
                     message=rotation_message,
                     status=MessageStatus.FINISHED,
@@ -4490,8 +4714,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 action_result = {
                     "success": True,
                     "message": rotation_message,
+                    "provider": rotate_result.get("provider"),
+                    "previous_provider": rotate_result.get("previous_provider"),
+                    "recovery_action": recovery_action,
                     "proxy_tier": rotate_result.get("proxy_tier", "residential"),
                     "rotations_remaining": rotate_result.get("rotations_remaining"),
+                    "next_recovery": rotate_result.get("next_recovery"),
                 }
                 await action_history.record_action(
                     dom_service=dom_service,
@@ -4940,6 +5168,8 @@ Based on this feedback, I need to continue working on the task and address the i
                         write_lock_approvals=write_lock_approvals,
                         system_name=system_name,
                         browser_network_recorder=browser_network_recorder,
+                        current_auth_realm=auth_realm,
+                        prepare_credentials_for_url=_prepare_credentials_for_url,
                     ),
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )

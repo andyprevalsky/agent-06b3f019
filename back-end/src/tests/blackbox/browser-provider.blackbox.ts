@@ -12,6 +12,12 @@ import {
   resolveKernelProxyMode,
 } from '../../providers/browser/kernelProxy';
 import { retryWithBackoff } from '../../providers/retry';
+import { steel } from '../../providers/steel/session';
+import {
+  assertFixedRotationLadder,
+  deleteKernelResource,
+  runCrossProviderRotationLadder,
+} from './browser-provider-rotation.support';
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
@@ -53,6 +59,7 @@ interface BrowserMetadataResponse {
   proxy_source?: string;
   proxy_location?: { country?: string; state?: string; city?: string };
   profile_id?: string;
+  steel_profile_id?: string;
 }
 
 interface BrowserApiResponse {
@@ -73,6 +80,9 @@ interface BrowserApiResponse {
   rotations_used?: number;
   rotations_remaining?: number;
   rotation_message?: string;
+  previous_provider?: string;
+  recovery_action?: string;
+  next_recovery?: string;
 }
 
 function withProvider(value: string | undefined, test: () => void): void {
@@ -140,6 +150,10 @@ const tests: Array<[string, () => void]> = [
     },
   ],
   [
+    'rotate_ip uses the fixed Kernel residential, Kernel mobile, Steel, Steel ladder',
+    assertFixedRotationLadder,
+  ],
+  [
     'Kernel residential proxies fall back from city to state to country',
     () => {
       const candidates = kernelProxyCandidates({
@@ -199,25 +213,16 @@ const tests: Array<[string, () => void]> = [
   ],
 ];
 
-async function deleteKernelResource(path: string): Promise<void> {
-  const apiKey = process.env.KERNEL_API_KEY?.trim();
-  if (!apiKey) return;
-  const response = await fetch(`https://api.onkernel.com${path}`, {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
-  if (response.status !== 204 && response.status !== 404) {
-    throw new Error(`Kernel cleanup failed for ${path}: HTTP ${response.status}`);
-  }
-}
-
 async function runLiveProviderParity(): Promise<void> {
   const baseUrl = process.env.TEST_BASE_URL?.replace(/\/$/, '');
   if (!baseUrl) return;
   const apiKey = process.env.BACKEND_API_KEY?.trim();
   const kernelApiKey = process.env.KERNEL_API_KEY?.trim();
-  if (!apiKey || !kernelApiKey) {
-    throw new Error('BACKEND_API_KEY and KERNEL_API_KEY are required for live provider parity');
+  const steelApiKey = process.env.STEEL_API_KEY?.trim();
+  if (!apiKey || !kernelApiKey || !steelApiKey) {
+    throw new Error(
+      'BACKEND_API_KEY, KERNEL_API_KEY, and STEEL_API_KEY are required for live provider parity'
+    );
   }
 
   const userId = `kernel-provider-${randomUUID()}`;
@@ -357,7 +362,18 @@ async function runLiveProviderParity(): Promise<void> {
     assert(ipBefore !== '', 'could not read exit IP before rotation');
 
     const rotated = await postWithKernelConnectionRetry('/rotate-proxy', { task_id: init.task_id });
-    assert(rotated.proxy_tier === 'residential', 'first rotation must be residential');
+    assert(
+      rotated.provider === 'kernel' && rotated.proxy_tier === 'residential',
+      'first rotation must be Kernel residential'
+    );
+    assert(
+      rotated.previous_provider === 'kernel' && rotated.recovery_action === 'ip_rotated',
+      'first rotation returned incorrect recovery metadata'
+    );
+    assert(
+      rotated.next_recovery === 'rotate_kernel_mobile_ip',
+      'first rotation did not advertise mandatory Kernel mobile next'
+    );
     assert(
       rotated.rotations_used === 1,
       `rotations_used should be 1, got ${rotated.rotations_used}`
@@ -386,26 +402,24 @@ async function runLiveProviderParity(): Promise<void> {
       `rotation did not change the exit IP (before=${ipBefore}, after=${ipAfter})`
     );
 
-    // ----- mobile tier: verify the residential->mobile escalation ACTUALLY moves
-    // the exit IP (ground truth via ipify, not the agent's self-report). The ladder
-    // is residential (calls 1-2) -> mobile (calls 3-4); seed the counter to 2 so the
-    // next rotation is call 3 = the mobile band. Gated on the same flag the backend
-    // reads, so a mobile-disabled deploy asserts the residential fallback instead of
-    // silently passing. -----
-    const mobileFlag = (process.env.KERNEL_MOBILE_FALLBACK_ENABLED ?? '').trim().toLowerCase();
-    const mobileOn = ['1', 'true', 'yes', 'on'].includes(mobileFlag);
-    await prisma.browserSession.update({
-      where: { id: String(init.task_id) },
-      data: { proxyRotationCount: 2 },
-    });
+    // ----- call 2: mandatory Kernel mobile. No feature flag and no counter seeding:
+    // this proves the real server-owned sequence that production will execute. -----
     const residentialIp = ipAfter;
     const mobileRotated = await postWithKernelConnectionRetry('/rotate-proxy', {
       task_id: init.task_id,
     });
-    const expectedTier = mobileOn ? 'mobile' : 'residential';
     assert(
-      mobileRotated.proxy_tier === expectedTier,
-      `call 3 expected tier ${expectedTier}, got ${mobileRotated.proxy_tier}`
+      mobileRotated.provider === 'kernel' && mobileRotated.proxy_tier === 'mobile',
+      `call 2 expected Kernel mobile, got ${mobileRotated.provider}/${mobileRotated.proxy_tier}`
+    );
+    assert(
+      mobileRotated.rotations_used === 2 && mobileRotated.rotations_remaining === 2,
+      'call 2 returned the wrong rotation counters'
+    );
+    assert(
+      mobileRotated.recovery_action === 'ip_rotated' &&
+        mobileRotated.next_recovery === 'switch_provider_to_steel',
+      'call 2 did not advertise the Kernel-to-Steel next recovery'
     );
     assert(
       mobileRotated.ws_url !== undefined && mobileRotated.ws_url !== rotated.ws_url,
@@ -424,40 +438,17 @@ async function runLiveProviderParity(): Promise<void> {
     );
     liveSessionId = String(mobileRotated.session_id);
     const mobileIp = await readDifferentExitIp(String(mobileRotated.ws_url), residentialIp);
-    // The residential->mobile switch (or a third residential recycle when mobile is
-    // off) must land a genuinely different egress IP. This is the exact claim the
-    // agent run could not prove: that the mobile tier actually rotates the IP.
+    // Ground truth comes from ipify, not from response metadata alone.
     assert(
       mobileIp !== '' && mobileIp !== residentialIp,
-      `${expectedTier} rotation did not change the exit IP (residential=${residentialIp}, next=${mobileIp})`
+      `mobile rotation did not change the exit IP (residential=${residentialIp}, mobile=${mobileIp})`
     );
     // Print the ground-truth IP ladder so the run is a self-documenting repro of
     // the exit IP actually changing across tiers (baseline -> residential -> mobile).
     console.log(
       `[rotate_ip repro] exit IP ladder: baseline(res)=${ipBefore} ` +
         `-> rotation1(residential)=${ipAfter} ` +
-        `-> rotation3(${mobileRotated.proxy_tier})=${mobileIp}`
-    );
-
-    // ----- rotation cap: seed the row at the cap and expect a 409 -----
-    await prisma.browserSession.update({
-      where: { id: String(init.task_id) },
-      data: { proxyRotationCount: 4 },
-    });
-    const exhaustedResponse = await fetch(`${baseUrl}/api/browser-session/rotate-proxy`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ task_id: init.task_id }),
-    });
-    assert(
-      exhaustedResponse.status === 409,
-      `expected 409 when rotation budget is exhausted, got ${exhaustedResponse.status}`
-    );
-    const exhaustedBody = (await exhaustedResponse.json()) as { error?: string; message?: string };
-    assert(
-      exhaustedBody.error === 'proxy_rotation_exhausted' &&
-        String(exhaustedBody.message).includes('PROXY_ROTATION_EXHAUSTED'),
-      'exhaustion response missing the structured error the agent reads'
+        `-> rotation2(${mobileRotated.proxy_tier})=${mobileIp}`
     );
 
     // ----- unknown task → 404 -----
@@ -591,6 +582,28 @@ async function runLiveProviderParity(): Promise<void> {
 
     const secondRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
     assert(secondRemote.proxy_id === proxyId, 'resume did not reuse the managed proxy ID');
+
+    const crossProvider = await runCrossProviderRotationLadder({
+      baseUrl,
+      headers,
+      taskId: String(init.task_id),
+      currentKernelSessionId: liveSessionId,
+      mobileIp,
+      post,
+      readDifferentExitIp,
+      retrieveKernelBrowser: (sessionId) =>
+        kernel.browsers.retrieve(sessionId, { include_deleted: true }),
+      retrieveSteelBrowser: (sessionId) => steel.sessions.retrieve(sessionId),
+    });
+    liveSessionId = crossProvider.finalSessionId;
+
+    console.log(
+      `[rotate_ip repro] complete ladder: Kernel baseline=${ipBefore} ` +
+        `-> Kernel residential=${ipAfter} -> Kernel mobile=${mobileIp} ` +
+        `-> Steel residential=${crossProvider.firstSteelIp} ` +
+        `-> Steel residential=${crossProvider.secondSteelIp}`
+    );
+
     await post('/close', { session_id: liveSessionId, pause: false });
     liveSessionId = undefined;
   } finally {

@@ -9,7 +9,12 @@
  */
 
 import { buildFingerprintScript } from '../../providers/steel/injectionScripts';
-import { buildSteelProxySettings } from '../../providers/steel/session';
+import { prisma } from '../../providers/database';
+import {
+  buildSteelProxySettings,
+  isInvalidSteelProxyConfiguration,
+} from '../../providers/steel/session';
+import { recreateSession } from '../../providers/steel/sessionResume';
 import type { FingerprintData } from '../../providers/steel/types';
 
 function makeFingerprint(): FingerprintData {
@@ -127,7 +132,129 @@ function testProxySettingsDropCityFallsBackToStateLevel(): void {
   }
 }
 
-function main(): void {
+function testInvalidProxyConfigurationClassification(): void {
+  assert(
+    isInvalidSteelProxyConfiguration(new Error('400 Invalid proxy configuration')),
+    'Steel invalid-proxy errors must trigger the city-drop retry'
+  );
+  assert(
+    !isInvalidSteelProxyConfiguration(new Error('500 upstream unavailable')),
+    'unrelated Steel failures must not alter proxy targeting'
+  );
+}
+
+async function testReplacementRetryDropsRejectedCity(): Promise<void> {
+  const browserSessionFindUnique = prisma.browserSession.findUnique;
+  const browserSessionUpdateMany = prisma.browserSession.updateMany;
+  const agentFindUnique = prisma.agent.findUnique;
+  const integrationFindUnique = prisma.integration.findUnique;
+  const profileFindUnique = prisma.browserProviderProfile.findUnique;
+  const contextFindUnique = prisma.browserContext.findUnique;
+  const previousProxyServer = process.env.STEEL_PROXY_SERVER;
+  const previousProxyEnabled = process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED;
+  const createInputs: Array<Record<string, unknown>> = [];
+
+  try {
+    delete process.env.STEEL_PROXY_SERVER;
+    process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED = 'true';
+    (
+      prisma.browserSession as unknown as { findUnique: typeof prisma.browserSession.findUnique }
+    ).findUnique = (async () => ({
+      id: 'replacement-city-retry-task',
+      sessionId: 'kernel-old',
+      provider: 'kernel',
+      currentUrl: null,
+      startUrl: null,
+      agentId: 'replacement-city-retry-agent',
+      contextId: 'replacement-city-retry-context',
+      context: { userId: 'replacement-city-retry-user' },
+    })) as typeof prisma.browserSession.findUnique;
+    (
+      prisma.browserSession as unknown as { updateMany: typeof prisma.browserSession.updateMany }
+    ).updateMany = (async () => ({ count: 1 })) as typeof prisma.browserSession.updateMany;
+    (prisma.agent as unknown as { findUnique: typeof prisma.agent.findUnique }).findUnique =
+      (async () => ({
+        proxyCountry: 'US',
+        proxyState: 'CA',
+        proxyCity: 'RCA TEST CITY',
+      })) as typeof prisma.agent.findUnique;
+    (
+      prisma.integration as unknown as { findUnique: typeof prisma.integration.findUnique }
+    ).findUnique = (async () => null) as typeof prisma.integration.findUnique;
+    (
+      prisma.browserProviderProfile as unknown as {
+        findUnique: typeof prisma.browserProviderProfile.findUnique;
+      }
+    ).findUnique = (async () => null) as typeof prisma.browserProviderProfile.findUnique;
+    (
+      prisma.browserContext as unknown as { findUnique: typeof prisma.browserContext.findUnique }
+    ).findUnique = (async () => ({ contextId: null })) as typeof prisma.browserContext.findUnique;
+
+    const result = await recreateSession(
+      'replacement-city-retry-task',
+      { forceManagedRotation: true },
+      {
+        createSession: async (input) => {
+          createInputs.push(input as unknown as Record<string, unknown>);
+          if (createInputs.length === 1) {
+            const error = new Error('400 Invalid proxy configuration') as Error & {
+              status: number;
+            };
+            error.status = 400;
+            throw error;
+          }
+          return {
+            id: 'steel-after-city-fallback',
+            debugUrl: 'https://steel.example/debug',
+            profileId: null,
+            proxySource: 'steel',
+          };
+        },
+        validateConnection: async () => true,
+      }
+    );
+
+    assert(result.sessionId === 'steel-after-city-fallback', 'replacement retry did not succeed');
+    assert(
+      createInputs.length === 2,
+      `expected two Steel create attempts, got ${createInputs.length}`
+    );
+    const firstGeo = (createInputs[0]?.useProxy as { geolocation?: Record<string, string> })
+      ?.geolocation;
+    const secondGeo = (createInputs[1]?.useProxy as { geolocation?: Record<string, string> })
+      ?.geolocation;
+    assert(firstGeo?.city === 'RCA TEST CITY', 'first replacement attempt did not include city');
+    assert(secondGeo?.city === undefined, 'replacement retry did not drop rejected city');
+    assert(secondGeo?.state === 'CA', 'replacement retry dropped state with city');
+    assert(secondGeo?.country === 'US', 'replacement retry dropped country with city');
+  } finally {
+    (
+      prisma.browserSession as unknown as { findUnique: typeof prisma.browserSession.findUnique }
+    ).findUnique = browserSessionFindUnique;
+    (
+      prisma.browserSession as unknown as { updateMany: typeof prisma.browserSession.updateMany }
+    ).updateMany = browserSessionUpdateMany;
+    (prisma.agent as unknown as { findUnique: typeof prisma.agent.findUnique }).findUnique =
+      agentFindUnique;
+    (
+      prisma.integration as unknown as { findUnique: typeof prisma.integration.findUnique }
+    ).findUnique = integrationFindUnique;
+    (
+      prisma.browserProviderProfile as unknown as {
+        findUnique: typeof prisma.browserProviderProfile.findUnique;
+      }
+    ).findUnique = profileFindUnique;
+    (
+      prisma.browserContext as unknown as { findUnique: typeof prisma.browserContext.findUnique }
+    ).findUnique = contextFindUnique;
+    if (previousProxyServer === undefined) delete process.env.STEEL_PROXY_SERVER;
+    else process.env.STEEL_PROXY_SERVER = previousProxyServer;
+    if (previousProxyEnabled === undefined) delete process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED;
+    else process.env.BROWSER_AGENT_STEEL_PROXY_ENABLED = previousProxyEnabled;
+  }
+}
+
+async function main(): Promise<void> {
   const tests = [
     {
       name: 'inner viewport dimensions are not spoofed',
@@ -141,12 +268,20 @@ function main(): void {
       name: 'proxy settings drop unsupported city and fall back to country+state',
       fn: testProxySettingsDropCityFallsBackToStateLevel,
     },
+    {
+      name: 'invalid Steel proxy configuration triggers location fallback',
+      fn: testInvalidProxyConfigurationClassification,
+    },
+    {
+      name: 'Steel replacement retries a rejected city at country and state scope',
+      fn: testReplacementRetryDropsRejectedCity,
+    },
   ];
   const failures: string[] = [];
 
   for (const test of tests) {
     try {
-      test.fn();
+      await test.fn();
       console.log(`✓ ${test.name}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -161,4 +296,4 @@ function main(): void {
   console.log(`\nPassed ${tests.length} Steel fingerprint test(s).`);
 }
 
-main();
+void main();

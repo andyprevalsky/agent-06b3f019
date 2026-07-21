@@ -538,11 +538,19 @@ def auth_realm_from_url(url: str) -> str:
     """Best-effort realm derivation for the auth-options request."""
     if not url:
         return ""
+    parsed_input = urlparse(url)
+    looks_like_host_port = bool(re.match(r"^[^/?#]+:\d+(?:[/?#]|$)", url))
+    if (
+        parsed_input.scheme
+        and parsed_input.scheme not in {"http", "https"}
+        and not looks_like_host_port
+    ):
+        return ""
     parsed = urlparse(url if url.startswith(("http://", "https://")) else f"https://{url}")
-    host = (parsed.netloc or parsed.path).split("/")[0].lower()
+    host = (parsed.hostname or parsed.path.split("/")[0]).lower()
     if host.startswith("www."):
         host = host[4:]
-    allow_query_override = host.startswith(("localhost", "127.0.0.1")) or host.endswith(
+    allow_query_override = host in {"localhost", "127.0.0.1"} or host.endswith(
         (".ngrok-free.dev", ".ngrok.app", ".ngrok.io", ".loca.lt")
     )
     if allow_query_override:
@@ -552,9 +560,26 @@ def auth_realm_from_url(url: str) -> str:
             override_host = auth_realm_from_url(override)
             if override_host:
                 return override_host
+    if host == "aws.amazon.com" or host.endswith(".aws.amazon.com"):
+        return "aws.amazon.com"
+    if host == "amazon.com" or host.endswith(".amazon.com"):
+        return "amazon.com"
     if host == "uber.com" or host.endswith(".uber.com"):
         return "uber.com"
     return host
+
+
+def auth_realm_matches_url(auth_realm: str, url: str) -> bool:
+    """Return whether a backend-authoritative realm owns this URL host."""
+    if not auth_realm or not url:
+        return False
+    derived_realm = auth_realm_from_url(url)
+    if derived_realm == auth_realm:
+        return True
+    parsed = urlparse(url if url.startswith(("http://", "https://")) else f"https://{url}")
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    normalized_realm = auth_realm.lower().lstrip(".").removeprefix("www.")
+    return host == normalized_realm or host.endswith(f".{normalized_realm}")
 
 
 def _password_ref(origin: str, username: str, username_counts: Dict[str, int]) -> str:

@@ -882,7 +882,7 @@ class DOMService:
         except Exception as e:
             logger.warning(f"⚠️ [anti-detect] Failed to inject anti-detection script: {e}")
 
-    async def inject_passkeys(self, passkeys: List[Dict[str, Any]]) -> None:
+    async def inject_passkeys(self, passkeys: List[Dict[str, Any]]) -> int:
         """Seed a CDP virtual authenticator with cloud-custody passkeys.
 
         Each passkey dict must carry a DECRYPTED PKCS#8 private key (base64),
@@ -893,29 +893,30 @@ class DOMService:
         agent can also click "Sign in with a passkey" for gated flows.
         """
         if not passkeys:
-            return
+            return 0
         if self._webauthn_cdp is None:
-            logger.warning("⚠️ [passkey] no WebAuthn CDP session; cannot inject passkeys")
-            return
-        try:
-            result = await self._send_cdp_command(
-                self._webauthn_cdp,
-                "WebAuthn.addVirtualAuthenticator",
-                {
-                    "options": {
-                        "protocol": "ctap2",
-                        "transport": "internal",
-                        "hasResidentKey": True,
-                        "hasUserVerification": True,
-                        "isUserVerified": True,
-                        "automaticPresenceSimulation": True,
-                    }
-                },
-            )
-            self._passkey_authenticator_id = result.get("authenticatorId")
-        except Exception as e:
-            logger.warning(f"⚠️ [passkey] addVirtualAuthenticator failed: {e}")
-            return
+            raise RuntimeError("No WebAuthn CDP session is available for passkey injection")
+        if self._passkey_authenticator_id is None:
+            try:
+                result = await self._send_cdp_command(
+                    self._webauthn_cdp,
+                    "WebAuthn.addVirtualAuthenticator",
+                    {
+                        "options": {
+                            "protocol": "ctap2",
+                            "transport": "internal",
+                            "hasResidentKey": True,
+                            "hasUserVerification": True,
+                            "isUserVerified": True,
+                            "automaticPresenceSimulation": True,
+                        }
+                    },
+                )
+                self._passkey_authenticator_id = result.get("authenticatorId")
+            except Exception as e:
+                raise RuntimeError("Failed to create the browser passkey authenticator") from e
+            if not self._passkey_authenticator_id:
+                raise RuntimeError("Browser passkey authenticator did not return an id")
 
         seeded = 0
         for pk in passkeys:
@@ -923,6 +924,8 @@ class DOMService:
             private_key = pk.get("privateKey")
             rp_id = pk.get("rpId")
             if not credential_id or not private_key or not rp_id:
+                raise RuntimeError(f"Incomplete passkey payload for relying party {rp_id or 'unknown'}")
+            if credential_id in self._passkey_seed_counts:
                 continue
             credential: Dict[str, Any] = {
                 "credentialId": credential_id,
@@ -943,7 +946,7 @@ class DOMService:
                 self._passkey_seed_counts[credential_id] = int(pk.get("signCount") or 0)
                 seeded += 1
             except Exception as e:
-                logger.warning(f"⚠️ [passkey] addCredential failed for {rp_id}: {e}")
+                raise RuntimeError(f"Failed to inject passkey for {rp_id}") from e
         logger.info(f"🔑 [passkey] seeded {seeded} passkey credential(s) on virtual authenticator for the session")
         if seeded:
             counts = await self.read_passkey_signcounts()
@@ -955,6 +958,11 @@ class DOMService:
                 f"expected_count={len(expected_ids)} observed_count={len(observed_ids)} "
                 f"missing_count={len(missing)}"
             )
+            if missing:
+                raise RuntimeError(
+                    f"Browser passkey readback is missing {len(missing)} injected credential(s)"
+                )
+        return seeded
 
     async def read_passkey_signcounts(self) -> Dict[str, int]:
         """Return {credentialId: signCount} for the seeded authenticator.

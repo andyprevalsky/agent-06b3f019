@@ -260,16 +260,15 @@ export async function injectUserData(
     url = `https://${url}`;
   }
   const hostname = new URL(url).hostname;
-  // Extract registrable domain (e.g. "www.amazon.com" → "amazon.com")
-  const parts = hostname.split('.');
-  const registrableDomain = parts.length > 2 ? parts.slice(-2).join('.') : hostname;
   const authRealm = canonicalAuthRealm(url);
-  // Match: exact domain, with leading dot, and registrable domain variants
+  // Match the exact host plus the canonical auth realm. Never infer a
+  // registrable domain by taking the last two labels: for example.co.uk that
+  // would become co.uk and cross a credential boundary.
   const domainVariants = [
     hostname, // "www.amazon.com"
     `.${hostname}`, // ".www.amazon.com"
-    registrableDomain, // "amazon.com"
-    `.${registrableDomain}`, // ".amazon.com"
+    authRealm, // "amazon.com"
+    `.${authRealm}`, // ".amazon.com"
   ];
   const uniqueDomains = [...new Set(domainVariants)];
   // Origin-based tables (localStorage, IndexedDB, cacheStorage, permissions) store
@@ -278,10 +277,10 @@ export async function injectUserData(
   const originDomainFilter = {
     userId,
     OR: [
-      { origin: { endsWith: `://${registrableDomain}` } }, // exact: https://amazon.com
-      { origin: { contains: `://${registrableDomain}:` } }, // exact with port: https://amazon.com:8443
-      { origin: { endsWith: `.${registrableDomain}` } }, // subdomain: https://www.amazon.com
-      { origin: { contains: `.${registrableDomain}:` } }, // subdomain with port: https://www.amazon.com:8443
+      { origin: { endsWith: `://${authRealm}` } }, // exact: https://amazon.com
+      { origin: { contains: `://${authRealm}:` } }, // exact with port: https://amazon.com:8443
+      { origin: { endsWith: `.${authRealm}` } }, // subdomain: https://www.amazon.com
+      { origin: { contains: `.${authRealm}:` } }, // subdomain with port: https://www.amazon.com:8443
     ],
   };
   log.info(
@@ -382,6 +381,11 @@ export async function injectUserData(
         browserProfile: authSource.browserProfile,
       },
     });
+    if (cookies.length === 0) {
+      throw new Error(
+        `Cookie bundle ${authSource.id} was selected for ${authRealm} but contains no cookie rows`
+      );
+    }
   }
 
   const hasCookies = cookies.length > 0;
@@ -391,6 +395,7 @@ export async function injectUserData(
   const hasIndexedDB = indexedDBOrigins.length > 0;
   const hasPermissions = permissions.length > 0;
   const hasCacheStorage = cacheStorageOrigins.length > 0;
+  const selectedCookieBundleId = authSource.kind === 'cookie_bundle' ? authSource.id : null;
 
   log.info(
     `  Cookies: ${hasCookies ? cookies.length : 'none'}, Fingerprint: ${hasFingerprint ? 'yes' : 'no'}, localStorage: ${hasLocalStorage ? localStorageOrigins.length + ' origins' : 'none'}, IndexedDB: ${hasIndexedDB ? indexedDBOrigins.length + ' origins' : 'none'}, Permissions: ${hasPermissions ? permissions.length + ' grants' : 'none'}, CacheStorage: ${hasCacheStorage ? cacheStorageOrigins.length + ' origins' : 'none'}`
@@ -415,6 +420,9 @@ export async function injectUserData(
       log.info(`  [3/9] CDP connected (${Date.now() - startTime}ms)`);
     }
     const context = browser.contexts()[0];
+    if (context === undefined) {
+      throw new Error('Validated CDP browser has no context for credential injection');
+    }
 
     let cookieResult = {
       injected: false,
@@ -431,6 +439,7 @@ export async function injectUserData(
     // Run all injections in parallel for performance
     log.info(`  [4/5] Injecting browser state in parallel...`);
     const injectionPromises: Promise<void>[] = [];
+    const injectionErrors: Error[] = [];
 
     // 1. Inject cookies if available
     if (hasCookies) {
@@ -461,7 +470,14 @@ export async function injectUserData(
               };
             });
 
-            const validCookies = playwrightCookies.filter((c) => c.name && c.value);
+            const invalidCookies = playwrightCookies.filter((cookie) => cookie.name === '');
+            if (invalidCookies.length > 0) {
+              throw new Error(
+                `Cookie bundle ${selectedCookieBundleId ?? 'unknown'} contains ${invalidCookies.length} cookie row(s) without a name`
+              );
+            }
+            // Empty cookie values are valid and must not be filtered out.
+            const validCookies = playwrightCookies;
             log.info(
               `  [cookies] Transform complete, ${validCookies.length} valid (${Date.now() - startTime}ms)`
             );
@@ -480,6 +496,11 @@ export async function injectUserData(
             log.error('Failed to inject cookies', {
               error: error instanceof Error ? error.message : String(error),
             });
+            injectionErrors.push(
+              new Error('Failed to inject cookies', {
+                cause: error instanceof Error ? error : new Error(String(error)),
+              })
+            );
           }
         })()
       );
@@ -512,6 +533,11 @@ export async function injectUserData(
             log.error('Failed to inject localStorage', {
               error: error instanceof Error ? error.message : String(error),
             });
+            injectionErrors.push(
+              new Error('Failed to inject localStorage', {
+                cause: error instanceof Error ? error : new Error(String(error)),
+              })
+            );
           }
         })()
       );
@@ -527,6 +553,11 @@ export async function injectUserData(
             log.error('Failed to inject indexedDB', {
               error: error instanceof Error ? error.message : String(error),
             });
+            injectionErrors.push(
+              new Error('Failed to inject indexedDB', {
+                cause: error instanceof Error ? error : new Error(String(error)),
+              })
+            );
           }
         })()
       );
@@ -543,6 +574,11 @@ export async function injectUserData(
             log.error('Failed to inject permissions', {
               error: error instanceof Error ? error.message : String(error),
             });
+            injectionErrors.push(
+              new Error('Failed to inject permissions', {
+                cause: error instanceof Error ? error : new Error(String(error)),
+              })
+            );
           }
         })()
       );
@@ -563,6 +599,11 @@ export async function injectUserData(
             log.error('Failed to inject cacheStorage', {
               error: error instanceof Error ? error.message : String(error),
             });
+            injectionErrors.push(
+              new Error('Failed to inject cacheStorage', {
+                cause: error instanceof Error ? error : new Error(String(error)),
+              })
+            );
           }
         })()
       );
@@ -584,6 +625,9 @@ export async function injectUserData(
 
     // Wait for all injections to complete in parallel
     await Promise.all(injectionPromises);
+    if (injectionErrors.length > 0) {
+      throw new AggregateError(injectionErrors, 'Browser credential/state injection failed');
+    }
     log.info(`  [4/5] ✅ All injections complete (${Date.now() - startTime}ms)`);
     return {
       cookies: cookieResult,

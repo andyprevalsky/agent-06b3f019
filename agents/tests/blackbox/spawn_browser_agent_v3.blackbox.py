@@ -4321,6 +4321,194 @@ async def test_resume_browser_session_rate_limited():
     assert out["rate_limited"] is True
 
 
+async def test_rotate_browser_proxy_posts_current_url():
+    from domains.spawn_browser_agent_v3.repo import rotate_browser_proxy
+
+    setup_mock(
+        {
+            "/api/browser-session/rotate-proxy": {
+                "status": 200,
+                "json": {
+                    "session_id": "steel-1",
+                    "ws_url": "wss://steel-1",
+                    "recovery_action": "provider_switched",
+                },
+            }
+        }
+    )
+    out = await rotate_browser_proxy(_fake_config(), "t1", "https://example.com/current")
+    assert out["recovery_action"] == "provider_switched"
+    call = assert_captured_call(url_contains="/api/browser-session/rotate-proxy", method="POST")
+    assert json.loads(call["requestBody"]) == {
+        "task_id": "t1",
+        "current_url": "https://example.com/current",
+    }
+
+
+async def test_rotation_storage_state_survives_provider_switch():
+    from domains.spawn_browser_agent_v3.handler import (
+        _capture_rotation_storage_state,
+        _restore_rotation_storage_state,
+    )
+
+    storage_state = {
+        "cookies": [
+            {
+                "name": "session",
+                "value": "secret",
+                "domain": ".example.com",
+                "path": "/",
+                "expires": -1,
+                "httpOnly": True,
+                "secure": True,
+                "sameSite": "Lax",
+            }
+        ],
+        "origins": [
+            {
+                "origin": "https://example.com",
+                "localStorage": [{"name": "checkout", "value": "ready"}],
+            }
+        ],
+    }
+    old_context = SimpleNamespace(storage_state=AsyncMock(return_value=storage_state))
+    old_page = SimpleNamespace(context=old_context)
+    captured = await _capture_rotation_storage_state(old_page)
+    old_context.storage_state.assert_awaited_once_with(indexed_db=True)
+
+    new_context = SimpleNamespace(add_cookies=AsyncMock(), add_init_script=AsyncMock())
+    new_page = SimpleNamespace(
+        context=new_context,
+        url="https://example.com/current",
+        evaluate=AsyncMock(),
+        goto=AsyncMock(),
+    )
+    await _restore_rotation_storage_state(
+        new_page,
+        captured,
+        current_url="https://example.com/current",
+    )
+    new_context.add_cookies.assert_awaited_once_with(storage_state["cookies"])
+    new_context.add_init_script.assert_awaited_once()
+    new_page.evaluate.assert_awaited_once()
+    new_page.goto.assert_awaited_once_with(
+        "https://example.com/current",
+        wait_until="domcontentloaded",
+        timeout=15_000,
+    )
+
+
+async def test_rotation_storage_state_round_trips_in_real_browser():
+    """Cookies, localStorage, and IndexedDB survive a real context replacement."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3.handler import (
+        _capture_rotation_storage_state,
+        _restore_rotation_storage_state,
+    )
+
+    url = "http://storage-rotation.test/"
+
+    async def serve_page(route):
+        await route.fulfill(
+            status=200,
+            content_type="text/html",
+            body="<!doctype html><title>rotation storage</title>",
+        )
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            old_context = await browser.new_context()
+            old_page = await old_context.new_page()
+            await old_page.route("**/*", serve_page)
+            await old_page.goto(url)
+            await old_context.add_cookies(
+                [
+                    {
+                        "name": "session",
+                        "value": "cookie-secret",
+                        "url": url,
+                        "httpOnly": True,
+                        "sameSite": "Lax",
+                    }
+                ]
+            )
+            await old_page.evaluate("localStorage.setItem('checkout', 'ready')")
+            await old_page.evaluate(
+                """async () => {
+                  await new Promise((resolve, reject) => {
+                    const request = indexedDB.open('auth-db', 1);
+                    request.onupgradeneeded = () => {
+                      request.result.createObjectStore('sessions', {keyPath: 'id'});
+                    };
+                    request.onerror = () => reject(request.error);
+                    request.onsuccess = () => {
+                      const db = request.result;
+                      const tx = db.transaction('sessions', 'readwrite');
+                      tx.objectStore('sessions').put({id: 'primary', token: 'idb-secret'});
+                      tx.oncomplete = () => { db.close(); resolve(); };
+                      tx.onerror = () => reject(tx.error);
+                    };
+                  });
+                }"""
+            )
+
+            captured = await _capture_rotation_storage_state(old_page)
+            assert captured is not None
+            origin = next(item for item in captured["origins"] if item["origin"] == url.rstrip("/"))
+            assert origin["localStorage"] == [{"name": "checkout", "value": "ready"}]
+            assert origin["indexedDB"][0]["name"] == "auth-db"
+
+            new_context = await browser.new_context()
+            new_page = await new_context.new_page()
+            await new_page.route("**/*", serve_page)
+            await _restore_rotation_storage_state(new_page, captured, current_url=url)
+
+            cookies = await new_context.cookies(url)
+            assert any(
+                cookie["name"] == "session" and cookie["value"] == "cookie-secret"
+                for cookie in cookies
+            )
+            assert await new_page.evaluate("localStorage.getItem('checkout')") == "ready"
+            indexed_db_token = await new_page.evaluate(
+                """async () => await new Promise((resolve, reject) => {
+                  const request = indexedDB.open('auth-db');
+                  request.onerror = () => reject(request.error);
+                  request.onsuccess = () => {
+                    const db = request.result;
+                    const tx = db.transaction('sessions', 'readonly');
+                    const get = tx.objectStore('sessions').get('primary');
+                    get.onsuccess = () => { db.close(); resolve(get.result?.token); };
+                    get.onerror = () => { db.close(); reject(get.error); };
+                  };
+                })"""
+            )
+            assert indexed_db_token == "idb-secret"
+            await new_context.close()
+            await old_context.close()
+        finally:
+            await browser.close()
+
+
+def test_rotation_session_metadata_tracks_provider_switch():
+    from domains.spawn_browser_agent_v3.handler import _updated_rotation_session_metadata
+
+    updated = _updated_rotation_session_metadata(
+        {"provider": "kernel", "profile_id": "kernel-profile"},
+        {
+            "browser_session_metadata": {
+                "provider": "steel",
+                "profile_id": "steel-profile",
+                "steel_profile_id": "steel-profile",
+            }
+        },
+    )
+    assert updated["provider"] == "steel"
+    assert updated["profile_id"] == "steel-profile"
+    assert updated["steel_profile_id"] == "steel-profile"
+
+
 async def test_fetch_auth_options_success():
     from domains.spawn_browser_agent_v3.repo import fetch_auth_options
 
@@ -11110,6 +11298,22 @@ async def run_all_tests():
         test_resume_browser_session_posts_resume_endpoint,
     )
     await r.record_async("resume_browser_session_rate_limited", test_resume_browser_session_rate_limited)
+    await r.record_async(
+        "rotate_browser_proxy_current_url",
+        test_rotate_browser_proxy_posts_current_url,
+    )
+    await r.record_async(
+        "rotation_storage_state_provider_switch",
+        test_rotation_storage_state_survives_provider_switch,
+    )
+    await r.record_async(
+        "rotation_storage_state_real_browser_round_trip",
+        test_rotation_storage_state_round_trips_in_real_browser,
+    )
+    r.record(
+        "rotation_session_metadata_provider_switch",
+        test_rotation_session_metadata_tracks_provider_switch,
+    )
     await r.record_async("fetch_auth_options_success", test_fetch_auth_options_success)
     await r.record_async("fetch_auth_options_error", test_fetch_auth_options_error_raises)
     await r.record_async(

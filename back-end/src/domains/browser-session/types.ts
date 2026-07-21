@@ -28,10 +28,15 @@ export const resumeSessionSchema = z.object({
 // identified by task_id (the stable BrowserSession row id / escalation key).
 export const rotateProxySchema = z.object({
   task_id: z.string().uuid(),
+  current_url: z.string().min(1).max(8192).optional(),
 });
 
 export const injectLocalStorageSchema = z.object({
   origin: z.string().url(),
+});
+
+export const prepareSessionCredentialsSchema = z.object({
+  target_url: z.string().min(1),
 });
 
 // ---------------------------------------------------------------------------
@@ -43,6 +48,7 @@ export type CloseSessionInput = z.infer<typeof closeSessionSchema>;
 export type ResumeSessionInput = z.infer<typeof resumeSessionSchema>;
 export type RotateProxyInput = z.infer<typeof rotateProxySchema>;
 export type InjectLocalStorageInput = z.infer<typeof injectLocalStorageSchema>;
+export type PrepareSessionCredentialsInput = z.infer<typeof prepareSessionCredentialsSchema>;
 
 // ---------------------------------------------------------------------------
 // Errors

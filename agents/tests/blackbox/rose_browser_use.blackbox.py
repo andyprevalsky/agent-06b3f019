@@ -131,6 +131,20 @@ def test_rotate_ip_normalizes_and_preserves_reason():
         assert result["params"].get("reason"), result
 
 
+def test_rotate_ip_prompt_uses_fixed_cross_provider_ladder():
+    description = BROWSER_USE_TOOLS["rotate_ip"]["description"]
+    assert "first call" in description
+    assert "Kernel residential" in description
+    assert "second call" in description
+    assert "Kernel mobile" in description
+    assert "third call" in description
+    assert "Kernel to Steel" in description
+    assert "fourth call" in description
+    assert "another Steel residential" in description
+    assert "already began on Steel stays on Steel" in description
+    assert "if mobile" not in description.lower()
+
+
 def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
     prompt = build_browser_use_system_prompt(["click", "goto"])
     assert "# Role" in prompt
@@ -1684,6 +1698,12 @@ async def run_all_tests():
     r.record("normalize_click_no_index_raises", test_normalize_click_without_index_raises)
     r.record("normalize_click_coords_missing_y_raises", test_normalize_click_coordinates_missing_y_raises)
     r.record("normalize_non_dict_action_raises", test_normalize_non_dict_action_raises)
+    r.record("advertised_tools_are_normalizable", test_every_advertised_tool_is_normalizable)
+    r.record("rotate_ip_preserves_reason", test_rotate_ip_normalizes_and_preserves_reason)
+    r.record(
+        "rotate_ip_cross_provider_ladder",
+        test_rotate_ip_prompt_uses_fixed_cross_provider_ladder,
+    )
 
     r.record("params_seconds_to_time_ms", test_params_seconds_to_time_ms)
     r.record("params_down_true_direction", test_params_down_true_to_direction_and_amount)
