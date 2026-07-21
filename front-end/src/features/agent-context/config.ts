@@ -33,3 +33,14 @@ export const BACKFILL_MAX_ATTEMPTS = 4;
 
 /** Base back-off (ms) between post-subscribe backfill retries; doubles each attempt, capped at MAX_RECONNECT_DELAY_MS. */
 export const BACKFILL_RETRY_BASE_MS = 500;
+
+/**
+ * A connected realtime channel can still lose an individual broadcast. After a
+ * successful subscribe, keep reconciling an unfinished latest chat turn for a
+ * short, bounded window so a missed canonical final-message INSERT is recovered
+ * before the five-second user-visible lifecycle budget expires.
+ */
+export const CONNECTED_COMPLETION_BACKFILL_MAX_ATTEMPTS = 9;
+
+/** Cadence for the bounded connected-channel completion reconcile (ms). */
+export const CONNECTED_COMPLETION_BACKFILL_POLL_MS = 600;
