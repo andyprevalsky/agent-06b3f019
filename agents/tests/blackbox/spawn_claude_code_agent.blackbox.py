@@ -1836,8 +1836,10 @@ class _FakeCCWorkflow:
 
     def __init__(self, activity_handle):
         self._handle = activity_handle
+        self.started_activity_args = None
 
     def start_activity(self, fn, args=None, **kwargs):
+        self.started_activity_args = args
         return self._handle
 
     async def wait_condition(self, predicate):
@@ -1918,6 +1920,42 @@ async def test_cc_execute_tool_happy_path_yields_finished():
     assert finished.metadata["task_id"] == "t-1"
     assert finished.data["usage"]["llm"][0]["tokens_in"] == 100
     assert finished.data["usage"]["service"][0]["cost_cents"] == 0.05
+
+
+async def test_cc_execute_tool_forced_claude_fetches_matching_credential():
+    """Forced Claude must not send a GPT-only workflow through shared API billing."""
+    from domains.spawn_claude_code_agent.handler import SpawnClaudeCodeAgentManager
+
+    handle = _FakeActivityHandle(result={"success": True, "message": "ok", "output_files": []})
+
+    class _ForcedClaudeWorkflow(_FakeCCWorkflow):
+        def __init__(self):
+            super().__init__(handle)
+            self.credential_fetches = 0
+
+        async def execute_activity(self, fn, args=None, **kwargs):
+            self.credential_fetches += 1
+            assert fn.__name__ == "fetch_claude_max_token_activity"
+            assert args == ["u-1"]
+            return {"accessToken": "fresh-claude-token", "source": "pool"}
+
+    fake = _ForcedClaudeWorkflow()
+    restore = _patch_cc_workflow(fake)
+    wf = _FakeCCWorkflowInstance()
+    wf.compute_token_provider = "gpt"
+    wf.gpt_code_token = "active-gpt-token"
+
+    try:
+        with patch.dict(os.environ, {"ROSE_CODE_AGENT_PROVIDER": "claude"}):
+            manager = SpawnClaudeCodeAgentManager()
+            await _collect_cc_events(manager.execute_tool(wf, {"goal": "g"}, "tc-forced-claude"))
+    finally:
+        restore()
+
+    assert fake.credential_fetches == 1
+    assert fake.started_activity_args[8] == "fresh-claude-token"
+    assert fake.started_activity_args[9] == "claude"
+    assert fake.started_activity_args[10] == "active-gpt-token"
 
 
 async def test_cc_execute_tool_incomplete_success_false_title():
@@ -2197,6 +2235,10 @@ async def run_all_tests():
     await r.record_async("spawn_activity_error_reraises", test_spawn_activity_error_reraises_after_cleanup)
     # SpawnClaudeCodeAgentManager.execute_tool
     await r.record_async("cc_exec_happy", test_cc_execute_tool_happy_path_yields_finished)
+    await r.record_async(
+        "cc_exec_forced_claude_credential",
+        test_cc_execute_tool_forced_claude_fetches_matching_credential,
+    )
     await r.record_async("cc_exec_incomplete", test_cc_execute_tool_incomplete_success_false_title)
     await r.record_async("cc_exec_files", test_cc_execute_tool_emits_assistant_events_for_files)
     await r.record_async("cc_exec_cancel_status", test_cc_execute_tool_cancelled_status_yields_error)

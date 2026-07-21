@@ -19,6 +19,7 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
 from helpers.attachments import extract_attachments_from_context
+from helpers.llm import fetch_claude_max_token_activity
 from helpers.tracing import span
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
@@ -100,6 +101,12 @@ class SpawnClaudeCodeAgentManager(ToolManager):
             )
             fast_mode_cache_enabled = bool(getattr(workflow_instance, "fast_mode_cache_enabled", False))
             code_provider = _select_code_provider(workflow_instance, gpt_token)
+            claude_token = await _resolve_forced_claude_token(
+                workflow_instance,
+                user_id=user_id,
+                code_provider=code_provider,
+                claude_token=claude_token,
+            )
             logger.info(
                 "[ClaudeCode] Selected code sandbox provider",
                 agent_id=agent_id,
@@ -313,6 +320,43 @@ def _select_code_provider(workflow_instance: Any, gpt_token: Optional[str]) -> s
     if provider == "gpt" and gpt_token:
         return "codex"
     return "claude"
+
+
+async def _resolve_forced_claude_token(
+    workflow_instance: Any,
+    *,
+    user_id: str,
+    code_provider: str,
+    claude_token: Optional[str],
+) -> Optional[str]:
+    """Fetch a Claude credential when a forced Claude run selected GPT globally."""
+    if code_provider != "claude" or _forced_code_provider() != "claude" or claude_token:
+        return claude_token
+
+    try:
+        result = await workflow.execute_activity(
+            fetch_claude_max_token_activity,
+            args=[user_id],
+            start_to_close_timeout=timedelta(seconds=20),
+            retry_policy=RetryPolicy(maximum_attempts=2),
+        )
+    except Exception as exc:
+        logger.warning(
+            "[ClaudeCode] Forced Claude credential fetch failed; using configured fallback",
+            user_id=user_id,
+            error=extract_error_message(exc),
+        )
+        return None
+
+    token = result.get("accessToken") if isinstance(result, dict) else None
+    logger.info(
+        "[ClaudeCode] Forced Claude credential resolved",
+        user_id=user_id,
+        source=result.get("source") if isinstance(result, dict) else None,
+        credential_found=bool(token),
+        active_compute_provider=getattr(workflow_instance, "compute_token_provider", None),
+    )
+    return token if isinstance(token, str) and token else None
 
 
 def _fp_to_dict(fp: Any) -> Dict[str, Any]:
