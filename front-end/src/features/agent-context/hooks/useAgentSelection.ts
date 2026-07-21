@@ -41,6 +41,7 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
     setAgent,
     setIsChatMode,
     setIsLoadingAgent,
+    setInspectionContext,
     setMessages,
     setSelectedAgentIdState,
   } = state;
@@ -53,6 +54,7 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
         const projection =
           pendingCreationRef.current?.agentId === agentId ? pendingCreationRef.current : null;
         setAgent(data.agent);
+        setInspectionContext(data.inspection_context ?? null);
         setMessages((previous) => mergeCanonicalMessages(previous, data.messages, projection));
         setIsChatMode(!data.agent.temporal_workflow_id);
         initialLoadDoneRef.current = agentId;
@@ -76,6 +78,7 @@ export function useAgentSelection(state: AgentProviderState, options: SelectionO
       setAgent,
       setIsChatMode,
       setIsLoadingAgent,
+      setInspectionContext,
       setMessages,
       setSelectedAgentIdState,
     ],
@@ -249,6 +252,7 @@ function killConnections(
 
 function flushState(state: AgentProviderState) {
   state.setMessages([]);
+  state.setInspectionContext(null);
   state.setStreamingBubbles((previous: Map<string, StreamingBubble>) => {
     for (const bubble of previous.values()) {
       if (bubble.timeoutId) window.clearTimeout(bubble.timeoutId);
