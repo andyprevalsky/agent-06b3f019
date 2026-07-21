@@ -84,6 +84,7 @@
     --safe-area-inset-right: env(safe-area-inset-right, 0px);
     --safe-area-inset-bottom: env(safe-area-inset-bottom, 0px);
     --safe-area-inset-left: env(safe-area-inset-left, 0px);
+    --mobile-terminal-header-height: calc(3.5rem + var(--safe-area-inset-top));
     --app-rem-scale: 1;
 
     /* Smooth transitions */

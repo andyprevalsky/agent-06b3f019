@@ -34,6 +34,7 @@
 import { useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { completeAuthAssistanceRequest, useAgentContext } from '../hooks';
+import { resolveBrowserControlState } from './browserControlState';
 import { BrowserCompletionView } from './browser-view-panel/BrowserCompletionView';
 import { BrowserViewBody } from './browser-view-panel/BrowserViewBody';
 import { PortalActionsPanel } from './browser-view-panel/ActionsPanel';
@@ -82,6 +83,10 @@ export default function BrowserViewPanel({
     handleResume,
   );
   const isWaitingForAuthAssistance = pendingAuthAssistance !== null;
+  const controlState = resolveBrowserControlState({
+    isDisconnected,
+    isWaitingForAuthAssistance,
+  });
 
   const toggleFullscreen = () => {
     const next = !isThisFullscreen;
@@ -122,11 +127,11 @@ export default function BrowserViewPanel({
         isThisFullscreen={isThisFullscreen}
         isDisconnected={isDisconnected}
         isWaitingForAuthAssistance={isWaitingForAuthAssistance}
-        isResuming={isResuming || isCompletingAuthAssistance}
+        isResuming={controlState === 'waiting' ? isCompletingAuthAssistance : isResuming}
         pendingWriteLockApproval={pendingWriteLockApproval}
         onToggleFullscreen={toggleFullscreen}
         onResume={() => {
-          void handleStartAgent();
+          void (controlState === 'waiting' ? handleStartAgent() : handleResume());
         }}
         onApprovalHandled={onApprovalHandled}
       />

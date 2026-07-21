@@ -323,13 +323,35 @@ async function runLiveProviderParity(): Promise<void> {
       try {
         const ctx = b.contexts()[0];
         const p = ctx.pages()[0] ?? (await ctx.newPage());
-        await navigateKernelPage(p, 'https://api.ipify.org?format=json');
+        await navigateKernelPage(
+          p,
+          `https://api.ipify.org?format=json&nonce=${encodeURIComponent(randomUUID())}`
+        );
         const raw = await p.evaluate(() => document.body.innerText);
         return String((JSON.parse(raw) as { ip?: string }).ip ?? '');
       } finally {
         await b.close();
       }
     };
+    const readDifferentExitIp = (wsUrl: string, previousIp: string): Promise<string> =>
+      retryWithBackoff(
+        async () => {
+          const ip = await readExitIp(wsUrl);
+          if (ip === '' || ip === previousIp) {
+            throw new Error(`proxy returned unchanged exit IP ${ip || '<empty>'}`);
+          }
+          return ip;
+        },
+        {
+          maxRetries: 3,
+          fixedDelays: [500, 1_000, 1_500],
+          // Kernel's residential/mobile proxy contract rotates exit nodes between
+          // requests, so tolerate a provider returning the prior node once while
+          // still requiring this session to demonstrate a genuinely different IP.
+          isRetryable: () => true,
+          component: 'browser-provider:exit-ip-change',
+        }
+      );
 
     const ipBefore = await readExitIp(String(init.ws_url));
     assert(ipBefore !== '', 'could not read exit IP before rotation');
@@ -357,7 +379,7 @@ async function runLiveProviderParity(): Promise<void> {
     assert(Boolean(evicted.deleted_at), 'superseded Kernel session was not evicted after rotation');
     liveSessionId = String(rotated.session_id);
 
-    const ipAfter = await readExitIp(String(rotated.ws_url));
+    const ipAfter = await readDifferentExitIp(String(rotated.ws_url), ipBefore);
     // Residential exits vary per session; a rotation should land a different IP.
     assert(
       ipAfter !== '' && ipAfter !== ipBefore,
@@ -401,7 +423,7 @@ async function runLiveProviderParity(): Promise<void> {
       'residential session was not evicted before the mobile-band rotation'
     );
     liveSessionId = String(mobileRotated.session_id);
-    const mobileIp = await readExitIp(String(mobileRotated.ws_url));
+    const mobileIp = await readDifferentExitIp(String(mobileRotated.ws_url), residentialIp);
     // The residential->mobile switch (or a third residential recycle when mobile is
     // off) must land a genuinely different egress IP. This is the exact claim the
     // agent run could not prove: that the mobile tier actually rotates the IP.

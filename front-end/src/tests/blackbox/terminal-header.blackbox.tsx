@@ -1,8 +1,9 @@
 /**
  * Blackbox tests for TerminalHeader responsive auth actions.
  */
-import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, screen } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { ComponentProps } from 'react';
 import { renderWithProviders } from './test-wrapper';
 
@@ -39,6 +40,7 @@ function renderHeader(overrides: Partial<ComponentProps<typeof TerminalHeader>> 
     onCreateNewAgent: vi.fn(),
     onSelectAgent: vi.fn(),
     onLoginClick: vi.fn(),
+    onLogout: vi.fn(),
     isSignedIn: false,
     clientSource: 'WEB',
     realtimeReady: true,
@@ -60,44 +62,52 @@ function renderHeader(overrides: Partial<ComponentProps<typeof TerminalHeader>> 
 }
 
 describe('TerminalHeader responsive auth action', () => {
+  beforeEach(() => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 });
+  });
+
   it('keeps mobile header edge padding consistent between logo and login action', () => {
     renderHeader({ isSignedIn: false });
 
-    expect(screen.getByRole('banner')).toHaveClass('p-2');
+    expect(screen.getByRole('banner')).toHaveClass(
+      'px-4',
+      'h-[var(--mobile-terminal-header-height)]',
+    );
     expect(screen.getByRole('button', { name: /Rose/ })).not.toHaveClass('px-1');
-    expect(screen.getByRole('button', { name: 'Login' })).toHaveClass('h-8');
+    expect(screen.getByRole('button', { name: 'Open menu' })).toHaveClass('h-9');
   });
 
-  it('shows a mobile login action instead of the inbox when signed out', () => {
+  it('shows login inside the mobile menu instead of mounting the desktop inbox', async () => {
+    const user = userEvent.setup();
     const props = renderHeader({ isSignedIn: false });
 
+    await user.click(screen.getByRole('button', { name: 'Open menu' }));
     const loginButton = screen.getByRole('button', { name: 'Login' });
-    expect(loginButton).toHaveClass('md:hidden');
-    fireEvent.click(loginButton);
+    await user.click(loginButton);
     expect(props.onLoginClick).toHaveBeenCalledOnce();
-
-    expect(screen.getByTestId('attention-inbox').parentElement).toHaveClass('hidden', 'md:block');
+    expect(screen.queryByTestId('attention-inbox')).not.toBeInTheDocument();
   });
 
-  it('keeps the inbox as the header action when signed in', () => {
+  it('keeps the inbox as the desktop header action when signed in', () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
     renderHeader({ isSignedIn: true });
 
-    expect(screen.queryByRole('button', { name: 'Login' })).not.toBeInTheDocument();
-    expect(screen.getByTestId('attention-inbox').parentElement).not.toHaveClass('hidden');
+    expect(screen.getByTestId('attention-inbox')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Open menu' })).not.toBeInTheDocument();
   });
 
   it('shows a mobile-only agents drawer trigger when signed in', () => {
     renderHeader({ isSignedIn: true });
 
-    const trigger = screen.getByRole('button', { name: 'Open agents menu' });
+    const trigger = screen.getByRole('button', { name: 'Open menu' });
     expect(trigger).toBeInTheDocument();
     // Mobile-only: the desktop AppSidebar owns the agent list at >= md.
     expect(trigger).toHaveClass('md:hidden');
   });
 
-  it('does not render the agents drawer trigger when signed out', () => {
+  it('renders the mobile menu trigger when signed out', () => {
     renderHeader({ isSignedIn: false });
 
-    expect(screen.queryByRole('button', { name: 'Open agents menu' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Open menu' })).toBeInTheDocument();
   });
 });

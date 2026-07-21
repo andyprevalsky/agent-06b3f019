@@ -7,7 +7,8 @@
  *
  * MOBILE LAYOUT:
  *   OPENING_ANIMATION → centered inside the chat area above the input stack
- *   MOBILE_LOADER     → keeps the desktop ASCII scale and positions below the header
+ *   MOBILE_LOADER     → keeps the desktop ASCII scale and starts below the
+ *                       full safe-area-aware mobile header
  *   MOBILE_ASCII      → visual-only transform, no layout shift for text/input
  *   MESSAGE_LIST      → normal scrollable message area
  */
@@ -54,12 +55,12 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
         dripStyles={drip.dripStyles}
         blur={drip.blur}
       />
-      <div className="h-24" />
+      <div className="h-[var(--mobile-terminal-header-height)] md:h-24" />
       {a.selectedAgentId && a.agentDetail?.parent_agent_id && <div className="h-14" />}
 
       <div
         data-testid="terminal-opening-loader"
-        className="pointer-events-none absolute inset-x-0 bottom-0 top-16 flex items-center justify-center transition-all duration-700 ease-in-out md:inset-0 md:h-[100dvh]"
+        className="pointer-events-none absolute inset-x-0 bottom-0 top-[var(--mobile-terminal-header-height)] flex items-center justify-center transition-all duration-700 ease-in-out md:inset-0 md:h-[100dvh]"
         style={{
           opacity: showLoader ? 1 : 0.2,
           transform: showLoader ? 'translateY(0)' : 'translateY(8px)',
@@ -69,7 +70,7 @@ export function ChatScrollArea({ agents: a, drip, opening, messagesEndRef }: Cha
         <div className="space-y-6 text-center md:mb-[20vh]">
           <div
             data-testid="terminal-opening-ascii-transform"
-            className="relative translate-y-[5%] scale-95 md:translate-y-0 md:scale-100"
+            className="relative translate-y-[5%] scale-95 max-md:[@media(max-height:720px)]:[zoom:0.72] md:translate-y-0 md:scale-100"
           >
             <AsciiLoader
               showWarmingUp={false}

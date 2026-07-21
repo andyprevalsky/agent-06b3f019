@@ -267,6 +267,11 @@ const KNOWN_VIOLATIONS: Record<string, string[]> = {
   'features/gate-playground/components/GatePlayground.tsx': [
     'components layer imports "../presets"',
   ],
+  // /mobile-preview is a dev-only composition harness that intentionally
+  // renders the production terminal components together for visual QA.
+  'features/mobile-preview/components/MobilePreview.tsx': [
+    'Cross-domain import: "@/features/terminal-component-group',
+  ],
 };
 
 // ─── Test ──────────────────────────────────────────────────────────────────
