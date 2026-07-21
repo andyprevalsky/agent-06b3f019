@@ -3840,6 +3840,17 @@ def test_refresh_wmh_bounds_the_archive_scan_by_default() -> None:
     assert "WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES'" in refresh
 
 
+def test_refresh_wmh_publishes_the_rebuilt_volume_as_the_proven_fleet_snapshot() -> None:
+    """A warm-volume rebuild is useless if fleet clones keep selecting the prior snapshot."""
+    cloud = CLOUD_SCRIPT.read_text()
+    refresh = cloud[cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') : cloud.index("# MODE: run (default)")]
+
+    assert 'create_volume_snapshot_exact "$VOL_ID"' in refresh
+    assert 'NEW_SNAP="$CREATED_SNAPSHOT_ID"' in refresh
+    assert '"$NEW_SNAP" > "$GIT_COMMON_DIR/cloudbench-warm-deps.fp"' in refresh
+    assert "WMH model snapshot published for fleet clones" in refresh
+
+
 def test_start_barrier_tolerates_infra_failures() -> None:
     """RCA (2026-07-15): at fleet width some isolated stacks sporadically fail
     on-box startup (resource/timing races under N concurrent full stacks). The
