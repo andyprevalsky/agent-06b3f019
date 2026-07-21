@@ -68,6 +68,9 @@ jobs:
       SLACK_ERROR_CHANNEL_ID: ${{ secrets.SLACK_ERROR_CHANNEL_ID }}
       DISPATCH_SLACK_TS: ${{ github.event.client_payload.slack_ts }}
       DISPATCH_SLACK_CHANNEL: ${{ github.event.client_payload.slack_channel }}
+      # The broker runs from a root-owned path, but operates on this checkout.
+      AUTO_RCA_ROOT_DIR: ${{ github.workspace }}
+      AUTO_RCA_GATE_STATE_DIR: /var/lib/rose-auto-rca/${{ github.run_id }}
 
     steps:
       - name: Validate dispatch payload
@@ -96,6 +99,13 @@ jobs:
           ref: main
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Install immutable RCA command broker
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -o root -g root -m 0555 scripts/auto-rca-tool /usr/local/bin/rose-auto-rca-tool
+          sudo install -d -o root -g root -m 0700 "$AUTO_RCA_GATE_STATE_DIR"
 
       - name: Setup Node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -179,7 +189,7 @@ jobs:
             Agent ID: ${{ env.AGENT_ID }}
 
             EVIDENCE FIRST:
-              scripts/auto-rca-tool evidence
+              /usr/local/bin/rose-auto-rca-tool evidence
             Identify the first-bad boundary.
 
             REPRODUCE AT FULL FIDELITY: you have full resources — FLY_API_TOKEN is
@@ -189,13 +199,13 @@ jobs:
             benchmark task that reproduces THIS failure, run it, and confirm it
             fails the same way. Write the selected catalog task name to
             `.context/auto-rca/benchmark-task`, then run
-            `scripts/auto-rca-tool benchmark`. For API/provider-level bugs a backend blackbox
+            `/usr/local/bin/rose-auto-rca-tool benchmark`. For API/provider-level bugs a backend blackbox
             under back-end/src/tests/blackbox/ is the faster repro. Whichever you
             use: it MUST fail before the fix and pass after, with no weakened
             assertion, and be cemented so the regression can't return.
 
             OPEN THE PR: write the PR body to `.context/auto-rca/pr-body.md`, then
-            run `scripts/auto-rca-tool publish-draft`. The broker commits tracked
+            run `/usr/local/bin/rose-auto-rca-tool publish-draft`. The broker commits tracked
             changes, pushes only $RCA_BRANCH, opens a DRAFT PR into main titled
             "auto-RCA: ${{ env.FAILURE_TITLE }}", and appends the trusted Slack
             lifecycle marker. In the body: link the failing
@@ -204,11 +214,11 @@ jobs:
 
             THEN RUN THE DEPLOY GATES (do not skip): run the /deploy Phase 1 gate
             suite on your committed draft branch with
-            `scripts/auto-rca-tool offline-gates`, then run the fleet smoke gate
-            with `scripts/auto-rca-tool smoke-gates`. Fix anything that fails,
+            `/usr/local/bin/rose-auto-rca-tool offline-gates`, then run the fleet smoke gate
+            with `/usr/local/bin/rose-auto-rca-tool smoke-gates`. Fix anything that fails,
             republish the draft, and re-run both until every gate is green. When
             ALL gates pass for the current HEAD, run
-            `scripts/auto-rca-tool mark-ready`. Do NOT merge — a human
+            `/usr/local/bin/rose-auto-rca-tool mark-ready`. Do NOT merge — a human
             reviews the ready PR and merges; that human merge is the ONLY hard gate.
 
             If a repro is genuinely impossible, open the DRAFT PR (leave it draft)
@@ -220,7 +230,7 @@ jobs:
             --model opus
             --effort high
             --max-turns 80
-            --allowedTools "Bash(scripts/auto-rca-tool evidence),Bash(scripts/auto-rca-tool benchmark),Bash(scripts/auto-rca-tool offline-gates),Bash(scripts/auto-rca-tool smoke-gates),Bash(scripts/auto-rca-tool publish-draft),Bash(scripts/auto-rca-tool mark-ready)"
+            --allowedTools "Bash(/usr/local/bin/rose-auto-rca-tool evidence),Bash(/usr/local/bin/rose-auto-rca-tool benchmark),Bash(/usr/local/bin/rose-auto-rca-tool offline-gates),Bash(/usr/local/bin/rose-auto-rca-tool smoke-gates),Bash(/usr/local/bin/rose-auto-rca-tool publish-draft),Bash(/usr/local/bin/rose-auto-rca-tool mark-ready)"
 
       - name: Require RCA pull request
         shell: bash

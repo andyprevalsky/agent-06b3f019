@@ -6,8 +6,9 @@ set -euo pipefail
 # script owns network targets, credentials, git destinations, and gate commands
 # so production evidence cannot turn into arbitrary shell access.
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="${AUTO_RCA_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CONTEXT_DIR="${AUTO_RCA_CONTEXT_DIR:-$ROOT_DIR/.context/auto-rca}"
+GATE_STATE_DIR="${AUTO_RCA_GATE_STATE_DIR:-}"
 PROD_BACKEND_URL="https://navi-j9a9.onrender.com"
 
 fail() {
@@ -27,18 +28,28 @@ require_clean_checkout() {
   fi
 }
 
+require_gate_state_dir() {
+  [[ "$GATE_STATE_DIR" =~ ^/var/lib/rose-auto-rca/[0-9]+$ ]] || \
+    fail "AUTO_RCA_GATE_STATE_DIR must be the workflow's root-owned run directory"
+}
+
 record_gate() {
-  local gate="$1"
-  mkdir -p "$CONTEXT_DIR"
-  git -C "$ROOT_DIR" rev-parse HEAD > "$CONTEXT_DIR/${gate}.sha"
+  local gate="$1" head
+  require_gate_state_dir
+  head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  printf '%s\n' "$head" | sudo tee "$GATE_STATE_DIR/${gate}.sha" >/dev/null
+  sudo chmod 0400 "$GATE_STATE_DIR/${gate}.sha"
 }
 
 require_gate_for_head() {
   local gate="$1"
-  local marker="$CONTEXT_DIR/${gate}.sha" head
-  [ -f "$marker" ] || fail "$gate has not passed"
+  local marker head attested_head
+  require_gate_state_dir
+  marker="$GATE_STATE_DIR/${gate}.sha"
+  sudo test -f "$marker" || fail "$gate has not passed"
   head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
-  [ "$(tr -d '\n' < "$marker")" = "$head" ] || fail "$gate did not pass for HEAD $head"
+  attested_head="$(sudo cat "$marker")"
+  [ "$attested_head" = "$head" ] || fail "$gate did not pass for HEAD $head"
 }
 
 evidence() {
@@ -107,6 +118,7 @@ publish_draft() {
     fail "RCA must commit a fix or a scaffolded reproduction before publishing"
   fi
 
+  gh auth setup-git
   git -C "$ROOT_DIR" push --set-upstream origin "$branch"
   existing_pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json url --jq '.[0].url // empty')"
   if [ -n "$existing_pr" ]; then
