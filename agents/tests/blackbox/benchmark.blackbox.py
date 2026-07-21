@@ -637,6 +637,19 @@ def test_payment_benchmark_enables_bundled_frontend_before_stack_start():
         assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
 
 
+def test_claude_code_benchmark_forces_real_claude_provider_before_stack_start():
+    """A task that requires Claude Code must not silently run through Codex."""
+    import os
+    from unittest.mock import patch
+
+    from benchmarks import local
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("ROSE_CODE_AGENT_PROVIDER", None)
+        local.configure_task_environment(["claude-code-agent"])
+        assert os.environ["ROSE_CODE_AGENT_PROVIDER"] == "claude"
+
+
 async def test_edge_warmup_requires_explicit_research_port():
     """Retired research ports must not add a failing warmup to every local benchmark."""
     import os
@@ -7646,6 +7659,10 @@ async def run_all_tests():
     r.record(
         "payment_benchmark_bundled_frontend",
         test_payment_benchmark_enables_bundled_frontend_before_stack_start,
+    )
+    r.record(
+        "claude_code_benchmark_real_provider",
+        test_claude_code_benchmark_forces_real_claude_provider_before_stack_start,
     )
     await r.record_async(
         "edge_warmup_explicit_research_port",
