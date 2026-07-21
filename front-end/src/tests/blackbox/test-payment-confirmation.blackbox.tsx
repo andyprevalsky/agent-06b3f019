@@ -12,7 +12,7 @@ import TestPaymentPage, {
   Confirmation,
   ReceiptSummary,
 } from '@/features/test-payment/components/TestPaymentPage';
-import { LIVE_LIFECYCLE_ITEM } from '@/features/test-payment/config';
+import { LIVE_LIFECYCLE_ITEM, TEST_PAYMENT_MERCHANT_NAME } from '@/features/test-payment/config';
 import type { TestPaymentConfirmation } from '@/features/test-payment/types';
 
 const CONFIRMATION: TestPaymentConfirmation = {
@@ -113,6 +113,9 @@ describe('test-payment Confirmation receipt', () => {
   it('shows the order id and total charged', () => {
     render(<Confirmation confirmation={CONFIRMATION} />);
     expect(screen.getByText(/Order tp_abc12345 was paid successfully/)).toBeInTheDocument();
+    expect(screen.getByTestId('payment-confirmation-merchant')).toHaveTextContent(
+      `Merchant: ${TEST_PAYMENT_MERCHANT_NAME}`,
+    );
     expect(screen.getByTestId('payment-confirmation-total')).toHaveTextContent('$43.96');
   });
 
