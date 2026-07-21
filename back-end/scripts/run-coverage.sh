@@ -58,6 +58,14 @@ export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 
+# Coverage is a deterministic local-code gate, not an external analytics probe.
+# A full admin-health run can spend most of Amplitude's five-minute chart-query
+# budget, starving the mandatory live blackbox gate that follows coverage during
+# /deploy. Keep coverage offline; the later live suite still requires real
+# Amplitude funnel counts when credentials are configured.
+export AMPLITUDE_API_KEY=""
+export AMPLITUDE_SECRET_KEY=""
+
 # Coverage starts only a local backend. E2B smoke sandboxes cannot reach stale
 # developer ngrok URLs from .env, so keep those smoke sessions on direct provider
 # calls unless the caller explicitly opts into a known-live tunnel.
