@@ -31,6 +31,7 @@ from helpers.attachments import extract_file_pointer_dicts, resolve_attachments_
 from helpers.context_pointers import annotate_with_pointer
 from helpers.handle_tool_event import handle_tool_event
 from helpers.llm import (
+    _completed_child_task_structured_response,
     _pending_llm_context,
     build_llm_messages,
     call_llm_activity,
@@ -536,6 +537,33 @@ async def run_agent(  # noqa: C901
         if poll_messages:
             last_checked = await poll_and_update_context(poll_messages, context, last_checked)
 
+        # A browser/code child has already run its own verifier before emitting
+        # a terminal structured_response. When that response covers every
+        # parent output field, the parent verifier has a deterministic fast
+        # path for accepting it. Do not offer another expensive child spawn on
+        # the handoff turn: require the parent to cross attempt_completion so
+        # the normal verifier and completion persistence still run.
+        completed_child_output = None
+        if not is_plan_loop and not skip_verification and "attempt_completion" in tools:
+            completed_child_output = _completed_child_task_structured_response(context, response_schema)
+        completion_instruction = None
+        turn_tools = tools
+        required_turn_tool = None
+        if completed_child_output is not None:
+            turn_tools = ["attempt_completion"]
+            required_turn_tool = "attempt_completion"
+            completion_instruction = (
+                "A previously delegated browser or code task already completed and returned verified structured "
+                "output covering every required parent response field. Do not repeat that work or spawn another "
+                "agent. Call attempt_completion now so the parent verifier can accept the completed child result."
+            )
+            logger.info(
+                "run_agent.completed_child_forces_completion",
+                agent_id=agent_id,
+                iteration=iteration,
+                output_fields=sorted(completed_child_output),
+            )
+
         # 3. Query blueprints after first iteration (only in PLAN phase, not EXECUTE)
         if False:
             # Check if we have any user messages
@@ -773,6 +801,8 @@ async def run_agent(  # noqa: C901
                     current_system_prompt,
                     user_id=user_id,
                 )
+        if is_inside_temporal_activity and completion_instruction and messages is not None:
+            messages.append({"role": "user", "content": completion_instruction})
 
         # Resolve direct compute tokens dynamically when the workflow provides
         # getters; otherwise use this loop's remembered successful token state.
@@ -914,12 +944,15 @@ async def run_agent(  # noqa: C901
                                 gpt_auth_present=bool(current_gpt_token),
                                 claude_auth_present=bool(current_claude_token),
                             ):
+                                turn_response_model = (
+                                    create_agent_action_model(turn_tools) if required_turn_tool else AgentAction
+                                )
                                 pydantic_result, usage, detected_tools_ordered = await call_llm_structured_streaming(
                                     messages=messages,
                                     model=model,
                                     temperature=1.0,
                                     max_tokens=8192,
-                                    response_model=AgentAction,
+                                    response_model=turn_response_model,
                                     on_chunk=on_chunk,
                                     reasoning_max_tokens=reasoning_max_tokens,
                                     agent_id=agent_id,
@@ -992,7 +1025,7 @@ async def run_agent(  # noqa: C901
                     args=[
                         agent_id,
                         model,
-                        tools,
+                        turn_tools,
                         reasoning_max_tokens,
                         agent_id,
                         stream_id,
@@ -1000,8 +1033,8 @@ async def run_agent(  # noqa: C901
                         current_claude_token,
                         call_site_label,
                         current_system_prompt,
-                        None,
-                        None,
+                        completion_instruction,
+                        required_turn_tool,
                         False,
                         "",
                         current_claude_token_source,
