@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { createCardProvider, type CardProvider } from '../../providers/card-provider';
+import { createCardProviderForAgent, type CardProvider } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
 import { refundCapturedPurchase } from '../../providers/stripe';
 import {
@@ -68,7 +68,8 @@ export async function closePurchaseCard(
     return { ok: true, status: purchase.status };
   }
 
-  const activeCardProvider = cardProvider ?? createCardProvider(purchase.userId);
+  const activeCardProvider =
+    cardProvider ?? (await createCardProviderForAgent(purchase.userId, purchase.agentId));
 
   // Settled: the card was used and the funding charge captured; close the card but keep the charge.
   if (purchase.status === PurchaseSpendStatus.CLEARED) {
