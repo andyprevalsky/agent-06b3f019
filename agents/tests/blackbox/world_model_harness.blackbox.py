@@ -724,6 +724,27 @@ def test_update_world_model_for_simulation_uses_delta_exports_and_progress_event
             assert calls["builds"] == 1
             assert calls["index_refreshes"] == 0
 
+            # Exporter changes must invalidate cached per-bundle OTel even when the encrypted
+            # archive itself is unchanged. Otherwise a compacting/schema fix can never repair
+            # already-cached retrieval examples.
+            delta_index_path = Path(out) / "delta-index.json"
+            stale_index = json.loads(delta_index_path.read_text(encoding="utf-8"))
+            stale_index["bundles"]["root-delta-a"]["export_schema_version"] = -1
+            delta_index_path.write_text(json.dumps(stale_index), encoding="utf-8")
+            schema_refresh = update_world_model_for_simulation(
+                output_dir=out,
+                root_agent_ids=["root-delta-a", "root-delta-b"],
+                name="rose-delta",
+                gepa_budget=0,
+                progress=lambda _event: None,
+                upstream_build=fake_upstream_build,
+                config_factory=fake_config_factory,
+                index_refresher=fake_index_refresher,
+            )
+            assert schema_refresh["updated_traces"] == 1
+            assert schema_refresh["index_refreshed"] is True
+            assert calls["index_refreshes"] == 1
+
             archive_json(
                 root_agent_id="root-delta-b",
                 path="provider/vapi/poll/call-ext-2.json.gz.enc",
@@ -746,7 +767,7 @@ def test_update_world_model_for_simulation_uses_delta_exports_and_progress_event
             assert third["index_refreshed"] is True
             assert third["index_refresh"]["indexed_traces"] == 2
             assert calls["builds"] == 1
-            assert calls["index_refreshes"] == 1
+            assert calls["index_refreshes"] == 2
 
             fourth = update_world_model_for_simulation(
                 output_dir=out,
@@ -762,10 +783,11 @@ def test_update_world_model_for_simulation_uses_delta_exports_and_progress_event
             assert fourth["build_ran"] is True
             assert fourth["index_refreshed"] is False
             assert calls["builds"] == 2
-            assert calls["index_refreshes"] == 1
+            assert calls["index_refreshes"] == 2
 
             index = json.loads((Path(out) / "delta-index.json").read_text(encoding="utf-8"))
             assert set(index["bundles"]) == {"root-delta-a", "root-delta-b"}
+            assert all(bundle["export_schema_version"] >= 1 for bundle in index["bundles"].values())
             assert Path(index["trace_file"]).exists()
             assert Path(index["replay_corpus_file"]).exists()
         finally:
@@ -1139,6 +1161,13 @@ def test_root_export_includes_child_agent_llm_dumps_when_manifest_lists_tree():
             assert step.action.name == "rose.llm_tool_call.spawn_browser_agent"
             assert step.action.arguments["agent_id"] == child_agent_id
             assert "child-wmh-tree/llm/child-dump.json.gz.enc" in step.action.arguments["artifact_refs"]
+            # Full DB rows belong in the replay session, not in every retrieval example.
+            # Retaining only provenance + counts keeps embeddings and few-shot prompts grounded
+            # without multiplying a multi-megabyte fixture by every LLM tool call.
+            structured = step.state_before.structured
+            assert "db_fixture" not in structured
+            assert structured["db_fixture_ref"]["path"] == "db/start.fixture.json.gz.enc"
+            assert structured["row_counts"] == {"Agent": 2}
         finally:
             restore()
 

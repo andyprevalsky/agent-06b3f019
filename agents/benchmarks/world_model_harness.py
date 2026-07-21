@@ -39,6 +39,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _LOCAL_ARCHIVE_ROOT = _REPO_ROOT / ".context" / "trace-archive"
 _WMH_REFERENCE_ROOT = _REPO_ROOT / ".context" / "reference" / "world-model-harness"
 _DEFAULT_WMH_BUILD_ROOT = _REPO_ROOT / ".context" / "world-model"
+# Increment whenever cached per-bundle OTel/session output changes independently of archive bytes.
+_WMH_EXPORT_SCHEMA_VERSION = 2
 
 _SECRET_KEY_RE = re.compile(
     r"(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret|"
@@ -557,6 +559,18 @@ def reconstruct_initial_state(root_agent_id: str, *, redaction_mode: str = "publ
     return _maybe_redact(state, redaction_mode)
 
 
+def _retrieval_state_from_initial_state(initial_state: JsonObject) -> JsonObject:
+    """Remove replay-only bulk data before repeating state in every retrieval step.
+
+    The full fixture remains in ``sessions/*.session.json`` for deterministic replay. Retrieval
+    only needs the stable fixture reference/hash, row counts, goal, and other compact provenance;
+    embedding and prompting every database row adds no signal and multiplies fixtures by the
+    number of LLM tool calls.
+    """
+
+    return {key: value for key, value in initial_state.items() if key != "db_fixture"}
+
+
 def _transition_from_raw(raw: JsonObject, root_agent_id: str, redaction_mode: str) -> RoseTransition:
     action_raw = raw.get("action") if isinstance(raw.get("action"), dict) else {}
     observation_raw = raw.get("observation") if isinstance(raw.get("observation"), dict) else {}
@@ -649,6 +663,7 @@ def _transitions_from_llm_dumps(
 ) -> list[RoseTransition]:
     transitions: list[RoseTransition] = []
     replay_dump_count = 0
+    retrieval_state = _retrieval_state_from_initial_state(initial_state)
     for archive_agent_id in bundle_agent_ids(root_agent_id):
         updates = _latest_update_by_dump_id(archive_agent_id)
         for path in archive_artifact_paths(archive_agent_id):
@@ -721,7 +736,7 @@ def _transitions_from_llm_dumps(
                 )
                 transitions.append(
                     RoseTransition(
-                        state_before=initial_state,
+                        state_before=retrieval_state,
                         scratchpad="",
                         action=action,
                         observation=observation,
@@ -1639,7 +1654,16 @@ def update_world_model_for_simulation(
         session_path = session_dir / f"{root_agent_id}.session.json"
         previous = old_bundles.get(root_agent_id) if isinstance(old_bundles, dict) else None
         previous_sha = previous.get("sha256") if isinstance(previous, dict) else None
-        if force or previous_sha != signature["sha256"] or not otel_path.exists() or not session_path.exists():
+        previous_export_schema = (
+            previous.get("export_schema_version") if isinstance(previous, dict) else None
+        )
+        if (
+            force
+            or previous_sha != signature["sha256"]
+            or previous_export_schema != _WMH_EXPORT_SCHEMA_VERSION
+            or not otel_path.exists()
+            or not session_path.exists()
+        ):
             changed.append(root_agent_id)
         else:
             unchanged.append(root_agent_id)
@@ -1663,7 +1687,8 @@ def update_world_model_for_simulation(
     for root_agent_id in changed:
         otel_path = otel_dir / f"{root_agent_id}.otel.jsonl"
         export_archive_to_otel_jsonl(root_agent_id, otel_path, redaction_mode="public")
-        exported_spans += sum(1 for line in otel_path.read_text(encoding="utf-8").splitlines() if line.strip())
+        with otel_path.open("r", encoding="utf-8") as exported:
+            exported_spans += sum(1 for line in exported if line.strip())
         session = _build_replay_session(root_agent_id, split[root_agent_id])
         (session_dir / f"{root_agent_id}.session.json").write_text(
             json.dumps(session, indent=2, sort_keys=True) + "\n",
@@ -1685,9 +1710,10 @@ def update_world_model_for_simulation(
         for root_agent_id in bundle_ids:
             otel_path = otel_dir / f"{root_agent_id}.otel.jsonl"
             if otel_path.exists():
-                text = otel_path.read_text(encoding="utf-8").strip()
-                if text:
-                    combined.write(text + "\n")
+                with otel_path.open("r", encoding="utf-8") as exported:
+                    for line in exported:
+                        if line.strip():
+                            combined.write(line if line.endswith("\n") else line + "\n")
             session_path = session_dir / f"{root_agent_id}.session.json"
             if session_path.exists():
                 try:
@@ -1770,6 +1796,7 @@ def update_world_model_for_simulation(
     index["bundles"] = {
         root_agent_id: {
             **signatures[root_agent_id],
+            "export_schema_version": _WMH_EXPORT_SCHEMA_VERSION,
             "split": split[root_agent_id],
             "otel_file": str(otel_dir / f"{root_agent_id}.otel.jsonl"),
             "session_file": str(session_dir / f"{root_agent_id}.session.json"),
