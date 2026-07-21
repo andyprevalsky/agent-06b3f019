@@ -5,8 +5,8 @@ from typing import Awaitable, Callable, Dict, List
 
 import structlog
 
-from helpers.context_scope import filter_internal_subagent_messages
 from helpers.context_pointers import annotate_with_pointer
+from helpers.context_scope import filter_internal_subagent_messages
 
 logger = structlog.get_logger()
 

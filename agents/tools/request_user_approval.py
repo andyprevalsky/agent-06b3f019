@@ -12,8 +12,8 @@ from domains.request_user_approval.repo import (
 from domains.request_user_approval.service import (
     RequestUserApprovalManager,
     get_manager,
-    request_user_attention_direct,
     request_user_approval_direct,
+    request_user_attention_direct,
 )
 from domains.request_user_approval.types import UserRejectedError
 
