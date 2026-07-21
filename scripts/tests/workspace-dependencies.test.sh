@@ -10,7 +10,7 @@ cat > "$TEMP_ROOT/package.json" <<'JSON'
 {"name":"test-root","private":true,"workspaces":["front-end"]}
 JSON
 cat > "$TEMP_ROOT/front-end/package.json" <<'JSON'
-{"name":"test-front-end","private":true,"dependencies":{"react":"1.0.0"}}
+{"name":"test-front-end","private":true,"dependencies":{"react":"1.0.0","fsevents":"1.0.0"},"optionalDependencies":{"fsevents":"2.0.0"}}
 JSON
 cat > "$TEMP_ROOT/bin/npm" <<'SH'
 #!/usr/bin/env bash

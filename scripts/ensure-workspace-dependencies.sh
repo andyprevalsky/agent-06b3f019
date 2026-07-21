@@ -24,10 +24,13 @@ const requireFromWorkspace = createRequire(manifestPath);
 const dependencies = {
     ...manifest.dependencies,
     ...manifest.devDependencies,
-    ...manifest.optionalDependencies,
 };
+const optionalDependencies = new Set(Object.keys(manifest.optionalDependencies || {}));
 
 for (const dependency of Object.keys(dependencies)) {
+    if (optionalDependencies.has(dependency)) {
+        continue;
+    }
     const dependencyPaths = requireFromWorkspace.resolve.paths(dependency) || [];
     const installed = dependencyPaths.some((basePath) =>
         fs.existsSync(path.join(basePath, dependency, "package.json")),

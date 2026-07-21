@@ -120,8 +120,8 @@ export const createSubscriptionCheckoutUrl = async (): Promise<string> => {
   if (!response.ok) {
     throw new Error('Failed to start subscription checkout');
   }
-  const payload = (await response.json()) as { url?: string };
-  if (payload.url === undefined || payload.url === '') {
+  const payload = (await response.json()) as { url?: unknown };
+  if (typeof payload.url !== 'string' || payload.url.trim() === '') {
     throw new Error('No checkout URL returned');
   }
   return payload.url;
