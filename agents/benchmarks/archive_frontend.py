@@ -9,6 +9,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import NoReturn
@@ -34,6 +35,50 @@ def _daemonize(log_path: Path) -> None:
 
 def _write_metadata(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def _process_group_alive(group_id: int) -> bool:
+    try:
+        os.killpg(group_id, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+
+
+def _wait_for_process_group_exit(group_id: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _process_group_alive(group_id):
+            return True
+        time.sleep(0.05)
+    return not _process_group_alive(group_id)
+
+
+def _stop_frontend(frontend: subprocess.Popen, *, grace_seconds: float = 2.0) -> bool:
+    """Stop and confirm the dedicated npm/Vite process group, with escalation."""
+    group_id = frontend.pid  # start_new_session=True makes the child its group leader.
+    try:
+        os.killpg(group_id, signal.SIGTERM)
+    except OSError:
+        pass
+    try:
+        frontend.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        pass
+    if _wait_for_process_group_exit(group_id, 0.5):
+        return True
+
+    try:
+        os.killpg(group_id, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        frontend.wait(timeout=1.0)
+    except subprocess.TimeoutExpired:
+        return False
+    return _wait_for_process_group_exit(group_id, 1.0)
 
 
 def launch(
@@ -66,49 +111,55 @@ def launch(
         "VITE_BACKEND_API_URL": f"http://{host}:{api_port}",
         "VITE_DEV_PORT": str(frontend_port),
     }
-    frontend = subprocess.Popen(
-        ["npm", "run", "dev", "--", "--host", host],
-        cwd=frontend_dir,
-        env=env,
-        stdout=open(context_dir / "archive-frontend.log", "a"),
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
+    with open(context_dir / "archive-frontend.log", "a") as frontend_log:
+        frontend = subprocess.Popen(
+            ["npm", "run", "dev", "--", "--host", host],
+            cwd=frontend_dir,
+            env=env,
+            stdout=frontend_log,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
 
-    metadata_name = "archive-frontend-live.json" if upstream_url else "archive-frontend.json"
-    _write_metadata(
-        context_dir / metadata_name,
-        {
-            "supervisor_pid": os.getpid(),
-            "frontend_pid": frontend.pid,
-            "api_url": f"http://{host}:{api_port}",
-            "frontend_url": f"http://localhost:{frontend_port}",
-            "run_json": str(run_json) if run_json else "",
-            "live": bool(upstream_url),
-        },
-    )
-    pid_name = "archive-frontend-live.pid" if upstream_url else "archive-frontend.pid"
-    (context_dir / pid_name).write_text(str(os.getpid()), encoding="utf-8")
+    server: ThreadingHTTPServer | None = None
+    try:
+        metadata_name = "archive-frontend-live.json" if upstream_url else "archive-frontend.json"
+        _write_metadata(
+            context_dir / metadata_name,
+            {
+                "supervisor_pid": os.getpid(),
+                "frontend_pid": frontend.pid,
+                "api_url": f"http://{host}:{api_port}",
+                "frontend_url": f"http://localhost:{frontend_port}",
+                "run_json": str(run_json) if run_json else "",
+                "live": bool(upstream_url),
+            },
+        )
+        pid_name = "archive-frontend-live.pid" if upstream_url else "archive-frontend.pid"
+        (context_dir / pid_name).write_text(str(os.getpid()), encoding="utf-8")
 
-    def shutdown(_signum: int, _frame: object) -> None:
-        try:
-            frontend.terminate()
-        except Exception:
-            pass
+        def shutdown(_signum: int, _frame: object) -> None:
+            if not _stop_frontend(frontend):
+                print("archive frontend process group did not exit; retaining supervisor ownership", flush=True)
+                return
+            raise SystemExit(0)
+
+        signal.signal(signal.SIGTERM, shutdown)
+        signal.signal(signal.SIGINT, shutdown)
+
+        server = ThreadingHTTPServer((host, api_port), ArchiveHandler)
+        print(
+            f"benchmark archive frontend supervisor pid={os.getpid()} "
+            f"api=http://{host}:{api_port} frontend=http://localhost:{frontend_port} "
+            f"agents={len(ArchiveHandler.agents)}",
+            flush=True,
+        )
+        server.serve_forever()
         raise SystemExit(0)
-
-    signal.signal(signal.SIGTERM, shutdown)
-    signal.signal(signal.SIGINT, shutdown)
-
-    server = ThreadingHTTPServer((host, api_port), ArchiveHandler)
-    print(
-        f"benchmark archive frontend supervisor pid={os.getpid()} "
-        f"api=http://{host}:{api_port} frontend=http://localhost:{frontend_port} "
-        f"agents={len(ArchiveHandler.agents)}",
-        flush=True,
-    )
-    server.serve_forever()
-    raise SystemExit(0)
+    finally:
+        if server is not None:
+            server.server_close()
+        _stop_frontend(frontend)
 
 
 def main() -> int:

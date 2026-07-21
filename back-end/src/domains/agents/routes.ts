@@ -17,6 +17,7 @@ import * as controlService from './agentControlService';
 import * as queryService from './agentQueryService';
 import messageRoutes from './routes.messages';
 import batchRoutes from './routes.batch';
+import alertRoutes from './routes.alerts';
 
 const log = createLogger('Agents');
 const router = Router();
@@ -88,6 +89,8 @@ router.get(
     }
   })
 );
+
+router.use('/', alertRoutes);
 
 router.get(
   '/:id',

@@ -100,6 +100,25 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Resolve affected user
+        shell: bash
+        run: |
+          set -uo pipefail
+          response="$(curl -fsS --retry 3 --retry-all-errors --connect-timeout 5 --max-time 20 \
+            "$PROD_BACKEND_URL/api/agents/$AGENT_ID/alert-context" \
+            -H "X-API-Key: $BACKEND_API_KEY" 2>/dev/null || true)"
+          affected_user_name="$(printf '%s' "$response" | jq -r '.affected_user_name // empty' 2>/dev/null || true)"
+          affected_user_name="$(printf '%s' "$affected_user_name" \
+            | tr '\r\n\t' '   ' \
+            | tr -s ' ' \
+            | sed 's/^ *//; s/ *$//; s/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' \
+            | cut -c1-160)"
+          if [ -z "$affected_user_name" ]; then
+            affected_user_name='Affected user unavailable'
+            echo "Agent owner name could not be resolved; preserving the RCA alert with an explicit unavailable state." >&2
+          fi
+          printf 'AFFECTED_USER_NAME=%s\n' "$affected_user_name" >> "$GITHUB_ENV"
+
       - name: Install immutable RCA command broker
         shell: bash
         run: |
@@ -266,12 +285,26 @@ jobs:
           pr_url="$(gh pr list --head "$RCA_BRANCH" --state open --json url --jq '.[0].url // empty' 2>/dev/null || true)"
           is_draft="$(gh pr list --head "$RCA_BRANCH" --state open --json isDraft --jq '.[0].isDraft // empty' 2>/dev/null || true)"
           if [ -n "$pr_url" ] && [ "$is_draft" = "false" ]; then
-            text="🟢 *Ready for review — approve to ship* · \`${AGENT_ID}\`"$'\n'"All deploy gates green."$'\n'"<${pr_url}|Open PR> · <${run_url}|RCA run>"
+            state='🟢 Ready for review — approve to ship'
           elif [ -n "$pr_url" ]; then
-            text="🔵 *Draft PR open* (needs attention) · \`${AGENT_ID}\`"$'\n'"<${pr_url}|Open PR> · <${run_url}|RCA run>"
+            state='🔵 Draft PR open (needs attention)'
           else
             text="⚠️ *RCA finished without a PR* · \`${AGENT_ID}\`"$'\n'"<${run_url}|RCA run>"
           fi
-          curl -sS -X POST https://slack.com/api/chat.update \
+          if [ -n "$pr_url" ]; then
+            text="$(
+              AFFECTED_USER_NAME="$AFFECTED_USER_NAME" \
+              RCA_STATE="$state" \
+              RCA_FE_URL="https://roselabs.ai/?agent-id=$AGENT_ID" \
+              RCA_PR_URL="$pr_url" \
+              RCA_RUN_URL="$run_url" \
+              /usr/local/bin/rose-auto-rca-tool slack-message
+            )"
+          fi
+          response="$(curl -sS -X POST https://slack.com/api/chat.update \
             -H "Authorization: Bearer $SLACK_BOT_TOKEN" -H 'Content-Type: application/json; charset=utf-8' \
-            --data "$(jq -n --arg c "$channel" --arg ts "$ts" --arg t "$text" '{channel:$c,ts:$ts,text:$t}')" >/dev/null || true
+            --data "$(jq -n --arg c "$channel" --arg ts "$ts" --arg t "$text" '{channel:$c,ts:$ts,text:$t}')")"
+          if ! printf '%s' "$response" | jq -e '.ok == true' >/dev/null; then
+            echo "Slack chat.update failed: $(printf '%s' "$response" | jq -r '.error // "unknown error"')" >&2
+            exit 1
+          fi
