@@ -177,9 +177,7 @@ jobs:
             Agent ID: ${{ env.AGENT_ID }}
 
             EVIDENCE FIRST:
-              curl -s "$PROD_BACKEND_URL/api/agents/${{ env.AGENT_ID }}" -H "X-API-Key: $BACKEND_API_KEY"
-              cd agents && python benchmarks/agent_logs.py ${{ env.AGENT_ID }} --url "$PROD_BACKEND_URL" --tree --diagnostics
-              python benchmarks/agent_latency.py ${{ env.AGENT_ID }}
+              scripts/auto-rca-tool evidence
             Identify the first-bad boundary.
 
             REPRODUCE AT FULL FIDELITY: you have full resources — FLY_API_TOKEN is
@@ -187,26 +185,28 @@ jobs:
             (Temporal Cloud + LLM/compute + the full `run.sh` stack) to run a real
             agent repro. Use it for agent-level failures: author or select the
             benchmark task that reproduces THIS failure, run it, and confirm it
-            fails the same way. For API/provider-level bugs a backend blackbox
+            fails the same way. Write the selected catalog task name to
+            `.context/auto-rca/benchmark-task`, then run
+            `scripts/auto-rca-tool benchmark`. For API/provider-level bugs a backend blackbox
             under back-end/src/tests/blackbox/ is the faster repro. Whichever you
             use: it MUST fail before the fix and pass after, with no weakened
             assertion, and be cemented so the regression can't return.
 
-            OPEN THE PR: commit on the current branch ($RCA_BRANCH) and open a
-            DRAFT PR into main titled "auto-RCA: ${{ env.FAILURE_TITLE }}" via
-            `gh pr create --draft --base main`. In the body: link the failing
+            OPEN THE PR: write the PR body to `.context/auto-rca/pr-body.md`, then
+            run `scripts/auto-rca-tool publish-draft`. The broker commits tracked
+            changes, pushes only $RCA_BRANCH, opens a DRAFT PR into main titled
+            "auto-RCA: ${{ env.FAILURE_TITLE }}", and appends the trusted Slack
+            lifecycle marker. In the body: link the failing
             agent (https://roselabs.ai/?agent-id=${{ env.AGENT_ID }}), give the
-            root cause, the repro (command + pre/post output), and the fix, and
-            include this EXACT hidden marker on its own line (unchanged) so the
-            ship notifier can find the Slack card to update on merge:
-            <!-- rca-slack ts=${{ steps.slack.outputs.ts }} channel=${{ steps.slack.outputs.channel }} -->
+            root cause, the repro (command + pre/post output), and the fix.
 
             THEN RUN THE DEPLOY GATES (do not skip): run the /deploy Phase 1 gate
-            suite on your branch — Prettier, ESLint, TypeScript, structural tests,
-            blackbox tests, and the smoke benchmarks (`scripts/run-bench`, which
-            uses the fleet). Fix anything that fails and re-run until every gate is
-            green — a failing gate is the job, not a reason to stop. When ALL gates
-            pass, mark the PR ready with `gh pr ready`. Do NOT merge — a human
+            suite on your committed draft branch with
+            `scripts/auto-rca-tool offline-gates`, then run the fleet smoke gate
+            with `scripts/auto-rca-tool smoke-gates`. Fix anything that fails,
+            republish the draft, and re-run both until every gate is green. When
+            ALL gates pass for the current HEAD, run
+            `scripts/auto-rca-tool mark-ready`. Do NOT merge — a human
             reviews the ready PR and merges; that human merge is the ONLY hard gate.
 
             If a repro is genuinely impossible, open the DRAFT PR (leave it draft)
@@ -218,6 +218,18 @@ jobs:
             --model opus
             --effort high
             --max-turns 80
+            --allowedTools "Bash(scripts/auto-rca-tool evidence),Bash(scripts/auto-rca-tool benchmark),Bash(scripts/auto-rca-tool offline-gates),Bash(scripts/auto-rca-tool smoke-gates),Bash(scripts/auto-rca-tool publish-draft),Bash(scripts/auto-rca-tool mark-ready)"
+
+      - name: Require RCA pull request
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_url="$(gh pr list --head "$RCA_BRANCH" --state open --json url --jq '.[0].url // empty')"
+          if [ -z "$pr_url" ]; then
+            echo "No RCA pull request was created — failing the workflow." >&2
+            exit 1
+          fi
+          echo "RCA pull request: $pr_url"
 
       - name: Slack — reflect PR outcome
         if: always() && env.SLACK_BOT_TOKEN != '' && steps.slack.outputs.ts != ''
