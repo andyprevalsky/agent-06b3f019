@@ -106,13 +106,13 @@ jobs:
             slack_channel="$(printf '%s' "$marker" | sed -nE 's/.*channel=([^ ]*).*/\1/p')"
             pr_url="$(printf '%s' "$pr" | jq -r '.html_url')"
             checkout_ref="refs/pull/$COMMENT_PR_NUMBER/head"
-            mode=revision
+            read -r mode noop < <(EVENT_NAME="$EVENT_NAME" /usr/local/bin/rose-auto-rca-tool dispatch-plan)
           else
             agent_id="${INITIAL_AGENT_ID:-}"
             [[ "$agent_id" =~ $uuid_re ]] || { echo "agent_id must be a UUID" >&2; exit 1; }
             title="auto-RCA: Production agent failure $agent_id"
             existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
-              --json title,url,body,headRefName,baseRefName \
+              --json title,url,body,headRefName,baseRefName,isDraft \
               --jq "map(select(.title == \"$title\" and .baseRefName == \"main\" and (.headRefName | startswith(\"auto-rca/\")))) | .[0] // empty")"
             if [ -n "$existing" ]; then
               branch="$(printf '%s' "$existing" | jq -r '.headRefName')"
@@ -128,14 +128,17 @@ jobs:
               slack_channel="$(printf '%s' "$marker" | sed -nE 's/.*channel=([^ ]*).*/\1/p')"
               pr_url="$(printf '%s' "$existing" | jq -r '.url')"
               checkout_ref="$branch"
-              mode=recovery
+              existing_is_draft="$(printf '%s' "$existing" | jq -r '.isDraft')"
+              read -r mode noop < <(EVENT_NAME="$EVENT_NAME" EXISTING_PR_FOUND=true \
+                EXISTING_PR_IS_DRAFT="$existing_is_draft" /usr/local/bin/rose-auto-rca-tool dispatch-plan)
             else
               branch="auto-rca/$agent_id"
               slack_ts="${DISPATCH_SLACK_TS:-}"
               slack_channel="${DISPATCH_SLACK_CHANNEL:-$DEFAULT_SLACK_CHANNEL}"
               pr_url=''
               checkout_ref=main
-              mode=initial
+              read -r mode noop < <(EVENT_NAME="$EVENT_NAME" EXISTING_PR_FOUND=false \
+                /usr/local/bin/rose-auto-rca-tool dispatch-plan)
             fi
           fi
           [[ "$agent_id" =~ $uuid_re ]] || { echo "agent_id must be a UUID" >&2; exit 1; }
@@ -150,6 +153,7 @@ jobs:
             printf 'RCA_BRANCH=%s\n' "$branch"
             printf 'RCA_CHECKOUT_REF=%s\n' "$checkout_ref"
             printf 'RCA_MODE=%s\n' "$mode"
+            printf 'RCA_NOOP=%s\n' "$noop"
             printf 'RCA_PR_URL=%s\n' "$pr_url"
             printf 'SLACK_TS=%s\n' "$slack_ts"
             printf 'SLACK_CHANNEL=%s\n' "$slack_channel"
@@ -195,7 +199,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
           AUTO_RCA_PR_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
-        run: /usr/local/bin/rose-auto-rca-tool begin-draft
+        run: |
+          if [ "$RCA_NOOP" = true ]; then
+            printf 'pr_url=%s\n' "$RCA_PR_URL" >> "$GITHUB_OUTPUT"
+            printf '%s\n' "$RCA_PR_URL"
+          else
+            /usr/local/bin/rose-auto-rca-tool begin-draft
+          fi
 
       - name: Slack — mark investigation active
         id: slack_active
@@ -203,8 +213,8 @@ jobs:
         shell: bash
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          RCA_RECONCILE_SLACK: ${{ env.RCA_MODE == 'recovery' && env.SLACK_TS == '' && 'true' || 'false' }}
-          RCA_STATE: ${{ env.RCA_MODE == 'revision' && 'revising' || 'running' }}
+          RCA_RECONCILE_SLACK: ${{ env.RCA_MODE != 'initial' && env.SLACK_TS == '' && 'true' || 'false' }}
+          RCA_STATE: ${{ env.RCA_NOOP == 'true' && 'ready' || (env.RCA_MODE == 'revision' && 'revising' || 'running') }}
           RCA_FE_URL: https://roselabs.ai/?agent-id=${{ env.AGENT_ID }}
           RCA_PR_URL: ${{ steps.begin.outputs.pr_url }}
           RCA_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -219,11 +229,12 @@ jobs:
         run: /usr/local/bin/rose-auto-rca-tool bind-slack
 
       - name: Sync revision branch with current main
-        if: env.RCA_MODE != 'initial'
+        if: env.RCA_MODE != 'initial' && env.RCA_NOOP != 'true'
         shell: bash
         run: git -c core.hooksPath=/dev/null merge --no-edit origin/main
 
       - name: Collect production evidence outside the investigator process
+        if: env.RCA_NOOP != 'true'
         continue-on-error: true
         shell: bash
         env:
@@ -234,20 +245,24 @@ jobs:
         run: /usr/local/bin/rose-auto-rca-tool collect-evidence
 
       - name: Setup Node
+        if: env.RCA_NOOP != 'true'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 
       - name: Setup Python
+        if: env.RCA_NOOP != 'true'
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
       - name: Install flyctl
+        if: env.RCA_NOOP != 'true'
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # master
 
       - name: Build trusted investigator prompt
         id: prompt
+        if: env.RCA_NOOP != 'true'
         shell: bash
         env:
           REVIEW_FEEDBACK: ${{ github.event.comment.body }}
@@ -278,6 +293,7 @@ jobs:
 
       - name: Root-cause with dedicated Claude account
         id: investigator_primary
+        if: env.RCA_NOOP != 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
         with:
@@ -314,7 +330,7 @@ jobs:
 
       - name: Check primary completion contract
         id: primary_contract
-        if: always()
+        if: always() && env.RCA_NOOP != 'true'
         shell: bash
         run: /usr/local/bin/rose-auto-rca-tool completion-status
 
@@ -357,7 +373,7 @@ jobs:
 
       - name: Finalize PR from trusted completion contract
         id: finalize
-        if: always()
+        if: always() && env.RCA_NOOP != 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
@@ -367,7 +383,7 @@ jobs:
         run: /usr/local/bin/rose-auto-rca-tool ensure-draft
 
       - name: Slack — reflect trusted final state
-        if: always() && steps.begin.outputs.pr_url != '' && env.SLACK_CHANNEL != ''
+        if: always() && env.RCA_NOOP != 'true' && steps.begin.outputs.pr_url != '' && env.SLACK_CHANNEL != ''
         shell: bash
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -378,6 +394,6 @@ jobs:
         run: /usr/local/bin/rose-auto-rca-tool slack-update
 
       - name: Require complete evidence-backed RCA
-        if: always()
+        if: always() && env.RCA_NOOP != 'true'
         shell: bash
         run: /usr/local/bin/rose-auto-rca-tool require-complete

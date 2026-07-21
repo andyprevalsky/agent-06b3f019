@@ -118,6 +118,23 @@ require_gate_for_head() {
   gate_passed_for_head "$gate" || fail "$gate has not passed for the current HEAD"
 }
 
+dispatch_plan() {
+  case "${EVENT_NAME:-}" in
+    issue_comment)
+      printf 'revision false\n'
+      ;;
+    repository_dispatch|workflow_dispatch)
+      case "${EXISTING_PR_FOUND:-false}:${EXISTING_PR_IS_DRAFT:-}" in
+        false:) printf 'initial false\n' ;;
+        true:true) printf 'recovery false\n' ;;
+        true:false) printf 'ready-reconcile true\n' ;;
+        *) fail "existing PR state is invalid" ;;
+      esac
+      ;;
+    *) fail "EVENT_NAME is invalid" ;;
+  esac
+}
+
 collect_evidence() {
   local temp_file agent_json context_json logs_json
   require_agent_id
@@ -686,6 +703,7 @@ slack_update() {
 }
 
 case "${1:-}" in
+  dispatch-plan) [ "$#" -eq 1 ] || fail "dispatch-plan takes no arguments"; dispatch_plan ;;
   collect-evidence) [ "$#" -eq 1 ] || fail "collect-evidence takes no arguments"; collect_evidence ;;
   evidence) [ "$#" -eq 1 ] || fail "evidence takes no arguments"; evidence ;;
   verification) [ "$#" -eq 1 ] || fail "verification takes no arguments"; verification ;;
@@ -702,5 +720,5 @@ case "${1:-}" in
   mark-ready) [ "$#" -eq 1 ] || fail "mark-ready takes no arguments"; mark_ready ;;
   slack-message) [ "$#" -eq 1 ] || fail "slack-message takes no arguments"; slack_message ;;
   slack-update) [ "$#" -eq 1 ] || fail "slack-update takes no arguments"; slack_update ;;
-  *) fail "usage: scripts/auto-rca-tool {collect-evidence|evidence|verification|verify-repro|offline-gates|smoke-gates|publish-draft|begin-draft|bind-slack|completion-status|require-complete|ensure-draft|mark-ready|slack-message|slack-update}" ;;
+  *) fail "usage: scripts/auto-rca-tool {dispatch-plan|collect-evidence|evidence|verification|verify-repro|offline-gates|smoke-gates|publish-draft|begin-draft|bind-slack|completion-status|require-complete|ensure-draft|mark-ready|slack-message|slack-update}" ;;
 esac

@@ -136,6 +136,26 @@ SH
 
 chmod +x "$FAKE_BIN/git" "$FAKE_BIN/gh" "$FAKE_BIN/sudo" "$FAKE_BIN/curl"
 
+assert_dispatch_plan() {
+  local expected="$1" actual
+  shift
+  actual="$(env "$@" "$RCA_TOOL" dispatch-plan)"
+  [ "$actual" = "$expected" ] || {
+    echo "FAIL: dispatch plan expected '$expected', got '$actual'" >&2
+    exit 1
+  }
+}
+
+assert_dispatch_plan 'initial false' EVENT_NAME=repository_dispatch EXISTING_PR_FOUND=false
+assert_dispatch_plan 'recovery false' EVENT_NAME=repository_dispatch EXISTING_PR_FOUND=true EXISTING_PR_IS_DRAFT=true
+assert_dispatch_plan 'ready-reconcile true' EVENT_NAME=repository_dispatch EXISTING_PR_FOUND=true EXISTING_PR_IS_DRAFT=false
+assert_dispatch_plan 'revision false' EVENT_NAME=issue_comment
+if EVENT_NAME=repository_dispatch EXISTING_PR_FOUND=true EXISTING_PR_IS_DRAFT=unknown \
+  "$RCA_TOOL" dispatch-plan >/dev/null 2>&1; then
+  echo "FAIL: invalid duplicate PR state was accepted" >&2
+  exit 1
+fi
+
 cat > "$CHECKOUT/scripts/tests/sample.test.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
