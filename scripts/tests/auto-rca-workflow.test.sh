@@ -51,12 +51,26 @@ require_absent "$WORKFLOW" 'Bash(curl' "auto-RCA must not expose raw curl to pro
 require_absent "$WORKFLOW" 'Bash(gh' "auto-RCA must not expose raw GitHub CLI access"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool evidence' "auto-RCA prompt must gather evidence through the immutable command broker"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool publish-draft' "auto-RCA prompt must publish through the immutable command broker"
+require_text "$WORKFLOW" 'name: Ensure preliminary RCA draft' "auto-RCA must create a preliminary draft when Claude does not publish one"
+require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool ensure-draft' "the trusted workflow must enforce the preliminary draft fallback"
+require_absent "$WORKFLOW" 'Bash(/usr/local/bin/rose-auto-rca-tool ensure-draft)' "Claude must not be allowed to invoke the trusted draft fallback"
 require_text "$WORKFLOW" 'name: Require RCA pull request' "auto-RCA must reject a successful Claude step that produced no PR"
 require_text "$WORKFLOW" 'No RCA pull request was created' "missing PR must be a visible workflow failure"
 require_text "$RCA_TOOL" "sudo tee \"${LITERAL_DOLLAR}GATE_STATE_DIR/${LITERAL_DOLLAR}{gate}.sha\"" "gate attestations must be written through the root-owned broker state"
 require_text "$RCA_TOOL" "sudo cat \"${LITERAL_DOLLAR}marker\"" "gate attestations must be read from the root-owned broker state"
 require_absent "$RCA_TOOL" "\"${LITERAL_DOLLAR}CONTEXT_DIR/${LITERAL_DOLLAR}{gate}.sha\"" "gate attestations must not live in the agent-writable context directory"
-require_text "$RCA_TOOL" 'gh auth setup-git' "the broker must configure Git authentication before pushing"
+require_text "$RCA_TOOL" "GIT_ASKPASS=\"${LITERAL_DOLLAR}askpass\" GIT_TERMINAL_PROMPT=0" "the broker must authenticate pushes through an ephemeral askpass helper"
+require_text "$RCA_TOOL" "git_push_branch \"${LITERAL_DOLLAR}branch\"" "all RCA pushes must use the authenticated broker path"
+require_text "$RCA_TOOL" "git -C \"${LITERAL_DOLLAR}ROOT_DIR\" remote set-url origin \"https://github.com/${LITERAL_DOLLAR}GITHUB_REPOSITORY.git\"" "the broker must replace action-mutated origin credentials with the validated repository URL"
+require_absent "$RCA_TOOL" 'remote get-url origin' "the broker must not trust the origin URL left by the Claude action"
+require_absent "$RCA_TOOL" 'gh auth setup-git' "the broker must not rely on gh auth setup-git for ephemeral GITHUB_TOKEN authentication"
+require_absent "$RCA_TOOL" "${LITERAL_DOLLAR}{GH_TOKEN}@github.com" "the broker must not place the GitHub token in a remote URL"
+require_absent "$RCA_TOOL" 'extraheader' "the broker must not persist a derived credential in repository config"
+
+ensure_line="$(grep -nF 'name: Ensure preliminary RCA draft' "$WORKFLOW" | cut -d: -f1)"
+require_line="$(grep -nF 'name: Require RCA pull request' "$WORKFLOW" | cut -d: -f1)"
+[ -n "$ensure_line" ] && [ -n "$require_line" ] && [ "$ensure_line" -lt "$require_line" ] || \
+  fail "the preliminary draft fallback must run before the PR postcondition"
 
 [ -x "$RCA_TOOL" ] || fail "auto-RCA command broker must exist and be executable"
 if "$RCA_TOOL" >/dev/null 2>&1; then

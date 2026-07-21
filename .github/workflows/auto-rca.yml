@@ -232,7 +232,13 @@ jobs:
             --max-turns 80
             --allowedTools "Bash(/usr/local/bin/rose-auto-rca-tool evidence),Bash(/usr/local/bin/rose-auto-rca-tool benchmark),Bash(/usr/local/bin/rose-auto-rca-tool offline-gates),Bash(/usr/local/bin/rose-auto-rca-tool smoke-gates),Bash(/usr/local/bin/rose-auto-rca-tool publish-draft),Bash(/usr/local/bin/rose-auto-rca-tool mark-ready)"
 
+      - name: Ensure preliminary RCA draft
+        if: always()
+        shell: bash
+        run: /usr/local/bin/rose-auto-rca-tool ensure-draft
+
       - name: Require RCA pull request
+        if: always()
         shell: bash
         run: |
           set -euo pipefail
