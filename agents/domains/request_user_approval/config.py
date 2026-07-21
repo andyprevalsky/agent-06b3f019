@@ -4,7 +4,7 @@ Constants and defaults for the approval domain.
 Imports: own types only.
 """
 
-from utils.attention_requests import REJECTION_SENTINEL
+from utils.attention_requests import REJECTION_SENTINEL as REJECTION_SENTINEL
 
 # Timeouts
 CREATE_REQUEST_TIMEOUT_SECONDS = 30.0

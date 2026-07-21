@@ -25,6 +25,10 @@ if [ -d tests/fast_cache ]; then
     "$COVERAGE_BIN" run --append -m pytest tests/fast_cache -q
 fi
 
+if [ -d tests/unit ]; then
+    "$COVERAGE_BIN" run --append -m pytest tests/unit -q
+fi
+
 case "$MODE" in
     --report)
         "$COVERAGE_BIN" report --no-fail-under

@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Optional, Type, Union, get_args, get_origin
 
 from pydantic import BaseModel
 
-
 SYNTHETIC_OUTPUT_TOOL_NAME = "submit_response"
 _FORCE_TOOL_CHOICE_KEY = "__rose_force_tool_choice"
 
