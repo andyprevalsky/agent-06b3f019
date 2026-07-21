@@ -279,3 +279,8 @@ export async function findHeldPurchasesByTotal(totalCents: number, limit = 10) {
     take: limit,
   });
 }
+
+export {
+  settlePurchaseAfterTransactionCleared,
+  type SettlePurchaseClearedResult,
+} from './repoSettlement';

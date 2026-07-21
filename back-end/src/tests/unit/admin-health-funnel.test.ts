@@ -4,6 +4,8 @@ import assert from 'node:assert';
 import type { AgentStatus } from '@prisma/client';
 import 'dotenv/config';
 import {
+  amplitudeFunnelQueryCost,
+  isAmplitudeFunnelQueryWithinBudget,
   orderedFunnelCounts,
   type AmplitudeFunnelResult,
 } from '../../domains/admin-health/amplitude';
@@ -27,6 +29,18 @@ assert.deepStrictEqual(orderedFunnelCounts([0, 0, 0, 0, 0, 0]), {
   otp_code_submitted: 0,
 });
 assert.throws(() => orderedFunnelCounts([100, 80, 81, 40, 30, 20]), /must be non-increasing/);
+
+const queryStart = new Date('2026-01-01T00:00:00.000Z');
+const after83Days = new Date('2026-03-25T00:00:00.000Z');
+const after84Days = new Date('2026-03-26T00:00:00.000Z');
+assert.strictEqual(amplitudeFunnelQueryCost(queryStart, after83Days), 996);
+assert.strictEqual(isAmplitudeFunnelQueryWithinBudget(queryStart, after83Days), true);
+assert.strictEqual(amplitudeFunnelQueryCost(queryStart, after84Days), 1008);
+assert.strictEqual(
+  isAmplitudeFunnelQueryWithinBudget(queryStart, after84Days),
+  false,
+  'Amplitude periods above 83 days must fail closed before issuing an impossible query'
+);
 
 const compared = compareFunnelSteps(
   buildFunnelSteps([], 5, amplitude),

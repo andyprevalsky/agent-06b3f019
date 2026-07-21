@@ -610,10 +610,12 @@ async function testWaitlist_excludesPhonelessSignups() {
 }
 
 async function main() {
-  const tests = [
+  const strictLiveTests = [
     { name: 'GET /api/admin-health no auth -> 401', fn: testNoAuth },
     { name: 'GET /api/admin-health non-admin -> 403', fn: testNonAdminForbidden },
     { name: 'GET /api/admin-health weekly admin -> metrics', fn: testAdminHappyWeekly },
+  ];
+  const remainingTests = [
     { name: 'GET /api/admin-health monthly admin -> metrics', fn: testAdminHappyMonthly },
     { name: 'GET /api/admin-health quarterly admin -> metrics', fn: testAdminHappyQuarterly },
     { name: 'GET /api/admin-health yearly admin -> metrics', fn: testAdminHappyYearly },
@@ -623,7 +625,13 @@ async function main() {
     },
   ];
 
-  const results = await runPool(tests, CASE_CONCURRENCY);
+  // The weekly case is the strict live-Amplitude integration probe. Run it
+  // before broader period-shape checks so sibling cases cannot spend the
+  // provider's shared chart-query budget first.
+  const results = [
+    ...(await runPool(strictLiveTests, 1)),
+    ...(await runPool(remainingTests, CASE_CONCURRENCY)),
+  ];
   const failed = results.filter((result) => !result.passed);
   for (const result of results) {
     const icon = result.passed ? '✅' : '❌';
