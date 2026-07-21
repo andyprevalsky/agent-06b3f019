@@ -3360,10 +3360,13 @@ def _local_victoria_db_container() -> Optional[str]:
 
 
 def _services_manifest_is_active(services: dict) -> bool:
-    """Return whether a running services manifest still owns a live run.sh."""
-    if services.get("status") != "running":
+    """Return whether a services manifest is authoritative for fixture SQL."""
+    status = services.get("status")
+    if status in {"failed", "stopped"}:
         return False
     run_sh_pid = services.get("run_sh_pid")
+    if run_sh_pid is None:
+        return True
     if not isinstance(run_sh_pid, int) or run_sh_pid <= 1:
         return False
     try:

@@ -111,12 +111,10 @@ docker_info_quick() {
 
 docker_available_for_workspace_db() {
     local db_container=$1
-    if docker_info_quick; then
-        return 0
-    fi
+    docker_info_quick && return 0
     # /deploy pre-starts the worktree-owned DB. A busy Docker Desktop can make
-    # `docker info` exceed the one-second startup budget even while this known
-    # container is healthy; preserve isolation instead of falling through to
+    # the broad daemon probe miss its startup budget even while this known
+    # container is available; preserve isolation instead of falling through to
     # the shared system Postgres in that case.
     docker_ps_ports_quick '{{.Names}}' | grep -Fxq "$db_container"
 }
@@ -451,7 +449,7 @@ if ! $PRESTARTED_WORKSPACE_DB && \
     # authoritative check even when a busy Docker Desktop daemon makes the
     # broader `docker info` probe miss its bounded response window.
     DOCKER_OK=true
-elif ! $PRESTARTED_WORKSPACE_DB && docker_available_for_workspace_db "$DB_CONTAINER"; then
+elif ! $PRESTARTED_WORKSPACE_DB && docker_info_quick; then
     DOCKER_OK=true
 fi
 
