@@ -203,7 +203,7 @@ function MobileHeaderBar(props: TerminalHeaderProps) {
     resumingAgentId,
   } = props;
   return (
-    <header className="fixed inset-x-0 top-0 z-50 grid h-[calc(3.5rem+var(--safe-area-inset-top))] grid-cols-3 items-center border-b border-border/60 bg-background/85 px-4 pt-[var(--safe-area-inset-top)] backdrop-blur-md">
+    <header className="fixed inset-x-0 top-0 z-50 grid h-[var(--mobile-terminal-header-height)] grid-cols-3 items-center border-b border-border/60 bg-background/85 px-4 pt-[var(--safe-area-inset-top)] backdrop-blur-md">
       <div className="justify-self-start">
         <BrandButton onCreateNewAgent={onCreateNewAgent} />
       </div>

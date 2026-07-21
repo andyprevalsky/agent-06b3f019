@@ -1818,6 +1818,79 @@ describe('BrowserStatusBar (blackbox)', () => {
     expect(screen.getByText('Take Control')).toBeInTheDocument();
   });
 
+  it('resumes a disconnected fullscreen session instead of completing stale auth assistance', async () => {
+    let resumeCalls = 0;
+    let authCompletionCalls = 0;
+    server.use(
+      http.post(`${API_BASE}/browser-session/resume`, () => {
+        resumeCalls += 1;
+        return HttpResponse.json({ success: true });
+      }),
+      http.post(`${API_BASE}/auth-assistance/:id/complete`, () => {
+        authCompletionCalls += 1;
+        return HttpResponse.json({ success: true });
+      }),
+      http.post(`${API_BASE}/auth-assistance/:id/refresh-session`, () =>
+        HttpResponse.json({
+          request: { id: 'auth-stale', steelSessionId: 'steel-stale' },
+          handoff: {
+            type: 'live_view',
+            steelSessionId: 'steel-stale',
+            liveViewUrl: 'https://debug.steel.dev/session/stale',
+          },
+          liveViewUrl: 'https://debug.steel.dev/session/stale',
+          refreshed: false,
+        }),
+      ),
+    );
+    const messages: Message[] = [
+      {
+        message_id: 'auth-stale',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'auth_assistance',
+          title: 'Waiting for login',
+          toolStatus: 'IN_PROGRESS',
+          requestUserAuthentication: {
+            requestId: 'auth-stale',
+            authRealm: 'example.com',
+            taskId: 'task-1',
+            liveViewUrl: 'https://debug.steel.dev/session/stale',
+          },
+        },
+      },
+      {
+        message_id: 'pause-after-auth',
+        timestamp: '2026-01-01T00:00:01Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-1',
+          action_type: 'session_paused',
+          title: 'Paused after login request',
+        },
+      },
+    ];
+
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(messages, <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
+    );
+
+    await user.click(screen.getByText('Paused after login request'));
+    await waitFor(() => expect(screen.getByText("Agent's Browser")).toBeInTheDocument());
+    const header = screen.getByText("Agent's Browser").closest('div')!.parentElement!;
+    const headerButtons = within(header).getAllByRole('button');
+    await user.click(headerButtons[headerButtons.length - 2]);
+
+    await user.click(await screen.findByRole('button', { name: 'Take Control' }));
+    await waitFor(() => expect(resumeCalls).toBe(1));
+    expect(authCompletionCalls).toBe(0);
+  });
+
   it('closing fullscreen via X button returns to expanded view', async () => {
     const user = userEvent.setup();
     renderWithProviders(
@@ -2135,6 +2208,61 @@ describe('BrowserViewPanel (blackbox)', () => {
       expect(screen.getByText('Browser Session Disconnected')).toBeInTheDocument();
     });
     expect(screen.getByText('Take Control')).toBeInTheDocument();
+  });
+
+  it('resumes after disconnect instead of completing a stale inline auth request', async () => {
+    let resumeCalls = 0;
+    let authCompletionCalls = 0;
+    server.use(
+      http.post(`${API_BASE}/browser-session/resume`, () => {
+        resumeCalls += 1;
+        return HttpResponse.json({ success: true });
+      }),
+      http.post(`${API_BASE}/auth-assistance/:id/complete`, () => {
+        authCompletionCalls += 1;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+    const messages: Message[] = [
+      {
+        message_id: 'inline-auth-stale',
+        timestamp: '2026-01-01T00:00:00Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-inline-auth',
+          action_type: 'auth_assistance',
+          title: 'Waiting for login',
+          toolStatus: 'IN_PROGRESS',
+          requestUserAuthentication: {
+            requestId: 'inline-auth-stale',
+            authRealm: 'example.com',
+            taskId: 'task-inline-auth',
+            liveViewUrl: 'https://debug.steel.dev/session/stale-inline',
+          },
+        },
+      },
+    ];
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(
+        messages,
+        <BrowserViewPanel
+          taskId="task-inline-auth"
+          browserUrl="about:blank"
+          isAnyBrowserFullscreen={false}
+          onFullscreenToggle={() => {}}
+        />,
+      ),
+    );
+
+    await act(async () => {
+      window.dispatchEvent(new MessageEvent('message', { data: 'browserbase-disconnected' }));
+    });
+    await user.click(await screen.findByRole('button', { name: 'Take Control' }));
+
+    await waitFor(() => expect(resumeCalls).toBe(1));
+    expect(authCompletionCalls).toBe(0);
   });
 });
 

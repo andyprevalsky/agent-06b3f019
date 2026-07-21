@@ -74,6 +74,23 @@ describe('BrowserStatusBarFullscreen mobile layout', () => {
     expect(viewportSyncMock).toHaveBeenCalledWith('t1', expect.any(Object), true);
   });
 
+  it('prioritizes disconnected controls when desktop auth assistance is also pending', () => {
+    mobileState.value = false;
+    renderWithProviders(
+      <BrowserStatusBarFullscreen
+        {...defaultProps({
+          isDisconnected: true,
+          isWaitingForAuthAssistance: true,
+          authAssistanceRequest: 'Please sign in',
+        })}
+      />,
+    );
+
+    expect(screen.getByText('Disconnected')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Take Control' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start Agent' })).not.toBeInTheDocument();
+  });
+
   it('stacks a full-width browser above always-visible progress on mobile', () => {
     mobileState.value = true;
     renderWithProviders(<BrowserStatusBarFullscreen {...defaultProps()} />);
@@ -102,5 +119,24 @@ describe('BrowserStatusBarFullscreen mobile layout', () => {
     expect(screen.queryByRole('button', { name: 'Browser' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Progress' })).not.toBeInTheDocument();
     expect(screen.queryByText(/handle logins or captchas/i)).not.toBeInTheDocument();
+  });
+
+  it('keeps disconnected controls internally consistent when auth assistance is also pending', () => {
+    mobileState.value = true;
+    renderWithProviders(
+      <BrowserStatusBarFullscreen
+        {...defaultProps({
+          isDisconnected: true,
+          isWaitingForAuthAssistance: true,
+          authAssistanceRequest: 'Please sign in',
+        })}
+      />,
+    );
+
+    const footer = screen.getByTestId('mobile-browser-control-footer');
+    expect(footer).toHaveTextContent('Browser disconnected');
+    expect(screen.getByRole('button', { name: 'Take control' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start Agent' })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('thinking-animation')).not.toBeInTheDocument();
   });
 });

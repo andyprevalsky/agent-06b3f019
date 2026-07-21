@@ -69,7 +69,10 @@ describe('TerminalHeader responsive auth action', () => {
   it('keeps mobile header edge padding consistent between logo and login action', () => {
     renderHeader({ isSignedIn: false });
 
-    expect(screen.getByRole('banner')).toHaveClass('px-4');
+    expect(screen.getByRole('banner')).toHaveClass(
+      'px-4',
+      'h-[var(--mobile-terminal-header-height)]',
+    );
     expect(screen.getByRole('button', { name: /Rose/ })).not.toHaveClass('px-1');
     expect(screen.getByRole('button', { name: 'Open menu' })).toHaveClass('h-9');
   });

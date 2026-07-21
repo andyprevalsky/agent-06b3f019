@@ -67,8 +67,14 @@ function browserMeta(extra: Meta): Meta {
 
 async function main(): Promise<void> {
   const url = process.env.DATABASE_URL ?? '';
-  const host = url.replace(/postgres(ql)?:\/\/[^@]*@/, '').split('/')[0];
-  if (!/localhost|127\.0\.0\.1/.test(host)) {
+  let host = '';
+  try {
+    host = new URL(url).hostname.toLowerCase();
+  } catch {
+    // The local-only guard below owns the error so malformed URLs cannot reach Prisma.
+  }
+  const localDatabaseHosts = new Set(['localhost', '127.0.0.1', '[::1]']);
+  if (!localDatabaseHosts.has(host)) {
     throw new Error(
       `Refusing to seed: DATABASE_URL host is "${host}", not local. Set DATABASE_URL + DIRECT_URL to the local dev DB.`
     );

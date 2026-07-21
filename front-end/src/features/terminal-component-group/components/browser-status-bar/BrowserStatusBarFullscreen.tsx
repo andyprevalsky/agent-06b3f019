@@ -30,6 +30,7 @@ import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-mobile';
 import BrowserBorderGlow from '../BrowserBorderGlow';
 import BrowserCursorOverlay from '../BrowserCursorOverlay';
+import { resolveBrowserControlState, type BrowserControlState } from '../browserControlState';
 import type { Message } from '../../hooks';
 import {
   DisconnectedOverlay,
@@ -64,26 +65,19 @@ interface FullscreenProps {
   onResume: () => void;
 }
 
-function ActiveIndicator({
-  isDisconnected,
-  isWaitingForAuthAssistance,
-}: {
-  isDisconnected: boolean;
-  isWaitingForAuthAssistance: boolean;
-}) {
-  const label = isDisconnected
-    ? 'Disconnected'
-    : isWaitingForAuthAssistance
-      ? 'Waiting for assistance'
-      : 'Active';
+function ActiveIndicator({ controlState }: { controlState: BrowserControlState }) {
+  const label =
+    controlState === 'disconnected'
+      ? 'Disconnected'
+      : controlState === 'waiting'
+        ? 'Waiting for assistance'
+        : 'Active';
   return (
     <div className="flex min-w-0 items-center gap-2">
       <div
         className={cn(
           'h-2 w-2 flex-shrink-0 rounded-full',
-          isDisconnected || isWaitingForAuthAssistance
-            ? 'bg-yellow-500'
-            : 'bg-green-500 animate-pulse',
+          controlState === 'active' ? 'bg-green-500 animate-pulse' : 'bg-yellow-500',
         )}
       />
       <span className="truncate text-sm font-medium">{label}</span>
@@ -93,22 +87,17 @@ function ActiveIndicator({
 
 /** Desktop frame header: Active state + proxy chip + close. */
 function DesktopFrameHeader({
-  isDisconnected,
-  isWaitingForAuthAssistance,
+  controlState,
   browserSessionMetadata,
   onClose,
 }: {
-  isDisconnected: boolean;
-  isWaitingForAuthAssistance: boolean;
+  controlState: BrowserControlState;
   browserSessionMetadata: BrowserSessionMetadata | null;
   onClose: (e: MouseEvent) => void;
 }) {
   return (
     <div className="flex items-center justify-between border-b border-border p-4">
-      <ActiveIndicator
-        isDisconnected={isDisconnected}
-        isWaitingForAuthAssistance={isWaitingForAuthAssistance}
-      />
+      <ActiveIndicator controlState={controlState} />
       <div className="flex items-center gap-2">
         <BrowserProxyLocationChip metadata={browserSessionMetadata} tooltipPosition="bottom" />
         <button onClick={onClose} className="rounded p-2 transition-colors hover:bg-muted">
@@ -121,20 +110,15 @@ function DesktopFrameHeader({
 
 /** Fixed mobile header: Active state + close. */
 function MobileFrameHeader({
-  isDisconnected,
-  isWaitingForAuthAssistance,
+  controlState,
   onClose,
 }: {
-  isDisconnected: boolean;
-  isWaitingForAuthAssistance: boolean;
+  controlState: BrowserControlState;
   onClose: (e: MouseEvent) => void;
 }) {
   return (
     <div className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-border p-3">
-      <ActiveIndicator
-        isDisconnected={isDisconnected}
-        isWaitingForAuthAssistance={isWaitingForAuthAssistance}
-      />
+      <ActiveIndicator controlState={controlState} />
       <button onClick={onClose} className="rounded p-1.5 transition-colors hover:bg-muted">
         <X className="h-5 w-5 text-muted-foreground" />
       </button>
@@ -148,14 +132,13 @@ type PaneProps = Pick<
   | 'taskId'
   | 'browserUrl'
   | 'messages'
-  | 'isDisconnected'
-  | 'isWaitingForAuthAssistance'
   | 'authAssistanceRequest'
   | 'isResuming'
   | 'onResume'
 > & {
   paneRef: RefObject<HTMLDivElement>;
   isMobile: boolean;
+  controlState: BrowserControlState;
 };
 
 /** Live-iframe pane + agent overlays. No header or redundant helper footer. */
@@ -165,8 +148,7 @@ function BrowserPaneBody({
   taskId,
   browserUrl,
   messages,
-  isDisconnected,
-  isWaitingForAuthAssistance,
+  controlState,
   authAssistanceRequest,
   isResuming,
   isMobile,
@@ -190,14 +172,14 @@ function BrowserPaneBody({
           sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
           title="Browser"
         />
-        {!isWaitingForAuthAssistance && <BrowserBorderGlow />}
-        {!isWaitingForAuthAssistance && (
+        {controlState === 'active' && <BrowserBorderGlow />}
+        {controlState === 'active' && (
           <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
         )}
-        {!isMobile && !isDisconnected && !isWaitingForAuthAssistance && (
+        {!isMobile && controlState === 'active' && (
           <TakeControlChip onResume={onResume} isResuming={isResuming} />
         )}
-        {!isMobile && isWaitingForAuthAssistance && (
+        {!isMobile && controlState === 'waiting' && (
           <WaitingForAssistanceChip
             onResume={onResume}
             isResuming={isResuming}
@@ -205,7 +187,7 @@ function BrowserPaneBody({
             isMobile={isMobile}
           />
         )}
-        {!isMobile && isDisconnected && !isWaitingForAuthAssistance && (
+        {!isMobile && controlState === 'disconnected' && (
           <DisconnectedOverlay onResume={onResume} isResuming={isResuming} />
         )}
       </div>
@@ -215,27 +197,24 @@ function BrowserPaneBody({
 
 function MobileFullscreen({
   props,
+  controlState,
   pane,
   progressPanel,
 }: {
   props: FullscreenProps;
+  controlState: BrowserControlState;
   pane: ReactNode;
   progressPanel: ReactNode;
 }) {
   return createPortal(
     <div className="fixed inset-0 z-50 flex flex-col bg-background">
-      <MobileFrameHeader
-        isDisconnected={props.isDisconnected}
-        isWaitingForAuthAssistance={props.isWaitingForAuthAssistance}
-        onClose={props.onClose}
-      />
+      <MobileFrameHeader controlState={controlState} onClose={props.onClose} />
       <div className="flex min-h-0 flex-1 flex-col">
         {pane}
         <MobileBrowserControlFooter
           onResume={props.onResume}
           isResuming={props.isResuming}
-          isDisconnected={props.isDisconnected}
-          isWaitingForAuthAssistance={props.isWaitingForAuthAssistance}
+          controlState={controlState}
           request={props.authAssistanceRequest}
         />
         <div className="min-h-0 flex-1 border-t border-border bg-background">{progressPanel}</div>
@@ -247,10 +226,12 @@ function MobileFullscreen({
 
 function DesktopFullscreen({
   props,
+  controlState,
   pane,
   progressPanel,
 }: {
   props: FullscreenProps;
+  controlState: BrowserControlState;
   pane: ReactNode;
   progressPanel: ReactNode;
 }) {
@@ -259,8 +240,7 @@ function DesktopFullscreen({
       {progressPanel}
       <div className="flex min-w-0 flex-1 flex-col">
         <DesktopFrameHeader
-          isDisconnected={props.isDisconnected}
-          isWaitingForAuthAssistance={props.isWaitingForAuthAssistance}
+          controlState={controlState}
           browserSessionMetadata={props.browserSessionMetadata}
           onClose={props.onClose}
         />
@@ -274,6 +254,7 @@ function DesktopFullscreen({
 export function BrowserStatusBarFullscreen(props: FullscreenProps) {
   const browserPaneRef = useRef<HTMLDivElement>(null);
   const isMobile = useIsMobile();
+  const controlState = resolveBrowserControlState(props);
   useBrowserViewportSync(props.taskId, browserPaneRef, !isMobile);
 
   const pane = (
@@ -283,8 +264,7 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
       taskId={props.taskId}
       browserUrl={props.browserUrl}
       messages={props.messages}
-      isDisconnected={props.isDisconnected}
-      isWaitingForAuthAssistance={props.isWaitingForAuthAssistance}
+      controlState={controlState}
       authAssistanceRequest={props.authAssistanceRequest}
       isResuming={props.isResuming}
       isMobile={isMobile}
@@ -297,16 +277,25 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
       taskId={props.taskId}
       outputSchema={props.outputSchema}
       stepProgress={props.stepProgress}
-      isDisconnected={props.isDisconnected}
-      isWaitingForAuthAssistance={props.isWaitingForAuthAssistance}
+      controlState={controlState}
       pendingWriteLockApproval={props.pendingWriteLockApproval}
       isMobile={isMobile}
     />
   );
 
   return isMobile ? (
-    <MobileFullscreen props={props} pane={pane} progressPanel={progressPanel} />
+    <MobileFullscreen
+      props={props}
+      controlState={controlState}
+      pane={pane}
+      progressPanel={progressPanel}
+    />
   ) : (
-    <DesktopFullscreen props={props} pane={pane} progressPanel={progressPanel} />
+    <DesktopFullscreen
+      props={props}
+      controlState={controlState}
+      pane={pane}
+      progressPanel={progressPanel}
+    />
   );
 }

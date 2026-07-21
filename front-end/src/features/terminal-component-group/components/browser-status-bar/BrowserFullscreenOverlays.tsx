@@ -9,11 +9,14 @@
  * [ACTIVE_DESKTOP]      -> TakeControlChip over the browser
  * [WAITING_DESKTOP]     -> WaitingForAssistanceChip over the browser
  * [DISCONNECTED_DESKTOP] -> DisconnectedOverlay over the browser
- * [*_MOBILE]            -> MobileBrowserControlFooter below the browser
+ * [*_MOBILE]            -> MobileBrowserControlFooter below the browser, with
+ *                          DISCONNECTED > WAITING > ACTIVE priority shared by
+ *                          its label, animation, and action
  */
 
 import { cn } from '@/lib/utils';
 import ThinkingAnimation from '@/components/ThinkingAnimation';
+import type { BrowserControlState } from '../browserControlState';
 
 export function TakeControlChip({
   onResume,
@@ -55,22 +58,21 @@ export function TakeControlChip({
 export function MobileBrowserControlFooter({
   onResume,
   isResuming,
-  isDisconnected,
-  isWaitingForAuthAssistance,
+  controlState,
   request,
 }: {
   onResume: () => void;
   isResuming: boolean;
-  isDisconnected: boolean;
-  isWaitingForAuthAssistance: boolean;
+  controlState: BrowserControlState;
   request?: string;
 }) {
-  const label = isDisconnected
-    ? 'Browser disconnected'
-    : isWaitingForAuthAssistance
-      ? (request ?? 'Agent waiting for assistance')
-      : 'Agent in progress';
-  const action = isWaitingForAuthAssistance ? 'Start Agent' : 'Take control';
+  const label =
+    controlState === 'disconnected'
+      ? 'Browser disconnected'
+      : controlState === 'waiting'
+        ? (request ?? 'Agent waiting for assistance')
+        : 'Agent in progress';
+  const action = controlState === 'waiting' ? 'Start Agent' : 'Take control';
 
   return (
     <div
@@ -78,7 +80,7 @@ export function MobileBrowserControlFooter({
       className="flex w-full flex-none items-center justify-between gap-3 bg-navi-black px-4 py-3"
     >
       <div className="flex min-w-0 items-center gap-2">
-        {!isDisconnected && !isWaitingForAuthAssistance && (
+        {controlState === 'active' && (
           <ThinkingAnimation
             dataUrl="/thinking_animations.txt"
             autoplay

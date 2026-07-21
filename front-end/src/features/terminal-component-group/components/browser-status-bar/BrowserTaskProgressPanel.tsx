@@ -18,6 +18,7 @@ import { X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { MessageList } from '../MessageList';
 import { SchemaChip } from '../SchemaChip';
+import type { BrowserControlState } from '../browserControlState';
 import { BrowserWriteLockApproval } from './BrowserWriteLockApproval';
 import { StepProgressBar } from './StepProgressBar';
 import type { OutputSchemaRef, PendingWriteLockApproval, StepProgress } from './types';
@@ -26,8 +27,7 @@ interface TaskProgressSidebarProps {
   taskId: string;
   outputSchema: OutputSchemaRef | undefined;
   stepProgress: StepProgress | null;
-  isDisconnected: boolean;
-  isWaitingForAuthAssistance: boolean;
+  controlState: BrowserControlState;
   pendingWriteLockApproval: PendingWriteLockApproval | null;
   isMobile?: boolean;
   onClose?: () => void;
@@ -37,8 +37,7 @@ export function TaskProgressSidebar({
   taskId,
   outputSchema,
   stepProgress,
-  isDisconnected,
-  isWaitingForAuthAssistance,
+  controlState,
   pendingWriteLockApproval,
   isMobile = false,
   onClose,
@@ -83,7 +82,7 @@ export function TaskProgressSidebar({
             subAgentId={taskId}
             containerClassName="flex flex-col gap-1.5 overflow-x-hidden"
             showStatusBanners={false}
-            showThinkingIndicator={!isDisconnected && !isWaitingForAuthAssistance}
+            showThinkingIndicator={controlState === 'active'}
             compact
           />
         </div>
