@@ -57,6 +57,51 @@ COMMON_CSV_HEADER_NAMES = {
     "zip",
 }
 
+_TOOL_EVIDENCE_METADATA_KEYS = {
+    "cost",
+    "cost_cents",
+    "elapsed",
+    "elapsed_ms",
+    "model",
+    "provider",
+    "provider_used",
+    "query",
+    "status",
+    "success",
+    "usage",
+    "url",
+}
+
+
+def _has_usable_tool_evidence(value: Any) -> bool:
+    """Return whether a successful tool result contains non-empty evidence."""
+    if value is None or isinstance(value, bool):
+        return False
+    if isinstance(value, str):
+        normalized = value.strip()
+        if not normalized or normalized.lower() in {"null", "none", "[]", "{}"}:
+            return False
+        lowered = normalized.lower()
+        return not lowered.startswith(
+            ("error:", "error ", "failed:", "failed ", "failure:", "failure ", "exception:", "exception ")
+        )
+    if isinstance(value, dict):
+        if value.get("success") is False or value.get("ok") is False:
+            return False
+        status = str(value.get("status") or "").strip().lower()
+        if status in {"error", "failed", "failure"}:
+            return False
+        if any(value.get(key) for key in ("error", "errors", "exception")):
+            return False
+        return any(
+            _has_usable_tool_evidence(item)
+            for key, item in value.items()
+            if key not in _TOOL_EVIDENCE_METADATA_KEYS and key not in {"ok", "error", "errors", "exception"}
+        )
+    if isinstance(value, (list, tuple, set)):
+        return any(_has_usable_tool_evidence(item) for item in value)
+    return bool(value)
+
 
 # =============================================================================
 # VALIDATION
@@ -117,12 +162,11 @@ def validate_spawn_params(tool_call: dict) -> None:
         if not has_items and not has_csv:
             raise ValueError("spawn_agent(type='for_each') requires either 'items' (list) or 'items_csv' (string).")
 
-    if agent_type == "explore":
-        if tool_call.get("output_schema"):
-            raise ValueError(
-                "spawn_agent(type='explore') does not use 'output_schema'. "
-                "Explore agents return free-form research summaries."
-            )
+    if agent_type == "explore" and tool_call.get("output_schema"):
+        raise ValueError(
+            "spawn_agent(type='explore') does not use 'output_schema'. "
+            "Explore agents return free-form research summaries."
+        )
 
 
 def resolve_start_phase(tool_call: Dict[str, Any]) -> str:
@@ -266,6 +310,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
 
     # Collect raw tool call results for callers that need evidence
     tool_call_results: List[str] = []
+    has_usable_tool_evidence = False
 
     # Data sources the explore agent tried to grep but whose connector isn't
     # connected. Surfaced to the parent workflow, which raises one blocking
@@ -367,6 +412,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
 
     async def explore_execute_tool(tool_name: str, tool_args: Dict, tool_call_id: str) -> Dict:
         """Execute a tool inside the explore activity context."""
+        nonlocal has_usable_tool_evidence
         activity.heartbeat(f"Explore agent executing: {tool_name}")
 
         tool_call_dict = {"tool": tool_name, **tool_args}
@@ -423,9 +469,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
             if isinstance(result, dict):
                 for st in result.get("unavailable_sources") or []:
                     key = st.get("source") if isinstance(st, dict) else st
-                    if key and not any(
-                        u.get("source") == key for u in unavailable_sources_collected
-                    ):
+                    if key and not any(u.get("source") == key for u in unavailable_sources_collected):
                         unavailable_sources_collected.append(st)
         elif tool_name == "attempt_completion":
             return {"success": True, "message": "Completion accepted"}
@@ -438,6 +482,9 @@ async def spawn_explore_agent_activity(  # noqa: C901
             actual_result = result.get("result", result)
         else:
             actual_result = result
+
+        if _has_usable_tool_evidence(actual_result):
+            has_usable_tool_evidence = True
 
         # Serialize the actual result into message so run_agent puts it in context.
         try:
@@ -552,9 +599,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
     # do its job — it is FAILED (the parent will raise the connect gate). This
     # takes precedence over the run's own completed/error status.
     has_unavailable = bool(unavailable_sources_collected)
-    unavailable_names = ", ".join(
-        str(u.get("source")) for u in unavailable_sources_collected
-    )
+    unavailable_names = ", ".join(str(u.get("source")) for u in unavailable_sources_collected)
     # A tool-free explore completion is not grounded research. Models can
     # occasionally call attempt_completion immediately and claim that search
     # was unavailable even though the tools were present. Treat that as a
@@ -563,7 +608,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
     # explores may legitimately summarize the supplied content without another
     # tool call, so preserve that path.
     completed_without_tool_evidence = (
-        result.get("status") == "completed" and not tool_call_results and not attachment_texts
+        result.get("status") == "completed" and not has_usable_tool_evidence and not attachment_texts
     )
     run_completed = result.get("status") == "completed" and not completed_without_tool_evidence
     result_payload = {

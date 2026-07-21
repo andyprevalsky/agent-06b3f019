@@ -699,7 +699,46 @@ async def test_handler_explore_failed_result_yields_error():
     finally:
         restore()
 
-    assert any(event.status == MessageStatus.ERROR for event in events)
+    error_event = next(event for event in events if event.status == MessageStatus.ERROR)
+    assert error_event.message == "Web search was unavailable."
+    assert "error_reason" not in (error_event.data or {})
+    assert "error_reason" not in (error_event.metadata or {})
+
+
+async def test_handler_explore_failed_result_forwards_error_reason():
+    """An explicit activity failure reason reaches the parent and UI event."""
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from tools.base import MessageStatus
+
+    reason = "explore completed without tool evidence"
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        start_activity_result=_Activity(
+            result={
+                "status": "error",
+                "result": "Web search was unavailable.",
+                "error_reason": reason,
+                "accumulated_usage": [],
+                "llm_iteration_usage": [],
+            }
+        ),
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        events = await _collect(
+            SpawnAgentManager()._spawn_explore(
+                workflow_instance=_FakeWFInstance(),
+                tool_call={"type": "explore", "goal": "g"},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    error_event = next(event for event in events if event.status == MessageStatus.ERROR)
+    assert error_event.message == reason
+    assert error_event.data["error_reason"] == reason
+    assert error_event.metadata["error_reason"] == reason
 
 
 async def test_handler_explore_cancelled_yields_error():
@@ -1755,6 +1794,52 @@ async def test_spawn_explore_agent_activity_rejects_tool_free_completion():
     assert result["error_reason"] == "explore completed without tool evidence"
 
 
+async def test_spawn_explore_agent_activity_rejects_empty_or_failed_tool_results():
+    """A tool record is not evidence when its successful payload is empty or failed."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    empty_or_failed_results = [
+        None,
+        "",
+        [],
+        {},
+        {"hits": []},
+        {"error": "search unavailable"},
+        {"success": False, "message": "search unavailable"},
+        {"status": "failed", "message": "search unavailable"},
+    ]
+
+    for tool_result in empty_or_failed_results:
+        fake_ws = MagicMock()
+        fake_ws.execute_tool = AsyncMock(return_value={"usage": {}, "result": tool_result})
+
+        async def fake_run_agent(**kwargs):
+            await kwargs["execute_tool"]("web_search", {"query": "current city data"}, "tc1")
+            return {
+                "status": "completed",
+                "final_response": "Web search was unavailable.",
+                "tokens_in": 1,
+                "tokens_out": 1,
+            }
+
+        with (
+            patch("temporalio.activity.heartbeat"),
+            patch("loop.run_agent.run_agent", new=fake_run_agent),
+            patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+        ):
+            result = await spawn_explore_agent_activity(
+                agent_id="a",
+                user_id="u",
+                goal="Research current city data",
+                model="m",
+            )
+
+        assert result["status"] == "error", tool_result
+        assert result["error_reason"] == "explore completed without tool evidence", tool_result
+
+
 async def test_spawn_explore_agent_activity_inner_callbacks_work():
     """Verify the on_tokens callback and explore_post_message reach DB save."""
     from unittest.mock import AsyncMock, patch
@@ -1877,6 +1962,7 @@ async def test_spawn_explore_agent_activity_execute_tool_dispatch():
 
     # Tool-call results were captured
     assert len(result["tool_call_results"]) >= 3
+    assert result["status"] == "completed"
     # accumulated_usage captured the dict-with-usage results
     assert len(result["accumulated_usage"]) == 2  # web_search and grep had usage envelopes
     assert fake_ws.execute_tool.call_args.kwargs["fast_mode_cache_enabled"] is False
@@ -2161,6 +2247,10 @@ async def run_all_tests():
     await r.record_async("handler_explore_gates_off", test_handler_explore_gates_off_skips_fetch)
     await r.record_async("handler_explore_capture", test_handler_explore_capture_tool_results)
     await r.record_async("handler_explore_failed_result", test_handler_explore_failed_result_yields_error)
+    await r.record_async(
+        "handler_explore_failed_result_forwards_error_reason",
+        test_handler_explore_failed_result_forwards_error_reason,
+    )
     await r.record_async("handler_explore_cancelled", test_handler_explore_cancelled_yields_error)
     await r.record_async("handler_explore_exception", test_handler_explore_exception_yields_error)
     await r.record_async("handler_browser_delegates", test_handler_browser_delegates)
@@ -2219,6 +2309,10 @@ async def run_all_tests():
     await r.record_async(
         "explore_activity_rejects_tool_free_completion",
         test_spawn_explore_agent_activity_rejects_tool_free_completion,
+    )
+    await r.record_async(
+        "explore_activity_rejects_empty_or_failed_tool_results",
+        test_spawn_explore_agent_activity_rejects_empty_or_failed_tool_results,
     )
     await r.record_async("explore_activity_callbacks", test_spawn_explore_agent_activity_inner_callbacks_work)
     await r.record_async("explore_activity_dispatch", test_spawn_explore_agent_activity_execute_tool_dispatch)

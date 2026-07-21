@@ -412,6 +412,7 @@ class SpawnAgentManager(ToolManager):
             # parent (spawn_agent) raises one blocking source_connect gate each.
             unavailable_sources = result.get("unavailable_sources") or []
             explore_failed = result.get("status") not in {None, "completed"}
+            explore_error_reason = result.get("error_reason")
 
             # Hand raw tool-call traces to any caller that asked for them
             # (wait_for's condition-judge). Keeping this out of the persisted
@@ -426,22 +427,37 @@ class SpawnAgentManager(ToolManager):
                 combined_llm.extend(usage.get("llm", []))
                 combined_service.extend(usage.get("service", []))
 
+            event_data: Dict[str, Any] = {
+                "usage": {
+                    "llm": combined_llm,
+                    "service": combined_service,
+                },
+                "result": explore_result,
+                "unavailable_sources": unavailable_sources,
+            }
+            event_metadata: Dict[str, Any] = {
+                "agentType": "explore",
+                "taskId": task_id,
+                "fullGoal": ui_goal,
+            }
+            if explore_error_reason:
+                event_data["error_reason"] = explore_error_reason
+                event_metadata["error_reason"] = explore_error_reason
+            event_message = (
+                explore_error_reason
+                if (unavailable_sources or explore_failed) and explore_error_reason
+                else explore_result
+            )
+
             # FINISHED with result and usage — or ERROR when a required data
             # source wasn't connected (the explore couldn't finish its job).
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title=ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
-                message=explore_result,
+                message=event_message,
                 status=MessageStatus.ERROR if unavailable_sources or explore_failed else MessageStatus.FINISHED,
-                data={
-                    "usage": {
-                        "llm": combined_llm,
-                        "service": combined_service,
-                    },
-                    "result": explore_result,
-                    "unavailable_sources": unavailable_sources,
-                },
-                metadata={"agentType": "explore", "taskId": task_id, "fullGoal": ui_goal},
+                data=event_data,
+                metadata=event_metadata,
             )
 
         except BaseException as e:
@@ -848,8 +864,6 @@ async def _raise_source_connect_gates(workflow_instance, unavailable_sources: Li
             connect_url,
         )
         try:
-            await raise_gate_direct(
-                workflow_instance, gate, gate_key=f"source_connect:{connector}"
-            )
+            await raise_gate_direct(workflow_instance, gate, gate_key=f"source_connect:{connector}")
         except GateRejectedError:
             workflow.logger.info(f"[spawn_agent] source_connect gate declined for {connector}")
