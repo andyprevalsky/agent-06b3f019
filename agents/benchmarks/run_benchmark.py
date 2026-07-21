@@ -448,6 +448,20 @@ def _fetch_wmh_usage() -> Optional[dict]:
     return payload if isinstance(payload, dict) else None
 
 
+def _fetch_wmh_retrieval_audit() -> Optional[dict]:
+    """Best-effort exact retrieval evidence from the served WMH."""
+    base = os.environ.get("WMH_BASE_URL", "").strip().rstrip("/")
+    if not base:
+        return None
+    try:
+        resp = httpx.get(f"{base}/retrieval_audit", timeout=5.0)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _fetch_wmh_grounding_usd() -> Optional[float]:
     """WMH grounding cost (USD) — thin wrapper over `_fetch_wmh_usage`."""
     payload = _fetch_wmh_usage()
@@ -8263,6 +8277,7 @@ async def main_async(args):
 
         # Always save results — even partial results from interrupted runs are valuable
         if run.task_results:
+            run.world_model_retrieval_audit = _fetch_wmh_retrieval_audit()
             path = run.save()
             print(f"\n  Results saved: {path}")
             try:
