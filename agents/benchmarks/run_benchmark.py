@@ -1322,10 +1322,16 @@ async def _wait_for_expected_payment_lifecycle(
         purchase = lifecycle.get("purchase") if isinstance(lifecycle, dict) else None
         status = purchase.get("status") if isinstance(purchase, dict) else None
         wallet_funding = lifecycle.get("walletFunding") if isinstance(lifecycle, dict) else None
-        release_pending = (
-            status == "HELD" and isinstance(wallet_funding, dict) and wallet_funding.get("status") == "RECLAIMING"
+        # Reconciliation commits the durable funding reclaim before it refunds Stripe and marks
+        # the purchase VOIDED. A lifecycle read can therefore observe HELD + RECLAIMED in that
+        # short persistence window. Keep polling both in-flight states instead of treating the
+        # internally consistent recovery race as a terminal benchmark mismatch.
+        compensation_pending = (
+            status == "HELD"
+            and isinstance(wallet_funding, dict)
+            and wallet_funding.get("status") in {"RECLAIMING", "RECLAIMED"}
         )
-        if (status not in retryable_statuses and not release_pending) or time.monotonic() >= deadline:
+        if (status not in retryable_statuses and not compensation_pending) or time.monotonic() >= deadline:
             return lifecycle
         await asyncio.sleep(poll_interval_seconds)
         try:
