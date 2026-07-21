@@ -1,4 +1,4 @@
-import { createCardProvider, type CardProvider } from '../../providers/card-provider';
+import { createCardProviderForAgent, type CardProvider } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
 import {
   cancelAuthorizedHold,
@@ -105,7 +105,8 @@ async function mintCaptureAndIssue(
 ): Promise<MintPurchaseResult> {
   const purchaseId = purchase.id;
   state.activeWalletFundingProvider = walletFundingProvider ?? createWalletFundingProvider();
-  state.activeCardProvider = cardProvider ?? createCardProvider(input.userId);
+  state.activeCardProvider =
+    cardProvider ?? (await createCardProviderForAgent(input.userId, input.agentId));
   const { cardRequest, minted, providerTransferId } = await mintCompanyFlowCard(
     purchase,
     input,

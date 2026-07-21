@@ -19,6 +19,7 @@ import {
   StaticRoseAgentCardProvider,
   agentCardMintEnabled,
   createCardProvider,
+  createCardProviderForAgent,
   isCardLive,
 } from '../../providers/card-provider';
 // Credential accessors are intentionally NOT re-exported from the barrel; import them directly.
@@ -183,6 +184,32 @@ async function main(): Promise<void> {
         `${benchVar} routes through the real provider, never the static Brex card`
       );
     }
+
+    // --- Production benchmark requests are agent-scoped, not process-scoped ---
+    setCutoffEnv();
+    let resolvedAgentId: string | null | undefined;
+    const productionBenchmarkProvider = await createCardProviderForAgent(
+      'benchmark-user',
+      'benchmark-agent',
+      {
+        isBenchmarkAgent: async (agentId) => {
+          resolvedAgentId = agentId;
+          return true;
+        },
+      }
+    );
+    assert.strictEqual(resolvedAgentId, 'benchmark-agent');
+    assert.ok(
+      productionBenchmarkProvider instanceof AgentCardRoutingProvider,
+      'a durable benchmark agent routes through real AgentCard on the shared production process'
+    );
+    const productionUserProvider = await createCardProviderForAgent('ordinary-user', 'user-agent', {
+      isBenchmarkAgent: async () => false,
+    });
+    assert.ok(
+      productionUserProvider instanceof StaticRoseAgentCardProvider,
+      'ordinary production agents remain behind the static-card cutoff'
+    );
 
     // --- Env injection + rotation: credentials come from env and flow into getDetails ---
     setCutoffEnv();
