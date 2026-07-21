@@ -37,6 +37,8 @@ require_absent "$WORKFLOW" "Failure source: ${LITERAL_DOLLAR}{{ env.FAILURE_SOUR
 require_absent "$WORKFLOW" "Failure title: ${LITERAL_DOLLAR}{{ env.FAILURE_TITLE }}" "failure title must not be interpolated into the privileged prompt"
 require_text "$WORKFLOW" 'slack_ts must be a Slack message timestamp' "dispatch Slack timestamp must be validated"
 require_text "$WORKFLOW" 'slack_channel must be a Slack channel ID' "dispatch Slack channel must be validated"
+require_text "$WORKFLOW" 'name: Resolve affected user' "auto-RCA must resolve the affected user before rendering lifecycle messages"
+require_text "$WORKFLOW" "\"${LITERAL_DOLLAR}PROD_BACKEND_URL/api/agents/${LITERAL_DOLLAR}AGENT_ID/alert-context\"" "auto-RCA must resolve the agent owner through the internal alert-context endpoint"
 require_text "$WORKFLOW" "SLACK_OUTPUT_TS: ${LITERAL_DOLLAR}{{ steps.slack.outputs.ts }}" "step output must enter shell through the environment"
 require_absent "$WORKFLOW" "ts=\"${LITERAL_DOLLAR}{{ steps.slack.outputs.ts }}\"" "step output must not be interpolated directly into shell source"
 require_text "$WORKFLOW" "printf 'SLACK_TS=%s\\n' \"${LITERAL_DOLLAR}{ts:-}\" >> \"${LITERAL_DOLLAR}GITHUB_ENV\"" "resolved manual-dispatch Slack timestamp must reach the RCA broker"
@@ -59,6 +61,7 @@ require_text "$WORKFLOW" "AUTO_RCA_PR_TOKEN: ${LITERAL_DOLLAR}{{ secrets.GH_UPDA
 require_absent "$WORKFLOW" 'Bash(/usr/local/bin/rose-auto-rca-tool ensure-draft)' "Claude must not be allowed to invoke the trusted draft fallback"
 require_text "$WORKFLOW" 'name: Require RCA pull request' "auto-RCA must reject a successful Claude step that produced no PR"
 require_text "$WORKFLOW" 'No RCA pull request was created' "missing PR must be a visible workflow failure"
+require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool slack-message' "the trusted workflow must use the cemented Slack lifecycle formatter"
 require_text "$RCA_TOOL" "sudo tee \"${LITERAL_DOLLAR}GATE_STATE_DIR/${LITERAL_DOLLAR}{gate}.sha\"" "gate attestations must be written through the root-owned broker state"
 require_text "$RCA_TOOL" "sudo cat \"${LITERAL_DOLLAR}marker\"" "gate attestations must be read from the root-owned broker state"
 require_absent "$RCA_TOOL" "\"${LITERAL_DOLLAR}CONTEXT_DIR/${LITERAL_DOLLAR}{gate}.sha\"" "gate attestations must not live in the agent-writable context directory"
@@ -107,6 +110,22 @@ if AGENT_ID=550e8400-e29b-41d4-a716-446655440000 RCA_BRANCH=auto-rca/test \
   AUTO_RCA_CONTEXT_DIR="$TEMP_ROOT" "$RCA_TOOL" mark-ready >/dev/null 2>&1; then
   fail "auto-RCA command broker must not mark a PR ready before both gates pass"
 fi
+
+expected_slack_message="*Affected user:* Ada Lovelace
+*Current state:* 🔵 Draft PR open (needs attention)
+*Links:* <https://roselabs.ai/?agent-id=550e8400-e29b-41d4-a716-446655440000|FE View> · <https://github.com/Rose-Ai-Labs/rose/pull/999|PR> · <https://github.com/Rose-Ai-Labs/rose/actions/runs/123|GH Action RCA Run>
+*Agent ID:* \`550e8400-e29b-41d4-a716-446655440000\`"
+actual_slack_message="$(
+  AGENT_ID=550e8400-e29b-41d4-a716-446655440000 \
+  AFFECTED_USER_NAME='Ada Lovelace' \
+  RCA_STATE='🔵 Draft PR open (needs attention)' \
+  RCA_FE_URL='https://roselabs.ai/?agent-id=550e8400-e29b-41d4-a716-446655440000' \
+  RCA_PR_URL='https://github.com/Rose-Ai-Labs/rose/pull/999' \
+  RCA_RUN_URL='https://github.com/Rose-Ai-Labs/rose/actions/runs/123' \
+  "$RCA_TOOL" slack-message
+)"
+[ "$actual_slack_message" = "$expected_slack_message" ] || \
+  fail "Slack lifecycle message must contain affected user, current state, FE View, PR, GitHub Action run, and agent ID"
 
 while IFS= read -r action_ref; do
   if ! [[ "$action_ref" =~ @[0-9a-f]{40}$ ]]; then

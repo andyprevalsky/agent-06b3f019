@@ -261,6 +261,7 @@ run_suite "Cloud Benchmark Restore Readiness" bash scripts/tests/cloudbench-rest
 run_suite "Cloud Benchmark Orphan-Proxy Reaper" bash scripts/tests/fleet-orphan-proxy-reaper.test.sh
 run_suite "Seed-Dump Cache Decision" bash scripts/tests/seed-cache-decision.test.sh
 run_suite "Fast-Mode Cache Schema Retry" bash scripts/tests/fast-mode-cache-schema-retry.test.sh
+run_suite "Workspace Dependency Preflight" bash scripts/tests/workspace-dependencies.test.sh
 
 # ── Build checks (run in parallel with blackbox tests) ──
 BUILD_PIDS=()
