@@ -18,6 +18,7 @@
 import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import fs from 'fs';
 import path from 'path';
+import { ADMIN_USER_IDS } from '../utils/adminAccess';
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -31,10 +32,7 @@ const LOCAL_DIR = path.join(__dirname, '..', '..', '..', '.context', 'benchmark-
  * agent fallback on the normal agent APIs are internal-team tooling. Mirrors
  * the front-end ADMIN_USER_IDS (terminal-component-group/config.ts).
  */
-export const BENCHMARK_HUB_ADMIN_USER_IDS = new Set([
-  '1f85ff25-6e29-4c1b-8739-f917bd101a30', // Andy Prevalsky
-  '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9', // Tamara Chayo
-]);
+export const BENCHMARK_HUB_ADMIN_USER_IDS = ADMIN_USER_IDS;
 
 /** Internal API key or an allowlisted team member may read the benchmark
  * archive through the normal agent APIs. */
