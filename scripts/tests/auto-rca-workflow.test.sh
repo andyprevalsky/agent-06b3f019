@@ -39,6 +39,8 @@ require_text "$WORKFLOW" 'slack_ts must be a Slack message timestamp' "dispatch 
 require_text "$WORKFLOW" 'slack_channel must be a Slack channel ID' "dispatch Slack channel must be validated"
 require_text "$WORKFLOW" "SLACK_OUTPUT_TS: ${LITERAL_DOLLAR}{{ steps.slack.outputs.ts }}" "step output must enter shell through the environment"
 require_absent "$WORKFLOW" "ts=\"${LITERAL_DOLLAR}{{ steps.slack.outputs.ts }}\"" "step output must not be interpolated directly into shell source"
+require_text "$WORKFLOW" "printf 'SLACK_TS=%s\\n' \"${LITERAL_DOLLAR}{ts:-}\" >> \"${LITERAL_DOLLAR}GITHUB_ENV\"" "resolved manual-dispatch Slack timestamp must reach the RCA broker"
+require_text "$WORKFLOW" "printf 'SLACK_CHANNEL=%s\\n' \"${LITERAL_DOLLAR}{channel:-}\" >> \"${LITERAL_DOLLAR}GITHUB_ENV\"" "resolved manual-dispatch Slack channel must reach the RCA broker"
 require_text "$WORKFLOW" 'persist-credentials: false' "checkout credentials must not persist into RCA tools"
 require_text "$SHIPPED_WORKFLOW" "github.event.pull_request.base.ref == 'main'" "shipped notice must require a merge into main"
 require_text "$WORKFLOW" '--allowedTools "Bash(scripts/auto-rca-tool evidence),Bash(scripts/auto-rca-tool benchmark),Bash(scripts/auto-rca-tool offline-gates),Bash(scripts/auto-rca-tool smoke-gates),Bash(scripts/auto-rca-tool publish-draft),Bash(scripts/auto-rca-tool mark-ready)"' "auto-RCA must grant only the checked-in command broker"
