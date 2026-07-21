@@ -45,14 +45,17 @@ require_text "$WORKFLOW" 'persist-credentials: false' "checkout credentials must
 require_text "$SHIPPED_WORKFLOW" "github.event.pull_request.base.ref == 'main'" "shipped notice must require a merge into main"
 require_text "$WORKFLOW" 'sudo install -o root -g root -m 0555 scripts/auto-rca-tool /usr/local/bin/rose-auto-rca-tool' "auto-RCA must install an immutable broker outside the agent workspace"
 require_text "$WORKFLOW" "sudo install -d -o root -g root -m 0700 \"${LITERAL_DOLLAR}AUTO_RCA_GATE_STATE_DIR\"" "auto-RCA must create root-owned gate state outside the agent workspace"
-require_text "$WORKFLOW" '--allowedTools "Bash(/usr/local/bin/rose-auto-rca-tool evidence),Bash(/usr/local/bin/rose-auto-rca-tool benchmark),Bash(/usr/local/bin/rose-auto-rca-tool offline-gates),Bash(/usr/local/bin/rose-auto-rca-tool smoke-gates),Bash(/usr/local/bin/rose-auto-rca-tool publish-draft),Bash(/usr/local/bin/rose-auto-rca-tool mark-ready)"' "auto-RCA must grant only the immutable command broker"
+require_text "$WORKFLOW" '--allowedTools "Bash(/usr/local/bin/rose-auto-rca-tool evidence),Bash(/usr/local/bin/rose-auto-rca-tool benchmark),Bash(/usr/local/bin/rose-auto-rca-tool offline-gates),Bash(/usr/local/bin/rose-auto-rca-tool smoke-gates),Bash(/usr/local/bin/rose-auto-rca-tool publish-draft)"' "auto-RCA must grant only the immutable command broker"
+require_absent "$WORKFLOW" 'Bash(/usr/local/bin/rose-auto-rca-tool mark-ready)' "Claude must not control the trusted PR readiness transition"
 require_absent "$WORKFLOW" 'Bash(*)' "auto-RCA must never grant arbitrary shell execution"
 require_absent "$WORKFLOW" 'Bash(curl' "auto-RCA must not expose raw curl to production evidence"
 require_absent "$WORKFLOW" 'Bash(gh' "auto-RCA must not expose raw GitHub CLI access"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool evidence' "auto-RCA prompt must gather evidence through the immutable command broker"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool publish-draft' "auto-RCA prompt must publish through the immutable command broker"
+require_text "$WORKFLOW" 'The trusted workflow step that follows you creates the DRAFT PR' "the prompt must describe the trusted PR-creation boundary"
 require_text "$WORKFLOW" 'name: Ensure preliminary RCA draft' "auto-RCA must create a preliminary draft when Claude does not publish one"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool ensure-draft' "the trusted workflow must enforce the preliminary draft fallback"
+require_text "$WORKFLOW" "AUTO_RCA_PR_TOKEN: ${LITERAL_DOLLAR}{{ secrets.GH_UPDATE_TOKEN }}" "only the trusted fallback step must receive the PR-capable token"
 require_absent "$WORKFLOW" 'Bash(/usr/local/bin/rose-auto-rca-tool ensure-draft)' "Claude must not be allowed to invoke the trusted draft fallback"
 require_text "$WORKFLOW" 'name: Require RCA pull request' "auto-RCA must reject a successful Claude step that produced no PR"
 require_text "$WORKFLOW" 'No RCA pull request was created' "missing PR must be a visible workflow failure"
@@ -66,8 +69,18 @@ require_absent "$RCA_TOOL" 'remote get-url origin' "the broker must not trust th
 require_absent "$RCA_TOOL" 'gh auth setup-git' "the broker must not rely on gh auth setup-git for ephemeral GITHUB_TOKEN authentication"
 require_absent "$RCA_TOOL" "${LITERAL_DOLLAR}{GH_TOKEN}@github.com" "the broker must not place the GitHub token in a remote URL"
 require_absent "$RCA_TOOL" 'extraheader' "the broker must not persist a derived credential in repository config"
+require_text "$RCA_TOOL" "GH_TOKEN=\"${LITERAL_DOLLAR}AUTO_RCA_PR_TOKEN\" gh pr create" "draft creation must use the dedicated PR-capable token"
+publish_start="$(grep -n '^publish_draft()' "$RCA_TOOL" | cut -d: -f1)"
+ensure_start="$(grep -n '^ensure_draft()' "$RCA_TOOL" | cut -d: -f1)"
+if sed -n "${publish_start},$((ensure_start - 1))p" "$RCA_TOOL" | grep -Fq 'gh pr create'; then
+  fail "Claude-callable publish_draft must not create pull requests"
+fi
 
+claude_line="$(grep -nF 'name: Root-cause with Claude Code' "$WORKFLOW" | cut -d: -f1)"
 ensure_line="$(grep -nF 'name: Ensure preliminary RCA draft' "$WORKFLOW" | cut -d: -f1)"
+sed -n "${claude_line},${ensure_line}p" "$WORKFLOW" | grep -Fq 'continue-on-error: true' || \
+  fail "the trusted fallback, not the model process exit, must determine whether a draft lifecycle fails"
+
 require_line="$(grep -nF 'name: Require RCA pull request' "$WORKFLOW" | cut -d: -f1)"
 [ -n "$ensure_line" ] && [ -n "$require_line" ] && [ "$ensure_line" -lt "$require_line" ] || \
   fail "the preliminary draft fallback must run before the PR postcondition"
