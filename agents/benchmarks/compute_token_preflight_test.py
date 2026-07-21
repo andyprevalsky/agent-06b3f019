@@ -13,7 +13,13 @@ task at the fixture before an agent was created — 0/8 on the ecommerce slice.
 These tests pin the tolerance on both paths without needing a live DB.
 """
 
+import subprocess
+import sys
+import time
+from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 import benchmarks.run_benchmark as rb
 
@@ -34,7 +40,7 @@ def _captured_seed_env(**kwargs) -> dict[str, str]:
 
     with (
         patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
-        patch.object(rb.subprocess, "run", side_effect=fake_run),
+        patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
     ):
         rb._sync_compute_tokens(**kwargs)
     return seen["env"]
@@ -119,3 +125,43 @@ def test_preflight_raises_when_sync_fails():
             raise AssertionError("expected RuntimeError when compute-token sync fails")
         except RuntimeError as exc:
             assert "compute tokens" in str(exc).lower()
+
+
+def test_timed_out_seed_kills_its_process_group_and_preserves_partial_output(
+    tmp_path: Path,
+):
+    started = tmp_path / "child-started"
+    escaped_marker = repr(str(tmp_path / "orphan-finished"))
+    escaped_started = repr(str(started))
+    child = (
+        "import pathlib,time; "
+        f"pathlib.Path({escaped_started}).write_text('started'); "
+        "time.sleep(3); "
+        f"pathlib.Path({escaped_marker}).write_text('survived')"
+    )
+    parent = (
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable, '-c', {child!r}]); "
+        "print('credential-step-before-timeout', flush=True); "
+        "print('npx-warning-before-timeout', file=sys.stderr, flush=True); "
+        "time.sleep(10)"
+    )
+
+    with pytest.raises(subprocess.TimeoutExpired) as caught:
+        rb._run_seed_subprocess(
+            [sys.executable, "-c", parent],
+            cwd=tmp_path,
+            env=None,
+            timeout=2,
+        )
+
+    output = caught.value.stdout or ""
+    if isinstance(output, bytes):
+        output = output.decode()
+    assert "credential-step-before-timeout" in output
+    detail = rb._seed_sync_error_detail(caught.value)
+    assert "credential-step-before-timeout" in detail
+    assert "npx-warning-before-timeout" in detail
+    assert started.exists()
+    time.sleep(3.2)
+    assert not (tmp_path / "orphan-finished").exists()

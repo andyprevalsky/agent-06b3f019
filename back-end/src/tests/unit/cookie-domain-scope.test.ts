@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 
 // RCA #5 (ecommerce slice): the benchmark browser-credential live fixture ran a
 // FULL ~22k-cookie sync inside a 420s cap — on a warm-restored box (which skips
@@ -17,9 +16,9 @@ import { parseCookieDomains, cookieSyncWhere } from '../../../scripts/cookie-dom
 function test(name: string, fn: () => void): void {
   try {
     fn();
-    console.log(`  ✅ ${name}`);
+    process.stdout.write(`  ✅ ${name}\n`);
   } catch (error) {
-    console.error(`  ❌ ${name}`);
+    process.stderr.write(`  ❌ ${name}\n`);
     throw error;
   }
 }
@@ -65,4 +64,4 @@ test('multiple domains produce three clauses each', () => {
   assert.equal((where.OR as unknown[]).length, 6);
 });
 
-console.log('cookie-domain-scope: all tests passed');
+process.stdout.write('cookie-domain-scope: all tests passed\n');

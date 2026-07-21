@@ -33,6 +33,7 @@ import csv
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -3623,17 +3624,72 @@ def _run_gate_fixture(task_name: str, action: str) -> dict:
     return _parse_last_json_line(result.stdout)
 
 
-def _seed_sync_error_detail(result: "subprocess.CompletedProcess[str]") -> str:
+def _seed_output_text(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode(errors="replace")
+    return value if isinstance(value, str) else ""
+
+
+def _seed_sync_error_detail(result: object) -> str:
     """Render a failed seed-local subprocess's output without destroying the
     diagnosis. Prisma errors put the actual reason (error code / constraint /
     timeout) at the END of the message, after the invocation header — a naive
     head truncation reduced the 2026-07-18 claude-code-agent smoke failure to
     an unusable 'Invalid `localCookie.upsert()` invocation in <file>' stub.
     Keep the head for context and the tail for the root cause."""
-    detail = (result.stderr or result.stdout or "").strip()
+    stderr = _seed_output_text(getattr(result, "stderr", None))
+    stdout = _seed_output_text(
+        getattr(result, "stdout", None) or getattr(result, "output", None)
+    )
+    streams = []
+    if stderr.strip():
+        streams.append(f"[stderr]\n{stderr.strip()}")
+    if stdout.strip():
+        streams.append(f"[stdout]\n{stdout.strip()}")
+    detail = "\n".join(streams)
     if len(detail) <= 1200:
         return detail
     return f"{detail[:300]}\n    … [{len(detail) - 1100} chars elided] …\n    {detail[-800:]}"
+
+
+def _run_seed_subprocess(
+    command: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str] | None,
+    timeout: float,
+) -> "subprocess.CompletedProcess[str]":
+    """Run a seed command in its own process group.
+
+    ``npx`` launches a child Node process. Killing only the wrapper on timeout
+    leaves that child syncing production credentials after the benchmark has
+    already failed and teardown has begun. A dedicated session lets the timeout
+    path terminate the complete seed tree and retain its partial diagnostics.
+    """
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(
+            exc.cmd,
+            exc.timeout,
+            output=stdout or exc.output,
+            stderr=stderr or exc.stderr,
+        ) from None
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool:
@@ -3661,14 +3717,18 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     if tolerate_gpt_code_unavailable:
         env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
     try:
-        result = subprocess.run(
+        result = _run_seed_subprocess(
             ["npx", "tsx", "scripts/seed-local.ts", "--compute-tokens-only"],
             cwd=REPO_ROOT / "back-end",
             env=env,
-            capture_output=True,
-            text=True,
             timeout=120,
         )
+    except subprocess.TimeoutExpired as exc:
+        print(
+            f"    ⚠ Compute-token sync timed out after {exc.timeout}s: "
+            f"{_seed_sync_error_detail(exc)}"
+        )
+        return False
     except Exception as exc:
         print(f"    ⚠ Compute-token sync error: {exc}")
         return False
@@ -3687,12 +3747,13 @@ def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     so the live fixture re-pulls them right before the agent starts.
     Best-effort but loud. Reads the prod source from back-end/.env.
 
-    When ``cookie_domains`` is given (from the task's environment.live_cookie_domains)
-    the cookie sync is scoped to just those domains — the dominant cost is the full
-    ~22k-cookie graph, so a task that only needs e.g. doordash.com syncs ~100 rows
-    in seconds instead of ~13 min (which blew the old 420s budget on every warm box
-    that skipped run.sh's boot sync). With no domains declared it syncs the full
-    graph under a raised budget (user-approved: generic tasks pay the honest cost)."""
+    When ``cookie_domains`` is given (from the task's environment.live_cookie_domains),
+    every domain-bearing browser-auth table is scoped to those domains: cookies,
+    bundles, origin storage, permissions, passwords, Steel sessions, and passkeys.
+    A task that only needs e.g. doordash.com therefore avoids both the full ~22k
+    cookie graph and thousands of unrelated durable-auth rows. With no domains
+    declared it syncs the full graph under a raised budget (generic tasks pay the
+    honest cost)."""
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Credential sync skipped: local Victoria DB not found")
@@ -3701,8 +3762,8 @@ def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
     if cookie_domains:
-        # seed-local.ts filters the prod cookie read to these domains (index-backed),
-        # so the sync is bounded by the task's own cookies, not the whole account.
+        # seed-local.ts filters every domain-bearing browser-auth read, so the
+        # sync is bounded by the task's auth state, not the whole account.
         env["SEED_COOKIE_DOMAINS"] = ",".join(cookie_domains)
         cred_timeout = 300
         print(
@@ -3710,23 +3771,27 @@ def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
             f"domain(s): {', '.join(cookie_domains)}"
         )
     else:
-        # No declared domains → full cookie graph. It legitimately takes several
+        # No declared domains → full browser-auth graph. It legitimately takes several
         # minutes on a warm box (which skipped run.sh's boot sync), so give it the
         # honest budget instead of failing the whole task at 420s.
         cred_timeout = 900
         print("    🍪 full browser-credential sync (no live_cookie_domains) — raised budget")
     try:
-        result = subprocess.run(
+        result = _run_seed_subprocess(
             ["npx", "tsx", "scripts/seed-local.ts", "--credentials-only"],
             cwd=REPO_ROOT / "back-end",
             env=env,
-            capture_output=True,
-            text=True,
             # A scoped sync takes seconds; the full graph takes minutes. seed-local
             # retries transient DB failures up to 3x internally, so the budget must
             # cover multiple attempts of whichever mode this is.
             timeout=cred_timeout,
         )
+    except subprocess.TimeoutExpired as exc:
+        print(
+            f"    ⚠ Credential sync timed out after {exc.timeout}s: "
+            f"{_seed_sync_error_detail(exc)}"
+        )
+        return False
     except Exception as exc:
         print(f"    ⚠ Credential sync error: {exc}")
         return False
@@ -3752,14 +3817,16 @@ def _sync_passkeys() -> None:
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
     try:
-        result = subprocess.run(
+        result = _run_seed_subprocess(
             ["npx", "tsx", "scripts/seed-local.ts", "--passkeys-only"],
             cwd=REPO_ROOT / "back-end",
             env=env,
-            capture_output=True,
-            text=True,
             timeout=120,
         )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Passkey-only sync timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}"
+        ) from exc
     except Exception as exc:
         raise RuntimeError(f"Passkey-only sync failed: {exc}") from exc
     if result.returncode != 0:

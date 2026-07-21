@@ -656,6 +656,9 @@ PY
 # non-hub listener sitting on it. The test must therefore only ever point the
 # fleets at ports it PROBED free and then occupied with its own hub stubs —
 # never at a well-known port that could carry a real process on a dev machine.
+# Derive a process-specific search window from this run's random tmp root so
+# concurrent copies of this regression (for example, two Conductor workspaces)
+# do not both probe 42000 free and then race to own the same listener.
 find_free_port() {  # find_free_port <start>
     local start="$1" port
     for port in $(seq "$start" $((start + 500))); do
@@ -666,7 +669,15 @@ find_free_port() {  # find_free_port <start>
     done
     return 1
 }
-HUB_PORT_A="$(find_free_port 42000)" || fail "could not find a free test port for workstream A"
+PORT_WINDOW_START="$(TMP_ROOT="$TMP_ROOT" python3 - <<'PY'
+import hashlib
+import os
+
+digest = hashlib.sha256(os.environ["TMP_ROOT"].encode()).digest()
+print(40000 + int.from_bytes(digest[:4], "big") % 15000)
+PY
+)"
+HUB_PORT_A="$(find_free_port "$PORT_WINDOW_START")" || fail "could not find a free test port for workstream A"
 HUB_PORT_B="$(find_free_port $((HUB_PORT_A + 1)))" || fail "could not find a free test port for workstream B"
 CONDUCTOR_PORT_A=$((HUB_PORT_A - 5764))
 CONDUCTOR_PORT_B=$((HUB_PORT_B - 5764))
@@ -720,6 +731,14 @@ registered = {}
 class Hub(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/hub-meta.json":
+            body = json.dumps({"hub_runs_dir": str(runs_root.resolve())}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if path.startswith("/api/benchmarks/runs/"):
             run_id = path.rsplit("/", 1)[-1]
             if run_id not in registered:

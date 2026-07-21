@@ -36,7 +36,15 @@ export function checkPatternSafety(source: string, flags: string): PatternSafety
   try {
     diagnostics = checkSync(source, flags, { timeout: 1000 });
   } catch {
-    return { ok: true }; // analyzer error/timeout — fail open; the length cap is the backstop
+    // The analyzer is the only guard against catastrophic backtracking. A
+    // length cap alone cannot make short nested-quantifier patterns safe, so
+    // analyzer errors and timeouts must fail closed before the pattern reaches
+    // Postgres.
+    return {
+      ok: false,
+      reason:
+        'Pattern safety analysis did not complete. Use a simpler expression without nested quantifiers or stacked wildcards.',
+    };
   }
   if (diagnostics.status !== 'vulnerable') return { ok: true };
   const complexity = diagnostics.complexity;
