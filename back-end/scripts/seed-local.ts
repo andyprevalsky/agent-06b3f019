@@ -391,7 +391,15 @@ async function syncComputeTokensWithRetries(): Promise<void> {
       const count = await syncIntegrations();
       const usableClaudeCodeCount = await countUsableClaudeCodeIntegrations();
       if (usableClaudeCodeCount === 0) {
-        throw new Error('No usable claude_code integrations after sync');
+        if (process.env.SEED_ALLOW_MISSING_CLAUDE_CODE === '1') {
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, ` +
+              '0 usable claude_code — proceeding with the caller-validated ' +
+              'ANTHROPIC_API_KEY fallback (SEED_ALLOW_MISSING_CLAUDE_CODE=1)'
+          );
+        } else {
+          throw new Error('No usable claude_code integrations after sync');
+        }
       }
       const usableGptCodeCount = await countUsableGptCodeIntegrations();
       if (usableGptCodeCount === 0) {

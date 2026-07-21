@@ -7,6 +7,8 @@ report card's `cost.wmh_grounding_usd`. We stub `httpx.get` so no server is need
 
 from __future__ import annotations
 
+import asyncio
+
 import benchmarks.run_benchmark as rb
 
 
@@ -93,7 +95,7 @@ def test_live_fixture_skips_entire_overlay_in_simulate(monkeypatch):
     """Simulation must not apply a partial production-credential overlay."""
     monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "simulate")
     calls = []
-    monkeypatch.setattr(rb, "_sync_compute_tokens", lambda: calls.append("compute") or True)
+    monkeypatch.setattr(rb, "_sync_compute_tokens", lambda **_kwargs: calls.append("compute") or True)
     monkeypatch.setattr(rb, "_sync_browser_credentials", lambda: calls.append("browser"))
 
     manifest = rb._apply_live_fixture(_fixture_ctx())
@@ -105,8 +107,12 @@ def test_live_fixture_skips_entire_overlay_in_simulate(monkeypatch):
 def test_live_fixture_syncs_complete_browser_auth_when_real(monkeypatch):
     monkeypatch.setenv("BENCHMARK_WORLD_MODEL_MODE", "real")
     calls = []
-    monkeypatch.setattr(rb, "_sync_compute_tokens", lambda: calls.append("compute") or True)
-    monkeypatch.setattr(rb, "_sync_browser_credentials", lambda: calls.append("browser") or True)
+    monkeypatch.setattr(rb, "_sync_compute_tokens", lambda **_kwargs: calls.append("compute") or True)
+    monkeypatch.setattr(
+        rb,
+        "_sync_browser_credentials",
+        lambda _domains=(): calls.append("browser") or True,
+    )
 
     manifest = rb._apply_live_fixture(_fixture_ctx())
 
@@ -116,10 +122,15 @@ def test_live_fixture_syncs_complete_browser_auth_when_real(monkeypatch):
 
 def test_local_run_refreshes_compute_tokens_without_live_browser_state(monkeypatch):
     calls = []
-    monkeypatch.setattr(rb, "_sync_compute_tokens", lambda: calls.append("compute") or True)
+    monkeypatch.setattr(rb, "_sync_compute_tokens", lambda **_kwargs: calls.append("compute") or True)
+    monkeypatch.setattr(
+        rb,
+        "_has_usable_anthropic_api_key_fallback",
+        lambda _base_url: asyncio.sleep(0, result=False),
+    )
 
-    rb._refresh_local_compute_tokens_for_run("http://localhost:3001")
-    rb._refresh_local_compute_tokens_for_run("https://api.roselabs.ai")
+    asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
+    asyncio.run(rb._refresh_local_compute_tokens_for_run("https://api.roselabs.ai"))
 
     assert calls == ["compute"]
 

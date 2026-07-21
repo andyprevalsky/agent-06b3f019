@@ -38,6 +38,16 @@ assert.doesNotMatch(
   /for attempt in \$\(seq 1 600\)/,
   'coverage readiness must not use a fixed attempt-count timeout'
 );
+assert.match(
+  coverageScript,
+  /export FAST_MODE_CACHE_DATABASE_URL="\$LOCAL_DB_URL"/,
+  'coverage must isolate Fast Mode cache fixtures in the local test database'
+);
+assert.doesNotMatch(
+  coverageScript,
+  /ENV_DATABASE_URL=.*DATABASE_URL/,
+  'coverage must not derive its Fast Mode cache database from the production .env'
+);
 
 for (const [name, harness] of [
   ['coverage', coverageScript],

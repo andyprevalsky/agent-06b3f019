@@ -628,6 +628,10 @@ async function testAnthropicApiKeyCooldown_markThenOnCooldown() {
   });
   assertStatus(status.status, 200, status.data);
   assert(
+    typeof (status.data as { configured?: unknown }).configured === 'boolean',
+    'anthropic availability should report whether the running backend configured the key'
+  );
+  assert(
     (status.data as { onCooldown?: boolean }).onCooldown === true,
     'anthropic key should report on-cooldown after being marked rate-limited'
   );

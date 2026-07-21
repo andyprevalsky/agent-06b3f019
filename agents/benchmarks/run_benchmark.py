@@ -1324,8 +1324,7 @@ async def _get_initial_payment_lifecycle_with_retry(
             if attempt >= max_attempts:
                 break
             print(
-                "    ⚠ Transient initial payment lifecycle read failed "
-                f"({attempt}/{max_attempts}); retrying: {error}"
+                f"    ⚠ Transient initial payment lifecycle read failed ({attempt}/{max_attempts}); retrying: {error}"
             )
             await asyncio.sleep(retry_delay_seconds)
     raise RuntimeError(
@@ -1465,10 +1464,7 @@ async def _agentcard_setup_attention_still_open_after_terminal(
     for attempt in range(1, max_attempts + 1):
         try:
             pending = await fetch_requests(base_url)
-            setup_still_open = any(
-                req.get("id") == request_id and _attention_request_is_open(req)
-                for req in pending
-            )
+            setup_still_open = any(req.get("id") == request_id and _attention_request_is_open(req) for req in pending)
             if not setup_still_open or attempt >= max_attempts:
                 return setup_still_open
         except Exception as error:
@@ -2685,9 +2681,7 @@ async def poll_agent(
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
                                     "expected_attention_kind_seen": observed_kind,
-                                    "expected_attention_kind_any_of": list(
-                                        task.expected_attention_kind_any_of
-                                    ),
+                                    "expected_attention_kind_any_of": list(task.expected_attention_kind_any_of),
                                     "expected_attention_request_id": req_id,
                                 }
                             if task.expected_attention_kinds:
@@ -3782,9 +3776,7 @@ def _seed_sync_error_detail(result: object) -> str:
     an unusable 'Invalid `localCookie.upsert()` invocation in <file>' stub.
     Keep the head for context and the tail for the root cause."""
     stderr = _seed_output_text(getattr(result, "stderr", None))
-    stdout = _seed_output_text(
-        getattr(result, "stdout", None) or getattr(result, "output", None)
-    )
+    stdout = _seed_output_text(getattr(result, "stdout", None) or getattr(result, "output", None))
     streams = []
     if stderr.strip():
         streams.append(f"[stderr]\n{stderr.strip()}")
@@ -3836,7 +3828,11 @@ def _run_seed_subprocess(
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
-def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool:
+def _sync_compute_tokens(
+    *,
+    tolerate_gpt_code_unavailable: bool = False,
+    tolerate_claude_code_unavailable: bool = False,
+) -> bool:
     """Refresh the compute-token integrations (claude_code / gpt_code + pool)
     from prod into the isolated benchmark DB. Returns False on any failure so
     the live-fixture caller can fail closed. A frozen DB
@@ -3844,13 +3840,11 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     which forces the agent's claudeAuth fetch to fail into the paid waterfall.
     Reads the prod source from back-end/.env; writes to the isolated DB.
 
-    ``tolerate_gpt_code_unavailable`` sets the seed's ``SEED_ALLOW_MISSING_GPT_CODE``
-    opt-in so the sync succeeds when Codex (gpt_code) is quota-blocked
-    (rateLimitedUntil set), since the agent runtime drives claude_code. Both the
-    blanket pre-flight AND the live-fixture overlay pass it: browser/credential
-    tasks never touch Codex, so an exhausted gpt_code must not abort them here.
-    Codex-dependent tasks fail closed at their own strict credential gate
-    downstream, not at this shared compute-token sync."""
+    The tolerance flags set explicit seed opt-ins for providers whose runtime
+    replacements have already been validated by the caller. Codex-dependent
+    tasks keep their strict credential gate downstream. Missing Claude OAuth is
+    tolerated only after the local backend confirms that the configured funded
+    Anthropic API key is not on cooldown."""
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Compute-token sync skipped: local Victoria DB not found")
@@ -3859,11 +3853,14 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
     env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
+    env.pop("SEED_ALLOW_MISSING_CLAUDE_CODE", None)
     shared_source = _shared_workspace_database_url()
     if shared_source and shared_source != database_url:
         env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = shared_source
     if tolerate_gpt_code_unavailable:
         env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
+    if tolerate_claude_code_unavailable:
+        env["SEED_ALLOW_MISSING_CLAUDE_CODE"] = "1"
     try:
         result = _run_seed_subprocess(
             ["npx", "tsx", "scripts/seed-local.ts", "--compute-tokens-only"],
@@ -3872,10 +3869,7 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
             timeout=120,
         )
     except subprocess.TimeoutExpired as exc:
-        print(
-            f"    ⚠ Compute-token sync timed out after {exc.timeout}s: "
-            f"{_seed_sync_error_detail(exc)}"
-        )
+        print(f"    ⚠ Compute-token sync timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
         return False
     except Exception as exc:
         print(f"    ⚠ Compute-token sync error: {exc}")
@@ -3915,10 +3909,7 @@ def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
         # sync is bounded by the task's auth state, not the whole account.
         env["SEED_COOKIE_DOMAINS"] = ",".join(cookie_domains)
         cred_timeout = 300
-        print(
-            f"    🍪 scoping browser-credential sync to {len(cookie_domains)} "
-            f"domain(s): {', '.join(cookie_domains)}"
-        )
+        print(f"    🍪 scoping browser-credential sync to {len(cookie_domains)} domain(s): {', '.join(cookie_domains)}")
     else:
         # No declared domains → full browser-auth graph. It legitimately takes several
         # minutes on a warm box (which skipped run.sh's boot sync), so give it the
@@ -3936,10 +3927,7 @@ def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
             timeout=cred_timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        print(
-            f"    ⚠ Credential sync timed out after {exc.timeout}s: "
-            f"{_seed_sync_error_detail(exc)}"
-        )
+        print(f"    ⚠ Credential sync timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
         return False
     except Exception as exc:
         print(f"    ⚠ Credential sync error: {exc}")
@@ -3973,9 +3961,7 @@ def _sync_passkeys() -> None:
             timeout=120,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"Passkey-only sync timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}"
-        ) from exc
+        raise RuntimeError(f"Passkey-only sync timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}") from exc
     except Exception as exc:
         raise RuntimeError(f"Passkey-only sync failed: {exc}") from exc
     if result.returncode != 0:
@@ -3994,6 +3980,7 @@ class LiveFixtureContext:
     # sync is scoped to just those cookie domains (seconds, not ~13 min). Empty →
     # full cookie sync with a raised budget.
     cookie_domains: tuple[str, ...] = ()
+    tolerate_claude_code_unavailable: bool = False
 
 
 def _is_simulate_mode() -> bool:
@@ -4020,14 +4007,17 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     # abort the whole run before an agent is ever created. Codex-dependent tasks
     # keep their own strict credential gates downstream. Without this, an exhausted
     # org-wide Codex quota failed every browser task at the fixture (0/8 ecommerce).
-    if not _sync_compute_tokens(tolerate_gpt_code_unavailable=True):
+    if not _sync_compute_tokens(
+        tolerate_gpt_code_unavailable=True,
+        tolerate_claude_code_unavailable=ctx.tolerate_claude_code_unavailable,
+    ):
         raise RuntimeError("Live fixture could not refresh compute tokens")
     if not _sync_browser_credentials(ctx.cookie_domains):
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
     return {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
 
 
-def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
+async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     """Refresh agent-infrastructure compute credentials once before local tasks.
 
     This is required even when no task opts into browser credential state. It is
@@ -4039,7 +4029,11 @@ def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
     # Codex-dependent tasks keep their own strict credential gates downstream.
-    if not _sync_compute_tokens(tolerate_gpt_code_unavailable=True):
+    tolerate_missing_claude = await _has_usable_anthropic_api_key_fallback(base_url)
+    if not _sync_compute_tokens(
+        tolerate_gpt_code_unavailable=True,
+        tolerate_claude_code_unavailable=tolerate_missing_claude,
+    ):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
 
 
@@ -4286,7 +4280,7 @@ assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
 )
 
 
-def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
+async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
     """Apply every live fixture the task's environment resolves to, in order.
 
     Live fixtures only apply against the local benchmark stack. Scenario-specific
@@ -4301,11 +4295,13 @@ def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
     auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
     raw_domains = (task.environment or {}).get("live_cookie_domains") or []
     cookie_domains = tuple(str(d).strip() for d in raw_domains if str(d).strip())
+    tolerate_missing_claude = await _has_usable_anthropic_api_key_fallback(base_url)
     ctx = LiveFixtureContext(
         base_url=base_url,
         user_id=USER_ID,
         auth_realm=auth_realm,
         cookie_domains=cookie_domains,
+        tolerate_claude_code_unavailable=tolerate_missing_claude,
     )
     manifests: list[dict] = []
     for name in fixtures:
@@ -6491,7 +6487,7 @@ async def run_single_task(
         # Apply the live overlay inside the cleanup boundary. The passkey-only
         # scenario intentionally removes shared browser state and must restore it
         # even when agent creation or evaluation fails.
-        live_fixture_manifests = _apply_live_fixtures(task, base_url)
+        live_fixture_manifests = await _apply_live_fixtures(task, base_url)
         if task.browser_profile_mode == "fresh" and not _is_simulate_mode():
             if not _is_local_base_url(base_url):
                 raise RuntimeError(f"{task.name}: fresh browser state requires an isolated local benchmark stack")
@@ -7685,8 +7681,32 @@ async def _fail_stale_active_agents():
         print(f"  ⚠ Could not run stale-agent cleanup: {e}")
 
 
-def _has_anthropic_api_key_fallback_configured() -> bool:
-    return bool(load_env_var("ANTHROPIC_API_KEY", _BACKEND_ENV, _AGENTS_ENV))
+async def _has_usable_anthropic_api_key_fallback(base_url: str) -> bool:
+    """Mirror the backend's funded-fallback selection without probing the key.
+
+    Credential health owns the live Anthropic request. The benchmark preflight
+    owns runtime selection: the key must be configured and the backend's shared
+    out-of-credits circuit breaker must be clear. Any unavailable check fails
+    closed and leaves Claude OAuth mandatory.
+    """
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{base_url}/api/integrations/compute-code/anthropic-key/cooldown",
+                headers=headers,
+                timeout=10.0,
+            )
+        if response.status_code != 200:
+            return False
+        availability = response.json()
+        return (
+            isinstance(availability, dict)
+            and availability.get("configured") is True
+            and availability.get("onCooldown") is False
+        )
+    except Exception:
+        return False
 
 
 async def _check_compute_code_credentials(base_url: str) -> bool:
@@ -7709,18 +7729,7 @@ async def _check_compute_code_credentials(base_url: str) -> bool:
                 data = resp.json()
                 return data.get("type") in ("claude", "gpt") and bool(data.get("accessToken"))
 
-            if not _has_anthropic_api_key_fallback_configured():
-                return False
-
-            cooldown_resp = await client.get(
-                f"{base_url}/api/integrations/compute-code/anthropic-key/cooldown",
-                headers=headers,
-                timeout=10.0,
-            )
-            if cooldown_resp.status_code != 200:
-                return False
-            cooldown_data = cooldown_resp.json()
-            return cooldown_data.get("onCooldown") is not True
+        return await _has_usable_anthropic_api_key_fallback(base_url)
     except Exception:
         return False
 
@@ -7907,7 +7916,7 @@ async def main_async(args):
                 print("  ⚠ Temporal stale-workflow cleanup timed out after 30s; continuing")
             await _fail_stale_active_agents()
         await _warmup_edge_functions(base_url)
-        _refresh_local_compute_tokens_for_run(base_url)
+        await _refresh_local_compute_tokens_for_run(base_url)
 
     # Pre-flight: check provider-typed compute credentials for code-agent tests.
     skipped_claude_tasks: List[BenchmarkTask] = []

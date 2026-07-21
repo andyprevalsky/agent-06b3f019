@@ -184,6 +184,27 @@ test('missing-Codex bypass warning reports the usable Claude count', async () =>
   assert(warning > bypass, 'expected its warning to report the usable Claude count');
 });
 
+test('missing-Claude bypass requires the caller-validated Anthropic fallback opt-in', async () => {
+  const source = readSeedLocalSource();
+  const zeroClaude = source.indexOf('if (usableClaudeCodeCount === 0)');
+  const bypass = source.indexOf("process.env.SEED_ALLOW_MISSING_CLAUDE_CODE === '1'", zeroClaude);
+  const warning = source.indexOf('caller-validated', bypass);
+  const fallback = source.indexOf('ANTHROPIC_API_KEY fallback', warning);
+  const strictFailure = source.indexOf(
+    "throw new Error('No usable claude_code integrations after sync')",
+    bypass
+  );
+
+  assert(zeroClaude > 0, 'expected an explicit zero-Claude availability check');
+  assert(bypass > zeroClaude, 'expected an explicit missing-Claude opt-in');
+  assert(warning > bypass, 'expected the bypass to identify its validated runtime replacement');
+  assert(fallback > warning, 'expected the runtime replacement to be the Anthropic API key');
+  assert(
+    strictFailure > fallback,
+    'expected missing Claude OAuth to fail closed without the opt-in'
+  );
+});
+
 (async () => {
   let failed = 0;
   for (const { name, fn } of tests) {

@@ -1220,7 +1220,7 @@ async def test_agentcard_setup_terminal_check_refreshes_stale_attention_poll():
                 {
                     "id": "setup-1",
                     "metadata": {"attentionKind": "agentcard_user_cardholder_onboarding_required"},
-                }
+                },
             ]
         return [
             {
@@ -1875,9 +1875,7 @@ async def test_amazon_beanie_poll_rejects_second_or_unrelated_approval_without_r
         "metadata": {"attentionKind": "auth_assistance"},
     }
 
-    (data, triggered, resolved, failure), responses = await _run_amazon_attention_poll(
-        [payment, write_lock]
-    )
+    (data, triggered, resolved, failure), responses = await _run_amazon_attention_poll([payment, write_lock])
     assert failure is not None and "Expected exactly one attention request" in failure
     assert data["_benchmark"]["attention_kinds_observed"] == [
         "payment_approval",
@@ -3784,7 +3782,6 @@ async def test_code_agent_preflight_rejects_missing_compute_token():
 
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
-    original_has_fallback = bench._has_anthropic_api_key_fallback_configured
     try:
 
         async def fake_headers():
@@ -3792,13 +3789,11 @@ async def test_code_agent_preflight_rejects_missing_compute_token():
 
         bench._api_headers = fake_headers
         bench.httpx.AsyncClient = FakeClient
-        bench._has_anthropic_api_key_fallback_configured = lambda: False
 
         assert await bench._check_compute_code_credentials("http://localhost:55120") is False
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
-        bench._has_anthropic_api_key_fallback_configured = original_has_fallback
 
 
 async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
@@ -3827,12 +3822,11 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
             if url.endswith("/api/integrations/compute-code/credentials/token"):
                 return FakeResponse(404, {"error": "NO_TOKENS_AVAILABLE"})
             if url.endswith("/api/integrations/compute-code/anthropic-key/cooldown"):
-                return FakeResponse(200, {"onCooldown": False})
+                return FakeResponse(200, {"configured": True, "onCooldown": False})
             raise AssertionError(f"unexpected URL {url}")
 
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
-    original_has_fallback = bench._has_anthropic_api_key_fallback_configured
     try:
 
         async def fake_headers():
@@ -3840,13 +3834,11 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
 
         bench._api_headers = fake_headers
         bench.httpx.AsyncClient = FakeClient
-        bench._has_anthropic_api_key_fallback_configured = lambda: True
 
         assert await bench._check_compute_code_credentials("http://localhost:55120") is True
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
-        bench._has_anthropic_api_key_fallback_configured = original_has_fallback
 
     assert calls == [
         (
@@ -3860,6 +3852,118 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
             10.0,
         ),
     ]
+
+
+async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback():
+    """Blanket local refresh must accept the same funded fallback as runtime."""
+    import benchmarks.run_benchmark as bench
+
+    http_calls = []
+    sync_options = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"configured": True, "onCooldown": False}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, *, headers, timeout):
+            http_calls.append((url, headers, timeout))
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    original_sync = bench._sync_compute_tokens
+    try:
+
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        def fake_sync(**options):
+            sync_options.append(options)
+            return options.get("tolerate_claude_code_unavailable") is True
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+        bench._sync_compute_tokens = fake_sync
+
+        refresh = bench._refresh_local_compute_tokens_for_run("http://localhost:55120")
+        if asyncio.iscoroutine(refresh):
+            await refresh
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+        bench._sync_compute_tokens = original_sync
+
+    assert sync_options == [
+        {
+            "tolerate_gpt_code_unavailable": True,
+            "tolerate_claude_code_unavailable": True,
+        }
+    ]
+    assert http_calls == [
+        (
+            "http://localhost:55120/api/integrations/compute-code/anthropic-key/cooldown",
+            {"X-API-Key": "test-key"},
+            10.0,
+        )
+    ]
+
+
+async def test_anthropic_api_key_fallback_availability_fails_closed():
+    """Only an explicitly configured, non-cooled backend runtime is usable."""
+    import benchmarks.run_benchmark as bench
+
+    cases = [
+        ("missing-key", 200, {"configured": False, "onCooldown": False}, None),
+        ("cooldown", 200, {"configured": True, "onCooldown": True}, None),
+        ("malformed-empty", 200, {}, None),
+        ("malformed-null", 200, None, None),
+        ("non-200", 503, {"configured": True, "onCooldown": False}, None),
+        ("unreachable", 0, None, RuntimeError("backend unavailable")),
+    ]
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        for name, status_code, body, error in cases:
+
+            class FakeResponse:
+                def __init__(self):
+                    self.status_code = status_code
+
+                def json(self):
+                    return body
+
+            class FakeClient:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return None
+
+                async def get(self, _url, *, headers, timeout):
+                    if error is not None:
+                        raise error
+                    return FakeResponse()
+
+            bench.httpx.AsyncClient = FakeClient
+            assert await bench._has_usable_anthropic_api_key_fallback("http://localhost:55120") is False, name
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
 
 
 def test_normalize_attention_requests_accepts_backend_contract():
@@ -4740,8 +4844,7 @@ def test_runner_fixtures_use_isolated_system_database_identity():
                 return_value=SimpleNamespace(returncode=0, stdout="1\n", stderr=""),
             ):
                 assert run_benchmark._local_victoria_database_url() == (
-                    "postgresql://postgres:postgres@localhost:5432/"
-                    "victoria_bench_1784586845_71851_68350"
+                    "postgresql://postgres:postgres@localhost:5432/victoria_bench_1784586845_71851_68350"
                 )
     finally:
         if prior_context is None:
@@ -4783,9 +4886,7 @@ def test_runner_fixtures_fail_closed_when_isolated_database_is_unavailable():
             os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
             with patch.object(run_benchmark.subprocess, "run", side_effect=probe):
                 assert run_benchmark._local_victoria_database_url() is None
-        assert probed_urls == [
-            "postgresql://postgres:postgres@localhost:5432/victoria_bench_unavailable"
-        ]
+        assert probed_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_bench_unavailable"]
     finally:
         if prior_context is None:
             os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
@@ -4881,13 +4982,10 @@ def test_run_sh_seed_dump_targets_isolated_database_atomically():
     """System-Postgres isolated runs must restore/dump their per-run DB safely."""
     run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
 
-    assert 'bash scripts/restore-seed-dump.sh' in run_script
+    assert "bash scripts/restore-seed-dump.sh" in run_script
     assert '"$_SEED_RESTORE_CONTAINER" >/dev/null' in run_script
     assert '"$_SEED_RESTORE_CONTAINER" >/dev/null 2>&1' not in run_script
-    assert (
-        'pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME"'
-        in run_script
-    )
+    assert 'pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME"' in run_script
     assert 'mv "$_SEED_DUMP_TMP" "$_SEED_DUMP"' in run_script
     required_guard = run_script.index('if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]')
     cold_sync = run_script.index('echo "🌱 Syncing production data to local database (first run)..."')
@@ -4908,20 +5006,15 @@ def test_seed_dump_restore_uses_target_container_pg_restore():
 
         host_restore = tmp_path / "pg_restore"
         host_restore.write_text(
-            '#!/bin/sh\n'
+            "#!/bin/sh\n"
             'echo "host pg_restore $*" >> "$COMMAND_LOG"\n'
-            'echo \'unrecognized configuration parameter "transaction_timeout"\' >&2\n'
-            'exit 1\n'
+            "echo 'unrecognized configuration parameter \"transaction_timeout\"' >&2\n"
+            "exit 1\n"
         )
         host_restore.chmod(0o755)
 
         docker = tmp_path / "docker"
-        docker.write_text(
-            '#!/bin/sh\n'
-            'echo "docker $*" >> "$COMMAND_LOG"\n'
-            'cat >/dev/null\n'
-            'exit 0\n'
-        )
+        docker.write_text('#!/bin/sh\necho "docker $*" >> "$COMMAND_LOG"\ncat >/dev/null\nexit 0\n')
         docker.chmod(0o755)
 
         result = subprocess.run(
@@ -4968,12 +5061,12 @@ def test_workspace_dependency_preflight_respects_hoisted_installs():
         fake_bin.mkdir()
         npm = fake_bin / "npm"
         npm.write_text(
-            '#!/bin/sh\n'
+            "#!/bin/sh\n"
             'echo "$*" >> "$COMMAND_LOG"\n'
             'if [ "$1" = "pkg" ]; then exit 0; fi\n'
             'if [ "$1" = "ls" ]; then [ "${NPM_GRAPH_READY:-0}" = 1 ] || [ -f "$INSTALLED_MARKER" ]; exit; fi\n'
             'if [ "$1" = "install" ]; then touch "$INSTALLED_MARKER"; exit 0; fi\n'
-            'exit 1\n'
+            "exit 1\n"
         )
         npm.chmod(0o755)
         common_env = {
@@ -5022,9 +5115,7 @@ def test_workspace_dependency_preflight_supports_standalone_packages():
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        (tmp_path / "package.json").write_text(
-            '{"name":"test-root","workspaces":["back-end"]}\n'
-        )
+        (tmp_path / "package.json").write_text('{"name":"test-root","workspaces":["back-end"]}\n')
         standalone = tmp_path / "mac-app"
         standalone.mkdir()
         (standalone / "package.json").write_text('{"name":"test-mac-app"}\n')
@@ -5034,12 +5125,12 @@ def test_workspace_dependency_preflight_supports_standalone_packages():
         fake_bin.mkdir()
         npm = fake_bin / "npm"
         npm.write_text(
-            '#!/bin/sh\n'
+            "#!/bin/sh\n"
             'echo "$PWD::$*" >> "$COMMAND_LOG"\n'
             'if [ "$1" = "pkg" ]; then exit 1; fi\n'
             'if [ "$1" = "ls" ]; then [ -f "$INSTALLED_MARKER" ]; exit; fi\n'
             'if [ "$1" = "install" ]; then touch "$INSTALLED_MARKER"; exit 0; fi\n'
-            'exit 1\n'
+            "exit 1\n"
         )
         npm.chmod(0o755)
 
@@ -5090,7 +5181,7 @@ def test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe():
     run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
 
     reachable_probe = 'pg_isready -h localhost -p "$LOCAL_DB_PORT" -U postgres -d victoria -q'
-    ownership_probe = 'workspace_db_container_owns_port &&'
+    ownership_probe = "workspace_db_container_owns_port &&"
     assert 'docker inspect "$DB_CONTAINER"' in run_script
     assert 'container_port" = "$LOCAL_DB_PORT"' in run_script
     assert reachable_probe in run_script
@@ -7982,6 +8073,14 @@ async def run_all_tests():
     await r.record_async(
         "code_agent_preflight_accepts_anthropic_api_key_fallback",
         test_code_agent_preflight_accepts_anthropic_api_key_fallback,
+    )
+    await r.record_async(
+        "local_compute_refresh_accepts_anthropic_api_key_fallback",
+        test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback,
+    )
+    await r.record_async(
+        "anthropic_api_key_fallback_availability_fails_closed",
+        test_anthropic_api_key_fallback_availability_fails_closed,
     )
     r.record("normalize_attention_requests", test_normalize_attention_requests_accepts_backend_contract)
     r.record("attention_kind_auth_vs_write_lock", test_attention_request_kind_distinguishes_auth_from_write_lock)
