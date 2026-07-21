@@ -394,12 +394,23 @@ fi
 DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
 DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
 PRESTARTED_WORKSPACE_DB=false
+
+workspace_db_container_owns_port() {
+    local container_port
+    container_port=$(docker inspect "$DB_CONTAINER" \
+        --format='{{if .State.Running}}{{(index (index .HostConfig.PortBindings "5432/tcp") 0).HostPort}}{{end}}' \
+        2>/dev/null || true)
+    [ "$container_port" = "$LOCAL_DB_PORT" ]
+}
+
 # Probe the workspace-scoped database service itself before asking the whole
 # Docker daemon for global state. Under concurrent deploy load `docker info`
 # can miss its one-second responsiveness budget even while this already-started
-# Postgres is healthy. A reachable workspace port is all run.sh needs; later DB
-# operations can use the host port directly without falling onto shared :5432.
+# Postgres is healthy. Verify that the exact workspace-named container owns the
+# expected host port before trusting the listener; another workspace can have
+# valid victoria credentials on a stale inherited port.
 if [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && \
+   workspace_db_container_owns_port && \
    PGPASSWORD=postgres pg_isready -h localhost -p "$LOCAL_DB_PORT" -U postgres -d victoria -q 2>/dev/null; then
     PRESTARTED_WORKSPACE_DB=true
 fi
@@ -1506,7 +1517,7 @@ fi
 if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
     echo "📦 Building bundled frontend before starting runtime services..."
     (cd front-end && rm -f "$FRONTEND_LOG_FILE" && \
-        VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" npx vite build > "$FRONTEND_LOG_FILE" 2>&1)
+        VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" VITE_REALTIME_PRIVATE=false npx vite build > "$FRONTEND_LOG_FILE" 2>&1)
 fi
 launch_backend_service
 

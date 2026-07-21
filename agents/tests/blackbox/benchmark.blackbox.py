@@ -480,6 +480,28 @@ async def test_parallel_benchmark_scheduler_serializes_browser_profile_writers()
     )
 
 
+def test_destructive_db_fixtures_run_before_parallel_agent_trees():
+    """A retained failed tree must not outlive the boundary for destructive fixtures."""
+    from benchmarks import run_benchmark as bench
+
+    class Task:
+        def __init__(self, name: str):
+            self.name = name
+
+    phases = bench._parallel_task_phases(
+        [
+            Task("claude-code-agent"),
+            Task("browser-biometrics-webdecoy"),
+            Task("chat-mode"),
+        ]
+    )
+
+    assert [(mode, [task.name for task in tasks]) for mode, tasks in phases] == [
+        ("exclusive", ["browser-biometrics-webdecoy"]),
+        ("parallel", ["claude-code-agent", "chat-mode"]),
+    ]
+
+
 def test_response_schema_feedback_benchmark_declares_real_mid_run_message():
     """The regression benchmark must inject non-goal feedback into a live agent run."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -1134,7 +1156,7 @@ def test_production_frontend_url_ignores_stale_local_services_manifest():
                 os.environ[name] = value
 
 
-def test_agentcard_setup_fixture_preflights_every_lifecycle_task():
+def test_agentcard_setup_fixture_skips_production_lifecycle():
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _agentcard_setup_fixture_action
 
@@ -1144,7 +1166,7 @@ def test_agentcard_setup_fixture_preflights_every_lifecycle_task():
 
     assert _agentcard_setup_fixture_action(standard, "http://localhost:55120") == "complete"
     assert _agentcard_setup_fixture_action(setup, "http://localhost:55120") == "reset"
-    assert _agentcard_setup_fixture_action(production, "https://api.roselabs.ai") == "complete"
+    assert _agentcard_setup_fixture_action(production, "https://api.roselabs.ai") is None
 
 
 def test_expected_attention_kind_uses_ordered_sequence():
@@ -4634,6 +4656,8 @@ def test_runner_fixtures_reject_manifest_without_database_identity():
             os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
         else:
             os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
+
+
 def test_local_isolated_stack_opts_into_fast_seed_dump():
     """An empty per-run DB must restore a cached seed instead of cold-syncing prod."""
     from benchmarks import local as local_bench
@@ -4889,13 +4913,47 @@ def test_workspace_dependency_preflight_rejects_missing_package_manifest():
 
 
 def test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe():
-    """A healthy workspace DB must not become shared system PG when Docker is busy."""
+    """Only the expected workspace container may bypass a busy Docker probe."""
     run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
 
     reachable_probe = 'pg_isready -h localhost -p "$LOCAL_DB_PORT" -U postgres -d victoria -q'
+    ownership_probe = 'workspace_db_container_owns_port &&'
+    assert 'docker inspect "$DB_CONTAINER"' in run_script
+    assert 'container_port" = "$LOCAL_DB_PORT"' in run_script
     assert reachable_probe in run_script
+    assert ownership_probe in run_script
+    assert run_script.index(ownership_probe) < run_script.index(reachable_probe)
     assert run_script.index(reachable_probe) < run_script.index("docker_info_quick; then")
     assert "if $PRESTARTED_WORKSPACE_DB; then" in run_script
+
+    function_start = run_script.index("workspace_db_container_owns_port() {")
+    function_end = run_script.index("\n}\n", function_start) + 3
+    ownership_function = run_script[function_start:function_end]
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_docker = Path(tmp) / "docker"
+        fake_docker.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_CONTAINER_PORT"\n')
+        fake_docker.chmod(0o755)
+        env = {
+            **os.environ,
+            "PATH": f"{tmp}:{os.environ.get('PATH', '')}",
+        }
+        command = (
+            ownership_function
+            + "\nDB_CONTAINER=victoria-db-bamako\nLOCAL_DB_PORT=55235\n"
+            + "workspace_db_container_owns_port\n"
+        )
+        owned = subprocess.run(
+            ["bash", "-c", command],
+            env={**env, "FAKE_CONTAINER_PORT": "55235"},
+            check=False,
+        )
+        foreign = subprocess.run(
+            ["bash", "-c", command],
+            env={**env, "FAKE_CONTAINER_PORT": "55205"},
+            check=False,
+        )
+        assert owned.returncode == 0
+        assert foreign.returncode != 0
 
 
 def test_run_sh_required_seed_failure_cleans_exact_owned_database():
@@ -7715,6 +7773,10 @@ async def run_all_tests():
         test_parallel_benchmark_scheduler_serializes_browser_profile_writers,
     )
     r.record(
+        "destructive_fixtures_precede_parallel_trees",
+        test_destructive_db_fixtures_run_before_parallel_agent_trees,
+    )
+    r.record(
         "browser_agent_cookie_bundle_bootstrap_local_only",
         test_browser_agent_cookie_bundle_bootstrap_is_local_only,
     )
@@ -7991,6 +8053,10 @@ async def run_all_tests():
     r.record(
         "production_frontend_ignores_stale_local_manifest",
         test_production_frontend_url_ignores_stale_local_services_manifest,
+    )
+    r.record(
+        "agentcard_setup_fixture_skips_production_lifecycle",
+        test_agentcard_setup_fixture_skips_production_lifecycle,
     )
     r.record(
         "ordered_attention_kind_sequence",

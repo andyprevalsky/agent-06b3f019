@@ -1,16 +1,38 @@
 #!/usr/bin/env tsx
 
-import assert from 'node:assert';
+import assert from 'node:assert/strict';
+
 import { checkPatternSafety } from '../../domains/data/regexSafety';
 
-const result = checkPatternSafety('safe-looking-pattern', '', () => {
-  throw new Error('simulated analyzer timeout');
-});
+function run(): void {
+  assert.equal(checkPatternSafety('(.*a){20}$', '').ok, false);
+  assert.equal(checkPatternSafety('meeting.*tomorrow', '').ok, true);
+  assert.equal(
+    checkPatternSafety('Multiline incident START.*incident END', 's', 0).ok,
+    true,
+    'a provably linear single-wildcard pattern must not depend on analyzer scheduling'
+  );
 
-assert.deepStrictEqual(result, {
-  ok: false,
-  reason:
-    'Pattern safety analysis did not complete. Use a simpler expression without nested quantifiers or stacked wildcards.',
-});
+  // An invalid runtime value makes recheck throw synchronously, exercising the
+  // same fail-closed branch used when its bounded analysis times out.
+  const analyzerFailure = checkPatternSafety('ordinary text', null as unknown as string);
+  assert.equal(analyzerFailure.ok, false, 'analyzer failures must reject the unclassified pattern');
+  assert.match(analyzerFailure.reason ?? '', /safety analysis did not complete/);
 
-process.stdout.write('PASS regex safety fails closed when analysis throws or times out\n');
+  const analyzerTimeout = checkPatternSafety('(.*a){20}$', '', 0);
+  assert.equal(analyzerTimeout.ok, false, 'unknown timeout diagnostics must fail closed');
+  assert.match(analyzerTimeout.reason ?? '', /safety analysis did not complete/);
+
+  const injectedAnalyzerFailure = checkPatternSafety('safe-looking-pattern', '', () => {
+    throw new Error('simulated analyzer timeout');
+  });
+  assert.deepEqual(injectedAnalyzerFailure, {
+    ok: false,
+    reason:
+      'Pattern safety analysis did not complete. Use a simpler expression without nested quantifiers or stacked wildcards.',
+  });
+
+  process.stdout.write('PASS regex safety rejects dangerous and unclassified patterns\n');
+}
+
+run();

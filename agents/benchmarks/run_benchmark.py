@@ -127,8 +127,9 @@ MINTED_AGENT_ACCOUNT_X_POST_GOAL = "Make a post on X.com that says, Hello World"
 GREP_EXPLORE_STRESS_TASK_NAME = "grep-explore-stress"
 AMAZON_PASSKEY_TASK_NAME = "browser-agent-amazon-passkey"
 # Tasks whose fixtures destructively mutate shared benchmark DB state. The
-# parallel scheduler runs these serially after the batch drains so they cannot
-# corrupt an in-flight sibling task. Each fixture must also restore its state.
+# parallel scheduler runs these serially before starting any ordinary task so a
+# retained failed agent tree cannot mutate their fixtures. Each fixture must
+# also restore its state.
 EXCLUSIVE_SHARED_DB_TASK_NAMES = {
     GREP_EXPLORE_STRESS_TASK_NAME,
     AMAZON_PASSKEY_TASK_NAME,
@@ -7013,6 +7014,12 @@ def _validate_task_target(task: BenchmarkTask, base_url: str) -> None:
 
 
 def _agentcard_setup_fixture_action(task: BenchmarkTask, base_url: str) -> Optional[str]:
+    # Production-only lifecycles must exercise the user's real AgentCard
+    # integration. Completing the benchmark setup fixture against production
+    # replaces that path with a sandbox cardholder, making every provider
+    # transfer report livemode=false and defeating this gate's purpose.
+    if task.production_only:
+        return None
     if task.agentcard_setup_action == "complete":
         return "reset"
     if task.expected_payment_lifecycle:
@@ -7708,6 +7715,22 @@ def _parallel_task_runners(
     return [run_limited(task) for task in tasks]
 
 
+def _parallel_task_phases(
+    tasks: list[BenchmarkTask],
+) -> list[tuple[str, list[BenchmarkTask]]]:
+    """Order destructive fixture tasks ahead of agent trees that may outlive a root.
+
+    A timed-out task can be intentionally retained for diagnostics while one of
+    its descendants continues working. Running a destructive fixture after the
+    root future settles therefore is not isolated: the descendant can recreate
+    shared rows during the fixture. Starting the exclusive phase first makes the
+    clean-stack boundary real without sacrificing failed-tree diagnostics.
+    """
+    exclusive = [task for task in tasks if task.name in EXCLUSIVE_SHARED_DB_TASK_NAMES]
+    parallel = [task for task in tasks if task.name not in EXCLUSIVE_SHARED_DB_TASK_NAMES]
+    return [("exclusive", exclusive), ("parallel", parallel)]
+
+
 async def main_async(args):
     if args.list:
         print("\nBenchmark Tasks:")
@@ -8045,14 +8068,15 @@ async def main_async(args):
             if max_concurrency is not None and max_concurrency < 1:
                 raise ValueError("--max-concurrency must be >= 1")
 
-            # Destructive shared-DB fixtures must never overlap in-flight tasks.
-            # Run them serially after the normal parallel batch drains.
-            exclusive_db_tasks = [t for t in tasks if t.name in EXCLUSIVE_SHARED_DB_TASK_NAMES]
-            parallel_batch = [t for t in tasks if t.name not in EXCLUSIVE_SHARED_DB_TASK_NAMES]
+            # Destructive shared-DB fixtures must never overlap any agent tree.
+            # Run them before ordinary roots can leave retained descendants.
+            phases = _parallel_task_phases(tasks)
+            exclusive_db_tasks = phases[0][1]
+            parallel_batch = phases[1][1]
             if exclusive_db_tasks:
                 names = ", ".join(t.name for t in exclusive_db_tasks)
                 print(
-                    f"\n  Deferring {len(exclusive_db_tasks)} destructive DB fixture task(s) to a serial phase: {names}"
+                    f"\n  Running {len(exclusive_db_tasks)} destructive DB fixture task(s) before the parallel phase: {names}"
                 )
 
             if max_concurrency is None or max_concurrency >= len(parallel_batch):
@@ -8068,18 +8092,33 @@ async def main_async(args):
                     on_agent_created=_remember_live_agent,
                 )
 
-            task_runners = _parallel_task_runners(
-                parallel_batch,
-                max_concurrency,
-                run_parallel_task,
-            )
-
-            pending_results: dict[asyncio.Task, BenchmarkTask] = {
-                asyncio.create_task(runner, name=f"benchmark-{task.name}"): task
-                for task, runner in zip(parallel_batch, task_runners)
-            }
-            pending = set(pending_results)
+            pending_results: dict[asyncio.Task, BenchmarkTask] = {}
+            pending: set[asyncio.Task] = set()
             try:
+                for task in exclusive_db_tasks:
+                    print(f"\n  Running destructive DB fixture task serially: {task.name}")
+                    _report_running.clear()
+                    _report_running.add(task.name)
+                    result = await run_single_task(
+                        base_url,
+                        task,
+                        args.keep_failed_agents,
+                        on_agent_created=_remember_live_agent,
+                    )
+                    run.task_results.append(result)
+                    _report_running.discard(task.name)
+                    _emit_report(set())
+
+                task_runners = _parallel_task_runners(
+                    parallel_batch,
+                    max_concurrency,
+                    run_parallel_task,
+                )
+                pending_results = {
+                    asyncio.create_task(runner, name=f"benchmark-{task.name}"): task
+                    for task, runner in zip(parallel_batch, task_runners)
+                }
+                pending = set(pending_results)
                 while pending:
                     _report_running.clear()
                     _report_running.update(pending_results[future].name for future in pending)
@@ -8105,19 +8144,6 @@ async def main_async(args):
                         else:
                             run.task_results.append(result)
                     _emit_report({pending_results[future].name for future in pending})
-                for task in exclusive_db_tasks:
-                    print(f"\n  Running destructive DB fixture task serially: {task.name}")
-                    _report_running.clear()
-                    _report_running.add(task.name)
-                    result = await run_single_task(
-                        base_url,
-                        task,
-                        args.keep_failed_agents,
-                        on_agent_created=_remember_live_agent,
-                    )
-                    run.task_results.append(result)
-                    _report_running.discard(task.name)
-                    _emit_report(set())
             except asyncio.CancelledError:
                 for task_future in pending:
                     task_future.cancel()

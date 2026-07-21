@@ -39,6 +39,7 @@ require_text "$RUN_SH" 'Building bundled frontend before starting runtime servic
 require_text "$RUN_SH" 'npx vite preview --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE"' "bundled frontend service must only serve the completed production build"
 require_text "$RUN_SH" 'for _ in $(seq 1 25); do' "Docker health detection must tolerate a busy Desktop daemon before falling back to the shared system database"
 require_text "$RUN_SH" 'docker ps --filter "name=^${DB_CONTAINER}$"' "deploy-prestarted workspace database must bypass a slow broad Docker health probe"
+require_text "$RUN_SH" 'workspace_db_container_owns_port &&' "deploy-prestarted database reuse must verify the exact workspace container owns the configured port"
 
 BUNDLED_BUILD_LINE=$(grep -n 'Building bundled frontend before starting runtime services' "$RUN_SH" | head -1 | cut -d: -f1)
 BACKEND_LAUNCH_LINE=$(grep -n '^launch_backend_service$' "$RUN_SH" | head -1 | cut -d: -f1)
@@ -89,6 +90,7 @@ require_text "$DEPLOY_ENV" 'export LOCAL_DB_PORT=$((conductor_port + 5))' "/depl
 require_text "$DEPLOY_ENV" 'export RUN_SH_STRICT_CONDUCTOR_PORT=1' "/deploy must reject silent runtime port reassignment"
 require_text "$RUN_SH" 'if ! port_range_can_reassign; then' "run.sh must honor strict deploy port mode"
 require_text "$RUN_SH" '[ "${RUN_SH_STRICT_CONDUCTOR_PORT:-0}" = "1" ] || { $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]' "bundled deploy stacks must preserve strict ports across shell boundaries"
+require_text "$RUN_SH" 'VITE_REALTIME_PRIVATE=false npx vite build' "bundled local frontends must not request production-only private realtime authorization"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_BUNDLED_FRONTEND=true' "/deploy launch must carry strict-port mode across shell boundaries"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8' "/deploy stack must run enough benchmark workers (8) for the blackbox agent suite it also serves — a single worker saturates under the full-domain load"
 require_text "$DEPLOY_COMMAND" 'TRACE_ARCHIVE_ENABLED=0' "/deploy lifecycle measurements must disable the out-of-band trace recorder"
