@@ -16,6 +16,9 @@
  *              full-screen overlay (a fixed 320px column would clip the iframe
  *              to a sliver on a phone).
  *
+ * CONTROL FOOTER:
+ * Browser interaction is self-evident; no helper row consumes viewport height.
+ *
  * MOBILE ACTIONS PANEL STATE (fullscreen only):
  * [HIDDEN] --tap Task progress--> [OPEN overlay] --tap close--> [HIDDEN]
  */
@@ -45,21 +48,6 @@ interface BrowserViewBodyProps {
   onToggleFullscreen: () => void;
   onResume: () => void;
   onApprovalHandled?: () => void;
-}
-
-function ControlHint({ isFullscreen }: { isFullscreen: boolean }) {
-  return (
-    <div
-      className={cn(
-        'px-3 py-2 border-x border-b border-border bg-muted/20',
-        !isFullscreen && 'rounded-br-lg',
-      )}
-    >
-      <p className="text-[10px] text-muted-foreground italic">
-        You can interact with the browser to handle logins or captchas
-      </p>
-    </div>
-  );
 }
 
 function MobileTaskProgressToggle({ onOpen }: { onOpen: () => void }) {
@@ -155,14 +143,12 @@ export function BrowserViewBody({
             onResume={onResume}
           />
 
-          {pendingWriteLockApproval ? (
+          {pendingWriteLockApproval && (
             <BrowserWriteLockApproval
               attentionRequestId={pendingWriteLockApproval.attentionRequestId}
               question={pendingWriteLockApproval.question}
               onApprovalHandled={onApprovalHandled}
             />
-          ) : (
-            <ControlHint isFullscreen={isThisFullscreen} />
           )}
         </div>
 

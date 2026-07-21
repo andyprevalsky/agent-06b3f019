@@ -8,6 +8,7 @@ import type { ComponentType, MouseEvent } from 'react';
 import { ChevronUp, Maximize2 } from 'lucide-react';
 import { getToolIcon } from '@/lib/toolIcons';
 import { SchemaChip } from '../SchemaChip';
+import type { BrowserControlState } from '../browserControlState';
 import { BrowserProxyLocationChip } from './BrowserProxyLocationChip';
 import { BrowserThumbnail } from './BrowserThumbnail';
 import type { BrowserSessionMetadata, OutputSchemaRef } from './types';
@@ -17,7 +18,7 @@ interface MinimizedProps {
   forceMinimized: boolean;
   lastActionType: string | undefined;
   lastActionTitle: string;
-  isWaitingForAuthAssistance: boolean;
+  controlState: BrowserControlState;
   outputSchema: OutputSchemaRef | undefined;
   browserSessionMetadata: BrowserSessionMetadata | null;
   onExpand: () => void;
@@ -50,7 +51,7 @@ export function BrowserStatusBarMinimized({
   forceMinimized,
   lastActionType,
   lastActionTitle,
-  isWaitingForAuthAssistance,
+  controlState,
   outputSchema,
   browserSessionMetadata,
   onExpand,
@@ -76,7 +77,7 @@ export function BrowserStatusBarMinimized({
           disabled={forceMinimized}
         />
         <LastActionRow lastActionType={lastActionType} lastActionTitle={lastActionTitle} />
-        {isWaitingForAuthAssistance && !forceMinimized && (
+        {controlState === 'waiting' && !forceMinimized && (
           <button
             type="button"
             onClick={onFullscreenClick}

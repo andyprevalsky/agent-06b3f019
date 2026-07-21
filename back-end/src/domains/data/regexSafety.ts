@@ -30,7 +30,7 @@ type PatternAnalyzer = typeof checkSync;
 export function checkPatternSafety(
   source: string,
   flags: string,
-  analyzePattern: PatternAnalyzer = checkSync
+  analyze: PatternAnalyzer = checkSync
 ): PatternSafety {
   if (source.length > MAX_PATTERN_LENGTH) {
     return {
@@ -40,11 +40,16 @@ export function checkPatternSafety(
   }
   let diagnostics;
   try {
-    diagnostics = analyzePattern(source, flags, { timeout: 1000 });
+    diagnostics = analyze(source, flags, { timeout: 1000 });
   } catch {
+    // The analyzer is the only guard against catastrophic backtracking. A
+    // length cap alone cannot make short nested-quantifier patterns safe, so
+    // analyzer errors and timeouts must fail closed before the pattern reaches
+    // Postgres.
     return {
       ok: false,
-      reason: 'Pattern could not be verified as safe to evaluate.',
+      reason:
+        'Pattern safety analysis did not complete. Use a simpler expression without nested quantifiers or stacked wildcards.',
     };
   }
   if (diagnostics.status !== 'vulnerable') return { ok: true };

@@ -2,8 +2,8 @@ import importlib.util
 import inspect
 import json
 import os
-import signal
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -23,12 +23,14 @@ AGGREGATE_SCRIPT = ROOT / "scripts" / "cloudbench-aggregate-runs.py"
 DRIVER_SCRIPT = ROOT / "scripts" / "cloudbench-run.sh"
 FLEET_SCRIPT = ROOT / "scripts" / "run-bench-fleet"
 CLOUD_SCRIPT = ROOT / "scripts" / "run-bench-cloud"
+AGENT_LINK_SERVER = ROOT / "agents" / "benchmarks" / "agent_link_server.py"
 PREDEPLOY_SCRIPT = ROOT / "scripts" / "run-predeploy-cloud"
 PREDEPLOY_LOCAL_SCRIPT = ROOT / "scripts" / "run-predeploy-local"
 PREDEPLOY_METRICS_SCRIPT = ROOT / "agents" / "benchmarks" / "predeploy_metrics.py"
 LOGGED_COMMAND_SCRIPT = ROOT / "scripts" / "run_logged_command.py"
 RUN_BENCH_SCRIPT = ROOT / "scripts" / "run-bench"
 STACK_SCRIPT = ROOT / "scripts" / "run.sh"
+SEED_CACHE_LIB = ROOT / "scripts" / "lib" / "seed-cache.sh"
 LOCAL_RUNNER = ROOT / "agents" / "benchmarks" / "local.py"
 DEPLOY_COMMAND = ROOT / ".claude" / "commands" / "deploy.md"
 
@@ -571,7 +573,8 @@ def test_cold_fleet_guest_gets_a_first_run_stack_budget(tmp_path: Path) -> None:
 
 def test_fleet_barrier_budget_covers_cold_guest_bootstrap() -> None:
     """RCA (2026-07-17): after the on-box cold-start budget was raised to
-    1800s, the parent controller still used its independent 720s per-box
+    2160s (the 1800s measured cold path plus 20% headroom), the parent
+    controller still used its independent 720s per-box
     barrier ceiling. Live run 20260717-204617-18785 excluded the healthy cold
     replacement at exactly 720s while it was still syncing browser data.
 
@@ -608,7 +611,7 @@ def test_fleet_barrier_budget_covers_cold_guest_bootstrap() -> None:
         in fleet
     )
     assert (
-        '--env "CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS=${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"'
+        '--env "CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS=${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-2160}"'
         in cloud
     )
     assert (
@@ -627,7 +630,16 @@ def test_freshly_seeded_database_gets_cold_backend_health_budget() -> None:
     warm databases retain the fast budget, and operator overrides still win.
     """
     stack = STACK_SCRIPT.read_text()
-    helper = _extract_fleet_function(stack, "isolated_backend_ready_attempts() {")
+    # run.sh sources scripts/lib/seed-cache.sh, so isolated_backend_ready_attempts
+    # delegates the actual number to backend_ready_budget() living in that lib.
+    # Reproduce the same composition here (budget helper + attempts wrapper) plus
+    # the DB_RESTORED=false default run.sh sets before calling it.
+    budget = _extract_fleet_function(
+        SEED_CACHE_LIB.read_text(), "backend_ready_budget() {"
+    )
+    helper = (
+        budget + "\n" + _extract_fleet_function(stack, "isolated_backend_ready_attempts() {")
+    )
 
     def attempts(*, cold: bool, override: str | None = None) -> int:
         env = os.environ.copy()
@@ -639,7 +651,7 @@ def test_freshly_seeded_database_gets_cold_backend_health_budget() -> None:
             [
                 "bash",
                 "-c",
-                f"{helper}\nFIRST_RUN_SEEDED=$1\nisolated_backend_ready_attempts",
+                f"{helper}\nFIRST_RUN_SEEDED=$1\nDB_RESTORED=false\nisolated_backend_ready_attempts",
                 "attempts",
                 "true" if cold else "false",
             ],
@@ -1911,7 +1923,7 @@ clone_machine_target "$LEDGER"
         0,
         target_id,
     )
-    failed_after_create, failed_target_ledger = allocate(
+    recovered_after_create, recovered_target_ledger = allocate(
         f"Cloning Machine {source_id} into region ord\nError: monitor failed",
         1,
         target_id,
@@ -1930,10 +1942,10 @@ clone_machine_target "$LEDGER"
     assert created_target.stdout == target_id
     assert target_ledger.read_text().splitlines() == [target_id]
     assert target_ledger.with_suffix(".names").read_text() == ""
-    assert failed_after_create.returncode == 1
-    assert failed_after_create.stdout == ""
-    assert failed_target_ledger.read_text().splitlines() == [target_id]
-    assert failed_target_ledger.with_suffix(".names").read_text() == ""
+    assert recovered_after_create.returncode == 0, recovered_after_create.stderr
+    assert recovered_after_create.stdout == target_id
+    assert recovered_target_ledger.read_text().splitlines() == [target_id]
+    assert recovered_target_ledger.with_suffix(".names").read_text() == ""
     assert "--detach" in clone_function
     assert "--name" in clone_function
     # Exactly one clone-from-source call site, and it is bounded by the
@@ -2942,7 +2954,12 @@ def test_refresh_deps_rejects_invalid_ref_before_fly(tmp_path: Path) -> None:
 def test_isolated_backend_startup_retries_one_hung_process(tmp_path: Path) -> None:
     """A live-but-never-listening first backend cannot abort the whole fleet slot."""
     stack = STACK_SCRIPT.read_text()
-    helpers = "".join(
+    # isolated_backend_ready_attempts() delegates to backend_ready_budget(), which
+    # run.sh sources from scripts/lib/seed-cache.sh — prepend it so the extracted
+    # snippet is self-contained just like the sourced production stack.
+    helpers = _extract_fleet_function(
+        SEED_CACHE_LIB.read_text(), "backend_ready_budget() {"
+    ) + "".join(
         _extract_fleet_function(stack, signature)
         for signature in (
             "launch_backend_service() {",
@@ -2986,8 +3003,22 @@ PIDS=("")
 NAMES=()
 BENCHMARK_MODE=true
 BENCHMARK_ISOLATED_RUN=true
+FIRST_RUN_SEEDED=false
+DB_RESTORED=false
 SCRIPT_DIR="$SCRIPT_DIR"
-curl() {{ [ "$(cat "$LAUNCHES")" -ge 2 ]; }}
+    # Force the first controller-owned PID through the retry path. For the
+    # replacement, wait until its TERM-ignoring descendant exists; that proves
+    # run-in-new-session has established the process group before the fake
+    # health check succeeds and removes an async-launch race from this test.
+    curl() {{
+        [ -s "$CHILD_DIR/root-1" ] || return 1
+        [ "$BACKEND_PID" != "$(cat "$CHILD_DIR/root-1")" ] || return 1
+        for _ in $(seq 1 100); do
+            [ -s "$CHILD_DIR/child-2" ] && return 0
+            sleep 0.1
+        done
+        return 1
+    }}
 {helpers}
 launch_backend_service
 echo "$BACKEND_PID" > "$CHILD_DIR/root-1"
@@ -3014,7 +3045,7 @@ exit "$rc"
     broken_script = script.replace(
         'python3 "$SCRIPT_DIR/run-in-new-session.py"',
         'python3 "$ROOT_DIR/scripts/run-in-new-session.py"',
-    )
+    ).replace("for _ in $(seq 1 100); do", "for _ in $(seq 1 1); do")
     broken = subprocess.run(
         ["bash", "-c", broken_script],
         cwd=ROOT,
@@ -3278,7 +3309,7 @@ def test_run_is_visible_in_hub_from_fire_time(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
     lock_at = fleet.index('if ! cloudbench_controller_lock_acquire_wait')
     card_at = fleet.index('write_startup_card "controller starting"')
-    hub_at = fleet.index("start_central_hub\n")
+    hub_at = fleet.index("start_central_hub || exit 1\n")
     require_hub_at = fleet.index("require_central_hub_visibility || exit 1")
     verify_at = fleet.index('Verifying the shared benchmark app environment')
     fanout_at = fleet.index("# ── Phase 1:")
@@ -3289,8 +3320,10 @@ def test_run_is_visible_in_hub_from_fire_time(tmp_path: Path) -> None:
     # phase updates at each controller stage
     for phase in ("verifying environment", "healing warm snapshot", "provisioning"):
         assert f'write_startup_card "{phase}' in fleet, f"missing phase update: {phase}"
-    # early + late hub starts must stay the SAME server invocation (no drift)
-    assert fleet.count('agents/benchmarks/agent_link_server.py') == 2
+    # Early and late phases share one identity-aware lifecycle implementation;
+    # duplicating the launch path previously let the late copy kill foreign hubs.
+    assert fleet.count('agents/benchmarks/agent_link_server.py') == 1
+    assert fleet.count("start_central_hub || exit 1") == 2
 
     # functional: the card is a valid hub-readable starting card
     helper_start = fleet.index("write_startup_card() {")
@@ -3342,6 +3375,312 @@ if require_central_hub_visibility; then exit 99; fi
     assert visibility.returncode == 0, visibility.stderr
     assert "central hub registration verified" in visibility.stdout
     assert "refusing to continue invisibly" in visibility.stderr
+
+
+def test_foreign_central_hub_port_reuses_only_the_matching_runs_root(
+    tmp_path: Path,
+) -> None:
+    """A stale/foreign workspace hub on the derived Conductor port must stay
+    alive, while this fleet selects a hub that serves its own runs root."""
+    base_port = None
+    for candidate in range(42000, 62000):
+        sockets = []
+        try:
+            for port in (candidate, candidate + 1):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.bind(("127.0.0.1", port))
+                sockets.append(sock)
+            base_port = candidate
+            break
+        except OSError:
+            pass
+        finally:
+            for sock in sockets:
+                sock.close()
+    assert base_port is not None, "could not reserve consecutive hub test ports"
+
+    foreign_root = tmp_path / "foreign"
+    foreign_root.mkdir()
+    (foreign_root / "index.html").write_text("Benchmark runs foreign-workspace\n")
+    runs_root = tmp_path / "runs"
+    runs_root.mkdir()
+    hub_context = tmp_path / "hub-context"
+    hub_context.mkdir()
+
+    foreign = subprocess.Popen(
+        [sys.executable, "-m", "http.server", str(base_port), "--bind", "127.0.0.1"],
+        cwd=foreign_root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    own_hub = subprocess.Popen(
+        [
+            sys.executable,
+            str(AGENT_LINK_SERVER),
+            "--root",
+            str(runs_root),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(base_port + 1),
+            "--repo-root",
+            str(ROOT),
+            "--context-dir",
+            str(hub_context),
+            "--frontend-dir",
+            str(ROOT / "front-end"),
+            "--hub-runs-dir",
+            str(runs_root),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(50):
+            if foreign.poll() is None and own_hub.poll() is None:
+                probe = subprocess.run(
+                    ["curl", "--noproxy", "*", "-fsS", f"http://127.0.0.1:{base_port + 1}/hub-meta.json"],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if probe.returncode == 0:
+                    break
+            time.sleep(0.05)
+
+        selection = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$HELPER"; cloudbench_select_central_hub_port "$FOREIGN_PORT" "$RUNS_ROOT"',
+            ],
+            env={
+                **os.environ,
+                "HELPER": str(ENV_HELPER_SCRIPT),
+                "FOREIGN_PORT": str(base_port),
+                "RUNS_ROOT": str(runs_root),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert selection.returncode == 0, selection.stderr
+        assert selection.stdout.strip() == str(base_port + 1)
+        assert foreign.poll() is None, "foreign workspace hub must not be killed"
+        assert own_hub.poll() is None
+        assert "cloudbench_select_central_hub_port" in FLEET_SCRIPT.read_text()
+    finally:
+        foreign.terminate()
+        own_hub.terminate()
+        foreign.wait(timeout=5)
+        own_hub.wait(timeout=5)
+
+
+def test_central_hub_startup_rebinds_serves_the_run_and_never_kills_foreign_owner(
+    tmp_path: Path,
+) -> None:
+    base_port = None
+    for candidate in range(42000, 62000):
+        sockets = []
+        try:
+            for port in (candidate, candidate + 1):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.bind(("127.0.0.1", port))
+                sockets.append(sock)
+            base_port = candidate
+            break
+        except OSError:
+            pass
+        finally:
+            for sock in sockets:
+                sock.close()
+    assert base_port is not None
+
+    foreign_root = tmp_path / "foreign-startup"
+    foreign_root.mkdir()
+    (foreign_root / "index.html").write_text("Benchmark runs foreign-workspace\n")
+    runs_root = tmp_path / "runs-startup"
+    (runs_root / "visible-run" / "_batch").mkdir(parents=True)
+    (runs_root / "visible-run" / "_batch" / "report-card.json").write_text(
+        json.dumps({"run_id": "visible-run", "status": "starting"})
+    )
+    hub_context = runs_root / "_hub"
+
+    foreign = subprocess.Popen(
+        [sys.executable, "-m", "http.server", str(base_port), "--bind", "127.0.0.1"],
+        cwd=foreign_root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    fleet = FLEET_SCRIPT.read_text()
+    startup = _extract_fleet_function(fleet, "start_central_hub() {")
+    visibility = _extract_fleet_function(fleet, "require_central_hub_visibility() {")
+    shell = f'''set -uo pipefail
+source "$HELPER"
+ROOT_DIR="$ROOT"
+RUNS_ROOT="$RUNS_ROOT"
+HUB_CTX_DIR="$HUB_CTX_DIR"
+DASH_BASE="$FOREIGN_PORT"
+RUN_ID=visible-run
+UNIFIED_DASH_PID=
+CLOUDBENCH_HUB_VISIBILITY_ATTEMPTS=10
+{startup}
+{visibility}
+start_central_hub
+require_central_hub_visibility
+first_port="$DASH_BASE"
+start_central_hub
+require_central_hub_visibility
+[ "$DASH_BASE" = "$first_port" ]
+printf 'SELECTED_PORT=%s\n' "$DASH_BASE"
+'''
+    try:
+        for _ in range(50):
+            if foreign.poll() is None:
+                probe = subprocess.run(
+                    ["curl", "--noproxy", "*", "-fsS", f"http://127.0.0.1:{base_port}/"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                if probe.returncode == 0:
+                    break
+            time.sleep(0.05)
+
+        result = subprocess.run(
+            ["bash", "-c", shell],
+            env={
+                **os.environ,
+                "HELPER": str(ENV_HELPER_SCRIPT),
+                "ROOT": str(ROOT),
+                "RUNS_ROOT": str(runs_root),
+                "HUB_CTX_DIR": str(hub_context),
+                "FOREIGN_PORT": str(base_port),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+        assert result.returncode == 0, result.stderr
+        assert f"SELECTED_PORT={base_port + 1}" in result.stdout
+        assert "central hub registration verified: run=visible-run" in result.stdout
+        assert foreign.poll() is None, "fleet startup must not kill the foreign hub"
+
+        # The post-provisioning revalidation must precede the aggregator fork so
+        # its subshell captures the final rebound DASH_BASE for every agent URL.
+        manifest = fleet.index('} > "$UNIFIED_DIR/benches.json"')
+        late_start = fleet.index("start_central_hub || exit 1", manifest)
+        aggregator = fleet.index("(\n    while :; do", late_start)
+        assert late_start < aggregator
+        assert fleet.index("require_central_hub_visibility || exit 1", late_start) < aggregator
+        assert 'env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE"' in fleet[aggregator:]
+        assert 'kill "$pp"' not in fleet
+    finally:
+        foreign.terminate()
+        foreign.wait(timeout=5)
+        pid_file = hub_context / "agent-link-server.pid"
+        if pid_file.exists():
+            os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
+
+
+def test_central_hub_startup_retries_when_foreign_process_wins_bind_race(
+    tmp_path: Path,
+) -> None:
+    base_port = None
+    for candidate in range(42000, 62000):
+        sockets = []
+        try:
+            for port in (candidate, candidate + 1):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.bind(("127.0.0.1", port))
+                sockets.append(sock)
+            base_port = candidate
+            break
+        except OSError:
+            pass
+        finally:
+            for sock in sockets:
+                sock.close()
+    assert base_port is not None
+
+    runs_root = tmp_path / "race-runs"
+    (runs_root / "race-run" / "_batch").mkdir(parents=True)
+    (runs_root / "race-run" / "_batch" / "report-card.json").write_text(
+        json.dumps({"run_id": "race-run", "status": "starting"})
+    )
+    hub_context = runs_root / "_hub"
+    race_marker = tmp_path / "race-selected"
+    competitor_pid_file = tmp_path / "competitor.pid"
+    competitor_root = tmp_path / "competitor"
+    competitor_root.mkdir()
+    (competitor_root / "index.html").write_text("Benchmark runs bind-race winner\n")
+
+    fleet = FLEET_SCRIPT.read_text()
+    startup = _extract_fleet_function(fleet, "start_central_hub() {")
+    visibility = _extract_fleet_function(fleet, "require_central_hub_visibility() {")
+    shell = f'''set -uo pipefail
+source "$HELPER"
+eval "$(declare -f cloudbench_select_central_hub_port | sed '1s/cloudbench_select_central_hub_port/cloudbench_select_central_hub_port_original/')"
+cloudbench_select_central_hub_port() {{
+    if [ ! -e "$RACE_MARKER" ]; then
+        : > "$RACE_MARKER"
+        cloudbench_detach_reexec "$COMPETITOR_LOG" \
+            python3 -m http.server "$FOREIGN_PORT" --bind 127.0.0.1
+        for _ in $(seq 1 50); do
+            lsof -tiTCP:"$FOREIGN_PORT" -sTCP:LISTEN >/dev/null 2>&1 && break
+            sleep 0.05
+        done
+        lsof -tiTCP:"$FOREIGN_PORT" -sTCP:LISTEN | head -1 > "$COMPETITOR_PID_FILE"
+        printf '%s\n' "$FOREIGN_PORT"
+        return 0
+    fi
+    cloudbench_select_central_hub_port_original "$@"
+}}
+ROOT_DIR="$ROOT"
+RUNS_ROOT="$RUNS_ROOT"
+HUB_CTX_DIR="$HUB_CTX_DIR"
+DASH_BASE="$FOREIGN_PORT"
+RUN_ID=race-run
+UNIFIED_DASH_PID=
+CLOUDBENCH_HUB_VISIBILITY_ATTEMPTS=10
+{startup}
+{visibility}
+start_central_hub
+require_central_hub_visibility
+printf 'SELECTED_PORT=%s\n' "$DASH_BASE"
+'''
+    try:
+        result = subprocess.run(
+            ["bash", "-c", shell],
+            env={
+                **os.environ,
+                "HELPER": str(ENV_HELPER_SCRIPT),
+                "ROOT": str(ROOT),
+                "RUNS_ROOT": str(runs_root),
+                "HUB_CTX_DIR": str(hub_context),
+                "FOREIGN_PORT": str(base_port),
+                "RACE_MARKER": str(race_marker),
+                "COMPETITOR_PID_FILE": str(competitor_pid_file),
+                "COMPETITOR_ROOT": str(competitor_root),
+                "COMPETITOR_LOG": str(tmp_path / "competitor.log"),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+        assert result.returncode == 0, result.stderr
+        assert f"SELECTED_PORT={base_port + 1}" in result.stdout
+        competitor_pid = int(competitor_pid_file.read_text().strip())
+        os.kill(competitor_pid, 0)
+    finally:
+        for path in (competitor_pid_file, hub_context / "agent-link-server.pid"):
+            if path.exists():
+                try:
+                    os.kill(int(path.read_text().strip()), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
 
 
 def test_warm_source_parks_between_maintenance_and_fleet_runs() -> None:
@@ -3675,7 +4014,6 @@ def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
     persisted marker over the same data plane used for release, so the barrier
     must observe that artifact directly.
     """
-    import socket
     import urllib.error
     import urllib.request
 

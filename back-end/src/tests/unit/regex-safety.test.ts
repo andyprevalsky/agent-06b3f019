@@ -1,14 +1,16 @@
-import assert from 'node:assert/strict';
+#!/usr/bin/env tsx
 
+import assert from 'node:assert';
 import { checkPatternSafety } from '../../domains/data/regexSafety';
 
-const analyzerFailure = checkPatternSafety('safe-looking-pattern', '', () => {
-  throw new Error('analyzer unavailable');
+const result = checkPatternSafety('safe-looking-pattern', '', () => {
+  throw new Error('simulated analyzer timeout');
 });
 
-assert.deepEqual(analyzerFailure, {
+assert.deepStrictEqual(result, {
   ok: false,
-  reason: 'Pattern could not be verified as safe to evaluate.',
+  reason:
+    'Pattern safety analysis did not complete. Use a simpler expression without nested quantifiers or stacked wildcards.',
 });
 
-process.stdout.write('Regex analyzer failures are rejected\n');
+process.stdout.write('PASS regex safety fails closed when analysis throws or times out\n');

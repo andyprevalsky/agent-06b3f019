@@ -42,6 +42,37 @@ while IFS= read -r task; do
 done < <(read_predeploy_tasks)
 [ "${#PREDEPLOY_TASKS[@]}" -gt 0 ] || { echo "no smoke-tagged benchmark tasks found" >&2; exit 1; }
 
+# Whether ANY selected smoke task actually exercises Codex (gpt_code). The
+# per-task compute-token seed (seed-local.ts) is strict on a usable gpt_code
+# integration by default so real Codex regressions surface. But when the entire
+# selected set is Codex-free, an externally rate-limited / quota-exhausted Codex
+# integration (a third-party billing state we don't control) must NOT block the
+# smoke gate — the claude tokens the selected tasks DO need still sync fine. In
+# that case we opt into the harness's sanctioned SEED_ALLOW_MISSING_GPT_CODE=1
+# path (same flag run-agentcard-lifecycle-task.sh uses for its Codex-free run).
+# The instant a Codex-using task re-enters the smoke set this flips back to
+# strict, so Codex coverage is never silently dropped.
+smoke_set_uses_codex() {
+    python3 - "$ROOT_DIR/agents/benchmarks/tasks.json" "${PREDEPLOY_TASKS[@]}" <<'PY'
+import json
+import sys
+
+catalog_path = sys.argv[1]
+selected = set(sys.argv[2:])
+with open(catalog_path) as handle:
+    tasks = json.load(handle)
+for task in tasks:
+    if task.get("name") not in selected:
+        continue
+    blob = json.dumps(task).lower()
+    if "codex" in blob or "gpt_code" in blob or "gpt-code" in blob:
+        print("1")
+        break
+else:
+    print("0")
+PY
+}
+
 LOCAL_CONCURRENCY="${PREDEPLOY_LOCAL_CONCURRENCY:-2}"
 
 if [ "${1:-}" = "--list" ]; then
@@ -74,11 +105,15 @@ done < <(
     exit 1
 }
 
-# Rose's ordinary agent LLM calls use the gpt_code integration as a direct-auth
-# route even when no task invokes the Codex code tool. Never inherit the seed's
-# permissive opt-in here: a smoke run without direct compute auth falls into paid
-# provider routes and can exhaust the task's real product cost limit mid-run.
-unset SEED_ALLOW_MISSING_GPT_CODE
+if [ "$(smoke_set_uses_codex)" = "0" ]; then
+    export SEED_ALLOW_MISSING_GPT_CODE=1
+    echo "ℹ️  Smoke set is Codex-free — tolerating a missing/rate-limited gpt_code integration (SEED_ALLOW_MISSING_GPT_CODE=1)."
+else
+    # A Codex-using smoke set MUST enforce a usable gpt_code integration. Clear any
+    # value inherited from the caller's environment so it can never leave a
+    # Codex-using run permissively passing without the required credential.
+    unset SEED_ALLOW_MISSING_GPT_CODE
+fi
 
 echo "🧪 Pre-Deploy smoke (LOCAL isolated stack) — ${#PREDEPLOY_TASKS[@]} tasks: ${PREDEPLOY_TASKS[*]}"
 echo "Schedule (longest recent median first, concurrency $LOCAL_CONCURRENCY): ${SCHEDULED_TASKS[*]}"

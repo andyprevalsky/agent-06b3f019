@@ -20,6 +20,8 @@ require_text() {
 require_text "Exactly two planned user-input gates." "/descend must define two planned user gates"
 require_text "HARNESS_FIX_DECISION" "/descend must stop for harness-fix approval"
 require_text "DEPLOY_ADMIN_APPROVAL" "/descend must stop for required deploy approval"
+require_text "every HARNESS failure has a completed RCA; and" "/descend must require every harness RCA to be complete before stopping"
+require_text "Never enter HARNESS_FIX_DECISION with an open observability gap." "/descend must keep investigating open observability gaps instead of stopping"
 require_text "pause only" "deploy approval must not freeze independent RCA work"
 require_text "Prepare a clean" "/descend must use a fix-only isolated deploy worktree"
 require_text "Bench run:" "/descend header must show benchmark timing"
@@ -35,6 +37,8 @@ require_text "The unchanged local repro now" "fix approval must report post-fix 
 require_text "**Is this fix approved?**" "fix approval must ask a clear decision question"
 
 RESPONSE_CONTRACT=$(sed -n '/^## Response contract/,$p' "$DESCEND_COMMAND")
+STOP_ONE_CONTRACT=$(sed -n '/^## Stop 1 — HARNESS_FIX_DECISION/,/^## Rerun and parallel deploy/p' "$DESCEND_COMMAND")
+grep -Fq 'or an honest open observability gap' <<<"$STOP_ONE_CONTRACT" && fail "open observability gaps must not qualify for the harness-fix decision stop"
 grep -Fq '~~~text' <<<"$RESPONSE_CONTRACT" && fail "response examples must not use code blocks"
 grep -Fq '━' <<<"$RESPONSE_CONTRACT" && fail "response header must not use an ASCII banner"
 grep -Fq '| Andy decision |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
