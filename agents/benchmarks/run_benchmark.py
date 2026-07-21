@@ -1436,6 +1436,37 @@ async def get_attention_requests(base_url: str) -> list:
         return []
 
 
+async def _agentcard_setup_attention_still_open_after_terminal(
+    base_url: str,
+    *,
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 0.25,
+    fetch_requests: Callable[[str], Awaitable[list]] = get_attention_requests,
+) -> bool:
+    """Refresh setup attention after terminal status instead of trusting a stale parallel poll."""
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    setup_kind = "agentcard_user_cardholder_onboarding_required"
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            pending = await fetch_requests(base_url)
+            setup_still_open = any(
+                _attention_request_is_open(req) and _attention_request_kind(req) == setup_kind
+                for req in pending
+            )
+            if not setup_still_open or attempt >= max_attempts:
+                return setup_still_open
+        except Exception as error:
+            last_error = error
+            if attempt >= max_attempts:
+                break
+        await asyncio.sleep(retry_delay_seconds)
+    raise RuntimeError(
+        f"Terminal AgentCard setup attention remained unreadable after {max_attempts} reads: {last_error}"
+    ) from last_error
+
+
 async def respond_to_attention_request(base_url: str, request_id: str, response: str) -> None:
     """POST /api/attention-requests/:id/respond"""
     headers = await _api_headers()
@@ -2338,10 +2369,8 @@ async def poll_agent(
         # Agent mode: done on terminal status
         if status in TERMINAL_STATUSES:
             if task.agentcard_setup_action == "complete":
-                setup_kind = "agentcard_user_cardholder_onboarding_required"
-                setup_still_open = any(
-                    _attention_request_is_open(req) and _attention_request_kind(req) == setup_kind
-                    for req in _pending_attention
+                setup_still_open = await _agentcard_setup_attention_still_open_after_terminal(
+                    base_url,
                 )
                 data["_benchmark"] = {
                     **data.get("_benchmark", {}),

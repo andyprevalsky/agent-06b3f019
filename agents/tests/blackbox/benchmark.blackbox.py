@@ -1150,6 +1150,55 @@ def test_agentcard_setup_attention_is_not_auto_approved():
     )
 
 
+async def test_agentcard_setup_terminal_check_refreshes_stale_attention_poll():
+    from benchmarks.run_benchmark import _agentcard_setup_attention_still_open_after_terminal
+
+    reads = 0
+
+    async def fetch_requests(_base_url: str) -> list:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return [
+                {
+                    "id": "setup-1",
+                    "metadata": {"attentionKind": "agentcard_user_cardholder_onboarding_required"},
+                }
+            ]
+        return [
+            {
+                "id": "setup-1",
+                "answered": True,
+                "metadata": {"attentionKind": "agentcard_user_cardholder_onboarding_required"},
+            }
+        ]
+
+    assert not await _agentcard_setup_attention_still_open_after_terminal(
+        "http://localhost:55120",
+        retry_delay_seconds=0,
+        fetch_requests=fetch_requests,
+    )
+    assert reads == 2
+
+
+async def test_agentcard_setup_terminal_check_fails_closed_for_open_attention():
+    from benchmarks.run_benchmark import _agentcard_setup_attention_still_open_after_terminal
+
+    async def fetch_requests(_base_url: str) -> list:
+        return [
+            {
+                "id": "setup-1",
+                "metadata": {"attentionKind": "agentcard_user_cardholder_onboarding_required"},
+            }
+        ]
+
+    assert await _agentcard_setup_attention_still_open_after_terminal(
+        "http://localhost:55120",
+        retry_delay_seconds=0,
+        fetch_requests=fetch_requests,
+    )
+
+
 def _required_ecommerce_judge_task():
     from benchmarks.benchmark_tasks import BenchmarkTask
 
@@ -7615,6 +7664,14 @@ async def run_all_tests():
     r.record(
         "agentcard_setup_attention_not_auto_approved",
         test_agentcard_setup_attention_is_not_auto_approved,
+    )
+    await r.record_async(
+        "agentcard_setup_terminal_refreshes_attention",
+        test_agentcard_setup_terminal_check_refreshes_stale_attention_poll,
+    )
+    await r.record_async(
+        "agentcard_setup_terminal_open_attention_fails_closed",
+        test_agentcard_setup_terminal_check_fails_closed_for_open_attention,
     )
     r.record(
         "ecommerce_attention_rejects_auth_blocker",
