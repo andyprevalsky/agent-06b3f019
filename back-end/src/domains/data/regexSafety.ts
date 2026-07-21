@@ -42,12 +42,14 @@ export function checkPatternSafety(
   try {
     diagnostics = analyze(source, flags, { timeout: 1000 });
   } catch {
-    // This guard protects a backtracking database regex engine. If analysis is
-    // unavailable or times out, accepting the pattern would bypass the only
-    // ReDoS defense, so reject it and let the caller request a simpler query.
+    // The analyzer is the only guard against catastrophic backtracking. A
+    // length cap alone cannot make short nested-quantifier patterns safe, so
+    // analyzer errors and timeouts must fail closed before the pattern reaches
+    // Postgres.
     return {
       ok: false,
-      reason: 'Pattern safety could not be verified. Use a shorter, simpler expression.',
+      reason:
+        'Pattern safety analysis did not complete. Use a simpler expression without nested quantifiers or stacked wildcards.',
     };
   }
   if (diagnostics.status !== 'vulnerable') return { ok: true };

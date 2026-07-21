@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Least-privilege command broker for the auto-RCA Claude Code workflow.
+# Claude may invoke only the exact subcommands granted in auto-rca.yml; this
+# script owns network targets, credentials, git destinations, and gate commands
+# so production evidence cannot turn into arbitrary shell access.
+
+ROOT_DIR="${AUTO_RCA_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+CONTEXT_DIR="${AUTO_RCA_CONTEXT_DIR:-$ROOT_DIR/.context/auto-rca}"
+GATE_STATE_DIR="${AUTO_RCA_GATE_STATE_DIR:-}"
+PROD_BACKEND_URL="https://navi-j9a9.onrender.com"
+
+fail() {
+  printf 'auto-rca-tool: %s\n' "$1" >&2
+  exit 2
+}
+
+require_agent_id() {
+  if ! [[ "${AGENT_ID:-}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+    fail "AGENT_ID must be a UUID"
+  fi
+}
+
+require_clean_checkout() {
+  if [ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal)" ]; then
+    fail "gates require a clean committed checkout; publish the draft first"
+  fi
+}
+
+require_gate_state_dir() {
+  [[ "$GATE_STATE_DIR" =~ ^/var/lib/rose-auto-rca/[0-9]+$ ]] || \
+    fail "AUTO_RCA_GATE_STATE_DIR must be the workflow's root-owned run directory"
+}
+
+record_gate() {
+  local gate="$1" head
+  require_gate_state_dir
+  head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  printf '%s\n' "$head" | sudo tee "$GATE_STATE_DIR/${gate}.sha" >/dev/null
+  sudo chmod 0400 "$GATE_STATE_DIR/${gate}.sha"
+}
+
+require_gate_for_head() {
+  local gate="$1"
+  local marker head attested_head
+  require_gate_state_dir
+  marker="$GATE_STATE_DIR/${gate}.sha"
+  sudo test -f "$marker" || fail "$gate has not passed"
+  head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  attested_head="$(sudo cat "$marker")"
+  [ "$attested_head" = "$head" ] || fail "$gate did not pass for HEAD $head"
+}
+
+evidence() {
+  require_agent_id
+  [ -n "${BACKEND_API_KEY:-}" ] || fail "BACKEND_API_KEY is required"
+
+  curl -fsS --connect-timeout 5 --max-time 30 \
+    "$PROD_BACKEND_URL/api/agents/$AGENT_ID" \
+    -H "X-API-Key: $BACKEND_API_KEY"
+  printf '\n'
+  (
+    cd "$ROOT_DIR/agents"
+    python benchmarks/agent_logs.py "$AGENT_ID" \
+      --url "$PROD_BACKEND_URL" --tree --diagnostics
+  )
+}
+
+benchmark() {
+  local task_file="$CONTEXT_DIR/benchmark-task" task
+  [ -f "$task_file" ] || fail "write one benchmark task name to $task_file"
+  task="$(tr -d '\r\n' < "$task_file")"
+  [ -n "$task" ] || fail "benchmark task name is empty"
+
+  python3 - "$ROOT_DIR/agents/benchmarks/tasks.json" "$task" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    catalog = json.load(handle)
+if not any(item.get("name") == sys.argv[2] for item in catalog):
+    raise SystemExit(f"unknown benchmark task: {sys.argv[2]}")
+PY
+
+  exec bash "$ROOT_DIR/scripts/run-bench" "$task"
+}
+
+offline_gates() {
+  require_clean_checkout
+  bash "$ROOT_DIR/scripts/test.sh" --no-smoke
+  record_gate offline-gates
+}
+
+smoke_gates() {
+  require_clean_checkout
+  "$ROOT_DIR/scripts/run-predeploy-cloud"
+  record_gate smoke-gates
+}
+
+publish_draft() {
+  local branch body_file final_body existing_pr
+  require_agent_id
+  branch="${RCA_BRANCH:-}"
+  [[ "$branch" =~ ^auto-rca/[A-Za-z0-9._/-]+$ ]] || fail "RCA_BRANCH is invalid"
+  [ "$(git -C "$ROOT_DIR" branch --show-current)" = "$branch" ] || fail "checkout is not on RCA_BRANCH"
+
+  body_file="$CONTEXT_DIR/pr-body.md"
+  [ -s "$body_file" ] || fail "write the RCA report to $body_file before publishing"
+  mkdir -p "$CONTEXT_DIR"
+
+  if [ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal)" ]; then
+    git -C "$ROOT_DIR" add -A
+    git -C "$ROOT_DIR" diff --cached --quiet && fail "no tracked RCA changes to commit"
+    git -C "$ROOT_DIR" commit -m "auto-RCA: investigate production agent $AGENT_ID"
+  fi
+  if [ "$(git -C "$ROOT_DIR" rev-list --count main..HEAD)" -eq 0 ]; then
+    fail "RCA must commit a fix or a scaffolded reproduction before publishing"
+  fi
+
+  gh auth setup-git
+  git -C "$ROOT_DIR" push --set-upstream origin "$branch"
+  existing_pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json url --jq '.[0].url // empty')"
+  if [ -n "$existing_pr" ]; then
+    printf '%s\n' "$existing_pr"
+    return
+  fi
+
+  final_body="$CONTEXT_DIR/pr-body-final.md"
+  python3 - "$body_file" "$final_body" "${SLACK_TS:-}" "${SLACK_CHANNEL:-}" <<'PY'
+import pathlib
+import re
+import sys
+
+source, target, slack_ts, slack_channel = sys.argv[1:]
+if slack_ts and not re.fullmatch(r"[0-9]{10,}\.[0-9]{6}", slack_ts):
+    raise SystemExit("invalid SLACK_TS")
+if slack_channel and not re.fullmatch(r"[A-Z0-9]{9,32}", slack_channel):
+    raise SystemExit("invalid SLACK_CHANNEL")
+body = pathlib.Path(source).read_text(encoding="utf-8").rstrip()
+marker = f"<!-- rca-slack ts={slack_ts} channel={slack_channel} -->"
+pathlib.Path(target).write_text(f"{body}\n\n{marker}\n", encoding="utf-8")
+PY
+
+  gh pr create \
+    --repo "$GITHUB_REPOSITORY" \
+    --draft \
+    --base main \
+    --head "$branch" \
+    --title "auto-RCA: Production agent failure $AGENT_ID" \
+    --body-file "$final_body"
+}
+
+mark_ready() {
+  local branch pr_url
+  require_agent_id
+  require_gate_for_head offline-gates
+  require_gate_for_head smoke-gates
+  branch="${RCA_BRANCH:-}"
+  [[ "$branch" =~ ^auto-rca/[A-Za-z0-9._/-]+$ ]] || fail "RCA_BRANCH is invalid"
+  pr_url="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json url --jq '.[0].url // empty')"
+  [ -n "$pr_url" ] || fail "no open RCA pull request exists"
+  gh pr ready --repo "$GITHUB_REPOSITORY" "$pr_url"
+}
+
+case "${1:-}" in
+  evidence) [ "$#" -eq 1 ] || fail "evidence takes no arguments"; evidence ;;
+  benchmark) [ "$#" -eq 1 ] || fail "benchmark takes no arguments"; benchmark ;;
+  offline-gates) [ "$#" -eq 1 ] || fail "offline-gates takes no arguments"; offline_gates ;;
+  smoke-gates) [ "$#" -eq 1 ] || fail "smoke-gates takes no arguments"; smoke_gates ;;
+  publish-draft) [ "$#" -eq 1 ] || fail "publish-draft takes no arguments"; publish_draft ;;
+  mark-ready) [ "$#" -eq 1 ] || fail "mark-ready takes no arguments"; mark_ready ;;
+  *) fail "usage: scripts/auto-rca-tool {evidence|benchmark|offline-gates|smoke-gates|publish-draft|mark-ready}" ;;
+esac

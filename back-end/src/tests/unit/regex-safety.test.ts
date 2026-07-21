@@ -9,7 +9,8 @@ const result = checkPatternSafety('safe-looking-pattern', '', () => {
 
 assert.deepStrictEqual(result, {
   ok: false,
-  reason: 'Pattern safety could not be verified. Use a shorter, simpler expression.',
+  reason:
+    'Pattern safety analysis did not complete. Use a simpler expression without nested quantifiers or stacked wildcards.',
 });
 
 process.stdout.write('PASS regex safety fails closed when analysis throws or times out\n');
