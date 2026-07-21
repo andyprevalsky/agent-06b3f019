@@ -59,7 +59,11 @@ docker_ps_ports_quick() {
     tmp=$(mktemp)
     docker ps --format "$1" >"$tmp" 2>/dev/null &
     pid=$!
-    for _ in 1 2 3 4 5; do
+    # Docker Desktop can take more than one second to answer while other
+    # workspaces are active. Falling back to the shared system database in that
+    # case defeats per-workspace isolation and can expose a concurrently changed
+    # schema, so allow a bounded five-second health probe.
+    for _ in $(seq 1 25); do
         if ! kill -0 "$pid" 2>/dev/null; then
             status=0
             wait "$pid" || status=$?
@@ -385,13 +389,18 @@ fi
 # ── Pre-flight: ensure Postgres is available ──
 # Prefer Docker (per-workspace container), fall back to system Postgres when
 # the Docker daemon isn't available (sandboxed containers, CI without --privileged).
+DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
+DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
 DOCKER_OK=false
-if docker_info_quick; then
+if docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' 2>/dev/null | grep -q .; then
+    # /deploy pre-starts this exact workspace container. Prefer that direct,
+    # authoritative check even when a busy Docker Desktop daemon makes the
+    # broader `docker info` probe miss its bounded response window.
+    DOCKER_OK=true
+elif docker_info_quick; then
     DOCKER_OK=true
 fi
 
-DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
-DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
 DB_OWNED_BY_US=false  # Track whether this run started/created the DB.
 DB_OWNED_CONTAINER_ID=""
 USE_SYSTEM_PG=false
@@ -1434,12 +1443,21 @@ if $BENCHMARK_MODE; then
     export VITE_DEV_AUTO_LOGIN_OTP="${VITE_DEV_AUTO_LOGIN_OTP:-191919}"
 
 fi
+
+# Build the benchmark frontend before launching the backend and worker. Building
+# alongside eight worker processes can starve Vite long enough for the public
+# tunnel readiness check to fail even though the application is healthy.
+if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
+    echo "📦 Building bundled frontend before starting runtime services..."
+    (cd front-end && rm -f "$FRONTEND_LOG_FILE" && \
+        VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" npx vite build > "$FRONTEND_LOG_FILE" 2>&1)
+fi
 launch_backend_service
 
 # Front-end is always launched. Public payment benchmarks use a production bundle
 # so the cloud browser does not fetch the Vite development module graph over ngrok.
 if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
-    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_BACKEND_API_URL=$PUBLIC_BASE_URL npx vite build > "$FRONTEND_LOG_FILE" 2>&1 && npx vite preview --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE" 2>&1' &
+    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && npx vite preview --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE" 2>&1' &
 elif [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
     run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_DEV_PORT=$FRONTEND_PORT npx vite > "$FRONTEND_LOG_FILE" 2>&1' &
 else

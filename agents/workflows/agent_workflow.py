@@ -42,6 +42,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from helpers.context_compaction import build_context_compaction_metadata
     from helpers.context_scope import filter_internal_subagent_messages
+    from helpers.error_alert import report_failure_activity
     from helpers.handle_tool_event import handle_tool_event
     from helpers.llm import (
         call_llm_activity,
@@ -3458,6 +3459,31 @@ class AgentWorkflow:
 
         except Exception as e:
             workflow.logger.error(f"Failed to mark failed: {e}")
+
+        # 3b. Alert #errors (and optionally launch an RCA agent) — root agents
+        # only. Sub-agent failures are frequently recovered by the parent, so
+        # alerting on each one is noise; a sub-failure that actually breaks the
+        # run propagates to the root's _mark_failed and alerts there. Best-effort
+        # and gated: the activity never raises and swallows its own errors.
+        if not self.parent_workflow_id:
+            try:
+                await workflow.execute_activity(
+                    report_failure_activity,
+                    args=[
+                        self.agent_id,
+                        "agent_workflow",
+                        message,
+                        {
+                            "reason": reason,
+                            "steps_taken": failure_context.get("steps_taken"),
+                            "verifier_reasoning": verifier_reasoning,
+                        },
+                    ],
+                    start_to_close_timeout=timedelta(seconds=20),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+            except Exception as e:
+                workflow.logger.warning(f"report_failure_activity dispatch failed (non-fatal): {e}")
 
         # 4. Signal parent with failure context for learning
         if self.parent_workflow_id:
