@@ -694,12 +694,13 @@ async def test_edge_warmup_requires_explicit_research_port():
 
 
 def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
-    """The deploy lifecycle helper must provision its declared sandbox float gate."""
+    """The lifecycle helper provisions float without syncing unrelated browser auth."""
     helper = (Path(__file__).resolve().parents[3] / "scripts" / "run-agentcard-lifecycle-task.sh").read_text()
 
     assert 'if [ "$BOOTSTRAP_FLAG" = "--bootstrap" ]' in helper
     assert "scripts/setup-benchmark-payment.ts" in helper
     assert "DATABASE_URL=" in helper
+    assert "export BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1" in helper
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():

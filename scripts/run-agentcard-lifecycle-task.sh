@@ -48,6 +48,11 @@ export AGENTCARD_ONBOARDING_RETURN_URL="${AGENTCARD_ONBOARDING_RETURN_URL:-https
 # stays strict everywhere else (default), so Codex regressions still surface in
 # the codex-code test that actually uses it.
 export SEED_ALLOW_MISSING_GPT_CODE=1
+# These sandbox lifecycle tasks use only the bundled /test_payment fixture and
+# never consume production browser cookies, passwords, passkeys, or storage.
+# Skipping that unrelated graph prevents a warm local database from spending
+# minutes upserting every production cookie before the lifecycle stack starts.
+export BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1
 
 LOG_FILE="$ROOT_DIR/.context/agentcard-lifecycle-$TASK_NAME.log"
 STACK_PID=""
