@@ -1,4 +1,11 @@
-from .keycap import keycap_function, generate_model
-from .controller import Controller
-from .controller import ConfigurationManager
+from .controller import ConfigurationManager, Controller
+from .keycap import generate_model, keycap_function
 from .plant import Plant
+
+__all__ = [
+    "ConfigurationManager",
+    "Controller",
+    "Plant",
+    "generate_model",
+    "keycap_function",
+]
