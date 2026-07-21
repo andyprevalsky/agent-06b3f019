@@ -1161,6 +1161,10 @@ async def test_agentcard_setup_terminal_check_refreshes_stale_attention_poll():
         if reads == 1:
             return [
                 {
+                    "id": "stale-setup-from-another-agent",
+                    "metadata": {"attentionKind": "agentcard_user_cardholder_onboarding_required"},
+                },
+                {
                     "id": "setup-1",
                     "metadata": {"attentionKind": "agentcard_user_cardholder_onboarding_required"},
                 }
@@ -1175,6 +1179,7 @@ async def test_agentcard_setup_terminal_check_refreshes_stale_attention_poll():
 
     assert not await _agentcard_setup_attention_still_open_after_terminal(
         "http://localhost:55120",
+        "setup-1",
         retry_delay_seconds=0,
         fetch_requests=fetch_requests,
     )
@@ -1194,6 +1199,7 @@ async def test_agentcard_setup_terminal_check_fails_closed_for_open_attention():
 
     assert await _agentcard_setup_attention_still_open_after_terminal(
         "http://localhost:55120",
+        "setup-1",
         retry_delay_seconds=0,
         fetch_requests=fetch_requests,
     )

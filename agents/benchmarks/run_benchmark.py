@@ -1438,6 +1438,7 @@ async def get_attention_requests(base_url: str) -> list:
 
 async def _agentcard_setup_attention_still_open_after_terminal(
     base_url: str,
+    request_id: str,
     *,
     max_attempts: int = 3,
     retry_delay_seconds: float = 0.25,
@@ -1446,13 +1447,12 @@ async def _agentcard_setup_attention_still_open_after_terminal(
     """Refresh setup attention after terminal status instead of trusting a stale parallel poll."""
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
-    setup_kind = "agentcard_user_cardholder_onboarding_required"
     last_error: Optional[Exception] = None
     for attempt in range(1, max_attempts + 1):
         try:
             pending = await fetch_requests(base_url)
             setup_still_open = any(
-                _attention_request_is_open(req) and _attention_request_kind(req) == setup_kind
+                req.get("id") == request_id and _attention_request_is_open(req)
                 for req in pending
             )
             if not setup_still_open or attempt >= max_attempts:
@@ -2206,6 +2206,7 @@ async def poll_agent(
     seen_attention_ids: set[str] = set()
     seen_attention_kinds: List[str] = []
     agentcard_setup_attention_seen = False
+    agentcard_setup_attention_id: Optional[str] = None
     attention_requests_seen: list[dict] = []
     chat_assistant_seen_at: Optional[float] = None
     payment_card_action_completed = False
@@ -2369,9 +2370,12 @@ async def poll_agent(
         # Agent mode: done on terminal status
         if status in TERMINAL_STATUSES:
             if task.agentcard_setup_action == "complete":
-                setup_still_open = await _agentcard_setup_attention_still_open_after_terminal(
-                    base_url,
-                )
+                setup_still_open = False
+                if agentcard_setup_attention_seen and agentcard_setup_attention_id:
+                    setup_still_open = await _agentcard_setup_attention_still_open_after_terminal(
+                        base_url,
+                        agentcard_setup_attention_id,
+                    )
                 data["_benchmark"] = {
                     **data.get("_benchmark", {}),
                     "expected_attention_kinds_seen": list(seen_attention_kinds),
@@ -2698,6 +2702,7 @@ async def poll_agent(
                             ):
                                 await configure_benchmark_agentcard_setup(base_url, "complete")
                                 agentcard_setup_attention_seen = True
+                                agentcard_setup_attention_id = req_id
                                 print(f"    ✅ Completed one-time AgentCard setup for attention {req_id[:8]}")
                                 continue
                         if task.name == CALENDLY_TASK_NAME and _contains_calendly_link(req):
