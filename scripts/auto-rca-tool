@@ -151,6 +151,67 @@ PY
     --body-file "$final_body"
 }
 
+ensure_draft() {
+  local branch existing_pr run_id report_dir report_file run_url agent_url body
+  require_agent_id
+  branch="${RCA_BRANCH:-}"
+  [[ "$branch" =~ ^auto-rca/[A-Za-z0-9._/-]+$ ]] || fail "RCA_BRANCH is invalid"
+  [ "$(git -C "$ROOT_DIR" branch --show-current)" = "$branch" ] || fail "checkout is not on RCA_BRANCH"
+  run_id="${GITHUB_RUN_ID:-}"
+  [[ "$run_id" =~ ^[0-9]+$ ]] || fail "GITHUB_RUN_ID is invalid"
+  [[ "${GITHUB_REPOSITORY:-}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || fail "GITHUB_REPOSITORY is invalid"
+
+  existing_pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --state open --json url --jq '.[0].url // empty')"
+  if [ -n "$existing_pr" ]; then
+    printf '%s\n' "$existing_pr"
+    return
+  fi
+
+  if [ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal)" ]; then
+    git -C "$ROOT_DIR" add -A
+    if ! git -C "$ROOT_DIR" diff --cached --quiet; then
+      git -C "$ROOT_DIR" commit -m "auto-RCA: preserve preliminary investigation for $AGENT_ID"
+    fi
+  fi
+
+  if [ "$(git -C "$ROOT_DIR" rev-list --count main..HEAD)" -eq 0 ]; then
+    report_dir="$ROOT_DIR/docs/rca/preliminary"
+    report_file="$report_dir/${AGENT_ID}-${run_id}.md"
+    [ ! -e "$report_file" ] || fail "preliminary RCA report path already exists"
+    mkdir -p "$report_dir"
+    {
+      printf '# Preliminary RCA: production agent %s\n\n' "$AGENT_ID"
+      printf 'Status: preliminary + observability gap\n\n'
+      printf 'The automated investigator completed without publishing its own draft. '
+      printf 'This scaffold preserves the incident and guarantees a reviewable PR rather than a false-green run.\n\n'
+      printf -- '- Agent: https://roselabs.ai/?agent-id=%s\n' "$AGENT_ID"
+      printf -- '- Workflow run: https://github.com/%s/actions/runs/%s\n' "$GITHUB_REPOSITORY" "$run_id"
+      printf '\nA human must complete the evidence, first-bad boundary, reproduction, and fix before merge.\n'
+    } > "$report_file"
+    git -C "$ROOT_DIR" add "$report_file"
+    git -C "$ROOT_DIR" commit -m "auto-RCA: scaffold investigation for $AGENT_ID"
+  fi
+
+  gh auth setup-git
+  git -C "$ROOT_DIR" push --set-upstream origin "$branch"
+  run_url="https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id"
+  agent_url="https://roselabs.ai/?agent-id=$AGENT_ID"
+  body="$(printf '%s\n\n%s\n\n%s\n%s\n\n%s\n\n<!-- rca-slack ts=%s channel=%s -->' \
+    'Status: preliminary + observability gap' \
+    'The automated investigator completed without publishing a draft. This fallback preserves a reviewable incident artifact; do not merge until the RCA, reproduction, and fix are complete.' \
+    "Agent: $agent_url" \
+    "Workflow run: $run_url" \
+    'Required follow-up: add the evidence, first-bad boundary, failing/passing reproduction, cemented test, and deploy-gate results.' \
+    "${SLACK_TS:-}" "${SLACK_CHANNEL:-}")"
+  gh pr create \
+    --repo "$GITHUB_REPOSITORY" \
+    --draft \
+    --base main \
+    --head "$branch" \
+    --title "auto-RCA: Production agent failure $AGENT_ID" \
+    --body "$body"
+}
+
 mark_ready() {
   local branch pr_url
   require_agent_id
@@ -170,5 +231,6 @@ case "${1:-}" in
   smoke-gates) [ "$#" -eq 1 ] || fail "smoke-gates takes no arguments"; smoke_gates ;;
   publish-draft) [ "$#" -eq 1 ] || fail "publish-draft takes no arguments"; publish_draft ;;
   mark-ready) [ "$#" -eq 1 ] || fail "mark-ready takes no arguments"; mark_ready ;;
-  *) fail "usage: scripts/auto-rca-tool {evidence|benchmark|offline-gates|smoke-gates|publish-draft|mark-ready}" ;;
+  ensure-draft) [ "$#" -eq 1 ] || fail "ensure-draft takes no arguments"; ensure_draft ;;
+  *) fail "usage: scripts/auto-rca-tool {evidence|benchmark|offline-gates|smoke-gates|publish-draft|mark-ready|ensure-draft}" ;;
 esac
