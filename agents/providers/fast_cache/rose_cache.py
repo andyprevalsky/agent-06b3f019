@@ -168,6 +168,7 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
         "thinking": complete_kwargs.get("thinking"),
         "effort": complete_kwargs.get("effort"),
         "provider_fast_mode": complete_kwargs.get("provider_fast_mode"),
+        "exclude_anthropic_family": bool(complete_kwargs.get("_exclude_anthropic_family", False)),
         "response_schema": response_schema,
         "env_fingerprint": os.getenv("FAST_MODE_AGENT_ENV_FINGERPRINT", "default"),
     }

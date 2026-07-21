@@ -94,6 +94,15 @@ _DEFAULT_IDLE_TIMEOUT_S: Optional[float] = 120.0
 _HEARTBEAT_INTERVAL_S = 10.0
 _STALL_TOKEN_COOLDOWN_S = 10 * 60
 
+
+def _anthropic_family_excluded(requested: bool = False) -> bool:
+    return requested or os.getenv("ROSE_EXCLUDE_ANTHROPIC_FAMILY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
 # Errors from claude_auth that mean "try the waterfall next" — as long as
 # they fire before the first non-metadata chunk reaches the caller.
 _FALL_THROUGH_ERRORS = (
@@ -539,6 +548,11 @@ class RoseClient:
         agent_id = kwargs.get("agent_id")
         messages = kwargs.get("messages")
         pool = kwargs.get("pool")
+        exclude_anthropic_family = _anthropic_family_excluded(
+            bool(kwargs.get("_exclude_anthropic_family", False))
+        )
+        if exclude_anthropic_family != bool(kwargs.get("_exclude_anthropic_family", False)):
+            kwargs = {**kwargs, "_exclude_anthropic_family": exclude_anthropic_family}
 
         if pool == "rose-1-browser-use" or str(call_site).startswith("browser_use"):
             async for chunk in self._complete_impl(**kwargs):
@@ -615,9 +629,7 @@ class RoseClient:
         # Allow a process owner to prove that a maintenance or benchmark run
         # cannot consume Anthropic credit. This complements the existing
         # call-scoped flag and covers nested browser/evaluator calls as well.
-        _exclude_anthropic_family = _exclude_anthropic_family or os.getenv(
-            "ROSE_EXCLUDE_ANTHROPIC_FAMILY", ""
-        ).strip().lower() in {"1", "true", "yes", "on"}
+        _exclude_anthropic_family = _anthropic_family_excluded(_exclude_anthropic_family)
         pool_spec = get_pool(pool)
         rid = request_id or uuid.uuid4().hex[:12]
         started = time.monotonic()
