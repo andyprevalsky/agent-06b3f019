@@ -10,14 +10,43 @@
  * For anonymous users (Supabase native), the JWT will have is_anonymous=true.
  */
 
+import { Prisma } from '@prisma/client';
 import type { Request, Response, NextFunction } from 'express';
 import type jwt from 'jsonwebtoken';
 import { prisma } from './database';
 import { createInitialCredit } from './credits';
+import { syncJwtUser, type JwtUserStore } from './hybridAuthUser';
 import { createLogger } from './logger';
 import { verifySupabaseAccessToken } from './supabaseJwt';
 
 const log = createLogger('HybridAuth');
+
+const jwtUserStore: JwtUserStore = {
+  async findUser(userId) {
+    return await prisma.user.findUnique({
+      where: { userId },
+      select: { phone: true },
+    });
+  },
+  async createUser(input) {
+    await prisma.user.create({
+      data: {
+        userId: input.userId,
+        isAnonymous: input.isAnonymous,
+        phone: input.phone,
+      },
+    });
+  },
+  async updatePhone(userId, phone) {
+    await prisma.user.update({
+      where: { userId },
+      data: { phone },
+    });
+  },
+  isUniqueViolation(error) {
+    return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+  },
+};
 
 export interface HybridAuthRequest extends Request {
   userId?: string;
@@ -160,19 +189,12 @@ async function handleJwtAuth(
   req.isRoseApiKey = false;
   req.isAnonymous = isAnonymous;
 
-  const result = await prisma.user.upsert({
-    where: { userId },
-    create: {
-      userId,
-      isAnonymous,
-      phone: typeof payload.phone === 'string' ? payload.phone : null,
-    },
-    update: {
-      ...(typeof payload.phone === 'string' ? { phone: payload.phone } : {}),
-    },
+  const isNewUser = await syncJwtUser(jwtUserStore, {
+    userId,
+    isAnonymous,
+    phone: typeof payload.phone === 'string' ? payload.phone : null,
   });
 
-  const isNewUser = Math.abs(result.createdAt.getTime() - result.updatedAt.getTime()) < 1000;
   if (isNewUser) {
     log.info('Created user record', { userId, isAnonymous });
     await createInitialCredit(userId);
