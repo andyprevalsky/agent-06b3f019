@@ -13,16 +13,16 @@ test, so a human can review a ready solution instead of a blank page.
 1. **Never route alerts through our own backend/DB.** The failures we most want
    to hear about are the ones where the backend/DB is unhealthy, so an alerter
    that depends on our infra goes silent exactly when it matters. Every emitter
-   posts **directly to Slack** (external webhook); the RCA trigger posts
-   **directly to GitHub's API**. No Prisma table, no internal route.
+   posts **directly to Slack** (bot API, with incoming-webhook fallback); the RCA
+   trigger posts **directly to GitHub's API**. No Prisma table, no internal route.
 2. **Emitters never throw.** They live in callers' catch blocks and must not turn
    a handled failure into an unhandled one. Fire-and-forget.
 3. **In-memory dedup, no DB.** A per-process throttle suppresses the same failure
    signature for 5 min so a crash-loop can't firehose `#errors`. Bounded map,
    O(1) per failure — holds at 10k agents (no per-agent state).
-4. **RCA is flag-gated (`AUTO_RCA_ENABLED`, default off).** Phase 1 = capture +
-   Slack only. Watch the channel, gauge noise, then flip the flag to spend RCA
-   tokens.
+4. **RCA is flag-gated (`AUTO_RCA_ENABLED`, default off).** Production enables
+   it explicitly only after the workflow, credentials, and lifecycle card are
+   deployed and verified.
 5. **Full outage needs an external monitor.** A dead process can't page itself;
    an external uptime monitor pinging `/health/deep` is the only net for "backend
    or DB is fully down."
@@ -44,13 +44,17 @@ sub-failure that breaks the whole run propagates to the root and alerts there.
 
 - `back-end/src/providers/errorAlert.ts` — `alertError()` (Slack + optional RCA dispatch, throttled, never throws)
 - `agents/helpers/error_alert.py` — `report_failure_activity` (mirror, httpx)
-- `.github/workflows/auto-rca.yml` — dormant until `AUTO_RCA_ENABLED=1`; runs `/rca`, opens draft PR
+- `.github/workflows/auto-rca.yml` — dispatch target used when `AUTO_RCA_ENABLED=1`; runs `/rca`, opens draft PR
 - `back-end/src/server.ts` — `/health/deep`, `uncaughtException` hook, wiring
 - Wiring: `agentMessageService.ts`, `sms-webhook/service.ts`, `agent_workflow.py`, `worker.py`
 
-## Env vars (all optional; unset = degrade to logging, no crash)
+## Env vars (unset transports degrade to logging, never crash callers)
 
-- `SLACK_ERROR_WEBHOOK_URL` — Slack incoming webhook for `#errors` (backend + agents)
+- `SLACK_BOT_TOKEN` — preferred Slack transport; returns the message handle used
+  for in-place RCA lifecycle updates
+- `SLACK_ERROR_CHANNEL_ID` — Slack destination (`C0BE1B87882` in production)
+- `SLACK_ERROR_WEBHOOK_URL` — optional post-only fallback when bot credentials
+  are absent
 - `AUTO_RCA_ENABLED` — `1` to launch RCA agents (default off)
 - `GITHUB_DISPATCH_TOKEN` — PAT with `repo` scope to fire `repository_dispatch` (only needed when RCA on)
 - `GITHUB_DISPATCH_REPO` — default `Rose-Ai-Labs/rose`
@@ -68,13 +72,14 @@ sub-failure that breaks the whole run propagates to the root and alerts there.
   branches: the live database returns 200/up, while an injected database failure
   returns a generic 503/down response without leaking the detailed error.
 
-## Manual setup (one-time, requires user)
+## Production setup
 
-1. Create a Slack incoming webhook for `#errors`; set `SLACK_ERROR_WEBHOOK_URL`
-   on Render (backend) and Fly (agents).
+1. Set `SLACK_BOT_TOKEN`, `SLACK_ERROR_CHANNEL_ID`, `AUTO_RCA_ENABLED=1`, and
+   `GITHUB_DISPATCH_TOKEN` on Render (backend) and Fly (agents).
 2. Point an external uptime monitor (BetterStack/UptimeRobot) at
    `https://navi-j9a9.onrender.com/health/deep` → alert `#errors` on non-200.
-3. When ready for auto-RCA: set `AUTO_RCA_ENABLED=1` + `GITHUB_DISPATCH_TOKEN`.
+3. Store the Slack and dedicated RCA OAuth credentials as GitHub Actions
+   secrets so the workflow can update the lifecycle card and run Claude Code.
 
 ## Where the RCA agent runs
 
@@ -101,10 +106,6 @@ instead.
 
 ## Follow-ups (deferred)
 
-- **Validate `auto-rca.yml` with one real `workflow_dispatch`** before flipping
-  `AUTO_RCA_ENABLED=1` — confirm `scripts/run-bench` drives the fleet cleanly from
-  a GH runner (flyctl + `FLY_API_TOKEN` present; the fleet controller normally
-  runs from a dev/hub host, so prove the clone→repro→reap path once from CI).
 - Stuck-agent watchdog (`source:'agent_watchdog'`) — cron sweep for agents left
   non-terminal past a threshold (catches SIGKILL/OOM that can't self-report).
 - Recurring-after-resolved re-alert once dedup graduates from in-memory to shared.
