@@ -91,6 +91,19 @@ def test_blanket_preflight_uses_tolerant_sync():
     assert captured["tolerant"] is True
 
 
+def test_simulation_preflight_uses_restored_seed_without_prod_sync():
+    """Cloud simulation has a fresh restored seed DB but no second source DB endpoint."""
+    calls = []
+    with (
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(rb, "_is_simulate_mode", return_value=True),
+        patch.object(rb, "_sync_compute_tokens", side_effect=lambda **_kwargs: calls.append(True)),
+    ):
+        rb._refresh_local_compute_tokens_for_run("http://localhost:3001")
+
+    assert calls == []
+
+
 def test_live_fixture_sync_tolerates_missing_gpt_code():
     captured: dict[str, bool] = {}
 

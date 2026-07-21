@@ -4007,11 +4007,14 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
 def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     """Refresh agent-infrastructure compute credentials once before local tasks.
 
-    This is required even when no task opts into browser credential state. It is
-    deliberately separate from ``environment.live_fixtures`` so simulated and
-    synthetic runs can still create and drive agents to completion.
+    Real local tasks refresh from the verified shared workspace. Simulated cloud
+    stacks already restore the current dated seed dump and deliberately have no
+    second source DB endpoint, so they use that restored credential state.
     """
     if not _is_local_base_url(base_url):
+        return
+    if _is_simulate_mode():
+        print("    🌍 simulate mode — using compute tokens from the restored seed DB")
         return
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
