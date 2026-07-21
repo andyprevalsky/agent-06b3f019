@@ -26,7 +26,6 @@ interface WaterfallOptions {
   responseFormat?: ResponseFormat;
   temperature?: number;
   maxTokens?: number;
-  reasoningEffort?: string;
   openrouterKey: string;
   requestId: string;
   callSite?: string;
@@ -34,6 +33,7 @@ interface WaterfallOptions {
   idleTimeoutMs?: number;
   abortSignal?: AbortSignal;
   providerFastMode?: boolean;
+  reasoningEffort?: string;
   tools?: Array<Record<string, unknown>>;
   toolChoice?: unknown;
 }
@@ -44,8 +44,8 @@ export function buildOpenRouterBody(opts: {
   responseFormat?: ResponseFormat;
   temperature?: number;
   maxTokens?: number;
-  reasoningEffort?: string;
   providerFastMode?: boolean;
+  reasoningEffort?: string;
   tools?: Array<Record<string, unknown>>;
   toolChoice?: unknown;
 }): Record<string, unknown> {
@@ -58,10 +58,10 @@ export function buildOpenRouterBody(opts: {
   if (opts.responseFormat) body.response_format = opts.responseFormat;
   if (opts.temperature !== undefined) body.temperature = opts.temperature;
   if (opts.maxTokens !== undefined) body.max_tokens = opts.maxTokens;
+  if (opts.providerFastMode === true) body.speed = 'fast';
   if (opts.reasoningEffort !== undefined) {
     body.reasoning = { effort: opts.reasoningEffort };
   }
-  if (opts.providerFastMode === true) body.speed = 'fast';
   if (opts.tools) body.tools = opts.tools;
   if (opts.toolChoice !== undefined) body.tool_choice = opts.toolChoice;
   return body;
@@ -72,6 +72,9 @@ export async function* waterfallComplete(opts: WaterfallOptions): AsyncIterable<
   const perStepMs = opts.perStepTimeoutMs ?? PER_STEP_TIMEOUT_MS;
 
   for (let idx = 0; idx < opts.poolSpec.waterfall.length; idx++) {
+    if (opts.abortSignal?.aborted) {
+      throw opts.abortSignal.reason ?? new Error('OpenRouter waterfall aborted');
+    }
     const model = opts.poolSpec.waterfall[idx];
     log.info('step', {
       request_id: opts.requestId,
@@ -88,8 +91,8 @@ export async function* waterfallComplete(opts: WaterfallOptions): AsyncIterable<
       responseFormat: opts.responseFormat,
       temperature: opts.temperature,
       maxTokens: opts.maxTokens,
-      reasoningEffort: opts.reasoningEffort,
       providerFastMode: opts.providerFastMode,
+      reasoningEffort: opts.reasoningEffort,
       tools: opts.tools,
       toolChoice: opts.toolChoice,
     });
@@ -116,6 +119,11 @@ export async function* waterfallComplete(opts: WaterfallOptions): AsyncIterable<
       }
       return;
     } catch (err) {
+      // A bounded hedge abort means this whole waterfall lost the race. Do not
+      // mistake cancellation for a provider failure and start the next model.
+      if (opts.abortSignal?.aborted) {
+        throw opts.abortSignal.reason ?? err;
+      }
       const re = err instanceof RoseError ? err : new RoseError(String(err));
       if (emitted) {
         log.warn('step_failed_mid_stream', {
