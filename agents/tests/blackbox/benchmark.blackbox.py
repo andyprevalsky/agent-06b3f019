@@ -460,7 +460,7 @@ async def test_parallel_benchmark_scheduler_serializes_browser_profile_writers()
                 two_browser_tasks_running.set()
             try:
                 await asyncio.wait_for(two_browser_tasks_running.wait(), timeout=0.05)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 pass
             finally:
                 active_browser_tasks -= 1
