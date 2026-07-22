@@ -31,6 +31,7 @@ DRIVER_SCRIPT = ROOT / "scripts" / "cloudbench-run.sh"
 WORKER_SCRIPT = ROOT / "scripts" / "cloudbench-worker.sh"
 FLEET_SCRIPT = ROOT / "scripts" / "run-bench-fleet"
 CLOUD_SCRIPT = ROOT / "scripts" / "run-bench-cloud"
+CLOUDBENCH_RESULT_SCRIPT = ROOT / "scripts" / "cloudbench_result.py"
 AGENT_LINK_SERVER = ROOT / "agents" / "benchmarks" / "agent_link_server.py"
 PORT_LEASE_SCRIPT = ROOT / "scripts" / "cloudbench-port-lease.py"
 PREDEPLOY_SCRIPT = ROOT / "scripts" / "run-predeploy-cloud"
@@ -848,6 +849,121 @@ def test_predeploy_local_runner_selects_the_catalog_smoke_group() -> None:
     ]
 
 
+def test_cloudbench_result_allows_only_approved_claude_credential_skip(tmp_path: Path) -> None:
+    reason = "Claude Code credentials unavailable: no synced Claude token and no available pool token"
+
+    def write_run(path: Path, task_name: str, failure_reason: str) -> None:
+        path.write_text(
+            json.dumps(
+                {
+                    "timestamp": "2026-07-22T00:00:00+00:00",
+                    "summary": {
+                        "total": 1,
+                        "passed": 0,
+                        "failed": 0,
+                        "skipped": 1,
+                        "pass_rate": 0.0,
+                    },
+                    "tasks": [
+                        {
+                            "name": task_name,
+                            "passed": False,
+                            "status": "SKIPPED",
+                            "failure_reason": failure_reason,
+                        }
+                    ],
+                }
+            )
+        )
+
+    approved = tmp_path / "approved.json"
+    write_run(approved, "cache-coverage", reason)
+    accepted = subprocess.run(
+        [
+            sys.executable,
+            str(CLOUDBENCH_RESULT_SCRIPT),
+            str(approved),
+            "--expected-task",
+            "cache-coverage",
+            "--require-pass",
+            "--allow-claude-code-credential-skip",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert accepted.returncode == 0, accepted.stderr
+
+    strict = subprocess.run(
+        [
+            sys.executable,
+            str(CLOUDBENCH_RESULT_SCRIPT),
+            str(approved),
+            "--expected-task",
+            "cache-coverage",
+            "--require-pass",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert strict.returncode != 0
+    assert "task results are not all passing" in strict.stderr
+
+    wrong_task = tmp_path / "wrong-task.json"
+    write_run(wrong_task, "chat-mode", reason)
+    rejected_wrong_task = subprocess.run(
+        [
+            sys.executable,
+            str(CLOUDBENCH_RESULT_SCRIPT),
+            str(wrong_task),
+            "--expected-task",
+            "chat-mode",
+            "--require-pass",
+            "--allow-claude-code-credential-skip",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert rejected_wrong_task.returncode != 0
+    assert "task results are not all passing" in rejected_wrong_task.stderr
+
+    wrong_reason = tmp_path / "wrong-reason.json"
+    write_run(wrong_reason, "cache-coverage", "some other skip")
+    rejected_wrong_reason = subprocess.run(
+        [
+            sys.executable,
+            str(CLOUDBENCH_RESULT_SCRIPT),
+            str(wrong_reason),
+            "--expected-task",
+            "cache-coverage",
+            "--require-pass",
+            "--allow-claude-code-credential-skip",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert rejected_wrong_reason.returncode != 0
+    assert "task results are not all passing" in rejected_wrong_reason.stderr
+
+
+def test_cloudbench_wrappers_accept_approved_claude_credential_skip() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    fleet = FLEET_SCRIPT.read_text()
+
+    cloud_validation = cloud.split('"$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT"', 1)[1].split(
+        "then", 1
+    )[0]
+    assert "--require-pass --allow-claude-code-credential-skip" in cloud_validation
+    assert '"--allow-claude-code-credential-skip"' in fleet
+
+
 def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     # The policy, shell entrypoints, and Python owner form one executable chain.
     # Assert every hop so documentation can delegate without duplicating a
@@ -1262,7 +1378,7 @@ def test_boot_launch_delivers_the_exact_worktree_patch_to_every_guest() -> None:
     assert 'LOCAL_PATCH_SHA256=$FLEET_PATCH_SHA256' in worker_stage
     assert 'sftp put' in worker_stage
     patch_upload = worker_stage.split('if [ -n "$FLEET_PATCH_FILE" ]', 1)[1].split(
-        'if fly_with_timeout 20 ssh console', 1
+        'if run_worker_stage_cmd "launch worker wrapper"', 1
     )[0]
     assert '|| true' not in patch_upload
     assert "continue" in patch_upload
@@ -1294,7 +1410,7 @@ def test_autoscaled_worker_failure_publishes_durable_failure_marker(tmp_path: Pa
     patch_file = tmp_path / "workspace.patch"
     patch_file.write_text("patch\n")
 
-    for mode in ("upload-failure", "readiness-failure"):
+    for mode in ("storage-not-ready", "upload-failure", "readiness-failure"):
         out = tmp_path / mode
         calls = tmp_path / f"{mode}.calls"
         script = f"""set -euo pipefail
@@ -1316,6 +1432,7 @@ CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS=0
 MODE={shlex.quote(mode)}
 OUT={shlex.quote(str(out))}
 CALLS={shlex.quote(str(calls))}
+: > "$CALLS"
 reserve_worker_machine_slot() {{ return 0; }}
 capacity_release_reservation() {{ return 0; }}
 controller_github_token_b64() {{ printf '%s' token-b64; }}
@@ -1324,12 +1441,13 @@ clone_machine_target() {{
   printf '%s\n' abc123 >> "$1"
   printf '%s' abc123
 }}
-machine_storage_ready() {{ return 0; }}
+machine_storage_ready() {{ [ "$MODE" != storage-not-ready ]; }}
+machine_storage_failed() {{ return 1; }}
 fly_with_timeout() {{
   shift
   printf '%s\n' "$*" >> "$CALLS"
   case "$*" in
-    *"ssh sftp put"*"cloudbench-local.patch"*)
+    *"cloudbench-local.patch"*)
       [ "$MODE" != upload-failure ] ;;
     *) return 0 ;;
   esac
@@ -1343,7 +1461,8 @@ provision_worker bench workspace primary fd00::1 0 "$OUT"
 wait || true
 test "$(_pool_ids "$OUT")" = 1
 test -s "$OUT/worker-abc123.failed"
-test ! -e "$OUT/worker-ready/abc123"
+test -s "$OUT/worker-abc123.stage.log"
+test ! -e "$OUT/worker-abc123.ready"
 """
         result = subprocess.run(
             ["bash", "-c", script],
@@ -1354,18 +1473,30 @@ test ! -e "$OUT/worker-ready/abc123"
         )
         assert result.returncode == 0, (mode, result.stdout, result.stderr)
         fly_calls = calls.read_text().splitlines()
+        stage_log = (out / "worker-abc123.stage.log").read_text()
+        if mode == "storage-not-ready":
+            assert fly_calls == []
+            assert "storage not ready" in stage_log
+            assert "could not be staged and launched; see worker-abc123.stage.log" in (
+                out / "worker-abc123.failed"
+            ).read_text()
+            continue
         neutralize = next(i for i, call in enumerate(fly_calls) if "machine update abc123" in call)
         first_start = next(i for i, call in enumerate(fly_calls) if "machine start abc123" in call)
         assert neutralize < first_start
         assert "--env CLOUDBENCH_BOOT=0 --command sleep infinity" in fly_calls[neutralize]
         assert "--skip-start" in fly_calls[neutralize]
+        assert "neutralize cloned boot command" in stage_log
+        assert "start neutralized worker" in stage_log
         launch_calls = [call for call in fly_calls if "ssh console" in call]
         assert len(launch_calls) <= 1
         if mode == "readiness-failure":
             assert len(launch_calls) == 1
             assert "/tmp/rbw.sh" in launch_calls[0]
+            assert "did not reach queue readiness" in stage_log
         else:
             assert launch_calls == []
+            assert "upload local patch failed" in stage_log
 
     worker = WORKER_SCRIPT.read_text()
     assert worker.index("patch payload checksum mismatch") < worker.index(

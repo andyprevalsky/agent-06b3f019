@@ -3322,7 +3322,7 @@ reconcile_worker_failure_outcomes() {  # <bench> <bench-output-dir>
 
 provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <primary_ip> <sim01> <out>
     local bench="$1" ws="$2" primary_id="$3" pip="$4" sim="$5" out="$6"
-    local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file
+    local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file stage_log
     worker_capacity_token="$FLEET_OWNER_TOKEN-worker-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     if ! reserve_worker_machine_slot "$worker_capacity_token"; then
         printf '%s\n' "Machine-count capacity unavailable for worker clone" > "$out/autoscaler.failed"
@@ -3366,6 +3366,8 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     # proves that Temporal worker.run() reached its queue-polling boundary.
     : > "$out/worker-$wid.pending"
     rm -f "$out/worker-$wid.cancelled"
+    stage_log="$out/worker-$wid.stage.log"
+    : > "$stage_log" 2>/dev/null || true
     local wrapper worker_env; wrapper="$(mktemp)"; worker_env="$(mktemp)"
     chmod 600 "$worker_env" 2>/dev/null || true
     printf 'CLOUDBENCH_GITHUB_TOKEN_B64=%q\n' "$worker_github_token_b64" > "$worker_env"
@@ -3413,39 +3415,70 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
           local ready_tmp="$out/worker-$wid.ready.tmp.$$"
           : > "$ready_tmp" && mv "$ready_tmp" "$out/worker-$wid.ready"
       }
+      log_worker_stage() {
+          printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" "$*" >> "$stage_log" 2>/dev/null || true
+      }
+      run_worker_stage_cmd() {
+          local label="$1" rc
+          shift
+          log_worker_stage "attempt ${attempt:-?}/${stage_attempts}: $label"
+          if "$@" >> "$stage_log" 2>&1; then
+              log_worker_stage "attempt ${attempt:-?}/${stage_attempts}: $label succeeded"
+              return 0
+          else
+              rc=$?
+              log_worker_stage "attempt ${attempt:-?}/${stage_attempts}: $label failed rc=$rc"
+              return "$rc"
+          fi
+      }
       launched=0
       worker_neutralized=0
-      for _ in $(seq 1 "$stage_attempts"); do
+      for attempt in $(seq 1 "$stage_attempts"); do
         worker_provision_cancelled && finish_cancelled_worker_provision
-        if machine_storage_ready "$wid"; then
-            # A worker is cloned from this benchmark's primary, whose config is
-            # already set to auto-run cloudbench-boot.sh. Neutralize that copied
-            # command before its first start or staging could race a duplicate
-            # primary benchmark driver on the same task queue/run token.
-            if [ "$worker_neutralized" != "1" ]; then
-                if ! fly_with_timeout 30 machine update "$wid" -a "$APP" \
-                    --env CLOUDBENCH_BOOT=0 --command "sleep infinity" \
-                    --skip-health-checks --skip-start --yes >/dev/null 2>&1; then
-                    sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
-                    continue
-                fi
-                worker_neutralized=1
+        if ! machine_storage_ready "$wid"; then
+            if machine_storage_failed "$wid"; then
+                publish_worker_failure "worker $wid storage failed before staging; see worker-$wid.stage.log"
+                exit 1
             fi
-            fly_with_timeout 20 machine start "$wid" -a "$APP" >/dev/null 2>&1 || true
+            log_worker_stage "attempt $attempt/$stage_attempts: storage not ready"
+            sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+            continue
         fi
-          if fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-worker.sh" /data/cloudbench-worker.sh >/dev/null 2>&1 \
-             && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh >/dev/null 2>&1 \
-             && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env >/dev/null 2>&1 \
-             && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh >/dev/null 2>&1; then
+        # A worker is cloned from this benchmark's primary, whose config is
+        # already set to auto-run cloudbench-boot.sh. Neutralize that copied
+        # command before its first start or staging could race a duplicate
+        # primary benchmark driver on the same task queue/run token.
+        if [ "$worker_neutralized" != "1" ]; then
+            if ! run_worker_stage_cmd "neutralize cloned boot command" \
+                fly_with_timeout 30 machine update "$wid" -a "$APP" \
+                --env CLOUDBENCH_BOOT=0 --command "sleep infinity" \
+                --skip-health-checks --skip-start --yes; then
+                sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+                continue
+            fi
+            worker_neutralized=1
+        fi
+        run_worker_stage_cmd "start neutralized worker" \
+            fly_with_timeout 20 machine start "$wid" -a "$APP" || true
+          if run_worker_stage_cmd "upload cloudbench-worker.sh" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-worker.sh" /data/cloudbench-worker.sh \
+             && run_worker_stage_cmd "upload cloudbench-fetch-ref.sh" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh \
+             && run_worker_stage_cmd "upload worker environment" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env \
+             && run_worker_stage_cmd "upload worker wrapper" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh; then
               if [ -n "$FLEET_PATCH_FILE" ]; then
-                  if ! fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1; then
+                  if ! run_worker_stage_cmd "upload local patch" \
+                      fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch; then
                       worker_provision_cancelled && finish_cancelled_worker_provision
                       sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
                       continue
                   fi
               fi
-              if fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
-                  -C "bash -c \"begin=\$(date +%s); : > /data/worker.log; printf '%s\\n' \\\"\$begin\\\" > /data/worker.started-at; setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\"" >/dev/null 2>&1; then
+              if run_worker_stage_cmd "launch worker wrapper" \
+                  fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
+                  -C "bash -c \"begin=\$(date +%s); : > /data/worker.log; printf '%s\\n' \\\"\$begin\\\" > /data/worker.started-at; setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\""; then
                   launched=1
                   break
               fi
@@ -3456,7 +3489,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
       rm -f "$wrapper" "$worker_env" 2>/dev/null || true
       if [ "$launched" != "1" ]; then
           worker_provision_cancelled && finish_cancelled_worker_provision
-          publish_worker_failure "worker $wid could not be staged and launched"
+          publish_worker_failure "worker $wid could not be staged and launched; see worker-$wid.stage.log"
           exit 1
       fi
 
@@ -3473,7 +3506,8 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
           sleep 5
       done
       worker_provision_cancelled && finish_cancelled_worker_provision
-      publish_worker_failure "worker $wid did not reach queue readiness within ${worker_ready_timeout}s"
+      log_worker_stage "worker did not reach queue readiness within ${worker_ready_timeout}s"
+      publish_worker_failure "worker $wid did not reach queue readiness within ${worker_ready_timeout}s; see worker-$wid.stage.log"
       exit 1
     ) &
     return 0
@@ -3738,9 +3772,8 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
             local n=$((cur - want))
             echo "  ⤵️  [$bench] scale down -$n (desired=$desired, pool=$cur)"
             for _ in $(seq 1 "$n"); do
-                local ready_state wid
-                ready_state="$(find "$out/worker-ready" -type f 2>/dev/null | tail -1)"
-                wid="${ready_state##*/}"
+                local wid
+                wid="$(tail -1 "$out/worker-clones.ids" 2>/dev/null || true)"
                 [ -n "$wid" ] || break
                 # Publish cancellation before provider destroy. A provisioner
                 # staging this worker can then distinguish intentional scale-in
@@ -3763,7 +3796,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
                 sed '$d' "$out/worker-clones.ids" > "$out/worker-clones.ids.tmp" 2>/dev/null && mv "$out/worker-clones.ids.tmp" "$out/worker-clones.ids" || true
                 awk -v id="$wid" '$0 != id' "$out/worker-ready.ids" > "$out/worker-ready.ids.tmp" 2>/dev/null \
                     && mv "$out/worker-ready.ids.tmp" "$out/worker-ready.ids" || true
-                rm -f "$out/worker-$wid.pending"
+                rm -f "$out/worker-$wid.pending" "$out/worker-$wid.ready"
             done
         fi
         reconcile_worker_ready_outcomes "$out"
@@ -4317,7 +4350,15 @@ expected=os.environ["EXPECTED_TASK"]
 child_rc=int(os.environ["CHILD_RC"])
 try:
     check=subprocess.run(
-        [sys.executable, "scripts/cloudbench_result.py", p, "--expected-task", expected, "--require-pass"],
+        [
+            sys.executable,
+            "scripts/cloudbench_result.py",
+            p,
+            "--expected-task",
+            expected,
+            "--require-pass",
+            "--allow-claude-code-credential-skip",
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,

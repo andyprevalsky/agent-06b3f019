@@ -3097,7 +3097,7 @@ if [ "$RUN_IDENTITY_OK" = "1" ] && [ -s "$RUN_OUT" ]; then
     for task_name in "${BENCH_TASKS[@]}"; do
         validation_args+=(--expected-task "$task_name")
     done
-    if python3 "$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT" "${validation_args[@]}" --require-pass; then
+    if python3 "$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT" "${validation_args[@]}" --require-pass --allow-claude-code-credential-skip; then
         RUN_PASS_OK="1"
     fi
 fi

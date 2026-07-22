@@ -514,19 +514,20 @@ def test_claude_code_preflight_rejects_anthropic_fallback_without_claude_token()
 
 
 def test_ci_allows_only_claude_code_credential_skips():
-    skipped = rb.TaskResult(
-        name="claude-code-agent",
-        passed=False,
-        agent_id="",
-        status="SKIPPED",
-        progress_score=0,
-        duration_seconds=0,
-        cost_cents=0,
-        message_count=0,
-        failure_reason=rb.CLAUDE_CODE_CREDENTIAL_SKIP_REASON,
-    )
-    summary = {"failed": 0, "skipped": 1}
-    assert rb._ci_should_fail(summary, [skipped]) is False
+    for task_name in ("claude-code-agent", "cache-coverage"):
+        skipped = rb.TaskResult(
+            name=task_name,
+            passed=False,
+            agent_id="",
+            status="SKIPPED",
+            progress_score=0,
+            duration_seconds=0,
+            cost_cents=0,
+            message_count=0,
+            failure_reason=rb.CLAUDE_CODE_CREDENTIAL_SKIP_REASON,
+        )
+        summary = {"failed": 0, "skipped": 1}
+        assert rb._ci_should_fail(summary, [skipped]) is False
 
 
 def test_ci_still_fails_other_skips():
