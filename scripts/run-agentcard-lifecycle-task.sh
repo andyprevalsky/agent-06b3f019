@@ -61,6 +61,11 @@ export SEED_ALLOW_MISSING_GPT_CODE=1
 # Skipping that unrelated graph prevents a warm local database from spending
 # minutes upserting every production cookie before the lifecycle stack starts.
 export BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1
+# AgentCard lifecycle tasks do not simulate against the World Model Harness. A
+# WMH build/delta refresh can consume the entire lifecycle readiness window
+# before the public tunnel smoke runs, blocking the payment gate even though the
+# backend, frontend, and worker are healthy.
+export BENCHMARK_SKIP_WMH_BUILD=1
 
 LOG_FILE="$ROOT_DIR/.context/agentcard-lifecycle-$TASK_NAME.log"
 STACK_PID=""
