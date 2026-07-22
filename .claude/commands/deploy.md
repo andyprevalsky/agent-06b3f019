@@ -15,9 +15,10 @@ Push the current branch, create a PR, obtain a CodeRabbit review (or Claude Code
 Before running tests or creating/updating a PR, capture the current Conductor workspace title so it can be restored after merge (the deploy flow mutates `pr_title_locked` to the PR title; without this capture the pre-deploy title is lost):
 
 ```bash
-WORKSPACE_DIR="$(basename "$PWD")"
+ESCAPED_WORKSPACE_PATH=$(printf "%s" "$PWD" | sed "s/'/''/g")
+ESCAPED_BRANCH=$(printf "%s" "$(git branch --show-current)" | sed "s/'/''/g")
 ORIGINAL_WORKSPACE_TITLE="$(sqlite3 "$HOME/Library/Application Support/com.conductor.app/conductor.db" \
-  "SELECT pr_title FROM workspaces WHERE directory_name = '$WORKSPACE_DIR' LIMIT 1;")"
+  "SELECT pr_title FROM workspaces WHERE workspace_path = '$ESCAPED_WORKSPACE_PATH' AND branch = '$ESCAPED_BRANCH' LIMIT 1;")"
 echo "ORIGINAL_WORKSPACE_TITLE=$ORIGINAL_WORKSPACE_TITLE"
 ```
 
@@ -1015,15 +1016,19 @@ Store the title in the `pr_title_locked` column — this column is ours and is n
 ```bash
 # Escape single quotes for SQL
 ESCAPED_TITLE=$(printf "%s" "$PR_TITLE" | sed "s/'/''/g")
+ESCAPED_WORKSPACE_PATH=$(printf "%s" "$PWD" | sed "s/'/''/g")
+ESCAPED_BRANCH=$(printf "%s" "$(git branch --show-current)" | sed "s/'/''/g")
 sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
-  "UPDATE workspaces SET pr_title_locked = '$ESCAPED_TITLE' WHERE directory_name = '$(basename "$PWD")'"
+  "UPDATE workspaces SET pr_title_locked = '$ESCAPED_TITLE' WHERE workspace_path = '$ESCAPED_WORKSPACE_PATH' AND branch = '$ESCAPED_BRANCH'"
 ```
 
 From this point on, Steps 9–13 should read the PR title from this record (rather than querying GitHub) so the workspace and the deploy flow agree on what's shipping:
 
 ```bash
+ESCAPED_WORKSPACE_PATH=$(printf "%s" "$PWD" | sed "s/'/''/g")
+ESCAPED_BRANCH=$(printf "%s" "$(git branch --show-current)" | sed "s/'/''/g")
 PR_TITLE=$(sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
-  "SELECT pr_title_locked FROM workspaces WHERE directory_name = '$(basename "$PWD")'")
+  "SELECT pr_title_locked FROM workspaces WHERE workspace_path = '$ESCAPED_WORKSPACE_PATH' AND branch = '$ESCAPED_BRANCH'")
 ```
 
 ## Step 9: Wait for code review
