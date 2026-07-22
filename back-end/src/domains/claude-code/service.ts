@@ -263,6 +263,9 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
   const isRateLimited = /You've hit your limit/i.test(output);
   const authFailure = AUTH_FAILURE_PATTERNS.some((re) => re.test(output));
   if (!isRateLimited && !authFailure) return;
+  const sharedCredentialReason = authFailure
+    ? 'claude_code_auth_failure'
+    : 'claude_code_rate_limit';
 
   const session = await repo.findSessionById(taskId);
   if (session === null) {
@@ -275,9 +278,8 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
     // the funded ANTHROPIC_API_KEY fallback. Back off that shared credential
     // so every subsequent spawn skips the known-broken key instead of burning
     // another E2B sandbox with the same terminal failure.
-    const reason = authFailure ? 'claude_code_auth_failure' : 'claude_code_rate_limit';
-    log.warn(`Claude Code ${reason} on funded ANTHROPIC_API_KEY for ${taskId}`);
-    await markAnthropicApiKeyOnCooldown(reason);
+    log.warn(`Claude Code ${sharedCredentialReason} on funded ANTHROPIC_API_KEY for ${taskId}`);
+    await markAnthropicApiKeyOnCooldown(sharedCredentialReason);
     return;
   }
 
@@ -310,7 +312,7 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
     }
   } else if (tokenSource === 'anthropic') {
     log.warn(`Claude Code ${failureKind} on shared Anthropic API key`);
-    await markAnthropicApiKeyOnCooldown('claude_code_billing_failure');
+    await markAnthropicApiKeyOnCooldown(sharedCredentialReason);
   }
 }
 

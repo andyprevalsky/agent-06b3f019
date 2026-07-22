@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 from _test_utils import BlackboxResult
 
@@ -5744,6 +5745,236 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             os.environ["BENCHMARK_SEED_DUMP"] = prior_seed_dump
 
 
+def test_local_start_services_reaps_process_when_readiness_fails():
+    """A partially initialized isolated stack must not outlive its launcher."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    class FakeProcess:
+        pass
+
+    process = FakeProcess()
+    with tempfile.TemporaryDirectory() as tmp:
+        context_dir = Path(tmp) / "isolated-run"
+        stack = local_bench.ServiceStack(
+            run_id="isolated-run",
+            context_dir=context_dir,
+            manifest_path=context_dir / "services.json",
+            service_log=context_dir / "services.log",
+            isolated=True,
+            workspace_name="blackbox-bench-isolated-run",
+            base_port=55120,
+        )
+        with (
+            patch.object(local_bench.subprocess, "Popen", return_value=process),
+            patch.object(
+                local_bench,
+                "wait_for_services",
+                side_effect=TimeoutError("services never became ready"),
+            ),
+            patch.object(local_bench, "stop_services") as stop_services,
+        ):
+            try:
+                local_bench.start_services(stack, clean_first=False)
+            except TimeoutError as exc:
+                assert str(exc) == "services never became ready"
+            else:
+                raise AssertionError("start_services unexpectedly ignored the readiness failure")
+
+        stop_services.assert_called_once_with(process, stack=stack)
+
+
+def test_local_start_services_preserves_readiness_failure_when_cleanup_fails():
+    """Cleanup diagnostics must not mask the startup failure that triggered them."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    class FakeProcess:
+        pass
+
+    process = FakeProcess()
+    with tempfile.TemporaryDirectory() as tmp:
+        context_dir = Path(tmp) / "isolated-run"
+        stack = local_bench.ServiceStack(
+            run_id="isolated-run",
+            context_dir=context_dir,
+            manifest_path=context_dir / "services.json",
+            service_log=context_dir / "services.log",
+            isolated=True,
+            workspace_name="blackbox-bench-isolated-run",
+            base_port=55120,
+        )
+        with (
+            patch.object(local_bench.subprocess, "Popen", return_value=process),
+            patch.object(
+                local_bench,
+                "wait_for_services",
+                side_effect=TimeoutError("services never became ready"),
+            ),
+            patch.object(
+                local_bench,
+                "stop_services",
+                side_effect=RuntimeError("cleanup failed"),
+            ) as stop_services,
+        ):
+            try:
+                local_bench.start_services(stack, clean_first=False)
+            except TimeoutError as exc:
+                assert str(exc) == "services never became ready"
+            else:
+                raise AssertionError("cleanup failure replaced the readiness failure")
+
+        stop_services.assert_called_once_with(process, stack=stack)
+
+
+def test_local_start_services_reaps_only_its_real_process_group():
+    """Readiness rollback kills its process tree without touching a sibling."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    real_popen = subprocess.Popen
+    owned_process = None
+    with tempfile.TemporaryDirectory() as process_tmp:
+        child_pid_path = Path(process_tmp) / "child.pid"
+
+        def launch_owned_process(_command, **kwargs):
+            nonlocal owned_process
+            owned_process = real_popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import pathlib, subprocess, sys, time; "
+                        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+                        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+                        "time.sleep(60)"
+                    ),
+                    str(child_pid_path),
+                ],
+                **kwargs,
+            )
+            deadline = time.monotonic() + 5
+            while not child_pid_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert child_pid_path.exists(), "owned process did not launch its child"
+            return owned_process
+
+        class SubprocessFacade:
+            DEVNULL = subprocess.DEVNULL
+            STDOUT = subprocess.STDOUT
+            TimeoutExpired = subprocess.TimeoutExpired
+            Popen = staticmethod(launch_owned_process)
+            run = staticmethod(subprocess.run)
+
+        sibling_process = real_popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            cwd=local_bench.REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                context_dir = Path(tmp) / "cleanup-owned-unique"
+                stack = local_bench.ServiceStack(
+                    run_id="cleanup-owned-unique",
+                    context_dir=context_dir,
+                    manifest_path=context_dir / "services.json",
+                    service_log=context_dir / "services.log",
+                    isolated=True,
+                    workspace_name="blackbox-bench-cleanup-owned-unique",
+                    base_port=55120,
+                )
+                with (
+                    patch.object(local_bench, "subprocess", SubprocessFacade),
+                    patch.object(local_bench, "_stop_owned_db_from_stack_identity"),
+                    patch.object(
+                        local_bench,
+                        "wait_for_services",
+                        side_effect=TimeoutError("services never became ready"),
+                    ),
+                ):
+                    try:
+                        local_bench.start_services(stack, clean_first=False)
+                    except TimeoutError:
+                        pass
+                    else:
+                        raise AssertionError("start_services unexpectedly ignored the readiness failure")
+
+            assert owned_process is not None
+            child_pid = int(child_pid_path.read_text())
+            assert owned_process.poll() is not None, "the partially started process group survived"
+            deadline = time.monotonic() + 5
+            while _pid_is_live(child_pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert not _pid_is_live(child_pid), "a child of the partially started group survived"
+            assert sibling_process.poll() is None, "cleanup terminated an unrelated sibling process"
+        finally:
+            for process in (owned_process, sibling_process):
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+
+
+def _pid_is_live(pid: int) -> bool:
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "stat="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    status = result.stdout.strip()
+    return bool(status) and not status.startswith("Z")
+
+
+def test_local_stop_services_removes_pre_manifest_owned_database():
+    """Pre-manifest rollback derives only the exact isolated DB resource names."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    class StoppedProcess:
+        pid = 12345
+
+        @staticmethod
+        def poll():
+            return 0
+
+    with tempfile.TemporaryDirectory() as tmp:
+        context_dir = Path(tmp) / "cleanup-owned-unique"
+        stack = local_bench.ServiceStack(
+            run_id="cleanup-owned-unique",
+            context_dir=context_dir,
+            manifest_path=context_dir / "services.json",
+            service_log=context_dir / "services.log",
+            isolated=True,
+            workspace_name="blackbox-bench-cleanup-owned-unique",
+            base_port=55120,
+        )
+        with (
+            patch.object(local_bench.subprocess, "run") as run,
+            patch.object(local_bench, "_kill_scoped_processes_by_run_id"),
+        ):
+            local_bench.stop_services(StoppedProcess(), stack=stack)
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert [
+        "docker",
+        "rm",
+        "-f",
+        "victoria-db-blackbox-bench-cleanup-owned-unique",
+    ] in commands
+    assert [
+        "docker",
+        "volume",
+        "rm",
+        "victoria-pgdata-blackbox-bench-cleanup-owned-unique",
+    ] in commands
+
+
 def test_run_sh_seed_dump_targets_isolated_database_atomically():
     """System-Postgres isolated runs must restore/dump their per-run DB safely."""
     run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
@@ -8915,6 +9146,22 @@ async def run_all_tests():
         test_runner_fixtures_reject_manifest_without_database_identity,
     )
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
+    r.record(
+        "local_start_services_readiness_cleanup",
+        test_local_start_services_reaps_process_when_readiness_fails,
+    )
+    r.record(
+        "local_start_services_cleanup_error_preserves_readiness_failure",
+        test_local_start_services_preserves_readiness_failure_when_cleanup_fails,
+    )
+    r.record(
+        "local_start_services_exact_process_group_cleanup",
+        test_local_start_services_reaps_only_its_real_process_group,
+    )
+    r.record(
+        "local_stop_services_pre_manifest_database_cleanup",
+        test_local_stop_services_removes_pre_manifest_owned_database,
+    )
     r.record(
         "run_sh_seed_dump_isolated_database",
         test_run_sh_seed_dump_targets_isolated_database_atomically,

@@ -462,6 +462,28 @@ def _stop_owned_db_from_manifest(stack: ServiceStack) -> None:
         subprocess.run(["docker", "volume", "rm", volume], cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _stop_owned_db_from_stack_identity(stack: ServiceStack) -> None:
+    """Remove the exact isolated DB when startup failed before its manifest."""
+    if not stack.isolated or not stack.workspace_name:
+        return
+    container = f"victoria-db-{stack.workspace_name}"
+    volume = f"victoria-pgdata-{stack.workspace_name}"
+    subprocess.run(
+        ["docker", "rm", "-f", container],
+        cwd=REPO_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    subprocess.run(
+        ["docker", "volume", "rm", volume],
+        cwd=REPO_ROOT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+
+
 def _descendant_pids(root: int) -> set[int]:
     """Every descendant of root (inclusive), captured now via pgrep -P."""
     seen: set[int] = set()
@@ -710,7 +732,6 @@ def start_services(
     stack.context_dir.mkdir(parents=True, exist_ok=True)
     if clean_first and not stack.isolated:
         subprocess.run(["bash", "scripts/kill-services.sh"], cwd=REPO_ROOT, check=True)
-    service_log = open(stack.service_log, "w")
     env = {**os.environ, "DISABLE_GMAIL_SYNC": "1"}
     if anon_steel_profile:
         env["BENCHMARK_ANON_STEEL_PROFILE"] = "true"
@@ -741,16 +762,28 @@ def start_services(
             resolved_model = world_model_name or os.environ.get("WMH_MODEL_NAME")
             if resolved_model:
                 env["WMH_MODEL_NAME"] = resolved_model
-    process = subprocess.Popen(
-        ["bash", "scripts/run.sh", "--benchmark"],
-        cwd=REPO_ROOT,
-        stdout=service_log,
-        stderr=subprocess.STDOUT,
-        env=env,
-        start_new_session=True,
-    )
-    service_log.close()
-    manifest = wait_for_services(stack.manifest_path, process=process, service_log=stack.service_log)
+    with open(stack.service_log, "w") as service_log:
+        process = subprocess.Popen(
+            ["bash", "scripts/run.sh", "--benchmark"],
+            cwd=REPO_ROOT,
+            stdout=service_log,
+            stderr=subprocess.STDOUT,
+            env=env,
+            start_new_session=True,
+        )
+    try:
+        manifest = wait_for_services(stack.manifest_path, process=process, service_log=stack.service_log)
+    except BaseException:
+        # Ownership transfers to the caller only after readiness succeeds. Reap
+        # the exact process group here while its Popen handle is still available;
+        # before services.json exists, the caller cannot rediscover that group.
+        try:
+            stop_services(process, stack=stack)
+        except Exception as cleanup_exc:
+            # Cleanup diagnostics must not replace the readiness failure that
+            # explains why startup aborted in the first place.
+            print(f"Warning: failed to clean up benchmark services: {cleanup_exc}", file=sys.stderr)
+        raise
     return process, manifest
 
 
@@ -794,6 +827,8 @@ def stop_services(process: subprocess.Popen | None = None, *, stack: ServiceStac
     if stack is not None and stack.isolated:
         if _manifest_status(stack) != "stopped":
             _stop_owned_db_from_manifest(stack)
+            if not stack.manifest_path.exists():
+                _stop_owned_db_from_stack_identity(stack)
         _kill_scoped_processes_by_run_id(stack)
 
 
