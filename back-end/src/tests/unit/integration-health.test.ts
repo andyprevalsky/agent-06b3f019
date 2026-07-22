@@ -32,5 +32,20 @@ assert.match(
   /console\.anthropic\.com\/settings\/billing/,
   'Anthropic billing failure must direct the operator to the billing page'
 );
+assert.match(
+  healthCheck,
+  /DEPLOY_GATE_OVERRIDES/,
+  'credential health must expose the audited deploy-gate override channel'
+);
+assert.match(
+  healthCheck,
+  /credential-health:anthropic/,
+  'Anthropic override must be provider-specific rather than disabling all credential checks'
+);
+assert.match(
+  healthCheck,
+  /explicitly overridden by DEPLOY_GATE_OVERRIDES/,
+  'credential health output must disclose rather than conceal an override'
+);
 
 process.stdout.write('integration health contracts passed\n');

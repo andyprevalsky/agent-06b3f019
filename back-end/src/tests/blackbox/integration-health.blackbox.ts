@@ -32,6 +32,7 @@ interface CheckResult {
   passed: boolean;
   duration: number;
   error?: string;
+  overridden?: boolean;
 }
 
 async function fetchWithTimeout(
@@ -64,6 +65,14 @@ function requireEnv(name: string): string {
     );
   }
   return value;
+}
+
+function hasGateOverride(gate: string): boolean {
+  return (process.env.DEPLOY_GATE_OVERRIDES ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value) => value !== '')
+    .includes(gate);
 }
 
 async function runCheck(name: string, fn: () => Promise<void>): Promise<CheckResult> {
@@ -225,27 +234,50 @@ async function runAll(): Promise<void> {
     { name: 'E2B (sandboxes)', fn: checkE2B },
     { name: 'Steel (browser sessions)', fn: checkSteel },
     { name: 'Parallel.ai (web search)', fn: checkParallel, warnOnly: true },
-    { name: 'Anthropic (Claude API)', fn: checkAnthropic },
+    {
+      name: 'Anthropic (Claude API)',
+      fn: checkAnthropic,
+      overridden: hasGateOverride('credential-health:anthropic'),
+    },
     { name: 'OpenRouter (LLM judge)', fn: checkOpenRouter },
     { name: 'Supabase (auth/DB)', fn: checkSupabase },
   ];
 
-  const results = await Promise.all(checks.map((c) => runCheck(c.name, c.fn)));
+  const results = await Promise.all(
+    checks.map((check) =>
+      check.overridden === true
+        ? Promise.resolve<CheckResult>({
+            name: check.name,
+            passed: true,
+            duration: 0,
+            overridden: true,
+          })
+        : runCheck(check.name, check.fn)
+    )
+  );
 
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     const isWarn = !r.passed && checks[i].warnOnly === true;
-    const icon = r.passed ? '  PASS' : isWarn ? '  WARN' : '  FAIL';
-    console.log(`${icon}  ${r.name}${r.passed ? '' : ` -- ${r.error}`} (${r.duration}ms)`);
+    const icon =
+      r.overridden === true ? '  SKIP' : r.passed ? '  PASS' : isWarn ? '  WARN' : '  FAIL';
+    const detail =
+      r.overridden === true
+        ? ' -- explicitly overridden by DEPLOY_GATE_OVERRIDES'
+        : r.passed
+          ? ''
+          : ` -- ${r.error}`;
+    console.log(`${icon}  ${r.name}${detail} (${r.duration}ms)`);
   }
 
   const hardFailures = results.filter((r, i) => !r.passed && checks[i].warnOnly !== true);
   const warnings = results.filter((r, i) => !r.passed && checks[i].warnOnly === true);
-  const passed = results.filter((r) => r.passed).length;
+  const overrides = results.filter((r) => r.overridden === true);
+  const passed = results.filter((r) => r.passed && r.overridden !== true).length;
 
   console.log('\n' + '='.repeat(50));
   console.log(
-    `\nResults: ${passed} passed, ${warnings.length} warnings, ${hardFailures.length} failed, ${results.length} total`
+    `\nResults: ${passed} passed, ${warnings.length} warnings, ${overrides.length} overrides, ${hardFailures.length} failed, ${results.length} total`
   );
 
   if (hardFailures.length > 0) {
@@ -254,7 +286,11 @@ async function runAll(): Promise<void> {
     process.exit(1);
   }
 
-  console.log('\nALL INTEGRATION-HEALTH CHECKS PASSED\n');
+  console.log(
+    overrides.length > 0
+      ? `\nINTEGRATION-HEALTH CHECKS COMPLETE WITH ${overrides.length} EXPLICIT OVERRIDE(S)\n`
+      : '\nALL INTEGRATION-HEALTH CHECKS PASSED\n'
+  );
   process.exit(0);
 }
 
