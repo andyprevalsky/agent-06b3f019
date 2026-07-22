@@ -14,7 +14,7 @@
  * |                                                                         |
  * | 1. KILL CONNECTIONS --> unsubscribe(channel), clear timeouts           |
  * |                                                                         |
- * | 2. FLUSH STATE -------> setMessages([]), clear streaming state         |
+ * | 2. FLUSH STATE -------> setMessages([]), clear streams + inspection   |
  * |                                                                         |
  * | 3. CONNECT NEW -------> subscribeToAgent(newAgentId)                   |
  * |                          loadAgentDetail(newAgentId)                    |
@@ -50,6 +50,8 @@
  *     |
  *     v (subscription + fetch complete) -> OPEN GATE
  * [AGENT_ACTIVE] <-- agentDetail: AgentDetail, messages: Message[], gate: open, URL: ?agent-id=X
+ *     | own run: inspectionContext=null
+ *     | admin + foreign run: inspectionContext=owner identity -> floating read-only badge
  *     |
  *     | (change agent) -> SYNC URL -> CLOSE GATE first, prevents cross-agent contamination
  *     v
@@ -83,6 +85,7 @@
  * Key state:
  * - selectedAgentId: string | null
  * - agentDetail: AgentDetail | null
+ * - inspectionContext: InspectionContext | null
  * - messages: Message[]
  * - streamingBubbles: Map<string, StreamingBubble>
  * - streamingPlans, streamingAttention, streamingTools: Maps

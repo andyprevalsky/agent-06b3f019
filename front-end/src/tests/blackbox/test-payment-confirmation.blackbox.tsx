@@ -119,6 +119,13 @@ describe('test-payment Confirmation receipt', () => {
     expect(screen.getByTestId('payment-confirmation-total')).toHaveTextContent('$43.96');
   });
 
+  it('keeps the exact merchant identity visible on the confirmation page', () => {
+    render(<Confirmation confirmation={CONFIRMATION} />);
+    expect(screen.getByTestId('payment-confirmation')).toHaveTextContent(
+      `Merchant: ${TEST_PAYMENT_MERCHANT_NAME}`,
+    );
+  });
+
   it('renders every purchased item by name so the page is groundable', () => {
     render(<Confirmation confirmation={CONFIRMATION} />);
     const receipt = screen.getByTestId('payment-confirmation-receipt');

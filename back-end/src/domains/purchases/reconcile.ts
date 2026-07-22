@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { createCardProvider, type CardProvider } from '../../providers/card-provider';
+import { createCardProviderForAgent, type CardProvider } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
 import { refundCapturedPurchase } from '../../providers/stripe';
 import {
@@ -11,11 +11,7 @@ import { AGENTCARD_WEBHOOK_SECRET } from './config';
 import { PurchaseError } from './errors';
 import * as repo from './repo';
 import { PurchaseSpendStatus, type AgentCardWebhookEvent } from './types';
-import {
-  beginPurchaseWalletReclaim,
-  consumePurchaseWalletFunding,
-  reclaimPurchaseWalletFunding,
-} from './walletFunding';
+import { beginPurchaseWalletReclaim, reclaimPurchaseWalletFunding } from './walletFunding';
 
 const log = createLogger('Purchases');
 
@@ -72,7 +68,8 @@ export async function closePurchaseCard(
     return { ok: true, status: purchase.status };
   }
 
-  const activeCardProvider = cardProvider ?? createCardProvider(purchase.userId);
+  const activeCardProvider =
+    cardProvider ?? (await createCardProviderForAgent(purchase.userId, purchase.agentId));
 
   // Settled: the card was used and the funding charge captured; close the card but keep the charge.
   if (purchase.status === PurchaseSpendStatus.CLEARED) {
@@ -187,8 +184,14 @@ export async function handleAgentCardWebhook(event: AgentCardWebhookEvent): Prom
   }
 
   if (event.type === 'transaction.cleared') {
-    await consumePurchaseWalletFunding(purchase.id);
-    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
+    const result = await repo.settlePurchaseAfterTransactionCleared(purchase.id);
+    if (result.outcome === 'ignored') {
+      log.warn('Ignoring transaction.cleared for a purchase already being reclaimed', {
+        purchase_id: purchase.id,
+        card_id: cardId,
+        funding_status: result.fundingStatus,
+      });
+    }
   } else if (event.type === 'transaction.voided') {
     if (purchase.status === PurchaseSpendStatus.CLEARED) {
       // The hold was already captured, then the card transaction reversed → refund the charge.

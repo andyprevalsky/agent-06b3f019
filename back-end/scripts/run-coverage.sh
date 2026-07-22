@@ -58,6 +58,14 @@ export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 
+# Coverage is a deterministic local-code gate, not an external analytics probe.
+# A full admin-health run can spend most of Amplitude's five-minute chart-query
+# budget, starving the mandatory live blackbox gate that follows coverage during
+# /deploy. Keep coverage offline; the later live suite still requires real
+# Amplitude funnel counts when credentials are configured.
+export AMPLITUDE_API_KEY=""
+export AMPLITUDE_SECRET_KEY=""
+
 # Coverage starts only a local backend. E2B smoke sandboxes cannot reach stale
 # developer ngrok URLs from .env, so keep those smoke sessions on direct provider
 # calls unless the caller explicitly opts into a known-live tunnel.
@@ -151,8 +159,22 @@ SQL
   # pre-seed a valid production credential without disabling the real Codex
   # black-box test that consumes it.
   if [[ "${BACKEND_CODEX_TOKEN_SYNC_SKIP:-0}" != "1" ]]; then
-    echo "Syncing local Codex credentials to local test database..."
-    npx tsx scripts/sync-codex-token.ts >/dev/null
+    CODEX_AUTH_FILE="${CODEX_AUTH_PATH:-$HOME/.codex/auth.json}"
+    CODEX_AUTH_MODE="$(jq -r '.auth_mode // empty' "$CODEX_AUTH_FILE" 2>/dev/null || true)"
+    if [[ "$CODEX_AUTH_MODE" == "chatgpt" ]]; then
+      echo "Syncing local Codex credentials to local test database..."
+      npx tsx scripts/sync-codex-token.ts >/dev/null
+    else
+      SEEDED_CODEX_COUNT="$(psql "$LOCAL_DB_URL" -At -v ON_ERROR_STOP=1 -c \
+        "SELECT count(*) FROM \"Integration\" WHERE name='gpt_code' AND status='CONNECTED' AND \"isActive\"=true AND coalesce(config->>'encryptedCredentials','') <> '';" 2>/dev/null || printf 0)"
+      if [[ "$SEEDED_CODEX_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Using the connected gpt_code credential already seeded in the isolated test database."
+      else
+        echo "❌ Codex auth is not ChatGPT mode and the isolated test database has no connected gpt_code credential." >&2
+        echo "   Run codex login, seed the integration, or set BACKEND_CODEX_TOKEN_SYNC_SKIP=1 only when the caller already seeded it." >&2
+        exit 1
+      fi
+    fi
   fi
 fi
 

@@ -321,16 +321,44 @@ def _build_prompt_cache_key(
     pool_spec: PoolSpec,
     model_override: Optional[str] = None,
     static_cache_scope: str,
+    cache_namespace: Optional[str] = None,
 ) -> str:
     fingerprint = json.dumps(
         {
             "model": model_override or pool_spec.gpt_auth_model,
             "staticCacheScope": static_cache_scope,
+            "cacheNamespace": cache_namespace,
         },
         sort_keys=True,
         default=str,
     )
     return "rose:" + hashlib.sha256(fingerprint.encode()).hexdigest()[:24]
+
+
+def _build_cache_namespace(
+    messages: List[Dict[str, Any]],
+    *,
+    lineage_key: Optional[str],
+    agent_id: Optional[str],
+    call_site: Optional[str],
+) -> str:
+    """Isolate provider cache sessions while preserving per-call prefix growth."""
+    first_non_system_message: Optional[Dict[str, Any]] = None
+    for message in messages:
+        if message.get("role") != "system":
+            first_non_system_message = message
+            break
+
+    material = json.dumps(
+        {
+            "lineage": lineage_key or agent_id or "unbound",
+            "callSite": call_site or "unspecified",
+            "firstMessage": first_non_system_message,
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(material.encode()).hexdigest()[:24]
 
 
 def _normalize_reasoning_effort(effort: Optional[str]) -> str:
@@ -352,6 +380,7 @@ def build_codex_responses_body(
     temperature: Optional[float] = None,
     effort: Optional[str] = None,
     provider_fast_mode: bool = False,
+    cache_namespace: Optional[str] = None,
     request_id: str,
 ) -> Dict[str, Any]:
     """Assemble the Codex Responses request body.
@@ -372,6 +401,7 @@ def build_codex_responses_body(
             pool_spec=pool_spec,
             model_override=model_override,
             static_cache_scope=static_cache_scope,
+            cache_namespace=cache_namespace,
         ),
         "include": ["reasoning.encrypted_content"],
     }
@@ -409,6 +439,7 @@ async def gpt_auth_complete(
     request_id: str,
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
+    cache_namespace: Optional[str] = None,
     provider_fast_mode: bool = False,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = None,
@@ -422,6 +453,16 @@ async def gpt_auth_complete(
         temperature=temperature,
         effort=effort,
         provider_fast_mode=provider_fast_mode,
+        cache_namespace=(
+            cache_namespace
+            if cache_namespace is not None
+            else _build_cache_namespace(
+                messages,
+                lineage_key=auth.lineage_key,
+                agent_id=agent_id,
+                call_site=call_site,
+            )
+        ),
         request_id=request_id,
     )
     actual_model = f"{pool_spec.gpt_auth_model}-gpt"
@@ -503,6 +544,7 @@ async def openai_api_key_complete(
     request_id: str,
     agent_id: Optional[str] = None,
     call_site: Optional[str] = None,
+    cache_namespace: Optional[str] = None,
     provider_fast_mode: bool = False,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = None,
@@ -517,6 +559,16 @@ async def openai_api_key_complete(
         temperature=temperature,
         effort=effort,
         provider_fast_mode=provider_fast_mode,
+        cache_namespace=(
+            cache_namespace
+            if cache_namespace is not None
+            else _build_cache_namespace(
+                messages,
+                lineage_key=None,
+                agent_id=agent_id,
+                call_site=call_site,
+            )
+        ),
         request_id=request_id,
     )
     actual_model = f"{model}-openai"

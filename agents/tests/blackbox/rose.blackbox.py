@@ -58,12 +58,17 @@ from providers.rose.claude_auth import (
     claude_auth_complete,
 )
 from providers.rose.client import _cache_input_accounting, _messages_without_internal_system_boundaries
-from providers.rose.gpt_auth import build_codex_responses_body
+from providers.rose.gpt_auth import build_codex_responses_body, gpt_auth_complete
 from providers.rose.schema import (
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
 )
-from providers.rose.transport import ANTHROPIC_FAST_MODE_BETA, OPENAI_RESPONSES_API_URL, _with_fast_mode_beta
+from providers.rose.transport import (
+    ANTHROPIC_FAST_MODE_BETA,
+    OPENAI_RESPONSES_API_URL,
+    _codex_extra_headers_from_body,
+    _with_fast_mode_beta,
+)
 from providers.rose.transforms import (
     apply_anthropic_tool_config,
     get_messages_for_model,
@@ -2280,6 +2285,138 @@ def test_build_codex_responses_body_contract():
         request_id="max-effort",
     )
     assert max_effort_body["reasoning"]["effort"] == "xhigh"
+
+
+def test_codex_cache_scope_uses_canonical_session_headers():
+    """Codex cache affinity must use the HTTP header names its client sends."""
+    scope = "rose:7c4fd924ea17566d159427d8"
+
+    assert _codex_extra_headers_from_body({"prompt_cache_key": scope}) == {
+        "session-id": scope,
+        "thread-id": scope,
+        "x-client-request-id": scope,
+    }
+    assert _codex_extra_headers_from_body({"prompt_cache_key": "  "}) == {}
+
+
+async def test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes():
+    """Codex cache sessions stay stable per agent/call-site without cross-agent eviction."""
+    import providers.rose.gpt_auth as gpt_auth_mod
+
+    captured_bodies = []
+
+    async def _capture_attempt(**kwargs):
+        captured_bodies.append(kwargs["body"])
+        if False:
+            yield None
+
+    pool = get_pool("rose-1-ultra")
+    base_messages = [
+        {"role": "system", "content": "stable system rules"},
+        {"role": "user", "content": "inspect example.com"},
+    ]
+    grown_messages = [
+        *base_messages,
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_browser",
+                    "function": {"name": "spawn_browser_agent", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_browser", "content": "Example Domain"},
+    ]
+
+    async def _capture(
+        *,
+        lineage_key: str,
+        agent_id: str,
+        call_site: str,
+        messages,
+        cache_namespace=None,
+    ):
+        auth = GptAuthContext(
+            token="test-token",
+            source="user",
+            user_id="test-user",
+            lineage_key=lineage_key,
+            max_rotations=0,
+        )
+        async for _ in gpt_auth_complete(
+            pool_spec=pool,
+            messages=messages,
+            auth=auth,
+            request_id=f"request-{len(captured_bodies)}",
+            agent_id=agent_id,
+            call_site=call_site,
+            cache_namespace=cache_namespace,
+        ):
+            pass
+
+    with patch.object(gpt_auth_mod, "_attempt_with_token", _capture_attempt):
+        await _capture(
+            lineage_key="agent:browser-a",
+            agent_id="browser-a",
+            call_site="execute_loop",
+            messages=base_messages,
+        )
+        await _capture(
+            lineage_key="agent:browser-a",
+            agent_id="browser-a",
+            call_site="execute_loop",
+            messages=grown_messages,
+        )
+        await _capture(
+            lineage_key="agent:browser-b",
+            agent_id="browser-b",
+            call_site="execute_loop",
+            messages=base_messages,
+        )
+        await _capture(
+            lineage_key="agent:browser-a",
+            agent_id="browser-a",
+            call_site="verifier_browser",
+            messages=base_messages,
+        )
+        await _capture(
+            lineage_key="agent:parent",
+            agent_id="parent",
+            call_site="browser_use_step_1",
+            messages=base_messages,
+            cache_namespace="browser-task:task-a:browser_use",
+        )
+        await _capture(
+            lineage_key="agent:parent",
+            agent_id="parent",
+            call_site="browser_use_step_2",
+            messages=grown_messages,
+            cache_namespace="browser-task:task-a:browser_use",
+        )
+        await _capture(
+            lineage_key="agent:parent",
+            agent_id="parent",
+            call_site="browser_use_step_1",
+            messages=base_messages,
+            cache_namespace="browser-task:task-b:browser_use",
+        )
+        await _capture(
+            lineage_key="agent:parent",
+            agent_id="parent",
+            call_site="write_lock_notification_fork_2",
+            messages=grown_messages,
+            cache_namespace="browser-task:task-a:write_lock_notification",
+        )
+
+    cache_keys = [body["prompt_cache_key"] for body in captured_bodies]
+    assert cache_keys[0] == cache_keys[1], "A growing conversation must reuse its prior Codex cache session"
+    assert cache_keys[0] != cache_keys[2], "Concurrent agents must not evict each other's prompt prefix"
+    assert cache_keys[0] != cache_keys[3], "Different LLM call sites must not share one Codex cache session"
+    assert cache_keys[4] == cache_keys[5], "Consecutive browser steps must reuse one Codex cache session"
+    assert cache_keys[4] != cache_keys[6], "Parallel browser tasks under one parent must not share a cache session"
+    assert cache_keys[4] != cache_keys[7], "A browser fork must not overwrite the main browser cache session"
 
 
 def test_build_codex_responses_body_preserves_tool_history_and_multimodal():
@@ -4844,6 +4981,11 @@ async def run_all_tests():
         test_parse_responses_sse_failed_context_length_is_invalid_request,
     )
     r.record("codex_responses_body_contract", test_build_codex_responses_body_contract)
+    r.record("codex_cache_scope_session_headers", test_codex_cache_scope_uses_canonical_session_headers)
+    await r.record_async(
+        "gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes",
+        test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes,
+    )
     r.record(
         "codex_body_tool_history_multimodal", test_build_codex_responses_body_preserves_tool_history_and_multimodal
     )

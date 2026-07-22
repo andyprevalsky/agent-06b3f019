@@ -70,6 +70,21 @@ interface SerializedResponse {
   headers: Record<string, string>;
 }
 
+export function isRetryableOutboundResponseStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+export function outboundReplayCacheKey(url: string, method: string, body: string | null): string {
+  return `call:${JSON.stringify([url, method, body])}`;
+}
+
+class NonReplayableResponseError extends Error {
+  constructor(readonly response: SerializedResponse) {
+    super(`Outbound response ${response.status} must not be replayed`);
+    this.name = 'NonReplayableResponseError';
+  }
+}
+
 /**
  * Thin adapter around real fetch — fast-forward wraps this to cache `call()` results.
  */
@@ -80,7 +95,7 @@ class FetchReplayClient {
     this.originalFetch = original;
   }
 
-  async call(
+  private async request(
     url: string,
     method: string,
     headers: string,
@@ -106,6 +121,31 @@ class FetchReplayClient {
       headers: responseHeaders,
     };
   }
+
+  async call(
+    url: string,
+    method: string,
+    headers: string,
+    body: string | null
+  ): Promise<SerializedResponse> {
+    const response = await this.request(url, method, headers, body);
+    if (isRetryableOutboundResponseStatus(response.status)) {
+      // fast-forward persists fulfilled return values. Throwing keeps transient
+      // provider failures out of the replay cache; the wrapper below converts
+      // this sentinel back into normal fetch Response semantics.
+      throw new NonReplayableResponseError(response);
+    }
+    return response;
+  }
+
+  callUncached(
+    url: string,
+    method: string,
+    headers: string,
+    body: string | null
+  ): Promise<SerializedResponse> {
+    return this.request(url, method, headers, body);
+  }
 }
 
 const captures: CapturedCall[] = [];
@@ -117,7 +157,11 @@ export function shouldBypassOutboundReplay(url: string): boolean {
   try {
     const hostname = new URL(url).hostname.toLowerCase();
     return (
-      hostname === 'e2b.app' || hostname.endsWith('.e2b.app') || hostname === 'api.onkernel.com'
+      hostname === 'e2b.app' ||
+      hostname.endsWith('.e2b.app') ||
+      hostname === 'api.onkernel.com' ||
+      hostname === 'amplitude.com' ||
+      hostname === 'analytics.eu.amplitude.com'
     );
   } catch {
     return false;
@@ -359,12 +403,18 @@ export function installFetchCapture(): Router {
 
       // Real benchmarks capture pass-through traffic but must observe mutable
       // provider state. Only explicit blackbox runs opt into replay.
-      const cacheKey = JSON.stringify({ method: 'call', args: [url, method, requestBody] });
+      const cacheKey = outboundReplayCacheKey(url, method, requestBody);
       const wasCached = replayEnabled && fsCache ? await fsCache.has(cacheKey) : false;
 
-      const serialized: SerializedResponse = replayEnabled
-        ? await cachedClient.call(url, method, headersJson, requestBody)
-        : await rawClient.call(url, method, headersJson, requestBody);
+      let serialized: SerializedResponse;
+      try {
+        serialized = replayEnabled
+          ? await cachedClient.call(url, method, headersJson, requestBody)
+          : await rawClient.callUncached(url, method, headersJson, requestBody);
+      } catch (error) {
+        if (!(error instanceof NonReplayableResponseError)) throw error;
+        serialized = error.response;
+      }
 
       entry.durationMs = Date.now() - start;
       entry.responseStatus = serialized.status;

@@ -1041,7 +1041,10 @@
     "attachment": null,
     "approval_handling": "auto_approve",
     "expected_approval_count": 1,
-    "expected_attention_kind": "write_lock",
+    "expected_attention_kind_any_of": [
+      "payment_approval",
+      "write_lock"
+    ],
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -1131,7 +1134,7 @@
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "The root agent completes after exactly one auto-approved write-lock",
+          "The root agent completes after exactly one auto-approved purchase approval: payment-card approval or final write approval",
           "The approval request identifies the beanie and its price"
         ],
         "checks": [
@@ -1166,7 +1169,7 @@
         "criteria": [
           "The selected product is one black beanie priced under $35, and grounded rating, review, material, or product-detail evidence supports that it is well-made",
           "The agent uses the normal cart and checkout path rather than Buy Now",
-          "The trajectory shows the qualifying purchase completed after the single approved write boundary"
+          "The trajectory shows the qualifying purchase completed after exactly one approved purchase boundary: payment-card approval or final write approval"
         ],
         "judge_prompt": "Pass only when browser/tool evidence grounds the exact product, price, quality basis, normal cart path, and completed purchase. Authentication assistance, unsupported quality claims, or use of Buy Now is a failure."
       }

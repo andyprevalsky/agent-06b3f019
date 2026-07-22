@@ -36,7 +36,12 @@ grep -qE '^reap_orphaned_fleet_proxies$' "$FLEET" || fail "reaper is not called 
 # 2) Real-process behavior. A fake 'flyctl' whose ps line matches the reaper's
 #    selector (contains 'flyctl proxy' and '-a <APP>'). It must NOT exec — exec
 #    would replace argv with the sleep's, hiding the 'flyctl proxy' args from ps.
-printf '#!/usr/bin/env bash\nsleep 300\n' > "$TMP/flyctl"
+printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'sleep 300 &' \
+    'child=$!' \
+    'trap '\''kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; exit 0'\'' TERM INT' \
+    'wait "$child"' > "$TMP/flyctl"
 chmod +x "$TMP/flyctl"
 
 # Orphan: the subshell backgrounds the proxy then exits, so it reparents to init

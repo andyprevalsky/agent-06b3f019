@@ -609,6 +609,7 @@ class RoseClient:
         provider_fast_mode: bool = False,
         dump_context: bool = True,
         dump_extra: Optional[Dict[str, Any]] = None,
+        cache_namespace: Optional[str] = None,
         _exclude_anthropic_family: bool = False,
     ) -> AsyncIterator[StreamChunk]:
         """Run a full Rose completion, yielding normalized StreamChunks.
@@ -1024,6 +1025,7 @@ class RoseClient:
                                 request_id=rid,
                                 agent_id=agent_id,
                                 call_site=call_site,
+                                cache_namespace=cache_namespace,
                                 provider_fast_mode=provider_fast_mode,
                                 ttft_timeout_s=current_ttft_s,
                                 idle_timeout_s=idle_timeout_s,
@@ -1196,6 +1198,7 @@ class RoseClient:
                             request_id=rid,
                             agent_id=agent_id,
                             call_site=call_site,
+                            cache_namespace=cache_namespace,
                             ttft_timeout_s=ttft_timeout_s,
                             idle_timeout_s=idle_timeout_s,
                         )
@@ -1387,6 +1390,7 @@ class RoseClient:
         deadline_s: float = _DEFAULT_DEADLINE_S,
         skip_cache_write: bool = False,
         dump_extra: Optional[Dict[str, Any]] = None,
+        cache_namespace: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run one browser-use step through the rose-1-browser-use pool.
 
@@ -1449,6 +1453,7 @@ class RoseClient:
             deadline_s=deadline_s,
             skip_cache_write=skip_cache_write,
             dump_context=False,
+            cache_namespace=cache_namespace,
         )
 
         actual_model = response.actual_model or ""
@@ -1543,6 +1548,7 @@ class RoseClient:
         deadline_s: float = _DEFAULT_DEADLINE_S,
         dump_context: bool = True,
         dump_extra: Optional[Dict[str, Any]] = None,
+        cache_namespace: Optional[str] = None,
     ) -> RoseResponse:
         """Consume the stream into a single `RoseResponse` — convenience for
         non-streaming callers who don't care about incremental chunks."""
@@ -1566,6 +1572,7 @@ class RoseClient:
             deadline_s=deadline_s,
             dump_context=dump_context,
             dump_extra=dump_extra,
+            cache_namespace=cache_namespace,
         ):
             if chunk.kind == "content" and structured_output is not None:
                 structured_output.add_chunk(chunk)
@@ -1681,6 +1688,7 @@ async def _try_gpt_auth(
     request_id: str,
     agent_id: Optional[str],
     call_site: Optional[str],
+    cache_namespace: Optional[str] = None,
     provider_fast_mode: bool = False,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
@@ -1700,6 +1708,7 @@ async def _try_gpt_auth(
         request_id=request_id,
         agent_id=agent_id,
         call_site=call_site,
+        cache_namespace=cache_namespace,
         provider_fast_mode=provider_fast_mode,
         ttft_timeout_s=ttft_timeout_s,
         idle_timeout_s=idle_timeout_s,
@@ -1735,6 +1744,7 @@ async def _try_openai_api_key(
     request_id: str,
     agent_id: Optional[str],
     call_site: Optional[str],
+    cache_namespace: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
@@ -1755,6 +1765,7 @@ async def _try_openai_api_key(
         request_id=request_id,
         agent_id=agent_id,
         call_site=call_site,
+        cache_namespace=cache_namespace,
         provider_fast_mode=provider_fast_mode,
         ttft_timeout_s=ttft_timeout_s,
         idle_timeout_s=idle_timeout_s,

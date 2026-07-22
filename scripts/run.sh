@@ -27,11 +27,22 @@ normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
 . "$SCRIPT_DIR/lib/ngrok-tunnel.sh"
 . "$SCRIPT_DIR/lib/run-context.sh"
+. "$SCRIPT_DIR/lib/run-service-readiness.sh"
 . "$SCRIPT_DIR/lib/seed-cache.sh"
 . "$SCRIPT_DIR/lib/fast-mode-cache-schema.sh"
 
 RUN_CONTEXT_DIR="$(normalize_run_context_dir "$PWD" "${BENCHMARK_CONTEXT_DIR:-.context}")"
 BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
+
+# Export both benchmark-mode signals so child services (backend + worker) actually
+# see them. Backend code keys benchmark-only behavior off these (purchase KYC
+# simulation, the RLS-free agent preview, and the AgentCard mint cutoff's
+# force-enable of real minting). `--benchmark` sets BENCHMARK_MODE locally; without
+# this export it never reached the backend, so those checks silently read an unset
+# var — e.g. a `run.sh --benchmark` lifecycle stack would hand the agent the static
+# Rose Agent Card instead of minting a real AgentCard. The isolated `run-bench`
+# path already exports BENCHMARK_ISOLATED_RUN; re-exporting here is idempotent.
+export BENCHMARK_MODE BENCHMARK_ISOLATED_RUN
 
 # mac-app is Electron + requires nvm/Node 20.10.0; only runs on macOS.
 IS_MAC=false
@@ -98,6 +109,16 @@ docker_info_quick() {
     return 1
 }
 
+docker_available_for_workspace_db() {
+    local db_container=$1
+    docker_info_quick && return 0
+    # /deploy pre-starts the worktree-owned DB. A busy Docker Desktop can make
+    # the broad daemon probe miss its startup budget even while this known
+    # container is available; preserve isolation instead of falling through to
+    # the shared system Postgres in that case.
+    docker_ps_ports_quick '{{.Names}}' | grep -Fxq "$db_container"
+}
+
 # Check cwd first because many service command lines are just "node" or
 # "python3" and do not include the worktree path.
 process_belongs_to_this_worktree() {
@@ -114,6 +135,13 @@ process_belongs_to_this_worktree() {
 # Check if a port requires moving this workspace to a different range.
 # Current-worktree processes are handled later as stale/running services; any
 # other listener should trigger reassignment before services or Postgres start.
+#
+# Only LISTENING sockets are considered: a listener bind fails (EADDRINUSE) solely
+# because another LISTENER holds the port. An outbound ESTABLISHED connection that
+# merely borrowed this number as its ephemeral local port (e.g. a concurrent
+# workspace's `flyctl proxy` streaming to Fly) does NOT block our bind, so it must
+# not be mistaken for an occupant — otherwise unlucky ephemeral-port collisions
+# across sibling workspaces spuriously fail strict-Conductor-port startup.
 port_requires_reassign() {
     local port=$1
     local pids
@@ -1553,7 +1581,8 @@ elif [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
 else
     run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee "$FRONTEND_LOG_FILE"' &
 fi
-PIDS+=($!); NAMES+=("front-end")
+FRONTEND_PID=$!
+PIDS+=("$FRONTEND_PID"); NAMES+=("front-end")
 
 # mac-app is skipped in benchmark mode (Electron is heavy and smoke doesn't touch it).
 if ! $BENCHMARK_MODE && $IS_MAC; then
@@ -1588,6 +1617,8 @@ if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
         exit 1
     }
 fi
+
+wait_for_frontend_ready "$FRONTEND_PID" "$FRONTEND_PORT" "$FRONTEND_LOG_FILE" || exit 1
 
 SERVICE_STATUS=running
 write_services_manifest

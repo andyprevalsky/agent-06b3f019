@@ -161,6 +161,7 @@ function buildReturn(a: BuildArgs) {
     realtimeReady: a.auth.realtimeReady,
     canSubmitGoals: a.canSubmitGoals,
     agentDetail: a.ctx.agent,
+    inspectionContext: a.ctx.inspectionContext,
     selectedAgentId: a.ctx.selectedAgentId,
     messages: a.ctx.messages,
     contextStreamingBubbles: a.ctx.streamingBubbles,

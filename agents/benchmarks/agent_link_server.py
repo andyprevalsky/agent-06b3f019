@@ -23,6 +23,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import signal
 import socket
 import subprocess
 import threading
@@ -36,6 +38,12 @@ from pathlib import Path
 # Serialize archive-frontend launches across handler threads so concurrent first
 # clicks spawn ONE Vite process, not several (the user's "no wasted resources").
 _LAUNCH_LOCK = threading.Lock()
+
+# A hub is durable, but its generated localhost viewers are a bounded cache. Each
+# viewer owns one archive API and one Vite process; leaving one pair per clicked
+# source forever exhausts both ports and memory as historical runs accumulate.
+_MAX_ARCHIVE_VIEWERS = 16
+_VIEWER_METADATA_NAMES = ("archive-frontend-live.json", "archive-frontend.json")
 
 # Never route a localhost health/redirect probe through an ambient HTTP proxy.
 _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -51,16 +59,27 @@ def _healthy(url: str) -> bool:
         return False
 
 
-def _free_port(preferred: int) -> int:
-    for port in [preferred] + list(range(preferred + 1, preferred + 100)):
+def _free_port(preferred: int, *, excluded: set[int] | None = None) -> int:
+    """Prefer a bounded local range, then let the kernel allocate any free port."""
+    excluded = excluded or set()
+    highest_port = 65535
+    preferred_ports = []
+    if 0 < preferred <= highest_port:
+        preferred_ports = list(range(preferred, min(preferred + 100, highest_port + 1)))
+
+    # Port zero delegates the dense-port search to the kernel. Retry it a bounded
+    # number of times in case it returns a port reserved for this launch pair.
+    for port in preferred_ports + ([0] * 10):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             sock.bind(("127.0.0.1", port))
         except OSError:
             sock.close()
             continue
+        assigned = int(sock.getsockname()[1])
         sock.close()
-        return port
+        if assigned not in excluded:
+            return assigned
     raise RuntimeError("no free local port found")
 
 
@@ -71,19 +90,221 @@ def _read_json(path: Path) -> dict:
         return {}
 
 
+def _metadata_pid(metadata: dict) -> int:
+    try:
+        return max(0, int(metadata.get("supervisor_pid") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        # Fail closed on permission/transient probe errors: an unverified PID is
+        # never safe to forget, overwrite, or recycle.
         return True
+    try:
+        state = subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "stat="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return True
+    return not state.startswith("Z")
+
+
+def _viewer_context_from_command(pid: int, command: str) -> Path | None:
+    """Resolve one archive supervisor's exact context, including legacy relative paths."""
+    marker = " --context-dir "
+    if "archive_frontend.py" not in command or marker not in command:
+        return None
+    context_argument = command.split(marker, 1)[1].split(" --host ", 1)[0]
+    candidate = Path(context_argument)
+    if candidate.is_absolute():
+        return candidate.resolve()
+
+    # Older hubs passed relative paths. Resolve those against the candidate
+    # process's cwd, not this hub's cwd, so stale metadata can never target a
+    # same-named viewer belonging to another Conductor workspace.
+    try:
+        cwd_record = subprocess.check_output(
+            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return None
+    cwd = next((line[1:] for line in cwd_record.splitlines() if line.startswith("n")), "")
+    return (Path(cwd) / candidate).resolve() if cwd else None
+
+
+def _viewer_pid_is_owned(pid: int, context_dir: Path) -> bool:
+    """Confirm a metadata PID still names this exact archive supervisor."""
+    try:
+        command = subprocess.check_output(
+            ["ps", "-ww", "-p", str(pid), "-o", "command="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return False
+    return _viewer_context_from_command(pid, command) == context_dir.resolve()
+
+
+def _viewer_processes_by_context(viewers_root: Path) -> tuple[dict[Path, list[int]], bool]:
+    """Discover every exact-owned supervisor, including metadata-overwritten duplicates."""
+    root = viewers_root.resolve()
+    found: dict[Path, list[int]] = {}
+    try:
+        process_table = subprocess.check_output(
+            ["ps", "-ww", "-axo", "pid=,command="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return found, False
+    for line in process_table.splitlines():
+        raw_pid, separator, command = line.strip().partition(" ")
+        if (
+            not separator
+            or "archive_frontend.py" not in command
+            or " --context-dir " not in command
+        ):
+            continue
+        try:
+            pid = int(raw_pid)
+        except ValueError:
+            continue
+        context_dir = _viewer_context_from_command(pid, command)
+        if context_dir is None:
+            # A relative supervisor whose cwd cannot be established might belong
+            # to this hub. Never treat an incomplete inventory as an empty one.
+            return found, False
+        if context_dir.parent != root:
+            continue
+        found.setdefault(context_dir, []).append(pid)
+    return found, True
+
+
+def _remove_viewer_context(viewers_root: Path, context_dir: Path) -> None:
+    """Remove only a generated child of this hub's viewer-cache directory."""
+    root = viewers_root.resolve()
+    target = context_dir.resolve()
+    if target.parent == root:
+        shutil.rmtree(target, ignore_errors=True)
+
+
+def _terminate_viewer(context_dir: Path, pid: int) -> bool:
+    if not _viewer_pid_is_owned(pid, context_dir):
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
     except OSError:
         return False
+    return _wait_for_pid_exit(pid)
+
+
+def _wait_for_pid_exit(pid: int) -> bool:
+    """Confirm the supervisor ran its child-process-group shutdown handler."""
+    for _ in range(100):
+        if not _pid_alive(pid):
+            return True
+        time.sleep(0.05)
+    return not _pid_alive(pid)
+
+
+def _reap_excess_viewers(viewers_root: Path, launching_context: Path) -> tuple[list[int], bool]:
+    """Recycle a target and reserve one bounded slot without losing ownership."""
+    viewers_root.mkdir(parents=True, exist_ok=True)
+    launching_context = launching_context.resolve()
+    discovered, discovery_complete = _viewer_processes_by_context(viewers_root)
+    if not discovery_complete:
+        return [], False
+    active: list[tuple[float, Path, list[int], bool]] = []
+    terminated: list[int] = []
+    launching_blocked = False
+
+    stored_contexts = {path.resolve() for path in viewers_root.iterdir() if path.is_dir()}
+    for context_dir in sorted(stored_contexts | set(discovered)):
+        pid_access: dict[int, float] = {pid: 0.0 for pid in discovered.get(context_dir, [])}
+        last_access = 0.0
+        unknown_owner = False
+        had_metadata = False
+        for metadata_name in _VIEWER_METADATA_NAMES:
+            metadata_path = context_dir / metadata_name
+            if not metadata_path.exists():
+                continue
+            had_metadata = True
+            metadata = _read_json(metadata_path)
+            try:
+                accessed_at = metadata_path.stat().st_mtime
+            except OSError:
+                accessed_at = 0.0
+            last_access = max(last_access, accessed_at)
+            pid = _metadata_pid(metadata)
+            if not pid:
+                # Corrupt/incomplete metadata may still belong to a running
+                # viewer. Count it conservatively but never guess what to kill.
+                unknown_owner = True
+                continue
+            if pid and _pid_alive(pid):
+                pid_access[pid] = max(accessed_at, pid_access.get(pid, 0.0))
+
+        pids = list(pid_access)
+        if not pids and not unknown_owner:
+            # No metadata is the just-created launch directory; dead, valid
+            # metadata is stale and safe to remove.
+            if context_dir != launching_context or had_metadata:
+                _remove_viewer_context(viewers_root, context_dir)
+            continue
+
+        if context_dir == launching_context:
+            # The caller's two health checks already failed. Do not overwrite its
+            # metadata and strand an alive-but-unhealthy supervisor on every retry.
+            remaining: list[int] = []
+            for pid in pids:
+                if _terminate_viewer(context_dir, pid):
+                    terminated.append(pid)
+                else:
+                    remaining.append(pid)
+            if not remaining and not unknown_owner:
+                _remove_viewer_context(viewers_root, context_dir)
+            else:
+                active.append((last_access, context_dir, remaining, unknown_owner))
+                launching_blocked = True
+            continue
+
+        active.append((last_access, context_dir, pids, unknown_owner))
+
+    # Count supervisors, not directories: interrupted mode switches can leave two
+    # metadata owners in one context. An unknown owner reserves one safe slot.
+    active_units = sum(len(pids) + int(unknown) for _at, _ctx, pids, unknown in active)
+    for _accessed_at, context_dir, pids, unknown_owner in sorted(active, key=lambda entry: entry[0]):
+        if active_units <= _MAX_ARCHIVE_VIEWERS - 1:
+            break
+        remaining: list[int] = []
+        for pid in pids:
+            if _terminate_viewer(context_dir, pid):
+                terminated.append(pid)
+                active_units -= 1
+            else:
+                remaining.append(pid)
+        if not remaining and not unknown_owner:
+            _remove_viewer_context(viewers_root, context_dir)
+
+    slot_available = not launching_blocked and active_units <= _MAX_ARCHIVE_VIEWERS - 1
+    return terminated, slot_available
 
 
 def _existing_archive_frontend(context_dir: Path) -> str:
     """URL of the already-running archive frontend if it is healthy, else ''."""
     meta = _read_json(context_dir / "archive-frontend-live.json")
     url = str(meta.get("frontend_url") or "")
-    pid = int(meta.get("supervisor_pid") or 0)
+    pid = _metadata_pid(meta)
     if url and pid and _pid_alive(pid) and _healthy(url):
         return url.rstrip("/")
     return ""
@@ -317,7 +538,7 @@ def _api_url_from_meta(ctx: Path) -> str:
     for meta_name in ("archive-frontend-live.json", "archive-frontend.json"):
         meta = _read_json(ctx / meta_name)
         api = str(meta.get("api_url") or "")
-        pid = int(meta.get("supervisor_pid") or 0)
+        pid = _metadata_pid(meta)
         if api and pid and _pid_alive(pid):
             return api.rstrip("/")
     return ""
@@ -328,8 +549,12 @@ def _existing_archive_in(ctx: Path) -> str:
     for meta_name in ("archive-frontend-live.json", "archive-frontend.json"):
         meta = _read_json(ctx / meta_name)
         url = str(meta.get("frontend_url") or "")
-        pid = int(meta.get("supervisor_pid") or 0)
+        pid = _metadata_pid(meta)
         if url and pid and _pid_alive(pid) and _healthy(url):
+            try:
+                (ctx / meta_name).touch()
+            except OSError:
+                pass
             return url.rstrip("/")
     return ""
 
@@ -346,8 +571,12 @@ def _launch_archive_for(args: argparse.Namespace, source: dict) -> str:
         existing = _existing_archive_in(ctx)
         if existing:
             return existing
+        _terminated, slot_available = _reap_excess_viewers(args.context_dir / "viewers", ctx)
+        if not slot_available:
+            return ""
+        ctx.mkdir(parents=True, exist_ok=True)
         api_port = _free_port(args.preferred_archive_port)
-        frontend_port = _free_port(api_port + 1)
+        frontend_port = _free_port(api_port + 1, excluded={api_port})
         cmd = ["python3", str(args.repo_root / "agents/benchmarks/archive_frontend.py")]
         if source.get("run_json"):
             cmd.append(str(source["run_json"]))
@@ -388,7 +617,7 @@ def _launch_archive_frontend(args: argparse.Namespace) -> str:
             return existing
 
         api_port = _free_port(args.preferred_archive_port)
-        frontend_port = _free_port(api_port + 1)
+        frontend_port = _free_port(api_port + 1, excluded={api_port})
         cmd = ["python3", str(args.repo_root / "agents/benchmarks/archive_frontend.py")]
         if args.run_json:
             cmd.append(str(args.run_json))

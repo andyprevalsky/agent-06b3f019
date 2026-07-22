@@ -8,7 +8,6 @@ from typing import List, Optional
 from benchmarks.fixtures import DEFAULT_BASE_IMAGE
 from benchmarks.live_fixtures import resolve_live_fixtures
 
-
 DEFAULT_MIN_STEPS_BY_AGENT_CLASS: dict[str, int] = {"browser": 5}
 
 
@@ -36,6 +35,7 @@ class BenchmarkTask:
     expected_approval_count: Optional[int] = None  # Exact number of approvals expected (used with count_only)
     expected_attention_kind: Optional[str] = None  # metadata.attentionKind expected for approval-style tasks
     expected_attention_kinds: List[str] = field(default_factory=list)  # Allowed terminal attention kinds for flows with multiple valid checkout gates
+    expected_attention_kind_any_of: List[str] = field(default_factory=list)  # Exactly one approval whose kind is in this set
     agentcard_setup_action: Optional[str] = None  # Benchmark user action for hosted setup (for example, complete)
     expected_credential_ref_kind: Optional[str] = None  # credential_ref.kind that must be observed before terminal success
     forbidden_credential_ref_kinds: List[str] = field(default_factory=list)  # credential paths that invalidate the run

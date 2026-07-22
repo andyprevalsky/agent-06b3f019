@@ -167,6 +167,29 @@ async function testEarlyFailureOnlyPropagatesForCommittedDirect(): Promise<void>
   assert.strictEqual(leakedFrames, 0, 'failed speculative frames must be discarded');
 }
 
+async function testDiscardDoesNotWaitForNonCooperativeProvider(): Promise<void> {
+  const provider = deferred<string>();
+  const coordinator = createEarlyDirectGeneratorCoordinator({
+    start: async () => provider.promise,
+  });
+
+  coordinator.start();
+  await flushMicrotasks();
+  const discard = coordinator.discard();
+  const settledPromptly = await Promise.race([
+    discard.then(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 25)),
+  ]);
+
+  provider.resolve('late provider result');
+  await discard;
+  assert.strictEqual(
+    settledPromptly,
+    true,
+    'discard must not block the canonical route on provider cancellation'
+  );
+}
+
 async function testCompletedSpeculationAndCanonicalBranchesStayIsolated(): Promise<void> {
   const visibleFrames: string[] = [];
   let cacheWrites = 0;
@@ -249,6 +272,7 @@ async function main(): Promise<void> {
   testObviousNonDirectIntentsDoNotConsumeSpeculativeCapacity();
   await testMismatchAbortsAndDiscardsWithoutSideEffects();
   await testEarlyFailureOnlyPropagatesForCommittedDirect();
+  await testDiscardDoesNotWaitForNonCooperativeProvider();
   await testReusableTransactionalGate();
   await testCompletedSpeculationAndCanonicalBranchesStayIsolated();
   process.stdout.write('PASS early direct generator transactional overlap\n');

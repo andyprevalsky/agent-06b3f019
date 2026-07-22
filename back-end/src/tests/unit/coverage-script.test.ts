@@ -38,6 +38,11 @@ assert.doesNotMatch(
   /for attempt in \$\(seq 1 600\)/,
   'coverage readiness must not use a fixed attempt-count timeout'
 );
+assert.match(
+  coverageScript,
+  /export AMPLITUDE_API_KEY=""\s+export AMPLITUDE_SECRET_KEY=""/,
+  'coverage must not consume the live Amplitude chart-query budget'
+);
 
 for (const [name, harness] of [
   ['coverage', coverageScript],
@@ -52,6 +57,16 @@ for (const [name, harness] of [
     harness,
     /if \[\[ "\$\{BACKEND_CODEX_SMOKE_SKIP:-0\}" != "1" \]\]; then\s+echo "Syncing local Codex credentials/,
     `${name} harness must not couple credential sync to live-smoke execution`
+  );
+  assert.match(
+    harness,
+    /CODEX_AUTH_MODE=.*auth_mode/,
+    `${name} harness must inspect the local Codex auth mode before importing it`
+  );
+  assert.match(
+    harness,
+    /SEEDED_CODEX_COUNT=.*Integration.*gpt_code/s,
+    `${name} harness must preserve a connected isolated gpt_code credential when local auth is incompatible`
   );
 }
 
