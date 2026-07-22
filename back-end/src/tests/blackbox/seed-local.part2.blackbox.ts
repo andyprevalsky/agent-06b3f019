@@ -20,6 +20,10 @@ function readSeedLocalSource(): string {
   return readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
 }
 
+function readRepoFile(path: string): string {
+  return readFileSync(resolve(__dirname, '../../../../', path), 'utf8');
+}
+
 test('full sync defers browser-auth failure until later tables finish', async () => {
   const source = readSeedLocalSource();
   const fullSyncCollector = source.indexOf('const browserAuthSyncFailures: Error[] = [];');
@@ -182,6 +186,54 @@ test('missing-Codex bypass warning reports the usable Claude count', async () =>
 
   assert(bypass > 0, 'expected the explicit missing-Codex bypass');
   assert(warning > bypass, 'expected its warning to report the usable Claude count');
+});
+
+test('missing-Claude bypass is explicit and preserves strict-by-default failure', async () => {
+  const source = readSeedLocalSource();
+  const zeroClaude = source.indexOf('if (usableClaudeCodeCount === 0)');
+  const bypass = source.indexOf("process.env.SEED_ALLOW_MISSING_CLAUDE_CODE !== '1'", zeroClaude);
+  const strictFailure = source.indexOf(
+    "throw new Error('No usable claude_code integrations after sync')",
+    bypass
+  );
+  const warning = source.indexOf('this run declares requires_claude_code=false', strictFailure);
+  const gptInspection = source.indexOf('await inspectGptCodeIntegrations()', warning);
+
+  assert(zeroClaude > 0, 'expected an explicit zero-Claude branch');
+  assert(bypass > zeroClaude, 'expected the missing-Claude opt-out inside that branch');
+  assert(strictFailure > bypass, 'expected the default path to remain fail-closed');
+  assert(warning > strictFailure, 'expected the opt-out path to explain its task contract');
+  assert(
+    gptInspection > warning,
+    'expected gpt_code validation to remain active after the Claude opt-out'
+  );
+});
+
+test('AgentCard launcher scopes the missing-Claude opt-out to non-Claude tasks', async () => {
+  const launcher = readRepoFile('scripts/run-agentcard-lifecycle-task.sh');
+  const tasks = JSON.parse(readRepoFile('agents/benchmarks/tasks.json')) as Array<{
+    name: string;
+    requires_claude_code: boolean;
+  }>;
+  const acceptedTasks = [
+    'agent-payment-test-shop',
+    'agent-payment-setup-resume',
+    'agent-payment-idempotent-abandonment',
+    'agent-payment-abandonment',
+  ];
+
+  assert(
+    launcher.includes('export SEED_ALLOW_MISSING_CLAUDE_CODE=1'),
+    'expected the AgentCard launcher to opt into the explicit missing-Claude path'
+  );
+  for (const taskName of acceptedTasks) {
+    const task = tasks.find((candidate) => candidate.name === taskName);
+    assert(task !== undefined, `expected ${taskName} in the benchmark catalog`);
+    assert(
+      task.requires_claude_code === false,
+      `expected ${taskName} to remain explicitly non-Claude before using the opt-out`
+    );
+  }
 });
 
 (async () => {

@@ -407,7 +407,14 @@ async function syncComputeTokensWithRetries(): Promise<void> {
       const count = await syncIntegrations();
       const usableClaudeCodeCount = await countUsableClaudeCodeIntegrations();
       if (usableClaudeCodeCount === 0) {
-        throw new Error('No usable claude_code integrations after sync');
+        if (process.env.SEED_ALLOW_MISSING_CLAUDE_CODE !== '1') {
+          throw new Error('No usable claude_code integrations after sync');
+        }
+        console.warn(
+          `  ⚠️  Compute Tokens (integrations): ${count} synced, 0 usable claude_code — ` +
+            `proceeding without Claude Code ` +
+            `(SEED_ALLOW_MISSING_CLAUDE_CODE=1; this run declares requires_claude_code=false)`
+        );
       }
       const { usable: usableGptCodeCount, rateLimited: rateLimitedGptCodeCount } =
         await inspectGptCodeIntegrations();
