@@ -24,7 +24,7 @@ case "$args" in
   *" branch --show-current "*) printf '%s\n' "$RCA_BRANCH" ;;
   *" status --porcelain --untracked-files=normal "*) ;;
   *" diff --name-only --diff-filter=U "*) ;;
-  *" rev-list --count main..HEAD "*) printf '%s\n' "${FAKE_REV_COUNT:-1}" ;;
+  *" rev-list --count origin/main..HEAD "*) printf '%s\n' "${FAKE_REV_COUNT:-1}" ;;
   *" rev-parse HEAD "*) printf '0123456789abcdef0123456789abcdef01234567\n' ;;
   *" remote set-url origin "*) ;;
   *" push --set-upstream origin "*) ;;
