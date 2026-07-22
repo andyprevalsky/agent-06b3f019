@@ -1,4 +1,7 @@
 name: Auto RCA
+run-name: >-
+  Auto RCA · ${{ github.event.client_payload.agent_id || inputs.agent_id ||
+  github.event.issue.title || github.run_id }}
 
 # State machine:
 # failure -> one draft PR + one Slack card -> running/revising -> blocked|ready
@@ -209,12 +212,12 @@ jobs:
 
       - name: Slack — mark investigation active
         id: slack_active
-        if: env.SLACK_CHANNEL != ''
+        if: env.SLACK_CHANNEL != '' && env.RCA_NOOP != 'true'
         shell: bash
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           RCA_RECONCILE_SLACK: ${{ env.RCA_MODE != 'initial' && env.SLACK_TS == '' && 'true' || 'false' }}
-          RCA_STATE: ${{ env.RCA_NOOP == 'true' && 'ready' || (env.RCA_MODE == 'revision' && 'revising' || 'running') }}
+          RCA_STATE: ${{ env.RCA_MODE == 'revision' && 'revising' || 'running' }}
           RCA_FE_URL: https://roselabs.ai/?agent-id=${{ env.AGENT_ID }}
           RCA_PR_URL: ${{ steps.begin.outputs.pr_url }}
           RCA_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

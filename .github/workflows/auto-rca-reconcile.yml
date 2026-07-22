@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       actions: read
-      contents: read
+      contents: write
       pull-requests: write
     steps:
       - name: Checkout trusted lifecycle code
@@ -38,23 +38,61 @@ jobs:
           BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
           DEFAULT_SLACK_CHANNEL: ${{ secrets.SLACK_ERROR_CHANNEL_ID }}
           TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+          TRIGGER_RUN_TITLE: ${{ github.event.workflow_run.display_title }}
+          AUTO_RCA_ROOT_DIR: ${{ github.workspace }}
         run: |
           set -euo pipefail
           uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+          trigger_agent_id=''
+          trigger_is_feedback=false
           if [[ "${TRIGGER_RUN_ID:-}" =~ ^[0-9]+$ ]]; then
-            search="actions/runs/$TRIGGER_RUN_ID in:body"
+            if [[ "${TRIGGER_RUN_TITLE:-}" == 'Auto RCA · '* ]]; then
+              trigger_agent_id="${TRIGGER_RUN_TITLE#Auto RCA · }"
+              if [[ "$trigger_agent_id" == 'auto-RCA: Production agent failure '* ]]; then
+                trigger_agent_id="${trigger_agent_id#auto-RCA: Production agent failure }"
+                trigger_is_feedback=true
+              fi
+            fi
+            if [[ "$trigger_agent_id" =~ $uuid_re ]]; then
+              search="\"auto-RCA: Production agent failure $trigger_agent_id\" in:title"
+            else
+              search="actions/runs/$TRIGGER_RUN_ID in:body"
+            fi
           else
             search='auto-RCA: Production agent failure in:title'
           fi
           prs="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 100 \
-            --search "$search" --json title,url,body,headRefName,isDraft)"
+            --search "$search" --json number,title,url,body,headRefName,isDraft)"
           count="$(printf '%s' "$prs" | jq 'length')"
+          if [ "$count" -eq 0 ] && [[ "$trigger_agent_id" =~ $uuid_re ]] \
+            && [[ "${TRIGGER_RUN_ID:-}" =~ ^[0-9]+$ ]]; then
+            # Even a checkout/setup/PR-creation failure must converge to a
+            # visible blocked draft with all three Slack links. A run-scoped
+            # legacy branch avoids overwriting a partially-pushed primary.
+            short_id="$(printf '%s' "$trigger_agent_id" | tr -cd 'a-zA-Z0-9' | cut -c1-12)"
+            recovery_branch="auto-rca/${short_id}-${TRIGGER_RUN_ID}"
+            git config user.name "rose-auto-rca[bot]"
+            git config user.email "auto-rca@roselabs.ai"
+            git checkout -B "$recovery_branch" main
+            recovery_pr_url="$(AGENT_ID="$trigger_agent_id" RCA_BRANCH="$recovery_branch" \
+              GITHUB_RUN_ID="$TRIGGER_RUN_ID" SLACK_TS='' SLACK_CHANNEL="$DEFAULT_SLACK_CHANNEL" \
+              RCA_BEGIN_REASON="The RCA workflow ended before it could create its draft. Recovery created this blocked PR; add a top-level \`/rca <requested changes>\` Conversation comment to retry." \
+              /usr/local/bin/rose-auto-rca-tool begin-draft | tail -1)"
+            [[ "$recovery_pr_url" =~ ^https://github\.com/[^/]+/[^/]+/pull/[0-9]+$ ]] || {
+              echo "Recovery did not create a valid PR URL" >&2; exit 1;
+            }
+            recovery_pr_number="${recovery_pr_url##*/}"
+            prs="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$recovery_pr_number" --jq \
+              '[{number, title, url: .html_url, body, headRefName: .head.ref, isDraft: .draft}]')"
+            count=1
+          fi
           for ((index = 0; index < count; index += 1)); do
             pr="$(printf '%s' "$prs" | jq -c ".[$index]")"
             title="$(printf '%s' "$pr" | jq -r '.title')"
             agent_id="${title#auto-RCA: Production agent failure }"
             [[ "$agent_id" =~ $uuid_re ]] || continue
             [ "$title" = "auto-RCA: Production agent failure $agent_id" ] || continue
+            [ -z "$trigger_agent_id" ] || [ "$trigger_agent_id" = "$agent_id" ] || continue
             branch="$(printf '%s' "$pr" | jq -r '.headRefName')"
             short_id="$(printf '%s' "$agent_id" | tr -cd 'a-zA-Z0-9' | cut -c1-12)"
             if [ "$branch" != "auto-rca/$agent_id" ] && ! [[ "$branch" =~ ^auto-rca/${short_id}-[0-9]+$ ]]; then
@@ -64,20 +102,33 @@ jobs:
             marker="$(printf '%s' "$body" | grep -oE '<!-- rca-slack ts=[^ ]* channel=[^ ]*( agent=[^ ]+ run=[^ ]+)? -->' | head -1 || true)"
             slack_ts="$(printf '%s' "$marker" | sed -nE 's/.*ts=([^ ]*).*/\1/p')"
             slack_channel="$(printf '%s' "$marker" | sed -nE 's/.*channel=([^ ]*).*/\1/p')"
-            run_id="$(printf '%s' "$marker" | sed -nE 's/.* run=([^ ]+) -->/\1/p')"
+            marker_run_id="$(printf '%s' "$marker" | sed -nE 's/.* run=([^ ]+) -->/\1/p')"
+            if [ "$trigger_agent_id" = "$agent_id" ] && [ "$trigger_is_feedback" = true ] \
+              && [[ "${TRIGGER_RUN_ID:-}" =~ ^[0-9]+$ ]]; then
+              run_id="$TRIGGER_RUN_ID"
+            elif [[ "$marker_run_id" =~ ^[0-9]+$ ]]; then
+              # A repository/workflow dispatch against an already-verified PR
+              # is a reducer no-op. Preserve the useful original RCA run.
+              run_id="$marker_run_id"
+            elif [ "$trigger_agent_id" = "$agent_id" ] && [[ "${TRIGGER_RUN_ID:-}" =~ ^[0-9]+$ ]]; then
+              run_id="$TRIGGER_RUN_ID"
+            else
+              run_id=''
+            fi
             [ -n "$slack_channel" ] || slack_channel="$DEFAULT_SLACK_CHANNEL"
             [[ "$slack_channel" =~ ^[A-Z0-9]{9,32}$ ]] || continue
             [[ "$run_id" =~ ^[0-9]+$ ]] || continue
             run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id" 2>/dev/null || printf '{}')"
             run_status="$(printf '%s' "$run" | jq -r '.status // "completed"')"
-            if [ "$run_status" = completed ]; then
-              if [ "$(printf '%s' "$pr" | jq -r '.isDraft')" = false ]; then
-                state=ready
-              else
-                state=blocked
-              fi
-            else
-              state=running
+            verified="$(printf '%s' "$body" | sed -nE 's/.*<!-- rca-verified head=[0-9a-f]{40} agent=([^ ]+) run=([0-9]+) -->.*/\1 \2/p' | head -1)"
+            read -r verified_agent verified_run <<< "$verified"
+            pr_is_draft="$(printf '%s' "$pr" | jq -r '.isDraft')"
+            read -r state repair < <(RCA_RUN_STATUS="$run_status" RCA_PR_IS_DRAFT="$pr_is_draft" \
+              RCA_VERIFIED_AGENT="$verified_agent" RCA_VERIFIED_RUN="$verified_run" \
+              AGENT_ID="$agent_id" GITHUB_RUN_ID="$run_id" \
+              /usr/local/bin/rose-auto-rca-tool reconcile-plan)
+            if [ "$repair" = draft ]; then
+              gh pr ready --undo --repo "$GITHUB_REPOSITORY" "$(printf '%s' "$pr" | jq -r '.url')"
             fi
             response="$(curl -fsS --retry 3 --retry-all-errors --connect-timeout 5 --max-time 20 \
               "https://navi-j9a9.onrender.com/api/agents/$agent_id/alert-context" \

@@ -135,6 +135,29 @@ dispatch_plan() {
   esac
 }
 
+reconcile_plan() {
+  case "${RCA_PR_IS_DRAFT:-}" in true|false) ;; *) fail "RCA_PR_IS_DRAFT is invalid" ;; esac
+  require_agent_id
+  require_run_id
+  case "${RCA_RUN_STATUS:-}" in
+    queued|in_progress|pending|requested|waiting)
+      printf 'running keep\n'
+      return
+      ;;
+    completed) ;;
+    *) fail "RCA_RUN_STATUS is invalid" ;;
+  esac
+  if [ "$RCA_PR_IS_DRAFT" = false ] \
+    && [ "${RCA_VERIFIED_AGENT:-}" = "$AGENT_ID" ] \
+    && [ "${RCA_VERIFIED_RUN:-}" = "$GITHUB_RUN_ID" ]; then
+    printf 'ready keep\n'
+  elif [ "$RCA_PR_IS_DRAFT" = false ]; then
+    printf 'blocked draft\n'
+  else
+    printf 'blocked keep\n'
+  fi
+}
+
 collect_evidence() {
   local temp_file agent_json context_json logs_json
   require_agent_id
@@ -313,6 +336,13 @@ if slack_ts and not re.fullmatch(r"[0-9]{10,}\.[0-9]{6}", slack_ts):
 if slack_channel and not re.fullmatch(r"[A-Z0-9]{9,32}", slack_channel):
     raise SystemExit("invalid SLACK_CHANNEL")
 body = pathlib.Path(source).read_text(encoding="utf-8").rstrip()
+# Lifecycle markers are trusted broker output, never investigator prose. Strip
+# lookalikes before binding the report to this exact agent and HEAD.
+body = re.sub(
+    r"(?m)^<!-- rca-(?:complete|verified|slack)\b[^>]*-->[ \t]*\n?",
+    "",
+    body,
+).rstrip()
 complete = f"<!-- rca-complete head={head} agent={agent_id} -->"
 slack = (
     f"<!-- rca-slack ts={slack_ts} channel={slack_channel} "
@@ -436,19 +466,25 @@ bind_slack() {
   body_file="$(mktemp "${RUNNER_TEMP:-/tmp}/rose-auto-rca-pr-body.XXXXXX")"
   trap 'rm -f "$body_file"' RETURN
   printf '%s' "$body" > "$body_file"
-  updated="$(python3 - "$marker" "$body_file" <<'PY'
+  updated="$(python3 - "$marker" "$body_file" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" <<'PY'
 import pathlib
 import re
 import sys
 
-marker = sys.argv[1]
-body = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").rstrip()
+marker, body_path, repository, run_id = sys.argv[1:5]
+body = pathlib.Path(body_path).read_text(encoding="utf-8").rstrip()
 pattern = r'<!-- rca-slack ts=[^ ]* channel=[^ ]*(?: agent=[^ ]+ run=[^ ]+)? -->'
-if re.search(pattern, body):
-    body = re.sub(pattern, marker, body, count=1)
+body = re.sub(pattern, '', body).rstrip()
+run_url = f"https://github.com/{repository}/actions/runs/{run_id}"
+run_line = re.compile(
+    r'(?im)^(?P<label>(?:RCA workflow|Workflow run):)\s+'
+    r'https://github\.com/[^/\s]+/[^/\s]+/actions/runs/\d+\s*$'
+)
+if run_line.search(body):
+    body = run_line.sub(lambda match: f"{match.group('label')} {run_url}", body)
 else:
-    body = f"{body}\n\n{marker}"
-print(body)
+    body = f"{body}\n\nRCA workflow: {run_url}"
+print(f"{body.rstrip()}\n\n{marker}")
 PY
 )"
   update_pr_body "$pr_number" "$updated"
@@ -456,28 +492,54 @@ PY
 }
 
 begin_draft() {
-  local pr_json pr_url is_draft body
+  local pr_json pr_url pr_number is_draft body
   require_agent_id
   require_branch
   require_repo
   require_run_id
   [ -n "${AUTO_RCA_PR_TOKEN:-}" ] || fail "AUTO_RCA_PR_TOKEN is required"
 
-  write_preliminary_scaffold
-  git_push_branch "$RCA_BRANCH"
   pr_json="$(find_pr_json)"
   pr_url="$(pr_url_from_json "$pr_json")"
-  if [ -z "$pr_url" ]; then
-    body="$(preliminary_body 'The automated investigator is gathering evidence and building the reproduction.')"
-    pr_url="$(create_pr "$body")"
-  else
+  body="$(preliminary_body "${RCA_BEGIN_REASON:-The automated investigator is gathering evidence and building the reproduction.}")"
+  if [ -n "$pr_url" ]; then
+    pr_number="$(pr_number_from_json "$pr_json")"
+    [ -n "$pr_number" ] || fail "existing RCA pull request has no number"
+    # Invalidate the previous ready contract before any model-controlled
+    # commit, push, or merge can fail. Then bind this exact run for immediate
+    # workflow_run reconciliation.
     is_draft="$(pr_draft_from_json "$pr_json")"
     if [ "$is_draft" = "false" ]; then
       GH_TOKEN="$AUTO_RCA_PR_TOKEN" gh pr ready --undo --repo "$GITHUB_REPOSITORY" "$pr_url"
     fi
+    update_pr_body "$pr_number" "$body"
+  fi
+
+  write_preliminary_scaffold
+  git_push_branch "$RCA_BRANCH"
+  if [ -z "$pr_url" ]; then
+    pr_url="$(create_pr "$body")"
   fi
   emit_output pr_url "$pr_url"
   printf '%s\n' "$pr_url"
+}
+
+trusted_ready_marker() {
+  local head
+  head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+  printf '<!-- rca-verified head=%s agent=%s run=%s -->' "$head" "$AGENT_ID" "$GITHUB_RUN_ID"
+}
+
+sanitized_report() {
+  local report="$CONTEXT_DIR/pr-body-final.md"
+  python3 - "$report" <<'PY'
+import pathlib
+import re
+import sys
+
+body = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+print(re.sub(r'<!-- rca-verified\b[^>]*-->', '', body).rstrip())
+PY
 }
 
 report_contract_passes() {
@@ -549,13 +611,13 @@ ensure_draft() {
 
   if [ "$dirty" = false ] && report_contract_passes; then
     complete=true
-    body="$(cat "$CONTEXT_DIR/pr-body-final.md")"
+    body="$(sanitized_report)"$'\n\n'"$(trusted_ready_marker)"
   elif [ "$dirty" = true ]; then
     reason='The investigator left uncommitted changes. They were not executed or pushed with trusted credentials; comment on the PR to retry.'
     body="$(preliminary_body "$reason")"
   elif [ -s "$CONTEXT_DIR/pr-body-final.md" ]; then
     reason='The investigator published an RCA report, but its evidence, unchanged repro, report contract, or HEAD-scoped deploy gates are incomplete.'
-    body="$(preliminary_body "$reason")"$'\n\n'"$(cat "$CONTEXT_DIR/pr-body-final.md")"
+    body="$(preliminary_body "$reason")"$'\n\n'"$(sanitized_report)"
   else
     reason="The investigator did not publish a complete RCA report. Primary outcome: ${PRIMARY_INVESTIGATOR_OUTCOME:-unknown}; retry outcome: ${RETRY_INVESTIGATOR_OUTCOME:-not-run}."
     body="$(preliminary_body "$reason")"
@@ -704,6 +766,7 @@ slack_update() {
 
 case "${1:-}" in
   dispatch-plan) [ "$#" -eq 1 ] || fail "dispatch-plan takes no arguments"; dispatch_plan ;;
+  reconcile-plan) [ "$#" -eq 1 ] || fail "reconcile-plan takes no arguments"; reconcile_plan ;;
   collect-evidence) [ "$#" -eq 1 ] || fail "collect-evidence takes no arguments"; collect_evidence ;;
   evidence) [ "$#" -eq 1 ] || fail "evidence takes no arguments"; evidence ;;
   verification) [ "$#" -eq 1 ] || fail "verification takes no arguments"; verification ;;
@@ -720,5 +783,5 @@ case "${1:-}" in
   mark-ready) [ "$#" -eq 1 ] || fail "mark-ready takes no arguments"; mark_ready ;;
   slack-message) [ "$#" -eq 1 ] || fail "slack-message takes no arguments"; slack_message ;;
   slack-update) [ "$#" -eq 1 ] || fail "slack-update takes no arguments"; slack_update ;;
-  *) fail "usage: scripts/auto-rca-tool {dispatch-plan|collect-evidence|evidence|verification|verify-repro|offline-gates|smoke-gates|publish-draft|begin-draft|bind-slack|completion-status|require-complete|ensure-draft|mark-ready|slack-message|slack-update}" ;;
+  *) fail "usage: scripts/auto-rca-tool {dispatch-plan|reconcile-plan|collect-evidence|evidence|verification|verify-repro|offline-gates|smoke-gates|publish-draft|begin-draft|bind-slack|completion-status|require-complete|ensure-draft|mark-ready|slack-message|slack-update}" ;;
 esac
