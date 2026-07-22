@@ -3764,8 +3764,11 @@ async def test_client_direct_auth_outer_deadline_marks_without_burning_next_toke
                     gpt_auth=auth,
                     call_site="test-deadline-stall-cooldown",
                     deadline_s=0.03,
-                    ttft_timeout_s=0.5,
-                    idle_timeout_s=1.0,
+                    # This case owns the outer-deadline boundary. Keep the
+                    # inner transport timers far enough away that a loaded CI
+                    # event loop cannot make TTFT win the race by accident.
+                    ttft_timeout_s=5.0,
+                    idle_timeout_s=5.0,
                 )
             )
         except RoseDeadlineError as exc:

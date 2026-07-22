@@ -64,6 +64,20 @@ expect_flag_pass() {
   echo "PASS: $label"
 }
 
+expect_deferred_pass() {
+  local dir="$1" label="$2"
+  if ! (
+    cd "$dir" && AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED=true \
+      bash scripts/check-agent-behavior-approval.sh \
+        --defer-human-approval-to-exact-head-pr-review=true >/tmp/agent-behavior-guard.out 2>&1
+  ); then
+    echo "FAIL: expected trusted exact-head deferral PASS: $label" >&2
+    cat /tmp/agent-behavior-guard.out >&2
+    exit 1
+  fi
+  echo "PASS: $label"
+}
+
 # 1. Terminal handoff added to the workflow (the exact 500715a5f regression shape).
 terminal_repo="$(new_repo terminal-handoff)"
 cat >>"$terminal_repo/agents/workflows/agent_workflow.py" <<'PY'
@@ -73,6 +87,14 @@ PY
 git -C "$terminal_repo" add agents/workflows/agent_workflow.py
 expect_fail "$terminal_repo" "adding a terminal _handle_incomplete handoff requires approval"
 expect_flag_pass "$terminal_repo" "approval flag permits the terminal-handoff change"
+if (cd "$terminal_repo" && env -u AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED \
+  bash scripts/check-agent-behavior-approval.sh \
+  --defer-human-approval-to-exact-head-pr-review=true >/tmp/agent-behavior-guard.out 2>&1); then
+  echo "FAIL: untrusted caller deferred agent-behavior approval" >&2
+  exit 1
+fi
+echo "PASS: agent-behavior exact-head deferral is restricted to trusted Auto RCA"
+expect_deferred_pass "$terminal_repo" "trusted Auto RCA may defer behavior approval to the exact-head review"
 
 # 2. Flipping a returned status literal between recoverable and terminal.
 status_repo="$(new_repo status-literal)"

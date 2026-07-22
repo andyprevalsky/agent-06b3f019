@@ -58,7 +58,39 @@ sub-failure that breaks the whole run propagates to the root and alerts there.
 - `AUTO_RCA_ENABLED` — `1` to launch RCA agents (default off)
 - `GITHUB_DISPATCH_TOKEN` — PAT with `repo` scope to fire `repository_dispatch` (only needed when RCA on)
 - `GITHUB_DISPATCH_REPO` — default `Rose-Ai-Labs/rose`
+- `SLACK_SIGNING_SECRET` — verifies Slack Events API feedback callbacks
 - `PUBLIC_FRONTEND_URL` — default `https://roselabs.ai` (for the agent deep-link)
+
+## Human lifecycle
+
+```text
+failure
+  → one Slack card + one draft PR
+  → /RCA evidence → unchanged local repro → fix
+  → automated /deploy offline + smoke gates
+  → blocked (exact failed step) | ready for review
+  → formal APPROVED review of the exact verified HEAD
+  → immediate merge → shipped
+```
+
+The Slack card always contains the affected user's name, current state, FE/PR/
+Actions links, agent ID, the exact current or failed `/RCA`/`/deploy` phase, and
+a human-readable elapsed-time waterfall. The same trusted waterfall is persisted
+on the PR. Timeline records live in the workflow's root-owned gate directory;
+investigator prose cannot forge them.
+
+A reviewer can reply normally in the card's Slack thread or leave a normal
+top-level PR comment. Signed Slack events are durably converted into PR comments
+before the webhook returns success, and the exact human message receives an eyes
+reaction once accepted. One agent-keyed workflow serializes revisions and scans
+all unconsumed feedback comments, so comments arriving while work is active are
+included in the next batch. The agent answers in the original Slack thread;
+feedback is marked consumed only after trusted finalization and the thread reply.
+
+Chat feedback never authorizes a merge. Automated `/deploy` work proceeds without
+a chat approval pause, but the exact PR HEAD still requires a formal GitHub
+APPROVED review. That review also satisfies any prompt or recovery-behavior human
+gate deferred by the automated run. A changed HEAD makes the approval stale.
 
 ## Verification (automated)
 
@@ -74,11 +106,16 @@ sub-failure that breaks the whole run propagates to the root and alerts there.
 
 ## Production setup
 
-1. Set `SLACK_BOT_TOKEN`, `SLACK_ERROR_CHANNEL_ID`, `AUTO_RCA_ENABLED=1`, and
-   `GITHUB_DISPATCH_TOKEN` on Render (backend) and Fly (agents).
-2. Point an external uptime monitor (BetterStack/UptimeRobot) at
+1. Set `SLACK_BOT_TOKEN`, `SLACK_ERROR_CHANNEL_ID`, `SLACK_SIGNING_SECRET`,
+   `AUTO_RCA_ENABLED=1`, and `GITHUB_DISPATCH_TOKEN` on Render (backend); keep
+   the alert-emitter values on Fly (agents).
+2. Configure the Slack Events API callback as
+   `https://navi-j9a9.onrender.com/api/webhooks/slack/auto-rca`, subscribe to
+   human message events for the errors channel, and grant message-history plus
+   `reactions:write`/`chat:write` scopes.
+3. Point an external uptime monitor (BetterStack/UptimeRobot) at
    `https://navi-j9a9.onrender.com/health/deep` → alert `#errors` on non-200.
-3. Store the Slack and dedicated RCA OAuth credentials as GitHub Actions
+4. Store the Slack and dedicated RCA OAuth credentials as GitHub Actions
    secrets so the workflow can update the lifecycle card and run Claude Code.
 
 ## Where the RCA agent runs

@@ -316,7 +316,15 @@ echo "Starting isolated backend for black-box tests on port $PORT"
 echo "Backend log: $BACKEND_LOG"
 echo "Artifacts: $ARTIFACT_DIR"
 
-PORT="$PORT" DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_CAPTURE_OUTBOUND=1 BLACKBOX_TEST_REPLAY_OUTBOUND=1 npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
+PORT="$PORT" \
+DISABLE_GMAIL_SYNC=1 \
+BLACKBOX_TEST_CAPTURE_OUTBOUND=1 \
+BLACKBOX_TEST_REPLAY_OUTBOUND=1 \
+SLACK_SIGNING_SECRET=blackbox-slack-signing-secret \
+SLACK_BOT_TOKEN=xoxb-blackbox-slack-token \
+SLACK_ERROR_CHANNEL_ID=C0BE1B87882 \
+GITHUB_DISPATCH_TOKEN=github-blackbox-dispatch-token \
+npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
 
 cleanup() {

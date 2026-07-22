@@ -86,7 +86,7 @@ jobs:
             git checkout -B "$recovery_branch" main
             recovery_pr_url="$(AGENT_ID="$trigger_agent_id" RCA_BRANCH="$recovery_branch" \
               GITHUB_RUN_ID="$TRIGGER_RUN_ID" SLACK_TS='' SLACK_CHANNEL="$DEFAULT_SLACK_CHANNEL" \
-              RCA_BEGIN_REASON="The RCA workflow ended before it could create its draft. Recovery created this blocked PR; add a top-level \`/rca <requested changes>\` Conversation comment to retry." \
+              RCA_BEGIN_REASON="The RCA workflow ended before it could create its draft. Recovery created this blocked PR; reply in its Slack thread or leave a normal top-level PR comment to retry." \
               /usr/local/bin/rose-auto-rca-tool begin-draft | tail -1)"
             [[ "$recovery_pr_url" =~ ^https://github\.com/[^/]+/[^/]+/pull/[0-9]+$ ]] || {
               echo "Recovery did not create a valid PR URL" >&2; exit 1;
@@ -137,6 +137,26 @@ jobs:
               RCA_VERIFIED_AGENT="$verified_agent" RCA_VERIFIED_RUN="$verified_run" \
               AGENT_ID="$agent_id" GITHUB_RUN_ID="$run_id" \
               /usr/local/bin/rose-auto-rca-tool reconcile-plan)
+            pipeline_step_override=''
+            if [ "$state" = blocked ] && { \
+              ! grep -Fq '<!-- rca-waterfall-start -->' <<< "$body" || \
+              grep -Fq '— in progress' <<< "$body"; \
+            }; then
+              jobs="$(gh api --paginate --slurp \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" 2>/dev/null || printf '[]')"
+              failed_step="$(printf '%s' "$jobs" | jq -r \
+                '[.[][]?.steps[]? | select(.conclusion == "failure" or .conclusion == "cancelled")][0].name // ""')"
+              case "$failed_step" in
+                *production\ evidence*) pipeline_step_override='/RCA · production evidence — failed' ;;
+                *reproduction*) pipeline_step_override='/RCA · unchanged local reproduction — failed' ;;
+                *investigation*|*coding\ environment*|*ownership*) pipeline_step_override='/RCA · investigation — failed' ;;
+                *offline*) pipeline_step_override='/deploy · offline gates — failed' ;;
+                *smoke*) pipeline_step_override='/deploy · smoke gates — failed' ;;
+                *finalization*|*Finalize\ PR*) pipeline_step_override='/deploy · trusted PR finalization — failed' ;;
+                *Require\ complete*) pipeline_step_override='/deploy · completion contract — failed' ;;
+                *) pipeline_step_override='/RCA · workflow setup — failed' ;;
+              esac
+            fi
             if [ "$repair" = draft ]; then
               gh pr ready --undo --repo "$GITHUB_REPOSITORY" "$(printf '%s' "$pr" | jq -r '.url')"
             fi
@@ -152,7 +172,9 @@ jobs:
             AGENT_ID="$agent_id" AFFECTED_USER_NAME="$affected_user_name" RCA_STATE="$state" \
             RCA_FE_URL="https://roselabs.ai/?agent-id=$agent_id" \
             RCA_PR_URL="$(printf '%s' "$pr" | jq -r '.url')" \
+            RCA_PR_BODY="$body" \
             RCA_RUN_URL="https://github.com/$GITHUB_REPOSITORY/actions/runs/$run_id" \
+            RCA_PIPELINE_STEP_OVERRIDE="$pipeline_step_override" \
             RCA_RECONCILE_SLACK=true SLACK_TS="$slack_ts" SLACK_CHANNEL="$slack_channel" \
               /usr/local/bin/rose-auto-rca-tool slack-update
             resolved_ts="$(sed -n 's/^ts=//p' "$output" | tail -1)"

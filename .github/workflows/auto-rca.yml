@@ -5,9 +5,10 @@ run-name: >-
 
 # State machine:
 # failure -> one draft PR + one Slack card -> running/revising -> blocked|ready
-# -> top-level `/rca ...` Conversation comment -> revising -> blocked|ready
-# -> human merge -> shipped, or close without merge -> cancelled. A trusted
-# verifier, not investigator prose, owns every transition out of draft.
+# -> ordinary Slack thread reply or top-level PR comment -> revising
+# -> blocked|ready -> exact-head human approval -> merge -> shipped, or close
+# without merge -> cancelled. A trusted verifier, not investigator prose, owns
+# every transition, exact step result, and duration out of draft.
 
 on:
   repository_dispatch:
@@ -30,7 +31,8 @@ jobs:
     if: >-
       github.event_name != 'issue_comment' ||
       (github.event.issue.pull_request &&
-      startsWith(github.event.comment.body, '/rca'))
+      github.event.comment.user.type == 'User' &&
+      !contains(github.event.comment.body, '<!-- rca-feedback-consumed'))
     runs-on: ubuntu-latest
     timeout-minutes: 180
     permissions:
@@ -60,9 +62,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if ! id -u rose-auto-rca >/dev/null 2>&1; then
+            sudo useradd --system --create-home --shell /bin/bash rose-auto-rca
+          fi
           sudo install -o root -g root -m 0555 scripts/auto-rca-tool /usr/local/bin/rose-auto-rca-tool
+          sudo install -o root -g root -m 0555 scripts/auto-rca-claude-wrapper /usr/local/bin/rose-auto-rca-claude-wrapper
           sudo install -o root -g root -m 0444 .github/auto-rca-prompt.txt /usr/local/share/rose-auto-rca-prompt.txt
-          sudo install -d -o root -g root -m 0700 "$AUTO_RCA_GATE_STATE_DIR"
+          sudo install -d -o root -g rose-auto-rca -m 0750 "$AUTO_RCA_GATE_STATE_DIR"
+          sudo install -d -o rose-auto-rca -g rose-auto-rca -m 0700 /home/rose-auto-rca/tmp
 
       - name: Resolve and validate lifecycle context
         shell: bash
@@ -70,8 +77,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           COMMENT_PR_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_ID: ${{ github.event.comment.id }}
           COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
-          REVIEW_FEEDBACK: ${{ github.event.comment.body }}
           DEFAULT_SLACK_CHANNEL: ${{ secrets.SLACK_ERROR_CHANNEL_ID }}
         run: |
           set -euo pipefail
@@ -81,10 +88,7 @@ jobs:
           }
           if [ "$EVENT_NAME" = issue_comment ]; then
             [[ "$COMMENT_PR_NUMBER" =~ ^[0-9]+$ ]] || { echo "Invalid PR number" >&2; exit 1; }
-            printf '%s' "$REVIEW_FEEDBACK" | head -1 | grep -Eq '^/rca([[:space:]]|$)' || {
-              echo "Feedback must start with an exact /rca command" >&2; exit 1;
-            }
-            [ "${#REVIEW_FEEDBACK}" -le 8000 ] || { echo "RCA feedback is too long" >&2; exit 1; }
+            [[ "$COMMENT_ID" =~ ^[0-9]+$ ]] || { echo "Invalid feedback comment ID" >&2; exit 1; }
             permission="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$COMMENT_AUTHOR/permission" --jq '.permission')"
             case "$permission" in admin|maintain) ;; *) echo "RCA feedback requires maintain permission" >&2; exit 1 ;; esac
             pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$COMMENT_PR_NUMBER")"
@@ -111,6 +115,26 @@ jobs:
             pr_url="$(printf '%s' "$pr" | jq -r '.html_url')"
             checkout_ref="refs/pull/$COMMENT_PR_NUMBER/head"
             read -r mode noop < <(EVENT_NAME="$EVENT_NAME" /usr/local/bin/rose-auto-rca-tool dispatch-plan)
+            comment_pages="$(gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/issues/$COMMENT_PR_NUMBER/comments?per_page=100")"
+            feedback_batch="$(printf '%s' "$comment_pages" | \
+              TRIGGER_COMMENT_ID="$COMMENT_ID" SLACK_CHANNEL="$slack_channel" \
+              SLACK_THREAD_TS="$slack_ts" /usr/local/bin/rose-auto-rca-tool feedback-batch)"
+            if [ "$(printf '%s' "$feedback_batch" | jq 'length')" -eq 0 ]; then
+              noop=true
+            fi
+            while IFS= read -r feedback_author; do
+              [ -n "$feedback_author" ] || continue
+              permission="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$feedback_author/permission" --jq '.permission')"
+              case "$permission" in
+                admin|maintain) ;;
+                *) echo "Queued RCA feedback requires maintain permission" >&2; exit 1 ;;
+              esac
+            done < <(printf '%s' "$feedback_batch" | jq -r 'map(.author) | unique[]')
+            feedback_b64="$(printf '%s' "$feedback_batch" | python3 -c 'import base64,json,sys; items=json.load(sys.stdin); lines=["- {} feedback from {}: {}".format("Slack" if item["source"] == "slack" else "GitHub", item["author"], item["text"]) for item in items]; print(base64.b64encode("\n".join(lines).encode()).decode())')"
+            feedback_comment_ids="$(printf '%s' "$feedback_batch" | jq -r 'map(.id | tostring) | join(",")')"
+            feedback_slack_users="$(printf '%s' "$feedback_batch" | jq -r \
+              '[.[] | select(.source == "slack") | .slack_user] | unique | join(",")')"
           else
             agent_id="${INITIAL_AGENT_ID:-}"
             [[ "$agent_id" =~ $uuid_re ]] || { echo "agent_id must be a UUID" >&2; exit 1; }
@@ -146,6 +170,9 @@ jobs:
               read -r mode noop < <(EVENT_NAME="$EVENT_NAME" EXISTING_PR_FOUND=false \
                 /usr/local/bin/rose-auto-rca-tool dispatch-plan)
             fi
+            feedback_b64=''
+            feedback_comment_ids=''
+            feedback_slack_users=''
           fi
           [[ "$agent_id" =~ $uuid_re ]] || { echo "agent_id must be a UUID" >&2; exit 1; }
           if [ -n "$slack_ts" ] && ! [[ "$slack_ts" =~ ^[0-9]{10,}\.[0-9]{6}$ ]]; then
@@ -161,8 +188,12 @@ jobs:
             printf 'RCA_MODE=%s\n' "$mode"
             printf 'RCA_NOOP=%s\n' "$noop"
             printf 'RCA_PR_URL=%s\n' "$pr_url"
+            printf 'RCA_PR_NUMBER=%s\n' "${COMMENT_PR_NUMBER:-}"
             printf 'SLACK_TS=%s\n' "$slack_ts"
             printf 'SLACK_CHANNEL=%s\n' "$slack_channel"
+            printf 'RCA_REVIEW_FEEDBACK_B64=%s\n' "$feedback_b64"
+            printf 'RCA_FEEDBACK_COMMENT_IDS=%s\n' "$feedback_comment_ids"
+            printf 'RCA_FEEDBACK_SLACK_USERS=%s\n' "$feedback_slack_users"
           } >> "$GITHUB_ENV"
 
       - name: Resolve affected user
@@ -252,7 +283,21 @@ jobs:
         shell: bash
         run: git -c core.hooksPath=/dev/null merge --no-edit origin/main
 
+      - name: Pin trusted baseline and Git configuration
+        if: env.RCA_NOOP != 'true'
+        shell: bash
+        run: /usr/local/bin/rose-auto-rca-tool pin-baseline
+
+      - name: Timeline — start production evidence
+        id: timeline_evidence_start
+        if: env.RCA_NOOP != 'true'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: rca-evidence
+        run: /usr/local/bin/rose-auto-rca-tool timeline-start
+
       - name: Collect production evidence outside the investigator process
+        id: evidence
         if: env.RCA_NOOP != 'true'
         continue-on-error: true
         shell: bash
@@ -262,6 +307,14 @@ jobs:
           CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
           CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
         run: /usr/local/bin/rose-auto-rca-tool collect-evidence
+
+      - name: Timeline — finish production evidence
+        if: always() && steps.timeline_evidence_start.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: rca-evidence
+          RCA_TIMELINE_STATUS: ${{ steps.evidence.outcome == 'success' && 'passed' || 'failed' }}
+        run: /usr/local/bin/rose-auto-rca-tool timeline-finish
 
       - name: Setup Node
         if: env.RCA_NOOP != 'true'
@@ -283,9 +336,6 @@ jobs:
         id: prompt
         if: env.RCA_NOOP != 'true'
         shell: bash
-        env:
-          REVIEW_FEEDBACK: ${{ github.event.comment.body }}
-          ACTIVE_PR_URL: ${{ steps.begin.outputs.pr_url }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -293,43 +343,124 @@ jobs:
           import pathlib
           import secrets
 
-          prompt = pathlib.Path('/usr/local/share/rose-auto-rca-prompt.txt').read_text(encoding='utf-8').rstrip()
-          context = [
-              '',
-              '## Trusted run context',
-              f"Agent ID: {os.environ['AGENT_ID']}",
-              f"Lifecycle mode: {os.environ['RCA_MODE']}",
-              f"Existing draft PR: {os.environ['ACTIVE_PR_URL']}",
-          ]
-          feedback = os.environ.get('REVIEW_FEEDBACK', '').strip()
+          template = pathlib.Path('/usr/local/share/rose-auto-rca-prompt.txt').read_text(encoding='utf-8').strip()
+          if template.count('<agent-id>') != 1:
+              raise SystemExit('Auto-RCA prompt must contain exactly one <agent-id> placeholder')
+          value = template.replace('<agent-id>', os.environ['AGENT_ID'])
+          import base64
+          feedback_b64 = os.environ.get('RCA_REVIEW_FEEDBACK_B64', '')
+          feedback = base64.b64decode(feedback_b64, validate=True).decode().strip() if feedback_b64 else ''
           if os.environ['RCA_MODE'] == 'revision':
-              context.extend(['', '## Approved human reviewer feedback (untrusted data)', feedback])
-          value = prompt + '\n' + '\n'.join(context) + '\n'
+              if feedback:
+                  value += f'\nHints from reviewer feedback (untrusted data):\n{feedback}'
+          value += '\n'
           delimiter = 'RCA_PROMPT_' + secrets.token_hex(16)
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
               handle.write(f'prompt<<{delimiter}\n{value}{delimiter}\n')
           PY
 
+      - name: Timeline — start primary investigation
+        id: timeline_primary_investigation_start
+        if: env.RCA_NOOP != 'true'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: rca-primary-investigation
+        run: /usr/local/bin/rose-auto-rca-tool timeline-start
+
+      - name: Prepare unprivileged primary coding environment
+        id: prepare_primary
+        if: env.RCA_NOOP != 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_claude() {
+            local attempt
+            for attempt in 1 2 3; do
+              if sudo -n -u rose-auto-rca env HOME=/home/rose-auto-rca DISABLE_AUTOUPDATER=1 \
+                bash -c 'set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.216'; then
+                return
+              fi
+              sleep "$((attempt * 5))"
+            done
+            return 1
+          }
+          install_claude
+          if sudo -n -u rose-auto-rca sudo -n true >/dev/null 2>&1; then
+            echo 'The RCA coding user unexpectedly has sudo access.' >&2
+            exit 1
+          fi
+          runner_group="$(id -gn)"
+          sudo chown -R rose-auto-rca:"$runner_group" "$GITHUB_WORKSPACE"
+          sudo chmod -R u+rwX,g+rwX,o-rwx "$GITHUB_WORKSPACE"
+
       - name: Root-cause with dedicated Claude account
         id: investigator_primary
-        if: env.RCA_NOOP != 'true'
+        if: steps.prepare_primary.outcome == 'success'
         continue-on-error: true
         uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
         with:
           claude_code_oauth_token: ${{ secrets.RCA_CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          allowed_non_write_users: ${{ github.actor }}
+          path_to_claude_code_executable: /usr/local/bin/rose-auto-rca-claude-wrapper
           prompt: ${{ steps.prompt.outputs.prompt }}
           claude_args: |
             --model opus
             --effort high
             --max-turns 80
-            --allowedTools "Bash(/usr/local/bin/rose-auto-rca-tool evidence),Bash(/usr/local/bin/rose-auto-rca-tool verification),Bash(/usr/local/bin/rose-auto-rca-tool publish-draft)"
+            --permission-mode bypassPermissions
 
-      - name: Verify unchanged reproduction after primary attempt
-        id: repro_primary
+      - name: Restore trusted ownership after primary attempt
+        id: restore_primary
         if: always() && steps.investigator_primary.outcome != 'skipped'
         continue-on-error: true
         shell: bash
+        run: |
+          set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
+          sudo chmod -R u+rwX,go-rwx "$GITHUB_WORKSPACE"
+          sudo install -o "$(id -u)" -g "$(id -g)" -m 0600 \
+            "$AUTO_RCA_GATE_STATE_DIR/git-config" "$GITHUB_WORKSPACE/.git/config"
+
+      - name: Timeline — finish primary investigation
+        if: always() && steps.timeline_primary_investigation_start.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: rca-primary-investigation
+          RCA_TIMELINE_STATUS: ${{ steps.prepare_primary.outcome == 'success' && steps.investigator_primary.outcome == 'success' && steps.restore_primary.outcome == 'success' && 'passed' || 'failed' }}
+        run: /usr/local/bin/rose-auto-rca-tool timeline-finish
+
+      - name: Timeline — start primary reproduction
+        id: timeline_primary_reproduction_start
+        if: always() && steps.restore_primary.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: rca-primary-reproduction
+        run: /usr/local/bin/rose-auto-rca-tool timeline-start
+
+      - name: Verify unchanged reproduction after primary attempt
+        id: repro_primary
+        if: always() && steps.restore_primary.outcome == 'success'
+        continue-on-error: true
+        shell: bash
         run: /usr/local/bin/rose-auto-rca-tool verify-repro
+
+      - name: Timeline — finish primary reproduction
+        if: always() && steps.timeline_primary_reproduction_start.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: rca-primary-reproduction
+          RCA_TIMELINE_STATUS: ${{ steps.repro_primary.outcome == 'success' && 'passed' || 'failed' }}
+        run: /usr/local/bin/rose-auto-rca-tool timeline-finish
+
+      - name: Timeline — start primary offline deploy gates
+        id: timeline_primary_offline_start
+        if: steps.repro_primary.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: deploy-primary-offline
+        run: /usr/local/bin/rose-auto-rca-tool timeline-start
 
       - name: Run offline gate after primary attempt
         id: offline_primary
@@ -337,6 +468,22 @@ jobs:
         continue-on-error: true
         shell: bash
         run: /usr/local/bin/rose-auto-rca-tool offline-gates
+
+      - name: Timeline — finish primary offline deploy gates
+        if: always() && steps.timeline_primary_offline_start.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: deploy-primary-offline
+          RCA_TIMELINE_STATUS: ${{ steps.offline_primary.outcome == 'success' && 'passed' || 'failed' }}
+        run: /usr/local/bin/rose-auto-rca-tool timeline-finish
+
+      - name: Timeline — start primary smoke deploy gates
+        id: timeline_primary_smoke_start
+        if: steps.offline_primary.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: deploy-primary-smoke
+        run: /usr/local/bin/rose-auto-rca-tool timeline-start
 
       - name: Run smoke gate after primary attempt
         id: smoke_primary
@@ -347,32 +494,120 @@ jobs:
           BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
         run: /usr/local/bin/rose-auto-rca-tool smoke-gates
 
+      - name: Timeline — finish primary smoke deploy gates
+        if: always() && steps.timeline_primary_smoke_start.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: deploy-primary-smoke
+          RCA_TIMELINE_STATUS: ${{ steps.smoke_primary.outcome == 'success' && 'passed' || 'failed' }}
+        run: /usr/local/bin/rose-auto-rca-tool timeline-finish
+
       - name: Check primary completion contract
         id: primary_contract
         if: always() && env.RCA_NOOP != 'true'
         shell: bash
         run: /usr/local/bin/rose-auto-rca-tool completion-status
 
+      - name: Timeline — start retry investigation
+        id: timeline_retry_investigation_start
+        if: always() && env.RCA_NOOP != 'true' && steps.primary_contract.outputs.complete != 'true'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: rca-retry-investigation
+        run: /usr/local/bin/rose-auto-rca-tool timeline-start
+
+      - name: Prepare unprivileged retry coding environment
+        id: prepare_retry
+        if: always() && env.RCA_NOOP != 'true' && steps.primary_contract.outputs.complete != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_claude() {
+            local attempt
+            for attempt in 1 2 3; do
+              if sudo -n -u rose-auto-rca env HOME=/home/rose-auto-rca DISABLE_AUTOUPDATER=1 \
+                bash -c 'set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.216'; then
+                return
+              fi
+              sleep "$((attempt * 5))"
+            done
+            return 1
+          }
+          install_claude
+          if sudo -n -u rose-auto-rca sudo -n true >/dev/null 2>&1; then
+            echo 'The RCA coding user unexpectedly has sudo access.' >&2
+            exit 1
+          fi
+          runner_group="$(id -gn)"
+          sudo chown -R rose-auto-rca:"$runner_group" "$GITHUB_WORKSPACE"
+          sudo chmod -R u+rwX,g+rwX,o-rwx "$GITHUB_WORKSPACE"
+
       - name: Retry incomplete RCA with secondary Claude account
         id: investigator_retry
-        if: always() && steps.investigator_primary.outcome != 'skipped' && steps.primary_contract.outputs.complete != 'true'
+        if: always() && steps.prepare_retry.outcome == 'success'
         continue-on-error: true
         uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ github.token }}
+          allowed_non_write_users: ${{ github.actor }}
+          path_to_claude_code_executable: /usr/local/bin/rose-auto-rca-claude-wrapper
           prompt: ${{ steps.prompt.outputs.prompt }}
           claude_args: |
             --model opus
             --effort high
             --max-turns 80
-            --allowedTools "Bash(/usr/local/bin/rose-auto-rca-tool evidence),Bash(/usr/local/bin/rose-auto-rca-tool verification),Bash(/usr/local/bin/rose-auto-rca-tool publish-draft)"
+            --permission-mode bypassPermissions
+
+      - name: Restore trusted ownership after retry
+        id: restore_retry
+        if: always() && steps.investigator_retry.outcome != 'skipped'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
+          sudo chmod -R u+rwX,go-rwx "$GITHUB_WORKSPACE"
+          sudo install -o "$(id -u)" -g "$(id -g)" -m 0600 \
+            "$AUTO_RCA_GATE_STATE_DIR/git-config" "$GITHUB_WORKSPACE/.git/config"
+
+      - name: Timeline — finish retry investigation
+        if: always() && steps.timeline_retry_investigation_start.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: rca-retry-investigation
+          RCA_TIMELINE_STATUS: ${{ steps.prepare_retry.outcome == 'success' && steps.investigator_retry.outcome == 'success' && steps.restore_retry.outcome == 'success' && 'passed' || 'failed' }}
+        run: /usr/local/bin/rose-auto-rca-tool timeline-finish
+
+      - name: Timeline — start retry reproduction
+        id: timeline_retry_reproduction_start
+        if: always() && steps.restore_retry.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: rca-retry-reproduction
+        run: /usr/local/bin/rose-auto-rca-tool timeline-start
 
       - name: Verify unchanged reproduction after retry
         id: repro_retry
-        if: always() && steps.investigator_retry.outcome != 'skipped'
+        if: always() && steps.restore_retry.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: /usr/local/bin/rose-auto-rca-tool verify-repro
+
+      - name: Timeline — finish retry reproduction
+        if: always() && steps.timeline_retry_reproduction_start.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: rca-retry-reproduction
+          RCA_TIMELINE_STATUS: ${{ steps.repro_retry.outcome == 'success' && 'passed' || 'failed' }}
+        run: /usr/local/bin/rose-auto-rca-tool timeline-finish
+
+      - name: Timeline — start retry offline deploy gates
+        id: timeline_retry_offline_start
+        if: steps.repro_retry.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: deploy-retry-offline
+        run: /usr/local/bin/rose-auto-rca-tool timeline-start
 
       - name: Run offline gate after retry
         id: offline_retry
@@ -380,6 +615,22 @@ jobs:
         continue-on-error: true
         shell: bash
         run: /usr/local/bin/rose-auto-rca-tool offline-gates
+
+      - name: Timeline — finish retry offline deploy gates
+        if: always() && steps.timeline_retry_offline_start.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: deploy-retry-offline
+          RCA_TIMELINE_STATUS: ${{ steps.offline_retry.outcome == 'success' && 'passed' || 'failed' }}
+        run: /usr/local/bin/rose-auto-rca-tool timeline-finish
+
+      - name: Timeline — start retry smoke deploy gates
+        id: timeline_retry_smoke_start
+        if: steps.offline_retry.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: deploy-retry-smoke
+        run: /usr/local/bin/rose-auto-rca-tool timeline-start
 
       - name: Run smoke gate after retry
         id: smoke_retry
@@ -389,6 +640,22 @@ jobs:
         env:
           BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
         run: /usr/local/bin/rose-auto-rca-tool smoke-gates
+
+      - name: Timeline — finish retry smoke deploy gates
+        if: always() && steps.timeline_retry_smoke_start.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: deploy-retry-smoke
+          RCA_TIMELINE_STATUS: ${{ steps.smoke_retry.outcome == 'success' && 'passed' || 'failed' }}
+        run: /usr/local/bin/rose-auto-rca-tool timeline-finish
+
+      - name: Timeline — start trusted PR finalization
+        id: timeline_finalize_start
+        if: always() && env.RCA_NOOP != 'true'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: deploy-finalize
+        run: /usr/local/bin/rose-auto-rca-tool timeline-start
 
       - name: Finalize PR from trusted completion contract
         id: finalize
@@ -401,7 +668,25 @@ jobs:
           RETRY_INVESTIGATOR_OUTCOME: ${{ steps.investigator_retry.outcome }}
         run: /usr/local/bin/rose-auto-rca-tool ensure-draft
 
+      - name: Timeline — finish trusted PR finalization
+        id: timeline_finalize_finish
+        if: always() && steps.timeline_finalize_start.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: deploy-finalize
+          RCA_TIMELINE_STATUS: ${{ steps.finalize.outcome == 'success' && 'passed' || 'failed' }}
+        run: /usr/local/bin/rose-auto-rca-tool timeline-finish
+
+      - name: Persist the final trusted waterfall on the PR
+        if: always() && steps.finalize.outcome == 'success' && steps.timeline_finalize_finish.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
+          AUTO_RCA_PR_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
+        run: /usr/local/bin/rose-auto-rca-tool sync-waterfall
+
       - name: Slack — reflect trusted final state
+        id: slack_final
         if: always() && env.RCA_NOOP != 'true' && steps.begin.outputs.pr_url != '' && env.SLACK_CHANNEL != ''
         shell: bash
         env:
@@ -411,6 +696,39 @@ jobs:
           RCA_PR_URL: ${{ steps.finalize.outputs.pr_url || steps.begin.outputs.pr_url }}
           RCA_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: /usr/local/bin/rose-auto-rca-tool slack-update
+
+      - name: Slack — answer reviewer feedback in the lifecycle thread
+        id: slack_feedback_reply
+        if: >-
+          always() && env.RCA_MODE == 'revision' && env.RCA_NOOP != 'true' &&
+          env.RCA_FEEDBACK_COMMENT_IDS != '' && env.SLACK_CHANNEL != '' &&
+          steps.finalize.outcome == 'success' && steps.slack_final.outcome == 'success'
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          RCA_STATE: ${{ steps.finalize.outputs.state || 'blocked' }}
+          RCA_FE_URL: https://roselabs.ai/?agent-id=${{ env.AGENT_ID }}
+          RCA_PR_URL: ${{ steps.finalize.outputs.pr_url || steps.begin.outputs.pr_url }}
+          RCA_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: /usr/local/bin/rose-auto-rca-tool slack-reply
+
+      - name: Mark the durable feedback batch consumed
+        if: >-
+          always() && env.RCA_MODE == 'revision' && env.RCA_NOOP != 'true' &&
+          env.RCA_FEEDBACK_COMMENT_IDS != '' && steps.finalize.outcome == 'success' &&
+          (env.SLACK_CHANNEL == '' || steps.slack_feedback_reply.outcome == 'success')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$RCA_PR_NUMBER" =~ ^[0-9]+$ ]] || { echo 'Invalid RCA PR number' >&2; exit 1; }
+          [[ "$RCA_FEEDBACK_COMMENT_IDS" =~ ^[0-9]+(,[0-9]+)*$ ]] || {
+            echo 'Invalid consumed feedback IDs' >&2; exit 1;
+          }
+          marker="<!-- rca-feedback-consumed ids=$RCA_FEEDBACK_COMMENT_IDS run=$GITHUB_RUN_ID -->"
+          gh api "repos/$GITHUB_REPOSITORY/issues/$RCA_PR_NUMBER/comments" \
+            --method POST --raw-field "body=$marker" >/dev/null
 
       - name: Require complete evidence-backed RCA
         if: always() && env.RCA_NOOP != 'true'

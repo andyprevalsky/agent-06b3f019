@@ -104,4 +104,5 @@ jobs:
           RCA_STATE: ${{ env.RCA_TERMINAL_STATE }}
           RCA_FE_URL: https://roselabs.ai/?agent-id=${{ env.AGENT_ID }}
           RCA_PR_URL: ${{ github.event.pull_request.html_url }}
+          RCA_PR_BODY: ${{ github.event.pull_request.body }}
         run: /usr/local/bin/rose-auto-rca-tool slack-update
