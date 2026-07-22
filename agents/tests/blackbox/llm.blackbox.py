@@ -1428,6 +1428,39 @@ async def test_build_llm_messages_preserves_timestamp_timezone():
     assert messages[1]["content"].startswith("[2026-07-11T13:45-07:00] ")
 
 
+async def test_build_llm_messages_normalizes_pointer_annotations_across_context_sources():
+    """In-memory and backend-fetched copies of one context must build identical requests.
+
+    The workflow annotates its in-memory USER/TOOL rows with self-reference
+    pointers, while a cross-worker activity fetches canonical DB rows without
+    those transient annotations. Worker placement must not change LLM-visible
+    request bytes or destroy a conversation's prompt-cache prefix.
+    """
+    from helpers.context_pointers import annotate_with_pointer
+    from helpers.llm import build_llm_messages
+
+    canonical_context = [
+        {
+            "message_id": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            "role": "USER",
+            "text": "Buy the benchmark item",
+            "timestamp": "2026-07-21T12:34:00Z",
+            "metadata": {},
+        }
+    ]
+    in_memory_context = [{**canonical_context[0], "metadata": {}}]
+    annotate_with_pointer(in_memory_context[0])
+
+    in_memory_messages = await build_llm_messages(in_memory_context, "System prompt")
+    backend_messages = await build_llm_messages(canonical_context, "System prompt")
+
+    assert backend_messages == in_memory_messages
+    assert '<resolved-ref pointer="@ref:message:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"/>' in backend_messages[
+        1
+    ]["content"]
+    assert canonical_context[0]["text"] == "Buy the benchmark item"
+
+
 async def test_build_llm_messages_preserves_codex_reasoning_metadata_separately():
     """Encrypted GPT reasoning state should be replayable without entering visible assistant text."""
     from helpers.llm import build_llm_messages
@@ -5780,6 +5813,10 @@ async def run_all_tests():
     await r.record_async(
         "build_llm_messages_preserves_timestamp_timezone",
         test_build_llm_messages_preserves_timestamp_timezone,
+    )
+    await r.record_async(
+        "build_llm_messages_normalizes_pointer_annotations_across_context_sources",
+        test_build_llm_messages_normalizes_pointer_annotations_across_context_sources,
     )
     await r.record_async(
         "build_llm_messages_preserves_codex_reasoning_metadata_separately",

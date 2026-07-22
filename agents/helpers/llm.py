@@ -28,7 +28,7 @@ from helpers.attachments import (
     get_file_from_pointer,
 )
 from helpers.context_compaction import is_excluded_from_model
-from helpers.context_pointers import resolve_pointers_in_messages
+from helpers.context_pointers import annotate_with_pointer, resolve_pointers_in_messages
 from helpers.context_scope import is_internal_subagent_message
 from helpers.messages import (
     CoalescingStreamBroadcaster,
@@ -1448,6 +1448,14 @@ async def build_llm_messages(  # noqa: C901
     Returns:
         List of OpenAI-compatible messages ready for LLM
     """
+    # Pointer annotations are an LLM-boundary representation, not canonical DB
+    # state. Initial workflow context already carries them, but a cross-worker
+    # activity rebuilds from unannotated DB rows. Normalize a copy here so worker
+    # placement cannot change request bytes (or the provider cache prefix).
+    context = [dict(msg) for msg in context]
+    for msg in context:
+        annotate_with_pointer(msg)
+
     # Filter TOOL messages: skip IN_PROGRESS, keep only latest terminal message
     # (FINISHED/ERROR) per toolCallId.
     context = _filter_superseded_browser_protocol_failures(context)

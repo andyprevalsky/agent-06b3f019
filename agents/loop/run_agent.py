@@ -540,9 +540,10 @@ async def run_agent(  # noqa: C901
         # A browser/code child has already run its own verifier before emitting
         # a terminal structured_response. When that response covers every
         # parent output field, the parent verifier has a deterministic fast
-        # path for accepting it. Do not offer another expensive child spawn on
-        # the handoff turn: require the parent to cross attempt_completion so
-        # the normal verifier and completion persistence still run.
+        # path for accepting it. Require attempt_completion on the handoff turn
+        # so the normal verifier and completion persistence still run. Keep the
+        # full tool schema stable across turns for provider prompt-cache reuse;
+        # required_tool enforces the only legal response at runtime.
         completed_child_output = None
         if not is_plan_loop and not skip_verification and "attempt_completion" in tools:
             completed_child_output = _completed_child_task_structured_response(context, response_schema)
@@ -550,7 +551,6 @@ async def run_agent(  # noqa: C901
         turn_tools = tools
         required_turn_tool = None
         if completed_child_output is not None:
-            turn_tools = ["attempt_completion"]
             required_turn_tool = "attempt_completion"
             completion_instruction = (
                 "A previously delegated browser or code task already completed and returned verified structured "

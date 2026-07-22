@@ -1103,8 +1103,8 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
         if fn is call_llm_activity:
             llm_calls.append(args)
             required_tool = args[11]
-            # Reproduce the observed model choice unless orchestration narrows
-            # this schema-complete handoff to the completion boundary.
+            # Reproduce the observed model choice unless orchestration forces
+            # this schema-complete handoff through the completion boundary.
             tool_name = "attempt_completion" if required_tool == "attempt_completion" else "spawn_agent"
             tool_call = {"tool": tool_name}
             if tool_name == "spawn_agent":
@@ -1157,7 +1157,7 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
 
     assert result["status"] == "completed"
     assert executed_tools == ["attempt_completion"]
-    assert llm_calls[0][2] == ["attempt_completion"]
+    assert llm_calls[0][2] == ["spawn_agent", "attempt_completion"]
     assert llm_calls[0][11] == "attempt_completion"
     assert "already completed" in llm_calls[0][10]
 
