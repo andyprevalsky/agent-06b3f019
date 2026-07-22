@@ -8272,7 +8272,7 @@ async def _check_claude_code_credentials(base_url: str) -> bool:
             )
             if resp.status_code == 200:
                 data = resp.json()
-                return data.get("source") in ("user", "pool") and bool(data.get("accessToken"))
+                return bool(data.get("accessToken"))
         return False
     except Exception:
         return False
