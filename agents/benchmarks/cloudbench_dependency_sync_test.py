@@ -927,6 +927,8 @@ def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
     assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF"' in fleet
     assert '[ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] || cloudbench_worktree_has_changes "$ROOT_DIR"' in fleet
     assert "cloudbench_fetchable_ref" in fleet
+    assert cloud.count('LOCAL_PATCH_FILE=""') == 1
+    assert cloud.count('STAGED_LOCAL_FILES=()') == 1
 
 
 def test_worktree_patch_includes_unpushed_commits_from_fetchable_base(

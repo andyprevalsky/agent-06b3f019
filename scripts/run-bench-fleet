@@ -722,10 +722,13 @@ print_code_provenance() {
         echo "  local  : $REQUESTED_BENCH_REF (complete delta ships on fetchable base)"
     fi
     echo "  pushed : $pushed"
-    untracked_count="$(
-        git -C "$ROOT_DIR" ls-files --others --exclude-standard \
-            | awk '!/^agents\/benchmarks\/history\/[^/]+\.jsonl$/ { count += 1 } END { print count + 0 }'
-    )"
+    untracked_count=0
+    while IFS= read -r relative_path; do
+        case "$relative_path" in
+            agents/benchmarks/history/*.jsonl) continue ;;
+        esac
+        untracked_count=$((untracked_count + 1))
+    done < <(git -C "$ROOT_DIR" ls-files --others --exclude-standard)
     if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" = "1" ]; then
         echo "  diff   : local changes intentionally excluded (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (pinned; local patch excluded)"
@@ -737,10 +740,12 @@ print_code_provenance() {
         dirtystat="$(git -C "$ROOT_DIR" diff --shortstat "$BENCH_REF" -- . ":(exclude)agents/benchmarks/history/*.jsonl" 2>/dev/null | sed 's/^ *//')"
         echo "  diff   : DIRTY — shipped as a patch on top of $BENCH_REF: $dirtystat, $untracked_count untracked"
         git -C "$ROOT_DIR" diff --stat "$BENCH_REF" -- . ":(exclude)agents/benchmarks/history/*.jsonl" 2>/dev/null | sed 's/^/           /' | tail -30
-        git -C "$ROOT_DIR" ls-files --others --exclude-standard \
-            | awk '!/^agents\/benchmarks\/history\/[^/]+\.jsonl$/' \
-            | sed 's/^/           + /' \
-            | tail -30
+        while IFS= read -r relative_path; do
+            case "$relative_path" in
+                agents/benchmarks/history/*.jsonl) continue ;;
+            esac
+            printf '           + %s\n' "$relative_path"
+        done < <(git -C "$ROOT_DIR" ls-files --others --exclude-standard) | tail -30
         CODE_SUMMARY="$branch@$head_sha +patch($dirtystat, $untracked_count untracked)"
     fi
     echo "══════════════════════════════════════════════════════════"
