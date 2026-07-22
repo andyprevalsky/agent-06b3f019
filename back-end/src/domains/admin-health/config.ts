@@ -38,6 +38,9 @@ export const LINEAR_TAMARA_NAMES = ['Tamara Chayo', 'Tamy Chayo', 'Tamy', 'Tamar
 export const AMPLITUDE_API_KEY = process.env.AMPLITUDE_API_KEY ?? '';
 export const AMPLITUDE_SECRET_KEY = process.env.AMPLITUDE_SECRET_KEY ?? '';
 export const AMPLITUDE_API_BASE_URL = process.env.AMPLITUDE_API_BASE_URL ?? 'https://amplitude.com';
+export const BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES =
+  process.env.BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES;
+export const BLACKBOX_TEST_CAPTURE_OUTBOUND = process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1';
 /**
  * Canonical copy sent by both SMS and email when an admin pulls someone off
  * the waitlist. Keeping one value prevents the two channels from drifting.

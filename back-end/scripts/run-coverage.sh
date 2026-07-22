@@ -57,6 +57,20 @@ export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
 export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+# Only the weekly admin-health case asserts real Amplitude counts. Keep that
+# strict live probe enabled while preventing non-asserting shape cases from
+# spending the provider's shared query budget.
+export BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES="${BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES:-weekly}"
+# Coverage remains deterministic and still exercises the unavailable path.
+# The deploy workflow runs one focused live weekly probe afterward, so a
+# provider quota failure can be retried without rerunning all 91 deterministic domains.
+export AMPLITUDE_API_KEY=""
+export AMPLITUDE_SECRET_KEY=""
+# Credential health is a mandatory focused deploy stage, not deterministic code
+# coverage. Keep its real provider calls out of this 91-domain batch so a TLS or
+# provider outage can be retried without rerunning every instrumented test.
+export BLACKBOX_TEST_SKIP_DOMAINS="${BLACKBOX_TEST_SKIP_DOMAINS:+$BLACKBOX_TEST_SKIP_DOMAINS,}integration-health"
+export CONTRACT_TEST_SKIP_DOMAINS="$BLACKBOX_TEST_SKIP_DOMAINS"
 
 # Coverage is a deterministic local-code gate, not an external analytics probe.
 # A full admin-health run can spend most of Amplitude's five-minute chart-query
@@ -118,7 +132,7 @@ DB_CONTAINER="victoria-db-${WORKSPACE_HINT}"
 DB_FOUND=false
 ISOLATED_DB_RESOLVED=false
 
-if docker info >/dev/null 2>&1; then
+if docker_info_quick; then
   if RESOLVED_CONTAINER="$(resolve_local_db_container "$WORKSPACE_HINT" "$WORKTREE_HINT")"; then
     DB_CONTAINER="$RESOLVED_CONTAINER"
     ISOLATED_DB_RESOLVED=true
@@ -131,11 +145,11 @@ if docker info >/dev/null 2>&1; then
     fi
   fi
 
-  ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | sed 's/.*://') || true
+  ACTUAL_PORT=$(docker_quick port "$DB_CONTAINER" 5432 | head -1 | sed 's/.*://') || true
   if [[ -n "$ACTUAL_PORT" ]]; then
     LOCAL_DB_PORT="$ACTUAL_PORT"
   fi
-  if [[ -n "$LOCAL_DB_PORT" ]] && docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
+  if [[ -n "$LOCAL_DB_PORT" ]] && docker_quick exec "$DB_CONTAINER" pg_isready -U postgres -q >/dev/null; then
     DB_FOUND=true
     echo "Using local Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
   fi
@@ -209,7 +223,7 @@ export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"
 
 echo "Starting backend with coverage collection on port $COV_PORT..."
 NODE_V8_COVERAGE="$COV_TMP" PORT="$COV_PORT" DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_CAPTURE_OUTBOUND=1 BLACKBOX_TEST_REPLAY_OUTBOUND=1 \
-  npx tsx src/bootstrap.ts >"$COV_LOG" 2>&1 &
+  node --import tsx src/bootstrap.ts >"$COV_LOG" 2>&1 &
 BACKEND_PID=$!
 
 cleanup() {
@@ -217,6 +231,8 @@ cleanup() {
     kill "$BACKEND_PID" >/dev/null 2>&1 || true
     wait "$BACKEND_PID" 2>/dev/null || true
   fi
+  # These raw blobs are inputs to the report, not durable test evidence.
+  rm -rf "$COV_TMP"
 }
 trap cleanup EXIT INT TERM
 
@@ -265,41 +281,33 @@ echo "Backend ready at $TEST_BASE_URL"
 # picks up module-level fetch-stubbed suites (e.g. rose.blackbox.ts) that
 # exercise provider code in the test process rather than via HTTP to the
 # instrumented backend. All per-process coverage files merge at report time.
-echo "Running blackbox tests..."
+echo "Running blackbox and unit tests in parallel..."
 TEST_EXIT=0
+UNIT_EXIT=0
 NODE_V8_COVERAGE="$COV_TMP" \
 BLACKBOX_TEST_USE_EXISTING_BACKEND=1 CONTRACT_TEST_USE_EXISTING_BACKEND=1 \
 BLACKBOX_TEST_DATABASE_URL="$LOCAL_DB_URL" CONTRACT_TEST_DATABASE_URL="$LOCAL_DB_URL" \
-BLACKBOX_TEST_CONCURRENCY="${BLACKBOX_TEST_CONCURRENCY:-1}" CONTRACT_TEST_CONCURRENCY="${CONTRACT_TEST_CONCURRENCY:-1}" \
-BLACKBOX_TEST_CASE_CONCURRENCY="${BLACKBOX_TEST_CASE_CONCURRENCY:-1}" CONTRACT_TEST_CASE_CONCURRENCY="${CONTRACT_TEST_CASE_CONCURRENCY:-1}" \
-  bash scripts/run-blackbox-tests.sh || TEST_EXIT=$?
+BACKEND_CODEX_TOKEN_SYNC_SKIP=1 \
+BLACKBOX_TEST_CONCURRENCY="${BLACKBOX_TEST_CONCURRENCY:-4}" CONTRACT_TEST_CONCURRENCY="${CONTRACT_TEST_CONCURRENCY:-4}" \
+BLACKBOX_TEST_CASE_CONCURRENCY="${BLACKBOX_TEST_CASE_CONCURRENCY:-30}" CONTRACT_TEST_CASE_CONCURRENCY="${CONTRACT_TEST_CASE_CONCURRENCY:-30}" \
+  bash scripts/run-blackbox-tests.sh &
+BLACKBOX_PID=$!
 
-if $DB_FOUND; then
-  echo "Re-syncing Prisma schema before unit tests..."
-  if command -v psql >/dev/null 2>&1; then
-    psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
-DO $$
-BEGIN
-  IF to_regclass('"UserAuthAssistanceRequest"') IS NOT NULL
-     AND to_regclass('"AgentAttentionRequest"') IS NOT NULL THEN
-    DELETE FROM "UserAuthAssistanceRequest" request
-    WHERE NOT EXISTS (
-      SELECT 1
-      FROM "AgentAttentionRequest" attention
-      WHERE attention.id = request.id
-    );
-  END IF;
-END $$;
-SQL
+BACKEND_UNIT_COVERAGE_DIR="$COV_TMP" \
+BACKEND_UNIT_CONCURRENCY="${BACKEND_UNIT_CONCURRENCY:-6}" \
+  node --import tsx scripts/run-unit-tests.ts &
+UNIT_PID=$!
+
+wait "$BLACKBOX_PID" || TEST_EXIT=$?
+wait "$UNIT_PID" || UNIT_EXIT=$?
+
+if [[ "$TEST_EXIT" -ne 0 || "$UNIT_EXIT" -ne 0 ]]; then
+  echo "Backend test phase failed; skipping report work until the failing lifecycle is fixed."
+  if [[ "$TEST_EXIT" -ne 0 ]]; then
+    exit "$TEST_EXIT"
   fi
-  npx prisma db push --skip-generate --accept-data-loss >/dev/null
+  exit "$UNIT_EXIT"
 fi
-
-echo "Running unit tests..."
-UNIT_EXIT=0
-while IFS= read -r test_file; do
-  NODE_V8_COVERAGE="$COV_TMP" npx tsx "$test_file" || UNIT_EXIT=$?
-done < <(find src/tests/unit -type f -name '*.test.ts' | sort)
 
 # Stop the server so NODE_V8_COVERAGE flushes data
 echo "Stopping backend and collecting coverage data..."
