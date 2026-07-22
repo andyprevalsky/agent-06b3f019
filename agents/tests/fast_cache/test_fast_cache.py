@@ -949,6 +949,28 @@ def test_llm_request_key_changes_when_pool_model_contract_changes(monkeypatch):
     assert ctx.llm_key("execute_loop", changed_request) != original_key
 
 
+def test_llm_request_key_separates_anthropic_exclusion_policy(monkeypatch):
+    monkeypatch.delenv("ROSE_EXCLUDE_ANTHROPIC_FAMILY", raising=False)
+    ctx = FastCacheContext(enabled=True, goal="same goal", base_step=1)
+    normal = rose_cache.request_key_material({"pool": "rose-1-ultra"})
+    excluded = rose_cache.request_key_material(
+        {"pool": "rose-1-ultra", "_exclude_anthropic_family": True}
+    )
+
+    assert ctx.llm_key("execute_loop", normal) != ctx.llm_key("execute_loop", excluded)
+
+
+def test_llm_request_key_resolves_environment_provider_policy(monkeypatch):
+    """Outer cached_complete and RoseClient.complete must fingerprint one policy."""
+    monkeypatch.setenv("ROSE_EXCLUDE_ANTHROPIC_FAMILY", "1")
+    implicit = rose_cache.request_key_material({"pool": "rose-1-ultra"})
+    explicit = rose_cache.request_key_material(
+        {"pool": "rose-1-ultra", "_exclude_anthropic_family": True}
+    )
+
+    assert implicit == explicit
+
+
 def test_position_llm_key_ignores_prior_tool_outputs_but_keeps_static_prompt():
     ctx = FastCacheContext(enabled=True, goal="same coding-agent goal", base_step=2)
     base_request = {

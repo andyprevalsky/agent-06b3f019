@@ -49,6 +49,7 @@ import { CLOUD_AGENT_TOOL_NAME, CREATING_CLOUD_AGENT_TITLE } from './cloudAgentL
 import { createLogger } from '../logger';
 import {
   createEarlyDirectGeneratorCoordinator,
+  shouldStartEarlyDirectGenerator,
   type TransactionalStreamGate,
 } from './earlyDirectGenerator';
 
@@ -97,6 +98,7 @@ export async function handleChatMessage(config: {
   const speculativeGenerator = createEarlyDirectGeneratorCoordinator({
     start: ({ abortSignal, streamGate }) => runGenerator(messages, { abortSignal, streamGate }),
   });
+  const shouldSpeculateDirectAnswer = shouldStartEarlyDirectGenerator(messages);
 
   // ============================================
   // LLM CALL 1: Router - Decide action
@@ -109,7 +111,7 @@ export async function handleChatMessage(config: {
       messages,
       model: phaseModels.router,
       providerRoute: phaseModels.routerProviderRoute,
-      onRouterStarted: speculativeGenerator.start,
+      onRouterStarted: shouldSpeculateDirectAnswer ? speculativeGenerator.start : undefined,
       onActionDetected: (action) => {
         if (action !== 'direct_answer') void speculativeGenerator.discard();
       },

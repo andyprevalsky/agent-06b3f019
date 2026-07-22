@@ -67,6 +67,20 @@ def test_returns_none_on_unreachable(monkeypatch):
     assert rb._fetch_wmh_grounding_usd() is None
 
 
+def test_fetches_exact_wmh_retrieval_audit(monkeypatch):
+    monkeypatch.setenv("WMH_BASE_URL", "http://localhost:9999/")
+    seen = {}
+    audit = {"schema": "rose.wmh_retrieval_audit.v1", "query_count": 2, "events": []}
+
+    def fake_get(url, *a, **k):
+        seen["url"] = url
+        return _FakeResp(audit)
+
+    monkeypatch.setattr(rb.httpx, "get", fake_get)
+    assert rb._fetch_wmh_retrieval_audit() == audit
+    assert seen["url"] == "http://localhost:9999/retrieval_audit"
+
+
 def test_returns_none_on_http_error_status(monkeypatch):
     monkeypatch.setenv("WMH_BASE_URL", "http://localhost:9999")
     monkeypatch.setattr(rb.httpx, "get", lambda *a, **k: _FakeResp({}, status_ok=False))

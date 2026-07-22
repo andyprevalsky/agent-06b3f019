@@ -11,7 +11,11 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from benchmarks.serve_world_model import _add_rose_usage_route
+from benchmarks.serve_world_model import (
+    RetrievalAuditRetriever,
+    _add_retrieval_audit_route,
+    _add_rose_usage_route,
+)
 from benchmarks.wmh_rose_provider import RoseUsageAccumulator
 
 
@@ -55,3 +59,50 @@ def test_rose_usage_route_live_updates():
     acc.record(cost_usd=0.01, input_tokens=3, output_tokens=1)
     assert client.get("/rose_usage").json()["calls"] == 1
     assert client.get("/rose_usage").json()["total_cost_usd"] == 0.01
+
+
+def test_retrieval_audit_records_ordered_real_world_examples():
+    from wmh.core.types import Action, ActionKind, EnvState, Observation, Step
+
+    archived = Step(
+        task="Buy a black beanie",
+        state_before=EnvState(
+            structured={"root_agent_id": "root-real", "root_goal": "Checkout on Amazon"}
+        ),
+        action=Action(
+            kind=ActionKind.TOOL_CALL,
+            name="rose.llm_tool_call.spawn_browser_agent",
+            arguments={"goal": "Buy a beanie", "agent_id": "child-real"},
+        ),
+        observation=Observation(content="Checkout completed"),
+        raw_span_ids=["span-real"],
+    )
+
+    class FakeRetriever:
+        def __init__(self):
+            self.steps = [archived]
+
+        def topk(self, _state, _action, _k):
+            return list(self.steps)
+
+        def add(self, step):
+            self.steps.append(step)
+
+        def sample(self, n):
+            return self.steps[:n]
+
+        def index(self, _traces):
+            return None
+
+    audit = RetrievalAuditRetriever(FakeRetriever())
+    query = Action(kind=ActionKind.TOOL_CALL, name="rose.browser.click", arguments={"selector": "#buy"})
+    assert audit.topk(EnvState(structured={"url": "https://amazon.com"}), query, 5) == [archived]
+
+    app = FastAPI()
+    _add_retrieval_audit_route(app, audit)
+    payload = TestClient(app).get("/retrieval_audit").json()
+    assert payload["query_count"] == 1
+    assert payload["offline_index_steps"] == 1
+    assert payload["real_world_demo_uses"] == 1
+    assert payload["events"][0]["demos"][0]["source"] == "real_world_archive"
+    assert payload["events"][0]["demos"][0]["root_agent_id"] == "root-real"

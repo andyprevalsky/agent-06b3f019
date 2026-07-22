@@ -438,12 +438,17 @@ class SimulatedBrowserRecorder:
         if not self.frames:
             return None
         frames_json = json.dumps(self.frames, ensure_ascii=False).replace("</", "<\\/")
+        frame_csp_json = json.dumps(
+            '<meta http-equiv="Content-Security-Policy" '
+            'content="default-src \'none\'; img-src data: blob:; '
+            'style-src \'unsafe-inline\'; font-src data:">'
+        )
         title = html.escape(f"Simulated browser recording {self.task_id}")
         return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>{title}</title>
 <style>html,body{{margin:0;height:100%;background:#09090b;color:#eee;font:13px sans-serif}}#app{{display:flex;flex-direction:column;height:100%}}header{{display:flex;gap:10px;padding:10px;background:#18181b}}#timeline{{flex:1}}#stage{{position:relative;flex:1;background:white}}#stage img,#stage iframe{{position:absolute;inset:0;width:100%;height:100%;border:0;object-fit:contain}}</style></head>
 <body><div id="app"><header><button id="play">Play</button><input id="timeline" type="range" min="0" value="0"><span id="meta"></span></header><div id="stage"></div></div>
-<script>const frames={frames_json};let index=0,timer=null;const stage=document.getElementById('stage'),range=document.getElementById('timeline'),meta=document.getElementById('meta'),play=document.getElementById('play'),frameCsp='<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src data: blob:; style-src \'unsafe-inline\'; font-src data:">';range.max=Math.max(0,frames.length-1);function render(i){{index=Math.max(0,Math.min(frames.length-1,Number(i)||0));range.value=String(index);stage.replaceChildren();const frame=frames[index];if(!frame)return;if(frame.kind==='html'){{const el=document.createElement('iframe');el.sandbox='';el.srcdoc=frameCsp+(frame.html||'');stage.appendChild(el)}}else{{const el=document.createElement('img');el.src=frame.src||'';stage.appendChild(el)}}meta.textContent=`${{index+1}}/${{frames.length}} · ${{frame.label||frame.action||'step'}}`;}}range.oninput=()=>render(range.value);play.onclick=()=>{{if(timer){{clearInterval(timer);timer=null;play.textContent='Play';return}}play.textContent='Pause';timer=setInterval(()=>{{if(index>=frames.length-1){{clearInterval(timer);timer=null;play.textContent='Play';return}}render(index+1)}},500)}};render(0);</script></body></html>""".encode()
+<script>const frames={frames_json};let index=0,timer=null;const stage=document.getElementById('stage'),range=document.getElementById('timeline'),meta=document.getElementById('meta'),play=document.getElementById('play'),frameCsp={frame_csp_json};range.max=Math.max(0,frames.length-1);function render(i){{index=Math.max(0,Math.min(frames.length-1,Number(i)||0));range.value=String(index);stage.replaceChildren();const frame=frames[index];if(!frame)return;if(frame.kind==='html'){{const el=document.createElement('iframe');el.sandbox='';el.srcdoc=frameCsp+(frame.html||'');stage.appendChild(el)}}else{{const el=document.createElement('img');el.src=frame.src||'';stage.appendChild(el)}}meta.textContent=`${{index+1}}/${{frames.length}} · ${{frame.label||frame.action||'step'}}`;}}range.oninput=()=>render(range.value);play.onclick=()=>{{if(timer){{clearInterval(timer);timer=null;play.textContent='Play';return}}play.textContent='Pause';timer=setInterval(()=>{{if(index>=frames.length-1){{clearInterval(timer);timer=null;play.textContent='Play';return}}render(index+1)}},500)}};render(0);</script></body></html>""".encode()
 
     async def _archive_recording_artifacts(self) -> None:
         if not archive_enabled():

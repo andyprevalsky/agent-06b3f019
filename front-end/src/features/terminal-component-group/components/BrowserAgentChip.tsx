@@ -108,12 +108,12 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
     return undefined;
   }, [callMessages]);
 
-  // Prefer the LAST session's recording: a tool call may retry across several
-  // browser sessions, and earlier ones are often the frozen/splash attempts —
-  // the final session is the one that actually reached page content. A single
-  // reverse scan returns whichever source the LATEST recording message carries
-  // (Kernel view URL OR Supabase pointer) — scanning the two independently could
-  // surface an older session's view URL over the latest retry's pointer.
+  // Prefer the LAST browser session's recording: a tool call may retry across
+  // several sessions, and earlier ones are often frozen/splash attempts. Kernel
+  // can emit more than one replay for the SAME session when an approval pauses
+  // and resumes the activity, though. In that case collect every finished replay
+  // with the latest recording's browser_url so the FE plays the pre-approval and
+  // post-approval clips continuously instead of dropping the first half.
   const recordingSource = useMemo<
     | { kind: 'video'; pointer: FilePointer }
     | { kind: 'view'; urls: string[] }
@@ -137,7 +137,28 @@ export default function BrowserAgentChip({ message }: BrowserAgentChipProps) {
         if (clean.length) return { kind: 'view', urls: clean };
       }
       const url = md?.recording_view_url as string | null | undefined;
-      if (url) return { kind: 'view', urls: [url] };
+      if (url) {
+        const browserUrl = md?.browser_url as string | null | undefined;
+        if (!browserUrl) return { kind: 'view', urls: [url] };
+        const seen = new Set<string>();
+        const sessionUrls: string[] = [];
+        for (const taskMessage of taskMessages) {
+          const taskMetadata = taskMessage.metadata;
+          if (
+            taskMetadata?.action_type !== 'recording' ||
+            taskMetadata?.toolStatus !== 'FINISHED' ||
+            taskMetadata?.browser_url !== browserUrl
+          ) {
+            continue;
+          }
+          const sessionUrl = taskMetadata.recording_view_url;
+          if (typeof sessionUrl === 'string' && sessionUrl.length > 0 && !seen.has(sessionUrl)) {
+            seen.add(sessionUrl);
+            sessionUrls.push(sessionUrl);
+          }
+        }
+        return { kind: 'view', urls: sessionUrls.length > 0 ? sessionUrls : [url] };
+      }
       // Legacy screenshot replay: a self-contained HTML player pointer.
       if (fp?.storage_path) return { kind: 'pointer', pointer: fp };
     }

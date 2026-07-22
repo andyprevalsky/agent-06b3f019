@@ -554,6 +554,7 @@ export async function getComputeCodeToken(
     agentId?: string;
     rootAgentId?: string;
     fastCacheAffinityKey?: string;
+    tokenType?: 'claude' | 'gpt';
   }
 ) {
   const result = await fetchComputeTokenForUser(userId, {
@@ -563,6 +564,7 @@ export async function getComputeCodeToken(
     agentId: lineage?.agentId,
     rootAgentId: lineage?.rootAgentId,
     fastCacheAffinityKey: lineage?.fastCacheAffinityKey,
+    tokenType: lineage?.tokenType,
   });
   if (result === null || result === undefined) throw new NoTokensAvailableError();
   return {

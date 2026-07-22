@@ -43,7 +43,11 @@ def _captured_seed_env(**kwargs) -> dict[str, str]:
     with (
         patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
         patch.object(rb, "_shared_workspace_database_url", return_value=None),
-        patch.object(rb, "load_env_var", return_value="postgresql://prod/victoria"),
+        patch.object(
+            rb,
+            "_production_compute_token_database_url",
+            return_value="postgresql://prod/victoria",
+        ),
         patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
     ):
         rb._sync_compute_tokens(**kwargs)
@@ -83,50 +87,43 @@ def test_sync_uses_verified_shared_workspace_as_compute_token_source():
     assert seen["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://shared/victoria"
 
 
-def test_shared_stack_sync_uses_explicit_production_compute_token_source():
-    seen: dict[str, dict[str, str]] = {}
+def test_cloud_sync_uses_explicit_production_compute_token_source():
+    env = _captured_seed_env(tolerate_gpt_code_unavailable=True)
+    assert env["DATABASE_URL"] == "postgresql://local/victoria"
+    assert env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://prod/victoria"
 
-    def fake_run(_cmd, **kw):
-        seen["env"] = kw.get("env", {})
-        return _Result(0)
 
-    with (
-        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
-        patch.object(rb, "_shared_workspace_database_url", return_value=None),
-        patch.object(rb, "load_env_var", return_value="postgresql://prod/victoria?pgbouncer=true"),
-        patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
+def test_production_compute_source_preserves_prisma_pooler_parameters():
+    source = "postgresql://prod/db?pgbouncer=true&connection_limit=1"
+    with patch.object(
+        rb,
+        "load_env_var",
+        side_effect=lambda name, _path, **_kwargs: source if name == "DATABASE_URL" else None,
     ):
-        assert rb._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is True
-
-    assert seen["env"]["DATABASE_URL"] == "postgresql://local/victoria"
-    assert seen["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://prod/victoria?pgbouncer=true"
+        assert rb._production_compute_token_database_url("postgresql://local/victoria") == source
 
 
-def test_source_file_lookup_ignores_isolated_process_database(tmp_path: Path):
+def test_production_compute_source_ignores_isolated_process_database(tmp_path: Path):
     env_file = tmp_path / ".env"
     env_file.write_text("DATABASE_URL=postgresql://prod/rose\n")
 
-    with patch.dict(os.environ, {"DATABASE_URL": "postgresql://local/victoria"}):
-        assert (
-            rb.load_env_var(
-                "DATABASE_URL",
-                str(env_file),
-                include_process_env=False,
-            )
-            == "postgresql://prod/rose"
-        )
+    with (
+        patch.dict(os.environ, {"DATABASE_URL": "postgresql://local/victoria"}),
+        patch.object(rb, "_BACKEND_ENV", str(env_file)),
+    ):
+        assert rb._production_compute_token_database_url("postgresql://local/victoria") == "postgresql://prod/rose"
 
 
-def test_sync_fails_closed_without_distinct_compute_token_source():
+def test_sync_fails_before_seed_when_no_explicit_source_exists():
+    calls = []
     with (
         patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
         patch.object(rb, "_shared_workspace_database_url", return_value=None),
-        patch.object(rb, "load_env_var", return_value=None),
-        patch.object(rb, "_run_seed_subprocess") as seed,
+        patch.object(rb, "_production_compute_token_database_url", return_value=None),
+        patch.object(rb, "_run_seed_subprocess", side_effect=lambda *_args, **_kwargs: calls.append(True)),
     ):
-        assert rb._sync_compute_tokens() is False
-
-    seed.assert_not_called()
+        assert rb._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is False
+    assert calls == []
 
 
 def test_blanket_preflight_uses_tolerant_sync():
@@ -153,6 +150,19 @@ def test_blanket_preflight_uses_tolerant_sync():
         asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
 
     assert captured == {"gpt": True, "claude": True}
+
+
+def test_simulation_preflight_uses_restored_seed_without_prod_sync():
+    """Cloud simulation has a fresh restored seed DB but no second source DB endpoint."""
+    calls = []
+    with (
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(rb, "_is_simulate_mode", return_value=True),
+        patch.object(rb, "_sync_compute_tokens", side_effect=lambda **_kwargs: calls.append(True)),
+    ):
+        rb._refresh_local_compute_tokens_for_run("http://localhost:3001")
+
+    assert calls == []
 
 
 def test_live_fixture_sync_tolerates_missing_gpt_code():

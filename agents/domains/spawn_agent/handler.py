@@ -145,6 +145,56 @@ def _prior_explore_agent_count(workflow_instance) -> int:
     return count
 
 
+def _explore_slot_reservations(workflow_instance) -> set[str]:
+    """Return per-workflow reservations for same-turn explore calls.
+
+    Regular tool calls execute concurrently. Without a synchronous reservation,
+    several calls can all observe the same number of finished children and each
+    claim the final city slot before any IN_PROGRESS event reaches context.
+    """
+    reservations = getattr(workflow_instance, "_explore_slot_reservations", None)
+    if not isinstance(reservations, set):
+        reservations = set()
+        setattr(workflow_instance, "_explore_slot_reservations", reservations)
+    return reservations
+
+
+def _explore_limit_error(expected_explore_agents: int) -> str:
+    return (
+        f"This task asked for one explore sub-agent per city and already has {expected_explore_agents} "
+        "explore agents. Use the gathered research and finish the answer instead of spawning more."
+    )
+
+
+def _has_failed_completion_feedback(workflow_instance) -> bool:
+    """Return whether a verifier asked the parent for corrective work."""
+    context = getattr(workflow_instance, "context", [])
+    if not isinstance(context, list):
+        return False
+    for msg in context:
+        if not isinstance(msg, dict) or (msg.get("role") or "").upper() != "TOOL":
+            continue
+        metadata = msg.get("metadata") or {}
+        if (
+            metadata.get("toolName") not in ("attempt_completion", "attempt_completion_with_result")
+            or metadata.get("toolStatus") != "FINISHED"
+            or not metadata.get("verifierMessage")
+        ):
+            continue
+        feedback = " ".join(
+            str(value or "")
+            for value in (metadata.get("title"), metadata.get("message"), msg.get("text"))
+        ).lower()
+        if "verifier rejected" in feedback or ("progress:" in feedback and "100%" not in feedback):
+            return True
+    return False
+
+
+def _explore_agent_capacity(workflow_instance, expected_explore_agents: int) -> int:
+    """Allow one bounded corrective explore after explicit verifier feedback."""
+    return expected_explore_agents + int(_has_failed_completion_feedback(workflow_instance))
+
+
 def _blocked_research_only_agent_type(workflow_instance, tool_call: Dict[str, Any]) -> str | None:
     """Return an explanatory error when an explore-only task tries to delegate incorrectly."""
     if not _explore_only_research_instruction(workflow_instance, tool_call):
@@ -159,15 +209,10 @@ def _blocked_research_only_agent_type(workflow_instance, tool_call: Dict[str, An
         )
     goal_text = _combined_goal_text(workflow_instance, tool_call)
     expected_explore_agents = _expected_explore_agents_for_city_task(goal_text)
-    if (
-        agent_type == "explore"
-        and expected_explore_agents is not None
-        and _prior_explore_agent_count(workflow_instance) >= expected_explore_agents
-    ):
-        return (
-            f"This task asked for one explore sub-agent per city and already has {expected_explore_agents} "
-            "explore agents. Use the gathered research and finish the answer instead of spawning more."
-        )
+    if agent_type == "explore" and expected_explore_agents is not None:
+        explore_capacity = _explore_agent_capacity(workflow_instance, expected_explore_agents)
+        if _prior_explore_agent_count(workflow_instance) >= explore_capacity:
+            return _explore_limit_error(explore_capacity)
     return None
 
 
@@ -211,21 +256,46 @@ class SpawnAgentManager(ToolManager):
             )
             return
 
-        if agent_type == "explore":
-            async for event in self._spawn_explore(workflow_instance, tool_call, tool_call_id):
-                yield event
-        elif agent_type == "browser":
-            async for event in self._spawn_browser(workflow_instance, tool_call, tool_call_id):
-                yield event
-        elif agent_type == "code":
-            async for event in self._spawn_code(workflow_instance, tool_call, tool_call_id):
-                yield event
-        elif agent_type == "general_purpose":
-            async for event in self._spawn_sub_agent(workflow_instance, tool_call, tool_call_id):
-                yield event
-        elif agent_type == "for_each":
-            async for event in self._spawn_for_each(workflow_instance, tool_call, tool_call_id):
-                yield event
+        reserved_explore_slot = False
+        if agent_type == "explore" and _explore_only_research_instruction(workflow_instance, tool_call):
+            expected_explore_agents = _expected_explore_agents_for_city_task(
+                _combined_goal_text(workflow_instance, tool_call)
+            )
+            if expected_explore_agents is not None:
+                explore_capacity = _explore_agent_capacity(workflow_instance, expected_explore_agents)
+                reservations = _explore_slot_reservations(workflow_instance)
+                occupied_slots = _prior_explore_agent_count(workflow_instance) + len(reservations)
+                if occupied_slots >= explore_capacity:
+                    yield ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title="spawn_agent failed",
+                        message=_explore_limit_error(explore_capacity),
+                        status=MessageStatus.ERROR,
+                        metadata={"agentType": agent_type},
+                    )
+                    return
+                reservations.add(tool_call_id)
+                reserved_explore_slot = True
+
+        try:
+            if agent_type == "explore":
+                async for event in self._spawn_explore(workflow_instance, tool_call, tool_call_id):
+                    yield event
+            elif agent_type == "browser":
+                async for event in self._spawn_browser(workflow_instance, tool_call, tool_call_id):
+                    yield event
+            elif agent_type == "code":
+                async for event in self._spawn_code(workflow_instance, tool_call, tool_call_id):
+                    yield event
+            elif agent_type == "general_purpose":
+                async for event in self._spawn_sub_agent(workflow_instance, tool_call, tool_call_id):
+                    yield event
+            elif agent_type == "for_each":
+                async for event in self._spawn_for_each(workflow_instance, tool_call, tool_call_id):
+                    yield event
+        finally:
+            if reserved_explore_slot:
+                _explore_slot_reservations(workflow_instance).discard(tool_call_id)
 
     async def _spawn_explore(  # noqa: C901
         self,

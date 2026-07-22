@@ -212,8 +212,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "request_payment_card": {
         "description": (
-            "Request a one-time virtual payment card for the current checkout. Call this when you reach a "
-            "checkout/payment page and BEFORE typing any card details. First read the full itemized receipt off "
+            "Request a one-time virtual payment card for the current checkout only if checkout requires you to "
+            "enter new card details. If a valid saved payment method is already selected and no card entry is "
+            "required, do not call this tool; continue with that saved method. Before typing any new card details, "
+            "first read the full itemized receipt off "
             "the page and visit each product page as needed. Every item MUST include its canonical product-detail "
             "URL (never the cart or checkout URL), numeric rating, and numeric review count, plus its name, image "
             "URL if visible, unit price in cents, quantity, and line total in cents. Include every fee, the "
@@ -329,7 +331,13 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                                 "quantity": {"type": "string", "description": "Visible quantity"},
                                 "description": {"type": "string", "description": "Visible variant details"},
                                 "rating": {"type": "string", "description": "Required numeric rating"},
-                                "review_count": {"type": "string", "description": "Required numeric review count"},
+                                "review_count": {
+                                    "type": "string",
+                                    "description": (
+                                        "Required numeric review count followed by 'reviews' or 'ratings', "
+                                        "for example '312 reviews'"
+                                    ),
+                                },
                                 "image_url": {"type": "string", "description": "Best visible product image URL"},
                                 "product_url": {
                                     "type": "string",
@@ -534,6 +542,7 @@ action envelope in text; use the provided tool call.
 - NEVER delete or close any user account
 - NEVER sign legal agreements on the user's behalf (accepting Terms of Service checkboxes is acceptable)
 - When making payments or posting to social media, you may be asked to confirm with the user first
+- Once a requested purchase is visibly placed or an order confirmation is shown, do not open cancellation, return, edit, or modification flows. The pre-write checkout state and prior actions are retained for verification; call attempt_completion promptly from the confirmation or order-details page instead of reopening product or checkout pages solely to reconstruct evidence.
 
 # Authentication
 

@@ -230,15 +230,22 @@ async function runAll(): Promise<void> {
   console.log('Integration Health Black-Box Checks\n');
   console.log('Validating external credentials used by smoke benchmarks...\n');
 
+  const excludeAnthropic = ['1', 'true', 'yes'].includes(
+    (process.env.ROSE_EXCLUDE_ANTHROPIC_FAMILY || '').trim().toLowerCase()
+  );
   const checks = [
     { name: 'E2B (sandboxes)', fn: checkE2B },
     { name: 'Steel (browser sessions)', fn: checkSteel },
     { name: 'Parallel.ai (web search)', fn: checkParallel, warnOnly: true },
-    {
-      name: 'Anthropic (Claude API)',
-      fn: checkAnthropic,
-      overridden: hasGateOverride('credential-health:anthropic'),
-    },
+    ...(!excludeAnthropic
+      ? [
+          {
+            name: 'Anthropic (Claude API)',
+            fn: checkAnthropic,
+            overridden: hasGateOverride('credential-health:anthropic'),
+          },
+        ]
+      : []),
     { name: 'OpenRouter (LLM judge)', fn: checkOpenRouter },
     { name: 'Supabase (auth/DB)', fn: checkSupabase },
   ];
@@ -255,6 +262,10 @@ async function runAll(): Promise<void> {
         : runCheck(check.name, check.fn)
     )
   );
+
+  if (excludeAnthropic) {
+    console.log('  SKIP  Anthropic (Claude API) -- excluded by ROSE_EXCLUDE_ANTHROPIC_FAMILY\n');
+  }
 
   for (let i = 0; i < results.length; i++) {
     const r = results[i];

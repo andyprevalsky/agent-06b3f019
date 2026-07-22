@@ -1769,14 +1769,20 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
     """Amazon uses the standard completed-commerce runtime and preserves cart-path semantics."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
-    approved_prompt = (
+    completed_purchase_prompt = (
+        "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. "
+        "Use my saved/default Amazon payment method and shipping address; do not request or add a new "
+        "payment card when a valid saved method is already selected. "
+        "Avoid using the Buy Now button as the purchase path, but make sure purchase is completed."
+    )
+    auth_assistance_prompt = (
         "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. "
         "Avoid using the Buy Now button as the purchase path, but make sure purchase is completed."
     )
     task = get_task_by_name("browser-agent-amazon-cookie-payment")
     assert task.description.endswith("complete the purchase.")
-    assert task.prompt == approved_prompt
-    assert get_task_by_name("browser-agent").prompt == approved_prompt
+    assert task.prompt == completed_purchase_prompt
+    assert get_task_by_name("browser-agent").prompt == auth_assistance_prompt
     assert task.approval_handling == "auto_approve"
     assert task.expected_attention_kind is None
     assert task.expected_attention_kind_any_of == ["payment_approval", "write_lock"]
@@ -2247,6 +2253,42 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
             os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
 
     assert raised, "live fixture must fail closed when credential refresh fails"
+
+
+def test_cloud_compute_token_sync_has_an_explicit_production_source():
+    """A cloud clone without a shared local DB must still satisfy seed-local's source contract."""
+    from types import SimpleNamespace
+
+    import benchmarks.run_benchmark as bench
+
+    captured = {}
+    originals = {
+        "local": bench._local_victoria_database_url,
+        "shared": bench._shared_workspace_database_url,
+        "production": bench._production_compute_token_database_url,
+        "seed": bench._run_seed_subprocess,
+    }
+    try:
+        bench._local_victoria_database_url = lambda: "postgresql://local/victoria"
+        bench._shared_workspace_database_url = lambda: None
+        bench._production_compute_token_database_url = (
+            lambda _local: "postgresql://prod/victoria"
+        )
+
+        def fake_seed(_command, **kwargs):
+            captured.update(kwargs["env"])
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        bench._run_seed_subprocess = fake_seed
+        assert bench._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is True
+    finally:
+        bench._local_victoria_database_url = originals["local"]
+        bench._shared_workspace_database_url = originals["shared"]
+        bench._production_compute_token_database_url = originals["production"]
+        bench._run_seed_subprocess = originals["seed"]
+
+    assert captured["DATABASE_URL"] == "postgresql://local/victoria"
+    assert captured["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://prod/victoria"
 
 
 def test_expected_passkey_credential_ref_is_required_even_when_approval_is_terminal():
@@ -8636,6 +8678,10 @@ async def run_all_tests():
     r.record(
         "live_fixture_auth_failure_is_fatal",
         test_live_fixture_fails_when_live_auth_refresh_fails,
+    )
+    r.record(
+        "cloud_compute_token_source_is_explicit",
+        test_cloud_compute_token_sync_has_an_explicit_production_source,
     )
     r.record(
         "expected_passkey_credential_ref",
