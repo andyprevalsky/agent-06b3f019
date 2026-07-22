@@ -709,6 +709,8 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "scripts/setup-benchmark-payment.ts" in helper
     assert "DATABASE_URL=" in helper
     assert "export BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1" in helper
+    assert "unset FAST_MODE_CACHE_DATABASE_URL" in helper
+    assert "export FAST_MODE_CACHE_USE_LOCAL=1" in helper
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():
