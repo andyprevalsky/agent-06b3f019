@@ -1187,6 +1187,7 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
     """
     from helpers.llm import call_llm_activity, check_progress
     from loop import run_agent as run_mod
+    from temporalio.exceptions import ApplicationError
 
     response_schema = {
         "fields": [
@@ -1234,11 +1235,16 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
     async def mock_execute_activity(fn, args=None, **_kwargs):
         if fn is call_llm_activity:
             llm_calls.append(args)
-            advertised_tools = args[2]
-            # Reproduce the live Amazon failure: GPT chose spawn_agent three
-            # times when it was still advertised despite a completion-only
-            # instruction and validator.
-            tool_name = "attempt_completion" if advertised_tools == ["attempt_completion"] else "spawn_agent"
+            required_tool = args[11]
+            # The real activity rejects a wrong required tool non-retryably;
+            # run_agent, not Temporal, owns the next semantic turn.
+            if len(llm_calls) == 1:
+                raise ApplicationError(
+                    "LLM must call exactly one tool, 'attempt_completion'. Got: ['spawn_agent']",
+                    type="LLMStructuredOutputError",
+                    non_retryable=True,
+                )
+            tool_name = "attempt_completion" if required_tool == "attempt_completion" else "spawn_agent"
             tool_call = {"tool": tool_name}
             if tool_name == "spawn_agent":
                 tool_call.update(
@@ -1271,7 +1277,10 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
     async def prompt():
         return "System prompt"
 
-    with patch.object(run_mod.workflow, "execute_activity", new=AsyncMock(side_effect=mock_execute_activity)):
+    with (
+        patch.object(run_mod.workflow, "execute_activity", new=AsyncMock(side_effect=mock_execute_activity)),
+        patch.object(run_mod.asyncio, "sleep", new=AsyncMock()),
+    ):
         result = await run_mod.run_agent(
             agent_id="amazon-parent",
             user_id="user-test",
@@ -1283,16 +1292,18 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
             is_inside_temporal_activity=False,
             post_message=AsyncMock(),
             execute_tool=execute_tool,
-            max_iterations=1,
+            max_iterations=2,
             skip_status_updates=True,
             response_schema=response_schema,
         )
 
     assert result["status"] == "completed"
     assert executed_tools == ["attempt_completion"]
-    assert llm_calls[0][2] == ["spawn_agent", "attempt_completion"]
-    assert llm_calls[0][11] == "attempt_completion"
-    assert "already completed" in llm_calls[0][10]
+    assert len(llm_calls) == 2
+    for call in llm_calls:
+        assert call[2] == ["spawn_agent", "attempt_completion"]
+        assert call[11] == "attempt_completion"
+        assert "already completed" in call[10]
 
 
 async def test_completed_child_required_tool_is_enforced_inside_direct_activity():

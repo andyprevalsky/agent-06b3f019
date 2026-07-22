@@ -835,9 +835,7 @@ async def test_fetch_compute_token_activity_excludes_claude_tokens_by_policy():
         }
     )
 
-    with patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}), patch(
-        "temporalio.activity.heartbeat"
-    ):
+    with patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}), patch("temporalio.activity.heartbeat"):
         from helpers.llm import fetch_compute_token_activity
 
         result = await fetch_compute_token_activity("user-1")
@@ -3092,6 +3090,62 @@ async def test_call_llm_activity_marks_structured_contract_failures_non_retryabl
     # Bounded in-activity re-generation (1 initial + MAX_STRUCTURED_PARSE_RETRIES),
     # then surfaced non-retryable — so it is not multiplied further by Temporal.
     assert completion_calls == 3
+
+
+async def test_call_llm_activity_rejects_wrong_required_tool_non_retryably():
+    """An allowed but wrong tool must never escape a completion-only handoff."""
+    import httpx
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_llm_activity
+    from temporalio.exceptions import ApplicationError
+
+    payload = {
+        "actual_model": "claude-sonnet-4-6",
+        "choices": [
+            {
+                "delta": {
+                    "content": json.dumps(
+                        {
+                            "response": "",
+                            "tool_calls": [{"tool": "web_search", "query": "repeat the completed work"}],
+                        }
+                    )
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
+    }
+    completion_calls = 0
+
+    def handler(req):
+        nonlocal completion_calls
+        if "/completions" in str(req.url):
+            completion_calls += 1
+            return httpx.Response(200, text=_sse_body([payload]))
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+
+    with patch("temporalio.activity.heartbeat"):
+        try:
+            await call_llm_activity(
+                messages_or_agent_id=[{"role": "user", "content": "Finish from the completed child"}],
+                model="rose-labs/rose-1-lite",
+                tool_names=["web_search", "attempt_completion"],
+                reasoning_max_tokens=0,
+                call_site="required-tool-contract-test",
+                required_tool="attempt_completion",
+            )
+            error = None
+        except ApplicationError as exc:
+            error = exc
+
+    assert error is not None
+    assert error.non_retryable is True
+    assert error.type == "LLMStructuredOutputError"
+    assert "Got: ['web_search']" in str(error)
+    assert completion_calls == 1
 
 
 async def test_call_llm_activity_with_agent_id_reads_shared_context():
@@ -6001,6 +6055,10 @@ async def run_all_tests():
     await r.record_async(
         "call_llm_activity_structured_contract_non_retryable",
         test_call_llm_activity_marks_structured_contract_failures_non_retryable,
+    )
+    await r.record_async(
+        "call_llm_activity_required_tool_non_retryable",
+        test_call_llm_activity_rejects_wrong_required_tool_non_retryably,
     )
     await r.record_async("mark_claude_token_rate_limited_exception", test_mark_claude_token_rate_limited_exception_path)
     await r.record_async("fetch_claude_max_token_exception", test_fetch_claude_max_token_exception_path)
