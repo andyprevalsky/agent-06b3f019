@@ -2,6 +2,7 @@
  * Browser-session domain repo — all Prisma calls.
  */
 
+import type { BrowserControlState } from '@prisma/client';
 import { prisma } from '../../providers/database';
 
 /**
@@ -105,6 +106,54 @@ export async function findSessionByTaskId(taskId: string) {
     where: { id: taskId },
     include: { context: { include: { providerProfiles: true } } },
   });
+}
+
+export async function findBrowserControlRecord(taskId: string) {
+  return prisma.browserSession.findUnique({
+    where: { id: taskId },
+    select: {
+      id: true,
+      status: true,
+      controlState: true,
+      controlLeaseExpiresAt: true,
+      debugUrl: true,
+      agentId: true,
+      context: { select: { userId: true } },
+    },
+  });
+}
+
+export async function findAgentStatus(agentId: string) {
+  return prisma.agent.findUnique({ where: { id: agentId }, select: { status: true } });
+}
+
+export async function transitionBrowserControlState(
+  taskId: string,
+  expectedStates: BrowserControlState[],
+  controlState: BrowserControlState,
+  controlLeaseExpiresAt: Date | null
+): Promise<boolean> {
+  const result = await prisma.browserSession.updateMany({
+    where: { id: taskId, controlState: { in: expectedStates } },
+    data: { controlState, controlLeaseExpiresAt },
+  });
+  return result.count === 1;
+}
+
+export async function expireBrowserControlLease(
+  taskId: string,
+  expectedState: BrowserControlState,
+  expectedLeaseExpiresAt: Date
+): Promise<boolean> {
+  const result = await prisma.browserSession.updateMany({
+    where: {
+      id: taskId,
+      controlState: expectedState,
+      controlLeaseExpiresAt: expectedLeaseExpiresAt,
+    },
+    data: { controlState: 'AGENT', controlLeaseExpiresAt: null },
+  });
+  return result.count === 1;
 }
 
 /**

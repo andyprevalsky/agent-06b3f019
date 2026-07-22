@@ -11379,6 +11379,156 @@ async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
 # ========================================
 
 
+def test_rotate_ip_reuses_the_streamed_tool_call_id():
+    """One LLM rotate_ip decision must produce one progress-tool lifecycle."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3.handler import (
+        _browser_action_tool_call_id,
+        _spawn_browser_agent_activity_v3_real,
+    )
+
+    llm_result = {"tool_call_id": "call_rotate_ip_123"}
+
+    assert _browser_action_tool_call_id(llm_result) == "call_rotate_ip_123"
+    assert _browser_action_tool_call_id(llm_result) == "call_rotate_ip_123"
+
+    # Cement the integration, not only the helper: the rotate branch must use
+    # the streamed id and must not allocate a second persisted lifecycle id.
+    activity_source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
+    rotate_branch = activity_source.split('if action_name == "rotate_ip":', 1)[1].split(
+        "# Add action result to history", 1
+    )[0]
+    assert "rotate_call_id = _browser_action_tool_call_id(llm_result)" in rotate_branch
+    assert "rotate_call_id = str(uuid_module.uuid4())" not in rotate_branch
+
+
+async def test_playwright_page_tracks_browser_use_tab_focus():
+    """Humanized clicks, recorder, and live view must follow browser-use focus."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3.handler import (
+        _rebind_browser_tab_runtime,
+        _spawn_browser_agent_activity_v3_real,
+    )
+
+    class FakeCdpSession:
+        def __init__(self, target_id):
+            self.target_id = target_id
+            self.detached = False
+
+        async def send(self, method):
+            assert method == "Target.getTargetInfo"
+            return {"targetInfo": {"targetId": self.target_id}}
+
+        async def detach(self):
+            self.detached = True
+
+    class FakePage:
+        def __init__(self, target_id, url):
+            self.target_id = target_id
+            self.url = url
+            self.front_calls = 0
+            self.mutated = False
+            page = self
+
+            class FakeMouse:
+                async def move(self, *_args, **_kwargs):
+                    return None
+
+                async def down(self, *_args, **_kwargs):
+                    return None
+
+                async def up(self, *_args, **_kwargs):
+                    page.mutated = True
+
+            self.mouse = FakeMouse()
+
+        async def bring_to_front(self):
+            self.front_calls += 1
+
+    class FakeContext:
+        def __init__(self, pages):
+            self.pages = pages
+            self.sessions = []
+
+        async def new_cdp_session(self, page):
+            session = FakeCdpSession(page.target_id)
+            self.sessions.append(session)
+            return session
+
+    page_a = FakePage("target-a", "https://doordash.example/orders")
+    page_b = FakePage("target-b", "https://google.example/sorry")
+    context = FakeContext([page_a, page_b])
+    browser = SimpleNamespace(contexts=[context])
+    dom_service = SimpleNamespace(session=SimpleNamespace(agent_focus_target_id="target-b"))
+
+    old_humanizer = SimpleNamespace(closed=False)
+
+    async def close_old_humanizer():
+        old_humanizer.closed = True
+
+    old_humanizer.close = close_old_humanizer
+    recorder = SimpleNamespace(page=page_a)
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "BROWSER_AGENT_CDP_MOUSE_TRANSPORT": "0",
+                "BROWSER_AGENT_IDLE_MOUSE_ENABLED": "0",
+                "BROWSER_AGENT_VISUAL_CURSOR_ENABLED": "0",
+            },
+        ),
+        patch("browser_tools.humanizer.asyncio.sleep", new=AsyncMock()),
+    ):
+        selected, rebound_humanizer = await _rebind_browser_tab_runtime(
+            dom_service=dom_service,
+            dom_page=SimpleNamespace(),
+            playwright_browser=browser,
+            current_page=page_a,
+            humanizer=old_humanizer,
+            browser_recorder=recorder,
+            cursor_observer=None,
+        )
+        await rebound_humanizer.click_at_coords(100, 100)
+
+    assert selected is page_b
+    assert recorder.page is page_b
+    assert old_humanizer.closed is True
+    assert page_a.front_calls == 0
+    assert page_b.front_calls == 1
+    assert page_a.mutated is False
+    assert page_b.mutated is True
+    assert all(session.detached for session in context.sessions)
+
+    activity_source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
+    assert "input_page, humanizer = await _rebind_browser_tab_runtime(" in activity_source
+
+
+async def test_browser_agent_yields_until_user_hands_control_back():
+    """The activity must acknowledge ownership and stop acting until release."""
+    from domains.spawn_browser_agent_v3.handler import _wait_for_browser_user_control
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.fetch_browser_control_state",
+            AsyncMock(side_effect=["requested", "user", "agent"]),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.acknowledge_browser_user_control",
+            AsyncMock(return_value="user"),
+        ) as acknowledge,
+        patch("domains.spawn_browser_agent_v3.handler.activity.heartbeat") as heartbeat,
+        patch("domains.spawn_browser_agent_v3.handler.asyncio.sleep", new=AsyncMock()),
+    ):
+        yielded = await _wait_for_browser_user_control(SimpleNamespace(), "task-1")
+
+    assert yielded is True
+    acknowledge.assert_awaited_once()
+    assert heartbeat.call_count == 2
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
@@ -11748,6 +11898,15 @@ async def run_all_tests():
     r.record(
         "rotation_session_metadata_provider_switch",
         test_rotation_session_metadata_tracks_provider_switch,
+    )
+    r.record("rotate_ip_stream_tool_id", test_rotate_ip_reuses_the_streamed_tool_call_id)
+    await r.record_async(
+        "playwright_page_tracks_browser_use_tab_focus",
+        test_playwright_page_tracks_browser_use_tab_focus,
+    )
+    await r.record_async(
+        "browser_agent_yields_for_user_control",
+        test_browser_agent_yields_until_user_hands_control_back,
     )
     await r.record_async("fetch_auth_options_success", test_fetch_auth_options_success)
     await r.record_async("fetch_auth_options_error", test_fetch_auth_options_error_raises)

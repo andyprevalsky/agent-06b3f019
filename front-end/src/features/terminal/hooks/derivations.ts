@@ -193,13 +193,20 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
   const panels: BrowserPanelData[] = [];
   const browserTaskIds = new Set<string>();
   const terminalToolCallIds = new Set<string>();
+  const latestTaskByToolCallId = new Map<string, string>();
 
-  messages.forEach((m) => {
+  [...messages].sort(compareBrowserMessageOrder).forEach((m) => {
     const taskId = m.metadata?.task_id;
     if (taskId && m.metadata?.toolName === 'spawn_browser_agent') {
       browserTaskIds.add(taskId);
     }
     const toolCallId = m.metadata?.toolCallId;
+    if (taskId && toolCallId && isBrowserInitMessage(m)) {
+      // A Temporal retry can allocate a new task id for the same logical tool
+      // call. Its init supersedes the earlier attempt even if hydration or
+      // realtime input does not contain the prior attempt's terminal event.
+      latestTaskByToolCallId.set(toolCallId, taskId);
+    }
     if (toolCallId && isToolCallScopedTerminalMessage(m)) {
       terminalToolCallIds.add(toolCallId);
     }
@@ -225,8 +232,10 @@ export function computeActiveBrowserPanels(messages: Message[]): BrowserPanelDat
     const isComplete =
       hasTerminalTaskMessage ||
       (typeof initToolCallId === 'string' && terminalToolCallIds.has(initToolCallId));
+    const isSuperseded =
+      typeof initToolCallId === 'string' && latestTaskByToolCallId.get(initToolCallId) !== taskId;
 
-    if (!isComplete && initMessage) {
+    if (!isComplete && !isSuperseded && initMessage) {
       panels.push({
         taskId,
         browserUrl:

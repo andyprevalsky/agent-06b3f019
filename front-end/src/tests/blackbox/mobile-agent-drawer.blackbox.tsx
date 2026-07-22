@@ -111,4 +111,15 @@ describe('MobileAgentDrawer', () => {
     await u.click(screen.getByRole('button', { name: 'Open menu' }));
     expect(await screen.findByText('No agents yet')).toBeInTheDocument();
   });
+
+  it('keeps the tab switcher below the iOS safe-area inset', async () => {
+    const u = userEvent.setup();
+    renderWithProviders(<MobileAgentDrawer {...defaultProps()} />);
+
+    await u.click(screen.getByRole('button', { name: 'Open menu' }));
+
+    expect(await screen.findByRole('dialog')).toHaveClass('pt-[var(--safe-area-inset-top)]');
+    expect(screen.getByRole('button', { name: 'Agents' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Notifications' })).toBeVisible();
+  });
 });

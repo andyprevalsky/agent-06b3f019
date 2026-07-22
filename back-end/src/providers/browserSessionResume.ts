@@ -3,7 +3,13 @@ import { prisma } from './database';
 import { DEFAULT_GEOLOCATION } from './geoip';
 import { createLogger } from './logger';
 import { canonicalAuthRealm } from './authRealm';
-import { getFingerprintInjectionData, injectUserData, resumeSession, rotateProxy } from './browser';
+import {
+  getBrowserCaptchaTelemetry,
+  getFingerprintInjectionData,
+  injectUserData,
+  resumeSession,
+  rotateProxy,
+} from './browser';
 import {
   ROTATION_CAP,
   rotationStepLabel,
@@ -32,9 +38,26 @@ export class RotationSessionNotFoundError extends Error {
 
 const log = createLogger('BrowserSessionResume');
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('CAPTCHA telemetry request timed out')),
+          timeoutMs
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 type InjectionResult = Awaited<ReturnType<typeof injectUserData>>;
 
-interface SerializedPassword {
+export interface SerializedPassword {
   id: string;
   origin: string;
   username: string;
@@ -42,7 +65,7 @@ interface SerializedPassword {
   dateLastUsed: number | null;
 }
 
-interface UserSettings {
+export interface UserSettings {
   name: string | null;
   phone: string | null;
   addressLine1: string | null;
@@ -57,7 +80,7 @@ interface UserSettings {
   customSystemPrompt: string | null;
 }
 
-interface SerializedPasskey {
+export interface SerializedPasskey {
   id: string;
   credentialId: string;
   encryptedPrivateKey: string;
@@ -344,6 +367,23 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
     recoveryAction: step.recoveryAction,
   });
 
+  const captchaTelemetryBeforeRotation = await withTimeout(
+    getBrowserCaptchaTelemetry(taskId),
+    3_000
+  ).catch((error) => {
+    log.warn('Failed to read CAPTCHA telemetry before browser rotation', {
+      taskId,
+      currentProvider,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  });
+  log.info('Captured CAPTCHA telemetry before browser rotation', {
+    taskId,
+    currentProvider,
+    captchaTelemetry: captchaTelemetryBeforeRotation,
+  });
+
   let result: Awaited<ReturnType<typeof rotateProxy>>;
   try {
     result = await rotateProxy(taskId, step);
@@ -381,6 +421,10 @@ export async function rotateBrowserProxy(taskId: string, userId?: string, curren
     rotations_remaining: rotationsRemaining,
     next_recovery: nextRecovery,
     rotation_message: buildRotationMessage(effectiveStep, rotationsUsed, rotationsRemaining),
+    captcha_telemetry_before_rotation: captchaTelemetryBeforeRotation,
+    // Steel exposes an in-flight flag. Kernel currently exposes terminal
+    // outcomes only, so preserve unknown as null instead of reporting false.
+    rotation_interrupted_captcha_solver: captchaTelemetryBeforeRotation?.isSolving ?? null,
   };
 }
 /* c8 ignore stop */
