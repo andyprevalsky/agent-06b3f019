@@ -722,18 +722,25 @@ print_code_provenance() {
         echo "  local  : $REQUESTED_BENCH_REF (complete delta ships on fetchable base)"
     fi
     echo "  pushed : $pushed"
-    untracked_count="$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | wc -l | tr -d ' ')"
+    untracked_count="$(
+        git -C "$ROOT_DIR" ls-files --others --exclude-standard \
+            | awk '!/^agents\/benchmarks\/history\/[^/]+\.jsonl$/ { count += 1 } END { print count + 0 }'
+    )"
     if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" = "1" ]; then
         echo "  diff   : local changes intentionally excluded (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (pinned; local patch excluded)"
-    elif ! cloudbench_worktree_has_changes "$ROOT_DIR"; then
+    elif [ "$REQUESTED_BENCH_REF" = "$BENCH_REF" ] \
+         && ! cloudbench_worktree_has_changes "$ROOT_DIR"; then
         echo "  diff   : clean working tree (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (clean)"
     else
-        dirtystat="$(git -C "$ROOT_DIR" diff --shortstat "$BENCH_REF" 2>/dev/null | sed 's/^ *//')"
+        dirtystat="$(git -C "$ROOT_DIR" diff --shortstat "$BENCH_REF" -- . ":(exclude)agents/benchmarks/history/*.jsonl" 2>/dev/null | sed 's/^ *//')"
         echo "  diff   : DIRTY — shipped as a patch on top of $BENCH_REF: $dirtystat, $untracked_count untracked"
-        git -C "$ROOT_DIR" diff --stat "$BENCH_REF" 2>/dev/null | sed 's/^/           /' | tail -30
-        git -C "$ROOT_DIR" ls-files --others --exclude-standard | sed 's/^/           + /' | tail -30
+        git -C "$ROOT_DIR" diff --stat "$BENCH_REF" -- . ":(exclude)agents/benchmarks/history/*.jsonl" 2>/dev/null | sed 's/^/           /' | tail -30
+        git -C "$ROOT_DIR" ls-files --others --exclude-standard \
+            | awk '!/^agents\/benchmarks\/history\/[^/]+\.jsonl$/' \
+            | sed 's/^/           + /' \
+            | tail -30
         CODE_SUMMARY="$branch@$head_sha +patch($dirtystat, $untracked_count untracked)"
     fi
     echo "══════════════════════════════════════════════════════════"
@@ -3042,7 +3049,7 @@ BOX_WMH_PORT="3007"        # run.sh WMH_PORT = base+6
 FLEET_PATCH_FILE=""
 FLEET_PATCH_SHA256=""
 if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
-   && cloudbench_worktree_has_changes "$ROOT_DIR"; then
+   && { [ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] || cloudbench_worktree_has_changes "$ROOT_DIR"; }; then
     FLEET_PATCH_FILE="$(mktemp)"
     if ! bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF" > "$FLEET_PATCH_FILE" \
         || [ ! -s "$FLEET_PATCH_FILE" ]; then
