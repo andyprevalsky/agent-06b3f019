@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -19,11 +20,12 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, TextIO
 
 AGENTS_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = AGENTS_DIR.parent
@@ -37,6 +39,10 @@ SERVICES_MANIFEST = REPO_ROOT / ".context" / "services.json"
 SERVICE_LOG = REPO_ROOT / ".context" / "local-benchmark-services.log"
 TUNNEL_LOG = REPO_ROOT / ".context" / "local-benchmark-ngrok.log"
 BENCHMARK_CONTEXT_ROOT = REPO_ROOT / ".context" / "benchmarks"
+# Port reservations must coordinate sibling Conductor worktrees on this host.
+# Persistent empty lock files are harmless; flock ownership ends with the process.
+PORT_RANGE_LOCK_ROOT = Path(tempfile.gettempdir()) / f"rose-benchmark-port-locks-{os.getuid()}"
+PORT_RANGE_OFFSETS = (0, 1, 2, 3, 4, 5, 6, 9)
 CHECKPOINT_ROOT = REPO_ROOT / ".context" / "benchmark-checkpoints"
 RUNS_DIR = AGENTS_DIR / "benchmarks" / "runs"
 # A fresh isolated stack syncs the production-backed benchmark fixture before
@@ -51,6 +57,8 @@ AGENT_PAYMENT_TASK_NAMES = {
     "agent-payment-setup-resume",
 }
 BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+_PORT_RANGE_RESERVATIONS: dict[int, tuple[TextIO, ...]] = {}
+_RESERVED_PORTS: set[int] = set()
 
 
 @dataclass(frozen=True)
@@ -130,8 +138,50 @@ def _docker_ports_snapshot() -> str:
     return result.stdout if result.returncode == 0 else ""
 
 
+def _reserve_port_range(base: int) -> bool:
+    """Hold every occupied port across processes until the stack is ready."""
+    ports = tuple(base + offset for offset in PORT_RANGE_OFFSETS)
+    if base in _PORT_RANGE_RESERVATIONS or _RESERVED_PORTS.intersection(ports):
+        return False
+    PORT_RANGE_LOCK_ROOT.mkdir(parents=True, exist_ok=True)
+    handles: list[TextIO] = []
+    for port in ports:
+        handle = open(PORT_RANGE_LOCK_ROOT / f"{port}.lock", "a+")
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.close()
+            for acquired in reversed(handles):
+                fcntl.flock(acquired.fileno(), fcntl.LOCK_UN)
+                acquired.close()
+            return False
+        except BaseException:
+            handle.close()
+            for acquired in reversed(handles):
+                with contextlib.suppress(OSError):
+                    fcntl.flock(acquired.fileno(), fcntl.LOCK_UN)
+                acquired.close()
+            raise
+        handles.append(handle)
+    _PORT_RANGE_RESERVATIONS[base] = tuple(handles)
+    _RESERVED_PORTS.update(ports)
+    return True
+
+
+def _release_port_range(base: int | None) -> None:
+    if base is None:
+        return
+    handles = _PORT_RANGE_RESERVATIONS.pop(base, None)
+    if handles is None:
+        return
+    _RESERVED_PORTS.difference_update(base + offset for offset in PORT_RANGE_OFFSETS)
+    for handle in reversed(handles):
+        with contextlib.suppress(OSError):
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        handle.close()
+
+
 def allocate_port_range(preferred_base: int | None = None) -> int:
-    offsets = (0, 1, 2, 3, 4, 5, 9)
     docker_ports = _docker_ports_snapshot()
     candidates: list[int] = []
     if preferred_base:
@@ -141,10 +191,13 @@ def allocate_port_range(preferred_base: int | None = None) -> int:
     candidates.extend(range(start, 65500, 20))
     candidates.extend(range(55000, start, 20))
     for base in candidates:
-        if base < 1024 or base + max(offsets) >= 65535:
+        if base < 1024 or base + max(PORT_RANGE_OFFSETS) >= 65535:
             continue
-        if all(_port_is_available(base + offset, docker_ports) for offset in offsets):
+        if not _reserve_port_range(base):
+            continue
+        if all(_port_is_available(base + offset, docker_ports) for offset in PORT_RANGE_OFFSETS):
             return base
+        _release_port_range(base)
     raise RuntimeError("Could not find a free benchmark port range")
 
 
@@ -762,29 +815,39 @@ def start_services(
             resolved_model = world_model_name or os.environ.get("WMH_MODEL_NAME")
             if resolved_model:
                 env["WMH_MODEL_NAME"] = resolved_model
-    with open(stack.service_log, "w") as service_log:
-        process = subprocess.Popen(
-            ["bash", "scripts/run.sh", "--benchmark"],
-            cwd=REPO_ROOT,
-            stdout=service_log,
-            stderr=subprocess.STDOUT,
-            env=env,
-            start_new_session=True,
-        )
     try:
-        manifest = wait_for_services(stack.manifest_path, process=process, service_log=stack.service_log)
-    except BaseException:
-        # Ownership transfers to the caller only after readiness succeeds. Reap
-        # the exact process group here while its Popen handle is still available;
-        # before services.json exists, the caller cannot rediscover that group.
+        with open(stack.service_log, "w") as service_log:
+            process = subprocess.Popen(
+                ["bash", "scripts/run.sh", "--benchmark"],
+                cwd=REPO_ROOT,
+                stdout=service_log,
+                stderr=subprocess.STDOUT,
+                env=env,
+                start_new_session=True,
+            )
         try:
-            stop_services(process, stack=stack)
-        except Exception as cleanup_exc:
-            # Cleanup diagnostics must not replace the readiness failure that
-            # explains why startup aborted in the first place.
-            print(f"Warning: failed to clean up benchmark services: {cleanup_exc}", file=sys.stderr)
-        raise
-    return process, manifest
+            manifest = wait_for_services(
+                stack.manifest_path,
+                process=process,
+                service_log=stack.service_log,
+            )
+        except BaseException:
+            # Ownership transfers to the caller only after readiness succeeds.
+            # Reap the exact process group while its handle is still available.
+            try:
+                stop_services(process, stack=stack)
+            except Exception as cleanup_exc:
+                # Cleanup diagnostics must not replace the readiness failure.
+                print(
+                    f"Warning: failed to clean up benchmark services: {cleanup_exc}",
+                    file=sys.stderr,
+                )
+            raise
+        return process, manifest
+    finally:
+        # A port that is merely checked is still racy. Keep the file lock until
+        # every service has bound and passed readiness (or startup has rolled back).
+        _release_port_range(stack.base_port)
 
 
 def stop_services(process: subprocess.Popen | None = None, *, stack: ServiceStack | None = None) -> None:

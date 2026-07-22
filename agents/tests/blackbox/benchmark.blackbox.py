@@ -5891,6 +5891,7 @@ def test_local_start_services_reaps_only_its_real_process_group():
                 with (
                     patch.object(local_bench, "subprocess", SubprocessFacade),
                     patch.object(local_bench, "_stop_owned_db_from_stack_identity"),
+                    patch.object(local_bench, "_release_port_range") as release_port_range,
                     patch.object(
                         local_bench,
                         "wait_for_services",
@@ -5903,6 +5904,7 @@ def test_local_start_services_reaps_only_its_real_process_group():
                         pass
                     else:
                         raise AssertionError("start_services unexpectedly ignored the readiness failure")
+                release_port_range.assert_called_once_with(stack.base_port)
 
             assert owned_process is not None
             child_pid = int(child_pid_path.read_text())
@@ -5973,6 +5975,88 @@ def test_local_stop_services_removes_pre_manifest_owned_database():
         "rm",
         "victoria-pgdata-blackbox-bench-cleanup-owned-unique",
     ] in commands
+
+
+def test_local_port_range_allocation_is_reserved_across_processes():
+    """Concurrent launchers must not select identical or overlapping ranges."""
+    from benchmarks import local as local_bench
+
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import time; "
+                "from benchmarks.local import allocate_port_range; "
+                "print(allocate_port_range(62000), flush=True); "
+                "time.sleep(60)"
+            ),
+        ],
+        cwd=local_bench.AGENTS_DIR,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    parent_bases = []
+    try:
+        assert child.stdout is not None
+        child_base_text = child.stdout.readline().strip()
+        assert child_base_text.isdigit(), f"child port allocation failed: {child_base_text!r}"
+        child_base = int(child_base_text)
+        occupied = lambda base: {base + offset for offset in local_bench.PORT_RANGE_OFFSETS}
+
+        overlapping_base = local_bench.allocate_port_range(child_base - 1)
+        parent_bases.append(overlapping_base)
+        assert occupied(overlapping_base).isdisjoint(occupied(child_base)), (
+            "concurrent launchers reserved overlapping port ranges"
+        )
+
+        exact_base = local_bench.allocate_port_range(child_base)
+        parent_bases.append(exact_base)
+        assert occupied(exact_base).isdisjoint(occupied(child_base)), (
+            "concurrent launchers reserved the same port range"
+        )
+    finally:
+        release = getattr(local_bench, "_release_port_range", None)
+        if release is not None:
+            for parent_base in parent_bases:
+                release(parent_base)
+        child.terminate()
+        child.wait(timeout=5)
+
+    assert local_bench.PORT_RANGE_LOCK_ROOT.parent == Path(tempfile.gettempdir()), (
+        "port reservations must coordinate sibling worktrees on the same host"
+    )
+
+
+def test_local_start_services_releases_port_reservation_after_readiness():
+    """A ready isolated stack must release its startup-only port reservation."""
+    from unittest.mock import Mock, patch
+
+    from benchmarks import local as local_bench
+
+    with tempfile.TemporaryDirectory() as tmp:
+        context_dir = Path(tmp) / "ready-port-release"
+        stack = local_bench.ServiceStack(
+            run_id="ready-port-release",
+            context_dir=context_dir,
+            manifest_path=context_dir / "services.json",
+            service_log=context_dir / "services.log",
+            isolated=True,
+            workspace_name="blackbox-bench-ready-port-release",
+            base_port=55130,
+        )
+        process = Mock()
+        manifest = {"backend": "http://localhost:55130"}
+        with (
+            patch.object(local_bench.subprocess, "Popen", return_value=process),
+            patch.object(local_bench, "wait_for_services", return_value=manifest),
+            patch.object(local_bench, "_release_port_range") as release_port_range,
+        ):
+            result = local_bench.start_services(stack, clean_first=False)
+
+    assert result == (process, manifest)
+    release_port_range.assert_called_once_with(stack.base_port)
 
 
 def test_run_sh_seed_dump_targets_isolated_database_atomically():
@@ -9161,6 +9245,14 @@ async def run_all_tests():
     r.record(
         "local_stop_services_pre_manifest_database_cleanup",
         test_local_stop_services_removes_pre_manifest_owned_database,
+    )
+    r.record(
+        "local_port_range_cross_process_reservation",
+        test_local_port_range_allocation_is_reserved_across_processes,
+    )
+    r.record(
+        "local_start_services_ready_port_release",
+        test_local_start_services_releases_port_reservation_after_readiness,
     )
     r.record(
         "run_sh_seed_dump_isolated_database",
