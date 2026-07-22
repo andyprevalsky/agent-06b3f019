@@ -460,7 +460,7 @@ agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync
 
 Both commands must pass. This operational verification wiring is pre-authorized by Step 0p and must never pause for human approval.
 
-## Step 4c: Credential health check
+## Step 4c: Credential health check (runs unless explicitly overridden)
 
 After all parallel Group 3 branches finish, validate every external credential
 (E2B, Steel, Parallel.ai, Anthropic, OpenRouter, Supabase) with the focused test
