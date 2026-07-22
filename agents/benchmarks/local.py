@@ -602,6 +602,18 @@ def configure_task_environment(tasks: Sequence[str]) -> None:
     if needs_frontend_tunnel(tasks):
         os.environ["BENCHMARK_BUNDLED_FRONTEND"] = "true"
     selected = set(tasks)
+    if AGENT_PAYMENT_TASK_NAMES & selected:
+        # Keep the consolidated isolated lane behaviorally equivalent to the
+        # former per-task lifecycle launcher. Payment tasks share one fixture,
+        # must execute uncached, and need the allowlisted hosted callback even
+        # though the checkout itself runs against the local bundled frontend.
+        os.environ["ALLOW_TEMPORAL_CLEANUP"] = "true"
+        os.environ["BENCHMARK_FAST_MODE_CACHE"] = "false"
+        os.environ["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
+        if not os.environ.get("AGENTCARD_ONBOARDING_RETURN_URL"):
+            os.environ["AGENTCARD_ONBOARDING_RETURN_URL"] = (
+                "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
+            )
     if any(task.name in selected and task.requires_claude_code for task in all_tasks()):
         os.environ["ROSE_CODE_AGENT_PROVIDER"] = "claude"
 

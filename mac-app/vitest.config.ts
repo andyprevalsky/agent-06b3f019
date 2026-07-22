@@ -43,12 +43,11 @@ export default defineConfig({
     include: ['tests/blackbox/**/*.blackbox.{ts,tsx}'],
     globals: true,
     css: false,
-    pool: 'forks',
-    // /deploy intentionally runs coverage and blackbox verification together.
-    // Bound each Vitest process so the pair cannot over-subscribe every CPU
-    // core and starve async module setup past the suite's real timeouts.
+    pool: 'threads',
+    // Four thread workers are the measured optimum for the single combined
+    // coverage/blackbox gate; threads avoid repeated Electron fixture startup.
     minWorkers: 1,
-    maxWorkers: 2,
+    maxWorkers: 4,
     // Both verification jobs run at the same time and exercise large dynamic
     // Electron module graphs. Keep the same contention-safe ceiling for the
     // non-coverage suite; the old 10s limit could expire while importing the

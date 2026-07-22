@@ -539,7 +539,10 @@ async function testAdminHappyWeekly() {
     ]) {
       const step = body.funnel.steps.find((item) => item.id === id);
       if (step?.status !== 'ready' || step.count === null) {
-        throw new Error(`Configured Amplitude funnel step ${id} must have a real count`);
+        throw new Error(
+          `Configured Amplitude funnel step ${id} must have a real count ` +
+            `(status=${step?.status ?? 'missing'}, detail=${step?.detail ?? 'missing'})`
+        );
       }
     }
   }
@@ -610,6 +613,16 @@ async function testWaitlist_excludesPhonelessSignups() {
 }
 
 async function main() {
+  const liveOnly = process.env.ADMIN_HEALTH_LIVE_ONLY === '1';
+  if (
+    liveOnly &&
+    (!process.env.AMPLITUDE_API_KEY?.trim() || !process.env.AMPLITUDE_SECRET_KEY?.trim())
+  ) {
+    throw new Error(
+      'ADMIN_HEALTH_LIVE_ONLY=1 requires AMPLITUDE_API_KEY and AMPLITUDE_SECRET_KEY; ' +
+        'the live Amplitude deploy gate must not pass without provider credentials'
+    );
+  }
   const strictLiveTests = [
     { name: 'GET /api/admin-health no auth -> 401', fn: testNoAuth },
     { name: 'GET /api/admin-health non-admin -> 403', fn: testNonAdminForbidden },
@@ -628,10 +641,12 @@ async function main() {
   // The weekly case is the strict live-Amplitude integration probe. Run it
   // before broader period-shape checks so sibling cases cannot spend the
   // provider's shared chart-query budget first.
-  const results = [
-    ...(await runPool(strictLiveTests, 1)),
-    ...(await runPool(remainingTests, CASE_CONCURRENCY)),
-  ];
+  const results = liveOnly
+    ? await runPool([strictLiveTests[2]], 1)
+    : [
+        ...(await runPool(strictLiveTests, 1)),
+        ...(await runPool(remainingTests, CASE_CONCURRENCY)),
+      ];
   const failed = results.filter((result) => !result.passed);
   for (const result of results) {
     const icon = result.passed ? '✅' : '❌';
