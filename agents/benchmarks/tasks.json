@@ -4080,7 +4080,6 @@
       "browser",
       "antibot",
       "auth",
-      "ecommerce",
       "regression"
     ],
     "price_limit_cents": 500,
