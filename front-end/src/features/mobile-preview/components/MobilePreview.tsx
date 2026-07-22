@@ -12,7 +12,6 @@
 
 import { useState, type MouseEvent } from 'react';
 
-import { AgentContext, type AgentContextValue } from '@/features/agent-context';
 import MobileAgentDrawer from '@/features/terminal-component-group/components/MobileAgentDrawer';
 import { BrowserStatusBarFullscreen } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarFullscreen';
 import type { Agent } from '@/features/terminal-component-group/hooks';
@@ -132,7 +131,7 @@ function noop(): void {
   /* preview */
 }
 
-const PREVIEW_AGENT_CONTEXT = {
+export const PREVIEW_AGENT_CONTEXT = {
   agent: MOCK_AGENTS[0],
   setAgent: noop,
   inspectionContext: null,
@@ -153,7 +152,7 @@ const PREVIEW_AGENT_CONTEXT = {
   isLoadingAgent: false,
   forceResubscribe: noop,
   isChatMode: false,
-} as unknown as AgentContextValue;
+};
 
 export default function MobilePreview() {
   const view = new URLSearchParams(window.location.search).get('view');
@@ -161,27 +160,25 @@ export default function MobilePreview() {
 
   if (view === 'browser') {
     return (
-      <AgentContext.Provider value={PREVIEW_AGENT_CONTEXT}>
-        <BrowserStatusBarFullscreen
-          agentId="a1"
-          taskId="task-preview"
-          browserUrl={FAKE_PAGE}
-          messages={MOCK_BROWSER_MESSAGES}
-          outputSchema={undefined}
-          browserSessionMetadata={{
-            provider: 'steel',
-            proxyLocation: { city: 'Ashburn', country: 'US' },
-          }}
-          stepProgress={{ stepsTaken: 8, totalSteps: 20 }}
-          isDisconnected={false}
-          isWaitingForAuthAssistance={false}
-          isResuming={false}
-          isUserControlling={isUserControlling}
-          pendingWriteLockApproval={null}
-          onClose={noop as (e: MouseEvent) => void}
-          onResume={() => setIsUserControlling((current) => !current)}
-        />
-      </AgentContext.Provider>
+      <BrowserStatusBarFullscreen
+        agentId="a1"
+        taskId="task-preview"
+        browserUrl={FAKE_PAGE}
+        messages={MOCK_BROWSER_MESSAGES}
+        outputSchema={undefined}
+        browserSessionMetadata={{
+          provider: 'steel',
+          proxyLocation: { city: 'Ashburn', country: 'US' },
+        }}
+        stepProgress={{ stepsTaken: 8, totalSteps: 20 }}
+        isDisconnected={false}
+        isWaitingForAuthAssistance={false}
+        isResuming={false}
+        isUserControlling={isUserControlling}
+        pendingWriteLockApproval={null}
+        onClose={noop as (e: MouseEvent) => void}
+        onResume={() => setIsUserControlling((current) => !current)}
+      />
     );
   }
 

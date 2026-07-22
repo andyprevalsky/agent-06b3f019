@@ -1,7 +1,7 @@
-import { BrowserControlState as PrismaControlState, BrowserSessionStatus } from '@prisma/client';
 import { resumeBrowserSession as resumeBrowserSessionProvider } from '../../providers/browserSessionResume';
 import * as repo from './repo';
 import { SessionNotFoundError } from './service.local-storage';
+import { BrowserControlState as PrismaControlState, BrowserSessionStatus } from './types';
 
 const { ACTIVE } = BrowserSessionStatus;
 const { AGENT, USER_REQUESTED, USER } = PrismaControlState;

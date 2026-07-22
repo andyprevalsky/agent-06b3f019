@@ -4,6 +4,8 @@
 
 import { z } from 'zod';
 
+export { BrowserControlState, BrowserSessionStatus } from '@prisma/client';
+
 // ---------------------------------------------------------------------------
 // Request validation schemas
 // ---------------------------------------------------------------------------
