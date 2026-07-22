@@ -209,42 +209,7 @@ Typical signatures to look for: `peer closed connection` during streaming, `[NO 
 
 ## Factory Workflow Review
 
-`python3 scripts/factory_review.py --open` (or `/factory-review`) scans local
-Conductor history and opens concise `/deploy` and `/RCA` state tables with Runs,
-Avg Time, and Total Time. Use the top weekly/monthly/quarterly toggle to update
-inline period-over-period deltas and compact charts inside each row's matching
-Runs, Avg Time, and Total Time cells.
-Every step title has a short plain-English description of what actually runs.
-Every row has a sequencing badge: numbers show start order and matching numbers
-start together. Yellow `3` groups Static verify, Coverage, and Runtime blackbox
-(the backend, frontend, agents, and mac blackbox suites run once under coverage
-and appear in both semantic rows, while Total Runs de-duplicates them). Orange
-`4` groups Code review, Smoke,
-AgentCard, and Semantic; Production verify is `5`. Spell out `Total` rather than
-using a symbol. Old unsplit shell calls are not deploy states: show them only as
-a historical data-gap note. Do not show phase ranges.
-Every time is start-to-finish wall clock: Avg Time is one lifecycle, Total Time
-is the union of that step's lifecycle envelopes, and the Total row is the
-logical deploy from its first command through completion (parallel work is never
-added). Approval guards specifically measure the assistant's explicit approval
-request until the human approves or rejects, even when that crosses turns. Count
-resolved approval waits from every deploy attempt, including attempts that never
-completed. New `/deploy` approval, runtime-blackbox, code-review, and production
-boundaries plus
-`/RCA` phase boundaries use `scripts/record_factory_event.py`; timed gate calls
-use `scripts/run-deploy-stage`. Prose inference is historical fallback only.
-Visible summaries must distinguish instrumented, historical inferred, and
-incomplete telemetry; partial event sets never silently fall back to inference.
-Charts show exact calendar ranges; hover snaps to real source-backed points with
-their value and sample details. Artifacts land in `.context/factory-review/`;
-validate with `python3 scripts/factory_review.py --self-test`.
-After parallel Group 3 and Group 4, show a wall-clock subtotal row with only the
-badge and Total Time metric/trend; omit its visible title, description, Runs, and
-Avg Time. It is the union of member lifecycle envelopes, not their sum; it
-equals the longest lane only when starts and retries align. These subtotals do
-not necessarily add to end-to-end because groups can overlap and transitions,
-fixes, commits, and waits can occur outside gates. Always show real percentage
-changes when adjacent periods exist; never substitute an `n<2` label.
+Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md`) to generate and open the source-backed `/deploy` and `/RCA` lifecycle, wall-clock, sequencing, and trend report; validate it with `python3 scripts/factory_review.py --self-test`.
 
 ## Critical Rules
 

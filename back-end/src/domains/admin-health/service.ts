@@ -4,6 +4,8 @@ import {
   ADMIN_USER_IDS,
   AMPLITUDE_API_KEY,
   AMPLITUDE_SECRET_KEY,
+  BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES,
+  BLACKBOX_TEST_CAPTURE_OUTBOUND,
 } from './config';
 import { buildConnectorAdoption } from './connectorAdoption';
 import {
@@ -90,8 +92,8 @@ async function fetchInputs(
   const previous = periods[periods.length - 2];
   const fetchLiveAmplitude = shouldFetchAmplitudeForBlackboxSlice(
     timeSlice,
-    process.env.BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES,
-    process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '1'
+    BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES,
+    BLACKBOX_TEST_CAPTURE_OUTBOUND
   );
   const blackboxOfflineAmplitude = () =>
     unavailableAmplitudeFunnel(
