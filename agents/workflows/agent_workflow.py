@@ -3534,9 +3534,9 @@ class AgentWorkflow:
         Order:
         1. Post IN_PROGRESS message → FE shows loading state
         2. Generate completion summary (LLM call)
-        3. Mark finished in DB
-        4. Update tree state (broadcast COMPLETED)
-        5. Post FINISHED message with isFinalSummary → FE renders CompletionSummaryCard
+        3. Post FINISHED message with isFinalSummary → FE renders CompletionSummaryCard
+        4. Mark finished in DB
+        5. Update tree state (broadcast COMPLETED)
         6. Signal parent (if sub-agent)
         7. Save blueprint (fire-and-forget, no UI)
         """
@@ -3651,6 +3651,34 @@ class AgentWorkflow:
             # Calculate cost from token usage (approximate: $0.001/1k input, $0.003/1k output)
             cost_dollars = (self.tokens_in / 1000 * 0.001) + (self.tokens_out / 1000 * 0.003)
 
+            # Post FINISHED message with completion summary (same toolCallId).
+            # This intentionally happens before the durable terminal status:
+            # pollers and benchmark evaluators treat COMPLETED as a safe point
+            # to read the transcript, so terminal status must mean the final
+            # summary is already observable.
+            # Suppress the automatic tree broadcast here; otherwise _post_message
+            # would emit its default ACTIVE state after we latched _is_finished.
+            await self._post_message(
+                "",
+                "TOOL",
+                {
+                    "toolCallId": tool_call_id,
+                    "isFinalSummary": True,
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "title": "✅ Task Complete",
+                    "completionSummary": {
+                        "summary": summary,
+                        "outputs": self._format_outputs(structured_response),
+                        "toolUsage": tool_usage,
+                        "totalToolCalls": total_tool_calls,
+                        "durationSeconds": duration_seconds,
+                        "costDollars": round(cost_dollars, 4),
+                    },
+                },
+                update_tree=False,
+            )
+
             # Mark finished (includes structured_response for persistence)
             await workflow.execute_activity(
                 mark_finished,
@@ -3672,32 +3700,6 @@ class AgentWorkflow:
             # Broadcast COMPLETED status with structured output to tree
             # (output_schema is already cached from startup and included in all broadcasts)
             await self._update_tree_state(progress=1.0, status="COMPLETED", structured_output=structured_response)
-
-            # Post FINISHED message with completion summary (same toolCallId).
-            # This is intentionally after mark_finished so a slow/non-critical
-            # message insert cannot leave a verified agent durably ACTIVE.
-            # Suppress the automatic tree broadcast here; otherwise _post_message
-            # would emit its default ACTIVE state after the explicit COMPLETED update.
-            await self._post_message(
-                "",
-                "TOOL",
-                {
-                    "toolCallId": tool_call_id,
-                    "isFinalSummary": True,
-                    "toolName": "completion_summary",
-                    "toolStatus": "FINISHED",
-                    "title": "✅ Task Complete",
-                    "completionSummary": {
-                        "summary": summary,
-                        "outputs": self._format_outputs(structured_response),
-                        "toolUsage": tool_usage,
-                        "totalToolCalls": total_tool_calls,
-                        "durationSeconds": duration_seconds,
-                        "costDollars": round(cost_dollars, 4),
-                    },
-                },
-                update_tree=False,
-            )
 
             # Send completion SMS notification (root + SMS-source only)
             if not self.parent_workflow_id and summary and self.agent_source == "SMS":

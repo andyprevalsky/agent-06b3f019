@@ -3729,7 +3729,7 @@ async def test_workflow_mark_complete_happy_path():
             and (args[3] or {}).get("toolStatus") == "FINISHED"
         )
         mark_finished_index = next(i for i, (name, _args) in enumerate(fake.activity_calls) if name == "mark_finished")
-        assert mark_finished_index < final_summary_index
+        assert final_summary_index < mark_finished_index
         # Child-completed signal to parent
         signal_names = [s[1] for s in fake.signal_calls]
         assert "child_completed" in signal_names
