@@ -3042,9 +3042,10 @@ BOX_WMH_PORT="3007"        # run.sh WMH_PORT = base+6
 FLEET_PATCH_FILE=""
 FLEET_PATCH_SHA256=""
 if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
-   && cloudbench_worktree_has_changes "$ROOT_DIR"; then
+   && { [ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] \
+        || cloudbench_worktree_has_changes "$ROOT_DIR"; }; then
     FLEET_PATCH_FILE="$(mktemp)"
-    if ! bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$FLEET_PATCH_FILE" \
+    if ! bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF" > "$FLEET_PATCH_FILE" \
         || [ ! -s "$FLEET_PATCH_FILE" ]; then
         echo "❌ could not create the fleet local workspace patch" >&2
         exit 1
@@ -3249,16 +3250,23 @@ ready_workers_operational() {  # ready_workers_operational <bench-output-dir>
 
 CONTROLLER_GITHUB_TOKEN_B64_CACHE="${CLOUDBENCH_GITHUB_TOKEN_B64:-}"
 controller_github_token_b64() {
-    local token=""
+    local token="" dotenv
     if [ -n "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" ]; then
         printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
         return 0
     fi
-    if command -v gh >/dev/null 2>&1; then
+    token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    if [ -z "$token" ] && command -v gh >/dev/null 2>&1; then
         token="$(gh auth token 2>/dev/null || true)"
     fi
-    [ -n "$token" ] || token="${GITHUB_TOKEN:-}"
-    [ -n "$token" ] || token="${GH_TOKEN:-}"
+    if [ -z "$token" ]; then
+        for dotenv in "$ROOT_DIR/back-end/.env" "$ROOT_DIR/agents/.env"; do
+            [ -f "$dotenv" ] || continue
+            token="$(grep -E '^GITHUB_TOKEN=' "$dotenv" 2>/dev/null | head -1 \
+                | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+            [ -z "$token" ] || break
+        done
+    fi
     [ -n "$token" ] || return 1
     CONTROLLER_GITHUB_TOKEN_B64_CACHE="$(printf '%s' "$token" | base64 | tr -d '\n')"
     printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
@@ -3425,7 +3433,11 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
              && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh >/dev/null 2>&1 \
              && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env >/dev/null 2>&1 \
              && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh >/dev/null 2>&1; then
-              [ -n "$FLEET_PATCH_FILE" ] && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1 || true
+              if [ -n "$FLEET_PATCH_FILE" ] \
+                 && ! fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1; then
+                  sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+                  continue
+              fi
               if fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
                   -C "bash -c \"begin=\$(date +%s); : > /data/worker.log; printf '%s\\n' \\\"\$begin\\\" > /data/worker.started-at; setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\"" >/dev/null 2>&1; then
                   launched=1
@@ -3720,9 +3732,12 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
             local n=$((cur - want))
             echo "  ⤵️  [$bench] scale down -$n (desired=$desired, pool=$cur)"
             for _ in $(seq 1 "$n"); do
-                local ready_state wid
-                ready_state="$(find "$out/worker-ready" -type f 2>/dev/null | tail -1)"
-                wid="${ready_state##*/}"
+                local wid
+                # worker-clones.ids is the authoritative ownership ledger from
+                # allocation through readiness. Scale-down must also be able to
+                # cancel a still-pending provisioner, so a ready-only directory
+                # cannot select the worker here.
+                wid="$(tail -1 "$out/worker-clones.ids" 2>/dev/null || true)"
                 [ -n "$wid" ] || break
                 # Publish cancellation before provider destroy. A provisioner
                 # staging this worker can then distinguish intentional scale-in

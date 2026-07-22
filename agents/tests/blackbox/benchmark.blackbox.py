@@ -4355,7 +4355,7 @@ async def test_code_agent_preflight_accepts_gpt_compute_token():
         async def __aexit__(self, *_args):
             return None
 
-        async def get(self, url, *, headers, timeout):
+        async def get(self, url, *, headers, params=None, timeout):
             calls.append((url, headers, timeout))
             return FakeResponse()
 
@@ -4440,7 +4440,7 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
         async def __aexit__(self, *_args):
             return None
 
-        async def get(self, url, *, headers, timeout):
+        async def get(self, url, *, headers, params=None, timeout):
             calls.append((url, headers, timeout))
             if url.endswith("/api/integrations/compute-code/credentials/token"):
                 return FakeResponse(404, {"error": "NO_TOKENS_AVAILABLE"})

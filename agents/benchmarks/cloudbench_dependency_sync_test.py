@@ -859,7 +859,7 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     assert "scripts/run-predeploy-local" in step
     assert "scripts/run-predeploy-cloud" in step
     assert "Benchmarks → Runs" in step
-    assert "6/6" in step
+    assert "every catalog entry tagged `smoke`" in step
     assert ".context/predeploy-runs/<run-id>/runner.log" in step
     assert "run_benchmark.py --suite smoke" not in step
     assert "scripts/run-deploy-stage --start" in deploy
@@ -868,7 +868,7 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     assert "bash scripts/run-predeploy-local" in step
     assert "LOCAL isolated benchmark stack" in step
     assert "Use the cloud fleet only as an explicit opt-in" in step
-    assert "6/6" in step
+    assert "every requested task passes" in step
     assert "run_benchmark.py --suite smoke" not in step
 
     predeploy_local = PREDEPLOY_LOCAL_SCRIPT.read_text()
@@ -924,6 +924,7 @@ def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
     assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in cloud
     assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF"' in fleet
     assert "cloudbench_fetchable_ref" in fleet
+    assert '[ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ]' in fleet
 
 
 def test_worktree_patch_includes_unpushed_commits_from_fetchable_base(
@@ -1179,11 +1180,19 @@ def test_boot_launch_delivers_the_exact_worktree_patch_to_every_guest() -> None:
         assert "patch payload checksum mismatch" in guest
 
     worker_stage = fleet[fleet.index("provision_worker() {") : fleet.index("bench_autoscaler() {")]
+    assert cloud.count('LOCAL_PATCH_FILE=""') == 1
     assert 'LOCAL_PATCH_SHA256=$FLEET_PATCH_SHA256' in worker_stage
     assert 'sftp put' in worker_stage
-    assert '|| true' not in worker_stage.split('if [ -n "$FLEET_PATCH_FILE" ]', 1)[1].split(
-        "echo \"  ✅", 1
+    patch_upload = worker_stage.split('if [ -n "$FLEET_PATCH_FILE" ]', 1)[1].split(
+        "if fly_with_timeout 20 ssh console", 1
     )[0]
+    assert '|| true' not in patch_upload
+    assert "continue" in patch_upload
+    scale_down = fleet.split('echo "  ⤵️  [$bench] scale down', 1)[1].split(
+        "reconcile_worker_ready_outcomes", 1
+    )[0]
+    assert 'tail -1 "$out/worker-clones.ids"' in scale_down
+    assert 'find "$out/worker-ready"' not in scale_down
 
 
 def test_boot_launch_runs_the_current_driver_before_applying_the_patch() -> None:
@@ -1200,11 +1209,13 @@ def test_boot_launch_runs_the_current_driver_before_applying_the_patch() -> None
     assert 'bash "$DRIVER" >> "$LOG" 2>&1' in boot
 
 
-def test_autoscaled_worker_failure_is_removed_and_replaceable(tmp_path: Path) -> None:
+def test_autoscaled_worker_failure_is_durable_and_never_counted_ready(tmp_path: Path) -> None:
     """Upload failure or a guest that never publishes post-patch readiness
-    must not remain counted as capacity forever."""
+    must fail the fleet closed while remaining tracked for controller cleanup."""
     fleet = FLEET_SCRIPT.read_text()
     pool_count = _extract_fleet_function(fleet, "_pool_ids() {")
+    worker_is_tracked = _extract_fleet_function(fleet, "worker_is_tracked() {")
+    reconcile_failure = _extract_fleet_function(fleet, "reconcile_worker_failure_outcomes() {")
     provision = _extract_fleet_function(fleet, "provision_worker() {")
     root = tmp_path / "root"
     (root / "scripts").mkdir(parents=True)
@@ -1214,12 +1225,12 @@ def test_autoscaled_worker_failure_is_removed_and_replaceable(tmp_path: Path) ->
 
     for mode in ("upload-failure", "readiness-failure"):
         out = tmp_path / mode
-        reaped = tmp_path / f"{mode}.reaped"
         calls = tmp_path / f"{mode}.calls"
         script = f"""
 ROOT_DIR={shlex.quote(str(root))}
 APP=test-app
 BENCH_REF=test-ref
+FLEET_OWNER_TOKEN=test-owner
 BOX_BACKEND_PORT=3001
 BOX_WMH_PORT=3007
 FLEET_WORKER_VM_SIZE=shared-cpu-1x
@@ -1228,10 +1239,16 @@ FLEET_PATCH_FILE={shlex.quote(str(patch_file))}
 FLEET_PATCH_SHA256=expected
 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=3
 CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS=0
+WORKER_STAGE_ATTEMPTS=3
+WORKER_READY_TIMEOUT=1
 MODE={shlex.quote(mode)}
+EXPECTED_REASON={shlex.quote('could not be staged and launched' if mode == 'upload-failure' else 'did not reach queue readiness')}
 OUT={shlex.quote(str(out))}
-REAPED={shlex.quote(str(reaped))}
 CALLS={shlex.quote(str(calls))}
+set -e
+mkdir -p "$OUT"
+reserve_worker_machine_slot() {{ :; }}
+capacity_release_reservation() {{ :; }}
 clone_machine_target() {{
   mkdir -p "$(dirname "$1")"
   printf '%s\n' abc123 >> "$1"
@@ -1244,21 +1261,24 @@ fly_with_timeout() {{
   case "$*" in
     *"ssh sftp put"*"cloudbench-local.patch"*)
       [ "$MODE" != upload-failure ] ;;
-    *"ssh console"*"/tmp/rbw.sh"*)
-      [ "$MODE" != readiness-failure ] ;;
     *) return 0 ;;
   esac
 }}
-reap_machine() {{ printf '%s\n' "$1" > "$REAPED"; }}
+worker_operational() {{ [ "$MODE" != readiness-failure ]; }}
 fleet_registry_release_id() {{ :; }}
+controller_github_token_b64() {{ printf token; }}
 {pool_count}
+{worker_is_tracked}
+{reconcile_failure}
 {provision}
 provision_worker bench workspace primary fd00::1 0 "$OUT"
 wait || true
-test "$(_pool_ids "$OUT")" = 0
-test -s "$REAPED"
-test ! -e "$OUT/worker-pending/abc123"
-test ! -e "$OUT/worker-ready/abc123"
+test "$(_pool_ids "$OUT")" = 1
+test -s "$OUT/worker-abc123.failed"
+test -e "$OUT/worker-abc123.pending"
+test ! -e "$OUT/worker-abc123.ready"
+! reconcile_worker_failure_outcomes bench "$OUT"
+grep -qF "$EXPECTED_REASON" "$OUT/autoscaler.failed"
 """
         result = subprocess.run(
             ["bash", "-c", script],
@@ -1275,16 +1295,38 @@ test ! -e "$OUT/worker-ready/abc123"
         assert "--env CLOUDBENCH_BOOT=0 --command sleep infinity" in fly_calls[neutralize]
         assert "--skip-start" in fly_calls[neutralize]
         launch_calls = [call for call in fly_calls if "ssh console" in call]
-        assert len(launch_calls) <= 1
-        if mode == "readiness-failure":
-            assert len(launch_calls) == 1
-            assert "for ready_try in \\$(seq 1 60)" in launch_calls[0]
-            assert "cloudbench-worker-abc123.ready" in launch_calls[0]
+        assert len(launch_calls) == (0 if mode == "upload-failure" else 1)
 
     worker = WORKER_SCRIPT.read_text()
     assert worker.index("patch payload checksum mismatch") < worker.index(
         'printf \'%s\\n\' "$$" > "$WORKER_READY_FILE"'
     )
+
+
+def test_worker_token_falls_back_to_workspace_env_without_gh(tmp_path: Path) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    resolver = _extract_fleet_function(fleet, "controller_github_token_b64() {")
+    (tmp_path / "back-end").mkdir()
+    (tmp_path / "back-end/.env").write_text('GITHUB_TOKEN="workspace-token"\n')
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""
+ROOT_DIR={shlex.quote(str(tmp_path))}
+CONTROLLER_GITHUB_TOKEN_B64_CACHE=""
+unset GITHUB_TOKEN GH_TOKEN
+{resolver}
+controller_github_token_b64 | base64 --decode
+""",
+        ],
+        env={"PATH": "/usr/bin:/bin"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "workspace-token"
 
 
 def test_fetch_ref_never_falls_back_to_stale_fetch_head(tmp_path: Path) -> None:
