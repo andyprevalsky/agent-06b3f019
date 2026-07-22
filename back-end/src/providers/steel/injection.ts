@@ -5,6 +5,7 @@
 import { prisma } from '../database';
 import { canonicalAuthRealm } from '../authRealm';
 import { type FingerprintData, log } from './types';
+import { steelCdpConnectionUrl } from './urls';
 import {
   injectCacheStorageState,
   injectIndexedDBState,
@@ -417,7 +418,7 @@ export async function injectUserData(
     } else {
       const { chromium } = await import('playwright');
       log.info(`  [3/9] Connecting to CDP...`);
-      browser = await chromium.connectOverCDP(dbSession.wsUrl);
+      browser = await chromium.connectOverCDP(steelCdpConnectionUrl(dbSession.wsUrl));
       log.info(`  [3/9] CDP connected (${Date.now() - startTime}ms)`);
     }
     const context = browser.contexts()[0];

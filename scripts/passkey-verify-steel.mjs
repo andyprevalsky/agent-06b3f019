@@ -11,93 +11,144 @@
  *
  * Run: node scripts/passkey-verify-steel.mjs
  */
-import { chromium } from 'playwright';
-import { readFileSync } from 'node:fs';
+import { chromium } from "playwright";
+import { readFileSync } from "node:fs";
 
-const REC = JSON.parse(readFileSync(process.env.PASSKEY_IN || '.context/passkey-enroll.json', 'utf8'));
+const REC = JSON.parse(
+  readFileSync(
+    process.env.PASSKEY_IN || ".context/passkey-enroll.json",
+    "utf8",
+  ),
+);
 const API_KEY = process.env.STEEL_API_KEY;
-if (!API_KEY) throw new Error('STEEL_API_KEY env required');
-const STEEL_API_BASE_URL = (process.env.STEEL_BASE_URL || 'https://connect.steelbrowser.com').replace(/\/+$/, '');
-const STEEL_CDP_BASE_URL = (process.env.STEEL_CONNECT_URL || 'wss://connect.steelbrowser.com').replace(/\/+$/, '');
-const log = (...a) => console.log(`[verify-steel] ${new Date().toISOString()}`, ...a);
+if (!API_KEY) throw new Error("STEEL_API_KEY env required");
+const STEEL_API_BASE_URL = (
+  process.env.STEEL_BASE_URL || "https://connect.steelbrowser.com"
+).replace(/\/+$/, "");
+const STEEL_CDP_BASE_URL = (
+  process.env.STEEL_CONNECT_URL || "wss://connect.steelbrowser.com"
+).replace(/\/+$/, "");
+const log = (...a) =>
+  console.log(`[verify-steel] ${new Date().toISOString()}`, ...a);
 
-async function steel(path, method = 'POST', body) {
+async function steel(path, method = "POST", body) {
   const res = await fetch(`${STEEL_API_BASE_URL}/v1${path}`, {
     method,
-    headers: { 'Steel-Api-Key': API_KEY, 'Content-Type': 'application/json' },
+    headers: { "Steel-Api-Key": API_KEY, "Content-Type": "application/json" },
     body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(`steel ${path} -> ${res.status} ${await res.text()}`);
+  if (!res.ok)
+    throw new Error(`steel ${path} -> ${res.status} ${await res.text()}`);
   return res.status === 204 ? {} : res.json();
 }
 
-const session = await steel('/sessions', 'POST', { solveCaptcha: true, dimensions: { width: 1288, height: 891 } });
+const session = await steel("/sessions", "POST", {
+  solveCaptcha: true,
+  dimensions: { width: 1288, height: 891 },
+});
 const sessionId = session.id;
 const wsUrl = new URL(STEEL_CDP_BASE_URL);
-wsUrl.searchParams.set('apiKey', API_KEY);
-wsUrl.searchParams.set('sessionId', sessionId);
-const interactiveUrl = `${session.debugUrl}?interactive=true`;
+wsUrl.searchParams.set("apiKey", API_KEY);
+wsUrl.searchParams.set("sessionId", sessionId);
+const interactiveUrl = new URL(session.debugUrl);
+interactiveUrl.searchParams.set("interactive", "true");
 log(`Steel session ${sessionId} live`);
 
 await (async () => {
-let browser;
-try {
-  browser = await chromium.connectOverCDP(wsUrl.toString());
-  const ctx = browser.contexts()[0];
-  const page = ctx.pages()[0] || (await ctx.newPage());
-  const client = await ctx.newCDPSession(page);
+  let browser;
+  try {
+    browser = await chromium.connectOverCDP(wsUrl.toString());
+    const ctx = browser.contexts()[0];
+    const page = ctx.pages()[0] || (await ctx.newPage());
+    const client = await ctx.newCDPSession(page);
 
-  await client.send('WebAuthn.enable', { enableUI: false });
-  const { authenticatorId } = await client.send('WebAuthn.addVirtualAuthenticator', {
-    options: { protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
-  });
-  await client.send('WebAuthn.addCredential', {
-    authenticatorId,
-    credential: {
-      credentialId: REC.credentialId,
-      privateKey: REC.privateKey,
-      rpId: REC.rpId,
-      userHandle: REC.userHandle ?? undefined,
-      signCount: REC.signCount ?? 0,
-      isResidentCredential: true,
-    },
-  });
-  log(`seeded virtual authenticator on STEEL (signCount=${REC.signCount ?? 0})`);
+    await client.send("WebAuthn.enable", { enableUI: false });
+    const { authenticatorId } = await client.send(
+      "WebAuthn.addVirtualAuthenticator",
+      {
+        options: {
+          protocol: "ctap2",
+          transport: "internal",
+          hasResidentKey: true,
+          hasUserVerification: true,
+          isUserVerified: true,
+          automaticPresenceSimulation: true,
+        },
+      },
+    );
+    await client.send("WebAuthn.addCredential", {
+      authenticatorId,
+      credential: {
+        credentialId: REC.credentialId,
+        privateKey: REC.privateKey,
+        rpId: REC.rpId,
+        userHandle: REC.userHandle ?? undefined,
+        signCount: REC.signCount ?? 0,
+        isResidentCredential: true,
+      },
+    });
+    log(
+      `seeded virtual authenticator on STEEL (signCount=${REC.signCount ?? 0})`,
+    );
 
-  await page.goto('https://www.amazon.com/ap/signin', { waitUntil: 'domcontentloaded' }).catch((e) => log('nav warn:', e.message));
-  log('===========================================================');
-  log('OPEN THIS INTERACTIVE LIVE VIEW AND DRIVE THE LOGIN:');
-  log(interactiveUrl);
-  log('-> enter your Amazon email, choose "Sign in with a passkey".');
-  log('===========================================================');
+    await page
+      .goto("https://www.amazon.com/ap/signin", {
+        waitUntil: "domcontentloaded",
+      })
+      .catch((e) => log("nav warn:", e.message));
+    log("===========================================================");
+    log("OPEN THIS INTERACTIVE LIVE VIEW AND DRIVE THE LOGIN:");
+    log(interactiveUrl.toString());
+    log('-> enter your Amazon email, choose "Sign in with a passkey".');
+    log("===========================================================");
 
-  const deadline = Date.now() + 8 * 60 * 1000;
-  let lastCount = REC.signCount ?? 0;
-  let used = false;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 2500));
+    const deadline = Date.now() + 8 * 60 * 1000;
+    let lastCount = REC.signCount ?? 0;
+    let used = false;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 2500));
+      try {
+        const { credentials } = await client.send("WebAuthn.getCredentials", {
+          authenticatorId,
+        });
+        const c = (credentials || []).find(
+          (x) => x.credentialId === REC.credentialId,
+        );
+        if (c && c.signCount > lastCount) {
+          used = true;
+          log(
+            `✅ signCount ${lastCount} -> ${c.signCount}: Amazon used OUR passkey on Steel.`,
+          );
+          lastCount = c.signCount;
+        }
+      } catch {}
+      let loggedIn = false,
+        url = "";
+      try {
+        url = page.url();
+        loggedIn = await page.evaluate(() => {
+          const a = document.querySelector("#nav-link-accountList");
+          return !!a && !/sign in/i.test(a.textContent || "sign in");
+        });
+      } catch {}
+      if (loggedIn && !/\/ap\/signin/.test(url)) {
+        log(
+          `✅✅ LOGGED IN via passkey on Steel. url=${url.slice(0, 60)} passkeyUsed=${used}`,
+        );
+        return;
+      }
+    }
+    log(`TIMEOUT. passkeyUsed(signCount advanced)=${used}.`);
+    process.exitCode = used ? 0 : 2;
+  } finally {
     try {
-      const { credentials } = await client.send('WebAuthn.getCredentials', { authenticatorId });
-      const c = (credentials || []).find((x) => x.credentialId === REC.credentialId);
-      if (c && c.signCount > lastCount) { used = true; log(`✅ signCount ${lastCount} -> ${c.signCount}: Amazon used OUR passkey on Steel.`); lastCount = c.signCount; }
+      if (browser) await browser.close();
     } catch {}
-    let loggedIn = false, url = '';
     try {
-      url = page.url();
-      loggedIn = await page.evaluate(() => {
-        const a = document.querySelector('#nav-link-accountList');
-        return !!a && !/sign in/i.test(a.textContent || 'sign in');
-      });
-    } catch {}
-    if (loggedIn && !/\/ap\/signin/.test(url)) {
-      log(`✅✅ LOGGED IN via passkey on Steel. url=${url.slice(0, 60)} passkeyUsed=${used}`);
-      return;
+      await steel(`/sessions/${sessionId}/release`, "POST");
+      log("released Steel session");
+    } catch (e) {
+      log("release warn:", e.message);
     }
   }
-  log(`TIMEOUT. passkeyUsed(signCount advanced)=${used}.`);
-  process.exitCode = used ? 0 : 2;
-} finally {
-  try { if (browser) await browser.close(); } catch {}
-  try { await steel(`/sessions/${sessionId}/release`, 'POST'); log('released Steel session'); } catch (e) { log('release warn:', e.message); }
-}
 })();

@@ -10695,6 +10695,7 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
             "session_id": "session-1",
             "cdp_url": "wss://connect.steel.dev/session-1",
             "task_id": "task-1",
+            "auth_realm": "dickblick.com",
         }
     )
     second = _FakeActivityHandle(
@@ -10771,6 +10772,7 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
     assert resume_state["visited_urls"] == ["https://www.dickblick.com/cart/"]
     assert "R&F Drawing Oil Stick" in resume_state["verifier_checkpoints"][0]["dom_tree"]
     assert resume_state["approval_type"] == "purchase"
+    assert resume_state["auth_realm"] == "dickblick.com"
     assert resume_state["step_count"] == 5
     assert resume_state["write_lock_approvals"]["purchase"] == {
         "domain": get_domain_from_url("https://www.dickblick.com/cart/"),
@@ -10833,6 +10835,7 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
             "session_id": "session-1",
             "cdp_url": "wss://connect.steel.dev/session-1",
             "task_id": "task-1",
+            "auth_realm": "dickblick.com",
         }
     )
     second = _FakeActivityHandle(
@@ -10921,6 +10924,7 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
     assert resumed_args[7] is True
     resume_state = resumed_args[12]
     assert resume_state["approval_type"] == "payment"
+    assert resume_state["auth_realm"] == "dickblick.com"
     assert resume_state["step_count"] == 12
     assert resume_state["write_lock_approvals"]["payment"] == {
         "domain": get_domain_from_url("https://www.dickblick.com/checkout/"),

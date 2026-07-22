@@ -40,6 +40,7 @@ async def _run_single_iteration(
     response_schema=None,
     llm_tool_calls_sequence=None,
     llm_tool_calls_factory=None,
+    llm_chunk_texts_sequence=None,
     fast_mode_cache_enabled=False,
     goal_text=None,
     poll_messages_override=None,
@@ -98,6 +99,9 @@ async def _run_single_iteration(
             selected_tool_calls = llm_tool_calls_factory()
         elif llm_tool_calls_sequence is not None:
             selected_tool_calls = llm_tool_calls_sequence.pop(0)
+        if llm_chunk_texts_sequence is not None:
+            chunk_text = llm_chunk_texts_sequence.pop(0)
+            await kwargs["on_chunk"](chunk_text, len(chunk_text))
         return (
             _DummyLLMResult("", selected_tool_calls),
             {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
@@ -1351,8 +1355,27 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
         },
     ]
     cache_contexts = []
+    stream_sequences = []
+    stream_final_sequences = []
     llm_call_count = 0
     original_set_context = fast_cache_context.set_context
+
+    class CapturingBroadcaster:
+        def __init__(self, **_kwargs):
+            pass
+
+        def update(self, _delta, sequence):
+            stream_sequences.append(sequence)
+
+        def reset(self):
+            pass
+
+        async def aclose(self, *, final_delta, final_sequence, await_done_broadcast):
+            del final_delta, await_done_broadcast
+            stream_final_sequences.append(final_sequence)
+
+        async def adispose(self):
+            pass
 
     def capture_cache_context(cache_context):
         cache_contexts.append((cache_context.read_enabled, cache_context.should_write, cache_context.base_step))
@@ -1369,6 +1392,8 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
     with (
         patch.object(fast_cache_context, "set_context", side_effect=capture_cache_context),
         patch.object(fast_cache_context, "write_through_enabled_for_user", return_value=False),
+        patch("loop.run_agent.CoalescingStreamBroadcaster", CapturingBroadcaster),
+        patch("loop.run_agent.activity.heartbeat"),
     ):
         result, _, executed = await _run_single_iteration(
             [],
@@ -1378,6 +1403,7 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
             response_schema=response_schema,
             verifier_structured_response=child_result,
             llm_tool_calls_factory=replay_while_cache_is_active,
+            llm_chunk_texts_sequence=["wrong tool", "required tool"],
             fast_mode_cache_enabled=True,
             goal_text="complete from verified child",
         )
@@ -1387,6 +1413,8 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
     assert [item["tool_name"] for item in executed] == ["attempt_completion"]
     assert llm_call_count == 2
     assert cache_contexts == [(True, True, 1), (False, False, 1)]
+    assert stream_sequences == [1, 2]
+    assert stream_final_sequences == [3]
 
 
 async def test_max_iterations_runs_final_verifier():

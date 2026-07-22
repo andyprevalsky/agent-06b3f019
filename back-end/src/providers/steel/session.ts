@@ -9,36 +9,17 @@ import { logJson } from '../../utils/log';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
 import { createLocalBrowserSession, connectValidatedBrowser } from './sessionConnection';
+import { STEEL_API_BASE_URL, steelCdpUrl, steelDebugUrl } from './urls';
 export { resumeSession } from './sessionResume';
-
-export const STEEL_API_BASE_URL = (
-  process.env.STEEL_BASE_URL ?? 'https://connect.steelbrowser.com'
-).replace(/\/+$/, '');
-export const STEEL_CDP_BASE_URL = (
-  process.env.STEEL_CONNECT_URL ?? 'wss://connect.steelbrowser.com'
-).replace(/\/+$/, '');
-
-export function steelApiUrl(path: string): string {
-  return `${STEEL_API_BASE_URL}/${path.replace(/^\/+/, '')}`;
-}
-
-export function steelCdpUrl(sessionId: string): string {
-  const url = new URL(STEEL_CDP_BASE_URL);
-  url.searchParams.set('apiKey', process.env.STEEL_API_KEY ?? '');
-  url.searchParams.set('sessionId', sessionId);
-  return url.toString();
-}
-
-export function steelDebugUrl(debugUrl: string): string {
-  const url = new URL(debugUrl);
-  if (url.hostname === 'api.steel.dev' || url.hostname === 'connect.steel.dev') {
-    const liveOrigin = new URL(STEEL_API_BASE_URL);
-    url.protocol = liveOrigin.protocol;
-    url.host = liveOrigin.host;
-  }
-  url.searchParams.set('interactive', 'false');
-  return url.toString();
-}
+export {
+  STEEL_API_BASE_URL,
+  STEEL_CDP_BASE_URL,
+  steelApiUrl,
+  steelCdpConnectionUrl,
+  steelCdpUrl,
+  steelDebugUrl,
+  steelPublicCdpUrl,
+} from './urls';
 
 export const steel = new Steel({
   steelAPIKey: process.env.STEEL_API_KEY,
@@ -382,8 +363,8 @@ export async function createSessionWithContext(
       // Keep the embedded trace viewer read-only.
       const debugUrl = steelDebugUrl(session.debugUrl);
 
-      // IMPORTANT: Per Steel docs, CDP connection URL must include apiKey parameter
-      // The session.websocketUrl does NOT include the apiKey, so we construct it manually
+      // Persist only the non-secret CDP locator. Connection helpers materialize
+      // the API key inside the backend or worker process immediately before use.
       const wsUrl = steelCdpUrl(session.id);
 
       // VALIDATE: Test that the WebSocket connection actually works before

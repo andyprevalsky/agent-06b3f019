@@ -19,6 +19,7 @@ import {
   steelDebugUrl,
 } from './session';
 import { validateSessionConnection } from './sessionConnection';
+import { steelCdpConnectionUrl } from './urls';
 
 function hasValue(value: string | null | undefined): value is string {
   return value !== null && value !== undefined && value !== '';
@@ -61,7 +62,7 @@ async function navigateToSavedUrl(wsUrl: string, savedUrl: string | undefined): 
   log.info(`  Navigating session to saved URL: ${savedUrl}`);
   try {
     const { chromium } = await import('playwright');
-    const browser = await chromium.connectOverCDP(wsUrl);
+    const browser = await chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl));
     const context = browser.contexts()[0];
     const page = context.pages()[0] ?? (await context.newPage());
     await page.goto(savedUrl, { waitUntil: 'domcontentloaded', timeout: 10_000 });

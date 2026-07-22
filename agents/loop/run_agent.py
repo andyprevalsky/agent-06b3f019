@@ -1023,8 +1023,8 @@ async def run_agent(  # noqa: C901
                                             write_enabled=False,
                                         )
                                     )
-                                # Reset streaming state for retry
-                                sequence[0] = 0
+                                # Keep sequence monotonic because this retry reuses
+                                # the same stream_id and may follow emitted chunks.
                                 last_text[0] = ""
                                 broadcaster.reset()
                                 continue

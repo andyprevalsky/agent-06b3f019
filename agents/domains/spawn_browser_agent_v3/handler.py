@@ -71,6 +71,7 @@ from .config import (
     VERIFIER_ULTRA_MODEL,
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
 )
+from .cdp_urls import steel_cdp_connection_url
 from .credential_runtime import build_realm_credential_state
 from .recording import (
     BrowserAgentRecorder,
@@ -1135,7 +1136,8 @@ async def _reconnect_browser_stack_after_rotation(
 
     # 2. Attach DOMService + Playwright to the rotated session.
     _disable_cdp_websocket_proxy()
-    dom_service = DOMService(cdp_url=new_cdp_url)
+    connection_cdp_url = steel_cdp_connection_url(new_cdp_url)
+    dom_service = DOMService(cdp_url=connection_cdp_url)
     await dom_service.connect()
     dom_page = await dom_service.session.get_current_page()
 
@@ -1144,7 +1146,7 @@ async def _reconnect_browser_stack_after_rotation(
     pw_instance = await async_playwright().start()
     driver_pid = getattr(_playwright_driver_process(pw_instance), "pid", None)
     try:
-        pw_browser = await pw_instance.chromium.connect_over_cdp(new_cdp_url)
+        pw_browser = await pw_instance.chromium.connect_over_cdp(connection_cdp_url)
     except BaseException:
         driver_process = _playwright_driver_process(pw_instance)
         with contextlib.suppress(Exception):
@@ -4577,7 +4579,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             """Connect DOMService + Playwright, apply fingerprint, init humanizer."""
             nonlocal playwright_driver_pid
             _disable_cdp_websocket_proxy()
-            _dom_service = DOMService(cdp_url=cdp_url)
+            connection_cdp_url = steel_cdp_connection_url(cdp_url)
+            _dom_service = DOMService(cdp_url=connection_cdp_url)
             _playwright_instance = None
             _playwright_browser = None
 
@@ -4600,7 +4603,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 _playwright_instance = _pw_instance
                 playwright_driver_pid = getattr(_playwright_driver_process(_pw_instance), "pid", None)
                 try:
-                    _pw_browser = await _pw_instance.chromium.connect_over_cdp(cdp_url)
+                    _pw_browser = await _pw_instance.chromium.connect_over_cdp(connection_cdp_url)
                 except BaseException:
                     _driver_process = _playwright_driver_process(_pw_instance)
                     with contextlib.suppress(Exception):
@@ -6561,6 +6564,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     "session_id": session_id,
                     "cdp_url": cdp_url,
                     "task_id": task_id,
+                    "auth_realm": auth_realm,
                     "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
                     **_browser_resume_continuity_state(
                         action_history=action_history,
@@ -6671,6 +6675,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     "session_id": session_id,
                     "cdp_url": cdp_url,
                     "task_id": task_id,
+                    "auth_realm": auth_realm,
                     "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
                     **_browser_resume_continuity_state(
                         action_history=action_history,
@@ -7292,6 +7297,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "session_id": result.get("session_id"),
                             "cdp_url": result.get("cdp_url"),
                             "task_id": result.get("task_id"),
+                            "auth_realm": result.get("auth_realm"),
                             "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                         }
                         _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
@@ -7714,6 +7720,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "session_id": result.get("session_id"),
                         "cdp_url": result.get("cdp_url"),
                         "task_id": result.get("task_id"),
+                        "auth_realm": result.get("auth_realm"),
                         "payment_card_refs": payment_card_refs,
                         "payment_card_last4": _normalize_payment_card_last4(card.get("last4")),
                         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),

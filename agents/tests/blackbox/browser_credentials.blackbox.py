@@ -3,13 +3,41 @@
 from __future__ import annotations
 
 import base64
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from urllib.parse import parse_qs, urlsplit
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from _test_utils import BlackboxResult, assert_captured_call, setup_mock
+
+
+def test_steel_cdp_key_is_materialized_only_at_connection_boundary() -> None:
+    from domains.spawn_browser_agent_v3.cdp_urls import steel_cdp_connection_url
+
+    previous = os.environ.get("STEEL_API_KEY")
+    os.environ["STEEL_API_KEY"] = "worker-steel-secret"
+    try:
+        public_url = "wss://connect.steelbrowser.com?sessionId=session-1"
+        connected = steel_cdp_connection_url(public_url)
+        query = parse_qs(urlsplit(connected).query)
+        assert query == {"sessionId": ["session-1"], "apiKey": ["worker-steel-secret"]}
+        assert "apiKey" not in public_url
+        legacy = steel_cdp_connection_url(
+            "wss://connect.steel.dev?sessionId=legacy-session&APIKEY=legacy-secret"
+        )
+        assert parse_qs(urlsplit(legacy).query) == {
+            "sessionId": ["legacy-session"],
+            "apiKey": ["worker-steel-secret"],
+        }
+        assert steel_cdp_connection_url("ws://kernel.example/session-1") == "ws://kernel.example/session-1"
+    finally:
+        if previous is None:
+            os.environ.pop("STEEL_API_KEY", None)
+        else:
+            os.environ["STEEL_API_KEY"] = previous
 
 
 async def test_cross_realm_goto_prepares_complete_credentials_before_navigation() -> None:
@@ -323,6 +351,10 @@ async def test_passkeys_from_multiple_realms_share_one_live_authenticator() -> N
 async def run_all_tests():
     print("browser-credentials blackbox tests:")
     runner = BlackboxResult()
+    runner.record(
+        "steel_cdp_key_is_materialized_only_at_connection_boundary",
+        test_steel_cdp_key_is_materialized_only_at_connection_boundary,
+    )
     await runner.record_async(
         "cross_realm_goto_prepares_complete_credentials_before_navigation",
         test_cross_realm_goto_prepares_complete_credentials_before_navigation,
