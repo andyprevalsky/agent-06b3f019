@@ -8,7 +8,8 @@
  *
  * Each check:
  *   - Reads the real env var from the shell (same one the backend uses)
- *   - Hits a cheap authenticated endpoint on the provider
+ *   - Hits the cheapest endpoint that proves the credential can perform the
+ *     operation required by smoke (an auth-only endpoint is insufficient)
  *   - FAILS if the env var is missing, if the response is 401/402/403,
  *     or if the provider returns 5xx while probing a smoke-critical endpoint
  *   - PASSES on other non-auth statuses (200, 400 validation, 404, etc.)
@@ -31,6 +32,7 @@ interface CheckResult {
   passed: boolean;
   duration: number;
   error?: string;
+  overridden?: boolean;
 }
 
 async function fetchWithTimeout(
@@ -63,6 +65,14 @@ function requireEnv(name: string): string {
     );
   }
   return value;
+}
+
+function hasGateOverride(gate: string): boolean {
+  return (process.env.DEPLOY_GATE_OVERRIDES ?? '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter((value) => value !== '')
+    .includes(gate);
 }
 
 async function runCheck(name: string, fn: () => Promise<void>): Promise<CheckResult> {
@@ -105,7 +115,7 @@ async function checkE2B(): Promise<void> {
 async function checkSteel(): Promise<void> {
   const key = requireEnv('STEEL_API_KEY');
   const res = await fetchWithTimeout(
-    'https://api.steel.dev/v1/sessions?limit=1',
+    'https://connect.steelbrowser.com/v1/sessions?limit=1',
     {
       method: 'GET',
       headers: { 'Steel-Api-Key': key },
@@ -146,14 +156,40 @@ async function checkParallel(): Promise<void> {
 
 async function checkAnthropic(): Promise<void> {
   const key = requireEnv('ANTHROPIC_API_KEY');
-  const res = await fetchWithTimeout('https://api.anthropic.com/v1/models', {
-    method: 'GET',
-    headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
+  // /v1/models proves only that the key authenticates. Anthropic returns 200
+  // there even when the account has no credits, then rejects real completions
+  // with HTTP 400. Spend one output token so this gate proves the exact
+  // capability the Claude Code smoke requires before provisioning E2B.
+  const res = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'x-api-key': key,
+      'anthropic-version': '2023-06-01',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5',
+      max_tokens: 1,
+      messages: [{ role: 'user', content: 'Reply OK' }],
+    }),
   });
+  const body = await res.text().catch(() => '');
+  if (
+    res.status === 400 &&
+    /credit balance is too low|out of credits|purchase credits/i.test(body)
+  ) {
+    throw new Error(
+      `Anthropic credits exhausted (HTTP ${res.status}). Add credits at https://console.anthropic.com/settings/billing. Body: ${body.slice(0, 200)}`
+    );
+  }
   if (authFailed(res.status)) {
-    const body = await res.text().catch(() => '');
     throw new Error(
       `Anthropic auth rejected (HTTP ${res.status}). Refresh ANTHROPIC_API_KEY from https://console.anthropic.com/. Body: ${body.slice(0, 200)}`
+    );
+  }
+  if (providerUnavailable(res.status)) {
+    throw new Error(
+      `Anthropic messages API unavailable (HTTP ${res.status}). Completions cannot run. Body: ${body.slice(0, 200)}`
     );
   }
 }
@@ -201,31 +237,58 @@ async function runAll(): Promise<void> {
     { name: 'E2B (sandboxes)', fn: checkE2B },
     { name: 'Steel (browser sessions)', fn: checkSteel },
     { name: 'Parallel.ai (web search)', fn: checkParallel, warnOnly: true },
-    ...(!excludeAnthropic ? [{ name: 'Anthropic (Claude API)', fn: checkAnthropic }] : []),
+    ...(!excludeAnthropic
+      ? [
+          {
+            name: 'Anthropic (Claude API)',
+            fn: checkAnthropic,
+            overridden: hasGateOverride('credential-health:anthropic'),
+          },
+        ]
+      : []),
     { name: 'OpenRouter (LLM judge)', fn: checkOpenRouter },
     { name: 'Supabase (auth/DB)', fn: checkSupabase },
   ];
+
+  const results = await Promise.all(
+    checks.map((check) =>
+      check.overridden === true
+        ? Promise.resolve<CheckResult>({
+            name: check.name,
+            passed: true,
+            duration: 0,
+            overridden: true,
+          })
+        : runCheck(check.name, check.fn)
+    )
+  );
 
   if (excludeAnthropic) {
     console.log('  SKIP  Anthropic (Claude API) -- excluded by ROSE_EXCLUDE_ANTHROPIC_FAMILY\n');
   }
 
-  const results = await Promise.all(checks.map((c) => runCheck(c.name, c.fn)));
-
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     const isWarn = !r.passed && checks[i].warnOnly === true;
-    const icon = r.passed ? '  PASS' : isWarn ? '  WARN' : '  FAIL';
-    console.log(`${icon}  ${r.name}${r.passed ? '' : ` -- ${r.error}`} (${r.duration}ms)`);
+    const icon =
+      r.overridden === true ? '  SKIP' : r.passed ? '  PASS' : isWarn ? '  WARN' : '  FAIL';
+    const detail =
+      r.overridden === true
+        ? ' -- explicitly overridden by DEPLOY_GATE_OVERRIDES'
+        : r.passed
+          ? ''
+          : ` -- ${r.error}`;
+    console.log(`${icon}  ${r.name}${detail} (${r.duration}ms)`);
   }
 
   const hardFailures = results.filter((r, i) => !r.passed && checks[i].warnOnly !== true);
   const warnings = results.filter((r, i) => !r.passed && checks[i].warnOnly === true);
-  const passed = results.filter((r) => r.passed).length;
+  const overrides = results.filter((r) => r.overridden === true);
+  const passed = results.filter((r) => r.passed && r.overridden !== true).length;
 
   console.log('\n' + '='.repeat(50));
   console.log(
-    `\nResults: ${passed} passed, ${warnings.length} warnings, ${hardFailures.length} failed, ${results.length} total`
+    `\nResults: ${passed} passed, ${warnings.length} warnings, ${overrides.length} overrides, ${hardFailures.length} failed, ${results.length} total`
   );
 
   if (hardFailures.length > 0) {
@@ -234,7 +297,11 @@ async function runAll(): Promise<void> {
     process.exit(1);
   }
 
-  console.log('\nALL INTEGRATION-HEALTH CHECKS PASSED\n');
+  console.log(
+    overrides.length > 0
+      ? `\nINTEGRATION-HEALTH CHECKS COMPLETE WITH ${overrides.length} EXPLICIT OVERRIDE(S)\n`
+      : '\nALL INTEGRATION-HEALTH CHECKS PASSED\n'
+  );
   process.exit(0);
 }
 

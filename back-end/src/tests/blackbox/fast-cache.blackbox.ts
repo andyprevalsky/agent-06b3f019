@@ -87,12 +87,13 @@ async function main(): Promise<void> {
 
   await test('#10 get-many returns hits and misses in one request', async () => {
     const secondKey = `${key}:second`;
-    await post('/api/fast-cache/set', {
+    const set = await post('/api/fast-cache/set', {
       key: secondKey,
       kind: 'llm',
       goalHash,
       value: { content: 'SECOND' },
     });
+    assert(set.status === 200, `second set status ${set.status}`);
     const get = await post('/api/fast-cache/get-many', {
       keys: [key, secondKey, `${key}:missing`, key],
     });

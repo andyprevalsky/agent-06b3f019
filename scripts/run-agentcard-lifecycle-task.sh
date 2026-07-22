@@ -33,6 +33,14 @@ export ALLOW_TEMPORAL_CLEANUP=true
 # Force it off unconditionally — a pre-set BENCHMARK_FAST_MODE_CACHE=true would
 # otherwise reintroduce the stale-replay loop.
 export BENCHMARK_FAST_MODE_CACHE=false
+# The lifecycle gate disables Fast Mode, so its startup must not depend on the
+# shared production cache pooler. A saturated pooler previously held the schema
+# ensure past this helper's 120-second readiness bound before the benchmark even
+# received an agent ID. Force run.sh's idempotent schema preflight onto the
+# workspace Postgres instead, and clear any inherited remote override so the
+# isolation contract cannot be bypassed accidentally.
+unset FAST_MODE_CACHE_DATABASE_URL
+export FAST_MODE_CACHE_USE_LOCAL=1
 # Hosted AgentCard onboarding requires an allowlisted HTTPS callback. The local
 # lifecycle benchmark never follows this URL—it completes the sandbox fixture
 # through the scoped test-payment API—but minting must still create a genuine

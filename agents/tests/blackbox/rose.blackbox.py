@@ -57,8 +57,13 @@ from providers.rose.claude_auth import (
     build_anthropic_body,
     claude_auth_complete,
 )
-from providers.rose.client import _cache_input_accounting, _messages_without_internal_system_boundaries
+from providers.rose.client import (
+    _cache_input_accounting,
+    _messages_without_internal_system_boundaries,
+    _normalize_usage_input_tokens,
+)
 from providers.rose.gpt_auth import build_codex_responses_body, gpt_auth_complete
+from providers.rose.pricing import get_model_pricing
 from providers.rose.schema import (
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
@@ -2290,11 +2295,12 @@ def test_build_codex_responses_body_contract():
 def test_codex_cache_scope_uses_canonical_session_headers():
     """Codex cache affinity must use the HTTP header names its client sends."""
     scope = "rose:7c4fd924ea17566d159427d8"
+    thread_id = "6eb14611-3b1c-45fe-92dd-dde8cefc9768"
 
-    assert _codex_extra_headers_from_body({"prompt_cache_key": scope}) == {
+    assert _codex_extra_headers_from_body({"prompt_cache_key": scope}, thread_id=thread_id) == {
         "session-id": scope,
-        "thread-id": scope,
-        "x-client-request-id": scope,
+        "thread-id": thread_id,
+        "x-client-request-id": thread_id,
     }
     assert _codex_extra_headers_from_body({"prompt_cache_key": "  "}) == {}
 
@@ -2328,6 +2334,21 @@ async def test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes():
             ],
         },
         {"role": "tool", "tool_call_id": "call_browser", "content": "Example Domain"},
+    ]
+    resolved_pointer_messages = [
+        {
+            "role": "system",
+            "content": "stable system rules",
+        },
+        {
+            "role": "user",
+            "content": (
+                "inspect example.com\n\n"
+                'Reference: <resolved-ref pointer="@ref:message:'
+                '660e93eb-8c47-4bfa-a6b0-282a43dd3e45"/>'
+            ),
+        },
+        *grown_messages[2:],
     ]
 
     async def _capture(
@@ -2368,6 +2389,12 @@ async def test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes():
             agent_id="browser-a",
             call_site="execute_loop",
             messages=grown_messages,
+        )
+        await _capture(
+            lineage_key="agent:browser-a",
+            agent_id="browser-a",
+            call_site="execute_loop",
+            messages=resolved_pointer_messages,
         )
         await _capture(
             lineage_key="agent:browser-b",
@@ -2412,11 +2439,12 @@ async def test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes():
 
     cache_keys = [body["prompt_cache_key"] for body in captured_bodies]
     assert cache_keys[0] == cache_keys[1], "A growing conversation must reuse its prior Codex cache session"
-    assert cache_keys[0] != cache_keys[2], "Concurrent agents must not evict each other's prompt prefix"
-    assert cache_keys[0] != cache_keys[3], "Different LLM call sites must not share one Codex cache session"
-    assert cache_keys[4] == cache_keys[5], "Consecutive browser steps must reuse one Codex cache session"
-    assert cache_keys[4] != cache_keys[6], "Parallel browser tasks under one parent must not share a cache session"
-    assert cache_keys[4] != cache_keys[7], "A browser fork must not overwrite the main browser cache session"
+    assert cache_keys[0] == cache_keys[2], "Resolved message references must not reset the cache session"
+    assert cache_keys[0] != cache_keys[3], "Concurrent agents must not evict each other's prompt prefix"
+    assert cache_keys[0] != cache_keys[4], "Different LLM call sites must not share one Codex cache session"
+    assert cache_keys[5] == cache_keys[6], "Consecutive browser steps must reuse one Codex cache session"
+    assert cache_keys[5] != cache_keys[7], "Parallel browser tasks under one parent must not share a cache session"
+    assert cache_keys[5] != cache_keys[8], "A browser fork must not overwrite the main browser cache session"
 
 
 def test_build_codex_responses_body_preserves_tool_history_and_multimodal():
@@ -2821,6 +2849,7 @@ def test_anthropic_api_key_headers_use_x_api_key():
     api_hdr = _anthropic_api_key_headers("sk-ant-api03-test")
     assert api_hdr["x-api-key"] == "sk-ant-api03-test"
     assert "Authorization" not in api_hdr  # api-key path must NOT use Bearer
+    assert "oauth-2025-04-20" not in api_hdr["anthropic-beta"]
     # OAuth path is the inverse: Bearer, no x-api-key.
     oauth_hdr = _anthropic_headers("oat-token")
     assert oauth_hdr["Authorization"] == "Bearer oat-token"
@@ -2850,6 +2879,47 @@ async def test_anthropic_api_key_complete_402_raises_payment_required():
     except RosePaymentRequiredError:
         raised = True
     assert raised, "expected RosePaymentRequiredError on HTTP 402"
+
+
+async def test_anthropic_api_key_complete_400_credit_balance_raises_payment_required():
+    """Anthropic reports an exhausted API-key balance as HTTP 400, not 402.
+
+    Preserve that exact production response so the client trips the shared
+    cooldown instead of treating it as a request-shape error and retrying the
+    dead credential for every agent call.
+    """
+    from providers.rose.claude_auth import anthropic_api_key_complete
+    from providers.rose.errors import RosePaymentRequiredError
+
+    def handler(req):
+        return httpx.Response(
+            400,
+            json={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": (
+                        "Your credit balance is too low to access the Anthropic API. "
+                        "Please go to Plans & Billing to upgrade or purchase credits."
+                    ),
+                },
+            },
+        )
+
+    set_mock_handler(handler)
+    raised = False
+    try:
+        await _drain(
+            anthropic_api_key_complete(
+                pool_spec=get_pool("rose-1-lite"),
+                messages=[{"role": "user", "content": "hi"}],
+                api_key="sk-ant-api03-test",
+                request_id="r-apikey-400-credit",
+            )
+        )
+    except RosePaymentRequiredError:
+        raised = True
+    assert raised, "expected RosePaymentRequiredError for the captured HTTP 400 credit banner"
 
 
 async def test_anthropic_api_key_complete_sets_anthropic_suffix():
@@ -4018,6 +4088,71 @@ async def test_client_rotates_compute_token_across_providers_before_waterfall():
     assert usage["compute_token_used"]["accessToken"] == "fresh-gpt"
 
 
+async def test_client_rotation_preserves_native_tool_contract_across_provider_types():
+    """A Claude->GPT rotation must retain AgentAction native tools."""
+    AgentAction = create_agent_action_model(["spawn_agent", "attempt_completion"])
+    captured_gpt_request = {}
+
+    async def rate_limited_claude(**_kwargs):
+        if False:
+            yield StreamChunk(kind="done", data={})
+        raise RoseRateLimitError("Claude OAuth rate limited")
+
+    async def successful_gpt(**kwargs):
+        captured_gpt_request.update(kwargs)
+        yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.6-terra-gpt"})
+        yield StreamChunk(
+            kind="tool_call",
+            data={"name": "attempt_completion", "arguments": {}, "id": "call-complete"},
+        )
+        yield StreamChunk(
+            kind="usage",
+            data={"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+        )
+        yield StreamChunk(kind="done", data={})
+
+    async def fetch_fresh(user_id):
+        return GptAuthContext(
+            token="fresh-gpt",
+            account_id="acct-fresh",
+            source="pool",
+            user_id=user_id,
+            pool_token_id="pool-gpt",
+            fetch_fresh=None,
+            max_rotations=1,
+        )
+
+    auth = ClaudeAuthContext(
+        token="rate-limited-claude",
+        source="pool",
+        user_id="user-1",
+        pool_token_id="pool-claude",
+        fetch_fresh=fetch_fresh,
+        max_rotations=1,
+    )
+    with (
+        patch("providers.rose.client.claude_auth_complete", rate_limited_claude),
+        patch("providers.rose.client.gpt_auth_complete", successful_gpt),
+    ):
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "Use the browser child"}],
+                response_model=AgentAction,
+                claude_auth=auth,
+                call_site="execute_loop",
+            )
+        )
+
+    assert any(chunk.kind == "tool_call" for chunk in chunks)
+    assert captured_gpt_request["response_format"] is None
+    assert {tool["name"] for tool in captured_gpt_request["tools"]} == {
+        "spawn_agent",
+        "attempt_completion",
+    }
+    assert captured_gpt_request["tool_choice"] == "any"
+
+
 async def test_client_splits_pydantic_model_to_claude_native_tools():
     AgentAction = create_agent_action_model(["wait_for", "attempt_completion"])
 
@@ -4462,6 +4597,123 @@ def test_cache_input_accounting_openrouter_waterfall_uses_inclusive_details():
     assert stats["cache_hit_pct"] == 94
 
 
+async def test_client_normalizes_inclusive_cache_usage_for_downstream_costing():
+    """OpenAI-compatible total prompt tokens must become the Rose exclusive contract.
+
+    Captured from spawn-sub-agents agent 8edbb0bf-aad7: OpenAI reported
+    61,441 total prompt tokens, including 40,951 cache reads and 20,368 cache
+    writes. Downstream cost accounting adds those cache counters separately,
+    so Rose must expose only the 122-token uncached tail as prompt_tokens.
+    """
+
+    async def captured_openai_api_key(**_kwargs):
+        yield StreamChunk(
+            kind="metadata",
+            data={"actual_model": "gpt-5.6-terra-openai"},
+        )
+        yield StreamChunk(
+            kind="usage",
+            data={
+                "prompt_tokens": 61_441,
+                "completion_tokens": 868,
+                "total_tokens": 62_309,
+                "cache_read_input_tokens": 40_951,
+                "cache_creation_input_tokens": 20_368,
+            },
+        )
+        yield StreamChunk(kind="done", data={})
+
+    client = RoseClient(openrouter_key="ork-x")
+    with (
+        patch("providers.rose.client._openai_api_key", return_value="sk-test"),
+        patch("providers.rose.client._try_openai_api_key", side_effect=captured_openai_api_key),
+    ):
+        chunks = await _drain(
+            client.complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "captured cache accounting"}],
+                call_site="cache-accounting-repro",
+            )
+        )
+
+    usage = next(chunk.data for chunk in chunks if chunk.kind == "usage")
+    assert usage["prompt_tokens"] == 122
+    assert usage["prompt_tokens_total"] == 61_441
+    assert usage["total_tokens"] == 62_309
+    assert usage["cache_read_input_tokens"] == 40_951
+    assert usage["cache_creation_input_tokens"] == 20_368
+
+
+def test_parallel_explore_trace_stays_below_cost_limit_after_cache_normalization():
+    """Replay the complete LLM usage from failed parallel-tool-calls agent 58a04e8d.
+
+    Three native-tool explore leaves completed successfully, but legacy accounting
+    reported 113.57c and paused the root before synthesis. OpenAI's prompt counter
+    already contained both cache buckets; normalizing it restores the actual 62.65c
+    trace cost without weakening the benchmark's 100c product limit.
+    """
+    # model suffix, inclusive prompt, completion, cache read, cache write
+    captured_usage = [
+        ("terra", 1_795, 198, 0, 1_792),
+        ("sol", 6_530, 509, 0, 6_408),
+        ("terra", 2_215, 271, 0, 2_093),
+        ("terra", 2_217, 132, 0, 2_095),
+        ("terra", 2_229, 144, 0, 2_107),
+        ("terra", 11_659, 212, 2_107, 9_430),
+        ("terra", 10_235, 275, 2_095, 8_018),
+        ("terra", 14_582, 440, 2_093, 12_367),
+        ("luna", 11_913, 964, 0, 11_910),
+        ("luna", 4_148, 563, 0, 4_145),
+        ("luna", 4_249, 988, 0, 4_246),
+        ("luna", 500, 78, 0, 500),
+        ("terra", 30_770, 325, 14_460, 16_188),
+        ("terra", 20_595, 254, 11_537, 8_936),
+        ("luna", 2_180, 1_147, 0, 2_177),
+        ("luna", 4_147, 475, 0, 4_144),
+        ("luna", 1_531, 987, 0, 1_528),
+        ("luna", 4_632, 393, 0, 4_629),
+        ("terra", 20_473, 1_863, 10_113, 10_238),
+        ("luna", 6_679, 161, 0, 6_676),
+        ("terra", 24_875, 2_161, 20_473, 4_280),
+        ("terra", 34_577, 1_964, 30_648, 3_807),
+    ]
+
+    def workflow_cost_cents(model: str, usage: dict) -> float:
+        pricing = get_model_pricing(model)
+        assert pricing is not None
+        input_rate = pricing["input_cents_per_1k"]
+        output_rate = pricing["output_cents_per_1k"]
+        return (
+            usage["prompt_tokens"] * input_rate
+            + usage["cache_read_input_tokens"] * input_rate * 0.25
+            + usage["cache_creation_input_tokens"] * input_rate
+            + usage["completion_tokens"] * output_rate
+        ) / 1_000
+
+    legacy_llm_cost = 0.0
+    normalized_llm_cost = 0.0
+    for suffix, prompt, completion, cache_read, cache_write in captured_usage:
+        model = f"gpt-5.6-{suffix}-openai"
+        raw_usage = {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_write,
+        }
+        legacy_llm_cost += workflow_cost_cents(model, raw_usage)
+        normalized_llm_cost += workflow_cost_cents(model, _normalize_usage_input_tokens(model, raw_usage))
+
+    # The same run incurred 11.5272c in web-search/fetch service usage.
+    service_cost_cents = 11.5272
+    legacy_trace_cost = legacy_llm_cost + service_cost_cents
+    normalized_trace_cost = normalized_llm_cost + service_cost_cents
+
+    assert abs(legacy_trace_cost - 113.567325) < 0.000001
+    assert legacy_trace_cost > 100
+    assert abs(normalized_trace_cost - 62.648575) < 0.000001
+    assert normalized_trace_cost < 100
+
+
 async def test_claude_auth_stream_reports_cache_hit_rate():
     """Simulated claudeAuth stream with cache metrics — validates cache_read
     tokens are reported and the hit rate is above a minimum threshold.
@@ -4842,6 +5094,67 @@ async def test_rose_client_synthesizes_force_any_for_response_model():
     assert tool_names == {"web_fetch", "attempt_completion"}
 
 
+async def test_rose_client_synthesizes_native_tools_for_api_key_without_oauth():
+    """Funded API-key routes must get the same real tools as OAuth routes.
+
+    The browser-smoke regression had no OAuth context. Its first rich
+    AgentAction turn was sent as a strict union response_format, rejected by
+    the funded provider, and fell to a different model. The next, simpler turn
+    then used the funded route, splitting an otherwise repeatable cache group.
+    """
+    from pydantic import BaseModel
+    from typing import Literal
+
+    class _WebFetchTool(BaseModel):
+        tool: Literal["web_fetch"]
+        url: str
+
+    class _AttemptCompletionTool(BaseModel):
+        tool: Literal["attempt_completion"]
+
+    class _ExploreAction(BaseModel):
+        response: str = ""
+        tool_calls: list[_WebFetchTool | _AttemptCompletionTool] = []
+
+    captured: dict = {}
+
+    async def _fake_try_openai_api_key(**kwargs):
+        captured["tools"] = kwargs.get("tools")
+        captured["tool_choice"] = kwargs.get("tool_choice")
+        captured["response_format"] = kwargs.get("response_format")
+        if False:
+            yield None
+        raise RuntimeError("short-circuit after capturing")
+
+    import providers.rose.client as client_mod
+
+    original = client_mod._try_openai_api_key
+    previous_key = os.environ.get("GPT_API_KEY")
+    client_mod._try_openai_api_key = _fake_try_openai_api_key
+    os.environ["GPT_API_KEY"] = "sk-proj-test"
+    try:
+        try:
+            async for _ in RoseClient().complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "browse"}],
+                response_model=_ExploreAction,
+            ):
+                pass
+        except RuntimeError as exc:
+            assert str(exc) == "short-circuit after capturing"
+    finally:
+        client_mod._try_openai_api_key = original
+        if previous_key is None:
+            os.environ.pop("GPT_API_KEY", None)
+        else:
+            os.environ["GPT_API_KEY"] = previous_key
+
+    assert captured.get("tool_choice") == "any"
+    assert captured.get("response_format") is None
+    tool_names = {tool["name"] for tool in (captured.get("tools") or [])}
+    assert tool_names == {"web_fetch", "attempt_completion"}
+
+
 # =====================================================================
 # Test runner
 # =====================================================================
@@ -5018,6 +5331,10 @@ async def run_all_tests():
     await r.record_async(
         "anthropic_apikey_402_payment_required", test_anthropic_api_key_complete_402_raises_payment_required
     )
+    await r.record_async(
+        "anthropic_apikey_400_credit_payment_required",
+        test_anthropic_api_key_complete_400_credit_balance_raises_payment_required,
+    )
     await r.record_async("anthropic_apikey_suffix", test_anthropic_api_key_complete_sets_anthropic_suffix)
     await r.record_async("anthropic_apikey_cooldown_mark", test_anthropic_api_key_cooldown_mark_then_on_cooldown)
     await r.record_async(
@@ -5087,6 +5404,10 @@ async def run_all_tests():
         "client_compute_rotates_across_providers",
         test_client_rotates_compute_token_across_providers_before_waterfall,
     )
+    await r.record_async(
+        "client_rotation_preserves_native_tool_contract",
+        test_client_rotation_preserves_native_tool_contract_across_provider_types,
+    )
     await r.record_async("client_pydantic_native_tools_split", test_client_splits_pydantic_model_to_claude_native_tools)
     await r.record_async(
         "client_gpt_pydantic_native_tools_split", test_client_splits_pydantic_model_to_gpt_native_tools
@@ -5113,6 +5434,14 @@ async def run_all_tests():
         "cache_accounting_openrouter_inclusive",
         test_cache_input_accounting_openrouter_waterfall_uses_inclusive_details,
     )
+    await r.record_async(
+        "client_normalizes_inclusive_cache_usage",
+        test_client_normalizes_inclusive_cache_usage_for_downstream_costing,
+    )
+    r.record(
+        "parallel_explore_trace_cache_cost_normalization",
+        test_parallel_explore_trace_stays_below_cost_limit_after_cache_normalization,
+    )
     await r.record_async("cache_hit_rate_smoke", test_claude_auth_stream_reports_cache_hit_rate)
     r.record("cache_structure_real_prompt", test_build_anthropic_body_cache_structure_from_real_prompt)
     r.record(
@@ -5134,6 +5463,10 @@ async def run_all_tests():
     await r.record_async(
         "rose_client_synthesizes_force_any_for_response_model",
         test_rose_client_synthesizes_force_any_for_response_model,
+    )
+    await r.record_async(
+        "rose_client_synthesizes_api_key_tools_without_oauth",
+        test_rose_client_synthesizes_native_tools_for_api_key_without_oauth,
     )
 
     teardown_mock()

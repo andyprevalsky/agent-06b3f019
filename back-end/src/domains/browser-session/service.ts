@@ -2,6 +2,7 @@
  * Browser-session domain service — business logic, no req/res.
  */
 
+import type { Browser } from 'playwright';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../../providers/geoip';
 import { createLogger } from '../../providers/logger';
 import {
@@ -25,6 +26,7 @@ import {
   RotationSessionNotFoundError,
 } from '../../providers/browserSessionResume';
 import { canonicalAuthRealm } from '../../providers/authRealm';
+import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
 import {
   injectLocalStorage,
@@ -112,6 +114,64 @@ export function buildBrowserSessionMetadata(
 // Helpers
 // ---------------------------------------------------------------------------
 
+export async function prepareSessionCredentials(
+  sessionId: string,
+  userId: string,
+  targetUrl: string,
+  options: { browser?: Browser } = {}
+) {
+  const session = await repo.findSessionBySessionId(sessionId);
+  if (session === null || session.context.userId !== userId) {
+    throw new SessionNotFoundError();
+  }
+
+  const authRealm = canonicalAuthRealm(targetUrl);
+  if (authRealm === '') {
+    throw new Error('Target URL must have an authentication realm');
+  }
+
+  const [authOptions, storedPasswords, passkeys] = await Promise.all([
+    getAuthOptions(userId, authRealm),
+    repo.findPasswords(userId),
+    repo.reservePasskeysForRealm(userId, authRealm),
+  ]);
+
+  const enabledPasswordIds = new Set(
+    authOptions.passwords.filter((password) => !password.disabled).map((password) => password.id)
+  );
+  const passwords = storedPasswords.filter((password) => enabledPasswordIds.has(password.id));
+  const returnedPasswordIds = new Set(passwords.map((password) => password.id));
+  const missingPasswordIds = [...enabledPasswordIds].filter((id) => !returnedPasswordIds.has(id));
+
+  const enabledPasskeyIds = new Set(
+    authOptions.passkeys.filter((passkey) => !passkey.disabled).map((passkey) => passkey.id)
+  );
+  const returnedPasskeyIds = new Set(passkeys.map((passkey) => passkey.id));
+  const missingPasskeyIds = [...enabledPasskeyIds].filter((id) => !returnedPasskeyIds.has(id));
+
+  if (missingPasswordIds.length > 0 || missingPasskeyIds.length > 0) {
+    throw new Error(
+      `Credential payload incomplete for ${authRealm}: ` +
+        `missing passwords [${missingPasswordIds.join(', ')}], ` +
+        `missing passkeys [${missingPasskeyIds.join(', ')}]`
+    );
+  }
+
+  const injectionResult = await injectUserData(sessionId, userId, targetUrl, options);
+
+  return {
+    auth_realm: authRealm,
+    auth_options: authOptions,
+    auth_credential_ref: injectionResult.cookies.credentialRef,
+    cookies_injected: injectionResult.cookies.injected,
+    cookies_count: injectionResult.cookies.cookieCount,
+    auth_source: injectionResult.cookies.authSource,
+    browser_state_injection: injectionResult,
+    passwords: serializePasswords(passwords),
+    passkeys: serializePasskeys(passkeys),
+  };
+}
+
 /* c8 ignore start -- initSession, closeBrowserSession, resumeBrowserSession require Steel SDK */
 export async function initSession(userId: string, agentId: string, startUrl: string) {
   log.info('Initializing browser session', {
@@ -120,17 +180,14 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     startUrl: startUrl !== '' ? startUrl : 'none',
   });
 
-  // Phase 1: All independent queries in parallel. The passkey reservation is a
-  // mutation (atomic signCount block reserve) keyed on the start_url's realm; it
-  // returns nothing for sites without a stored passkey.
-  const realm = canonicalAuthRealm(startUrl);
-  const [agent, contextId, user, fingerprintInjection, passwords, passkeys] = await Promise.all([
+  // Phase 1: Fetch session-independent data in parallel. Realm-scoped
+  // credentials are collected by the same preparation boundary used for JIT
+  // navigation after the provider session exists.
+  const [agent, contextId, user, fingerprintInjection] = await Promise.all([
     repo.findAgentProxy(agentId),
     getOrCreateContext(userId),
     repo.findUserSettings(userId),
     getFingerprintInjectionData(userId),
-    repo.findPasswords(userId),
-    repo.reservePasskeysForRealm(userId, realm),
   ]);
 
   const proxyGeo: ProxyGeoLocation =
@@ -159,18 +216,29 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     keepValidationConnection: true,
   });
 
-  // Phase 3: Inject user's cookies and fingerprint via CDP
-  const injectionResult = await injectUserData(session.sessionId, userId, startUrl, {
-    browser: session.validationBrowser ?? undefined,
-  });
-
-  const serializedPasswords = serializePasswords(passwords);
-  const serializedPasskeys = serializePasskeys(passkeys);
+  // Phase 3: Resolve and inject every credential/state type for the start realm.
+  let credentials: Awaited<ReturnType<typeof prepareSessionCredentials>>;
+  try {
+    credentials = await prepareSessionCredentials(session.sessionId, userId, startUrl, {
+      browser: session.validationBrowser ?? undefined,
+    });
+  } catch (error) {
+    await closeSession(session.sessionId, false).catch((cleanupError) => {
+      log.error('Failed to clean up browser after credential preparation error', {
+        sessionId: session.sessionId,
+        error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+      });
+    });
+    throw error;
+  }
   const userSettings = toUserSettings(user);
 
-  log.info('Including passwords in init response', { count: serializedPasswords.length });
-  if (serializedPasskeys.length > 0) {
-    log.info('Including passkeys in init response', { count: serializedPasskeys.length, realm });
+  log.info('Including passwords in init response', { count: credentials.passwords.length });
+  if (credentials.passkeys.length > 0) {
+    log.info('Including passkeys in init response', {
+      count: credentials.passkeys.length,
+      realm: credentials.auth_realm,
+    });
   }
 
   return {
@@ -179,15 +247,20 @@ export async function initSession(userId: string, agentId: string, startUrl: str
     session_id: session.sessionId,
     debug_url: session.debugUrl,
     ws_url: session.wsUrl,
-    browser_session_metadata: buildBrowserSessionMetadata(session, injectionResult),
-    cookies_injected: injectionResult.cookies.injected,
-    cookies_count: injectionResult.cookies.cookieCount,
-    auth_source: injectionResult.cookies.authSource,
-    auth_credential_ref: injectionResult.cookies.credentialRef,
-    fingerprint_injected: injectionResult.fingerprint.injected,
+    browser_session_metadata: buildBrowserSessionMetadata(
+      session,
+      credentials.browser_state_injection
+    ),
+    cookies_injected: credentials.cookies_injected,
+    cookies_count: credentials.cookies_count,
+    auth_source: credentials.auth_source,
+    auth_credential_ref: credentials.auth_credential_ref,
+    auth_options: credentials.auth_options,
+    auth_realm: credentials.auth_realm,
+    fingerprint_injected: credentials.browser_state_injection.fingerprint.injected,
     fingerprint_injection: fingerprintInjection,
-    passwords: serializedPasswords,
-    passkeys: serializedPasskeys,
+    passwords: credentials.passwords,
+    passkeys: credentials.passkeys,
     user_settings: userSettings,
   };
 }

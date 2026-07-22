@@ -36,6 +36,11 @@ TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
 STATIC_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
 
 
+def steel_api_url(path: str) -> str:
+    base_url = os.getenv("STEEL_BASE_URL", "https://connect.steelbrowser.com").rstrip("/")
+    return f"{base_url}/{path.lstrip('/')}"
+
+
 def browser_recordings_enabled() -> bool:
     value = os.getenv("BROWSER_AGENT_RECORDINGS", "").strip().lower()
     if value in TRUE_VALUES:
@@ -1204,7 +1209,7 @@ class BrowserAgentRecorder:
         if not api_key or not self.session_id:
             return None
 
-        hls_url = f"https://api.steel.dev/v1/sessions/{self.session_id}/hls"
+        hls_url = steel_api_url(f"v1/sessions/{self.session_id}/hls")
         self.media_dir.mkdir(parents=True, exist_ok=True)
         playlist_path = self.media_dir / "recording.m3u8"
         mp4_path = self.media_dir / "recording.mp4"

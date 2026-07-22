@@ -74,8 +74,13 @@ if grep -Fq 'SMOKE_RESEARCH_URL' "$DEPLOY_COMMAND"; then
   fail "/deploy must not wait on the retired research service"
 fi
 
-# /deploy runs all local semantics unconditionally and waits on the production gate.
-require_text "$DEPLOY_COMMAND" "Semantic tests run on every /deploy and may never be skipped." "/deploy must make semantic tests unconditional"
+# /deploy runs all local semantics by default and preserves explicit user authority
+# to override any individual gate with an auditable record.
+require_text "$DEPLOY_COMMAND" "Explicit user gate overrides (highest-precedence deploy rule)" "/deploy must define the user override precedence rule"
+require_text "$DEPLOY_COMMAND" "may override **any** \`/deploy\` gate" "/deploy must allow explicit user overrides for every gate"
+require_text "$DEPLOY_COMMAND" 'Record `⚠️ Overridden` in `TEST_REPORT`' "/deploy must disclose overridden gates instead of reporting them as passing"
+require_text "$DEPLOY_COMMAND" 'DEPLOY_GATE_OVERRIDES=credential-health:anthropic' "/deploy must document the narrow Anthropic credential override"
+require_text "$DEPLOY_COMMAND" "Semantic tests run on every /deploy unless the user explicitly overrides that gate." "/deploy must make semantic tests default-on while honoring explicit overrides"
 require_text "$DEPLOY_COMMAND" "SEMANTIC_WORKERS=4" "/deploy local semantic gate must use four workers"
 require_text "$DEPLOY_COMMAND" '. "$DEPLOY_ROOT/scripts/lib/workspace-env.sh"' "/deploy must load canonical workspace identity normalization"
 require_text "$DEPLOY_COMMAND" '. "$DEPLOY_ROOT/scripts/lib/deploy-local-env.sh"' "/deploy must load the tested local environment boundary"

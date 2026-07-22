@@ -7,8 +7,10 @@ import { resetKernelSessionTabs } from '../../providers/browser/kernel';
 function mockBrowser(pageCounts: number[]): {
   browser: Browser;
   closedWith: Array<{ runBeforeUnload?: boolean }>;
+  createdPages: number;
 } {
   const closedWith: Array<{ runBeforeUnload?: boolean }> = [];
+  let createdPages = 0;
   const contexts = pageCounts.map((pageCount) => {
     const pages = Array.from(
       { length: pageCount },
@@ -19,11 +21,20 @@ function mockBrowser(pageCounts: number[]): {
           },
         }) as Page
     );
-    return { pages: () => pages } as BrowserContext;
+    return {
+      pages: () => pages,
+      newPage: async () => {
+        createdPages += 1;
+        return {} as Page;
+      },
+    } as BrowserContext;
   });
   return {
     browser: { contexts: () => contexts } as Browser,
     closedWith,
+    get createdPages() {
+      return createdPages;
+    },
   };
 }
 
@@ -37,13 +48,15 @@ async function main(): Promise<void> {
     { runBeforeUnload: false },
     { runBeforeUnload: false },
   ]);
+  assert.strictEqual(restored.createdPages, 1);
 
   const empty = mockBrowser([0]);
   assert.strictEqual(await resetKernelSessionTabs(empty.browser), 0);
   assert.deepStrictEqual(empty.closedWith, []);
+  assert.strictEqual(empty.createdPages, 1);
 
   process.stdout.write(
-    'PASS Kernel sessions discard restored tabs without replacing the browser context\n'
+    'PASS Kernel sessions replace restored tabs while retaining the browser context\n'
   );
 }
 

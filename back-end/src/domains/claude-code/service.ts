@@ -15,6 +15,7 @@ import {
   markPoolTokenRateLimited,
   markUserTokenRateLimited,
 } from '../../providers/claudeCredentials';
+import { markAnthropicApiKeyOnCooldown } from '../../providers/computeCredentials';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';
@@ -242,7 +243,7 @@ const AUTH_FAILURE_PATTERNS: readonly RegExp[] = [
   /Please run \/login/i,
   /Not logged in/i,
   /Invalid authentication credentials/i,
-  /Credit balance too low/i,
+  /Credit balance(?: is)? too low/i,
   /Add funds:\s*https:\/\/platform\.claude\.com\/settings\/billing/i,
 ];
 
@@ -299,6 +300,9 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
         cooldownMs,
       });
     }
+  } else if (tokenSource === 'anthropic') {
+    log.warn(`Claude Code ${failureKind} on shared Anthropic API key`);
+    await markAnthropicApiKeyOnCooldown('claude_code_billing_failure');
   }
 }
 

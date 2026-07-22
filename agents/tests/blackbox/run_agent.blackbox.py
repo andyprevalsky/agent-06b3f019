@@ -35,9 +35,24 @@ async def _run_single_iteration(
     execute_tool_override=None,
     verifier_score=1.0,
     verifier_reasoning="done",
+    verifier_structured_response=None,
     winddown_window=0,
+    response_schema=None,
+    llm_tool_calls_sequence=None,
+    llm_tool_calls_factory=None,
+    llm_chunk_texts_sequence=None,
+    llm_usages_sequence=None,
+    llm_response_models=None,
+    llm_auth_calls=None,
+    fast_mode_cache_enabled=False,
+    goal_text=None,
     poll_messages_override=None,
     is_inside_temporal_activity=True,
+    response_model=None,
+    on_tokens_override=None,
+    check_paused_override=None,
+    gpt_token=None,
+    gpt_account_id=None,
 ):
     from loop.run_agent import run_agent
 
@@ -87,9 +102,36 @@ async def _run_single_iteration(
         default_execute_tool = default_mock_execute_tool
 
     async def mock_call_llm_structured_streaming(**kwargs):
+        if llm_response_models is not None:
+            llm_response_models.append(kwargs["response_model"])
+        if llm_auth_calls is not None:
+            llm_auth_calls.append(
+                {
+                    "claude_token": kwargs["claude_token"],
+                    "claude_token_source": kwargs["claude_token_source"],
+                    "claude_token_pool_id": kwargs["claude_token_pool_id"],
+                    "gpt_token": kwargs["gpt_token"],
+                    "gpt_account_id": kwargs["gpt_account_id"],
+                    "gpt_token_source": kwargs["gpt_token_source"],
+                    "gpt_token_pool_id": kwargs["gpt_token_pool_id"],
+                }
+            )
+        selected_tool_calls = tool_calls
+        if llm_tool_calls_factory is not None:
+            selected_tool_calls = llm_tool_calls_factory()
+        elif llm_tool_calls_sequence is not None:
+            selected_tool_calls = llm_tool_calls_sequence.pop(0)
+        if llm_chunk_texts_sequence is not None:
+            chunk_text = llm_chunk_texts_sequence.pop(0)
+            await kwargs["on_chunk"](chunk_text, len(chunk_text))
+        selected_usage = (
+            llm_usages_sequence.pop(0)
+            if llm_usages_sequence is not None
+            else {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        )
         return (
-            _DummyLLMResult("", tool_calls),
-            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            _DummyLLMResult("", selected_tool_calls),
+            selected_usage,
             detected_tools_ordered,
         )
 
@@ -97,7 +139,7 @@ async def _run_single_iteration(
         return {
             "score": verifier_score,
             "reasoning": verifier_reasoning,
-            "structured_response": None,
+            "structured_response": verifier_structured_response,
             "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
         }
 
@@ -132,6 +174,14 @@ async def _run_single_iteration(
             skip_verification=skip_verification,
             skip_status_updates=True,
             is_plan_loop=is_plan_loop,
+            response_schema=response_schema,
+            response_model=response_model,
+            fast_mode_cache_enabled=fast_mode_cache_enabled,
+            goal_text=goal_text,
+            on_tokens=on_tokens_override,
+            check_paused=check_paused_override,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
         )
 
     return result, posted_messages, executed_tools
@@ -233,11 +283,7 @@ async def test_rejected_completion_continues_with_stable_schema():
     assert schemas[0] == schemas[1] == schemas[2]
     assert "attempt_completion_with_result" in str(schemas[0])
     assert "minItems" not in schemas[0]["properties"]["tool_calls"]
-    rejected = [
-        message
-        for message in result["context"]
-        if message.get("metadata", {}).get("toolStatus") == "ERROR"
-    ]
+    rejected = [message for message in result["context"] if message.get("metadata", {}).get("toolStatus") == "ERROR"]
     assert len(rejected) == 1
     assert "no evidence tool has succeeded" in rejected[0]["text"]
 
@@ -1164,17 +1210,20 @@ async def test_run_verifier_dynamic_schema_getter():
 
 
 async def test_completed_browser_output_forces_parent_completion_instead_of_second_browser():
-    """A verified browser result covering the parent schema must not be re-run.
+    """A verified browser result must complete without replacing the tool schema.
 
     Regression: the simulated Amazon checkout browser returned a terminal,
     schema-complete result, but the unrestricted next root turn spawned a second
     browser session instead of calling attempt_completion. The parent verifier
-    already accepts this exact child output, so orchestration must expose only
-    the completion boundary on the handoff turn. A prose instruction plus a
-    post-parse validator is insufficient when spawn_agent remains advertised.
+    already accepts this exact child output, so the only legal next tool is the
+    completion boundary. The completion instruction + required-tool validation
+    enforce that boundary while preserving the original tool schema; narrowing
+    the schema here invalidates the provider prompt-cache prefix on the handoff
+    turn (captured in browser-smoke agent e8e0e86a-1f16).
     """
     from helpers.llm import call_llm_activity, check_progress
     from loop import run_agent as run_mod
+    from temporalio.exceptions import ApplicationError
 
     response_schema = {
         "fields": [
@@ -1222,11 +1271,16 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
     async def mock_execute_activity(fn, args=None, **_kwargs):
         if fn is call_llm_activity:
             llm_calls.append(args)
-            advertised_tools = args[2]
-            # Reproduce the live Amazon failure: GPT chose spawn_agent three
-            # times when it was still advertised despite a completion-only
-            # instruction and validator.
-            tool_name = "attempt_completion" if advertised_tools == ["attempt_completion"] else "spawn_agent"
+            required_tool = args[11]
+            # The real activity rejects a wrong required tool non-retryably;
+            # run_agent, not Temporal, owns the next semantic turn.
+            if len(llm_calls) == 1:
+                raise ApplicationError(
+                    "LLM must call exactly one tool, 'attempt_completion'. Got: ['spawn_agent']",
+                    type="LLMStructuredOutputError",
+                    non_retryable=True,
+                )
+            tool_name = "attempt_completion" if required_tool == "attempt_completion" else "spawn_agent"
             tool_call = {"tool": tool_name}
             if tool_name == "spawn_agent":
                 tool_call.update(
@@ -1259,7 +1313,10 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
     async def prompt():
         return "System prompt"
 
-    with patch.object(run_mod.workflow, "execute_activity", new=AsyncMock(side_effect=mock_execute_activity)):
+    with (
+        patch.object(run_mod.workflow, "execute_activity", new=AsyncMock(side_effect=mock_execute_activity)),
+        patch.object(run_mod.asyncio, "sleep", new=AsyncMock()),
+    ):
         result = await run_mod.run_agent(
             agent_id="amazon-parent",
             user_id="user-test",
@@ -1271,16 +1328,192 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
             is_inside_temporal_activity=False,
             post_message=AsyncMock(),
             execute_tool=execute_tool,
-            max_iterations=1,
+            max_iterations=2,
             skip_status_updates=True,
             response_schema=response_schema,
         )
 
     assert result["status"] == "completed"
     assert executed_tools == ["attempt_completion"]
-    assert llm_calls[0][2] == ["attempt_completion"]
-    assert llm_calls[0][11] == "attempt_completion"
-    assert "already completed" in llm_calls[0][10]
+    assert len(llm_calls) == 2
+    for call in llm_calls:
+        assert call[2] == ["spawn_agent", "attempt_completion"]
+        assert call[11] == "attempt_completion"
+        assert "already completed" in call[10]
+
+
+async def test_completed_child_required_tool_is_enforced_inside_direct_activity():
+    """The inline activity path retries instead of dispatching a non-completion tool."""
+    import providers.fast_cache.context as fast_cache_context
+
+    response_schema = {
+        "fields": [
+            {"name": "purchase_completed", "type": "bool", "required": True},
+            {"name": "order_confirmation_id", "type": "str", "required": True},
+        ]
+    }
+    child_result = {
+        "purchase_completed": True,
+        "order_confirmation_id": "111-2222222-3333333",
+    }
+    context = [
+        {"role": "USER", "text": "Buy the item", "timestamp": "2026-07-21T00:00:00Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-07-21T00:00:01Z",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "tool_call_id": "browser-one",
+                        "type": "browser",
+                        "goal": "Complete checkout",
+                        "output_schema": response_schema,
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Browser automation complete",
+            "timestamp": "2026-07-21T00:00:02Z",
+            "metadata": {
+                "toolCallId": "browser-one",
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "structured_response": child_result,
+            },
+        },
+    ]
+    cache_contexts = []
+    stream_sequences = []
+    stream_final_sequences = []
+    response_models = []
+    auth_calls = []
+    usage_reports = []
+    event_order = []
+    llm_call_count = 0
+    original_set_context = fast_cache_context.set_context
+
+    class CapturingBroadcaster:
+        def __init__(self, **_kwargs):
+            pass
+
+        def update(self, _delta, sequence):
+            stream_sequences.append(sequence)
+
+        def reset(self):
+            pass
+
+        async def aclose(self, *, final_delta, final_sequence, await_done_broadcast):
+            del final_delta, await_done_broadcast
+            stream_final_sequences.append(final_sequence)
+
+        async def adispose(self):
+            pass
+
+    def capture_cache_context(cache_context):
+        cache_contexts.append((cache_context.read_enabled, cache_context.should_write, cache_context.base_step))
+        return original_set_context(cache_context)
+
+    def replay_while_cache_is_active():
+        nonlocal llm_call_count
+        llm_call_count += 1
+        event_order.append(f"llm_{llm_call_count}")
+        cache_context = fast_cache_context.current_context()
+        if cache_context is not None and cache_context.active:
+            return [{"tool": "web_search", "query": "replayed rejected response"}]
+        return [{"tool": "attempt_completion"}]
+
+    async def capture_usage(tokens_in, tokens_out, actual_model, **metadata):
+        usage_reports.append((tokens_in, tokens_out, actual_model, metadata))
+        event_order.append(f"usage_{actual_model}")
+
+    async def capture_pause_check():
+        if event_order and event_order[-1].startswith("usage_"):
+            event_order.append("pause_check_after_usage")
+        return False
+
+    from pydantic import BaseModel, Field
+
+    class CustomBrowserAction(BaseModel):
+        response: str = ""
+        tool_calls: list = Field(default_factory=list)
+
+    with (
+        patch.object(fast_cache_context, "set_context", side_effect=capture_cache_context),
+        patch.object(fast_cache_context, "write_through_enabled_for_user", return_value=False),
+        patch("loop.run_agent.CoalescingStreamBroadcaster", CapturingBroadcaster),
+        patch("loop.run_agent.activity.heartbeat"),
+    ):
+        result, _, executed = await _run_single_iteration(
+            [],
+            [("attempt_completion", "completion-tool", 1.0)],
+            skip_verification=False,
+            initial_context=context,
+            response_schema=response_schema,
+            verifier_structured_response=child_result,
+            llm_tool_calls_factory=replay_while_cache_is_active,
+            llm_chunk_texts_sequence=["wrong tool", "required tool"],
+            llm_usages_sequence=[
+                {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 2,
+                    "total_tokens": 13,
+                    "cache_read_input_tokens": 3,
+                    "actual_model": "rejected-model",
+                    "gpt_token_rotated": True,
+                    "compute_token_used": {
+                        "type": "gpt",
+                        "accessToken": "rotated-gpt-token",
+                        "accountId": "rotated-gpt-account",
+                        "source": "pool",
+                        "poolTokenId": "pool-token-2",
+                    },
+                },
+                {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 5,
+                    "total_tokens": 12,
+                    "actual_model": "accepted-model",
+                },
+            ],
+            llm_response_models=response_models,
+            llm_auth_calls=auth_calls,
+            fast_mode_cache_enabled=True,
+            goal_text="complete from verified child",
+            response_model=CustomBrowserAction,
+            on_tokens_override=capture_usage,
+            check_paused_override=capture_pause_check,
+            gpt_token="stale-gpt-token",
+            gpt_account_id="stale-gpt-account",
+        )
+    original_set_context(None)
+
+    assert result["status"] == "completed"
+    assert [item["tool_name"] for item in executed] == ["attempt_completion"]
+    assert llm_call_count == 2
+    assert cache_contexts == [(True, True, 1), (False, False, 1)]
+    assert stream_sequences == [1, 2]
+    assert stream_final_sequences == [3]
+    assert response_models == [CustomBrowserAction, CustomBrowserAction]
+    assert [call["gpt_token"] for call in auth_calls] == ["stale-gpt-token", "rotated-gpt-token"]
+    assert [call["gpt_account_id"] for call in auth_calls] == [
+        "stale-gpt-account",
+        "rotated-gpt-account",
+    ]
+    assert auth_calls[1]["gpt_token_source"] == "pool"
+    assert auth_calls[1]["gpt_token_pool_id"] == "pool-token-2"
+    assert usage_reports[0][:3] == (11, 2, "rejected-model")
+    assert usage_reports[0][3]["cache_read_input_tokens"] == 3
+    assert usage_reports[0][3]["gpt_token_rotated"] is True
+    assert usage_reports[1][:3] == (7, 5, "accepted-model")
+    assert event_order.index("llm_1") < event_order.index("usage_rejected-model")
+    assert event_order.index("usage_rejected-model") < event_order.index("pause_check_after_usage")
+    assert event_order.index("pause_check_after_usage") < event_order.index("llm_2")
+    assert result["tokens_in"] >= 18
+    assert result["tokens_out"] >= 7
 
 
 async def test_max_iterations_runs_final_verifier():
@@ -1525,6 +1758,10 @@ async def run_all_tests():
     await r.record_async(
         "completed_browser_output_forces_parent_completion",
         test_completed_browser_output_forces_parent_completion_instead_of_second_browser,
+    )
+    await r.record_async(
+        "completed_child_required_tool_bypasses_rejected_fast_cache",
+        test_completed_child_required_tool_is_enforced_inside_direct_activity,
     )
     await r.record_async("max_iterations_runs_final_verifier", test_max_iterations_runs_final_verifier)
     await r.record_async("winddown_injects_one_message_near_cap", test_winddown_injects_one_message_near_cap)

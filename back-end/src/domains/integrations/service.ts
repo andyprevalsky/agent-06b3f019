@@ -6,7 +6,7 @@
 import { type Prisma, IntegrationType, IntegrationStatus, mergeJson } from './types';
 import { createLogger } from '../../providers/logger';
 import { sendSms } from '../../providers/smsQueue';
-import { getAdminPhone } from './config';
+import { getAdminPhone, isAnthropicApiKeyConfigured } from './config';
 import {
   fetchClaudeCodeAccessToken,
   fetchPoolToken,
@@ -649,10 +649,14 @@ export async function markComputeTokenRateLimited(
   throw new Error('Invalid type. Must be "claude", "gpt", or "anthropic".');
 }
 
-/** Read the shared ANTHROPIC_API_KEY cooldown — lets the agents Rose client
- *  skip the funded-default tier when it's backed off, without DB access. */
+/** Read the running backend's shared ANTHROPIC_API_KEY availability.
+ *  Consumers must require both configured=true and onCooldown=false before
+ *  selecting the funded-default tier; no secret material leaves the process. */
 export async function getAnthropicApiKeyCooldown() {
-  return { onCooldown: await isAnthropicApiKeyOnCooldown() };
+  return {
+    configured: isAnthropicApiKeyConfigured(),
+    onCooldown: await isAnthropicApiKeyOnCooldown(),
+  };
 }
 
 export async function markGptTokenRateLimited(

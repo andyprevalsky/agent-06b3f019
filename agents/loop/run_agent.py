@@ -31,6 +31,7 @@ from helpers.attachments import extract_file_pointer_dicts, resolve_attachments_
 from helpers.context_pointers import annotate_with_pointer
 from helpers.handle_tool_event import handle_tool_event
 from helpers.llm import (
+    LLMStructuredOutputError,
     _completed_child_task_structured_response,
     _pending_llm_context,
     build_llm_messages,
@@ -57,6 +58,27 @@ from utils.llm_timeouts import (
 from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model
 
 logger = structlog.get_logger()
+
+
+class RequiredTurnToolError(LLMStructuredOutputError):
+    """A valid structured result called a tool forbidden on this turn."""
+
+
+def _validate_required_turn_tool(result: Any, required_tool: Optional[str]) -> None:
+    """Reject direct-activity responses that violate a required-tool handoff."""
+    if not required_tool:
+        return
+    tool_names = []
+    for tool_call in getattr(result, "tool_calls", None) or []:
+        if hasattr(tool_call, "model_dump"):
+            payload = tool_call.model_dump()
+        elif isinstance(tool_call, dict):
+            payload = tool_call
+        else:
+            payload = {}
+        tool_names.append(payload.get("tool"))
+    if len(tool_names) != 1 or tool_names[0] != required_tool:
+        raise RequiredTurnToolError(f"LLM must call exactly one tool, '{required_tool}'. Got: {tool_names}")
 
 
 # Check credits every N iterations
@@ -344,6 +366,121 @@ async def run_agent(  # noqa: C901
             pool_token_id=token.get("poolTokenId"),
         )
 
+    def _resolve_current_compute_credentials(*, prefer_remembered: bool = False):
+        """Resolve credentials for the next provider attempt.
+
+        An immediate semantic retry must prefer the token that the rejected
+        provider attempt actually used. Workflow getters may not have observed
+        that in-call rotation yet.
+        """
+        if prefer_remembered:
+            return (
+                remembered_claude_token,
+                remembered_claude_token_source,
+                remembered_claude_token_pool_id,
+                remembered_gpt_token,
+                remembered_gpt_account_id,
+                remembered_gpt_token_source,
+                remembered_gpt_token_pool_id,
+            )
+
+        current_claude = get_claude_token() if get_claude_token else remembered_claude_token
+        current_gpt = get_gpt_token() if get_gpt_token else remembered_gpt_token
+        return (
+            current_claude,
+            (
+                get_claude_token_source()
+                if get_claude_token_source and current_claude
+                else remembered_claude_token_source
+            ),
+            (
+                get_claude_token_pool_id()
+                if get_claude_token_pool_id and current_claude
+                else remembered_claude_token_pool_id
+            ),
+            current_gpt,
+            (
+                get_gpt_account_id()
+                if get_gpt_account_id and current_gpt
+                else remembered_gpt_account_id
+            ),
+            (
+                get_gpt_token_source()
+                if get_gpt_token_source and current_gpt
+                else remembered_gpt_token_source
+            ),
+            (
+                get_gpt_token_pool_id()
+                if get_gpt_token_pool_id and current_gpt
+                else remembered_gpt_token_pool_id
+            ),
+        )
+
+    async def _account_llm_usage(attempt_usage: Dict[str, Any], *, label: str) -> bool:
+        """Account one provider attempt before another attempt can be issued."""
+        nonlocal tokens_in
+        nonlocal tokens_out
+        nonlocal token_count
+        nonlocal context_size
+        nonlocal cache_read_total
+        nonlocal cache_write_total
+
+        llm_tokens_in = attempt_usage.get("prompt_tokens", 0)
+        llm_tokens_out = attempt_usage.get("completion_tokens", 0)
+        llm_total = attempt_usage.get("total_tokens", 0)
+        tokens_in += llm_tokens_in
+        tokens_out += llm_tokens_out
+        token_count += llm_total
+
+        iter_cache_read = attempt_usage.get("cache_read_input_tokens", 0)
+        iter_cache_write = attempt_usage.get("cache_creation_input_tokens", 0)
+        _remember_successful_compute_token(attempt_usage.get("compute_token_used"))
+        context_size = llm_tokens_in + iter_cache_read + iter_cache_write
+        cache_read_total += iter_cache_read
+        cache_write_total += iter_cache_write
+        if iter_cache_read > 0 or iter_cache_write > 0:
+            total_input = llm_tokens_in + iter_cache_read + iter_cache_write
+            cache_pct = round(iter_cache_read / total_input * 100) if total_input > 0 else 0
+            logger.info(
+                f"💾 Cache i{iteration} ({label}): read={iter_cache_read} write={iter_cache_write} "
+                f"uncached={llm_tokens_in} hit={cache_pct}% | cumulative: "
+                f"read={cache_read_total} write={cache_write_total}"
+            )
+
+        if on_tokens:
+            try:
+                await on_tokens(
+                    llm_tokens_in,
+                    llm_tokens_out,
+                    attempt_usage.get("actual_model"),
+                    cache_read_input_tokens=iter_cache_read,
+                    cache_creation_input_tokens=iter_cache_write,
+                    call_site=cache_call_site,
+                    claude_token_error=attempt_usage.get("claude_token_error"),
+                    gpt_token_error=attempt_usage.get("gpt_token_error"),
+                    claude_token_rotated=attempt_usage.get("claude_token_rotated", False),
+                    gpt_token_rotated=attempt_usage.get("gpt_token_rotated", False),
+                    compute_token_used=attempt_usage.get("compute_token_used"),
+                    from_fast_cache=attempt_usage.get("from_fast_cache", False),
+                )
+            except Exception as e:
+                logger.warning(f"on_tokens callback failed: {e}")
+
+        return bool(check_paused and await check_paused())
+
+    def _paused_after_cost_result() -> Dict[str, Any]:
+        _pending_llm_context.pop(agent_id, None)
+        return {
+            "status": "paused",
+            "context": context,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "token_count": token_count,
+            "context_size": context_size,
+            "cache_read_input_tokens": cache_read_total,
+            "cache_creation_input_tokens": cache_write_total,
+        }
+
     def _log_cache_summary(status: str):
         """Log cache performance summary at end of run."""
         total_input = tokens_in + cache_read_total + cache_write_total
@@ -547,14 +684,14 @@ async def run_agent(  # noqa: C901
         if not is_plan_loop and not skip_verification and "attempt_completion" in tools:
             completed_child_output = _completed_child_task_structured_response(context, response_schema)
         completion_instruction = None
+        # Keep the provider-visible tool schema stable across turns. The
+        # completion instruction tells the model what to do and required_tool
+        # enforces it at the activity boundary; narrowing this list would move
+        # the native tool/schema block at the front of the provider prompt and
+        # invalidate the growing-conversation cache prefix.
         turn_tools = tools
         required_turn_tool = None
         if completed_child_output is not None:
-            # This is a real completion-only state, not a soft prompt hint. A
-            # completed browser child already supplied every parent output field,
-            # so advertising spawn_agent here lets the model repeat an irreversible
-            # task before the post-parse required-tool check can reject it.
-            turn_tools = ["attempt_completion"]
             required_turn_tool = "attempt_completion"
             completion_instruction = (
                 "A previously delegated browser or code task already completed and returned verified structured "
@@ -810,27 +947,15 @@ async def run_agent(  # noqa: C901
 
         # Resolve direct compute tokens dynamically when the workflow provides
         # getters; otherwise use this loop's remembered successful token state.
-        current_claude_token = get_claude_token() if get_claude_token else remembered_claude_token
-        current_claude_token_source = (
-            get_claude_token_source()
-            if get_claude_token_source and current_claude_token
-            else remembered_claude_token_source
-        )
-        current_claude_token_pool_id = (
-            get_claude_token_pool_id()
-            if get_claude_token_pool_id and current_claude_token
-            else remembered_claude_token_pool_id
-        )
-        current_gpt_token = get_gpt_token() if get_gpt_token else remembered_gpt_token
-        current_gpt_account_id = (
-            get_gpt_account_id() if get_gpt_account_id and current_gpt_token else remembered_gpt_account_id
-        )
-        current_gpt_token_source = (
-            get_gpt_token_source() if get_gpt_token_source and current_gpt_token else remembered_gpt_token_source
-        )
-        current_gpt_token_pool_id = (
-            get_gpt_token_pool_id() if get_gpt_token_pool_id and current_gpt_token else remembered_gpt_token_pool_id
-        )
+        (
+            current_claude_token,
+            current_claude_token_source,
+            current_claude_token_pool_id,
+            current_gpt_token,
+            current_gpt_account_id,
+            current_gpt_token_source,
+            current_gpt_token_pool_id,
+        ) = _resolve_current_compute_credentials()
 
         # 7. Call LLM with structured streaming
         try:
@@ -935,6 +1060,7 @@ async def run_agent(  # noqa: C901
                 max_llm_attempts = 3
                 try:
                     for llm_attempt in range(1, max_llm_attempts + 1):
+                        attempt_usage = None
                         try:
                             async with span(
                                 "call_llm",
@@ -948,9 +1074,10 @@ async def run_agent(  # noqa: C901
                                 gpt_auth_present=bool(current_gpt_token),
                                 claude_auth_present=bool(current_claude_token),
                             ):
-                                turn_response_model = (
-                                    create_agent_action_model(turn_tools) if required_turn_tool else AgentAction
-                                )
+                                # Required-tool enforcement is semantic and must
+                                # not replace a caller-provided response model
+                                # (browser agents use specialized tool schemas).
+                                turn_response_model = AgentAction
                                 pydantic_result, usage, detected_tools_ordered = await call_llm_structured_streaming(
                                     messages=messages,
                                     model=model,
@@ -974,16 +1101,59 @@ async def run_agent(  # noqa: C901
                                     call_site=cache_call_site,
                                     _exclude_anthropic_family=exclude_anthropic_family_on_llm_retry,
                                 )
+                                attempt_usage = usage
+                                _validate_required_turn_tool(pydantic_result, required_turn_tool)
                             break  # Success
                         except Exception as e:
                             error_message = extract_error_message(e)
-                            if llm_attempt < max_llm_attempts and "Failed to parse" in error_message:
+                            retryable_structured_result = "Failed to parse" in error_message or (
+                                required_turn_tool is not None and error_chain_has_type(e, "RequiredTurnToolError")
+                            )
+                            required_tool_rejected = required_turn_tool is not None and error_chain_has_type(
+                                e, "RequiredTurnToolError"
+                            )
+                            if required_tool_rejected and attempt_usage is not None:
+                                if await _account_llm_usage(
+                                    attempt_usage,
+                                    label=f"rejected semantic attempt {llm_attempt}",
+                                ):
+                                    logger.info("Agent paused after rejected-attempt cost check")
+                                    return _paused_after_cost_result()
+                            if llm_attempt < max_llm_attempts and retryable_structured_result:
                                 logger.warning(
-                                    f"[run_agent] LLM parse failed (attempt {llm_attempt}/{max_llm_attempts}), retrying",
+                                    f"[run_agent] LLM structured result rejected (attempt {llm_attempt}/{max_llm_attempts}), retrying",
                                     error=error_message,
                                 )
-                                # Reset streaming state for retry
-                                sequence[0] = 0
+                                if required_tool_rejected:
+                                    # The live response was structurally valid
+                                    # but semantically rejected. An active Fast
+                                    # Mode context could replay that same wrong
+                                    # tool forever, so only semantic retries
+                                    # bypass reads/writes. Transport retries keep
+                                    # the original trajectory position.
+                                    set_context(
+                                        FastCacheContext(
+                                            enabled=False,
+                                            goal=goal_text or "",
+                                            base_step=fast_cache_step,
+                                            write_enabled=False,
+                                        )
+                                    )
+                                    (
+                                        current_claude_token,
+                                        current_claude_token_source,
+                                        current_claude_token_pool_id,
+                                        current_gpt_token,
+                                        current_gpt_account_id,
+                                        current_gpt_token_source,
+                                        current_gpt_token_pool_id,
+                                    ) = _resolve_current_compute_credentials(
+                                        prefer_remembered=bool(
+                                            attempt_usage and attempt_usage.get("compute_token_used")
+                                        )
+                                    )
+                                # Keep sequence monotonic because this retry reuses
+                                # the same stream_id and may follow emitted chunks.
                                 last_text[0] = ""
                                 broadcaster.reset()
                                 continue
@@ -1081,69 +1251,14 @@ async def run_agent(  # noqa: C901
                 # Get detected tools for ID matching (from activity)
                 detected_tools_ordered = llm_result.get("detected_tools_ordered", [])
 
-            # Track tokens locally
+            # Account the successful provider attempt. Semantically rejected
+            # attempts were already accounted before their retries above.
             exclude_anthropic_family_on_llm_retry = False
-            llm_tokens_in = usage.get("prompt_tokens", 0)
-            llm_tokens_out = usage.get("completion_tokens", 0)
-            llm_total = usage.get("total_tokens", 0)
-
-            tokens_in += llm_tokens_in
-            tokens_out += llm_tokens_out
-            token_count += llm_total
-
-            # Track cache metrics
-            iter_cache_read = usage.get("cache_read_input_tokens", 0)
-            iter_cache_write = usage.get("cache_creation_input_tokens", 0)
-            _remember_successful_compute_token(usage.get("compute_token_used"))
-
-            # Context size = full prompt (uncached + cached) to reflect actual context window usage
-            context_size = llm_tokens_in + iter_cache_read + iter_cache_write
-            cache_read_total += iter_cache_read
-            cache_write_total += iter_cache_write
-            if iter_cache_read > 0 or iter_cache_write > 0:
-                total_input = llm_tokens_in + iter_cache_read + iter_cache_write
-                cache_pct = round(iter_cache_read / total_input * 100) if total_input > 0 else 0
-                logger.info(
-                    f"💾 Cache i{iteration}: read={iter_cache_read} write={iter_cache_write} uncached={llm_tokens_in} hit={cache_pct}% | cumulative: read={cache_read_total} write={cache_write_total}"
-                )
+            if await _account_llm_usage(usage, label="accepted attempt"):
+                logger.info("Agent paused after cost check")
+                return _paused_after_cost_result()
 
             fast_cache_llm_position = fast_cache_step
-
-            # Notify workflow of token usage for cost tracking and limit checking
-            # This happens BEFORE tree token broadcast so cost limit can pause before more work
-            if on_tokens:
-                try:
-                    await on_tokens(
-                        llm_tokens_in,
-                        llm_tokens_out,
-                        usage.get("actual_model"),
-                        cache_read_input_tokens=iter_cache_read,
-                        cache_creation_input_tokens=iter_cache_write,
-                        call_site=cache_call_site,
-                        claude_token_error=usage.get("claude_token_error"),
-                        gpt_token_error=usage.get("gpt_token_error"),
-                        claude_token_rotated=usage.get("claude_token_rotated", False),
-                        gpt_token_rotated=usage.get("gpt_token_rotated", False),
-                        compute_token_used=usage.get("compute_token_used"),
-                        from_fast_cache=usage.get("from_fast_cache", False),
-                    )
-                except Exception as e:
-                    logger.warning(f"on_tokens callback failed: {e}")
-
-            # Check if paused (cost limit may have been triggered by on_tokens)
-            if check_paused and await check_paused():
-                logger.info("Agent paused after cost check")
-                _pending_llm_context.pop(agent_id, None)
-                return {
-                    "status": "paused",
-                    "context": context,
-                    "tokens_in": tokens_in,
-                    "tokens_out": tokens_out,
-                    "token_count": token_count,
-                    "context_size": context_size,
-                    "cache_read_input_tokens": cache_read_total,
-                    "cache_creation_input_tokens": cache_write_total,
-                }
 
             # Calculate tree tokens (own + children's accumulated tokens)
             children_tokens_in, children_tokens_out = (0, 0)
@@ -1677,9 +1792,7 @@ async def run_agent(  # noqa: C901
                                 "text": f"Error: {completion_tool_error}",
                                 "timestamp": _safe_now().isoformat(),
                                 "metadata": {
-                                    key: value
-                                    for key, value in error_metadata.items()
-                                    if key != "subAgentId"
+                                    key: value for key, value in error_metadata.items() if key != "subAgentId"
                                 },
                             }
                         )

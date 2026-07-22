@@ -20,7 +20,7 @@ tomli-w>=1.0.0
 gepa>=0.1.1
 stagehand==0.5.5
 browser-use>=0.11.0
-playwright>=1.40.0  # For humanized input via CDP (separate from browser-use)
+playwright>=1.51.0  # Humanized CDP input + IndexedDB storage_state for provider rotation
 
 # Utilities
 python-dotenv>=1.0.0

@@ -7,16 +7,38 @@ import type { Browser } from 'playwright';
 import { prisma } from '../database';
 import { logJson } from '../../utils/log';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
+import { retryWithBackoff } from '../retry';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
 import { createLocalBrowserSession, connectValidatedBrowser } from './sessionConnection';
+import { STEEL_API_BASE_URL, steelCdpUrl, steelDebugUrl } from './urls';
 export { resumeSession } from './sessionResume';
+export {
+  STEEL_API_BASE_URL,
+  STEEL_CDP_BASE_URL,
+  steelApiUrl,
+  steelCdpConnectionUrl,
+  steelCdpUrl,
+  steelDebugUrl,
+  steelSessionFileUrl,
+  steelPublicCdpUrl,
+} from './urls';
 
 export const steel = new Steel({
   steelAPIKey: process.env.STEEL_API_KEY,
+  baseURL: STEEL_API_BASE_URL,
 });
 
 // Max retries when session validation fails
 export const MAX_SESSION_RETRIES = 3;
+
+export class SteelSessionCleanupError extends Error {
+  constructor(sessionId: string, cause: unknown) {
+    super(
+      `Failed to release Steel session ${sessionId} after bounded retries: ${cause instanceof Error ? cause.message : String(cause)}`
+    );
+    this.name = 'SteelSessionCleanupError';
+  }
+}
 
 const benchmarkAnonProfilesByAgent = new Map<string, string>();
 
@@ -154,12 +176,21 @@ export function rememberRejectedProxyCity(geolocation: ProxyGeoLocation): void {
   log.info(`  🌎 Remembering unsupported proxy city: ${proxyCityKey(geolocation)}`);
 }
 
+export function isInvalidSteelProxyConfiguration(error: unknown): boolean {
+  const status =
+    (error as Record<string, unknown>)?.status ?? (error as Record<string, unknown>)?.statusCode;
+  const message =
+    error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return status === 400 || message.includes('invalid proxy configuration');
+}
+
 export function buildSteelProxySettings(
   geolocation: ProxyGeoLocation,
-  dropCity = false
+  dropCity = false,
+  forceManagedRotation = false
 ): SteelProxySettings {
   const byopProxyServer = process.env.STEEL_PROXY_SERVER?.trim();
-  if (byopProxyServer) {
+  if (byopProxyServer && !forceManagedRotation) {
     log.info(`  Using BYOP proxy server: ${redactProxyServerForLog(byopProxyServer)}`);
     return { config: { server: byopProxyServer }, source: 'byop' };
   }
@@ -168,7 +199,7 @@ export function buildSteelProxySettings(
   // a per-user profileId, Steel pins one IP to each user's profile on first use,
   // giving every user a stable egress identity (and making cf_clearance reuse
   // work). An explicit STEEL_DEDICATED_IP_ID pins one shared IP instead.
-  if (envEnabled('BROWSER_AGENT_STEEL_DEDICATED_IP_ENABLED', false)) {
+  if (!forceManagedRotation && envEnabled('BROWSER_AGENT_STEEL_DEDICATED_IP_ENABLED', false)) {
     const pinnedId = process.env.STEEL_DEDICATED_IP_ID?.trim();
     log.info(
       `  Using Steel dedicated IP${pinnedId ? ` (pinned ${pinnedId})` : ' (auto-pin to profile)'}`
@@ -179,7 +210,8 @@ export function buildSteelProxySettings(
     };
   }
 
-  const useSteelProxy = envEnabled('BROWSER_AGENT_STEEL_PROXY_ENABLED', true);
+  const useSteelProxy =
+    forceManagedRotation || envEnabled('BROWSER_AGENT_STEEL_PROXY_ENABLED', true);
   if (!useSteelProxy) {
     return { config: false, source: 'none' };
   }
@@ -339,13 +371,12 @@ export async function createSessionWithContext(
 
       // Steel provides debugUrl for unauthenticated live viewing (anyone with URL can view)
       // sessionViewerUrl requires Steel dashboard login - don't use that
-      // Add ?interactive=true so users can interact with the browser
-      const debugUrl = `${session.debugUrl}?interactive=false`;
+      // Keep the embedded trace viewer read-only.
+      const debugUrl = steelDebugUrl(session.debugUrl);
 
-      // IMPORTANT: Per Steel docs, CDP connection URL must include apiKey parameter
-      // The session.websocketUrl does NOT include the apiKey, so we construct it manually
-      // Format: wss://connect.steel.dev?apiKey=${STEEL_API_KEY}&sessionId=${session.id}
-      const wsUrl = `wss://connect.steel.dev?apiKey=${process.env.STEEL_API_KEY}&sessionId=${session.id}`;
+      // Persist only the non-secret CDP locator. Connection helpers materialize
+      // the API key inside the backend or worker process immediately before use.
+      const wsUrl = steelCdpUrl(session.id);
 
       // VALIDATE: Test that the WebSocket connection actually works before
       // proceeding. The connection is kept open so injectUserData can reuse it
@@ -355,9 +386,9 @@ export async function createSessionWithContext(
       if (validationBrowser === null) {
         log.info(`  ⚠️ Session ${session.id} failed validation, releasing...`);
         try {
-          await steel.sessions.release(session.id);
+          await releaseSteelRemoteSession(session.id);
         } catch (releaseErr) {
-          log.info(`  ⚠️ Failed to release invalid session: ${releaseErr}`);
+          throw new SteelSessionCleanupError(session.id, releaseErr);
         }
         lastError = new Error(`Session validation failed on attempt ${attempt}`);
         continue; // Retry
@@ -387,9 +418,10 @@ export async function createSessionWithContext(
             await validationBrowser.close().catch(() => {});
             validationBrowser = null;
             try {
-              await steel.sessions.release(session.id);
+              await releaseSteelRemoteSession(session.id);
             } catch (releaseErr) {
               log.info(`  ⚠️ Failed to release superseded session: ${releaseErr}`);
+              throw new SteelSessionCleanupError(session.id, releaseErr);
             }
             dbContext = winningContext;
             lastError = new Error(
@@ -448,6 +480,7 @@ export async function createSessionWithContext(
       if (validationBrowser !== null) {
         await validationBrowser.close().catch(() => {});
       }
+      if (error instanceof SteelSessionCleanupError) throw error;
       // Steel 429 = concurrent session limit. Don't retry locally — bubble up so agent can backoff.
       const status =
         (error as Record<string, unknown>)?.status ??
@@ -465,8 +498,7 @@ export async function createSessionWithContext(
       // Steel rejects city-level proxies it can't fulfill ("400 Invalid proxy
       // configuration"). Drop the city and retry with country+state, which Steel
       // always supports — otherwise every retry repeats the same bad config.
-      const msg = (lastError.message || '').toLowerCase();
-      if (!dropProxyCity && (status === 400 || msg.includes('invalid proxy'))) {
+      if (!dropProxyCity && isInvalidSteelProxyConfiguration(error)) {
         dropProxyCity = true;
         rememberRejectedProxyCity(geolocation);
         log.info('  🌎 Dropping unsupported proxy city; retrying with country+state only');
@@ -494,7 +526,7 @@ export async function closeSession(
 
   try {
     // Release the Steel session
-    await steel.sessions.release(sessionId);
+    await releaseSteelRemoteSession(sessionId);
   } catch (error) {
     log.error('Failed to close session in Steel', {
       error: error instanceof Error ? error.message : String(error),
@@ -519,6 +551,29 @@ export async function closeSession(
   } else {
     log.info(`  ⚠️ No currentUrl to save`);
   }
+}
+
+/** Release only the remote Steel browser without mutating BrowserSession. */
+export async function releaseSteelRemoteSession(sessionId: string): Promise<void> {
+  await retryWithBackoff(
+    async () => {
+      try {
+        await steel.sessions.release(sessionId);
+      } catch (error) {
+        const status =
+          (error as Record<string, unknown>)?.status ??
+          (error as Record<string, unknown>)?.statusCode;
+        if (status === 404) return;
+        throw error;
+      }
+    },
+    {
+      maxRetries: 3,
+      fixedDelays: [250, 500],
+      isRetryable: () => true,
+      component: 'Steel session release',
+    }
+  );
 }
 
 /**

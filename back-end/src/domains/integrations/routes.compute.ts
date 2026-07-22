@@ -105,8 +105,9 @@ router.post(
 );
 
 /** GET /api/integrations/compute-code/anthropic-key/cooldown
- *  Whether the shared ANTHROPIC_API_KEY funded default is currently backed off.
- *  Read by the agents Rose client (which has no DB) so it can skip the tier. */
+ *  Whether the running backend has the shared ANTHROPIC_API_KEY funded default
+ *  and whether it is backed off. Read by agents (which have no DB) so they can
+ *  select the same runtime tier without duplicating environment assumptions. */
 router.get(
   '/compute-code/anthropic-key/cooldown',
   authenticate,

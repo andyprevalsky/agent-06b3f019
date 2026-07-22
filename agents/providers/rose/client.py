@@ -348,7 +348,7 @@ def _cache_input_accounting(
     cache_read = max(int(cache_read or 0), 0)
     cache_write = max(int(cache_write or 0), 0)
 
-    if actual_model.endswith("-claude"):
+    if actual_model.endswith(("-claude", "-anthropic")):
         total_input = prompt_tokens + cache_read + cache_write
         accounting = "exclusive"
     else:
@@ -362,6 +362,32 @@ def _cache_input_accounting(
         "uncached_input": uncached_input,
         "cache_hit_pct": cache_pct,
         "cache_accounting": accounting,
+    }
+
+
+def _normalize_usage_input_tokens(actual_model: str, usage_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose one provider-neutral usage contract to agent cost accounting.
+
+    Native Anthropic usage already reports only the uncached input tail in
+    ``prompt_tokens``. OpenAI-compatible APIs include cached reads and writes
+    in ``prompt_tokens``. The workflow prices those three buckets separately,
+    so forwarding OpenAI's inclusive counter double-charges cached input.
+    """
+    cache_read = usage_data.get("cache_read_input_tokens", 0) or 0
+    cache_write = usage_data.get("cache_creation_input_tokens", 0) or 0
+    prompt_tokens = usage_data.get("prompt_tokens", 0) or 0
+    cache_stats = _cache_input_accounting(
+        actual_model=actual_model,
+        prompt_tokens=prompt_tokens,
+        cache_read=cache_read,
+        cache_write=cache_write,
+    )
+    if cache_stats["cache_accounting"] == "exclusive":
+        return usage_data
+    return {
+        **usage_data,
+        "prompt_tokens": cache_stats["uncached_input"],
+        "prompt_tokens_total": cache_stats["total_input"],
     }
 
 
@@ -730,37 +756,26 @@ class RoseClient:
         anthropic_api_key_tool_choice = None
         direct_auth_tools = tools
         effective_tool_choice = tool_choice
-        if (
-            direct_auth_tools is None
-            and response_model is not None
-            and (claude_auth is not None or gpt_auth is not None)
-        ):
+        if direct_auth_tools is None and response_model is not None:
             direct_auth_tools = build_anthropic_tools_from_response_model(
                 response_model,
                 model=pool_spec.claude_auth_model,
             )
-        if claude_auth is not None:
-            # Plain structured-output models are better enforced by Anthropic
-            # `output_config.format` than by a synthetic submit tool. Keep
-            # native tools only for real tool-call models.
-            if not _is_synthetic_output_toolset(direct_auth_tools):
-                claude_auth_tools = direct_auth_tools
-            if claude_auth_tools:
-                # response_model is the explicit signal that "tool_calls is the
-                # only legal response shape." `auto` lets Anthropic emit prose
-                # instead — when it does, the streaming parser shoves text into
-                # the JSON envelope slot and json.loads explodes (Expecting
-                # value: line 1 column 1). Mirror gpt_auth (just below): force
-                # `any` whenever native tools are populated.
-                claude_auth_tool_choice = effective_tool_choice or "any"
-        if gpt_auth is not None:
-            # Plain structured-output models are better enforced by the
-            # Responses `text.format` JSON schema than by a synthetic submit
-            # tool. Keep native tools only for real tool-call models.
-            if not _is_synthetic_output_toolset(direct_auth_tools):
-                gpt_auth_tools = direct_auth_tools
-            if gpt_auth_tools:
-                gpt_auth_tool_choice = effective_tool_choice or "any"
+        # A direct credential can rotate between Claude and GPT inside this
+        # call, so prepare both provider contracts before route selection. If
+        # these projections depend on the credential present at entry, a
+        # cross-type rotation receives a response_format intended for the old
+        # route instead of the AgentAction native tools.
+        if not _is_synthetic_output_toolset(direct_auth_tools):
+            claude_auth_tools = direct_auth_tools
+            gpt_auth_tools = direct_auth_tools
+        if claude_auth_tools:
+            # response_model is the explicit signal that "tool_calls is the
+            # only legal response shape." `auto` lets Anthropic emit prose
+            # instead, so force a native tool call on either direct route.
+            claude_auth_tool_choice = effective_tool_choice or "any"
+        if gpt_auth_tools:
+            gpt_auth_tool_choice = effective_tool_choice or "any"
         # The funded OpenAI API-key route uses the same Responses native
         # tool protocol as gptAuth, so it must preserve real tool schemas even
         # when there is no direct GPT token lease.
@@ -1054,6 +1069,10 @@ class RoseClient:
                                         usage_data["gpt_token_rotated"] = direct_rotations > 0
                                     chunk = StreamChunk(kind="usage", data=usage_data)
                                     _emit_llm_cache(chunk.data)
+                                    chunk = StreamChunk(
+                                        kind="usage",
+                                        data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                                    )
                                 _record_dump_chunk(chunk)
                                 yield chunk
                         except RoseStallError as exc:
@@ -1216,6 +1235,10 @@ class RoseClient:
                                 _seen_actual_model = chunk.data["actual_model"]
                         elif chunk.kind == "usage":
                             _emit_llm_cache(chunk.data)
+                            chunk = StreamChunk(
+                                kind="usage",
+                                data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                            )
                         _record_dump_chunk(chunk)
                         yield chunk
                     logger.info(
@@ -1285,6 +1308,10 @@ class RoseClient:
                                 _seen_actual_model = chunk.data["actual_model"]
                         elif chunk.kind == "usage":
                             _emit_llm_cache(chunk.data)
+                            chunk = StreamChunk(
+                                kind="usage",
+                                data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                            )
                         _record_dump_chunk(chunk)
                         yield chunk
                     logger.info(
@@ -1347,6 +1374,10 @@ class RoseClient:
                     _seen_actual_model = chunk.data["actual_model"]
                 elif chunk.kind == "usage":
                     _emit_llm_cache(chunk.data)
+                    chunk = StreamChunk(
+                        kind="usage",
+                        data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                    )
                 _record_dump_chunk(chunk)
                 yield chunk
             logger.info(
