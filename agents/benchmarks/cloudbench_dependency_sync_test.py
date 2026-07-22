@@ -7684,6 +7684,14 @@ def test_cloud_test_payment_tasks_launch_bundled_frontend_with_supabase_env() ->
     assert 'STACK_ENV+=("VITE_SUPABASE_ANON_KEY=$FRONTEND_SUPABASE_ANON_KEY")' in driver
 
 
+def test_cloud_stack_failure_surfaces_frontend_build_log() -> None:
+    driver = DRIVER_SCRIPT.read_text()
+
+    assert "$CONTEXT_DIR/logs/frontend.log" in driver
+    assert "front-end/frontend-logs.log" in driver
+    assert "last 80 lines of frontend log" in driver
+
+
 def test_production_only_cloud_route_rejects_mixed_target_batches() -> None:
     result = subprocess.run(
         [

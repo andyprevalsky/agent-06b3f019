@@ -607,6 +607,12 @@ for i in $(seq 1 "$STACK_WAIT_SECONDS"); do
         log "FATAL: stack process exited (rc=$stack_rc) before becoming healthy after ${i}s"
         log "───── last 40 lines of stack log ($STACK_LOG) ─────"
         tail -40 "$STACK_LOG" 2>/dev/null | while IFS= read -r _line; do log "  | $_line"; done
+        for _frontend_log in "$CONTEXT_DIR/logs/frontend.log" "$REPO_DIR/front-end/frontend-logs.log"; do
+            if [ -f "$_frontend_log" ]; then
+                log "───── last 80 lines of frontend log ($_frontend_log) ─────"
+                tail -80 "$_frontend_log" 2>/dev/null | while IFS= read -r _line; do log "  | $_line"; done
+            fi
+        done
         if [ "$stack_rc" = 137 ] || dmesg 2>/dev/null | grep -qiE 'out of memory|oom-kill'; then
             log "  ⚠️ rc=137/OOM signature — stack was SIGKILLed (likely out-of-memory); check machine RAM vs concurrent service footprint"
         fi
