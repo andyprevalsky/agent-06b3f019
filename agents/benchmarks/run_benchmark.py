@@ -3436,6 +3436,12 @@ def evaluate_task(
             return True, None
         return False, "Expected validated payment-card request but none was observed"
 
+    if task.expected_gate:
+        benchmark_state = data.get("_benchmark", {})
+        if benchmark_state.get("expected_gate_seen"):
+            return True, None
+        return False, f"Expected gate {task.expected_gate} but none was observed"
+
     # Agent mode: must complete
     if status != "COMPLETED":
         return False, f"Agent status: {status} (expected COMPLETED)"

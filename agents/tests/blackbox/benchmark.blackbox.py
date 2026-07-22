@@ -1489,7 +1489,7 @@ async def test_expected_gate_auto_approve_task_returns_without_resolving_gate():
     from unittest.mock import AsyncMock, patch
 
     from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.run_benchmark import poll_agent
+    from benchmarks.run_benchmark import evaluate_task, poll_agent
 
     task = copy.deepcopy(get_task_by_name("gate-subscription-card-mint"))
     task._resolved_timeout_seconds = 0.1
@@ -1542,6 +1542,7 @@ async def test_expected_gate_auto_approve_task_returns_without_resolving_gate():
     assert data["_benchmark"]["expected_gate_seen"] is True
     assert data["_benchmark"]["expected_gate_request_id"] == "gate-1"
     respond.assert_not_awaited()
+    assert evaluate_task(task, data, approvals_triggered) == (True, None)
 
 
 async def test_agentcard_setup_terminal_check_refreshes_stale_attention_poll():
