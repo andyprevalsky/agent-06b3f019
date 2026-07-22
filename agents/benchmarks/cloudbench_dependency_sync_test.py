@@ -38,6 +38,7 @@ PREDEPLOY_LOCAL_SCRIPT = ROOT / "scripts" / "run-predeploy-local"
 PREDEPLOY_METRICS_SCRIPT = ROOT / "agents" / "benchmarks" / "predeploy_metrics.py"
 LOGGED_COMMAND_SCRIPT = ROOT / "scripts" / "run_logged_command.py"
 RUN_BENCH_SCRIPT = ROOT / "scripts" / "run-bench"
+WORKTREE_PATCH_SCRIPT = ROOT / "scripts" / "create-worktree-patch.sh"
 STACK_SCRIPT = ROOT / "scripts" / "run.sh"
 SEED_CACHE_LIB = ROOT / "scripts" / "lib" / "seed-cache.sh"
 LOCAL_RUNNER = ROOT / "agents" / "benchmarks" / "local.py"
@@ -904,6 +905,14 @@ def test_deploy_always_gates_changed_cloudbench_controllers() -> None:
     assert "cloudbench_dependency_sync_test.py" in gate
     assert "fleet_barrier_reads_the_authoritative_rotated_status_port" in gate
     assert "data_plane_barrier_release_at_full_fleet_width" in gate
+    assert "boot_launch_delivers_the_exact_worktree_patch_to_every_guest" in gate
+    assert "boot_launch_runs_the_current_driver_before_applying_the_patch" in gate
+    assert "cloud_patch_detection_and_payload_include_staged_only_changes" in gate
+    assert "patch_delivery_clears_stale_base64_configuration" in gate
+    assert "shared_patch_digest_is_pinned_and_verified" in gate
+    assert "declared_patch_payload_cannot_be_missing_or_empty" in gate
+    assert "empty_local_patch_cleanup_is_nounset_safe" in gate
+    assert "autoscaled_worker_failure_is_removed_and_replaceable" in gate
     assert "must never pause for human approval" in gate
     assert "Operational gate maintenance is pre-authorized" in deploy
 
@@ -995,6 +1004,140 @@ def test_boot_launch_stages_and_exports_complete_local_patch() -> None:
     )
 
 
+def test_cloud_patch_detection_and_payload_include_staged_only_changes(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "bench@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Bench"], check=True)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("before\n")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "baseline"], check=True, capture_output=True)
+    tracked.write_text("staged-only\n")
+    subprocess.run(["git", "-C", str(repo), "add", "tracked.txt"], check=True)
+    assert subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; cloudbench_worktree_has_changes "$2"',
+            "staged-check",
+            str(ENV_HELPER_SCRIPT),
+            str(repo),
+        ],
+        check=False,
+    ).returncode == 0
+    patch = subprocess.run(
+        ["bash", str(WORKTREE_PATCH_SCRIPT), str(repo)],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
+    assert "+staged-only" in patch
+    cloud = CLOUD_SCRIPT.read_text()
+    fleet = FLEET_SCRIPT.read_text()
+    assert 'cloudbench_worktree_has_changes "$ROOT_DIR"' in cloud
+    assert fleet.count('cloudbench_worktree_has_changes "$ROOT_DIR"') >= 2
+
+
+def test_patch_delivery_clears_stale_base64_configuration() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    driver = DRIVER_SCRIPT.read_text()
+    boot_start = cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then')
+    legacy_start = cloud.index("# ── 1. Start the warm machine", boot_start)
+    boot = cloud[boot_start:legacy_start]
+    legacy = cloud[legacy_start:]
+
+    assert "LOCAL_PATCH_B64" not in driver
+    assert '--env "LOCAL_PATCH_B64="' in boot
+    assert 'echo "unset LOCAL_PATCH_B64"' in legacy
+
+
+def test_shared_patch_digest_is_pinned_and_verified(tmp_path: Path) -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    fleet = FLEET_SCRIPT.read_text()
+    block_start = cloud.index("STAGED_LOCAL_FILES=()")
+    block_end = cloud.index("# ── Launch the driver", block_start)
+    patch_block = cloud[block_start:block_end]
+    payload = tmp_path / "shared.patch"
+    payload.write_text("original\n")
+    marker = tmp_path / "accepted"
+    script = f"""
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+ROOT_DIR={shlex.quote(str(ROOT))}
+CLOUDBENCH_LOCAL_PATCH_SOURCE={shlex.quote(str(payload))}
+CLOUDBENCH_LOCAL_PATCH_SHA256=definitely-not-the-payload-digest
+{patch_block}
+touch {shlex.quote(str(marker))}
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "checksum mismatch" in result.stderr
+    assert not marker.exists()
+
+    # At any fleet width, all children inherit the one fleet-pinned expected
+    # digest; no child promotes its independently observed hash to authority.
+    assert fleet.count('CLOUDBENCH_LOCAL_PATCH_SHA256="$FLEET_PATCH_SHA256"') == 1
+    assert 'LOCAL_PATCH_SHA256="$CLOUDBENCH_LOCAL_PATCH_SHA256"' in patch_block
+    assert 'if [ -n "$LOCAL_PATCH_FILE" ] && [ -z "$LOCAL_PATCH_SHA256" ]; then' in patch_block
+
+
+def test_declared_patch_payload_cannot_be_missing_or_empty(tmp_path: Path) -> None:
+    driver = DRIVER_SCRIPT.read_text()
+    worker = WORKER_SCRIPT.read_text()
+    driver_start = driver.index('if [ -n "${LOCAL_PATCH_FILE:-}" ]; then')
+    driver_end = driver.index("\nfi\n\n# Replace the bootstrap", driver_start) + len("\nfi\n")
+    worker_start = worker.index('if [ -n "${LOCAL_PATCH_FILE:-}" ]; then')
+    worker_end = worker.index("\nfi\n\n# Every autoscaled", worker_start) + len("\nfi\n")
+
+    for guest, block in (
+        ("primary", driver[driver_start:driver_end]),
+        ("worker", worker[worker_start:worker_end]),
+    ):
+        for payload_kind in ("missing", "empty"):
+            payload = tmp_path / f"{guest}-{payload_kind}.patch"
+            if payload_kind == "empty":
+                payload.touch()
+            reached = tmp_path / f"{guest}-{payload_kind}.reached"
+            script = f"""
+LOCAL_PATCH_FILE={shlex.quote(str(payload))}
+LOCAL_PATCH_SHA256=unused
+log() {{ printf '%s\\n' "$*" >&2; }}
+finish() {{ exit "$1"; }}
+{block}
+touch {shlex.quote(str(reached))}
+"""
+            result = subprocess.run(
+                ["bash", "-c", script],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            assert result.returncode != 0, (guest, payload_kind, result.stdout, result.stderr)
+            assert not reached.exists()
+            assert "missing or empty" in result.stderr
+
+
+def test_empty_local_patch_cleanup_is_nounset_safe() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    cleanup = _extract_fleet_function(cloud, "cleanup_staged_local_files() {")
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"set -u\nSTAGED_LOCAL_FILES=()\n{cleanup}\ncleanup_staged_local_files",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_cloud_patch_can_be_disabled_for_a_pinned_committed_ref() -> None:
     """A controller validating a committed ref must be able to ignore unrelated
     concurrent workspace edits without stashing, reverting, or shipping them."""
@@ -1010,6 +1153,138 @@ def test_cloud_patch_can_be_disabled_for_a_pinned_committed_ref() -> None:
     provenance = _extract_fleet_function(fleet, "print_code_provenance() {")
     assert "CLOUDBENCH_SKIP_LOCAL_PATCH:-0" in provenance
     assert "local changes intentionally excluded" in provenance
+
+
+def test_boot_launch_delivers_the_exact_worktree_patch_to_every_guest() -> None:
+    """The no-SSH launch path must not silently run the base checkout."""
+    cloud = CLOUD_SCRIPT.read_text()
+    fleet = FLEET_SCRIPT.read_text()
+    driver = DRIVER_SCRIPT.read_text()
+    worker = WORKER_SCRIPT.read_text()
+
+    boot_start = cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then')
+    patch_start = cloud.index('LOCAL_PATCH_FILE=""')
+    legacy_start = cloud.index("# ── 1. Start the warm machine", boot_start)
+    boot = cloud[boot_start:legacy_start]
+
+    assert patch_start < boot_start, "boot-launch decides delivery before creating the patch"
+    assert 'LOCAL_PATCH_FILE=/cloudbench-local.patch' in boot
+    assert 'LOCAL_PATCH_SHA256=$LOCAL_PATCH_SHA256' in boot
+    assert '--file-local "/cloudbench-local.patch=$LOCAL_PATCH_FILE"' in boot
+    assert 'CLOUDBENCH_LOCAL_PATCH_SOURCE="$FLEET_PATCH_FILE"' in fleet
+
+    for guest in (driver, worker):
+        assert 'LOCAL_PATCH_SHA256' in guest
+        assert 'sha256sum "$LOCAL_PATCH_FILE"' in guest
+        assert "patch payload checksum mismatch" in guest
+
+    worker_stage = fleet[fleet.index("provision_worker() {") : fleet.index("bench_autoscaler() {")]
+    assert 'LOCAL_PATCH_SHA256=$FLEET_PATCH_SHA256' in worker_stage
+    assert 'sftp put' in worker_stage
+    assert '|| true' not in worker_stage.split('if [ -n "$FLEET_PATCH_FILE" ]', 1)[1].split(
+        "echo \"  ✅", 1
+    )[0]
+
+
+def test_boot_launch_runs_the_current_driver_before_applying_the_patch() -> None:
+    """Updating the executing repo script can shift bytes under Bash itself."""
+    cloud = CLOUD_SCRIPT.read_text()
+    boot = (ROOT / "scripts" / "cloudbench-boot.sh").read_text()
+
+    boot_start = cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then')
+    legacy_start = cloud.index("# ── 1. Start the warm machine", boot_start)
+    launch = cloud[boot_start:legacy_start]
+    assert '--env CLOUDBENCH_RUN_SCRIPT=/cloudbench-run.sh' in launch
+    assert '--file-local "/cloudbench-run.sh=$ROOT_DIR/scripts/cloudbench-run.sh"' in launch
+    assert 'DRIVER="${CLOUDBENCH_RUN_SCRIPT:-/cloudbench-run.sh}"' in boot
+    assert 'bash "$DRIVER" >> "$LOG" 2>&1' in boot
+
+
+def test_autoscaled_worker_failure_is_removed_and_replaceable(tmp_path: Path) -> None:
+    """Upload failure or a guest that never publishes post-patch readiness
+    must not remain counted as capacity forever."""
+    fleet = FLEET_SCRIPT.read_text()
+    pool_count = _extract_fleet_function(fleet, "_pool_ids() {")
+    provision = _extract_fleet_function(fleet, "provision_worker() {")
+    root = tmp_path / "root"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts/cloudbench-worker.sh").write_text("#!/usr/bin/env bash\n")
+    patch_file = tmp_path / "workspace.patch"
+    patch_file.write_text("patch\n")
+
+    for mode in ("upload-failure", "readiness-failure"):
+        out = tmp_path / mode
+        reaped = tmp_path / f"{mode}.reaped"
+        calls = tmp_path / f"{mode}.calls"
+        script = f"""
+ROOT_DIR={shlex.quote(str(root))}
+APP=test-app
+BENCH_REF=test-ref
+BOX_BACKEND_PORT=3001
+BOX_WMH_PORT=3007
+FLEET_WORKER_VM_SIZE=shared-cpu-1x
+FLEET_WORKER_VM_MEMORY=1024
+FLEET_PATCH_FILE={shlex.quote(str(patch_file))}
+FLEET_PATCH_SHA256=expected
+CLOUDBENCH_WORKER_STAGE_ATTEMPTS=3
+CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS=0
+MODE={shlex.quote(mode)}
+OUT={shlex.quote(str(out))}
+REAPED={shlex.quote(str(reaped))}
+CALLS={shlex.quote(str(calls))}
+clone_machine_target() {{
+  mkdir -p "$(dirname "$1")"
+  printf '%s\n' abc123 >> "$1"
+  printf '%s' abc123
+}}
+machine_storage_ready() {{ return 0; }}
+fly_with_timeout() {{
+  shift
+  printf '%s\n' "$*" >> "$CALLS"
+  case "$*" in
+    *"ssh sftp put"*"cloudbench-local.patch"*)
+      [ "$MODE" != upload-failure ] ;;
+    *"ssh console"*"/tmp/rbw.sh"*)
+      [ "$MODE" != readiness-failure ] ;;
+    *) return 0 ;;
+  esac
+}}
+reap_machine() {{ printf '%s\n' "$1" > "$REAPED"; }}
+fleet_registry_release_id() {{ :; }}
+{pool_count}
+{provision}
+provision_worker bench workspace primary fd00::1 0 "$OUT"
+wait || true
+test "$(_pool_ids "$OUT")" = 0
+test -s "$REAPED"
+test ! -e "$OUT/worker-pending/abc123"
+test ! -e "$OUT/worker-ready/abc123"
+"""
+        result = subprocess.run(
+            ["bash", "-c", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+        assert result.returncode == 0, (mode, result.stdout, result.stderr)
+        fly_calls = calls.read_text().splitlines()
+        neutralize = next(i for i, call in enumerate(fly_calls) if "machine update abc123" in call)
+        first_start = next(i for i, call in enumerate(fly_calls) if "machine start abc123" in call)
+        assert neutralize < first_start
+        assert "--env CLOUDBENCH_BOOT=0 --command sleep infinity" in fly_calls[neutralize]
+        assert "--skip-start" in fly_calls[neutralize]
+        launch_calls = [call for call in fly_calls if "ssh console" in call]
+        assert len(launch_calls) <= 1
+        if mode == "readiness-failure":
+            assert len(launch_calls) == 1
+            assert "for ready_try in \\$(seq 1 60)" in launch_calls[0]
+            assert "cloudbench-worker-abc123.ready" in launch_calls[0]
+
+    worker = WORKER_SCRIPT.read_text()
+    assert worker.index("patch payload checksum mismatch") < worker.index(
+        'printf \'%s\\n\' "$$" > "$WORKER_READY_FILE"'
+    )
 
 
 def test_fetch_ref_never_falls_back_to_stale_fetch_head(tmp_path: Path) -> None:
@@ -1152,14 +1427,10 @@ def test_start_gate_replays_created_machine_with_restoring_volume(
     tmp_path: Path,
 ) -> None:
     cloud = CLOUD_SCRIPT.read_text()
-    readiness_function = "".join(
-        _extract_fleet_function(cloud, signature)
-        for signature in (
-            "_machines_json() {",
-            "_volumes_json() {",
-            "machine_storage_ready() {",
-        )
-    )
+    function_start = cloud.index("machine_storage_ready() {")
+    function_end = cloud.index("\n}\n", function_start) + 3
+    readiness_function = cloud[function_start:function_end]
+    timeout_function = _extract_fleet_function(cloud, "_with_timeout() {")
     machine_id = "machine-1"
     machines_path = tmp_path / "machines.json"
     volumes_path = tmp_path / "volumes.json"
@@ -1219,6 +1490,7 @@ exit 2
             f"""set -uo pipefail
 APP=bench-app
 FLY() {{ flyctl "$@"; }}
+{timeout_function}
 {readiness_function}
 if machine_storage_ready {machine_id}; then
   FLY machine start {machine_id} -a "$APP"
@@ -1504,6 +1776,56 @@ def test_machine_inventory_index_publication_is_linear(tmp_path: Path) -> None:
     assert published_at.isdigit()
 
 
+def test_storage_readiness_inventory_reads_are_bounded(tmp_path: Path) -> None:
+    """One wedged read-only Fly inventory call must yield to the retry loop."""
+    cloud = CLOUD_SCRIPT.read_text()
+    readiness = _extract_fleet_function(cloud, "machine_storage_ready() {")
+    timeout_fn = _extract_fleet_function(cloud, "_with_timeout() {")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_fly = fake_bin / "flyctl"
+    fake_fly.write_text(
+        """#!/usr/bin/env bash
+set -u
+if [ "$1 $2" = "machines list" ]; then
+  printf '%s\n' '[{"id":"machine-1","state":"created","config":{"mounts":[]}}]'
+  exit 0
+fi
+if [ "$1 $2" = "volumes list" ]; then
+  exec sleep 30
+fi
+exit 2
+"""
+    )
+    fake_fly.chmod(0o755)
+    env = {
+        "PATH": f"{fake_bin}:{Path('/usr/bin')}:{Path('/bin')}",
+        "MACHINE_READINESS_SCRIPT": str(MACHINE_READINESS_SCRIPT),
+        "CLOUDBENCH_STORAGE_QUERY_TIMEOUT": "0.2",
+    }
+
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
+APP=bench-app
+FLY() {{ flyctl "$@"; }}
+{timeout_fn}
+{readiness}
+machine_storage_ready machine-1
+""",
+        ],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=2,
+    )
+
+    assert result.returncode == 1, result.stderr
+
+
 def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()
@@ -1550,7 +1872,13 @@ def test_boot_update_always_submits_a_bounded_post_config_start() -> None:
     assert "FLY machine status" not in claim
     assert "FLY machine start" not in claim
     assert 'write_pool_claim "$claim_path"' in claim
-    assert 'if machine_storage_ready "$wid"; then\n            fly_with_timeout 20 machine start "$wid"' in fleet
+    worker_provision = _extract_fleet_function(fleet, "provision_worker() {")
+    storage_ready = worker_provision.index('if machine_storage_ready "$wid"; then')
+    neutralize = worker_provision.index('machine update "$wid"', storage_ready)
+    first_start = worker_provision.index('machine start "$wid"', neutralize)
+    assert storage_ready < neutralize < first_start
+    assert "--env CLOUDBENCH_BOOT=0" in worker_provision[neutralize:first_start]
+    assert "--skip-start" in worker_provision[neutralize:first_start]
 
 
 def test_boot_launch_delivers_the_advertised_local_workspace_patch() -> None:
@@ -1573,7 +1901,7 @@ def test_boot_launch_executes_the_current_injected_driver() -> None:
     branch = cloud[branch_start:]
 
     assert '--file-local "/cloudbench-run.sh=$ROOT_DIR/scripts/cloudbench-run.sh"' in branch
-    assert "DRIVER=/cloudbench-run.sh" in boot
+    assert 'DRIVER="${CLOUDBENCH_RUN_SCRIPT:-/cloudbench-run.sh}"' in boot
     assert 'bash "$DRIVER" >> "$LOG" 2>&1' in boot
     assert 'bash "$REPO/scripts/cloudbench-run.sh" >> "$LOG" 2>&1' not in boot
 
@@ -5381,6 +5709,99 @@ printf 'SELECTED_PORT=%s\n' "$DASH_BASE"
             os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
 
 
+def test_central_hub_runs_in_own_session_after_launcher_exit(tmp_path: Path) -> None:
+    """The hub is a persistent user surface, not a child of the fleet PTY.
+
+    A plain ``command &`` remains in the launcher's session and is hung up when
+    a PTY-backed controller exits. Prove the production launch function puts the
+    hub in a distinct session and that it still serves the run after the launcher
+    shell is completely gone.
+    """
+    port = None
+    for candidate in range(42000, 62000):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(("127.0.0.1", candidate))
+            port = candidate
+            break
+        except OSError:
+            pass
+        finally:
+            sock.close()
+    assert port is not None
+
+    runs_root = tmp_path / "runs-detached-hub"
+    (runs_root / "visible-run" / "_batch").mkdir(parents=True)
+    (runs_root / "visible-run" / "_batch" / "report-card.json").write_text(
+        json.dumps({"run_id": "visible-run", "status": "starting"})
+    )
+    hub_context = runs_root / "_hub"
+    launcher_sid_file = tmp_path / "launcher.sid"
+    fleet = FLEET_SCRIPT.read_text()
+    startup = _extract_fleet_function(fleet, "start_central_hub() {")
+    visibility = _extract_fleet_function(fleet, "require_central_hub_visibility() {")
+    shell = f'''set -uo pipefail
+source "$HELPER"
+ROOT_DIR="$ROOT"
+RUNS_ROOT="$RUNS_ROOT"
+HUB_CTX_DIR="$HUB_CTX_DIR"
+DASH_BASE="$DASH_BASE"
+RUN_ID=visible-run
+UNIFIED_DASH_PID=
+CLOUDBENCH_HUB_VISIBILITY_ATTEMPTS=10
+{startup}
+{visibility}
+python3 -c 'import os; print(os.getsid(0))' > "$LAUNCHER_SID_FILE"
+start_central_hub
+require_central_hub_visibility
+'''
+    hub_pid = None
+    try:
+        result = subprocess.run(
+            ["bash", "-c", shell],
+            env={
+                **os.environ,
+                "HELPER": str(ENV_HELPER_SCRIPT),
+                "ROOT": str(ROOT),
+                "RUNS_ROOT": str(runs_root),
+                "HUB_CTX_DIR": str(hub_context),
+                "DASH_BASE": str(port),
+                "LAUNCHER_SID_FILE": str(launcher_sid_file),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+        assert result.returncode == 0, result.stderr
+        hub_pid = int((hub_context / "agent-link-server.pid").read_text().strip())
+        launcher_sid = int(launcher_sid_file.read_text().strip())
+        os.kill(hub_pid, 0)
+        assert os.getsid(hub_pid) != launcher_sid, (
+            "persistent central hub must not share the launcher's terminal session"
+        )
+        probe = subprocess.run(
+            [
+                "curl",
+                "--noproxy",
+                "*",
+                "-fsS",
+                f"http://127.0.0.1:{port}/hub-meta.json",
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert probe.returncode == 0, probe.stderr
+        assert str(runs_root.resolve()) in probe.stdout
+    finally:
+        if hub_pid is not None:
+            try:
+                os.kill(hub_pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+
 def test_central_hub_startup_retries_when_foreign_process_wins_bind_race(
     tmp_path: Path,
 ) -> None:
@@ -6837,6 +7258,7 @@ def test_boot_supervisor_keeps_data_plane_alive_after_done() -> None:
     controller's next data-plane poll, or a real verdict becomes NORESULT."""
     boot = (CLOUD_SCRIPT.parent / "cloudbench-boot.sh").read_text()
 
+    assert 'DRIVER="${CLOUDBENCH_RUN_SCRIPT:-/cloudbench-run.sh}"' in boot
     assert 'bash "$DRIVER" >> "$LOG" 2>&1' in boot
     assert 'exec bash "$REPO/scripts/cloudbench-run.sh"' not in boot
     assert "holding for controller collection" in boot
@@ -6856,6 +7278,45 @@ def test_claimed_pool_teardown_is_parallel_with_shared_inventory() -> None:
     assert 'pool_machine_state "$id"' not in claimed
     assert "CLOUDBENCH_POOL_STOP_REQUEST_ATTEMPTS" in claimed
     assert "shared inventory" in claimed
+
+
+def test_fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown(
+    tmp_path: Path,
+) -> None:
+    """Cleanup must retain enough host space to run Fly/asdf after mid-run ENOSPC."""
+    fleet = FLEET_SCRIPT.read_text()
+    reserve = _extract_fleet_function(fleet, "reserve_cleanup_disk_space() {")
+    release = _extract_fleet_function(fleet, "release_cleanup_disk_reserve() {")
+    reserve_path = tmp_path / "cleanup-disk-reserve"
+    script = f"""set -uo pipefail
+CLEANUP_DISK_RESERVE_FILE="$1"
+CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=1
+{reserve}
+{release}
+reserve_cleanup_disk_space
+test "$(wc -c < "$CLEANUP_DISK_RESERVE_FILE" | tr -d ' ')" = 1048576
+provider_teardown() {{ test ! -e "$CLEANUP_DISK_RESERVE_FILE"; }}
+if provider_teardown; then exit 41; fi
+release_cleanup_disk_reserve
+provider_teardown
+"""
+    result = subprocess.run(
+        ["bash", "-c", script, "reserve", str(reserve_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert not reserve_path.exists()
+
+    cleanup = _extract_fleet_function(fleet, "cleanup() {")
+    release_call = "release_cleanup_disk_reserve"
+    assert cleanup.index(release_call) < cleanup.index("cloudbench_terminate_and_wait")
+    assert cleanup.index(release_call) < cleanup.index("reap_registry_clones")
+
+    recovery = _extract_fleet_function(fleet, "reconcile_stale_fleet_registries() {")
+    stale_release = 'release_cleanup_disk_reserve "$registry/cleanup-disk-reserve"'
+    assert recovery.index(stale_release) < recovery.index('reap_registry_clones "$registry" stale')
 
 
 def test_cloud_timeout_kills_a_command_that_ignores_sigalrm() -> None:
@@ -7030,6 +7491,7 @@ def test_cloud_runner_avoids_live_run_port_collisions() -> None:
     assert "sed -nE 's/.*status proxy:" not in barrier
     assert "CHILD_PORT[j] + 3" not in barrier
 
+    bindable = _extract_fleet_function(cloud, "local_port_is_bindable() {")
     claim = _extract_fleet_function(cloud, "claim_local_port() {")
     release = _extract_fleet_function(cloud, "release_local_port_leases() {")
     assert 'PORT_LEASE_HELPER="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-port-lease.py"' in cloud
@@ -7040,6 +7502,7 @@ PORT_LEASE_ROOT="$1"
 PORT_LEASE_NONCE="$$-$RANDOM"
 PORT_LEASE_HELPER="$3"
 PORT_LEASES=()
+{bindable}
 {claim}
 {release}
 trap release_local_port_leases EXIT

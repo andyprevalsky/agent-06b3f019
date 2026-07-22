@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { deduplicateToolMessages } from '@/features/terminal-component-group/hooks/deduplicateToolMessages';
 import { computeActiveBrowserPanels } from '@/features/terminal/hooks/derivations';
 
 import prodChipLeakTranscriptJson from './browser-chip-leak-prod-85530622.fixture.json';
@@ -299,6 +300,51 @@ describe('computeActiveBrowserPanels', () => {
     expect(computeActiveBrowserPanels(msgs)).toEqual([{ taskId: 'task-b', browserUrl: 'b' }]);
   });
 
+  it('never renders two panels while one browser tool call is retrying', () => {
+    // Production-shaped invariant: Temporal retried the logical call with a new
+    // task ID. Even when an input prefix lacks task A's terminal event, only the
+    // newest logical attempt may render. The exact missing-terminal cause in the
+    // reported trace remains preliminary.
+    const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
+      {
+        message_id: 'init-a',
+        timestamp: '2026-07-19T11:58:37.000Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-a',
+          toolCallId: 'browser-call-1',
+          toolName: 'spawn_browser_agent',
+          action_type: 'browser',
+          browser_url: 'https://kernel.example/live/a',
+          toolStatus: 'IN_PROGRESS',
+        },
+      },
+      {
+        message_id: 'init-b',
+        timestamp: '2026-07-19T11:58:46.000Z',
+        text: '',
+        role: 'TOOL',
+        metadata: {
+          task_id: 'task-b',
+          toolCallId: 'browser-call-1',
+          toolName: 'spawn_browser_agent',
+          action_type: 'browser',
+          browser_url: 'https://steel.example/live/b',
+          toolStatus: 'IN_PROGRESS',
+        },
+      },
+    ];
+
+    const panelsByPrefix = msgs.map((_, index) =>
+      computeActiveBrowserPanels(msgs.slice(0, index + 1)),
+    );
+    expect(panelsByPrefix.every((panels) => panels.length <= 1)).toBe(true);
+    expect(panelsByPrefix.at(-1)).toEqual([
+      { taskId: 'task-b', browserUrl: 'https://steel.example/live/b' },
+    ]);
+  });
+
   it('excludes tasks whose owning tool call finished at tool-call scope without task_complete', () => {
     const msgs: Parameters<typeof computeActiveBrowserPanels>[0] = [
       {
@@ -408,5 +454,42 @@ describe('computeActiveBrowserPanels', () => {
       },
     ];
     expect(computeActiveBrowserPanels(msgs)).toEqual([{ taskId: 't1', browserUrl: 'x' }]);
+  });
+});
+
+describe('rotate_ip progress lifecycle', () => {
+  it('renders one tool when streamed and persisted progress share the model tool-call id', () => {
+    const messages = [
+      {
+        message_id: 'streamed-rotate',
+        timestamp: '2026-07-19T11:58:12.000Z',
+        text: 'Starting rotate_ip...',
+        role: 'TOOL' as const,
+        metadata: {
+          toolCallId: 'call-rotate-1',
+          toolName: 'rotate_ip',
+          toolStatus: 'IN_PROGRESS',
+          title: 'Starting rotate_ip...',
+        },
+      },
+      {
+        message_id: 'persisted-rotate',
+        timestamp: '2026-07-19T11:58:12.100Z',
+        text: '',
+        role: 'TOOL' as const,
+        metadata: {
+          toolCallId: 'call-rotate-1',
+          toolName: 'rotate_ip',
+          toolStatus: 'IN_PROGRESS',
+          title: 'Rotating browser IP',
+        },
+      },
+    ];
+
+    const [rendered] = deduplicateToolMessages(messages);
+
+    expect(rendered).toHaveLength(1);
+    expect(rendered[0]?.metadata?.toolCallId).toBe('call-rotate-1');
+    expect(rendered[0]?.metadata?.title).toBe('Rotating browser IP');
   });
 });

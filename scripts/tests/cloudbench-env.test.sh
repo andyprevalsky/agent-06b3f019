@@ -131,7 +131,8 @@ production_function() {
 }
 PORT_LEASE_HELPER="$ROOT_DIR/scripts/cloudbench-port-lease.py"
 [ -f "$PORT_LEASE_HELPER" ] || fail "production port-lease helper is missing"
-for function_name in claim_local_port release_local_port_lease \
+for function_name in local_port_is_bindable claim_exact_local_port claim_local_port \
+    claim_local_archive_ports release_local_port_lease \
     release_local_port_leases publish_status_proxy_port start_leased_data_plane_proxy; do
   function_source="$(production_function "$function_name")"
   [ -n "$function_source" ] || fail "could not load production function $function_name"
@@ -168,9 +169,121 @@ start_leased_data_plane_proxy 61944 rotated_port 3001 occupied.local \
   fail "the proxy launcher did not preserve the replacement tunnel"
 cloudbench_terminate_and_wait 2 "$rotated_pid"
 release_local_port_leases
-[ ! -e "$PORT_LEASE_ROOT/$rotated_port" ] || fail "replacement proxy lease survived cleanup"
+[ ! -d "$PORT_LEASE_ROOT/$rotated_port" ] || fail "replacement proxy lease survived cleanup"
+
+# The dashboard allocator must not impose a hidden 100-port capacity ceiling.
+# A real 11-bench ecommerce fleet found every port in 61115..61214 occupied by
+# concurrent/archive viewers; the 11th child exited before publishing its boot
+# config, so the parent waited five minutes for an impossible 11/11 barrier.
+# Drive the production allocator with the same 100-collision boundary and prove
+# it leases the immediately following free port.
+PORT_LEASE_ROOT="$TMP_ROOT/dashboard-port-leases"
+PORT_LEASE_NONCE="dashboard-exhaustion-$$"
+PORT_LEASES=()
+dashboard_preferred=61115
+local_port_is_bindable() {
+  [ "$1" -ge $((dashboard_preferred + 100)) ]
+}
+dashboard_port=""
+claim_local_port "$dashboard_preferred" dashboard_port ||
+  fail "dashboard allocator stopped after 100 occupied ports instead of continuing"
+[ "$dashboard_port" = "$((dashboard_preferred + 100))" ] ||
+  fail "dashboard allocator did not select the first free port after 100 collisions"
+release_local_port_leases
+[ ! -d "$PORT_LEASE_ROOT/$dashboard_port" ] ||
+  fail "exhaustion-regression dashboard lease survived cleanup"
+
+# Shell arithmetic normally interprets a leading zero as octal. Port inputs are
+# decimal strings, so a valid zero-padded preference must remain valid.
+local_port_is_bindable() { return 0; }
+decimal_port=""
+claim_local_port 08080 decimal_port ||
+  fail "dashboard allocator rejected a zero-padded decimal preference"
+[ "$decimal_port" = "8080" ] ||
+  fail "dashboard allocator did not normalize a zero-padded preference as decimal"
+release_local_port_leases
+
+# A stale lease can be replaced between observation and cleanup. Simulate that
+# interleaving after the atomic rename and prove cleanup leaves the replacement.
+stale_port=61250
+stale_path="$PORT_LEASE_ROOT/$stale_port"
+mkdir -p "$stale_path"
+printf '%s stale\n' 99999999 > "$stale_path/owner"
+mv() {
+  command mv "$1" "$2" || return
+  mkdir -p "$1"
+  printf '%s replacement\n' "$$" > "$1/owner"
+}
+stale_result=""
+claim_local_port "$stale_port" stale_result ||
+  fail "allocator did not continue after atomically cleaning a stale lease"
+unset -f mv
+[ "$stale_result" = "$((stale_port + 1))" ] ||
+  fail "allocator did not skip the concurrently replaced lease"
+[ -d "$stale_path" ] || fail "stale cleanup removed a concurrently replaced lease"
+[ "$(cat "$stale_path/owner")" = "$$ replacement" ] ||
+  fail "stale cleanup changed the concurrently replaced lease owner"
+rm -rf "$stale_path"
+
+# The post-run archive viewer uses two adjacent leased ports. It must use
+# the same full-namespace allocator rather than retaining its former 100-port
+# inline scan, or a dense fleet can finish successfully but lose its archive UI.
+PORT_LEASE_ROOT="$TMP_ROOT/archive-port-leases"
+PORT_LEASE_NONCE="archive-exhaustion-$$"
+PORT_LEASES=()
+local_port_is_bindable() {
+  [ "$1" -ge $((dashboard_preferred + 100)) ]
+}
+archive_api_port=""
+archive_fe_port=""
+claim_local_archive_ports "$dashboard_preferred" archive_api_port archive_fe_port ||
+  fail "archive allocator stopped after 100 occupied ports instead of continuing"
+[ "$archive_api_port" = "$((dashboard_preferred + 100))" ] ||
+  fail "archive allocator did not select the first free API port after 100 collisions"
+[ "$archive_fe_port" = "$((dashboard_preferred + 101))" ] ||
+  fail "archive allocator did not lease the exact adjacent frontend port"
+release_local_port_leases
+[ ! -d "$PORT_LEASE_ROOT/$archive_api_port" ] &&
+  [ ! -d "$PORT_LEASE_ROOT/$archive_fe_port" ] ||
+  fail "exhaustion-regression archive leases survived cleanup"
+
+# If the preferred API port is free but its exact neighbor is not, release the
+# partial lease and continue until a genuinely adjacent pair is available.
+PORT_LEASE_ROOT="$TMP_ROOT/archive-adjacency-port-leases"
+PORT_LEASE_NONCE="archive-adjacency-$$"
+PORT_LEASES=()
+archive_preferred=62000
+local_port_is_bindable() {
+  [ "$1" -ne $((archive_preferred + 1)) ]
+}
+archive_api_port=""
+archive_fe_port=""
+claim_local_archive_ports "$archive_preferred" archive_api_port archive_fe_port ||
+  fail "archive allocator could not skip a candidate with an occupied neighbor"
+[ "$archive_api_port" = "$((archive_preferred + 2))" ] &&
+  [ "$archive_fe_port" = "$((archive_preferred + 3))" ] ||
+  fail "archive allocator returned non-adjacent ports after an occupied neighbor"
+[ ! -d "$PORT_LEASE_ROOT/$archive_preferred" ] ||
+  fail "archive allocator retained the partial API lease after adjacency failed"
+release_local_port_leases
+
+# Fleet preferred ports advance by 20 per child. At sufficient width that raw
+# preference crosses 65535, but the allocator must still wrap through the same
+# finite local namespace instead of rejecting an otherwise serviceable fleet.
+local_port_is_bindable() { return 0; }
+overflow_preferred=$((65535 + 20))
+overflow_expected=$((1024 + (overflow_preferred - 1024) % (65535 - 1024 + 1)))
+overflow_port=""
+claim_local_port "$overflow_preferred" overflow_port ||
+  fail "dashboard allocator rejected an overflowed fleet preference instead of wrapping"
+[ "$overflow_port" = "$overflow_expected" ] ||
+  fail "dashboard allocator normalized an overflowed preference to the wrong port"
+release_local_port_leases
+[ ! -d "$PORT_LEASE_ROOT/$overflow_port" ] ||
+  fail "overflow-regression dashboard lease survived cleanup"
 unset -f flyctl curl start_data_plane_proxy start_leased_data_plane_proxy \
-  claim_local_port release_local_port_lease \
+  local_port_is_bindable claim_exact_local_port claim_local_port \
+  claim_local_archive_ports release_local_port_lease \
   release_local_port_leases publish_status_proxy_port production_function
 unset CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS
 

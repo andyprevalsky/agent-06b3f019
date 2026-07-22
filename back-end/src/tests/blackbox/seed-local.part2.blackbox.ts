@@ -20,6 +20,10 @@ function readSeedLocalSource(): string {
   return readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
 }
 
+function readRepoFile(path: string): string {
+  return readFileSync(resolve(__dirname, '../../../../', path), 'utf8');
+}
+
 test('full sync defers browser-auth failure until later tables finish', async () => {
   const source = readSeedLocalSource();
   const fullSyncCollector = source.indexOf('const browserAuthSyncFailures: Error[] = [];');
@@ -237,6 +241,42 @@ test('compute-token sync can require GPT without requiring Claude OAuth', async 
     strictFailure > keyValidation,
     'expected missing Claude to stay fail-closed when Claude remains required'
   );
+});
+
+test('AgentCard launcher scopes the missing-Claude opt-out to non-Claude tasks', async () => {
+  const source = readSeedLocalSource();
+  const launcher = readRepoFile('scripts/run-agentcard-lifecycle-task.sh');
+  const tasks = JSON.parse(readRepoFile('agents/benchmarks/tasks.json')) as Array<{
+    name: string;
+    requires_claude_code: boolean;
+  }>;
+  const acceptedTasks = [
+    'agent-payment-test-shop',
+    'agent-payment-setup-resume',
+    'agent-payment-idempotent-abandonment',
+    'agent-payment-abandonment',
+  ];
+  const bypass = source.indexOf(
+    "process.env.SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK === '1'"
+  );
+  const warning = source.indexOf('launcher-scoped non-Claude task', bypass);
+  const gptInspection = source.indexOf('await inspectGptCodeIntegrations()', warning);
+
+  assert(bypass > 0, 'expected a distinct non-Claude task opt-out');
+  assert(warning > bypass, 'expected the opt-out to explain its narrow contract');
+  assert(gptInspection > warning, 'expected gpt_code validation to remain active');
+  assert(
+    launcher.includes('export SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK=1'),
+    'expected the AgentCard launcher to opt into the non-Claude task path'
+  );
+  for (const taskName of acceptedTasks) {
+    const task = tasks.find((candidate) => candidate.name === taskName);
+    assert(task !== undefined, `expected ${taskName} in the benchmark catalog`);
+    assert(
+      task.requires_claude_code === false,
+      `expected ${taskName} to remain explicitly non-Claude before using the opt-out`
+    );
+  }
 });
 
 (async () => {

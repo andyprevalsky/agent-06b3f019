@@ -55,6 +55,16 @@ export AGENTCARD_ONBOARDING_RETURN_URL="${AGENTCARD_ONBOARDING_RETURN_URL:-https
 # cooled-down shared Anthropic fallback.
 export ROSE_EXCLUDE_ANTHROPIC_FAMILY=1
 export SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt
+# The catalog pins every task accepted by this launcher to
+# requires_claude_code=false. A missing Claude Code integration must not block
+# these root/browser lifecycle checks before an agent exists; Claude-dependent
+# benchmark launchers remain strict because this opt-out is scoped to this
+# four-task script.
+export SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK=1
+# These tasks also never spawn a Codex code agent. An externally rate-limited
+# or quota-exhausted gpt_code integration must not block their setup. The root
+# and browser agent provider still performs its own runtime credential checks.
+export SEED_ALLOW_MISSING_GPT_CODE=1
 # These sandbox lifecycle tasks use only the bundled /test_payment fixture and
 # never consume production browser cookies, passwords, passkeys, or storage.
 # Skipping that unrelated graph prevents a warm local database from spending

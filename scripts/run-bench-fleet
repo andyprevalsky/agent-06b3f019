@@ -159,7 +159,7 @@ FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^[[:space:]]*/
 if [ "${CLOUDBENCH_TEST_FLEET_OWNER_TOKEN+x}" = "x" ]; then
     FLEET_OWNER_TOKEN="$CLOUDBENCH_TEST_FLEET_OWNER_TOKEN"
 else
-    FLEET_OWNER_TOKEN="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+FLEET_OWNER_TOKEN="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 fi
 FLEET_REGISTRY_DIR="$FLEET_OWNERSHIP_ROOT/$FLEET_OWNER_TOKEN"
 FLEET_REGISTRY_PUBLISHED=0
@@ -172,6 +172,7 @@ FLEET_REGISTRY_PUBLISHED=0
 CAPACITY_RESERVATION_ROOT="${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}"
 CAPACITY_RESERVATION_TOKEN="$FLEET_OWNER_TOKEN-primary"
 CAPACITY_RESERVATION_PUBLISHED=0
+CLEANUP_DISK_RESERVE_FILE="$FLEET_REGISTRY_DIR/cleanup-disk-reserve"
 while [ $# -gt 0 ]; do
     case "$1" in
         --detach)         DETACH="1"; shift ;;
@@ -725,7 +726,7 @@ print_code_provenance() {
     if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" = "1" ]; then
         echo "  diff   : local changes intentionally excluded (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (pinned; local patch excluded)"
-    elif git -C "$ROOT_DIR" diff --quiet "$BENCH_REF" 2>/dev/null && [ "$untracked_count" = "0" ]; then
+    elif ! cloudbench_worktree_has_changes "$ROOT_DIR"; then
         echo "  diff   : clean working tree (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (clean)"
     else
@@ -1382,6 +1383,28 @@ acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-d
     return 1
 }
 
+reserve_cleanup_disk_space() {
+    # The controller can run for hours while sibling workspaces generate coverage,
+    # dependencies, and trace archives. Keep one physically allocated local file
+    # that teardown releases before invoking asdf/flyctl, so a mid-run ENOSPC does
+    # not strand paid machines merely because those CLIs need shell temporaries.
+    local reserve_mb="${CLOUDBENCH_CLEANUP_DISK_RESERVE_MB:-512}"
+    case "$reserve_mb" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$reserve_mb" -ge 1 ] && [ "$reserve_mb" -le 4096 ] || return 1
+    rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || return 1
+    if ! dd if=/dev/zero of="$CLEANUP_DISK_RESERVE_FILE" \
+        bs=1048576 count="$reserve_mb" conv=fsync >/dev/null 2>&1; then
+        rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || true
+        return 1
+    fi
+}
+
+release_cleanup_disk_reserve() {  # [exact reserve path for a proven-dead registry]
+    local reserve_file="${1:-${CLEANUP_DISK_RESERVE_FILE:-}}"
+    [ -n "$reserve_file" ] || return 0
+    rm -f "$reserve_file" 2>/dev/null || return 1
+}
+
 reap_orphaned_fleet_proxies() {
     # A controller reaps its `flyctl proxy` (WireGuard data-plane) children via an
     # EXIT trap — but SIGKILL / a laptop sleep-crash bypasses that trap, orphaning
@@ -1438,6 +1461,11 @@ reconcile_stale_fleet_registries() {
             unresolved=1
             continue
         fi
+        release_cleanup_disk_reserve "$registry/cleanup-disk-reserve" || {
+            echo "❌ could not release stale fleet cleanup reserve in $registry" >&2
+            unresolved=1
+            continue
+        }
         acquire_registry_recovery_lock "$registry"
         recovery_lock_status=$?
         [ "$recovery_lock_status" -eq 2 ] && continue
@@ -2147,8 +2175,9 @@ json.dump(card, open(sys.argv[1], "w"), indent=1)
 PY
 }
 start_central_hub() {
-    local preferred_dash_base selected_dash_base attempt launch_pid wait_attempt
+    local preferred_dash_base selected_dash_base attempt launch_pid wait_attempt pid_file
     mkdir -p "$HUB_CTX_DIR"
+    pid_file="$HUB_CTX_DIR/agent-link-server.pid"
     preferred_dash_base="$DASH_BASE"
     for attempt in $(seq 1 20); do
         selected_dash_base="$(cloudbench_select_central_hub_port "$preferred_dash_base" "$RUNS_ROOT")" || return 1
@@ -2163,31 +2192,45 @@ start_central_hub() {
             return 0
         fi
 
-        python3 "$ROOT_DIR/agents/benchmarks/agent_link_server.py" \
-            --root "$RUNS_ROOT" --host 127.0.0.1 --port "$DASH_BASE" \
-            --repo-root "$ROOT_DIR" --context-dir "$HUB_CTX_DIR" \
-            --frontend-dir "$ROOT_DIR/front-end" --hub-runs-dir "$RUNS_ROOT" \
-            --preferred-archive-port "$((DASH_BASE + 200))" \
-            > "$HUB_CTX_DIR/hub.log" 2>&1 & launch_pid=$!
+        # The hub intentionally outlives this controller. A plain background job
+        # remains in the controller's terminal session and receives SIGHUP when a
+        # PTY-backed launcher closes, which leaves every terminal open-agent link
+        # dead. Re-exec it in its own session and have that process publish the PID
+        # it retains across exec so startup/race cleanup remains exact.
+        rm -f "$pid_file"
+        cloudbench_detach_reexec "$HUB_CTX_DIR/hub.log" bash -c '
+            pid_file="$1"
+            shift
+            printf "%s\n" "$$" > "$pid_file"
+            exec "$@"
+        ' _ "$pid_file" \
+            python3 "$ROOT_DIR/agents/benchmarks/agent_link_server.py" \
+                --root "$RUNS_ROOT" --host 127.0.0.1 --port "$DASH_BASE" \
+                --repo-root "$ROOT_DIR" --context-dir "$HUB_CTX_DIR" \
+                --frontend-dir "$ROOT_DIR/front-end" --hub-runs-dir "$RUNS_ROOT" \
+                --preferred-archive-port "$((DASH_BASE + 200))"
+        launch_pid=""
         for wait_attempt in $(seq 1 50); do
             if cloudbench_central_hub_matches "$DASH_BASE" "$RUNS_ROOT"; then
+                launch_pid="$(cat "$pid_file" 2>/dev/null || true)"
                 if kill -0 "$launch_pid" 2>/dev/null; then
                     UNIFIED_DASH_PID="$launch_pid"
-                    printf '%s\n' "$UNIFIED_DASH_PID" > "$HUB_CTX_DIR/agent-link-server.pid"
                 else
                     UNIFIED_DASH_PID=""
                 fi
                 echo "🖥️  local benchmark diagnostics: http://localhost:$DASH_BASE/ — run visible as STARTING"
                 return 0
             fi
-            kill -0 "$launch_pid" 2>/dev/null || break
+            launch_pid="$(cat "$pid_file" 2>/dev/null || true)"
+            [ -z "$launch_pid" ] || kill -0 "$launch_pid" 2>/dev/null || break
             sleep 0.1
         done
 
         # A concurrent workspace may have won the check-then-bind race. Stop only
         # the process we launched (never an unidentified listener), then select
         # again; the winner's runs-root identity will make us skip its port.
-        if kill -0 "$launch_pid" 2>/dev/null; then
+        launch_pid="$(cat "$pid_file" 2>/dev/null || true)"
+        if [ -n "$launch_pid" ] && kill -0 "$launch_pid" 2>/dev/null; then
             kill "$launch_pid" 2>/dev/null || true
             wait "$launch_pid" 2>/dev/null || true
         fi
@@ -2271,6 +2314,7 @@ cleanup() {
     # let a second signal interrupt teardown after the EXIT trap has begun.
     trap - EXIT
     trap '' HUP INT TERM
+    release_cleanup_disk_reserve || ec=1
     [ -n "${UNIFIED_AGG_PID:-}" ] && kill "$UNIFIED_AGG_PID" 2>/dev/null || true
     [ -n "${SNAPSHOT_LOOP_PID:-}" ] && kill "$SNAPSHOT_LOOP_PID" 2>/dev/null || true
     [ -n "${INVENTORY_WAIT_FIFO:-}" ] && rm -f "$INVENTORY_WAIT_FIFO" 2>/dev/null || true
@@ -2459,6 +2503,10 @@ if [ ! -f "$POOL_IDS_FILE" ] && [ -f "$LEGACY_POOL_IDS_FILE" ]; then
 fi
 fleet_registry_init || {
     echo "❌ could not atomically publish durable fleet ownership under $FLEET_OWNERSHIP_ROOT; refusing provider mutation" >&2
+    exit 1
+}
+reserve_cleanup_disk_space || {
+    echo "❌ could not allocate the emergency fleet teardown disk reserve; refusing provider mutation" >&2
     exit 1
 }
 reconcile_pool || exit 1   # stop + verify this workspace's pool before machine start
@@ -2992,11 +3040,20 @@ BOX_HEALTH_PORT="3003"     # cloudbench-run.sh HEALTH_PORT = CONDUCTOR_PORT(3001
 BOX_BACKEND_PORT="3001"
 BOX_WMH_PORT="3007"        # run.sh WMH_PORT = base+6
 FLEET_PATCH_FILE=""
+FLEET_PATCH_SHA256=""
 if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
-   && { ! git -C "$ROOT_DIR" diff --quiet --binary "$BENCH_REF" 2>/dev/null \
-        || [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | head -1)" ]; }; then
+   && cloudbench_worktree_has_changes "$ROOT_DIR"; then
     FLEET_PATCH_FILE="$(mktemp)"
-    bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF" > "$FLEET_PATCH_FILE"
+    if ! bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$FLEET_PATCH_FILE" \
+        || [ ! -s "$FLEET_PATCH_FILE" ]; then
+        echo "❌ could not create the fleet local workspace patch" >&2
+        exit 1
+    fi
+    FLEET_PATCH_SHA256="$(cloudbench_env_sha256 "$FLEET_PATCH_FILE")"
+    [ -n "$FLEET_PATCH_SHA256" ] || {
+        echo "❌ could not fingerprint the fleet local workspace patch" >&2
+        exit 1
+    }
 fi
 
 _machine_priv_ip() {  # _machine_priv_ip <machine_id>
@@ -3253,7 +3310,7 @@ reconcile_worker_failure_outcomes() {  # <bench> <bench-output-dir>
 
 provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <primary_ip> <sim01> <out>
     local bench="$1" ws="$2" primary_id="$3" pip="$4" sim="$5" out="$6"
-    local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64
+    local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file
     worker_capacity_token="$FLEET_OWNER_TOKEN-worker-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     if ! reserve_worker_machine_slot "$worker_capacity_token"; then
         printf '%s\n' "Machine-count capacity unavailable for worker clone" > "$out/autoscaler.failed"
@@ -3274,6 +3331,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         return 1
     fi
     echo "  ➕ [$bench] worker $wid created"
+    ready_file="/data/cloudbench-worker-$wid.ready"
     if ! worker_github_token_b64="$(controller_github_token_b64)"; then
         printf '%s\n' "No current controller GitHub token available for worker ref fetch" > "$out/autoscaler.failed"
         echo "  ❌ [$bench] mandatory autoscaler: missing worker GitHub token" >&2
@@ -3315,7 +3373,10 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         echo "export WMH_PORT=$(printf '%q' "$BOX_WMH_PORT")"
         echo "export HEALTH_PORT=$(printf '%q' "$FLEET_WORKER_HEALTH_PORT")"
         echo "export BENCH_SIMULATE=$(printf '%q' "$sim")"
+        echo "export WORKER_READY_FILE=$(printf '%q' "$ready_file")"
+        echo "rm -f $(printf '%q' "$ready_file")"
         [ -n "$FLEET_PATCH_FILE" ] && echo "export LOCAL_PATCH_FILE=/tmp/cloudbench-local.patch" || echo "unset LOCAL_PATCH_FILE"
+        [ -n "$FLEET_PATCH_FILE" ] && echo "export LOCAL_PATCH_SHA256=$FLEET_PATCH_SHA256" || echo "unset LOCAL_PATCH_SHA256"
         echo "exec bash /data/cloudbench-worker.sh"
     } > "$wrapper"
     (
@@ -3341,9 +3402,23 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
           : > "$ready_tmp" && mv "$ready_tmp" "$out/worker-$wid.ready"
       }
       launched=0
+      worker_neutralized=0
       for _ in $(seq 1 "$stage_attempts"); do
         worker_provision_cancelled && finish_cancelled_worker_provision
         if machine_storage_ready "$wid"; then
+            # A worker is cloned from this benchmark's primary, whose config is
+            # already set to auto-run cloudbench-boot.sh. Neutralize that copied
+            # command before its first start or staging could race a duplicate
+            # primary benchmark driver on the same task queue/run token.
+            if [ "$worker_neutralized" != "1" ]; then
+                if ! fly_with_timeout 30 machine update "$wid" -a "$APP" \
+                    --env CLOUDBENCH_BOOT=0 --command "sleep infinity" \
+                    --skip-health-checks --skip-start --yes >/dev/null 2>&1; then
+                    sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+                    continue
+                fi
+                worker_neutralized=1
+            fi
             fly_with_timeout 20 machine start "$wid" -a "$APP" >/dev/null 2>&1 || true
         fi
           if fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-worker.sh" /data/cloudbench-worker.sh >/dev/null 2>&1 \
@@ -3645,7 +3720,9 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
             local n=$((cur - want))
             echo "  ⤵️  [$bench] scale down -$n (desired=$desired, pool=$cur)"
             for _ in $(seq 1 "$n"); do
-                local wid; wid="$(tail -1 "$out/worker-clones.ids" 2>/dev/null)"
+                local ready_state wid
+                ready_state="$(find "$out/worker-ready" -type f 2>/dev/null | tail -1)"
+                wid="${ready_state##*/}"
                 [ -n "$wid" ] || break
                 # Publish cancellation before provider destroy. A provisioner
                 # staging this worker can then distinguish intentional scale-in
@@ -3782,6 +3859,8 @@ for bench in "${BENCHES[@]}"; do
     CLOUDBENCH_BOOT_CONFIG_BARRIER="$BOOT_CONFIG_BARRIER" \
     CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS="$BOOT_UPDATE_CAPACITY_WAIT_SECONDS" \
     CLOUDBENCH_BOOT_CONFIG_BARRIER_WAIT_SECONDS="$BOOT_CONFIG_BARRIER_WAIT_SECONDS" \
+    CLOUDBENCH_LOCAL_PATCH_SOURCE="$FLEET_PATCH_FILE" \
+    CLOUDBENCH_LOCAL_PATCH_SHA256="$FLEET_PATCH_SHA256" \
     NO_OPEN=1 \
         run_fleet_child_supervised "$out/benchmark-child.finished" \
             bash "$RUN_BENCH_CLOUD_BIN" "$bench" \

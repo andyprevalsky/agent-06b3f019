@@ -129,6 +129,38 @@ test.describe('browser-chip-count', () => {
       });
       await expectChipCount(page, 0, 'task B failed via tool-call-scoped error');
 
+      // ── Step 4: a retried logical tool call still owns one chip ───────
+      // Production shape from e0c3c42e-2d4c-4b11-bb10-42d54280fc0e:
+      // Temporal initialized a new task id under the same toolCallId. This
+      // deliberately omits an old-attempt terminal event to cement the UI
+      // invariant; the exact reason it was absent in the report is preliminary.
+      await postToolMessage(agentId, '', {
+        toolCallId: 'call-retried-browser',
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'IN_PROGRESS',
+        action_type: 'browser',
+        task_id: 'retry-task-old',
+        browser_url: `${LIVE_VIEW_URL}/retry-old`,
+      });
+      await expectChipCount(page, 1, 'first attempt of retried browser call');
+      await postToolMessage(agentId, '', {
+        toolCallId: 'call-retried-browser',
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'IN_PROGRESS',
+        action_type: 'browser',
+        task_id: 'retry-task-new',
+        browser_url: `${LIVE_VIEW_URL}/retry-new`,
+      });
+      await expectChipCount(page, 1, 'replacement attempt supersedes stale chip');
+      await postToolMessage(agentId, '**Status**: ✅ COMPLETE', {
+        toolCallId: 'call-retried-browser',
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'FINISHED',
+        action_type: 'task_complete',
+        task_id: 'retry-task-new',
+      });
+      await expectChipCount(page, 0, 'replacement attempt completed');
+
       // ── Invariant: reload agrees with realtime ────────────────────────
       // The chip count must be derived purely from persisted messages, so a
       // fresh hydration renders the same zero-chip state.

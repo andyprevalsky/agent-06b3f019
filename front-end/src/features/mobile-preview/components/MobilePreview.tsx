@@ -10,7 +10,7 @@
  * agent. Not linked from anywhere; reachable at /mobile-preview in `vite` dev.
  */
 
-import type { MouseEvent } from 'react';
+import { useState, type MouseEvent } from 'react';
 
 import MobileAgentDrawer from '@/features/terminal-component-group/components/MobileAgentDrawer';
 import { BrowserStatusBarFullscreen } from '@/features/terminal-component-group/components/browser-status-bar/BrowserStatusBarFullscreen';
@@ -131,8 +131,32 @@ function noop(): void {
   /* preview */
 }
 
+export const PREVIEW_AGENT_CONTEXT = {
+  agent: MOCK_AGENTS[0],
+  setAgent: noop,
+  inspectionContext: null,
+  selectedAgentId: 'a1',
+  setSelectedAgentId: noop,
+  stagePendingAgentCreation: noop,
+  reconcilePendingAgentCreation: async () => {},
+  rollbackPendingAgentCreation: () => false,
+  messages: MOCK_BROWSER_MESSAGES,
+  setMessages: noop,
+  streamingBubbles: new Map(),
+  streamingPlan: null,
+  streamingAttention: null,
+  streamingTools: new Map(),
+  streamedTextsRef: { current: new Set<string>() },
+  registerMessageHandler: () => noop,
+  sendMessage: async () => {},
+  isLoadingAgent: false,
+  forceResubscribe: noop,
+  isChatMode: false,
+};
+
 export default function MobilePreview() {
   const view = new URLSearchParams(window.location.search).get('view');
+  const [isUserControlling, setIsUserControlling] = useState(false);
 
   if (view === 'browser') {
     return (
@@ -150,9 +174,10 @@ export default function MobilePreview() {
         isDisconnected={false}
         isWaitingForAuthAssistance={false}
         isResuming={false}
+        isUserControlling={isUserControlling}
         pendingWriteLockApproval={null}
         onClose={noop as (e: MouseEvent) => void}
-        onResume={noop}
+        onResume={() => setIsUserControlling((current) => !current)}
       />
     );
   }

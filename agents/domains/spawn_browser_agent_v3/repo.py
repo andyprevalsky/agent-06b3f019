@@ -513,8 +513,7 @@ async def prepare_browser_auth(
             raise RuntimeError("Browser credential preparation returned a non-object payload")
         return data
     raise RuntimeError(
-        f"Failed to prepare browser credentials for {target_url}: "
-        f"HTTP {response.status_code} {response.text[:300]}"
+        f"Failed to prepare browser credentials for {target_url}: HTTP {response.status_code} {response.text[:300]}"
     )
 
 
@@ -594,6 +593,31 @@ async def fetch_session_info(config: Any, task_id: str, validate_live: bool = Fa
         if response.status_code == 200:
             return response.json()
         raise RuntimeError(f"Failed to fetch session info: HTTP {response.status_code}")
+
+
+async def fetch_browser_control_state(config: Any, task_id: str) -> str:
+    """Read agent/user ownership without reserving credentials or passkey counters."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.get(
+            f"{config.backend.api_url}/api/browser-session/task/{task_id}/control",
+            headers={"x-api-key": config.backend.api_key or ""},
+        )
+    if response.status_code == 200:
+        return str(response.json().get("state") or "agent")
+    raise RuntimeError(f"Failed to fetch browser control state: HTTP {response.status_code}")
+
+
+async def acknowledge_browser_user_control(config: Any, task_id: str) -> str:
+    """Acknowledge ownership at an action boundary before user input is enabled."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/browser-session/task/{task_id}/control",
+            headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
+            json={"mode": "acknowledge"},
+        )
+    if response.status_code == 200:
+        return str(response.json().get("state") or "agent")
+    raise RuntimeError(f"Failed to acknowledge browser control: HTTP {response.status_code}")
 
 
 async def close_browser_session(config: Any, session_id: str, pause: bool = False, current_url: str = "") -> None:

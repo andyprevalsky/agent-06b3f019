@@ -4,6 +4,8 @@
 
 import { z } from 'zod';
 
+export { BrowserControlState, BrowserSessionStatus } from '@prisma/client';
+
 // ---------------------------------------------------------------------------
 // Request validation schemas
 // ---------------------------------------------------------------------------
@@ -22,6 +24,10 @@ export const closeSessionSchema = z.object({
 
 export const resumeSessionSchema = z.object({
   task_id: z.string().uuid(), // Use stable task ID instead of session_id
+});
+
+export const browserControlSchema = z.object({
+  mode: z.enum(['user', 'agent', 'acknowledge']),
 });
 
 // rotate_ip tool → swap the browser session's outbound IP for the sub-agent run
