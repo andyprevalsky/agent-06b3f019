@@ -1658,9 +1658,19 @@ async def run_agent(  # noqa: C901
                         "error": True,
                         "subAgentId": task_id,
                     }
-                    if is_inside_temporal_activity and post_message:
-                        await post_message(completion_tool_error, "TOOL", error_metadata)
-                    if not poll_messages:
+                    completion_error_posted = False
+                    if post_message:
+                        try:
+                            await post_message(completion_tool_error, "TOOL", error_metadata)
+                            completion_error_posted = True
+                        except Exception as post_error:
+                            logger.warning(
+                                "Failed to persist rejected completion; keeping it in local context",
+                                agent_id=agent_id,
+                                tool_name=tool_name,
+                                error=str(post_error),
+                            )
+                    if not poll_messages or not completion_error_posted:
                         context.append(
                             {
                                 "role": "TOOL",

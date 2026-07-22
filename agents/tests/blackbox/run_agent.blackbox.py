@@ -36,6 +36,8 @@ async def _run_single_iteration(
     verifier_score=1.0,
     verifier_reasoning="done",
     winddown_window=0,
+    poll_messages_override=None,
+    is_inside_temporal_activity=True,
 ):
     from loop.run_agent import run_agent
 
@@ -120,8 +122,9 @@ async def _run_single_iteration(
             model="rose-labs/rose-1-lite",
             tools=["web_search", "web_fetch", "attempt_completion", "set_plan"],
             initial_context=ctx,
-            is_inside_temporal_activity=True,
+            is_inside_temporal_activity=is_inside_temporal_activity,
             post_message=mock_post_message,
+            poll_messages=poll_messages_override,
             execute_tool=default_execute_tool,
             build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
             max_iterations=max_iterations,
@@ -236,6 +239,44 @@ async def test_rejected_completion_continues_with_stable_schema():
         if message.get("metadata", {}).get("toolStatus") == "ERROR"
     ]
     assert len(rejected) == 1
+    assert "no evidence tool has succeeded" in rejected[0]["text"]
+
+
+async def test_rejected_completion_posts_error_in_workflow_polling_mode():
+    async def reject_completion(_tool_name, _tool_args, _tool_call_id):
+        return {
+            "error": True,
+            "message": "Completion rejected: no evidence tool has succeeded yet.",
+        }
+
+    async def poll_messages(_last_checked):
+        return []
+
+    workflow_llm_result = {
+        "response": "",
+        "tool_calls": [{"tool": "attempt_completion_with_result", "result": "unsupported"}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "detected_tools_ordered": [("attempt_completion_with_result", "tc-rejected", 1.0)],
+    }
+    with patch(
+        "loop.run_agent.workflow.execute_activity",
+        new=AsyncMock(return_value=workflow_llm_result),
+    ):
+        _, posted, _ = await _run_single_iteration(
+            workflow_llm_result["tool_calls"],
+            workflow_llm_result["detected_tools_ordered"],
+            execute_tool_override=reject_completion,
+            poll_messages_override=poll_messages,
+            is_inside_temporal_activity=False,
+        )
+
+    rejected = [
+        message
+        for message in posted
+        if message["role"] == "TOOL" and message.get("metadata", {}).get("toolStatus") == "ERROR"
+    ]
+    assert len(rejected) == 1
+    assert rejected[0]["metadata"]["toolCallId"] == "tc-rejected"
     assert "no evidence tool has succeeded" in rejected[0]["text"]
 
 
@@ -1397,6 +1438,10 @@ async def run_all_tests():
     await r.record_async(
         "rejected_completion_continues_with_stable_schema",
         test_rejected_completion_continues_with_stable_schema,
+    )
+    await r.record_async(
+        "rejected_completion_posts_error_in_workflow_polling_mode",
+        test_rejected_completion_posts_error_in_workflow_polling_mode,
     )
     await r.record_async(
         "same_llm_turn_spawn_agents_share_spawn_group_id",

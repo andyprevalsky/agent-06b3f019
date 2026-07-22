@@ -310,6 +310,7 @@ class ActionHistory:
 
     def __init__(self):
         self._entries: List[ActionHistoryEntry] = []
+        self._next_step = 1
 
     async def record_action(
         self,
@@ -341,7 +342,7 @@ class ActionHistory:
         Returns:
             The recorded ActionHistoryEntry
         """
-        step = len(self._entries) + 1
+        step = self._next_step
 
         # Convert between index and coordinates
         coords_dict = None
@@ -390,6 +391,7 @@ class ActionHistory:
         )
 
         self._entries.append(entry)
+        self._next_step = step + 1
         logger.debug(f"Recorded action {step}: {action} (index={index}, coords={coords_dict})")
 
         return entry
@@ -417,10 +419,12 @@ class ActionHistory:
                 continue
             restored.append(ActionHistoryEntry(**values))
         self._entries = restored
+        self._next_step = max((entry.step for entry in restored), default=0) + 1
 
     def clear(self) -> None:
         """Clear the action history."""
         self._entries = []
+        self._next_step = 1
 
     def __len__(self) -> int:
         return len(self._entries)

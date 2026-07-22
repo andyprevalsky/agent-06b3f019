@@ -4002,6 +4002,19 @@ async function testComputeRotation_poolRotatesAcrossProviders() {
   }
 }
 
+async function testComputeTokenDuplicateProviderConstraint_returns400() {
+  const caller = await createAnonSession();
+  const response = await request(
+    `${BASE_URL}/api/integrations/compute-code/credentials/token?tokenType=gpt&tokenType=claude`,
+    { headers: apiKeyHeaders(caller.userId) }
+  );
+  assertStatus(response.status, 400, response.data);
+  assert(
+    (response.data as { error?: string }).error === 'tokenType must be provided at most once',
+    `Expected duplicate tokenType validation error, got ${JSON.stringify(response.data)}`
+  );
+}
+
 async function testComputeTokenLineageSemaphore_capsLiveGptLeases() {
   const existingPoolIds = await existingComputePoolIds();
   const caller = await createAnonSession();
@@ -5733,6 +5746,10 @@ async function runAll() {
     {
       name: 'GET /claude-code/credentials/token no onboarding -> 404',
       fn: testClaudeCodeToken_noOnboarding,
+    },
+    {
+      name: 'GET /compute-code/credentials/token duplicate tokenType -> 400',
+      fn: testComputeTokenDuplicateProviderConstraint_returns400,
     },
   ];
 

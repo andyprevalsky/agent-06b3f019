@@ -41,6 +41,9 @@ router.get(
     if (userId === undefined || userId === '') {
       return res.status(400).json({ error: 'Missing user ID' });
     }
+    if (Array.isArray(req.query.tokenType)) {
+      return res.status(400).json({ error: 'tokenType must be provided at most once' });
+    }
     const requestedTokenType = queryValue(req, 'tokenType');
     if (
       requestedTokenType !== undefined &&

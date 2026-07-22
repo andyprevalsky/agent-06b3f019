@@ -374,6 +374,31 @@ def test_action_history_restores_across_activity_boundary():
     ]
 
 
+async def test_action_history_resume_preserves_monotonic_step_numbers():
+    from browser_tools.dom_service import ActionHistory
+
+    history = ActionHistory()
+    history.restore_entries(
+        [
+            {"step": step, "action": "click", "result": {"success": True}}
+            for step in range(21, 51)
+        ]
+    )
+
+    resumed_entry = await history.record_action(
+        dom_service=SimpleNamespace(selector_map={}),
+        action="scroll",
+    )
+    assert resumed_entry.step == 51
+
+    history.clear()
+    fresh_entry = await history.record_action(
+        dom_service=SimpleNamespace(selector_map={}),
+        action="navigate",
+    )
+    assert fresh_entry.step == 1
+
+
 def test_max_steps_return_declares_best_effort_and_final_verifier():
     """The max_iterations exit must wire the best-effort field AND run the final
     verifier salvage — guards against a silent revert of the RCA fix. Asserts on
@@ -11017,6 +11042,10 @@ async def run_all_tests():
         "browser_verifier_context_grounds_final_state", test_browser_verifier_context_grounds_in_final_state
     )
     r.record("action_history_restores_across_activity", test_action_history_restores_across_activity_boundary)
+    await r.record_async(
+        "action_history_resume_monotonic_steps",
+        test_action_history_resume_preserves_monotonic_step_numbers,
+    )
     r.record(
         "max_steps_return_wires_best_effort_and_verifier", test_max_steps_return_declares_best_effort_and_final_verifier
     )
