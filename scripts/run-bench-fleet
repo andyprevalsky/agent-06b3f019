@@ -3460,6 +3460,12 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         fi
         run_worker_stage_cmd "start neutralized worker" \
             fly_with_timeout 20 machine start "$wid" -a "$APP" || true
+        if ! run_worker_stage_cmd "clear stale worker stage files" \
+            fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
+            -C "rm -f /data/cloudbench-worker.sh /data/cloudbench-fetch-ref.sh /tmp/rbw.env /tmp/rbw.sh /tmp/cloudbench-local.patch"; then
+            sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+            continue
+        fi
           if run_worker_stage_cmd "upload cloudbench-worker.sh" \
                 fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-worker.sh" /data/cloudbench-worker.sh \
              && run_worker_stage_cmd "upload cloudbench-fetch-ref.sh" \

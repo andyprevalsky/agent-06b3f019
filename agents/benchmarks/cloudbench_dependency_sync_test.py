@@ -1447,7 +1447,7 @@ fly_with_timeout() {{
   shift
   printf '%s\n' "$*" >> "$CALLS"
   case "$*" in
-    *"cloudbench-local.patch"*)
+    *"ssh sftp put"*"cloudbench-local.patch"*)
       [ "$MODE" != upload-failure ] ;;
     *) return 0 ;;
   esac
@@ -1483,12 +1483,22 @@ test ! -e "$OUT/worker-abc123.ready"
             continue
         neutralize = next(i for i, call in enumerate(fly_calls) if "machine update abc123" in call)
         first_start = next(i for i, call in enumerate(fly_calls) if "machine start abc123" in call)
+        clear_stage = next(
+            i for i, call in enumerate(fly_calls) if "rm -f /data/cloudbench-worker.sh" in call
+        )
+        first_upload = next(
+            i
+            for i, call in enumerate(fly_calls)
+            if "ssh sftp put" in call and "cloudbench-worker.sh" in call
+        )
         assert neutralize < first_start
+        assert first_start < clear_stage < first_upload
         assert "--env CLOUDBENCH_BOOT=0 --command sleep infinity" in fly_calls[neutralize]
         assert "--skip-start" in fly_calls[neutralize]
         assert "neutralize cloned boot command" in stage_log
         assert "start neutralized worker" in stage_log
-        launch_calls = [call for call in fly_calls if "ssh console" in call]
+        assert "clear stale worker stage files" in stage_log
+        launch_calls = [call for call in fly_calls if "setsid bash /tmp/rbw.sh" in call]
         assert len(launch_calls) <= 1
         if mode == "readiness-failure":
             assert len(launch_calls) == 1
