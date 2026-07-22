@@ -217,10 +217,7 @@ async function postSlackBot(
  * GitHub owns Slack creation so a retry after a lost completion cannot repeat a
  * backend-created message.
  */
-async function dispatchRca(
-  input: AlertErrorInput,
-  slackChannel?: string
-): Promise<boolean> {
+async function dispatchRca(input: AlertErrorInput, slackChannel?: string): Promise<boolean> {
   const token = process.env.GITHUB_DISPATCH_TOKEN;
   const repo = process.env.GITHUB_DISPATCH_REPO ?? 'Rose-Ai-Labs/rose';
   if (token === undefined || token === '') {
