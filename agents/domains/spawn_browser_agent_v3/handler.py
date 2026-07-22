@@ -51,6 +51,11 @@ from utils.error_utils import extract_error_message
 from utils.prompts import build_verifier_prompt
 
 from .cdp_urls import steel_cdp_connection_url
+from .challenge_recovery import (
+    commit_cookie_removals,
+    probe_storage_state,
+    recover_from_challenge,
+)
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
     ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
@@ -85,15 +90,16 @@ from .repo import (
     close_browser_session,
     create_user_auth_assistance_request,
     fetch_auth_options,
+    fetch_browser_captcha_telemetry,
     fetch_browser_control_state,
     fetch_claude_token,
     fetch_session_info,
     init_browser_session,
     prepare_browser_auth,
     propagate_browser_run_credentials,
+    recover_browser_challenge,
     report_claude_token_rate_limited,
     resume_browser_session,
-    rotate_browser_proxy,
     save_browser_action_message,
     save_browser_assistant_message,
     save_browser_credential_ref_message,
@@ -1070,6 +1076,7 @@ async def _restore_rotation_storage_state(
     storage_state: Optional[Dict[str, Any]],
     *,
     current_url: str,
+    restore_cookies: bool = True,
 ) -> None:
     """Restore captured auth/storage into a replacement provider session."""
     if page is None or not storage_state or getattr(page, "context", None) is None:
@@ -1077,7 +1084,7 @@ async def _restore_rotation_storage_state(
 
     context = page.context
     cookies = storage_state.get("cookies") or []
-    if cookies:
+    if restore_cookies and cookies:
         await context.add_cookies(cookies)
 
     origins = storage_state.get("origins") or []
@@ -1292,6 +1299,34 @@ async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
 def _browser_action_tool_call_id(llm_result: Dict[str, Any]) -> str:
     """Return the one streamed tool-call id used for an action's full lifecycle."""
     return str(llm_result.get("tool_call_id") or uuid_module.uuid4())
+
+
+async def _wait_for_provider_captcha_solver(config: Any, task_id: str) -> None:
+    """Give provider-native auto-solving the first chance before recovery probes."""
+    deadline = asyncio.get_running_loop().time() + 45
+    saw_active_solver = False
+    inactive_polls = 0
+    while asyncio.get_running_loop().time() < deadline:
+        activity.heartbeat("Waiting for provider CAPTCHA auto-solver")
+        try:
+            telemetry = await fetch_browser_captcha_telemetry(config, task_id)
+        except Exception as exc:
+            logger.warning("CAPTCHA telemetry unavailable during challenge recovery", error=str(exc))
+            await asyncio.sleep(2)
+            return
+        is_solving = telemetry.get("isSolving")
+        if is_solving is True:
+            saw_active_solver = True
+            inactive_polls = 0
+        elif saw_active_solver:
+            return
+        else:
+            inactive_polls += 1
+            # Steel can take a moment to register a new task. Kernel only emits
+            # terminal outcomes, so three grace polls are its solver-first wait.
+            if inactive_polls >= 3:
+                return
+        await asyncio.sleep(2)
 
 
 def _playwright_driver_command_matches(command: str) -> bool:
@@ -5959,162 +5994,178 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     ),
                 }
 
-            if action_name == "rotate_ip":
-                rotate_reason = unified_action.get("params", {}).get("reason", "")
-                rotate_call_id = _browser_action_tool_call_id(llm_result)
-                logger.info("Browser agent requested IP rotation", reason=rotate_reason)
-                await save_browser_action_message(
-                    agent_id=agent_id,
-                    title="Rotating IP",
-                    task_id=task_id,
-                    message=rotate_reason,
-                    status=MessageStatus.IN_PROGRESS,
-                    browser_url=browser_url,
-                    action_type="browser",
-                    tool_call_id=rotate_call_id,
-                )
+            if action_name == "recover_from_challenge":
+                recovery_reason = unified_action.get("params", {}).get("reason", "")
+                recovery_call_id = _browser_action_tool_call_id(llm_result)
+                logger.info("Browser agent requested staged challenge recovery", reason=recovery_reason)
 
-                rotation_storage_state = await _capture_rotation_storage_state(input_page)
-                rotate_result = await rotate_browser_proxy(config, task_id, current_url)
+                progress_titles = {
+                    "captcha_solver": "Waiting for CAPTCHA auto-solver",
+                    "known_challenge_cookies": "Testing challenge cookies",
+                    "all_target_cookies": "Testing target-site cookies",
+                    "non_auth_cookies": "Testing non-auth cookies",
+                    "cookie_isolation": "Isolating poisoned cookie state",
+                    "apply_cookie_fix": "Applying safe cookie recovery",
+                    "browser_config_search": "Searching browser configurations",
+                }
 
-                # Budget exhausted or provider busy: surface the error to the run and
-                # let the model decide to stop — never tear down the live session.
-                if rotate_result.get("exhausted") or rotate_result.get("rate_limited"):
-                    err_msg = rotate_result.get("message") or (
-                        "Browser slots are busy; IP rotation could not complete. Retry shortly."
-                        if rotate_result.get("rate_limited")
-                        else "PROXY_ROTATION_EXHAUSTED"
+                async def emit_recovery_progress(stage: str, message: str) -> None:
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title=progress_titles.get(stage, "Recovering from browser challenge"),
+                        task_id=task_id,
+                        message=message,
+                        status=MessageStatus.IN_PROGRESS,
+                        browser_url=browser_url,
+                        action_type="browser_challenge_recovery",
+                        tool_call_id=recovery_call_id,
+                        extra_metadata={"recoveryStage": stage},
+                    )
+
+                recovery_storage_state = await _capture_rotation_storage_state(input_page)
+                if recovery_storage_state is None or playwright_browser is None or input_page is None:
+                    raise RuntimeError("Browser state is unavailable for auth-preserving challenge recovery")
+
+                async def search_browser_configs(storage_state: Dict[str, Any]) -> Dict[str, Any]:
+                    user_agent = ""
+                    with contextlib.suppress(Exception):
+                        user_agent = str(await input_page.evaluate("() => navigator.userAgent"))
+                    result = await recover_browser_challenge(
+                        config,
+                        task_id,
+                        current_url,
+                        storage_state,
+                        user_agent,
+                    )
+                    if result.get("rate_limited"):
+                        raise RuntimeError("Browser provider slots are busy; challenge recovery could not run")
+                    return result
+
+                try:
+                    recovery = await recover_from_challenge(
+                        source_state=recovery_storage_state,
+                        target_url=current_url,
+                        wait_for_solver=lambda: _wait_for_provider_captcha_solver(config, task_id),
+                        probe=lambda candidate: probe_storage_state(
+                            playwright_browser,
+                            candidate,
+                            current_url,
+                        ),
+                        commit_cookie_removals=lambda keys: commit_cookie_removals(
+                            input_page,
+                            keys,
+                            current_url,
+                        ),
+                        search_configs=search_browser_configs,
+                        progress=emit_recovery_progress,
+                    )
+
+                    config_result = recovery.config_result
+                    if config_result is not None:
+                        new_cdp_url = config_result.get("ws_url")
+                        if not isinstance(new_cdp_url, str) or not new_cdp_url:
+                            raise RuntimeError("Challenge recovery selected a browser without a CDP URL")
+                        reconnected = await _reconnect_browser_stack_after_rotation(
+                            new_cdp_url=new_cdp_url,
+                            old_dom_service=dom_service,
+                            old_playwright_browser=playwright_browser,
+                            old_playwright_instance=playwright_instance,
+                            old_driver_pid=playwright_driver_pid,
+                            fingerprint_injection=fingerprint_injection,
+                            agent_id=agent_id,
+                        )
+                        dom_service = reconnected["dom_service"]
+                        dom_page = reconnected["dom_page"]
+                        input_page = reconnected["input_page"]
+                        playwright_browser = reconnected["playwright_browser"]
+                        playwright_instance = reconnected["playwright_instance"]
+                        playwright_driver_pid = reconnected["playwright_driver_pid"]
+                        session_id = config_result.get("session_id", session_id)
+                        browser_url = config_result.get("debug_url", browser_url)
+                        cdp_url = new_cdp_url
+                        browser_session_metadata = _updated_rotation_session_metadata(
+                            browser_session_metadata,
+                            dict(config_result),
+                        )
+                        await _restore_rotation_storage_state(
+                            input_page,
+                            recovery_storage_state,
+                            current_url=current_url,
+                            restore_cookies=not bool(config_result.get("storage_state_preloaded")),
+                        )
+
+                        if browser_recorder is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_recorder.transition_browser(
+                                    page=input_page,
+                                    session_id=session_id,
+                                    browser_url=browser_url or "",
+                                    session_metadata=browser_session_metadata,
+                                )
+                        if browser_network_recorder is None and network_recorder_task is not None:
+                            with contextlib.suppress(Exception):
+                                browser_network_recorder = await asyncio.wait_for(
+                                    asyncio.shield(network_recorder_task),
+                                    timeout=10,
+                                )
+                        if browser_network_recorder is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_network_recorder.transition_browser(
+                                    browser_session=dom_service.session,
+                                    session_id=session_id,
+                                )
+
+                        if _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
+                            humanizer = BrowserHumanizer(dom_page=dom_page, input_page=input_page, fast=False)
+                            await humanizer.initialize_cursor(start_pos=(640, 400))
+                        else:
+                            humanizer = None
+
+                    browser_state = await dom_service.get_browser_state(include_screenshot=False)
+                    current_url = browser_state.get("url", current_url)
+                    recovery_message = (
+                        "Recovered by selecting a stable browser configuration; signed-in state was preserved."
+                        if config_result is not None
+                        else "Recovered by removing a proven non-auth cookie subset; signed-in state was preserved."
                     )
                     await save_browser_action_message(
                         agent_id=agent_id,
-                        title="IP rotation unavailable",
+                        title="Browser challenge recovered",
                         task_id=task_id,
-                        message=err_msg,
+                        message=recovery_message,
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url,
+                        action_type="browser_challenge_recovery",
+                        tool_call_id=recovery_call_id,
+                        extra_metadata={"recoveryStage": "complete"},
+                    )
+                    action_result = {
+                        "success": True,
+                        "message": recovery_message,
+                        "recovery_action": recovery.recovery,
+                        "provider": config_result.get("provider") if config_result else None,
+                        "proxy_tier": config_result.get("proxy_tier") if config_result else None,
+                        "removed_cookie_count": len(recovery.removed_cookie_keys),
+                    }
+                except Exception as exc:
+                    error_message = extract_error_message(exc)
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Browser challenge recovery failed",
+                        task_id=task_id,
+                        message=error_message,
                         status=MessageStatus.ERROR,
                         browser_url=browser_url,
-                        action_type="browser",
-                        tool_call_id=rotate_call_id,
+                        action_type="browser_challenge_recovery",
+                        tool_call_id=recovery_call_id,
                     )
-                    action_result = {"success": False, "error": err_msg}
-                    await action_history.record_action(
-                        dom_service=dom_service,
-                        action="rotate_ip",
-                        thinking=thinking,
-                        params={"reason": rotate_reason},
-                        result=action_result,
-                    )
-                    _append_browser_turn_messages(
-                        browser_turn_messages,
-                        task=task_prompt,
-                        browser_state=browser_state,
-                        include_screenshot=False,
-                        unified_action=unified_action,
-                        result=action_result,
-                        tool_call_id=rotate_call_id,
-                    )
-                    await browser_stream.finish_tools(status="ERROR")
-                    continue
+                    action_result = {"success": False, "error": error_message}
 
-                # Success: swap the live CDP/Playwright stack to the replacement
-                # session; captured storage preserves login across provider profiles.
-                new_cdp_url = rotate_result.get("ws_url")
-                if not isinstance(new_cdp_url, str) or not new_cdp_url:
-                    raise RuntimeError("rotate_ip succeeded without a replacement ws_url")
-                reconnected = await _reconnect_browser_stack_after_rotation(
-                    new_cdp_url=new_cdp_url,
-                    old_dom_service=dom_service,
-                    old_playwright_browser=playwright_browser,
-                    old_playwright_instance=playwright_instance,
-                    old_driver_pid=playwright_driver_pid,
-                    fingerprint_injection=fingerprint_injection,
-                    agent_id=agent_id,
-                )
-                dom_service = reconnected["dom_service"]
-                dom_page = reconnected["dom_page"]
-                input_page = reconnected["input_page"]
-                playwright_browser = reconnected["playwright_browser"]
-                playwright_instance = reconnected["playwright_instance"]
-                playwright_driver_pid = reconnected["playwright_driver_pid"]
-                session_id = rotate_result.get("session_id", session_id)
-                browser_url = rotate_result.get("debug_url", browser_url)
-                cdp_url = new_cdp_url
-                browser_session_metadata = _updated_rotation_session_metadata(
-                    browser_session_metadata,
-                    rotate_result,
-                )
-                try:
-                    await _restore_rotation_storage_state(
-                        input_page,
-                        rotation_storage_state,
-                        current_url=current_url,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to restore browser storage after IP rotation",
-                        provider=rotate_result.get("provider"),
-                        error=str(exc),
-                    )
-                    raise RuntimeError(
-                        "Browser state restoration failed after IP rotation; refusing to continue"
-                    ) from exc
-
-                # Follow the rotation in the recording: rebind to the new page and
-                # start a fresh replay segment on the rotated session, so the saved
-                # recording actually shows the exit IP changing across rotations
-                # instead of freezing on the first (now-evicted) session's IP.
-                if browser_recorder is not None:
-                    browser_recorder.page = input_page
-                    with contextlib.suppress(Exception):
-                        if rotate_result.get("provider") == "kernel":
-                            await browser_recorder.rotate_kernel_replay(session_id)
-                        elif getattr(browser_recorder, "uses_kernel_replay", False):
-                            await browser_recorder.stop_kernel_replay()
-
-                # Rebuild the humanizer against the new pages (input events must
-                # target the live page, not the torn-down one).
-                if _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
-                    humanizer = BrowserHumanizer(dom_page=dom_page, input_page=input_page, fast=False)
-                    await humanizer.initialize_cursor(start_pos=(640, 400))
-                else:
-                    humanizer = None
-
-                browser_state = await dom_service.get_browser_state(include_screenshot=False)
-                current_url = browser_state.get("url", current_url)
-
-                rotation_message = rotate_result.get("rotation_message", "Rotated to a fresh IP.")
-                recovery_action = rotate_result.get("recovery_action", "ip_rotated")
-                await save_browser_action_message(
-                    agent_id=agent_id,
-                    title=("Browser provider switched" if recovery_action == "provider_switched" else "IP rotated"),
-                    task_id=task_id,
-                    message=rotation_message,
-                    status=MessageStatus.FINISHED,
-                    browser_url=browser_url,
-                    action_type="browser",
-                    tool_call_id=rotate_call_id,
-                    extra_metadata={
-                        "captcha_telemetry_before_rotation": rotate_result.get("captcha_telemetry_before_rotation"),
-                        "rotation_interrupted_captcha_solver": rotate_result.get("rotation_interrupted_captcha_solver"),
-                    },
-                )
-
-                action_result = {
-                    "success": True,
-                    "message": rotation_message,
-                    "provider": rotate_result.get("provider"),
-                    "previous_provider": rotate_result.get("previous_provider"),
-                    "recovery_action": recovery_action,
-                    "proxy_tier": rotate_result.get("proxy_tier", "residential"),
-                    "rotations_remaining": rotate_result.get("rotations_remaining"),
-                    "next_recovery": rotate_result.get("next_recovery"),
-                    "captcha_telemetry_before_rotation": rotate_result.get("captcha_telemetry_before_rotation"),
-                    "rotation_interrupted_captcha_solver": rotate_result.get("rotation_interrupted_captcha_solver"),
-                }
                 await action_history.record_action(
                     dom_service=dom_service,
-                    action="rotate_ip",
+                    action="recover_from_challenge",
                     thinking=thinking,
-                    params={"reason": rotate_reason},
+                    params={"reason": recovery_reason},
                     result=action_result,
                 )
                 _append_browser_turn_messages(
@@ -6124,9 +6175,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     include_screenshot=False,
                     unified_action=unified_action,
                     result=action_result,
-                    tool_call_id=rotate_call_id,
+                    tool_call_id=recovery_call_id,
                 )
-                await browser_stream.finish_tools(status="FINISHED")
+                await browser_stream.finish_tools(status="FINISHED" if action_result.get("success") else "ERROR")
                 continue
 
             if action_name == "send_message_to_user":

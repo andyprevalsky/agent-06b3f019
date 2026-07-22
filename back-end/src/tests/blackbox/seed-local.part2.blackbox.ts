@@ -116,6 +116,30 @@ test('browser-auth sync includes every durable credential reference', async () =
   }
 });
 
+test('browser-context seed uses a cross-version projection before production migration', async () => {
+  const source = readSeedLocalSource();
+  const browserContextStart = source.indexOf("'Browser Context'");
+  const browserProfilesStart = source.indexOf("'Browser Provider Profiles'", browserContextStart);
+  const browserContextSync = source.slice(browserContextStart, browserProfilesStart);
+
+  assert(browserContextStart > 0, 'expected the Browser Context sync step');
+  assert(browserProfilesStart > browserContextStart, 'expected the provider-profile sync after it');
+  assert(
+    browserContextSync.includes('select: {'),
+    'expected an explicit projection so a newly generated client never selects unmigrated columns'
+  );
+  for (const stableColumn of ['id: true', 'userId: true', 'contextId: true']) {
+    assert(
+      browserContextSync.includes(stableColumn),
+      `expected the cross-version BrowserContext projection to include ${stableColumn}`
+    );
+  }
+  assert(
+    !browserContextSync.includes('preferredBrowserConfig: true'),
+    'production-only seed reads must not request the new preference before its migration deploys'
+  );
+});
+
 test('passkeys-only seed mode never enters browser state or password sync', async () => {
   const source = readSeedLocalSource();
   const flag = source.indexOf("process.argv.includes('--passkeys-only')");

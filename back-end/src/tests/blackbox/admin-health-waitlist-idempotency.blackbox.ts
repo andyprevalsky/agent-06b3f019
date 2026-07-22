@@ -73,9 +73,8 @@ async function testFailedGateRecordIsReclaimedNotStuck409() {
   // old code returned WaitlistInviteInProgressError (409) forever for any
   // non-SUCCEEDED record; the fix reclaims FAILED and re-runs the idempotent
   // mutation so the operation stays retryable.
-  const { resolveInviteGate, waitlistInviteGateOperationKey } = await import(
-    '../../domains/admin-health/service.waitlist-gate'
-  );
+  const { resolveInviteGate, waitlistInviteGateOperationKey } =
+    await import('../../domains/admin-health/service.waitlist-gate');
   const marker = `blackbox-gate-reclaim-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const phone = `+1999${String(Date.now()).slice(-7)}002`;
   const idempotencyKey = `${marker}-attempt`;
@@ -100,7 +99,11 @@ async function testFailedGateRecordIsReclaimedNotStuck409() {
     assert.equal(result.flagged, true, 'Reclaimed gate did not re-run the mutation');
     assert.equal(result.userId, marker, 'Reclaimed gate returned the wrong account');
     assert.equal(sideEffect.status, 'SUCCEEDED', 'Reclaimed gate did not persist success');
-    assert.notEqual(refreshed.offWaitlistAt, null, 'Reclaimed gate did not flag the user off waitlist');
+    assert.notEqual(
+      refreshed.offWaitlistAt,
+      null,
+      'Reclaimed gate did not flag the user off waitlist'
+    );
   } finally {
     await prisma.toolSideEffect.deleteMany({ where: { operationKey } });
     await prisma.user.deleteMany({ where: { userId: user.userId } });

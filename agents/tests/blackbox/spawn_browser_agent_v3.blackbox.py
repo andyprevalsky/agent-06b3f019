@@ -963,6 +963,270 @@ async def test_browser_agent_kernel_replay_follows_rotation():
         restore()
 
 
+async def test_browser_agent_recording_survives_kernel_to_steel_recovery():
+    """A config-search handoff must not close the recorder when the winning
+    session changes providers.  The finished replay must contain both the
+    outgoing Kernel segment and frames captured from the promoted Steel page."""
+    import tempfile
+    import re
+    import subprocess
+    from unittest import mock
+
+    from domains.spawn_browser_agent_v3 import recording as recording_module
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    class SteelContext:
+        def __init__(self):
+            self.pages = []
+
+    class SteelPage:
+        def __init__(self):
+            self.context = SteelContext()
+            self.context.pages = [self]
+            self.url = "https://order.online/checkout"
+
+        async def screenshot(self, **_kwargs):
+            return b"steel-frame"
+
+    restore = _kernel_replay_env()
+    previous_dir = os.environ.get("BROWSER_AGENT_RECORDINGS_DIR")
+    calls: list = []
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = temp_dir
+            with mock.patch.object(
+                recording_module.httpx,
+                "AsyncClient",
+                lambda *a, **k: _SessionAwareReplayClient(calls),
+            ):
+                recorder = await BrowserAgentRecorder.create(
+                    page=object(),
+                    agent_id="agent-1",
+                    task_id="task-1",
+                    session_id="kernel-before",
+                    browser_url="https://kernel.example/live/before",
+                    session_metadata={"provider": "kernel"},
+                )
+                assert recorder is not None
+                assert recorder.uses_kernel_replay is True
+
+                await recorder.transition_browser(
+                    page=SteelPage(),
+                    session_id="steel-after",
+                    browser_url="https://steel.example/live/after",
+                    session_metadata={"provider": "steel"},
+                )
+                await recorder.mark("post-recovery checkout", action="recovery")
+
+                assert any(
+                    frame["label"] == "post-recovery checkout" for frame in recorder.frames
+                ), "the promoted Steel half of the recording was dropped"
+                assert recorder.uses_kernel_replay is False
+                assert recorder._closed is False
+                assert recorder.session_id == "steel-after"
+                assert recorder.replay_view_urls == [
+                    "https://kernel.example/view/kernel-before"
+                ]
+                inline = recorder.export_inline_html_bytes()
+                assert inline is not None
+                html_text = inline.decode("utf-8")
+                assert "https://kernel.example/view/kernel-before" in html_text
+                assert "post-recovery checkout" in html_text
+                assert "prefixVideo.onended" in html_text
+                assert "beginFrameReplay(true)" in html_text
+                scripts = re.findall(r"<script>(.*?)</script>", html_text, flags=re.DOTALL)
+                assert len(scripts) == 1
+                parsed = subprocess.run(
+                    ["node", "--check", "-"],
+                    input=scripts[0],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                assert parsed.returncode == 0, parsed.stderr
+                await recorder.close(include_steel_media=False)
+                stop_url = (
+                    "https://kernel.example/browsers/kernel-before/"
+                    "replays/rep-kernel-before/stop"
+                )
+                assert calls.count(("POST", stop_url)) == 1
+    finally:
+        restore()
+        if previous_dir is None:
+            os.environ.pop("BROWSER_AGENT_RECORDINGS_DIR", None)
+        else:
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = previous_dir
+
+
+async def test_browser_agent_recording_rebinds_screenshot_mode_across_providers():
+    """Steel -> Steel and Steel -> Kernel keep one screenshot timeline. Once a
+    recording is in screenshot mode it must not open an unrelated native replay
+    midway through the same Browser Agent tool call."""
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    class PageContext:
+        def __init__(self):
+            self.pages = []
+
+    class ScreenshotPage:
+        def __init__(self, name: str):
+            self.name = name
+            self.context = PageContext()
+            self.context.pages = [self]
+            self.url = f"https://{name}.example/"
+
+        async def screenshot(self, **_kwargs):
+            return f"frame-{self.name}".encode()
+
+    restore = _kernel_replay_env()
+    previous_dir = os.environ.get("BROWSER_AGENT_RECORDINGS_DIR")
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = temp_dir
+            first_page = ScreenshotPage("steel-one")
+            recorder = BrowserAgentRecorder(
+                page=first_page,
+                agent_id="agent-1",
+                task_id="task-1",
+                session_id="steel-one",
+                browser_url=first_page.url,
+                session_metadata={"provider": "steel"},
+            )
+            await recorder.start()
+            capture_loop = recorder._loop_task
+            assert capture_loop is not None
+
+            steel_page = ScreenshotPage("steel-two")
+            await recorder.transition_browser(
+                page=steel_page,
+                session_id="steel-two",
+                browser_url=steel_page.url,
+                session_metadata={"provider": "steel"},
+            )
+            assert recorder.page is steel_page
+            assert recorder.session_id == "steel-two"
+            assert recorder._loop_task is capture_loop
+
+            kernel_page = ScreenshotPage("kernel-three")
+            await recorder.transition_browser(
+                page=kernel_page,
+                session_id="kernel-three",
+                browser_url=kernel_page.url,
+                session_metadata={"provider": "kernel"},
+            )
+            assert recorder.page is kernel_page
+            assert recorder.session_id == "kernel-three"
+            assert recorder.uses_kernel_replay is False
+            assert recorder.replay_view_urls == []
+            assert recorder._loop_task is capture_loop
+            captured_urls = [frame["tab_url"] for frame in recorder.frames]
+            assert first_page.url in captured_urls
+            assert steel_page.url in captured_urls
+            assert kernel_page.url in captured_urls
+            await recorder.close(include_steel_media=False)
+    finally:
+        restore()
+        if previous_dir is None:
+            os.environ.pop("BROWSER_AGENT_RECORDINGS_DIR", None)
+        else:
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = previous_dir
+
+
+async def test_browser_agent_hybrid_player_advances_all_segments_and_rebases_time():
+    """Execute the exported player: every Kernel segment must auto-advance before
+    screenshot playback, whose real-time timeline starts at zero."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    recorder = BrowserAgentRecorder(
+        page=object(),
+        agent_id="agent-1",
+        task_id="task-1",
+        session_id="steel-final",
+        browser_url="https://steel.example/final",
+        session_metadata={"provider": "steel"},
+    )
+    recorder._replay_segments = [
+        {"session_id": "kernel-1", "view_url": "data:video/mp4;base64,AAAA"},
+        {"session_id": "kernel-2", "view_url": "data:video/mp4;base64,BBBB"},
+    ]
+    pixel = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
+    recorder.frames = [
+        {
+            "src": pixel,
+            "ts_ms": 90_000,
+            "label": "promoted start",
+            "action": "recovery",
+            "cursor": None,
+            "metadata": {},
+            "size": 1,
+        },
+        {
+            "src": pixel,
+            "ts_ms": 91_000,
+            "label": "checkout",
+            "action": "stop",
+            "cursor": None,
+            "metadata": {},
+            "size": 1,
+        },
+    ]
+    html_text = recorder._build_html(recorder.frames)
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(html_text)
+            initial = await page.evaluate(
+                """() => ({
+                  videoHidden: prefixVideo.hidden,
+                  canvasHidden: canvas.hidden,
+                  timelineDisabled: timeline.disabled,
+                  source: prefixVideo.getAttribute('src'),
+                })"""
+            )
+            assert initial == {
+                "videoHidden": False,
+                "canvasHidden": True,
+                "timelineDisabled": True,
+                "source": "data:video/mp4;base64,AAAA",
+            }
+            await page.evaluate(
+                "skipIdle.checked = false; skipIdle.dispatchEvent(new Event('change'))"
+            )
+
+            await page.evaluate("prefixVideo.dispatchEvent(new Event('ended'))")
+            assert await page.evaluate("prefixVideo.getAttribute('src')") == (
+                "data:video/mp4;base64,BBBB"
+            )
+
+            await page.evaluate("prefixVideo.dispatchEvent(new Event('ended'))")
+            final = await page.evaluate(
+                """() => ({
+                  videoHidden: prefixVideo.hidden,
+                  canvasHidden: canvas.hidden,
+                  timelineDisabled: timeline.disabled,
+                  timelineMax: timeline.max,
+                  firstFrameMs: frames[0].ts_ms,
+                  secondFrameMs: frames[1].ts_ms,
+                })"""
+            )
+            assert final == {
+                "videoHidden": True,
+                "canvasHidden": False,
+                "timelineDisabled": False,
+                "timelineMax": "1000",
+                "firstFrameMs": 0,
+                "secondFrameMs": 1000,
+            }, final
+        finally:
+            await browser.close()
+
+
 async def test_browser_agent_kernel_replay_uses_native_recording():
     """Kernel sessions reuse Kernel's native replay: start/stop the replay via
     REST, surface a hosted recording_view_url, and DON'T screenshot every frame."""
@@ -2521,6 +2785,8 @@ async def test_browser_network_recording_captures_response_body():
     class FakeNetworkSend:
         def __init__(self):
             self.enabled_session_id = None
+            self.body_started = asyncio.Event()
+            self.release_body = asyncio.Event()
 
         async def enable(self, session_id=None):
             self.enabled_session_id = session_id
@@ -2528,6 +2794,8 @@ async def test_browser_network_recording_captures_response_body():
         async def getResponseBody(self, params, session_id=None):
             assert params == {"requestId": "123.4"}
             assert session_id == "cdp-1"
+            self.body_started.set()
+            await self.release_body.wait()
             return {
                 "base64Encoded": False,
                 "body": json.dumps({"errors": [{"message": "unexpected error"}]}),
@@ -2590,17 +2858,90 @@ async def test_browser_network_recording_captures_response_body():
                 "cdp-1",
             )
             network_register.finished_handler({"requestId": "123.4", "encodedDataLength": 48}, "cdp-1")
+            await network_send.body_started.wait()
+
+            class SecondFakeNetworkSend(FakeNetworkSend):
+                def __init__(self):
+                    super().__init__()
+                    self.release_body.set()
+
+                async def getResponseBody(self, params, session_id=None):
+                    assert params == {"requestId": "123.4"}
+                    assert session_id == "cdp-2"
+                    return {"base64Encoded": False, "body": '{"phase":"promoted"}'}
+
+            second_register = FakeNetworkRegister()
+            second_send = SecondFakeNetworkSend()
+            second_client = SimpleNamespace(
+                register=SimpleNamespace(Network=second_register),
+                send=SimpleNamespace(Network=second_send),
+            )
+            second_session = SimpleNamespace(
+                cdp_client=second_client,
+                get_or_create_cdp_session=AsyncMock(
+                    return_value=SimpleNamespace(session_id="cdp-2")
+                ),
+            )
+            await recorder.transition_browser(
+                browser_session=second_session,
+                session_id="kernel-2",
+            )
+            assert recorder.session_id == "kernel-2"
+            assert second_send.enabled_session_id == "cdp-2"
+
+            promoted_url = "https://api.x.com/1.1/graphql/user_flow.json?phase=promoted"
+            second_register.request_handler(
+                {
+                    "requestId": "123.4",
+                    "type": "Fetch",
+                    "request": {"method": "GET", "url": promoted_url},
+                },
+                "cdp-2",
+            )
+            second_register.response_handler(
+                {
+                    "requestId": "123.4",
+                    "type": "Fetch",
+                    "response": {
+                        "url": promoted_url,
+                        "status": 200,
+                        "mimeType": "application/json",
+                    },
+                },
+                "cdp-2",
+            )
+            second_register.finished_handler(
+                {"requestId": "123.4", "encodedDataLength": 20},
+                "cdp-2",
+            )
+            # Complete the outgoing browser's body only after the winner has
+            # reused the exact same CDP requestId. Both entries must survive and
+            # each body fetch must stay bound to its originating CDP client.
+            network_send.release_body.set()
 
             index_path = await recorder.close()
             assert index_path is not None
             index = json.loads(index_path.read_text())
-            assert index["entry_count"] == 1
-            entry = index["entries"][0]
+            assert index["session_id"] == "kernel-2"
+            assert index["entry_count"] == 2
+            same_id_entries = [
+                item for item in index["entries"] if item["request_id"] == "123.4"
+            ]
+            assert len(same_id_entries) == 2
+            entry = next(item for item in same_id_entries if item["url"] == url)
             assert entry["url"] == url
             assert entry["status"] == 200
             assert entry["body_file"].endswith(".json")
             body = json.loads((index_path.parent / entry["body_file"]).read_text())
             assert body["errors"][0]["message"] == "unexpected error"
+            promoted = next(
+                item for item in same_id_entries if item["url"] == promoted_url
+            )
+            assert promoted["url"] == promoted_url
+            promoted_body = json.loads(
+                (index_path.parent / promoted["body_file"]).read_text()
+            )
+            assert promoted_body == {"phase": "promoted"}
     finally:
         if previous_enabled is None:
             os.environ.pop("BROWSER_AGENT_RECORDINGS", None)
@@ -4482,27 +4823,43 @@ async def test_resume_browser_session_rate_limited():
     assert out["rate_limited"] is True
 
 
-async def test_rotate_browser_proxy_posts_current_url():
-    from domains.spawn_browser_agent_v3.repo import rotate_browser_proxy
+async def test_recover_browser_challenge_posts_current_url_and_state():
+    from domains.spawn_browser_agent_v3.repo import recover_browser_challenge
+
+    storage_state = {
+        "cookies": [{"name": "session", "value": "secret", "domain": ".example.com"}],
+        "origins": [{"origin": "https://example.com", "localStorage": []}],
+    }
 
     setup_mock(
         {
-            "/api/browser-session/rotate-proxy": {
+            "/api/browser-session/recover-challenge": {
                 "status": 200,
                 "json": {
                     "session_id": "steel-1",
                     "ws_url": "wss://steel-1",
-                    "recovery_action": "provider_switched",
+                    "recovery_action": "config_selected",
                 },
             }
         }
     )
-    out = await rotate_browser_proxy(_fake_config(), "t1", "https://example.com/current")
-    assert out["recovery_action"] == "provider_switched"
-    call = assert_captured_call(url_contains="/api/browser-session/rotate-proxy", method="POST")
+    out = await recover_browser_challenge(
+        _fake_config(),
+        "t1",
+        "https://example.com/current",
+        storage_state,
+        user_agent="test-agent",
+    )
+    assert out["recovery_action"] == "config_selected"
+    call = assert_captured_call(
+        url_contains="/api/browser-session/recover-challenge",
+        method="POST",
+    )
     assert json.loads(call["requestBody"]) == {
         "task_id": "t1",
         "current_url": "https://example.com/current",
+        "storage_state": storage_state,
+        "user_agent": "test-agent",
     }
 
 
@@ -4559,22 +4916,57 @@ async def test_rotation_storage_state_survives_provider_switch():
     )
 
 
-def test_rotation_restore_failure_aborts_replacement_session():
-    """A replacement session without restored auth state must not run actions."""
+async def test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_state():
+    from domains.spawn_browser_agent_v3.handler import _restore_rotation_storage_state
+
+    captured = {
+        "cookies": [
+            {
+                "name": "cf_clearance",
+                "value": "stale-before-solver",
+                "domain": ".order.online",
+                "path": "/",
+            }
+        ],
+        "origins": [
+            {
+                "origin": "https://order.online",
+                "localStorage": [{"name": "authState", "value": "keep"}],
+                "indexedDB": [],
+            }
+        ],
+    }
+    context = SimpleNamespace(add_cookies=AsyncMock(), add_init_script=AsyncMock())
+    page = SimpleNamespace(context=context, evaluate=AsyncMock(), goto=AsyncMock())
+
+    await _restore_rotation_storage_state(
+        page,
+        captured,
+        current_url="https://order.online/store/blue-bottle",
+        restore_cookies=False,
+    )
+
+    context.add_cookies.assert_not_awaited()
+    context.add_init_script.assert_awaited_once()
+    page.goto.assert_awaited_once()
+    page.evaluate.assert_awaited_once()
+
+
+def test_recovery_restore_failure_is_not_suppressed():
+    """A replacement session without restored origin state must not run actions."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
 
     source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
-    start = source.index("reconnected = await _reconnect_browser_stack_after_rotation(")
-    end = source.index("# Follow the rotation in the recording", start)
+    start = source.index("if config_result is not None:")
+    end = source.index("if browser_recorder is not None:", start)
     restore_block = source[start:end]
 
     assert "await _restore_rotation_storage_state(" in restore_block
-    assert "except Exception as exc:" in restore_block
-    assert "Browser state restoration failed after IP rotation; refusing to continue" in restore_block
-    assert "raise RuntimeError(" in restore_block
-    assert ") from exc" in restore_block
+    assert "restore_cookies=not bool(" in restore_block
+    assert 'config_result.get("storage_state_preloaded")' in restore_block
+    assert "contextlib.suppress" not in restore_block
 
 
 async def test_rotation_storage_state_round_trips_in_real_browser():
@@ -6086,6 +6478,7 @@ async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear(
     recorder._ignored_request_ids = set()
     recorder._active_request_ids = {"failed", "finished"}
     recorder._tasks = set()
+    recorder._cdp_client = None
     recorder._fetch_response_body = AsyncMock()
     recorder.entries = {
         "failed": {"url": "https://x/failed", "status": None},
@@ -11266,8 +11659,8 @@ async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
 # ========================================
 
 
-def test_rotate_ip_reuses_the_streamed_tool_call_id():
-    """One LLM rotate_ip decision must produce one progress-tool lifecycle."""
+def test_challenge_recovery_reuses_one_tool_call_id_for_every_stage():
+    """Every recovery stage must update one streamed progress lifecycle."""
     import inspect
 
     from domains.spawn_browser_agent_v3.handler import (
@@ -11275,19 +11668,22 @@ def test_rotate_ip_reuses_the_streamed_tool_call_id():
         _spawn_browser_agent_activity_v3_real,
     )
 
-    llm_result = {"tool_call_id": "call_rotate_ip_123"}
+    llm_result = {"tool_call_id": "call_recovery_123"}
 
-    assert _browser_action_tool_call_id(llm_result) == "call_rotate_ip_123"
-    assert _browser_action_tool_call_id(llm_result) == "call_rotate_ip_123"
+    assert _browser_action_tool_call_id(llm_result) == "call_recovery_123"
+    assert _browser_action_tool_call_id(llm_result) == "call_recovery_123"
 
-    # Cement the integration, not only the helper: the rotate branch must use
-    # the streamed id and must not allocate a second persisted lifecycle id.
+    # Cement the integration: all staged IN_PROGRESS and terminal events close
+    # the exact tool call streamed by the browser-use model.
     activity_source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
-    rotate_branch = activity_source.split('if action_name == "rotate_ip":', 1)[1].split(
-        "# Add action result to history", 1
+    recovery_branch = activity_source.split('if action_name == "recover_from_challenge":', 1)[1].split(
+        'if action_name == "send_message_to_user":', 1
     )[0]
-    assert "rotate_call_id = _browser_action_tool_call_id(llm_result)" in rotate_branch
-    assert "rotate_call_id = str(uuid_module.uuid4())" not in rotate_branch
+    assert "recovery_call_id = _browser_action_tool_call_id(llm_result)" in recovery_branch
+    assert "tool_call_id=recovery_call_id" in recovery_branch
+    assert "recovery_call_id = str(uuid_module.uuid4())" not in recovery_branch
+    assert "status=MessageStatus.IN_PROGRESS" in recovery_branch
+    assert 'restore_cookies=not bool(config_result.get("storage_state_preloaded"))' in recovery_branch
 
 
 async def test_playwright_page_tracks_browser_use_tab_focus():
@@ -11767,16 +12163,20 @@ async def run_all_tests():
     )
     await r.record_async("resume_browser_session_rate_limited", test_resume_browser_session_rate_limited)
     await r.record_async(
-        "rotate_browser_proxy_current_url",
-        test_rotate_browser_proxy_posts_current_url,
+        "recover_browser_challenge_current_url_and_state",
+        test_recover_browser_challenge_posts_current_url_and_state,
     )
     await r.record_async(
         "rotation_storage_state_provider_switch",
         test_rotation_storage_state_survives_provider_switch,
     )
+    await r.record_async(
+        "recovery_preloaded_solver_cookies",
+        test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_state,
+    )
     r.record(
-        "rotation_restore_failure_aborts_replacement_session",
-        test_rotation_restore_failure_aborts_replacement_session,
+        "recovery_restore_failure_is_not_suppressed",
+        test_recovery_restore_failure_is_not_suppressed,
     )
     await r.record_async(
         "rotation_storage_state_real_browser_round_trip",
@@ -11786,7 +12186,10 @@ async def run_all_tests():
         "rotation_session_metadata_provider_switch",
         test_rotation_session_metadata_tracks_provider_switch,
     )
-    r.record("rotate_ip_stream_tool_id", test_rotate_ip_reuses_the_streamed_tool_call_id)
+    r.record(
+        "challenge_recovery_stream_tool_id",
+        test_challenge_recovery_reuses_one_tool_call_id_for_every_stage,
+    )
     await r.record_async(
         "playwright_page_tracks_browser_use_tab_focus",
         test_playwright_page_tracks_browser_use_tab_focus,
@@ -12188,6 +12591,22 @@ async def run_all_tests():
     await r.record_async(
         "browser_agent_recording_start_failure_best_effort",
         test_browser_agent_recording_start_failure_is_best_effort,
+    )
+    await r.record_async(
+        "browser_agent_kernel_replay_follows_rotation",
+        test_browser_agent_kernel_replay_follows_rotation,
+    )
+    await r.record_async(
+        "browser_agent_recording_survives_kernel_to_steel_recovery",
+        test_browser_agent_recording_survives_kernel_to_steel_recovery,
+    )
+    await r.record_async(
+        "browser_agent_recording_rebinds_screenshot_mode_across_providers",
+        test_browser_agent_recording_rebinds_screenshot_mode_across_providers,
+    )
+    await r.record_async(
+        "browser_agent_hybrid_player_advances_all_segments_and_rebases_time",
+        test_browser_agent_hybrid_player_advances_all_segments_and_rebases_time,
     )
     await r.record_async(
         "browser_agent_kernel_replay_uses_native_recording",

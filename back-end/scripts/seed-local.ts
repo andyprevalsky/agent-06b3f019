@@ -182,7 +182,20 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   await syncRequiredTable(
     'Browser Context',
     async () => {
-      const ctx = await remote.browserContext.findUnique({ where: { userId: DEV_USER_ID } });
+      // Select the stable cross-version columns explicitly. During a pre-deploy
+      // benchmark the generated client can include a new local-only column that
+      // production has not migrated yet; an implicit SELECT * would make the
+      // auth-state sync fail before the migration can be exercised locally.
+      const ctx = await remote.browserContext.findUnique({
+        where: { userId: DEV_USER_ID },
+        select: {
+          id: true,
+          userId: true,
+          contextId: true,
+          createdAt: true,
+          updatedAt: true,
+        },
+      });
       if (!ctx) return 0;
       const { id, ...rest } = ctx;
       await local.browserContext.upsert({
