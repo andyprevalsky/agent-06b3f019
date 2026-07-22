@@ -187,6 +187,7 @@ async def run_agent(  # noqa: C901
     reasoning_max_tokens: int = 256,
     # State tracking (for continue_as_new)
     iteration_offset: int = 0,
+    fast_cache_position_offset: Optional[int] = None,
     # Blueprint control (skip for EXECUTE phase since PLAN already queried)
     skip_blueprint_query: bool = True,
     # Skip LLM verification call
@@ -266,7 +267,7 @@ async def run_agent(  # noqa: C901
     iteration = iteration_offset
     # Fast-cache position tracks committed LLM turns, not attempted loop
     # iterations. A transient transport failure must retry the same cache key.
-    fast_cache_llm_position = iteration_offset
+    fast_cache_llm_position = fast_cache_position_offset if fast_cache_position_offset is not None else iteration_offset
     set_plan_called = False  # Track if set_plan was called (for is_plan_loop)
     set_plan_succeeded = False  # Track if set_plan completed successfully (not just called)
     no_tool_count = 0  # Track consecutive iterations with no tool calls
@@ -462,6 +463,7 @@ async def run_agent(  # noqa: C901
                     gpt_token_rotated=attempt_usage.get("gpt_token_rotated", False),
                     compute_token_used=attempt_usage.get("compute_token_used"),
                     from_fast_cache=attempt_usage.get("from_fast_cache", False),
+                    iteration=iteration,
                 )
             except Exception as e:
                 logger.warning(f"on_tokens callback failed: {e}")

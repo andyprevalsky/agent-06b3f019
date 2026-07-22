@@ -1031,6 +1031,114 @@ def _bare_workflow_instance():
     return AgentWorkflow()
 
 
+def _deployment_resume_fixture(prior_status: str = "ACTIVE") -> Dict[str, Any]:
+    return {
+        "version": 1,
+        "kind": "deployment",
+        "prior_status": prior_status,
+        "prior_status_message": "Paused by user" if prior_status == "PAUSED" else None,
+        "progress": 0.4,
+        "token_count": 950,
+        "tokens_in": 680,
+        "tokens_out": 270,
+        "tree_tokens_in": 900,
+        "tree_tokens_out": 350,
+        "context_size": 42_000,
+        "message_count": 73,
+        "own_cost_cents": 17.25,
+        "subtree_cost_cents": 29,
+        "children_cost_cents": {"child-1": 12},
+        "children_tokens_in": {"child-1": 220},
+        "children_tokens_out": {"child-1": 80},
+        "child_last_tokens": {
+            "child-1": {"tokens_in": 220, "tokens_out": 80, "token_count": 300},
+        },
+        "iteration_offset": 6,
+        "max_iterations": 37,
+        "context_gates": {"network": False, "recent_communications": True},
+    }
+
+
+def test_workflow_restore_deployment_state_preserves_all_durable_counters():
+    wf = _bare_workflow_instance()
+    wf._restore_deployment_state(_deployment_resume_fixture())
+
+    assert wf._deployment_resume is True
+    assert wf._resume_prior_status == "ACTIVE"
+    assert wf._resume_progress == 0.4
+    assert (wf.token_count, wf.tokens_in, wf.tokens_out) == (950, 680, 270)
+    assert (wf.tree_tokens_in, wf.tree_tokens_out) == (900, 350)
+    assert (wf.context_size, wf.message_count) == (42_000, 73)
+    assert (wf.own_cost_cents, wf.subtree_cost_cents) == (17.25, 29)
+    assert wf.children_cost_cents == {"child-1": 12}
+    assert wf.children_tokens_in == {"child-1": 220}
+    assert wf.children_tokens_out == {"child-1": 80}
+    assert wf.child_last_tokens["child-1"]["token_count"] == 300
+    assert (wf.iteration_offset, wf.max_iterations) == (6, 37)
+    assert wf.context_gates == {"network": False, "recent_communications": True}
+    assert wf.is_paused is False
+    assert wf._cost_limit_reached is False
+
+
+def test_workflow_restore_deployment_state_preserves_pause_modes():
+    paused = _bare_workflow_instance()
+    paused._restore_deployment_state(_deployment_resume_fixture("PAUSED"))
+    assert paused.is_paused is True
+    assert paused._cost_limit_reached is False
+    assert paused._resume_status_message == "Paused by user"
+
+    limited = _bare_workflow_instance()
+    limited._restore_deployment_state(_deployment_resume_fixture("COST_LIMIT_REACHED"))
+    assert limited.is_paused is True
+    assert limited._cost_limit_reached is True
+
+
+def test_workflow_restore_deployment_state_rejects_unknown_contract():
+    wf = _bare_workflow_instance()
+    try:
+        wf._restore_deployment_state({"version": 2, "kind": "deployment"})
+        raise AssertionError("unknown resume versions must fail closed")
+    except ValueError as exc:
+        assert "Unsupported deployment resume state" in str(exc)
+
+
+def test_restart_safe_child_tool_counts_survive_memory_loss_without_duplication():
+    from helpers.summarize import _restart_safe_child_tool_counts
+
+    context = [
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolStatus": "FINISHED",
+                "toolCallId": "spawn-1",
+                "childToolCounts": {"web_search": 2},
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolStatus": "FINISHED",
+                "toolCallId": "spawn-1",
+                "childToolCounts": {"web_search": 2},
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolStatus": "FINISHED",
+                "toolCallId": "spawn-2",
+                "childToolCounts": {"web_search": 1, "web_fetch": 3},
+            },
+        },
+    ]
+
+    assert _restart_safe_child_tool_counts(context, {}) == {"web_search": 3, "web_fetch": 3}
+    assert _restart_safe_child_tool_counts(context, {"web_search": 3, "web_fetch": 3}) == {
+        "web_search": 3,
+        "web_fetch": 3,
+    }
+
+
 def test_workflow_get_pending_child_workflow_ids_empty():
     wf = _bare_workflow_instance()
     assert wf._get_pending_child_workflow_ids() == []
@@ -2533,12 +2641,15 @@ async def test_workflow_on_tokens_calculates_cost_with_pricing():
             cache_read_input_tokens=0,
             cache_creation_input_tokens=0,
             call_site="test",
+            iteration=7,
         )
         assert wf.tokens_in == 1000
         assert wf.tokens_out == 500
         assert wf.own_cost_cents > 0
         activity_names = [c[0] for c in fake.activity_calls]
         assert "save_tool_usage" in activity_names
+        save_call = next(call for call in fake.activity_calls if call[0] == "save_tool_usage")
+        assert save_call[1][3][0]["iteration"] == 7
     finally:
         _restore_workflow(original)
 
@@ -3167,6 +3278,120 @@ async def test_workflow_run_covers_chat_agent_startup_and_completion():
         assert init_posts[0][1][3]["toolStatus"] == "IN_PROGRESS"
         assert init_posts[1][1][3]["toolCallId"] == "tc-agent-init"
         assert init_posts[1][1][3]["toolStatus"] == "FINISHED"
+    finally:
+        workflow_module.run_agent = original_run_agent
+        _restore_workflow(original_workflow)
+
+
+async def test_workflow_run_deployment_resume_skips_startup_replay_and_restores_iteration():
+    """A deployment replacement resumes the LLM loop without replaying startup, PLAN, or DAG."""
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": [
+                {
+                    "role": "TOOL",
+                    "text": "Historical plan",
+                    "metadata": {
+                        "toolName": "set_plan",
+                        "toolStatus": "FINISHED",
+                        "data": {
+                            "tasks": [{"goal": "must not replay", "tool_name": "web_search"}],
+                            "dependencies": {},
+                            "join": "all",
+                        },
+                    },
+                }
+            ],
+            "get_model_context_window": 200_000,
+            "get_agent_source": "SMS",
+            "get_user_context": "remembered context",
+            "get_user_system_name": "Navi",
+            "get_user_custom_system_prompt": "Do not inject this twice.",
+            "fetch_compute_token_activity": None,
+            "fetch_agent_config": {
+                "response_schema": {"fields": []},
+                "write_lock_enabled": True,
+            },
+            "generate_completion_summary": {
+                "summary": "Resumed and finished.",
+                "tool_counts": {},
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            },
+        }
+    )
+
+    import workflows.agent_workflow as workflow_module
+
+    original_workflow = _patch_workflow(fake)
+    original_run_agent = workflow_module.run_agent
+    run_agent_calls = []
+
+    async def fake_run_agent(**kwargs):
+        run_agent_calls.append(kwargs)
+        return {
+            "status": "completed",
+            "context": [{"role": "ASSISTANT", "text": "done", "metadata": None}],
+            "structured_response": None,
+            "token_count": 0,
+            "context_size": 42_000,
+        }
+
+    workflow_module.run_agent = fake_run_agent
+    try:
+        result = await wf.run(
+            "agent-resume-1",
+            "user-run-1",
+            "Continue the task",
+            "anthropic/claude-sonnet-4.5",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+            None,
+            None,
+            None,
+            0,
+            "agent-resume-1",
+            "resume",
+            37,
+            250,
+            {"network": True},
+            False,
+            _deployment_resume_fixture(),
+        )
+
+        assert result == {"status": "completed", "goal": "Continue the task"}
+        assert len(run_agent_calls) == 1
+        assert run_agent_calls[0]["iteration_offset"] == 6
+        assert run_agent_calls[0]["max_iterations"] == 37
+        assert "is_plan_loop" not in run_agent_calls[0]
+
+        activity_names = [call[0] for call in fake.activity_calls]
+        started_sms = [
+            call
+            for call in fake.activity_calls
+            if call[0] == "notify_sms_event_activity" and call[1][1] == "agent_started"
+        ]
+        init_posts = [
+            call
+            for call in fake.activity_calls
+            if call[0] == "post_agent_message" and (call[1][3] or {}).get("toolName") == "agent_init"
+        ]
+        hidden_prompt_posts = [
+            call
+            for call in fake.activity_calls
+            if call[0] == "post_agent_message" and (call[1][3] or {}).get("isCustomSystemPrompt")
+        ]
+        startup_status = next(call for call in fake.activity_calls if call[0] == "update_agent_status")
+        assert startup_status[1][1] == "ACTIVE"
+        assert startup_status[1][2] == 0.4
+        assert startup_status[1][4:9] == [950, 42_000, 73, 900, 350]
+        assert started_sms == []
+        assert init_posts == []
+        assert hidden_prompt_posts == []
+        assert "set_response_schema_activity" not in activity_names
+        assert wf.context_gates == {"network": False, "recent_communications": True}
+        assert wf.own_cost_cents == 17.25
     finally:
         workflow_module.run_agent = original_run_agent
         _restore_workflow(original_workflow)
@@ -4677,6 +4902,13 @@ async def run_all_tests():
     r.record("usage_model_unknown_fallback", test_usage_model_falls_back_when_cache_provenance_is_unknown)
 
     # AgentWorkflow pure-method tests
+    r.record("wf_restore_deploy_state", test_workflow_restore_deployment_state_preserves_all_durable_counters)
+    r.record("wf_restore_deploy_pause", test_workflow_restore_deployment_state_preserves_pause_modes)
+    r.record("wf_restore_deploy_version", test_workflow_restore_deployment_state_rejects_unknown_contract)
+    r.record(
+        "wf_restart_safe_child_counts",
+        test_restart_safe_child_tool_counts_survive_memory_loss_without_duplication,
+    )
     r.record("wf_pending_children_empty", test_workflow_get_pending_child_workflow_ids_empty)
     r.record("wf_pending_children_populated", test_workflow_get_pending_child_workflow_ids_populated)
     r.record("wf_children_tokens_empty", test_workflow_get_children_tokens_empty)
@@ -4829,6 +5061,10 @@ async def run_all_tests():
     await r.record_async("wf_no_duplicate_cloud_agent_tool", test_workflow_does_not_advance_terminal_cloud_agent_tool)
     await r.record_async("wf_missing_cloud_agent_tool", test_workflow_caches_missing_cloud_agent_tool)
     await r.record_async("wf_run_startup_completion", test_workflow_run_covers_chat_agent_startup_and_completion)
+    await r.record_async(
+        "wf_run_deployment_resume",
+        test_workflow_run_deployment_resume_skips_startup_replay_and_restores_iteration,
+    )
     await r.record_async(
         "wf_run_skips_response_schema_for_subagent",
         test_workflow_run_skips_response_schema_generation_for_subagent,

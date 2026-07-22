@@ -330,6 +330,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
         gpt_token_rotated: bool = False,
         compute_token_used: Optional[Dict[str, Any]] = None,
         from_fast_cache: bool = False,
+        iteration: Optional[int] = None,
     ):
         """Track each LLM call's tokens with the actual model used."""
         llm_iteration_usage.append(
@@ -342,6 +343,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
                 "cache_read_input_tokens": cache_read_input_tokens,
                 "cache_creation_input_tokens": cache_creation_input_tokens,
                 "from_fast_cache": from_fast_cache,
+                "iteration": iteration,
             }
         )
 

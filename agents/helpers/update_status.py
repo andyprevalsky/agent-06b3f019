@@ -11,6 +11,7 @@ import structlog
 from temporalio import activity
 
 from config import load_config
+from helpers.workflow_generation import workflow_generation_headers
 
 logger = structlog.get_logger()
 
@@ -64,7 +65,11 @@ async def _update_agent_status_impl(
         response = await client.patch(
             f"{config.backend.api_url}/api/agents/{agent_id}/status",
             json=payload,
-            headers={"X-API-Key": config.backend.api_key, "Content-Type": "application/json"},
+            headers={
+                "X-API-Key": config.backend.api_key,
+                "Content-Type": "application/json",
+                **workflow_generation_headers(),
+            },
             timeout=30.0,
         )
         response.raise_for_status()

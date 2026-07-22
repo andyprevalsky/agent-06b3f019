@@ -853,7 +853,12 @@ async def post_agent_message(
 
         # Add metadata if provided
         if metadata:
-            payload["metadata"] = metadata
+            if role == "TOOL":
+                from helpers.workflow_generation import stamp_tool_workflow_generation
+
+                payload["metadata"] = stamp_tool_workflow_generation(metadata)
+            else:
+                payload["metadata"] = metadata
 
         # Add file_pointer for file attachment messages (OAI-style)
         if file_pointer:

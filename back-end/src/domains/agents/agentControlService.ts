@@ -2,27 +2,40 @@
  * Agent control service — pause, resume, restart, update status, update config, signals.
  */
 
-import { getTemporalClient, startAgentWorkflow } from '../../providers/temporal';
-import { broadcastAgentUpdate, broadcastAgentModeStarted } from '../../providers/chat';
+import { WorkflowNotFoundError } from '@temporalio/client';
+import {
+  getTemporalClient,
+  readAgentWorkflowLaunchConfig,
+  resolveTemporalWorkflowExecutionRef,
+  startAgentWorkflow,
+  startAgentWorkflowExecution,
+  type StartAgentWorkflowParams,
+  type TemporalWorkflowExecutionRef,
+} from '../../providers/temporal';
+import { broadcastAgentModeStarted } from '../../providers/chat';
 import { createLogger } from '../../providers/logger';
 import { resumeAgentWorkflow } from '../../providers/agentResume';
-import { classifyAgentFailureForSurface } from '../../providers/credentialPropagation';
-import { finalizeAgent } from '../../providers/traceArchiveLifecycle';
-import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
-import type { Prisma, UpdateStatusBody } from './types';
+import {
+  captureInProgressWorkflowTools,
+  finalizeInterruptedWorkflowTools,
+} from '../../providers/staleWorkflowTools';
+import {
+  replaceStaleWorkflow,
+  terminateStaleTemporalWorkflow,
+} from '../../providers/workflowReplacement';
+import {
+  claimWorkflowReplacement,
+  completeWorkflowReplacement,
+  markWorkflowReplacementFailed,
+  recordStaleWorkflowChain,
+  type WorkflowReplacementClaim,
+} from '../../providers/workflowReplacementState';
 import * as repo from './repo';
 
 export { updateAgentConfig } from './agentConfigService';
+export { updateAgentStatus } from './agentStatusService';
 
 const log = createLogger('Agents');
-const TERMINAL_STATUSES = new Set(['COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED']);
-const IRREVERSIBLE_STATUSES = new Set([
-  'COMPLETED',
-  'FAILED',
-  'OUT_OF_CREDITS',
-  'COST_LIMIT_REACHED',
-]);
-const NON_TERMINAL_STATUSES = new Set(['STARTING_UP', 'ACTIVE', 'PAUSED']);
 
 // ---------------------------------------------------------------------------
 // Pause / Resume
@@ -137,6 +150,12 @@ export async function startAgentMode(agentId: string, userId: string) {
     },
     priceLimitCents: agent.priceLimitCents,
     fastModeCacheEnabled: agent.fastModeCacheEnabled,
+    ...(agent.workflowMaxIterations !== null ? { maxIterations: agent.workflowMaxIterations } : {}),
+    ...(agent.workflowContextGates !== null
+      ? {
+          contextGates: agent.workflowContextGates as StartAgentWorkflowParams['contextGates'],
+        }
+      : {}),
   });
 
   await repo.updateAgent(agentId, { temporalWorkflowId: workflowId });
@@ -158,6 +177,39 @@ export async function startAgentMode(agentId: string, userId: string) {
 // Restart
 // ---------------------------------------------------------------------------
 
+async function startReplacementWorkflow(
+  agent: NonNullable<Awaited<ReturnType<typeof repo.findAgentWithVerifier>>>,
+  verifierType: string,
+  claim: WorkflowReplacementClaim
+): Promise<TemporalWorkflowExecutionRef> {
+  const currentParent =
+    agent.parentAgentId !== null ? await repo.findAgentById(agent.parentAgentId) : null;
+  const parentWorkflowId = currentParent?.temporalWorkflowId ?? agent.parentWorkflowId;
+  return startAgentWorkflowExecution({
+    agentId: agent.id,
+    userId: agent.userId,
+    goal: agent.goal,
+    model: agent.model,
+    reasoningMaxTokens: agent.reasoningMaxTokens,
+    verifier: { type: verifierType },
+    workflowId: claim.plannedWorkflowId,
+    ...(parentWorkflowId !== null ? { parentWorkflowId } : {}),
+    ...(agent.parentAgentId !== null ? { parentAgentId: agent.parentAgentId } : {}),
+    ...(agent.busId !== null ? { busId: agent.busId } : {}),
+    depth: agent.depth,
+    priceLimitCents: agent.priceLimitCents,
+    fastModeCacheEnabled: agent.fastModeCacheEnabled,
+    startPhase: 'resume',
+    ...(claim.resumeState.max_iterations !== null
+      ? { maxIterations: claim.resumeState.max_iterations }
+      : {}),
+    ...(claim.resumeState.context_gates !== null
+      ? { contextGates: claim.resumeState.context_gates }
+      : {}),
+    resumeState: claim.resumeState,
+  });
+}
+
 /** Restart an agent's workflow. */
 export async function restartAgent(agentId: string, userId?: string) {
   const agent = await repo.findAgentWithVerifier(agentId, userId);
@@ -169,191 +221,65 @@ export async function restartAgent(agentId: string, userId?: string) {
   if (agent.verifier === null) {
     return { error: 'Agent has no verifier configured', status: 400 };
   }
-
-  if (agent.temporalWorkflowId !== null) {
-    const client = await getTemporalClient();
+  const verifierType = agent.verifier.type;
+  let historicalLaunchConfig: Awaited<ReturnType<typeof readAgentWorkflowLaunchConfig>> | undefined;
+  if (agent.workflowReplacementToken === null && agent.temporalWorkflowId !== null) {
     try {
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-      await handle.terminate('Restarting with new worker code');
-      log.info('Terminated workflow for restart', {
-        agent_id: agentId,
-        workflow_id: agent.temporalWorkflowId,
-      });
-    } catch (e: unknown) {
-      const isNotFound = e instanceof Error && e.name === 'WorkflowNotFoundError';
-      if (isNotFound) {
-        log.info('Workflow already terminated/not found, proceeding with restart', {
-          agent_id: agentId,
-          workflow_id: agent.temporalWorkflowId,
-        });
-      } else {
-        log.error('Failed to terminate workflow for restart, aborting to prevent duplicates', {
-          agent_id: agentId,
-          workflow_id: agent.temporalWorkflowId,
-          error: e instanceof Error ? e.message : String(e),
-        });
-        return { error: 'Failed to terminate existing workflow', status: 500 };
+      historicalLaunchConfig = await readAgentWorkflowLaunchConfig(agent.temporalWorkflowId);
+    } catch (error) {
+      if (!(error instanceof WorkflowNotFoundError)) throw error;
+    }
+  }
+  const claim = await claimWorkflowReplacement(agentId, historicalLaunchConfig);
+  let staleExecution: TemporalWorkflowExecutionRef | null = null;
+  if (claim.staleWorkflowId !== null) {
+    if (claim.staleFirstExecutionRunId !== null) {
+      staleExecution = {
+        workflowId: claim.staleWorkflowId,
+        firstExecutionRunId: claim.staleFirstExecutionRunId,
+      };
+    } else {
+      try {
+        staleExecution = await resolveTemporalWorkflowExecutionRef(claim.staleWorkflowId);
+        await recordStaleWorkflowChain(claim, staleExecution);
+      } catch (error) {
+        if (!(error instanceof WorkflowNotFoundError)) {
+          await markWorkflowReplacementFailed(claim, error);
+          throw error;
+        }
       }
     }
   }
 
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  let execution: TemporalWorkflowExecutionRef;
+  try {
+    execution = await replaceStaleWorkflow(
+      {
+        agentId,
+        staleExecution,
+        staleWorkflowGeneration: claim.staleWorkflowId,
+      },
+      {
+        captureInProgressTools: captureInProgressWorkflowTools,
+        terminate: (stale) => terminateStaleTemporalWorkflow(stale, agentId),
+        finalizeInterruptedTools: finalizeInterruptedWorkflowTools,
+        startFresh: () => startReplacementWorkflow(agent, verifierType, claim),
+      }
+    );
+    await completeWorkflowReplacement(claim, execution);
+  } catch (error) {
+    await markWorkflowReplacementFailed(claim, error);
+    throw error;
+  }
 
-  await repo.updateAgent(agentId, { status: 'ACTIVE', statusMessage: null });
-
-  const workflowId = await startAgentWorkflow({
-    agentId: agent.id,
-    userId: agent.userId,
-    goal: agent.goal,
-    model: agent.model,
-    reasoningMaxTokens: agent.reasoningMaxTokens,
-    verifier: {
-      type: agent.verifier.type,
-    },
-    ...(agent.parentWorkflowId !== null ? { parentWorkflowId: agent.parentWorkflowId } : {}),
-    depth: agent.depth,
-    priceLimitCents: agent.priceLimitCents,
-    fastModeCacheEnabled: agent.fastModeCacheEnabled,
-  });
-
-  await repo.updateAgent(agentId, { temporalWorkflowId: workflowId });
-
-  log.info('Restarted agent', { agent_id: agentId, workflow_id: workflowId });
+  log.info('Restarted agent', { agent_id: agentId, workflow_id: execution.workflowId });
 
   return {
     success: true,
     agent_id: agentId,
-    workflow_id: workflowId,
+    workflow_id: execution.workflowId,
     message: 'Workflow restarted - will continue from existing context',
   };
-}
-
-// ---------------------------------------------------------------------------
-// Update status (internal/worker)
-// ---------------------------------------------------------------------------
-
-/** Agent fields relevant for status broadcast. */
-interface AgentStatusFields {
-  progress: number;
-  status: string;
-  statusMessage: string | null;
-  tokenCount: number;
-  tokensIn: number;
-  tokensOut: number;
-  contextSize: number;
-  messageCount: number;
-}
-
-interface UpdateAgentStatusDependencies {
-  cleanupPurchaseCards?: (agentId: string) => Promise<void>;
-}
-
-/** Best-effort cleanup fired once a root agent reaches a terminal status. */
-async function runTerminalAgentCleanup(
-  agentId: string,
-  status: string,
-  dependencies: UpdateAgentStatusDependencies
-): Promise<void> {
-  try {
-    await (dependencies.cleanupPurchaseCards ?? cleanupAgentPurchaseCards)(agentId);
-  } catch (error) {
-    log.warn('Terminal purchase-card cleanup unavailable; cron will retry', {
-      agent_id: agentId,
-      status,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-  try {
-    await finalizeAgent({ rootAgentId: agentId });
-  } catch (error) {
-    log.warn('Trace archive finalization unavailable', {
-      agent_id: agentId,
-      status,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
-
-export async function updateAgentStatus(
-  agentId: string,
-  body: UpdateStatusBody,
-  dependencies: UpdateAgentStatusDependencies = {}
-) {
-  const agent = await repo.findAgentById(agentId);
-
-  if (!agent) {
-    return null;
-  }
-
-  if (IRREVERSIBLE_STATUSES.has(agent.status) && NON_TERMINAL_STATUSES.has(body.status)) {
-    log.info('Ignoring stale non-terminal status update for terminal agent', {
-      agent_id: agentId,
-      current_status: agent.status,
-      attempted_status: body.status,
-      attempted_progress: body.progress,
-    });
-    return agent;
-  }
-
-  const updated = await repo.updateAgent(agentId, {
-    status: body.status,
-    statusMessage: body.statusMessage,
-    progress: body.progress,
-    tokenCount: body.tokenCount,
-    tokensIn: body.tokensIn,
-    tokensOut: body.tokensOut,
-    contextSize: body.contextSize,
-    messageCount: body.messageCount,
-    ...(body.structuredResponse !== undefined && {
-      structuredResponse: body.structuredResponse as Prisma.InputJsonValue,
-    }),
-    updatedAt: new Date(),
-  });
-
-  const fields = updated as unknown as AgentStatusFields;
-  let failureSurface: { rawError?: string; failureReason?: string | null } = {};
-  if (TERMINAL_STATUSES.has(fields.status) && fields.status !== 'COMPLETED') {
-    failureSurface = {
-      rawError: body.statusMessage ?? fields.statusMessage ?? undefined,
-      failureReason: null,
-    };
-    try {
-      const decision = await classifyAgentFailureForSurface(agentId);
-      failureSurface.failureReason = decision?.failureReason ?? null;
-      failureSurface.rawError = decision?.rawError ?? failureSurface.rawError;
-    } catch (error) {
-      log.warn('Failure classification unavailable for terminal status broadcast', {
-        agent_id: agentId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  const broadcastPayload: Parameters<typeof broadcastAgentUpdate>[1] & {
-    rawError?: string;
-    failureReason?: string | null;
-  } = {
-    progress: fields.progress,
-    status: fields.status,
-    statusMessage: fields.statusMessage ?? undefined,
-    tokenCount: fields.tokenCount,
-    tokensIn: fields.tokensIn,
-    tokensOut: fields.tokensOut,
-    contextSize: fields.contextSize,
-    messageCount: fields.messageCount,
-    ...failureSurface,
-  };
-
-  await broadcastAgentUpdate(agentId, broadcastPayload);
-  // Fire cleanup only on the FIRST terminal transition (`agent` is the pre-update
-  // row): re-running it on repeated terminal updates could race a second pass
-  // against the same still-HELD purchase (double close/reclaim/refund).
-  const wasAlreadyTerminal = IRREVERSIBLE_STATUSES.has(agent.status);
-  if (TERMINAL_STATUSES.has(fields.status) && agent.parentAgentId === null && !wasAlreadyTerminal) {
-    await runTerminalAgentCleanup(agentId, fields.status, dependencies);
-  }
-
-  return updated;
 }
 
 // ---------------------------------------------------------------------------

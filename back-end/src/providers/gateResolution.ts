@@ -13,6 +13,8 @@ import { Prisma } from '@prisma/client';
 import { prisma } from './database';
 import { getTemporalClient } from './temporal';
 import { createLogger } from './logger';
+import { findDeploymentFencedToolMessage, lockToolCallLifecycle } from './toolLifecycleMessages';
+import { lockAgentWorkflowGeneration } from './workflowGeneration';
 
 const log = createLogger('GateResolution');
 const errMsg = (error: unknown): string => (error instanceof Error ? error.message : String(error));
@@ -78,7 +80,7 @@ async function signalAllWaiters(request: ResolvableGateRequest, response: string
   }
 }
 
-async function finishAttentionMessages(
+export async function finishAttentionMessages(
   tx: Prisma.TransactionClient,
   request: ResolvableGateRequest
 ): Promise<number> {
@@ -101,23 +103,44 @@ async function finishAttentionMessages(
         },
       ],
     },
-    select: { id: true, metadata: true },
+    orderBy: { id: 'asc' },
+    select: { id: true, metadata: true, workflowGeneration: true },
   });
 
+  let finishedCount = 0;
   for (const message of pendingMessages) {
     if (message.metadata === null || Array.isArray(message.metadata)) continue;
+    const metadata = message.metadata as Prisma.JsonObject;
+    const toolCallId = metadata.toolCallId;
+    if (typeof toolCallId === 'string' && toolCallId.length > 0) {
+      const workflowGeneration = message.workflowGeneration ?? request.agentId;
+      await lockAgentWorkflowGeneration(tx, request.agentId);
+      await lockToolCallLifecycle(tx, request.agentId, workflowGeneration, toolCallId);
+      const deploymentFence = await findDeploymentFencedToolMessage(
+        tx,
+        request.agentId,
+        workflowGeneration,
+        toolCallId
+      );
+      if (deploymentFence !== null) continue;
+    }
+    const current = await tx.message.findUnique({ where: { id: message.id } });
+    if (current?.metadata === null || Array.isArray(current?.metadata)) continue;
+    const currentMetadata = current?.metadata as Prisma.JsonObject | undefined;
+    if (currentMetadata?.toolStatus !== 'IN_PROGRESS') continue;
     await tx.message.update({
       where: { id: message.id },
       data: {
         metadata: {
-          ...(message.metadata as Prisma.JsonObject),
+          ...currentMetadata,
           toolStatus: 'FINISHED',
         },
       },
     });
+    finishedCount += 1;
   }
 
-  return pendingMessages.length;
+  return finishedCount;
 }
 
 /**

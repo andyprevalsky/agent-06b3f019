@@ -185,6 +185,9 @@ async def save_browser_action_message(
 
         if status == MessageStatus.ERROR:
             metadata["error"] = True
+        from helpers.workflow_generation import stamp_tool_workflow_generation
+
+        metadata = stamp_tool_workflow_generation(metadata) or metadata
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             await client.post(
@@ -264,6 +267,9 @@ async def save_browser_credential_ref_message(
                     "auxiliary": {},
                 }
             )
+            from helpers.workflow_generation import stamp_tool_workflow_generation
+
+            metadata = stamp_tool_workflow_generation(metadata) or metadata
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(
@@ -513,8 +519,7 @@ async def prepare_browser_auth(
             raise RuntimeError("Browser credential preparation returned a non-object payload")
         return data
     raise RuntimeError(
-        f"Failed to prepare browser credentials for {target_url}: "
-        f"HTTP {response.status_code} {response.text[:300]}"
+        f"Failed to prepare browser credentials for {target_url}: HTTP {response.status_code} {response.text[:300]}"
     )
 
 

@@ -53,6 +53,7 @@ async def _run_single_iteration(
     check_paused_override=None,
     gpt_token=None,
     gpt_account_id=None,
+    iteration_offset=0,
 ):
     from loop.run_agent import run_agent
 
@@ -170,6 +171,7 @@ async def _run_single_iteration(
             execute_tool=default_execute_tool,
             build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
             max_iterations=max_iterations,
+            iteration_offset=iteration_offset,
             winddown_window=winddown_window,
             skip_verification=skip_verification,
             skip_status_updates=True,
@@ -185,6 +187,24 @@ async def _run_single_iteration(
         )
 
     return result, posted_messages, executed_tools
+
+
+async def test_iteration_offset_is_reported_with_each_billed_llm_turn():
+    reports = []
+
+    async def capture_usage(_tokens_in, _tokens_out, _model, **metadata):
+        reports.append(metadata)
+
+    result, _, _ = await _run_single_iteration(
+        [{"tool": "web_search", "query": "latest updates"}],
+        [("web_search", "tc-position", 1.0)],
+        max_iterations=7,
+        iteration_offset=6,
+        on_tokens_override=capture_usage,
+    )
+
+    assert result["status"] == "max_iterations"
+    assert reports[0]["iteration"] == 7
 
 
 async def test_tool_only_assistant_turn_persists_tool_calls():
@@ -1665,6 +1685,10 @@ async def test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler():
 async def run_all_tests():
     print("run-agent blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "iteration_offset_reported_with_usage",
+        test_iteration_offset_is_reported_with_each_billed_llm_turn,
+    )
     await r.record_async(
         "tool_only_assistant_turn_persists_tool_calls", test_tool_only_assistant_turn_persists_tool_calls
     )

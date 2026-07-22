@@ -16,6 +16,8 @@ import { prisma, runTransactionWithRetry } from '../../providers/database';
  */
 function optionalAgentCreateFields(params: {
   temporalWorkflowId?: string | null;
+  workflowMaxIterations?: number;
+  workflowContextGates?: Record<string, boolean>;
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
@@ -24,6 +26,12 @@ function optionalAgentCreateFields(params: {
   return {
     ...(params.temporalWorkflowId !== undefined && params.temporalWorkflowId !== null
       ? { temporalWorkflowId: params.temporalWorkflowId }
+      : {}),
+    ...(params.workflowMaxIterations !== undefined
+      ? { workflowMaxIterations: params.workflowMaxIterations }
+      : {}),
+    ...(params.workflowContextGates !== undefined
+      ? { workflowContextGates: params.workflowContextGates }
       : {}),
     ...(params.priceLimitCents !== undefined && params.priceLimitCents !== 0
       ? { priceLimitCents: params.priceLimitCents }
@@ -80,6 +88,8 @@ export async function createAgentTransaction(params: {
   isBenchmark?: boolean;
   attachments?: Array<Record<string, unknown>>;
   temporalWorkflowId?: string | null;
+  workflowMaxIterations?: number;
+  workflowContextGates?: Record<string, boolean>;
 }) {
   // runTransactionWithRetry (not raw prisma.$transaction): interactive
   // transactions bypass the client's per-query retry extension, so a momentary
@@ -136,6 +146,28 @@ export async function createAgentTransaction(params: {
   });
 }
 
+/** Update worker-owned fields only while the producing workflow is still current. */
+export async function updateAgentForWorkflow(
+  agentId: string,
+  workflowGeneration: string,
+  data: Prisma.AgentUpdateManyMutationInput
+) {
+  const workflowMatches: Prisma.AgentWhereInput[] = [{ temporalWorkflowId: workflowGeneration }];
+  // A brand-new legacy workflow uses agentId as its Workflow ID and can report
+  // STARTING_UP before the creator stores that ID. Replacement generations are
+  // preclaimed, so they must never use this null compatibility path.
+  if (workflowGeneration === agentId) workflowMatches.push({ temporalWorkflowId: null });
+  const result = await prisma.agent.updateMany({
+    where: {
+      id: agentId,
+      deletedAt: null,
+      OR: workflowMatches,
+    },
+    data,
+  });
+  return result.count === 1;
+}
+
 export interface BatchCreateAgentParams {
   agentId: string;
   userId: string;
@@ -160,6 +192,8 @@ export interface BatchCreateAgentParams {
   verifierType: string;
   attachments?: Array<Record<string, unknown>>;
   temporalWorkflowId: string;
+  workflowMaxIterations?: number;
+  workflowContextGates?: Record<string, boolean>;
 }
 
 /** Create N agents (each with verifier + goal message) in a single transaction.
@@ -191,16 +225,7 @@ export async function createAgentBatchTransaction(items: BatchCreateAgentParams[
         proxyCountry: params.proxyCountry,
         proxyState: params.proxyState,
         proxyCity: params.proxyCity,
-        temporalWorkflowId: params.temporalWorkflowId,
-        ...(params.priceLimitCents !== undefined && params.priceLimitCents !== 0
-          ? { priceLimitCents: params.priceLimitCents }
-          : {}),
-        ...(params.writeLockEnabled !== undefined
-          ? { writeLockEnabled: params.writeLockEnabled }
-          : {}),
-        ...(params.fastModeCacheEnabled !== undefined
-          ? { fastModeCacheEnabled: params.fastModeCacheEnabled }
-          : {}),
+        ...optionalAgentCreateFields(params),
       })),
     });
 

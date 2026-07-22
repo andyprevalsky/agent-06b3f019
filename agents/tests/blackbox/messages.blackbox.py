@@ -3,6 +3,7 @@
 import asyncio
 import json
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
@@ -109,6 +110,27 @@ async def test_post_message_boundary():
     assert body["role"] == "TOOL"
     assert body["message"] == "Boundary test message"
     assert body["metadata"]["toolName"] == "wait_for"
+
+
+async def test_post_message_stamps_workflow_generation():
+    """TOOL writes carry the producing Temporal Workflow ID automatically."""
+    _setup()
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("temporalio.activity.info", return_value=SimpleNamespace(workflow_id="wf-generation-2")),
+    ):
+        from helpers.messages import post_agent_message
+
+        await post_agent_message(
+            agent_id="agent-generation-1",
+            text="Running",
+            role="TOOL",
+            metadata={"toolCallId": "tc-1", "toolName": "wait_for", "toolStatus": "IN_PROGRESS"},
+        )
+
+    call = assert_captured_call(url_contains="/messages", method="POST")
+    body = json.loads(call["requestBody"])
+    assert body["metadata"]["workflowGeneration"] == "wf-generation-2"
 
 
 async def test_post_message_with_file_pointer():
@@ -763,6 +785,7 @@ async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("post_message_happy_path", test_post_message_happy_path)
     await r.record_async("post_message_boundary", test_post_message_boundary)
+    await r.record_async("post_message_stamps_workflow_generation", test_post_message_stamps_workflow_generation)
     await r.record_async("post_message_with_file_pointer", test_post_message_with_file_pointer)
     await r.record_async("post_message_no_metadata", test_post_message_no_metadata)
     await r.record_async("post_message_raises_on_http_error", test_post_message_raises_on_http_error)

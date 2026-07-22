@@ -10,6 +10,7 @@ export {
   createAgentTransaction,
   createAgentBatchTransaction,
   updateAgent,
+  updateAgentForWorkflow,
   failAgentIfStillActive,
   clearWorkflowForTerminalAgent,
   softDeleteAgent,

@@ -105,6 +105,7 @@ async function startDirectWorkflow(
     verifier: { type: verifier.type },
     ...(body.task_queue !== undefined ? { taskQueue: body.task_queue } : {}),
     startPhase: body.start_phase!,
+    ...(body.max_iterations !== undefined ? { maxIterations: body.max_iterations } : {}),
     priceLimitCents,
     ...(body.fast_mode_cache_enabled !== undefined
       ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
@@ -228,6 +229,8 @@ export async function createAgent(
     isBenchmark,
     attachments: body.attachments as Array<Record<string, unknown>> | undefined,
     temporalWorkflowId: willStartWorkflow ? agentId : null,
+    workflowMaxIterations: body.max_iterations,
+    workflowContextGates: body.context_gates,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
 

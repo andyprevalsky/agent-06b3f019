@@ -1039,6 +1039,133 @@ test('POST /:id/messages — duplicate internal TOOL retry is idempotent', async
   await deleteTestAgent(agentId, session.user.id);
 });
 
+test('POST /:id/messages — deployment fence preserves success and blocks stale writes', async () => {
+  const session = await createAnonymousSession('msg-tool-terminal-sticky');
+  const agentId = await createTestAgent(session.user.id, 'Tool terminal race test');
+  const toolCallId = `terminal-sticky-${randomUUID().slice(0, 8)}`;
+  const replacementGeneration = `${agentId}:replacement:${randomUUID()}`;
+  await prisma.agent.update({
+    where: { id: agentId },
+    data: { temporalWorkflowId: agentId },
+  });
+  const post = (
+    toolStatus: 'IN_PROGRESS' | 'FINISHED' | 'ERROR',
+    message: string,
+    workflowGeneration: string,
+    callId = toolCallId
+  ) =>
+    request(`${BASE_URL}/api/agents/${agentId}/messages`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        message,
+        role: 'TOOL',
+        metadata: {
+          toolCallId: callId,
+          toolName: 'web_search',
+          toolStatus,
+          workflowGeneration,
+        },
+      }),
+    });
+
+  const progress = await post('IN_PROGRESS', 'Searching', agentId);
+  const earlySuccess = await post('FINISHED', 'Search result preview', agentId);
+  const success = await post('FINISHED', 'Search complete', agentId);
+  await prisma.agent.update({
+    where: { id: agentId },
+    data: { temporalWorkflowId: replacementGeneration },
+  });
+  const staleProgress = await post('IN_PROGRESS', 'Still searching', agentId);
+  const brandNewStaleCallId = `late-stale-${randomUUID()}`;
+  const brandNewStale = await post(
+    'IN_PROGRESS',
+    'Started after cutover',
+    agentId,
+    brandNewStaleCallId
+  );
+  const replacementProgress = await post(
+    'IN_PROGRESS',
+    'Replacement searching',
+    replacementGeneration
+  );
+  const replacementSuccess = await post('FINISHED', 'Replacement complete', replacementGeneration);
+
+  assertStatus(progress.status, 201, progress.data);
+  assertStatus(earlySuccess.status, 201, earlySuccess.data);
+  assertStatus(success.status, 201, success.data);
+  assertStatus(staleProgress.status, 201, staleProgress.data);
+  assertStatus(brandNewStale.status, 201, brandNewStale.data);
+  assertStatus(replacementProgress.status, 201, replacementProgress.data);
+  assertStatus(replacementSuccess.status, 201, replacementSuccess.data);
+  const successBody = assertSchema(PostMessageResponse, success.data, 'sticky TOOL success');
+  const earlySuccessBody = assertSchema(
+    PostMessageResponse,
+    earlySuccess.data,
+    'early TOOL success'
+  );
+  const staleProgressBody = assertSchema(
+    PostMessageResponse,
+    staleProgress.data,
+    'sticky TOOL progress'
+  );
+  assert(
+    earlySuccessBody.message_id !== successBody.message_id,
+    'ordinary terminal updates must retain their existing multi-event behavior'
+  );
+  assert(
+    staleProgressBody.message_id === successBody.message_id,
+    'late stale progress must resolve to the fenced terminal result'
+  );
+  const brandNewStaleBody = assertSchema(
+    PostMessageResponse,
+    brandNewStale.data,
+    'brand-new stale TOOL progress'
+  );
+  const replacementSuccessBody = assertSchema(
+    PostMessageResponse,
+    replacementSuccess.data,
+    'replacement TOOL success'
+  );
+  assert(
+    replacementSuccessBody.message_id !== successBody.message_id,
+    'the replacement generation must be independent even when it reuses the call ID'
+  );
+
+  const terminalRows = await prisma.message.findMany({
+    where: {
+      agentId,
+      role: 'TOOL',
+      metadata: { path: ['toolCallId'], equals: toolCallId },
+    },
+  });
+  const terminalStatuses = terminalRows
+    .map((message) => (message.metadata as { toolStatus?: unknown } | null)?.toolStatus)
+    .filter((status) => status === 'FINISHED' || status === 'ERROR');
+  assert(
+    JSON.stringify(terminalStatuses.sort()) ===
+      JSON.stringify(['FINISHED', 'FINISHED', 'FINISHED']),
+    `Expected old and replacement successes without a contradictory error, got ${JSON.stringify(terminalStatuses)}`
+  );
+  const brandNewStaleRow = await prisma.message.findUniqueOrThrow({
+    where: { id: brandNewStaleBody.message_id },
+  });
+  assert(
+    brandNewStaleRow.text === 'new code version deployed, retry this tool',
+    'a first stale write after cutover must become the canonical deployment error'
+  );
+  assert(
+    (brandNewStaleRow.metadata as { toolStatus?: unknown } | null)?.toolStatus === 'FINISHED',
+    'brand-new stale progress must become a FINISHED error'
+  );
+  assert(
+    (brandNewStaleRow.metadata as { error?: unknown } | null)?.error === true,
+    'brand-new stale progress must be visible to the agent as an error'
+  );
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
 test('POST /:id/messages — changed TOOL metadata is a new event, exact retry is idempotent', async () => {
   const session = await createAnonymousSession('msg-spawn-tree-upgrade');
   const agentId = await createTestAgent(session.user.id, 'Spawn-tree upgrade test');
@@ -2910,6 +3037,16 @@ test('POST / — with context_gates parameter', async () => {
   assertStatus(res.status, 201, res.data);
   const body = res.data as { agent_id: string };
   assert(typeof body.agent_id === 'string', 'Expected agent_id in response');
+  const stored = await prisma.agent.findUniqueOrThrow({ where: { id: body.agent_id } });
+  const storedGates = stored.workflowContextGates as Record<string, boolean> | null;
+  assert(
+    storedGates?.user_profile === true &&
+      storedGates.network === false &&
+      storedGates.recent_communications === false &&
+      storedGates.integrations === true &&
+      Object.keys(storedGates).length === 4,
+    'context_gates should be persisted'
+  );
   await deleteTestAgent(body.agent_id, session.user.id);
 });
 
@@ -3493,6 +3630,8 @@ test('POST / — with max_iterations parameter', async () => {
   assertStatus(res.status, 201, res.data);
   const body = assertSchema(CreateAgentResponse, res.data, 'POST / max_iterations');
   trackedAgentIds.add(body.agent_id);
+  const stored = await prisma.agent.findUniqueOrThrow({ where: { id: body.agent_id } });
+  assert(stored.workflowMaxIterations === 5, 'max_iterations should be persisted');
 
   await deleteTestAgent(body.agent_id, session.user.id);
 });
@@ -3905,6 +4044,8 @@ function makeBatchAgent(opts: {
     bus_id: opts.busId,
     depth: 1,
     start_phase: 'execute',
+    max_iterations: 25,
+    context_gates: { network: false },
     response_schema: { fields: [{ name: 'value', type: 'int', required: true, description: 'x' }] },
     ...(opts.attachments !== undefined ? { attachments: opts.attachments } : {}),
   };
@@ -3935,6 +4076,18 @@ test('POST /agents/batch — happy path: 3 children all spawn', async () => {
     }
     trackedAgentIds.add(r.agent_id);
   }
+  const stored = await prisma.agent.findMany({
+    where: { id: { in: body.results.map((result) => result.agent_id) } },
+    select: { workflowMaxIterations: true, workflowContextGates: true },
+  });
+  assert(
+    stored.every((row) => row.workflowMaxIterations === 25),
+    'batch max_iterations not persisted'
+  );
+  assert(
+    stored.every((row) => JSON.stringify(row.workflowContextGates) === '{"network":false}'),
+    'batch context_gates not persisted'
+  );
   for (const r of body.results) await deleteTestAgent(r.agent_id, session.user.id);
   await deleteTestAgent(parentId, session.user.id);
 });

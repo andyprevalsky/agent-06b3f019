@@ -301,6 +301,69 @@ class AgentWorkflow:
 
         # Agent source (WEB, MAC_APP, SMS) — cached at startup for SMS notification gating
         self.agent_source: str = "WEB"
+        self._deployment_resume: bool = False
+        self._resume_prior_status: str = "ACTIVE"
+        self._resume_status_message: Optional[str] = None
+        self._resume_progress: float = 0.0
+        self.iteration_offset: int = 0
+
+    def _restore_deployment_state(self, state: Optional[Dict]) -> None:
+        """Restore the durable counters and pause flags captured at a deploy cutover."""
+        if not state:
+            return
+        if state.get("version") != 1 or state.get("kind") != "deployment":
+            raise ValueError("Unsupported deployment resume state")
+
+        def _number(name: str, default: float = 0) -> float:
+            value = state.get(name, default)
+            return value if isinstance(value, (int, float)) and not isinstance(value, bool) else default
+
+        def _number_map(name: str) -> Dict[str, float]:
+            value = state.get(name)
+            if not isinstance(value, dict):
+                return {}
+            return {
+                str(key): item
+                for key, item in value.items()
+                if isinstance(item, (int, float)) and not isinstance(item, bool)
+            }
+
+        self._deployment_resume = True
+        self._resume_prior_status = str(state.get("prior_status") or "ACTIVE")
+        prior_status_message = state.get("prior_status_message")
+        self._resume_status_message = prior_status_message if isinstance(prior_status_message, str) else None
+        self._resume_progress = float(_number("progress"))
+        self.token_count = int(_number("token_count"))
+        self.tokens_in = int(_number("tokens_in"))
+        self.tokens_out = int(_number("tokens_out"))
+        self.tree_tokens_in = int(_number("tree_tokens_in", self.tokens_in))
+        self.tree_tokens_out = int(_number("tree_tokens_out", self.tokens_out))
+        self.context_size = int(_number("context_size"))
+        self.message_count = int(_number("message_count"))
+        self.own_cost_cents = float(_number("own_cost_cents"))
+        self.subtree_cost_cents = float(_number("subtree_cost_cents", self.own_cost_cents))
+        self.children_cost_cents = _number_map("children_cost_cents")
+        self.children_tokens_in = {key: int(value) for key, value in _number_map("children_tokens_in").items()}
+        self.children_tokens_out = {key: int(value) for key, value in _number_map("children_tokens_out").items()}
+        child_last_tokens = state.get("child_last_tokens")
+        if isinstance(child_last_tokens, dict):
+            for child_id, child_tokens in child_last_tokens.items():
+                if not isinstance(child_tokens, dict):
+                    continue
+                self.child_last_tokens[str(child_id)] = {
+                    "tokens_in": int(child_tokens.get("tokens_in", 0)),
+                    "tokens_out": int(child_tokens.get("tokens_out", 0)),
+                    "token_count": int(child_tokens.get("token_count", 0)),
+                }
+        self.iteration_offset = int(_number("iteration_offset"))
+        if isinstance(state.get("max_iterations"), int):
+            self.max_iterations = state["max_iterations"]
+        if isinstance(state.get("context_gates"), dict):
+            self.context_gates = {
+                str(key): value for key, value in state["context_gates"].items() if isinstance(value, bool)
+            }
+        self._cost_limit_reached = self._resume_prior_status == "COST_LIMIT_REACHED"
+        self.is_paused = self._resume_prior_status in {"PAUSED", "COST_LIMIT_REACHED"}
 
     # =========================================================================
     # SIGNALS
@@ -487,6 +550,7 @@ class AgentWorkflow:
                         "subAgentId": child_agent_id,
                         "progress": 1.0,
                         "structuredResponse": structured_response,
+                        "childToolCounts": child_counts,
                     },
                 )
 
@@ -589,6 +653,7 @@ class AgentWorkflow:
         price_limit_cents: int = 100,  # Price limit in cents (default $1.00)
         context_gates: Optional[Dict[str, bool]] = None,  # Control which user context sections to include
         fast_mode_cache_enabled: bool = False,  # Fast Mode aggressive cache (own flag, NOT a context gate)
+        resume_state: Optional[Dict] = None,  # Deployment replacement bootstrap (never used by continue-as-new)
     ) -> Dict:
         """Execute agent task: optionally PLAN phase → EXECUTE phase."""
         # Bind agent_id to structlog context so ALL downstream structlog calls
@@ -613,6 +678,7 @@ class AgentWorkflow:
         self.fast_mode_cache_enabled = fast_mode_cache_enabled  # Record/replay third-party responses
         self.max_iterations = max_iterations
         self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
+        self._restore_deployment_state(resume_state)
         self.start_time = workflow.now()  # Track start time for duration calculation
         self.compute_token_lineage_key = f"agent:{agent_id}"
         self.compute_token_fast_cache_affinity_key = (
@@ -621,7 +687,8 @@ class AgentWorkflow:
 
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
 
-        await self._advance_cloud_agent_lifecycle(PREPARING_CLOUD_AGENT_TITLE, "IN_PROGRESS")
+        if not self._deployment_resume:
+            await self._advance_cloud_agent_lifecycle(PREPARING_CLOUD_AGENT_TITLE, "IN_PROGRESS")
 
         # Post an early heartbeat so external monitors (FE tree, benchmark
         # stall detector) see the agent is alive while init activities run.
@@ -633,25 +700,26 @@ class AgentWorkflow:
         # a liveness signal — UI renders it as a thin "Initializing" chip
         # and the row becomes irrelevant once a real tool message arrives.
         init_message_posted = False
-        with contextlib.suppress(Exception):
-            await workflow.execute_activity(
-                post_agent_message,
-                args=[
-                    agent_id,
-                    "Agent initializing — fetching context, system prompt, and tool config.",
-                    "TOOL",
-                    {
-                        "toolCallId": "tc-agent-init",
-                        "toolName": "agent_init",
-                        "toolStatus": "IN_PROGRESS",
-                        "title": "Initializing",
-                    },
-                    None,
-                ],
-                start_to_close_timeout=timedelta(seconds=15),
-                retry_policy=RetryPolicy(maximum_attempts=2),
-            )
-            init_message_posted = True
+        if not self._deployment_resume:
+            with contextlib.suppress(Exception):
+                await workflow.execute_activity(
+                    post_agent_message,
+                    args=[
+                        agent_id,
+                        "Agent initializing — fetching context, system prompt, and tool config.",
+                        "TOOL",
+                        {
+                            "toolCallId": "tc-agent-init",
+                            "toolName": "agent_init",
+                            "toolStatus": "IN_PROGRESS",
+                            "title": "Initializing",
+                        },
+                        None,
+                    ],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=RetryPolicy(maximum_attempts=2),
+                )
+                init_message_posted = True
 
         # Fetch model context window
         if self.max_context_tokens is None:
@@ -666,10 +734,24 @@ class AgentWorkflow:
                 self.max_context_tokens = 200_000
 
         # Update status
+        startup_status = self._resume_prior_status if self.is_paused else "ACTIVE"
+        startup_message = self._resume_status_message or (
+            "Restored after code update" if self._deployment_resume else "Agent started"
+        )
         with contextlib.suppress(Exception):
             await workflow.execute_activity(
                 update_agent_status,
-                args=[agent_id, "ACTIVE", 0.0, "Agent started", 0, 0, 0, 0, 0],
+                args=[
+                    agent_id,
+                    startup_status,
+                    self._resume_progress,
+                    startup_message,
+                    self.token_count,
+                    self.context_size,
+                    self.message_count,
+                    self.tree_tokens_in,
+                    self.tree_tokens_out,
+                ],
                 start_to_close_timeout=timedelta(seconds=15),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
@@ -720,7 +802,7 @@ class AgentWorkflow:
         # set) are intentionally excluded — at 10k agents a per-spawn SMS would
         # firehose the user's phone. Benchmark/eval runs are suppressed centrally
         # on the backend (Agent.isBenchmark) so this never texts the operator.
-        if not parent_workflow_id:
+        if not parent_workflow_id and not self._deployment_resume:
             try:
                 await workflow.execute_activity(
                     notify_sms_event_activity,
@@ -789,7 +871,7 @@ class AgentWorkflow:
 
         # Inject custom system prompt as hidden USER message for new agents
         # Only inject if: 1) custom prompt exists, 2) this is not a resume (no context passed)
-        if self.custom_system_prompt and not context:
+        if self.custom_system_prompt and not context and not self._deployment_resume:
             try:
                 await self._post_message(
                     f"Personality instructions: {self.custom_system_prompt}",
@@ -875,7 +957,7 @@ class AgentWorkflow:
 
         # Broadcast initial tree state with schema (only for sub-agents with bus_id)
         if self.bus_id:
-            await self._update_tree_state(progress=0.0, status="ACTIVE")
+            await self._update_tree_state(progress=0.0, status=startup_status)
 
         # If sub-agent, check parent's pause/cost-limit state before starting work
         # (covers race condition where signal arrived after spawn but before we're ready)
@@ -901,8 +983,8 @@ class AgentWorkflow:
         # is a local checkpoint/debug phase: it keeps the persisted plan, marks
         # already-finished DAG nodes from DB messages, then runs remaining nodes.
         resume_dag_from_context = start_phase == "execute_dag_resume"
-        skip_plan = start_phase in ("execute", "execute_continued", "execute_dag_resume")
-        skip_dag = start_phase == "execute_continued"  # After continue_as_new, DAG already ran
+        skip_plan = start_phase in ("execute", "execute_continued", "execute_dag_resume", "resume")
+        skip_dag = start_phase in ("execute_continued", "resume")
 
         if init_message_posted:
             with contextlib.suppress(Exception):
@@ -926,7 +1008,8 @@ class AgentWorkflow:
 
         # Pre-flight credit gate: if a user starts with exhausted free credits
         # and no subscription, block before spending more compute or running tools.
-        await self._check_credits()
+        if not self.is_paused:
+            await self._check_credits()
 
         # =====================================================================
         # PHASE 1: PLAN (research + create execution plan)
@@ -1153,6 +1236,8 @@ class AgentWorkflow:
             compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
             fast_mode_cache_enabled=self.fast_mode_cache_enabled,
             goal_text=self.fast_cache_goal,
+            iteration_offset=self.iteration_offset if self.max_iterations else 0,
+            fast_cache_position_offset=self.iteration_offset,
             **({"max_iterations": self.max_iterations} if self.max_iterations else {}),
         )
 
@@ -2725,6 +2810,7 @@ class AgentWorkflow:
         gpt_token_rotated: bool = False,
         compute_token_used: Optional[Dict[str, Any]] = None,
         from_fast_cache: bool = False,
+        iteration: Optional[int] = None,
     ) -> None:
         """Callback for run_agent to report token usage after each LLM call.
 
@@ -2961,6 +3047,7 @@ class AgentWorkflow:
                             "cache_read_input_tokens": cache_read_input_tokens,
                             "cache_creation_input_tokens": cache_creation_input_tokens,
                             "from_fast_cache": from_fast_cache,
+                            "iteration": iteration,
                         }
                     ],
                 ],

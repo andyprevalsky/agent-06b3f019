@@ -199,6 +199,7 @@ export async function postMessage(
     role,
     metadata: body.metadata,
     filePointer: body.file_pointer as Record<string, unknown> | undefined,
+    enforceCurrentWorkflowGeneration: isInternal,
   });
 
   // Create separate messages for each file attachment (OAI-style)

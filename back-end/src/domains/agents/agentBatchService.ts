@@ -83,6 +83,8 @@ function buildBatchItem(
       : {}),
     // Workflow id === agent id by convention (providers/temporal.ts:88).
     temporalWorkflowId: agentId,
+    ...(body.max_iterations !== undefined ? { workflowMaxIterations: body.max_iterations } : {}),
+    ...(body.context_gates !== undefined ? { workflowContextGates: body.context_gates } : {}),
   };
 }
 
