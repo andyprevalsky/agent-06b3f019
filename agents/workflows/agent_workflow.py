@@ -2460,6 +2460,7 @@ class AgentWorkflow:
             effective_call_site = call_site or tool_name or "unknown"
             cache_read = llm.get("cache_read_input_tokens", 0)
             cache_write = llm.get("cache_creation_input_tokens", 0)
+            cache_sequence_id = llm.get("cache_sequence_id")
             from_fast_cache = bool(llm.get("from_fast_cache"))
 
             if from_fast_cache:
@@ -2479,6 +2480,7 @@ class AgentWorkflow:
                         "cache_read_input_tokens": cache_read,
                         "cache_creation_input_tokens": cache_write,
                         "from_fast_cache": True,
+                        **({"cache_sequence_id": cache_sequence_id} if cache_sequence_id else {}),
                     }
                 )
                 continue
@@ -2499,6 +2501,7 @@ class AgentWorkflow:
                         "model": model,
                         "cache_read_input_tokens": cache_read,
                         "cache_creation_input_tokens": cache_write,
+                        **({"cache_sequence_id": cache_sequence_id} if cache_sequence_id else {}),
                     }
                 )
                 continue
@@ -2535,6 +2538,7 @@ class AgentWorkflow:
                 "model": model,
                 "cache_read_input_tokens": cache_read,
                 "cache_creation_input_tokens": cache_write,
+                **({"cache_sequence_id": cache_sequence_id} if cache_sequence_id else {}),
             }
             if cost_cents > 0:
                 total_cost_cents += cost_cents
@@ -2725,6 +2729,7 @@ class AgentWorkflow:
         gpt_token_rotated: bool = False,
         compute_token_used: Optional[Dict[str, Any]] = None,
         from_fast_cache: bool = False,
+        cache_sequence_id: Optional[str] = None,
     ) -> None:
         """Callback for run_agent to report token usage after each LLM call.
 
@@ -2961,6 +2966,7 @@ class AgentWorkflow:
                             "cache_read_input_tokens": cache_read_input_tokens,
                             "cache_creation_input_tokens": cache_creation_input_tokens,
                             "from_fast_cache": from_fast_cache,
+                            **({"cache_sequence_id": cache_sequence_id} if cache_sequence_id else {}),
                         }
                     ],
                 ],

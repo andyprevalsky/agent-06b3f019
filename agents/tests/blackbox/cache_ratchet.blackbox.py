@@ -11,6 +11,7 @@ FAILING_CLAUDE_CODE_AGENT_USAGE = [
         "type": "llm",
         "_benchmark_agent_id": "root",
         "call_site": "execute_loop",
+        "cache_sequence_id": "agent:root:call:execute_loop",
         "model": "gpt-5.6-sol-gpt",
         "cache_read_input_tokens": 1408,
         "cache_creation_input_tokens": 6260,
@@ -19,6 +20,7 @@ FAILING_CLAUDE_CODE_AGENT_USAGE = [
         "type": "llm",
         "_benchmark_agent_id": "root",
         "call_site": "completion_summary",
+        "cache_sequence_id": "agent:root:call:completion_summary",
         "model": "anthropic/claude-opus-4.8",
         "cache_read_input_tokens": 0,
         "cache_creation_input_tokens": 1300,
@@ -27,6 +29,7 @@ FAILING_CLAUDE_CODE_AGENT_USAGE = [
         "type": "llm",
         "_benchmark_agent_id": "root",
         "call_site": "execute_loop",
+        "cache_sequence_id": "agent:root:call:execute_loop",
         "model": "gpt-5.6-sol-gpt",
         "cache_read_input_tokens": 6528,
         "cache_creation_input_tokens": 2527,
@@ -35,6 +38,7 @@ FAILING_CLAUDE_CODE_AGENT_USAGE = [
         "type": "llm",
         "_benchmark_agent_id": "root",
         "call_site": "verifier_execute",
+        "cache_sequence_id": "agent:root:call:verifier_execute",
         "model": "gpt-5.6-sol-gpt",
         "cache_read_input_tokens": 0,
         "cache_creation_input_tokens": 2681,
@@ -56,7 +60,7 @@ def test_cache_ratchet_measures_repeatable_call_groups():
 
 
 def test_different_cache_namespaces_do_not_form_a_repeatable_group():
-    """A model/auth fallback at one call site is not proof of same-prefix reuse."""
+    """Sibling sequences at one call site are not proof of prefix reuse."""
     from benchmarks.llm_usage import aggregate_repeatable_cache_usage
 
     metrics = aggregate_repeatable_cache_usage(
@@ -65,7 +69,8 @@ def test_different_cache_namespaces_do_not_form_a_repeatable_group():
                 "type": "llm",
                 "_benchmark_agent_id": "root",
                 "call_site": "execute_loop",
-                "model": "claude-fable-5-claude",
+                "cache_sequence_id": "agent:root:task:a:call:execute_loop",
+                "model": "gpt-5.6-sol-gpt",
                 "cache_read_input_tokens": 10000,
                 "cache_creation_input_tokens": 0,
             },
@@ -73,10 +78,37 @@ def test_different_cache_namespaces_do_not_form_a_repeatable_group():
                 "type": "llm",
                 "_benchmark_agent_id": "root",
                 "call_site": "execute_loop",
+                "cache_sequence_id": "agent:root:task:b:call:execute_loop",
                 "model": "gpt-5.6-sol-gpt",
                 "cache_read_input_tokens": 0,
                 "cache_creation_input_tokens": 0,
             },
+        ]
+    )
+
+    assert metrics == {
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cache_hit_pct": 0.0,
+    }
+
+
+def test_independent_web_summaries_are_not_repeatable():
+    """Nine one-shot page summaries must contribute no repeatable denominator."""
+    from benchmarks.llm_usage import aggregate_repeatable_cache_usage
+
+    metrics = aggregate_repeatable_cache_usage(
+        [
+            {
+                "type": "llm",
+                "_benchmark_agent_id": "root",
+                "call_site": "summarize_web_fetch",
+                "cache_sequence_id": f"agent:root:tool:fetch-{index}:call:summarize_web_fetch",
+                "model": "gpt-5.6-sol-gpt",
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 1000 + index,
+            }
+            for index in range(9)
         ]
     )
 
@@ -124,8 +156,13 @@ def test_runner_enforces_repeatable_fields_and_missing_metrics_fail_closed():
         repeatable_cache_read_input_tokens=40,
         repeatable_cache_creation_input_tokens=60,
     )
+    no_genuine_repeat = _task_result(
+        "claude-code-agent",
+        repeatable_cache_read_input_tokens=0,
+        repeatable_cache_creation_input_tokens=0,
+    )
 
-    for result in (low_repeatable, missing_repeatable):
+    for result in (low_repeatable, missing_repeatable, no_genuine_repeat):
         try:
             enforce_cache_ratchets([result])
             raise AssertionError("positive-floor cache telemetry failed open")
@@ -150,6 +187,7 @@ async def test_collector_identity_is_authoritative_and_separates_agents():
                             "type": "llm",
                             "agent_id": "untrusted-shared-id",
                             "call_site": "execute_loop",
+                            "cache_sequence_id": "agent:untrusted-shared-id:call:execute_loop",
                             "cache_read_input_tokens": 50,
                             "cache_creation_input_tokens": 50,
                             "model": "gpt-5.6-sol-gpt",
@@ -268,6 +306,10 @@ async def run_all_tests():
     result.record(
         "cache_namespace_separation",
         test_different_cache_namespaces_do_not_form_a_repeatable_group,
+    )
+    result.record(
+        "independent_web_summaries_excluded",
+        test_independent_web_summaries_are_not_repeatable,
     )
     result.record(
         "runner_repeatable_fields_fail_closed",

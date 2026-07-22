@@ -96,16 +96,25 @@ def aggregate_repeatable_cache_usage(items: Iterable[dict[str, Any]]) -> dict[st
 
     A one-shot verifier or summary call has no same-run reuse opportunity, so
     mixing it into a prefix-reuse ratchet makes the result depend on unrelated
-    output size. Group by agent, call site, and normalized cache namespace, then
-    retain every call from groups with at least two calls so the first write and
-    later reads stay accountable.
+    output size. Only usage carrying the exact provider ``cache_sequence_id``
+    is eligible. Retain every call from sequences with at least two calls so the
+    first write and later reads stay accountable. Missing sequence telemetry is
+    deliberately excluded; positive task floors fail closed on the resulting
+    zero-token metric.
     """
-    llm_items = [item for item in items if item.get("type") == "llm"]
+    llm_items = [
+        item
+        for item in items
+        if item.get("type") == "llm"
+        and isinstance(item.get("cache_sequence_id"), str)
+        and item["cache_sequence_id"].strip()
+    ]
+
     def cache_group(item: dict[str, Any]) -> tuple[str, str, str, str]:
         provider, model = classify_usage_item(item)
         return (
             str(item.get("_benchmark_agent_id") or item.get("agent_id") or "unknown"),
-            str(item.get("call_site") or "unknown"),
+            item["cache_sequence_id"].strip(),
             provider,
             model,
         )

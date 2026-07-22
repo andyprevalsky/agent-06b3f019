@@ -2293,15 +2293,22 @@ def test_build_codex_responses_body_contract():
 
 
 def test_codex_cache_scope_uses_canonical_session_headers():
-    """Codex cache affinity must use the HTTP header names its client sends."""
+    """Every Codex affinity header must select the provider cache session."""
     scope = "rose:7c4fd924ea17566d159427d8"
     thread_id = "6eb14611-3b1c-45fe-92dd-dde8cefc9768"
 
     assert _codex_extra_headers_from_body({"prompt_cache_key": scope}, thread_id=thread_id) == {
         "session-id": scope,
-        "thread-id": thread_id,
-        "x-client-request-id": thread_id,
+        "thread-id": scope,
+        "x-client-request-id": scope,
     }
+    sibling_scope = "rose:568d74e103fc1f1c5b8dc7c4"
+    sibling_headers = _codex_extra_headers_from_body(
+        {"prompt_cache_key": sibling_scope},
+        thread_id=thread_id,
+    )
+    assert sibling_headers["thread-id"] == sibling_scope
+    assert sibling_headers["thread-id"] != scope
     assert _codex_extra_headers_from_body({"prompt_cache_key": "  "}) == {}
 
 
@@ -2436,6 +2443,34 @@ async def test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes():
             messages=grown_messages,
             cache_namespace="browser-task:task-a:write_lock_notification",
         )
+        await _capture(
+            lineage_key="agent:parent",
+            agent_id="parent",
+            call_site="explore_agent",
+            messages=base_messages,
+            cache_namespace="agent:parent:task:explore-a:call:explore_agent",
+        )
+        await _capture(
+            lineage_key="agent:parent",
+            agent_id="parent",
+            call_site="explore_agent",
+            messages=grown_messages,
+            cache_namespace="agent:parent:task:explore-a:call:explore_agent",
+        )
+        await _capture(
+            lineage_key="agent:parent",
+            agent_id="parent",
+            call_site="explore_agent",
+            messages=base_messages,
+            cache_namespace="agent:parent:task:explore-b:call:explore_agent",
+        )
+        await _capture(
+            lineage_key="agent:parent",
+            agent_id="parent",
+            call_site="explore_agent",
+            messages=base_messages,
+            cache_namespace="agent:parent:task:explore-c:call:explore_agent",
+        )
     cache_keys = [body["prompt_cache_key"] for body in captured_bodies]
     assert cache_keys[0] == cache_keys[1], "A growing conversation must reuse its prior Codex cache session"
     assert cache_keys[0] == cache_keys[2], "Resolved message references must not reset the cache session"
@@ -2444,6 +2479,49 @@ async def test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes():
     assert cache_keys[5] == cache_keys[6], "Consecutive browser steps must reuse one Codex cache session"
     assert cache_keys[5] != cache_keys[7], "Parallel browser tasks under one parent must not share a cache session"
     assert cache_keys[5] != cache_keys[8], "A browser fork must not overwrite the main browser cache session"
+    assert cache_keys[9] == cache_keys[10], "Later turns of one explore task must retain its cache session"
+    assert len({cache_keys[9], cache_keys[11], cache_keys[12]}) == 3, (
+        "Three sibling explore tasks must use three provider cache sessions"
+    )
+
+
+async def test_rose_client_routes_and_emits_one_cache_sequence_identity():
+    """The provider namespace and persisted usage must carry one exact ID."""
+    captured_namespaces = []
+
+    async def fake_gpt_route(**kwargs):
+        captured_namespaces.append(kwargs.get("cache_namespace"))
+        yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.6-terra-gpt"})
+        yield StreamChunk(kind="content", data={"text": "ok"})
+        yield StreamChunk(
+            kind="usage",
+            data={
+                "prompt_tokens": 10,
+                "completion_tokens": 1,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 10,
+            },
+        )
+        yield StreamChunk(kind="done", data={})
+
+    sequence_id = "agent:parent:task:explore-a:call:explore_agent"
+    client = RoseClient(openrouter_key="unused")
+    auth = GptAuthContext(token="test", source="user", user_id="test-user", max_rotations=0)
+    with patch("providers.rose.client._try_gpt_auth", fake_gpt_route):
+        chunks = await _drain(
+            client.complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "hi"}],
+                gpt_auth=auth,
+                call_site="explore_agent",
+                cache_namespace=sequence_id,
+                dump_context=False,
+            )
+        )
+
+    usage = next(chunk.data for chunk in chunks if chunk.kind == "usage")
+    assert captured_namespaces == [sequence_id]
+    assert usage["cache_sequence_id"] == sequence_id
 
 
 def test_build_codex_responses_body_preserves_tool_history_and_multimodal():
@@ -5300,6 +5378,10 @@ async def run_all_tests():
     await r.record_async(
         "gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes",
         test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes,
+    )
+    await r.record_async(
+        "rose_client_cache_sequence_identity",
+        test_rose_client_routes_and_emits_one_cache_sequence_identity,
     )
     r.record(
         "codex_body_tool_history_multimodal", test_build_codex_responses_body_preserves_tool_history_and_multimodal

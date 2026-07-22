@@ -575,7 +575,12 @@ async def test_handler_execute_tool_happy_path():
             return {
                 "summary": "Source: example.com\nA summary of the page.",
                 "files_to_download": ["https://example.com/file.pdf"],
-                "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "total_tokens": 150,
+                    "cache_sequence_id": "agent:a-1:tool:tc-wf:call:summarize_web_fetch",
+                },
                 "summarized": True,
             }
         if name == "web_fetch_download_activity":
@@ -600,6 +605,8 @@ async def test_handler_execute_tool_happy_path():
     assert "web_fetch_download_activity" in captured
     scrape_call = next(call for call in calls if call["activity"] == "web_fetch_activity")
     assert scrape_call["kwargs"]["retry_policy"].maximum_attempts == 2
+    summary_call = next(call for call in calls if call["activity"] == "summarize_and_filter_links")
+    assert summary_call["args"][-1] == "agent:a-1:tool:tc-wf:call:summarize_web_fetch"
     download_call = next(call for call in calls if call["activity"] == "web_fetch_download_activity")
     assert download_call["args"] == [["https://example.com/file.pdf"], "u-1", True, "root goal", False]
 
@@ -610,6 +617,9 @@ async def test_handler_execute_tool_happy_path():
     assert "Downloaded 1 file" in out["result"]["content"]
     # Service cost line attributed to Firecrawl
     assert out["usage"]["service"][0]["provider"] == "Firecrawl scrape"
+    assert out["usage"]["llm"][0]["cache_sequence_id"] == (
+        "agent:a-1:tool:tc-wf:call:summarize_web_fetch"
+    )
 
     tool_titles = [
         call["args"][3]["title"]
