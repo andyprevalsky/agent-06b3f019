@@ -233,13 +233,11 @@ class RequestUserAssistanceForAuthenticationBrowserTool(BaseModel):
     tool: Literal["request_user_assistance_for_authentication"]
 
 
-class RotateIpBrowserTool(BaseModel):
-    """Rotate the browser session's outbound IP when it is blocked/rate-limited."""
+class RecoverFromChallengeBrowserTool(BaseModel):
+    """Run staged auth-preserving recovery for a persistent anti-bot challenge."""
 
-    tool: Literal["rotate_ip"]
-    reason: str = Field(
-        description="One line on why the current IP appears blocked or rate-limited"
-    )
+    tool: Literal["recover_from_challenge"]
+    reason: str = Field(description="One line of concrete evidence that the anti-bot challenge persists")
 
 
 class PaymentLineItem(BaseModel):
@@ -686,7 +684,7 @@ BROWSER_TOOL_MODELS = {
     "attempt_completion": AttemptCompletionBrowserTool,
     # "send_message_to_user": SendMessageToUserBrowserTool,
     "request_user_assistance_for_authentication": RequestUserAssistanceForAuthenticationBrowserTool,
-    "rotate_ip": RotateIpBrowserTool,
+    "recover_from_challenge": RecoverFromChallengeBrowserTool,
     "request_payment_card": RequestPaymentCardBrowserTool,
     # Internal write-lock approval metadata. Kept in the stable tool surface
     # so a forked request can append only a user message and preserve cache reads.

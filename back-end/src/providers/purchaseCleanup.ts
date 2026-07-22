@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import {
   createCardProviderForAgent,
@@ -18,10 +19,17 @@ import {
   consumePurchaseWalletFunding,
   reclaimPurchaseWalletFunding,
 } from './purchase-wallet-funding';
-import { findWalletFundingByPurchaseId } from './purchase-wallet-funding-repo';
+import {
+  claimWalletFundingReclaimRetry,
+  findWalletFundingByPurchaseId,
+} from './purchase-wallet-funding-repo';
 
 const log = createLogger('PurchaseCleanup');
 const STALE_CHARGING_MS = Number(process.env.PURCHASE_STALE_CHARGING_MS ?? 15 * 60 * 1000);
+// One provider release pass polls for roughly a minute. Do not let the minute cron start a second
+// release-observation loop while that pass is still alive; crashed attempts become retryable on the next
+// tick after this lease window.
+const STALE_RECLAIMING_MS = 2 * 60 * 1000;
 
 /**
  * Funding states that mean *we already closed this card to reclaim it* (or finished doing so). Once
@@ -145,13 +153,24 @@ export async function cleanupAgentPurchaseCards(
       } else {
         // Claim the reclaim before closing the card so a concurrent pass can't read the now
         // not-live card as merchant-spent while the funding is still FUNDED.
-        await beginPurchaseWalletReclaim(purchase.id);
+        const reclaimClaim = await beginPurchaseWalletReclaim(purchase.id);
+        if (reclaimClaim.status === 'already_owned') {
+          log.info('Purchase funding reclaim is already owned; skipping duplicate card close', {
+            agent_id: agentId,
+            purchase_id: purchase.id,
+            card_id: cardId,
+          });
+          continue;
+        }
         await activeCardProvider.closeCard(cardId);
         try {
           await reclaimPurchaseWalletFunding(
             purchase,
             'agent_cleanup_unspent_card',
-            walletFundingProvider
+            walletFundingProvider,
+            reclaimClaim.status === 'owned'
+              ? { reclaimLeaseToken: reclaimClaim.reclaimLeaseToken }
+              : {}
           );
         } catch (reclaimError) {
           if (isWalletFundingConsumedDuringReclaimError(reclaimError)) {
@@ -238,6 +257,7 @@ export async function reconcileFailedPurchaseFundingReclaims(
   walletFundingProvider?: WalletFundingProvider,
   scope?: PurchaseReconcileScope
 ): Promise<void> {
+  const staleReclaimingBefore = new Date(Date.now() - STALE_RECLAIMING_MS);
   const purchases = await prisma.purchaseSpend.findMany({
     where: {
       ...reconcileUserFilter(scope),
@@ -245,7 +265,9 @@ export async function reconcileFailedPurchaseFundingReclaims(
         { status: PurchaseSpendStatus.FUNDING_RECLAIM_FAILED },
         {
           status: PurchaseSpendStatus.HELD,
-          walletFunding: { is: { status: 'RECLAIMING' } },
+          walletFunding: {
+            is: { status: 'RECLAIMING', updatedAt: { lte: staleReclaimingBefore } },
+          },
         },
       ],
       stripePaymentIntentId: { not: null },
@@ -262,10 +284,43 @@ export async function reconcileFailedPurchaseFundingReclaims(
 
   for (const purchase of purchases) {
     try {
+      const funding = await findWalletFundingByPurchaseId(purchase.id);
+      let reclaimLeaseToken: string | undefined;
+      if (
+        funding !== null &&
+        (funding.status === PurchaseWalletFundingStatus.FUNDED ||
+          funding.status === PurchaseWalletFundingStatus.RECLAIM_FAILED ||
+          funding.status === PurchaseWalletFundingStatus.RECLAIMING)
+      ) {
+        reclaimLeaseToken = randomUUID();
+        const retryClaim = await claimWalletFundingReclaimRetry(funding.id, {
+          reclaimIdempotencyKey:
+            funding.reclaimIdempotencyKey ?? `purchase-wallet-reclaim:${purchase.id}`,
+          reclaimLeaseToken,
+          staleReclaimingBefore,
+        });
+        if (retryClaim.count === 0) {
+          log.info(
+            'Purchase funding reclaim retry is already owned; skipping duplicate provider call',
+            {
+              purchase_id: purchase.id,
+              funding_id: funding.id,
+            }
+          );
+          continue;
+        }
+      }
       await reclaimPurchaseWalletFunding(
         purchase,
         'failed_company_transfer_release_retry',
-        walletFundingProvider
+        walletFundingProvider,
+        reclaimLeaseToken !== undefined &&
+          funding !== null &&
+          (funding.status === PurchaseWalletFundingStatus.FUNDED ||
+            funding.status === PurchaseWalletFundingStatus.RECLAIM_FAILED ||
+            funding.status === PurchaseWalletFundingStatus.RECLAIMING)
+          ? { reclaimLeaseToken }
+          : {}
       );
       if (purchase.stripePaymentIntentId !== null) {
         await refundCapturedPurchase(purchase.stripePaymentIntentId, purchase.id);
@@ -397,13 +452,21 @@ export async function reconcileDissolvedPurchaseHolds(
 
     // Claim the reclaim before closing the card so a concurrent pass can't read the now not-live
     // card as merchant-spent while the funding is still FUNDED.
-    await beginPurchaseWalletReclaim(purchase.id);
+    const reclaimClaim = await beginPurchaseWalletReclaim(purchase.id);
+    if (reclaimClaim.status === 'already_owned') {
+      log.info('Purchase funding reclaim is already owned; skipping duplicate card close', {
+        purchase_id: purchase.id,
+        card_id: cardId,
+      });
+      continue;
+    }
     await activeCardProvider.closeCard(cardId);
     try {
       await reclaimPurchaseWalletFunding(
         purchase,
         'stripe_hold_dissolved_unspent_card',
-        walletFundingProvider
+        walletFundingProvider,
+        reclaimClaim.status === 'owned' ? { reclaimLeaseToken: reclaimClaim.reclaimLeaseToken } : {}
       );
     } catch (error) {
       if (isWalletFundingConsumedDuringReclaimError(error)) {
