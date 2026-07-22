@@ -3974,6 +3974,7 @@ def _sync_compute_tokens(
     *,
     tolerate_gpt_code_unavailable: bool = False,
     tolerate_claude_code_unavailable: bool = False,
+    required_token_types: tuple[str, ...] | None = None,
 ) -> bool:
     """Refresh the compute-token integrations (claude_code / gpt_code + pool)
     from the verified workspace DB into an isolated benchmark DB. When there is
@@ -4001,7 +4002,11 @@ def _sync_compute_tokens(
         print("    ⚠ Compute-token sync skipped: no distinct credential-bearing source database found")
         return False
     env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = compute_token_source
+    env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
     env.pop("SEED_ALLOW_MISSING_CLAUDE_CODE", None)
+    env.pop("SEED_REQUIRE_COMPUTE_TOKEN_TYPES", None)
+    if required_token_types is not None:
+        env["SEED_REQUIRE_COMPUTE_TOKEN_TYPES"] = ",".join(required_token_types)
     if tolerate_gpt_code_unavailable:
         env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
     if tolerate_claude_code_unavailable:
@@ -4133,6 +4138,15 @@ def _is_simulate_mode() -> bool:
     return os.environ.get("BENCHMARK_WORLD_MODEL_MODE") == "simulate"
 
 
+def _anthropic_family_excluded() -> bool:
+    return os.getenv("ROSE_EXCLUDE_ANTHROPIC_FAMILY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     """Apply the one complete, current production-credential overlay.
 
@@ -4160,10 +4174,14 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     # abort the whole run before an agent is ever created. Codex-dependent tasks
     # keep their own strict credential gates downstream. Without this, an exhausted
     # org-wide Codex quota failed every browser task at the fixture (0/8 ecommerce).
-    if not _sync_compute_tokens(
-        tolerate_gpt_code_unavailable=True,
-        tolerate_claude_code_unavailable=ctx.tolerate_claude_code_unavailable,
-    ):
+    if _anthropic_family_excluded():
+        synced_compute_tokens = _sync_compute_tokens(required_token_types=("gpt",))
+    else:
+        synced_compute_tokens = _sync_compute_tokens(
+            tolerate_gpt_code_unavailable=True,
+            tolerate_claude_code_unavailable=ctx.tolerate_claude_code_unavailable,
+        )
+    if not synced_compute_tokens:
         raise RuntimeError("Live fixture could not refresh compute tokens")
     if not _sync_browser_credentials(ctx.cookie_domains):
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
@@ -4181,6 +4199,10 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
         return
     if _is_simulate_mode():
         print("    🌍 simulate mode — using compute tokens from the restored seed DB")
+        return
+    if _anthropic_family_excluded():
+        if not _sync_compute_tokens(required_token_types=("gpt",)):
+            raise RuntimeError("Benchmark run could not refresh local compute tokens")
         return
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
@@ -7876,9 +7898,11 @@ async def _check_compute_code_credentials(base_url: str) -> bool:
     try:
         headers = await _api_headers()
         async with httpx.AsyncClient() as client:
+            params = {"tokenType": "gpt"} if _anthropic_family_excluded() else None
             resp = await client.get(
                 f"{base_url}/api/integrations/compute-code/credentials/token",
                 headers=headers,
+                params=params,
                 timeout=10.0,
             )
             if resp.status_code == 200:

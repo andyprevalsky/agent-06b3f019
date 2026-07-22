@@ -100,6 +100,14 @@ def test_tolerant_sync_sets_the_seed_env_opt_in():
     assert env.get("SEED_ALLOW_MISSING_CLAUDE_CODE") == "1"
 
 
+def test_gpt_only_sync_requires_gpt_without_missing_gpt_opt_in():
+    with patch.dict(os.environ, {"SEED_ALLOW_MISSING_GPT_CODE": "1"}):
+        env = _captured_seed_env(required_token_types=("gpt",))
+    assert env.get("SEED_REQUIRE_COMPUTE_TOKEN_TYPES") == "gpt"
+    assert env.get("SEED_ALLOW_MISSING_GPT_CODE") is None
+    assert env.get("SEED_ALLOW_MISSING_CLAUDE_CODE") is None
+
+
 def test_sync_uses_verified_shared_workspace_as_compute_token_source():
     seen: dict[str, dict[str, str]] = {}
 
@@ -295,6 +303,59 @@ def test_blanket_preflight_uses_tolerant_sync():
         asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
 
     assert captured == {"gpt": True, "claude": True}
+
+
+def test_anthropic_excluded_preflight_requires_gpt_only_sync():
+    captured: dict[str, tuple[str, ...] | None] = {}
+
+    def fake_sync(
+        *,
+        tolerate_gpt_code_unavailable: bool = False,
+        tolerate_claude_code_unavailable: bool = False,
+        required_token_types: tuple[str, ...] | None = None,
+    ) -> bool:
+        captured["required"] = required_token_types
+        assert tolerate_gpt_code_unavailable is False
+        assert tolerate_claude_code_unavailable is False
+        return True
+
+    with (
+        patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}),
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(
+            rb,
+            "_has_usable_anthropic_api_key_fallback",
+            new=AsyncMock(side_effect=AssertionError("Anthropic fallback must not be checked")),
+        ),
+        patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+    ):
+        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
+
+    assert captured == {"required": ("gpt",)}
+
+
+def test_anthropic_excluded_compute_preflight_requests_gpt_token():
+    calls: list[dict] = []
+
+    class _FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _tb):
+            return False
+
+        async def get(self, *_args, **kwargs):
+            calls.append(kwargs)
+            return _JsonResponse(200, {"type": "gpt", "accessToken": "codex-token"})
+
+    with (
+        patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}),
+        patch.object(rb, "_api_headers", new=AsyncMock(return_value={})),
+        patch.object(rb.httpx, "AsyncClient", _FakeAsyncClient),
+    ):
+        assert asyncio.run(rb._check_compute_code_credentials("http://localhost:3001")) is True
+
+    assert calls[0]["params"] == {"tokenType": "gpt"}
 
 
 def test_claude_code_preflight_rejects_gpt_only_token_without_anthropic_fallback():

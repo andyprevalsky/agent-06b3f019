@@ -48,14 +48,12 @@ export FAST_MODE_CACHE_USE_LOCAL=1
 # boundary to the stable backend callback registered for the Rose Labs org so a
 # workspace-local `.env` URL cannot turn setup/resume into an opaque mint 500.
 export AGENTCARD_ONBOARDING_RETURN_URL="${AGENTCARD_ONBOARDING_RETURN_URL:-https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback}"
-# These payment-lifecycle tasks drive a browser checkout on claude compute
-# tokens and never spawn a Codex agent. An externally rate-limited or
-# quota-exhausted gpt_code (Codex) integration must not fail the stack's
-# compute-token sync and block an otherwise-healthy lifecycle gate. Allow the
-# sync to proceed without a usable Codex integration; the compute-token sync
-# stays strict everywhere else (default), so Codex regressions still surface in
-# the codex-code test that actually uses it.
-export SEED_ALLOW_MISSING_GPT_CODE=1
+# These payment-lifecycle tasks drive browser checkout, not Claude Code. The
+# deploy-approved Claude smoke owns real Claude coverage and is skippable when
+# Claude credentials are unavailable; AgentCard should still run against the
+# available GPT compute lane instead of blocking on absent Claude OAuth or a
+# cooled-down shared Anthropic fallback.
+export ROSE_EXCLUDE_ANTHROPIC_FAMILY=1
 # These sandbox lifecycle tasks use only the bundled /test_payment fixture and
 # never consume production browser cookies, passwords, passkeys, or storage.
 # Skipping that unrelated graph prevents a warm local database from spending
