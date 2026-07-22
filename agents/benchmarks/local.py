@@ -56,6 +56,10 @@ AGENT_PAYMENT_TASK_NAMES = {
     "agent-payment-abandonment",
     "agent-payment-setup-resume",
 }
+TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
+    "gate-subscription-card-mint",
+    "gate-kyc-card-mint",
+}
 NON_PURCHASE_GATE_TASK_NAMES = {"gate-source-connect-gmail"}
 BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 _PORT_RANGE_RESERVATIONS: dict[int, tuple[TextIO, ...]] = {}
@@ -663,7 +667,9 @@ def _kill_scoped_processes_by_run_id(stack: ServiceStack) -> None:
 
 
 def needs_frontend_tunnel(tasks: Sequence[str]) -> bool:
-    return bool(AGENT_PAYMENT_TASK_NAMES & set(tasks)) and not os.environ.get("BENCHMARK_FRONTEND_URL")
+    return bool(TEST_PAYMENT_FRONTEND_TASK_NAMES & set(tasks)) and not os.environ.get(
+        "BENCHMARK_FRONTEND_URL"
+    )
 
 
 def needs_imessage_relay(tasks: Sequence[str]) -> bool:

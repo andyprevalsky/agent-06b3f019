@@ -7672,6 +7672,18 @@ def test_cloud_dashboard_mirror_does_not_override_benchmark_frontend_url() -> No
     assert "BENCHMARK_REPORT_FRONTEND_URL" in DRIVER_SCRIPT.read_text()
 
 
+def test_cloud_test_payment_tasks_launch_bundled_frontend_with_supabase_env() -> None:
+    """Cloud test-payment tasks must not expose Vite's dev module graph."""
+    driver = DRIVER_SCRIPT.read_text()
+
+    assert "BENCH_NEEDS_BUNDLED_FRONTEND=0" in driver
+    assert "gate-subscription-card-mint|gate-kyc-card-mint" in driver
+    assert "BENCHMARK_BUNDLED_FRONTEND=true" in driver
+    assert 'cloudbench_env_value "$REPO_DIR/back-end/.env" SUPABASE_URL' in driver
+    assert 'STACK_ENV+=("VITE_SUPABASE_URL=$FRONTEND_SUPABASE_URL")' in driver
+    assert 'STACK_ENV+=("VITE_SUPABASE_ANON_KEY=$FRONTEND_SUPABASE_ANON_KEY")' in driver
+
+
 def test_production_only_cloud_route_rejects_mixed_target_batches() -> None:
     result = subprocess.run(
         [

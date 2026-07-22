@@ -145,10 +145,16 @@ run_with_heartbeat() {
 # The controller may pass "a,b,c" or "a b c"; accept both.
 read -r -a BENCH_TASK_LIST <<< "$(printf '%s' "$BENCH_TASKS" | tr ',' ' ')"
 BENCH_ENABLE_NON_PURCHASE_GATES=0
+BENCH_NEEDS_BUNDLED_FRONTEND=0
 for task_name in "${BENCH_TASK_LIST[@]}"; do
     case "$task_name" in
         gate-source-connect-gmail)
             BENCH_ENABLE_NON_PURCHASE_GATES=1
+            ;;
+    esac
+    case "$task_name" in
+        agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint)
+            BENCH_NEEDS_BUNDLED_FRONTEND=1
             ;;
     esac
 done
@@ -328,6 +334,14 @@ cloudbench_verify_env_file "$REPO_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" b
 cloudbench_validate_browser_provider_contract \
     "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
     "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || finish 1
+FRONTEND_SUPABASE_URL="$(cloudbench_env_value "$REPO_DIR/back-end/.env" VITE_SUPABASE_URL)"
+[ -n "$FRONTEND_SUPABASE_URL" ] || FRONTEND_SUPABASE_URL="$(cloudbench_env_value "$REPO_DIR/back-end/.env" SUPABASE_URL)"
+FRONTEND_SUPABASE_ANON_KEY="$(cloudbench_env_value "$REPO_DIR/back-end/.env" VITE_SUPABASE_ANON_KEY)"
+[ -n "$FRONTEND_SUPABASE_ANON_KEY" ] || FRONTEND_SUPABASE_ANON_KEY="$(cloudbench_env_value "$REPO_DIR/agents/.env" SUPABASE_ANON_KEY)"
+if [ "$BENCH_NEEDS_BUNDLED_FRONTEND" = "1" ]; then
+    [ -n "$FRONTEND_SUPABASE_URL" ] || { log "FATAL: bundled frontend benchmark is missing VITE_SUPABASE_URL/SUPABASE_URL"; finish 1; }
+    [ -n "$FRONTEND_SUPABASE_ANON_KEY" ] || { log "FATAL: bundled frontend benchmark is missing VITE_SUPABASE_ANON_KEY/SUPABASE_ANON_KEY"; finish 1; }
+fi
 
 # ── 3. Sync baked deps from the image into the volume checkout ──────────────
 step dep_sync
@@ -511,6 +525,15 @@ if [ -n "$BENCHMARK_VM_USD_PER_HOUR" ]; then
 fi
 if [ "$BENCH_ENABLE_NON_PURCHASE_GATES" = "1" ]; then
     STACK_ENV+=("NON_PURCHASE_GATES_ENABLED=1")
+fi
+if [ "$BENCH_NEEDS_BUNDLED_FRONTEND" = "1" ]; then
+    STACK_ENV+=("BENCHMARK_BUNDLED_FRONTEND=true")
+fi
+if [ -n "$FRONTEND_SUPABASE_URL" ]; then
+    STACK_ENV+=("VITE_SUPABASE_URL=$FRONTEND_SUPABASE_URL")
+fi
+if [ -n "$FRONTEND_SUPABASE_ANON_KEY" ]; then
+    STACK_ENV+=("VITE_SUPABASE_ANON_KEY=$FRONTEND_SUPABASE_ANON_KEY")
 fi
 if [ "$BENCH_SIMULATE" = "1" ]; then
     STACK_ENV+=(

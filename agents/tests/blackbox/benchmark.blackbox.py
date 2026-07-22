@@ -785,6 +785,26 @@ def test_payment_benchmark_enables_bundled_frontend_before_stack_start():
         assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
 
 
+def test_purchase_gate_benchmarks_enable_bundled_frontend_before_stack_start():
+    """Purchase-card gate benches also load the /test_payment frontend."""
+    import os
+    from unittest.mock import patch
+
+    from benchmarks import local
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        os.environ.pop("BENCHMARK_FRONTEND_URL", None)
+        local.configure_task_environment(["gate-subscription-card-mint"])
+        assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        os.environ.pop("BENCHMARK_FRONTEND_URL", None)
+        local.configure_task_environment(["gate-kyc-card-mint"])
+        assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
+
+
 def test_payment_benchmark_preserves_lifecycle_stack_contract():
     """The consolidated local lane must retain the old lifecycle launcher's env."""
     import os
@@ -4939,6 +4959,17 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
     assert "gate-source-connect-gmail" in script
     assert "BENCH_ENABLE_NON_PURCHASE_GATES" in script
     assert "NON_PURCHASE_GATES_ENABLED=1" in script
+
+
+def test_cloudbench_test_payment_benchmarks_enable_bundled_frontend_env():
+    """Cloudbench must build the payment frontend before public tunnel exposure."""
+    script = (Path(__file__).resolve().parents[3] / "scripts" / "cloudbench-run.sh").read_text()
+
+    assert "BENCH_NEEDS_BUNDLED_FRONTEND" in script
+    assert "gate-subscription-card-mint|gate-kyc-card-mint" in script
+    assert "BENCHMARK_BUNDLED_FRONTEND=true" in script
+    assert "VITE_SUPABASE_URL=$FRONTEND_SUPABASE_URL" in script
+    assert "VITE_SUPABASE_ANON_KEY=$FRONTEND_SUPABASE_ANON_KEY" in script
 
 
 async def test_create_agent_sends_write_lock_override_when_env_set():
@@ -9332,6 +9363,10 @@ async def run_all_tests():
         "cloudbench_source_connect_gate_benchmark_non_purchase_env",
         test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates,
     )
+    r.record(
+        "cloudbench_test_payment_bundled_frontend_env",
+        test_cloudbench_test_payment_benchmarks_enable_bundled_frontend_env,
+    )
     await r.record_async("create_agent_write_lock_override", test_create_agent_sends_write_lock_override_when_env_set)
     await r.record_async("create_agent_goal_override", test_create_agent_uses_goal_override_when_env_set)
     await r.record_async("create_agent_response_schema", test_create_agent_sends_task_response_schema)
@@ -9518,6 +9553,10 @@ async def run_all_tests():
     r.record(
         "payment_benchmark_bundled_frontend",
         test_payment_benchmark_enables_bundled_frontend_before_stack_start,
+    )
+    r.record(
+        "purchase_gate_benchmark_bundled_frontend",
+        test_purchase_gate_benchmarks_enable_bundled_frontend_before_stack_start,
     )
     r.record(
         "payment_benchmark_lifecycle_stack_contract",
