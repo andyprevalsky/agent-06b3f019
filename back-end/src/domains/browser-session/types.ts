@@ -24,6 +24,10 @@ export const resumeSessionSchema = z.object({
   task_id: z.string().uuid(), // Use stable task ID instead of session_id
 });
 
+export const browserControlSchema = z.object({
+  mode: z.enum(['user', 'agent', 'acknowledge']),
+});
+
 // rotate_ip tool → swap the browser session's outbound IP for the sub-agent run
 // identified by task_id (the stable BrowserSession row id / escalation key).
 export const rotateProxySchema = z.object({

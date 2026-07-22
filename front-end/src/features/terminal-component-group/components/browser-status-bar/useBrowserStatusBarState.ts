@@ -138,10 +138,26 @@ export function useBrowserStatusBarState(taskId: string): BrowserStatusBarViewMo
       ? lastMessage.metadata.title
       : 'Browser session active';
 
-  const isDisconnected = useMemo(
-    () => browserMessages.some((m) => m.metadata?.action_type === 'session_paused'),
-    [browserMessages],
-  );
+  const isDisconnected = useMemo(() => {
+    const orderedMessages = browserMessages
+      .map((message, index) => ({ message, index, timestamp: Date.parse(message.timestamp) }))
+      .sort((left, right) => {
+        const leftTimestamp = Number.isFinite(left.timestamp) ? left.timestamp : 0;
+        const rightTimestamp = Number.isFinite(right.timestamp) ? right.timestamp : 0;
+        return leftTimestamp - rightTimestamp || left.index - right.index;
+      });
+    for (let index = orderedMessages.length - 1; index >= 0; index -= 1) {
+      const message = orderedMessages[index].message;
+      if (message.metadata?.action_type === 'session_paused') return true;
+      if (
+        typeof message.metadata?.browser_url === 'string' &&
+        ['browser', 'session_started', 'system'].includes(message.metadata.action_type ?? '')
+      ) {
+        return false;
+      }
+    }
+    return false;
+  }, [browserMessages]);
 
   const outputSchema = useMemo<OutputSchemaRef | undefined>(() => {
     const initMessage = browserMessages.find((m) => m.metadata?.output_schema);

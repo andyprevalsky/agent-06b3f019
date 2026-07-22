@@ -178,6 +178,7 @@ export function useMessageListState({
 
   const streaming = useFilteredStreaming({
     subAgentId,
+    persistedMessages: ctx.messages,
     streamingBubbles: ctx.streamingBubbles,
     streamingPlan: ctx.streamingPlan,
     streamingAttention: ctx.streamingAttention,

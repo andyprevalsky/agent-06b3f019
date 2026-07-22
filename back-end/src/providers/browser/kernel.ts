@@ -9,6 +9,11 @@ import { createLogger } from '../logger';
 import { retryWithBackoff } from '../retry';
 import { connectValidatedBrowser, validateSessionConnection } from '../steel/sessionConnection';
 import { browserProviderEnabled } from './config';
+import {
+  kernelCaptchaTelemetryConfig,
+  summarizeKernelCaptchaEvents,
+  type BrowserCaptchaTelemetry,
+} from './captchaTelemetry';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import {
   getOrCreateKernelProxy,
@@ -182,6 +187,7 @@ async function createRemoteSession(
         const session = await client.browsers.create({
           headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
           stealth,
+          telemetry: kernelCaptchaTelemetryConfig(),
           gpu: browserProviderEnabled('KERNEL_GPU_ENABLED', false),
           // Do not let Chromium reopen the profile's previous window. The new-tab
           // page created by this policy is replaced below along with any unexpected
@@ -503,6 +509,22 @@ export async function getKernelSessionHealth(sessionId: string): Promise<Browser
     profileId: session.profile?.id ?? null,
     uptimeMs: session.usage?.uptime_ms ?? null,
   };
+}
+
+export async function getKernelCaptchaTelemetry(
+  sessionId: string
+): Promise<BrowserCaptchaTelemetry> {
+  const events: unknown[] = [];
+  for await (const entry of kernelClient().browsers.telemetry.events(sessionId, {
+    category: ['captcha'],
+    order: 'desc',
+  })) {
+    if (entry.event.type === 'captcha_solve_result') {
+      events.push(entry);
+    }
+    if (events.length >= 50) break;
+  }
+  return summarizeKernelCaptchaEvents(events);
 }
 
 export async function resizeKernelViewport(

@@ -152,7 +152,10 @@ export default function MobileAgentDrawer({
           <CountBadge count={notifCount} className="absolute -right-1 -top-1" />
         </button>
       </SheetTrigger>
-      <SheetContent side="right" className="flex w-[min(340px,88vw)] flex-col p-0">
+      <SheetContent
+        side="right"
+        className="flex w-[min(340px,88vw)] flex-col p-0 pt-[var(--safe-area-inset-top)]"
+      >
         <SheetTitle className="sr-only">Menu</SheetTitle>
         <SheetDescription className="sr-only">Your agents and notifications</SheetDescription>
 

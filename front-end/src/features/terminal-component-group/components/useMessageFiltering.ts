@@ -74,14 +74,34 @@ export interface FilteredStreamingState {
 
 interface UseFilteredStreamingOptions {
   subAgentId: string | undefined;
+  persistedMessages: Message[];
   streamingBubbles: Map<string, StreamingBubble>;
   streamingPlan: StreamingPlan | null;
   streamingAttention: StreamingAttention | null;
   streamingTools: Map<string, StreamingTool>;
 }
 
+export function coalesceStreamingTools(
+  streamingTools: Map<string, StreamingTool>,
+  persistedMessages: Message[],
+  target: string | null,
+): Map<string, StreamingTool> {
+  const persistedToolCallIds = new Set(
+    persistedMessages
+      .map((message) => message.metadata?.toolCallId)
+      .filter((toolCallId): toolCallId is string => typeof toolCallId === 'string'),
+  );
+  return new Map(
+    [...streamingTools].filter(
+      ([toolCallId, tool]) =>
+        (tool.subAgentId ?? null) === target && !persistedToolCallIds.has(toolCallId),
+    ),
+  );
+}
+
 export function useFilteredStreaming({
   subAgentId,
+  persistedMessages,
   streamingBubbles,
   streamingPlan,
   streamingAttention,
@@ -92,7 +112,7 @@ export function useFilteredStreaming({
     const bubbles = new Map(
       [...streamingBubbles].filter(([, b]) => (b.subAgentId ?? null) === target),
     );
-    const tools = new Map([...streamingTools].filter(([, t]) => (t.subAgentId ?? null) === target));
+    const tools = coalesceStreamingTools(streamingTools, persistedMessages, target);
     const plan =
       streamingPlan && (streamingPlan.subAgentId ?? null) === target ? streamingPlan : null;
     const attention =
@@ -123,7 +143,14 @@ export function useFilteredStreaming({
     }
 
     return { bubbles, plan, attention, tools, charCount, streamStartedAtMs, isClaude, isGpt };
-  }, [target, streamingBubbles, streamingPlan, streamingAttention, streamingTools]);
+  }, [
+    target,
+    persistedMessages,
+    streamingBubbles,
+    streamingPlan,
+    streamingAttention,
+    streamingTools,
+  ]);
 }
 
 export { mergeSubAgentTreeMessages, useSubAgentTreeMerge } from './useSubAgentTreeMerge';
