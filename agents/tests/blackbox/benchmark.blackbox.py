@@ -1483,6 +1483,67 @@ def test_agentcard_setup_attention_is_not_auto_approved():
     )
 
 
+async def test_expected_gate_auto_approve_task_returns_without_resolving_gate():
+    """Expected-gate tasks pass when the matching open gate appears; they must not auto-resolve it."""
+    import copy
+    from unittest.mock import AsyncMock, patch
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import poll_agent
+
+    task = copy.deepcopy(get_task_by_name("gate-subscription-card-mint"))
+    task._resolved_timeout_seconds = 0.1
+    agent_data = {
+        "agent": {"status": "ACTIVE", "progress": 0.03},
+        "messages": [{"id": "msg-1", "metadata": {}}],
+    }
+    gate_request = {
+        "id": "gate-1",
+        "agentId": "agent-1",
+        "metadata": {
+            "gate": {
+                "type": "subscription",
+                "gateKey": "subscription",
+                "severity": "blocking",
+                "status": "PENDING",
+            }
+        },
+    }
+    tree_stats = {
+        "total_messages": 1,
+        "agent_count": 1,
+        "active_count": 1,
+        "failed_count": 0,
+        "error_agents": [],
+        "total_cost_cents": 0,
+        "all_agents": [{"agent_id": "agent-1", "status": "ACTIVE", "message_count": 1}],
+    }
+    respond = AsyncMock()
+
+    with (
+        patch("benchmarks.run_benchmark.get_agent", AsyncMock(return_value=agent_data)),
+        patch("benchmarks.run_benchmark.get_attention_requests", AsyncMock(return_value=[gate_request])),
+        patch("benchmarks.run_benchmark.respond_to_attention_request", respond),
+        patch("benchmarks.run_benchmark._fetch_tree_stats", AsyncMock(return_value=tree_stats)),
+        patch("benchmarks.run_benchmark._fetch_message_counts", AsyncMock(return_value={})),
+        patch("benchmarks.run_benchmark._detect_infra_errors_from_fly", return_value=[]),
+        patch("benchmarks.run_benchmark.asyncio.sleep", AsyncMock(return_value=None)),
+        patch("benchmarks.run_benchmark.time.time", side_effect=[0, 0, 0, 1]),
+    ):
+        data, approvals_triggered, approvals_resolved, reason = await poll_agent(
+            "http://bench.local",
+            "agent-1",
+            task,
+        )
+
+    assert reason is None
+    assert approvals_triggered == 1
+    assert approvals_resolved == 0
+    assert data["_benchmark"]["expected_gate_seen"] is True
+    assert data["_benchmark"]["expected_gate_request_id"] == "gate-1"
+    respond.assert_not_awaited()
+
+
 async def test_agentcard_setup_terminal_check_refreshes_stale_attention_poll():
     from benchmarks.run_benchmark import _agentcard_setup_attention_still_open_after_terminal
 
@@ -9670,6 +9731,10 @@ async def run_all_tests():
     r.record(
         "agentcard_setup_attention_not_auto_approved",
         test_agentcard_setup_attention_is_not_auto_approved,
+    )
+    await r.record_async(
+        "expected_gate_auto_approve_returns_without_resolving_gate",
+        test_expected_gate_auto_approve_task_returns_without_resolving_gate,
     )
     await r.record_async(
         "agentcard_setup_terminal_refreshes_attention",

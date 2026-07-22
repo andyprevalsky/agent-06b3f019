@@ -2977,6 +2977,8 @@ async def poll_agent(
                                     "expected_gate": expected_gate_evidence["gate"],
                                     "expected_gate_request_id": req_id,
                                 }
+                                print(f"    ✅ Expected gate observed {req_id[:8]}")
+                                return data, approvals_triggered, approvals_resolved, None
                             receipt_error = _validate_payment_receipt(task, req, messages=messages)
                             if receipt_error:
                                 data["_benchmark"] = {
