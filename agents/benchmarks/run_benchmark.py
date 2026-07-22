@@ -3875,8 +3875,17 @@ def _sync_compute_tokens(
     env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
     env.pop("SEED_ALLOW_MISSING_CLAUDE_CODE", None)
     shared_source = _shared_workspace_database_url()
-    if shared_source and shared_source != database_url:
-        env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = shared_source
+    source_database_url = shared_source or load_env_var("DATABASE_URL", _BACKEND_ENV)
+    if not source_database_url or _psql_compatible_database_url(source_database_url) == _psql_compatible_database_url(
+        database_url
+    ):
+        print("    ⚠ Compute-token sync skipped: no distinct explicit source database found")
+        return False
+    # seed-local deliberately refuses to infer this source in compute-token-only
+    # mode. Resolve it here so both isolated runs (verified shared workspace DB)
+    # and direct workspace-stack runs (production DB from back-end/.env) satisfy
+    # the same fail-closed contract.
+    env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = source_database_url
     if tolerate_gpt_code_unavailable:
         env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
     if tolerate_claude_code_unavailable:

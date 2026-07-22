@@ -42,6 +42,7 @@ def _captured_seed_env(**kwargs) -> dict[str, str]:
     with (
         patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
         patch.object(rb, "_shared_workspace_database_url", return_value=None),
+        patch.object(rb, "load_env_var", return_value="postgresql://prod/victoria"),
         patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
     ):
         rb._sync_compute_tokens(**kwargs)
@@ -79,6 +80,40 @@ def test_sync_uses_verified_shared_workspace_as_compute_token_source():
 
     assert seen["env"]["DATABASE_URL"] == "postgresql://local/victoria"
     assert seen["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://shared/victoria"
+
+
+def test_shared_stack_sync_uses_explicit_production_compute_token_source():
+    seen: dict[str, dict[str, str]] = {}
+
+    def fake_run(_cmd, **kw):
+        seen["env"] = kw.get("env", {})
+        return _Result(0)
+
+    with (
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_shared_workspace_database_url", return_value=None),
+        patch.object(rb, "load_env_var", return_value="postgresql://prod/victoria?pgbouncer=true"),
+        patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
+    ):
+        assert rb._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is True
+
+    assert seen["env"]["DATABASE_URL"] == "postgresql://local/victoria"
+    assert (
+        seen["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"]
+        == "postgresql://prod/victoria?pgbouncer=true"
+    )
+
+
+def test_sync_fails_closed_without_distinct_compute_token_source():
+    with (
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_shared_workspace_database_url", return_value=None),
+        patch.object(rb, "load_env_var", return_value=None),
+        patch.object(rb, "_run_seed_subprocess") as seed,
+    ):
+        assert rb._sync_compute_tokens() is False
+
+    seed.assert_not_called()
 
 
 def test_blanket_preflight_uses_tolerant_sync():
