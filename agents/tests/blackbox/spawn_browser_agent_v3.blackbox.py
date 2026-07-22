@@ -842,6 +842,29 @@ async def test_browser_session_metadata_failure_is_fail_closed():
     assert sleep_mock.await_count == 2
 
 
+async def test_browser_session_metadata_rejects_missing_provider_before_publication():
+    from domains.spawn_browser_agent_v3.handler import _publish_browser_session_metadata_message
+
+    with patch(
+        "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+        new_callable=AsyncMock,
+    ) as save_mock:
+        for invalid_metadata in ({}, {"provider": ""}, {"provider": None}):
+            try:
+                await _publish_browser_session_metadata_message(
+                    agent_id="agent-1",
+                    task_id="task-1",
+                    browser_url="https://kernel.example/live/session-1",
+                    browser_session_metadata=invalid_metadata,
+                )
+            except ValueError as exc:
+                assert "non-empty provider" in str(exc)
+            else:
+                raise AssertionError("missing browser session provider must fail closed")
+
+    assert save_mock.await_count == 0
+
+
 async def test_browser_agent_recording_start_failure_is_best_effort():
     import tempfile
     from pathlib import Path
@@ -10420,6 +10443,7 @@ async def test_spawn_browser_activity_auth_assistance_keeps_live_steel_session_o
         "fingerprint_injection": None,
         "passwords": [],
         "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
         "same_session_available": True,
     }
     auth_request = {
@@ -12439,6 +12463,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_session_metadata_failure_is_fail_closed",
         test_browser_session_metadata_failure_is_fail_closed,
+    )
+    await r.record_async(
+        "browser_session_metadata_rejects_missing_provider",
+        test_browser_session_metadata_rejects_missing_provider_before_publication,
     )
     await r.record_async(
         "browser_agent_recording_start_failure_best_effort",

@@ -120,17 +120,41 @@ jobs:
             feedback_batch="$(printf '%s' "$comment_pages" | \
               TRIGGER_COMMENT_ID="$COMMENT_ID" SLACK_CHANNEL="$slack_channel" \
               SLACK_THREAD_TS="$slack_ts" /usr/local/bin/rose-auto-rca-tool feedback-batch)"
+            authorized_feedback='[]'
+            unauthorized_feedback_ids='[]'
+            while IFS= read -r feedback_item; do
+              feedback_author="$(printf '%s' "$feedback_item" | jq -r '.author')"
+              if ! permission="$(gh api \
+                "repos/$GITHUB_REPOSITORY/collaborators/$feedback_author/permission" \
+                --jq '.permission')"; then
+                echo "Could not verify queued RCA feedback permission for $feedback_author" >&2
+                exit 1
+              fi
+              case "$permission" in
+                admin|maintain)
+                  authorized_feedback="$(printf '%s' "$authorized_feedback" | \
+                    jq -c --argjson item "$feedback_item" '. + [$item]')"
+                  ;;
+                pull|triage|read|none)
+                  unauthorized_feedback_ids="$(printf '%s' "$unauthorized_feedback_ids" | \
+                    jq -c --argjson id "$(printf '%s' "$feedback_item" | jq '.id')" '. + [$id]')"
+                  ;;
+                *)
+                  echo "Unexpected queued RCA feedback permission for $feedback_author: $permission" >&2
+                  exit 1
+                  ;;
+              esac
+            done < <(printf '%s' "$feedback_batch" | jq -c '.[]')
+            unauthorized_feedback_csv="$(printf '%s' "$unauthorized_feedback_ids" | jq -r 'join(",")')"
+            if [ -n "$unauthorized_feedback_csv" ]; then
+              marker="<!-- rca-feedback-consumed ids=$unauthorized_feedback_csv run=$GITHUB_RUN_ID -->"
+              gh api "repos/$GITHUB_REPOSITORY/issues/$COMMENT_PR_NUMBER/comments" \
+                --method POST --raw-field "body=$marker" >/dev/null
+            fi
+            feedback_batch="$authorized_feedback"
             if [ "$(printf '%s' "$feedback_batch" | jq 'length')" -eq 0 ]; then
               noop=true
             fi
-            while IFS= read -r feedback_author; do
-              [ -n "$feedback_author" ] || continue
-              permission="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$feedback_author/permission" --jq '.permission')"
-              case "$permission" in
-                admin|maintain) ;;
-                *) echo "Queued RCA feedback requires maintain permission" >&2; exit 1 ;;
-              esac
-            done < <(printf '%s' "$feedback_batch" | jq -r 'map(.author) | unique[]')
             feedback_b64="$(printf '%s' "$feedback_batch" | python3 -c 'import base64,json,sys; items=json.load(sys.stdin); lines=["- {} feedback from {}: {}".format("Slack" if item["source"] == "slack" else "GitHub", item["author"], item["text"]) for item in items]; print(base64.b64encode("\n".join(lines).encode()).decode())')"
             feedback_comment_ids="$(printf '%s' "$feedback_batch" | jq -r 'map(.id | tostring) | join(",")')"
             feedback_slack_users="$(printf '%s' "$feedback_batch" | jq -r \
@@ -519,6 +543,7 @@ jobs:
       - name: Prepare unprivileged retry coding environment
         id: prepare_retry
         if: always() && env.RCA_NOOP != 'true' && steps.primary_contract.outputs.complete != 'true'
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -562,6 +587,7 @@ jobs:
       - name: Restore trusted ownership after retry
         id: restore_retry
         if: always() && steps.investigator_retry.outcome != 'skipped'
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail

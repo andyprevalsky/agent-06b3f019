@@ -40,6 +40,8 @@ _R2_CLIENT: Any = None
 _BACKEND_CLIENTS = threading.local()
 _ARTIFACT_LOCK_STRIPES = 256
 _ARTIFACT_WRITE_LOCKS = tuple(threading.Lock() for _ in range(_ARTIFACT_LOCK_STRIPES))
+_ARTIFACT_TRANSACTION_MAGIC = b"ROSE-TRACE-PAIR-V1\n"
+_ARTIFACT_TRANSACTION_SUFFIX = ".transaction"
 
 
 def _safe_segment(value: str) -> str:
@@ -174,7 +176,77 @@ def _artifact_lock(target: Path) -> Iterator[None]:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+def _artifact_transaction_path(target: Path) -> Path:
+    return target.with_suffix(target.suffix + _ARTIFACT_TRANSACTION_SUFFIX)
+
+
+def _encode_artifact_transaction(ciphertext: bytes, metadata: dict[str, Any]) -> bytes:
+    metadata_bytes = json.dumps(metadata, indent=2, sort_keys=True).encode("utf-8")
+    return _ARTIFACT_TRANSACTION_MAGIC + len(metadata_bytes).to_bytes(8, "big") + metadata_bytes + ciphertext
+
+
+def _decode_artifact_transaction(payload: bytes) -> tuple[bytes, dict[str, Any]]:
+    header_offset = len(_ARTIFACT_TRANSACTION_MAGIC)
+    if not payload.startswith(_ARTIFACT_TRANSACTION_MAGIC) or len(payload) < header_offset + 8:
+        raise ValueError("Archive transaction is invalid")
+    metadata_size = int.from_bytes(payload[header_offset : header_offset + 8], "big")
+    metadata_start = header_offset + 8
+    metadata_end = metadata_start + metadata_size
+    if metadata_size <= 0 or metadata_end > len(payload):
+        raise ValueError("Archive transaction metadata is invalid")
+    metadata = json.loads(payload[metadata_start:metadata_end].decode("utf-8"))
+    if not isinstance(metadata, dict):
+        raise ValueError("Archive transaction metadata must be an object")
+    return payload[metadata_end:], metadata
+
+
+def _write_file_durable(path: Path, payload: bytes) -> None:
+    with path.open("wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _fsync_parent(path: Path) -> None:
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _replace_durable(source: Path, target: Path) -> None:
+    source.replace(target)
+    _fsync_parent(target)
+
+
+def _recover_artifact_transaction_unlocked(target: Path) -> bool:
+    transaction_path = _artifact_transaction_path(target)
+    if not transaction_path.exists():
+        return False
+    ciphertext, metadata = _decode_artifact_transaction(transaction_path.read_bytes())
+    meta_path = target.with_suffix(target.suffix + ".meta.json")
+    unique_suffix = f".{os.getpid()}.{threading.get_ident()}.recover.tmp"
+    target_tmp = target.with_suffix(target.suffix + unique_suffix)
+    meta_tmp = meta_path.with_suffix(meta_path.suffix + unique_suffix)
+    try:
+        _write_file_durable(target_tmp, ciphertext)
+        _write_file_durable(meta_tmp, json.dumps(metadata, indent=2, sort_keys=True).encode("utf-8"))
+        _replace_durable(target_tmp, target)
+        _replace_durable(meta_tmp, meta_path)
+        transaction_path.unlink()
+        _fsync_parent(transaction_path)
+    finally:
+        for temporary in (target_tmp, meta_tmp):
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+    return True
+
+
 def _read_artifact_pair_unlocked(target: Path) -> Optional[tuple[bytes, dict[str, Any]]]:
+    _recover_artifact_transaction_unlocked(target)
     if not target.exists():
         return None
     meta_path = target.with_suffix(target.suffix + ".meta.json")
@@ -189,22 +261,19 @@ def _read_artifact_pair_unlocked(target: Path) -> Optional[tuple[bytes, dict[str
 
 def _write_artifact_pair(target: Path, ciphertext: bytes, metadata: dict[str, Any]) -> str:
     target.parent.mkdir(parents=True, exist_ok=True)
-    meta_path = target.with_suffix(target.suffix + ".meta.json")
     unique_suffix = f".{os.getpid()}.{threading.get_ident()}.tmp"
-    target_tmp = target.with_suffix(target.suffix + unique_suffix)
-    meta_tmp = meta_path.with_suffix(meta_path.suffix + unique_suffix)
+    transaction_path = _artifact_transaction_path(target)
+    transaction_tmp = transaction_path.with_suffix(transaction_path.suffix + unique_suffix)
     with _artifact_lock(target):
         try:
-            target_tmp.write_bytes(ciphertext)
-            meta_tmp.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
-            target_tmp.replace(target)
-            meta_tmp.replace(meta_path)
+            _write_file_durable(transaction_tmp, _encode_artifact_transaction(ciphertext, metadata))
+            _replace_durable(transaction_tmp, transaction_path)
+            _recover_artifact_transaction_unlocked(target)
         finally:
-            for temporary in (target_tmp, meta_tmp):
-                try:
-                    temporary.unlink()
-                except FileNotFoundError:
-                    pass
+            try:
+                transaction_tmp.unlink()
+            except FileNotFoundError:
+                pass
     return str(target)
 
 
@@ -231,7 +300,11 @@ def _delete_outbox(root_agent_id: str, path: str, *, expected_ciphertext_sha256:
         _, metadata = pair
         if metadata.get("ciphertext_sha256") != expected_ciphertext_sha256:
             return False
-        for item in (target.with_suffix(target.suffix + ".meta.json"), target):
+        for item in (
+            _artifact_transaction_path(target),
+            target.with_suffix(target.suffix + ".meta.json"),
+            target,
+        ):
             try:
                 item.unlink()
             except FileNotFoundError:
@@ -362,7 +435,11 @@ def list_local_artifact_paths(root_agent_id: str) -> list[str]:
         return []
     paths: list[str] = []
     for item in bundle.rglob("*"):
-        if item.is_file() and not item.name.endswith(".meta.json"):
+        if (
+            item.is_file()
+            and not item.name.endswith(".meta.json")
+            and _ARTIFACT_TRANSACTION_SUFFIX not in item.name
+        ):
             paths.append(item.relative_to(bundle).as_posix())
     return sorted(paths)
 

@@ -39,7 +39,13 @@ function signature(timestamp: string, body: string): string {
     .digest('hex')}`;
 }
 
-async function seedOutbound(url: string, method: string, body: string, responseBody: string) {
+async function seedOutbound(
+  url: string,
+  method: string,
+  body: string,
+  responseBody: string,
+  status = 200
+) {
   const key = `call:${JSON.stringify([url, method, body])}`;
   const response = await fetch(`${BASE_URL}/api/test/captures/cache`, {
     method: 'PUT',
@@ -47,8 +53,8 @@ async function seedOutbound(url: string, method: string, body: string, responseB
     body: JSON.stringify({
       key,
       value: {
-        status: 200,
-        statusText: 'OK',
+        status,
+        statusText: status >= 500 ? 'Server Error' : status >= 400 ? 'Client Error' : 'OK',
         body: responseBody,
         headers: { 'content-type': 'application/json' },
       },
@@ -152,6 +158,39 @@ async function testDispatchFailureRequestsSlackRetry() {
     !outbound.some((call) => call.url.includes('/reactions.add')),
     'reviewer was acknowledged before feedback became durable'
   );
+  assert(outbound.length === 1, `permanent 404 should dispatch once, got ${outbound.length}`);
+}
+
+async function testTransientDispatchFailureRetriesInsideAckWindow() {
+  const token = 'slack-transient-dispatch-failure';
+  const eventId = 'Ev01AUTORCATRANSIENT';
+  const body = feedbackEvent({}, eventId);
+  const githubBody = JSON.stringify({
+    event_type: 'agent-rca-feedback',
+    client_payload: {
+      slack_channel: CHANNEL,
+      slack_thread_ts: THREAD_TS,
+      slack_message_ts: MESSAGE_TS,
+      slack_user_id: 'U01REVIEWER',
+      slack_event_id: eventId,
+      feedback: 'Please cover the retry race and preserve the original error.',
+    },
+  });
+  await seedOutbound(
+    'https://api.github.com/repos/Rose-Ai-Labs/rose/dispatches',
+    'POST',
+    githubBody,
+    '{"error":"unavailable"}',
+    503
+  );
+
+  const response = await postSlack(body, token);
+  assert(response.status === 503, `expected retryable 503, got ${response.status}`);
+  const outbound = await waitForCaptures(token, 3);
+  assert(
+    outbound.length === 3,
+    `transient 503 should dispatch three times, got ${outbound.length}`
+  );
 }
 
 async function testThreadReplyDispatchesDurably() {
@@ -189,7 +228,14 @@ const tests: Array<[string, () => Promise<void>]> = [
   ['invalid signature rejected', testInvalidSignature],
   ['root channel message ignored', testRootMessageIgnored],
   ['bot thread reply ignored', testBotMessageIgnored],
-  ['dispatch failure requests a Slack retry', testDispatchFailureRequestsSlackRetry],
+  [
+    'permanent dispatch failure requests Slack redelivery without internal retry',
+    testDispatchFailureRequestsSlackRetry,
+  ],
+  [
+    'transient dispatch failure retries inside Slack ACK window',
+    testTransientDispatchFailureRetriesInsideAckWindow,
+  ],
   ['thread feedback durably dispatched before acknowledgement', testThreadReplyDispatchesDurably],
 ];
 

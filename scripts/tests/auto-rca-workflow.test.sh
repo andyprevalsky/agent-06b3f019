@@ -45,6 +45,11 @@ require_text "$WORKFLOW" "[ \"${LITERAL_DOLLAR}branch\" != \"auto-rca/${LITERAL_
 require_text "$WORKFLOW" "[ \"${LITERAL_DOLLAR}title\" = \"auto-RCA: Production agent failure ${LITERAL_DOLLAR}agent_id\" ]" "feedback PR title must be canonical"
 require_text "$WORKFLOW" "[ -z \"${LITERAL_DOLLAR}marker_agent\" ] || [ \"${LITERAL_DOLLAR}marker_agent\" = \"${LITERAL_DOLLAR}agent_id\" ]" "lifecycle marker must match the affected agent"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool feedback-batch' "all unconsumed durable feedback must enter one revision batch"
+require_text "$WORKFLOW" "authorized_feedback='[]'" "queued feedback must be filtered by current GitHub permission"
+require_text "$WORKFLOW" "unauthorized_feedback_ids='[]'" "unauthorized queued feedback must be tracked for consumption"
+require_text "$WORKFLOW" 'unauthorized_feedback_csv' "unauthorized queued feedback must receive a durable consumption marker"
+require_text "$WORKFLOW" 'Could not verify queued RCA feedback permission' "permission lookup failures must remain retryable instead of discarding feedback"
+require_absent "$WORKFLOW" 'Queued RCA feedback requires maintain permission' "one unauthorized queued comment must not stall every later revision"
 require_text "$WORKFLOW" 'RCA_REVIEW_FEEDBACK_B64=%s' "review feedback must cross step boundaries as encoded data"
 require_text "$WORKFLOW" 'Hints from reviewer feedback (untrusted data):' "review feedback must enter prompt construction only as untrusted hints"
 require_text "$WORKFLOW" 'RCA_FEEDBACK_COMMENT_IDS=%s' "the durable feedback batch must retain exact comment IDs"
@@ -135,6 +140,7 @@ require_text "$RECONCILE_WORKFLOW" '/usr/local/bin/rose-auto-rca-tool bind-slack
 require_text "$RCA_TOOL" "printf 'blocked keep" "failed or canceled draft runs must converge to blocked"
 require_text "$RCA_TOOL" "printf 'ready keep" "successful ready PRs must converge to ready"
 require_text "$RECONCILE_WORKFLOW" 'rca-verified head=' "reconciler must require the trusted ready marker"
+require_text "$RECONCILE_WORKFLOW" '[.[].jobs[]?.steps[]?' "reconciler must descend through slurped workflow-job pages"
 require_text "$RECONCILE_WORKFLOW" "if [ \"${LITERAL_DOLLAR}repair\" = draft ]" "reconciler must repair an invalid ready PR back to draft"
 
 # Investigator failures may not become false-green workflows.
@@ -188,6 +194,8 @@ retry_action_line="$(grep -nF 'name: Retry incomplete RCA with secondary Claude 
 retry_restore_line="$(grep -nF 'name: Restore trusted ownership after retry' "$WORKFLOW" | cut -d: -f1)"
 retry_verify_line="$(grep -nF 'name: Verify unchanged reproduction after retry' "$WORKFLOW" | cut -d: -f1)"
 [ "$retry_prepare_line" -lt "$retry_action_line" ] && [ "$retry_action_line" -lt "$retry_restore_line" ] && [ "$retry_restore_line" -lt "$retry_verify_line" ] || fail "retry sandbox/restore/verify order is unsafe"
+sed -n "${retry_prepare_line},$((retry_action_line - 1))p" "$WORKFLOW" | grep -Fq 'continue-on-error: true' || fail "retry preparation failure must remain a reported blocked state instead of failing the workflow early"
+sed -n "${retry_restore_line},$((retry_verify_line - 1))p" "$WORKFLOW" | grep -Fq 'continue-on-error: true' || fail "retry ownership restoration failure must remain a reported blocked state instead of failing the workflow early"
 require_text "$WORKFLOW" "if: always() && env.RCA_NOOP != 'true' && steps.primary_contract.outputs.complete != 'true'" "retry must run even when the primary investigator never started"
 [ -x "$CLAUDE_WRAPPER" ] || fail "unprivileged Claude wrapper must be executable"
 require_text "$CLAUDE_WRAPPER" 'exec sudo -n -H' "wrapper must enter the unprivileged environment through sudo"

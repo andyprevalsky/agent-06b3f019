@@ -168,6 +168,77 @@ def test_local_store_publishes_metadata_atomically():
         assert json.loads(meta.read_text()) == {"ok": True}
 
 
+def test_artifact_transaction_recovers_crash_between_pair_replacements():
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        target = Path(tmp) / "agent-recovery" / "llm" / "recover.json.gz.enc"
+        meta_path = target.with_suffix(target.suffix + ".meta.json")
+        transaction_path = trace_archive._artifact_transaction_path(target)
+        old_ciphertext = b"old-ciphertext"
+        new_ciphertext = b"new-ciphertext"
+        old_metadata = {"ciphertext_sha256": hashlib.sha256(old_ciphertext).hexdigest()}
+        new_metadata = {"ciphertext_sha256": hashlib.sha256(new_ciphertext).hexdigest()}
+        original_replace = Path.replace
+        interrupted = False
+
+        def interrupt_metadata_replace(source: Path, destination: Path):
+            nonlocal interrupted
+            if Path(destination) == meta_path and not interrupted:
+                interrupted = True
+                raise OSError("simulated crash between pair replacements")
+            return original_replace(source, destination)
+
+        try:
+            trace_archive._write_local("agent-recovery", "llm/recover.json.gz.enc", old_ciphertext, old_metadata)
+            Path.replace = interrupt_metadata_replace
+            try:
+                trace_archive._write_local(
+                    "agent-recovery",
+                    "llm/recover.json.gz.enc",
+                    new_ciphertext,
+                    new_metadata,
+                )
+            except OSError as exc:
+                assert "simulated crash" in str(exc)
+            else:
+                raise AssertionError("pair publication should have been interrupted")
+            finally:
+                Path.replace = original_replace
+
+            assert transaction_path.exists(), "recoverable transaction was removed after interrupted commit"
+            stored = trace_archive.read_local_artifact(
+                root_agent_id="agent-recovery",
+                path="llm/recover.json.gz.enc",
+            )
+            assert stored == (new_ciphertext, new_metadata)
+            assert not transaction_path.exists(), "successful recovery did not clear the transaction"
+            assert target.read_bytes() == new_ciphertext
+            assert json.loads(meta_path.read_text()) == new_metadata
+        finally:
+            Path.replace = original_replace
+            restore()
+
+
+def test_local_artifact_listing_hides_transaction_and_temporary_files():
+    from helpers.trace_archive import list_local_artifact_paths
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        bundle = Path(tmp) / "agent-listing" / "llm"
+        bundle.mkdir(parents=True)
+        try:
+            (bundle / "visible.json.gz.enc").write_bytes(b"ciphertext")
+            (bundle / "visible.json.gz.enc.meta.json").write_text("{}")
+            (bundle / "hidden.json.gz.enc.transaction").write_bytes(b"transaction")
+            (bundle / "hidden.json.gz.enc.transaction.123.tmp").write_bytes(b"temporary")
+
+            assert list_local_artifact_paths("agent-listing") == ["llm/visible.json.gz.enc"]
+        finally:
+            restore()
+
+
 def test_artifact_lock_pool_is_bounded():
     import helpers.trace_archive as trace_archive
 
@@ -1120,6 +1191,14 @@ async def run_all_tests():
     r.record("encrypt_media_skips_gzip", test_encrypt_media_skips_gzip)
     r.record("local_store_writes_ciphertext_and_metadata", test_local_store_writes_ciphertext_and_metadata)
     r.record("local_store_publishes_metadata_atomically", test_local_store_publishes_metadata_atomically)
+    r.record(
+        "artifact_transaction_recovers_crash_between_pair_replacements",
+        test_artifact_transaction_recovers_crash_between_pair_replacements,
+    )
+    r.record(
+        "local_artifact_listing_hides_transaction_and_temporary_files",
+        test_local_artifact_listing_hides_transaction_and_temporary_files,
+    )
     r.record("artifact_lock_pool_is_bounded", test_artifact_lock_pool_is_bounded)
     r.record(
         "cross_process_reader_waits_for_matched_artifact_pair",

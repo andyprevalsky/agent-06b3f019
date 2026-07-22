@@ -145,7 +145,7 @@ jobs:
               jobs="$(gh api --paginate --slurp \
                 "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs?per_page=100" 2>/dev/null || printf '[]')"
               failed_step="$(printf '%s' "$jobs" | jq -r \
-                '[.[][]?.steps[]? | select(.conclusion == "failure" or .conclusion == "cancelled")][0].name // ""')"
+                '[.[].jobs[]?.steps[]? | select(.conclusion == "failure" or .conclusion == "cancelled")][0].name // ""')"
               case "$failed_step" in
                 *production\ evidence*) pipeline_step_override='/RCA · production evidence — failed' ;;
                 *reproduction*) pipeline_step_override='/RCA · unchanged local reproduction — failed' ;;

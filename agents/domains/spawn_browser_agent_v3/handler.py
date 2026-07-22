@@ -4265,6 +4265,9 @@ async def _publish_browser_session_metadata_message(
     The browser-isolation evaluator and credential audit both consume this
     record, so unlike optional progress messages it must be acknowledged.
     """
+    provider = browser_session_metadata.get("provider")
+    if not isinstance(provider, str) or not provider.strip():
+        raise ValueError("Required browser session metadata must include a non-empty provider")
     max_attempts = 3
     tool_call_id = str(uuid_module.uuid4())
     for attempt in range(1, max_attempts + 1):
