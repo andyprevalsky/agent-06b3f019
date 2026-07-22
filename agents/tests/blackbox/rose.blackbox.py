@@ -2821,6 +2821,7 @@ def test_anthropic_api_key_headers_use_x_api_key():
     api_hdr = _anthropic_api_key_headers("sk-ant-api03-test")
     assert api_hdr["x-api-key"] == "sk-ant-api03-test"
     assert "Authorization" not in api_hdr  # api-key path must NOT use Bearer
+    assert "oauth-2025-04-20" not in api_hdr["anthropic-beta"]
     # OAuth path is the inverse: Bearer, no x-api-key.
     oauth_hdr = _anthropic_headers("oat-token")
     assert oauth_hdr["Authorization"] == "Bearer oat-token"
@@ -2850,6 +2851,47 @@ async def test_anthropic_api_key_complete_402_raises_payment_required():
     except RosePaymentRequiredError:
         raised = True
     assert raised, "expected RosePaymentRequiredError on HTTP 402"
+
+
+async def test_anthropic_api_key_complete_400_credit_balance_raises_payment_required():
+    """Anthropic reports an exhausted API-key balance as HTTP 400, not 402.
+
+    Preserve that exact production response so the client trips the shared
+    cooldown instead of treating it as a request-shape error and retrying the
+    dead credential for every agent call.
+    """
+    from providers.rose.claude_auth import anthropic_api_key_complete
+    from providers.rose.errors import RosePaymentRequiredError
+
+    def handler(req):
+        return httpx.Response(
+            400,
+            json={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": (
+                        "Your credit balance is too low to access the Anthropic API. "
+                        "Please go to Plans & Billing to upgrade or purchase credits."
+                    ),
+                },
+            },
+        )
+
+    set_mock_handler(handler)
+    raised = False
+    try:
+        await _drain(
+            anthropic_api_key_complete(
+                pool_spec=get_pool("rose-1-lite"),
+                messages=[{"role": "user", "content": "hi"}],
+                api_key="sk-ant-api03-test",
+                request_id="r-apikey-400-credit",
+            )
+        )
+    except RosePaymentRequiredError:
+        raised = True
+    assert raised, "expected RosePaymentRequiredError for the captured HTTP 400 credit banner"
 
 
 async def test_anthropic_api_key_complete_sets_anthropic_suffix():
@@ -4792,6 +4834,67 @@ async def test_rose_client_synthesizes_force_any_for_response_model():
     assert tool_names == {"web_fetch", "attempt_completion"}
 
 
+async def test_rose_client_synthesizes_native_tools_for_api_key_without_oauth():
+    """Funded API-key routes must get the same real tools as OAuth routes.
+
+    The browser-smoke regression had no OAuth context. Its first rich
+    AgentAction turn was sent as a strict union response_format, rejected by
+    the funded provider, and fell to a different model. The next, simpler turn
+    then used the funded route, splitting an otherwise repeatable cache group.
+    """
+    from pydantic import BaseModel
+    from typing import Literal
+
+    class _WebFetchTool(BaseModel):
+        tool: Literal["web_fetch"]
+        url: str
+
+    class _AttemptCompletionTool(BaseModel):
+        tool: Literal["attempt_completion"]
+
+    class _ExploreAction(BaseModel):
+        response: str = ""
+        tool_calls: list[_WebFetchTool | _AttemptCompletionTool] = []
+
+    captured: dict = {}
+
+    async def _fake_try_openai_api_key(**kwargs):
+        captured["tools"] = kwargs.get("tools")
+        captured["tool_choice"] = kwargs.get("tool_choice")
+        captured["response_format"] = kwargs.get("response_format")
+        if False:
+            yield None
+        raise RuntimeError("short-circuit after capturing")
+
+    import providers.rose.client as client_mod
+
+    original = client_mod._try_openai_api_key
+    previous_key = os.environ.get("GPT_API_KEY")
+    client_mod._try_openai_api_key = _fake_try_openai_api_key
+    os.environ["GPT_API_KEY"] = "sk-proj-test"
+    try:
+        try:
+            async for _ in RoseClient().complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "browse"}],
+                response_model=_ExploreAction,
+            ):
+                pass
+        except RuntimeError as exc:
+            assert str(exc) == "short-circuit after capturing"
+    finally:
+        client_mod._try_openai_api_key = original
+        if previous_key is None:
+            os.environ.pop("GPT_API_KEY", None)
+        else:
+            os.environ["GPT_API_KEY"] = previous_key
+
+    assert captured.get("tool_choice") == "any"
+    assert captured.get("response_format") is None
+    tool_names = {tool["name"] for tool in (captured.get("tools") or [])}
+    assert tool_names == {"web_fetch", "attempt_completion"}
+
+
 # =====================================================================
 # Test runner
 # =====================================================================
@@ -4968,6 +5071,10 @@ async def run_all_tests():
     await r.record_async(
         "anthropic_apikey_402_payment_required", test_anthropic_api_key_complete_402_raises_payment_required
     )
+    await r.record_async(
+        "anthropic_apikey_400_credit_payment_required",
+        test_anthropic_api_key_complete_400_credit_balance_raises_payment_required,
+    )
     await r.record_async("anthropic_apikey_suffix", test_anthropic_api_key_complete_sets_anthropic_suffix)
     await r.record_async("anthropic_apikey_cooldown_mark", test_anthropic_api_key_cooldown_mark_then_on_cooldown)
     await r.record_async(
@@ -5080,6 +5187,10 @@ async def run_all_tests():
     await r.record_async(
         "rose_client_synthesizes_force_any_for_response_model",
         test_rose_client_synthesizes_force_any_for_response_model,
+    )
+    await r.record_async(
+        "rose_client_synthesizes_api_key_tools_without_oauth",
+        test_rose_client_synthesizes_native_tools_for_api_key_without_oauth,
     )
 
     teardown_mock()

@@ -723,7 +723,6 @@ class RoseClient:
         if (
             direct_auth_tools is None
             and response_model is not None
-            and (claude_auth is not None or gpt_auth is not None)
         ):
             direct_auth_tools = build_anthropic_tools_from_response_model(
                 response_model,

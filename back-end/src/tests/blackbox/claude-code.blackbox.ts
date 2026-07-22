@@ -63,7 +63,7 @@ import crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../../providers/database';
-import { resolveClaudeCodeAuthEnvs } from '../../providers/e2b';
+import { resolveClaudeCodeAuthEnvs, resolveClaudeCodeTokenSource } from '../../providers/e2b';
 import { withComputePoolLock } from './compute-pool-lock.testkit';
 config();
 
@@ -436,6 +436,14 @@ function testResolveAuthEnvs_apiKeyFallback() {
     'falls back to api-key when no OAuth credential'
   );
   assert(envs.CLAUDE_CODE_OAUTH_TOKEN === undefined, 'no OAuth token in fallback');
+}
+
+function testResolveAuthEnvs_apiKeyFallbackRecordsSharedSource() {
+  assert(
+    resolveClaudeCodeTokenSource(null) === 'anthropic',
+    'shared API-key fallback must be persisted as anthropic so billing failures trip its cooldown'
+  );
+  assert(resolveClaudeCodeTokenSource(OAUTH_META) === 'pool', 'OAuth source must remain pool');
 }
 
 function testResolveAuthEnvs_apiKeyOnCooldownThrows() {
@@ -1271,6 +1279,10 @@ async function runAll() {
     {
       name: 'authEnvs -- api-key fallback when no OAuth',
       fn: async () => testResolveAuthEnvs_apiKeyFallback(),
+    },
+    {
+      name: 'authEnvs -- api-key fallback records shared source',
+      fn: async () => testResolveAuthEnvs_apiKeyFallbackRecordsSharedSource(),
     },
     {
       name: 'authEnvs -- throws when api-key on cooldown',

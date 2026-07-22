@@ -71,6 +71,10 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { prisma } from '../../providers/database';
+import {
+  __resetAnthropicApiKeyCooldown,
+  isAnthropicApiKeyOnCooldown,
+} from '../../providers/computeCredentials';
 import { withComputePoolLock } from './compute-pool-lock.testkit';
 config();
 
@@ -4542,7 +4546,7 @@ interface SeededSession {
 
 async function seedClaudeCodeSession(
   agentId: string,
-  source: 'user' | 'pool',
+  source: 'user' | 'pool' | 'anthropic',
   poolTokenId: string | null
 ): Promise<SeededSession> {
   const taskId = crypto.randomUUID();
@@ -4729,6 +4733,40 @@ async function testClaudeCodeBillingFailure_marksPoolTokenLongCooldown() {
     await cleanupSessions([session.taskId]);
     await prisma.agent.delete({ where: { id: dummyAgent.id } });
     await cleanupIntegrations([poolInt.id]);
+  }
+}
+
+async function testClaudeCodeBillingFailure_marksSharedAnthropicCooldown() {
+  const caller = await createAnonSession();
+  const dummyAgent = await prisma.agent.create({
+    data: {
+      id: crypto.randomUUID(),
+      userId: caller.userId,
+      goal: 'dummy-for-shared-anthropic-cooldown-test',
+      status: 'STARTING_UP',
+    },
+  });
+  const session = await seedClaudeCodeSession(dummyAgent.id, 'anthropic', null);
+
+  await __resetAnthropicApiKeyCooldown();
+  try {
+    const banner =
+      'Your credit balance is too low to access the Anthropic API. ' +
+      'Please go to Plans & Billing to upgrade or purchase credits.\n';
+    const res = await request(`${BASE_URL}/api/claude-code-session/${session.taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ output: banner }),
+    });
+    assertStatus(res.status, 200, res.data);
+    assert(
+      await isAnthropicApiKeyOnCooldown(),
+      'shared Anthropic API key must enter cooldown after the captured billing banner'
+    );
+  } finally {
+    await cleanupSessions([session.taskId]);
+    await prisma.agent.delete({ where: { id: dummyAgent.id } });
+    await __resetAnthropicApiKeyCooldown();
   }
 }
 
@@ -5769,6 +5807,10 @@ async function runAll() {
     {
       name: 'claude-code billing-failure -- pool token marked rate-limited with long cooldown',
       fn: testClaudeCodeBillingFailure_marksPoolTokenLongCooldown,
+    },
+    {
+      name: 'claude-code billing-failure -- shared Anthropic key enters cooldown',
+      fn: testClaudeCodeBillingFailure_marksSharedAnthropicCooldown,
     },
   ];
 

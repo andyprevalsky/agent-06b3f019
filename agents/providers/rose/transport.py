@@ -39,6 +39,9 @@ ANTHROPIC_BETA_HEADER = (
     "advanced-tool-use-2025-11-20,"
     "effort-2025-11-24"
 )
+ANTHROPIC_API_KEY_BETA_HEADER = ",".join(
+    beta for beta in ANTHROPIC_BETA_HEADER.split(",") if beta != "oauth-2025-04-20"
+)
 ANTHROPIC_FAST_MODE_BETA = "fast-mode-2026-02-01"
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_X_APP = "cli"
@@ -68,7 +71,7 @@ def _anthropic_api_key_headers(api_key: str) -> Dict[str, str]:
     return {
         "x-api-key": api_key,
         "anthropic-version": ANTHROPIC_VERSION,
-        "anthropic-beta": ANTHROPIC_BETA_HEADER,
+        "anthropic-beta": ANTHROPIC_API_KEY_BETA_HEADER,
         "Content-Type": "application/json",
     }
 
