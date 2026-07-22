@@ -19,7 +19,12 @@ fi
 
 MODE="${1:-check}"
 
-"$COVERAGE_BIN" run scripts/run_blackbox_tests.py
+# Domain tests share process-global mock state. Give each domain a fresh process
+# inside a bounded worker pool, then merge their parallel coverage files before
+# the focused pytest suites append their data.
+rm -f .coverage .coverage.*
+COVERAGE_BIN="$COVERAGE_BIN" "$PYTHON_BIN" scripts/run_coverage_blackbox_parallel.py
+"$COVERAGE_BIN" combine
 
 if [ -d tests/fast_cache ]; then
     "$COVERAGE_BIN" run --append -m pytest tests/fast_cache -q
