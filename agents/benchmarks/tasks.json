@@ -4080,9 +4080,8 @@
       "browser",
       "antibot",
       "auth",
-      "checkout",
-      "kernel",
-      "steel"
+      "ecommerce",
+      "regression"
     ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
