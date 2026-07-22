@@ -21,16 +21,20 @@ return a tiny auto-refreshing page — so a click NEVER lands on a dead localhos
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import shutil
 import signal
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
+from contextlib import contextmanager
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -49,30 +53,70 @@ _VIEWER_METADATA_NAMES = ("archive-frontend-live.json", "archive-frontend.json")
 _DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
+class PortAllocationError(RuntimeError):
+    """No local user port is available for a benchmark archive viewer."""
+
+
+@contextmanager
+def _host_archive_launch_lock():
+    """Serialize viewer port selection and launch across all local hub processes."""
+    lock_path = Path(tempfile.gettempdir()) / f"navi-cloudbench-archive-launch-{os.getuid()}.lock"
+    flags = os.O_CREAT | os.O_RDWR
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(lock_path, flags, 0o600)
+    with os.fdopen(fd, "a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
 def _healthy(url: str) -> bool:
     if not url:
         return False
     try:
         with _DIRECT_OPENER.open(url.rstrip("/") + "/", timeout=1.5) as resp:
             return 200 <= int(resp.status) < 500
+    except urllib.error.HTTPError as exc:
+        # An API root commonly has no route and answers 404. That is still a
+        # complete HTTP response proving the listener is bound and serving.
+        return int(exc.code) < 500
     except Exception:
         return False
 
 
-def _free_port(preferred: int, *, excluded: set[int] | None = None) -> int:
-    """Prefer a bounded local range, then let the kernel allocate any free port."""
-    excluded = excluded or set()
-    highest_port = 65535
-    preferred_ports = []
-    if 0 < preferred <= highest_port:
-        preferred_ports = list(range(preferred, min(preferred + 100, highest_port + 1)))
-
-    # Port zero delegates the dense-port search to the kernel. Retry it a bounded
-    # number of times in case it returns a port reserved for this launch pair.
-    for port in preferred_ports + ([0] * 10):
+def _free_port(preferred: int, exclude: set[int] | None = None) -> int:
+    if not 1024 <= preferred <= 65535:
+        raise ValueError("preferred local port must be between 1024 and 65535")
+    # Archive viewers are intentionally durable across benchmark epochs. A
+    # fixed preferred+99 window therefore fills even though the host still has
+    # thousands of valid user ports. Search the complete user-port space,
+    # preserving the preferred high range first and wrapping only if needed.
+    excluded = exclude or set()
+    for candidates in (range(preferred, 65536), range(1024, preferred)):
+        for port in candidates:
+            if port in excluded:
+                continue
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                sock.bind(("127.0.0.1", port))
+            except OSError:
+                sock.close()
+                continue
+            sock.close()
+            return port
+    # If every explicit user port raced occupied between selection attempts,
+    # give the kernel a bounded chance to choose an ephemeral port. Preserve
+    # pair exclusion because port zero can return the API port selected just
+    # before the frontend allocation.
+    for _ in range(10):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            sock.bind(("127.0.0.1", port))
+            sock.bind(("127.0.0.1", 0))
         except OSError:
             sock.close()
             continue
@@ -80,7 +124,15 @@ def _free_port(preferred: int, *, excluded: set[int] | None = None) -> int:
         sock.close()
         if assigned not in excluded:
             return assigned
-    raise RuntimeError("no free local port found")
+    raise PortAllocationError("no free local port found")
+
+
+def _allocate_archive_ports(preferred: int) -> tuple[int, int]:
+    """Select a distinct API/frontend pair, wrapping safely at port 65535."""
+    api_port = _free_port(preferred)
+    frontend_start = 1024 if api_port == 65535 else api_port + 1
+    frontend_port = _free_port(frontend_start, {api_port})
+    return api_port, frontend_port
 
 
 def _read_json(path: Path) -> dict:
@@ -304,8 +356,9 @@ def _existing_archive_frontend(context_dir: Path) -> str:
     """URL of the already-running archive frontend if it is healthy, else ''."""
     meta = _read_json(context_dir / "archive-frontend-live.json")
     url = str(meta.get("frontend_url") or "")
+    api = str(meta.get("api_url") or "")
     pid = _metadata_pid(meta)
-    if url and pid and _pid_alive(pid) and _healthy(url):
+    if url and api and pid and _pid_alive(pid) and _healthy(url) and _healthy(api):
         return url.rstrip("/")
     return ""
 
@@ -545,12 +598,13 @@ def _api_url_from_meta(ctx: Path) -> str:
 
 
 def _existing_archive_in(ctx: Path) -> str:
-    """Reused archive frontend URL from EITHER metadata file (live or static)."""
+    """Reused archive URL only when BOTH its frontend and API are healthy."""
     for meta_name in ("archive-frontend-live.json", "archive-frontend.json"):
         meta = _read_json(ctx / meta_name)
         url = str(meta.get("frontend_url") or "")
+        api = str(meta.get("api_url") or "")
         pid = _metadata_pid(meta)
-        if url and pid and _pid_alive(pid) and _healthy(url):
+        if url and api and pid and _pid_alive(pid) and _healthy(url) and _healthy(api):
             try:
                 (ctx / meta_name).touch()
             except OSError:
@@ -568,37 +622,43 @@ def _launch_archive_for(args: argparse.Namespace, source: dict) -> str:
     if existing:
         return existing
     with _LAUNCH_LOCK:
-        existing = _existing_archive_in(ctx)
-        if existing:
-            return existing
-        _terminated, slot_available = _reap_excess_viewers(args.context_dir / "viewers", ctx)
-        if not slot_available:
-            return ""
-        ctx.mkdir(parents=True, exist_ok=True)
-        api_port = _free_port(args.preferred_archive_port)
-        frontend_port = _free_port(api_port + 1, excluded={api_port})
-        cmd = ["python3", str(args.repo_root / "agents/benchmarks/archive_frontend.py")]
-        if source.get("run_json"):
-            cmd.append(str(source["run_json"]))
-        cmd += ["--frontend-dir", str(args.frontend_dir), "--context-dir", str(ctx),
-                "--host", "127.0.0.1", "--api-port", str(api_port),
-                "--frontend-port", str(frontend_port), "--daemon"]
-        if source.get("upstream_url"):
-            cmd += ["--upstream-url", source["upstream_url"]]
-        if source.get("upstream_api_key"):
-            cmd += ["--upstream-api-key", source["upstream_api_key"]]
-        if source.get("upstream_user_id"):
-            cmd += ["--upstream-user-id", source["upstream_user_id"]]
-        if source.get("ssh_machine"):
-            cmd += ["--ssh-machine", source["ssh_machine"]]
-        if source.get("ssh_app"):
-            cmd += ["--ssh-app", source["ssh_app"]]
-        subprocess.Popen(cmd, cwd=args.repo_root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        for _ in range(60):
-            url = _existing_archive_in(ctx)
-            if url:
-                return url
-            time.sleep(0.25)
+        with _host_archive_launch_lock():
+            existing = _existing_archive_in(ctx)
+            if existing:
+                return existing
+            _terminated, slot_available = _reap_excess_viewers(
+                args.context_dir / "viewers", ctx
+            )
+            if not slot_available:
+                return ""
+            ctx.mkdir(parents=True, exist_ok=True)
+            api_port, frontend_port = _allocate_archive_ports(args.preferred_archive_port)
+            cmd = ["python3", str(args.repo_root / "agents/benchmarks/archive_frontend.py")]
+            if source.get("run_json"):
+                cmd.append(str(source["run_json"]))
+            cmd += ["--frontend-dir", str(args.frontend_dir), "--context-dir", str(ctx),
+                    "--host", "127.0.0.1", "--api-port", str(api_port),
+                    "--frontend-port", str(frontend_port), "--daemon"]
+            if source.get("upstream_url"):
+                cmd += ["--upstream-url", source["upstream_url"]]
+            if source.get("upstream_api_key"):
+                cmd += ["--upstream-api-key", source["upstream_api_key"]]
+            if source.get("upstream_user_id"):
+                cmd += ["--upstream-user-id", source["upstream_user_id"]]
+            if source.get("ssh_machine"):
+                cmd += ["--ssh-machine", source["ssh_machine"]]
+            if source.get("ssh_app"):
+                cmd += ["--ssh-app", source["ssh_app"]]
+            subprocess.Popen(
+                cmd, cwd=args.repo_root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            # Metadata is published before both listeners necessarily bind. Keep
+            # the host lock until the complete frontend+API pair answers.
+            for _ in range(60):
+                url = _existing_archive_in(ctx)
+                if url:
+                    return url
+                time.sleep(0.25)
     return ""
 
 
@@ -612,46 +672,46 @@ def _launch_archive_frontend(args: argparse.Namespace) -> str:
     # reuses the one Vite this thread starts instead of spawning its own (the user's
     # "no wasted resources"). Other request types are served by sibling threads.
     with _LAUNCH_LOCK:
-        existing = _existing_archive_frontend(args.context_dir)
-        if existing:
-            return existing
+        with _host_archive_launch_lock():
+            existing = _existing_archive_frontend(args.context_dir)
+            if existing:
+                return existing
 
-        api_port = _free_port(args.preferred_archive_port)
-        frontend_port = _free_port(api_port + 1, excluded={api_port})
-        cmd = ["python3", str(args.repo_root / "agents/benchmarks/archive_frontend.py")]
-        if args.run_json:
-            cmd.append(str(args.run_json))
-        cmd += [
-            "--frontend-dir",
-            str(args.frontend_dir),
-            "--context-dir",
-            str(args.context_dir),
-            "--host",
-            "127.0.0.1",
-            "--api-port",
-            str(api_port),
-            "--frontend-port",
-            str(frontend_port),
-            "--daemon",
-        ]
-        if args.upstream_url:
-            cmd += ["--upstream-url", args.upstream_url]
-        if args.upstream_api_key:
-            cmd += ["--upstream-api-key", args.upstream_api_key]
-        if args.upstream_user_id:
-            cmd += ["--upstream-user-id", args.upstream_user_id]
-        subprocess.Popen(
-            cmd,
-            cwd=args.repo_root,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+            api_port, frontend_port = _allocate_archive_ports(args.preferred_archive_port)
+            cmd = ["python3", str(args.repo_root / "agents/benchmarks/archive_frontend.py")]
+            if args.run_json:
+                cmd.append(str(args.run_json))
+            cmd += [
+                "--frontend-dir",
+                str(args.frontend_dir),
+                "--context-dir",
+                str(args.context_dir),
+                "--host",
+                "127.0.0.1",
+                "--api-port",
+                str(api_port),
+                "--frontend-port",
+                str(frontend_port),
+                "--daemon",
+            ]
+            if args.upstream_url:
+                cmd += ["--upstream-url", args.upstream_url]
+            if args.upstream_api_key:
+                cmd += ["--upstream-api-key", args.upstream_api_key]
+            if args.upstream_user_id:
+                cmd += ["--upstream-user-id", args.upstream_user_id]
+            subprocess.Popen(
+                cmd,
+                cwd=args.repo_root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
 
-        for _ in range(60):
-            url = _existing_archive_frontend(args.context_dir)
-            if url:
-                return url
-            time.sleep(0.25)
+            for _ in range(60):
+                url = _existing_archive_frontend(args.context_dir)
+                if url:
+                    return url
+                time.sleep(0.25)
     return ""
 
 
@@ -662,6 +722,15 @@ _RETRY_PAGE = (
     b"<h1>Opening the agent view\xe2\x80\xa6</h1>"
     b"<p>The benchmark archive viewer is starting up. This page refreshes "
     b"automatically and will redirect as soon as it is ready.</p></body>"
+)
+
+
+_PORT_CAPACITY_PAGE = (
+    b"<!doctype html><title>Agent viewer unavailable</title>"
+    b"<body style='font-family: system-ui; padding: 32px; color:#121218'>"
+    b"<h1>The agent viewer is temporarily unavailable</h1>"
+    b"<p>No local user port is available for another benchmark archive viewer. "
+    b"Close an older viewer and retry this link.</p></body>"
 )
 
 
@@ -801,17 +870,29 @@ def _make_handler(args: argparse.Namespace):
             # and launch that view. Hub mode scans every run; fleet mode one run;
             # single mode the one configured run.json/upstream. api_ctx is the dir
             # whose metadata records the archive's REAL api port (see below).
-            if hub:
-                source = _resolve_hub_source(hub, agent_id)
-                target = _launch_archive_for(args, source) if source else ""
-                api_ctx = args.context_dir / "viewers" / source["key"] if source else None
-            elif getattr(args, "fleet_dir", None):
-                source = _resolve_fleet_source(args.fleet_dir, agent_id)
-                target = _launch_archive_for(args, source) if source else ""
-                api_ctx = args.context_dir / "viewers" / source["key"] if source else None
-            else:
-                target = _launch_archive_frontend(args)
-                api_ctx = args.context_dir
+            try:
+                if hub:
+                    source = _resolve_hub_source(hub, agent_id)
+                    target = _launch_archive_for(args, source) if source else ""
+                    api_ctx = args.context_dir / "viewers" / source["key"] if source else None
+                elif getattr(args, "fleet_dir", None):
+                    source = _resolve_fleet_source(args.fleet_dir, agent_id)
+                    target = _launch_archive_for(args, source) if source else ""
+                    api_ctx = args.context_dir / "viewers" / source["key"] if source else None
+                else:
+                    target = _launch_archive_frontend(args)
+                    api_ctx = args.context_dir
+            except PortAllocationError:
+                # A capacity fault must remain an honest HTTP response. Dropping
+                # the socket produces curl 52 and a dead-looking dashboard link.
+                self.send_response(503)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(_PORT_CAPACITY_PAGE)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Retry-After", "5")
+                self.end_headers()
+                self.wfile.write(_PORT_CAPACITY_PAGE)
+                return
 
             if target:
                 # Serve a loading page (NOT a bare 302): it polls the archive API

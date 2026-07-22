@@ -37,9 +37,10 @@ done < <(read_predeploy_tasks)
 
 echo "🧪 Verifying concurrent cloud benchmark workstream isolation..."
 bash "$ROOT_DIR/scripts/tests/cloudbench-env.test.sh"
+bash "$ROOT_DIR/scripts/tests/cloudbench-acceptance-autoscale.test.sh"
 "$ROOT_DIR/agents/venv/bin/python" -m pytest -q \
     "$ROOT_DIR/agents/benchmarks/cloudbench_dependency_sync_test.py" \
-    -k 'data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port'
+    -k 'data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or production_only_cloud_route'
 bash "$ROOT_DIR/scripts/tests/cloudbench-multi-workstream.test.sh"
 
 HUB_URL="${HUB_URL:-https://navi-j9a9.onrender.com}"

@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 /**
  * Black-box credential health checks for every external service that smoke
- * benchmarks depend on. Always runs — no skip-guards, no env-gated branches.
+ * benchmarks depend on.
  *
  * Purpose: fail in ~3s before the deploy skill spends $$$ on smoke benchmarks
  * only to discover E2B credits are out or a Steel key was rotated.
@@ -10,9 +10,12 @@
  *   - Reads the real env var from the shell (same one the backend uses)
  *   - Hits the cheapest endpoint that proves the credential can perform the
  *     operation required by smoke (an auth-only endpoint is insufficient)
- *   - FAILS if the env var is missing, if the response is 401/402/403,
- *     or if the provider returns 5xx while probing a smoke-critical endpoint
+ *   - FAILS if a smoke-critical env var is missing, if the response is
+ *     401/402/403, or if the provider returns 5xx while probing a
+ *     smoke-critical endpoint
  *   - PASSES on other non-auth statuses (200, 400 validation, 404, etc.)
+ *   - WARNS for non-blocking providers that future deploys may skip without
+ *     user approval (currently Parallel.ai and Anthropic/Claude)
  *
  * Failure messages include the exact env var name to refresh and the provider
  * dashboard URL so the human knows where to go.
@@ -243,6 +246,7 @@ async function runAll(): Promise<void> {
             name: 'Anthropic (Claude API)',
             fn: checkAnthropic,
             overridden: hasGateOverride('credential-health:anthropic'),
+            warnOnly: true,
           },
         ]
       : []),
@@ -287,8 +291,11 @@ async function runAll(): Promise<void> {
   const passed = results.filter((r) => r.passed && r.overridden !== true).length;
 
   console.log('\n' + '='.repeat(50));
+  const warningLabel = warnings.length === 1 ? 'warning' : 'warnings';
+  const overrideLabel = overrides.length === 1 ? 'override' : 'overrides';
+
   console.log(
-    `\nResults: ${passed} passed, ${warnings.length} warnings, ${overrides.length} overrides, ${hardFailures.length} failed, ${results.length} total`
+    `\nResults: ${passed} passed, ${warnings.length} ${warningLabel}, ${overrides.length} ${overrideLabel}, ${hardFailures.length} failed, ${results.length} total`
   );
 
   if (hardFailures.length > 0) {
@@ -297,9 +304,18 @@ async function runAll(): Promise<void> {
     process.exit(1);
   }
 
-  console.log(
+  const completionDetails = [
+    warnings.length > 0
+      ? `${warnings.length} ${warnings.length === 1 ? 'WARNING' : 'WARNINGS'}`
+      : '',
     overrides.length > 0
-      ? `\nINTEGRATION-HEALTH CHECKS COMPLETE WITH ${overrides.length} EXPLICIT OVERRIDE(S)\n`
+      ? `${overrides.length} EXPLICIT ${overrides.length === 1 ? 'OVERRIDE' : 'OVERRIDES'}`
+      : '',
+  ].filter(Boolean);
+
+  console.log(
+    completionDetails.length > 0
+      ? `\nINTEGRATION-HEALTH CHECKS COMPLETE WITH ${completionDetails.join(' AND ')}\n`
       : '\nALL INTEGRATION-HEALTH CHECKS PASSED\n'
   );
   process.exit(0);

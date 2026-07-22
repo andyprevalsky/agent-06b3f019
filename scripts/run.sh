@@ -743,7 +743,13 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
 fi
 
 if $DB_RESTORED; then
-    :
+    # A restored dump USUALLY already carries the Message trgm/grep indexes, but a
+    # dump published by an older box (before this step existed) or a partially-
+    # applied restore can lack them — so re-ensure idempotently. This gives the
+    # fast-restore path the SAME backend-ready schema as the cold-sync (else) path,
+    # which runs this same step, rather than a subtly different DB.
+    echo "🔎 Ensuring agent-network grep indexes (post-restore)..."
+    (cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts)
 else
 
 # Sync Prisma schema to local DB (idempotent, dev-only)

@@ -241,24 +241,21 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
     assert(callerBrowserCloseCount === 0, 'rejected injection closed caller-owned browser');
 
     await prisma.cookie.deleteMany({ where: { userId } });
-    let rejectedEmptyCookieBundle = false;
-    try {
-      await prepareSessionCredentials(
-        sessionId,
-        userId,
-        'https://www.example.co.uk/store/example',
-        { browser: fakeBrowser }
-      );
-    } catch (error) {
-      rejectedEmptyCookieBundle = String(error).includes('contains no cookie rows');
-    }
-    assert(
-      rejectedEmptyCookieBundle,
-      'credential boundary accepted a selected cookie bundle with no cookie rows'
+    const emptyCookieBundleResult = await prepareSessionCredentials(
+      sessionId,
+      userId,
+      'https://www.example.co.uk/store/example',
+      { browser: fakeBrowser }
     );
     assert(
-      callerBrowserCloseCount === 1,
-      'empty selected cookie bundle leaked the caller-provided browser'
+      emptyCookieBundleResult.auth_source === 'none' &&
+        emptyCookieBundleResult.auth_credential_ref === null &&
+        emptyCookieBundleResult.cookies_count === 0,
+      'credential boundary selected a cookie bundle with no matching cookie rows'
+    );
+    assert(
+      callerBrowserCloseCount === 0,
+      'skipping an empty cookie bundle closed the caller-provided browser'
     );
 
     let rejectedWrongOwner = false;

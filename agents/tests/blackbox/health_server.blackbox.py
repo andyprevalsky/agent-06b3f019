@@ -9,16 +9,27 @@ from _test_utils import (
 
 
 def test_health_endpoint():
-    """GET /health returns 200 with status key."""
-    from health_server import app
+    """GET /health is ready only while the Temporal worker is running."""
+    from health_server import app, set_worker_status
 
     client = app.test_client()
     response = client.get("/health")
 
+    assert response.status_code == 503
+    data = response.get_json()
+    assert data["status"] == "unhealthy"
+    assert data["worker"] == "stopped"
+
+    set_worker_status(True)
+    response = client.get("/health")
     assert response.status_code == 200
     data = response.get_json()
-    assert "status" in data
     assert data["status"] == "healthy"
+    assert data["worker"] == "running"
+
+    set_worker_status(False)
+    response = client.get("/health")
+    assert response.status_code == 503
 
 
 def test_metrics_endpoint():

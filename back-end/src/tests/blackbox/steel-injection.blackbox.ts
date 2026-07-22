@@ -42,34 +42,40 @@ async function createCookieBundle(params: {
   id?: string;
   browserProfile: string;
   disabled?: boolean;
+  authRealm?: string;
+  cookieDomain?: string;
+  includeCookie?: boolean;
   creationUtc: bigint;
 }) {
+  const authRealm = params.authRealm ?? 'amazon.com';
   const bundle = await prisma.cookieBundle.create({
     data: {
       id: params.id ?? randomUUID(),
       userId: params.userId,
-      authRealm: 'amazon.com',
+      authRealm,
       browserSource: 'chrome',
       browserProfile: params.browserProfile,
       disabledAt: params.disabled ? new Date('2026-01-01T00:00:00Z') : null,
       disabledReason: params.disabled ? 'previous auth failure' : null,
     },
   });
-  await prisma.cookie.create({
-    data: {
-      userId: params.userId,
-      domain: '.amazon.com',
-      name: `session-${params.browserProfile}`,
-      path: '/',
-      value: `value-${params.browserProfile}`,
-      browserSource: 'chrome',
-      browserProfile: params.browserProfile,
-      creationUtc: params.creationUtc,
-      expiresUtc: 999999999999999n,
-      isSecure: true,
-      isHttpOnly: true,
-    },
-  });
+  if (params.includeCookie !== false) {
+    await prisma.cookie.create({
+      data: {
+        userId: params.userId,
+        domain: params.cookieDomain ?? `.${authRealm}`,
+        name: `session-${params.browserProfile}`,
+        path: '/',
+        value: `value-${params.browserProfile}`,
+        browserSource: 'chrome',
+        browserProfile: params.browserProfile,
+        creationUtc: params.creationUtc,
+        expiresUtc: 999999999999999n,
+        isSecure: true,
+        isHttpOnly: true,
+      },
+    });
+  }
   return bundle;
 }
 
@@ -191,6 +197,55 @@ test('disabled CookieBundles are not selected when no enabled bundle exists', as
 
     assert(source.kind === 'none', 'expected disabled CookieBundle to be ignored');
     assert(source.credentialRef === null, 'expected no credential ref');
+  } finally {
+    await cleanup(userId);
+  }
+});
+
+test('CookieBundle selection includes parent-domain cookies for www auth realms', async () => {
+  const userId = await createUser();
+  try {
+    const bundle = await createCookieBundle({
+      userId,
+      authRealm: 'www.doordash.com',
+      cookieDomain: '.doordash.com',
+      browserProfile: 'Default',
+      creationUtc: 4000n,
+    });
+
+    const source = await resolveBrowserAuthCredentialSource({
+      userId,
+      authRealm: 'www.doordash.com',
+      steelContextId: null,
+    });
+
+    assert(source.kind === 'cookie_bundle', 'expected parent-domain cookie bundle');
+    assert(source.id === bundle.id, 'expected parent-domain CookieBundle id');
+    assert(source.freshestCookieUtc === 4000n, 'expected parent-domain cookie freshness');
+  } finally {
+    await cleanup(userId);
+  }
+});
+
+test('enabled CookieBundles with no injectable realm cookies are not selected', async () => {
+  const userId = await createUser();
+  try {
+    await createCookieBundle({
+      userId,
+      authRealm: 'www.doordash.com',
+      browserProfile: 'Empty',
+      includeCookie: false,
+      creationUtc: 5000n,
+    });
+
+    const source = await resolveBrowserAuthCredentialSource({
+      userId,
+      authRealm: 'www.doordash.com',
+      steelContextId: null,
+    });
+
+    assert(source.kind === 'none', 'expected empty CookieBundle to be ignored');
+    assert(source.credentialRef === null, 'expected no credential ref for an empty bundle');
   } finally {
     await cleanup(userId);
   }
