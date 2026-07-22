@@ -28,6 +28,7 @@ set -uo pipefail
 LOG=/data/bench.log
 REPO=/data/repo
 STATUS_PORT="${CLOUDBENCH_STATUS_PORT:-8011}"
+DRIVER="${CLOUDBENCH_RUN_SCRIPT:-/cloudbench-run.sh}"
 
 # Not a benchmark boot (the warm clone-source machine, or a bare manual start) →
 # idle exactly like the image's original `sleep infinity` CMD.
@@ -91,7 +92,6 @@ rm -f "$REPO/.git/index.lock" "$REPO/.git/"*.lock "$REPO/.git/refs/heads/"*.lock
 # NORESULT. The controller persists the run-scoped marker payloads first and
 # then explicitly stops/returns this Machine to the pool. If the driver crashes
 # before DONE, /driver-health still reports it dead while this supervisor lives.
-DRIVER=/cloudbench-run.sh
 if [ ! -s "$DRIVER" ]; then
     printf '[boot %s] injected driver missing; falling back to checked-out ref\n' "$(date -u +%H:%M:%S)" >> "$LOG"
     DRIVER="$REPO/scripts/cloudbench-run.sh"
