@@ -5,11 +5,13 @@ service (data transforms), and the static/pure parts of service_actions
 and handler (ClaudeTokenState, get_manager, workflow helper static bits).
 """
 
+import ast
 import asyncio
 import base64
 import json
 import os
 import sys
+import textwrap
 import time as time_module
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
@@ -5035,15 +5037,34 @@ def test_recovery_restore_failure_is_not_suppressed():
 
     from domains.spawn_browser_agent_v3 import handler
 
-    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
-    start = source.index("if config_result is not None:")
-    end = source.index("if browser_recorder is not None:", start)
-    restore_block = source[start:end]
+    source = textwrap.dedent(inspect.getsource(handler._spawn_browser_agent_activity_v3_real))
+    tree = ast.parse(source)
+    parents = {}
+    restore_awaits = []
 
-    assert "await _restore_rotation_storage_state(" in restore_block
-    assert "restore_cookies=not bool(" in restore_block
-    assert 'config_result.get("storage_state_preloaded")' in restore_block
-    assert "contextlib.suppress" not in restore_block
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[child] = parent
+        if (
+            isinstance(parent, ast.Await)
+            and isinstance(parent.value, ast.Call)
+            and isinstance(parent.value.func, ast.Name)
+            and parent.value.func.id == "_restore_rotation_storage_state"
+        ):
+            restore_awaits.append(parent)
+
+    assert len(restore_awaits) == 1
+    restore_await = restore_awaits[0]
+    restore_call = restore_await.value
+    restore_keywords = {keyword.arg: keyword.value for keyword in restore_call.keywords}
+    assert "restore_cookies" in restore_keywords
+    assert "storage_state_preloaded" in ast.unparse(restore_keywords["restore_cookies"])
+
+    ancestor = parents.get(restore_await)
+    while ancestor is not None:
+        if isinstance(ancestor, (ast.With, ast.AsyncWith)):
+            assert all("contextlib.suppress" not in ast.unparse(item.context_expr) for item in ancestor.items)
+        ancestor = parents.get(ancestor)
 
 
 def test_recovery_preflight_failures_resolve_the_in_progress_tool():
