@@ -9,6 +9,8 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { useState } from 'react';
 import { renderWithProviders } from './test-wrapper';
 
 // Control the mobile breakpoint deterministically.
@@ -52,6 +54,7 @@ function defaultProps(overrides: Partial<Props> = {}): Props {
     isWaitingForAuthAssistance: false,
     authAssistanceRequest: undefined,
     isResuming: false,
+    isUserControlling: false,
     pendingWriteLockApproval: null,
     onClose: vi.fn(),
     onResume: vi.fn(),
@@ -138,5 +141,27 @@ describe('BrowserStatusBarFullscreen mobile layout', () => {
     expect(screen.getByRole('button', { name: 'Take control' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Start Agent' })).not.toBeInTheDocument();
     expect(screen.queryByTestId('thinking-animation')).not.toBeInTheDocument();
+  });
+
+  it('flips between take-control and hand-back states on mobile', async () => {
+    mobileState.value = true;
+    function ControlHarness() {
+      const [controlled, setControlled] = useState(false);
+      return (
+        <BrowserStatusBarFullscreen
+          {...defaultProps({
+            isUserControlling: controlled,
+            onResume: () => setControlled((current) => !current),
+          })}
+        />
+      );
+    }
+    const user = userEvent.setup();
+    renderWithProviders(<ControlHarness />);
+
+    await user.click(screen.getByRole('button', { name: 'Take control' }));
+    expect(screen.getAllByText('You have control')).toHaveLength(2);
+    await user.click(screen.getByRole('button', { name: 'Hand back control' }));
+    expect(screen.getByRole('button', { name: 'Take control' })).toBeInTheDocument();
   });
 });

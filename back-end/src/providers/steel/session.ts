@@ -11,6 +11,10 @@ import { retryWithBackoff } from '../retry';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
 import { createLocalBrowserSession, connectValidatedBrowser } from './sessionConnection';
 import { STEEL_API_BASE_URL, steelCdpUrl, steelDebugUrl } from './urls';
+import {
+  summarizeSteelCaptchaStatus,
+  type BrowserCaptchaTelemetry,
+} from '../browser/captchaTelemetry';
 export { resumeSession } from './sessionResume';
 export {
   STEEL_API_BASE_URL,
@@ -616,6 +620,13 @@ export async function getSteelSessionHealth(sessionId: string): Promise<SteelSes
     ttlMs: Number.isFinite(expiresAtMs) ? Math.max(0, expiresAtMs - Date.now()) : null,
     profileId: remote.profileId ?? null,
   };
+}
+
+export async function getSteelCaptchaTelemetry(
+  sessionId: string
+): Promise<BrowserCaptchaTelemetry> {
+  const statuses = await steel.sessions.captchas.status(sessionId);
+  return summarizeSteelCaptchaStatus(statuses);
 }
 
 export async function getSteelSessionCookieSummary(
