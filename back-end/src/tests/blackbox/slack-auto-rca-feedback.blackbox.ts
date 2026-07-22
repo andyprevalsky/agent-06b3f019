@@ -9,8 +9,8 @@
 import { createHmac } from 'node:crypto';
 
 const BASE_URL = process.env.TEST_BASE_URL ?? 'http://localhost:3001';
-const SIGNING_SECRET = 'blackbox-slack-signing-secret';
-const CHANNEL = 'C0BE1B87882';
+const SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET ?? '';
+const CHANNEL = process.env.SLACK_ERROR_CHANNEL_ID ?? '';
 const THREAD_TS = '1784617220.480779';
 const MESSAGE_TS = '1784617333.123456';
 const EVENT_ID = 'Ev01AUTORCAFEEDBACK';
@@ -194,6 +194,8 @@ const tests: Array<[string, () => Promise<void>]> = [
 ];
 
 async function main(): Promise<void> {
+  assert(SIGNING_SECRET.length > 0, 'SLACK_SIGNING_SECRET fixture is required');
+  assert(CHANNEL.length > 0, 'SLACK_ERROR_CHANNEL_ID fixture is required');
   const results: TestResult[] = [];
   for (const [name, test] of tests) {
     const started = Date.now();

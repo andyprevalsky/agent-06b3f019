@@ -1209,7 +1209,7 @@ def test_boot_launch_runs_the_current_driver_before_applying_the_patch() -> None
     assert 'bash "$DRIVER" >> "$LOG" 2>&1' in boot
 
 
-def test_autoscaled_worker_failure_is_durable_and_never_counted_ready(tmp_path: Path) -> None:
+def test_autoscaled_worker_failure_is_removed_and_replaceable(tmp_path: Path) -> None:
     """Upload failure or a guest that never publishes post-patch readiness
     must fail the fleet closed while remaining tracked for controller cleanup."""
     fleet = FLEET_SCRIPT.read_text()

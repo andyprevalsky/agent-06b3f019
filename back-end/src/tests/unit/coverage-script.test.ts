@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const coverageScript = readFileSync(join(process.cwd(), 'scripts', 'run-coverage.sh'), 'utf8');
@@ -15,6 +15,46 @@ const unitRunner = readFileSync(join(process.cwd(), 'scripts', 'run-unit-tests.t
 const adminHealthBlackbox = readFileSync(
   join(process.cwd(), 'src', 'tests', 'blackbox', 'admin-health.blackbox.ts'),
   'utf8'
+);
+const autoRcaEnvPath = join(process.cwd(), 'scripts', 'blackbox-auto-rca-env.sh');
+
+assert.ok(
+  existsSync(autoRcaEnvPath),
+  'backend launchers must share the deterministic Slack auto-RCA environment'
+);
+const autoRcaEnv = readFileSync(autoRcaEnvPath, 'utf8');
+
+for (const [name, harness] of [
+  ['coverage', coverageScript],
+  ['blackbox', blackboxScript],
+] as const) {
+  assert.match(
+    harness,
+    /source .*blackbox-auto-rca-env\.sh/,
+    `${name} launcher must source the shared Slack auto-RCA fixture environment`
+  );
+  assert.ok(
+    harness.indexOf('source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"') <
+      harness.indexOf('src/bootstrap.ts'),
+    `${name} launcher must load the shared Slack auto-RCA environment before backend boot`
+  );
+}
+for (const variable of [
+  'SLACK_SIGNING_SECRET',
+  'SLACK_BOT_TOKEN',
+  'SLACK_ERROR_CHANNEL_ID',
+  'GITHUB_DISPATCH_TOKEN',
+]) {
+  assert.match(
+    autoRcaEnv,
+    new RegExp(`export ${variable}=`),
+    `shared auto-RCA environment is missing ${variable}`
+  );
+}
+assert.match(
+  autoRcaEnv,
+  /BLACKBOX_TEST_CAPTURE_OUTBOUND[\s\S]*BLACKBOX_TEST_REPLAY_OUTBOUND/,
+  'shared auto-RCA fixtures must fail closed outside capture/replay mode'
 );
 
 assert.match(
