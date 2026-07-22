@@ -65,11 +65,20 @@ _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
 _BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
 
 
-def load_env_var(name: str, *env_files: str) -> str:
-    """Load a var from os.environ, falling back to .env files."""
-    val = os.environ.get(name, "")
-    if val:
-        return val
+def load_env_var(
+    name: str,
+    *env_files: str,
+    include_process_env: bool = True,
+) -> str:
+    """Load a var from process state and then the requested ``.env`` files.
+
+    Callers resolving a remote source while the current process targets an
+    isolated local database can disable the process lookup explicitly.
+    """
+    if include_process_env:
+        val = os.environ.get(name, "")
+        if val:
+            return val
     for path in env_files:
         if not os.path.exists(path):
             continue

@@ -38,6 +38,12 @@ cloudbench_env_sha256() {
   fi
 }
 
+cloudbench_worktree_has_changes() {  # <repo-root>
+  local repo="$1"
+  ! git -C "$repo" diff --quiet HEAD --binary 2>/dev/null \
+    || [ -n "$(git -C "$repo" ls-files --others --exclude-standard | head -1)" ]
+}
+
 cloudbench_central_hub_runs_root() {  # <port>
   curl --noproxy '*' -fsS --max-time 2 \
     "http://127.0.0.1:$1/hub-meta.json" 2>/dev/null \

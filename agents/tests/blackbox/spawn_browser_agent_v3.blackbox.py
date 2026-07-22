@@ -1961,6 +1961,46 @@ async def test_browser_humanizer_cdp_mouse_transport_queues_full_path_before_dra
     assert observed[-1] == (360, 240)
 
 
+async def test_browser_humanizer_cdp_mouse_drain_timeout_uses_fallback():
+    """A stalled CDP mouse drain is bounded and falls back to Playwright input."""
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class StalledCDPSession:
+        async def send(self, method, payload):
+            await asyncio.Event().wait()
+
+    class FakeContext:
+        async def new_cdp_session(self, page):
+            return StalledCDPSession()
+
+    class FakeMouse:
+        def __init__(self):
+            self.moves = []
+
+        async def move(self, x, y):
+            self.moves.append((x, y))
+
+    mouse = FakeMouse()
+    page = SimpleNamespace(
+        mouse=mouse,
+        keyboard=SimpleNamespace(),
+        viewport_size={"width": 1280, "height": 800},
+        context=FakeContext(),
+    )
+    humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+    sample = SimpleNamespace(x=25, y=40, delay_s=0)
+
+    with patch("browser_tools.humanizer.CDP_INPUT_DRAIN_TIMEOUT_SECONDS", 0.01, create=True):
+        used_cdp = await asyncio.wait_for(
+            humanizer._move_path_with_cdp_fire_and_drain([sample]),
+            timeout=0.5,
+        )
+
+    assert used_cdp is False
+    assert humanizer._cdp_session is None
+    assert not humanizer._cdp_mouse_transport_enabled
+
+
 async def test_browser_humanizer_idle_movement_forwards_to_cdp_and_observer():
     from browser_tools.humanizer import BrowserHumanizer
 
@@ -2164,6 +2204,43 @@ async def test_browser_humanizer_cdp_keyboard_transport_queues_text_before_drain
     assert cdp.calls[1][1]["type"] == "char"
     assert cdp.calls[1][1]["text"] == "A"
     assert cdp.calls[4][1]["text"] == "b"
+
+
+async def test_browser_humanizer_cdp_keyboard_drain_timeout_is_bounded():
+    """A stalled CDP key dispatch cannot consume minutes of the browser task budget."""
+    from browser_tools.humanizer import BrowserHumanizer
+
+    class StalledCDPSession:
+        async def send(self, method, payload):
+            await asyncio.Event().wait()
+
+    class FakeContext:
+        async def new_cdp_session(self, page):
+            return StalledCDPSession()
+
+    class FakeKeycap:
+        @staticmethod
+        def next(char):
+            return SimpleNamespace(dwell_s=0, interval_s=0)
+
+    page = SimpleNamespace(
+        mouse=SimpleNamespace(),
+        keyboard=SimpleNamespace(),
+        viewport_size={"width": 1280, "height": 800},
+        context=FakeContext(),
+    )
+    humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+    humanizer._keycap = FakeKeycap()
+
+    with patch("browser_tools.humanizer.CDP_INPUT_DRAIN_TIMEOUT_SECONDS", 0.01, create=True):
+        try:
+            await asyncio.wait_for(humanizer.type_text("A"), timeout=0.5)
+            raise AssertionError("Expected stalled CDP keyboard dispatch to time out")
+        except asyncio.TimeoutError as exc:
+            assert "CDP keyboard input drain timed out" in str(exc)
+
+    assert humanizer._cdp_session is None
+    assert not humanizer._cdp_keyboard_transport_enabled
 
 
 async def test_browser_humanizer_cdp_session_initialization_is_serialized():
@@ -6830,15 +6907,51 @@ async def test_execute_click_write_lock_purchase_triggers_approval():
     assert out["approval_type"] == "purchase"
 
 
+async def test_execute_click_write_lock_return_confirmation_triggers_approval():
+    """The archived Amazon final-return control is blocked before the click executes."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = MagicMock()
+    dom = MagicMock()
+    element = MagicMock()
+    element.attributes = {"role": "button"}
+    element.get_all_children_text = MagicMock(return_value="Confirm your return")
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    out = await service_actions._execute_click(
+        session=session,
+        dom_service=dom,
+        action_history=ah,
+        element=element,
+        index=27,
+        coords=None,
+        thinking=None,
+        humanizer=None,
+        write_lock_enabled=True,
+        write_lock_approvals=None,
+        current_url="https://www.amazon.com/spr/returns/confirm",
+        system_name="Rose",
+    )
+
+    assert out["status"] == "needs_write_approval"
+    assert out["approval_type"] == "purchase"
+    assert "Confirm your return" in out["element_text"]
+    ah.record_action.assert_not_awaited()
+
+
 def test_write_lock_purchase_button_detects_order_controls():
-    """Final order/payment buttons are purchase-gated; cart and checkout navigation are not."""
+    """Final transaction buttons are gated; cart, checkout, and return navigation are not."""
     from browser_tools.write_lock import is_purchase_button
 
     assert is_purchase_button("Buy Now")
     assert is_purchase_button("Place your order")
+    assert is_purchase_button("Confirm your return")
+    assert is_purchase_button("Submit return request")
     assert not is_purchase_button("Add to Cart")
     assert not is_purchase_button("Go to Cart")
     assert not is_purchase_button("Proceed to checkout")
+    assert not is_purchase_button("Return to your orders")
 
 
 def test_write_lock_email_send_excludes_resend_controls():
@@ -11369,6 +11482,10 @@ async def run_all_tests():
         "execute_click_write_lock_purchase",
         test_execute_click_write_lock_purchase_triggers_approval,
     )
+    await r.record_async(
+        "execute_click_write_lock_return_confirmation",
+        test_execute_click_write_lock_return_confirmation_triggers_approval,
+    )
     r.record(
         "write_lock_purchase_button_order_controls",
         test_write_lock_purchase_button_detects_order_controls,
@@ -11608,6 +11725,10 @@ async def run_all_tests():
         test_browser_humanizer_cdp_mouse_transport_queues_full_path_before_drain,
     )
     await r.record_async(
+        "browser_humanizer_cdp_mouse_drain_timeout",
+        test_browser_humanizer_cdp_mouse_drain_timeout_uses_fallback,
+    )
+    await r.record_async(
         "browser_humanizer_idle_movement",
         test_browser_humanizer_idle_movement_forwards_to_cdp_and_observer,
     )
@@ -11618,6 +11739,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_humanizer_cdp_keyboard_transport",
         test_browser_humanizer_cdp_keyboard_transport_queues_text_before_drain,
+    )
+    await r.record_async(
+        "browser_humanizer_cdp_keyboard_drain_timeout",
+        test_browser_humanizer_cdp_keyboard_drain_timeout_is_bounded,
     )
     await r.record_async(
         "browser_humanizer_cdp_session_initialization",

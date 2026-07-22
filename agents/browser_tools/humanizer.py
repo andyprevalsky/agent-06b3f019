@@ -36,6 +36,7 @@ logger = structlog.get_logger()
 
 
 FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
+CDP_INPUT_DRAIN_TIMEOUT_SECONDS = float(os.getenv("BROWSER_AGENT_CDP_INPUT_DRAIN_TIMEOUT_SECONDS", "15"))
 
 
 def _env_enabled(name: str, default: bool = True) -> bool:
@@ -453,7 +454,10 @@ class BrowserHumanizer:
                 await asyncio.sleep(sample.delay_s)
 
             if pending:
-                await asyncio.gather(*pending)
+                await asyncio.wait_for(
+                    asyncio.gather(*pending),
+                    timeout=CDP_INPUT_DRAIN_TIMEOUT_SECONDS,
+                )
         except asyncio.CancelledError:
             for task in pending:
                 if not task.done():
@@ -701,7 +705,16 @@ class BrowserHumanizer:
                 timestamp += timing.interval_s
 
             if pending:
-                await asyncio.gather(*pending)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*pending),
+                        timeout=CDP_INPUT_DRAIN_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise asyncio.TimeoutError(
+                        "CDP keyboard input drain timed out after "
+                        f"{CDP_INPUT_DRAIN_TIMEOUT_SECONDS:g}s"
+                    ) from exc
         except BaseException:
             for task in pending:
                 if not task.done():

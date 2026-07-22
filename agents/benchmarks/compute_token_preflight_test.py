@@ -13,6 +13,7 @@ task at the fixture before an agent was created — 0/8 on the ecommerce slice.
 These tests pin the tolerance on both paths without needing a live DB.
 """
 
+import os
 import subprocess
 import sys
 import time
@@ -41,6 +42,7 @@ def _captured_seed_env(**kwargs) -> dict[str, str]:
     with (
         patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
         patch.object(rb, "_shared_workspace_database_url", return_value=None),
+        patch.object(rb, "load_env_var", return_value="postgresql://prod/rose"),
         patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
     ):
         rb._sync_compute_tokens(**kwargs)
@@ -73,6 +75,91 @@ def test_sync_uses_verified_shared_workspace_as_compute_token_source():
 
     assert seen["env"]["DATABASE_URL"] == "postgresql://local/victoria"
     assert seen["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://shared/victoria"
+
+
+def test_sync_prefers_verified_shared_source_and_clears_ambient_source():
+    seen: dict[str, dict[str, str]] = {}
+
+    def fake_run(_cmd, **kw):
+        seen["env"] = kw["env"]
+        return _Result(0)
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "DATABASE_URL": "postgresql://ambient/local",
+                "SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL": "postgresql://stale/source",
+            },
+        ),
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_shared_workspace_database_url", return_value="postgresql://shared/victoria"),
+        patch.object(rb, "load_env_var", return_value="postgresql://prod/rose"),
+        patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
+    ):
+        assert rb._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is True
+
+    assert (
+        seen["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"]
+        == "postgresql://shared/victoria"
+    )
+
+
+def test_seed_source_file_lookup_can_ignore_local_process_database(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("DATABASE_URL=postgresql://prod/rose\n")
+
+    with patch.dict(os.environ, {"DATABASE_URL": "postgresql://local/victoria"}):
+        assert (
+            rb.load_env_var(
+                "DATABASE_URL",
+                str(env_file),
+                include_process_env=False,
+            )
+            == "postgresql://prod/rose"
+        )
+
+
+def test_database_url_equivalence_normalizes_postgres_spelling_and_client_options():
+    assert rb._database_urls_equivalent(
+        "postgres://source:one@LOCALHOST/victoria?pgbouncer=true&sslmode=require",
+        "postgresql://target:two@localhost:5432/victoria?application_name=benchmark",
+    )
+
+
+def test_cloud_source_selection_remains_explicit_across_10000_runs():
+    calls = 0
+    iteration = -1
+
+    def local_database_url():
+        nonlocal iteration
+        iteration += 1
+        return f"postgresql://local/victoria-{iteration}"
+
+    def source_database_url(*_args, **_kwargs):
+        return f"postgresql://prod/rose-{iteration}?pgbouncer=true"
+
+    def fake_run(_cmd, **kw):
+        nonlocal calls
+        calls += 1
+        assert kw["env"]["DATABASE_URL"] == f"postgresql://local/victoria-{iteration}"
+        assert (
+            kw["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"]
+            == f"postgresql://prod/rose-{iteration}?pgbouncer=true"
+        )
+        return _Result(0)
+
+    with (
+        patch.object(rb, "_local_victoria_database_url", side_effect=local_database_url),
+        patch.object(rb, "_shared_workspace_database_url", return_value=None),
+        patch.object(rb, "load_env_var", side_effect=source_database_url),
+        patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
+        patch("builtins.print"),
+    ):
+        for _ in range(10_000):
+            assert rb._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is True
+
+    assert calls == 10_000
 
 
 def test_blanket_preflight_uses_tolerant_sync():

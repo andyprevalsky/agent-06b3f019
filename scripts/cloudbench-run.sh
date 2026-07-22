@@ -247,29 +247,31 @@ if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -fd 2>&1 | sed 's/^/   /'; then
     finish 1
 fi
 log "checkout at $(gosu "$APP_USER" git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-if [ -n "${LOCAL_PATCH_FILE:-}" ] && [ -s "$LOCAL_PATCH_FILE" ]; then
+if [ -n "${LOCAL_PATCH_FILE:-}" ]; then
+    [ -s "$LOCAL_PATCH_FILE" ] || {
+        log "FATAL: declared local patch payload is missing or empty"
+        finish 1
+    }
+    [ -n "${LOCAL_PATCH_SHA256:-}" ] || {
+        log "FATAL: local patch payload has no checksum"
+        finish 1
+    }
+    _actual_patch_sha="$(sha256sum "$LOCAL_PATCH_FILE" | awk '{print $1}')"
+    [ "$_actual_patch_sha" = "$LOCAL_PATCH_SHA256" ] || {
+        log "FATAL: patch payload checksum mismatch"
+        finish 1
+    }
     log "applying uploaded local workspace patch on top of checkout"
     if ! bash "$PREPARE_PATCH_SCRIPT" "$REPO_DIR" "$LOCAL_PATCH_FILE"; then
         log "FATAL: could not prepare uploaded local workspace patch"
         finish 1
     fi
-    if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn "$LOCAL_PATCH_FILE" 2>&1 | sed 's/^/   /'; then
+    if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn - \
+        < "$LOCAL_PATCH_FILE" 2>&1 | sed 's/^/   /'; then
         log "FATAL: could not apply uploaded local workspace patch"
         finish 1
     fi
-elif [ -n "${LOCAL_PATCH_B64:-}" ]; then
-    PATCH_FILE="/tmp/cloudbench-local.patch"
-    if printf '%s' "$LOCAL_PATCH_B64" | base64 -d > "$PATCH_FILE" 2>/dev/null && [ -s "$PATCH_FILE" ]; then
-        log "applying local workspace patch on top of checkout"
-        if ! bash "$PREPARE_PATCH_SCRIPT" "$REPO_DIR" "$PATCH_FILE"; then
-            log "FATAL: could not prepare local workspace patch"
-            finish 1
-        fi
-        if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn "$PATCH_FILE" 2>&1 | sed 's/^/   /'; then
-            log "FATAL: could not apply local workspace patch"
-            finish 1
-        fi
-    fi
+    log "verified local workspace patch $_actual_patch_sha"
 fi
 
 # Replace the bootstrap read-only http.server with the ref's authenticated

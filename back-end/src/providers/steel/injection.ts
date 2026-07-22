@@ -18,6 +18,7 @@ interface CookieBundleCandidate {
   browserSource: string;
   browserProfile: string;
   disabledAt: Date | null;
+  cookieCount: number;
   freshestCookieUtc: bigint | null;
 }
 
@@ -46,11 +47,21 @@ interface SteelRealmCookieSummary {
 }
 
 function cookieDomainWhere(authRealm: string) {
+  // CookieBundle.authRealm follows the browser start host, which can retain a
+  // leading `www.` for sites outside the small canonicalAuthRealm allowlist.
+  // Browser cookies are commonly scoped to the parent domain instead (for
+  // example authRealm=www.doordash.com with domain=.doordash.com). Selection
+  // and injection must use the same boundary-aware variants or we can advertise
+  // a CookieBundle while injecting zero cookies.
+  const normalizedRealm = authRealm.trim().toLowerCase().replace(/^\.+/, '');
+  const parentRealm = normalizedRealm.startsWith('www.')
+    ? normalizedRealm.slice('www.'.length)
+    : normalizedRealm;
+  const exactDomains = [...new Set([normalizedRealm, parentRealm])];
   return {
     OR: [
-      { domain: authRealm },
-      { domain: `.${authRealm}` },
-      { domain: { endsWith: `.${authRealm}` } },
+      ...exactDomains.flatMap((domain) => [{ domain }, { domain: `.${domain}` }]),
+      ...exactDomains.map((domain) => ({ domain: { endsWith: `.${domain}` } })),
     ],
   };
 }
@@ -109,7 +120,7 @@ async function getSteelSessionRealmCookieSummary(
   return summarizeSteelCookiesForRealm(context.cookies ?? [], authRealm);
 }
 
-async function freshestCookieUtcForBundle(params: {
+async function cookieSummaryForBundle(params: {
   userId: string;
   authRealm: string;
   browserSource: string;
@@ -122,9 +133,13 @@ async function freshestCookieUtcForBundle(params: {
       browserProfile: params.browserProfile,
       ...cookieDomainWhere(params.authRealm),
     },
+    _count: { _all: true },
     _max: { creationUtc: true },
   });
-  return result._max.creationUtc;
+  return {
+    cookieCount: result._count._all,
+    freshestCookieUtc: result._max.creationUtc,
+  };
 }
 
 async function selectTopCookieBundle(params: {
@@ -139,21 +154,30 @@ async function selectTopCookieBundle(params: {
   const candidates = await Promise.all(
     bundles
       .filter((bundle) => bundle.disabledAt === null)
-      .map(async (bundle) => ({
-        id: bundle.id,
-        browserSource: bundle.browserSource,
-        browserProfile: bundle.browserProfile,
-        disabledAt: bundle.disabledAt,
-        freshestCookieUtc: await freshestCookieUtcForBundle({
+      .map(async (bundle) => {
+        const summary = await cookieSummaryForBundle({
           userId: params.userId,
           authRealm: params.authRealm,
           browserSource: bundle.browserSource,
           browserProfile: bundle.browserProfile,
-        }),
-      }))
+        });
+        return {
+          id: bundle.id,
+          browserSource: bundle.browserSource,
+          browserProfile: bundle.browserProfile,
+          disabledAt: bundle.disabledAt,
+          ...summary,
+        };
+      })
   );
 
-  candidates.sort((a, b) => {
+  // An enabled marker without a matching cookie row is not an authentication
+  // source. Returning it records "credential applied" even though injectUserData
+  // has nothing to inject, which sends the browser down a misleading signed-out
+  // path and prevents fallback to another auth mechanism.
+  const injectableCandidates = candidates.filter((candidate) => candidate.cookieCount > 0);
+
+  injectableCandidates.sort((a, b) => {
     if ((a.disabledAt === null) !== (b.disabledAt === null)) {
       return a.disabledAt === null ? -1 : 1;
     }
@@ -161,7 +185,7 @@ async function selectTopCookieBundle(params: {
     const bFresh = b.freshestCookieUtc ?? 0n;
     return aFresh > bFresh ? -1 : aFresh < bFresh ? 1 : 0;
   });
-  return candidates[0] ?? null;
+  return injectableCandidates[0] ?? null;
 }
 
 export async function resolveBrowserAuthCredentialSource(params: {

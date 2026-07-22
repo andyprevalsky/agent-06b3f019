@@ -580,7 +580,208 @@ def _receipt_amount(receipt: dict, camel_key: str) -> int | None:
     return value if value is not None else receipt.get(snake_key)
 
 
-def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
+_STRUCTURED_MERCHANT_IDENTITY = re.compile(
+    r"^\s*(?P<business>.+?)\s*\(\s*(?P<platform>.+?)\s+-\s+"
+    r"(?P<host>(?:[a-z0-9-]+\.)+[a-z0-9-]+)\s*\)\s*$",
+    re.IGNORECASE,
+)
+_CONNECTED_MERCHANT_IDENTITY = re.compile(
+    r"^\s*(?P<business>.+?)\s+(?:via|on|through|by|/)\s+(?P<platform>.+?)\s*$",
+    re.IGNORECASE,
+)
+_NAVIGATION_ACTION_TYPES = {"goto", "navigate", "navigation"}
+
+
+def _merchant_identity_tokens(value: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def _merchant_host_matches(expected_host: str, actual_host: str) -> bool:
+    expected = expected_host.casefold().rstrip(".")
+    actual = actual_host.casefold().rstrip(".")
+    return actual == expected or actual.endswith(f".{expected}")
+
+
+def _browser_action_scope(metadata: dict) -> Optional[tuple[str, str]]:
+    candidates = [metadata]
+    if isinstance(metadata.get("auxiliary"), dict):
+        candidates.append(metadata["auxiliary"])
+    scope = next(
+        (
+            candidate.get("subAgentId")
+            or candidate.get("sub_agent_id")
+            or candidate.get("task_id")
+            or candidate.get("taskId")
+            for candidate in candidates
+            if candidate.get("subAgentId")
+            or candidate.get("sub_agent_id")
+            or candidate.get("task_id")
+            or candidate.get("taskId")
+        ),
+        None,
+    )
+    session = next(
+        (
+            candidate.get("browser_session_id") or candidate.get("browser_url")
+            for candidate in candidates
+            if candidate.get("browser_session_id") or candidate.get("browser_url")
+        ),
+        None,
+    )
+    if not scope or not session:
+        return None
+    return str(scope), str(session)
+
+
+def _browser_action_value(metadata: dict, *keys: str) -> object:
+    candidates = [metadata]
+    if isinstance(metadata.get("auxiliary"), dict):
+        candidates.append(metadata["auxiliary"])
+    return next(
+        (candidate.get(key) for candidate in candidates for key in keys if candidate.get(key)),
+        None,
+    )
+
+
+def _navigation_host(metadata: dict) -> Optional[str]:
+    values = [
+        _browser_action_value(metadata, "target_url", "current_url", "final_url", "url"),
+        _browser_action_value(metadata, "title"),
+    ]
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        match = re.search(r"https?://[^\s<>\"']+", value)
+        if not match:
+            continue
+        host = urlparse(match.group(0).rstrip(".,);]")).hostname
+        if host:
+            return host.casefold().rstrip(".")
+    return None
+
+
+def _grounded_payment_navigation_hosts(messages: Optional[List[dict]]) -> set[str]:
+    """Return hosts from the successful payment action's exact browser flow."""
+    navigations: list[tuple[int, tuple[str, str], str]] = []
+    payment_actions: list[tuple[int, tuple[str, str]]] = []
+    for index, message in enumerate(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "TOOL":
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        scope = _browser_action_scope(metadata)
+        if scope is None:
+            continue
+        status = str(_browser_action_value(metadata, "toolStatus", "tool_status") or "").upper()
+        if status != "FINISHED":
+            continue
+        action_type = str(_browser_action_value(metadata, "action_type") or "").casefold()
+        if action_type == "request_payment_card":
+            payment_actions.append((index, scope))
+        elif action_type in _NAVIGATION_ACTION_TYPES:
+            host = _navigation_host(metadata)
+            if host:
+                navigations.append((index, scope, host))
+    if not payment_actions:
+        return set()
+    payment_index, payment_scope = max(payment_actions, key=lambda item: item[0])
+    return {
+        host
+        for navigation_index, navigation_scope, host in navigations
+        if navigation_scope == payment_scope and navigation_index <= payment_index
+    }
+
+
+def _payment_approval_hosts(req: dict) -> set[str]:
+    """Return checkout hosts carried by the pending payment approval itself."""
+    metadata = req.get("metadata") if isinstance(req, dict) else None
+    metadata = metadata if isinstance(metadata, dict) else {}
+    approval = metadata.get("requestUserApproval")
+    if not isinstance(approval, dict):
+        return set()
+
+    values: list[object] = [approval.get("url"), approval.get("approvalUrl")]
+    notification = approval.get("writeLockNotification")
+    if isinstance(notification, dict):
+        service = notification.get("service")
+        if isinstance(service, dict):
+            values.extend([service.get("url"), service.get("domain")])
+
+    hosts: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        parsed = urlparse(value if "://" in value else f"https://{value}")
+        if parsed.hostname:
+            hosts.add(parsed.hostname.casefold().rstrip("."))
+    return hosts
+
+
+def _validate_payment_merchant_identity(
+    expected_merchant: object,
+    actual_merchant: object,
+    req: dict,
+    messages: Optional[List[dict]],
+    business_aliases: object = None,
+) -> Optional[str]:
+    if not isinstance(expected_merchant, str) or not isinstance(actual_merchant, str):
+        if actual_merchant != expected_merchant:
+            return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
+        return None
+
+    expected_match = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(expected_merchant)
+    if expected_match is None:
+        if actual_merchant != expected_merchant:
+            return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
+        return None
+
+    expected_businesses = {_merchant_identity_tokens(expected_match.group("business"))}
+    if isinstance(business_aliases, list):
+        expected_businesses.update(
+            _merchant_identity_tokens(alias)
+            for alias in business_aliases
+            if isinstance(alias, str) and alias.strip()
+        )
+    expected_platform = _merchant_identity_tokens(expected_match.group("platform"))
+    expected_host = expected_match.group("host").casefold().rstrip(".")
+    actual_match = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
+    if actual_match is None:
+        actual_match = _CONNECTED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
+    direct_merchant = (
+        expected_platform == ("direct",)
+        and _merchant_identity_tokens(actual_merchant) in expected_businesses
+    )
+    if not direct_merchant:
+        if (
+            actual_match is None
+            or _merchant_identity_tokens(actual_match.group("business")) not in expected_businesses
+            or _merchant_identity_tokens(actual_match.group("platform")) != expected_platform
+        ):
+            return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
+    if actual_match is not None and "host" in actual_match.groupdict():
+        actual_host = actual_match.group("host").casefold().rstrip(".")
+        if not _merchant_host_matches(expected_host, actual_host):
+            return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
+
+    # The approval URL is the terminal payment boundary the benchmark observes.
+    # Prefer it over inferred browser history: click-driven redirects may not emit a
+    # separate navigation tool event, and a prior visit must not rescue a wrong
+    # checkout URL. Legacy attention payloads without an approval URL retain the
+    # scoped, completed-navigation fallback.
+    grounded_hosts = _payment_approval_hosts(req) or _grounded_payment_navigation_hosts(messages)
+    if not any(_merchant_host_matches(expected_host, host) for host in grounded_hosts):
+        observed = ", ".join(sorted(grounded_hosts)) or "none"
+        return f"merchant host not grounded: expected {expected_host}, observed {observed}"
+    return None
+
+
+def _validate_payment_receipt(
+    task: BenchmarkTask,
+    req: dict,
+    *,
+    messages: Optional[List[dict]] = None,
+) -> Optional[str]:
     expected = task.expected_payment_receipt
     if not expected:
         return None
@@ -633,8 +834,16 @@ def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
             not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
         ):
             return "malformed complete payment receipt field: fingerprint"
-    if "merchant" in expected and receipt.get("merchant") != expected.get("merchant"):
-        return f"merchant mismatch: expected {expected.get('merchant')}, got {receipt.get('merchant')}"
+    if "merchant" in expected:
+        merchant_error = _validate_payment_merchant_identity(
+            expected.get("merchant"),
+            receipt.get("merchant"),
+            req,
+            messages,
+            expected.get("merchantBusinessAliases"),
+        )
+        if merchant_error:
+            return merchant_error
     if "currency" in expected and (receipt.get("currency") or "USD") != expected.get("currency", "USD"):
         return f"currency mismatch: expected {expected.get('currency', 'USD')}, got {receipt.get('currency')}"
     for key in ("subtotalCents", "totalCents"):
@@ -2219,6 +2428,8 @@ async def poll_agent(
     per_agent_state: Dict[str, dict] = {}
     seen_attention_ids: set[str] = set()
     seen_attention_kinds: List[str] = []
+    validated_payment_receipt_request_id: Optional[str] = None
+    expected_gate_evidence: Optional[dict] = None
     agentcard_setup_attention_seen = False
     agentcard_setup_attention_id: Optional[str] = None
     attention_requests_seen: list[dict] = []
@@ -2277,6 +2488,25 @@ async def poll_agent(
             "approvals_resolved": approvals_resolved,
             "attention_requests_seen": list(attention_requests_seen),
         }
+        if seen_attention_kinds:
+            data["_benchmark"]["attention_request_kind_seen"] = seen_attention_kinds[-1]
+            if task.expected_attention_kind:
+                data["_benchmark"]["expected_attention_kind_seen"] = task.expected_attention_kind
+            if task.expected_attention_kind_any_of:
+                data["_benchmark"]["expected_attention_kind_any_of"] = list(
+                    task.expected_attention_kind_any_of
+                )
+            if task.expected_attention_kinds:
+                data["_benchmark"]["expected_attention_kinds_seen"] = list(seen_attention_kinds)
+        if validated_payment_receipt_request_id:
+            data["_benchmark"]["expected_payment_receipt_seen"] = True
+            data["_benchmark"]["expected_payment_receipt_request_id"] = (
+                validated_payment_receipt_request_id
+            )
+        if expected_gate_evidence:
+            data["_benchmark"]["expected_gate_seen"] = True
+            data["_benchmark"]["expected_gate"] = expected_gate_evidence["gate"]
+            data["_benchmark"]["expected_gate_request_id"] = expected_gate_evidence["request_id"]
 
         exact_count_error = _root_exact_tool_count_exceeded(task, messages)
         if exact_count_error:
@@ -2656,14 +2886,6 @@ async def poll_agent(
                                     approvals_resolved,
                                     f"Expected attention kind {expected_kind}, observed {observed_kind}",
                                 )
-                            receipt_error = _validate_payment_receipt(task, req)
-                            if receipt_error:
-                                data["_benchmark"] = {
-                                    **data.get("_benchmark", {}),
-                                    "payment_receipt_validation_error": receipt_error,
-                                    "payment_receipt_request_id": req_id,
-                                }
-                                return data, approvals_triggered, approvals_resolved, receipt_error
                             approvals_triggered += 1
                             observed_kind = _attention_request_kind(req)
                             seen_attention_kinds.append(observed_kind)
@@ -2696,13 +2918,26 @@ async def poll_agent(
                                     "expected_attention_kinds_seen": list(seen_attention_kinds),
                                 }
                             if task.expected_gate:
+                                expected_gate_evidence = {
+                                    "gate": (req.get("metadata") or {}).get("gate"),
+                                    "request_id": req_id,
+                                }
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
                                     "expected_gate_seen": True,
-                                    "expected_gate": (req.get("metadata") or {}).get("gate"),
+                                    "expected_gate": expected_gate_evidence["gate"],
                                     "expected_gate_request_id": req_id,
                                 }
+                            receipt_error = _validate_payment_receipt(task, req, messages=messages)
+                            if receipt_error:
+                                data["_benchmark"] = {
+                                    **data.get("_benchmark", {}),
+                                    "payment_receipt_validation_error": receipt_error,
+                                    "payment_receipt_request_id": req_id,
+                                }
+                                return data, approvals_triggered, approvals_resolved, receipt_error
                             if task.expected_payment_receipt:
+                                validated_payment_receipt_request_id = req_id
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
                                     "expected_payment_receipt_seen": True,
@@ -3110,8 +3345,8 @@ def evaluate_task(
                     f"Expected {task.expected_attention_kind} attention request (to ignore) but none was triggered",
                 )
             return False, "Expected approval request (to ignore) but none were triggered"
+        benchmark_state = data.get("_benchmark", {})
         if task.expected_attention_kind:
-            benchmark_state = data.get("_benchmark", {})
             if benchmark_state.get("expected_attention_kind_seen") != task.expected_attention_kind:
                 return False, f"Expected {task.expected_attention_kind} attention request but it was not observed"
         if task.expected_attention_kinds:
@@ -3122,6 +3357,8 @@ def evaluate_task(
                     False,
                     f"Expected one of {task.expected_attention_kinds} attention requests, observed {observed_kind}",
                 )
+        if task.expected_payment_receipt and benchmark_state.get("expected_payment_receipt_seen") is not True:
+            return False, "Expected validated payment-card request but none was observed"
         return True, None
 
     if task.name == CALENDLY_TASK_NAME:
@@ -3415,6 +3652,36 @@ def _services_manifest_is_active(services: dict) -> bool:
     return True
 
 
+def _local_database_url_responds(database_url: str) -> bool:
+    """Probe the isolated DB without turning one bounded stall into a crash.
+
+    A restored cloud guest can briefly stop accepting queries while the backend
+    and worker finish opening their pools. ``subprocess.run(timeout=...)`` raises
+    rather than returning a failed result in that case, so retry only that
+    transient boundary. Ordinary query failures still fail closed immediately.
+    """
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            result = subprocess.run(
+                ["psql", database_url, "-t", "-A", "-c", "SELECT 1;"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            if attempt == attempts:
+                return False
+            print(
+                "    ⚠ Local Victoria DB probe timed out; "
+                f"retrying ({attempt}/{attempts})"
+            )
+            time.sleep(0.25 * attempt)
+            continue
+        return result.returncode == 0
+    return False
+
+
 def _local_victoria_database_url() -> Optional[str]:
     candidates: list[str] = []
     services_path = _benchmark_context_path() / "services.json"
@@ -3439,13 +3706,7 @@ def _local_victoria_database_url() -> Optional[str]:
         if database_url in seen:
             continue
         seen.add(database_url)
-        result = subprocess.run(
-            ["psql", database_url, "-t", "-A", "-c", "SELECT 1;"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
+        if _local_database_url_responds(database_url):
             return database_url
     return None
 
@@ -3499,6 +3760,23 @@ def _psql_compatible_database_url(database_url: str) -> str:
         [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key not in unsupported]
     )
     return urlunparse(parsed._replace(query=query))
+
+
+def _database_urls_equivalent(left: str, right: str) -> bool:
+    """Conservatively identify the same Postgres database across DSN options."""
+
+    def identity(database_url: str) -> tuple:
+        parsed = urlparse(database_url)
+        scheme = "postgresql" if parsed.scheme in {"postgres", "postgresql"} else parsed.scheme
+        port = parsed.port or (5432 if scheme == "postgresql" else None)
+        return (
+            scheme,
+            (parsed.hostname or "").lower(),
+            port,
+            parsed.path or "/",
+        )
+
+    return identity(left) == identity(right)
 
 
 def _run_local_victoria_sql(sql: str) -> str:
@@ -3879,9 +4157,20 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
     env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
+    env.pop("SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL", None)
     shared_source = _shared_workspace_database_url()
-    if shared_source and shared_source != database_url:
-        env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = shared_source
+    configured_source = (
+        shared_source
+        or load_env_var("DATABASE_URL", _BACKEND_ENV, include_process_env=False)
+        or load_env_var("DIRECT_DATABASE_URL", _BACKEND_ENV, include_process_env=False)
+    )
+    if not configured_source or _database_urls_equivalent(configured_source, database_url):
+        print(
+            "    ⚠ Compute-token sync skipped: no explicit source database "
+            "distinct from the isolated target"
+        )
+        return False
+    env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = configured_source
     if tolerate_gpt_code_unavailable:
         env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
     try:
@@ -3903,7 +4192,11 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     if result.returncode != 0:
         print(f"    ⚠ Compute-token sync failed: {_seed_sync_error_detail(result)}")
         return False
-    source_label = "shared workspace" if shared_source else "prod"
+    source_label = (
+        "shared workspace"
+        if shared_source and _database_urls_equivalent(configured_source, shared_source)
+        else "prod"
+    )
     print(f"    🔑 Refreshed compute tokens from {source_label}")
     return True
 

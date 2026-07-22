@@ -170,6 +170,10 @@ PURCHASE_BUTTON_PHRASES = [
     "proceed to pay",
     "checkout now",
     "complete checkout",
+    "confirm your return",
+    "confirm return",
+    "complete return",
+    "submit return",
 ]
 
 

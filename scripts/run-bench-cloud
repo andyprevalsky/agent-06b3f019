@@ -342,8 +342,12 @@ machine_storage_ready() {  # machine_storage_ready <id>
     # control-plane burst pooling is meant to eliminate.
     [ "${CLOUDBENCH_STORAGE_READY:-0}" = "1" ] && return 0
     local id="$1" machines volumes
-    machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 1
-    volumes="$(FLY volumes list -a "$APP" --json 2>/dev/null)" || return 1
+    local inventory_timeout="${CLOUDBENCH_STORAGE_QUERY_TIMEOUT:-20}"
+    # A single read-only flyctl process can wedge while the same API remains
+    # healthy for other callers. Yield to the existing readiness retry instead
+    # of holding the synchronized fleet barrier indefinitely.
+    machines="$(_with_timeout "$inventory_timeout" flyctl machines list -a "$APP" --json 2>/dev/null)" || return 1
+    volumes="$(_with_timeout "$inventory_timeout" flyctl volumes list -a "$APP" --json 2>/dev/null)" || return 1
     python3 "$MACHINE_READINESS_SCRIPT" "$id" \
         <(printf '%s' "$machines") <(printf '%s' "$volumes") >/dev/null
 }
@@ -1560,27 +1564,126 @@ finally:
 PY
 }
 
-claim_local_port() {  # claim_local_port <preferred> <output-variable>
-    local preferred="$1" output_var="$2" port lease owner owner_pid
+claim_exact_local_port() {  # claim_exact_local_port <port> <output-variable>
+    local port="$1" output_var="$2" lease owner owner_pid stale_lease
+    local port_min=1024 port_max=65535
+    case "$port" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    port=$((10#$port))
+    [ "$port" -ge "$port_min" ] && [ "$port" -le "$port_max" ] || return 1
     mkdir -p "$PORT_LEASE_ROOT"
-    for port in $(seq "$preferred" $(( preferred + 99 ))); do
-        lease="$PORT_LEASE_ROOT/$port"
-        if mkdir "$lease" 2>/dev/null; then
-            if local_port_is_bindable "$port"; then
-                printf '%s %s\n' "$$" "$PORT_LEASE_NONCE" > "$lease/owner"
-                PORT_LEASES+=("$lease")
-                printf -v "$output_var" '%s' "$port"
-                return 0
+    lease="$PORT_LEASE_ROOT/$port"
+    if mkdir "$lease" 2>/dev/null; then
+        if local_port_is_bindable "$port"; then
+            printf '%s %s\n' "$$" "$PORT_LEASE_NONCE" > "$lease/owner"
+            PORT_LEASES+=("$lease")
+            printf -v "$output_var" '%s' "$port"
+            return 0
+        fi
+        rmdir "$lease" 2>/dev/null || true
+        return 1
+    fi
+    owner="$(cat "$lease/owner" 2>/dev/null || true)"
+    owner_pid="${owner%% *}"
+    if [ -n "$owner_pid" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+        stale_lease="$PORT_LEASE_ROOT/.stale-$port-$$-$RANDOM-$RANDOM"
+        if mv "$lease" "$stale_lease" 2>/dev/null; then
+            rm -rf "$stale_lease" 2>/dev/null || true
+        fi
+    fi
+    return 1
+}
+
+claim_local_port() {  # claim_local_port <preferred> <output-variable>
+    local preferred="$1" output_var="$2" port lease owner owner_pid stale_lease
+    local range_start range_end scan_phase
+    local port_min=1024 port_max=65535 port_span
+    case "$preferred" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    preferred=$((10#$preferred))
+    port_span=$((port_max - port_min + 1))
+    # Fleet preferences advance by a fixed stride per child and can exceed the
+    # numeric TCP range at large widths. Map that preference into the valid
+    # namespace before searching, preserving its deterministic distribution.
+    preferred=$((port_min + ((preferred - port_min) % port_span + port_span) % port_span))
+    mkdir -p "$PORT_LEASE_ROOT"
+    # Search the complete unprivileged namespace exactly once, starting at the
+    # caller's preferred port and wrapping at 65535. Dense concurrent/archive
+    # viewers can legitimately occupy more than 100 adjacent ports; a fixed
+    # window turns that local density into a fleet-wide boot-barrier failure.
+    for scan_phase in 1 2; do
+        if [ "$scan_phase" -eq 1 ]; then
+            range_start="$preferred"
+            range_end="$port_max"
+        else
+            range_start="$port_min"
+            range_end=$((preferred - 1))
+        fi
+        [ "$range_start" -le "$range_end" ] || continue
+        port="$range_start"
+        while [ "$port" -le "$range_end" ]; do
+            lease="$PORT_LEASE_ROOT/$port"
+            if mkdir "$lease" 2>/dev/null; then
+                if local_port_is_bindable "$port"; then
+                    printf '%s %s\n' "$$" "$PORT_LEASE_NONCE" > "$lease/owner"
+                    PORT_LEASES+=("$lease")
+                    printf -v "$output_var" '%s' "$port"
+                    return 0
+                fi
+                rmdir "$lease" 2>/dev/null || true
+                port=$((port + 1))
+                continue
             fi
-            rmdir "$lease" 2>/dev/null || true
-            continue
-        fi
-        owner="$(cat "$lease/owner" 2>/dev/null || true)"
-        owner_pid="${owner%% *}"
-        if [ -n "$owner_pid" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
-            rm -rf "$lease" 2>/dev/null || true
-        fi
+            owner="$(cat "$lease/owner" 2>/dev/null || true)"
+            owner_pid="${owner%% *}"
+            if [ -n "$owner_pid" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+                stale_lease="$PORT_LEASE_ROOT/.stale-$port-$$-$RANDOM-$RANDOM"
+                if mv "$lease" "$stale_lease" 2>/dev/null; then
+                    rm -rf "$stale_lease" 2>/dev/null || true
+                fi
+            fi
+            port=$((port + 1))
+        done
     done
+    return 1
+}
+
+claim_local_archive_ports() {  # claim_local_archive_ports <preferred> <api-output-variable> <frontend-output-variable>
+    local preferred="$1" api_output_var="$2" frontend_output_var="$3"
+    local api_port frontend_port port range_start range_end scan_phase
+    local port_min=1024 port_max=65534 port_span
+    case "$preferred" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    preferred=$((10#$preferred))
+    port_span=$((port_max - port_min + 1))
+    preferred=$((port_min + ((preferred - port_min) % port_span + port_span) % port_span))
+
+    for scan_phase in 1 2; do
+        if [ "$scan_phase" -eq 1 ]; then
+            range_start="$preferred"
+            range_end="$port_max"
+        else
+            range_start="$port_min"
+            range_end=$((preferred - 1))
+        fi
+        [ "$range_start" -le "$range_end" ] || continue
+        port="$range_start"
+        while [ "$port" -le "$range_end" ]; do
+            if claim_exact_local_port "$port" api_port; then
+                if claim_exact_local_port "$((port + 1))" frontend_port; then
+                    printf -v "$api_output_var" '%s' "$api_port"
+                    printf -v "$frontend_output_var" '%s' "$frontend_port"
+                    return 0
+                fi
+                release_local_port_lease "$api_port"
+            fi
+            port=$((port + 1))
+        done
+    done
+
     return 1
 }
 
@@ -1615,36 +1718,11 @@ start_local_archive_frontend() {
     release_local_port_leases
     stop_live_archive_frontend
 
-    local ports archive_api_port archive_fe_port
-    ports="$(python3 - "$LOCAL_DASH_PORT" <<'PY'
-import socket
-import sys
-
-preferred = int(sys.argv[1])
-for api_port in [preferred] + list(range(preferred + 1, preferred + 100)):
-    fe_port = api_port + 1
-    sockets = []
-    ok = True
-    for port in (api_port, fe_port):
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            sock.bind(("127.0.0.1", port))
-        except OSError:
-            ok = False
-        sockets.append(sock)
-    for sock in sockets:
-        sock.close()
-    if ok:
-        print(api_port, fe_port)
-        break
-PY
-)"
-    if [ -z "$ports" ]; then
+    local archive_api_port="" archive_fe_port=""
+    if ! claim_local_archive_ports "$LOCAL_DASH_PORT" archive_api_port archive_fe_port; then
         echo "   could not find free local ports for archived frontend; files are in $ROOT_DIR/.context"
         return 0
     fi
-    archive_api_port="$(printf '%s' "$ports" | awk '{print $1}')"
-    archive_fe_port="$(printf '%s' "$ports" | awk '{print $2}')"
 
     for pid_file in "$OUT_DIR/archive-frontend.pid" "$OUT_DIR/archive-api.pid"; do
         if [ -f "$pid_file" ]; then
@@ -1804,6 +1882,59 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# Build the code payload before choosing a launch transport. Boot-launch and the
+# legacy SSH path must consume this one source of truth; creating it only inside
+# the legacy branch made the fast path silently run the base checkout.
+STAGED_LOCAL_FILES=()
+cleanup_staged_local_files() {
+    # macOS Bash 3.2 treats an empty array expansion as unbound under `set -u`.
+    # Most boot-launch children share the fleet patch and therefore stage no
+    # controller-local temp files; cleanup must remain a no-op in that case.
+    [ "${STAGED_LOCAL_FILES[0]+set}" = "set" ] || return 0
+    for p in "${STAGED_LOCAL_FILES[@]}"; do
+        [ -n "$p" ] && rm -f "$p" 2>/dev/null || true
+    done
+}
+LOCAL_PATCH_FILE=""
+LOCAL_PATCH_SHA256=""
+if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ]; then
+    if [ -n "${CLOUDBENCH_LOCAL_PATCH_SOURCE:-}" ]; then
+        [ -s "$CLOUDBENCH_LOCAL_PATCH_SOURCE" ] || {
+            echo "❌ shared local workspace patch is missing or empty" >&2
+            exit 1
+        }
+        [ -n "${CLOUDBENCH_LOCAL_PATCH_SHA256:-}" ] || {
+            echo "❌ shared local workspace patch has no fleet-pinned checksum" >&2
+            exit 1
+        }
+        LOCAL_PATCH_FILE="$CLOUDBENCH_LOCAL_PATCH_SOURCE"
+        _shared_patch_sha256="$(cloudbench_env_sha256 "$LOCAL_PATCH_FILE")"
+        [ "$_shared_patch_sha256" = "$CLOUDBENCH_LOCAL_PATCH_SHA256" ] || {
+            echo "❌ shared local workspace patch checksum mismatch" >&2
+            exit 1
+        }
+        # Reuse the fleet's one authoritative digest for every child/guest.
+        # The hash above verifies bytes, but never promotes a mutated child's
+        # newly observed value to the expected checksum.
+        LOCAL_PATCH_SHA256="$CLOUDBENCH_LOCAL_PATCH_SHA256"
+    elif cloudbench_worktree_has_changes "$ROOT_DIR"; then
+        LOCAL_PATCH_FILE="$(mktemp)"
+        STAGED_LOCAL_FILES+=("$LOCAL_PATCH_FILE")
+        if ! bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$LOCAL_PATCH_FILE" \
+            || [ ! -s "$LOCAL_PATCH_FILE" ]; then
+            echo "❌ could not create the local workspace patch" >&2
+            exit 1
+        fi
+    fi
+fi
+if [ -n "$LOCAL_PATCH_FILE" ] && [ -z "$LOCAL_PATCH_SHA256" ]; then
+    LOCAL_PATCH_SHA256="$(cloudbench_env_sha256 "$LOCAL_PATCH_FILE")"
+    [ -n "$LOCAL_PATCH_SHA256" ] || {
+        echo "❌ could not fingerprint the local workspace patch" >&2
+        exit 1
+    }
+fi
+
 # ── Launch the driver: BOOT-LAUNCH (no ssh) or the legacy ssh path ──────────
 # BOOT-LAUNCH removes the per-box launch-ssh burst (start + ssh-ready + clear-stale
 # + stage + launch + confirm ≈ 7 ssh × N) that saturated Fly's Machines-API rate
@@ -1828,6 +1959,8 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
     _envargs=(
         --env CLOUDBENCH_BOOT=1
+        --env CLOUDBENCH_RUN_SCRIPT=/cloudbench-run.sh
+        --env "LOCAL_PATCH_B64="
         --env "CLOUDBENCH_RUN_TOKEN=$RUN_LOG_TOKEN"
         --env "REF=$BENCH_REF"
         --env "CLOUDBENCH_GITHUB_TOKEN_B64=$_ghb64"
@@ -1847,6 +1980,16 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "BENCHMARK_PEAK_FLY_MACHINES=$OBSERVED_PEAK_FLY_MACHINES"
         --env "BENCHMARK_VM_USD_PER_HOUR=$VM_USD_PER_HOUR"
     )
+    _patch_file_args=()
+    if [ -n "$LOCAL_PATCH_FILE" ]; then
+        _envargs+=(
+            --env "LOCAL_PATCH_FILE=/cloudbench-local.patch"
+            --env "LOCAL_PATCH_SHA256=$LOCAL_PATCH_SHA256"
+        )
+        _patch_file_args+=(--file-local "/cloudbench-local.patch=$LOCAL_PATCH_FILE")
+    else
+        _envargs+=(--env "LOCAL_PATCH_FILE=" --env "LOCAL_PATCH_SHA256=")
+    fi
     [ "$DASHBOARD" = "1" ] && _envargs+=( --env "BENCHMARK_FRONTEND_URL=http://localhost:$LOCAL_DASH_PORT" )
     # The boot script lives on the /data volume (staged into the snapshot). flyctl
     # --command word-splits, so only a simple `bash <path>` works (an inline shell
@@ -1879,6 +2022,8 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         if _with_timeout "${CLOUDBENCH_BOOT_UPDATE_TIMEOUT:-90}" \
               flyctl machine update "$mid" -a "$APP" "${_envargs[@]}" \
               --file-local "/cloudbench-boot.sh=$ROOT_DIR/scripts/cloudbench-boot.sh" \
+              --file-local "/cloudbench-run.sh=$ROOT_DIR/scripts/cloudbench-run.sh" \
+              "${_patch_file_args[@]}" \
               --command "bash /cloudbench-boot.sh" --skip-health-checks --skip-start --yes \
               > "$_update_log" 2>&1; then
             _upd=1; break
@@ -2008,22 +2153,6 @@ fi
 for helper in cloudbench-fetch-ref.sh cloudbench-sync-deps.sh cloudbench-current-run-artifact.py; do
     [ -f "$ROOT_DIR/scripts/$helper" ] || { echo "❌ Missing scripts/$helper locally." >&2; exit 1; }
 done
-STAGED_LOCAL_FILES=()
-cleanup_staged_local_files() {
-    for p in "${STAGED_LOCAL_FILES[@]}"; do
-        [ -n "$p" ] && rm -f "$p" 2>/dev/null || true
-    done
-}
-
-LOCAL_PATCH_FILE=""
-if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
-   && { ! git -C "$ROOT_DIR" diff --quiet --binary \
-        || [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | head -1)" ]; }; then
-    LOCAL_PATCH_FILE="$(mktemp)"
-    STAGED_LOCAL_FILES+=("$LOCAL_PATCH_FILE")
-    bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$LOCAL_PATCH_FILE"
-fi
-
 # Proxy the box BACKEND (not its frontend) to the Mac. The local archive frontend
 # talks to a local archive API which proxies live agent reads here with the
 # benchmark API key — RLS-free, single-origin, no CORS. (flyctl proxy of the box
@@ -2065,10 +2194,12 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     else
         echo "unset BENCHMARK_FRONTEND_URL"
     fi
+    echo "unset LOCAL_PATCH_B64"
     if [ -n "$LOCAL_PATCH_FILE" ]; then
         echo "export LOCAL_PATCH_FILE=/tmp/cloudbench-local.patch"
+        echo "export LOCAL_PATCH_SHA256=$(printf '%q' "$LOCAL_PATCH_SHA256")"
     else
-        echo "unset LOCAL_PATCH_FILE LOCAL_PATCH_B64"
+        echo "unset LOCAL_PATCH_FILE LOCAL_PATCH_SHA256"
     fi
     echo "rm -f $(printf '%q' "$REMOTE_TMP_SCRIPT")"
     echo "exec bash /data/cloudbench-run.sh"
