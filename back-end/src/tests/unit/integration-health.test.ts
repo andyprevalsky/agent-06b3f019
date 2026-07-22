@@ -44,6 +44,11 @@ assert.match(
 );
 assert.match(
   healthCheck,
+  /name:\s*'Anthropic \(Claude API\)'[\s\S]*?warnOnly:\s*true/,
+  'Anthropic/Claude credential health must be non-blocking so future deploys can skip it without user approval'
+);
+assert.match(
+  healthCheck,
   /explicitly overridden by DEPLOY_GATE_OVERRIDES/,
   'credential health output must disclose rather than conceal an override'
 );

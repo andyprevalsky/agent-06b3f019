@@ -212,7 +212,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
 **Execution model for Steps 1–4a (run in this order):**
 
 1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them, then rerun Step 0p with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change prompt/instruction files, return to Step 0p without the flag and request fresh approval for those additional prompt changes.
-1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them, then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
+   1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them, then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
 2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1r (`research fmt/lint --fix`, skip if `CHANGED_RESEARCH` is empty) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
 3. **Parallel verifiers** (all read-only, independent — run in a single message with multiple Bash tool calls):
    - Step 2b: `eslint` verify (0 errors)
@@ -396,15 +396,17 @@ agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync
 
 Both commands must pass. This operational verification wiring is pre-authorized by Step 0p and must never pause for human approval.
 
-## Step 4c: Credential health check (runs unless explicitly overridden)
+## Step 4c: Credential health check
 
-Before spinning up services or spending money on smoke benchmarks, validate every external credential (E2B, Steel, Parallel.ai, Anthropic, OpenRouter, Supabase). This runs standalone against real provider endpoints — no local backend needed. Finishes in ~3s and fails fast on 401/402/403.
+Before spinning up services or spending money on smoke benchmarks, validate every external credential (E2B, Steel, Parallel.ai, Anthropic, OpenRouter, Supabase). This runs standalone against real provider endpoints — no local backend needed. Finishes in ~3s, hard-fails on 401/402/403 for smoke-critical providers, and reports warn-only providers without blocking deploy.
 
 ```bash
 cd back-end && bash ../scripts/run-deploy-stage credential-health -- npx tsx src/tests/blackbox/integration-health.blackbox.ts
 ```
 
-**If ANY credential is rejected** the error message names the exact env var to refresh and the provider dashboard URL. Escalate to the user immediately and do not proceed to Step 5 unless the user explicitly overrides that credential gate. If overridden, record the rejection as `⚠️ Overridden`, use the narrow gate-specific harness override, and continue every other check. Do not change production auth behavior merely to make a rejected credential appear healthy.
+**If any hard credential is rejected** the error message names the exact env var to refresh and the provider dashboard URL. Escalate to the user immediately and do not proceed to Step 5 unless the user explicitly overrides that credential gate. If overridden, record the rejection as `⚠️ Overridden`, use the narrow gate-specific harness override, and continue every other check. Do not change production auth behavior merely to make a rejected credential appear healthy.
+
+Anthropic/Claude is intentionally non-blocking in this gate: the probe should still run by default and report `WARN` on exhausted credits, rejected auth, or provider availability problems, but future deploys may proceed without human approval when only this provider fails. The optional `DEPLOY_GATE_OVERRIDES=credential-health:anthropic` path remains available when an operator wants an explicit audited skip instead of a live probe. Parallel.ai is also warn-only.
 
 This same file is also part of the full blackbox suite (Step 5a), so it will run again there when the backend-change path fires. Running it twice is harmless (~3s).
 
@@ -749,12 +751,12 @@ Failed benchmark agents are intentionally retained long enough for diagnostics. 
 
 When any local smoke benchmark fails, start with the run artifacts before making code changes:
 
-| Surface | Artifact | What to look for |
-| ------- | -------- | ---------------- |
-| Runner | `local.py` report card / `RESULTS:` line | which task failed + evaluator reason |
-| Result | `agents/benchmarks/runs/<run>.json` + `runs/<run>_diagnostics/` | failed agent ID and failure_reason |
-| Worker | `agents/navi-worker-log.txt` | tracebacks, tool errors, LLM-call failures |
-| Backend | `back-end/backend-logs.log` | 500s, Prisma errors, route failures |
+| Surface | Artifact                                                        | What to look for                           |
+| ------- | --------------------------------------------------------------- | ------------------------------------------ |
+| Runner  | `local.py` report card / `RESULTS:` line                        | which task failed + evaluator reason       |
+| Result  | `agents/benchmarks/runs/<run>.json` + `runs/<run>_diagnostics/` | failed agent ID and failure_reason         |
+| Worker  | `agents/navi-worker-log.txt`                                    | tracebacks, tool errors, LLM-call failures |
+| Backend | `back-end/backend-logs.log`                                     | 500s, Prisma errors, route failures        |
 
 For benchmark-specific diagnostics, run ALL three summaries in parallel — they answer different questions (LOCAL, so no `--prod` / `--url`):
 
