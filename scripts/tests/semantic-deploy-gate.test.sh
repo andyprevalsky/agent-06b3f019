@@ -81,6 +81,8 @@ require_text "$DEPLOY_COMMAND" '. "$DEPLOY_ROOT/scripts/lib/deploy-local-env.sh"
 require_text "$DEPLOY_COMMAND" 'configure_deploy_local_env' "/deploy must normalize identity before resolving local resources"
 require_text "$DEPLOY_COMMAND" 'bash scripts/tests/workspace-env.test.sh' "/deploy must run the behavioral workspace identity regression"
 require_text "$DEPLOY_COMMAND" 'bash scripts/tests/semantic-deploy-gate.test.sh' "/deploy must keep its command invariants in the static gate"
+require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/factory-review.test.py' "/deploy must protect factory-review telemetry collection"
+require_text "$DEPLOY_COMMAND" 'bash scripts/tests/run-deploy-stage.test.sh' "/deploy must protect deploy-stage telemetry collection"
 require_text "$DEPLOY_ENV" 'normalize_conductor_workspace_env' "/deploy environment must normalize stale workspace identity"
 require_text "$DEPLOY_ENV" 'export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMANTIC_QUEUE_WORKSPACE}-deploy-' "/deploy must mint a unique Temporal queue from normalized identity"
 require_text "$DEPLOY_ENV" 'export DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"' "/deploy DB container must use normalized identity"
@@ -90,22 +92,64 @@ require_text "$DEPLOY_ENV" 'export RUN_SH_STRICT_CONDUCTOR_PORT=1' "/deploy must
 require_text "$RUN_SH" 'if ! port_range_can_reassign; then' "run.sh must honor strict deploy port mode"
 require_text "$RUN_SH" '[ "${RUN_SH_STRICT_CONDUCTOR_PORT:-0}" = "1" ] || { $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]' "bundled deploy stacks must preserve strict ports across shell boundaries"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_BUNDLED_FRONTEND=true' "/deploy launch must carry strict-port mode across shell boundaries"
-require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8' "/deploy stack must run enough benchmark workers (8) for the blackbox agent suite it also serves — a single worker saturates under the full-domain load"
+require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8' "/deploy semantic stack must retain enough workers for concurrent lifecycle checks"
 require_text "$DEPLOY_COMMAND" 'TRACE_ARCHIVE_ENABLED=0' "/deploy lifecycle measurements must disable the out-of-band trace recorder"
+require_text "$DEPLOY_COMMAND" 'deploy stage-start runtime-blackbox' "/deploy must record the shared runtime-blackbox start boundary"
+require_text "$DEPLOY_COMMAND" 'deploy stage-finish runtime-blackbox' "/deploy must record the shared runtime-blackbox finish boundary"
+require_text "$DEPLOY_COMMAND" 'BACKEND_BLACKBOX_WORKERS=4' "/deploy must cap backend blackbox workers when agents coverage also runs"
+require_text "$DEPLOY_COMMAND" 'BACKEND_BLACKBOX_WORKERS=5' "/deploy must use the measured backend blackbox width in the all-repo batch"
+require_text "$DEPLOY_COMMAND" 'BACKEND_UNIT_WORKERS=2' "/deploy must retain the measured all-repo backend unit width"
+require_text "$DEPLOY_COMMAND" 'AGENTS_COVERAGE_WORKERS=3' "/deploy must retain the measured agents width in the all-repo batch"
+require_text "$DEPLOY_COMMAND" 'FRONTEND_COVERAGE_WORKERS=2' "/deploy must cap frontend workers in the all-repo batch"
+require_text "$DEPLOY_COMMAND" 'MAC_COVERAGE_WORKERS=1' "/deploy must cap Mac workers in the all-repo batch"
+require_text "$DEPLOY_COMMAND" 'BLACKBOX_TEST_CONCURRENCY="$BACKEND_BLACKBOX_WORKERS"' "/deploy must apply the computed backend worker budget"
+require_text "$DEPLOY_COMMAND" 'AGENTS_COVERAGE_CONCURRENCY="$AGENTS_COVERAGE_WORKERS"' "/deploy must apply the computed agents worker budget"
+require_text "$DEPLOY_COMMAND" '--maxWorkers="$FRONTEND_COVERAGE_WORKERS"' "/deploy must apply the computed frontend worker budget"
+require_text "$DEPLOY_COMMAND" '--maxWorkers="$MAC_COVERAGE_WORKERS"' "/deploy must apply the computed Mac worker budget"
+require_text "$DEPLOY_COMMAND" 'run-deploy-stage amplitude-live' "/deploy must retain the focused live Amplitude probe"
+require_text "$DEPLOY_COMMAND" 'ADMIN_HEALTH_LIVE_ONLY=1' "/deploy live Amplitude probe must run only the strict weekly endpoint case"
+require_text "$DEPLOY_COMMAND" 'Missing credentials fail closed' "/deploy must document fail-closed live Amplitude credentials"
+require_text "$DEPLOY_COMMAND" "scripts/run-bench-hub-poller\$" "/deploy must classify poller-only changes into backend coverage"
+require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'integration-health"' "backend coverage must isolate live credential health from deterministic coverage"
+require_text "$DEPLOY_COMMAND" 'Step 4c: Credential health blackbox (no skip)' "/deploy must retain one unconditional focused credential probe"
+require_text "$DEPLOY_COMMAND" 'run-deploy-stage credential-health' "/deploy must record the focused credential probe"
+if grep -Fq 'credential-health blackbox only when Step 4a is skipped' "$DEPLOY_COMMAND"; then
+  fail "/deploy must not retain the retired conditional credential-health wiring"
+fi
+set +e
+LIVE_AMPLITUDE_OUTPUT=$(
+  cd "$ROOT_DIR/back-end" &&
+    AMPLITUDE_API_KEY='' AMPLITUDE_SECRET_KEY='' ADMIN_HEALTH_LIVE_ONLY=1 \
+      npx tsx src/tests/blackbox/admin-health.blackbox.ts 2>&1
+)
+LIVE_AMPLITUDE_RC=$?
+set -e
+[ "$LIVE_AMPLITUDE_RC" -ne 0 ] || fail "/deploy live Amplitude probe must reject missing credentials"
+printf '%s\n' "$LIVE_AMPLITUDE_OUTPUT" | grep -Fq \
+  'ADMIN_HEALTH_LIVE_ONLY=1 requires AMPLITUDE_API_KEY and AMPLITUDE_SECRET_KEY' || \
+  fail "/deploy live Amplitude probe must explain its fail-closed credential contract"
+require_text "$DEPLOY_COMMAND" 'Do not start the Group 4 semantic/smoke' "/deploy must not oversubscribe Group 3 with Group 4 worker pools"
+for stage in backend frontend agents mac; do
+  require_text "$DEPLOY_COMMAND" "run-deploy-stage ${stage}-coverage-blackbox" "/deploy must run ${stage} coverage and blackbox behavior once in a combined gate"
+done
+if grep -Fq 'run-deploy-stage backend-blackbox' "$DEPLOY_COMMAND"; then
+  fail "/deploy must not rerun backend blackbox after backend coverage already ran it"
+fi
+if grep -Fq 'run-deploy-stage mac-blackbox' "$DEPLOY_COMMAND"; then
+  fail "/deploy must not rerun mac blackbox after mac coverage already ran it"
+fi
+if grep -Fq 'BLACKBOX_TEST_REPLAY_OUTBOUND=1' "$DEPLOY_COMMAND"; then
+  fail "/deploy semantic stack must not retain replay config used only by the removed duplicate backend blackbox run"
+fi
+require_text "$DEPLOY_COMMAND" 'bash scripts/run-deploy-stage agentcard-lifecycle --' "/deploy must record AgentCard as one lifecycle lane"
+require_text "$DEPLOY_COMMAND" 'bash scripts/run-bench --local' "/deploy AgentCard lane must own an isolated local stack"
+require_text "$DEPLOY_COMMAND" 'agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment' "/deploy must keep all four AgentCard lifecycle tasks in one lane"
+require_text "$DEPLOY_COMMAND" '--max-concurrency 1 --no-dashboard' "/deploy must preserve sequential payment state inside the isolated AgentCard lane"
+if grep -Fq 'bash scripts/run-agentcard-lifecycle-task.sh' "$DEPLOY_COMMAND"; then
+  fail "/deploy must not tear down and rebuild the shared stack for each AgentCard task"
+fi
 require_text "$DEPLOY_COMMAND" "gh workflow run chat-lifecycle-ratchet.yml" "/deploy must dispatch the production semantic gate"
 require_text "$DEPLOY_COMMAND" 'gh run watch "$SEMANTIC_RUN_ID" --exit-status' "/deploy must block on production semantic success"
-
-# Bind the replay opt-in to the actual run.sh launch block. A free-floating
-# mention in explanatory prose must not satisfy this contract.
-DEPLOY_STACK_LAUNCH=$(awk '
-  /BENCHMARK_BUNDLED_FRONTEND=true/ { capture=1 }
-  capture { print }
-  capture && /bash scripts\/run.sh --benchmark/ { exit }
-' "$DEPLOY_COMMAND")
-grep -Fq 'BLACKBOX_TEST_REPLAY_OUTBOUND=1' <<<"$DEPLOY_STACK_LAUNCH" || \
-  fail "/deploy run.sh launch must opt the existing-backend blackbox stack into fixture replay"
-grep -Fq 'bash scripts/run.sh --benchmark' <<<"$DEPLOY_STACK_LAUNCH" || \
-  fail "/deploy replay assertion must be bound to the run.sh benchmark launch"
 
 # /descend is part of the deploy orchestration surface. Keep its two user gates,
 # parallel deploy handoff, sorting, and rendered response contract cemented.

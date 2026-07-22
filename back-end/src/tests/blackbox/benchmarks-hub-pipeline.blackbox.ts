@@ -103,18 +103,13 @@ function awaitStatus(
 }
 
 /**
- * Wait for `check` to return a truthy value within `deadlineMs`, polling every
- * second (via the canonical retry provider). Throws with the STAGE name on
- * expiry — the anti-stuck primitive.
+ * Wait for `check` to return a truthy value within `deadlineMs`, polling on a
+ * short test-only interval via the canonical retry provider. Coverage is the
+ * sole deploy execution of this domain, so it must enforce production's same
+ * anti-stuck deadlines even while the implementation is instrumented.
  */
-// Under coverage instrumentation (NODE_V8_COVERAGE is exported to this test
-// process AND inherited by the spawned run-bench-hub-poller child), both the
-// backend and the poller run ~2-3x slower, so the multi-stage poller watchdogs
-// need proportionally longer budgets. Diagnosed: the identical cases pass
-// uninstrumented against the full stack — this is instrumentation overhead, not
-// a product regression. The full-stack blackbox gate keeps the tight timeouts as
-// the real performance signal; only the coverage harness is relaxed.
-const TIMEOUT_SCALE = process.env.NODE_V8_COVERAGE ? 3 : 1;
+const TIMEOUT_SCALE = 1;
+const PIPELINE_POLL_MS = 100;
 
 async function within<T>(
   stage: string,
@@ -122,7 +117,7 @@ async function within<T>(
   check: () => Promise<T | null | false>
 ): Promise<T> {
   const scaledDeadlineMs = deadlineMs * TIMEOUT_SCALE;
-  const attempts = Math.max(2, Math.ceil(scaledDeadlineMs / 1000));
+  const attempts = Math.max(2, Math.ceil(scaledDeadlineMs / PIPELINE_POLL_MS));
   try {
     return await retryWithBackoff(
       async () => {
@@ -134,7 +129,7 @@ async function within<T>(
       },
       {
         maxRetries: attempts,
-        fixedDelays: Array.from({ length: attempts }, () => 1000),
+        fixedDelays: Array.from({ length: attempts }, () => PIPELINE_POLL_MS),
         isRetryable: () => true,
         component: `pipeline:${stage}`,
       }
@@ -180,7 +175,7 @@ cat > "$CARD_DIR/report-card.json" <<CARD
  "per_task":[{"name":"$TASK","status":"running","duration_s":null,"cost_usd":null,
    "agent_url":"http://localhost/?agent-id=stub-agent-1","world_model_mode":"real","fast_mode":true}]}
 CARD
-sleep 18  # long enough for one live snapshot (15s cadence) to observe "running"
+sleep 0.6  # long enough for the injected 0.1s snapshot cadence to observe "running"
 ${
   mode === 'fail'
     ? `echo "stub runner exploding on purpose" >&2
@@ -253,7 +248,9 @@ function startPoller(
       HUB_URL: hubUrl,
       BACKEND_API_KEY: API_KEY,
       RUN_BENCH_BIN: stubPath,
-      POLL_INTERVAL: '2',
+      POLL_INTERVAL: '1',
+      HUB_CAPACITY_RETRY_SECONDS: '1',
+      HUB_SNAPSHOT_INTERVAL_SECONDS: '0.1',
       HUB_CLAIM_SCOPE: SCOPE,
       // Catalog export is production behavior, not part of this pipeline
       // contract. Keep the black-box hermetic so it cannot rewrite source.
@@ -527,12 +524,22 @@ async function legForeignArtifactIsolation(tmp: string): Promise<void> {
 
 async function legSnapshotStopsBeforeTerminal(tmp: string): Promise<void> {
   const stub = writeStubRunner(tmp, 'pass');
+  const pollerLog = path.join(tmp, 'poller-snapshot-teardown.log');
   let runId: string | null = null;
   let poller: ChildProcess | null = null;
   let snapshotStarted = false;
   let terminalSeen = false;
   let staleProgressAfterTerminal = false;
-  const heldSnapshotTimers = new Set<NodeJS.Timeout>();
+  const heldSnapshotResponses = new Set<http.ServerResponse>();
+
+  const releaseHeldSnapshots = (): void => {
+    for (const response of heldSnapshotResponses) {
+      heldSnapshotResponses.delete(response);
+      if (response.destroyed) continue;
+      response.writeHead(201, { 'Content-Type': 'application/json' });
+      response.end('{}');
+    }
+  };
 
   // Hold the live-snapshot response until after the runner exits. A leaked
   // uploader will then send its progress PATCH after the terminal PATCH; a
@@ -561,13 +568,7 @@ async function legSnapshotStopsBeforeTerminal(tmp: string): Promise<void> {
     if (req.method === 'POST' && requestPath.startsWith('/api/benchmarks/runs?live=1')) {
       snapshotStarted = true;
       req.resume();
-      const timer = setTimeout(() => {
-        heldSnapshotTimers.delete(timer);
-        if (res.destroyed) return;
-        res.writeHead(201, { 'Content-Type': 'application/json' });
-        res.end('{}');
-      }, 7_000);
-      heldSnapshotTimers.add(timer);
+      heldSnapshotResponses.add(res);
       return;
     }
 
@@ -600,18 +601,29 @@ async function legSnapshotStopsBeforeTerminal(tmp: string): Promise<void> {
     const request = await dispatchRequest(['chat-mode']);
     runId = request.runId;
 
-    poller = startPoller(stub, path.join(tmp, 'poller-snapshot-teardown.log'), proxyUrl);
+    poller = startPoller(stub, pollerLog, proxyUrl);
     await within('snapshot upload enters proxy', 30_000, async () => snapshotStarted || null);
     await awaitStatus(request.id, 'completes after snapshot cancel', 60_000, 'completed');
-    await new Promise((resolve) => setTimeout(resolve, 8_000));
-
     assert(terminalSeen, 'terminal completion PATCH never reached the hub');
+    // Release the exact blocked request immediately instead of waiting for a
+    // seven-second timer. The original contract observed one further second:
+    // a leaked uploader resumes and sends its forbidden progress PATCH, while
+    // a correctly reaped uploader has already closed the socket.
+    releaseHeldSnapshots();
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
     assert(
       !staleProgressAfterTerminal,
       'snapshot uploader survived completion and sent stale progress after the terminal PATCH'
     );
+  } catch (error) {
+    const details = fs.existsSync(pollerLog)
+      ? fs.readFileSync(pollerLog, 'utf8')
+      : '(no poller log)';
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)}\npoller log:\n${details}`
+    );
   } finally {
-    for (const timer of heldSnapshotTimers) clearTimeout(timer);
+    releaseHeldSnapshots();
     await stopPoller(poller);
     proxy.close();
     await cleanup(runId);
@@ -647,7 +659,10 @@ async function legHubOutageSpool(tmp: string): Promise<void> {
   const address = proxy.address();
   const proxyUrl = `http://127.0.0.1:${typeof address === 'object' && address !== null ? address.port : 0}`;
 
-  const spoolDir = path.join(REPO_ROOT, '.context', 'hub-upload-spool');
+  // Isolate this poller's recovery queue from any developer poller already
+  // running in the same worktree. Otherwise that healthy poller can consume
+  // the outage record before this leg observes it.
+  const spoolEnv = { HUB_UPLOAD_SPOOL_DIR: path.join(tmp, 'hub-upload-spool') };
   try {
     const request = await dispatchRequest(['chat-mode']);
     runId = request.runId;
@@ -655,14 +670,14 @@ async function legHubOutageSpool(tmp: string): Promise<void> {
     // This leg exercises the production poller's long-running recovery mode.
     // A one-shot poller intentionally exits after one empty/transient queue
     // read, which can make the proxy setup—not outage recovery—the assertion.
-    poller = startPoller(stub, path.join(tmp, 'poller-outage.log'), proxyUrl, true);
+    poller = startPoller(stub, path.join(tmp, 'poller-outage.log'), proxyUrl, true, spoolEnv);
     await awaitStatus(request.id, 'claimed (via proxy)', 25_000, 'running');
 
     // OUTAGE: kill the hub from the poller's perspective mid-run
     await new Promise<void>((resolve) => proxy.close(() => resolve()));
 
     // the poller must SURVIVE and spool the completion
-    const spoolFile = path.join(spoolDir, `${request.id}.json`);
+    const spoolFile = path.join(spoolEnv.HUB_UPLOAD_SPOOL_DIR, `${request.id}.json`);
     await within('completion spooled during outage', 60_000, async () =>
       fs.existsSync(spoolFile) ? true : null
     );
@@ -670,15 +685,37 @@ async function legHubOutageSpool(tmp: string): Promise<void> {
     assert(midOutage.status === 'running', 'request should still be running while spooled');
 
     // hub is back (BASE_URL was healthy all along) — a fresh poller tick flushes
-    flusher = startPoller(stub, path.join(tmp, 'poller-flush.log'));
+    flusher = startPoller(stub, path.join(tmp, 'poller-flush.log'), BASE_URL, false, spoolEnv);
     await awaitStatus(request.id, 'spool flushed after recovery', 40_000, 'completed');
-    assert(!fs.existsSync(spoolFile), 'spool file should be removed after flush');
+    // The Hub row becomes completed immediately before the poller unlinks the
+    // durable spool file. Observe both effects instead of racing that cleanup.
+    await within('spool file removed after flush', 5_000, async () =>
+      !fs.existsSync(spoolFile) ? true : null
+    );
   } finally {
     await stopPoller(poller);
     await stopPoller(flusher);
     proxy.close();
     await cleanup(runId);
   }
+}
+
+async function legProductionDefaultsRemainPinned(): Promise<void> {
+  const pollerSource = fs.readFileSync(POLLER, 'utf8');
+  assert(
+    pollerSource.includes('POLL_INTERVAL="${POLL_INTERVAL:-10}"'),
+    'production poll interval default must remain 10 seconds'
+  );
+  assert(
+    pollerSource.includes('HUB_SNAPSHOT_INTERVAL_SECONDS="${HUB_SNAPSHOT_INTERVAL_SECONDS:-15}"'),
+    'production live-snapshot interval default must remain 15 seconds'
+  );
+  assert(
+    pollerSource.includes(
+      'HUB_UPLOAD_SPOOL_DIR="${HUB_UPLOAD_SPOOL_DIR:-.context/hub-upload-spool}"'
+    ),
+    'production recovery spool must retain its repo-local default'
+  );
 }
 
 // ── runner ───────────────────────────────────────────────────────────────────
@@ -690,6 +727,7 @@ async function main(): Promise<void> {
   }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-pipeline-'));
   const legs: Array<[string, (tmp: string) => Promise<void>]> = [
+    ['production poll and snapshot defaults remain pinned', legProductionDefaultsRemainPinned],
     ['happy path: dispatch → claim → live → completed (hard deadlines)', legHappyPath],
     ['failure honesty: generic exit 1 → failed + error + dashboard reflects', legFailureHonesty],
     [

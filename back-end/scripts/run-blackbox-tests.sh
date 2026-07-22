@@ -25,6 +25,7 @@ export CONTRACT_TEST_ARTIFACT_DIR="$ARTIFACT_DIR"
 export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
 export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
+export BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES="${BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES:-weekly}"
 
 # Domains share one test database and several suites intentionally clean up
 # broad fixture classes. Run domains serially by default so one suite cannot
@@ -32,7 +33,7 @@ export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 export BLACKBOX_TEST_CONCURRENCY="${BLACKBOX_TEST_CONCURRENCY:-${CONTRACT_TEST_CONCURRENCY:-1}}"
 export CONTRACT_TEST_CONCURRENCY="$BLACKBOX_TEST_CONCURRENCY"
 
-RUNNER_CMD=(npx tsx src/tests/blackbox/run.ts)
+RUNNER_CMD=(node --import tsx src/tests/blackbox/run.ts)
 RUNNER_LOG="$ARTIFACT_DIR/runner.log"
 MANIFEST_PATH="$ARTIFACT_DIR/manifest.json"
 USE_EXISTING_BACKEND="${BLACKBOX_TEST_USE_EXISTING_BACKEND:-${CONTRACT_TEST_USE_EXISTING_BACKEND:-0}}"
@@ -130,9 +131,9 @@ if ! $STACK_DB_EXPECTED && [[ "$USE_EXISTING_BACKEND" == "1" && -f "$STACK_MANIF
         DB_CONTAINER="$MANIFEST_DB_CONTAINER"
       fi
       MANIFEST_DB_PORT=$(jq -r '.database.runtime_port // .ports.local_db // empty' "$STACK_MANIFEST")
-      ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | sed 's/.*://') || true
+      ACTUAL_PORT=$(docker_quick port "$DB_CONTAINER" 5432 | head -1 | sed 's/.*://') || true
       LOCAL_DB_PORT="${ACTUAL_PORT:-$MANIFEST_DB_PORT}"
-      if [[ -n "$LOCAL_DB_PORT" ]] && docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
+      if [[ -n "$LOCAL_DB_PORT" ]] && docker_quick exec "$DB_CONTAINER" pg_isready -U postgres -q >/dev/null; then
         DB_FOUND=true
         echo "Using existing stack Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
       fi
@@ -140,7 +141,7 @@ if ! $STACK_DB_EXPECTED && [[ "$USE_EXISTING_BACKEND" == "1" && -f "$STACK_MANIF
   fi
 fi
 # Try Docker container first
-if ! $STACK_DB_EXPECTED && docker info >/dev/null 2>&1; then
+if ! $STACK_DB_EXPECTED && docker_info_quick; then
   # Prefer the workspace-named container; fall back to the only running
   # victoria-db-* container if there's exactly one (covers cases where the
   # caller hasn't exported CONDUCTOR_WORKSPACE_NAME).
@@ -156,11 +157,11 @@ if ! $STACK_DB_EXPECTED && docker info >/dev/null 2>&1; then
     fi
   fi
 
-  ACTUAL_PORT=$(docker port "$DB_CONTAINER" 5432 2>/dev/null | head -1 | sed 's/.*://') || true
+  ACTUAL_PORT=$(docker_quick port "$DB_CONTAINER" 5432 | head -1 | sed 's/.*://') || true
   if [[ -n "$ACTUAL_PORT" ]]; then
     LOCAL_DB_PORT="$ACTUAL_PORT"
   fi
-  if [[ -n "$LOCAL_DB_PORT" ]] && docker exec "$DB_CONTAINER" pg_isready -U postgres -q 2>/dev/null; then
+  if [[ -n "$LOCAL_DB_PORT" ]] && docker_quick exec "$DB_CONTAINER" pg_isready -U postgres -q >/dev/null; then
     DB_FOUND=true
     echo "Using local Postgres (Docker container=$DB_CONTAINER) at localhost:$LOCAL_DB_PORT"
   fi
@@ -213,8 +214,13 @@ SQL
   # pre-seed a valid production credential without disabling the real Codex
   # black-box test that consumes it.
   if [[ "${BACKEND_CODEX_TOKEN_SYNC_SKIP:-0}" != "1" ]]; then
-    echo "Syncing local Codex credentials to local test database..."
-    npx tsx scripts/sync-codex-token.ts >/dev/null
+    CODEX_AUTH_FILE="${CODEX_AUTH_PATH:-${HOME}/.codex/auth.json}"
+    if [[ -f "$CODEX_AUTH_FILE" ]] && grep -Eq '"auth_mode"[[:space:]]*:[[:space:]]*"chatgpt"' "$CODEX_AUTH_FILE"; then
+      echo "Syncing local Codex credentials to local test database..."
+      npx tsx scripts/sync-codex-token.ts >/dev/null
+    else
+      echo "No local ChatGPT Codex auth envelope; using seeded integration or API-key fallback."
+    fi
   fi
 else
   echo "❌ No local Postgres available. Blackbox tests require a local DB to"

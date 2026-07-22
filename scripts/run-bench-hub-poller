@@ -25,6 +25,8 @@ HUB_URL="${HUB_URL:-http://localhost:3001}"
 RUN_BENCH_BIN="${RUN_BENCH_BIN:-scripts/run-bench}"   # test hook: stub the runner
 POLL_INTERVAL="${POLL_INTERVAL:-10}"
 HUB_CAPACITY_RETRY_SECONDS="${HUB_CAPACITY_RETRY_SECONDS:-$POLL_INTERVAL}"
+HUB_SNAPSHOT_INTERVAL_SECONDS="${HUB_SNAPSHOT_INTERVAL_SECONDS:-15}"
+HUB_UPLOAD_SPOOL_DIR="${HUB_UPLOAD_SPOOL_DIR:-.context/hub-upload-spool}"
 LOCAL_RUNNER=0
 ONCE=0
 for arg in "$@"; do
@@ -136,10 +138,13 @@ snapshot_loop() {  # snapshot_loop <request_id> <hub_run_id> <start_epoch> <arti
     # This function is launched in the background. exec makes SNAP_PID the
     # uploader itself (not a wrapper shell with a python child), so teardown can
     # terminate and reap the complete snapshot loop before a terminal PATCH.
-    HUB_CODE_SUMMARY="$CODE_SUMMARY" exec python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$start_epoch" "$artifact_root" "$local_artifact_root" "$task_names" <<'PY'
+    HUB_CODE_SUMMARY="$CODE_SUMMARY" HUB_SNAPSHOT_INTERVAL_SECONDS="$HUB_SNAPSHOT_INTERVAL_SECONDS" exec python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$start_epoch" "$artifact_root" "$local_artifact_root" "$task_names" <<'PY'
 import collections, glob, json, os, sys, time, urllib.request
 hub, key, user, req_id, run_id, start, artifact_root, local_artifact_root, expected_raw = sys.argv[1:10]
 start = float(start)
+snapshot_interval = float(os.environ.get("HUB_SNAPSHOT_INTERVAL_SECONDS", "15"))
+if snapshot_interval <= 0:
+    raise ValueError("HUB_SNAPSHOT_INTERVAL_SECONDS must be positive")
 expected = collections.Counter(expected_raw.split())
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 def post(path, body, method="POST"):
@@ -149,7 +154,7 @@ def post(path, body, method="POST"):
     opener.open(req, timeout=20).read()
 
 while True:
-    time.sleep(15)
+    time.sleep(snapshot_interval)
     try:
         # Only inspect this request's output root. Mtime alone is not ownership:
         # another benchmark producer can write a newer canonical artifact while
@@ -187,9 +192,9 @@ while True:
         # the run-request update route is PATCH-only (urllib defaults data= to POST)
         post(f"/api/benchmarks/run-requests/{req_id}",
              {"action": "progress", "progress": card, "run_id": run_id}, method="PATCH")
-    except Exception:
+    except Exception as error:
         # Snapshot upload is best-effort; the terminal result remains authoritative.
-        pass
+        print(f"snapshot upload failed: {type(error).__name__}: {error}", file=sys.stderr, flush=True)
 PY
 }
 
@@ -367,11 +372,11 @@ post(f"/api/benchmarks/run-requests/{req_id}", body, method="PATCH")
 print(f"request {req_id} → {action} (run {run_id})")
 PY
         then
-            mkdir -p .context/hub-upload-spool
+            mkdir -p "$HUB_UPLOAD_SPOOL_DIR"
             printf '{"req_id":"%s","run_id":"%s","bundle":"%s","exit_code":"%s"}\n' \
                 "$req_id" "$hub_run_id" "$final" "$exit_code" \
-                > ".context/hub-upload-spool/$req_id.json"
-            echo "   ⚠ hub unreachable — completion spooled to .context/hub-upload-spool/$req_id.json"
+                > "$HUB_UPLOAD_SPOOL_DIR/$req_id.json"
+            echo "   ⚠ hub unreachable — completion spooled to $HUB_UPLOAD_SPOOL_DIR/$req_id.json"
         fi
     else
         echo "   ⚠ no run bundle found after exit=$exit_code"
@@ -382,7 +387,7 @@ PY
 
 flush_spool() {
     local f
-    for f in .context/hub-upload-spool/*.json; do
+    for f in "$HUB_UPLOAD_SPOOL_DIR"/*.json; do
         [ -f "$f" ] || return 0
         if python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$f" <<'PY'
 import json, sys, urllib.request

@@ -2987,7 +2987,17 @@ NAMES=()
 BENCHMARK_MODE=true
 BENCHMARK_ISOLATED_RUN=true
 SCRIPT_DIR="$SCRIPT_DIR"
-curl() {{ [ "$(cat "$LAUNCHES")" -ge 2 ]; }}
+curl() {{
+    # The first launch is intentionally never healthy. After restart, wait only
+    # for the fake replacement child to be scheduled before reporting healthy;
+    # process-tree cleanup and the production readiness loop remain unchanged.
+    [ "$BACKEND_PID" = "$(cat "$CHILD_DIR/root-1")" ] && return 1
+    for _ in $(seq 1 40); do
+        [ "$(cat "$LAUNCHES")" -ge 2 ] && return 0
+        sleep 0.05
+    done
+    return 1
+}}
 {helpers}
 launch_backend_service
 echo "$BACKEND_PID" > "$CHILD_DIR/root-1"

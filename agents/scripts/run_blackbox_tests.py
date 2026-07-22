@@ -23,6 +23,8 @@ import time
 import uuid
 from pathlib import Path
 
+import structlog.contextvars
+
 AGENTS_ROOT = Path(__file__).resolve().parent.parent
 TESTS_DIR = AGENTS_ROOT / "tests" / "blackbox"
 ROOT_DIR = AGENTS_ROOT.parent
@@ -75,6 +77,9 @@ def list_domains() -> None:
 
 async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, str]:
     """Run a single domain's blackbox test. Returns (domain, passed, message)."""
+    # Sequential coverage shards share an interpreter, but each domain must
+    # begin with the same request/logging context as an isolated process.
+    structlog.contextvars.clear_contextvars()
     try:
         spec = importlib.util.spec_from_file_location(
             f"blackbox_{domain.replace('-', '_')}", test_file
@@ -102,10 +107,12 @@ async def run_single_domain(test_file: Path, domain: str) -> tuple[str, bool, st
 
     except Exception as e:
         return (domain, False, f"ERROR: {e}")
+    finally:
+        structlog.contextvars.clear_contextvars()
 
 
 async def run_tests(
-    domain_filter: str | None = None, concurrency: int = 30
+    domain_filters: list[str] | None = None, concurrency: int = 30
 ) -> int:
     run_id = os.environ.get("BLACKBOX_TEST_RUN_ID", generate_run_id())
     artifact_dir = Path(
@@ -118,7 +125,7 @@ async def run_tests(
         "run_id": run_id,
         "mode": "direct-import",
         "artifact_dir": str(artifact_dir),
-        "domain_filter": domain_filter,
+        "domain_filters": domain_filters,
         "capture_outbound": True,
         "concurrency": concurrency,
     }
@@ -135,13 +142,15 @@ async def run_tests(
     install_capture()
 
     # Discover test files
-    if domain_filter:
-        test_file = domain_to_test_file(domain_filter)
-        if test_file is None:
-            print(f"ERROR: No blackbox test found for domain '{domain_filter}'")
-            print(f"Expected: {TESTS_DIR}/{domain_filter.replace('-', '_')}.blackbox.py")
-            return 1
-        test_pairs = [(test_file, domain_filter)]
+    if domain_filters:
+        test_pairs = []
+        for domain_filter in domain_filters:
+            test_file = domain_to_test_file(domain_filter)
+            if test_file is None:
+                print(f"ERROR: No blackbox test found for domain '{domain_filter}'")
+                print(f"Expected: {TESTS_DIR}/{domain_filter.replace('-', '_')}.blackbox.py")
+                return 1
+            test_pairs.append((test_file, domain_filter))
     else:
         all_domains = discover_domains()
         if not all_domains:
@@ -205,7 +214,7 @@ def main() -> None:
         list_domains()
         return
 
-    domain_filter: str | None = None
+    domain_filters: list[str] = []
     concurrency = 30
 
     i = 0
@@ -218,12 +227,12 @@ def main() -> None:
                 sys.exit(1)
             i += 2
         elif not args[i].startswith("-"):
-            domain_filter = args[i]
+            domain_filters.append(args[i])
             i += 1
         else:
             i += 1
 
-    exit_code = asyncio.run(run_tests(domain_filter, concurrency))
+    exit_code = asyncio.run(run_tests(domain_filters or None, concurrency))
     sys.exit(exit_code)
 
 

@@ -247,6 +247,8 @@ else
   run_suite "Agent Behavior Approval Guard" bash scripts/check-agent-behavior-approval.sh
 fi
 run_suite "Agent Behavior Guard Unit Tests" bash scripts/tests/check-agent-behavior-approval.test.sh
+run_suite "Factory Review Telemetry" python3 scripts/tests/factory-review.test.py
+run_suite "Deploy Stage Telemetry" bash scripts/tests/run-deploy-stage.test.sh
 run_suite "Claude Review Fallback" bash scripts/tests/claude-review-fallback.test.sh
 run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
 run_suite "Existing Backend Replay Gate" bash scripts/tests/blackbox-existing-replay-gate.test.sh
