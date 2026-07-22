@@ -54,6 +54,7 @@ from providers.rose.errors import (
 )
 from providers.rose.gpt_auth import gpt_auth_complete, openai_api_key_complete
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
+from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import PoolName, get_pool
 from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
@@ -539,6 +540,11 @@ class RoseClient:
         agent_id = kwargs.get("agent_id")
         messages = kwargs.get("messages")
         pool = kwargs.get("pool")
+        exclude_anthropic_family = anthropic_family_excluded(
+            bool(kwargs.get("_exclude_anthropic_family", False))
+        )
+        if exclude_anthropic_family != bool(kwargs.get("_exclude_anthropic_family", False)):
+            kwargs = {**kwargs, "_exclude_anthropic_family": exclude_anthropic_family}
 
         if pool == "rose-1-browser-use" or str(call_site).startswith("browser_use"):
             async for chunk in self._complete_impl(**kwargs):
@@ -613,6 +619,10 @@ class RoseClient:
         chunk, then exactly one `done` chunk. All failures raise typed
         `RoseError`s; callers never see error chunks.
         """
+        # Allow a process owner to prove that a maintenance or benchmark run
+        # cannot consume Anthropic credit. This complements the existing
+        # call-scoped flag and covers nested browser/evaluator calls as well.
+        _exclude_anthropic_family = anthropic_family_excluded(_exclude_anthropic_family)
         pool_spec = get_pool(pool)
         rid = request_id or uuid.uuid4().hex[:12]
         started = time.monotonic()

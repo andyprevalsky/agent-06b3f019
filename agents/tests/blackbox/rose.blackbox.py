@@ -3270,6 +3270,56 @@ async def test_client_exclude_anthropic_family_skips_api_key_and_anthropic_water
     assert any(c.kind == "content" for c in chunks)
 
 
+async def test_client_env_exclude_anthropic_family_applies_to_every_call():
+    import providers.rose.client as rc
+
+    rc._reset_anthropic_api_key_cooldown_cache()
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    seen = {"anthropic": 0, "openrouter_models": []}
+
+    def handler(req):
+        if req.url.host == "api.anthropic.com":
+            seen["anthropic"] += 1
+            return httpx.Response(500, text="anthropic should be skipped")
+        if req.url.host == "openrouter.ai":
+            body = json.loads(req.content.decode())
+            seen["openrouter_models"].append(body["model"])
+            return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+    with patch.dict(
+        os.environ,
+        {
+            "ANTHROPIC_API_KEY": "sk-ant-api03-test",
+            "ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1",
+        },
+    ):
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "hi"}],
+                claude_auth=ClaudeAuthContext(
+                    token="sk-ant-oat01-test",
+                    source="user",
+                    user_id="test-user",
+                ),
+            )
+        )
+    rc._reset_anthropic_api_key_cooldown_cache()
+
+    assert seen["anthropic"] == 0
+    assert seen["openrouter_models"] == ["google/gemini-3.1-pro-preview"]
+    assert any(c.kind == "content" for c in chunks)
+
+
 # =====================================================================
 # RoseClient — top-level orchestration
 # =====================================================================
@@ -4991,6 +5041,10 @@ async def run_all_tests():
     )
     await r.record_async(
         "client_exclude_anthropic_family", test_client_exclude_anthropic_family_skips_api_key_and_anthropic_waterfall
+    )
+    await r.record_async(
+        "client_env_exclude_anthropic_family",
+        test_client_env_exclude_anthropic_family_applies_to_every_call,
     )
 
     await r.record_async("client_collect_waterfall", test_client_collect_waterfall_only_path)

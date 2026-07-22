@@ -431,8 +431,205 @@ def test_bundle_signature_r2_rejects_enumerated_ciphertext_without_metadata():
             r2_restore()
 
 
+def test_grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_fallbacks():
+    from benchmarks.world_model_harness import (
+        export_archive_to_otel_jsonl,
+        load_grounded_transitions,
+        load_transitions,
+    )
+    from helpers.trace_archive import archive_json
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+        restore = _with_archive_env(tmp)
+        try:
+            root = "root-grounded-fixtures"
+            start_fixture = {
+                "root_agent_id": root,
+                "user_id": "user",
+                "agent_ids": [root],
+                "rows": {"Agent": [{"id": root, "goal": "Complete checkout"}]},
+            }
+            archive_json(
+                root_agent_id=root,
+                path="db/start.fixture.json.gz.enc",
+                payload=start_fixture,
+            )
+            archive_json(
+                root_agent_id=root,
+                path="db/end.fixture.json.gz.enc",
+                payload={
+                    **start_fixture,
+                    "rows": {
+                        **start_fixture["rows"],
+                        "Message": [
+                            {
+                                "id": "rich-finished",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "createdAt": "2026-07-20T00:00:02Z",
+                                "metadata": {
+                                    "toolName": "spawn_browser_agent",
+                                    "toolCallId": "rich-call",
+                                    "toolStatus": "FINISHED",
+                                    "action_type": "click",
+                                    "task_id": "task-rich",
+                                    "title": "Clicked Place your order",
+                                },
+                            },
+                            {
+                                "id": "legacy-progress",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "createdAt": "2026-07-20T00:00:03Z",
+                                "metadata": {
+                                    "toolName": "spawn_browser_agent",
+                                    "toolCallId": "legacy-call",
+                                    "toolStatus": "IN_PROGRESS",
+                                    "action_type": "goto",
+                                    "task_id": "task-legacy",
+                                    "title": "Navigating → https://amazon.com",
+                                },
+                            },
+                            {
+                                "id": "legacy-finished",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "createdAt": "2026-07-20T00:00:04Z",
+                                "metadata": {
+                                    "toolName": "spawn_browser_agent",
+                                    "toolCallId": "legacy-call",
+                                    "toolStatus": "FINISHED",
+                                    "action_type": "goto",
+                                    "task_id": "task-legacy",
+                                    "title": "Navigated → https://amazon.com",
+                                },
+                            },
+                            {
+                                "id": "simulated-finished",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "createdAt": "2026-07-20T00:00:05Z",
+                                "metadata": {
+                                    "toolName": "spawn_browser_agent",
+                                    "toolCallId": "simulated-call",
+                                    "toolStatus": "FINISHED",
+                                    "action_type": "click",
+                                    "task_id": "task-simulated",
+                                    "title": "Clicked synthetic result",
+                                    "world_model_simulated": True,
+                                },
+                            },
+                            {
+                                "id": "lifecycle-finished",
+                                "agentId": root,
+                                "role": "TOOL",
+                                "createdAt": "2026-07-20T00:00:06Z",
+                                "metadata": {
+                                    "toolName": "spawn_browser_agent",
+                                    "toolCallId": "lifecycle-call",
+                                    "toolStatus": "FINISHED",
+                                    "action_type": "task_complete",
+                                    "task_id": "task-legacy",
+                                    "title": "Task complete",
+                                },
+                            },
+                        ],
+                    },
+                },
+            )
+            archive_json(
+                root_agent_id=root,
+                path="manifest.json.gz.enc",
+                payload={
+                    "root_agent_id": root,
+                    "world_model_mode": "real",
+                    "run": {"root_goal": "Complete checkout", "agent_ids": [root]},
+                },
+            )
+            archive_json(
+                root_agent_id=root,
+                path="llm/dump.json.gz.enc",
+                payload={
+                    "agent_id": root,
+                    "dump_id": "dump",
+                    "messages": [],
+                    "output": {
+                        "tool_calls": [
+                            {"id": "call", "name": "web_search", "arguments": {"q": "unavailable"}}
+                        ]
+                    },
+                },
+            )
+            archive_json(
+                root_agent_id=root,
+                path="media/browser/task-rich/observations/iteration_0001.json",
+                payload={
+                    "iteration": 1,
+                    "ts_ms": 1000,
+                    "browser_state": {
+                        "url": "https://amazon.com/checkout",
+                        "title": "Checkout",
+                        "dom_tree": "Place your order",
+                    },
+                    "action_entries": [],
+                },
+            )
+            archive_json(
+                root_agent_id=root,
+                path="media/browser/task-rich/observations/iteration_0002.json",
+                payload={
+                    "iteration": 2,
+                    "ts_ms": 2000,
+                    "browser_state": {
+                        "url": "https://amazon.com/confirmation",
+                        "title": "Order confirmation",
+                        "dom_tree": "Thank you, your order has been placed.",
+                    },
+                    "action_entries": [
+                        {
+                            "step": 1,
+                            "action": "click",
+                            "thinking": "Submit the visible checkout",
+                            "index": 42,
+                            "element_description": "Place your order button",
+                            "result": {"success": True},
+                        }
+                    ],
+                },
+            )
+
+            assert load_transitions(root)[0].action.category == "llm_tool_call"
+            grounded = load_grounded_transitions(root)
+            assert len(grounded) == 2
+            assert all(step.action.to_wmh_tool_name() == "rose.browser.browser_action" for step in grounded)
+            rich = next(step for step in grounded if step.observation.metadata["source"] == "browser_observation")
+            legacy = next(step for step in grounded if step.observation.metadata["source"] == "message_fixture")
+            assert rich.action.arguments["action"] == "click"
+            assert rich.action.arguments["params"]["index"] == 42
+            assert "Thank you, your order has been placed" in rich.observation.content
+            assert legacy.action.arguments["action"] == "goto"
+            assert legacy.action.arguments["params"]["url"] == "https://amazon.com"
+            assert "synthetic result" not in json.dumps([step.observation.content for step in grounded])
+
+            trace_path = Path(out) / "traces.otel.jsonl"
+            export_archive_to_otel_jsonl(root, trace_path)
+            exported = trace_path.read_text(encoding="utf-8")
+            assert "rose.browser.browser_action" in exported
+            assert "rose.llm_tool_call" not in exported
+            exported_spans = [json.loads(line) for line in exported.splitlines() if line]
+            outputs = []
+            for span in exported_spans:
+                for attribute in span.get("attributes", []):
+                    if attribute.get("key") == "gen_ai.tool.output":
+                        outputs.append(json.loads(attribute["value"]["stringValue"]))
+            assert outputs
+            assert all(output["metadata"]["result_unavailable"] is False for output in outputs)
+        finally:
+            restore()
+
+
 def test_refresh_world_model_index_persists_retriever_index_without_gepa():
-    _load_upstream_otel_adapter_class()  # skip when upstream wmh is unavailable
+    OtelGenAIAdapter = _load_upstream_otel_adapter_class()  # skip when upstream wmh is unavailable
     from benchmarks.world_model_harness import export_archive_to_otel_jsonl, refresh_world_model_index
 
     with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
@@ -453,8 +650,75 @@ def test_refresh_world_model_index_persists_retriever_index_without_gepa():
             assert (index_dir / "steps.jsonl").exists()
             steps_lines = (index_dir / "steps.jsonl").read_text(encoding="utf-8").strip().splitlines()
             assert len(steps_lines) == 2
+            expected_steps = [
+                step.model_dump(mode="json")
+                for trace in OtelGenAIAdapter().from_file(str(trace_file))
+                for step in trace.steps
+            ]
+            assert [json.loads(line) for line in steps_lines] == expected_steps
         finally:
             restore()
+
+
+def test_refresh_world_model_index_streams_jsonl_in_bounded_batches():
+    """Regression: a corpus refresh must not materialize the aggregate trace in memory.
+
+    The upstream adapter's ``from_file`` reads the entire JSONL file and constructs every
+    parsed span, trace, step, rendered embedding input, and vector before persistence. That
+    multiplication OOM-killed the 8 GiB cloud maintenance machine for a 20-bundle delta refresh.
+    """
+    _load_upstream_otel_adapter_class()
+    from benchmarks.world_model_harness import export_archive_to_otel_jsonl, refresh_world_model_index
+    import wmh.ingest.otel_genai as otel_genai
+    from wmh.ingest.otel_genai import OtelGenAIAdapter
+    from wmh.retrieval import HashingEmbedder
+
+    with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as out:
+        restore = _with_archive_env(tmp)
+        old_batch_size = os.environ.get("WMH_INDEX_BATCH_SIZE")
+        try:
+            _write_golden_bundle("root-index-streaming")
+            trace_file = Path(out) / "traces.otel.jsonl"
+            export_archive_to_otel_jsonl("root-index-streaming", trace_file, redaction_mode="public")
+
+            os.environ.pop("WMH_INDEX_BATCH_SIZE", None)
+            original_embed = HashingEmbedder.embed
+            embed_batch_sizes: list[int] = []
+
+            def bounded_embed(self, texts):
+                embed_batch_sizes.append(len(texts))
+                assert len(texts) <= 1
+                return original_embed(self, texts)
+
+            with (
+                patch.object(
+                    OtelGenAIAdapter,
+                    "from_file",
+                    side_effect=MemoryError("bulk aggregate loader crossed the memory boundary"),
+                ),
+                patch.object(
+                    otel_genai,
+                    "_spans_to_traces",
+                    side_effect=MemoryError("one oversized trace crossed the memory boundary"),
+                ),
+                patch.object(HashingEmbedder, "embed", bounded_embed),
+            ):
+                result = refresh_world_model_index(
+                    trace_file,
+                    Path(out) / "models" / "rose-streaming",
+                    embed_dim=64,
+                )
+
+            assert result["indexed_traces"] == 1
+            assert result["indexed_steps"] == 2
+            assert result["batch_size"] == 1
+            assert embed_batch_sizes == [1, 1]
+        finally:
+            restore()
+            if old_batch_size is None:
+                os.environ.pop("WMH_INDEX_BATCH_SIZE", None)
+            else:
+                os.environ["WMH_INDEX_BATCH_SIZE"] = old_batch_size
 
 
 def test_exported_otel_jsonl_reads_trace_bundle_from_r2_backend():
@@ -657,6 +921,27 @@ def test_update_world_model_for_simulation_uses_delta_exports_and_progress_event
             assert calls["builds"] == 1
             assert calls["index_refreshes"] == 0
 
+            # Exporter changes must invalidate cached per-bundle OTel even when the encrypted
+            # archive itself is unchanged. Otherwise a compacting/schema fix can never repair
+            # already-cached retrieval examples.
+            delta_index_path = Path(out) / "delta-index.json"
+            stale_index = json.loads(delta_index_path.read_text(encoding="utf-8"))
+            stale_index["bundles"]["root-delta-a"]["export_schema_version"] = -1
+            delta_index_path.write_text(json.dumps(stale_index), encoding="utf-8")
+            schema_refresh = update_world_model_for_simulation(
+                output_dir=out,
+                root_agent_ids=["root-delta-a", "root-delta-b"],
+                name="rose-delta",
+                gepa_budget=0,
+                progress=lambda _event: None,
+                upstream_build=fake_upstream_build,
+                config_factory=fake_config_factory,
+                index_refresher=fake_index_refresher,
+            )
+            assert schema_refresh["updated_traces"] == 1
+            assert schema_refresh["index_refreshed"] is True
+            assert calls["index_refreshes"] == 1
+
             archive_json(
                 root_agent_id="root-delta-b",
                 path="provider/vapi/poll/call-ext-2.json.gz.enc",
@@ -679,7 +964,7 @@ def test_update_world_model_for_simulation_uses_delta_exports_and_progress_event
             assert third["index_refreshed"] is True
             assert third["index_refresh"]["indexed_traces"] == 2
             assert calls["builds"] == 1
-            assert calls["index_refreshes"] == 1
+            assert calls["index_refreshes"] == 2
 
             fourth = update_world_model_for_simulation(
                 output_dir=out,
@@ -695,10 +980,11 @@ def test_update_world_model_for_simulation_uses_delta_exports_and_progress_event
             assert fourth["build_ran"] is True
             assert fourth["index_refreshed"] is False
             assert calls["builds"] == 2
-            assert calls["index_refreshes"] == 1
+            assert calls["index_refreshes"] == 2
 
             index = json.loads((Path(out) / "delta-index.json").read_text(encoding="utf-8"))
             assert set(index["bundles"]) == {"root-delta-a", "root-delta-b"}
+            assert all(bundle["export_schema_version"] >= 1 for bundle in index["bundles"].values())
             assert Path(index["trace_file"]).exists()
             assert Path(index["replay_corpus_file"]).exists()
         finally:
@@ -1003,11 +1289,9 @@ def test_compare_real_vs_world_model_benchmark_outcomes():
     assert failed["checks"]["pass_outcome_match"] is False
 
 
-def test_root_export_includes_child_agent_llm_dumps_when_manifest_lists_tree():
-    _load_upstream_otel_adapter_class()
-    from benchmarks.world_model_harness import export_archive_to_otel_jsonl
+def test_root_loader_keeps_child_llm_dumps_for_diagnostics_but_grounded_export_excludes_them():
+    from benchmarks.world_model_harness import export_archive_to_otel_jsonl, load_transitions
     from helpers.trace_archive import archive_json
-    from wmh.ingest.otel_genai import OtelGenAIAdapter
 
     with tempfile.TemporaryDirectory() as tmp:
         restore = _with_archive_env(tmp)
@@ -1063,15 +1347,16 @@ def test_root_export_includes_child_agent_llm_dumps_when_manifest_lists_tree():
                     },
                 },
             )
+            diagnostic = load_transitions(root_agent_id, redaction_mode="public")
+            assert len(diagnostic) == 1
+            assert diagnostic[0].action.to_wmh_tool_name() == "rose.llm_tool_call.spawn_browser_agent"
+            assert diagnostic[0].action.agent_id == child_agent_id
+            assert "child-wmh-tree/llm/child-dump.json.gz.enc" in diagnostic[0].action.artifact_refs
+            assert diagnostic[0].observation.metadata["result_unavailable"] is True
+
             out = Path(tmp) / "tree.otel.jsonl"
             export_archive_to_otel_jsonl(root_agent_id, out, redaction_mode="public")
-            traces = OtelGenAIAdapter().from_file(str(out))
-            assert len(traces) == 1
-            assert len(traces[0].steps) == 1
-            step = traces[0].steps[0]
-            assert step.action.name == "rose.llm_tool_call.spawn_browser_agent"
-            assert step.action.arguments["agent_id"] == child_agent_id
-            assert "child-wmh-tree/llm/child-dump.json.gz.enc" in step.action.arguments["artifact_refs"]
+            assert not out.read_text(encoding="utf-8").strip()
         finally:
             restore()
 
@@ -1885,6 +2170,7 @@ def test_simulated_browser_resume_payload_is_compact_and_media_free():
         world_model_session_id="wmh-session-1",
         total_input_tokens=123,
         total_output_tokens=45,
+        usage_by_model={"gpt-5.6-sol-gpt": {"input_tokens": 123, "output_tokens": 45}},
     )
 
     encoded = json.dumps(payload)
@@ -1896,6 +2182,9 @@ def test_simulated_browser_resume_payload_is_compact_and_media_free():
     assert len(payload["simulated_visited_urls"]) == 50
     assert payload["simulated_recording_frame_count"] == 51
     assert payload["simulated_action_entry_count"] == 50
+    assert payload["simulated_usage_by_model"] == {
+        "gpt-5.6-sol-gpt": {"input_tokens": 123, "output_tokens": 45}
+    }
     assert len(encoded) < 100_000
 
 
@@ -2624,12 +2913,20 @@ async def run_all_tests():
         test_refresh_world_model_index_persists_retriever_index_without_gepa,
     )
     r.record(
+        "refresh_world_model_index_streams_jsonl_in_bounded_batches",
+        test_refresh_world_model_index_streams_jsonl_in_bounded_batches,
+    )
+    r.record(
         "update_world_model_excludes_simulated_bundles_from_corpus",
         test_update_world_model_excludes_simulated_bundles_from_corpus,
     )
     r.record(
         "world_model_bundle_cap_preserves_existing_index_entries",
         test_world_model_bundle_cap_preserves_existing_index_entries,
+    )
+    r.record(
+        "grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_fallbacks",
+        test_grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_fallbacks,
     )
     r.record(
         "load_transitions_drops_fast_cache_replays_from_corpus",
@@ -2644,8 +2941,8 @@ async def run_all_tests():
         test_compare_real_vs_world_model_benchmark_outcomes,
     )
     r.record(
-        "root_export_includes_child_agent_llm_dumps_when_manifest_lists_tree",
-        test_root_export_includes_child_agent_llm_dumps_when_manifest_lists_tree,
+        "root_loader_keeps_child_llm_dumps_for_diagnostics_but_grounded_export_excludes_them",
+        test_root_loader_keeps_child_llm_dumps_for_diagnostics_but_grounded_export_excludes_them,
     )
     r.record(
         "canonical_action_categories_cover_agent_tool_families",

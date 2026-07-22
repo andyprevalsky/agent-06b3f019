@@ -19,6 +19,7 @@ import re
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Optional
 
@@ -39,6 +40,8 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _LOCAL_ARCHIVE_ROOT = _REPO_ROOT / ".context" / "trace-archive"
 _WMH_REFERENCE_ROOT = _REPO_ROOT / ".context" / "reference" / "world-model-harness"
 _DEFAULT_WMH_BUILD_ROOT = _REPO_ROOT / ".context" / "world-model"
+# Increment whenever cached per-bundle OTel/session output changes independently of archive bytes.
+_WMH_EXPORT_SCHEMA_VERSION = 3
 
 _SECRET_KEY_RE = re.compile(
     r"(api[_-]?key|access[_-]?token|refresh[_-]?token|authorization|password|secret|"
@@ -100,6 +103,25 @@ _ENVIRONMENT_BOUNDARY_TOOLS = (
         "payment_provider_response",
     }
 )
+_BROWSER_OBSERVATION_PATH_RE = re.compile(
+    r"^media/browser/(?P<task_id>[^/]+)/observations/iteration_(?P<iteration>\d+)\.json$"
+)
+_BROWSER_NON_ACTION_EVENTS = {
+    "auth_assistance",
+    "browser",
+    "credential_propagation",
+    "diagnostics",
+    "error",
+    "network_recording",
+    "recording",
+    "request_user_assistance_for_authentication",
+    "session_paused",
+    "supervisor_recovery",
+    "system",
+    "task_complete",
+    "task_started",
+    "write_lock_rejected",
+}
 
 
 @dataclass
@@ -557,6 +579,18 @@ def reconstruct_initial_state(root_agent_id: str, *, redaction_mode: str = "publ
     return _maybe_redact(state, redaction_mode)
 
 
+def _retrieval_state_from_initial_state(initial_state: JsonObject) -> JsonObject:
+    """Remove replay-only bulk data before repeating state in every retrieval step.
+
+    The full fixture remains in ``sessions/*.session.json`` for deterministic replay. Retrieval
+    only needs the stable fixture reference/hash, row counts, goal, and other compact provenance;
+    embedding and prompting every database row adds no signal and multiplies fixtures by the
+    number of LLM tool calls.
+    """
+
+    return {key: value for key, value in initial_state.items() if key != "db_fixture"}
+
+
 def _transition_from_raw(raw: JsonObject, root_agent_id: str, redaction_mode: str) -> RoseTransition:
     action_raw = raw.get("action") if isinstance(raw.get("action"), dict) else {}
     observation_raw = raw.get("observation") if isinstance(raw.get("observation"), dict) else {}
@@ -649,6 +683,7 @@ def _transitions_from_llm_dumps(
 ) -> list[RoseTransition]:
     transitions: list[RoseTransition] = []
     replay_dump_count = 0
+    retrieval_state = _retrieval_state_from_initial_state(initial_state)
     for archive_agent_id in bundle_agent_ids(root_agent_id):
         updates = _latest_update_by_dump_id(archive_agent_id)
         for path in archive_artifact_paths(archive_agent_id):
@@ -721,7 +756,7 @@ def _transitions_from_llm_dumps(
                 )
                 transitions.append(
                     RoseTransition(
-                        state_before=initial_state,
+                        state_before=retrieval_state,
                         scratchpad="",
                         action=action,
                         observation=observation,
@@ -735,6 +770,401 @@ def _transitions_from_llm_dumps(
             flush=True,
         )
     return transitions
+
+
+def _row_timestamp_ms(row: JsonObject) -> int | None:
+    for key in ("createdAt", "created_at", "timestamp", "updatedAt", "updated_at"):
+        value = row.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        return int(parsed.timestamp() * 1000)
+    return None
+
+
+def _compact_browser_state(value: Any, redaction_mode: str) -> JsonObject:
+    if not isinstance(value, dict):
+        return {}
+    state = {
+        key: inner
+        for key, inner in value.items()
+        if key not in {"frame", "screenshot", "website_frame"}
+    }
+    dom_tree = state.get("dom_tree")
+    if isinstance(dom_tree, str) and len(dom_tree) > 24_000:
+        state["dom_tree"] = dom_tree[:24_000] + "\n[truncated]"
+    return _maybe_redact(state, redaction_mode)
+
+
+def _browser_action_arguments_from_entry(
+    entry: JsonObject,
+    *,
+    root_goal: str,
+    previous_state: JsonObject,
+    redaction_mode: str,
+) -> JsonObject:
+    params = dict(entry.get("params") or {}) if isinstance(entry.get("params"), dict) else {}
+    for key in ("index", "coordinates", "element_description"):
+        if entry.get(key) is not None:
+            params[key] = entry[key]
+    return _maybe_redact(
+        {
+            "goal": root_goal,
+            "action": str(entry.get("action") or "unknown"),
+            "params": params,
+            "thinking": str(entry.get("thinking") or ""),
+            "current_browser_state": previous_state,
+            "approval": {"granted": False, "type": None, "payment_card_last4": None},
+        },
+        redaction_mode,
+    )
+
+
+def _transitions_from_browser_observations(
+    root_agent_id: str,
+    redaction_mode: str,
+    initial_state: JsonObject,
+) -> tuple[list[RoseTransition], set[str]]:
+    """Build grounded browser transitions from recorder DOM observations.
+
+    Recorder observations are real post-action website states and include the
+    exact cumulative action entries that produced them. An observation for
+    iteration N is the state after the final action in its action_entries list;
+    retaining that final action avoids falsely assigning one future state to
+    every intermediate action when the recorder sampled multiple steps apart.
+    """
+
+    retrieval_state = _retrieval_state_from_initial_state(initial_state)
+    root_goal = str(initial_state.get("root_goal") or "")
+    grouped: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    for archive_agent_id in bundle_agent_ids(root_agent_id):
+        for path in archive_artifact_paths(archive_agent_id):
+            match = _BROWSER_OBSERVATION_PATH_RE.match(path)
+            if not match:
+                continue
+            key = (archive_agent_id, match.group("task_id"))
+            grouped.setdefault(key, []).append((int(match.group("iteration")), path))
+
+    transitions: list[RoseTransition] = []
+    grounded_task_ids: set[str] = set()
+    for (archive_agent_id, task_id), observation_paths in sorted(grouped.items()):
+        previous_browser_state: JsonObject = {}
+        seen_actions: set[tuple[Any, str]] = set()
+        for iteration, path in sorted(observation_paths):
+            try:
+                payload = read_archive_json(archive_agent_id, path)
+            except (FileNotFoundError, ValueError):
+                continue
+            browser_state = _compact_browser_state(payload.get("browser_state"), redaction_mode)
+            action_entries = payload.get("action_entries")
+            if isinstance(action_entries, list) and action_entries:
+                raw_entry = action_entries[-1]
+                if isinstance(raw_entry, dict):
+                    entry = raw_entry
+                    action_name = str(entry.get("action") or "unknown")
+                    action_key = (entry.get("step", iteration - 1), action_name)
+                    if action_key not in seen_actions and browser_state:
+                        seen_actions.add(action_key)
+                        grounded_task_ids.add(task_id)
+                        artifact_ref = (
+                            path if archive_agent_id == root_agent_id else f"{archive_agent_id}/{path}"
+                        )
+                        action_result = (
+                            entry.get("result") if isinstance(entry.get("result"), dict) else {}
+                        )
+                        observation_payload = _maybe_redact(
+                            {
+                                "browser_state": browser_state,
+                                "action_result": action_result,
+                            },
+                            redaction_mode,
+                        )
+                        timestamp_ms = (
+                            int(payload["ts_ms"])
+                            if isinstance(payload.get("ts_ms"), (int, float))
+                            and not isinstance(payload.get("ts_ms"), bool)
+                            else None
+                        )
+                        state_before = dict(retrieval_state)
+                        if previous_browser_state:
+                            state_before["browser_state"] = previous_browser_state
+                        transitions.append(
+                            RoseTransition(
+                                state_before=state_before,
+                                scratchpad=str(entry.get("thinking") or ""),
+                                action=CanonicalAction(
+                                    category="browser",
+                                    name="browser_action",
+                                    arguments=_browser_action_arguments_from_entry(
+                                        entry,
+                                        root_goal=root_goal,
+                                        previous_state=previous_browser_state,
+                                        redaction_mode=redaction_mode,
+                                    ),
+                                    agent_id=archive_agent_id,
+                                    tool_call_id=f"archive:{task_id}:{action_key[0]}",
+                                    artifact_refs=[artifact_ref],
+                                    timestamp_ms=timestamp_ms,
+                                ),
+                                observation=CanonicalObservation(
+                                    category="browser_state",
+                                    content=json.dumps(
+                                        observation_payload,
+                                        ensure_ascii=False,
+                                        sort_keys=True,
+                                    ),
+                                    is_error=bool(action_result.get("success") is False),
+                                    metadata={
+                                        "source": "browser_observation",
+                                        "task_id": task_id,
+                                        "iteration": iteration,
+                                        "action_step": action_key[0],
+                                        "result_unavailable": False,
+                                    },
+                                    artifact_refs=[artifact_ref],
+                                    timestamp_ms=timestamp_ms,
+                                ),
+                            )
+                        )
+            if browser_state:
+                previous_browser_state = browser_state
+    return transitions, grounded_task_ids
+
+
+def _browser_params_from_message(metadata: JsonObject, title: str) -> JsonObject:
+    params = dict(metadata.get("auxiliary") or {}) if isinstance(metadata.get("auxiliary"), dict) else {}
+    action_type = str(metadata.get("action_type") or "")
+    if action_type == "goto" and "→" in title:
+        params["url"] = title.split("→", 1)[1].strip()
+    elif action_type == "input_text":
+        match = re.search(r"Typed '([^']*)'", title)
+        if match:
+            params["text"] = match.group(1)
+    elif action_type == "press_key" and title.startswith("Pressed "):
+        params["key"] = title[len("Pressed ") :].strip()
+    elif action_type.startswith("scroll_"):
+        params["direction"] = action_type.removeprefix("scroll_")
+        match = re.search(r"(\d+)px", title)
+        if match:
+            params["amount"] = int(match.group(1))
+    elif action_type == "wait":
+        match = re.search(r"(\d+)ms", title)
+        if match:
+            params["time_ms"] = int(match.group(1))
+    if title:
+        params["grounded_event"] = title
+    return params
+
+
+def _browser_state_from_message(title: str, message: str, action_type: str) -> JsonObject:
+    content = message.strip() or title.strip()
+    url = ""
+    if action_type == "goto" and "→" in title:
+        url = title.split("→", 1)[1].strip()
+    return {
+        "url": url,
+        "title": title,
+        "dom_tree": content,
+        "viewport": {"width": 1280, "height": 800},
+        "scroll_position": {"pages_above": 0, "pages_below": 0, "total_pages": 1},
+        "page_stats": {},
+        "tabs": ([{"id": 0, "url": url, "title": title}] if url else []),
+        "recent_events": [content] if content else [],
+    }
+
+
+def _transitions_from_message_fixture(
+    root_agent_id: str,
+    redaction_mode: str,
+    initial_state: JsonObject,
+    *,
+    skip_browser_task_ids: set[str],
+) -> list[RoseTransition]:
+    """Recover real completed environment calls from the archived DB fixture."""
+
+    try:
+        fixture = read_archive_json(root_agent_id, "db/end.fixture.json.gz.enc")
+    except (FileNotFoundError, ValueError):
+        return []
+    rows = fixture.get("rows") if isinstance(fixture.get("rows"), dict) else {}
+    raw_messages = rows.get("Message") if isinstance(rows, dict) else []
+    if not isinstance(raw_messages, list):
+        return []
+    messages = [row for row in raw_messages if isinstance(row, dict)]
+    messages.sort(key=lambda row: (_row_timestamp_ms(row) or 0, str(row.get("id") or "")))
+
+    assistant_args: dict[str, JsonObject] = {}
+    for row in messages:
+        if str(row.get("role") or "").upper() != "ASSISTANT":
+            continue
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        tool_calls = metadata.get("tool_calls") if isinstance(metadata.get("tool_calls"), list) else []
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            call_id = str(call.get("tool_call_id") or call.get("id") or "")
+            if not call_id:
+                continue
+            assistant_args[call_id] = {
+                key: value
+                for key, value in call.items()
+                if key not in {"tool", "name", "tool_call_id", "id"}
+            }
+
+    retrieval_state = _retrieval_state_from_initial_state(initial_state)
+    root_goal = str(initial_state.get("root_goal") or "")
+    previous_browser_states: dict[str, JsonObject] = {}
+    last_observations: dict[str, str] = {}
+    transitions: list[RoseTransition] = []
+    for row in messages:
+        if str(row.get("role") or "").upper() != "TOOL":
+            continue
+        metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+        if str(metadata.get("toolStatus") or "").upper() != "FINISHED":
+            continue
+        if metadata.get("world_model_simulated") is True:
+            continue
+        tool_name = str(metadata.get("toolName") or "")
+        tool_call_id = str(metadata.get("toolCallId") or "")
+        title = str(metadata.get("title") or "").strip()
+        message = str(row.get("message") or row.get("content") or "").strip()
+        timestamp_ms = _row_timestamp_ms(row)
+
+        if tool_name in _BROWSER_ORCHESTRATION_TOOLS:
+            action_type = str(metadata.get("action_type") or "").strip()
+            task_id = str(metadata.get("task_id") or metadata.get("subAgentId") or "")
+            if (
+                not action_type
+                or action_type in _BROWSER_NON_ACTION_EVENTS
+                or action_type.startswith(("agentcard_", "purchase_"))
+                or task_id in skip_browser_task_ids
+            ):
+                continue
+            previous_state = previous_browser_states.get(task_id, {})
+            next_state = _browser_state_from_message(title, message, action_type)
+            action_args = {
+                "goal": root_goal,
+                "action": action_type,
+                "params": _browser_params_from_message(metadata, title),
+                "thinking": "",
+                "current_browser_state": previous_state,
+                "approval": {"granted": False, "type": None, "payment_card_last4": None},
+            }
+            state_before = dict(retrieval_state)
+            if previous_state:
+                state_before["browser_state"] = previous_state
+            result_payload = {
+                "browser_state": next_state,
+                "action_result": {"success": not bool(metadata.get("error")), "message": message},
+            }
+            transitions.append(
+                RoseTransition(
+                    state_before=_maybe_redact(state_before, redaction_mode),
+                    scratchpad="",
+                    action=CanonicalAction(
+                        category="browser",
+                        name="browser_action",
+                        arguments=_maybe_redact(action_args, redaction_mode),
+                        agent_id=str(row.get("agentId") or root_agent_id),
+                        tool_call_id=tool_call_id,
+                        artifact_refs=["db/end.fixture.json.gz.enc"],
+                        timestamp_ms=timestamp_ms,
+                    ),
+                    observation=CanonicalObservation(
+                        category="browser_state",
+                        content=json.dumps(
+                            _maybe_redact(result_payload, redaction_mode),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                        ),
+                        is_error=bool(metadata.get("error")),
+                        metadata={
+                            "source": "message_fixture",
+                            "task_id": task_id,
+                            "title": _maybe_redact(title, redaction_mode),
+                            "result_unavailable": False,
+                        },
+                        artifact_refs=["db/end.fixture.json.gz.enc"],
+                        timestamp_ms=timestamp_ms,
+                    ),
+                )
+            )
+            previous_browser_states[task_id] = _maybe_redact(next_state, redaction_mode)
+            continue
+
+        if not is_world_model_environment_boundary(tool_name):
+            continue
+        content = message or title
+        state_before = dict(retrieval_state)
+        if last_observations.get(tool_name):
+            state_before["previous_observation"] = last_observations[tool_name]
+        args = assistant_args.get(tool_call_id) or (
+            dict(metadata.get("auxiliary")) if isinstance(metadata.get("auxiliary"), dict) else {}
+        )
+        transitions.append(
+            RoseTransition(
+                state_before=_maybe_redact(state_before, redaction_mode),
+                scratchpad="",
+                action=CanonicalAction(
+                    category=canonical_category_for_tool(tool_name),
+                    name=tool_name,
+                    arguments=_maybe_redact(args, redaction_mode),
+                    agent_id=str(row.get("agentId") or root_agent_id),
+                    tool_call_id=tool_call_id,
+                    artifact_refs=["db/end.fixture.json.gz.enc"],
+                    timestamp_ms=timestamp_ms,
+                ),
+                observation=CanonicalObservation(
+                    category=f"{canonical_category_for_tool(tool_name)}_result",
+                    content=str(_maybe_redact(content, redaction_mode)),
+                    is_error=bool(metadata.get("error")),
+                    metadata={
+                        "source": "message_fixture",
+                        "title": _maybe_redact(title, redaction_mode),
+                        "result_unavailable": False,
+                    },
+                    artifact_refs=["db/end.fixture.json.gz.enc"],
+                    timestamp_ms=timestamp_ms,
+                ),
+            )
+        )
+        last_observations[tool_name] = content
+    return transitions
+
+
+def load_grounded_transitions(
+    root_agent_id: str,
+    *,
+    redaction_mode: str = "public",
+) -> list[RoseTransition]:
+    """Load only actions paired with real archived environment observations."""
+
+    initial_state = reconstruct_initial_state(root_agent_id, redaction_mode=redaction_mode)
+    explicit = _transitions_from_trace_artifact(root_agent_id, redaction_mode)
+    if explicit:
+        return [
+            transition
+            for transition in explicit
+            if transition.action.category != "llm_tool_call"
+            and transition.observation.metadata.get("result_unavailable") is not True
+        ]
+    browser, grounded_task_ids = _transitions_from_browser_observations(
+        root_agent_id,
+        redaction_mode,
+        initial_state,
+    )
+    messages = _transitions_from_message_fixture(
+        root_agent_id,
+        redaction_mode,
+        initial_state,
+        skip_browser_task_ids=grounded_task_ids,
+    )
+    return [*browser, *messages]
 
 
 def load_transitions(root_agent_id: str, *, redaction_mode: str = "public") -> list[RoseTransition]:
@@ -1037,25 +1467,156 @@ def refresh_world_model_index(
 
     _ensure_wmh_importable()
     try:
-        # Import the adapter class directly (not via get_adapter) so this works even when
-        # wmh.ingest was partially loaded without its registration side effects.
-        from wmh.ingest.otel_genai import OtelGenAIAdapter
-        from wmh.retrieval import EmbeddingRetriever, HashingEmbedder
+        import numpy as np
+        from wmh.core.render import encode_state_action
+        # These parser helpers preserve upstream's exact OTel span -> Step mapping while consuming
+        # Rose's ordered JSONL one transition at a time. OtelGenAIAdapter.from_file reads the
+        # complete corpus into memory, and even one archived trace can contain hundreds of MiB.
+        from wmh.ingest.otel_genai import (
+            _build_steps,
+            _collect_spans,
+            _is_llm_span,
+            _is_tool_span,
+        )
+        from wmh.retrieval import HashingEmbedder
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "world-model-harness is not importable; install agents/requirements.txt "
             "or keep .context/reference/world-model-harness with its dependencies available"
         ) from exc
 
-    traces = OtelGenAIAdapter().from_file(str(trace_file))
-    retriever = EmbeddingRetriever(HashingEmbedder(dim=embed_dim))
-    retriever.index(traces)
+    # Archived browser states vary by orders of magnitude, so a step-count batch larger than one
+    # is not a memory bound. Keep the safe default at one; operators may explicitly raise it for a
+    # known-small corpus.
+    batch_size = int(os.environ.get("WMH_INDEX_BATCH_SIZE", "1") or "1")
+    if batch_size <= 0:
+        raise ValueError(f"WMH_INDEX_BATCH_SIZE must be positive, got {batch_size}")
+
+    trace_path = Path(trace_file)
+
+    def iter_step_events():
+        """Yield ``(trace_id, step-or-None)`` without materializing a trace or corpus.
+
+        The ``None`` event marks the start of each contiguous trace so zero-step traces are still
+        counted. Rose exports ordered action/tool-observation pairs, which lets upstream's
+        ``_build_steps`` normalize one transition at a time instead of retaining every span in a
+        potentially huge trace.
+        """
+        current_trace_id: str | None = None
+        pending_spans = []
+        with trace_path.open("r", encoding="utf-8") as source:
+            for line in source:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    parsed_spans = _collect_spans(json.loads(stripped))
+                except json.JSONDecodeError:
+                    # Match upstream's JSONL behavior: a truncated/corrupt line is skipped while
+                    # every complete line remains usable.
+                    continue
+                for span in parsed_spans:
+                    if current_trace_id is not None and span.trace_id != current_trace_id:
+                        for step in _build_steps(pending_spans):
+                            yield current_trace_id, step
+                        pending_spans = []
+                        current_trace_id = None
+                    if current_trace_id is None:
+                        current_trace_id = span.trace_id
+                        yield current_trace_id, None
+
+                    if _is_llm_span(span):
+                        # A second LLM action means the prior one had no tool observation.
+                        for step in _build_steps(pending_spans):
+                            yield current_trace_id, step
+                        pending_spans = [span]
+                    elif _is_tool_span(span):
+                        pending_spans.append(span)
+                        for step in _build_steps(pending_spans):
+                            yield current_trace_id, step
+                        pending_spans = []
+        if current_trace_id is not None:
+            for step in _build_steps(pending_spans):
+                yield current_trace_id, step
+
+    # Count in a bounded first pass so the final .npy can be opened as a disk-backed array with
+    # its correct header. The second pass only retains one transition and one embedding batch.
+    indexed_traces = 0
+    indexed_steps = 0
+    for _trace_id, step in iter_step_events():
+        if step is None:
+            indexed_traces += 1
+        else:
+            indexed_steps += 1
+
     index_path = Path(model_root) / "index"
-    retriever.save(index_path)
+    index_path.mkdir(parents=True, exist_ok=True)
+    embedder = HashingEmbedder(dim=embed_dim)
+    peak_batch_steps = 0
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="index-refresh-", dir=str(index_path.parent)) as tmp:
+        tmp_path = Path(tmp)
+        tmp_matrix_path = tmp_path / "embeddings.npy"
+        tmp_steps_path = tmp_path / "steps.jsonl"
+        if indexed_steps:
+            matrix = np.lib.format.open_memmap(
+                tmp_matrix_path,
+                mode="w+",
+                dtype=np.float64,
+                shape=(indexed_steps, embed_dim),
+            )
+        else:
+            matrix = None
+            np.save(tmp_matrix_path, np.empty((0, 0), dtype=np.float64))
+
+        row = 0
+        with tmp_steps_path.open("w", encoding="utf-8") as steps_output:
+            steps = []
+
+            def write_batch() -> None:
+                nonlocal row, peak_batch_steps
+                if not steps:
+                    return
+                peak_batch_steps = max(peak_batch_steps, len(steps))
+                texts = [encode_state_action(step.state_before, step.action) for step in steps]
+                vectors = np.asarray(embedder.embed(texts), dtype=np.float64)
+                expected_shape = (len(steps), embed_dim)
+                if vectors.shape != expected_shape:
+                    raise ValueError(
+                        f"embedder returned shape {vectors.shape}, expected {expected_shape}"
+                    )
+                assert matrix is not None
+                matrix[row : row + len(steps)] = vectors
+                for step in steps:
+                    steps_output.write(step.model_dump_json() + "\n")
+                row += len(steps)
+                steps.clear()
+
+            for _trace_id, step in iter_step_events():
+                if step is not None:
+                    steps.append(step)
+                    if len(steps) >= batch_size:
+                        write_batch()
+            write_batch()
+
+        if row != indexed_steps:
+            raise RuntimeError(
+                f"trace corpus changed during index refresh: counted {indexed_steps} steps, wrote {row}"
+            )
+        if matrix is not None:
+            matrix.flush()
+            del matrix
+        os.replace(tmp_matrix_path, index_path / "embeddings.npy")
+        os.replace(tmp_steps_path, index_path / "steps.jsonl")
+
     return {
-        "indexed_traces": len(traces),
-        "indexed_steps": sum(len(trace.steps) for trace in traces),
+        "indexed_traces": indexed_traces,
+        "indexed_steps": indexed_steps,
         "index_path": str(index_path),
+        "batch_size": batch_size,
+        "peak_batch_steps": peak_batch_steps,
     }
 
 
@@ -1147,7 +1708,7 @@ def export_archive_to_otel_jsonl(
     run = manifest.get("run") if isinstance(manifest.get("run"), dict) else {}
     task_name = benchmark_task_name or manifest.get("benchmark_task_name")
     root_goal = task or run.get("root_goal") or task_name
-    transitions = load_transitions(root_agent_id, redaction_mode=redaction_mode)
+    transitions = load_grounded_transitions(root_agent_id, redaction_mode=redaction_mode)
     spans = transitions_to_otel_spans(
         root_agent_id,
         transitions,
@@ -1264,7 +1825,7 @@ async def evaluate_archive_with_world_model(
     if not wmh_base_url or not model_name:
         return {"status": "not_configured", "reason": "WMH_BASE_URL and WMH_MODEL_NAME are required"}
 
-    transitions = load_transitions(root_agent_id, redaction_mode=redaction_mode)
+    transitions = load_grounded_transitions(root_agent_id, redaction_mode=redaction_mode)
     if not transitions:
         return {"status": "no_steps", "reason": "archive contains no transitions"}
     initial_state = reconstruct_initial_state(root_agent_id, redaction_mode=redaction_mode)
@@ -1390,7 +1951,7 @@ def build_replay_corpus(
 
 
 def _build_replay_session(root_agent_id: str, split: str) -> JsonObject:
-    transitions = load_transitions(root_agent_id, redaction_mode="public")
+    transitions = load_grounded_transitions(root_agent_id, redaction_mode="public")
     state = reconstruct_initial_state(root_agent_id, redaction_mode="public")
     keys = []
     for transition in transitions:
@@ -1508,7 +2069,16 @@ def update_world_model_for_simulation(
         session_path = session_dir / f"{root_agent_id}.session.json"
         previous = old_bundles.get(root_agent_id) if isinstance(old_bundles, dict) else None
         previous_sha = previous.get("sha256") if isinstance(previous, dict) else None
-        if force or previous_sha != signature["sha256"] or not otel_path.exists() or not session_path.exists():
+        previous_export_schema = (
+            previous.get("export_schema_version") if isinstance(previous, dict) else None
+        )
+        if (
+            force
+            or previous_sha != signature["sha256"]
+            or previous_export_schema != _WMH_EXPORT_SCHEMA_VERSION
+            or not otel_path.exists()
+            or not session_path.exists()
+        ):
             changed.append(root_agent_id)
         else:
             unchanged.append(root_agent_id)
@@ -1532,7 +2102,8 @@ def update_world_model_for_simulation(
     for root_agent_id in changed:
         otel_path = otel_dir / f"{root_agent_id}.otel.jsonl"
         export_archive_to_otel_jsonl(root_agent_id, otel_path, redaction_mode="public")
-        exported_spans += sum(1 for line in otel_path.read_text(encoding="utf-8").splitlines() if line.strip())
+        with otel_path.open("r", encoding="utf-8") as exported:
+            exported_spans += sum(1 for line in exported if line.strip())
         session = _build_replay_session(root_agent_id, split[root_agent_id])
         (session_dir / f"{root_agent_id}.session.json").write_text(
             json.dumps(session, indent=2, sort_keys=True) + "\n",
@@ -1554,9 +2125,10 @@ def update_world_model_for_simulation(
         for root_agent_id in bundle_ids:
             otel_path = otel_dir / f"{root_agent_id}.otel.jsonl"
             if otel_path.exists():
-                text = otel_path.read_text(encoding="utf-8").strip()
-                if text:
-                    combined.write(text + "\n")
+                with otel_path.open("r", encoding="utf-8") as exported:
+                    for line in exported:
+                        if line.strip():
+                            combined.write(line if line.endswith("\n") else line + "\n")
             session_path = session_dir / f"{root_agent_id}.session.json"
             if session_path.exists():
                 try:
@@ -1639,6 +2211,7 @@ def update_world_model_for_simulation(
     index["bundles"] = {
         root_agent_id: {
             **signatures[root_agent_id],
+            "export_schema_version": _WMH_EXPORT_SCHEMA_VERSION,
             "split": split[root_agent_id],
             "otel_file": str(otel_dir / f"{root_agent_id}.otel.jsonl"),
             "session_file": str(session_dir / f"{root_agent_id}.session.json"),

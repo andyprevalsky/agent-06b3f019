@@ -815,6 +815,40 @@ async def test_fetch_compute_token_activity_passes_lineage_params():
     assert "agentId=a-1" in call["url"]
     assert "rootAgentId=root-1" in call["url"]
     assert "fastCacheAffinityKey=affinity-1" in call["url"]
+    assert "tokenType=" not in call["url"]
+
+
+async def test_fetch_compute_token_activity_excludes_claude_tokens_by_policy():
+    """Anthropic exclusion constrains unified compute leases to GPT tokens."""
+    setup_mock(
+        {
+            "/api/integrations/compute-code/credentials/token": {
+                "status": 200,
+                "json": {
+                    "type": "gpt",
+                    "accessToken": "gpt-token",
+                    "accountId": "acct-1",
+                    "source": "pool",
+                    "poolTokenId": "pool-gpt-1",
+                },
+            },
+        }
+    )
+
+    with patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}), patch(
+        "temporalio.activity.heartbeat"
+    ):
+        from helpers.llm import fetch_compute_token_activity
+
+        result = await fetch_compute_token_activity("user-1")
+
+    assert result is not None
+    assert result["type"] == "gpt"
+    call = assert_captured_call(
+        url_contains="/api/integrations/compute-code/credentials/token",
+        method="GET",
+    )
+    assert "tokenType=gpt" in call["url"]
 
 
 async def test_heartbeat_compute_token_lineage_activity_posts_lineage_key():
@@ -5721,6 +5755,10 @@ async def run_all_tests():
     )
     await r.record_async(
         "fetch_claude_max_token_activity_missing_token_field", test_fetch_claude_max_token_activity_missing_token_field
+    )
+    await r.record_async(
+        "fetch_compute_token_activity_excludes_claude_tokens_by_policy",
+        test_fetch_compute_token_activity_excludes_claude_tokens_by_policy,
     )
     await r.record_async(
         "mark_claude_token_rate_limited_user_success", test_mark_claude_token_rate_limited_user_success

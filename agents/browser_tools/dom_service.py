@@ -13,7 +13,7 @@ import logging
 import math
 import random
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
@@ -310,6 +310,7 @@ class ActionHistory:
 
     def __init__(self):
         self._entries: List[ActionHistoryEntry] = []
+        self._next_step = 1
 
     async def record_action(
         self,
@@ -341,7 +342,7 @@ class ActionHistory:
         Returns:
             The recorded ActionHistoryEntry
         """
-        step = len(self._entries) + 1
+        step = self._next_step
 
         # Convert between index and coordinates
         coords_dict = None
@@ -390,6 +391,7 @@ class ActionHistory:
         )
 
         self._entries.append(entry)
+        self._next_step = step + 1
         logger.debug(f"Recorded action {step}: {action} (index={index}, coords={coords_dict})")
 
         return entry
@@ -398,9 +400,31 @@ class ActionHistory:
         """Get all entries as dicts for Rose API request."""
         return [entry.to_dict() for entry in self._entries]
 
+    def restore_entries(self, entries: Optional[List[Dict[str, Any]]]) -> None:
+        """Restore action history after a durable workflow pause.
+
+        Browser write approval ends the current Temporal activity and starts a
+        new one after the user responds.  Keeping the compact action entries
+        lets both the resumed browser model and the verifier see the real steps
+        that happened before the pause instead of treating the resumed page as
+        a brand-new session.
+        """
+        restored: List[ActionHistoryEntry] = []
+        allowed_fields = {entry_field.name for entry_field in fields(ActionHistoryEntry)}
+        for raw_entry in entries or []:
+            if not isinstance(raw_entry, dict):
+                continue
+            values = {key: value for key, value in raw_entry.items() if key in allowed_fields}
+            if not isinstance(values.get("step"), int) or not isinstance(values.get("action"), str):
+                continue
+            restored.append(ActionHistoryEntry(**values))
+        self._entries = restored
+        self._next_step = max((entry.step for entry in restored), default=0) + 1
+
     def clear(self) -> None:
         """Clear the action history."""
         self._entries = []
+        self._next_step = 1
 
     def __len__(self) -> int:
         return len(self._entries)

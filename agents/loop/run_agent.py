@@ -550,6 +550,10 @@ async def run_agent(  # noqa: C901
         turn_tools = tools
         required_turn_tool = None
         if completed_child_output is not None:
+            # This is a real completion-only state, not a soft prompt hint. A
+            # completed browser child already supplied every parent output field,
+            # so advertising spawn_agent here lets the model repeat an irreversible
+            # task before the post-parse required-tool check can reject it.
             turn_tools = ["attempt_completion"]
             required_turn_tool = "attempt_completion"
             completion_instruction = (
@@ -1548,7 +1552,6 @@ async def run_agent(  # noqa: C901
                     # Track set_plan success (only if no error)
                     if tool_name == "set_plan" and not is_error:
                         set_plan_succeeded = True
-
         # Repetition detection: if the agent keeps calling the same tools with identical
         # args, it's stuck. Inject a strong nudge after 3 consecutive identical iterations.
         if processed_tools:
@@ -1618,6 +1621,8 @@ async def run_agent(  # noqa: C901
                 # Continue to next iteration (don't process attempt_completion)
             else:
                 # Execute the tool first (it posts its own IN_PROGRESS/FINISHED)
+                completion_tool_result = None
+                completion_tool_error = None
                 if execute_tool:
                     try:
                         execution_tool_args = dict(tool_args)
@@ -1631,9 +1636,61 @@ async def run_agent(  # noqa: C901
                             span_source="agents.loop.run_agent.run_agent.attempt_completion_dispatch",
                             span_key="agents.loop.run_agent.run_agent.attempt_completion_dispatch",
                         ):
-                            await execute_tool(tool_name, execution_tool_args, tool_call_id)
+                            completion_tool_result = await execute_tool(tool_name, execution_tool_args, tool_call_id)
                     except Exception as e:
-                        logger.warning(f"attempt_completion tool error (non-fatal): {e}")
+                        completion_tool_error = str(e)
+                        logger.warning(f"attempt_completion tool error: {e}")
+
+                if isinstance(completion_tool_result, dict) and completion_tool_result.get("error"):
+                    completion_tool_error = str(
+                        completion_tool_result.get("message") or "Completion was rejected by the tool executor"
+                    )
+
+                # Completion is a normal tool boundary. If its executor rejects
+                # the call, show that error to the same model and continue the
+                # loop instead of treating the rejected call as terminal.
+                if completion_tool_error:
+                    error_metadata = {
+                        "toolCallId": tool_call_id,
+                        "toolName": tool_name,
+                        "toolStatus": "ERROR",
+                        "title": f"{tool_name} rejected",
+                        "error": True,
+                        "subAgentId": task_id,
+                    }
+                    completion_error_posted = False
+                    if post_message:
+                        try:
+                            await post_message(completion_tool_error, "TOOL", error_metadata)
+                            completion_error_posted = True
+                        except Exception as post_error:
+                            logger.warning(
+                                "Failed to persist rejected completion; keeping it in local context",
+                                agent_id=agent_id,
+                                tool_name=tool_name,
+                                error=str(post_error),
+                            )
+                    if not poll_messages or not completion_error_posted:
+                        context.append(
+                            {
+                                "role": "TOOL",
+                                "text": f"Error: {completion_tool_error}",
+                                "timestamp": _safe_now().isoformat(),
+                                "metadata": {
+                                    key: value
+                                    for key, value in error_metadata.items()
+                                    if key != "subAgentId"
+                                },
+                            }
+                        )
+                    logger.info(
+                        "run_agent.completion_rejected",
+                        agent_id=agent_id,
+                        iteration=iteration,
+                        tool_name=tool_name,
+                        reason=completion_tool_error,
+                    )
+                    continue
 
                 # When no poll_messages, locally append the attempt_completion
                 # result so the verifier sees the current iteration's artifact.

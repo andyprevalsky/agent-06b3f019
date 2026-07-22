@@ -41,6 +41,11 @@ def _captured_seed_env(**kwargs) -> dict[str, str]:
     with (
         patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
         patch.object(rb, "_shared_workspace_database_url", return_value=None),
+        patch.object(
+            rb,
+            "_production_compute_token_database_url",
+            return_value="postgresql://prod/victoria",
+        ),
         patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
     ):
         rb._sync_compute_tokens(**kwargs)
@@ -75,6 +80,30 @@ def test_sync_uses_verified_shared_workspace_as_compute_token_source():
     assert seen["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://shared/victoria"
 
 
+def test_cloud_sync_uses_explicit_production_compute_token_source():
+    env = _captured_seed_env(tolerate_gpt_code_unavailable=True)
+    assert env["DATABASE_URL"] == "postgresql://local/victoria"
+    assert env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://prod/victoria"
+
+
+def test_production_compute_source_preserves_prisma_pooler_parameters():
+    source = "postgresql://prod/db?pgbouncer=true&connection_limit=1"
+    with patch.object(rb, "load_env_var", side_effect=lambda name, _path: source if name == "DATABASE_URL" else None):
+        assert rb._production_compute_token_database_url("postgresql://local/victoria") == source
+
+
+def test_sync_fails_before_seed_when_no_explicit_source_exists():
+    calls = []
+    with (
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_shared_workspace_database_url", return_value=None),
+        patch.object(rb, "_production_compute_token_database_url", return_value=None),
+        patch.object(rb, "_run_seed_subprocess", side_effect=lambda *_args, **_kwargs: calls.append(True)),
+    ):
+        assert rb._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is False
+    assert calls == []
+
+
 def test_blanket_preflight_uses_tolerant_sync():
     captured: dict[str, bool] = {}
 
@@ -89,6 +118,19 @@ def test_blanket_preflight_uses_tolerant_sync():
         rb._refresh_local_compute_tokens_for_run("http://localhost:3001")
 
     assert captured["tolerant"] is True
+
+
+def test_simulation_preflight_uses_restored_seed_without_prod_sync():
+    """Cloud simulation has a fresh restored seed DB but no second source DB endpoint."""
+    calls = []
+    with (
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(rb, "_is_simulate_mode", return_value=True),
+        patch.object(rb, "_sync_compute_tokens", side_effect=lambda **_kwargs: calls.append(True)),
+    ):
+        rb._refresh_local_compute_tokens_for_run("http://localhost:3001")
+
+    assert calls == []
 
 
 def test_live_fixture_sync_tolerates_missing_gpt_code():

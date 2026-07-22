@@ -36,6 +36,8 @@ async def _run_single_iteration(
     verifier_score=1.0,
     verifier_reasoning="done",
     winddown_window=0,
+    poll_messages_override=None,
+    is_inside_temporal_activity=True,
 ):
     from loop.run_agent import run_agent
 
@@ -120,8 +122,9 @@ async def _run_single_iteration(
             model="rose-labs/rose-1-lite",
             tools=["web_search", "web_fetch", "attempt_completion", "set_plan"],
             initial_context=ctx,
-            is_inside_temporal_activity=True,
+            is_inside_temporal_activity=is_inside_temporal_activity,
             post_message=mock_post_message,
+            poll_messages=poll_messages_override,
             execute_tool=default_execute_tool,
             build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
             max_iterations=max_iterations,
@@ -159,6 +162,122 @@ async def test_tool_only_assistant_turn_persists_tool_calls():
 
     assert len(executed) == 1
     assert executed[0]["tool_call_id"] == "tc-web-search-1"
+
+
+async def test_rejected_completion_continues_with_stable_schema():
+    """A rejected completion returns to the same loop without changing its schema."""
+    from loop.run_agent import run_agent
+
+    schemas = []
+    executed = []
+    has_evidence = False
+    turns = [
+        _DummyLLMResult("", [{"tool": "attempt_completion_with_result", "result": "unsupported"}]),
+        _DummyLLMResult("", [{"tool": "web_search", "query": "official population"}]),
+        _DummyLLMResult("", [{"tool": "attempt_completion_with_result", "result": "123"}]),
+    ]
+
+    async def mock_call_llm_structured_streaming(**kwargs):
+        schemas.append(kwargs["response_model"].model_json_schema())
+        result = turns.pop(0)
+        tool_name = result.tool_calls[0].model_dump()["tool"]
+        return (
+            result,
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            [(tool_name, f"tc-{len(schemas)}", float(len(schemas)))],
+        )
+
+    async def execute_tool(tool_name, _tool_args, _tool_call_id):
+        nonlocal has_evidence
+        executed.append(tool_name)
+        if tool_name == "web_search":
+            has_evidence = True
+            return {"message": "grounded evidence"}
+        if not has_evidence:
+            return {
+                "error": True,
+                "message": "Completion rejected: no evidence tool has succeeded yet.",
+            }
+        return {"message": "grounded evidence"}
+
+    async def prompt():
+        return "System prompt"
+
+    with patch(
+        "loop.run_agent.call_llm_structured_streaming",
+        new=AsyncMock(side_effect=mock_call_llm_structured_streaming),
+    ):
+        result = await run_agent(
+            agent_id="explore-leaf",
+            user_id="user-test",
+            system_prompt=prompt,
+            verifier_prompt_generator=prompt,
+            model="rose-labs/rose-1-lite",
+            tools=["web_search", "attempt_completion_with_result"],
+            initial_context=[{"role": "USER", "text": "Research it", "timestamp": "2024-01-01T00:00:00Z"}],
+            is_inside_temporal_activity=True,
+            post_message=AsyncMock(),
+            execute_tool=execute_tool,
+            build_messages=lambda context, system: [{"role": "system", "content": system}],
+            max_iterations=3,
+            skip_verification=True,
+            skip_status_updates=True,
+        )
+
+    assert result["status"] == "completed"
+    assert executed == [
+        "attempt_completion_with_result",
+        "web_search",
+        "attempt_completion_with_result",
+    ]
+    assert schemas[0] == schemas[1] == schemas[2]
+    assert "attempt_completion_with_result" in str(schemas[0])
+    assert "minItems" not in schemas[0]["properties"]["tool_calls"]
+    rejected = [
+        message
+        for message in result["context"]
+        if message.get("metadata", {}).get("toolStatus") == "ERROR"
+    ]
+    assert len(rejected) == 1
+    assert "no evidence tool has succeeded" in rejected[0]["text"]
+
+
+async def test_rejected_completion_posts_error_in_workflow_polling_mode():
+    async def reject_completion(_tool_name, _tool_args, _tool_call_id):
+        return {
+            "error": True,
+            "message": "Completion rejected: no evidence tool has succeeded yet.",
+        }
+
+    async def poll_messages(_last_checked):
+        return []
+
+    workflow_llm_result = {
+        "response": "",
+        "tool_calls": [{"tool": "attempt_completion_with_result", "result": "unsupported"}],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "detected_tools_ordered": [("attempt_completion_with_result", "tc-rejected", 1.0)],
+    }
+    with patch(
+        "loop.run_agent.workflow.execute_activity",
+        new=AsyncMock(return_value=workflow_llm_result),
+    ):
+        _, posted, _ = await _run_single_iteration(
+            workflow_llm_result["tool_calls"],
+            workflow_llm_result["detected_tools_ordered"],
+            execute_tool_override=reject_completion,
+            poll_messages_override=poll_messages,
+            is_inside_temporal_activity=False,
+        )
+
+    rejected = [
+        message
+        for message in posted
+        if message["role"] == "TOOL" and message.get("metadata", {}).get("toolStatus") == "ERROR"
+    ]
+    assert len(rejected) == 1
+    assert rejected[0]["metadata"]["toolCallId"] == "tc-rejected"
+    assert "no evidence tool has succeeded" in rejected[0]["text"]
 
 
 async def test_same_llm_turn_spawn_agents_share_spawn_group_id_without_persisting_arg():
@@ -1050,8 +1169,9 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
     Regression: the simulated Amazon checkout browser returned a terminal,
     schema-complete result, but the unrestricted next root turn spawned a second
     browser session instead of calling attempt_completion. The parent verifier
-    already accepts this exact child output, so the only legal next tool is the
-    completion boundary.
+    already accepts this exact child output, so orchestration must expose only
+    the completion boundary on the handoff turn. A prose instruction plus a
+    post-parse validator is insufficient when spawn_agent remains advertised.
     """
     from helpers.llm import call_llm_activity, check_progress
     from loop import run_agent as run_mod
@@ -1102,10 +1222,11 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
     async def mock_execute_activity(fn, args=None, **_kwargs):
         if fn is call_llm_activity:
             llm_calls.append(args)
-            required_tool = args[11]
-            # Reproduce the observed model choice unless orchestration narrows
-            # this schema-complete handoff to the completion boundary.
-            tool_name = "attempt_completion" if required_tool == "attempt_completion" else "spawn_agent"
+            advertised_tools = args[2]
+            # Reproduce the live Amazon failure: GPT chose spawn_agent three
+            # times when it was still advertised despite a completion-only
+            # instruction and validator.
+            tool_name = "attempt_completion" if advertised_tools == ["attempt_completion"] else "spawn_agent"
             tool_call = {"tool": tool_name}
             if tool_name == "spawn_agent":
                 tool_call.update(
@@ -1313,6 +1434,14 @@ async def run_all_tests():
     r = BlackboxResult()
     await r.record_async(
         "tool_only_assistant_turn_persists_tool_calls", test_tool_only_assistant_turn_persists_tool_calls
+    )
+    await r.record_async(
+        "rejected_completion_continues_with_stable_schema",
+        test_rejected_completion_continues_with_stable_schema,
+    )
+    await r.record_async(
+        "rejected_completion_posts_error_in_workflow_polling_mode",
+        test_rejected_completion_posts_error_in_workflow_polling_mode,
     )
     await r.record_async(
         "same_llm_turn_spawn_agents_share_spawn_group_id",
