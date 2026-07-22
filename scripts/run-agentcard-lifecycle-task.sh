@@ -54,6 +54,7 @@ export AGENTCARD_ONBOARDING_RETURN_URL="${AGENTCARD_ONBOARDING_RETURN_URL:-https
 # available GPT compute lane instead of blocking on absent Claude OAuth or a
 # cooled-down shared Anthropic fallback.
 export ROSE_EXCLUDE_ANTHROPIC_FAMILY=1
+export SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt
 # These sandbox lifecycle tasks use only the bundled /test_payment fixture and
 # never consume production browser cookies, passwords, passkeys, or storage.
 # Skipping that unrelated graph prevents a warm local database from spending

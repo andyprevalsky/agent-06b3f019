@@ -170,6 +170,7 @@ def publish_index(machines_path: Path, volumes_path: Path, root: Path) -> None:
     fence, fence_token = _publication_fence()
     generation: Path | None = None
     next_link: Path | None = None
+    swap_committed = False
     try:
         current_before_name = _current_generation_name(root)
         # With the publication fence held, no live publisher can own any
@@ -239,6 +240,7 @@ def publish_index(machines_path: Path, volumes_path: Path, root: Path) -> None:
         next_link = root / f".current-{os.getpid()}-{time.time_ns()}"
         next_link.symlink_to(generation.name)
         os.replace(next_link, root / "current")
+        swap_committed = True
 
         # Keep exactly the new current plus the symlink-proven old current for
         # open-path races. Never infer predecessor status from marker mtimes.
@@ -254,7 +256,7 @@ def publish_index(machines_path: Path, volumes_path: Path, root: Path) -> None:
                 next_link.unlink()
             except FileNotFoundError:
                 pass
-        if generation is not None:
+        if generation is not None and not swap_committed:
             shutil.rmtree(generation, ignore_errors=True)
         raise
     finally:

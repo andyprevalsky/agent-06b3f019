@@ -1387,6 +1387,68 @@ def test_machine_inventory_publication_cleans_temp_link_on_replace_failure(
     assert not list(index.glob(".generation-*"))
 
 
+def test_machine_inventory_publication_keeps_committed_generation_on_prune_failure(
+    tmp_path: Path,
+) -> None:
+    machines = tmp_path / "machines.json"
+    volumes = tmp_path / "volumes.json"
+    index = tmp_path / "inventory"
+    machines.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "machine-1",
+                    "name": "cloudbench-one",
+                    "state": "created",
+                    "private_ip": "fdaa::1",
+                    "config": {"mounts": []},
+                }
+            ]
+        )
+    )
+    volumes.write_text(json.dumps([]))
+
+    spec = importlib.util.spec_from_file_location(
+        "cloudbench_machine_readiness_prune_failure",
+        MACHINE_READINESS_SCRIPT,
+    )
+    assert spec is not None and spec.loader is not None
+    readiness_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(readiness_module)
+
+    original_replace = readiness_module.os.replace
+    original_glob = readiness_module.Path.glob
+    swap_committed = False
+
+    def tracked_replace(src: object, dst: object) -> None:
+        nonlocal swap_committed
+        original_replace(src, dst)
+        swap_committed = True
+
+    def fail_prune_glob(path: Path, pattern: str):
+        if swap_committed and pattern == ".generation-*":
+            raise OSError("forced prune failure after committed current swap")
+        return original_glob(path, pattern)
+
+    readiness_module.os.replace = tracked_replace
+    readiness_module.Path.glob = fail_prune_glob
+    try:
+        try:
+            readiness_module.publish_index(machines, volumes, index)
+            raise AssertionError("publish_index should fail when post-swap pruning fails")
+        except OSError as exc:
+            assert "forced prune failure" in str(exc)
+    finally:
+        readiness_module.os.replace = original_replace
+        readiness_module.Path.glob = original_glob
+
+    assert not list(index.glob(".current-*"))
+    assert (index / "current").is_symlink()
+    current_generation = (index / "current").resolve()
+    assert current_generation.exists()
+    assert f"generation={current_generation.name}" in (index / "current/health").read_text()
+
+
 def test_machine_inventory_index_publication_is_linear(tmp_path: Path) -> None:
     """Publishing N keyed records must not rescan all N machines/volumes for
     each record. Instrument list iteration so this proves algorithmic work

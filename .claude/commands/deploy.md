@@ -864,6 +864,7 @@ Group 4 siblings.
 cd "$(git rev-parse --show-toplevel)"
 CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
   ROSE_EXCLUDE_ANTHROPIC_FAMILY=1 \
+  SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt \
   BENCHMARK_SKIP_WMH_BUILD=1 \
   bash scripts/run-deploy-stage agentcard-lifecycle -- \
   bash scripts/run-bench --local agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment --bootstrap --max-concurrency 1 --no-dashboard

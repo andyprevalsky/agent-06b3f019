@@ -156,6 +156,7 @@ fi
 require_text "$DEPLOY_COMMAND" 'bash scripts/run-deploy-stage agentcard-lifecycle --' "/deploy must record AgentCard as one lifecycle lane"
 require_text "$DEPLOY_COMMAND" 'bash scripts/run-bench --local' "/deploy AgentCard lane must own an isolated local stack"
 require_text "$DEPLOY_COMMAND" 'ROSE_EXCLUDE_ANTHROPIC_FAMILY=1' "/deploy AgentCard lane must use the non-Claude compute lane when Claude credentials are unavailable"
+require_text "$DEPLOY_COMMAND" 'SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt' "/deploy AgentCard lane must pass GPT-only seed policy into the isolated stack"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1' "/deploy AgentCard lane must not cold-build an unused simulated world model"
 require_text "$DEPLOY_COMMAND" 'agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment' "/deploy must keep all four AgentCard lifecycle tasks in one lane"
 require_text "$DEPLOY_COMMAND" '--max-concurrency 1 --no-dashboard' "/deploy must preserve sequential payment state inside the isolated AgentCard lane"
@@ -166,6 +167,7 @@ require_text "$DEPLOY_COMMAND" "gh workflow run chat-lifecycle-ratchet.yml" "/de
 require_text "$DEPLOY_COMMAND" 'gh run watch "$SEMANTIC_RUN_ID" --exit-status' "/deploy must block on production semantic success"
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export BENCHMARK_SKIP_WMH_BUILD=1' "AgentCard lifecycle stacks must skip unrelated WMH build/refresh before readiness"
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export ROSE_EXCLUDE_ANTHROPIC_FAMILY=1' "AgentCard lifecycle helper must not block on Claude credentials"
+require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt' "AgentCard lifecycle helper must pass GPT-only seed policy into run.sh"
 
 # /descend is part of the deploy orchestration surface. Keep its two user gates,
 # parallel deploy handoff, sorting, and rendered response contract cemented.
