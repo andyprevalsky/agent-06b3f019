@@ -907,12 +907,14 @@ def test_deploy_always_gates_changed_cloudbench_controllers() -> None:
     assert "data_plane_barrier_release_at_full_fleet_width" in gate
     assert "boot_launch_delivers_the_exact_worktree_patch_to_every_guest" in gate
     assert "boot_launch_runs_the_current_driver_before_applying_the_patch" in gate
+    assert "cloud_patch_includes_tracked_and_untracked_changes" in gate
     assert "cloud_patch_detection_and_payload_include_staged_only_changes" in gate
+    assert "worktree_patch_ignores_append_only_history_ledgers" in gate
     assert "patch_delivery_clears_stale_base64_configuration" in gate
     assert "shared_patch_digest_is_pinned_and_verified" in gate
     assert "declared_patch_payload_cannot_be_missing_or_empty" in gate
     assert "empty_local_patch_cleanup_is_nounset_safe" in gate
-    assert "autoscaled_worker_failure_is_removed_and_replaceable" in gate
+    assert "autoscaled_worker_failure_publishes_durable_failure_marker" in gate
     assert "must never pause for human approval" in gate
     assert "Operational gate maintenance is pre-authorized" in deploy
 
@@ -1122,6 +1124,65 @@ touch {shlex.quote(str(reached))}
             assert "missing or empty" in result.stderr
 
 
+def test_worktree_patch_ignores_append_only_history_ledgers(tmp_path: Path) -> None:
+    """A dirty append-only telemetry ledger must not poison cloud patch apply.
+
+    RCA (2026-07-22): a /descend run committed local timing rows, then shipped
+    the complete unpushed workspace delta to persistent cloud guests. Guests can
+    carry their own independent append-only history rows, so treating these
+    union-merge ledgers like ordinary context-sensitive source files made
+    `git apply` reject the entire runtime patch before benchmarks started.
+    """
+    base = tmp_path / "base"
+    source = tmp_path / "source"
+    guest = tmp_path / "guest"
+    patch = tmp_path / "workspace.patch"
+
+    base.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=base, check=True)
+    subprocess.run(["git", "config", "user.email", "bench@example.com"], cwd=base, check=True)
+    subprocess.run(["git", "config", "user.name", "Bench"], cwd=base, check=True)
+    history = base / "agents/benchmarks/history/descend_steps.jsonl"
+    history.parent.mkdir(parents=True)
+    history.write_text('{"record_type":"factory_event_schema","schema_version":1,"workflow":"descend"}\n')
+    app = base / "scripts/runtime-surface.sh"
+    app.parent.mkdir()
+    app.write_text("old runtime\n")
+    subprocess.run(["git", "add", "."], cwd=base, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=base, check=True)
+
+    subprocess.run(["git", "clone", "-q", str(base), str(source)], check=True)
+    subprocess.run(["git", "clone", "-q", str(base), str(guest)], check=True)
+
+    (source / "scripts/runtime-surface.sh").write_text("new runtime\n")
+    with (source / "agents/benchmarks/history/descend_steps.jsonl").open("a") as handle:
+        handle.write('{"record_type":"factory_event","run_id":"local-descend"}\n')
+
+    with (guest / "agents/benchmarks/history/descend_steps.jsonl").open("a") as handle:
+        handle.write('{"record_type":"factory_event","run_id":"guest-prior-run"}\n')
+
+    with patch.open("w") as handle:
+        subprocess.run(
+            ["bash", str(WORKTREE_PATCH_SCRIPT), str(source), "HEAD"],
+            text=True,
+            stdout=handle,
+            check=True,
+        )
+
+    applied = subprocess.run(
+        ["git", "apply", "--whitespace=nowarn", str(patch)],
+        cwd=guest,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert applied.returncode == 0, applied.stderr
+    assert (guest / "scripts/runtime-surface.sh").read_text() == "new runtime\n"
+    assert "local-descend" not in (guest / "agents/benchmarks/history/descend_steps.jsonl").read_text()
+    assert "guest-prior-run" in (guest / "agents/benchmarks/history/descend_steps.jsonl").read_text()
+
+
 def test_empty_local_patch_cleanup_is_nounset_safe() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     cleanup = _extract_fleet_function(cloud, "cleanup_staged_local_files() {")
@@ -1181,9 +1242,11 @@ def test_boot_launch_delivers_the_exact_worktree_patch_to_every_guest() -> None:
     worker_stage = fleet[fleet.index("provision_worker() {") : fleet.index("bench_autoscaler() {")]
     assert 'LOCAL_PATCH_SHA256=$FLEET_PATCH_SHA256' in worker_stage
     assert 'sftp put' in worker_stage
-    assert '|| true' not in worker_stage.split('if [ -n "$FLEET_PATCH_FILE" ]', 1)[1].split(
-        "echo \"  ✅", 1
+    patch_upload = worker_stage.split('if [ -n "$FLEET_PATCH_FILE" ]', 1)[1].split(
+        'if fly_with_timeout 20 ssh console', 1
     )[0]
+    assert '|| true' not in patch_upload
+    assert "continue" in patch_upload
 
 
 def test_boot_launch_runs_the_current_driver_before_applying_the_patch() -> None:
@@ -1200,9 +1263,9 @@ def test_boot_launch_runs_the_current_driver_before_applying_the_patch() -> None
     assert 'bash "$DRIVER" >> "$LOG" 2>&1' in boot
 
 
-def test_autoscaled_worker_failure_is_removed_and_replaceable(tmp_path: Path) -> None:
+def test_autoscaled_worker_failure_publishes_durable_failure_marker(tmp_path: Path) -> None:
     """Upload failure or a guest that never publishes post-patch readiness
-    must not remain counted as capacity forever."""
+    must publish a durable failure before it can be counted as ready capacity."""
     fleet = FLEET_SCRIPT.read_text()
     pool_count = _extract_fleet_function(fleet, "_pool_ids() {")
     provision = _extract_fleet_function(fleet, "provision_worker() {")
@@ -1214,24 +1277,29 @@ def test_autoscaled_worker_failure_is_removed_and_replaceable(tmp_path: Path) ->
 
     for mode in ("upload-failure", "readiness-failure"):
         out = tmp_path / mode
-        reaped = tmp_path / f"{mode}.reaped"
         calls = tmp_path / f"{mode}.calls"
-        script = f"""
+        script = f"""set -euo pipefail
 ROOT_DIR={shlex.quote(str(root))}
 APP=test-app
+FLEET_OWNER_TOKEN=test-owner
 BENCH_REF=test-ref
 BOX_BACKEND_PORT=3001
 BOX_WMH_PORT=3007
 FLEET_WORKER_VM_SIZE=shared-cpu-1x
 FLEET_WORKER_VM_MEMORY=1024
+WORKER_STAGE_ATTEMPTS=3
+WORKER_READY_TIMEOUT=1
+FLEET_WORKER_HEALTH_PORT=3103
 FLEET_PATCH_FILE={shlex.quote(str(patch_file))}
 FLEET_PATCH_SHA256=expected
 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=3
 CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS=0
 MODE={shlex.quote(mode)}
 OUT={shlex.quote(str(out))}
-REAPED={shlex.quote(str(reaped))}
 CALLS={shlex.quote(str(calls))}
+reserve_worker_machine_slot() {{ return 0; }}
+capacity_release_reservation() {{ return 0; }}
+controller_github_token_b64() {{ printf '%s' token-b64; }}
 clone_machine_target() {{
   mkdir -p "$(dirname "$1")"
   printf '%s\n' abc123 >> "$1"
@@ -1244,20 +1312,18 @@ fly_with_timeout() {{
   case "$*" in
     *"ssh sftp put"*"cloudbench-local.patch"*)
       [ "$MODE" != upload-failure ] ;;
-    *"ssh console"*"/tmp/rbw.sh"*)
-      [ "$MODE" != readiness-failure ] ;;
     *) return 0 ;;
   esac
 }}
-reap_machine() {{ printf '%s\n' "$1" > "$REAPED"; }}
+worker_operational() {{ [ "$MODE" != readiness-failure ]; }}
 fleet_registry_release_id() {{ :; }}
+sleep() {{ :; }}
 {pool_count}
 {provision}
 provision_worker bench workspace primary fd00::1 0 "$OUT"
 wait || true
-test "$(_pool_ids "$OUT")" = 0
-test -s "$REAPED"
-test ! -e "$OUT/worker-pending/abc123"
+test "$(_pool_ids "$OUT")" = 1
+test -s "$OUT/worker-abc123.failed"
 test ! -e "$OUT/worker-ready/abc123"
 """
         result = subprocess.run(
@@ -1278,8 +1344,9 @@ test ! -e "$OUT/worker-ready/abc123"
         assert len(launch_calls) <= 1
         if mode == "readiness-failure":
             assert len(launch_calls) == 1
-            assert "for ready_try in \\$(seq 1 60)" in launch_calls[0]
-            assert "cloudbench-worker-abc123.ready" in launch_calls[0]
+            assert "/tmp/rbw.sh" in launch_calls[0]
+        else:
+            assert launch_calls == []
 
     worker = WORKER_SCRIPT.read_text()
     assert worker.index("patch payload checksum mismatch") < worker.index(

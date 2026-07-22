@@ -3044,7 +3044,7 @@ FLEET_PATCH_SHA256=""
 if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
    && cloudbench_worktree_has_changes "$ROOT_DIR"; then
     FLEET_PATCH_FILE="$(mktemp)"
-    if ! bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$FLEET_PATCH_FILE" \
+    if ! bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF" > "$FLEET_PATCH_FILE" \
         || [ ! -s "$FLEET_PATCH_FILE" ]; then
         echo "❌ could not create the fleet local workspace patch" >&2
         exit 1
@@ -3425,7 +3425,13 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
              && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh >/dev/null 2>&1 \
              && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env >/dev/null 2>&1 \
              && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh >/dev/null 2>&1; then
-              [ -n "$FLEET_PATCH_FILE" ] && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1 || true
+              if [ -n "$FLEET_PATCH_FILE" ]; then
+                  if ! fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1; then
+                      worker_provision_cancelled && finish_cancelled_worker_provision
+                      sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+                      continue
+                  fi
+              fi
               if fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
                   -C "bash -c \"begin=\$(date +%s); : > /data/worker.log; printf '%s\\n' \\\"\$begin\\\" > /data/worker.started-at; setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\"" >/dev/null 2>&1; then
                   launched=1

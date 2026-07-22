@@ -4349,13 +4349,16 @@ async def test_code_agent_preflight_accepts_gpt_compute_token():
             return {"type": "gpt", "accessToken": "gpt-token"}
 
     class FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, *_args):
             return None
 
-        async def get(self, url, *, headers, timeout):
+        async def get(self, url, *, headers, params=None, timeout):
             calls.append((url, headers, timeout))
             return FakeResponse()
 
@@ -4394,13 +4397,16 @@ async def test_code_agent_preflight_rejects_missing_compute_token():
             return {"error": "NO_TOKENS_AVAILABLE"}
 
     class FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, *_args):
             return None
 
-        async def get(self, _url, *, headers, timeout):
+        async def get(self, _url, *, headers, params=None, timeout):
             return FakeResponse()
 
     original_headers = bench._api_headers
@@ -4434,13 +4440,16 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
             return self._body
 
     class FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, *_args):
             return None
 
-        async def get(self, url, *, headers, timeout):
+        async def get(self, url, *, headers, params=None, timeout):
             calls.append((url, headers, timeout))
             if url.endswith("/api/integrations/compute-code/credentials/token"):
                 return FakeResponse(404, {"error": "NO_TOKENS_AVAILABLE"})
