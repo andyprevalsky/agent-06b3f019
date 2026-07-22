@@ -4355,8 +4355,8 @@ async def test_code_agent_preflight_accepts_gpt_compute_token():
         async def __aexit__(self, *_args):
             return None
 
-        async def get(self, url, *, headers, timeout):
-            calls.append((url, headers, timeout))
+        async def get(self, url, *, headers, params=None, timeout):
+            calls.append((url, headers, params, timeout))
             return FakeResponse()
 
     original_headers = bench._api_headers
@@ -4378,6 +4378,7 @@ async def test_code_agent_preflight_accepts_gpt_compute_token():
         (
             "http://localhost:55120/api/integrations/compute-code/credentials/token",
             {"X-API-Key": "test-key"},
+            None,
             10.0,
         )
     ]
@@ -4400,7 +4401,8 @@ async def test_code_agent_preflight_rejects_missing_compute_token():
         async def __aexit__(self, *_args):
             return None
 
-        async def get(self, _url, *, headers, timeout):
+        async def get(self, _url, *, headers, params=None, timeout):
+            assert params is None
             return FakeResponse()
 
     original_headers = bench._api_headers
@@ -4440,8 +4442,8 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
         async def __aexit__(self, *_args):
             return None
 
-        async def get(self, url, *, headers, timeout):
-            calls.append((url, headers, timeout))
+        async def get(self, url, *, headers, params=None, timeout):
+            calls.append((url, headers, params, timeout))
             if url.endswith("/api/integrations/compute-code/credentials/token"):
                 return FakeResponse(404, {"error": "NO_TOKENS_AVAILABLE"})
             if url.endswith("/api/integrations/compute-code/anthropic-key/cooldown"):
@@ -4467,11 +4469,13 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
         (
             "http://localhost:55120/api/integrations/compute-code/credentials/token",
             {"X-API-Key": "test-key"},
+            None,
             10.0,
         ),
         (
             "http://localhost:55120/api/integrations/compute-code/anthropic-key/cooldown",
             {"X-API-Key": "test-key"},
+            None,
             10.0,
         ),
     ]
@@ -8712,6 +8716,7 @@ def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
         "browser-biometrics-webdecoy",
         "browser-toast-nopa-write-lock",
         "browser-agent-amazon-cookie-payment",
+        "browser-blue-bottle-challenge-recovery",
     }
     assert "ecommerce" in by_name["browser-agent-amazon-cookie-payment"].tags
     assert all(task.tags.count("antibot") == 1 for task in tasks)

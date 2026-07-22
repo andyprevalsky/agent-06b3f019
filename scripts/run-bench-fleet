@@ -3331,8 +3331,22 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
         return 1
     fi
     echo "  ➕ [$bench] worker $wid created"
+    cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
+        local cleanup_out="$1" cleanup_wid="$2" tracking_tmp
+        if ! reap_machine "$cleanup_wid"; then
+            return 1
+        fi
+        fleet_registry_release_id "$cleanup_wid" || return 1
+        tracking_tmp="$cleanup_out/worker-clones.ids.tmp.$cleanup_wid.$$"
+        grep -Fxv "$cleanup_wid" "$cleanup_out/worker-clones.ids" > "$tracking_tmp" 2>/dev/null || true
+        mv "$tracking_tmp" "$cleanup_out/worker-clones.ids" || return 1
+        rm -f "$cleanup_out/worker-$cleanup_wid.pending" \
+            "$cleanup_out/worker-$cleanup_wid.ready" \
+            "$cleanup_out/worker-$cleanup_wid.cancelled"
+    }
     ready_file="/data/cloudbench-worker-$wid.ready"
     if ! worker_github_token_b64="$(controller_github_token_b64)"; then
+        cleanup_failed_worker "$out" "$wid" || true
         printf '%s\n' "No current controller GitHub token available for worker ref fetch" > "$out/autoscaler.failed"
         echo "  ❌ [$bench] mandatory autoscaler: missing worker GitHub token" >&2
         return 1
@@ -3341,11 +3355,13 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     worker_ready_timeout="$WORKER_READY_TIMEOUT"
     case "$stage_attempts:$worker_ready_timeout" in
         *[!0-9:]*|:*|*:)
+            cleanup_failed_worker "$out" "$wid" || true
             printf '%s\n' "invalid worker stage/readiness timeout configuration" > "$out/autoscaler.failed"
             return 1
             ;;
     esac
     if [ "$stage_attempts" -lt 1 ] || [ "$worker_ready_timeout" -lt 1 ]; then
+        cleanup_failed_worker "$out" "$wid" || true
         printf '%s\n' "worker stage attempts and readiness timeout must be positive" > "$out/autoscaler.failed"
         return 1
     fi
@@ -3397,6 +3413,16 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
           printf '%s\n' "$reason" > "$failure_tmp" \
               && mv "$failure_tmp" "$out/worker-$wid.failed"
       }
+      discard_replaceable_worker() {
+          local reason="$1"
+          rm -f "$wrapper" "$worker_env" 2>/dev/null || true
+          if cleanup_failed_worker "$out" "$wid"; then
+              echo "  ⚠️  [$bench] $reason; removed worker $wid so capacity can be retried" >&2
+              exit 1
+          fi
+          publish_worker_failure "$reason; worker $wid could not be reaped"
+          exit 1
+      }
       publish_worker_ready() {
           local ready_tmp="$out/worker-$wid.ready.tmp.$$"
           : > "$ready_tmp" && mv "$ready_tmp" "$out/worker-$wid.ready"
@@ -3425,7 +3451,13 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
              && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh >/dev/null 2>&1 \
              && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env >/dev/null 2>&1 \
              && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh >/dev/null 2>&1; then
-              [ -n "$FLEET_PATCH_FILE" ] && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1 || true
+              if [ -n "$FLEET_PATCH_FILE" ]; then
+                  if ! fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1; then
+                      worker_provision_cancelled && finish_cancelled_worker_provision
+                      sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+                      continue
+                  fi
+              fi
               if fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
                   -C "bash -c \"begin=\$(date +%s); : > /data/worker.log; printf '%s\\n' \\\"\$begin\\\" > /data/worker.started-at; setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\"" >/dev/null 2>&1; then
                   launched=1
@@ -3438,8 +3470,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
       rm -f "$wrapper" "$worker_env" 2>/dev/null || true
       if [ "$launched" != "1" ]; then
           worker_provision_cancelled && finish_cancelled_worker_provision
-          publish_worker_failure "worker $wid could not be staged and launched"
-          exit 1
+          discard_replaceable_worker "worker $wid could not be staged and launched"
       fi
 
       ready_deadline=$((SECONDS + worker_ready_timeout))
@@ -3455,8 +3486,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
           sleep 5
       done
       worker_provision_cancelled && finish_cancelled_worker_provision
-      publish_worker_failure "worker $wid did not reach queue readiness within ${worker_ready_timeout}s"
-      exit 1
+      discard_replaceable_worker "worker $wid did not reach queue readiness within ${worker_ready_timeout}s"
     ) &
     return 0
 }

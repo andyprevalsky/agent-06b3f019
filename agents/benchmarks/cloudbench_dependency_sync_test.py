@@ -1181,9 +1181,15 @@ def test_boot_launch_delivers_the_exact_worktree_patch_to_every_guest() -> None:
     worker_stage = fleet[fleet.index("provision_worker() {") : fleet.index("bench_autoscaler() {")]
     assert 'LOCAL_PATCH_SHA256=$FLEET_PATCH_SHA256' in worker_stage
     assert 'sftp put' in worker_stage
-    assert '|| true' not in worker_stage.split('if [ -n "$FLEET_PATCH_FILE" ]', 1)[1].split(
-        "echo \"  ✅", 1
-    )[0]
+    patch_upload = next(
+        line
+        for line in worker_stage.splitlines()
+        if "sftp put" in line and "cloudbench-local.patch" in line
+    )
+    assert "if ! fly_with_timeout" in patch_upload
+    assert "|| true" not in patch_upload
+    patch_failure_block = worker_stage.split(patch_upload, 1)[1][:500]
+    assert "continue" in patch_failure_block
 
 
 def test_boot_launch_runs_the_current_driver_before_applying_the_patch() -> None:
@@ -1226,6 +1232,9 @@ FLEET_WORKER_VM_SIZE=shared-cpu-1x
 FLEET_WORKER_VM_MEMORY=1024
 FLEET_PATCH_FILE={shlex.quote(str(patch_file))}
 FLEET_PATCH_SHA256=expected
+FLEET_OWNER_TOKEN=test-owner
+WORKER_STAGE_ATTEMPTS=3
+WORKER_READY_TIMEOUT=1
 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=3
 CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS=0
 MODE={shlex.quote(mode)}
@@ -1237,15 +1246,17 @@ clone_machine_target() {{
   printf '%s\n' abc123 >> "$1"
   printf '%s' abc123
 }}
+reserve_worker_machine_slot() {{ return 0; }}
+capacity_release_reservation() {{ return 0; }}
+controller_github_token_b64() {{ printf token; }}
 machine_storage_ready() {{ return 0; }}
+worker_operational() {{ [ "$MODE" != readiness-failure ]; }}
 fly_with_timeout() {{
   shift
   printf '%s\n' "$*" >> "$CALLS"
   case "$*" in
     *"ssh sftp put"*"cloudbench-local.patch"*)
       [ "$MODE" != upload-failure ] ;;
-    *"ssh console"*"/tmp/rbw.sh"*)
-      [ "$MODE" != readiness-failure ] ;;
     *) return 0 ;;
   esac
 }}
@@ -1257,8 +1268,8 @@ provision_worker bench workspace primary fd00::1 0 "$OUT"
 wait || true
 test "$(_pool_ids "$OUT")" = 0
 test -s "$REAPED"
-test ! -e "$OUT/worker-pending/abc123"
-test ! -e "$OUT/worker-ready/abc123"
+test ! -e "$OUT/worker-abc123.pending"
+test ! -e "$OUT/worker-abc123.ready"
 """
         result = subprocess.run(
             ["bash", "-c", script],
@@ -1278,8 +1289,9 @@ test ! -e "$OUT/worker-ready/abc123"
         assert len(launch_calls) <= 1
         if mode == "readiness-failure":
             assert len(launch_calls) == 1
-            assert "for ready_try in \\$(seq 1 60)" in launch_calls[0]
-            assert "cloudbench-worker-abc123.ready" in launch_calls[0]
+
+        assert 'ready_deadline=$((SECONDS + worker_ready_timeout))' in provision
+        assert 'if worker_operational "$wid"; then' in provision
 
     worker = WORKER_SCRIPT.read_text()
     assert worker.index("patch payload checksum mismatch") < worker.index(
