@@ -66,6 +66,27 @@ export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
 export AMPLITUDE_API_KEY=""
 export AMPLITUDE_SECRET_KEY=""
 
+# Coverage is also not the deploy credential-health gate. The integration-health
+# blackbox intentionally performs live provider billing/credential probes, which
+# are required later as their own /deploy stage. Exclude only that operational
+# probe here so code coverage remains a deterministic local-code gate.
+append_blackbox_skip_domain() {
+  local current="$1"
+  local domain="$2"
+  case ",$current," in
+    *",$domain,"*) printf '%s\n' "$current" ;;
+    "") printf '%s\n' "$domain" ;;
+    *) printf '%s,%s\n' "$current" "$domain" ;;
+  esac
+}
+
+export BLACKBOX_TEST_SKIP_DOMAINS="$(
+  append_blackbox_skip_domain "${BLACKBOX_TEST_SKIP_DOMAINS:-}" "integration-health"
+)"
+export CONTRACT_TEST_SKIP_DOMAINS="$(
+  append_blackbox_skip_domain "${CONTRACT_TEST_SKIP_DOMAINS:-}" "integration-health"
+)"
+
 # Coverage starts only a local backend. E2B smoke sandboxes cannot reach stale
 # developer ngrok URLs from .env, so keep those smoke sessions on direct provider
 # calls unless the caller explicitly opts into a known-live tunnel.
