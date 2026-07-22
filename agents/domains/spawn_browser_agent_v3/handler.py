@@ -118,6 +118,7 @@ from .service_actions import (
 )
 from .service_crypto import (
     ExtractedOTP,
+    PAYMENT_CARD_ENTRY_RULE,
     auth_realm_from_url,
     build_auth_options_prompt_section,
     build_autopay_prompt_section,
@@ -499,6 +500,54 @@ def _remap_cached_browser_action_target(
         target=cached_target.get("description") or cached_target.get("text"),
     )
     return remapped
+
+
+async def _prepare_pending_write_lock_action(
+    dom_service: Any,
+    pending_action: Dict[str, Any],
+    *,
+    target_signature: Optional[Dict[str, Any]] = None,
+) -> tuple[Dict[str, Any], Dict[str, Any], str]:
+    """Rehydrate browser state before replaying the exact action a user approved."""
+    browser_state = await dom_service.get_browser_state(include_screenshot=False)
+    current_url = str(browser_state.get("url") or "")
+    if not current_url:
+        raise RuntimeError("Cannot execute an approved browser action without a resumed page URL")
+    action = _remap_cached_browser_action_target(
+        pending_action,
+        cached_target=target_signature,
+        dom_service=dom_service,
+    )
+    return action, browser_state, current_url
+
+
+def _browser_ground_truth_checkpoint(
+    browser_state: Dict[str, Any],
+    current_url: str,
+) -> Optional[Dict[str, str]]:
+    """Keep a browser-extracted DOM snapshot across an approval activity boundary."""
+    dom_tree = str(browser_state.get("dom_tree") or "")
+    if not dom_tree:
+        return None
+    return {
+        "url": str(browser_state.get("url") or current_url or ""),
+        "title": str(browser_state.get("title") or ""),
+        "dom_tree": dom_tree,
+    }
+
+
+def _browser_resume_continuity_state(
+    *,
+    action_history: Any,
+    visited_urls: List[str],
+    verifier_checkpoints: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Serialize compact, browser-sourced continuity for a resumed activity."""
+    return {
+        "action_history": action_history.get_entries()[-30:],
+        "visited_urls": list(visited_urls[-30:]),
+        "verifier_checkpoints": list(verifier_checkpoints[-3:]),
+    }
 
 
 def _resume_context_from_session_info(
@@ -3125,7 +3174,20 @@ _SIMULATED_BROWSER_RESUME_FIELDS = (
     "world_model_session_id",
     "simulated_total_input_tokens",
     "simulated_total_output_tokens",
+    "simulated_usage_by_model",
 )
+
+_BROWSER_RESUME_CONTINUITY_FIELDS = (
+    "action_history",
+    "visited_urls",
+    "verifier_checkpoints",
+)
+
+
+def _copy_browser_resume_continuity_fields(source: Dict[str, Any], target: Dict[str, Any]) -> None:
+    for key in _BROWSER_RESUME_CONTINUITY_FIELDS:
+        if key in source:
+            target[key] = source[key]
 
 
 def _copy_simulated_browser_resume_fields(source: Dict[str, Any], target: Dict[str, Any]) -> None:
@@ -3149,6 +3211,7 @@ def _simulated_browser_resume_payload(
     world_model_session_id: str,
     total_input_tokens: int,
     total_output_tokens: int,
+    usage_by_model: Dict[str, Dict[str, int]],
 ) -> Dict[str, Any]:
     compact_state = _compact_simulated_resume_value(browser_state)
     compact_actions = [_compact_simulated_resume_value(entry) for entry in action_entries[-30:]]
@@ -3166,6 +3229,7 @@ def _simulated_browser_resume_payload(
         "world_model_session_id": world_model_session_id,
         "simulated_total_input_tokens": total_input_tokens,
         "simulated_total_output_tokens": total_output_tokens,
+        "simulated_usage_by_model": usage_by_model,
     }
 
 
@@ -3304,22 +3368,34 @@ async def _verify_simulated_browser_completion(
 
 
 def _simulated_browser_usage_items(
-    total_input_tokens: int, total_output_tokens: int, model_pricing: Dict[str, Any]
+    total_input_tokens: int,
+    total_output_tokens: int,
+    model_pricing: Dict[str, Any],
+    usage_by_model: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> List[Dict[str, Any]]:
-    return [
-        {
-            "type": "llm",
-            "cost_cents": round(
-                (total_input_tokens / 1000) * model_pricing.get("input_cents_per_1k", 0)
-                + (total_output_tokens / 1000) * model_pricing.get("output_cents_per_1k", 0),
-                4,
-            ),
-            "provider": "Rose 1 Browser Use",
-            "input_tokens": total_input_tokens,
-            "output_tokens": total_output_tokens,
-        },
-        {"type": "service", "cost_cents": 0, "provider": "World Model Harness"},
-    ]
+    model_rows = usage_by_model or {
+        "": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}
+    }
+    items: List[Dict[str, Any]] = []
+    for model, usage in model_rows.items():
+        input_tokens = int(usage.get("input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        items.append(
+            {
+                "type": "llm",
+                "model": model or None,
+                "cost_cents": round(
+                    (input_tokens / 1000) * model_pricing.get("input_cents_per_1k", 0)
+                    + (output_tokens / 1000) * model_pricing.get("output_cents_per_1k", 0),
+                    4,
+                ),
+                "provider": "Rose 1 Browser Use",
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }
+        )
+    items.append({"type": "service", "cost_cents": 0, "provider": "World Model Harness"})
+    return items
 
 
 async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
@@ -3365,6 +3441,14 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
     action_summary = list(resume.get("simulated_action_summary") or [])
     total_input_tokens = int(resume.get("simulated_total_input_tokens") or 0)
     total_output_tokens = int(resume.get("simulated_total_output_tokens") or 0)
+    usage_by_model = {
+        str(model): {
+            "input_tokens": int((usage or {}).get("input_tokens") or 0),
+            "output_tokens": int((usage or {}).get("output_tokens") or 0),
+        }
+        for model, usage in (resume.get("simulated_usage_by_model") or {}).items()
+        if isinstance(usage, dict)
+    }
     iteration = int(resume.get("step_count") or 0)
     payment_card_last4 = _normalize_payment_card_last4(resume.get("payment_card_last4"))
     write_lock_approvals = dict(resume.get("write_lock_approvals") or {})
@@ -3409,6 +3493,7 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
             world_model_session_id=world_model_session_id,
             total_input_tokens=total_input_tokens,
             total_output_tokens=total_output_tokens,
+            usage_by_model=usage_by_model,
         )
 
     async def remember_frame(frame: Optional[Dict[str, Any]], *, step: int, label: str, action_name: str) -> None:
@@ -3608,8 +3693,17 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
                 await browser_stream.finish()
 
             usage = llm_result.get("usage") or {}
-            total_input_tokens += int(usage.get("prompt_tokens") or 0)
-            total_output_tokens += int(usage.get("completion_tokens") or 0)
+            input_tokens = int(usage.get("prompt_tokens") or 0)
+            output_tokens = int(usage.get("completion_tokens") or 0)
+            total_input_tokens += input_tokens
+            total_output_tokens += output_tokens
+            actual_model = str(llm_result.get("actual_model") or "")
+            model_usage = usage_by_model.setdefault(
+                actual_model,
+                {"input_tokens": 0, "output_tokens": 0},
+            )
+            model_usage["input_tokens"] += input_tokens
+            model_usage["output_tokens"] += output_tokens
             action = dict(llm_result.get("action") or {})
             action_name = str(action.get("action") or "")
             thinking = str(action.get("thinking") or "")
@@ -3756,7 +3850,10 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
                         "structured_response": structured,
                         "execution_time_ms": (safe_time() - started_at) * 1000,
                         "usage_items": _simulated_browser_usage_items(
-                            total_input_tokens, total_output_tokens, model_pricing
+                            total_input_tokens,
+                            total_output_tokens,
+                            model_pricing,
+                            usage_by_model,
                         ),
                     }
                 rejection = {"success": False, "score": score, "reasoning": reasoning}
@@ -3974,20 +4071,34 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     action_summary: List[str] = []
     write_lock_approvals: Dict[str, Dict] = {}
     auth_realm = auth_realm_from_url(start_url)
+    verifier_checkpoints: List[Dict[str, Any]] = []
 
     pending_write_lock_action: Optional[Dict[str, Any]] = None
+    pending_write_lock_target: Optional[Dict[str, Any]] = None
     resume_step_count: int = 0
     auth_assistance_resume_mode: Optional[str] = None
     resume_user_messages: List[Dict[str, str]] = []
     payment_card_last4: Optional[str] = None
     if write_lock_resume_state:
         pending_write_lock_action = write_lock_resume_state.get("pending_action")
+        pending_write_lock_target = write_lock_resume_state.get("pending_action_target")
         write_lock_approvals = write_lock_resume_state.get("write_lock_approvals", {})
         resume_step_count = write_lock_resume_state.get("step_count", 0)
         session_id = write_lock_resume_state.get("session_id") or session_id
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
         auth_realm = write_lock_resume_state.get("auth_realm") or auth_realm
         payment_card_last4 = _normalize_payment_card_last4(write_lock_resume_state.get("payment_card_last4"))
+        action_history.restore_entries(write_lock_resume_state.get("action_history"))
+        visited_urls = [
+            str(url)
+            for url in (write_lock_resume_state.get("visited_urls") or [])
+            if isinstance(url, str) and url
+        ][-30:]
+        verifier_checkpoints = [
+            checkpoint
+            for checkpoint in (write_lock_resume_state.get("verifier_checkpoints") or [])
+            if isinstance(checkpoint, dict) and checkpoint.get("dom_tree")
+        ][-3:]
         if write_lock_resume_state.get("approval_type") == "auth_assistance":
             resume_user_messages.append(
                 build_auth_assistance_resume_user_message(
@@ -4490,12 +4601,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     else:
                         _user_context_sections.append(
                             "## Payment Authorization\n"
-                            "Autopay DISABLED. For ALL purchases, call request_payment_card with the full itemized receipt."
+                            f"Autopay DISABLED. {PAYMENT_CARD_ENTRY_RULE} "
+                            "If new card details are required, include the full itemized receipt when calling it."
                         )
             else:
                 _user_context_sections.append(
                     "## Payment Authorization\n"
-                    "For purchases, extract the full itemized receipt and call request_payment_card. "
+                    f"{PAYMENT_CARD_ENTRY_RULE} If new card details are required, extract the full itemized "
+                    "receipt and include it when calling request_payment_card. "
                     "Never ask the user to type a payment card into chat."
                 )
             _user_context_sections.append(
@@ -4983,8 +5096,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             # Handle pending write lock action
             if pending_write_lock_action:
                 logger.info("Executing pending write lock action after approval")
-                unified_action = pending_write_lock_action
+                unified_action, browser_state, current_url = await _prepare_pending_write_lock_action(
+                    dom_service,
+                    pending_write_lock_action,
+                    target_signature=pending_write_lock_target,
+                )
                 pending_write_lock_action = None
+                pending_write_lock_target = None
 
                 activity.heartbeat(f"Step {iteration} - executing pending write lock action")
                 if (
@@ -5014,6 +5132,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     system_name=system_name,
                     browser_network_recorder=browser_network_recorder,
                 )
+
+                if result.get("status") == "needs_write_approval":
+                    raise RuntimeError(
+                        "The resumed page did not recognize the just-approved write action; refusing to loop"
+                    )
 
                 action_name = unified_action.get("action", "unknown")
                 logger.info(f"Pending write lock action executed: {action_name}", result=result)
@@ -5462,6 +5585,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
                     "execution_time_ms": execution_time_ms,
                     "usage_items": usage_items,
+                    **_browser_resume_continuity_state(
+                        action_history=action_history,
+                        visited_urls=visited_urls,
+                        verifier_checkpoints=verifier_checkpoints,
+                    ),
                 }
 
             if action_name == "rotate_ip":
@@ -5666,6 +5794,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         config=config,
                         session_id=session_id,
                         payment_card_evidence=_build_payment_card_verifier_evidence(payment_card_last4),
+                        browser_checkpoints=verifier_checkpoints,
                     )
 
                     verifier_prompt = build_verifier_prompt(
@@ -6157,6 +6286,12 @@ Based on this feedback, I need to continue working on the task and address the i
                     url=current_url,
                 )
 
+                checkpoint = _browser_ground_truth_checkpoint(browser_state, current_url)
+                if checkpoint and (
+                    not verifier_checkpoints or checkpoint != verifier_checkpoints[-1]
+                ):
+                    verifier_checkpoints.append(checkpoint)
+
                 if dom_service:
                     try:
                         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
@@ -6177,6 +6312,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     "question": question,
                     "current_url": current_url,
                     "pending_action": unified_action,
+                    "pending_action_target": llm_result.get("_fast_cache_browser_target"),
                     "write_lock_notification": write_lock_notification,
                     "write_lock_notification_usage": write_lock_notification_usage,
                     "write_lock_approvals": write_lock_approvals,
@@ -6185,6 +6321,11 @@ Based on this feedback, I need to continue working on the task and address the i
                     "cdp_url": cdp_url,
                     "task_id": task_id,
                     "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
+                    **_browser_resume_continuity_state(
+                        action_history=action_history,
+                        visited_urls=visited_urls,
+                        verifier_checkpoints=verifier_checkpoints,
+                    ),
                 }
 
             if result.get("status") in {"needs_payment_card_approval", "awaiting_payment_card_approval"}:
@@ -6263,6 +6404,12 @@ Based on this feedback, I need to continue working on the task and address the i
                         error=str(notification_error),
                     )
 
+                checkpoint = _browser_ground_truth_checkpoint(browser_state, current_url)
+                if checkpoint and (
+                    not verifier_checkpoints or checkpoint != verifier_checkpoints[-1]
+                ):
+                    verifier_checkpoints.append(checkpoint)
+
                 if dom_service:
                     try:
                         await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
@@ -6283,6 +6430,11 @@ Based on this feedback, I need to continue working on the task and address the i
                     "cdp_url": cdp_url,
                     "task_id": task_id,
                     "recorded_passkey_credential_ids": sorted(recorded_passkey_credential_ids),
+                    **_browser_resume_continuity_state(
+                        action_history=action_history,
+                        visited_urls=visited_urls,
+                        verifier_checkpoints=verifier_checkpoints,
+                    ),
                 }
 
             if result.get("success", True):
@@ -6405,6 +6557,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     action_history=action_history,
                     config=config,
                     session_id=session_id,
+                    browser_checkpoints=verifier_checkpoints,
                 )
                 final_verifier_prompt = build_verifier_prompt(
                     response_schema=transform_schema_for_remote_session(response_schema)
@@ -6890,6 +7043,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                         write_lock_resume_state = {
                             "pending_action": result.get("pending_action"),
+                            "pending_action_target": result.get("pending_action_target"),
                             "write_lock_approvals": current_approvals,
                             "approval_type": approval_type,
                             "step_count": result.get("step_count", 0),
@@ -6898,6 +7052,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "task_id": result.get("task_id"),
                             "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                         }
+                        _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                         _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
 
                         logger.info(
@@ -7321,6 +7476,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "payment_card_last4": _normalize_payment_card_last4(card.get("last4")),
                         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
+                    _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                     _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
 
                     yield ToolEvent(
@@ -7420,6 +7576,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "auth_realm": result.get("auth_realm"),
                         "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                     }
+                    _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                     _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
 
                     yield ToolEvent(

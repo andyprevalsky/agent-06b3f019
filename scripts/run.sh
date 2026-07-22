@@ -1512,7 +1512,12 @@ wait_for_isolated_backend_ready() {
 # Launch each service
 if $BENCHMARK_MODE; then
     export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
-    export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
+    # Do not manufacture a shell-level `local` backend here. Both the backend
+    # and Python worker load their injected .env files, where cloud benchmarks
+    # are configured for R2; an exported fallback wins over dotenv and strands
+    # the only gold trace on the disposable fleet volume. An explicitly
+    # exported caller value is already inherited, and no-env local development
+    # still uses each provider's built-in local default.
     export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$PWD/.context}"
     export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
     export BLACKBOX_TEST_REPLAY_OUTBOUND="${BLACKBOX_TEST_REPLAY_OUTBOUND:-0}"

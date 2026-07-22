@@ -78,6 +78,7 @@
       "smoke"
     ],
     "price_limit_cents": 100,
+    "no_anthropic_price_limit_cents": 200,
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": null,
@@ -107,6 +108,7 @@
       "smoke"
     ],
     "price_limit_cents": 100,
+    "no_anthropic_price_limit_cents": 200,
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": null,
@@ -1020,7 +1022,7 @@
     "name": "browser-agent-amazon-cookie-payment",
     "title": "Amazon Cookie Auth Payment Write Lock",
     "description": "Buy a qualifying Amazon beanie through the normal cart path and complete the purchase.",
-    "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed.",
+    "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Use my saved/default Amazon payment method and shipping address; do not request or add a new payment card when a valid saved method is already selected. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [

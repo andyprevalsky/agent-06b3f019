@@ -1076,7 +1076,7 @@ async def create_agent(
     body: dict = {
         "goal": goal,
         "source": request_source,
-        "price_limit_cents": task.price_limit_cents,
+        "price_limit_cents": task.effective_price_limit_cents(),
         "verifier": {
             "type": "FLOAT_LLM_JUDGE",
         },
@@ -3446,6 +3446,27 @@ def _shared_workspace_database_url() -> Optional[str]:
     return database_url if result.returncode == 0 else None
 
 
+def _production_compute_token_database_url(local_database_url: str) -> Optional[str]:
+    """Return the explicit production source used by cloud benchmark clones.
+
+    Local isolated runs prefer the already-verified top-level workspace DB, but
+    cloud clones do not have that second local service. Their decoded backend
+    env is the only explicit source available to ``seed-local
+    --compute-tokens-only``. Keep the source selection in Python so the seed
+    command never falls back to an ambient ``DATABASE_URL`` that run.sh has
+    overwritten with the isolated destination.
+    """
+    configured_url = load_env_var("DATABASE_URL", _BACKEND_ENV) or load_env_var(
+        "DIRECT_DATABASE_URL", _BACKEND_ENV
+    )
+    if not configured_url:
+        return None
+    # This URL is consumed by Prisma, not psql. Preserve its pooler contract
+    # (`pgbouncer=true`, connection limits, etc.); stripping those parameters
+    # makes Supabase's transaction pooler reject prepared statements (26000).
+    return configured_url if configured_url != local_database_url else None
+
+
 def _psql_compatible_database_url(database_url: str) -> str:
     """Drop Prisma-only query params before passing a URL to the psql CLI."""
     parsed = urlparse(database_url)
@@ -3837,8 +3858,15 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     env["DIRECT_URL"] = database_url
     env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
     shared_source = _shared_workspace_database_url()
-    if shared_source and shared_source != database_url:
-        env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = shared_source
+    source_database_url = (
+        shared_source
+        if shared_source and shared_source != database_url
+        else _production_compute_token_database_url(database_url)
+    )
+    if not source_database_url:
+        print("    ⚠ Compute-token sync skipped: no explicit source DB found")
+        return False
+    env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = source_database_url
     if tolerate_gpt_code_unavailable:
         env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
     try:
@@ -3860,7 +3888,7 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     if result.returncode != 0:
         print(f"    ⚠ Compute-token sync failed: {_seed_sync_error_detail(result)}")
         return False
-    source_label = "shared workspace" if shared_source else "prod"
+    source_label = "shared workspace" if source_database_url == shared_source else "prod"
     print(f"    🔑 Refreshed compute tokens from {source_label}")
     return True
 
@@ -6392,7 +6420,7 @@ async def run_single_task(
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
     print(f"\n  {'=' * 50}")
     print(f"  📋 {task.name}: {task.title}")
-    print(f"     timeout={resolved_timeout}s, price_limit={task.price_limit_cents}c")
+    print(f"     timeout={resolved_timeout}s, price_limit={task.effective_price_limit_cents()}c")
     all_attachments = task.attachments or ([task.attachment] if task.attachment else [])
     if all_attachments:
         print(f"     attachments={all_attachments}")

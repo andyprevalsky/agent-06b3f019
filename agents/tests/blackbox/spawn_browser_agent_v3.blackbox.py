@@ -322,6 +322,13 @@ async def test_browser_verifier_context_grounds_in_final_state():
             action_history=_FakeHistory(),
             config=SimpleNamespace(),
             session_id="sess-1",
+            browser_checkpoints=[
+                {
+                    "url": "https://shop.example/checkout",
+                    "title": "Review order",
+                    "dom_tree": "<main>Cart checkout; Item price: $42.00</main>",
+                }
+            ],
         )
 
     roles = [m["role"] for m in ctx]
@@ -331,9 +338,40 @@ async def test_browser_verifier_context_grounds_in_final_state():
     # Ground truth (DOM) lives in the USER message, not an LLM-generated TOOL result.
     assert "$42.00" in ctx[0]["text"]
     assert "FINAL STATE" in ctx[0]["text"]
+    assert "PRE-WRITE CHECKPOINTS" in ctx[0]["text"]
+    assert "Cart checkout; Item price: $42.00" in ctx[0]["text"]
+    assert "browser ground truth, not an agent claim" in ctx[0]["text"]
     # Final-state screenshot rides through as a multimodal image reference.
     screenshot_msg = next(m for m in ctx if m.get("metadata", {}).get("toolName") == "final_screenshot")
     assert screenshot_msg["metadata"]["screenshot_b64"] == "ZmFrZS1iNjQ="
+
+
+def test_action_history_restores_across_activity_boundary():
+    from browser_tools.dom_service import ActionHistory
+
+    history = ActionHistory()
+    history.restore_entries(
+        [
+            {
+                "step": 1,
+                "action": "click",
+                "index": 42,
+                "element_description": "[42] a '1 Cart'",
+                "result": {"success": True},
+            },
+            {"step": "invalid", "action": "ignored"},
+        ]
+    )
+
+    assert history.get_entries() == [
+        {
+            "step": 1,
+            "action": "click",
+            "index": 42,
+            "element_description": "[42] a '1 Cart'",
+            "result": {"success": True},
+        }
+    ]
 
 
 def test_max_steps_return_declares_best_effort_and_final_verifier():
@@ -461,6 +499,52 @@ def test_browser_task_prompt_does_not_duplicate_system_prompt():
     assert "Payment confirmed" in payment_summary
     assert "Order ID: tp_123" in payment_summary
     assert "Aurora Notebook, Ceramic Mug, Canvas Tote" in payment_summary
+
+
+async def test_pending_write_lock_action_rehydrates_url_and_remaps_dom_target():
+    """An approved click must resolve against the resumed DOM, not its stale pre-pause index."""
+    from domains.spawn_browser_agent_v3.handler import _prepare_pending_write_lock_action
+
+    class _Element:
+        def __init__(self, *, name: str, text: str):
+            self.tag_name = "input"
+            self.node_name = "input"
+            self.attributes = {"name": name}
+            self.text_content = text
+            self._text = text
+
+        def get_all_children_text(self):
+            return self._text
+
+    target = _Element(name="placeYourOrder1", text="Place your order")
+    unrelated = _Element(name="addToCart", text="Add to Cart")
+
+    class _DomService:
+        def __init__(self):
+            self.selector_map = {42: unrelated}
+
+        async def get_browser_state(self, *, include_screenshot: bool):
+            assert include_screenshot is False
+            self.selector_map = {7: target, 42: unrelated}
+            return {"url": "https://www.amazon.com/checkout/order", "dom_tree": "checkout"}
+
+    pending_action = {"action": "click", "index": 42, "params": {"index": 42}}
+    target_signature = {
+        "tag": "input",
+        "text": "Place your order",
+        "attrs": {"name": "placeYourOrder1"},
+    }
+
+    action, state, current_url = await _prepare_pending_write_lock_action(
+        _DomService(),
+        pending_action,
+        target_signature=target_signature,
+    )
+
+    assert current_url == "https://www.amazon.com/checkout/order"
+    assert state["dom_tree"] == "checkout"
+    assert action["index"] == 7
+    assert action["params"]["index"] == 7
 
 
 async def test_browser_agent_recording_writes_local_html_replay():
@@ -3172,6 +3256,9 @@ def test_build_autopay_prompt_section():
     assert out.lstrip().startswith("## Billing Address")
     assert "## Payment Information" in out
     assert "call request_payment_card" in out
+    assert "only if checkout requires you to enter new card details" in out
+    assert "valid saved payment method is already selected" in out
+    assert "do not call request_payment_card" in out
     # Card field names are emitted by the RESUME prompt (after mint), not the autopay prompt.
     assert "4111111111111111" not in out
 
@@ -4897,6 +4984,26 @@ async def test_call_browser_use_with_rotation_uses_gpt_auth():
     assert client.calls[0]["browser_state"]["_extra_user_messages"] == [
         {"role": "user", "content": "resume from current live state"}
     ]
+
+
+def test_simulated_browser_usage_preserves_transport_model():
+    from domains.spawn_browser_agent_v3.handler import _simulated_browser_usage_items
+
+    items = _simulated_browser_usage_items(
+        30,
+        3,
+        {"input_cents_per_1k": 1, "output_cents_per_1k": 2},
+        {
+            "gpt-5.6-sol-gpt": {"input_tokens": 20, "output_tokens": 2},
+            "google/gemini-3.1-pro-preview": {"input_tokens": 10, "output_tokens": 1},
+        },
+    )
+
+    assert [(item.get("model"), item.get("input_tokens"), item.get("output_tokens")) for item in items[:-1]] == [
+        ("gpt-5.6-sol-gpt", 20, 2),
+        ("google/gemini-3.1-pro-preview", 10, 1),
+    ]
+    assert items[-1]["provider"] == "World Model Harness"
 
 
 async def test_browser_thinking_stream_routes_chunks_to_browser_message_list():
@@ -10291,7 +10398,28 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
                 "params": {},
                 "thinking": "Click Checkout Now",
             },
+            "pending_action_target": {
+                "tag": "input",
+                "text": "Checkout Now",
+                "attrs": {"name": "placeOrder"},
+            },
             "write_lock_approvals": {},
+            "action_history": [
+                {
+                    "step": 1,
+                    "action": "click",
+                    "element_description": "[9] a '1 Cart'",
+                    "result": {"success": True},
+                }
+            ],
+            "visited_urls": ["https://www.dickblick.com/cart/"],
+            "verifier_checkpoints": [
+                {
+                    "url": "https://www.dickblick.com/cart/",
+                    "title": "Review order",
+                    "dom_tree": "<main>R&F Drawing Oil Stick; Total $12.00</main>",
+                }
+            ],
             "step_count": 5,
             "session_id": "session-1",
             "cdp_url": "wss://connect.steel.dev/session-1",
@@ -10367,6 +10495,10 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
     assert resumed_args[7] is True
     resume_state = resumed_args[12]
     assert resume_state["pending_action"]["action"] == "click"
+    assert resume_state["pending_action_target"]["attrs"]["name"] == "placeOrder"
+    assert resume_state["action_history"][0]["element_description"] == "[9] a '1 Cart'"
+    assert resume_state["visited_urls"] == ["https://www.dickblick.com/cart/"]
+    assert "R&F Drawing Oil Stick" in resume_state["verifier_checkpoints"][0]["dom_tree"]
     assert resume_state["approval_type"] == "purchase"
     assert resume_state["step_count"] == 5
     assert resume_state["write_lock_approvals"]["purchase"] == {
@@ -10863,6 +10995,7 @@ async def run_all_tests():
     await r.record_async(
         "browser_verifier_context_grounds_final_state", test_browser_verifier_context_grounds_in_final_state
     )
+    r.record("action_history_restores_across_activity", test_action_history_restores_across_activity_boundary)
     r.record(
         "max_steps_return_wires_best_effort_and_verifier", test_max_steps_return_declares_best_effort_and_final_verifier
     )
@@ -10877,6 +11010,10 @@ async def run_all_tests():
     r.record(
         "browser_task_prompt_no_system_duplication",
         test_browser_task_prompt_does_not_duplicate_system_prompt,
+    )
+    await r.record_async(
+        "pending_write_lock_rehydrates_url_and_dom_target",
+        test_pending_write_lock_action_rehydrates_url_and_remaps_dom_target,
     )
     r.record(
         "browser_turn_history_preserves_state",

@@ -146,6 +146,8 @@ def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
     assert "call exactly one available browser action tool" in prompt
     assert "# Screenshot Tool" not in prompt
     assert "Use the `screenshot` action" not in prompt
+    assert "do not open cancellation, return, edit, or modification flows" in prompt
+    assert "call attempt_completion promptly" in prompt
 
 
 def test_build_browser_use_system_prompt_does_not_advertise_extract():
@@ -239,6 +241,8 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     assert auth_help["input_schema"]["required"] == []
 
     payment = tools[2]
+    assert "only if checkout requires you to enter new card details" in payment["description"]
+    assert "valid saved payment method is already selected" in payment["description"]
     line_items = payment["input_schema"]["properties"]["line_items"]
     assert line_items["items"]["required"] == [
         "name",
@@ -254,6 +258,9 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     write_lock = tools[3]
     purchase_item = write_lock["input_schema"]["properties"]["purchase"]["properties"]["items"]["items"]
     assert purchase_item["required"] == ["title", "rating", "review_count", "product_url"]
+    review_count_description = purchase_item["properties"]["review_count"]["description"]
+    assert "followed by 'reviews' or 'ratings'" in review_count_description
+    assert "312 reviews" in review_count_description
     assert "anyOf" not in write_lock["input_schema"]
     assert "oneOf" not in write_lock["input_schema"]
     assert "allOf" not in write_lock["input_schema"]

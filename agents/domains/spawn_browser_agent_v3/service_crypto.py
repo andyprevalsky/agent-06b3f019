@@ -29,6 +29,11 @@ MIN_USABLE_EMAIL_OTP_TTL_SECONDS = 30
 CHROMIUM_UNIX_EPOCH_OFFSET_SECONDS = 11644473600
 UNIX_MS_VS_CHROMIUM_MICROSECONDS_BOUNDARY = 10000000000000
 PAYMENT_CARD_SECRET_REFS = ("card_number", "card_name", "card_expiry", "card_cvv")
+PAYMENT_CARD_ENTRY_RULE = (
+    "Use request_payment_card only if checkout requires you to enter new card details. "
+    "If a valid saved payment method is already selected and no card entry is required, "
+    "do not call request_payment_card; continue with that saved method."
+)
 
 
 # ========================================
@@ -838,7 +843,9 @@ def build_autopay_prompt_section(payment_data: Dict[str, Any], encrypted_envelop
 {billing_address}{contact_info}
 
 ## Payment Information
-AUTOPAY ENABLED (limit: ${autopay_limit_dollars:.2f}): When you reach a checkout/payment page, read the full itemized receipt off the page (each product: name, image URL if visible, unit price in cents, quantity, line total in cents; plus every fee, the subtotal, and the final total) and call request_payment_card with it — BEFORE touching any payment field.
+AUTOPAY ENABLED (limit: ${autopay_limit_dollars:.2f}): {PAYMENT_CARD_ENTRY_RULE}
+
+If new card details are required, first read the full itemized receipt off the page (each product: name, image URL if visible, unit price in cents, quantity, line total in cents; plus every fee, the subtotal, and the final total), then call request_payment_card with it BEFORE touching any payment field.
 
 Do not type any card details yet, and do not ask the user to enter a card. The one-time card is minted on demand only after you call request_payment_card and the user approves; its secret refs are then provided for you to type into the payment fields."""
 
