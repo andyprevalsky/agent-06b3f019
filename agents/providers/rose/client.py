@@ -347,7 +347,7 @@ def _cache_input_accounting(
     cache_read = max(int(cache_read or 0), 0)
     cache_write = max(int(cache_write or 0), 0)
 
-    if actual_model.endswith("-claude"):
+    if actual_model.endswith(("-claude", "-anthropic")):
         total_input = prompt_tokens + cache_read + cache_write
         accounting = "exclusive"
     else:
@@ -361,6 +361,32 @@ def _cache_input_accounting(
         "uncached_input": uncached_input,
         "cache_hit_pct": cache_pct,
         "cache_accounting": accounting,
+    }
+
+
+def _normalize_usage_input_tokens(actual_model: str, usage_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose one provider-neutral usage contract to agent cost accounting.
+
+    Native Anthropic usage already reports only the uncached input tail in
+    ``prompt_tokens``. OpenAI-compatible APIs include cached reads and writes
+    in ``prompt_tokens``. The workflow prices those three buckets separately,
+    so forwarding OpenAI's inclusive counter double-charges cached input.
+    """
+    cache_read = usage_data.get("cache_read_input_tokens", 0) or 0
+    cache_write = usage_data.get("cache_creation_input_tokens", 0) or 0
+    prompt_tokens = usage_data.get("prompt_tokens", 0) or 0
+    cache_stats = _cache_input_accounting(
+        actual_model=actual_model,
+        prompt_tokens=prompt_tokens,
+        cache_read=cache_read,
+        cache_write=cache_write,
+    )
+    if cache_stats["cache_accounting"] == "exclusive":
+        return usage_data
+    return {
+        **usage_data,
+        "prompt_tokens": cache_stats["uncached_input"],
+        "prompt_tokens_total": cache_stats["total_input"],
     }
 
 
@@ -1043,6 +1069,10 @@ class RoseClient:
                                         usage_data["gpt_token_rotated"] = direct_rotations > 0
                                     chunk = StreamChunk(kind="usage", data=usage_data)
                                     _emit_llm_cache(chunk.data)
+                                    chunk = StreamChunk(
+                                        kind="usage",
+                                        data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                                    )
                                 _record_dump_chunk(chunk)
                                 yield chunk
                         except RoseStallError as exc:
@@ -1205,6 +1235,10 @@ class RoseClient:
                                 _seen_actual_model = chunk.data["actual_model"]
                         elif chunk.kind == "usage":
                             _emit_llm_cache(chunk.data)
+                            chunk = StreamChunk(
+                                kind="usage",
+                                data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                            )
                         _record_dump_chunk(chunk)
                         yield chunk
                     logger.info(
@@ -1274,6 +1308,10 @@ class RoseClient:
                                 _seen_actual_model = chunk.data["actual_model"]
                         elif chunk.kind == "usage":
                             _emit_llm_cache(chunk.data)
+                            chunk = StreamChunk(
+                                kind="usage",
+                                data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                            )
                         _record_dump_chunk(chunk)
                         yield chunk
                     logger.info(
@@ -1336,6 +1374,10 @@ class RoseClient:
                     _seen_actual_model = chunk.data["actual_model"]
                 elif chunk.kind == "usage":
                     _emit_llm_cache(chunk.data)
+                    chunk = StreamChunk(
+                        kind="usage",
+                        data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                    )
                 _record_dump_chunk(chunk)
                 yield chunk
             logger.info(

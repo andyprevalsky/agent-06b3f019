@@ -1980,7 +1980,10 @@ async def test_call_llm_structured_streaming_happy_path():
 
     assert response.response == "hello"
     assert response.tool_calls == []
-    assert usage["prompt_tokens"] == 10
+    # OpenAI-compatible transports report an inclusive prompt total. Rose's
+    # provider-neutral contract exposes only the uncached tail for downstream
+    # pricing; the Rose-client regression separately pins the original total.
+    assert usage["prompt_tokens"] == 5
     assert usage["completion_tokens"] == 5
     assert usage["cache_read_input_tokens"] == 2
     assert usage["cache_creation_input_tokens"] == 3

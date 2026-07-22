@@ -1045,13 +1045,16 @@ async def test_run_verifier_dynamic_schema_getter():
 
 
 async def test_completed_browser_output_forces_parent_completion_instead_of_second_browser():
-    """A verified browser result covering the parent schema must not be re-run.
+    """A verified browser result must complete without replacing the tool schema.
 
     Regression: the simulated Amazon checkout browser returned a terminal,
     schema-complete result, but the unrestricted next root turn spawned a second
     browser session instead of calling attempt_completion. The parent verifier
     already accepts this exact child output, so the only legal next tool is the
-    completion boundary.
+    completion boundary. The completion instruction + required-tool validation
+    enforce that boundary while preserving the original tool schema; narrowing
+    the schema here invalidates the provider prompt-cache prefix on the handoff
+    turn (captured in browser-smoke agent e8e0e86a-1f16).
     """
     from helpers.llm import call_llm_activity, check_progress
     from loop import run_agent as run_mod
@@ -1157,7 +1160,7 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
 
     assert result["status"] == "completed"
     assert executed_tools == ["attempt_completion"]
-    assert llm_calls[0][2] == ["attempt_completion"]
+    assert llm_calls[0][2] == ["spawn_agent", "attempt_completion"]
     assert llm_calls[0][11] == "attempt_completion"
     assert "already completed" in llm_calls[0][10]
 

@@ -57,8 +57,13 @@ from providers.rose.claude_auth import (
     build_anthropic_body,
     claude_auth_complete,
 )
-from providers.rose.client import _cache_input_accounting, _messages_without_internal_system_boundaries
+from providers.rose.client import (
+    _cache_input_accounting,
+    _messages_without_internal_system_boundaries,
+    _normalize_usage_input_tokens,
+)
 from providers.rose.gpt_auth import build_codex_responses_body, gpt_auth_complete
+from providers.rose.pricing import get_model_pricing
 from providers.rose.schema import (
     build_anthropic_tools_from_response_model,
     build_openai_response_format,
@@ -2329,6 +2334,21 @@ async def test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes():
         },
         {"role": "tool", "tool_call_id": "call_browser", "content": "Example Domain"},
     ]
+    resolved_pointer_messages = [
+        {
+            "role": "system",
+            "content": "stable system rules",
+        },
+        {
+            "role": "user",
+            "content": (
+                "inspect example.com\n\n"
+                'Reference: <resolved-ref pointer="@ref:message:'
+                '660e93eb-8c47-4bfa-a6b0-282a43dd3e45"/>'
+            ),
+        },
+        *grown_messages[2:],
+    ]
 
     async def _capture(
         *,
@@ -2368,6 +2388,12 @@ async def test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes():
             agent_id="browser-a",
             call_site="execute_loop",
             messages=grown_messages,
+        )
+        await _capture(
+            lineage_key="agent:browser-a",
+            agent_id="browser-a",
+            call_site="execute_loop",
+            messages=resolved_pointer_messages,
         )
         await _capture(
             lineage_key="agent:browser-b",
@@ -2412,11 +2438,12 @@ async def test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes():
 
     cache_keys = [body["prompt_cache_key"] for body in captured_bodies]
     assert cache_keys[0] == cache_keys[1], "A growing conversation must reuse its prior Codex cache session"
-    assert cache_keys[0] != cache_keys[2], "Concurrent agents must not evict each other's prompt prefix"
-    assert cache_keys[0] != cache_keys[3], "Different LLM call sites must not share one Codex cache session"
-    assert cache_keys[4] == cache_keys[5], "Consecutive browser steps must reuse one Codex cache session"
-    assert cache_keys[4] != cache_keys[6], "Parallel browser tasks under one parent must not share a cache session"
-    assert cache_keys[4] != cache_keys[7], "A browser fork must not overwrite the main browser cache session"
+    assert cache_keys[0] == cache_keys[2], "Resolved message references must not reset the cache session"
+    assert cache_keys[0] != cache_keys[3], "Concurrent agents must not evict each other's prompt prefix"
+    assert cache_keys[0] != cache_keys[4], "Different LLM call sites must not share one Codex cache session"
+    assert cache_keys[5] == cache_keys[6], "Consecutive browser steps must reuse one Codex cache session"
+    assert cache_keys[5] != cache_keys[7], "Parallel browser tasks under one parent must not share a cache session"
+    assert cache_keys[5] != cache_keys[8], "A browser fork must not overwrite the main browser cache session"
 
 
 def test_build_codex_responses_body_preserves_tool_history_and_multimodal():
@@ -4454,6 +4481,123 @@ def test_cache_input_accounting_openrouter_waterfall_uses_inclusive_details():
     assert stats["cache_hit_pct"] == 94
 
 
+async def test_client_normalizes_inclusive_cache_usage_for_downstream_costing():
+    """OpenAI-compatible total prompt tokens must become the Rose exclusive contract.
+
+    Captured from spawn-sub-agents agent 8edbb0bf-aad7: OpenAI reported
+    61,441 total prompt tokens, including 40,951 cache reads and 20,368 cache
+    writes. Downstream cost accounting adds those cache counters separately,
+    so Rose must expose only the 122-token uncached tail as prompt_tokens.
+    """
+
+    async def captured_openai_api_key(**_kwargs):
+        yield StreamChunk(
+            kind="metadata",
+            data={"actual_model": "gpt-5.6-terra-openai"},
+        )
+        yield StreamChunk(
+            kind="usage",
+            data={
+                "prompt_tokens": 61_441,
+                "completion_tokens": 868,
+                "total_tokens": 62_309,
+                "cache_read_input_tokens": 40_951,
+                "cache_creation_input_tokens": 20_368,
+            },
+        )
+        yield StreamChunk(kind="done", data={})
+
+    client = RoseClient(openrouter_key="ork-x")
+    with (
+        patch("providers.rose.client._openai_api_key", return_value="sk-test"),
+        patch("providers.rose.client._try_openai_api_key", side_effect=captured_openai_api_key),
+    ):
+        chunks = await _drain(
+            client.complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "captured cache accounting"}],
+                call_site="cache-accounting-repro",
+            )
+        )
+
+    usage = next(chunk.data for chunk in chunks if chunk.kind == "usage")
+    assert usage["prompt_tokens"] == 122
+    assert usage["prompt_tokens_total"] == 61_441
+    assert usage["total_tokens"] == 62_309
+    assert usage["cache_read_input_tokens"] == 40_951
+    assert usage["cache_creation_input_tokens"] == 20_368
+
+
+def test_parallel_explore_trace_stays_below_cost_limit_after_cache_normalization():
+    """Replay the complete LLM usage from failed parallel-tool-calls agent 58a04e8d.
+
+    Three native-tool explore leaves completed successfully, but legacy accounting
+    reported 113.57c and paused the root before synthesis. OpenAI's prompt counter
+    already contained both cache buckets; normalizing it restores the actual 62.65c
+    trace cost without weakening the benchmark's 100c product limit.
+    """
+    # model suffix, inclusive prompt, completion, cache read, cache write
+    captured_usage = [
+        ("terra", 1_795, 198, 0, 1_792),
+        ("sol", 6_530, 509, 0, 6_408),
+        ("terra", 2_215, 271, 0, 2_093),
+        ("terra", 2_217, 132, 0, 2_095),
+        ("terra", 2_229, 144, 0, 2_107),
+        ("terra", 11_659, 212, 2_107, 9_430),
+        ("terra", 10_235, 275, 2_095, 8_018),
+        ("terra", 14_582, 440, 2_093, 12_367),
+        ("luna", 11_913, 964, 0, 11_910),
+        ("luna", 4_148, 563, 0, 4_145),
+        ("luna", 4_249, 988, 0, 4_246),
+        ("luna", 500, 78, 0, 500),
+        ("terra", 30_770, 325, 14_460, 16_188),
+        ("terra", 20_595, 254, 11_537, 8_936),
+        ("luna", 2_180, 1_147, 0, 2_177),
+        ("luna", 4_147, 475, 0, 4_144),
+        ("luna", 1_531, 987, 0, 1_528),
+        ("luna", 4_632, 393, 0, 4_629),
+        ("terra", 20_473, 1_863, 10_113, 10_238),
+        ("luna", 6_679, 161, 0, 6_676),
+        ("terra", 24_875, 2_161, 20_473, 4_280),
+        ("terra", 34_577, 1_964, 30_648, 3_807),
+    ]
+
+    def workflow_cost_cents(model: str, usage: dict) -> float:
+        pricing = get_model_pricing(model)
+        assert pricing is not None
+        input_rate = pricing["input_cents_per_1k"]
+        output_rate = pricing["output_cents_per_1k"]
+        return (
+            usage["prompt_tokens"] * input_rate
+            + usage["cache_read_input_tokens"] * input_rate * 0.25
+            + usage["cache_creation_input_tokens"] * input_rate
+            + usage["completion_tokens"] * output_rate
+        ) / 1_000
+
+    legacy_llm_cost = 0.0
+    normalized_llm_cost = 0.0
+    for suffix, prompt, completion, cache_read, cache_write in captured_usage:
+        model = f"gpt-5.6-{suffix}-openai"
+        raw_usage = {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_write,
+        }
+        legacy_llm_cost += workflow_cost_cents(model, raw_usage)
+        normalized_llm_cost += workflow_cost_cents(model, _normalize_usage_input_tokens(model, raw_usage))
+
+    # The same run incurred 11.5272c in web-search/fetch service usage.
+    service_cost_cents = 11.5272
+    legacy_trace_cost = legacy_llm_cost + service_cost_cents
+    normalized_trace_cost = normalized_llm_cost + service_cost_cents
+
+    assert abs(legacy_trace_cost - 113.567325) < 0.000001
+    assert legacy_trace_cost > 100
+    assert abs(normalized_trace_cost - 62.648575) < 0.000001
+    assert normalized_trace_cost < 100
+
+
 async def test_claude_auth_stream_reports_cache_hit_rate():
     """Simulated claudeAuth stream with cache metrics — validates cache_read
     tokens are reported and the hit rate is above a minimum threshold.
@@ -5165,6 +5309,14 @@ async def run_all_tests():
     r.record(
         "cache_accounting_openrouter_inclusive",
         test_cache_input_accounting_openrouter_waterfall_uses_inclusive_details,
+    )
+    await r.record_async(
+        "client_normalizes_inclusive_cache_usage",
+        test_client_normalizes_inclusive_cache_usage_for_downstream_costing,
+    )
+    r.record(
+        "parallel_explore_trace_cache_cost_normalization",
+        test_parallel_explore_trace_stays_below_cost_limit_after_cache_normalization,
     )
     await r.record_async("cache_hit_rate_smoke", test_claude_auth_stream_reports_cache_hit_rate)
     r.record("cache_structure_real_prompt", test_build_anthropic_body_cache_structure_from_real_prompt)

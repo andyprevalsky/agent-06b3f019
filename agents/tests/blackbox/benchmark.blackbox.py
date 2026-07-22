@@ -4751,6 +4751,77 @@ def test_local_failed_tasks_from_run_reads_result_json():
     assert [(f.name, f.agent_id, f.failure_reason) for f in failures] == [("browser-agent", "b2", "verifier failed")]
 
 
+def test_local_benchmark_invocation_propagates_cache_ratchet_exit():
+    """A saved all-task-pass artifact must not swallow a post-run ratchet failure.
+
+    Captured from isolated smoke run 1784687608-25918-44421: the runner
+    printed ``CACHE RATCHET FAILED`` and exited 1 after saving a 5/5 task
+    artifact, but local.py returned success because it only re-read task pass
+    fields from that artifact.
+    """
+    from benchmarks import local
+
+    original_popen = local.subprocess.Popen
+    with tempfile.TemporaryDirectory() as raw_dir:
+        result_path = Path(raw_dir) / "cache-ratchet-run.json"
+        result_path.write_text(json.dumps({"tasks": [{"name": "browser-smoke", "passed": True}]}))
+
+        class FailedRatchetProcess:
+            def __init__(self):
+                self.stdout = iter(
+                    [
+                        f"  Results saved: {result_path}\n",
+                        "  ❌ CACHE RATCHET FAILED (per-task repeatable prompt-cache hit floor)\n",
+                    ]
+                )
+
+            @staticmethod
+            def wait():
+                return 1
+
+        try:
+            local.subprocess.Popen = lambda *_args, **_kwargs: FailedRatchetProcess()
+            try:
+                local.run_benchmark_invocation(
+                    local.BenchmarkInvocation("benchmarks", ["browser-smoke"]),
+                    port=55120,
+                    bootstrap=False,
+                    anon=False,
+                    max_concurrency=1,
+                )
+                raise AssertionError("local benchmark wrapper swallowed the runner's exit code 1")
+            except RuntimeError as exc:
+                assert "exit code 1" in str(exc)
+                assert str(result_path) in str(exc)
+
+            # A task-level failure must still return the artifact so main() can
+            # run agent_latency, agent_logs, and agent_cache before exiting 1.
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "tasks": [
+                            {
+                                "name": "browser-smoke",
+                                "passed": False,
+                                "agent_id": "failed-agent",
+                                "failure_reason": "verifier failed",
+                            }
+                        ]
+                    }
+                )
+            )
+            returned = local.run_benchmark_invocation(
+                local.BenchmarkInvocation("benchmarks", ["browser-smoke"]),
+                port=55120,
+                bootstrap=False,
+                anon=False,
+                max_concurrency=1,
+            )
+            assert returned == result_path
+        finally:
+            local.subprocess.Popen = original_popen
+
+
 def test_run_sh_manifest_writer_publishes_wmh_when_served():
     """run.sh's manifest writer carries ports.wmh + urls.wmh + a wmh service entry.
 
@@ -8215,6 +8286,10 @@ async def run_all_tests():
     r.record("local_args_anon", test_local_benchmark_args_pass_anon_to_run_benchmark)
     r.record("local_args_single_task", test_local_benchmark_args_for_single_task_not_parallel)
     r.record("local_failed_tasks_from_run", test_local_failed_tasks_from_run_reads_result_json)
+    r.record(
+        "local_invocation_propagates_cache_ratchet_exit",
+        test_local_benchmark_invocation_propagates_cache_ratchet_exit,
+    )
     r.record("local_services_manifest_validation", test_local_services_manifest_validation_requires_ports)
     r.record(
         "local_manifest_system_database_identity",

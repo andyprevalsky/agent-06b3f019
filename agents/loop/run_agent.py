@@ -547,10 +547,14 @@ async def run_agent(  # noqa: C901
         if not is_plan_loop and not skip_verification and "attempt_completion" in tools:
             completed_child_output = _completed_child_task_structured_response(context, response_schema)
         completion_instruction = None
+        # Keep the provider-visible tool schema stable across turns. The
+        # completion instruction tells the model what to do and required_tool
+        # enforces it at the activity boundary; narrowing this list would move
+        # the native tool/schema block at the front of the provider prompt and
+        # invalidate the growing-conversation cache prefix.
         turn_tools = tools
         required_turn_tool = None
         if completed_child_output is not None:
-            turn_tools = ["attempt_completion"]
             required_turn_tool = "attempt_completion"
             completion_instruction = (
                 "A previously delegated browser or code task already completed and returned verified structured "
