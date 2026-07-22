@@ -8243,14 +8243,13 @@ async def _check_claude_code_credentials(base_url: str) -> bool:
         headers = await _api_headers()
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{base_url}/api/integrations/compute-code/credentials/token",
+                f"{base_url}/api/integrations/claude-code/credentials/token",
                 headers=headers,
                 timeout=10.0,
             )
             if resp.status_code == 200:
                 data = resp.json()
-                if data.get("type") == "claude" and bool(data.get("accessToken")):
-                    return True
+                return bool(data.get("accessToken"))
         return False
     except Exception:
         return False
