@@ -2244,8 +2244,8 @@ async def post_attachment_message(base_url: str, agent_id: str, file_pointers: L
         return resp.status_code in (200, 201)
 
 
-async def upload_attachment(base_url: str, agent_id: str, filepath: str) -> Optional[dict]:
-    """Upload a file attachment for an agent. Returns FilePointer or None."""
+async def upload_attachment(base_url: str, agent_id: str, filepath: str) -> dict:
+    """Upload a file attachment for an agent. Raises if the required FilePointer is unavailable."""
     headers = await _api_headers()
     # Remove Content-Type — httpx sets multipart boundary automatically
     headers.pop("Content-Type", None)
@@ -2260,10 +2260,13 @@ async def upload_attachment(base_url: str, agent_id: str, filepath: str) -> Opti
             )
         if resp.status_code in (200, 201):
             data = resp.json()
-            return data.get("file_pointer") or data.get("filePointer")
-        else:
-            print(f"    ⚠ Attachment upload failed: {resp.status_code} - {resp.text[:200]}")
-            return None
+            pointer = data.get("file_pointer") or data.get("filePointer")
+            if isinstance(pointer, dict):
+                return pointer
+            raise RuntimeError(f"Attachment upload for {filename} returned no FilePointer")
+        raise RuntimeError(
+            f"Attachment upload failed for {filename}: HTTP {resp.status_code}: {resp.text[:500]}"
+        )
 
 
 # ============================================================
@@ -7021,11 +7024,8 @@ async def run_single_task(
 
                 print(f"    Uploading {attach_filename}...")
                 fp = await upload_attachment(base_url, agent_id, filepath)
-                if fp:
-                    file_pointers.append(fp)
-                    print("    ✅ Uploaded, FilePointer received")
-                else:
-                    print("    ⚠ Upload returned no FilePointer, continuing anyway")
+                file_pointers.append(fp)
+                print("    ✅ Uploaded, FilePointer received")
 
             # Post a message with all file pointers so the agent can see them
             if file_pointers:

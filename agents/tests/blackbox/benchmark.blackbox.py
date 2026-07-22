@@ -9014,6 +9014,56 @@ def test_checkpoint_validation_mass_agent_sequence_remains_strict():
     assert visible == ["Thought"]
 
 
+async def test_required_attachment_upload_failure_is_fatal():
+    """Required benchmark attachments must fail fast instead of running agents without files."""
+    from benchmarks import run_benchmark as bench
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            payload = json.dumps({"error": "Node.js detected but native WebSocket not found"}).encode()
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    original_api_headers = bench._api_headers
+
+    async def fake_api_headers():
+        return {"Content-Type": "application/json"}
+
+    try:
+        bench._api_headers = fake_api_headers
+        with tempfile.NamedTemporaryFile(suffix=".csv") as temp:
+            temp.write(b"name\nAlpha\n")
+            temp.flush()
+            try:
+                await bench.upload_attachment(
+                    f"http://127.0.0.1:{server.server_address[1]}",
+                    "agent-attachment-repro",
+                    temp.name,
+                )
+                raise AssertionError("attachment upload failure was allowed to continue")
+            except RuntimeError as exc:
+                message = str(exc)
+                assert "Attachment upload failed" in message
+                assert "HTTP 500" in message
+                assert "native WebSocket not found" in message
+    finally:
+        bench._api_headers = original_api_headers
+        server.shutdown()
+        server.server_close()
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
@@ -9036,6 +9086,10 @@ async def run_all_tests():
     r.record(
         "cloudbench_shell_contract_requires_identity_and_exit",
         test_cloudbench_shell_controllers_require_fresh_identity_and_child_success,
+    )
+    await r.record_async(
+        "required_attachment_upload_failure_is_fatal",
+        test_required_attachment_upload_failure_is_fatal,
     )
     r.record(
         "cloudbench_prisma_freshness_permanent_gate",
