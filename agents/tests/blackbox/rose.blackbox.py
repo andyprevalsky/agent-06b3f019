@@ -2409,6 +2409,28 @@ async def test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes():
             messages=grown_messages,
             cache_namespace="browser-task:task-a:write_lock_notification",
         )
+        pointer_annotated_messages = [
+            {"role": "system", "content": "stable system rules"},
+            {
+                "role": "user",
+                "content": (
+                    "inspect example.com\n\n"
+                    'Reference: <resolved-ref pointer="ctx-user-1">inspect example.com</resolved-ref>'
+                ),
+            },
+        ]
+        await _capture(
+            lineage_key="agent:pointer-stable",
+            agent_id="pointer-stable",
+            call_site="execute_loop",
+            messages=pointer_annotated_messages,
+        )
+        await _capture(
+            lineage_key="agent:pointer-stable",
+            agent_id="pointer-stable",
+            call_site="execute_loop",
+            messages=base_messages,
+        )
 
     cache_keys = [body["prompt_cache_key"] for body in captured_bodies]
     assert cache_keys[0] == cache_keys[1], "A growing conversation must reuse its prior Codex cache session"
@@ -2417,6 +2439,7 @@ async def test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes():
     assert cache_keys[4] == cache_keys[5], "Consecutive browser steps must reuse one Codex cache session"
     assert cache_keys[4] != cache_keys[6], "Parallel browser tasks under one parent must not share a cache session"
     assert cache_keys[4] != cache_keys[7], "A browser fork must not overwrite the main browser cache session"
+    assert cache_keys[8] == cache_keys[9], "Pointer resolution must not replace a conversation's Codex cache session"
 
 
 def test_build_codex_responses_body_preserves_tool_history_and_multimodal():

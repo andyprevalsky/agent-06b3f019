@@ -4701,8 +4701,7 @@ async function testClaudeCodeBillingFailure_marksPoolTokenLongCooldown() {
   const session = await seedClaudeCodeSession(dummyAgent.id, 'pool', poolInt.id);
 
   try {
-    const banner =
-      'Credit balance too low · Add funds: https://platform.claude.com/settings/billing\n';
+    const banner = 'Credit balance is too low\n';
     const res = await request(`${BASE_URL}/api/claude-code-session/${session.taskId}/output`, {
       method: 'POST',
       headers: apiKeyHeaders(),

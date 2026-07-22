@@ -343,15 +343,17 @@ def _build_cache_namespace(
     call_site: Optional[str],
 ) -> str:
     """Isolate provider cache sessions while preserving per-call prefix growth."""
+    conversation_identity = lineage_key or agent_id
     first_non_system_message: Optional[Dict[str, Any]] = None
-    for message in messages:
-        if message.get("role") != "system":
-            first_non_system_message = message
-            break
+    if conversation_identity is None:
+        for message in messages:
+            if message.get("role") != "system":
+                first_non_system_message = message
+                break
 
     material = json.dumps(
         {
-            "lineage": lineage_key or agent_id or "unbound",
+            "lineage": conversation_identity or "unbound",
             "callSite": call_site or "unspecified",
             "firstMessage": first_non_system_message,
         },
