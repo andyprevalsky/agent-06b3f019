@@ -18,7 +18,10 @@ import {
   consumePurchaseWalletFunding,
   reclaimPurchaseWalletFunding,
 } from './purchase-wallet-funding';
-import { findWalletFundingByPurchaseId } from './purchase-wallet-funding-repo';
+import {
+  claimWalletFundingReclaimRetry,
+  findWalletFundingByPurchaseId,
+} from './purchase-wallet-funding-repo';
 
 const log = createLogger('PurchaseCleanup');
 const STALE_CHARGING_MS = Number(process.env.PURCHASE_STALE_CHARGING_MS ?? 15 * 60 * 1000);
@@ -277,6 +280,29 @@ export async function reconcileFailedPurchaseFundingReclaims(
 
   for (const purchase of purchases) {
     try {
+      const funding = await findWalletFundingByPurchaseId(purchase.id);
+      if (
+        funding !== null &&
+        (funding.status === PurchaseWalletFundingStatus.FUNDED ||
+          funding.status === PurchaseWalletFundingStatus.RECLAIM_FAILED ||
+          funding.status === PurchaseWalletFundingStatus.RECLAIMING)
+      ) {
+        const retryClaim = await claimWalletFundingReclaimRetry(funding.id, {
+          reclaimIdempotencyKey:
+            funding.reclaimIdempotencyKey ?? `purchase-wallet-reclaim:${purchase.id}`,
+          staleReclaimingBefore,
+        });
+        if (retryClaim.count === 0) {
+          log.info(
+            'Purchase funding reclaim retry is already owned; skipping duplicate provider call',
+            {
+              purchase_id: purchase.id,
+              funding_id: funding.id,
+            }
+          );
+          continue;
+        }
+      }
       await reclaimPurchaseWalletFunding(
         purchase,
         'failed_company_transfer_release_retry',

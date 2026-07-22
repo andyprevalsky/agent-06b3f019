@@ -1211,6 +1211,7 @@ def test_autoscaled_worker_failure_is_removed_and_replaceable(tmp_path: Path) ->
     must not remain counted as capacity forever."""
     fleet = FLEET_SCRIPT.read_text()
     pool_count = _extract_fleet_function(fleet, "_pool_ids() {")
+    cleanup = _worker_cleanup_bundle(fleet)
     provision = _extract_fleet_function(fleet, "provision_worker() {")
     root = tmp_path / "root"
     (root / "scripts").mkdir(parents=True)
@@ -1263,6 +1264,7 @@ fly_with_timeout() {{
 reap_machine() {{ printf '%s\n' "$1" > "$REAPED"; }}
 fleet_registry_release_id() {{ :; }}
 {pool_count}
+{cleanup}
 {provision}
 provision_worker bench workspace primary fd00::1 0 "$OUT"
 wait || true
@@ -1305,7 +1307,9 @@ def test_worker_preflight_failure_records_cleanup_failure_and_keeps_retry_handle
     The original provisioning error stays visible, while the worker id remains
     tracked so controller teardown can retry deletion.
     """
-    provision = _extract_fleet_function(FLEET_SCRIPT.read_text(), "provision_worker() {")
+    fleet = FLEET_SCRIPT.read_text()
+    cleanup = _worker_cleanup_bundle(fleet)
+    provision = _extract_fleet_function(fleet, "provision_worker() {")
     output = tmp_path / "bench"
     output.mkdir()
     reaped = tmp_path / "reaped"
@@ -1323,6 +1327,7 @@ clone_machine_target() {{
 controller_github_token_b64() {{ return 1; }}
 reap_machine() {{ printf '%s\\n' "$1" > {shlex.quote(str(reaped))}; return 1; }}
 fleet_registry_release_id() {{ return 0; }}
+{cleanup}
 {provision}
 provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))}
 exit $?
@@ -1339,6 +1344,114 @@ exit $?
     assert "No current controller GitHub token" in failure
     assert "cleanup failed and remains tracked for controller teardown" in failure
     assert "cleanup failed and remains tracked" in result.stderr
+
+
+def test_worker_cleanup_serializes_ledger_and_preserves_cancellation(tmp_path: Path) -> None:
+    """Two cleanup owners must reap once and keep a late cancellation durable."""
+    cleanup = _worker_cleanup_bundle(FLEET_SCRIPT.read_text())
+    output = tmp_path / "bench"
+    output.mkdir()
+    worker_id = "deadbeef000002"
+    (output / "worker-clones.ids").write_text(f"{worker_id}\n")
+    (output / "worker-ready.ids").write_text(f"{worker_id}\n")
+    (output / f"worker-{worker_id}.pending").touch()
+    (output / f"worker-{worker_id}.ready").touch()
+    (output / f"worker-{worker_id}.cancelled").touch()
+    reaps = tmp_path / "reaps"
+    releases = tmp_path / "releases"
+    script = f"""set -e
+OUT={shlex.quote(str(output))}
+WID={worker_id}
+REAPS={shlex.quote(str(reaps))}
+RELEASES={shlex.quote(str(releases))}
+reap_machine() {{ printf '%s\n' "$1" >> "$REAPS"; sleep 0.1; }}
+fleet_registry_release_id() {{ printf '%s\n' "$1" >> "$RELEASES"; }}
+{cleanup}
+cleanup_failed_worker "$OUT" "$WID" &
+first=$!
+cleanup_failed_worker "$OUT" "$WID" &
+second=$!
+wait "$first"
+wait "$second"
+test ! -s "$OUT/worker-clones.ids"
+test ! -s "$OUT/worker-ready.ids"
+test ! -e "$OUT/worker-$WID.pending"
+test ! -e "$OUT/worker-$WID.ready"
+test -e "$OUT/worker-$WID.cancelled"
+test ! -e "$OUT/worker-clones.ids.lock"
+test "$(wc -l < "$REAPS" | tr -d ' ')" = 1
+test "$(wc -l < "$RELEASES" | tr -d ' ')" = 1
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+
+    unreadable = tmp_path / "unreadable"
+    unreadable.mkdir()
+    (unreadable / "worker-clones.ids").write_text(f"{worker_id}\n")
+    read_error_script = f"""set +e
+OUT={shlex.quote(str(unreadable))}
+WID={worker_id}
+grep() {{ return 2; }}
+reap_machine() {{ return 99; }}
+fleet_registry_release_id() {{ return 99; }}
+{cleanup}
+cleanup_failed_worker "$OUT" "$WID"
+rc=$?
+test "$rc" -ne 0
+test "$(cat "$OUT/worker-clones.ids")" = "$WID"
+test ! -e "$OUT/worker-clones.ids.lock"
+"""
+    read_error = subprocess.run(
+        ["bash", "-c", read_error_script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert read_error.returncode == 0, read_error.stderr + read_error.stdout
+
+
+def test_worker_numeric_settings_are_validated_independently(tmp_path: Path) -> None:
+    """Colon-bearing values must never reach numeric tests or seq."""
+    fleet = FLEET_SCRIPT.read_text()
+    cleanup = _worker_cleanup_bundle(fleet)
+    provision = _extract_fleet_function(fleet, "provision_worker() {")
+
+    for index, (stage_attempts, ready_timeout) in enumerate((("1:2", "3"), ("2", "3:4"))):
+        output = tmp_path / f"invalid-{index}"
+        output.mkdir()
+        reaped = tmp_path / f"invalid-{index}.reaped"
+        script = f"""set +e
+FLEET_OWNER_TOKEN=test-owner
+BENCH_REF=test-ref
+FLEET_WORKER_VM_SIZE=shared-cpu-1x
+FLEET_WORKER_VM_MEMORY=1024
+WORKER_STAGE_ATTEMPTS={shlex.quote(stage_attempts)}
+WORKER_READY_TIMEOUT={shlex.quote(ready_timeout)}
+reserve_worker_machine_slot() {{ return 0; }}
+capacity_release_reservation() {{ return 0; }}
+clone_machine_target() {{ printf '%s\n' deadbeef000003 >> "$1"; printf '%s' deadbeef000003; }}
+controller_github_token_b64() {{ printf token; }}
+reap_machine() {{ printf '%s\n' "$1" > {shlex.quote(str(reaped))}; }}
+fleet_registry_release_id() {{ return 0; }}
+{cleanup}
+{provision}
+provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))}
+rc=$?
+test "$rc" -ne 0
+test ! -s {shlex.quote(str(output / "worker-clones.ids"))}
+grep -q 'invalid worker stage/readiness timeout configuration' {shlex.quote(str(output / "autoscaler.failed"))}
+exit 0
+"""
+        result = subprocess.run(
+            ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
+        )
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert reaped.read_text().strip() == "deadbeef000003"
 
 
 def test_fetch_ref_never_falls_back_to_stale_fetch_head(tmp_path: Path) -> None:
@@ -3724,6 +3837,18 @@ def _extract_fleet_function(source: str, signature: str) -> str:
     start = source.index(signature)
     end = source.index("\n}\n", start) + 3
     return source[start:end]
+
+
+def _worker_cleanup_bundle(source: str) -> str:
+    return "\n".join(
+        _extract_fleet_function(source, signature)
+        for signature in (
+            "worker_is_tracked() {",
+            "worker_ledger_lock_acquire() {",
+            "worker_ledger_lock_release() {",
+            "cleanup_failed_worker() {",
+        )
+    )
 
 
 def _clone_index_adapter_fixture() -> str:

@@ -136,6 +136,36 @@ export async function claimWalletFundingReclaim(
   });
 }
 
+/**
+ * Take ownership of a retryable reclaim. The stale timestamp is part of the compare-and-set so
+ * concurrent cron workers cannot both revive the same expired lease and replay provider cleanup.
+ * FUNDED is included for legacy rows whose purchase was marked FUNDING_RECLAIM_FAILED before the
+ * funding row advanced to RECLAIM_FAILED.
+ */
+export async function claimWalletFundingReclaimRetry(
+  id: string,
+  data: { reclaimIdempotencyKey: string; staleReclaimingBefore: Date }
+) {
+  return prisma.purchaseWalletFunding.updateMany({
+    where: {
+      id,
+      OR: [
+        { status: PurchaseWalletFundingStatus.FUNDED },
+        { status: PurchaseWalletFundingStatus.RECLAIM_FAILED },
+        {
+          status: PurchaseWalletFundingStatus.RECLAIMING,
+          updatedAt: { lte: data.staleReclaimingBefore },
+        },
+      ],
+    },
+    data: {
+      status: PurchaseWalletFundingStatus.RECLAIMING,
+      reclaimIdempotencyKey: data.reclaimIdempotencyKey,
+      errorMessage: null,
+    },
+  });
+}
+
 export async function markWalletFundingReclaimed(
   id: string,
   data: {

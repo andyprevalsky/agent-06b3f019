@@ -26,6 +26,7 @@ import {
   recordPurchaseWalletFunding,
 } from '../../providers/purchase-wallet-funding';
 import {
+  claimWalletFundingReclaimRetry,
   findWalletFundingByPurchaseId,
   markWalletFundingFailed,
 } from '../../providers/purchase-wallet-funding-repo';
@@ -389,6 +390,58 @@ async function main(): Promise<void> {
     ]);
     assert.equal(claims.filter((claim) => claim === 'owned').length, 1);
     assert.equal(claims.filter((claim) => claim === 'already_owned').length, 2);
+  });
+
+  await test('stale reclaim retry CAS grants exactly one cross-worker lease owner', async () => {
+    const userId = await seedUser();
+    const purchase = await seedPurchase(userId);
+    await recordPurchaseWalletFunding(purchase, 'usd', 'owt_retry_owner', {});
+    const staleUpdatedAt = new Date(Date.now() - 5 * 60 * 1000);
+    await prisma.purchaseWalletFunding.update({
+      where: { purchaseId: purchase.id },
+      data: {
+        status: PurchaseWalletFundingStatus.RECLAIMING,
+        updatedAt: staleUpdatedAt,
+      },
+    });
+    const funding = await findWalletFundingByPurchaseId(purchase.id);
+    assert.ok(funding);
+
+    const staleReclaimingBefore = new Date(Date.now() - 2 * 60 * 1000);
+    const claims = await Promise.all(
+      Array.from({ length: 8 }, async () =>
+        claimWalletFundingReclaimRetry(funding.id, {
+          reclaimIdempotencyKey: `purchase-wallet-reclaim:${purchase.id}`,
+          staleReclaimingBefore,
+        })
+      )
+    );
+    assert.equal(
+      claims.reduce((count, claim) => count + claim.count, 0),
+      1,
+      'the timestamp CAS must elect one retry owner across concurrent processes'
+    );
+
+    const freshLeaseClaim = await claimWalletFundingReclaimRetry(funding.id, {
+      reclaimIdempotencyKey: `purchase-wallet-reclaim:${purchase.id}`,
+      staleReclaimingBefore,
+    });
+    assert.equal(freshLeaseClaim.count, 0, 'a fresh RECLAIMING lease is not stealable');
+
+    await setFundingStatus(purchase.id, PurchaseWalletFundingStatus.RECLAIM_FAILED);
+    const failedRetryClaims = await Promise.all(
+      Array.from({ length: 8 }, async () =>
+        claimWalletFundingReclaimRetry(funding.id, {
+          reclaimIdempotencyKey: `purchase-wallet-reclaim:${purchase.id}`,
+          staleReclaimingBefore,
+        })
+      )
+    );
+    assert.equal(
+      failedRetryClaims.reduce((count, claim) => count + claim.count, 0),
+      1,
+      'a RECLAIM_FAILED row must also elect one retry owner'
+    );
   });
 
   await test('recordPurchaseWalletFunding never resurrects a reclaimed transfer', async () => {

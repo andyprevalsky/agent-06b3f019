@@ -5068,6 +5068,35 @@ def test_recovery_preflight_failures_resolve_the_in_progress_tool():
     assert recovery_block.count("tool_call_id=recovery_call_id") >= 2
 
 
+def test_recovery_reconnect_failure_drops_disconnected_browser_handles():
+    """A failed promoted-session attach must preserve its real error result."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    recovery_block = source.split('if action_name == "recover_from_challenge":', 1)[1].split(
+        'if action_name == "send_message_to_user":', 1
+    )[0]
+    reconnect = recovery_block.index("reconnected = await _reconnect_browser_stack_after_rotation(")
+    clear_handles = recovery_block.index("dom_service = None", reconnect)
+    preserve_error = recovery_block.index("error_message = extract_error_message(exc)", clear_handles)
+    history_guard = recovery_block.index("if dom_service is not None:", preserve_error)
+    append_turn = recovery_block.index("_append_browser_turn_messages(", history_guard)
+
+    assert reconnect < clear_handles < preserve_error < history_guard < append_turn
+    disconnected_slice = recovery_block[clear_handles:preserve_error]
+    for handle in (
+        "dom_service",
+        "dom_page",
+        "input_page",
+        "playwright_browser",
+        "playwright_instance",
+        "playwright_driver_pid",
+    ):
+        assert f"{handle} = None" in disconnected_slice
+
+
 async def test_provider_handoff_replaces_humanizer_without_leaking_idle_work():
     from domains.spawn_browser_agent_v3.handler import _replace_browser_humanizer
 
@@ -12523,6 +12552,10 @@ async def run_all_tests():
     r.record(
         "recovery_preflight_failure_resolves_tool",
         test_recovery_preflight_failures_resolve_the_in_progress_tool,
+    )
+    r.record(
+        "recovery_reconnect_failure_drops_handles",
+        test_recovery_reconnect_failure_drops_disconnected_browser_handles,
     )
     await r.record_async(
         "provider_handoff_replaces_humanizer",

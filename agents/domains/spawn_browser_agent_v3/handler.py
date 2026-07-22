@@ -6132,15 +6132,28 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         new_cdp_url = config_result.get("ws_url")
                         if not isinstance(new_cdp_url, str) or not new_cdp_url:
                             raise RuntimeError("Challenge recovery selected a browser without a CDP URL")
-                        reconnected = await _reconnect_browser_stack_after_rotation(
-                            new_cdp_url=new_cdp_url,
-                            old_dom_service=dom_service,
-                            old_playwright_browser=playwright_browser,
-                            old_playwright_instance=playwright_instance,
-                            old_driver_pid=playwright_driver_pid,
-                            fingerprint_injection=fingerprint_injection,
-                            agent_id=agent_id,
-                        )
+                        try:
+                            reconnected = await _reconnect_browser_stack_after_rotation(
+                                new_cdp_url=new_cdp_url,
+                                old_dom_service=dom_service,
+                                old_playwright_browser=playwright_browser,
+                                old_playwright_instance=playwright_instance,
+                                old_driver_pid=playwright_driver_pid,
+                                fingerprint_injection=fingerprint_injection,
+                                agent_id=agent_id,
+                            )
+                        except Exception:
+                            # The reconnect helper disconnects the old stack before attaching to
+                            # the promoted session. Drop every dead handle so the error path cannot
+                            # attempt a screenshot/action against the disconnected browser and mask
+                            # the original reconnect failure.
+                            dom_service = None
+                            dom_page = None
+                            input_page = None
+                            playwright_browser = None
+                            playwright_instance = None
+                            playwright_driver_pid = None
+                            raise
                         dom_service = reconnected["dom_service"]
                         dom_page = reconnected["dom_page"]
                         input_page = reconnected["input_page"]
@@ -6231,13 +6244,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
                     action_result = {"success": False, "error": error_message}
 
-                await action_history.record_action(
-                    dom_service=dom_service,
-                    action="recover_from_challenge",
-                    thinking=thinking,
-                    params={"reason": recovery_reason},
-                    result=action_result,
-                )
+                if dom_service is not None:
+                    await action_history.record_action(
+                        dom_service=dom_service,
+                        action="recover_from_challenge",
+                        thinking=thinking,
+                        params={"reason": recovery_reason},
+                        result=action_result,
+                    )
                 _append_browser_turn_messages(
                     browser_turn_messages,
                     task=task_prompt,
