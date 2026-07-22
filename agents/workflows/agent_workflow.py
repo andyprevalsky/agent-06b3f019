@@ -1253,6 +1253,7 @@ class AgentWorkflow:
                         gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
                         compute_token_used=v_usage.get("compute_token_used"),
                         from_fast_cache=v_usage.get("from_fast_cache", False),
+                        cache_sequence_id=v_usage.get("cache_sequence_id"),
                     )
                 except Exception as e:
                     workflow.logger.warning(f"[DAG] _on_tokens failed for post-DAG verifier: {e}")
@@ -2078,6 +2079,7 @@ class AgentWorkflow:
                             gpt_token_rotated=rotation_signal.get("gpt_token_rotated", False),
                             compute_token_used=rotation_signal.get("compute_token_used"),
                             from_fast_cache=rotation_signal.get("from_fast_cache", False),
+                            cache_sequence_id=rotation_signal.get("cache_sequence_id"),
                         )
                     except Exception as e:
                         workflow.logger.warning(f"_on_tokens failed for {tool_name} summarizer: {e}")
@@ -2233,6 +2235,7 @@ class AgentWorkflow:
                 None,
                 True,
                 True,
+                f"agent:{self.agent_id}:call:approval_param_populator",
             ],
             start_to_close_timeout=timedelta(seconds=600),
             retry_policy=RetryPolicy(maximum_attempts=2),
@@ -2267,6 +2270,7 @@ class AgentWorkflow:
                     gpt_token_rotated=usage.get("gpt_token_rotated", False),
                     compute_token_used=usage.get("compute_token_used"),
                     from_fast_cache=usage.get("from_fast_cache", False),
+                    cache_sequence_id=usage.get("cache_sequence_id"),
                 )
             except Exception as error:
                 workflow.logger.warning(f"on_tokens failed for approval_param_populator: {error}")

@@ -663,6 +663,7 @@ Output the summary only — no preamble."""
             call_site=f"summarize_{tool_name}",
             agent_id=agent_id,
             user_id=claude_token_user_id or gpt_token_user_id,
+            cache_sequence_id=cache_sequence_id,
         )
 
         summary = (result.get("content") or "").strip()

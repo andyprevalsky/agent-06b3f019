@@ -3415,6 +3415,7 @@ async def call_llm(
                         "temperature": temperature,
                         "max_tokens": max_tokens,
                         "provider_fast_mode": bool(ctx.provider_fast_mode),
+                        "cache_namespace": cache_sequence_id,
                     }
                     key = ctx.llm_key(call_site, fast_cache_request_key_material(fast_cache_kwargs))
                     stored_ok = await fast_cache_client.cache_set(
@@ -4703,6 +4704,7 @@ async def call_llm_activity(  # noqa: C901
     fast_mode_step: Optional[int] = None,
     force_backend_context: bool = False,
     cache_before_extra_user_message: bool = False,
+    cache_sequence_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -4958,6 +4960,7 @@ async def call_llm_activity(  # noqa: C901
                 on_model_detected=on_model_detected,
                 call_site=call_site,
                 skip_cache_write=skip_cache_write,
+                cache_sequence_id=cache_sequence_id,
             )
         finally:
             # Guarantee the background drainer never leaks if streaming raises.

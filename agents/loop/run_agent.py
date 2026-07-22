@@ -1250,6 +1250,9 @@ async def run_agent(  # noqa: C901
                         fast_mode_cache_enabled,
                         goal_text,
                         fast_cache_step,
+                        False,
+                        False,
+                        resolved_cache_sequence_id,
                     ],
                     start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),
@@ -1965,6 +1968,7 @@ async def run_agent(  # noqa: C901
                             gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
                             compute_token_used=v_usage.get("compute_token_used"),
                             from_fast_cache=v_usage.get("from_fast_cache", False),
+                            cache_sequence_id=v_usage.get("cache_sequence_id") or resolved_cache_sequence_id,
                         )
                     except Exception as e:
                         logger.warning(f"on_tokens callback failed for verifier: {e}")
@@ -2187,6 +2191,7 @@ async def run_agent(  # noqa: C901
                         gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
                         compute_token_used=v_usage.get("compute_token_used"),
                         from_fast_cache=v_usage.get("from_fast_cache", False),
+                        cache_sequence_id=v_usage.get("cache_sequence_id") or resolved_cache_sequence_id,
                     )
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed for final verifier: {e}")
@@ -2322,6 +2327,7 @@ async def _compress_context(
                     gpt_token_rotated=usage.get("gpt_token_rotated", False),
                     compute_token_used=usage.get("compute_token_used"),
                     from_fast_cache=usage.get("from_fast_cache", False),
+                    cache_sequence_id=usage.get("cache_sequence_id"),
                 )
             except Exception as e:
                 logger.warning(f"on_tokens callback failed for context_compression: {e}")
