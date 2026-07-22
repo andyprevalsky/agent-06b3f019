@@ -2628,6 +2628,38 @@ def test_compute_token_sync_passes_explicit_prod_source_without_shared_workspace
     assert captured["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == prod_url
 
 
+def test_shared_workspace_compute_source_requires_usable_claude_code():
+    """A reachable shared DB without an agent token must not shadow prod."""
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        shared_context = root / ".context"
+        shared_context.mkdir()
+        (shared_context / "services.json").write_text(
+            '{"status":"running","database":{"port":55135,"use_system_postgres":false}}'
+        )
+        isolated_context = shared_context / "benchmarks" / "isolated"
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            sql = command[-1]
+            stdout = "f\n" if 'FROM "Integration"' in sql else "1\n"
+            return subprocess.CompletedProcess(command, 0, stdout, "")
+
+        with (
+            patch.object(bench, "REPO_ROOT", root),
+            patch.object(bench, "_benchmark_context_path", return_value=isolated_context),
+            patch.object(bench.subprocess, "run", side_effect=fake_run),
+        ):
+            assert bench._shared_workspace_database_url() is None
+
+        assert any('FROM "Integration"' in command[-1] for command in commands)
+
+
 def test_compute_token_source_contract_preserves_prisma_dsn_and_rejects_self_source():
     """Source selection ignores ambient state and never rewrites or self-syncs a DSN."""
     from unittest.mock import patch
@@ -8959,6 +8991,10 @@ async def run_all_tests():
     r.record(
         "compute_token_explicit_prod_source",
         test_compute_token_sync_passes_explicit_prod_source_without_shared_workspace,
+    )
+    r.record(
+        "compute_token_shared_source_requires_claude",
+        test_shared_workspace_compute_source_requires_usable_claude_code,
     )
     r.record(
         "compute_token_source_contract",

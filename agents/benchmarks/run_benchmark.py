@@ -3712,7 +3712,13 @@ def _local_victoria_database_url() -> Optional[str]:
 
 
 def _shared_workspace_database_url() -> Optional[str]:
-    """Return the healthy top-level workspace DB when a run uses an isolated DB."""
+    """Return a credentialed top-level workspace DB for an isolated run.
+
+    Reachability alone is insufficient: the shared runtime can mark its dev
+    token expired and all pooled tokens rate-limited while production already
+    has a replacement. In that state, preferring the shared DB makes the
+    isolated seed retry deterministic stale data instead of consulting prod.
+    """
     shared_context = REPO_ROOT / ".context"
     try:
         if _benchmark_context_path().resolve() == shared_context.resolve():
@@ -3738,16 +3744,31 @@ def _shared_workspace_database_url() -> Optional[str]:
             return None
         database_url = f"postgresql://postgres:postgres@localhost:{port}/victoria"
 
+    usable_claude_query = f"""
+        SELECT EXISTS (
+          SELECT 1
+          FROM "Integration"
+          WHERE name = 'claude_code'
+            AND status = 'CONNECTED'
+            AND (
+              "userId" = '{USER_ID}'
+              OR "poolingEnabled" = TRUE
+            )
+            AND COALESCE(config->>'encryptedCredentials', '') <> ''
+            AND ("rateLimitedUntil" IS NULL OR "rateLimitedUntil" < NOW())
+        );
+    """.strip()
     try:
         result = subprocess.run(
-            ["psql", database_url, "-t", "-A", "-c", "SELECT 1;"],
+            ["psql", database_url, "-t", "-A", "-c", usable_claude_query],
             capture_output=True,
             text=True,
             timeout=5,
         )
     except Exception:
         return None
-    return database_url if result.returncode == 0 else None
+    usable = result.returncode == 0 and result.stdout.strip().lower() in {"t", "true", "1"}
+    return database_url if usable else None
 
 
 def _psql_compatible_database_url(database_url: str) -> str:

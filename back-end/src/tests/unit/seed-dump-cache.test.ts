@@ -80,8 +80,16 @@ test('CLI fails closed (exit 1) on a missing subcommand argument', () => {
 });
 
 async function testHangingEndpointIsBounded(): Promise<void> {
+  let requestObserved = false;
+  let requestWatchdog: NodeJS.Timeout | undefined;
+  let killedByRequestWatchdog = false;
   const server = createServer(() => {
     // Intentionally leave the response open: the client deadline must abort it.
+    requestObserved = true;
+    requestWatchdog = setTimeout(() => {
+      killedByRequestWatchdog = true;
+      child.kill('SIGKILL');
+    }, 2_000);
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -101,17 +109,20 @@ async function testHangingEndpointIsBounded(): Promise<void> {
     },
     stdio: 'pipe',
   });
-  let killedByWatchdog = false;
-  const watchdog = setTimeout(() => {
-    killedByWatchdog = true;
+  let killedByStartupWatchdog = false;
+  const startupWatchdog = setTimeout(() => {
+    killedByStartupWatchdog = true;
     child.kill('SIGKILL');
-  }, 2_000);
+  }, 30_000);
   const [code] = (await once(child, 'close')) as [number | null];
-  clearTimeout(watchdog);
+  clearTimeout(startupWatchdog);
+  if (requestWatchdog) clearTimeout(requestWatchdog);
   server.closeAllConnections();
   server.close();
 
-  assert.equal(killedByWatchdog, false, 'R2 request exceeded its client-owned deadline');
+  assert.equal(killedByStartupWatchdog, false, 'R2 deadline test CLI did not start');
+  assert.equal(requestObserved, true, 'R2 deadline test never reached the hanging endpoint');
+  assert.equal(killedByRequestWatchdog, false, 'R2 request exceeded its client-owned deadline');
   assert.equal(code, 1, 'timed-out cache lookup must fail closed');
 }
 

@@ -77,6 +77,31 @@ def test_sync_uses_verified_shared_workspace_as_compute_token_source():
     assert seen["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://shared/victoria"
 
 
+def test_shared_workspace_source_requires_usable_claude_code(tmp_path: Path):
+    shared_context = tmp_path / ".context"
+    shared_context.mkdir()
+    (shared_context / "services.json").write_text(
+        '{"status":"running","database":{"port":55135,"use_system_postgres":false}}'
+    )
+    isolated_context = shared_context / "benchmarks" / "isolated"
+    commands: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        sql = command[-1]
+        stdout = "f\n" if 'FROM "Integration"' in sql else "1\n"
+        return subprocess.CompletedProcess(command, 0, stdout, "")
+
+    with (
+        patch.object(rb, "REPO_ROOT", tmp_path),
+        patch.object(rb, "_benchmark_context_path", return_value=isolated_context),
+        patch.object(rb.subprocess, "run", side_effect=fake_run),
+    ):
+        assert rb._shared_workspace_database_url() is None
+
+    assert any('FROM "Integration"' in command[-1] for command in commands)
+
+
 def test_sync_prefers_verified_shared_source_and_clears_ambient_source():
     seen: dict[str, dict[str, str]] = {}
 
