@@ -7,11 +7,13 @@ process.env.AMPLITUDE_SECRET_KEY = 'test-secret';
 process.env.AMPLITUDE_API_BASE_URL = 'https://amplitude.test';
 
 const originalFetch = globalThis.fetch;
+let fetchAttempts = 0;
 let funnelAttempts = 0;
 let quotaAttempts = 0;
 let funnelMode: 'concurrent-once' | 'quota' = 'concurrent-once';
 
 globalThis.fetch = (async (input: string | URL | Request): Promise<Response> => {
+  fetchAttempts += 1;
   const url = new URL(input instanceof Request ? input.url : input.toString());
   if (url.pathname === '/api/2/events/list') {
     return Response.json({
@@ -57,11 +59,19 @@ globalThis.fetch = (async (input: string | URL | Request): Promise<Response> => 
 
 async function main(): Promise<void> {
   const { fetchAmplitudeFunnel } = await import('../../domains/admin-health/amplitude');
-  const result = await fetchAmplitudeFunnel(
-    new Date('2026-07-01T00:00:00.000Z'),
-    new Date('2026-07-08T00:00:00.000Z')
-  );
 
+  const overBudget = await fetchAmplitudeFunnel(
+    new Date('2026-01-01T00:00:00.000Z'),
+    new Date('2026-03-26T00:00:00.000Z')
+  );
+  assert.strictEqual(fetchAttempts, 0, 'an 84-day query must be rejected before any fetch');
+  assert.ok(Object.values(overBudget.counts).every((count) => count === null));
+
+  const result = await fetchAmplitudeFunnel(
+    new Date('2026-01-01T00:00:00.000Z'),
+    new Date('2026-03-25T00:00:00.000Z')
+  );
+  assert.strictEqual(fetchAttempts, 3, 'an 83-day query must reach events and funnel fetches');
   assert.strictEqual(funnelAttempts, 2, 'a transient concurrency 429 must be retried once');
   assert.deepStrictEqual(result.counts, {
     landing_page_viewed: 100,
@@ -82,7 +92,7 @@ async function main(): Promise<void> {
     Object.values(quotaResult.counts).every((count) => count === null),
     'a non-concurrency 429 must remain unavailable'
   );
-  process.stdout.write('admin-health Amplitude retry test passed\n');
+  process.stdout.write('admin-health Amplitude retry and budget tests passed\n');
 }
 
 main()

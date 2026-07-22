@@ -784,6 +784,32 @@ def test_payment_benchmark_enables_bundled_frontend_before_stack_start():
         assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
 
 
+def test_payment_benchmark_preserves_lifecycle_stack_contract():
+    """The consolidated local lane must retain the old lifecycle launcher's env."""
+    import os
+    from unittest.mock import patch
+
+    from benchmarks import local
+
+    keys = (
+        "ALLOW_TEMPORAL_CLEANUP",
+        "BENCHMARK_FAST_MODE_CACHE",
+        "SEED_ALLOW_MISSING_GPT_CODE",
+        "AGENTCARD_ONBOARDING_RETURN_URL",
+    )
+    with patch.dict(os.environ, {}, clear=False):
+        for key in keys:
+            os.environ.pop(key, None)
+        local.configure_task_environment(["agent-payment-test-shop"])
+        assert os.environ["ALLOW_TEMPORAL_CLEANUP"] == "true"
+        assert os.environ["BENCHMARK_FAST_MODE_CACHE"] == "false"
+        assert os.environ["SEED_ALLOW_MISSING_GPT_CODE"] == "1"
+        assert (
+            os.environ["AGENTCARD_ONBOARDING_RETURN_URL"]
+            == "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
+        )
+
+
 def test_isolated_benchmark_services_allow_slow_first_sync():
     """System-Postgres fallback must outlive a cold production-data sync."""
     from benchmarks import local
@@ -9009,6 +9035,10 @@ async def run_all_tests():
     r.record(
         "payment_benchmark_bundled_frontend",
         test_payment_benchmark_enables_bundled_frontend_before_stack_start,
+    )
+    r.record(
+        "payment_benchmark_lifecycle_stack_contract",
+        test_payment_benchmark_preserves_lifecycle_stack_contract,
     )
     r.record(
         "isolated_benchmark_slow_first_sync",
