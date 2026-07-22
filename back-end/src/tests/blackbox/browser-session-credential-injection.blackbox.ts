@@ -19,6 +19,8 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
   const browserProfile = 'Default';
   let addedCookies: Array<{ name?: string; domain?: string; value?: string }> = [];
   const injectedScripts: string[] = [];
+  const injectionEvents: string[] = [];
+  let callerBrowserCloseCount = 0;
 
   await prisma.user.createMany({
     data: [
@@ -118,14 +120,18 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
     contexts: () => [
       {
         addCookies: async (cookies: Array<{ name?: string; domain?: string; value?: string }>) => {
+          injectionEvents.push('cookies');
           addedCookies = cookies;
         },
         addInitScript: async (script: string) => {
+          injectionEvents.push('browser-state');
           injectedScripts.push(script);
         },
       },
     ],
-    close: async () => undefined,
+    close: async () => {
+      callerBrowserCloseCount += 1;
+    },
   } as unknown as Browser;
 
   try {
@@ -141,6 +147,8 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
     assert(addedCookies.length === 1, 'invalid cookie row was not filtered');
     assert(addedCookies[0]?.name === 'uk-session', 'wrong cookie injected');
     assert(addedCookies[0]?.value === '', 'valid empty cookie value was filtered out');
+    assert(injectionEvents[0] === 'cookies', 'browser state mutated before cookie injection');
+    assert(callerBrowserCloseCount === 0, 'caller-owned browser connection was closed');
     assert(
       result.passwords.length === 1 && result.passwords[0]?.id === password.id,
       'realm password missing from unified payload'
@@ -209,6 +217,7 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
     );
 
     await prisma.cookie.deleteMany({ where: { userId, name: { not: '' } } });
+    const scriptCountBeforeRejectedCookies = injectedScripts.length;
     let rejectedAllInvalidCookies = false;
     try {
       await prepareSessionCredentials(
@@ -225,6 +234,11 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
         );
     }
     assert(rejectedAllInvalidCookies, 'credential boundary accepted only invalid cookie rows');
+    assert(
+      injectedScripts.length === scriptCountBeforeRejectedCookies,
+      'browser state mutated after credential-critical cookie injection failed'
+    );
+    assert(callerBrowserCloseCount === 0, 'rejected injection closed caller-owned browser');
 
     await prisma.cookie.deleteMany({ where: { userId } });
     let rejectedEmptyCookieBundle = false;

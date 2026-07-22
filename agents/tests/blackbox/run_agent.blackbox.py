@@ -39,6 +39,9 @@ async def _run_single_iteration(
     winddown_window=0,
     response_schema=None,
     llm_tool_calls_sequence=None,
+    llm_tool_calls_factory=None,
+    fast_mode_cache_enabled=False,
+    goal_text=None,
 ):
     from loop.run_agent import run_agent
 
@@ -89,7 +92,9 @@ async def _run_single_iteration(
 
     async def mock_call_llm_structured_streaming(**kwargs):
         selected_tool_calls = tool_calls
-        if llm_tool_calls_sequence is not None:
+        if llm_tool_calls_factory is not None:
+            selected_tool_calls = llm_tool_calls_factory()
+        elif llm_tool_calls_sequence is not None:
             selected_tool_calls = llm_tool_calls_sequence.pop(0)
         return (
             _DummyLLMResult("", selected_tool_calls),
@@ -136,6 +141,8 @@ async def _run_single_iteration(
             skip_status_updates=True,
             is_plan_loop=is_plan_loop,
             response_schema=response_schema,
+            fast_mode_cache_enabled=fast_mode_cache_enabled,
+            goal_text=goal_text,
         )
 
     return result, posted_messages, executed_tools
@@ -1174,6 +1181,8 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
 
 async def test_completed_child_required_tool_is_enforced_inside_direct_activity():
     """The inline activity path retries instead of dispatching a non-completion tool."""
+    import providers.fast_cache.context as fast_cache_context
+
     response_schema = {
         "fields": [
             {"name": "purchase_completed", "type": "bool", "required": True},
@@ -1214,24 +1223,43 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
             },
         },
     ]
-    tool_call_attempts = [
-        [{"tool": "web_search", "query": "repeat completed work"}],
-        [{"tool": "attempt_completion"}],
-    ]
+    cache_contexts = []
+    llm_call_count = 0
+    original_set_context = fast_cache_context.set_context
 
-    result, _, executed = await _run_single_iteration(
-        [],
-        [("attempt_completion", "completion-tool", 1.0)],
-        skip_verification=False,
-        initial_context=context,
-        response_schema=response_schema,
-        verifier_structured_response=child_result,
-        llm_tool_calls_sequence=tool_call_attempts,
-    )
+    def capture_cache_context(cache_context):
+        cache_contexts.append((cache_context.read_enabled, cache_context.should_write, cache_context.base_step))
+        return original_set_context(cache_context)
+
+    def replay_while_cache_is_active():
+        nonlocal llm_call_count
+        llm_call_count += 1
+        cache_context = fast_cache_context.current_context()
+        if cache_context is not None and cache_context.active:
+            return [{"tool": "web_search", "query": "replayed rejected response"}]
+        return [{"tool": "attempt_completion"}]
+
+    with (
+        patch.object(fast_cache_context, "set_context", side_effect=capture_cache_context),
+        patch.object(fast_cache_context, "write_through_enabled_for_user", return_value=False),
+    ):
+        result, _, executed = await _run_single_iteration(
+            [],
+            [("attempt_completion", "completion-tool", 1.0)],
+            skip_verification=False,
+            initial_context=context,
+            response_schema=response_schema,
+            verifier_structured_response=child_result,
+            llm_tool_calls_factory=replay_while_cache_is_active,
+            fast_mode_cache_enabled=True,
+            goal_text="complete from verified child",
+        )
+    original_set_context(None)
 
     assert result["status"] == "completed"
     assert [item["tool_name"] for item in executed] == ["attempt_completion"]
-    assert tool_call_attempts == []
+    assert llm_call_count == 2
+    assert cache_contexts == [(True, True, 1), (False, False, 1)]
 
 
 async def test_max_iterations_runs_final_verifier():
@@ -1468,6 +1496,10 @@ async def run_all_tests():
     await r.record_async(
         "completed_browser_output_forces_parent_completion",
         test_completed_browser_output_forces_parent_completion_instead_of_second_browser,
+    )
+    await r.record_async(
+        "completed_child_required_tool_bypasses_rejected_fast_cache",
+        test_completed_child_required_tool_is_enforced_inside_direct_activity,
     )
     await r.record_async("max_iterations_runs_final_verifier", test_max_iterations_runs_final_verifier)
     await r.record_async("winddown_injects_one_message_near_cap", test_winddown_injects_one_message_near_cap)

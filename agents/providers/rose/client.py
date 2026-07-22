@@ -746,36 +746,26 @@ class RoseClient:
         anthropic_api_key_tool_choice = None
         direct_auth_tools = tools
         effective_tool_choice = tool_choice
-        if (
-            direct_auth_tools is None
-            and response_model is not None
-        ):
+        if direct_auth_tools is None and response_model is not None:
             direct_auth_tools = build_anthropic_tools_from_response_model(
                 response_model,
                 model=pool_spec.claude_auth_model,
             )
-        if claude_auth is not None:
-            # Plain structured-output models are better enforced by Anthropic
-            # `output_config.format` than by a synthetic submit tool. Keep
-            # native tools only for real tool-call models.
-            if not _is_synthetic_output_toolset(direct_auth_tools):
-                claude_auth_tools = direct_auth_tools
-            if claude_auth_tools:
-                # response_model is the explicit signal that "tool_calls is the
-                # only legal response shape." `auto` lets Anthropic emit prose
-                # instead — when it does, the streaming parser shoves text into
-                # the JSON envelope slot and json.loads explodes (Expecting
-                # value: line 1 column 1). Mirror gpt_auth (just below): force
-                # `any` whenever native tools are populated.
-                claude_auth_tool_choice = effective_tool_choice or "any"
-        if gpt_auth is not None:
-            # Plain structured-output models are better enforced by the
-            # Responses `text.format` JSON schema than by a synthetic submit
-            # tool. Keep native tools only for real tool-call models.
-            if not _is_synthetic_output_toolset(direct_auth_tools):
-                gpt_auth_tools = direct_auth_tools
-            if gpt_auth_tools:
-                gpt_auth_tool_choice = effective_tool_choice or "any"
+        # A direct credential can rotate between Claude and GPT inside this
+        # call, so prepare both provider contracts before route selection. If
+        # these projections depend on the credential present at entry, a
+        # cross-type rotation receives a response_format intended for the old
+        # route instead of the AgentAction native tools.
+        if not _is_synthetic_output_toolset(direct_auth_tools):
+            claude_auth_tools = direct_auth_tools
+            gpt_auth_tools = direct_auth_tools
+        if claude_auth_tools:
+            # response_model is the explicit signal that "tool_calls is the
+            # only legal response shape." `auto` lets Anthropic emit prose
+            # instead, so force a native tool call on either direct route.
+            claude_auth_tool_choice = effective_tool_choice or "any"
+        if gpt_auth_tools:
+            gpt_auth_tool_choice = effective_tool_choice or "any"
         # The funded OpenAI API-key route uses the same Responses native
         # tool protocol as gptAuth, so it must preserve real tool schemas even
         # when there is no direct GPT token lease.

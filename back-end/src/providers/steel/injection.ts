@@ -408,6 +408,7 @@ export async function injectUserData(
   // caller's already-validated connection when provided — a fresh CDP
   // handshake to Steel costs 3-5s.
   let browser;
+  const closeBrowserWhenDone = options?.browser === undefined;
 
   try {
     if (options?.browser) {
@@ -436,81 +437,80 @@ export async function injectUserData(
     let permissionsResult = { injected: false, grantCount: 0 };
     let cacheStorageResult = { injected: false, originCount: 0 };
 
-    // Run all injections in parallel for performance
+    // Credential-critical cookies must complete before best-effort browser
+    // state mutates the live context. A failed /prepare-auth request must not
+    // leave localStorage, IndexedDB, permissions, or cache state half-applied.
+    if (hasCookies) {
+      try {
+        log.info(`  [cookies] Transforming ${cookies.length} cookies...`);
+        const CHROME_EPOCH_OFFSET = 11644473600;
+        const playwrightCookies = cookies.map((cookie) => {
+          let expires: number | undefined;
+
+          if (cookie.expiresUtc && cookie.expiresUtc > 0n) {
+            expires = Math.floor(Number(cookie.expiresUtc) / 1000000) - CHROME_EPOCH_OFFSET;
+            if (expires < Date.now() / 1000) {
+              expires = undefined;
+            }
+          }
+
+          return {
+            name: cookie.name,
+            value: cookie.value,
+            domain: cookie.domain,
+            path: cookie.path || '/',
+            expires,
+            secure: cookie.isSecure,
+            httpOnly: cookie.isHttpOnly,
+            sameSite: 'Lax' as const,
+          };
+        });
+
+        const invalidCookies = playwrightCookies.filter((cookie) => cookie.name === '');
+        if (invalidCookies.length > 0) {
+          log.warn('Ignoring cookie rows without names', {
+            cookieBundleId: selectedCookieBundleId ?? 'unknown',
+            invalidCookieCount: invalidCookies.length,
+          });
+        }
+        const validCookies = playwrightCookies.filter((cookie) => cookie.name !== '');
+        if (validCookies.length === 0) {
+          throw new Error(
+            `Cookie bundle ${selectedCookieBundleId ?? 'unknown'} contains ${invalidCookies.length} cookie row(s) without a name`
+          );
+        }
+        // Empty cookie values are valid and must not be filtered out.
+        log.info(
+          `  [cookies] Transform complete, ${validCookies.length} valid (${Date.now() - startTime}ms)`
+        );
+
+        log.info(`  [cookies] Injecting via CDP...`);
+        await context.addCookies(validCookies);
+        log.info(`  [cookies] ✅ Injected (${Date.now() - startTime}ms)`);
+        cookieResult = {
+          injected: true,
+          cookieCount: validCookies.length,
+          authSource: authSource.kind,
+          credentialRef: authSource.credentialRef,
+        };
+      } catch (error) {
+        log.error('Failed to inject cookies', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw new AggregateError(
+          [
+            new Error('Failed to inject cookies', {
+              cause: error instanceof Error ? error : new Error(String(error)),
+            }),
+          ],
+          'Browser credential injection failed'
+        );
+      }
+    }
+
+    // Run non-credential browser-state injections in parallel for performance.
     log.info(`  [4/5] Injecting browser state in parallel...`);
     const injectionPromises: Promise<void>[] = [];
-    const credentialInjectionErrors: Error[] = [];
-
-    // 1. Inject cookies if available
-    if (hasCookies) {
-      injectionPromises.push(
-        (async () => {
-          try {
-            log.info(`  [cookies] Transforming ${cookies.length} cookies...`);
-            const CHROME_EPOCH_OFFSET = 11644473600;
-            const playwrightCookies = cookies.map((cookie) => {
-              let expires: number | undefined;
-
-              if (cookie.expiresUtc && cookie.expiresUtc > 0n) {
-                expires = Math.floor(Number(cookie.expiresUtc) / 1000000) - CHROME_EPOCH_OFFSET;
-                if (expires < Date.now() / 1000) {
-                  expires = undefined;
-                }
-              }
-
-              return {
-                name: cookie.name,
-                value: cookie.value,
-                domain: cookie.domain,
-                path: cookie.path || '/',
-                expires,
-                secure: cookie.isSecure,
-                httpOnly: cookie.isHttpOnly,
-                sameSite: 'Lax' as const,
-              };
-            });
-
-            const invalidCookies = playwrightCookies.filter((cookie) => cookie.name === '');
-            if (invalidCookies.length > 0) {
-              log.warn('Ignoring cookie rows without names', {
-                cookieBundleId: selectedCookieBundleId ?? 'unknown',
-                invalidCookieCount: invalidCookies.length,
-              });
-            }
-            const validCookies = playwrightCookies.filter((cookie) => cookie.name !== '');
-            if (validCookies.length === 0) {
-              throw new Error(
-                `Cookie bundle ${selectedCookieBundleId ?? 'unknown'} contains ${invalidCookies.length} cookie row(s) without a name`
-              );
-            }
-            // Empty cookie values are valid and must not be filtered out.
-            log.info(
-              `  [cookies] Transform complete, ${validCookies.length} valid (${Date.now() - startTime}ms)`
-            );
-
-            // Inject all cookies in one CDP call
-            log.info(`  [cookies] Injecting via CDP...`);
-            await context.addCookies(validCookies);
-            log.info(`  [cookies] ✅ Injected (${Date.now() - startTime}ms)`);
-            cookieResult = {
-              injected: true,
-              cookieCount: validCookies.length,
-              authSource: authSource.kind,
-              credentialRef: authSource.credentialRef,
-            };
-          } catch (error) {
-            log.error('Failed to inject cookies', {
-              error: error instanceof Error ? error.message : String(error),
-            });
-            credentialInjectionErrors.push(
-              new Error('Failed to inject cookies', {
-                cause: error instanceof Error ? error : new Error(String(error)),
-              })
-            );
-          }
-        })()
-      );
-    }
 
     // 2. Fingerprint: NOT injected here on purpose. CDP-level settings
     // (Network.setUserAgentOverride, addInitScript, Emulation overrides) are
@@ -611,9 +611,6 @@ export async function injectUserData(
 
     // Wait for all injections to complete in parallel
     await Promise.all(injectionPromises);
-    if (credentialInjectionErrors.length > 0) {
-      throw new AggregateError(credentialInjectionErrors, 'Browser credential injection failed');
-    }
     log.info(`  [4/5] ✅ All injections complete (${Date.now() - startTime}ms)`);
     return {
       cookies: cookieResult,
@@ -624,12 +621,15 @@ export async function injectUserData(
       cacheStorage: cacheStorageResult,
     };
   } finally {
-    // Always disconnect from the browser (doesn't close the Steel session).
+    // Disconnect only connections opened here. Callers may pass a validated
+    // browser they continue using after credential preparation.
     // Fire-and-forget: the connection is being discarded, and awaiting the
     // websocket teardown put ~350-400ms on the init critical path.
-    if (browser) {
+    if (browser && closeBrowserWhenDone) {
       log.info(`  [5/5] Closing CDP connection (async)...`);
       void browser.close().catch(() => {});
+      log.info(`🔐 [injectUserData] COMPLETE (${Date.now() - startTime}ms total)`);
+    } else if (browser) {
       log.info(`🔐 [injectUserData] COMPLETE (${Date.now() - startTime}ms total)`);
     }
   }

@@ -4463,14 +4463,14 @@ async def test_rotation_storage_state_round_trips_in_real_browser():
             new_context = await browser.new_context()
             new_page = await new_context.new_page()
             await new_page.route("**/*", serve_page)
+            await new_page.goto(url)
+            await new_page.evaluate("localStorage.setItem('stale-key', 'must-be-removed')")
             await _restore_rotation_storage_state(new_page, captured, current_url=url)
 
             cookies = await new_context.cookies(url)
-            assert any(
-                cookie["name"] == "session" and cookie["value"] == "cookie-secret"
-                for cookie in cookies
-            )
+            assert any(cookie["name"] == "session" and cookie["value"] == "cookie-secret" for cookie in cookies)
             assert await new_page.evaluate("localStorage.getItem('checkout')") == "ready"
+            assert await new_page.evaluate("localStorage.getItem('stale-key')") is None
             indexed_db_token = await new_page.evaluate(
                 """async () => await new Promise((resolve, reject) => {
                   const request = indexedDB.open('auth-db');
@@ -5848,7 +5848,11 @@ def test_network_recorder_updates_status_at_capacity():
     assert recorder.entries["r1"]["status"] == 429
     # A NEW request is still refused once at capacity.
     recorder._on_response_received(
-        {"requestId": "r2", "type": "XHR", "response": {"url": "https://x/other", "status": 200, "mimeType": "application/json"}},
+        {
+            "requestId": "r2",
+            "type": "XHR",
+            "response": {"url": "https://x/other", "status": 200, "mimeType": "application/json"},
+        },
         None,
     )
     assert "r2" not in recorder.entries

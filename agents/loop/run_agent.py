@@ -60,6 +60,10 @@ from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model
 logger = structlog.get_logger()
 
 
+class RequiredTurnToolError(LLMStructuredOutputError):
+    """A valid structured result called a tool forbidden on this turn."""
+
+
 def _validate_required_turn_tool(result: Any, required_tool: Optional[str]) -> None:
     """Reject direct-activity responses that violate a required-tool handoff."""
     if not required_tool:
@@ -74,9 +78,7 @@ def _validate_required_turn_tool(result: Any, required_tool: Optional[str]) -> N
             payload = {}
         tool_names.append(payload.get("tool"))
     if len(tool_names) != 1 or tool_names[0] != required_tool:
-        raise LLMStructuredOutputError(
-            f"LLM must call exactly one tool, '{required_tool}'. Got: {tool_names}"
-        )
+        raise RequiredTurnToolError(f"LLM must call exactly one tool, '{required_tool}'. Got: {tool_names}")
 
 
 # Check credits every N iterations
@@ -999,14 +1001,28 @@ async def run_agent(  # noqa: C901
                         except Exception as e:
                             error_message = extract_error_message(e)
                             retryable_structured_result = "Failed to parse" in error_message or (
-                                required_turn_tool is not None
-                                and error_chain_has_type(e, "LLMStructuredOutputError")
+                                required_turn_tool is not None and error_chain_has_type(e, "RequiredTurnToolError")
                             )
                             if llm_attempt < max_llm_attempts and retryable_structured_result:
                                 logger.warning(
                                     f"[run_agent] LLM structured result rejected (attempt {llm_attempt}/{max_llm_attempts}), retrying",
                                     error=error_message,
                                 )
+                                if required_turn_tool is not None and error_chain_has_type(e, "RequiredTurnToolError"):
+                                    # The live response was structurally valid
+                                    # but semantically rejected. An active Fast
+                                    # Mode context could replay that same wrong
+                                    # tool forever, so only semantic retries
+                                    # bypass reads/writes. Transport retries keep
+                                    # the original trajectory position.
+                                    set_context(
+                                        FastCacheContext(
+                                            enabled=False,
+                                            goal=goal_text or "",
+                                            base_step=fast_cache_step,
+                                            write_enabled=False,
+                                        )
+                                    )
                                 # Reset streaming state for retry
                                 sequence[0] = 0
                                 last_text[0] = ""

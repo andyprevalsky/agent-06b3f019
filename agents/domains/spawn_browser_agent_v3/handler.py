@@ -957,6 +957,7 @@ def _rotation_storage_restore_script(storage_state: Dict[str, Any]) -> str:
       // Some origins disable sessionStorage. The per-document promise below
       // still prevents the init script and explicit restore from racing.
     }}
+    localStorage.clear();
     for (const item of state.localStorage || []) localStorage.setItem(item.name, item.value);
     for (const database of state.indexedDB || []) {{
       await new Promise((resolve, reject) => {{
@@ -4659,9 +4660,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             )
             _auth_options_section = _realm_credential_state.auth_options_section
             _password_origins = _realm_credential_state.password_origins
-            _credential_refs_by_secret_ref = (
-                _realm_credential_state.credential_refs_by_secret_ref
-            )
+            _credential_refs_by_secret_ref = _realm_credential_state.credential_refs_by_secret_ref
 
             _secret_refs: Dict[str, str] = {}
             payment_card_refs = (write_lock_resume_state or {}).get("payment_card_refs") or {}
@@ -4834,9 +4833,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         # on every later realm transition.
         auth_options = initial_realm_credential_state.auth_options
         auth_runtime_state = initial_realm_credential_state.auth_runtime_state
-        passkey_ref_by_credential_id.update(
-            initial_realm_credential_state.passkey_ref_by_credential_id
-        )
+        passkey_ref_by_credential_id.update(initial_realm_credential_state.passkey_ref_by_credential_id)
         if initial_realm_credential_state.decrypted_passkeys:
             injected_passkey_count = await dom_service.inject_passkeys(
                 initial_realm_credential_state.decrypted_passkeys
@@ -5052,17 +5049,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 payload,
                 decryption_key=config.payment.decryption_key,
             )
-            if (
-                realm_state.auth_realm != target_realm
-                and not auth_realm_matches_url(realm_state.auth_realm, target_url)
+            if realm_state.auth_realm != target_realm and not auth_realm_matches_url(
+                realm_state.auth_realm, target_url
             ):
-                raise RuntimeError(
-                    f"Credential realm mismatch: requested {target_realm}, got {realm_state.auth_realm}"
-                )
+                raise RuntimeError(f"Credential realm mismatch: requested {target_realm}, got {realm_state.auth_realm}")
 
-            injected_passkey_count = await dom_service.inject_passkeys(
-                realm_state.decrypted_passkeys
-            )
+            injected_passkey_count = await dom_service.inject_passkeys(realm_state.decrypted_passkeys)
             passkey_ref_by_credential_id.update(realm_state.passkey_ref_by_credential_id)
 
             retained_non_password_refs = {
@@ -5098,14 +5090,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 or minted_option.get("account_label")
             )
             minted_phone_label = (
-                minted_option.get("phone")
-                or minted_option.get("agentPhone")
-                or minted_option.get("agent_phone")
+                minted_option.get("phone") or minted_option.get("agentPhone") or minted_option.get("agent_phone")
             )
             minted_account_labels = {
-                str(label).strip().lower()
-                for label in (minted_account_label, minted_phone_label)
-                if label
+                str(label).strip().lower() for label in (minted_account_label, minted_phone_label) if label
             }
             minted_primary_label = minted_account_label or minted_phone_label
             minted_credential_ref = (
@@ -5810,11 +5798,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 recovery_action = rotate_result.get("recovery_action", "ip_rotated")
                 await save_browser_action_message(
                     agent_id=agent_id,
-                    title=(
-                        "Browser provider switched"
-                        if recovery_action == "provider_switched"
-                        else "IP rotated"
-                    ),
+                    title=("Browser provider switched" if recovery_action == "provider_switched" else "IP rotated"),
                     task_id=task_id,
                     message=rotation_message,
                     status=MessageStatus.FINISHED,

@@ -4037,6 +4037,71 @@ async def test_client_rotates_compute_token_across_providers_before_waterfall():
     assert usage["compute_token_used"]["accessToken"] == "fresh-gpt"
 
 
+async def test_client_rotation_preserves_native_tool_contract_across_provider_types():
+    """A Claude->GPT rotation must retain AgentAction native tools."""
+    AgentAction = create_agent_action_model(["spawn_agent", "attempt_completion"])
+    captured_gpt_request = {}
+
+    async def rate_limited_claude(**_kwargs):
+        if False:
+            yield StreamChunk(kind="done", data={})
+        raise RoseRateLimitError("Claude OAuth rate limited")
+
+    async def successful_gpt(**kwargs):
+        captured_gpt_request.update(kwargs)
+        yield StreamChunk(kind="metadata", data={"actual_model": "gpt-5.6-terra-gpt"})
+        yield StreamChunk(
+            kind="tool_call",
+            data={"name": "attempt_completion", "arguments": {}, "id": "call-complete"},
+        )
+        yield StreamChunk(
+            kind="usage",
+            data={"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+        )
+        yield StreamChunk(kind="done", data={})
+
+    async def fetch_fresh(user_id):
+        return GptAuthContext(
+            token="fresh-gpt",
+            account_id="acct-fresh",
+            source="pool",
+            user_id=user_id,
+            pool_token_id="pool-gpt",
+            fetch_fresh=None,
+            max_rotations=1,
+        )
+
+    auth = ClaudeAuthContext(
+        token="rate-limited-claude",
+        source="pool",
+        user_id="user-1",
+        pool_token_id="pool-claude",
+        fetch_fresh=fetch_fresh,
+        max_rotations=1,
+    )
+    with (
+        patch("providers.rose.client.claude_auth_complete", rate_limited_claude),
+        patch("providers.rose.client.gpt_auth_complete", successful_gpt),
+    ):
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-lite",
+                messages=[{"role": "user", "content": "Use the browser child"}],
+                response_model=AgentAction,
+                claude_auth=auth,
+                call_site="execute_loop",
+            )
+        )
+
+    assert any(chunk.kind == "tool_call" for chunk in chunks)
+    assert captured_gpt_request["response_format"] is None
+    assert {tool["name"] for tool in captured_gpt_request["tools"]} == {
+        "spawn_agent",
+        "attempt_completion",
+    }
+    assert captured_gpt_request["tool_choice"] == "any"
+
+
 async def test_client_splits_pydantic_model_to_claude_native_tools():
     AgentAction = create_agent_action_model(["wait_for", "attempt_completion"])
 
@@ -5283,6 +5348,10 @@ async def run_all_tests():
     await r.record_async(
         "client_compute_rotates_across_providers",
         test_client_rotates_compute_token_across_providers_before_waterfall,
+    )
+    await r.record_async(
+        "client_rotation_preserves_native_tool_contract",
+        test_client_rotation_preserves_native_tool_contract_across_provider_types,
     )
     await r.record_async("client_pydantic_native_tools_split", test_client_splits_pydantic_model_to_claude_native_tools)
     await r.record_async(
