@@ -183,6 +183,28 @@ if RCA_RUN_STATUS=unknown RCA_PR_IS_DRAFT=true AGENT_ID=d29e631e-b78a-40dd-8f0b-
   exit 1
 fi
 
+pr_pages='[[
+  {"number":1,"state":"open","title":"auto-RCA: Production agent failure d29e631e-b78a-40dd-8f0b-732d1143a854","html_url":"https://github.com/Rose-Ai-Labs/rose/pull/1","body":"ok","draft":true,"base":{"ref":"main"},"head":{"ref":"auto-rca/d29e631e-b78a-40dd-8f0b-732d1143a854","repo":{"full_name":"Rose-Ai-Labs/rose"}}},
+  {"number":2,"state":"open","title":"auto-RCA: Production agent failure d29e631e-b78a-40dd-8f0b-732d1143a854","html_url":"https://github.com/attacker/rose/pull/2","body":"fork","draft":true,"base":{"ref":"main"},"head":{"ref":"auto-rca/d29e631e-b78a-40dd-8f0b-732d1143a854","repo":{"full_name":"attacker/rose"}}},
+  {"number":3,"state":"open","title":"unrelated","html_url":"https://github.com/Rose-Ai-Labs/rose/pull/3","body":"wrong","draft":true,"base":{"ref":"main"},"head":{"ref":"auto-rca/d29e631e-b78a-40dd-8f0b-732d1143a854","repo":{"full_name":"Rose-Ai-Labs/rose"}}}
+]]'
+selected_prs="$(printf '%s' "$pr_pages" | \
+  AGENT_ID=d29e631e-b78a-40dd-8f0b-732d1143a854 GITHUB_REPOSITORY=Rose-Ai-Labs/rose \
+  "$RCA_TOOL" select-agent-prs)"
+[ "$(printf '%s' "$selected_prs" | jq 'length')" -eq 1 ] || {
+  echo "FAIL: exact PR selection admitted a fork or unrelated lifecycle" >&2
+  exit 1
+}
+[ "$(printf '%s' "$selected_prs" | jq -r '.[0].number')" -eq 1 ] || exit 1
+duplicate_pr_pages="$(printf '%s' "$pr_pages" | jq \
+  '.[0] += [{"number":4,"state":"open","title":"auto-RCA: Production agent failure d29e631e-b78a-40dd-8f0b-732d1143a854","html_url":"https://github.com/Rose-Ai-Labs/rose/pull/4","body":"duplicate","draft":true,"base":{"ref":"main"},"head":{"ref":"auto-rca/d29e631eb78a-456","repo":{"full_name":"Rose-Ai-Labs/rose"}}}]')"
+if printf '%s' "$duplicate_pr_pages" | \
+  AGENT_ID=d29e631e-b78a-40dd-8f0b-732d1143a854 GITHUB_REPOSITORY=Rose-Ai-Labs/rose \
+  "$RCA_TOOL" select-agent-prs >/dev/null 2>&1; then
+  echo "FAIL: multiple open lifecycle PRs were silently accepted" >&2
+  exit 1
+fi
+
 : > "$TEST_ROOT/gh-calls.txt"
 PATH="$FAKE_BIN:$PATH" \
 CAPTURED_BODY="$CAPTURED_BODY" \
@@ -456,7 +478,7 @@ grep -Fq 'Workflow run: https://github.com/Rose-Ai-Labs/rose/actions/runs/123' "
   exit 1
 }
 
-for state in running revising blocked draft ready shipped; do
+for state in running revising blocked draft ready shipped cancelled; do
   case "$state" in
     running) expected_label='🟡 RCA running' ;;
     revising) expected_label='🟡 Revising RCA from PR feedback' ;;
@@ -464,6 +486,7 @@ for state in running revising blocked draft ready shipped; do
     draft) expected_label='🔵 Draft PR open (needs attention)' ;;
     ready) expected_label='🟢 Ready for review — approve to ship' ;;
     shipped) expected_label='✅ Shipped — merged to main' ;;
+    cancelled) expected_label='⚪ Cancelled — PR closed without merge' ;;
   esac
   message="$(
     AGENT_ID="d29e631e-b78a-40dd-8f0b-732d1143a854" \
@@ -480,7 +503,7 @@ for state in running revising blocked draft ready shipped; do
   grep -Fq '<https://github.com/Rose-Ai-Labs/rose/pull/999|PR>' <<< "$message" || exit 1
   grep -Fq '<https://github.com/Rose-Ai-Labs/rose/actions/runs/123|GH Action RCA Run>' <<< "$message" || exit 1
   grep -Fq "*Agent ID:* \`d29e631e-b78a-40dd-8f0b-732d1143a854\`" <<< "$message" || exit 1
-  if [ "$state" = shipped ]; then
+  if [ "$state" = shipped ] || [ "$state" = cancelled ]; then
     ! grep -Fq '*Feedback:*' <<< "$message" || exit 1
   else
     grep -Fq "*Feedback:* Add a top-level Conversation comment \`/rca <requested changes>\` on the PR." <<< "$message" || exit 1

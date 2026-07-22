@@ -158,6 +158,56 @@ reconcile_plan() {
   fi
 }
 
+select_agent_prs() {
+  require_agent_id
+  require_repo
+  python3 - "$AGENT_ID" "$GITHUB_REPOSITORY" 3<&0 <<'PY'
+import json
+import os
+import re
+import sys
+
+agent_id, repository = sys.argv[1:3]
+payload = json.load(os.fdopen(3))
+pulls = []
+for page in payload if isinstance(payload, list) else []:
+    if isinstance(page, list):
+        pulls.extend(page)
+    elif isinstance(page, dict):
+        pulls.append(page)
+
+title = f"auto-RCA: Production agent failure {agent_id}"
+short_id = re.sub(r"[^A-Za-z0-9]", "", agent_id)[:12]
+legacy = re.compile(rf"^auto-rca/{re.escape(short_id)}-[0-9]+$")
+candidates = []
+for pull in pulls:
+    head = pull.get("head") or {}
+    base = pull.get("base") or {}
+    head_repo = head.get("repo") or {}
+    branch = head.get("ref") or ""
+    if (
+        pull.get("state") == "open"
+        and pull.get("title") == title
+        and base.get("ref") == "main"
+        and head_repo.get("full_name") == repository
+        and (branch == f"auto-rca/{agent_id}" or legacy.fullmatch(branch))
+    ):
+        candidates.append({
+            "number": pull.get("number"),
+            "title": pull.get("title"),
+            "url": pull.get("html_url"),
+            "body": pull.get("body") or "",
+            "headRefName": branch,
+            "baseRefName": base.get("ref"),
+            "isDraft": bool(pull.get("draft")),
+        })
+
+if len(candidates) > 1:
+    raise SystemExit(f"multiple open Auto RCA PRs violate the one-PR invariant for {agent_id}")
+print(json.dumps(candidates, separators=(",", ":")))
+PY
+}
+
 collect_evidence() {
   local temp_file agent_json context_json logs_json
   require_agent_id
@@ -685,6 +735,7 @@ slack_message() {
     draft) label='🔵 Draft PR open (needs attention)' ;;
     ready) label='🟢 Ready for review — approve to ship' ;;
     shipped) label='✅ Shipped — merged to main' ;;
+    cancelled) label='⚪ Cancelled — PR closed without merge' ;;
     *) fail "RCA_STATE is invalid" ;;
   esac
   [ "$fe_url" = "https://roselabs.ai/?agent-id=$AGENT_ID" ] || fail "RCA_FE_URL is invalid"
@@ -696,7 +747,7 @@ slack_message() {
   printf '*Current state:* %s\n' "$label"
   printf '*Links:* <%s|FE View> · <%s|PR> · <%s|GH Action RCA Run>\n' "$fe_url" "$pr_url" "$run_url"
   printf '%s\n' "*Agent ID:* \`$AGENT_ID\`"
-  if [ "$state" != shipped ]; then
+  if [ "$state" != shipped ] && [ "$state" != cancelled ]; then
     printf '%s\n' "*Feedback:* Add a top-level Conversation comment \`/rca <requested changes>\` on the PR."
   fi
 }
@@ -767,6 +818,7 @@ slack_update() {
 case "${1:-}" in
   dispatch-plan) [ "$#" -eq 1 ] || fail "dispatch-plan takes no arguments"; dispatch_plan ;;
   reconcile-plan) [ "$#" -eq 1 ] || fail "reconcile-plan takes no arguments"; reconcile_plan ;;
+  select-agent-prs) [ "$#" -eq 1 ] || fail "select-agent-prs takes JSON on stdin and no arguments"; select_agent_prs ;;
   collect-evidence) [ "$#" -eq 1 ] || fail "collect-evidence takes no arguments"; collect_evidence ;;
   evidence) [ "$#" -eq 1 ] || fail "evidence takes no arguments"; evidence ;;
   verification) [ "$#" -eq 1 ] || fail "verification takes no arguments"; verification ;;
@@ -783,5 +835,5 @@ case "${1:-}" in
   mark-ready) [ "$#" -eq 1 ] || fail "mark-ready takes no arguments"; mark_ready ;;
   slack-message) [ "$#" -eq 1 ] || fail "slack-message takes no arguments"; slack_message ;;
   slack-update) [ "$#" -eq 1 ] || fail "slack-update takes no arguments"; slack_update ;;
-  *) fail "usage: scripts/auto-rca-tool {dispatch-plan|reconcile-plan|collect-evidence|evidence|verification|verify-repro|offline-gates|smoke-gates|publish-draft|begin-draft|bind-slack|completion-status|require-complete|ensure-draft|mark-ready|slack-message|slack-update}" ;;
+  *) fail "usage: scripts/auto-rca-tool {dispatch-plan|reconcile-plan|select-agent-prs|collect-evidence|evidence|verification|verify-repro|offline-gates|smoke-gates|publish-draft|begin-draft|bind-slack|completion-status|require-complete|ensure-draft|mark-ready|slack-message|slack-update}" ;;
 esac

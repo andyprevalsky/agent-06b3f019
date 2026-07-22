@@ -6,8 +6,8 @@ run-name: >-
 # State machine:
 # failure -> one draft PR + one Slack card -> running/revising -> blocked|ready
 # -> top-level `/rca ...` Conversation comment -> revising -> blocked|ready
-# -> human merge -> shipped. A trusted verifier, not investigator prose, owns
-# every transition out of draft.
+# -> human merge -> shipped, or close without merge -> cancelled. A trusted
+# verifier, not investigator prose, owns every transition out of draft.
 
 on:
   repository_dispatch:
@@ -114,9 +114,11 @@ jobs:
             agent_id="${INITIAL_AGENT_ID:-}"
             [[ "$agent_id" =~ $uuid_re ]] || { echo "agent_id must be a UUID" >&2; exit 1; }
             title="auto-RCA: Production agent failure $agent_id"
-            existing="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" \
-              --json title,url,body,headRefName,baseRefName,isDraft \
-              --jq "map(select(.title == \"$title\" and .baseRefName == \"main\" and (.headRefName | startswith(\"auto-rca/\")))) | .[0] // empty")"
+            open_pr_pages="$(gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/pulls?state=open&base=main&per_page=100")"
+            matching_prs="$(printf '%s' "$open_pr_pages" | AGENT_ID="$agent_id" \
+              /usr/local/bin/rose-auto-rca-tool select-agent-prs)"
+            existing="$(printf '%s' "$matching_prs" | jq -c '.[0] // empty')"
             if [ -n "$existing" ]; then
               branch="$(printf '%s' "$existing" | jq -r '.headRefName')"
               short_id="$(printf '%s' "$agent_id" | tr -cd 'a-zA-Z0-9' | cut -c1-12)"
@@ -177,6 +179,19 @@ jobs:
           [ -n "$affected_user_name" ] || affected_user_name='Affected user unavailable'
           printf 'AFFECTED_USER_NAME=%s\n' "$affected_user_name" >> "$GITHUB_ENV"
 
+      - name: Slack — immediately mark reviewer feedback in progress
+        id: slack_revision_active
+        if: env.RCA_MODE == 'revision' && env.RCA_NOOP != 'true' && env.SLACK_CHANNEL != ''
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          RCA_RECONCILE_SLACK: ${{ env.SLACK_TS == '' && 'true' || 'false' }}
+          RCA_STATE: revising
+          RCA_FE_URL: https://roselabs.ai/?agent-id=${{ env.AGENT_ID }}
+          RCA_PR_URL: ${{ env.RCA_PR_URL }}
+          RCA_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: /usr/local/bin/rose-auto-rca-tool slack-update
+
       - name: Checkout RCA target
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -212,19 +227,19 @@ jobs:
 
       - name: Slack — mark investigation active
         id: slack_active
-        if: env.SLACK_CHANNEL != '' && env.RCA_NOOP != 'true'
+        if: env.SLACK_CHANNEL != '' && env.RCA_NOOP != 'true' && env.RCA_MODE != 'revision'
         shell: bash
         env:
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           RCA_RECONCILE_SLACK: ${{ env.RCA_MODE != 'initial' && env.SLACK_TS == '' && 'true' || 'false' }}
-          RCA_STATE: ${{ env.RCA_MODE == 'revision' && 'revising' || 'running' }}
+          RCA_STATE: running
           RCA_FE_URL: https://roselabs.ai/?agent-id=${{ env.AGENT_ID }}
           RCA_PR_URL: ${{ steps.begin.outputs.pr_url }}
           RCA_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: /usr/local/bin/rose-auto-rca-tool slack-update
 
       - name: Bind Slack lifecycle handle to the PR
-        if: steps.slack_active.outcome == 'success'
+        if: steps.slack_active.outcome == 'success' || steps.slack_revision_active.outcome == 'success'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
