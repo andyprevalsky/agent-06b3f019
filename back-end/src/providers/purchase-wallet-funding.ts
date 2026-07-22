@@ -274,9 +274,9 @@ async function performPurchaseWalletFundingReclaim(
 
 /**
  * Coalesce same-process retries for one provider transfer. The database state machine keeps the
- * result idempotent, but invoking AgentCard's close/release polling loop twice at once is not a
- * harmless read: each loop periodically replays `close_card`. All callers observe the same outcome,
- * and a later retry may start after this attempt has settled.
+ * result idempotent, and one owner must observe the transfer release before a later retry starts.
+ * `close_card` belongs exclusively to the card-provider owner; this funding operation is read-only
+ * provider reconciliation and must never replay that mutation.
  */
 export async function reclaimPurchaseWalletFunding(
   purchase: Pick<PurchaseSpend, 'id' | 'userId' | 'agentId' | 'totalCents'> & {

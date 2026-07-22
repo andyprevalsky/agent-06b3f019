@@ -380,7 +380,7 @@ async function main(): Promise<void> {
       async () => {
         throw new Error('429 Too many requests');
       },
-      { attempts: 2, delayMs: 0, replayCloseEvery: 5 }
+      { attempts: 2, delayMs: 0 }
     );
     await assert.rejects(
       () =>

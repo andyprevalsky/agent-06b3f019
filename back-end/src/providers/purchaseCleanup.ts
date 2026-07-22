@@ -26,7 +26,7 @@ import {
 const log = createLogger('PurchaseCleanup');
 const STALE_CHARGING_MS = Number(process.env.PURCHASE_STALE_CHARGING_MS ?? 15 * 60 * 1000);
 // One provider release pass polls for roughly a minute. Do not let the minute cron start a second
-// close/release loop while that pass is still alive; crashed attempts become retryable on the next
+// release-observation loop while that pass is still alive; crashed attempts become retryable on the next
 // tick after this lease window.
 const STALE_RECLAIMING_MS = 2 * 60 * 1000;
 

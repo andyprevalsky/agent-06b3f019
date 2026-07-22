@@ -1084,6 +1084,35 @@ async def test_abandonment_retries_a_pending_company_release():
     assert recoveries == 1
 
 
+async def test_abandonment_timeout_surfaces_the_last_durable_mismatch():
+    """A bounded cleanup wait cannot report success while funding remains in flight."""
+    import pytest
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    lifecycle = {
+        "purchase": {"status": "HELD"},
+        "walletFunding": {"status": "RECLAIMING"},
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "did not reach the expected terminal state before timeout: "
+            "payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'"
+        ),
+    ):
+        await _wait_for_expected_payment_lifecycle(
+            "http://localhost:55120",
+            "agent-123",
+            get_task_by_name("agent-payment-abandonment"),
+            lifecycle,
+            timeout_seconds=0,
+            poll_interval_seconds=0,
+        )
+
+
 async def test_abandonment_waits_between_funding_reclaim_and_purchase_void():
     """The reconciler persists RECLAIMED before its refund and purchase-status updates."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -9479,6 +9508,10 @@ async def run_all_tests():
     await r.record_async(
         "abandonment_retries_pending_company_release",
         test_abandonment_retries_a_pending_company_release,
+    )
+    await r.record_async(
+        "abandonment_timeout_surfaces_durable_mismatch",
+        test_abandonment_timeout_surfaces_the_last_durable_mismatch,
     )
     await r.record_async(
         "abandonment_waits_between_reclaim_and_void",

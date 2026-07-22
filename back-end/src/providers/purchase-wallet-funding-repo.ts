@@ -118,9 +118,9 @@ export async function markWalletFundingReclaiming(
 /**
  * Claim the first close/reclaim attempt for a funded transfer. Unlike
  * `markWalletFundingReclaiming`, this is intentionally a FUNDED-only CAS: a second cleanup that
- * arrives while the first one is polling AgentCard must not replay `close_card`. AgentCard declares
- * close idempotent, but overlapping closes can strand a sandbox company transfer as `consumed`
- * after the card is already CLOSED/$0, leaving no provider-side recovery operation.
+ * arrives while the first one is polling AgentCard must not replay `close_card`. Even though
+ * AgentCard declares close idempotent, the mutation has exactly one owner; all retry paths only
+ * observe the resulting transfer release.
  */
 export async function claimWalletFundingReclaim(
   id: string,
@@ -138,7 +138,7 @@ export async function claimWalletFundingReclaim(
 
 /**
  * Take ownership of a retryable reclaim. The stale timestamp is part of the compare-and-set so
- * concurrent cron workers cannot both revive the same expired lease and replay provider cleanup.
+ * concurrent cron workers cannot both revive the same expired lease and poll provider cleanup.
  * FUNDED is included for legacy rows whose purchase was marked FUNDING_RECLAIM_FAILED before the
  * funding row advanced to RECLAIM_FAILED.
  */
