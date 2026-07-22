@@ -22,6 +22,10 @@ import { findWalletFundingByPurchaseId } from './purchase-wallet-funding-repo';
 
 const log = createLogger('PurchaseCleanup');
 const STALE_CHARGING_MS = Number(process.env.PURCHASE_STALE_CHARGING_MS ?? 15 * 60 * 1000);
+// One provider release pass polls for roughly a minute. Do not let the minute cron start a second
+// close/release loop while that pass is still alive; crashed attempts become retryable on the next
+// tick after this lease window.
+const STALE_RECLAIMING_MS = 2 * 60 * 1000;
 
 /**
  * Funding states that mean *we already closed this card to reclaim it* (or finished doing so). Once
@@ -145,7 +149,15 @@ export async function cleanupAgentPurchaseCards(
       } else {
         // Claim the reclaim before closing the card so a concurrent pass can't read the now
         // not-live card as merchant-spent while the funding is still FUNDED.
-        await beginPurchaseWalletReclaim(purchase.id);
+        const reclaimClaim = await beginPurchaseWalletReclaim(purchase.id);
+        if (reclaimClaim === 'already_owned') {
+          log.info('Purchase funding reclaim is already owned; skipping duplicate card close', {
+            agent_id: agentId,
+            purchase_id: purchase.id,
+            card_id: cardId,
+          });
+          continue;
+        }
         await activeCardProvider.closeCard(cardId);
         try {
           await reclaimPurchaseWalletFunding(
@@ -238,6 +250,7 @@ export async function reconcileFailedPurchaseFundingReclaims(
   walletFundingProvider?: WalletFundingProvider,
   scope?: PurchaseReconcileScope
 ): Promise<void> {
+  const staleReclaimingBefore = new Date(Date.now() - STALE_RECLAIMING_MS);
   const purchases = await prisma.purchaseSpend.findMany({
     where: {
       ...reconcileUserFilter(scope),
@@ -245,7 +258,9 @@ export async function reconcileFailedPurchaseFundingReclaims(
         { status: PurchaseSpendStatus.FUNDING_RECLAIM_FAILED },
         {
           status: PurchaseSpendStatus.HELD,
-          walletFunding: { is: { status: 'RECLAIMING' } },
+          walletFunding: {
+            is: { status: 'RECLAIMING', updatedAt: { lte: staleReclaimingBefore } },
+          },
         },
       ],
       stripePaymentIntentId: { not: null },
@@ -397,7 +412,14 @@ export async function reconcileDissolvedPurchaseHolds(
 
     // Claim the reclaim before closing the card so a concurrent pass can't read the now not-live
     // card as merchant-spent while the funding is still FUNDED.
-    await beginPurchaseWalletReclaim(purchase.id);
+    const reclaimClaim = await beginPurchaseWalletReclaim(purchase.id);
+    if (reclaimClaim === 'already_owned') {
+      log.info('Purchase funding reclaim is already owned; skipping duplicate card close', {
+        purchase_id: purchase.id,
+        card_id: cardId,
+      });
+      continue;
+    }
     await activeCardProvider.closeCard(cardId);
     try {
       await reclaimPurchaseWalletFunding(

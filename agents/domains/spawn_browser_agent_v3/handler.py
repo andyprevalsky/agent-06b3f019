@@ -5028,7 +5028,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 session_id=session_id,
                 output_dir=recording_output_dir,
             )
-            if recorder and task_id:
+            if recorder and recorder.persists_network_log and task_id:
                 await save_browser_action_message(
                     agent_id=agent_id,
                     title="Browser network recording started",
@@ -5785,6 +5785,46 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             if unified_action is not llm_result.get("action"):
                 llm_result = dict(llm_result)
                 llm_result["action"] = unified_action
+
+            # Some anti-bot services return an explicit network-reputation
+            # verdict even when the rendered page no longer looks challenged.
+            # Reject that exit deterministically before executing the model's
+            # next action. The synthetic recovery gets its own stable tool-call
+            # lifecycle and takes the solver -> config-search fast path below.
+            if browser_network_recorder is None and network_recorder_task is not None and network_recorder_task.done():
+                with contextlib.suppress(Exception):
+                    browser_network_recorder = network_recorder_task.result()
+            provider_exit_rejection = (
+                browser_network_recorder.pop_provider_exit_rejection()
+                if browser_network_recorder is not None
+                else None
+            )
+            if provider_exit_rejection is not None:
+                # The streamed model action was superseded before execution;
+                # close it accurately instead of stitching its tool id onto the
+                # independently generated recovery lifecycle below.
+                await browser_stream.finish_tools(status="ERROR")
+                rejected_action = unified_action.get("action", "")
+                recovery_tool_call_id = f"provider-exit-recovery-{uuid_module.uuid4()}"
+                unified_action = {
+                    "action": "recover_from_challenge",
+                    "thinking": "",
+                    "params": {
+                        "reason": "The current provider IP was explicitly rejected for fingerprint reuse.",
+                        "provider_exit_rejected": True,
+                    },
+                }
+                llm_result = {
+                    **llm_result,
+                    "action": unified_action,
+                    "tool_call_id": recovery_tool_call_id,
+                }
+                logger.warning(
+                    "Replacing browser action with provider-exit recovery",
+                    rejected_action=rejected_action,
+                    rejection=provider_exit_rejection,
+                    tool_call_id=recovery_tool_call_id,
+                )
             action_name = unified_action.get("action", "")
             thinking = unified_action.get("thinking", "")
 
@@ -6082,6 +6122,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         ),
                         search_configs=search_browser_configs,
                         progress=emit_recovery_progress,
+                        provider_exit_rejected=bool(
+                            unified_action.get("params", {}).get("provider_exit_rejected")
+                        ),
                     )
 
                     config_result = recovery.config_result

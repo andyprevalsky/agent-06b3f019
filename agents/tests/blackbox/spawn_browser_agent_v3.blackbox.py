@@ -6661,6 +6661,131 @@ async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear(
     assert recorder._ignored_request_ids == set()
 
 
+async def test_network_recorder_emits_one_explicit_fingerprint_exit_rejection_per_browser():
+    """Only the exact structured detector verdict may trigger provider search.
+
+    Duplicate responses from one browser and late bodies from a discarded browser
+    must not schedule extra recovery runs.
+    """
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._closed = False
+    recorder._max_body_bytes = 262_144
+    recorder._body_index = 0
+    recorder._started_at = 0.0
+    recorder._network_generation = 4
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder.persists_network_log = False
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {
+        "4:r1": {
+            "browser_generation": 4,
+            "mime_type": "application/json",
+            "url": "https://shop.test/verify?token=secret",
+        }
+    }
+    poison_body = {
+        "score": 0.087,
+        "detections": [
+            {
+                "category": "fingerprint",
+                "reason": "IP has used many different fingerprints",
+            }
+        ],
+    }
+    get_body = AsyncMock(return_value={"body": json.dumps(poison_body), "base64Encoded": False})
+    client = SimpleNamespace(send=SimpleNamespace(Network=SimpleNamespace(getResponseBody=get_body)))
+
+    await recorder._fetch_response_body("4:r1", "r1", "cdp-4", client)
+    rejection = recorder.pop_provider_exit_rejection()
+    assert rejection == {
+        "reason": "ip has used many different fingerprints",
+        "url": "https://shop.test/verify",
+        "browser_generation": 4,
+    }
+    assert recorder.entries == {}, "monitor-only request metadata must not accumulate"
+    assert recorder.pop_provider_exit_rejection() is None
+
+    # A duplicate verdict on the same exit is one recovery signal, not a loop.
+    await recorder._fetch_response_body("4:r1", "r1", "cdp-4", client)
+    assert recorder.pop_provider_exit_rejection() is None
+
+    # A late body from the outgoing generation cannot poison the promoted one.
+    recorder._network_generation = 5
+    recorder._rejected_network_generations.clear()
+    await recorder._fetch_response_body("4:r1", "r1", "cdp-4", client)
+    assert recorder.pop_provider_exit_rejection() is None
+
+    # Scores and prose alone are intentionally insufficient.
+    recorder.entries["5:r2"] = {
+        "browser_generation": 5,
+        "mime_type": "application/json",
+        "url": "https://shop.test/score",
+    }
+    get_body.return_value = {
+        "body": json.dumps({"score": 0.9, "message": "IP has used many different fingerprints"}),
+        "base64Encoded": False,
+    }
+    await recorder._fetch_response_body("5:r2", "r2", "cdp-5", client)
+    assert recorder.pop_provider_exit_rejection() is None
+    assert recorder.entries == {}
+
+
+async def test_provider_exit_monitor_runs_without_production_body_log_persistence():
+    """Disabling local recordings must not disable the lightweight prod signal."""
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    register = SimpleNamespace(
+        Network=SimpleNamespace(
+            requestWillBeSent=MagicMock(),
+            responseReceived=MagicMock(),
+            loadingFinished=MagicMock(),
+            loadingFailed=MagicMock(),
+        )
+    )
+    send = SimpleNamespace(Network=SimpleNamespace(enable=AsyncMock()))
+    cdp_client = SimpleNamespace(register=register, send=send)
+    browser_session = SimpleNamespace(
+        cdp_client=cdp_client,
+        get_or_create_cdp_session=AsyncMock(return_value=SimpleNamespace(session_id="cdp-prod")),
+    )
+    previous = {
+        name: os.environ.get(name)
+        for name in (
+            "BROWSER_AGENT_RECORDINGS",
+            "BROWSER_AGENT_NETWORK_RECORDING",
+            "BROWSER_AGENT_PROVIDER_EXIT_MONITORING",
+        )
+    }
+    try:
+        os.environ["BROWSER_AGENT_RECORDINGS"] = "0"
+        os.environ["BROWSER_AGENT_NETWORK_RECORDING"] = "0"
+        os.environ["BROWSER_AGENT_PROVIDER_EXIT_MONITORING"] = "1"
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = await BrowserNetworkRecorder.create(
+                browser_session=browser_session,
+                agent_id="agent-prod",
+                task_id="task-prod",
+                session_id="session-prod",
+                output_dir=Path(tmp) / "recording",
+            )
+            assert recorder is not None
+            assert recorder.persists_network_log is False
+            assert not recorder.network_dir.exists()
+            assert await recorder.close() is None
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 async def test_execute_action_read_network_requests():
     """execute_action returns captured traffic when a recorder is present, and a
     clear error when network capture is inactive (never a silent success)."""
@@ -6689,6 +6814,17 @@ async def test_execute_action_read_network_requests():
     out_none = await execute_action(dom, ah, {"action": "read_network_requests", "params": {}})
     assert out_none["success"] is False
     assert "not active" in out_none["error"]
+
+    monitor_only = MagicMock(persists_network_log=False)
+    out_monitor = await execute_action(
+        dom,
+        ah,
+        {"action": "read_network_requests", "params": {}},
+        browser_network_recorder=monitor_only,
+    )
+    assert out_monitor["success"] is False
+    assert "not active" in out_monitor["error"]
+    monitor_only.query_requests.assert_not_called()
 
 
 async def test_execute_action_request_payment_card_requests_workflow_approval():
@@ -11885,6 +12021,11 @@ def test_challenge_recovery_reuses_one_tool_call_id_for_every_stage():
     assert "recovery_call_id = str(uuid_module.uuid4())" not in recovery_branch
     assert "status=MessageStatus.IN_PROGRESS" in recovery_branch
     assert 'restore_cookies=not bool(config_result.get("storage_state_preloaded"))' in recovery_branch
+    activity_source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
+    assert "pop_provider_exit_rejection()" in activity_source
+    assert '"provider_exit_rejected": True' in activity_source
+    assert "provider_exit_rejected=bool(" in recovery_branch
+    assert 'await browser_stream.finish_tools(status="ERROR")' in activity_source
 
 
 async def test_playwright_page_tracks_browser_use_tab_focus():
@@ -12538,6 +12679,14 @@ async def run_all_tests():
     await r.record_async(
         "network_recorder_terminal_requests_bounded",
         test_network_recorder_terminal_requests_do_not_accumulate_after_clear,
+    )
+    await r.record_async(
+        "network_recorder_fingerprint_exit_rejection",
+        test_network_recorder_emits_one_explicit_fingerprint_exit_rejection_per_browser,
+    )
+    await r.record_async(
+        "provider_exit_monitor_without_recording",
+        test_provider_exit_monitor_runs_without_production_body_log_persistence,
     )
     await r.record_async("execute_action_read_network_requests", test_execute_action_read_network_requests)
     await r.record_async(

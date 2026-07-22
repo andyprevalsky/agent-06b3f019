@@ -1769,8 +1769,34 @@ def browser_network_recording_enabled() -> bool:
     return browser_recordings_enabled()
 
 
+def provider_exit_monitoring_enabled() -> bool:
+    """Keep the lightweight rejection signal active outside local recordings."""
+    value = os.getenv("BROWSER_AGENT_PROVIDER_EXIT_MONITORING", "").strip().lower()
+    if value in TRUE_VALUES:
+        return True
+    if value in FALSE_VALUES:
+        return False
+    return True
+
+
+_FINGERPRINT_POISON_REASON = "ip has used many different fingerprints"
+
+
+def _contains_fingerprint_poison_detection(value: Any) -> bool:
+    """Recognize only an explicit detector verdict, never infer from a score."""
+    if isinstance(value, dict):
+        category = str(value.get("category") or "").strip().lower()
+        reason = " ".join(str(value.get("reason") or "").strip().lower().split())
+        if category == "fingerprint" and reason == _FINGERPRINT_POISON_REASON:
+            return True
+        return any(_contains_fingerprint_poison_detection(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_fingerprint_poison_detection(item) for item in value)
+    return False
+
+
 class BrowserNetworkRecorder:
-    """Dev-only CDP network recorder for response-body debugging."""
+    """CDP network observer with optional local body-log persistence."""
 
     STATIC_EXTENSIONS = (
         ".css",
@@ -1802,6 +1828,7 @@ class BrowserNetworkRecorder:
         task_id: str,
         session_id: str,
         output_dir: Path,
+        persist_network_log: bool = True,
     ) -> None:
         self.browser_session = browser_session
         self.agent_id = agent_id
@@ -1809,6 +1836,7 @@ class BrowserNetworkRecorder:
         self.session_id = session_id
         self.output_dir = output_dir
         self.network_dir = self.output_dir / "network"
+        self.persists_network_log = persist_network_log
         self.entries: Dict[str, Dict[str, Any]] = {}
         # Request IDs that were in flight when the agent last cleared the buffer
         # (read_network_requests clear=True). Their late response events must NOT
@@ -1821,6 +1849,8 @@ class BrowserNetworkRecorder:
         self._started_at = time.monotonic()
         self._closed = False
         self._tasks: set[asyncio.Task] = set()
+        self._provider_exit_rejections: List[Dict[str, Any]] = []
+        self._rejected_network_generations: set[int] = set()
         self._cdp_client: Any = None
         # CDP requestId values are scoped to one remote browser connection and
         # can repeat after challenge recovery promotes another provider/session.
@@ -1830,6 +1860,8 @@ class BrowserNetworkRecorder:
         self._body_index = 0
         self._max_entries = max(1, int(os.getenv("BROWSER_AGENT_NETWORK_MAX_ENTRIES", "300")))
         self._max_body_bytes = max(1024, int(os.getenv("BROWSER_AGENT_NETWORK_MAX_BODY_BYTES", "262144")))
+        if not self.persists_network_log:
+            self._max_body_bytes = min(self._max_body_bytes, 65_536)
         self._patterns = [
             item.strip().lower()
             for item in os.getenv("BROWSER_AGENT_NETWORK_CAPTURE_URL_PATTERNS", "").split(",")
@@ -1846,7 +1878,8 @@ class BrowserNetworkRecorder:
         session_id: Optional[str],
         output_dir: Path,
     ) -> Optional["BrowserNetworkRecorder"]:
-        if not browser_network_recording_enabled() or not task_id or not session_id:
+        persist_network_log = browser_network_recording_enabled()
+        if (not persist_network_log and not provider_exit_monitoring_enabled()) or not task_id or not session_id:
             return None
         if not hasattr(browser_session, "get_or_create_cdp_session"):
             logger.warning(
@@ -1862,6 +1895,7 @@ class BrowserNetworkRecorder:
             task_id=task_id,
             session_id=session_id,
             output_dir=output_dir,
+            persist_network_log=persist_network_log,
         )
         try:
             await recorder.start()
@@ -1877,7 +1911,8 @@ class BrowserNetworkRecorder:
         return recorder
 
     async def start(self) -> None:
-        self.network_dir.mkdir(parents=True, exist_ok=True)
+        if self.persists_network_log:
+            self.network_dir.mkdir(parents=True, exist_ok=True)
         cdp_session = await self.browser_session.get_or_create_cdp_session()
         cdp_client = getattr(self.browser_session, "cdp_client", None) or cdp_session.cdp_client
         self._cdp_client = cdp_client
@@ -1907,11 +1942,15 @@ class BrowserNetworkRecorder:
 
         await cdp_client.send.Network.enable(session_id=cdp_session.session_id)
         logger.info(
-            "Browser network response-body recording started",
+            (
+                "Browser network response-body recording started"
+                if self.persists_network_log
+                else "Browser provider-exit monitoring started"
+            ),
             agent_id=self.agent_id,
             task_id=self.task_id,
             session_id=self.session_id,
-            output_dir=str(self.network_dir),
+            **({"output_dir": str(self.network_dir)} if self.persists_network_log else {}),
         )
 
     async def transition_browser(self, *, browser_session: Any, session_id: str) -> None:
@@ -1997,6 +2036,12 @@ class BrowserNetworkRecorder:
             request_key = self._request_key(request_id, generation)
             self._active_request_ids.add(request_key)
             if request_key in self._ignored_request_ids:
+                return
+            # The always-on reputation monitor needs only small JSON detector
+            # responses. Drop all other content before loading its body; full
+            # text/HTML capture remains available when local recording is on.
+            if not getattr(self, "persists_network_log", True) and "json" not in mime_type.lower():
+                self.entries.pop(request_key, None)
                 return
             # Capacity only blocks NEW requests; an already-tracked request must
             # still receive its status/response update (otherwise a page that
@@ -2104,30 +2149,60 @@ class BrowserNetworkRecorder:
             if truncated:
                 body_bytes = body_bytes[: self._max_body_bytes]
 
-            self._body_index += 1
-            index = self._body_index
-            extension = ".json" if "json" in str(entry.get("mime_type", "")).lower() else ".txt"
-            body_path = self.network_dir / f"{index:04d}_{request_id.replace('.', '_')}{extension}"
-            body_path.write_bytes(body_bytes)
-            entry.update(
-                {
-                    "body_file": body_path.name,
-                    "body_size": original_size,
-                    "body_truncated": truncated,
-                    "body_base64_encoded": bool(response.get("base64Encoded")),
-                    "body_captured_at_ms": int((time.monotonic() - self._started_at) * 1000),
-                }
-            )
-            logger.info(
-                "Browser network response body captured",
-                agent_id=self.agent_id,
-                task_id=self.task_id,
-                status=entry.get("status"),
-                url=entry.get("url"),
-                body_file=str(body_path),
-                body_size=original_size,
-                body_truncated=truncated,
-            )
+            if "json" in str(entry.get("mime_type", "")).lower():
+                with contextlib.suppress(json.JSONDecodeError, UnicodeDecodeError):
+                    payload = json.loads(body_bytes.decode("utf-8"))
+                    generation = int(entry.get("browser_generation") or 0)
+                    current_generation = int(getattr(self, "_network_generation", generation))
+                    rejected_generations = getattr(self, "_rejected_network_generations", set())
+                    if (
+                        generation == current_generation
+                        and generation not in rejected_generations
+                        and _contains_fingerprint_poison_detection(payload)
+                    ):
+                        rejected_generations.add(generation)
+                        self._rejected_network_generations = rejected_generations
+                        rejections = getattr(self, "_provider_exit_rejections", [])
+                        rejections.append(
+                            {
+                                "reason": _FINGERPRINT_POISON_REASON,
+                                "url": _redact_url_query(str(entry.get("url") or "")),
+                                "browser_generation": generation,
+                            }
+                        )
+                        self._provider_exit_rejections = rejections
+                        logger.warning(
+                            "Browser provider exit explicitly rejected by fingerprint detector",
+                            agent_id=self.agent_id,
+                            task_id=self.task_id,
+                            browser_generation=generation,
+                        )
+
+            if getattr(self, "persists_network_log", True):
+                self._body_index += 1
+                index = self._body_index
+                extension = ".json" if "json" in str(entry.get("mime_type", "")).lower() else ".txt"
+                body_path = self.network_dir / f"{index:04d}_{request_id.replace('.', '_')}{extension}"
+                body_path.write_bytes(body_bytes)
+                entry.update(
+                    {
+                        "body_file": body_path.name,
+                        "body_size": original_size,
+                        "body_truncated": truncated,
+                        "body_base64_encoded": bool(response.get("base64Encoded")),
+                        "body_captured_at_ms": int((time.monotonic() - self._started_at) * 1000),
+                    }
+                )
+                logger.info(
+                    "Browser network response body captured",
+                    agent_id=self.agent_id,
+                    task_id=self.task_id,
+                    status=entry.get("status"),
+                    url=entry.get("url"),
+                    body_file=str(body_path),
+                    body_size=original_size,
+                    body_truncated=truncated,
+                )
         except Exception as exc:
             entry["body_error"] = str(exc)
             logger.warning(
@@ -2138,6 +2213,19 @@ class BrowserNetworkRecorder:
                 url=entry.get("url"),
                 error=str(exc),
             )
+        finally:
+            # Monitoring-only sessions must stay bounded during long-lived apps.
+            # The rejection queue retains the only signal the runtime needs;
+            # request metadata and parsed response bodies are not exposed or kept.
+            if not getattr(self, "persists_network_log", True):
+                self.entries.pop(request_key, None)
+
+    def pop_provider_exit_rejection(self) -> Optional[Dict[str, Any]]:
+        """Consume one explicit rejection verdict for the active browser exit."""
+        rejections = getattr(self, "_provider_exit_rejections", [])
+        if not rejections:
+            return None
+        return rejections.pop(0)
 
     def query_requests(
         self,
@@ -2185,7 +2273,7 @@ class BrowserNetworkRecorder:
 
     async def close(self) -> Optional[Path]:
         if self._closed:
-            return self.network_dir / "index.json" if self.entries else None
+            return self.network_dir / "index.json" if self.entries and self.persists_network_log else None
         if self._tasks:
             done, pending = await asyncio.wait(self._tasks, timeout=3)
             for task in pending:
@@ -2199,6 +2287,8 @@ class BrowserNetworkRecorder:
                     completed=len(done),
                 )
         self._closed = True
+        if not self.persists_network_log:
+            return None
         if not self.entries:
             return None
         index_path = self.network_dir / "index.json"

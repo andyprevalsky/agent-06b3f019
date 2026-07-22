@@ -115,6 +115,27 @@ export async function markWalletFundingReclaiming(
   });
 }
 
+/**
+ * Claim the first close/reclaim attempt for a funded transfer. Unlike
+ * `markWalletFundingReclaiming`, this is intentionally a FUNDED-only CAS: a second cleanup that
+ * arrives while the first one is polling AgentCard must not replay `close_card`. AgentCard declares
+ * close idempotent, but overlapping closes can strand a sandbox company transfer as `consumed`
+ * after the card is already CLOSED/$0, leaving no provider-side recovery operation.
+ */
+export async function claimWalletFundingReclaim(
+  id: string,
+  data: { reclaimIdempotencyKey: string }
+) {
+  return prisma.purchaseWalletFunding.updateMany({
+    where: { id, status: PurchaseWalletFundingStatus.FUNDED },
+    data: {
+      status: PurchaseWalletFundingStatus.RECLAIMING,
+      reclaimIdempotencyKey: data.reclaimIdempotencyKey,
+      errorMessage: null,
+    },
+  });
+}
+
 export async function markWalletFundingReclaimed(
   id: string,
   data: {

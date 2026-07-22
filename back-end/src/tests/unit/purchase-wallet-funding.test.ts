@@ -85,24 +85,6 @@ class ThrowingReclaimProvider extends FakeProvider {
   }
 }
 
-class ConcurrentReclaimProvider extends FakeProvider {
-  private entered = 0;
-  private releaseBoth!: () => void;
-  private readonly bothEntered = new Promise<void>((resolve) => {
-    this.releaseBoth = resolve;
-  });
-
-  async reclaimUserWalletFunding(
-    request: WalletFundingReclaimRequest
-  ): Promise<WalletFundingResult> {
-    this.reclaimCalls.push(request);
-    this.entered += 1;
-    if (this.entered === 2) this.releaseBoth();
-    await this.bothEntered;
-    return { providerTransferId: request.providerTransferId, metadata: { reclaimed: true } };
-  }
-}
-
 async function seedUser(): Promise<string> {
   const userId = `pwf-unit-${randomUUID()}`;
   await prisma.user.create({ data: { userId, isAnonymous: true } });
@@ -287,11 +269,11 @@ async function main(): Promise<void> {
     assert.equal(funding?.reclaimProviderTransferId, `wfr_${purchase.id}`);
   });
 
-  await test('concurrent reclaim completion is idempotent for the CAS loser', async () => {
+  await test('concurrent reclaim calls share one provider release loop', async () => {
     const userId = await seedUser();
     const purchase = await seedPurchase(userId);
     await recordPurchaseWalletFunding(purchase, 'usd', 'owt_concurrent_reclaim', {});
-    const provider = new ConcurrentReclaimProvider();
+    const provider = new FakeProvider();
 
     await Promise.all([
       reclaimPurchaseWalletFunding(purchase, 'cleanup_a', provider),
@@ -300,7 +282,7 @@ async function main(): Promise<void> {
 
     const funding = await findWalletFundingByPurchaseId(purchase.id);
     assert.equal(funding?.status, PurchaseWalletFundingStatus.RECLAIMED);
-    assert.equal(provider.reclaimCalls.length, 2);
+    assert.equal(provider.reclaimCalls.length, 1, 'only one provider mutation may run at a time');
   });
 
   await test('reclaim skips PENDING/FAILED/RECLAIMED funding', async () => {
@@ -382,7 +364,7 @@ async function main(): Promise<void> {
     const userId = await seedUser();
     const purchase = await seedPurchase(userId);
     await recordPurchaseWalletFunding(purchase, 'usd', 'owt_begin', {});
-    await beginPurchaseWalletReclaim(purchase.id);
+    assert.equal(await beginPurchaseWalletReclaim(purchase.id), 'owned');
     let funding = await findWalletFundingByPurchaseId(purchase.id);
     assert.equal(
       funding?.status,
@@ -391,9 +373,22 @@ async function main(): Promise<void> {
     );
     // Non-FUNDED rows are left untouched (idempotent no-op).
     await setFundingStatus(purchase.id, PurchaseWalletFundingStatus.CONSUMED);
-    await beginPurchaseWalletReclaim(purchase.id);
+    assert.equal(await beginPurchaseWalletReclaim(purchase.id), 'not_applicable');
     funding = await findWalletFundingByPurchaseId(purchase.id);
     assert.equal(funding?.status, PurchaseWalletFundingStatus.CONSUMED);
+  });
+
+  await test('beginPurchaseWalletReclaim grants exactly one concurrent close owner', async () => {
+    const userId = await seedUser();
+    const purchase = await seedPurchase(userId);
+    await recordPurchaseWalletFunding(purchase, 'usd', 'owt_close_owner', {});
+    const claims = await Promise.all([
+      beginPurchaseWalletReclaim(purchase.id),
+      beginPurchaseWalletReclaim(purchase.id),
+      beginPurchaseWalletReclaim(purchase.id),
+    ]);
+    assert.equal(claims.filter((claim) => claim === 'owned').length, 1);
+    assert.equal(claims.filter((claim) => claim === 'already_owned').length, 2);
   });
 
   await test('recordPurchaseWalletFunding never resurrects a reclaimed transfer', async () => {

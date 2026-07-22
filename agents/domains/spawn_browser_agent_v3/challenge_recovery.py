@@ -299,6 +299,7 @@ async def recover_from_challenge(
     commit_cookie_removals: CommitCookies,
     search_configs: ConfigSearch,
     progress: Progress,
+    provider_exit_rejected: bool = False,
 ) -> ChallengeRecoveryResult:
     """Run solver -> cookie isolation -> parallel provider/config recovery.
 
@@ -342,6 +343,15 @@ async def recover_from_challenge(
         "Waiting for the browser provider's automatic CAPTCHA solver before changing state.",
     )
     await wait_for_solver()
+
+    # A detector can sometimes identify the network exit itself as the cause
+    # (for example, an IP observed with many unrelated browser fingerprints).
+    # In that case cookie experiments cannot improve the exit's reputation and
+    # only risk wasting time around auth-bearing state. Still give the native
+    # provider solver its normal first chance, then preserve the entire source
+    # state and search fresh provider/IP configurations directly.
+    if provider_exit_rejected:
+        return await search_with_preserved_auth_state()
 
     cookies = {
         cookie_key(cookie): cookie for cookie in source_state.get("cookies") or [] if isinstance(cookie, Mapping)

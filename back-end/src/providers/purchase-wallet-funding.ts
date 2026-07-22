@@ -147,21 +147,36 @@ export async function consumePurchaseWalletFunding(purchaseId: string): Promise<
  * makes it read as not-live; without this pre-claim a concurrent cleanup pass would observe the
  * not-live card while the funding is still FUNDED, misclassify it as merchant-spent, and consume
  * the transfer — permanently draining the company float. Marking RECLAIMING first makes that pass
- * defer to the in-flight reclaim instead. No-op for any non-FUNDED row (already reclaiming,
- * consumed, terminal, or not yet funded); the subsequent `reclaimPurchaseWalletFunding` handles it.
+ * defer to the in-flight reclaim instead. The explicit claim result lets callers suppress only an
+ * active owner while preserving the legacy close/reconcile behavior for missing or terminal rows.
  */
-export async function beginPurchaseWalletReclaim(purchaseId: string): Promise<void> {
+export type PurchaseWalletReclaimClaim = 'owned' | 'already_owned' | 'not_applicable';
+
+export async function beginPurchaseWalletReclaim(
+  purchaseId: string
+): Promise<PurchaseWalletReclaimClaim> {
   const funding = await repo.findWalletFundingByPurchaseId(purchaseId);
-  if (funding === null || funding.status !== PurchaseWalletFundingStatus.FUNDED) return;
+  if (funding === null) return 'not_applicable';
+  if (funding.status === PurchaseWalletFundingStatus.RECLAIMING) return 'already_owned';
+  if (funding.status !== PurchaseWalletFundingStatus.FUNDED) return 'not_applicable';
   const reclaimIdempotencyKey =
     funding.reclaimIdempotencyKey ?? `purchase-wallet-reclaim:${purchaseId}`;
-  await repo.markWalletFundingReclaiming(funding.id, {
+  const claimed = await repo.claimWalletFundingReclaim(funding.id, {
     reclaimIdempotencyKey,
-    allowConsumed: false,
   });
+  if (claimed.count === 1) return 'owned';
+
+  // A competing caller may have advanced the FUNDED row after our read. Suppress only an active
+  // RECLAIMING owner; every other state preserves the legacy close/reconcile behavior.
+  const current = await repo.findWalletFundingByPurchaseId(purchaseId);
+  return current?.status === PurchaseWalletFundingStatus.RECLAIMING
+    ? 'already_owned'
+    : 'not_applicable';
 }
 
-export async function reclaimPurchaseWalletFunding(
+const inFlightPurchaseWalletReclaims = new Map<string, Promise<void>>();
+
+async function performPurchaseWalletFundingReclaim(
   purchase: Pick<PurchaseSpend, 'id' | 'userId' | 'agentId' | 'totalCents'> & {
     cardId?: string | null;
   },
@@ -254,5 +269,38 @@ export async function reclaimPurchaseWalletFunding(
       error instanceof Error ? error.message : String(error)
     );
     throw error;
+  }
+}
+
+/**
+ * Coalesce same-process retries for one provider transfer. The database state machine keeps the
+ * result idempotent, but invoking AgentCard's close/release polling loop twice at once is not a
+ * harmless read: each loop periodically replays `close_card`. All callers observe the same outcome,
+ * and a later retry may start after this attempt has settled.
+ */
+export async function reclaimPurchaseWalletFunding(
+  purchase: Pick<PurchaseSpend, 'id' | 'userId' | 'agentId' | 'totalCents'> & {
+    cardId?: string | null;
+  },
+  reason: string,
+  walletFundingProvider?: WalletFundingProvider,
+  opts: { allowConsumed?: boolean } = {}
+): Promise<void> {
+  const existing = inFlightPurchaseWalletReclaims.get(purchase.id);
+  if (existing !== undefined) return existing;
+
+  const reclaim = performPurchaseWalletFundingReclaim(
+    purchase,
+    reason,
+    walletFundingProvider,
+    opts
+  );
+  inFlightPurchaseWalletReclaims.set(purchase.id, reclaim);
+  try {
+    await reclaim;
+  } finally {
+    if (inFlightPurchaseWalletReclaims.get(purchase.id) === reclaim) {
+      inFlightPurchaseWalletReclaims.delete(purchase.id);
+    }
   }
 }
