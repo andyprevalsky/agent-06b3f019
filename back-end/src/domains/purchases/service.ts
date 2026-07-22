@@ -1,5 +1,5 @@
 import {
-  createCardProvider,
+  createCardProviderForAgent,
   isCardLive,
   type CardProvider,
   type CardProviderDetailsResult,
@@ -80,11 +80,15 @@ function isStaleChargingPurchase(purchase: PurchaseSpend, now: Date): boolean {
  */
 async function tryGetLiveCardDetails(
   userId: string,
+  agentId: string | null,
   cardId: string,
   cardProvider?: CardProvider
 ): Promise<CardProviderDetailsResult | null> {
+  // Provider selection may perform a database lookup. Let those errors propagate so a transient
+  // benchmark-classification failure cannot be mistaken for a consumed card and trigger billing.
+  const activeCardProvider = cardProvider ?? (await createCardProviderForAgent(userId, agentId));
   try {
-    const details = await (cardProvider ?? createCardProvider(userId)).getDetails(cardId);
+    const details = await activeCardProvider.getDetails(cardId);
     return isCardLive(details) ? details : null;
   } catch (error) {
     log.warn('Reuse liveness check failed; treating card as consumed', {
@@ -124,7 +128,12 @@ export async function lookupPurchase(
   // delivered. If the webhook was delayed or lost, this still forces a fresh approval rather than
   // silently handing back a dead, already-charged card.
   if (reusable && purchase.cardId !== null) {
-    const liveDetails = await tryGetLiveCardDetails(userId, purchase.cardId, cardProvider);
+    const liveDetails = await tryGetLiveCardDetails(
+      userId,
+      purchase.agentId,
+      purchase.cardId,
+      cardProvider
+    );
     if (!liveDetails) {
       await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
       reusable = false;
@@ -177,7 +186,12 @@ async function tryReuseExistingPurchase(
   // Idempotent retry within the reuse window: hand back the held card while it's still live and
   // unspent (e.g. a transient browser-agent error retried the identical cart).
   if (isReusableStatus(existing.status) && existing.cardId !== null) {
-    const liveDetails = await tryGetLiveCardDetails(existing.userId, existing.cardId, cardProvider);
+    const liveDetails = await tryGetLiveCardDetails(
+      existing.userId,
+      existing.agentId,
+      existing.cardId,
+      cardProvider
+    );
     if (liveDetails) {
       return {
         purchaseId: existing.id,

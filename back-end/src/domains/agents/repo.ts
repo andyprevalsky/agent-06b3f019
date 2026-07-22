@@ -152,6 +152,36 @@ export async function findAgentStatus(agentId: string) {
   });
 }
 
+/** Resolve the minimal owner context needed by the external failure-alert workflow. */
+export async function findAgentAlertContext(agentId: string) {
+  const agent = await prisma.agent.findFirst({
+    where: {
+      id: agentId,
+      deletedAt: null,
+    },
+    select: {
+      id: true,
+      userId: true,
+      status: true,
+    },
+  });
+  if (!agent) return null;
+
+  const user = await prisma.user.findUnique({
+    where: { userId: agent.userId },
+    select: { name: true },
+  });
+  return { ...agent, userName: user?.name ?? null };
+}
+
+/** Resolve the account identity displayed while an administrator inspects a run. */
+export async function findUserInspectionIdentity(userId: string) {
+  return prisma.user.findUnique({
+    where: { userId },
+    select: { name: true, phone: true, email: true },
+  });
+}
+
 /** Fetch agent by ID (unique). */
 export async function findAgentUnique(agentId: string) {
   return prisma.agent.findUnique({

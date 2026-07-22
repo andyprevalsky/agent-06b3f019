@@ -480,6 +480,28 @@ async def test_parallel_benchmark_scheduler_serializes_browser_profile_writers()
     )
 
 
+def test_destructive_db_fixtures_run_before_parallel_agent_trees():
+    """A retained failed tree must not outlive the boundary for destructive fixtures."""
+    from benchmarks import run_benchmark as bench
+
+    class Task:
+        def __init__(self, name: str):
+            self.name = name
+
+    phases = bench._parallel_task_phases(
+        [
+            Task("claude-code-agent"),
+            Task("browser-biometrics-webdecoy"),
+            Task("chat-mode"),
+        ]
+    )
+
+    assert [(mode, [task.name for task in tasks]) for mode, tasks in phases] == [
+        ("exclusive", ["browser-biometrics-webdecoy"]),
+        ("parallel", ["claude-code-agent", "chat-mode"]),
+    ]
+
+
 def test_response_schema_feedback_benchmark_declares_real_mid_run_message():
     """The regression benchmark must inject non-goal feedback into a live agent run."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -663,6 +685,14 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         )
 
 
+def test_isolated_benchmark_services_allow_slow_first_sync():
+    """System-Postgres fallback must outlive a cold production-data sync."""
+    from benchmarks import local
+
+    timeout = local.wait_for_services.__kwdefaults__["timeout_seconds"]
+    assert timeout >= 600
+
+
 def test_claude_code_benchmark_forces_real_claude_provider_before_stack_start():
     """A task that requires Claude Code must not silently run through Codex."""
     import os
@@ -698,12 +728,15 @@ async def test_edge_warmup_requires_explicit_research_port():
 
 
 def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
-    """The deploy lifecycle helper must provision its declared sandbox float gate."""
+    """The lifecycle helper provisions float without syncing unrelated browser auth."""
     helper = (Path(__file__).resolve().parents[3] / "scripts" / "run-agentcard-lifecycle-task.sh").read_text()
 
     assert 'if [ "$BOOTSTRAP_FLAG" = "--bootstrap" ]' in helper
     assert "scripts/setup-benchmark-payment.ts" in helper
     assert "DATABASE_URL=" in helper
+    assert "export BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1" in helper
+    assert "unset FAST_MODE_CACHE_DATABASE_URL" in helper
+    assert "export FAST_MODE_CACHE_USE_LOCAL=1" in helper
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():
@@ -924,6 +957,36 @@ async def test_abandonment_retries_a_pending_company_release():
     assert recoveries == 1
 
 
+async def test_abandonment_waits_between_funding_reclaim_and_purchase_void():
+    """The reconciler persists RECLAIMED before its refund and purchase-status updates."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    task = get_task_by_name("agent-payment-abandonment")
+    reads = 0
+
+    async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal reads
+        reads += 1
+        return task.expected_payment_lifecycle
+
+    result = await _wait_for_expected_payment_lifecycle(
+        "http://localhost:55120",
+        "agent-123",
+        task,
+        {
+            "purchase": {"status": "HELD"},
+            "walletFunding": {"status": "RECLAIMED"},
+        },
+        timeout_seconds=1,
+        poll_interval_seconds=0,
+        fetch_lifecycle=fetch_lifecycle,
+    )
+
+    assert result["purchase"]["status"] == "VOIDED"
+    assert reads == 1
+
+
 async def test_abandonment_tolerates_one_transient_lifecycle_read_failure():
     """One provider timeout cannot erase an already-started durable compensation."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -979,6 +1042,53 @@ async def test_abandonment_surfaces_three_consecutive_lifecycle_read_failures():
             poll_interval_seconds=0,
             fetch_lifecycle=fetch_lifecycle,
         )
+
+
+async def test_initial_payment_lifecycle_retries_one_transient_provider_failure():
+    """The terminal snapshot gets the same bounded transient tolerance as cleanup reads."""
+    from benchmarks.run_benchmark import _get_initial_payment_lifecycle_with_retry
+
+    reads = 0
+
+    async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise RuntimeError('500 {"error":"Failed to read test payment lifecycle"}')
+        return {"purchase": {"status": "CLEARED"}}
+
+    result = await _get_initial_payment_lifecycle_with_retry(
+        "http://localhost:55120",
+        "agent-123",
+        retry_delay_seconds=0,
+        fetch_lifecycle=fetch_lifecycle,
+    )
+
+    assert result["purchase"]["status"] == "CLEARED"
+    assert reads == 2
+
+
+async def test_initial_payment_lifecycle_bounds_persistent_provider_failure():
+    """A real provider outage still fails closed after the bounded retry budget."""
+    import pytest
+
+    from benchmarks.run_benchmark import _get_initial_payment_lifecycle_with_retry
+
+    reads = 0
+
+    async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal reads
+        reads += 1
+        raise RuntimeError("upstream unavailable")
+
+    with pytest.raises(RuntimeError, match="unavailable after 3 reads"):
+        await _get_initial_payment_lifecycle_with_retry(
+            "http://localhost:55120",
+            "agent-123",
+            retry_delay_seconds=0,
+            fetch_lifecycle=fetch_lifecycle,
+        )
+    assert reads == 3
 
 
 def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
@@ -1083,7 +1193,95 @@ def test_production_frontend_url_ignores_stale_local_services_manifest():
                 os.environ[name] = value
 
 
-def test_agentcard_setup_fixture_preflights_every_lifecycle_task():
+def test_system_postgres_fixture_sql_targets_manifest_database_name():
+    """Fixture mutations must hit the isolated DB that serves the benchmark stack."""
+    from benchmarks import run_benchmark as bench
+
+    environment_names = ("BENCHMARK_CONTEXT_DIR", "DIRECT_URL", "DATABASE_URL")
+    prior = {name: os.environ.get(name) for name in environment_names}
+    original_run = bench.subprocess.run
+    try:
+        with tempfile.TemporaryDirectory() as context_dir:
+            Path(context_dir, "services.json").write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "run_sh_pid": os.getpid(),
+                        "database": {
+                            "name": "victoria_bench_isolated_123",
+                            "runtime_port": 5432,
+                            "use_system_postgres": True,
+                        },
+                        "ports": {"local_db": 58145},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            os.environ.pop("DIRECT_URL", None)
+            os.environ.pop("DATABASE_URL", None)
+
+            probed_urls = []
+
+            def fake_run(args, **_kwargs):
+                probed_urls.append(args[1])
+                return subprocess.CompletedProcess(args, 0, stdout="1\n", stderr="")
+
+            bench.subprocess.run = fake_run
+            assert bench._local_victoria_database_url() == (
+                "postgresql://postgres:postgres@localhost:5432/victoria_bench_isolated_123"
+            )
+            assert probed_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_bench_isolated_123"]
+
+            probed_urls.clear()
+            Path(context_dir, "services.json").write_text(
+                json.dumps(
+                    {
+                        "status": "stopped",
+                        "database": {
+                            "name": "victoria_bench_stale_456",
+                            "runtime_port": 5432,
+                            "use_system_postgres": True,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            os.environ["DATABASE_URL"] = "postgresql://postgres:postgres@localhost:5432/victoria_env_explicit"
+            assert bench._local_victoria_database_url() == (
+                "postgresql://postgres:postgres@localhost:5432/victoria_env_explicit"
+            )
+            assert probed_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_env_explicit"]
+
+            probed_urls.clear()
+            Path(context_dir, "services.json").write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "run_sh_pid": 999_999_999,
+                        "database": {
+                            "name": "victoria_bench_orphaned_789",
+                            "runtime_port": 5432,
+                            "use_system_postgres": True,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            assert bench._local_victoria_database_url() == (
+                "postgresql://postgres:postgres@localhost:5432/victoria_env_explicit"
+            )
+            assert probed_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_env_explicit"]
+    finally:
+        bench.subprocess.run = original_run
+        for name, value in prior.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+def test_agentcard_setup_fixture_skips_production_lifecycle():
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _agentcard_setup_fixture_action
 
@@ -1093,7 +1291,7 @@ def test_agentcard_setup_fixture_preflights_every_lifecycle_task():
 
     assert _agentcard_setup_fixture_action(standard, "http://localhost:55120") == "complete"
     assert _agentcard_setup_fixture_action(setup, "http://localhost:55120") == "reset"
-    assert _agentcard_setup_fixture_action(production, "https://api.roselabs.ai") == "complete"
+    assert _agentcard_setup_fixture_action(production, "https://api.roselabs.ai") is None
 
 
 def test_expected_attention_kind_uses_ordered_sequence():
@@ -1126,6 +1324,61 @@ def test_agentcard_setup_attention_is_not_auto_approved():
     assert not _should_auto_approve_attention(
         task,
         {"metadata": {"attentionKind": "agentcard_user_cardholder_onboarding_required"}},
+    )
+
+
+async def test_agentcard_setup_terminal_check_refreshes_stale_attention_poll():
+    from benchmarks.run_benchmark import _agentcard_setup_attention_still_open_after_terminal
+
+    reads = 0
+
+    async def fetch_requests(_base_url: str) -> list:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return [
+                {
+                    "id": "stale-setup-from-another-agent",
+                    "metadata": {"attentionKind": "agentcard_user_cardholder_onboarding_required"},
+                },
+                {
+                    "id": "setup-1",
+                    "metadata": {"attentionKind": "agentcard_user_cardholder_onboarding_required"},
+                },
+            ]
+        return [
+            {
+                "id": "setup-1",
+                "answered": True,
+                "metadata": {"attentionKind": "agentcard_user_cardholder_onboarding_required"},
+            }
+        ]
+
+    assert not await _agentcard_setup_attention_still_open_after_terminal(
+        "http://localhost:55120",
+        "setup-1",
+        retry_delay_seconds=0,
+        fetch_requests=fetch_requests,
+    )
+    assert reads == 2
+
+
+async def test_agentcard_setup_terminal_check_fails_closed_for_open_attention():
+    from benchmarks.run_benchmark import _agentcard_setup_attention_still_open_after_terminal
+
+    async def fetch_requests(_base_url: str) -> list:
+        return [
+            {
+                "id": "setup-1",
+                "metadata": {"attentionKind": "agentcard_user_cardholder_onboarding_required"},
+            }
+        ]
+
+    assert await _agentcard_setup_attention_still_open_after_terminal(
+        "http://localhost:55120",
+        "setup-1",
+        retry_delay_seconds=0,
+        fetch_requests=fetch_requests,
     )
 
 
@@ -1542,16 +1795,23 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
     """Amazon uses the standard completed-commerce runtime and preserves cart-path semantics."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
-    approved_prompt = (
+    completed_purchase_prompt = (
+        "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. "
+        "Use my saved/default Amazon payment method and shipping address; do not request or add a new "
+        "payment card when a valid saved method is already selected. "
+        "Avoid using the Buy Now button as the purchase path, but make sure purchase is completed."
+    )
+    auth_assistance_prompt = (
         "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. "
         "Avoid using the Buy Now button as the purchase path, but make sure purchase is completed."
     )
     task = get_task_by_name("browser-agent-amazon-cookie-payment")
     assert task.description.endswith("complete the purchase.")
-    assert task.prompt == approved_prompt
-    assert get_task_by_name("browser-agent").prompt == approved_prompt
+    assert task.prompt == completed_purchase_prompt
+    assert get_task_by_name("browser-agent").prompt == auth_assistance_prompt
     assert task.approval_handling == "auto_approve"
-    assert task.expected_attention_kind == "write_lock"
+    assert task.expected_attention_kind is None
+    assert task.expected_attention_kind_any_of == ["payment_approval", "write_lock"]
     assert task.expected_approval_count == 1
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.min_steps == {"browser": 5}
@@ -1587,9 +1847,178 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
     )
     assert approval_check["required_strings"] == ["beanie"]
     assert approval_check["require_amount"] is True
+    runtime_criteria = " ".join(task.evaluators[0]["criteria"]).lower()
+    assert "payment-card approval or final write approval" in runtime_criteria
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
+    assert "payment-card approval or final write approval" in semantic_criteria
     for requirement in ("black", "under $35", "well-made", "buy now", "completed"):
         assert requirement in semantic_criteria
+
+
+def test_amazon_beanie_accepts_exactly_one_payment_or_write_lock():
+    """Either purchase approval is valid, but unrelated or duplicate approvals fail."""
+    from dataclasses import replace
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _attention_request_matches_task, evaluate_task
+
+    task = replace(
+        get_task_by_name("browser-agent-amazon-cookie-payment"),
+        expected_tools=[],
+        expected_tool_counts=None,
+        enforce_declared_evaluators=False,
+        evaluators=[],
+    )
+    payment = {"metadata": {"requestPaymentCard": {}}}
+    write_lock = {"metadata": {"requestUserApproval": {"writePermission": True}}}
+    auth = {"metadata": {"attentionKind": "auth_assistance"}}
+
+    assert _attention_request_matches_task(task, payment) is True
+    assert _attention_request_matches_task(task, write_lock) is True
+    assert _attention_request_matches_task(task, auth) is False
+    assert _attention_request_matches_task(task, write_lock, observed_count=1) is False
+
+    payment_only = {
+        "agent": {"status": "COMPLETED", "progress": 1.0},
+        "messages": [],
+        "_benchmark": {"attention_request_kind_seen": "payment_approval"},
+    }
+    write_lock_only = {
+        "agent": {"status": "COMPLETED", "progress": 1.0},
+        "messages": [],
+        "_benchmark": {"attention_request_kind_seen": "write_lock"},
+    }
+    assert evaluate_task(task, payment_only, approvals_triggered=1) == (True, None)
+    assert evaluate_task(task, write_lock_only, approvals_triggered=1) == (True, None)
+    passed, reason = evaluate_task(task, payment_only, approvals_triggered=2)
+    assert passed is False
+    assert reason == "Expected exactly 1 approval request(s), observed 2"
+
+
+def _amazon_attention_poll_task():
+    from dataclasses import replace
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    return replace(
+        get_task_by_name("browser-agent-amazon-cookie-payment"),
+        expected_tools=[],
+        expected_tool_counts=None,
+        enforce_declared_evaluators=False,
+        evaluators=[],
+        timeout_seconds=5,
+    )
+
+
+async def _run_amazon_attention_poll(requests: list[dict]):
+    import benchmarks.run_benchmark as bench
+
+    agent_reads = 0
+    attention_reads = 0
+    responses: list[tuple[str, str]] = []
+    agent_id = "agent-amazon"
+
+    async def fake_get_agent(_base_url: str, _agent_id: str) -> dict:
+        nonlocal agent_reads
+        agent_reads += 1
+        status = "COMPLETED" if agent_reads > len(requests) else "ACTIVE"
+        return {
+            "agent": {"status": status, "progress": 1.0},
+            "messages": [],
+        }
+
+    async def fake_get_attention_requests(_base_url: str) -> list[dict]:
+        nonlocal attention_reads
+        attention_reads += 1
+        if attention_reads <= len(requests):
+            return [requests[attention_reads - 1]]
+        return []
+
+    async def fake_respond(_base_url: str, request_id: str, response: str) -> None:
+        responses.append((request_id, response))
+
+    async def fake_tree_stats(_base_url: str, _agent_id: str) -> dict:
+        return {
+            "total_messages": 0,
+            "agent_count": 1,
+            "total_cost_cents": 0,
+            "active_count": 1,
+            "failed_count": 0,
+            "error_agents": [],
+            "all_agents": [
+                {
+                    "agent_id": agent_id,
+                    "status": "ACTIVE",
+                    "message_count": 0,
+                }
+            ],
+        }
+
+    async def fake_message_counts(_base_url: str, _agent_ids: list[str]) -> dict[str, int]:
+        return {}
+
+    originals = {
+        "get_agent": bench.get_agent,
+        "get_attention_requests": bench.get_attention_requests,
+        "respond_to_attention_request": bench.respond_to_attention_request,
+        "_fetch_tree_stats": bench._fetch_tree_stats,
+        "_fetch_message_counts": bench._fetch_message_counts,
+        "_detect_infra_errors_from_fly": bench._detect_infra_errors_from_fly,
+        "validate_context": bench.validate_context,
+        "POLL_INTERVAL": bench.POLL_INTERVAL,
+    }
+    try:
+        bench.get_agent = fake_get_agent
+        bench.get_attention_requests = fake_get_attention_requests
+        bench.respond_to_attention_request = fake_respond
+        bench._fetch_tree_stats = fake_tree_stats
+        bench._fetch_message_counts = fake_message_counts
+        bench._detect_infra_errors_from_fly = lambda _agent_ids: []
+        bench.validate_context = lambda _messages: []
+        bench.POLL_INTERVAL = 0
+        result = await bench.poll_agent(
+            "http://localhost:55120",
+            agent_id,
+            _amazon_attention_poll_task(),
+        )
+    finally:
+        for name, value in originals.items():
+            setattr(bench, name, value)
+    return result, responses
+
+
+async def test_amazon_beanie_poll_rejects_second_or_unrelated_approval_without_resolving_it():
+    """The live poll boundary approves one allowed kind and fails closed on every other request."""
+    payment = {
+        "id": "payment-approval",
+        "agentId": "agent-amazon",
+        "metadata": {"requestPaymentCard": {}},
+    }
+    write_lock = {
+        "id": "write-lock",
+        "agentId": "agent-amazon",
+        "metadata": {"requestUserApproval": {"writePermission": True}},
+    }
+    auth = {
+        "id": "auth-assistance",
+        "agentId": "agent-amazon",
+        "metadata": {"attentionKind": "auth_assistance"},
+    }
+
+    (data, triggered, resolved, failure), responses = await _run_amazon_attention_poll([payment, write_lock])
+    assert failure is not None and "Expected exactly one attention request" in failure
+    assert data["_benchmark"]["attention_kinds_observed"] == [
+        "payment_approval",
+        "write_lock",
+    ]
+    assert (triggered, resolved) == (1, 1)
+    assert responses == [("payment-approval", "approved")]
+
+    (data, triggered, resolved, failure), responses = await _run_amazon_attention_poll([auth])
+    assert failure is not None and "auth_assistance" in failure
+    assert data["_benchmark"]["attention_kinds_observed"] == ["auth_assistance"]
+    assert (triggered, resolved) == (0, 0)
+    assert responses == []
 
 
 def test_alchemy_sauna_catalog_requires_single_clean_completed_booking():
@@ -1827,8 +2256,11 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
     raised = False
     try:
         os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
-        bench._sync_compute_tokens = lambda: True
-        bench._sync_browser_credentials = lambda: False
+        # Mirror the real signatures: _apply_live_fixture calls
+        # _sync_compute_tokens(tolerate_gpt_code_unavailable=True) and
+        # _sync_browser_credentials(ctx.cookie_domains).
+        bench._sync_compute_tokens = lambda **_: True
+        bench._sync_browser_credentials = lambda *_a, **_k: False
         bench._apply_live_fixture(
             bench.LiveFixtureContext(
                 base_url="http://localhost:54121",
@@ -1847,6 +2279,42 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
             os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
 
     assert raised, "live fixture must fail closed when credential refresh fails"
+
+
+def test_cloud_compute_token_sync_has_an_explicit_production_source():
+    """A cloud clone without a shared local DB must still satisfy seed-local's source contract."""
+    from types import SimpleNamespace
+
+    import benchmarks.run_benchmark as bench
+
+    captured = {}
+    originals = {
+        "local": bench._local_victoria_database_url,
+        "shared": bench._shared_workspace_database_url,
+        "production": bench._production_compute_token_database_url,
+        "seed": bench._run_seed_subprocess,
+    }
+    try:
+        bench._local_victoria_database_url = lambda: "postgresql://local/victoria"
+        bench._shared_workspace_database_url = lambda: None
+        bench._production_compute_token_database_url = (
+            lambda _local: "postgresql://prod/victoria"
+        )
+
+        def fake_seed(_command, **kwargs):
+            captured.update(kwargs["env"])
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        bench._run_seed_subprocess = fake_seed
+        assert bench._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is True
+    finally:
+        bench._local_victoria_database_url = originals["local"]
+        bench._shared_workspace_database_url = originals["shared"]
+        bench._production_compute_token_database_url = originals["production"]
+        bench._run_seed_subprocess = originals["seed"]
+
+    assert captured["DATABASE_URL"] == "postgresql://local/victoria"
+    assert captured["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://prod/victoria"
 
 
 def test_expected_passkey_credential_ref_is_required_even_when_approval_is_terminal():
@@ -3480,7 +3948,6 @@ async def test_code_agent_preflight_rejects_missing_compute_token():
 
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
-    original_has_fallback = bench._has_anthropic_api_key_fallback_configured
     try:
 
         async def fake_headers():
@@ -3488,13 +3955,11 @@ async def test_code_agent_preflight_rejects_missing_compute_token():
 
         bench._api_headers = fake_headers
         bench.httpx.AsyncClient = FakeClient
-        bench._has_anthropic_api_key_fallback_configured = lambda: False
 
         assert await bench._check_compute_code_credentials("http://localhost:55120") is False
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
-        bench._has_anthropic_api_key_fallback_configured = original_has_fallback
 
 
 async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
@@ -3523,12 +3988,11 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
             if url.endswith("/api/integrations/compute-code/credentials/token"):
                 return FakeResponse(404, {"error": "NO_TOKENS_AVAILABLE"})
             if url.endswith("/api/integrations/compute-code/anthropic-key/cooldown"):
-                return FakeResponse(200, {"onCooldown": False})
+                return FakeResponse(200, {"configured": True, "onCooldown": False})
             raise AssertionError(f"unexpected URL {url}")
 
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
-    original_has_fallback = bench._has_anthropic_api_key_fallback_configured
     try:
 
         async def fake_headers():
@@ -3536,13 +4000,11 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
 
         bench._api_headers = fake_headers
         bench.httpx.AsyncClient = FakeClient
-        bench._has_anthropic_api_key_fallback_configured = lambda: True
 
         assert await bench._check_compute_code_credentials("http://localhost:55120") is True
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
-        bench._has_anthropic_api_key_fallback_configured = original_has_fallback
 
     assert calls == [
         (
@@ -3556,6 +4018,148 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
             10.0,
         ),
     ]
+
+
+async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback():
+    """Blanket local refresh must accept the same funded fallback as runtime."""
+    import benchmarks.run_benchmark as bench
+
+    http_calls = []
+    sync_options = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"configured": True, "onCooldown": False}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, *, headers, timeout):
+            http_calls.append((url, headers, timeout))
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    original_sync = bench._sync_compute_tokens
+    try:
+
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        def fake_sync(**options):
+            sync_options.append(options)
+            return options.get("tolerate_claude_code_unavailable") is True
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+        bench._sync_compute_tokens = fake_sync
+
+        refresh = bench._refresh_local_compute_tokens_for_run("http://localhost:55120")
+        if asyncio.iscoroutine(refresh):
+            await refresh
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+        bench._sync_compute_tokens = original_sync
+
+    assert sync_options == [
+        {
+            "tolerate_gpt_code_unavailable": True,
+            "tolerate_claude_code_unavailable": True,
+        }
+    ]
+    assert http_calls == [
+        (
+            "http://localhost:55120/api/integrations/compute-code/anthropic-key/cooldown",
+            {"X-API-Key": "test-key"},
+            10.0,
+        )
+    ]
+
+
+def test_compute_token_sync_reads_source_file_not_isolated_process_target():
+    """The isolated target DSN must not shadow the explicit production source."""
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    class SeedResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        env_file = Path(temp_dir) / ".env"
+        env_file.write_text("DATABASE_URL=postgresql://prod/rose\n")
+        with (
+            patch.dict(os.environ, {"DATABASE_URL": "postgresql://local/victoria"}),
+            patch.object(bench, "_BACKEND_ENV", str(env_file)),
+            patch.object(
+                bench,
+                "_local_victoria_database_url",
+                return_value="postgresql://local/victoria",
+            ),
+            patch.object(bench, "_shared_workspace_database_url", return_value=None),
+            patch.object(bench, "_run_seed_subprocess", return_value=SeedResult()) as seed,
+        ):
+            assert bench._sync_compute_tokens() is True
+
+    assert seed.call_args.kwargs["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://prod/rose"
+
+
+async def test_anthropic_api_key_fallback_availability_fails_closed():
+    """Only an explicitly configured, non-cooled backend runtime is usable."""
+    import benchmarks.run_benchmark as bench
+
+    cases = [
+        ("missing-key", 200, {"configured": False, "onCooldown": False}, None),
+        ("cooldown", 200, {"configured": True, "onCooldown": True}, None),
+        ("malformed-empty", 200, {}, None),
+        ("malformed-null", 200, None, None),
+        ("non-200", 503, {"configured": True, "onCooldown": False}, None),
+        ("unreachable", 0, None, RuntimeError("backend unavailable")),
+    ]
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        for name, status_code, body, error in cases:
+
+            class FakeResponse:
+                def __init__(self):
+                    self.status_code = status_code
+
+                def json(self):
+                    return body
+
+            class FakeClient:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return None
+
+                async def get(self, _url, *, headers, timeout):
+                    if error is not None:
+                        raise error
+                    return FakeResponse()
+
+            bench.httpx.AsyncClient = FakeClient
+            assert await bench._has_usable_anthropic_api_key_fallback("http://localhost:55120") is False, name
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
 
 
 def test_normalize_attention_requests_accepts_backend_contract():
@@ -4247,6 +4851,77 @@ def test_local_failed_tasks_from_run_reads_result_json():
     assert [(f.name, f.agent_id, f.failure_reason) for f in failures] == [("browser-agent", "b2", "verifier failed")]
 
 
+def test_local_benchmark_invocation_propagates_cache_ratchet_exit():
+    """A saved all-task-pass artifact must not swallow a post-run ratchet failure.
+
+    Captured from isolated smoke run 1784687608-25918-44421: the runner
+    printed ``CACHE RATCHET FAILED`` and exited 1 after saving a 5/5 task
+    artifact, but local.py returned success because it only re-read task pass
+    fields from that artifact.
+    """
+    from benchmarks import local
+
+    original_popen = local.subprocess.Popen
+    with tempfile.TemporaryDirectory() as raw_dir:
+        result_path = Path(raw_dir) / "cache-ratchet-run.json"
+        result_path.write_text(json.dumps({"tasks": [{"name": "browser-smoke", "passed": True}]}))
+
+        class FailedRatchetProcess:
+            def __init__(self):
+                self.stdout = iter(
+                    [
+                        f"  Results saved: {result_path}\n",
+                        "  ❌ CACHE RATCHET FAILED (per-task repeatable prompt-cache hit floor)\n",
+                    ]
+                )
+
+            @staticmethod
+            def wait():
+                return 1
+
+        try:
+            local.subprocess.Popen = lambda *_args, **_kwargs: FailedRatchetProcess()
+            try:
+                local.run_benchmark_invocation(
+                    local.BenchmarkInvocation("benchmarks", ["browser-smoke"]),
+                    port=55120,
+                    bootstrap=False,
+                    anon=False,
+                    max_concurrency=1,
+                )
+                raise AssertionError("local benchmark wrapper swallowed the runner's exit code 1")
+            except RuntimeError as exc:
+                assert "exit code 1" in str(exc)
+                assert str(result_path) in str(exc)
+
+            # A task-level failure must still return the artifact so main() can
+            # run agent_latency, agent_logs, and agent_cache before exiting 1.
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "tasks": [
+                            {
+                                "name": "browser-smoke",
+                                "passed": False,
+                                "agent_id": "failed-agent",
+                                "failure_reason": "verifier failed",
+                            }
+                        ]
+                    }
+                )
+            )
+            returned = local.run_benchmark_invocation(
+                local.BenchmarkInvocation("benchmarks", ["browser-smoke"]),
+                port=55120,
+                bootstrap=False,
+                anon=False,
+                max_concurrency=1,
+            )
+            assert returned == result_path
+        finally:
+            local.subprocess.Popen = original_popen
+
+
 def test_run_sh_manifest_writer_publishes_wmh_when_served():
     """run.sh's manifest writer carries ports.wmh + urls.wmh + a wmh service entry.
 
@@ -4331,6 +5006,7 @@ def test_apply_manifest_environment_injects_wmh_base_url_and_model():
         apply_manifest_environment(
             {
                 "ports": {"backend": 55020, "health": 55022, "local_db": 55025, "wmh": 55026},
+                "database": {"name": "victoria_test_manifest"},
                 "urls": {"wmh": "http://localhost:55026/"},
                 "wmh_model_name": "rose-archive",
             }
@@ -4406,6 +5082,462 @@ def test_local_manifest_uses_isolated_system_database_identity():
     assert manifest_database_url(manifest) == (
         "postgresql://postgres:postgres@localhost:5432/victoria_bench_1783809252_85375_82461"
     )
+
+
+def test_runner_fixtures_use_isolated_system_database_identity():
+    """Fixture SQL must target the same isolated DB named by the service stack."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from benchmarks import run_benchmark
+
+    manifest = {
+        "ports": {"local_db": 55435},
+        "database": {
+            "use_system_postgres": True,
+            "port": 5432,
+            "runtime_port": 5432,
+            "name": "victoria_bench_1784586845_71851_68350",
+        },
+    }
+    prior_context = os.environ.get("BENCHMARK_CONTEXT_DIR")
+    try:
+        with tempfile.TemporaryDirectory() as context_dir:
+            Path(context_dir, "services.json").write_text(json.dumps(manifest), encoding="utf-8")
+            os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            with patch.object(
+                run_benchmark.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0, stdout="1\n", stderr=""),
+            ):
+                assert run_benchmark._local_victoria_database_url() == (
+                    "postgresql://postgres:postgres@localhost:5432/victoria_bench_1784586845_71851_68350"
+                )
+    finally:
+        if prior_context is None:
+            os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
+        else:
+            os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
+
+
+def test_runner_fixtures_fail_closed_when_isolated_database_is_unavailable():
+    """An unreachable isolated DB must never redirect fixture writes to a shared DB."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from benchmarks import run_benchmark
+
+    manifest = {
+        "ports": {"local_db": 55435},
+        "database": {
+            "use_system_postgres": True,
+            "port": 5432,
+            "name": "victoria_bench_unavailable",
+        },
+    }
+    probed_urls = []
+
+    def probe(command, **_kwargs):
+        database_url = command[1]
+        probed_urls.append(database_url)
+        return SimpleNamespace(
+            returncode=1 if database_url.endswith("/victoria_bench_unavailable") else 0,
+            stdout="",
+            stderr="connection failed",
+        )
+
+    prior_context = os.environ.get("BENCHMARK_CONTEXT_DIR")
+    try:
+        with tempfile.TemporaryDirectory() as context_dir:
+            Path(context_dir, "services.json").write_text(json.dumps(manifest), encoding="utf-8")
+            os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            with patch.object(run_benchmark.subprocess, "run", side_effect=probe):
+                assert run_benchmark._local_victoria_database_url() is None
+        assert probed_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_bench_unavailable"]
+    finally:
+        if prior_context is None:
+            os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
+        else:
+            os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
+
+
+def test_runner_fixtures_reject_manifest_without_database_identity():
+    """A partial manifest must not default destructive fixture writes to `victoria`."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from benchmarks import run_benchmark
+
+    manifest = {
+        "ports": {"local_db": 55435},
+        "database": {
+            "use_system_postgres": True,
+            "port": 5432,
+        },
+    }
+    prior_context = os.environ.get("BENCHMARK_CONTEXT_DIR")
+    try:
+        with tempfile.TemporaryDirectory() as context_dir:
+            Path(context_dir, "services.json").write_text(json.dumps(manifest), encoding="utf-8")
+            os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            with patch.object(
+                run_benchmark.subprocess,
+                "run",
+                return_value=SimpleNamespace(returncode=0, stdout="1\n", stderr=""),
+            ) as probe:
+                try:
+                    run_benchmark._local_victoria_database_url()
+                except RuntimeError as exc:
+                    assert "database name" in str(exc).lower()
+                else:
+                    raise AssertionError("partial manifest was allowed to target a default database")
+                probe.assert_not_called()
+    finally:
+        if prior_context is None:
+            os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
+        else:
+            os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
+
+
+def test_local_isolated_stack_opts_into_fast_seed_dump():
+    """An empty per-run DB must restore a cached seed instead of cold-syncing prod."""
+    from benchmarks import local as local_bench
+
+    captured = {}
+
+    class FakeProcess:
+        pass
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["env"] = kwargs["env"]
+        return FakeProcess()
+
+    original_popen = local_bench.subprocess.Popen
+    original_wait = local_bench.wait_for_services
+    prior_seed_dump = os.environ.pop("BENCHMARK_SEED_DUMP", None)
+    try:
+        local_bench.subprocess.Popen = fake_popen
+        local_bench.wait_for_services = lambda *_args, **_kwargs: {"ports": {}}
+        with tempfile.TemporaryDirectory() as tmp:
+            context_dir = Path(tmp) / "isolated-run"
+            stack = local_bench.ServiceStack(
+                run_id="isolated-run",
+                context_dir=context_dir,
+                manifest_path=context_dir / "services.json",
+                service_log=context_dir / "services.log",
+                isolated=True,
+                workspace_name="blackbox-bench-isolated-run",
+                base_port=55120,
+            )
+            local_bench.start_services(stack, clean_first=False)
+
+            seed_dump = Path(captured["env"]["BENCHMARK_SEED_DUMP"])
+            assert seed_dump.parent == local_bench.BENCHMARK_CONTEXT_ROOT / "seed-cache"
+            assert seed_dump.name.endswith(".dump")
+            assert seed_dump.parent.is_dir()
+            assert captured["env"]["BENCHMARK_REQUIRE_SEED_DUMP"] == "1"
+            assert captured["command"] == ["bash", "scripts/run.sh", "--benchmark"]
+    finally:
+        local_bench.subprocess.Popen = original_popen
+        local_bench.wait_for_services = original_wait
+        if prior_seed_dump is not None:
+            os.environ["BENCHMARK_SEED_DUMP"] = prior_seed_dump
+
+
+def test_run_sh_seed_dump_targets_isolated_database_atomically():
+    """System-Postgres isolated runs must restore/dump their per-run DB safely."""
+    run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
+
+    assert "bash scripts/restore-seed-dump.sh" in run_script
+    assert '"$_SEED_RESTORE_CONTAINER" >/dev/null' in run_script
+    assert '"$_SEED_RESTORE_CONTAINER" >/dev/null 2>&1' not in run_script
+    assert 'pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME"' in run_script
+    assert 'mv "$_SEED_DUMP_TMP" "$_SEED_DUMP"' in run_script
+    required_guard = run_script.index('if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]')
+    cold_sync = run_script.index('echo "🌱 Syncing production data to local database (first run)..."')
+    assert required_guard < cold_sync
+    assert "refusing a slow production cold-sync" in run_script
+
+
+def test_seed_dump_restore_uses_target_container_pg_restore():
+    """A newer host client must not restore into the older per-run DB server."""
+    repo_root = Path(__file__).resolve().parents[3]
+    helper = repo_root / "scripts" / "restore-seed-dump.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        command_log = tmp_path / "commands.log"
+        dump = tmp_path / "seed.dump"
+        dump.write_bytes(b"custom-archive-fixture")
+
+        host_restore = tmp_path / "pg_restore"
+        host_restore.write_text(
+            "#!/bin/sh\n"
+            'echo "host pg_restore $*" >> "$COMMAND_LOG"\n'
+            "echo 'unrecognized configuration parameter \"transaction_timeout\"' >&2\n"
+            "exit 1\n"
+        )
+        host_restore.chmod(0o755)
+
+        docker = tmp_path / "docker"
+        docker.write_text('#!/bin/sh\necho "docker $*" >> "$COMMAND_LOG"\ncat >/dev/null\nexit 0\n')
+        docker.chmod(0o755)
+
+        result = subprocess.run(
+            [
+                "bash",
+                str(helper),
+                str(dump),
+                "localhost",
+                "55395",
+                "postgres",
+                "victoria",
+                "victoria-db-owned-run",
+            ],
+            cwd=repo_root,
+            env={
+                **os.environ,
+                "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
+                "COMMAND_LOG": str(command_log),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = command_log.read_text()
+        assert "docker exec -i victoria-db-owned-run pg_restore" in calls
+        assert "host pg_restore" not in calls
+
+
+def test_workspace_dependency_preflight_respects_hoisted_installs():
+    """A healthy hoisted npm workspace must not reinstall on every stack boot."""
+    repo_root = Path(__file__).resolve().parents[3]
+    helper = repo_root / "scripts" / "ensure-workspace-dependencies.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        workspace = tmp_path / "back-end"
+        workspace.mkdir()
+        (workspace / "package.json").write_text('{"name":"test-back-end"}\n')
+        command_log = tmp_path / "commands.log"
+        installed_marker = tmp_path / "installed"
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        npm = fake_bin / "npm"
+        npm.write_text(
+            "#!/bin/sh\n"
+            'echo "$*" >> "$COMMAND_LOG"\n'
+            'if [ "$1" = "pkg" ]; then exit 0; fi\n'
+            'if [ "$1" = "ls" ]; then [ "${NPM_GRAPH_READY:-0}" = 1 ] || [ -f "$INSTALLED_MARKER" ]; exit; fi\n'
+            'if [ "$1" = "install" ]; then touch "$INSTALLED_MARKER"; exit 0; fi\n'
+            "exit 1\n"
+        )
+        npm.chmod(0o755)
+        common_env = {
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+            "COMMAND_LOG": str(command_log),
+            "INSTALLED_MARKER": str(installed_marker),
+        }
+
+        ready = subprocess.run(
+            ["bash", str(helper), "back-end"],
+            cwd=tmp_path,
+            env={**common_env, "NPM_GRAPH_READY": "1"},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert ready.returncode == 0, ready.stdout + ready.stderr
+        assert command_log.read_text().splitlines() == [
+            "pkg get name --workspace=back-end --silent",
+            "ls --workspace=back-end --depth=0 --silent",
+        ]
+
+        command_log.write_text("")
+        missing = subprocess.run(
+            ["bash", str(helper), "back-end"],
+            cwd=tmp_path,
+            env={**common_env, "NPM_GRAPH_READY": "0"},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert missing.returncode == 0, missing.stdout + missing.stderr
+        assert command_log.read_text().splitlines() == [
+            "pkg get name --workspace=back-end --silent",
+            "ls --workspace=back-end --depth=0 --silent",
+            "install --workspace=back-end --no-audit --no-fund",
+            "ls --workspace=back-end --depth=0 --silent",
+        ]
+
+
+def test_workspace_dependency_preflight_supports_standalone_packages():
+    """A package outside root workspaces must run npm in its own directory."""
+    repo_root = Path(__file__).resolve().parents[3]
+    helper = repo_root / "scripts" / "ensure-workspace-dependencies.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        (tmp_path / "package.json").write_text('{"name":"test-root","workspaces":["back-end"]}\n')
+        standalone = tmp_path / "mac-app"
+        standalone.mkdir()
+        (standalone / "package.json").write_text('{"name":"test-mac-app"}\n')
+        command_log = tmp_path / "commands.log"
+        installed_marker = tmp_path / "installed"
+        fake_bin = tmp_path / "bin"
+        fake_bin.mkdir()
+        npm = fake_bin / "npm"
+        npm.write_text(
+            "#!/bin/sh\n"
+            'echo "$PWD::$*" >> "$COMMAND_LOG"\n'
+            'if [ "$1" = "pkg" ]; then exit 1; fi\n'
+            'if [ "$1" = "ls" ]; then [ -f "$INSTALLED_MARKER" ]; exit; fi\n'
+            'if [ "$1" = "install" ]; then touch "$INSTALLED_MARKER"; exit 0; fi\n'
+            "exit 1\n"
+        )
+        npm.chmod(0o755)
+
+        result = subprocess.run(
+            ["bash", str(helper), "mac-app"],
+            cwd=tmp_path,
+            env={
+                **os.environ,
+                "PATH": f"{fake_bin}:{os.environ.get('PATH', '')}",
+                "COMMAND_LOG": str(command_log),
+                "INSTALLED_MARKER": str(installed_marker),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        commands = command_log.read_text().splitlines()
+        assert commands == [
+            f"{tmp_path.resolve()}::pkg get name --workspace=mac-app --silent",
+            f"{standalone.resolve()}::ls --depth=0 --silent",
+            f"{standalone.resolve()}::install --no-audit --no-fund",
+            f"{standalone.resolve()}::ls --depth=0 --silent",
+        ], commands
+
+
+def test_workspace_dependency_preflight_rejects_missing_package_manifest():
+    """A misspelled package path must fail instead of bypassing preflight."""
+    repo_root = Path(__file__).resolve().parents[3]
+    helper = repo_root / "scripts" / "ensure-workspace-dependencies.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result = subprocess.run(
+            ["bash", str(helper), "does-not-exist"],
+            cwd=tmp,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode != 0
+        assert "does-not-exist/package.json" in result.stderr
+
+
+def test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe():
+    """Only the expected workspace container may bypass a busy Docker probe."""
+    run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
+
+    reachable_probe = 'pg_isready -h localhost -p "$LOCAL_DB_PORT" -U postgres -d victoria -q'
+    ownership_probe = "workspace_db_container_owns_port &&"
+    assert 'docker inspect "$DB_CONTAINER"' in run_script
+    assert 'container_port" = "$LOCAL_DB_PORT"' in run_script
+    assert reachable_probe in run_script
+    assert ownership_probe in run_script
+    assert run_script.index(ownership_probe) < run_script.index(reachable_probe)
+    assert run_script.index(reachable_probe) < run_script.index("docker_info_quick; then")
+    assert "if $PRESTARTED_WORKSPACE_DB; then" in run_script
+
+    function_start = run_script.index("workspace_db_container_owns_port() {")
+    function_end = run_script.index("\n}\n", function_start) + 3
+    ownership_function = run_script[function_start:function_end]
+    with tempfile.TemporaryDirectory() as tmp:
+        fake_docker = Path(tmp) / "docker"
+        fake_docker.write_text('#!/bin/sh\nprintf "%s\\n" "$FAKE_CONTAINER_PORT"\n')
+        fake_docker.chmod(0o755)
+        env = {
+            **os.environ,
+            "PATH": f"{tmp}:{os.environ.get('PATH', '')}",
+        }
+        command = (
+            ownership_function
+            + "\nDB_CONTAINER=victoria-db-bamako\nLOCAL_DB_PORT=55235\n"
+            + "workspace_db_container_owns_port\n"
+        )
+        owned = subprocess.run(
+            ["bash", "-c", command],
+            env={**env, "FAKE_CONTAINER_PORT": "55235"},
+            check=False,
+        )
+        foreign = subprocess.run(
+            ["bash", "-c", command],
+            env={**env, "FAKE_CONTAINER_PORT": "55205"},
+            check=False,
+        )
+        assert owned.returncode == 0
+        assert foreign.returncode != 0
+
+
+def test_run_sh_required_seed_failure_cleans_exact_owned_database():
+    """Fail-fast seed preflight must reap only the DB resource this run created."""
+    run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
+    function_start = run_script.index("cleanup_seed_bootstrap_database() {")
+    function_end = run_script.index("\n}\n", function_start) + 3
+    cleanup_function = run_script[function_start:function_end]
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        command_log = tmp_path / "commands.log"
+        for command in ("docker", "dropdb"):
+            executable = tmp_path / command
+            executable.write_text(f'#!/bin/sh\necho "{command} $*" >> "$COMMAND_LOG"\n')
+            executable.chmod(0o755)
+
+        common_env = {
+            **os.environ,
+            "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
+            "COMMAND_LOG": str(command_log),
+        }
+        subprocess.run(
+            [
+                "bash",
+                "-c",
+                cleanup_function
+                + "\nUSE_SYSTEM_PG=true\nSYSTEM_DB_OWNED_BY_US=true\n"
+                + "DB_OWNED_CONTAINER_ID=''\nLOCAL_DB_NAME=victoria_bench_owned\n"
+                + "cleanup_seed_bootstrap_database\n",
+            ],
+            env=common_env,
+            check=True,
+        )
+        subprocess.run(
+            [
+                "bash",
+                "-c",
+                cleanup_function
+                + "\nUSE_SYSTEM_PG=false\nSYSTEM_DB_OWNED_BY_US=false\n"
+                + "DB_OWNED_CONTAINER_ID=owned-id\nDB_CONTAINER=victoria-db-owned\n"
+                + "DB_VOLUME=victoria-pgdata-owned\ncleanup_seed_bootstrap_database\n",
+            ],
+            env=common_env,
+            check=True,
+        )
+
+        commands = command_log.read_text().splitlines()
+        assert commands == [
+            "dropdb -h localhost -p 5432 -U postgres --if-exists victoria_bench_owned",
+            "docker rm -f victoria-db-owned",
+            "docker volume rm victoria-pgdata-owned",
+        ]
 
 
 def test_local_extract_results_path_and_diagnostic_commands():
@@ -7172,6 +8304,10 @@ async def run_all_tests():
         test_parallel_benchmark_scheduler_serializes_browser_profile_writers,
     )
     r.record(
+        "destructive_fixtures_precede_parallel_trees",
+        test_destructive_db_fixtures_run_before_parallel_agent_trees,
+    )
+    r.record(
         "browser_agent_cookie_bundle_bootstrap_local_only",
         test_browser_agent_cookie_bundle_bootstrap_is_local_only,
     )
@@ -7204,6 +8340,18 @@ async def run_all_tests():
     await r.record_async(
         "code_agent_preflight_accepts_anthropic_api_key_fallback",
         test_code_agent_preflight_accepts_anthropic_api_key_fallback,
+    )
+    await r.record_async(
+        "local_compute_refresh_accepts_anthropic_api_key_fallback",
+        test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback,
+    )
+    r.record(
+        "compute_token_source_ignores_isolated_process_target",
+        test_compute_token_sync_reads_source_file_not_isolated_process_target,
+    )
+    await r.record_async(
+        "anthropic_api_key_fallback_availability_fails_closed",
+        test_anthropic_api_key_fallback_availability_fails_closed,
     )
     r.record("normalize_attention_requests", test_normalize_attention_requests_accepts_backend_contract)
     r.record("attention_kind_auth_vs_write_lock", test_attention_request_kind_distinguishes_auth_from_write_lock)
@@ -7242,10 +8390,55 @@ async def run_all_tests():
     r.record("local_args_anon", test_local_benchmark_args_pass_anon_to_run_benchmark)
     r.record("local_args_single_task", test_local_benchmark_args_for_single_task_not_parallel)
     r.record("local_failed_tasks_from_run", test_local_failed_tasks_from_run_reads_result_json)
+    r.record(
+        "local_invocation_propagates_cache_ratchet_exit",
+        test_local_benchmark_invocation_propagates_cache_ratchet_exit,
+    )
     r.record("local_services_manifest_validation", test_local_services_manifest_validation_requires_ports)
     r.record(
         "local_manifest_system_database_identity",
         test_local_manifest_uses_isolated_system_database_identity,
+    )
+    r.record(
+        "runner_fixture_system_database_identity",
+        test_runner_fixtures_use_isolated_system_database_identity,
+    )
+    r.record(
+        "runner_fixture_isolated_database_fail_closed",
+        test_runner_fixtures_fail_closed_when_isolated_database_is_unavailable,
+    )
+    r.record(
+        "runner_fixture_manifest_database_identity_required",
+        test_runner_fixtures_reject_manifest_without_database_identity,
+    )
+    r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
+    r.record(
+        "run_sh_seed_dump_isolated_database",
+        test_run_sh_seed_dump_targets_isolated_database_atomically,
+    )
+    r.record(
+        "seed_dump_restore_target_client",
+        test_seed_dump_restore_uses_target_container_pg_restore,
+    )
+    r.record(
+        "workspace_dependency_preflight",
+        test_workspace_dependency_preflight_respects_hoisted_installs,
+    )
+    r.record(
+        "standalone_dependency_preflight",
+        test_workspace_dependency_preflight_supports_standalone_packages,
+    )
+    r.record(
+        "missing_package_dependency_preflight",
+        test_workspace_dependency_preflight_rejects_missing_package_manifest,
+    )
+    r.record(
+        "run_sh_reuses_reachable_workspace_db",
+        test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe,
+    )
+    r.record(
+        "run_sh_required_seed_cleanup",
+        test_run_sh_required_seed_failure_cleans_exact_owned_database,
     )
     r.record("run_sh_manifest_publishes_wmh", test_run_sh_manifest_writer_publishes_wmh_when_served)
     r.record("apply_manifest_env_injects_wmh", test_apply_manifest_environment_injects_wmh_base_url_and_model)
@@ -7345,6 +8538,10 @@ async def run_all_tests():
         test_payment_benchmark_preserves_lifecycle_stack_contract,
     )
     r.record(
+        "isolated_benchmark_slow_first_sync",
+        test_isolated_benchmark_services_allow_slow_first_sync,
+    )
+    r.record(
         "claude_code_benchmark_real_provider",
         test_claude_code_benchmark_forces_real_claude_provider_before_stack_start,
     )
@@ -7381,12 +8578,24 @@ async def run_all_tests():
         test_abandonment_retries_a_pending_company_release,
     )
     await r.record_async(
+        "abandonment_waits_between_reclaim_and_void",
+        test_abandonment_waits_between_funding_reclaim_and_purchase_void,
+    )
+    await r.record_async(
         "abandonment_tolerates_transient_lifecycle_read",
         test_abandonment_tolerates_one_transient_lifecycle_read_failure,
     )
     await r.record_async(
         "abandonment_bounds_persistent_lifecycle_outage",
         test_abandonment_surfaces_three_consecutive_lifecycle_read_failures,
+    )
+    await r.record_async(
+        "initial_payment_lifecycle_tolerates_transient_read",
+        test_initial_payment_lifecycle_retries_one_transient_provider_failure,
+    )
+    await r.record_async(
+        "initial_payment_lifecycle_bounds_persistent_outage",
+        test_initial_payment_lifecycle_bounds_persistent_provider_failure,
     )
     r.record(
         "agent_payment_requires_lifecycle_evidence",
@@ -7401,12 +8610,28 @@ async def run_all_tests():
         test_production_frontend_url_ignores_stale_local_services_manifest,
     )
     r.record(
+        "system_postgres_fixture_targets_manifest_db",
+        test_system_postgres_fixture_sql_targets_manifest_database_name,
+    )
+    r.record(
+        "agentcard_setup_fixture_skips_production_lifecycle",
+        test_agentcard_setup_fixture_skips_production_lifecycle,
+    )
+    r.record(
         "ordered_attention_kind_sequence",
         test_expected_attention_kind_uses_ordered_sequence,
     )
     r.record(
         "agentcard_setup_attention_not_auto_approved",
         test_agentcard_setup_attention_is_not_auto_approved,
+    )
+    await r.record_async(
+        "agentcard_setup_terminal_refreshes_attention",
+        test_agentcard_setup_terminal_check_refreshes_stale_attention_poll,
+    )
+    await r.record_async(
+        "agentcard_setup_terminal_open_attention_fails_closed",
+        test_agentcard_setup_terminal_check_fails_closed_for_open_attention,
     )
     r.record(
         "ecommerce_attention_rejects_auth_blocker",
@@ -7453,6 +8678,14 @@ async def run_all_tests():
         test_amazon_beanie_catalog_requires_clean_completed_cart_purchase,
     )
     r.record(
+        "amazon_beanie_exactly_one_payment_or_write_lock",
+        test_amazon_beanie_accepts_exactly_one_payment_or_write_lock,
+    )
+    await r.record_async(
+        "amazon_beanie_poll_rejects_second_or_unrelated_approval",
+        test_amazon_beanie_poll_rejects_second_or_unrelated_approval_without_resolving_it,
+    )
+    r.record(
         "alchemy_sauna_clean_completed_booking",
         test_alchemy_sauna_catalog_requires_single_clean_completed_booking,
     )
@@ -7475,6 +8708,10 @@ async def run_all_tests():
     r.record(
         "live_fixture_auth_failure_is_fatal",
         test_live_fixture_fails_when_live_auth_refresh_fails,
+    )
+    r.record(
+        "cloud_compute_token_source_is_explicit",
+        test_cloud_compute_token_sync_has_an_explicit_production_source,
     )
     r.record(
         "expected_passkey_credential_ref",

@@ -57,11 +57,27 @@ function r2Configured(): boolean {
   );
 }
 
+export function cacheRequestTimeoutMs(
+  env: Record<string, string | undefined> = process.env
+): number {
+  const configured = Number(env.SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS);
+  if (!Number.isFinite(configured) || configured <= 0) return 30_000;
+  return Math.min(Math.max(Math.floor(configured), 100), 60_000);
+}
+
 function client(): S3Client {
   const accountId = process.env.R2_ACCOUNT_ID || '';
+  const requestTimeout = cacheRequestTimeoutMs();
   return new S3Client({
     region: 'auto',
-    endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+    endpoint: process.env.R2_ENDPOINT || `https://${accountId}.r2.cloudflarestorage.com`,
+    maxAttempts: 1,
+    requestHandler: {
+      connectionTimeout: Math.min(requestTimeout, 5_000),
+      requestTimeout,
+      socketTimeout: requestTimeout,
+      throwOnRequestTimeout: true,
+    },
     credentials: {
       accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
       secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',

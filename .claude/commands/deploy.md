@@ -27,7 +27,39 @@ If `ORIGINAL_WORKSPACE_TITLE` is empty, continue deploy but skip the final Step 
 
 # Phase 1: Test Loop
 
-**ABSOLUTE RULE: 100% of tests must pass before proceeding to Phase 2. There are ZERO exceptions.** "Pre-existing failure", "not related to my changes", "performance issue", "local resource contention", "flaky test" — NONE of these are valid excuses. If a test fails, you fix it or you stop and ask the user. You NEVER skip, rationalize, or proceed with failing tests. A deploy with failing tests is a critical failure on your part.
+**DEFAULT RULE: 100% of tests must pass before proceeding to Phase 2.** "Pre-existing failure", "not related to my changes", "performance issue", "local resource contention", and "flaky test" are not automatic excuses. If a test fails, fix it or stop and ask the user unless the user explicitly overrides that specific gate under the policy below.
+
+## Explicit user gate overrides (highest-precedence deploy rule)
+
+An explicit user message may override **any** `/deploy` gate, including tests,
+coverage, credential health, smoke benchmarks, review, merge readiness, or
+post-deploy verification. This section takes precedence over every contrary
+"must pass", "no skip", "do not proceed", or "stop" instruction elsewhere in
+this command.
+
+An override is valid only when the user clearly identifies the gate or failure
+being overridden and explicitly directs the agent to skip, override, proceed,
+merge, ship, or go despite it. Admin status alone and ambiguous encouragement
+are not overrides; a concrete message such as "skip the Anthropic credential
+test and go" is. Never infer an override from silence or from approval of an
+unrelated change.
+
+When a gate is overridden:
+
+1. Continue immediately without asking for duplicate confirmation.
+2. Record `⚠️ Overridden` in `TEST_REPORT`, the exact gate/failure, and a concise
+   paraphrase of the user's approval. Never misreport an overridden gate as
+   passing.
+3. Run every remaining non-overridden gate. An override is narrow unless the
+   user explicitly makes it broader.
+4. Include the override and its concrete risk in the PR body and final handoff.
+5. Use a gate-specific harness override when one exists. For the Anthropic
+   credential probe, set
+   `DEPLOY_GATE_OVERRIDES=credential-health:anthropic`; this skips only that
+   provider check and leaves all other credential checks active.
+
+Gate approval does not authorize unrelated destructive actions, purchases, or
+secret disclosure; those still require their own authority.
 
 Start one durable timing run before the first gate. Every timed command below tees its console output to a per-stage log and atomically appends status + wall duration to the run timeline, so parallel verifier writes are safe:
 
@@ -43,7 +75,7 @@ gate. Run it as the exact standalone command shown, require exit 0 and its
 either is missing. Search output, quoted command text, and failed tool calls are
 not telemetry.
 
-**You must fix ALL failing tests, even if they are not caused by the changes in this branch.** The deploy flow is a gate — it guarantees that main is always green. If a test was already broken before your branch, that is now your responsibility to fix before merging. This includes infrastructure issues, flaky tests, timeout tuning, missing credentials, third-party integration problems, and anything else. The bar is simple: every test passes, or you don't merge.
+**You must fix ALL non-overridden failing tests, even if they are not caused by the changes in this branch.** The deploy flow defaults to keeping main green. If a test was already broken before your branch, that is now your responsibility to fix before merging unless the user explicitly overrides that exact gate. This includes infrastructure issues, flaky tests, timeout tuning, missing credentials, third-party integration problems, and anything else.
 
 Run all checks locally. If any step fails, fix the issue and re-run that step. If fixing required code changes, re-run the entire Test Loop from the top.
 
@@ -426,7 +458,7 @@ agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync
 
 Both commands must pass. This operational verification wiring is pre-authorized by Step 0p and must never pause for human approval.
 
-## Step 4c: Credential health blackbox (no skip)
+## Step 4c: Credential health check (runs unless explicitly overridden)
 
 After all parallel Group 3 branches finish, validate every external credential
 (E2B, Steel, Parallel.ai, Anthropic, OpenRouter, Supabase) with the focused test
@@ -438,7 +470,7 @@ all 91 instrumented back-end domains.
 cd back-end && bash ../scripts/run-deploy-stage credential-health -- npx tsx src/tests/blackbox/integration-health.blackbox.ts
 ```
 
-**If ANY credential is rejected** the error message names the exact env var to refresh and the provider dashboard URL. Escalate to the user immediately — do NOT proceed to Step 5. Refreshing credentials is a human task; working around auth failures in code is forbidden.
+**If ANY credential is rejected** the error message names the exact env var to refresh and the provider dashboard URL. Escalate to the user immediately and do not proceed to Step 5 unless the user explicitly overrides that credential gate. If overridden, record the rejection as `⚠️ Overridden`, use the narrow gate-specific harness override, and continue every other check. Do not change production auth behavior merely to make a rejected credential appear healthy.
 
 ## Step 4h: Live Amplitude admin-health probe (no skip)
 
@@ -843,7 +875,7 @@ four task results and total cost in `TEST_REPORT`.
 
 Semantic tests exercise real user flows through Playwright/Chromium against the full local stack (backend + worker + **frontend**). They are the only gate that proves realtime broadcasts reach the UI and that the login path still works end-to-end.
 
-**Semantic tests run on every /deploy and may never be skipped.** This is independent of the smoke-benchmark change classifier: documentation-only, test-only, frontend-only, and backend-only deploys all run the complete semantic suite. A deploy changes production state even when the app diff is small, so the user-visible frontend contract is always re-proven.
+**Semantic tests run on every /deploy unless the user explicitly overrides that gate.** This is independent of the smoke-benchmark change classifier: documentation-only, test-only, frontend-only, and backend-only deploys all run the complete semantic suite by default. A deploy changes production state even when the app diff is small, so the user-visible frontend contract is normally re-proven.
 
 ### Running semantic tests
 

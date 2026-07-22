@@ -886,6 +886,7 @@ def position_request_fingerprint(request: Any) -> str:
         "thinking": request.get("thinking"),
         "effort": request.get("effort"),
         "provider_fast_mode": request.get("provider_fast_mode"),
+        "exclude_anthropic_family": request.get("exclude_anthropic_family"),
         "response_schema": request.get("response_schema"),
         "env_fingerprint": request.get("env_fingerprint"),
     }

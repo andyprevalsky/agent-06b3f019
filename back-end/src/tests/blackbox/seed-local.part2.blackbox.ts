@@ -91,8 +91,24 @@ test('browser-auth sync includes every durable credential reference', async () =
   const browserStateEnd = source.indexOf('function sleep', browserStateStart);
   const browserState = source.slice(browserStateStart, browserStateEnd);
 
-  for (const model of ['browserProviderProfile', 'cookieBundle', 'steelSessionAuth']) {
-    assert(browserState.includes(`remote.${model}`), `expected production ${model} read`);
+  assert(
+    browserState.includes('remote.browserProviderProfile'),
+    'expected production browserProviderProfile read'
+  );
+  assert(
+    browserState.includes('tx.browserProviderProfile'),
+    'expected local browserProviderProfile write'
+  );
+
+  for (const model of ['cookieBundle', 'steelSessionAuth']) {
+    assert(
+      source.includes(`${model}: (where) => remote.${model}.findMany`),
+      `expected production ${model} reader`
+    );
+    assert(
+      browserState.includes(`scopedRemoteBrowserAuth.${model}()`),
+      `expected scoped production ${model} read`
+    );
     assert(
       browserState.includes(`local.${model}`) || browserState.includes(`tx.${model}`),
       `expected local ${model} write`
@@ -136,6 +152,63 @@ test('seed-local rejects conflicting exclusive sync modes before creating databa
   assert(
     source.includes('Seed modes are mutually exclusive; received'),
     'expected conflicting flags to be named in the failure'
+  );
+});
+
+test('compute-token-only sync fails closed without an explicit source database', async () => {
+  const source = readSeedLocalSource();
+  const modeFlag = source.indexOf("process.argv.includes('--compute-tokens-only')");
+  const sourceVariable = source.indexOf('const COMPUTE_TOKEN_SOURCE_DATABASE_URL');
+  const failClosed = source.indexOf(
+    'if (COMPUTE_TOKENS_ONLY && !COMPUTE_TOKEN_SOURCE_DATABASE_URL)'
+  );
+  const envRead = source.indexOf('dotenv.parse(readFileSync(envPath))');
+  const clients = source.indexOf('const remote = new PrismaClient');
+
+  assert(sourceVariable > modeFlag, 'expected the explicit compute-token source variable');
+  assert(failClosed > sourceVariable, 'expected compute-token mode to reject a missing source');
+  assert(failClosed < envRead, 'expected rejection before any .env fallback can be read');
+  assert(failClosed < clients, 'expected rejection before database clients are created');
+  assert(
+    source.includes('refusing to fall back to .env'),
+    'expected the failure to explain the protected boundary'
+  );
+});
+
+test('missing-Codex bypass warning reports the usable Claude count', async () => {
+  const source = readSeedLocalSource();
+  const bypass = source.indexOf("process.env.SEED_ALLOW_MISSING_GPT_CODE === '1'");
+  const warning = source.indexOf('usable claude_code, 0 usable gpt_code', bypass);
+
+  assert(bypass > 0, 'expected the explicit missing-Codex bypass');
+  assert(warning > bypass, 'expected its warning to report the usable Claude count');
+});
+
+test('missing-Claude bypass requires the caller-validated Anthropic fallback opt-in', async () => {
+  const source = readSeedLocalSource();
+  const zeroClaude = source.indexOf('if (usableClaudeCodeCount === 0)');
+  const bypass = source.indexOf("process.env.SEED_ALLOW_MISSING_CLAUDE_CODE === '1'", zeroClaude);
+  const keyValidation = source.indexOf('process.env.ANTHROPIC_API_KEY?.trim()', bypass);
+  const emptyKeyFailure = source.indexOf(
+    'SEED_ALLOW_MISSING_CLAUDE_CODE=1 requires a non-empty ANTHROPIC_API_KEY',
+    keyValidation
+  );
+  const warning = source.indexOf('caller-validated', bypass);
+  const fallback = source.indexOf('ANTHROPIC_API_KEY fallback', warning);
+  const strictFailure = source.indexOf(
+    "throw new Error('No usable claude_code integrations after sync')",
+    bypass
+  );
+
+  assert(zeroClaude > 0, 'expected an explicit zero-Claude availability check');
+  assert(bypass > zeroClaude, 'expected an explicit missing-Claude opt-in');
+  assert(keyValidation > bypass, 'expected the fallback to validate the Anthropic API key');
+  assert(emptyKeyFailure > keyValidation, 'expected an empty Anthropic API key to fail closed');
+  assert(warning > emptyKeyFailure, 'expected validation before the fallback warning');
+  assert(fallback > warning, 'expected the runtime replacement to be the Anthropic API key');
+  assert(
+    strictFailure > fallback,
+    'expected missing Claude OAuth to fail closed without the opt-in'
   );
 });
 

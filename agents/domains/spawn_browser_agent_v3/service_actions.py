@@ -11,7 +11,7 @@ import inspect
 import json
 import time as time_module
 from io import BytesIO
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 import structlog
@@ -19,7 +19,12 @@ from PIL import Image
 
 from browser_tools.schemas import RequestPaymentCardBrowserTool
 from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
-from domains.spawn_browser_agent_v3.service_crypto import PAYMENT_CARD_SECRET_REFS, has_payment_card_secret_refs
+from domains.spawn_browser_agent_v3.service_crypto import (
+    PAYMENT_CARD_SECRET_REFS,
+    auth_realm_from_url,
+    auth_realm_matches_url,
+    has_payment_card_secret_refs,
+)
 from utils.purchase_approval import validate_product_url_for_pages
 
 if TYPE_CHECKING:
@@ -307,6 +312,10 @@ async def execute_action(  # noqa: C901
     write_lock_approvals: Optional[Dict[str, Dict]] = None,
     system_name: str = "Rose",
     browser_network_recorder: Optional[Any] = None,
+    current_auth_realm: str = "",
+    prepare_credentials_for_url: Optional[
+        Callable[[str], Awaitable[Optional[Dict[str, Any]]]]
+    ] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -489,6 +498,8 @@ async def execute_action(  # noqa: C901
                 thinking=thinking,
                 session_id=session_id,
                 config=config,
+                current_auth_realm=current_auth_realm,
+                prepare_credentials_for_url=prepare_credentials_for_url,
             )
 
         elif action_name == "navback":
@@ -1755,40 +1766,65 @@ async def _execute_goto(
     thinking: Any,
     session_id: Optional[str],
     config: Any,
+    current_auth_realm: str = "",
+    prepare_credentials_for_url: Optional[
+        Callable[[str], Awaitable[Optional[Dict[str, Any]]]]
+    ] = None,
+    wait_for_navigation: Optional[Callable[..., Awaitable[None]]] = None,
 ) -> Dict[str, Any]:
-    """Execute a goto (navigation) action."""
+    """Prepare a target realm's credentials, then execute navigation."""
     from browser_use.browser.events import NavigateToUrlEvent
-
-    from domains.spawn_browser_agent_v3.repo import inject_local_storage
 
     url = params.get("url", "")
     if url and not url.startswith(("http://", "https://", "about:", "file:")):
         url = f"https://{url}"
         logger.info(f"\U0001f517 Auto-added https:// to URL: {url}")
+    credential_summary = None
+    target_auth_realm = auth_realm_from_url(url)
+    if (
+        prepare_credentials_for_url is not None
+        and target_auth_realm
+        and not auth_realm_matches_url(current_auth_realm, url)
+    ):
+        prepared = await prepare_credentials_for_url(url)
+        if prepared is not None:
+            credential_summary = {
+                key: prepared[key]
+                for key in (
+                    "auth_realm",
+                    "cookies_injected",
+                    "cookie_count",
+                    "password_count",
+                    "passkey_count",
+                    "passkeys_newly_injected",
+                )
+                if key in prepared
+            }
+
     event = session.event_bus.dispatch(NavigateToUrlEvent(url=url))
     await event
     await event.event_result(raise_if_any=True, raise_if_none=False)
 
-    if session_id and config:
-        try:
-            parsed = urlparse(url)
-            origin = f"{parsed.scheme}://{parsed.netloc}"
-            result_data = await inject_local_storage(config, session_id, origin)
-            if result_data and result_data.get("injected"):
-                logger.info(f"\U0001f4be Injected {result_data.get('count', 0)} localStorage entries for {origin}")
-        except Exception as e:
-            logger.warning(f"Failed to inject localStorage for {url}: {e}")
+    navigation_waiter = wait_for_navigation or wait_for_navigation_ready
+    await navigation_waiter(dom_service, url=url)
 
-    await wait_for_navigation_ready(dom_service, url=url)
-
+    result: Dict[str, Any] = {"success": True, "message": "", "current_url": url}
+    if credential_summary is not None:
+        # The preparation callback consumes encrypted credential material
+        # internally. Only its deliberately non-sensitive summary may enter
+        # action history or the model-visible tool result.
+        result["credentials_prepared"] = credential_summary
+        result["auth_realm"] = str(
+            credential_summary.get("auth_realm") or target_auth_realm
+        )
     await action_history.record_action(
         dom_service=dom_service,
         action="goto",
         thinking=thinking,
         params={"url": url},
-        result={"success": True, "current_url": url},
+        result=result,
     )
-    return {"success": True, "message": "", "current_url": url}
+    return result
 
 
 async def _execute_extract(

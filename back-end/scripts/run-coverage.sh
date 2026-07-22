@@ -72,6 +72,14 @@ export AMPLITUDE_SECRET_KEY=""
 export BLACKBOX_TEST_SKIP_DOMAINS="${BLACKBOX_TEST_SKIP_DOMAINS:+$BLACKBOX_TEST_SKIP_DOMAINS,}integration-health"
 export CONTRACT_TEST_SKIP_DOMAINS="$BLACKBOX_TEST_SKIP_DOMAINS"
 
+# Coverage is a deterministic local-code gate, not an external analytics probe.
+# A full admin-health run can spend most of Amplitude's five-minute chart-query
+# budget, starving the mandatory live blackbox gate that follows coverage during
+# /deploy. Keep coverage offline; the later live suite still requires real
+# Amplitude funnel counts when credentials are configured.
+export AMPLITUDE_API_KEY=""
+export AMPLITUDE_SECRET_KEY=""
+
 # Coverage starts only a local backend. E2B smoke sandboxes cannot reach stale
 # developer ngrok URLs from .env, so keep those smoke sessions on direct provider
 # calls unless the caller explicitly opts into a known-live tunnel.
@@ -165,31 +173,32 @@ SQL
   # pre-seed a valid production credential without disabling the real Codex
   # black-box test that consumes it.
   if [[ "${BACKEND_CODEX_TOKEN_SYNC_SKIP:-0}" != "1" ]]; then
-    CODEX_AUTH_FILE="${CODEX_AUTH_PATH:-${HOME}/.codex/auth.json}"
-    if [[ -f "$CODEX_AUTH_FILE" ]] && grep -Eq '"auth_mode"[[:space:]]*:[[:space:]]*"chatgpt"' "$CODEX_AUTH_FILE"; then
+    CODEX_AUTH_FILE="${CODEX_AUTH_PATH:-$HOME/.codex/auth.json}"
+    CODEX_AUTH_MODE="$(jq -r '.auth_mode // empty' "$CODEX_AUTH_FILE" 2>/dev/null || true)"
+    if [[ "$CODEX_AUTH_MODE" == "chatgpt" ]]; then
       echo "Syncing local Codex credentials to local test database..."
       npx tsx scripts/sync-codex-token.ts >/dev/null
     else
-      echo "No local ChatGPT Codex auth envelope; using seeded integration or API-key fallback."
+      SEEDED_CODEX_COUNT="$(psql "$LOCAL_DB_URL" -At -v ON_ERROR_STOP=1 -c \
+        "SELECT count(*) FROM \"Integration\" WHERE name='gpt_code' AND status='CONNECTED' AND \"isActive\"=true AND coalesce(config->>'encryptedCredentials','') <> '';" 2>/dev/null || printf 0)"
+      if [[ "$SEEDED_CODEX_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Using the connected gpt_code credential already seeded in the isolated test database."
+      else
+        echo "❌ Codex auth is not ChatGPT mode and the isolated test database has no connected gpt_code credential." >&2
+        echo "   Run codex login, seed the integration, or set BACKEND_CODEX_TOKEN_SYNC_SKIP=1 only when the caller already seeded it." >&2
+        exit 1
+      fi
     fi
   fi
 fi
 
-# Fast Mode cache requires an explicit URL outside production (no fallback to the
-# local app database). Mirror scripts/run.sh: derive it from back-end/.env's
-# DATABASE_URL (the shared cache DB) before DATABASE_URL is overridden to the
-# local test database above. Without this, every /api/fast-cache route 500s and
-# the fast-cache blackbox domain fails under coverage.
-if [[ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" && -f .env ]]; then
-  ENV_DATABASE_URL=$(grep -E '^DATABASE_URL=' .env | head -1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
-  if [[ -n "$ENV_DATABASE_URL" ]]; then
-    export FAST_MODE_CACHE_DATABASE_URL="$ENV_DATABASE_URL"
-  fi
-fi
-if [[ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]]; then
-  echo "❌ FAST_MODE_CACHE_DATABASE_URL is required (or keep DATABASE_URL in back-end/.env so it can be derived)." >&2
-  exit 1
-fi
+# Fast Mode cache still requires an explicit URL outside production, but a local
+# coverage run must not write fixtures into (or depend on capacity from) the
+# shared production cache database. The local schema includes FastModeCacheEntry,
+# so point the instrumented backend at the same isolated database used by every
+# other blackbox domain. scripts/run.sh retains the shared-cache behavior for
+# real local agent stacks; this override is coverage-only.
+export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"
 
 echo "Starting backend with coverage collection on port $COV_PORT..."
 NODE_V8_COVERAGE="$COV_TMP" PORT="$COV_PORT" DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_CAPTURE_OUTBOUND=1 BLACKBOX_TEST_REPLAY_OUTBOUND=1 \

@@ -14,6 +14,7 @@
  *   currentView === 'benchmarks'   → <BenchmarksView /> (team-gated tab)
  *   currentView === 'agents'       → agent chat / landing
  *   open-agent deep link           → force 'agents' even from browse/settings
+ *   agents + inspectionContext     → floating read-only account identity badge
  */
 
 import { useState, useMemo, lazy } from 'react';
@@ -45,6 +46,7 @@ import type { TerminalView } from '../types';
 import { BROWSER_REVIEW_TEST_PHONE } from '../config';
 
 import { BackgroundPattern } from './BackgroundPattern';
+import { InspectionAccountBadge } from './InspectionAccountBadge';
 import { TerminalHeader } from './TerminalHeader';
 import { MainContent } from './TerminalMainContent';
 import { TerminalModals } from './TerminalModals';
@@ -152,6 +154,9 @@ function TerminalLayout(props: TerminalLayoutProps) {
           onCreateNewAgent={agents.handleCreateNewAgent}
           onSelectAgent={agents.handleSelectAgent}
           onLoginClick={agents.handleLoginClick}
+          onLogout={() => {
+            void agents.handleLogout();
+          }}
           isSignedIn={agents.isFullySignedIn}
           clientSource={agents.clientSource}
           realtimeReady={agents.realtimeReady}
@@ -167,6 +172,8 @@ function TerminalLayout(props: TerminalLayoutProps) {
           shadowIntensity={drip.shadowIntensity}
         />
       )}
+
+      {currentView === 'agents' && <InspectionAccountBadge context={agents.inspectionContext} />}
 
       <div className="h-screen flex z-[4]" style={{ height: '100dvh' }}>
         <SidebarSection

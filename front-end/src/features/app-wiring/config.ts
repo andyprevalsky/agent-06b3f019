@@ -12,8 +12,14 @@ import ResearchBlogPost from '@/features/research-blog-post';
 import Download from '@/features/download';
 import TestPayment from '@/features/test-payment';
 import GatePlayground from '@/features/gate-playground';
+import MobilePreview from '@/features/mobile-preview';
 import { PlaidOAuthRedirect } from '@/features/integrations';
 import Waitlist from '@/pages/Waitlist';
+
+/** Dev-only design harness routes (stripped from production builds). */
+const DEV_ROUTES: readonly RouteEntry[] = import.meta.env.DEV
+  ? [{ path: '/mobile-preview', component: MobilePreview }]
+  : [];
 
 /**
  * Application route table.
@@ -32,8 +38,9 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { path: '/test_payment', component: TestPayment },
   { path: '/gate-playground', component: GatePlayground },
   { path: '/plaid-oauth-redirect', component: PlaidOAuthRedirect },
+  ...DEV_ROUTES,
   { path: '*', component: NotFound, isCatchAll: true },
-] as const;
+];
 
 /** Amplitude analytics configuration. */
 export const AMPLITUDE_API_KEY = 'ff5280db0f34594af90323d5ef9e3e34';

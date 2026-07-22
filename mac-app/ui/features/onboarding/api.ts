@@ -1,7 +1,7 @@
 import { getSession } from '@/lib/supabase';
 import { type CustomizationData } from '@/features/customization';
 import { getBackendUrl } from './config';
-import type { UserSettingsResponse } from './types';
+import type { UserSettingsResponse, WaitlistStatus } from './types';
 
 const authHeader = (token: string): Record<string, string> => ({
   Authorization: `Bearer ${token}`,
@@ -91,7 +91,41 @@ export const saveCustomization = async (
   }
 };
 
-export { checkWaitlistStatus, createSubscriptionCheckoutUrl } from './gateApi';
+/** Resolve the persisted invite/subscription gate for the final onboarding step. */
+export const checkWaitlistStatus = async (): Promise<WaitlistStatus> => {
+  const token = requireToken();
+  const response = await fetch(`${getBackendUrl()}/api/invite-codes/check`, {
+    headers: authHeader(token),
+  });
+  if (!response.ok) {
+    throw new Error('Failed to check invite code status');
+  }
+  const payload = (await response.json()) as {
+    needsInviteCode?: unknown;
+    offWaitlist?: unknown;
+  };
+  if (typeof payload.needsInviteCode !== 'boolean' || typeof payload.offWaitlist !== 'boolean') {
+    throw new Error('Malformed invite-code check response');
+  }
+  return { needsInviteCode: payload.needsInviteCode, offWaitlist: payload.offWaitlist };
+};
+
+/** Mint a Stripe subscription checkout URL for the onboarding subscribe view. */
+export const createSubscriptionCheckoutUrl = async (): Promise<string> => {
+  const token = requireToken();
+  const response = await fetch(`${getBackendUrl()}/api/billing/subscription-checkout`, {
+    method: 'POST',
+    headers: authHeader(token),
+  });
+  if (!response.ok) {
+    throw new Error('Failed to start subscription checkout');
+  }
+  const payload = (await response.json()) as { url?: unknown };
+  if (typeof payload.url !== 'string' || payload.url.trim() === '') {
+    throw new Error('No checkout URL returned');
+  }
+  return payload.url;
+};
 
 /** Redeem an invite code; throws with the server's message on rejection. */
 export const redeemInviteCode = async (inviteCode: number): Promise<void> => {

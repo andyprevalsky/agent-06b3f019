@@ -54,6 +54,7 @@ from providers.rose.errors import (
 )
 from providers.rose.gpt_auth import gpt_auth_complete, openai_api_key_complete
 from providers.rose.legacy_adapter import classify_claude_token_error, classify_gpt_token_error
+from providers.rose.policy import anthropic_family_excluded
 from providers.rose.pools import PoolName, get_pool
 from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
@@ -347,7 +348,7 @@ def _cache_input_accounting(
     cache_read = max(int(cache_read or 0), 0)
     cache_write = max(int(cache_write or 0), 0)
 
-    if actual_model.endswith("-claude"):
+    if actual_model.endswith(("-claude", "-anthropic")):
         total_input = prompt_tokens + cache_read + cache_write
         accounting = "exclusive"
     else:
@@ -361,6 +362,32 @@ def _cache_input_accounting(
         "uncached_input": uncached_input,
         "cache_hit_pct": cache_pct,
         "cache_accounting": accounting,
+    }
+
+
+def _normalize_usage_input_tokens(actual_model: str, usage_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose one provider-neutral usage contract to agent cost accounting.
+
+    Native Anthropic usage already reports only the uncached input tail in
+    ``prompt_tokens``. OpenAI-compatible APIs include cached reads and writes
+    in ``prompt_tokens``. The workflow prices those three buckets separately,
+    so forwarding OpenAI's inclusive counter double-charges cached input.
+    """
+    cache_read = usage_data.get("cache_read_input_tokens", 0) or 0
+    cache_write = usage_data.get("cache_creation_input_tokens", 0) or 0
+    prompt_tokens = usage_data.get("prompt_tokens", 0) or 0
+    cache_stats = _cache_input_accounting(
+        actual_model=actual_model,
+        prompt_tokens=prompt_tokens,
+        cache_read=cache_read,
+        cache_write=cache_write,
+    )
+    if cache_stats["cache_accounting"] == "exclusive":
+        return usage_data
+    return {
+        **usage_data,
+        "prompt_tokens": cache_stats["uncached_input"],
+        "prompt_tokens_total": cache_stats["total_input"],
     }
 
 
@@ -539,6 +566,11 @@ class RoseClient:
         agent_id = kwargs.get("agent_id")
         messages = kwargs.get("messages")
         pool = kwargs.get("pool")
+        exclude_anthropic_family = anthropic_family_excluded(
+            bool(kwargs.get("_exclude_anthropic_family", False))
+        )
+        if exclude_anthropic_family != bool(kwargs.get("_exclude_anthropic_family", False)):
+            kwargs = {**kwargs, "_exclude_anthropic_family": exclude_anthropic_family}
 
         if pool == "rose-1-browser-use" or str(call_site).startswith("browser_use"):
             async for chunk in self._complete_impl(**kwargs):
@@ -603,6 +635,7 @@ class RoseClient:
         provider_fast_mode: bool = False,
         dump_context: bool = True,
         dump_extra: Optional[Dict[str, Any]] = None,
+        cache_namespace: Optional[str] = None,
         _exclude_anthropic_family: bool = False,
     ) -> AsyncIterator[StreamChunk]:
         """Run a full Rose completion, yielding normalized StreamChunks.
@@ -612,6 +645,10 @@ class RoseClient:
         chunk, then exactly one `done` chunk. All failures raise typed
         `RoseError`s; callers never see error chunks.
         """
+        # Allow a process owner to prove that a maintenance or benchmark run
+        # cannot consume Anthropic credit. This complements the existing
+        # call-scoped flag and covers nested browser/evaluator calls as well.
+        _exclude_anthropic_family = anthropic_family_excluded(_exclude_anthropic_family)
         pool_spec = get_pool(pool)
         rid = request_id or uuid.uuid4().hex[:12]
         started = time.monotonic()
@@ -719,37 +756,26 @@ class RoseClient:
         anthropic_api_key_tool_choice = None
         direct_auth_tools = tools
         effective_tool_choice = tool_choice
-        if (
-            direct_auth_tools is None
-            and response_model is not None
-            and (claude_auth is not None or gpt_auth is not None)
-        ):
+        if direct_auth_tools is None and response_model is not None:
             direct_auth_tools = build_anthropic_tools_from_response_model(
                 response_model,
                 model=pool_spec.claude_auth_model,
             )
-        if claude_auth is not None:
-            # Plain structured-output models are better enforced by Anthropic
-            # `output_config.format` than by a synthetic submit tool. Keep
-            # native tools only for real tool-call models.
-            if not _is_synthetic_output_toolset(direct_auth_tools):
-                claude_auth_tools = direct_auth_tools
-            if claude_auth_tools:
-                # response_model is the explicit signal that "tool_calls is the
-                # only legal response shape." `auto` lets Anthropic emit prose
-                # instead — when it does, the streaming parser shoves text into
-                # the JSON envelope slot and json.loads explodes (Expecting
-                # value: line 1 column 1). Mirror gpt_auth (just below): force
-                # `any` whenever native tools are populated.
-                claude_auth_tool_choice = effective_tool_choice or "any"
-        if gpt_auth is not None:
-            # Plain structured-output models are better enforced by the
-            # Responses `text.format` JSON schema than by a synthetic submit
-            # tool. Keep native tools only for real tool-call models.
-            if not _is_synthetic_output_toolset(direct_auth_tools):
-                gpt_auth_tools = direct_auth_tools
-            if gpt_auth_tools:
-                gpt_auth_tool_choice = effective_tool_choice or "any"
+        # A direct credential can rotate between Claude and GPT inside this
+        # call, so prepare both provider contracts before route selection. If
+        # these projections depend on the credential present at entry, a
+        # cross-type rotation receives a response_format intended for the old
+        # route instead of the AgentAction native tools.
+        if not _is_synthetic_output_toolset(direct_auth_tools):
+            claude_auth_tools = direct_auth_tools
+            gpt_auth_tools = direct_auth_tools
+        if claude_auth_tools:
+            # response_model is the explicit signal that "tool_calls is the
+            # only legal response shape." `auto` lets Anthropic emit prose
+            # instead, so force a native tool call on either direct route.
+            claude_auth_tool_choice = effective_tool_choice or "any"
+        if gpt_auth_tools:
+            gpt_auth_tool_choice = effective_tool_choice or "any"
         # The funded OpenAI API-key route uses the same Responses native
         # tool protocol as gptAuth, so it must preserve real tool schemas even
         # when there is no direct GPT token lease.
@@ -1014,6 +1040,7 @@ class RoseClient:
                                 request_id=rid,
                                 agent_id=agent_id,
                                 call_site=call_site,
+                                cache_namespace=cache_namespace,
                                 provider_fast_mode=provider_fast_mode,
                                 ttft_timeout_s=current_ttft_s,
                                 idle_timeout_s=idle_timeout_s,
@@ -1042,6 +1069,10 @@ class RoseClient:
                                         usage_data["gpt_token_rotated"] = direct_rotations > 0
                                     chunk = StreamChunk(kind="usage", data=usage_data)
                                     _emit_llm_cache(chunk.data)
+                                    chunk = StreamChunk(
+                                        kind="usage",
+                                        data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                                    )
                                 _record_dump_chunk(chunk)
                                 yield chunk
                         except RoseStallError as exc:
@@ -1186,6 +1217,7 @@ class RoseClient:
                             request_id=rid,
                             agent_id=agent_id,
                             call_site=call_site,
+                            cache_namespace=cache_namespace,
                             ttft_timeout_s=ttft_timeout_s,
                             idle_timeout_s=idle_timeout_s,
                         )
@@ -1203,6 +1235,10 @@ class RoseClient:
                                 _seen_actual_model = chunk.data["actual_model"]
                         elif chunk.kind == "usage":
                             _emit_llm_cache(chunk.data)
+                            chunk = StreamChunk(
+                                kind="usage",
+                                data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                            )
                         _record_dump_chunk(chunk)
                         yield chunk
                     logger.info(
@@ -1272,6 +1308,10 @@ class RoseClient:
                                 _seen_actual_model = chunk.data["actual_model"]
                         elif chunk.kind == "usage":
                             _emit_llm_cache(chunk.data)
+                            chunk = StreamChunk(
+                                kind="usage",
+                                data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                            )
                         _record_dump_chunk(chunk)
                         yield chunk
                     logger.info(
@@ -1334,6 +1374,10 @@ class RoseClient:
                     _seen_actual_model = chunk.data["actual_model"]
                 elif chunk.kind == "usage":
                     _emit_llm_cache(chunk.data)
+                    chunk = StreamChunk(
+                        kind="usage",
+                        data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
+                    )
                 _record_dump_chunk(chunk)
                 yield chunk
             logger.info(
@@ -1377,6 +1421,7 @@ class RoseClient:
         deadline_s: float = _DEFAULT_DEADLINE_S,
         skip_cache_write: bool = False,
         dump_extra: Optional[Dict[str, Any]] = None,
+        cache_namespace: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run one browser-use step through the rose-1-browser-use pool.
 
@@ -1439,6 +1484,7 @@ class RoseClient:
             deadline_s=deadline_s,
             skip_cache_write=skip_cache_write,
             dump_context=False,
+            cache_namespace=cache_namespace,
         )
 
         actual_model = response.actual_model or ""
@@ -1533,6 +1579,7 @@ class RoseClient:
         deadline_s: float = _DEFAULT_DEADLINE_S,
         dump_context: bool = True,
         dump_extra: Optional[Dict[str, Any]] = None,
+        cache_namespace: Optional[str] = None,
     ) -> RoseResponse:
         """Consume the stream into a single `RoseResponse` — convenience for
         non-streaming callers who don't care about incremental chunks."""
@@ -1556,6 +1603,7 @@ class RoseClient:
             deadline_s=deadline_s,
             dump_context=dump_context,
             dump_extra=dump_extra,
+            cache_namespace=cache_namespace,
         ):
             if chunk.kind == "content" and structured_output is not None:
                 structured_output.add_chunk(chunk)
@@ -1671,6 +1719,7 @@ async def _try_gpt_auth(
     request_id: str,
     agent_id: Optional[str],
     call_site: Optional[str],
+    cache_namespace: Optional[str] = None,
     provider_fast_mode: bool = False,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
@@ -1690,6 +1739,7 @@ async def _try_gpt_auth(
         request_id=request_id,
         agent_id=agent_id,
         call_site=call_site,
+        cache_namespace=cache_namespace,
         provider_fast_mode=provider_fast_mode,
         ttft_timeout_s=ttft_timeout_s,
         idle_timeout_s=idle_timeout_s,
@@ -1725,6 +1775,7 @@ async def _try_openai_api_key(
     request_id: str,
     agent_id: Optional[str],
     call_site: Optional[str],
+    cache_namespace: Optional[str] = None,
     ttft_timeout_s: float = _DEFAULT_TTFT_TIMEOUT_S,
     idle_timeout_s: Optional[float] = _DEFAULT_IDLE_TIMEOUT_S,
 ) -> AsyncIterator[StreamChunk]:
@@ -1745,6 +1796,7 @@ async def _try_openai_api_key(
         request_id=request_id,
         agent_id=agent_id,
         call_site=call_site,
+        cache_namespace=cache_namespace,
         provider_fast_mode=provider_fast_mode,
         ttft_timeout_s=ttft_timeout_s,
         idle_timeout_s=idle_timeout_s,

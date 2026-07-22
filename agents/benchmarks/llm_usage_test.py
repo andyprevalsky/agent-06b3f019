@@ -29,6 +29,9 @@ def test_classifies_every_required_auth_path_and_openrouter_slot() -> None:
         "claude_oauth_token",
         "claude-fable-5",
     )
+    assert classify_usage_item(
+        {"model": "gpt-5.6-sol-gpt", "provider": "Rose 1 Browser Use"}
+    ) == ("codex_token", "gpt-5.6-sol")
     # AgentWorkflow._track_usage fills a browser usage item's absent transport
     # model from the parent agent alias before persisting it. Provider identity
     # remains authoritative for the browser pool in this production shape.

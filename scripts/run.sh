@@ -27,9 +27,22 @@ normalize_conductor_workspace_env
 . "$SCRIPT_DIR/lib/run-process-cleanup.sh"
 . "$SCRIPT_DIR/lib/ngrok-tunnel.sh"
 . "$SCRIPT_DIR/lib/run-context.sh"
+. "$SCRIPT_DIR/lib/run-service-readiness.sh"
+. "$SCRIPT_DIR/lib/seed-cache.sh"
+. "$SCRIPT_DIR/lib/fast-mode-cache-schema.sh"
 
 RUN_CONTEXT_DIR="$(normalize_run_context_dir "$PWD" "${BENCHMARK_CONTEXT_DIR:-.context}")"
 BENCHMARK_ISOLATED_RUN="${BENCHMARK_ISOLATED_RUN:-false}"
+
+# Export both benchmark-mode signals so child services (backend + worker) actually
+# see them. Backend code keys benchmark-only behavior off these (purchase KYC
+# simulation, the RLS-free agent preview, and the AgentCard mint cutoff's
+# force-enable of real minting). `--benchmark` sets BENCHMARK_MODE locally; without
+# this export it never reached the backend, so those checks silently read an unset
+# var — e.g. a `run.sh --benchmark` lifecycle stack would hand the agent the static
+# Rose Agent Card instead of minting a real AgentCard. The isolated `run-bench`
+# path already exports BENCHMARK_ISOLATED_RUN; re-exporting here is idempotent.
+export BENCHMARK_MODE BENCHMARK_ISOLATED_RUN
 
 # mac-app is Electron + requires nvm/Node 20.10.0; only runs on macOS.
 IS_MAC=false
@@ -96,6 +109,16 @@ docker_info_quick() {
     return 1
 }
 
+docker_available_for_workspace_db() {
+    local db_container=$1
+    docker_info_quick && return 0
+    # /deploy pre-starts the worktree-owned DB. A busy Docker Desktop can make
+    # the broad daemon probe miss its startup budget even while this known
+    # container is available; preserve isolation instead of falling through to
+    # the shared system Postgres in that case.
+    docker_ps_ports_quick '{{.Names}}' | grep -Fxq "$db_container"
+}
+
 # Check cwd first because many service command lines are just "node" or
 # "python3" and do not include the worktree path.
 process_belongs_to_this_worktree() {
@@ -112,6 +135,13 @@ process_belongs_to_this_worktree() {
 # Check if a port requires moving this workspace to a different range.
 # Current-worktree processes are handled later as stale/running services; any
 # other listener should trigger reassignment before services or Postgres start.
+#
+# Only LISTENING sockets are considered: a listener bind fails (EADDRINUSE) solely
+# because another LISTENER holds the port. An outbound ESTABLISHED connection that
+# merely borrowed this number as its ephemeral local port (e.g. a concurrent
+# workspace's `flyctl proxy` streaming to Fly) does NOT block our bind, so it must
+# not be mistaken for an occupant — otherwise unlucky ephemeral-port collisions
+# across sibling workspaces spuriously fail strict-Conductor-port startup.
 port_requires_reassign() {
     local port=$1
     local pids
@@ -391,13 +421,35 @@ fi
 # the Docker daemon isn't available (sandboxed containers, CI without --privileged).
 DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
 DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
+PRESTARTED_WORKSPACE_DB=false
+
+workspace_db_container_owns_port() {
+    local container_port
+    container_port=$(docker inspect "$DB_CONTAINER" \
+        --format='{{if .State.Running}}{{(index (index .HostConfig.PortBindings "5432/tcp") 0).HostPort}}{{end}}' \
+        2>/dev/null || true)
+    [ "$container_port" = "$LOCAL_DB_PORT" ]
+}
+
+# Probe the workspace-scoped database service itself before asking the whole
+# Docker daemon for global state. Under concurrent deploy load `docker info`
+# can miss its one-second responsiveness budget even while this already-started
+# Postgres is healthy. Verify that the exact workspace-named container owns the
+# expected host port before trusting the listener; another workspace can have
+# valid victoria credentials on a stale inherited port.
+if [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && \
+   workspace_db_container_owns_port && \
+   PGPASSWORD=postgres pg_isready -h localhost -p "$LOCAL_DB_PORT" -U postgres -d victoria -q 2>/dev/null; then
+    PRESTARTED_WORKSPACE_DB=true
+fi
 DOCKER_OK=false
-if docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' 2>/dev/null | grep -q .; then
+if ! $PRESTARTED_WORKSPACE_DB && \
+   docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' 2>/dev/null | grep -q .; then
     # /deploy pre-starts this exact workspace container. Prefer that direct,
     # authoritative check even when a busy Docker Desktop daemon makes the
     # broader `docker info` probe miss its bounded response window.
     DOCKER_OK=true
-elif docker_info_quick; then
+elif ! $PRESTARTED_WORKSPACE_DB && docker_info_quick; then
     DOCKER_OK=true
 fi
 
@@ -411,7 +463,30 @@ if [ "${ROSE_USE_SYSTEM_PG:-false}" = "true" ]; then
     USE_SYSTEM_PG=true
 fi
 
-if $DOCKER_OK && ! $USE_SYSTEM_PG; then
+cleanup_seed_bootstrap_database() {
+    if $USE_SYSTEM_PG && $SYSTEM_DB_OWNED_BY_US; then
+        PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$LOCAL_DB_NAME" >/dev/null 2>&1 || true
+        SYSTEM_DB_OWNED_BY_US=false
+        DB_OWNED_BY_US=false
+    elif [ -n "$DB_OWNED_CONTAINER_ID" ]; then
+        docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
+        docker volume rm "$DB_VOLUME" >/dev/null 2>&1 || true
+        DB_OWNED_CONTAINER_ID=""
+        DB_OWNED_BY_US=false
+    fi
+}
+
+fail_required_seed_dump() {
+    echo "❌ $1" >&2
+    echo "   Expected cache token: $_SEED_CACHE_TOKEN" >&2
+    cleanup_seed_bootstrap_database
+    exit 1
+}
+
+if $PRESTARTED_WORKSPACE_DB; then
+    LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
+    echo "🐘 Reusing healthy workspace Postgres on port $LOCAL_DB_PORT (Docker daemon probe not required)"
+elif $DOCKER_OK && ! $USE_SYSTEM_PG; then
     # ── Docker path (macOS / Linux with working Docker) ──
     if ! docker ps &>/dev/null 2>&1; then
         if [ -d "/Applications/Docker.app" ]; then
@@ -585,7 +660,18 @@ if [ -z "${FAST_MODE_CACHE_DATABASE_URL:-}" ]; then
     exit 1
 fi
 echo "🧠 Ensuring Fast Mode cache schema..."
-(cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts)
+# This ensure connects to FAST_MODE_CACHE_DATABASE_URL — the SHARED prod pooler by
+# default (see above). When a cloud fleet boots concurrently (plus any neighbor
+# fleet on the same app), the pooler briefly saturates and this single query dies
+# with "Timed out fetching a new connection from the connection pool" → under
+# `set -e` the WHOLE stack aborts before the barrier (observed: 8/8 boxes lost to a
+# transient pooler spike while a 50-machine neighbor fleet held connections). The
+# op is idempotent (CREATE TABLE/INDEX IF NOT EXISTS), so retry with backoff and
+# let the transient saturation drain — same resilience the seed/cred syncs already have.
+if ! ensure_fast_mode_cache_schema bash -c \
+    'cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts'; then
+    exit 1
+fi
 
 # Larger Prisma pool: Fast Mode adds cache get/set on every LLM call, which under
 # sub-agent fan-out competes with the agent's own writes for the connection pool
@@ -616,23 +702,43 @@ _SEED_CACHE_TOKEN="${_SCHEMA_HASH}-$(date -u +%Y%m%d 2>/dev/null || echo undated
 # gate on the file, not the environment. seed-dump-cache.ts loads the .env itself.
 _SEED_CACHE_ENABLED=0
 grep -qE '^R2_BUCKET_TRACE_ARCHIVE=.' back-end/.env 2>/dev/null && _SEED_CACHE_ENABLED=1
-if [ -n "$_SEED_DUMP" ] && [ ! -s "$_SEED_DUMP" ] && [ "$_SEED_CACHE_ENABLED" = 1 ]; then
+# Decide where the seeded DB comes from (scripts/lib/seed-cache.sh). A stale dump
+# baked into the warm snapshot must fall through to the shared cache, NOT shadow
+# it — the old `[ ! -s ]` guard skipped the download whenever ANY dump existed, so
+# a hash-mismatched snapshot dump cold-synced every clone and starved the barrier.
+_SEED_DECISION="$(seed_cache_decision "$_SEED_DUMP" "$_SCHEMA_HASH" "$_SEED_CACHE_ENABLED")"
+if [ "$_SEED_DECISION" = "consult-remote" ]; then
+    # Drop any stale local dump so a clean cache object lands in its place.
+    rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
     echo "🔎 Checking shared seed-dump cache ($_SEED_CACHE_TOKEN)..."
     if (cd back-end && npx tsx scripts/seed-dump-cache.ts get "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") 2>/dev/null && [ -s "$_SEED_DUMP" ]; then
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
+        _SEED_DECISION="restore-local"
         echo "   ✅ pulled cached seed dump ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}')) — restoring instead of cold-syncing"
     else
         rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
         echo "   ℹ️ no cached dump for this schema/day — will cold-sync and populate it"
     fi
 fi
-if [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ] && [ "$(cat "${_SEED_DUMP}.schemahash" 2>/dev/null || echo x)" = "$_SCHEMA_HASH" ]; then
+if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ] && [ "$_SEED_DECISION" != "restore-local" ]; then
+    fail_required_seed_dump "Isolated local benchmarks require a schema-matched seed dump; refusing a slow production cold-sync."
+fi
+if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ]; then
     echo "🗜️  Restoring seeded DB from persistent dump ($_SEED_DUMP) — skipping schema push + seed..."
-    if PGPASSWORD=postgres pg_restore -h localhost -U postgres -d victoria --clean --if-exists --no-owner "$_SEED_DUMP" >/dev/null 2>&1; then
+    _SEED_RESTORE_CONTAINER=""
+    if ! $USE_SYSTEM_PG; then
+        _SEED_RESTORE_CONTAINER="$DB_CONTAINER"
+    fi
+    if PGPASSWORD=postgres bash scripts/restore-seed-dump.sh \
+        "$_SEED_DUMP" localhost "$LOCAL_DB_ACTUAL_PORT" postgres "$LOCAL_DB_NAME" \
+        "$_SEED_RESTORE_CONTAINER" >/dev/null; then
         DB_RESTORED=true
         echo "   ✅ DB restored from dump"
     else
         echo "   ⚠️ restore failed — falling back to push + seed"
+        if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]; then
+            fail_required_seed_dump "Required isolated benchmark seed dump could not be restored; refusing a slow production cold-sync."
+        fi
     fi
 fi
 
@@ -696,7 +802,11 @@ fi
 # instead of re-seeding. Best-effort; the schemahash guards against schema drift.
 if [ -n "$_SEED_DUMP" ]; then
     echo "🗜️  Saving seed dump for fast future warm-starts ($_SEED_DUMP)..."
-    if PGPASSWORD=postgres pg_dump -h localhost -U postgres -Fc victoria > "$_SEED_DUMP" 2>/dev/null; then
+    mkdir -p "$(dirname "$_SEED_DUMP")"
+    _SEED_DUMP_TMP="${_SEED_DUMP}.tmp.$$"
+    rm -f "$_SEED_DUMP_TMP" 2>/dev/null || true
+    if PGPASSWORD=postgres pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME" > "$_SEED_DUMP_TMP" 2>/dev/null; then
+        mv "$_SEED_DUMP_TMP" "$_SEED_DUMP"
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
         echo "   ✅ seed dump saved ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}'))"
         # Publish to the shared cache so the NEXT clone (any workspace — including a
@@ -708,7 +818,7 @@ if [ -n "$_SEED_DUMP" ]; then
             fi
         fi
     else
-        rm -f "$_SEED_DUMP" 2>/dev/null || true
+        rm -f "$_SEED_DUMP_TMP" 2>/dev/null || true
     fi
 fi
 
@@ -717,13 +827,7 @@ fi   # end: if $DB_RESTORED / else (push + seed + dump)
 # ── Pre-flight: ensure node_modules exist for all JS services ──
 JS_SVC_DIRS=(back-end front-end)
 $IS_MAC && JS_SVC_DIRS+=(mac-app)
-for svc_dir in "${JS_SVC_DIRS[@]}"; do
-    if [ -f "$svc_dir/package.json" ] && [ ! -d "$svc_dir/node_modules" ]; then
-        echo "📦 Installing $svc_dir dependencies..."
-        (cd "$svc_dir" && npm install)
-        echo "📦 $svc_dir deps ready"
-    fi
-done
+bash "$SCRIPT_DIR/ensure-workspace-dependencies.sh" "${JS_SVC_DIRS[@]}"
 
 # ── Pre-flight: ensure agents venv exists with deps installed ──
 if [ ! -f agents/venv/bin/activate ] || ! agents/venv/bin/python -c "import temporalio" 2>/dev/null; then
@@ -1156,22 +1260,40 @@ start_world_model_harness() {
     WMH_PID=$!
     PIDS+=($WMH_PID); NAMES+=("wmh")
 
-    # Health-wait on GET /healthz (short timeout — check the log if it never comes up).
+    # Cold model loading on a freshly restored cloud volume can legitimately take
+    # longer than 30 seconds before Uvicorn binds. Keep waiting while the owned
+    # process is alive, with a bounded budget aligned to WMH inference startup.
+    local health_timeout_default=180
+    local health_timeout_max=600
+    local health_timeout="${WMH_HEALTH_TIMEOUT_SECONDS:-$health_timeout_default}"
+    local health_timeout_max_digits=${#health_timeout_max}
+    if ! [[ "$health_timeout" =~ ^[1-9][0-9]*$ ]] || \
+        (( ${#health_timeout} > health_timeout_max_digits )) || \
+        (( health_timeout > health_timeout_max )); then
+        echo "⚠️  Invalid WMH_HEALTH_TIMEOUT_SECONDS=$health_timeout; using 180s."
+        health_timeout=$health_timeout_default
+    fi
     local ready=false
-    for _ in $(seq 1 30); do
+    local health_attempt=0
+    local health_deadline=$((SECONDS + health_timeout))
+    while (( health_attempt < health_timeout && SECONDS <= health_deadline )); do
+        health_attempt=$((health_attempt + 1))
         if ! kill -0 "$WMH_PID" 2>/dev/null; then
             echo "⚠️  WMH server exited before becoming ready — not served this run (see $wmh_log)."
             tail -20 "$wmh_log" || true
             return 0
         fi
-        if curl -fsS "http://localhost:$WMH_PORT/healthz" >/dev/null 2>&1; then
+        if curl -fsS --connect-timeout 1 --max-time 1 \
+            "http://localhost:$WMH_PORT/healthz" >/dev/null 2>&1; then
             ready=true
             break
         fi
-        sleep 1
+        if (( health_attempt < health_timeout && SECONDS < health_deadline )); then
+            sleep 1
+        fi
     done
     if ! $ready; then
-        echo "⚠️  WMH server did not answer /healthz on port $WMH_PORT within 30s — not served this run (see $wmh_log)."
+        echo "⚠️  WMH server did not answer /healthz on port $WMH_PORT within ${health_timeout}s — not served this run (see $wmh_log)."
         tail -20 "$wmh_log" || true
         return 0
     fi
@@ -1383,16 +1505,14 @@ restart_backend_service() {
     launch_backend_service
 }
 isolated_backend_ready_attempts() {
-    if [ -n "${CLOUDBENCH_BACKEND_START_READY_ATTEMPTS:-}" ]; then
-        printf '%s\n' "$CLOUDBENCH_BACKEND_START_READY_ATTEMPTS"
-    elif $FIRST_RUN_SEEDED; then
-        # The first backend launch after a full production seed has substantially
-        # more database state to initialize. Do not kill a live process at the
-        # warm guest's 60-second boundary and thereby restart all of that work.
-        printf '%s\n' "${CLOUDBENCH_COLD_BACKEND_START_READY_ATTEMPTS:-180}"
-    else
-        printf '%s\n' 60
-    fi
+    # The long budget applies to ANY box that just materialised the full prod DB —
+    # a cold seed (FIRST_RUN_SEEDED) OR a cache/dump restore (DB_RESTORED). Both
+    # leave the backend the same large state to warm; capping restore at 60s timed
+    # out every warm box and starved the barrier. See backend_ready_budget().
+    local _frs=0 _dbr=0
+    $FIRST_RUN_SEEDED && _frs=1
+    $DB_RESTORED && _dbr=1
+    backend_ready_budget "$_frs" "$_dbr" "${CLOUDBENCH_BACKEND_START_READY_ATTEMPTS:-}"
 }
 wait_for_isolated_backend_ready() {
     local launch_attempt probe_attempt
@@ -1420,7 +1540,12 @@ wait_for_isolated_backend_ready() {
 # Launch each service
 if $BENCHMARK_MODE; then
     export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
-    export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
+    # Do not manufacture a shell-level `local` backend here. Both the backend
+    # and Python worker load their injected .env files, where cloud benchmarks
+    # are configured for R2; an exported fallback wins over dotenv and strands
+    # the only gold trace on the disposable fleet volume. An explicitly
+    # exported caller value is already inherited, and no-env local development
+    # still uses each provider's built-in local default.
     export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$PWD/.context}"
     export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
     export BLACKBOX_TEST_REPLAY_OUTBOUND="${BLACKBOX_TEST_REPLAY_OUTBOUND:-0}"
@@ -1443,7 +1568,7 @@ fi
 if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
     echo "📦 Building bundled frontend before starting runtime services..."
     (cd front-end && rm -f "$FRONTEND_LOG_FILE" && \
-        VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" npx vite build > "$FRONTEND_LOG_FILE" 2>&1)
+        VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" VITE_REALTIME_PRIVATE=false npx vite build > "$FRONTEND_LOG_FILE" 2>&1)
 fi
 launch_backend_service
 
@@ -1456,7 +1581,8 @@ elif [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
 else
     run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_DEV_PORT=$FRONTEND_PORT npx vite 2>&1 | tee "$FRONTEND_LOG_FILE"' &
 fi
-PIDS+=($!); NAMES+=("front-end")
+FRONTEND_PID=$!
+PIDS+=("$FRONTEND_PID"); NAMES+=("front-end")
 
 # mac-app is skipped in benchmark mode (Electron is heavy and smoke doesn't touch it).
 if ! $BENCHMARK_MODE && $IS_MAC; then
@@ -1491,6 +1617,8 @@ if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
         exit 1
     }
 fi
+
+wait_for_frontend_ready "$FRONTEND_PID" "$FRONTEND_PORT" "$FRONTEND_LOG_FILE" || exit 1
 
 SERVICE_STATUS=running
 write_services_manifest

@@ -11,12 +11,13 @@ import { getClientIP } from '../../providers/geoip';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
 import { createAgentSchema, updateAgentSchema, updateStatusSchema } from './types';
-import { isBenchmarkRequest, rejectAnonymousCreate, rejectGatedCreate } from './routes.guards';
+import * as routeGuards from './routes.guards';
 import * as lifecycleService from './agentLifecycleService';
 import * as controlService from './agentControlService';
 import * as queryService from './agentQueryService';
 import messageRoutes from './routes.messages';
 import batchRoutes from './routes.batch';
+import alertRoutes from './routes.alerts';
 
 const log = createLogger('Agents');
 const router = Router();
@@ -89,21 +90,23 @@ router.get(
   })
 );
 
+router.use('/', alertRoutes);
+
 router.get(
   '/:id',
   auth,
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
       noCacheHeaders(res);
-      const userId = req.isInternal === true ? undefined : req.userId;
+      const { userId, inspectionViewerUserId } = routeGuards.resolveAgentReadAccess(req);
       const rawSince = typeof req.query.since === 'string' ? new Date(req.query.since) : undefined;
       const since = rawSince && !isNaN(rawSince.getTime()) ? rawSince : undefined;
-      const result = await queryService.getAgentDetail(
-        req.params.id,
+      const result = await queryService.getAgentDetail(req.params.id, {
         userId,
         since,
-        canReadBenchmarkArchive(req)
-      );
+        allowBenchmarkArchive: canReadBenchmarkArchive(req),
+        inspectionViewerUserId,
+      });
       if (result === null) {
         res.status(404).json({ error: 'Agent not found' });
         return;
@@ -154,8 +157,8 @@ router.post(
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
       const body = createAgentSchema.parse(req.body);
-      if (rejectAnonymousCreate(req, res)) return;
-      if (await rejectGatedCreate(req, res)) return;
+      if (routeGuards.rejectAnonymousCreate(req, res)) return;
+      if (await routeGuards.rejectGatedCreate(req, res)) return;
       const userId = req.userId ?? body.user_id;
       if (userId === undefined || userId === null || userId === '') {
         res.status(401).json({ error: 'Unauthorized: user_id required' });
@@ -167,7 +170,7 @@ router.post(
         userId,
         req.isInternal === true,
         clientIP,
-        isBenchmarkRequest(req)
+        routeGuards.isBenchmarkRequest(req)
       );
       res.status(201).json(result);
     } catch (error) {

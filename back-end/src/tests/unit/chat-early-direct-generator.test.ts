@@ -5,6 +5,7 @@ import {
   createEarlyDirectGeneratorCoordinator,
   createTransactionalStreamGate,
   runAfterStreamCommit,
+  shouldStartEarlyDirectGenerator,
 } from '../../providers/chat/earlyDirectGenerator';
 import { createGeneratorAttentionLifecycle } from '../../providers/chat/generatorAttentionStream';
 
@@ -80,6 +81,22 @@ async function testNonDirectActionsNeverStartEarly(): Promise<void> {
   assert.strictEqual(starts, 0, 'web_search/escalation must not start without detection');
 }
 
+function testObviousNonDirectIntentsDoNotConsumeSpeculativeCapacity(): void {
+  const direct = [{ role: 'USER', text: 'Explain why the sky is blue.' }];
+  const webSearch = [{ role: 'USER', text: "Search the web for today's latency announcement." }];
+  const autonomousAgent = [
+    { role: 'USER', text: 'Start an autonomous agent in execute mode to inspect the files.' },
+  ];
+
+  assert.strictEqual(shouldStartEarlyDirectGenerator(direct), true);
+  assert.strictEqual(shouldStartEarlyDirectGenerator(webSearch), false);
+  assert.strictEqual(shouldStartEarlyDirectGenerator(autonomousAgent), false);
+  assert.strictEqual(
+    shouldStartEarlyDirectGenerator([{ role: 'ASSISTANT', text: 'No user turn yet.' }]),
+    false
+  );
+}
+
 async function testMismatchAbortsAndDiscardsWithoutSideEffects(): Promise<void> {
   let aborted = false;
   const attentionFrames: string[] = [];
@@ -148,6 +165,29 @@ async function testEarlyFailureOnlyPropagatesForCommittedDirect(): Promise<void>
     (error: unknown) => error === committedFailure
   );
   assert.strictEqual(leakedFrames, 0, 'failed speculative frames must be discarded');
+}
+
+async function testDiscardDoesNotWaitForNonCooperativeProvider(): Promise<void> {
+  const provider = deferred<string>();
+  const coordinator = createEarlyDirectGeneratorCoordinator({
+    start: async () => provider.promise,
+  });
+
+  coordinator.start();
+  await flushMicrotasks();
+  const discard = coordinator.discard();
+  const settledPromptly = await Promise.race([
+    discard.then(() => true),
+    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 25)),
+  ]);
+
+  provider.resolve('late provider result');
+  await discard;
+  assert.strictEqual(
+    settledPromptly,
+    true,
+    'discard must not block the canonical route on provider cancellation'
+  );
 }
 
 async function testCompletedSpeculationAndCanonicalBranchesStayIsolated(): Promise<void> {
@@ -229,8 +269,10 @@ async function testReusableTransactionalGate(): Promise<void> {
 async function main(): Promise<void> {
   await testDirectOverlapBuffersUntilCommit();
   await testNonDirectActionsNeverStartEarly();
+  testObviousNonDirectIntentsDoNotConsumeSpeculativeCapacity();
   await testMismatchAbortsAndDiscardsWithoutSideEffects();
   await testEarlyFailureOnlyPropagatesForCommittedDirect();
+  await testDiscardDoesNotWaitForNonCooperativeProvider();
   await testReusableTransactionalGate();
   await testCompletedSpeculationAndCanonicalBranchesStayIsolated();
   process.stdout.write('PASS early direct generator transactional overlap\n');

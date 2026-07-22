@@ -41,6 +41,17 @@ router.get(
     if (userId === undefined || userId === '') {
       return res.status(400).json({ error: 'Missing user ID' });
     }
+    if (Array.isArray(req.query.tokenType)) {
+      return res.status(400).json({ error: 'tokenType must be provided at most once' });
+    }
+    const requestedTokenType = queryValue(req, 'tokenType');
+    if (
+      requestedTokenType !== undefined &&
+      requestedTokenType !== 'claude' &&
+      requestedTokenType !== 'gpt'
+    ) {
+      return res.status(400).json({ error: 'tokenType must be claude or gpt' });
+    }
 
     try {
       const result = await service.getComputeCodeToken(
@@ -52,6 +63,7 @@ router.get(
           agentId: queryValue(req, 'agentId'),
           rootAgentId: queryValue(req, 'rootAgentId'),
           fastCacheAffinityKey: queryValue(req, 'fastCacheAffinityKey'),
+          tokenType: requestedTokenType,
         }
       );
       return res.json(result);
@@ -93,8 +105,9 @@ router.post(
 );
 
 /** GET /api/integrations/compute-code/anthropic-key/cooldown
- *  Whether the shared ANTHROPIC_API_KEY funded default is currently backed off.
- *  Read by the agents Rose client (which has no DB) so it can skip the tier. */
+ *  Whether the running backend has the shared ANTHROPIC_API_KEY funded default
+ *  and whether it is backed off. Read by agents (which have no DB) so they can
+ *  select the same runtime tier without duplicating environment assumptions. */
 router.get(
   '/compute-code/anthropic-key/cooldown',
   authenticate,

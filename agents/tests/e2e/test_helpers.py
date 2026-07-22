@@ -20,6 +20,8 @@ from typing import Optional
 from urllib.parse import parse_qs, urlparse
 import httpx
 
+from domains.spawn_browser_agent_v3.cdp_urls import steel_cdp_connection_url
+
 # Configuration
 BASE_URL = os.environ.get("TEST_BASE_URL", "http://localhost:3001")
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://kzlurqihzaolhzsbkctf.supabase.co")
@@ -410,7 +412,7 @@ async def _drive_live_auth_handoff_state(
         raise AssertionError("Playwright is required for auth handoff live-state e2e") from exc
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.connect_over_cdp(ws_url)
+        browser = await playwright.chromium.connect_over_cdp(steel_cdp_connection_url(ws_url))
         deadline = time.monotonic() + (expectation.timeout_ms / 1000)
         page = None
         while time.monotonic() < deadline and page is None:

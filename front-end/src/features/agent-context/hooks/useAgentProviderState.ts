@@ -2,7 +2,7 @@ import { useRef, useState } from 'react';
 import { type RealtimeChannel } from '@supabase/supabase-js';
 
 import { getQueryParams } from '@/lib/url';
-import type { AgentDetail, Message } from '@/lib/api';
+import type { AgentDetail, InspectionContext, Message } from '@/lib/api';
 
 import type {
   MessageHandler,
@@ -16,6 +16,7 @@ import type {
 export function useAgentProviderState() {
   const initialAgentId = getQueryParams().get('agent-id');
   const [agent, setAgent] = useState<AgentDetail | null>(null);
+  const [inspectionContext, setInspectionContext] = useState<InspectionContext | null>(null);
   const [selectedAgentId, setSelectedAgentIdState] = useState<string | null>(initialAgentId);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoadingAgent, setIsLoadingAgent] = useState(false);
@@ -29,6 +30,8 @@ export function useAgentProviderState() {
   return {
     agent,
     setAgent,
+    inspectionContext,
+    setInspectionContext,
     selectedAgentId,
     setSelectedAgentIdState,
     selectedAgentIdRef: useRef<string | null>(initialAgentId),

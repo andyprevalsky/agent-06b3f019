@@ -29,9 +29,7 @@ export async function injectLocalStorageState(
       const allLocalStorage = ${JSON.stringify(localStorageByOrigin)};
       const currentOrigin = window.location.origin;
       for (const [origin, entries] of Object.entries(allLocalStorage)) {
-        if (currentOrigin === origin ||
-            currentOrigin.endsWith(origin.replace('https://', '.')) ||
-            origin.includes(currentOrigin.replace('https://', ''))) {
+        if (currentOrigin === origin) {
           for (const entry of entries) {
             try { localStorage.setItem(entry.key, entry.value); } catch (e) {}
           }
@@ -61,8 +59,7 @@ export async function injectIndexedDBState(
       const currentOrigin = window.location.origin;
       let matchingDatabases = null;
       for (const [origin, databases] of Object.entries(allIndexedDB)) {
-        if (currentOrigin === origin ||
-            currentOrigin.includes(origin.replace('https://', '').replace('http://', ''))) {
+        if (currentOrigin === origin) {
           matchingDatabases = databases;
           break;
         }
@@ -181,8 +178,7 @@ export async function injectCacheStorageState(
       const currentOrigin = window.location.origin;
       let matchingCaches = null;
       for (const [origin, caches] of Object.entries(cachesByOrigin)) {
-        if (currentOrigin === origin ||
-            currentOrigin.includes(origin.replace('https://', '').replace('http://', ''))) {
+        if (currentOrigin === origin) {
           matchingCaches = caches;
           break;
         }

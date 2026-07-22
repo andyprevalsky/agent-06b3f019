@@ -33,6 +33,14 @@ export ALLOW_TEMPORAL_CLEANUP=true
 # Force it off unconditionally — a pre-set BENCHMARK_FAST_MODE_CACHE=true would
 # otherwise reintroduce the stale-replay loop.
 export BENCHMARK_FAST_MODE_CACHE=false
+# The lifecycle gate disables Fast Mode, so its startup must not depend on the
+# shared production cache pooler. A saturated pooler previously held the schema
+# ensure past this helper's 120-second readiness bound before the benchmark even
+# received an agent ID. Force run.sh's idempotent schema preflight onto the
+# workspace Postgres instead, and clear any inherited remote override so the
+# isolation contract cannot be bypassed accidentally.
+unset FAST_MODE_CACHE_DATABASE_URL
+export FAST_MODE_CACHE_USE_LOCAL=1
 # Hosted AgentCard onboarding requires an allowlisted HTTPS callback. The local
 # lifecycle benchmark never follows this URL—it completes the sandbox fixture
 # through the scoped test-payment API—but minting must still create a genuine
@@ -48,6 +56,11 @@ export AGENTCARD_ONBOARDING_RETURN_URL="${AGENTCARD_ONBOARDING_RETURN_URL:-https
 # stays strict everywhere else (default), so Codex regressions still surface in
 # the codex-code test that actually uses it.
 export SEED_ALLOW_MISSING_GPT_CODE=1
+# These sandbox lifecycle tasks use only the bundled /test_payment fixture and
+# never consume production browser cookies, passwords, passkeys, or storage.
+# Skipping that unrelated graph prevents a warm local database from spending
+# minutes upserting every production cookie before the lifecycle stack starts.
+export BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1
 
 LOG_FILE="$ROOT_DIR/.context/agentcard-lifecycle-$TASK_NAME.log"
 STACK_PID=""

@@ -691,6 +691,14 @@ def _dashboard_context_dir(stack: ServiceStack) -> Path:
     return stack.context_dir
 
 
+def local_seed_dump_path() -> Path:
+    """Schema- and day-scoped cache path for isolated local benchmark databases."""
+    schema = REPO_ROOT / "back-end" / "prisma" / "schema.prisma"
+    schema_hash = hashlib.sha1(schema.read_bytes()).hexdigest()
+    day = time.strftime("%Y%m%d", time.gmtime())
+    return BENCHMARK_CONTEXT_ROOT / "seed-cache" / f"{schema_hash}-{day}.dump"
+
+
 def start_services(
     stack: ServiceStack,
     clean_first: bool = True,
@@ -716,6 +724,14 @@ def start_services(
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
         env["CONDUCTOR_PORT"] = str(stack.base_port)
         env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
+        # Every isolated run starts with an empty per-run database. Opt into
+        # run.sh's schema/day-keyed R2 seed cache so startup restores the same
+        # prod snapshot in seconds instead of row-syncing tens of thousands of
+        # records before services.json can be published.
+        seed_dump = Path(env.get("BENCHMARK_SEED_DUMP") or local_seed_dump_path())
+        seed_dump.parent.mkdir(parents=True, exist_ok=True)
+        env["BENCHMARK_SEED_DUMP"] = str(seed_dump)
+        env["BENCHMARK_REQUIRE_SEED_DUMP"] = "1"
         if simulate:
             # Put the worker into simulate mode. run.sh forks the agents worker from this
             # env, so these must be set here (the worker's WMH adapter + fast-cache scope
@@ -953,12 +969,14 @@ def manifest_frontend_url(manifest: dict) -> str:
 def manifest_database_url(manifest: dict) -> str:
     ports = manifest.get("ports") if isinstance(manifest, dict) else {}
     database = manifest.get("database") if isinstance(manifest, dict) else {}
+    name = database.get("name") if isinstance(database, dict) else None
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("Services manifest is missing database name")
     port = database.get("port") if isinstance(database, dict) else None
     if not port:
         port = 5432 if isinstance(database, dict) and database.get("use_system_postgres") else ports.get("local_db")
     if not port:
         raise ValueError("Services manifest is missing local_db port")
-    name = database.get("name", "victoria") if isinstance(database, dict) else "victoria"
     return f"postgresql://postgres:postgres@localhost:{port}/{name}"
 
 
@@ -1301,7 +1319,14 @@ def run_benchmark_invocation(
         latest_hint = f"; newest result after start was {latest}" if latest else ""
         raise RuntimeError(f"Benchmark command did not print a result file marker (exit {code}){latest_hint}")
     if code != 0:
-        print(f"Benchmark invocation failed with exit code {code}; result: {result_path}")
+        # The saved run artifact records task outcomes, but post-run gates such
+        # as cache and memory ratchets execute after that save. Never infer
+        # success by re-reading an all-task-pass artifact when the owning runner
+        # exited non-zero. Ordinary task failures still return their artifact so
+        # the caller can run all three per-agent diagnostics before failing.
+        if not failed_tasks_from_run(result_path):
+            raise RuntimeError(f"Benchmark invocation failed with exit code {code}; result: {result_path}")
+        print(f"Benchmark tasks failed with exit code {code}; collecting diagnostics from: {result_path}")
     return result_path
 
 

@@ -250,13 +250,19 @@ run_suite "Agent Behavior Guard Unit Tests" bash scripts/tests/check-agent-behav
 run_suite "Factory Review Telemetry" python3 scripts/tests/factory-review.test.py
 run_suite "Deploy Stage Telemetry" bash scripts/tests/run-deploy-stage.test.sh
 run_suite "Claude Review Fallback" bash scripts/tests/claude-review-fallback.test.sh
+run_suite "Auto RCA Workflow Contract" bash scripts/tests/auto-rca-workflow.test.sh
+run_suite "Auto RCA Lifecycle Blackbox" bash scripts/tests/auto-rca-lifecycle.blackbox.test.sh
 run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
+run_suite "Descend Command" bash scripts/tests/descend-command.test.sh
 run_suite "Existing Backend Replay Gate" bash scripts/tests/blackbox-existing-replay-gate.test.sh
 run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.sh
 run_suite "Cloud Benchmark Lifecycle" agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py
 run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh
 run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh
 run_suite "Cloud Benchmark Orphan-Proxy Reaper" bash scripts/tests/fleet-orphan-proxy-reaper.test.sh
+run_suite "Seed-Dump Cache Decision" bash scripts/tests/seed-cache-decision.test.sh
+run_suite "Fast-Mode Cache Schema Retry" bash scripts/tests/fast-mode-cache-schema-retry.test.sh
+run_suite "Workspace Dependency Preflight" bash scripts/tests/workspace-dependencies.test.sh
 
 # ── Build checks (run in parallel with blackbox tests) ──
 BUILD_PIDS=()

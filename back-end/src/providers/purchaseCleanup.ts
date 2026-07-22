@@ -1,6 +1,6 @@
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import {
-  createCardProvider,
+  createCardProviderForAgent,
   isCardLive,
   type CardProvider,
   type CardProviderDetailsResult,
@@ -117,8 +117,9 @@ export async function cleanupAgentPurchaseCards(
   for (const purchase of openPurchases) {
     const cardId = purchase.cardId;
     if (cardId === null) continue;
-    const activeCardProvider = cardProvider ?? createCardProvider(purchase.userId);
     try {
+      const activeCardProvider =
+        cardProvider ?? (await createCardProviderForAgent(purchase.userId, purchase.agentId));
       let cardWasUsed: boolean;
       try {
         const details = await activeCardProvider.getDetails(cardId);
@@ -137,8 +138,8 @@ export async function cleanupAgentPurchaseCards(
 
       if (cardWasUsed) {
         await consumePurchaseWalletFunding(purchase.id);
-        await prisma.purchaseSpend.update({
-          where: { id: purchase.id },
+        await prisma.purchaseSpend.updateMany({
+          where: { id: purchase.id, status: PurchaseSpendStatus.HELD },
           data: { status: PurchaseSpendStatus.CLEARED },
         });
       } else {
@@ -154,8 +155,8 @@ export async function cleanupAgentPurchaseCards(
           );
         } catch (reclaimError) {
           if (isWalletFundingConsumedDuringReclaimError(reclaimError)) {
-            await prisma.purchaseSpend.update({
-              where: { id: purchase.id },
+            await prisma.purchaseSpend.updateMany({
+              where: { id: purchase.id, status: PurchaseSpendStatus.HELD },
               data: { status: PurchaseSpendStatus.CLEARED },
             });
             continue;
@@ -275,8 +276,13 @@ export async function reconcileFailedPurchaseFundingReclaims(
       });
     } catch (error) {
       if (isWalletFundingConsumedDuringReclaimError(error)) {
-        await prisma.purchaseSpend.update({
-          where: { id: purchase.id },
+        await prisma.purchaseSpend.updateMany({
+          where: {
+            id: purchase.id,
+            status: {
+              in: [PurchaseSpendStatus.HELD, PurchaseSpendStatus.FUNDING_RECLAIM_FAILED],
+            },
+          },
           data: { status: PurchaseSpendStatus.CLEARED },
         });
         continue;
@@ -359,9 +365,11 @@ export async function reconcileDissolvedPurchaseHolds(
     }
     if (!hasDissolvedHold(paymentIntent)) continue;
 
-    const activeCardProvider = cardProvider ?? createCardProvider(purchase.userId);
+    let activeCardProvider: CardProvider;
     let cardWasUsed: boolean;
     try {
+      activeCardProvider =
+        cardProvider ?? (await createCardProviderForAgent(purchase.userId, purchase.agentId));
       const details = await activeCardProvider.getDetails(cardId);
       cardWasUsed = await purchaseCardWasSpent(purchase.id, details);
     } catch (error) {
@@ -375,8 +383,8 @@ export async function reconcileDissolvedPurchaseHolds(
 
     if (cardWasUsed) {
       await consumePurchaseWalletFunding(purchase.id);
-      await prisma.purchaseSpend.update({
-        where: { id: purchase.id },
+      await prisma.purchaseSpend.updateMany({
+        where: { id: purchase.id, status: PurchaseSpendStatus.HELD },
         data: { status: PurchaseSpendStatus.CAPTURE_FAILED },
       });
       log.error('Stripe hold dissolved after AgentCard card was spent', {
@@ -399,8 +407,8 @@ export async function reconcileDissolvedPurchaseHolds(
       );
     } catch (error) {
       if (isWalletFundingConsumedDuringReclaimError(error)) {
-        await prisma.purchaseSpend.update({
-          where: { id: purchase.id },
+        await prisma.purchaseSpend.updateMany({
+          where: { id: purchase.id, status: PurchaseSpendStatus.HELD },
           data: { status: PurchaseSpendStatus.CAPTURE_FAILED },
         });
         continue;

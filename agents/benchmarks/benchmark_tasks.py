@@ -8,7 +8,6 @@ from typing import List, Optional
 from benchmarks.fixtures import DEFAULT_BASE_IMAGE
 from benchmarks.live_fixtures import resolve_live_fixtures
 
-
 DEFAULT_MIN_STEPS_BY_AGENT_CLASS: dict[str, int] = {"browser": 5}
 
 
@@ -27,14 +26,16 @@ class BenchmarkTask:
     attachment: Optional[str]
     approval_handling: Optional[str]  # "auto_approve", "ignore", "prompt_user", "count_only", or None
     start_phase: Optional[str]  # "plan", "execute", or None (chat mode)
+    no_anthropic_price_limit_cents: Optional[int] = None  # Alternate cap for the funded non-Anthropic route
     browser_profile_mode: str = "persistent"  # "persistent" or isolated "fresh" browser state
     browser_auth_realm: Optional[str] = None  # Realm whose saved auth is isolated for fresh mode
     attachments: List[str] = field(default_factory=list)  # Multiple attachments (alternative to single attachment)
     row_start: Optional[int] = None  # Slice CSV attachments starting at this 1-indexed data row
-    row_end: Optional[int] = None    # Slice CSV attachments ending at this 1-indexed data row (inclusive)
+    row_end: Optional[int] = None  # Slice CSV attachments ending at this 1-indexed data row (inclusive)
     expected_approval_count: Optional[int] = None  # Exact number of approvals expected (used with count_only)
     expected_attention_kind: Optional[str] = None  # metadata.attentionKind expected for approval-style tasks
     expected_attention_kinds: List[str] = field(default_factory=list)  # Allowed terminal attention kinds for flows with multiple valid checkout gates
+    expected_attention_kind_any_of: List[str] = field(default_factory=list)  # Exactly one approval whose kind is in this set
     agentcard_setup_action: Optional[str] = None  # Benchmark user action for hosted setup (for example, complete)
     expected_credential_ref_kind: Optional[str] = None  # credential_ref.kind that must be observed before terminal success
     forbidden_credential_ref_kinds: List[str] = field(default_factory=list)  # credential paths that invalidate the run
@@ -90,6 +91,13 @@ class BenchmarkTask:
     expected_browser_session_metadata_values: Optional[dict] = None
     expected_pre_credential_message_contains: List[str] = field(default_factory=list)
     expected_post_credential_message_contains: List[str] = field(default_factory=list)
+
+    def effective_price_limit_cents(self) -> int:
+        """Return the route-aware cap without weakening the default eval."""
+        exclude_anthropic = os.getenv("ROSE_EXCLUDE_ANTHROPIC_FAMILY", "").strip().lower()
+        if exclude_anthropic in {"1", "true", "yes", "on"} and self.no_anthropic_price_limit_cents is not None:
+            return self.no_anthropic_price_limit_cents
+        return self.price_limit_cents
 
 
 _TASKS_FILE = os.path.join(os.path.dirname(__file__), "tasks.json")

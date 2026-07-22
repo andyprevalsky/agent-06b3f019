@@ -7,12 +7,12 @@ exactly when it matters. `report_failure_activity` posts straight to a Slack
 incoming webhook, and — only when AUTO_RCA_ENABLED=1 — fires a GitHub
 repository_dispatch straight to GitHub's API.
 
-Dedup is an in-memory per-process throttle (no DB, no shared state): the same
-signature pages at most once per _THROTTLE_WINDOW_S per worker process. This is
-best-effort noise control, not correctness — a retry landing on a different
-worker may emit a duplicate, which is acceptable. The activity NEVER raises:
-alerting must not disrupt the agent failure path, and Temporal's at-least-once
-retries are naturally deduped by the throttle.
+When Auto RCA is enabled, GitHub owns the one-PR/one-Slack-card lifecycle. The
+worker dispatches only the stable agent ID; it does not first create a Slack
+side effect that can be duplicated when Temporal retries after a lost activity
+completion. Duplicate dispatches are expected and reconciled downstream by the
+deterministic agent lifecycle key. The in-memory throttle remains best-effort
+noise control, never a correctness boundary. The activity NEVER raises.
 """
 
 import json
@@ -141,7 +141,6 @@ async def _post_slack_bot(token: str, channel: str, payload: Dict[str, Any]) -> 
 
 async def _dispatch_rca(
     agent_id: str,
-    slack_ts: str = "",
     slack_channel: str = "",
 ) -> bool:
     token = os.environ.get("GITHUB_DISPATCH_TOKEN")
@@ -161,7 +160,6 @@ async def _dispatch_rca(
                 "event_type": "agent-failure",
                 "client_payload": {
                     "agent_id": agent_id,
-                    "slack_ts": slack_ts,
                     "slack_channel": slack_channel,
                 },
             },
@@ -185,29 +183,45 @@ async def report_failure_activity(
 
     Best-effort — always returns, never raises. Deduped by the in-memory throttle.
     """
-    key = _fingerprint(source, message)
+    # Keep ordinary alerts agent-scoped, but cap auto-RCA dispatches by incident
+    # signature so one provider outage cannot launch one workflow per agent.
+    signature = _fingerprint(source, message)
+    key = f"alert:{agent_id or '-'}:{signature}"
     acquired = False
+    rca_key = f"rca:{signature}"
+    rca_acquired = False
     delivered = False
     try:
         acquired = _acquire_alert_slot(key, time.time())
         if not acquired:
             return {"alerted": False, "throttled": True}
 
-        payload = _slack_payload(source, message, agent_id, context)
         bot_token = os.environ.get("SLACK_BOT_TOKEN")
         channel_id = os.environ.get("SLACK_ERROR_CHANNEL_ID")
         webhook = os.environ.get("SLACK_ERROR_WEBHOOK_URL")
 
+        # Auto RCA owns the visible Slack card. Dispatch first and avoid a
+        # worker-created card entirely so a side-effect-then-lost-completion
+        # retry cannot duplicate the user's lifecycle. If dispatch is down, we
+        # still fall back to the ordinary direct alert below.
+        if os.environ.get("AUTO_RCA_ENABLED") == "1" and agent_id:
+            rca_acquired = _acquire_alert_slot(rca_key, time.time())
+            if rca_acquired:
+                dispatched = await _dispatch_rca(agent_id, channel_id or "")
+                _finish_alert_slot(rca_key, dispatched, time.time())
+                rca_acquired = False
+                if dispatched:
+                    delivered = True
+                    return {"alerted": True, "rca_dispatched": True}
+
+        payload = _slack_payload(source, message, agent_id, context)
+
         # Prefer the bot token: it yields an editable handle for the lifecycle card.
         # Fall back to an incoming webhook (post-only, no lifecycle edits).
-        slack_ts = ""
-        slack_channel = ""
         alerted = False
         if bot_token and channel_id:
             posted = await _post_slack_bot(bot_token, channel_id, payload)
             if posted:
-                slack_ts = posted["ts"]
-                slack_channel = posted["channel"]
                 alerted = True
         elif webhook:
             async with httpx.AsyncClient() as client:
@@ -223,14 +237,14 @@ async def report_failure_activity(
             )
 
         delivered = alerted
-        if os.environ.get("AUTO_RCA_ENABLED") == "1" and agent_id:
-            delivered = (await _dispatch_rca(agent_id, slack_ts, slack_channel)) or delivered
-
         return {"alerted": alerted}
     except Exception as e:  # never fail the agent because alerting failed
         activity.logger.warning(f"report_failure_activity non-fatal: {e}")
         return {"alerted": False, "error": str(e)}
     finally:
+        if rca_acquired:
+            # Exceptions during dispatch must not suppress the incident retry.
+            _finish_alert_slot(rca_key, False, time.time())
         if acquired:
             # Failed transports remain eligible for the next occurrence to retry.
             _finish_alert_slot(key, delivered, time.time())

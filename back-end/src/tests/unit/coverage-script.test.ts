@@ -112,6 +112,21 @@ assert.match(
   /\['benchmarks-hub-pipeline', 90\]/,
   'deadline-sensitive Hub lifecycle must start in the first parallel wave'
 );
+assert.match(
+  coverageScript,
+  /export FAST_MODE_CACHE_DATABASE_URL="\$LOCAL_DB_URL"/,
+  'coverage must isolate Fast Mode cache fixtures in the local test database'
+);
+assert.doesNotMatch(
+  coverageScript,
+  /ENV_DATABASE_URL=.*DATABASE_URL/,
+  'coverage must not derive its Fast Mode cache database from the production .env'
+);
+assert.match(
+  coverageScript,
+  /export AMPLITUDE_API_KEY=""\s+export AMPLITUDE_SECRET_KEY=""/,
+  'coverage must not consume the live Amplitude chart-query budget'
+);
 
 for (const [name, harness] of [
   ['coverage', coverageScript],
@@ -126,6 +141,16 @@ for (const [name, harness] of [
     harness,
     /if \[\[ "\$\{BACKEND_CODEX_SMOKE_SKIP:-0\}" != "1" \]\]; then\s+echo "Syncing local Codex credentials/,
     `${name} harness must not couple credential sync to live-smoke execution`
+  );
+  assert.match(
+    harness,
+    /CODEX_AUTH_MODE=.*auth_mode/,
+    `${name} harness must inspect the local Codex auth mode before importing it`
+  );
+  assert.match(
+    harness,
+    /SEEDED_CODEX_COUNT=.*Integration.*gpt_code/s,
+    `${name} harness must preserve a connected isolated gpt_code credential when local auth is incompatible`
   );
 }
 

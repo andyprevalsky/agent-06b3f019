@@ -2,8 +2,9 @@ import importlib.util
 import inspect
 import json
 import os
-import signal
+import re
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -23,12 +24,14 @@ AGGREGATE_SCRIPT = ROOT / "scripts" / "cloudbench-aggregate-runs.py"
 DRIVER_SCRIPT = ROOT / "scripts" / "cloudbench-run.sh"
 FLEET_SCRIPT = ROOT / "scripts" / "run-bench-fleet"
 CLOUD_SCRIPT = ROOT / "scripts" / "run-bench-cloud"
+AGENT_LINK_SERVER = ROOT / "agents" / "benchmarks" / "agent_link_server.py"
 PREDEPLOY_SCRIPT = ROOT / "scripts" / "run-predeploy-cloud"
 PREDEPLOY_LOCAL_SCRIPT = ROOT / "scripts" / "run-predeploy-local"
 PREDEPLOY_METRICS_SCRIPT = ROOT / "agents" / "benchmarks" / "predeploy_metrics.py"
 LOGGED_COMMAND_SCRIPT = ROOT / "scripts" / "run_logged_command.py"
 RUN_BENCH_SCRIPT = ROOT / "scripts" / "run-bench"
 STACK_SCRIPT = ROOT / "scripts" / "run.sh"
+SEED_CACHE_LIB = ROOT / "scripts" / "lib" / "seed-cache.sh"
 LOCAL_RUNNER = ROOT / "agents" / "benchmarks" / "local.py"
 DEPLOY_COMMAND = ROOT / ".claude" / "commands" / "deploy.md"
 
@@ -62,14 +65,14 @@ def _write_prisma_fixture(root: Path) -> tuple[Path, Path, dict[str, str]]:
     bin_dir = root / "bin"
     bin_dir.mkdir()
     gosu = bin_dir / "gosu"
-    gosu.write_text("#!/usr/bin/env bash\nset -eu\nshift\nexec \"$@\"\n")
+    gosu.write_text('#!/usr/bin/env bash\nset -eu\nshift\nexec "$@"\n')
     gosu.chmod(0o755)
     npx = bin_dir / "npx"
     npx.write_text(
         "#!/usr/bin/env bash\n"
         "set -eu\n"
-        "printf '%s\\n' \"$*\" >> \"$PRISMA_GENERATE_LOG\"\n"
-        "[ \"${PRISMA_GENERATE_FAIL:-0}\" != 1 ]\n"
+        'printf \'%s\\n\' "$*" >> "$PRISMA_GENERATE_LOG"\n'
+        '[ "${PRISMA_GENERATE_FAIL:-0}" != 1 ]\n'
     )
     npx.chmod(0o755)
 
@@ -108,9 +111,7 @@ def test_prisma_client_regenerates_only_when_schema_fingerprint_changes(
     assert len(generate_log.read_text().splitlines()) == 1
     assert marker.read_text() == first_fingerprint
 
-    (repo / "back-end/prisma/schema.prisma").write_text(
-        "model Alpha { id String @id gateKey String? }\n"
-    )
+    (repo / "back-end/prisma/schema.prisma").write_text("model Alpha { id String @id gateKey String? }\n")
     changed = _run_prisma_sync(repo, env)
     assert changed.returncode == 0, changed.stderr
     assert len(generate_log.read_text().splitlines()) == 2
@@ -149,10 +150,7 @@ def test_boot_launch_propagates_parent_hub_identity_to_remote_benchmark() -> Non
     cloud_script = CLOUD_SCRIPT.read_text()
     env_args = cloud_script.split("_envargs=(", 1)[1].split("    )", 1)[0]
 
-    assert (
-        '--env "BENCHMARK_HUB_PARENT_RUN_ID=${BENCHMARK_HUB_PARENT_RUN_ID:-}"'
-        in env_args
-    )
+    assert '--env "BENCHMARK_HUB_PARENT_RUN_ID=${BENCHMARK_HUB_PARENT_RUN_ID:-}"' in env_args
 
 
 def test_refreshes_stale_volume_dependency_trees(tmp_path: Path) -> None:
@@ -204,11 +202,7 @@ def test_refreshes_fingerprinted_venv_when_runtime_files_are_unreadable(
     assert first.returncode == 0, first.stderr
 
     cached_python = repo / "agents/venv/bin/python"
-    cached_python.write_text(
-        "#!/usr/bin/env bash\n"
-        "echo 'OSError: [Errno 5] Input/output error' >&2\n"
-        "exit 5\n"
-    )
+    cached_python.write_text("#!/usr/bin/env bash\necho 'OSError: [Errno 5] Input/output error' >&2\nexit 5\n")
     cached_python.chmod(0o755)
     marker_before = (repo / "agents/venv/.cloudbench-deps-fingerprint").read_text()
 
@@ -233,17 +227,11 @@ def test_relocates_donor_virtualenv_text_prefixes_after_sync(tmp_path: Path) -> 
     donor_bin = donor / "agents/venv/bin"
     donor_bin.mkdir(parents=True)
     (donor_bin / "python").write_text("current")
-    (donor_bin / "example-tool").write_text(
-        f"#!{donor / 'agents/venv/bin/python'}\nprint('ok')\n"
-    )
-    (donor / "agents/venv/pyvenv.cfg").write_text(
-        f"command = python -m venv {donor / 'agents/venv'}\n"
-    )
+    (donor_bin / "example-tool").write_text(f"#!{donor / 'agents/venv/bin/python'}\nprint('ok')\n")
+    (donor / "agents/venv/pyvenv.cfg").write_text(f"command = python -m venv {donor / 'agents/venv'}\n")
     donor_cache = donor / "agents/venv/lib/python3.11/site-packages/demo/__pycache__"
     donor_cache.mkdir(parents=True)
-    (donor_cache / "module.cpython-311.pyc").write_bytes(
-        b"\0compiled:" + str(donor / "agents/venv").encode()
-    )
+    (donor_cache / "module.cpython-311.pyc").write_bytes(b"\0compiled:" + str(donor / "agents/venv").encode())
 
     result = subprocess.run(
         ["bash", str(SCRIPT), str(donor), str(repo)],
@@ -254,17 +242,10 @@ def test_relocates_donor_virtualenv_text_prefixes_after_sync(tmp_path: Path) -> 
 
     assert result.returncode == 0, result.stderr
     repo_prefix = str(repo / "agents/venv")
-    assert (repo / "agents/venv/bin/example-tool").read_text().splitlines()[0] == (
-        f"#!{repo_prefix}/bin/python"
-    )
+    assert (repo / "agents/venv/bin/example-tool").read_text().splitlines()[0] == (f"#!{repo_prefix}/bin/python")
     assert repo_prefix in (repo / "agents/venv/pyvenv.cfg").read_text()
-    assert str(donor / "agents/venv") not in (
-        repo / "agents/venv/pyvenv.cfg"
-    ).read_text()
-    assert not (
-        repo
-        / "agents/venv/lib/python3.11/site-packages/demo/__pycache__/module.cpython-311.pyc"
-    ).exists()
+    assert str(donor / "agents/venv") not in (repo / "agents/venv/pyvenv.cfg").read_text()
+    assert not (repo / "agents/venv/lib/python3.11/site-packages/demo/__pycache__/module.cpython-311.pyc").exists()
 
 
 def test_does_not_persist_python_fingerprint_when_relocation_fails(
@@ -278,9 +259,7 @@ def test_does_not_persist_python_fingerprint_when_relocation_fails(
     donor_venv = donor / "agents/venv"
     (donor_venv / "bin").mkdir(parents=True)
     (donor_venv / "bin/python").write_text("current")
-    (donor_venv / "binary-extension.so").write_bytes(
-        b"\0embedded:" + str(donor_venv).encode()
-    )
+    (donor_venv / "binary-extension.so").write_bytes(b"\0embedded:" + str(donor_venv).encode())
 
     result = subprocess.run(
         ["bash", str(SCRIPT), str(donor), str(repo)],
@@ -333,17 +312,13 @@ def test_central_refresh_installs_changed_manifest_dependencies(tmp_path: Path) 
     npm.write_text(
         "#!/usr/bin/env bash\n"
         "set -eu\n"
-        "printf 'npm cwd=%s args=%s\\n' \"$PWD\" \"$*\" >> \"$INSTALL_LOG\"\n"
+        'printf \'npm cwd=%s args=%s\\n\' "$PWD" "$*" >> "$INSTALL_LOG"\n'
         "mkdir -p node_modules\n"
         "touch node_modules/installed-from-manifests\n"
     )
     npm.chmod(0o755)
     npx = bin_dir / "npx"
-    npx.write_text(
-        "#!/usr/bin/env bash\n"
-        "set -eu\n"
-        "printf 'npx cwd=%s args=%s\\n' \"$PWD\" \"$*\" >> \"$INSTALL_LOG\"\n"
-    )
+    npx.write_text('#!/usr/bin/env bash\nset -eu\nprintf \'npx cwd=%s args=%s\\n\' "$PWD" "$*" >> "$INSTALL_LOG"\n')
     npx.chmod(0o755)
 
     result = subprocess.run(
@@ -369,11 +344,8 @@ def test_central_refresh_installs_changed_manifest_dependencies(tmp_path: Path) 
 
 
 def _write_fake_python_with_venv(path: Path, *, fail_pip: bool) -> None:
-    pip_script = (
-        "#!/usr/bin/env bash\n"
-        "set -eu\n"
-        "printf 'pip cwd=%s args=%s\\n' \"$PWD\" \"$*\" >> \"$INSTALL_LOG\"\n"
-        + ("exit 9\n" if fail_pip else "touch \"$(dirname \"$0\")/../installed-from-manifests\"\n")
+    pip_script = '#!/usr/bin/env bash\nset -eu\nprintf \'pip cwd=%s args=%s\\n\' "$PWD" "$*" >> "$INSTALL_LOG"\n' + (
+        "exit 9\n" if fail_pip else 'touch "$(dirname "$0")/../installed-from-manifests"\n'
     )
     real_python = sys.executable
     path.write_text(
@@ -406,12 +378,16 @@ def _python_rebuild_fixture(tmp_path: Path, *, fail_pip: bool) -> tuple[Path, Pa
     (old_venv / ".cloudbench-deps-fingerprint").write_text("old-fingerprint\n")
     bin_dir.mkdir()
     _write_fake_python_with_venv(bin_dir / "python3", fail_pip=fail_pip)
-    return donor, repo, {
-        **os.environ,
-        "PATH": f"{bin_dir}:{os.environ['PATH']}",
-        "INSTALL_LOG": str(install_log),
-        "CLOUDBENCH_REBUILD_DEPS": "1",
-    }
+    return (
+        donor,
+        repo,
+        {
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "INSTALL_LOG": str(install_log),
+            "CLOUDBENCH_REBUILD_DEPS": "1",
+        },
+    )
 
 
 def test_central_refresh_replaces_python_venv_from_changed_requirements(tmp_path: Path) -> None:
@@ -514,13 +490,9 @@ def test_current_run_artifact_ignores_stale_snapshot_results(tmp_path: Path) -> 
 def test_driver_clears_snapshot_reports_before_any_failing_setup_step() -> None:
     driver = DRIVER_SCRIPT.read_text()
 
-    assert driver.index('rm -rf "$CONTEXT_DIR"') < driver.index(
-        'bash "$SYNC_DEPS_SCRIPT"'
-    )
+    assert driver.index('rm -rf "$CONTEXT_DIR"') < driver.index('bash "$SYNC_DEPS_SCRIPT"')
     assert '[ -f "$card" ] && [ "$card" -nt "$RUN_OUTPUT_MARKER" ]' in driver
-    assert driver.index("unset CLOUDBENCH_GITHUB_TOKEN_B64") < driver.index(
-        'bash "$SYNC_DEPS_SCRIPT"'
-    )
+    assert driver.index("unset CLOUDBENCH_GITHUB_TOKEN_B64") < driver.index('bash "$SYNC_DEPS_SCRIPT"')
 
 
 def test_cold_fleet_guest_gets_a_first_run_stack_budget(tmp_path: Path) -> None:
@@ -560,18 +532,22 @@ def test_cold_fleet_guest_gets_a_first_run_stack_budget(tmp_path: Path) -> None:
 
     assert budget(cold=True) >= 1800
     assert budget(cold=False) == 900
-    assert budget(
-        cold=True,
-        env={
-            "CLOUDBENCH_STACK_WAIT_SECONDS": "120",
-            "CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS": "321",
-        },
-    ) == 321
+    assert (
+        budget(
+            cold=True,
+            env={
+                "CLOUDBENCH_STACK_WAIT_SECONDS": "120",
+                "CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS": "321",
+            },
+        )
+        == 321
+    )
 
 
 def test_fleet_barrier_budget_covers_cold_guest_bootstrap() -> None:
     """RCA (2026-07-17): after the on-box cold-start budget was raised to
-    1800s, the parent controller still used its independent 720s per-box
+    2160s (the 1800s measured cold path plus 20% headroom), the parent
+    controller still used its independent 720s per-box
     barrier ceiling. Live run 20260717-204617-18785 excluded the healthy cold
     replacement at exactly 720s while it was still syncing browser data.
 
@@ -607,10 +583,18 @@ def test_fleet_barrier_budget_covers_cold_guest_bootstrap() -> None:
         'CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS="$FIRST_RUN_STACK_WAIT_SECONDS"'
         in fleet
     )
-    assert (
-        '--env "CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS=${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-1800}"'
-        in cloud
+    cold_default_pattern = re.compile(
+        r"CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-([0-9]+)"
     )
+    fleet_defaults = cold_default_pattern.findall(fleet)
+    cloud_defaults = cold_default_pattern.findall(cloud)
+    driver_defaults = cold_default_pattern.findall(DRIVER_SCRIPT.read_text())
+    assert len(fleet_defaults) == 2
+    assert len(cloud_defaults) == 2
+    assert len(driver_defaults) == 1
+    cold_defaults = fleet_defaults + cloud_defaults + driver_defaults
+    assert len(set(cold_defaults)) == 1
+    assert int(cold_defaults[0]) >= 1800
     assert (
         '"$START_BARRIER_WAIT_SECONDS" -lt "$PER_BOX_BARRIER_WAIT_SECONDS"'
         in fleet
@@ -627,7 +611,16 @@ def test_freshly_seeded_database_gets_cold_backend_health_budget() -> None:
     warm databases retain the fast budget, and operator overrides still win.
     """
     stack = STACK_SCRIPT.read_text()
-    helper = _extract_fleet_function(stack, "isolated_backend_ready_attempts() {")
+    # run.sh sources scripts/lib/seed-cache.sh, so isolated_backend_ready_attempts
+    # delegates the actual number to backend_ready_budget() living in that lib.
+    # Reproduce the same composition here (budget helper + attempts wrapper) plus
+    # the DB_RESTORED=false default run.sh sets before calling it.
+    budget = _extract_fleet_function(
+        SEED_CACHE_LIB.read_text(), "backend_ready_budget() {"
+    )
+    helper = (
+        budget + "\n" + _extract_fleet_function(stack, "isolated_backend_ready_attempts() {")
+    )
 
     def attempts(*, cold: bool, override: str | None = None) -> int:
         env = os.environ.copy()
@@ -639,7 +632,7 @@ def test_freshly_seeded_database_gets_cold_backend_health_budget() -> None:
             [
                 "bash",
                 "-c",
-                f"{helper}\nFIRST_RUN_SEEDED=$1\nisolated_backend_ready_attempts",
+                f"{helper}\nFIRST_RUN_SEEDED=$1\nDB_RESTORED=false\nisolated_backend_ready_attempts",
                 "attempts",
                 "true" if cold else "false",
             ],
@@ -654,7 +647,7 @@ def test_freshly_seeded_database_gets_cold_backend_health_budget() -> None:
     assert attempts(cold=True) >= 180
     assert attempts(cold=False) == 60
     assert attempts(cold=True, override="17") == 17
-    assert 'FIRST_RUN_SEEDED=true' in stack
+    assert "FIRST_RUN_SEEDED=true" in stack
     assert 'attempts="$(isolated_backend_ready_attempts)"' in stack
 
 
@@ -666,15 +659,9 @@ def test_fleet_waits_for_every_isolated_stack_before_releasing_benchmarks() -> N
     assert "synchronized start barrier ready" in driver
     assert "CLOUDBENCH_START_BARRIER" in cloud
     assert "export CLOUDBENCH_START_BARRIER_WAIT_SECONDS" in cloud
-    assert (
-        'START_BARRIER_WAIT_SECONDS="${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}"'
-        in fleet
-    )
+    assert 'START_BARRIER_WAIT_SECONDS="${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}"' in fleet
     assert "CHILD_RUN_TIMEOUT=$((RUN_TIMEOUT + START_BARRIER_WAIT_SECONDS))" in fleet
-    assert (
-        'CLOUDBENCH_START_BARRIER_WAIT_SECONDS="$START_BARRIER_WAIT_SECONDS"'
-        in fleet
-    )
+    assert 'CLOUDBENCH_START_BARRIER_WAIT_SECONDS="$START_BARRIER_WAIT_SECONDS"' in fleet
     assert '--timeout "$CHILD_RUN_TIMEOUT"' in fleet
     assert "deadline=$(( barrier_start + START_BARRIER_WAIT_SECONDS ))" in fleet
     assert 'CHILD_MACHINE+=("$cid")' in fleet
@@ -732,9 +719,7 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     # transitive implementation string, while a shared-stack regression cannot
     # hide behind otherwise-correct source routing.
     deploy = DEPLOY_COMMAND.read_text()
-    step = deploy.split("## Step 6: Smoke benchmarks + fix", 1)[1].split(
-        "## Step 6b: Semantic tests + fix", 1
-    )[0]
+    step = deploy.split("## Step 6: Smoke benchmarks + fix", 1)[1].split("## Step 6b: Semantic tests + fix", 1)[0]
 
     assert "scripts/run-predeploy-local" in step
     assert "scripts/run-predeploy-cloud" in step
@@ -763,13 +748,9 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     from benchmarks import local as local_runner
 
     assert local_runner.SERVICE_START_TIMEOUT_SECONDS == 600
-    assert inspect.signature(local_runner.wait_for_services).parameters[
-        "timeout_seconds"
-    ].default == 600
+    assert inspect.signature(local_runner.wait_for_services).parameters["timeout_seconds"].default == 600
     monkeypatch.setattr(local_runner, "allocate_port_range", lambda _preferred: 62000)
-    args = local_runner.parse_args(
-        ["single-creator-arm", "--run-id", "predeploy-contract", "--base-port", "62000"]
-    )
+    args = local_runner.parse_args(["single-creator-arm", "--run-id", "predeploy-contract", "--base-port", "62000"])
     stack = local_runner.build_service_stack(args)
     assert stack.isolated is True
     assert stack.workspace_name is not None
@@ -805,20 +786,16 @@ def test_cloud_patch_can_be_disabled_for_a_pinned_committed_ref() -> None:
     """A controller validating a committed ref must be able to ignore unrelated
     concurrent workspace edits without stashing, reverting, or shipping them."""
     cloud = CLOUD_SCRIPT.read_text()
-    patch_block = cloud.split('LOCAL_PATCH_FILE=""', 1)[1].split(
-        "# Proxy the box BACKEND", 1
-    )[0]
-    assert 'CLOUDBENCH_SKIP_LOCAL_PATCH:-0' in patch_block
+    patch_block = cloud.split('LOCAL_PATCH_FILE=""', 1)[1].split("# Proxy the box BACKEND", 1)[0]
+    assert "CLOUDBENCH_SKIP_LOCAL_PATCH:-0" in patch_block
     assert '!= "1"' in patch_block
     assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in patch_block
     fleet = FLEET_SCRIPT.read_text()
-    fleet_patch_block = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split(
-        "_machine_priv_ip()", 1
-    )[0]
-    assert 'CLOUDBENCH_SKIP_LOCAL_PATCH:-0' in fleet_patch_block
+    fleet_patch_block = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("_machine_priv_ip()", 1)[0]
+    assert "CLOUDBENCH_SKIP_LOCAL_PATCH:-0" in fleet_patch_block
     assert '!= "1"' in fleet_patch_block
     provenance = _extract_fleet_function(fleet, "print_code_provenance() {")
-    assert 'CLOUDBENCH_SKIP_LOCAL_PATCH:-0' in provenance
+    assert "CLOUDBENCH_SKIP_LOCAL_PATCH:-0" in provenance
     assert "local changes intentionally excluded" in provenance
 
 
@@ -972,9 +949,7 @@ def test_start_gate_replays_created_machine_with_restoring_volume(
                 {
                     "id": machine_id,
                     "state": "created",
-                    "config": {
-                        "mounts": [{"volume": "volume-1", "path": "/data"}]
-                    },
+                    "config": {"mounts": [{"volume": "volume-1", "path": "/data"}]},
                 }
             ]
         )
@@ -1055,40 +1030,34 @@ fi
 def test_fresh_clone_start_paths_honor_storage_readiness_contract() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()
-    startup = cloud.split("# ── 1. Start the warm machine", 1)[1].split(
-        "# ── 2.", 1
-    )[0]
+    startup = cloud.split("# ── 1. Start the warm machine", 1)[1].split("# ── 2.", 1)[0]
 
     assert 'MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"' in cloud
     assert startup.count('if machine_storage_ready "$mid"') == 2
     assert startup.count('request_machine_start "$mid"') == 2
-    assert startup.index('if machine_storage_ready "$mid"') < startup.index(
-        'request_machine_start "$mid"'
-    )
+    assert startup.index('if machine_storage_ready "$mid"') < startup.index('request_machine_start "$mid"')
     assert 'MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"' in fleet
     assert 'CLOUDBENCH_STORAGE_READY="$([ "$src" = "pool" ] && printf 1 || printf 0)"' in fleet
     storage = _extract_fleet_function(cloud, "machine_storage_ready() {")
-    assert 'CLOUDBENCH_STORAGE_READY:-0' in storage
+    assert "CLOUDBENCH_STORAGE_READY:-0" in storage
     pool_slot = _extract_fleet_function(fleet, "provision_pool_slot() {")
     assert 'if machine_storage_ready "$id"; then' in pool_slot
-    assert pool_slot.index('if machine_storage_ready "$id"; then') < pool_slot.index(
-        'FLY machine start "$id"'
-    )
+    assert pool_slot.index('if machine_storage_ready "$id"; then') < pool_slot.index('FLY machine start "$id"')
 
 
 def test_pool_boot_update_is_bounded_and_skips_redundant_inventory_polling() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()
-    branch = cloud[cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then'):]
-    assert 'CLOUDBENCH_BOOT_UPDATE_TIMEOUT' in branch
+    branch = cloud[cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then') :]
+    assert "CLOUDBENCH_BOOT_UPDATE_TIMEOUT" in branch
     assert '_with_timeout "${CLOUDBENCH_BOOT_UPDATE_TIMEOUT:-90}"' in branch
     assert "final Fly update error" in branch
-    pool_fast_path = branch[branch.index('if [ "${CLOUDBENCH_STORAGE_READY:-0}" = "1" ]; then'):]
+    pool_fast_path = branch[branch.index('if [ "${CLOUDBENCH_STORAGE_READY:-0}" = "1" ]; then') :]
     pool_fast_path = pool_fast_path[: pool_fast_path.index("else")]
     assert "machine_state" not in pool_fast_path
     assert "machine_storage_ready" not in pool_fast_path
     assert "request_machine_start" not in pool_fast_path
-    assert 'CLOUDBENCH_BOOT_START_TIMEOUT' in pool_fast_path
+    assert "CLOUDBENCH_BOOT_START_TIMEOUT" in pool_fast_path
     assert 'flyctl machine start "$mid"' in pool_fast_path
     claim_start = fleet.index("claim_pool_machine() {")
     claim_end = fleet.index("\n}\n", claim_start)
@@ -1097,10 +1066,32 @@ def test_pool_boot_update_is_bounded_and_skips_redundant_inventory_polling() -> 
     assert "FLY machine status" not in claim
     assert "FLY machine start" not in claim
     assert 'write_pool_claim "$claim_path"' in claim
-    assert (
-        'if machine_storage_ready "$wid"; then\n'
-        '            fly_with_timeout 20 machine start "$wid"' in fleet
-    )
+    assert 'if machine_storage_ready "$wid"; then\n            fly_with_timeout 20 machine start "$wid"' in fleet
+
+
+def test_boot_launch_delivers_the_advertised_local_workspace_patch() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    branch_start = cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then')
+    setup = cloud[:branch_start]
+    branch = cloud[branch_start:]
+
+    assert 'LOCAL_PATCH_FILE="$(mktemp)"' in setup
+    assert '--env "LOCAL_PATCH_FILE=/cloudbench-local.patch"' in branch
+    assert '--file-local "/cloudbench-local.patch=$LOCAL_PATCH_FILE"' in branch
+    assert '--env "LOCAL_PATCH_FILE="' in branch
+
+
+def test_boot_launch_executes_the_current_injected_driver() -> None:
+    """Driver edits must take effect before that driver applies the workspace patch."""
+    cloud = CLOUD_SCRIPT.read_text()
+    boot = (CLOUD_SCRIPT.parent / "cloudbench-boot.sh").read_text()
+    branch_start = cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then')
+    branch = cloud[branch_start:]
+
+    assert '--file-local "/cloudbench-run.sh=$ROOT_DIR/scripts/cloudbench-run.sh"' in branch
+    assert "DRIVER=/cloudbench-run.sh" in boot
+    assert 'bash "$DRIVER" >> "$LOG" 2>&1' in boot
+    assert 'bash "$REPO/scripts/cloudbench-run.sh" >> "$LOG" 2>&1' not in boot
 
 
 def test_snapshot_and_pool_dependency_proofs_are_exact() -> None:
@@ -1113,7 +1104,7 @@ def test_snapshot_and_pool_dependency_proofs_are_exact() -> None:
     assert "an interrupted refresh" in fleet
     assert 'POOL_META_FILE="$POOL_IDS_FILE.deps"' in fleet
     assert 'printf \'%s %s %s\\n\' "$CURRENT_NODE_FP" "$CURRENT_PY_FP" "$SNAP_ID"' in fleet
-    assert 'pooled machines were built from unproven/stale dependency trees' in fleet
+    assert "pooled machines were built from unproven/stale dependency trees" in fleet
 
 
 def test_autoscaler_metrics_poll_over_data_plane_without_ssh() -> None:
@@ -1164,7 +1155,7 @@ def test_persistent_pool_logs_use_run_scoped_terminal_markers() -> None:
     driver = DRIVER_SCRIPT.read_text()
 
     assert 'DONE_MARKER="::CLOUDBENCH-DONE:: token=$RUN_LOG_TOKEN"' in cloud
-    assert 'export CLOUDBENCH_RUN_TOKEN=' in cloud
+    assert "export CLOUDBENCH_RUN_TOKEN=" in cloud
     assert "RUNSTAMP-$RUN_LOG_TOKEN" in cloud
     assert 'LOG_RESET_ATTEMPTS="${CLOUDBENCH_LOG_RESET_ATTEMPTS:-20}"' in cloud
     assert 'for _ in $(seq 1 "$LOG_RESET_ATTEMPTS")' in cloud
@@ -1228,9 +1219,7 @@ activate_machine_environment machine-1
         ]
     )
     rejected, rejected_calls = activate([(1, "request returned non-2xx status: 401")])
-    embedded_status, embedded_status_calls = activate(
-        [(1, "machine abc503def returned nontransient validation error")]
-    )
+    embedded_status, embedded_status_calls = activate([(1, "machine abc503def returned nontransient validation error")])
     exhausted, exhausted_calls = activate(
         [
             (1, "request returned non-2xx status: 503"),
@@ -1387,9 +1376,7 @@ activate_machine_environment machine-1 "$ROLE"
     malformed_null, malformed_null_updates = activate(["malformed-null"])
     unsafe_state, unsafe_state_updates = activate(["created"])
     active_warm, active_warm_updates = activate(["started"], role="warm")
-    lost_owner, lost_owner_updates = activate(
-        ["stopped"] * 4, update_status=1, guard_updates=1
-    )
+    lost_owner, lost_owner_updates = activate(["stopped"] * 4, update_status=1, guard_updates=1)
 
     assert already_started.returncode == 0, already_started.stderr
     assert already_started_updates == 0
@@ -1506,9 +1493,7 @@ activate_owned_machine_images registry.fly.io/bench:new
     setup_start = cloud.index('if [ "$MODE" = "setup" ]; then')
     setup_end = cloud.index("# MODE: --refresh-wmh", setup_start)
     setup = cloud[setup_start:setup_end]
-    assert setup.index('activate_owned_machine_images "$IMAGE_REF"') < setup.index(
-        'start_machine "$mid"'
-    )
+    assert setup.index('activate_owned_machine_images "$IMAGE_REF"') < setup.index('start_machine "$mid"')
 
 
 def test_warm_resolver_ignores_live_cached_pool_machine(tmp_path: Path) -> None:
@@ -1550,15 +1535,10 @@ def test_setup_fetch_trusts_only_the_rose_owned_warm_checkout() -> None:
     setup_end = cloud.index("# MODE: --refresh-wmh", setup_start)
     setup = cloud[setup_start:setup_end]
 
-    assert (
-        setup.count(
-            "git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO'"
-        )
-        >= 2
-    )
+    assert setup.count("git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO'") >= 2
     assert "git config --global --add safe.directory" not in setup
-    assert r'\"\$GITHUB_TOKEN\"' in setup
-    assert 'CLONE_CMD_B64=' in setup
+    assert r"\"\$GITHUB_TOKEN\"" in setup
+    assert "CLONE_CMD_B64=" in setup
     assert "base64 -d | bash" in setup
     assert '-C "bash -lc \\"printf' in setup
     assert 'if ! clone_output="$(FLY ssh console' in setup
@@ -1577,12 +1557,8 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
     wrapper_start = cloud.index("inject_secrets() {")
     wrapper_end = cloud.index("\n}\n", wrapper_start)
     wrapper = cloud[wrapper_start:wrapper_end]
-    assert wrapper.index("acquire_app_environment_lock") < wrapper.index(
-        "( _inject_secrets_locked )"
-    )
-    assert wrapper.index("( _inject_secrets_locked )") < wrapper.index(
-        "release_app_environment_lock"
-    )
+    assert wrapper.index("acquire_app_environment_lock") < wrapper.index("( _inject_secrets_locked )")
+    assert wrapper.index("( _inject_secrets_locked )") < wrapper.index("release_app_environment_lock")
     locked_start = cloud.index("_inject_secrets_locked() {")
     locked_end = cloud.index("\n}\n", locked_start)
     assert 'FLY secrets set --stage -a "$APP"' in cloud[locked_start:locked_end]
@@ -1617,18 +1593,10 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
     cleanup_end = fleet.index("\n}", cleanup_start)
     cleanup = fleet[cleanup_start:cleanup_end]
     assert cleanup.index("trap - EXIT") < cleanup.index("terminate_and_wait")
-    assert cleanup.index("trap '' HUP INT TERM") < cleanup.index(
-        "terminate_and_wait"
-    )
-    assert (
-        'cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" '
-        '"${AUTOSCALER_PIDS[@]:-}"'
-    ) in cleanup
-    assert (
-        'cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" '
-        '"${CHILD_PIDS[@]:-}"'
-    ) in cleanup
-    assert 'CLOUDBENCH_CHILD_TERM_SECONDS:-30' in fleet
+    assert cleanup.index("trap '' HUP INT TERM") < cleanup.index("terminate_and_wait")
+    assert ('cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${AUTOSCALER_PIDS[@]:-}"') in cleanup
+    assert ('cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${CHILD_PIDS[@]:-}"') in cleanup
+    assert "CLOUDBENCH_CHILD_TERM_SECONDS:-30" in fleet
     helper = ENV_HELPER_SCRIPT.read_text()
     assert "cloudbench_terminate_and_wait() {" in helper
     assert 'kill -KILL "$pid"' in helper
@@ -1911,7 +1879,7 @@ clone_machine_target "$LEDGER"
         0,
         target_id,
     )
-    failed_after_create, failed_target_ledger = allocate(
+    recovered_after_create, recovered_target_ledger = allocate(
         f"Cloning Machine {source_id} into region ord\nError: monitor failed",
         1,
         target_id,
@@ -1930,10 +1898,10 @@ clone_machine_target "$LEDGER"
     assert created_target.stdout == target_id
     assert target_ledger.read_text().splitlines() == [target_id]
     assert target_ledger.with_suffix(".names").read_text() == ""
-    assert failed_after_create.returncode == 1
-    assert failed_after_create.stdout == ""
-    assert failed_target_ledger.read_text().splitlines() == [target_id]
-    assert failed_target_ledger.with_suffix(".names").read_text() == ""
+    assert recovered_after_create.returncode == 0, recovered_after_create.stderr
+    assert recovered_after_create.stdout == target_id
+    assert recovered_target_ledger.read_text().splitlines() == [target_id]
+    assert recovered_target_ledger.with_suffix(".names").read_text() == ""
     assert "--detach" in clone_function
     assert "--name" in clone_function
     # Exactly one clone-from-source call site, and it is bounded by the
@@ -1995,7 +1963,7 @@ def test_pool_provision_fans_out_slots_concurrently() -> None:
     assert 'for pid in "${pool_pids[@]}"; do' in pool
     assert pool.index('wait "$pid"') < pool.index("PROVISION_PIDS=()")
     assert "CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS" in pool
-    assert 'pool-provision-$i.ids' in slot
+    assert "pool-provision-$i.ids" in slot
     assert 'pool_ledger_record_id "$id"' in slot
     assert "snapshot_machine_state" in slot
     assert "FLY machine status" not in slot
@@ -2003,7 +1971,7 @@ def test_pool_provision_fans_out_slots_concurrently() -> None:
     cleanup = _extract_fleet_function(fleet, "cleanup() {")
     assert '"${PROVISION_PIDS[@]:-}"' in cleanup
 
-    pool_branch = fleet[fleet.index('if [ -n "$PROVISION_POOL" ]; then'):]
+    pool_branch = fleet[fleet.index('if [ -n "$PROVISION_POOL" ]; then') :]
     assert pool_branch.index("machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!") < pool_branch.index(
         'provision_pool "$PROVISION_POOL"'
     )
@@ -2144,9 +2112,7 @@ def test_runner_ownership_probe_executes_through_remote_shell() -> None:
     Model flyctl's direct-exec boundary: only an explicit remote shell may
     interpret the assignment, pipeline, command substitution, and printf.
     """
-    probe = _extract_fleet_function(
-        FLEET_SCRIPT.read_text(), "registry_runner_count() {"
-    )
+    probe = _extract_fleet_function(FLEET_SCRIPT.read_text(), "registry_runner_count() {")
     script = f"""set -u
 APP=test-app
 FLY() {{
@@ -2163,9 +2129,7 @@ FLY() {{
 {probe}
 test "$(registry_runner_count machine-1)" = 0
 """
-    result = subprocess.run(
-        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=5
-    )
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=5)
     assert result.returncode == 0, result.stderr
 
 
@@ -2180,21 +2144,15 @@ def test_fleet_canonicalizes_short_ref_before_remote_handoff(tmp_path: Path) -> 
         ["git", "-C", str(tmp_path), "config", "user.email", "test@example.com"],
         check=True,
     )
-    subprocess.run(
-        ["git", "-C", str(tmp_path), "config", "user.name", "Test"], check=True
-    )
+    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "Test"], check=True)
     (tmp_path / "tracked").write_text("content\n")
     subprocess.run(["git", "-C", str(tmp_path), "add", "tracked"], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "fixture"], check=True)
-    full_ref = subprocess.check_output(
-        ["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True
-    ).strip()
+    full_ref = subprocess.check_output(["git", "-C", str(tmp_path), "rev-parse", "HEAD"], text=True).strip()
     short_ref = full_ref[:9]
     fleet = FLEET_SCRIPT.read_text()
     canonicalize = (
-        _extract_fleet_function(fleet, "canonicalize_bench_ref() {")
-        if "canonicalize_bench_ref() {" in fleet
-        else ""
+        _extract_fleet_function(fleet, "canonicalize_bench_ref() {") if "canonicalize_bench_ref() {" in fleet else ""
     )
     result = subprocess.run(
         [
@@ -2439,8 +2397,7 @@ def test_reap_machine_destroys_the_clones_forked_volume(tmp_path: Path) -> None:
     while never touching the warm source's volume."""
     fleet = FLEET_SCRIPT.read_text()
     helpers = "".join(
-        _extract_fleet_function(fleet, sig)
-        for sig in ("machine_volume_id() {", "reap_volume() {", "reap_machine() {")
+        _extract_fleet_function(fleet, sig) for sig in ("machine_volume_id() {", "reap_volume() {", "reap_machine() {")
     )
     calls = tmp_path / "calls"
 
@@ -2494,10 +2451,7 @@ def test_orphan_volume_sweep_reaps_only_aged_unattached_clone_volumes(tmp_path: 
     — never attached ones, other apps' volume names, fresh in-flight forks
     (concurrent controller create->attach window), or the warm source volume."""
     fleet = FLEET_SCRIPT.read_text()
-    helpers = "".join(
-        _extract_fleet_function(fleet, sig)
-        for sig in ("reap_volume() {", "sweep_orphaned_volumes() {")
-    )
+    helpers = "".join(_extract_fleet_function(fleet, sig) for sig in ("reap_volume() {", "sweep_orphaned_volumes() {"))
     calls = tmp_path / "calls"
 
     script = f"""set -uo pipefail
@@ -2611,9 +2565,7 @@ def test_read_pollers_share_one_machines_snapshot(tmp_path: Path) -> None:
     assert "machines_snapshot_loop() {" in fleet
     assert "machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!" in fleet
     assert 'kill "$SNAPSHOT_LOOP_PID"' in fleet
-    assert fleet.index("machines_snapshot_loop & SNAPSHOT_LOOP_PID") < fleet.index(
-        "# ── Phase 1:"
-    )
+    assert fleet.index("machines_snapshot_loop & SNAPSHOT_LOOP_PID") < fleet.index("# ── Phase 1:")
     # backoff on API failure lives in the loop (single caller = single backoff)
     loop = _extract_fleet_function(fleet, "machines_snapshot_loop() {")
     assert "backoff" in loop
@@ -2643,8 +2595,7 @@ def test_read_pollers_share_one_machines_snapshot(tmp_path: Path) -> None:
 
     # fleet_machines_json: functional — serves fresh snapshot, falls back live
     helpers = "".join(
-        _extract_fleet_function(fleet, sig)
-        for sig in ("_fresh_snapshot_or() {", "fleet_machines_json() {")
+        _extract_fleet_function(fleet, sig) for sig in ("_fresh_snapshot_or() {", "fleet_machines_json() {")
     )
     snap = tmp_path / "machines.json"
     snap.write_text('[{"id":"from-snapshot"}]\n')
@@ -2661,7 +2612,9 @@ fleet_machines_json
     result = subprocess.run(
         ["bash", "-c", script],
         env={"SNAP": str(snap), "PATH": os.environ["PATH"]},
-        text=True, capture_output=True, check=False,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     lines = result.stdout.strip().splitlines()
@@ -2669,9 +2622,16 @@ fleet_machines_json
     assert lines[1] == '[{"id":"from-live"}]', lines
 
 
-def _preflight_harness(tmp_path: Path, *, state_line: str | None, dirty: bool,
-                       autorefresh: str, snap_epoch: int, refresh_status: int = 0,
-                       refreshed_snapshot: str = "snap-transaction") -> tuple:
+def _preflight_harness(
+    tmp_path: Path,
+    *,
+    state_line: str | None,
+    dirty: bool,
+    autorefresh: str,
+    snap_epoch: int,
+    refresh_status: int = 0,
+    refreshed_snapshot: str = "snap-transaction",
+) -> tuple:
     """Run warm_deps_preflight with stubbed FLY/git/refresh; returns (result, calls)."""
     fleet = FLEET_SCRIPT.read_text()
     helpers = "".join(
@@ -2686,10 +2646,10 @@ def _preflight_harness(tmp_path: Path, *, state_line: str | None, dirty: bool,
     (root / "scripts").mkdir(parents=True)
     fake_cloud = root / "scripts" / "run-bench-cloud"
     fake_cloud.write_text(
-        '#!/usr/bin/env bash\n'
+        "#!/usr/bin/env bash\n"
         'echo "refresh-deps $*" >> "$CALLS_FILE"\n'
         f'printf "NODEFP PYFP 2000 {refreshed_snapshot}\\n" > "$COMMON/cloudbench-warm-deps.fp"\n'
-        f'exit {refresh_status}\n'
+        f"exit {refresh_status}\n"
     )
     fake_cloud.chmod(0o755)
     (root / "scripts" / "cloudbench-select-snapshot.py").write_text('print("snap-new")\n')
@@ -2724,9 +2684,10 @@ echo "SNAP_AFTER=$SNAP_ID"
 """
     result = subprocess.run(
         ["bash", "-c", script],
-        env={"ROOT": str(root), "COMMON": str(common), "CALLS_FILE": str(calls),
-             "PATH": os.environ["PATH"]},
-        text=True, capture_output=True, check=False,
+        env={"ROOT": str(root), "COMMON": str(common), "CALLS_FILE": str(calls), "PATH": os.environ["PATH"]},
+        text=True,
+        capture_output=True,
+        check=False,
     )
     return result, calls
 
@@ -2740,8 +2701,8 @@ def test_warm_deps_preflight_fast_path_and_central_heal(tmp_path: Path) -> None:
     centrally). It must never block the run on failure."""
     # (a) matching state + fresh snapshot → fast path, no refresh
     result, calls = _preflight_harness(
-        tmp_path / "a", state_line="NODEFP PYFP 1000 snap-current", dirty=False,
-        autorefresh="1", snap_epoch=2000)
+        tmp_path / "a", state_line="NODEFP PYFP 1000 snap-current", dirty=False, autorefresh="1", snap_epoch=2000
+    )
     assert result.returncode == 0, result.stderr
     assert "fast bring-up" in result.stdout
     assert calls.read_text() == ""
@@ -2749,8 +2710,7 @@ def test_warm_deps_preflight_fast_path_and_central_heal(tmp_path: Path) -> None:
 
     # (b) no state → central heal once, then adopt only the exact snapshot
     # the refresh transaction published (never a newer unrelated snapshot).
-    result, calls = _preflight_harness(
-        tmp_path / "b", state_line=None, dirty=False, autorefresh="1", snap_epoch=2000)
+    result, calls = _preflight_harness(tmp_path / "b", state_line=None, dirty=False, autorefresh="1", snap_epoch=2000)
     assert result.returncode == 0, result.stderr
     assert "refresh-deps --refresh-deps --ref abc123" in calls.read_text()
     assert "SNAP_AFTER=snap-transaction" in result.stdout
@@ -2758,8 +2718,7 @@ def test_warm_deps_preflight_fast_path_and_central_heal(tmp_path: Path) -> None:
     # (c) dirty manifests cannot be fetched/rebuilt centrally and must fail
     # before provisioning; the old advertised per-box fallback hits the same
     # immutable donor mismatch and cannot work.
-    result, calls = _preflight_harness(
-        tmp_path / "c", state_line=None, dirty=True, autorefresh="1", snap_epoch=2000)
+    result, calls = _preflight_harness(tmp_path / "c", state_line=None, dirty=True, autorefresh="1", snap_epoch=2000)
     assert result.returncode != 0
     assert "DIRTY" in result.stdout + result.stderr
     assert calls.read_text() == ""
@@ -2767,16 +2726,15 @@ def test_warm_deps_preflight_fast_path_and_central_heal(tmp_path: Path) -> None:
     # (d) a failed central transaction aborts immediately instead of launching
     # clones that are already known to fail the copy-only dependency gate.
     result, calls = _preflight_harness(
-        tmp_path / "d", state_line=None, dirty=False, autorefresh="1",
-        snap_epoch=2000, refresh_status=1)
+        tmp_path / "d", state_line=None, dirty=False, autorefresh="1", snap_epoch=2000, refresh_status=1
+    )
     assert result.returncode != 0
     assert "refresh-deps --refresh-deps --ref abc123" in calls.read_text()
     assert "refusing to provision" in result.stdout + result.stderr
 
     # (e) disabling required maintenance also fails before provisioning and
     # prints the explicit manual repair command.
-    result, calls = _preflight_harness(
-        tmp_path / "e", state_line=None, dirty=False, autorefresh="0", snap_epoch=2000)
+    result, calls = _preflight_harness(tmp_path / "e", state_line=None, dirty=False, autorefresh="0", snap_epoch=2000)
     assert result.returncode != 0
     assert "--refresh-deps" in result.stdout + result.stderr
     assert calls.read_text() == ""
@@ -2786,10 +2744,7 @@ def test_refresh_deps_is_a_validated_maintenance_transaction() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()
     driver = DRIVER_SCRIPT.read_text()
-    refresh = cloud[
-        cloud.index('if [ "$MODE" = "refresh-deps" ]; then'):
-        cloud.index('# MODE: --refresh-wmh')
-    ]
+    refresh = cloud[cloud.index('if [ "$MODE" = "refresh-deps" ]; then') : cloud.index("# MODE: --refresh-wmh")]
     snapshot_helper = _extract_fleet_function(cloud, "create_volume_snapshot_exact() {")
 
     assert "CLOUDBENCH_REBUILD_DEPS=1" in refresh
@@ -2801,7 +2756,7 @@ def test_refresh_deps_is_a_validated_maintenance_transaction() -> None:
     assert "remote dependency state did not match" in refresh
     assert 'create_volume_snapshot_exact "$VOL_ID" || exit 1' in refresh
     assert 'volumes snapshots create "$vol" -a "$APP" --json' in snapshot_helper
-    assert 'CREATED_SNAPSHOT_ID=' in snapshot_helper
+    assert "CREATED_SNAPSHOT_ID=" in snapshot_helper
     assert 'BEFORE_IDS="$before_ids"' in snapshot_helper
     assert "authoritative pre-snapshot inventory" in snapshot_helper
     assert "multiple new snapshots appeared" in snapshot_helper
@@ -2832,7 +2787,9 @@ fi
     result = subprocess.run(
         ["bash", "-c", script],
         env={"CALLS": str(calls), "PATH": os.environ["PATH"]},
-        text=True, capture_output=True, check=False,
+        text=True,
+        capture_output=True,
+        check=False,
     )
 
     assert result.returncode == 0, result.stderr
@@ -2850,7 +2807,9 @@ fi
     slow = subprocess.run(
         ["bash", "-c", slow_script],
         env={"CALLS": str(calls), "PATH": os.environ["PATH"]},
-        text=True, capture_output=True, check=False,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert slow.returncode == 0, slow.stderr
     assert "snapshots create" not in calls.read_text()
@@ -2886,7 +2845,9 @@ echo "EXACT=$CREATED_SNAPSHOT_ID"
     result = subprocess.run(
         ["bash", "-c", script],
         env={"CALLS": str(calls), "CREATED": str(created), "PATH": os.environ["PATH"]},
-        text=True, capture_output=True, check=False,
+        text=True,
+        capture_output=True,
+        check=False,
     )
 
     assert result.returncode == 0, result.stderr
@@ -2896,13 +2857,14 @@ echo "EXACT=$CREATED_SNAPSHOT_ID"
     created.unlink()
     ambiguous_script = script.replace(
         '{"id":"snap-owned","status":"created","size":10}]',
-        '{"id":"snap-owned","status":"created","size":10},'
-        '{"id":"snap-racing","status":"running","size":0}]',
+        '{"id":"snap-owned","status":"created","size":10},{"id":"snap-racing","status":"running","size":0}]',
     )
     ambiguous = subprocess.run(
         ["bash", "-c", ambiguous_script],
         env={"CALLS": str(calls), "CREATED": str(created), "PATH": os.environ["PATH"]},
-        text=True, capture_output=True, check=False,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert ambiguous.returncode != 0
     assert "multiple new snapshots appeared" in ambiguous.stderr
@@ -2916,11 +2878,7 @@ def test_refresh_deps_rejects_invalid_ref_before_fly(tmp_path: Path) -> None:
     calls = tmp_path / "fly-calls"
     calls.write_text("")
     fake_fly = bin_dir / "flyctl"
-    fake_fly.write_text(
-        '#!/usr/bin/env bash\n'
-        'printf "%s\\n" "$*" >> "$FLY_CALLS"\n'
-        'echo "[]"\n'
-    )
+    fake_fly.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$FLY_CALLS"\necho "[]"\n')
     fake_fly.chmod(0o755)
 
     result = subprocess.run(
@@ -2931,7 +2889,10 @@ def test_refresh_deps_rejects_invalid_ref_before_fly(tmp_path: Path) -> None:
             "FLY_BENCH_API_TOKEN": "test-token",
             "FLY_CALLS": str(calls),
         },
-        text=True, capture_output=True, check=False, timeout=20,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=20,
     )
 
     assert result.returncode != 0
@@ -2942,7 +2903,12 @@ def test_refresh_deps_rejects_invalid_ref_before_fly(tmp_path: Path) -> None:
 def test_isolated_backend_startup_retries_one_hung_process(tmp_path: Path) -> None:
     """A live-but-never-listening first backend cannot abort the whole fleet slot."""
     stack = STACK_SCRIPT.read_text()
-    helpers = "".join(
+    # isolated_backend_ready_attempts() delegates to backend_ready_budget(), which
+    # run.sh sources from scripts/lib/seed-cache.sh — prepend it so the extracted
+    # snippet is self-contained just like the sourced production stack.
+    helpers = _extract_fleet_function(
+        SEED_CACHE_LIB.read_text(), "backend_ready_budget() {"
+    ) + "".join(
         _extract_fleet_function(stack, signature)
         for signature in (
             "launch_backend_service() {",
@@ -2971,6 +2937,7 @@ def test_isolated_backend_startup_retries_one_hung_process(tmp_path: Path) -> No
         "#!/usr/bin/env bash\n"
         'count=$(cat "$LAUNCHES")\n'
         'count=$((count + 1))\n'
+        '[ "$count" -lt 2 ] || sleep 3\n'
         'echo "$count" > "$LAUNCHES"\n'
         'exec python3 "$LAUNCHER" "$CHILD_DIR/child-$count"\n'
     )
@@ -2980,24 +2947,30 @@ BACKEND_PORT=3001
 BACKEND_LOG_FILE="$CHILD_DIR/backend.log"
 FAIL_DIR="$CHILD_DIR/fail"
 mkdir -p "$FAIL_DIR"
-CLOUDBENCH_BACKEND_START_READY_ATTEMPTS=2
+# Keep this below the production warm-start budget (60), but large enough to
+# cover the deterministic delayed second launch in the fake npx wrapper.
+CLOUDBENCH_BACKEND_START_READY_ATTEMPTS=10
 BACKEND_INDEX=0
 PIDS=("")
 NAMES=()
 BENCHMARK_MODE=true
 BENCHMARK_ISOLATED_RUN=true
+FIRST_RUN_SEEDED=false
+DB_RESTORED=false
 SCRIPT_DIR="$SCRIPT_DIR"
-curl() {{
-    # The first launch is intentionally never healthy. After restart, wait only
-    # for the fake replacement child to be scheduled before reporting healthy;
-    # process-tree cleanup and the production readiness loop remain unchanged.
-    [ "$BACKEND_PID" = "$(cat "$CHILD_DIR/root-1")" ] && return 1
-    for _ in $(seq 1 40); do
-        [ "$(cat "$LAUNCHES")" -ge 2 ] && return 0
-        sleep 0.05
-    done
-    return 1
-}}
+    # Force the first controller-owned PID through the retry path. For the
+    # replacement, wait until its TERM-ignoring descendant exists; that proves
+    # run-in-new-session has established the process group before the fake
+    # health check succeeds and removes an async-launch race from this test.
+    curl() {{
+        [ -s "$CHILD_DIR/root-1" ] || return 1
+        [ "$BACKEND_PID" != "$(cat "$CHILD_DIR/root-1")" ] || return 1
+        for _ in $(seq 1 100); do
+            [ -s "$CHILD_DIR/child-2" ] && return 0
+            sleep 0.1
+        done
+        return 1
+    }}
 {helpers}
 launch_backend_service
 echo "$BACKEND_PID" > "$CHILD_DIR/root-1"
@@ -3024,7 +2997,7 @@ exit "$rc"
     broken_script = script.replace(
         'python3 "$SCRIPT_DIR/run-in-new-session.py"',
         'python3 "$ROOT_DIR/scripts/run-in-new-session.py"',
-    )
+    ).replace("for _ in $(seq 1 100); do", "for _ in $(seq 1 1); do")
     broken = subprocess.run(
         ["bash", "-c", broken_script],
         cwd=ROOT,
@@ -3041,10 +3014,13 @@ exit "$rc"
         ["bash", "-c", script],
         cwd=ROOT,
         env=harness_env,
-        # The harness deliberately waits through TERM and KILL windows twice.
-        # Coverage runs 30 domains concurrently, so leave headroom for scheduler
-        # contention while still bounding a genuinely stuck cleanup.
-        text=True, capture_output=True, check=False, timeout=60,
+        # The harness launches and tears down two process groups, waiting through
+        # TERM and KILL windows twice. Concurrent coverage/deploy loops can delay
+        # scheduling, so leave headroom while still bounding a stuck cleanup.
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=60,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -3103,9 +3079,7 @@ def test_local_predeploy_skips_wmh_and_wmh_logs_survive_agent_chdir(tmp_path: Pa
     (fixture / "agents" / "benchmarks").mkdir(parents=True)
     (fixture / "scripts" / "run-predeploy-local").write_text(predeploy)
     (fixture / "scripts" / "run_logged_command.py").write_text(LOGGED_COMMAND_SCRIPT.read_text())
-    (fixture / "agents" / "benchmarks" / "predeploy_metrics.py").write_text(
-        PREDEPLOY_METRICS_SCRIPT.read_text()
-    )
+    (fixture / "agents" / "benchmarks" / "predeploy_metrics.py").write_text(PREDEPLOY_METRICS_SCRIPT.read_text())
     (fixture / "agents" / "benchmarks" / "tasks.json").write_text(
         json.dumps([{"name": "smoke-fixture", "tags": ["smoke"]}])
     )
@@ -3115,9 +3089,7 @@ def test_local_predeploy_skips_wmh_and_wmh_logs_survive_agent_chdir(tmp_path: Pa
     )
     (fixture / "scripts" / "run-bench").chmod(0o755)
     subprocess.run(["git", "init", "-q", str(fixture)], check=True)
-    subprocess.run(
-        ["git", "-C", str(fixture), "config", "user.email", "test@example.com"], check=True
-    )
+    subprocess.run(["git", "-C", str(fixture), "config", "user.email", "test@example.com"], check=True)
     subprocess.run(["git", "-C", str(fixture), "config", "user.name", "Test"], check=True)
     subprocess.run(["git", "-C", str(fixture), "add", "."], check=True)
     subprocess.run(["git", "-C", str(fixture), "commit", "-qm", "fixture"], check=True)
@@ -3162,13 +3134,132 @@ start_world_model_harness
     assert not (wmh_root / "agents" / ".context").exists()
 
 
+def test_isolated_stack_forwards_anthropic_exclusion_to_wmh_provider() -> None:
+    """The stack env allow-list must preserve an explicit no-Anthropic run policy."""
+    stack = DRIVER_SCRIPT.read_text()
+    stack_env_start = stack.index("STACK_ENV=(")
+    stack_env_end = stack.index("\n)", stack_env_start)
+    stack_env = stack[stack_env_start:stack_env_end]
+
+    assert '"ROSE_EXCLUDE_ANTHROPIC_FAMILY=${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}"' in stack_env
+
+
+def test_wmh_health_wait_allows_cold_model_load_past_thirty_seconds(tmp_path: Path) -> None:
+    """A live WMH process must not be discarded before its cold model finishes loading."""
+    stack = STACK_SCRIPT.read_text()
+    wmh = _extract_fleet_function(stack, "start_world_model_harness() {")
+
+    wmh_root = tmp_path / "wmh"
+    activate = wmh_root / "agents" / "venv" / "bin" / "activate"
+    fake_bin = wmh_root / "fake-bin"
+    model_root = wmh_root / ".context" / "model"
+    (model_root / "models" / "fixture").mkdir(parents=True)
+    (model_root / "build.manifest.json").write_text("{}")
+    activate.parent.mkdir(parents=True)
+    fake_bin.mkdir()
+    activate.write_text(f'export PATH="{fake_bin}:$PATH"\n')
+    fake_python = fake_bin / "python"
+    fake_python.write_text("#!/usr/bin/env bash\ntrap 'exit 0' TERM INT\nwhile :; do /bin/sleep 60; done\n")
+    fake_python.chmod(0o755)
+
+    harness = f"""set -uo pipefail
+cd "$WMH_ROOT"
+should_serve_world_model() {{ return 0; }}
+PIDS=()
+NAMES=()
+RUN_CONTEXT_DIR=.context/isolated
+WMH_BUILD_DIR=.context/model
+WMH_MODEL_NAME=fixture
+WMH_PORT=39999
+BENCHMARK_MODE=true
+BENCHMARK_SKIP_WMH_DELTA=1
+curl_attempts=0
+curl() {{
+    curl_args="$*"
+    curl_attempts=$((curl_attempts + 1))
+    [ "$curl_attempts" -ge 31 ]
+}}
+sleep() {{ :; }}
+{wmh}
+start_world_model_harness
+printf 'attempts=%s base=%s args=%s\n' "$curl_attempts" "${{WMH_BASE_URL:-}}" "$curl_args"
+kill "$WMH_PID" 2>/dev/null || true
+wait "$WMH_PID" 2>/dev/null || true
+"""
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        env={**os.environ, "WMH_ROOT": str(wmh_root)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "attempts=31 base=http://localhost:39999" in result.stdout
+    assert "--connect-timeout 1 --max-time 1" in result.stdout
+
+
+def test_wmh_health_wait_caps_untrusted_timeout_without_expanding_seq(tmp_path: Path) -> None:
+    """An extreme readiness timeout must fall back to the bounded default."""
+    stack = STACK_SCRIPT.read_text()
+    wmh = _extract_fleet_function(stack, "start_world_model_harness() {")
+
+    wmh_root = tmp_path / "wmh"
+    activate = wmh_root / "agents" / "venv" / "bin" / "activate"
+    fake_bin = wmh_root / "fake-bin"
+    model_root = wmh_root / ".context" / "model"
+    (model_root / "models" / "fixture").mkdir(parents=True)
+    (model_root / "build.manifest.json").write_text("{}")
+    activate.parent.mkdir(parents=True)
+    fake_bin.mkdir()
+    activate.write_text(f'export PATH="{fake_bin}:$PATH"\n')
+    fake_python = fake_bin / "python"
+    fake_python.write_text("#!/usr/bin/env bash\ntrap 'exit 0' TERM INT\nwhile :; do /bin/sleep 60; done\n")
+    fake_python.chmod(0o755)
+
+    harness = f"""set -uo pipefail
+cd "$WMH_ROOT"
+should_serve_world_model() {{ return 0; }}
+PIDS=()
+NAMES=()
+RUN_CONTEXT_DIR=.context/isolated
+WMH_BUILD_DIR=.context/model
+WMH_MODEL_NAME=fixture
+WMH_PORT=39999
+WMH_HEALTH_TIMEOUT_SECONDS=999999999999999999999999999999999999999999999999999999999999
+BENCHMARK_MODE=true
+BENCHMARK_SKIP_WMH_DELTA=1
+curl_attempts=0
+curl() {{ curl_attempts=$((curl_attempts + 1)); return 1; }}
+sleep() {{ :; }}
+{wmh}
+start_world_model_harness
+printf 'attempts=%s\n' "$curl_attempts"
+kill "$WMH_PID" 2>/dev/null || true
+wait "$WMH_PID" 2>/dev/null || true
+"""
+    result = subprocess.run(
+        ["bash", "-c", harness],
+        env={**os.environ, "WMH_ROOT": str(wmh_root)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        "Invalid WMH_HEALTH_TIMEOUT_SECONDS="
+        "999999999999999999999999999999999999999999999999999999999999; using 180s"
+        in result.stdout
+    )
+    assert "attempts=180" in result.stdout
+
+
 def test_refresh_deps_mode_contract() -> None:
     """--refresh-deps must sync the ref, run the marker-gated dep sync, STOP the
-        machine before snapshotting (quiesced snapshot), wait boundedly for the
-        exact created snapshot, and record the shared freshness state file."""
+    machine before snapshotting (quiesced snapshot), wait boundedly for the
+    exact created snapshot, and record the shared freshness state file."""
     cloud = CLOUD_SCRIPT.read_text()
     start = cloud.index('if [ "$MODE" = "refresh-deps" ]; then')
-    end = cloud.index('# MODE: --refresh-wmh', start)
+    end = cloud.index("# MODE: --refresh-wmh", start)
     mode = cloud[start:end]
     snapshot_helper = _extract_fleet_function(cloud, "create_volume_snapshot_exact() {")
     assert "cloudbench-sync-deps.sh' /app" in mode
@@ -3176,9 +3267,9 @@ def test_refresh_deps_mode_contract() -> None:
     # stop precedes the snapshot cut
     assert mode.index('stop_machine_strict "$mid"') < mode.index('create_volume_snapshot_exact "$VOL_ID"')
     # bounded wait for a COMPLETE fresh snapshot
-    assert 'CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS:-90' in snapshot_helper
+    assert "CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS:-90" in snapshot_helper
     # shared freshness state recorded for fleet preflights
-    assert 'cloudbench-warm-deps.fp' in mode
+    assert "cloudbench-warm-deps.fp" in mode
     assert "cloudbench_node_dependency_fingerprint" in mode
     assert "cloudbench_manifest_fingerprint" in mode
     # flag is wired
@@ -3201,11 +3292,11 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
 
     # snapshot-exec happens before arg parsing / locks / machines
     snap_at = fleet.index('exec bash "$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-fleet"')
-    assert snap_at < fleet.index('while [ $# -gt 0 ]; do')
+    assert snap_at < fleet.index("while [ $# -gt 0 ]; do")
     assert snap_at < fleet.index("cloudbench_controller_lock_acquire")
     # the snapshot carries all three co-versioned interpreter files
     for f in ("run-bench-fleet", "run-bench-cloud", "cloudbench-env.sh"):
-        assert f in fleet[fleet.index("cloudbench-scripts.XXXXXX"):snap_at], f"{f} missing from snapshot copy set"
+        assert f in fleet[fleet.index("cloudbench-scripts.XXXXXX") : snap_at], f"{f} missing from snapshot copy set"
     # every child/preflight/verify call goes through the snapshot binary —
     # no direct executable reference to the live checkout remains
     assert 'RUN_BENCH_CLOUD_BIN="$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-cloud"' in fleet
@@ -3229,7 +3320,10 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
     result = subprocess.run(
         ["bash", str(FLEET_SCRIPT), "--help"],
         env={**os.environ, "CLOUDBENCH_SCRIPT_SNAPSHOT": "", "TMPDIR": str(tmp_path)},
-        text=True, capture_output=True, check=False, timeout=30,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=30,
     )
     assert result.returncode == 0, result.stderr
     assert "run-bench-fleet" in result.stdout
@@ -3269,7 +3363,9 @@ def test_bring_up_report_attributes_time_to_named_steps(tmp_path: Path) -> None:
     )
     result = subprocess.run(
         ["python3", str(ROOT / "scripts" / "cloudbench-bring-up-report.py"), str(run)],
-        text=True, capture_output=True, check=False,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     out = result.stdout
@@ -3286,11 +3382,11 @@ def test_run_is_visible_in_hub_from_fire_time(tmp_path: Path) -> None:
     and the hub started right after the controller lock, before any
     preflight/heal/machine work, and the phase updates at each stage."""
     fleet = FLEET_SCRIPT.read_text()
-    lock_at = fleet.index('if ! cloudbench_controller_lock_acquire_wait')
+    lock_at = fleet.index("if ! cloudbench_controller_lock_acquire_wait")
     card_at = fleet.index('write_startup_card "controller starting"')
-    hub_at = fleet.index("start_central_hub\n")
+    hub_at = fleet.index("start_central_hub || exit 1\n")
     require_hub_at = fleet.index("require_central_hub_visibility || exit 1")
-    verify_at = fleet.index('Verifying the shared benchmark app environment')
+    verify_at = fleet.index("Verifying the shared benchmark app environment")
     fanout_at = fleet.index("# ── Phase 1:")
     assert lock_at < card_at < verify_at, "startup card must precede preflight"
     assert lock_at < hub_at < verify_at, "hub must serve before preflight"
@@ -3299,22 +3395,30 @@ def test_run_is_visible_in_hub_from_fire_time(tmp_path: Path) -> None:
     # phase updates at each controller stage
     for phase in ("verifying environment", "healing warm snapshot", "provisioning"):
         assert f'write_startup_card "{phase}' in fleet, f"missing phase update: {phase}"
-    # early + late hub starts must stay the SAME server invocation (no drift)
-    assert fleet.count('agents/benchmarks/agent_link_server.py') == 2
+    # Early and late phases share one identity-aware lifecycle implementation;
+    # duplicating the launch path previously let the late copy kill foreign hubs.
+    assert fleet.count("agents/benchmarks/agent_link_server.py") == 1
+    assert fleet.count("start_central_hub || exit 1") == 2
 
     # functional: the card is a valid hub-readable starting card
     helper_start = fleet.index("write_startup_card() {")
-    helper = fleet[helper_start:fleet.index("\nPY\n}", helper_start) + len("\nPY\n}")]
+    helper = fleet[helper_start : fleet.index("\nPY\n}", helper_start) + len("\nPY\n}")]
     result = subprocess.run(
-        ["bash", "-c", f'''set -uo pipefail
+        [
+            "bash",
+            "-c",
+            f"""set -uo pipefail
 FLEET_DIR="$FD"
 RUN_ID=test-run
 BENCHES=(alpha beta)
 {helper}
 write_startup_card "healing warm snapshot (dep trees)"
-'''],
+""",
+        ],
         env={"FD": str(tmp_path), "PATH": os.environ["PATH"]},
-        text=True, capture_output=True, check=False,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     card = json.loads((tmp_path / "_batch" / "report-card.json").read_text())
@@ -3332,7 +3436,7 @@ write_startup_card "healing warm snapshot (dep trees)"
         [
             "bash",
             "-c",
-            f'''set -uo pipefail
+            f"""set -uo pipefail
 RUN_ID=visible-run
 DASH_BASE=8765
 UNIFIED_DASH_PID=
@@ -3343,7 +3447,7 @@ curl() {{ return 1; }}
 sleep() {{ :; }}
 CLOUDBENCH_HUB_VISIBILITY_ATTEMPTS=1
 if require_central_hub_visibility; then exit 99; fi
-''',
+""",
         ],
         text=True,
         capture_output=True,
@@ -3354,11 +3458,317 @@ if require_central_hub_visibility; then exit 99; fi
     assert "refusing to continue invisibly" in visibility.stderr
 
 
+def test_foreign_central_hub_port_reuses_only_the_matching_runs_root(
+    tmp_path: Path,
+) -> None:
+    """A stale/foreign workspace hub on the derived Conductor port must stay
+    alive, while this fleet selects a hub that serves its own runs root."""
+    base_port = None
+    for candidate in range(42000, 62000):
+        sockets = []
+        try:
+            for port in (candidate, candidate + 1):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.bind(("127.0.0.1", port))
+                sockets.append(sock)
+            base_port = candidate
+            break
+        except OSError:
+            pass
+        finally:
+            for sock in sockets:
+                sock.close()
+    assert base_port is not None, "could not reserve consecutive hub test ports"
+
+    foreign_root = tmp_path / "foreign"
+    foreign_root.mkdir()
+    (foreign_root / "index.html").write_text("Benchmark runs foreign-workspace\n")
+    runs_root = tmp_path / "runs"
+    runs_root.mkdir()
+    hub_context = tmp_path / "hub-context"
+    hub_context.mkdir()
+
+    foreign = subprocess.Popen(
+        [sys.executable, "-m", "http.server", str(base_port), "--bind", "127.0.0.1"],
+        cwd=foreign_root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    own_hub = subprocess.Popen(
+        [
+            sys.executable,
+            str(AGENT_LINK_SERVER),
+            "--root",
+            str(runs_root),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(base_port + 1),
+            "--repo-root",
+            str(ROOT),
+            "--context-dir",
+            str(hub_context),
+            "--frontend-dir",
+            str(ROOT / "front-end"),
+            "--hub-runs-dir",
+            str(runs_root),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(50):
+            if foreign.poll() is None and own_hub.poll() is None:
+                probe = subprocess.run(
+                    ["curl", "--noproxy", "*", "-fsS", f"http://127.0.0.1:{base_port + 1}/hub-meta.json"],
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+                if probe.returncode == 0:
+                    break
+            time.sleep(0.05)
+
+        selection = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$HELPER"; cloudbench_select_central_hub_port "$FOREIGN_PORT" "$RUNS_ROOT"',
+            ],
+            env={
+                **os.environ,
+                "HELPER": str(ENV_HELPER_SCRIPT),
+                "FOREIGN_PORT": str(base_port),
+                "RUNS_ROOT": str(runs_root),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert selection.returncode == 0, selection.stderr
+        assert selection.stdout.strip() == str(base_port + 1)
+        assert foreign.poll() is None, "foreign workspace hub must not be killed"
+        assert own_hub.poll() is None
+        assert "cloudbench_select_central_hub_port" in FLEET_SCRIPT.read_text()
+    finally:
+        foreign.terminate()
+        own_hub.terminate()
+        foreign.wait(timeout=5)
+        own_hub.wait(timeout=5)
+
+
+def test_central_hub_startup_rebinds_serves_the_run_and_never_kills_foreign_owner(
+    tmp_path: Path,
+) -> None:
+    base_port = None
+    for candidate in range(42000, 62000):
+        sockets = []
+        try:
+            for port in (candidate, candidate + 1):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.bind(("127.0.0.1", port))
+                sockets.append(sock)
+            base_port = candidate
+            break
+        except OSError:
+            pass
+        finally:
+            for sock in sockets:
+                sock.close()
+    assert base_port is not None
+
+    foreign_root = tmp_path / "foreign-startup"
+    foreign_root.mkdir()
+    (foreign_root / "index.html").write_text("Benchmark runs foreign-workspace\n")
+    runs_root = tmp_path / "runs-startup"
+    (runs_root / "visible-run" / "_batch").mkdir(parents=True)
+    (runs_root / "visible-run" / "_batch" / "report-card.json").write_text(
+        json.dumps({"run_id": "visible-run", "status": "starting"})
+    )
+    hub_context = runs_root / "_hub"
+
+    foreign = subprocess.Popen(
+        [sys.executable, "-m", "http.server", str(base_port), "--bind", "127.0.0.1"],
+        cwd=foreign_root,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    fleet = FLEET_SCRIPT.read_text()
+    startup = _extract_fleet_function(fleet, "start_central_hub() {")
+    visibility = _extract_fleet_function(fleet, "require_central_hub_visibility() {")
+    shell = f'''set -uo pipefail
+source "$HELPER"
+ROOT_DIR="$ROOT"
+RUNS_ROOT="$RUNS_ROOT"
+HUB_CTX_DIR="$HUB_CTX_DIR"
+DASH_BASE="$FOREIGN_PORT"
+RUN_ID=visible-run
+UNIFIED_DASH_PID=
+CLOUDBENCH_HUB_VISIBILITY_ATTEMPTS=10
+{startup}
+{visibility}
+start_central_hub
+require_central_hub_visibility
+first_port="$DASH_BASE"
+start_central_hub
+require_central_hub_visibility
+[ "$DASH_BASE" = "$first_port" ]
+printf 'SELECTED_PORT=%s\n' "$DASH_BASE"
+'''
+    try:
+        for _ in range(50):
+            if foreign.poll() is None:
+                probe = subprocess.run(
+                    ["curl", "--noproxy", "*", "-fsS", f"http://127.0.0.1:{base_port}/"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+                if probe.returncode == 0:
+                    break
+            time.sleep(0.05)
+
+        result = subprocess.run(
+            ["bash", "-c", shell],
+            env={
+                **os.environ,
+                "HELPER": str(ENV_HELPER_SCRIPT),
+                "ROOT": str(ROOT),
+                "RUNS_ROOT": str(runs_root),
+                "HUB_CTX_DIR": str(hub_context),
+                "FOREIGN_PORT": str(base_port),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+        assert result.returncode == 0, result.stderr
+        assert f"SELECTED_PORT={base_port + 1}" in result.stdout
+        assert "central hub registration verified: run=visible-run" in result.stdout
+        assert foreign.poll() is None, "fleet startup must not kill the foreign hub"
+
+        # The post-provisioning revalidation must precede the aggregator fork so
+        # its subshell captures the final rebound DASH_BASE for every agent URL.
+        manifest = fleet.index('} > "$UNIFIED_DIR/benches.json"')
+        late_start = fleet.index("start_central_hub || exit 1", manifest)
+        aggregator = fleet.index("(\n    while :; do", late_start)
+        assert late_start < aggregator
+        assert fleet.index("require_central_hub_visibility || exit 1", late_start) < aggregator
+        assert 'env FLEET_DIR="$FLEET_DIR" UNIFIED_DIR="$UNIFIED_DIR" DASH_BASE="$DASH_BASE"' in fleet[aggregator:]
+        assert 'kill "$pp"' not in fleet
+    finally:
+        foreign.terminate()
+        foreign.wait(timeout=5)
+        pid_file = hub_context / "agent-link-server.pid"
+        if pid_file.exists():
+            os.kill(int(pid_file.read_text().strip()), signal.SIGTERM)
+
+
+def test_central_hub_startup_retries_when_foreign_process_wins_bind_race(
+    tmp_path: Path,
+) -> None:
+    base_port = None
+    for candidate in range(42000, 62000):
+        sockets = []
+        try:
+            for port in (candidate, candidate + 1):
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.bind(("127.0.0.1", port))
+                sockets.append(sock)
+            base_port = candidate
+            break
+        except OSError:
+            pass
+        finally:
+            for sock in sockets:
+                sock.close()
+    assert base_port is not None
+
+    runs_root = tmp_path / "race-runs"
+    (runs_root / "race-run" / "_batch").mkdir(parents=True)
+    (runs_root / "race-run" / "_batch" / "report-card.json").write_text(
+        json.dumps({"run_id": "race-run", "status": "starting"})
+    )
+    hub_context = runs_root / "_hub"
+    race_marker = tmp_path / "race-selected"
+    competitor_pid_file = tmp_path / "competitor.pid"
+    competitor_root = tmp_path / "competitor"
+    competitor_root.mkdir()
+    (competitor_root / "index.html").write_text("Benchmark runs bind-race winner\n")
+
+    fleet = FLEET_SCRIPT.read_text()
+    startup = _extract_fleet_function(fleet, "start_central_hub() {")
+    visibility = _extract_fleet_function(fleet, "require_central_hub_visibility() {")
+    shell = f'''set -uo pipefail
+source "$HELPER"
+eval "$(declare -f cloudbench_select_central_hub_port | sed '1s/cloudbench_select_central_hub_port/cloudbench_select_central_hub_port_original/')"
+cloudbench_select_central_hub_port() {{
+    if [ ! -e "$RACE_MARKER" ]; then
+        : > "$RACE_MARKER"
+        cloudbench_detach_reexec "$COMPETITOR_LOG" \
+            python3 -m http.server "$FOREIGN_PORT" --bind 127.0.0.1
+        for _ in $(seq 1 50); do
+            lsof -tiTCP:"$FOREIGN_PORT" -sTCP:LISTEN >/dev/null 2>&1 && break
+            sleep 0.05
+        done
+        lsof -tiTCP:"$FOREIGN_PORT" -sTCP:LISTEN | head -1 > "$COMPETITOR_PID_FILE"
+        printf '%s\n' "$FOREIGN_PORT"
+        return 0
+    fi
+    cloudbench_select_central_hub_port_original "$@"
+}}
+ROOT_DIR="$ROOT"
+RUNS_ROOT="$RUNS_ROOT"
+HUB_CTX_DIR="$HUB_CTX_DIR"
+DASH_BASE="$FOREIGN_PORT"
+RUN_ID=race-run
+UNIFIED_DASH_PID=
+CLOUDBENCH_HUB_VISIBILITY_ATTEMPTS=10
+{startup}
+{visibility}
+start_central_hub
+require_central_hub_visibility
+printf 'SELECTED_PORT=%s\n' "$DASH_BASE"
+'''
+    try:
+        result = subprocess.run(
+            ["bash", "-c", shell],
+            env={
+                **os.environ,
+                "HELPER": str(ENV_HELPER_SCRIPT),
+                "ROOT": str(ROOT),
+                "RUNS_ROOT": str(runs_root),
+                "HUB_CTX_DIR": str(hub_context),
+                "FOREIGN_PORT": str(base_port),
+                "RACE_MARKER": str(race_marker),
+                "COMPETITOR_PID_FILE": str(competitor_pid_file),
+                "COMPETITOR_ROOT": str(competitor_root),
+                "COMPETITOR_LOG": str(tmp_path / "competitor.log"),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=20,
+        )
+        assert result.returncode == 0, result.stderr
+        assert f"SELECTED_PORT={base_port + 1}" in result.stdout
+        competitor_pid = int(competitor_pid_file.read_text().strip())
+        os.kill(competitor_pid, 0)
+    finally:
+        for path in (competitor_pid_file, hub_context / "agent-link-server.pid"):
+            if path.exists():
+                try:
+                    os.kill(int(path.read_text().strip()), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+
+
 def test_warm_source_parks_between_maintenance_and_fleet_runs() -> None:
     """The stopped donor must not consume the config transaction's CPU margin."""
     fleet = FLEET_SCRIPT.read_text()
     cloud = CLOUD_SCRIPT.read_text()
-    park_at = fleet.index('parking warm source at $WARM_PARKED_VM_SIZE')
+    park_at = fleet.index("parking warm source at $WARM_PARKED_VM_SIZE")
     fanout_at = fleet.index("# ── Phase 1:")
     assert park_at < fanout_at
     assert 'WARM_PARKED_VM_SIZE="${CLOUDBENCH_WARM_PARKED_VM_SIZE:-shared-cpu-1x}"' in fleet
@@ -3412,7 +3822,9 @@ echo "reap_exit=$?"
     result = subprocess.run(
         ["bash", "-c", script],
         env={"ROOT": str(root), "REG": str(reg), "PATH": os.environ["PATH"]},
-        text=True, capture_output=True, check=False,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert "retaining ownership and refusing to provision" in result.stderr
     assert "reap_exit=1" in result.stdout, f"{result.stdout}\n{result.stderr}"
@@ -3468,14 +3880,46 @@ def test_cloud_git_sync_uses_safe_directory_everywhere() -> None:
 def test_refresh_wmh_bounds_the_archive_scan_by_default() -> None:
     """Maintenance must not scan every historical R2 bundle before a run."""
     cloud = CLOUD_SCRIPT.read_text()
-    refresh = cloud[
-        cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') :
-        cloud.index('# MODE: run (default)')
-    ]
+    refresh = cloud[cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') : cloud.index("# MODE: run (default)")]
 
     assert 'WMH_REFRESH_MAX_BUNDLES="${WMH_REFRESH_MAX_BUNDLES:-20}"' in refresh
     assert "WMH_REFRESH_MAX_BUNDLES must be a non-negative integer" in refresh
     assert "WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES'" in refresh
+
+
+def test_refresh_wmh_can_select_an_exact_attributable_corpus() -> None:
+    """A one-trace delta proof must name the admitted live root explicitly."""
+    cloud = CLOUD_SCRIPT.read_text()
+    refresh = cloud[cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') : cloud.index("# MODE: run (default)")]
+
+    assert 'WMH_REFRESH_ROOT_AGENT_IDS="${WMH_REFRESH_ROOT_AGENT_IDS:-}"' in refresh
+    assert "WMH_REFRESH_ROOT_AGENT_IDS must be comma-separated UUIDs" in refresh
+    assert "explicit WMH root count exceeds WMH_REFRESH_MAX_BUNDLES" in refresh
+    assert "explicit_roots=" in refresh
+    assert "WMH_ROOT_AGENT_IDS='$WMH_REFRESH_ROOT_AGENT_IDS'" in refresh
+    assert "u(root_agent_ids=ids or None" in refresh
+
+
+def test_benchmark_stack_does_not_override_injected_r2_archive_backend() -> None:
+    """Gold live traces must survive disposal of their fleet volume."""
+    stack = STACK_SCRIPT.read_text()
+    benchmark_env = stack[stack.index("if $BENCHMARK_MODE; then") : stack.index("# Build the benchmark frontend")]
+
+    assert 'export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"' in benchmark_env
+    assert 'export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$PWD/.context}"' in benchmark_env
+    assert 'TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"' not in benchmark_env
+    assert "disposable fleet volume" in benchmark_env
+
+
+def test_refresh_wmh_publishes_the_rebuilt_volume_as_the_proven_fleet_snapshot() -> None:
+    """A warm-volume rebuild is useless if fleet clones keep selecting the prior snapshot."""
+    cloud = CLOUD_SCRIPT.read_text()
+    refresh = cloud[cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') : cloud.index("# MODE: run (default)")]
+
+    assert 'create_volume_snapshot_exact "$VOL_ID"' in refresh
+    assert 'NEW_SNAP="$CREATED_SNAPSHOT_ID"' in refresh
+    assert '"$NEW_SNAP" > "$GIT_COMMON_DIR/cloudbench-warm-deps.fp"' in refresh
+    assert "WMH model snapshot published for fleet clones" in refresh
 
 
 def test_start_barrier_tolerates_infra_failures() -> None:
@@ -3598,9 +4042,7 @@ def test_start_barrier_release_uses_authenticated_data_plane(tmp_path: Path) -> 
         pid_file.write_text(f"{os.getpid()}\n")
         with local_opener.open(f"{base}/driver-health", timeout=1) as response:
             assert response.status == 204
-        health_probe = _extract_fleet_function(
-            CLOUD_SCRIPT.read_text(), "probe_driver_health() {"
-        )
+        health_probe = _extract_fleet_function(CLOUD_SCRIPT.read_text(), "probe_driver_health() {")
 
         def probe(probe_port: int) -> int:
             result = subprocess.run(
@@ -3685,7 +4127,6 @@ def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
     persisted marker over the same data plane used for release, so the barrier
     must observe that artifact directly.
     """
-    import socket
     import urllib.error
     import urllib.request
 
@@ -3700,9 +4141,7 @@ def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
         for index in range(30):
             root = tmp_path / str(index)
             root.mkdir()
-            (root / "bench.log").write_text(
-                f"synchronized start barrier ready: {barrier}\n"
-            )
+            (root / "bench.log").write_text(f"synchronized start barrier ready: {barrier}\n")
             ready_file = root / "server.port"
             server = subprocess.Popen(
                 [
@@ -3739,9 +4178,7 @@ def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
         local_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         while True:
             try:
-                with local_opener.open(
-                    f"http://127.0.0.1:{ports[-1]}/bench.log", timeout=0.2
-                ):
+                with local_opener.open(f"http://127.0.0.1:{ports[-1]}/bench.log", timeout=0.2):
                     break
             except (OSError, urllib.error.URLError):
                 if time.time() >= deadline:
@@ -3752,14 +4189,16 @@ def test_data_plane_barrier_release_at_full_fleet_width(tmp_path: Path) -> None:
             # Mirror the production failure: the on-box marker exists while
             # the controller's streamed log never received the READY line.
             (root / f"cloudbench-start-{barrier}.ready").touch()
-            (root / "fleet-child.log").write_text(
-                f"status proxy: 127.0.0.1:{port} -> fly:8011\n"
-            )
+            (root / "fleet-child.log").write_text(f"status proxy: 127.0.0.1:{port} -> fly:8011\n")
             (root / "status-proxy.port").write_text(f"{port}\n")
 
         release_fn = _extract_fleet_function(
             FLEET_SCRIPT.read_text(), "release_start_barrier() {"
         )
+        # Thirty concurrent curl subprocesses can be scheduler-delayed on a
+        # shared CI host. Keep the production curl/attempt deadlines unchanged,
+        # but give the enclosing test process enough wall time to observe them.
+        subprocess_timeout_seconds = 20
         quoted_roots = " ".join(shlex.quote(str(root)) for root in roots)
         script = f"""set +e
 SYNCHRONIZED_START=1
@@ -3768,20 +4207,22 @@ START_BARRIER_WAIT_SECONDS=2
 CLOUDBENCH_PER_BOX_BARRIER_WAIT_SECONDS=2
 CLOUDBENCH_BARRIER_TOKEN={token}
 CLOUDBENCH_BARRIER_RELEASE_ATTEMPTS=2
-CHILD_PIDS=({' '.join([str(os.getpid())] * 30)})
+CHILD_PIDS=({" ".join([str(os.getpid())] * 30)})
 CHILD_OUT=({quoted_roots})
-CHILD_BENCH=({' '.join(f'task-{i}' for i in range(30))})
-CHILD_MACHINE=({' '.join(f'machine-{i}' for i in range(30))})
+CHILD_BENCH=({" ".join(f"task-{i}" for i in range(30))})
+CHILD_MACHINE=({" ".join(f"machine-{i}" for i in range(30))})
 {release_fn}
 release_start_barrier
 """
         success = subprocess.run(
-            ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=8
+            ["bash", "-c", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=subprocess_timeout_seconds,
         )
         assert success.returncode == 0, success.stderr
-        assert all(
-            (root / f"cloudbench-start-{barrier}.release").exists() for root in roots
-        )
+        assert all((root / f"cloudbench-start-{barrier}.release").exists() for root in roots)
 
         for root in roots:
             (root / f"cloudbench-start-{barrier}.release").unlink()
@@ -3789,8 +4230,7 @@ release_start_barrier
         # retain the compatibility READY signal after taking its server down so
         # the controller must attempt, and fail, the release POST.
         (roots[-1] / "fleet-child.log").write_text(
-            f"status proxy: 127.0.0.1:{ports[-1]} -> fly:8011\n"
-            f"synchronized start barrier ready: {barrier}\n"
+            f"status proxy: 127.0.0.1:{ports[-1]} -> fly:8011\nsynchronized start barrier ready: {barrier}\n"
         )
         servers[-1].terminate()
         servers[-1].wait(timeout=5)
@@ -3799,7 +4239,7 @@ release_start_barrier
             text=True,
             capture_output=True,
             check=False,
-            timeout=8,
+            timeout=subprocess_timeout_seconds,
         )
         assert failed.returncode == 1
         assert "could not release synchronized start barrier" in failed.stderr
@@ -3820,12 +4260,9 @@ def test_clone_burst_is_rate_limit_resilient() -> None:
     attempts, so a rate-limited clone outlasts the burst instead of giving up."""
     fleet = FLEET_SCRIPT.read_text()
     # More attempts (was 3).
-    assert (
-        'max_attempts="${CLOUDBENCH_CLONE_MAX_ATTEMPTS:-'
-        '${CLOUDBENCH_CLONE_ATTEMPTS:-5}}"' in fleet
-    )
+    assert 'max_attempts="${CLOUDBENCH_CLONE_MAX_ATTEMPTS:-${CLOUDBENCH_CLONE_ATTEMPTS:-5}}"' in fleet
     # Launch burst is staggered, not simultaneous.
-    assert 'CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS' in fleet
+    assert "CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS" in fleet
     # Exponential backoff (bit-shift by attempt) with a cap and jitter.
     clone_fn = _extract_fleet_function(fleet, "clone_machine_target() {")
     assert "1 << (attempt - 1)" in clone_fn
@@ -3865,8 +4302,8 @@ def test_launcher_detects_dead_onbox_driver() -> None:
     # the legacy multi-SSH path retains its conservative throttle.
     fleet = FLEET_SCRIPT.read_text()
     assert "CLOUDBENCH_LAUNCH_STAGGER_SECONDS" in fleet
-    assert 'CLOUDBENCH_LAUNCH_STAGGER_SECONDS:-0.25}' in fleet
-    assert 'CLOUDBENCH_LAUNCH_STAGGER_SECONDS:-3.5}' in fleet
+    assert "CLOUDBENCH_LAUNCH_STAGGER_SECONDS:-0.25}" in fleet
+    assert "CLOUDBENCH_LAUNCH_STAGGER_SECONDS:-3.5}" in fleet
     # Stack-health FATAL captures the actual death cause (exit code + tail + OOM).
     run = (CLOUD_SCRIPT.parent / "cloudbench-run.sh").read_text()
     assert "stack process exited (rc=$stack_rc)" in run
@@ -3881,9 +4318,7 @@ def test_dead_driver_refetches_durable_done_before_infra(tmp_path: Path) -> None
     Require a bounded reconnect/refetch before that classification so a genuine
     terminal verdict cannot become NORESULT because of a transport race."""
     cloud = CLOUD_SCRIPT.read_text()
-    recovery = _extract_fleet_function(
-        cloud, "recover_terminal_marker_after_dead_driver() {"
-    )
+    recovery = _extract_fleet_function(cloud, "recover_terminal_marker_after_dead_driver() {")
     ssh_log = tmp_path / "bench.log"
     read_state = tmp_path / "read-count"
     script = f"""
@@ -3926,22 +4361,20 @@ def test_corrupt_pool_guest_is_quarantined_instead_of_reused(tmp_path: Path) -> 
     makes the same corrupt runtime eligible for later benchmark runs. Require a
     high-confidence multi-binary signature and durable pool eviction."""
     fleet = FLEET_SCRIPT.read_text()
-    signature = _extract_fleet_function(
-        fleet, "pool_machine_guest_corruption_signature() {"
-    )
+    signature = _extract_fleet_function(fleet, "pool_machine_guest_corruption_signature() {")
     corrupt = tmp_path / "corrupt.log"
     corrupt.write_text(
         '/repo/scripts/run.sh: line 320: 1104 Bus error fuser "$port/tcp"\n'
-        'line 516: 1122 Segmentation fault PGPASSWORD=x dropdb -h localhost\n'
+        "line 516: 1122 Segmentation fault PGPASSWORD=x dropdb -h localhost\n"
     )
     benign = tmp_path / "benign.log"
     benign.write_text("application worker Segmentation fault\n")
     detected = subprocess.run(
-        ["bash", "-c", f"{signature}\npool_machine_guest_corruption_signature \"$1\"", "sig", str(corrupt)],
+        ["bash", "-c", f'{signature}\npool_machine_guest_corruption_signature "$1"', "sig", str(corrupt)],
         check=False,
     )
     ignored = subprocess.run(
-        ["bash", "-c", f"{signature}\npool_machine_guest_corruption_signature \"$1\"", "sig", str(benign)],
+        ["bash", "-c", f'{signature}\npool_machine_guest_corruption_signature "$1"', "sig", str(benign)],
         check=False,
     )
     assert detected.returncode == 0
@@ -4024,9 +4457,7 @@ start_leased_data_plane_proxy() {{
 ensure_status_proxy
 test -f {shlex.quote(str(restarted))}
 """
-    result = subprocess.run(
-        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=5
-    )
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=5)
     assert result.returncode == 0, result.stderr
 
 
@@ -4074,9 +4505,7 @@ wait
 test "$(wc -l < {shlex.quote(str(observed))} | tr -d ' ')" = 12
 test "$(sort -nr {shlex.quote(str(observed))} | head -1 | tr -d ' ')" -le 4
 """
-    result = subprocess.run(
-        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
-    )
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10)
     assert result.returncode == 0, result.stderr
 
 
@@ -4100,11 +4529,7 @@ def test_boot_launch_dashboard_card_mirror_uses_data_plane() -> None:
     second per box; at daily width that exhausted Fly and left an SSH child
     alive after the real verdict and DONE marker."""
     cloud = CLOUD_SCRIPT.read_text()
-    mirror = cloud[
-        cloud.index("expected_total=\"${#BENCH_TASKS[@]}\"") : cloud.index(
-            "DASHBOARD_MIRROR_PID=$!"
-        )
-    ]
+    mirror = cloud[cloud.index('expected_total="${#BENCH_TASKS[@]}"') : cloud.index("DASHBOARD_MIRROR_PID=$!")]
 
     assert 'if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then' in mirror
     assert "/repo/.context/cloudbench/report-card.json" in mirror
@@ -4117,7 +4542,7 @@ def test_boot_supervisor_keeps_data_plane_alive_after_done() -> None:
     controller's next data-plane poll, or a real verdict becomes NORESULT."""
     boot = (CLOUD_SCRIPT.parent / "cloudbench-boot.sh").read_text()
 
-    assert 'bash "$REPO/scripts/cloudbench-run.sh" >> "$LOG" 2>&1' in boot
+    assert 'bash "$DRIVER" >> "$LOG" 2>&1' in boot
     assert 'exec bash "$REPO/scripts/cloudbench-run.sh"' not in boot
     assert "holding for controller collection" in boot
     assert boot.rstrip().endswith("exec sleep infinity")
@@ -4127,11 +4552,7 @@ def test_claimed_pool_teardown_is_parallel_with_shared_inventory() -> None:
     """Thirty serial stop-and-list loops add N teardown latency and API load."""
     fleet = FLEET_SCRIPT.read_text()
     cleanup = _extract_fleet_function(fleet, "cleanup() {")
-    claimed = cleanup[
-        cleanup.index("pending_pool_ids=") : cleanup.index(
-            'if [ "$FLEET_REGISTRY_PUBLISHED"'
-        )
-    ]
+    claimed = cleanup[cleanup.index("pending_pool_ids=") : cleanup.index('if [ "$FLEET_REGISTRY_PUBLISHED"')]
 
     assert 'machine stop "$id"' in claimed
     assert "CLOUDBENCH_POOL_STOP_REQUEST_TIMEOUT" in claimed
@@ -4208,9 +4629,7 @@ rc=$?
 echo rc=$rc
 exit 0
 """
-    result = subprocess.run(
-        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=6
-    )
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=6)
     assert "benchmark heartbeat" in result.stdout
     assert "rc=7" in result.stdout
 
@@ -4228,9 +4647,7 @@ def test_cloud_runner_avoids_live_run_port_collisions() -> None:
     assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 3))" LOCAL_STATUS_PORT' in cloud
     assert 'start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 1))" LIVE_BACKEND_PORT' in cloud
     assert "return 98" in _extract_fleet_function(cloud, "start_data_plane_proxy() {")
-    assert "release_local_port_lease" in _extract_fleet_function(
-        cloud, "start_leased_data_plane_proxy() {"
-    )
+    assert "release_local_port_lease" in _extract_fleet_function(cloud, "start_leased_data_plane_proxy() {")
     assert "release_local_port_leases" in _extract_fleet_function(cloud, "stop_on_exit() {")
     assert 'pkill -f "flyctl proxy $LOCAL_STATUS_PORT' not in cloud
     assert 'pkill -f "flyctl proxy $LIVE_BACKEND_PORT' not in cloud
@@ -4289,8 +4706,7 @@ def test_fleet_barrier_reads_the_authoritative_rotated_status_port(tmp_path: Pat
     child_out = tmp_path / "child"
     child_out.mkdir()
     (child_out / "fleet-child.log").write_text(
-        "status proxy: 127.0.0.1:60944 -> fly:8011\n"
-        "synchronized start barrier ready: rotation-test\n"
+        "status proxy: 127.0.0.1:60944 -> fly:8011\nsynchronized start barrier ready: rotation-test\n"
     )
     (child_out / "status-proxy.port").write_text("61945\n")
     observed_url = tmp_path / "release-url"
@@ -4315,8 +4731,6 @@ sleep() {{ :; }}
 {release}
 release_start_barrier
 """
-    result = subprocess.run(
-        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=5
-    )
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False, timeout=5)
     assert result.returncode == 0, result.stderr
     assert observed_url.read_text().strip() == "http://127.0.0.1:61945/release"

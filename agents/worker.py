@@ -71,7 +71,10 @@ from domains.spawn_browser_agent_v3.handler import (
     drain_background_browser_cleanups,
     spawn_browser_agent_activity_v3,
 )
-from domains.spawn_claude_code_agent.service import spawn_claude_code_activity
+from domains.spawn_claude_code_agent.service import (
+    resolve_code_agent_provider_activity,
+    spawn_claude_code_activity,
+)
 from domains.spawn_sub_agents.service import (
     spawn_sub_agent_activity,
     spawn_sub_agents_batch_activity,
@@ -1060,6 +1063,7 @@ async def main():
             lookup_purchase_activity,
             mint_purchase_card_activity,
             spawn_browser_agent_activity_v3,  # V3: browser-use + Rose API
+            resolve_code_agent_provider_activity,
             spawn_claude_code_activity,  # Claude Code in E2B sandbox
             # New event-driven tool activities
             web_search_activity,

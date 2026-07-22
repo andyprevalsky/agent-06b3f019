@@ -85,6 +85,24 @@ class ThrowingReclaimProvider extends FakeProvider {
   }
 }
 
+class ConcurrentReclaimProvider extends FakeProvider {
+  private entered = 0;
+  private releaseBoth!: () => void;
+  private readonly bothEntered = new Promise<void>((resolve) => {
+    this.releaseBoth = resolve;
+  });
+
+  async reclaimUserWalletFunding(
+    request: WalletFundingReclaimRequest
+  ): Promise<WalletFundingResult> {
+    this.reclaimCalls.push(request);
+    this.entered += 1;
+    if (this.entered === 2) this.releaseBoth();
+    await this.bothEntered;
+    return { providerTransferId: request.providerTransferId, metadata: { reclaimed: true } };
+  }
+}
+
 async function seedUser(): Promise<string> {
   const userId = `pwf-unit-${randomUUID()}`;
   await prisma.user.create({ data: { userId, isAnonymous: true } });
@@ -267,6 +285,22 @@ async function main(): Promise<void> {
     const funding = await findWalletFundingByPurchaseId(purchase.id);
     assert.equal(funding?.status, PurchaseWalletFundingStatus.RECLAIMED);
     assert.equal(funding?.reclaimProviderTransferId, `wfr_${purchase.id}`);
+  });
+
+  await test('concurrent reclaim completion is idempotent for the CAS loser', async () => {
+    const userId = await seedUser();
+    const purchase = await seedPurchase(userId);
+    await recordPurchaseWalletFunding(purchase, 'usd', 'owt_concurrent_reclaim', {});
+    const provider = new ConcurrentReclaimProvider();
+
+    await Promise.all([
+      reclaimPurchaseWalletFunding(purchase, 'cleanup_a', provider),
+      reclaimPurchaseWalletFunding(purchase, 'cleanup_b', provider),
+    ]);
+
+    const funding = await findWalletFundingByPurchaseId(purchase.id);
+    assert.equal(funding?.status, PurchaseWalletFundingStatus.RECLAIMED);
+    assert.equal(provider.reclaimCalls.length, 2);
   });
 
   await test('reclaim skips PENDING/FAILED/RECLAIMED funding', async () => {

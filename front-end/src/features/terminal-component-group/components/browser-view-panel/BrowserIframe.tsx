@@ -23,6 +23,7 @@ import { cn } from '@/lib/utils';
 import { useIsMobile } from '@/hooks/use-mobile';
 import BrowserBorderGlow from '../BrowserBorderGlow';
 import BrowserCursorOverlay from '../BrowserCursorOverlay';
+import { resolveBrowserControlState } from '../browserControlState';
 import { StatusOverlay } from './StatusOverlay';
 import type { Message } from '../../hooks';
 
@@ -51,6 +52,10 @@ export function BrowserIframe({
 }: BrowserIframeProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const isMobile = useIsMobile();
+  const controlState = resolveBrowserControlState({
+    isDisconnected,
+    isWaitingForAuthAssistance,
+  });
 
   return (
     <div
@@ -68,15 +73,15 @@ export function BrowserIframe({
         title="Browser Session"
       />
 
-      {!isWaitingForAuthAssistance && <BrowserBorderGlow />}
-      {!isWaitingForAuthAssistance && (
+      {controlState === 'active' && <BrowserBorderGlow />}
+      {controlState === 'active' && (
         <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
       )}
 
-      {isDisconnected && !isWaitingForAuthAssistance && (
+      {controlState === 'disconnected' && (
         <StatusOverlay isResuming={isResuming} onResume={onResume} />
       )}
-      {isWaitingForAuthAssistance && (
+      {controlState === 'waiting' && (
         <StatusOverlay
           isResuming={isResuming}
           onResume={onResume}

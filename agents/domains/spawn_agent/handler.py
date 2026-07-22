@@ -131,7 +131,10 @@ def _prior_explore_agent_count(workflow_instance) -> int:
             continue
         if metadata.get("agentType") != "explore":
             continue
-        if metadata.get("toolStatus") not in {"IN_PROGRESS", "FINISHED"}:
+        # Only successful children satisfy a one-per-city instruction. Counting
+        # IN_PROGRESS here also counted calls that later ended in ERROR, which
+        # prevented the parent from replacing an evidence-free explore child.
+        if metadata.get("toolStatus") != "FINISHED":
             continue
         tool_call_id = metadata.get("toolCallId")
         if tool_call_id:
@@ -140,6 +143,56 @@ def _prior_explore_agent_count(workflow_instance) -> int:
             seen_tool_calls.add(tool_call_id)
         count += 1
     return count
+
+
+def _explore_slot_reservations(workflow_instance) -> set[str]:
+    """Return per-workflow reservations for same-turn explore calls.
+
+    Regular tool calls execute concurrently. Without a synchronous reservation,
+    several calls can all observe the same number of finished children and each
+    claim the final city slot before any IN_PROGRESS event reaches context.
+    """
+    reservations = getattr(workflow_instance, "_explore_slot_reservations", None)
+    if not isinstance(reservations, set):
+        reservations = set()
+        setattr(workflow_instance, "_explore_slot_reservations", reservations)
+    return reservations
+
+
+def _explore_limit_error(expected_explore_agents: int) -> str:
+    return (
+        f"This task asked for one explore sub-agent per city and already has {expected_explore_agents} "
+        "explore agents. Use the gathered research and finish the answer instead of spawning more."
+    )
+
+
+def _has_failed_completion_feedback(workflow_instance) -> bool:
+    """Return whether a verifier asked the parent for corrective work."""
+    context = getattr(workflow_instance, "context", [])
+    if not isinstance(context, list):
+        return False
+    for msg in context:
+        if not isinstance(msg, dict) or (msg.get("role") or "").upper() != "TOOL":
+            continue
+        metadata = msg.get("metadata") or {}
+        if (
+            metadata.get("toolName") not in ("attempt_completion", "attempt_completion_with_result")
+            or metadata.get("toolStatus") != "FINISHED"
+            or not metadata.get("verifierMessage")
+        ):
+            continue
+        feedback = " ".join(
+            str(value or "")
+            for value in (metadata.get("title"), metadata.get("message"), msg.get("text"))
+        ).lower()
+        if "verifier rejected" in feedback or ("progress:" in feedback and "100%" not in feedback):
+            return True
+    return False
+
+
+def _explore_agent_capacity(workflow_instance, expected_explore_agents: int) -> int:
+    """Allow one bounded corrective explore after explicit verifier feedback."""
+    return expected_explore_agents + int(_has_failed_completion_feedback(workflow_instance))
 
 
 def _blocked_research_only_agent_type(workflow_instance, tool_call: Dict[str, Any]) -> str | None:
@@ -156,15 +209,10 @@ def _blocked_research_only_agent_type(workflow_instance, tool_call: Dict[str, An
         )
     goal_text = _combined_goal_text(workflow_instance, tool_call)
     expected_explore_agents = _expected_explore_agents_for_city_task(goal_text)
-    if (
-        agent_type == "explore"
-        and expected_explore_agents is not None
-        and _prior_explore_agent_count(workflow_instance) >= expected_explore_agents
-    ):
-        return (
-            f"This task asked for one explore sub-agent per city and already has {expected_explore_agents} "
-            "explore agents. Use the gathered research and finish the answer instead of spawning more."
-        )
+    if agent_type == "explore" and expected_explore_agents is not None:
+        explore_capacity = _explore_agent_capacity(workflow_instance, expected_explore_agents)
+        if _prior_explore_agent_count(workflow_instance) >= explore_capacity:
+            return _explore_limit_error(explore_capacity)
     return None
 
 
@@ -208,21 +256,46 @@ class SpawnAgentManager(ToolManager):
             )
             return
 
-        if agent_type == "explore":
-            async for event in self._spawn_explore(workflow_instance, tool_call, tool_call_id):
-                yield event
-        elif agent_type == "browser":
-            async for event in self._spawn_browser(workflow_instance, tool_call, tool_call_id):
-                yield event
-        elif agent_type == "code":
-            async for event in self._spawn_code(workflow_instance, tool_call, tool_call_id):
-                yield event
-        elif agent_type == "general_purpose":
-            async for event in self._spawn_sub_agent(workflow_instance, tool_call, tool_call_id):
-                yield event
-        elif agent_type == "for_each":
-            async for event in self._spawn_for_each(workflow_instance, tool_call, tool_call_id):
-                yield event
+        reserved_explore_slot = False
+        if agent_type == "explore" and _explore_only_research_instruction(workflow_instance, tool_call):
+            expected_explore_agents = _expected_explore_agents_for_city_task(
+                _combined_goal_text(workflow_instance, tool_call)
+            )
+            if expected_explore_agents is not None:
+                explore_capacity = _explore_agent_capacity(workflow_instance, expected_explore_agents)
+                reservations = _explore_slot_reservations(workflow_instance)
+                occupied_slots = _prior_explore_agent_count(workflow_instance) + len(reservations)
+                if occupied_slots >= explore_capacity:
+                    yield ToolEvent(
+                        type=EventType.POST_MESSAGE,
+                        title="spawn_agent failed",
+                        message=_explore_limit_error(explore_capacity),
+                        status=MessageStatus.ERROR,
+                        metadata={"agentType": agent_type},
+                    )
+                    return
+                reservations.add(tool_call_id)
+                reserved_explore_slot = True
+
+        try:
+            if agent_type == "explore":
+                async for event in self._spawn_explore(workflow_instance, tool_call, tool_call_id):
+                    yield event
+            elif agent_type == "browser":
+                async for event in self._spawn_browser(workflow_instance, tool_call, tool_call_id):
+                    yield event
+            elif agent_type == "code":
+                async for event in self._spawn_code(workflow_instance, tool_call, tool_call_id):
+                    yield event
+            elif agent_type == "general_purpose":
+                async for event in self._spawn_sub_agent(workflow_instance, tool_call, tool_call_id):
+                    yield event
+            elif agent_type == "for_each":
+                async for event in self._spawn_for_each(workflow_instance, tool_call, tool_call_id):
+                    yield event
+        finally:
+            if reserved_explore_slot:
+                _explore_slot_reservations(workflow_instance).discard(tool_call_id)
 
     async def _spawn_explore(  # noqa: C901
         self,
@@ -408,6 +481,8 @@ class SpawnAgentManager(ToolManager):
             # connected. When present the explore is a FAILED sub-agent, and the
             # parent (spawn_agent) raises one blocking source_connect gate each.
             unavailable_sources = result.get("unavailable_sources") or []
+            explore_failed = result.get("status") not in {None, "completed"}
+            explore_error_reason = result.get("error_reason")
 
             # Hand raw tool-call traces to any caller that asked for them
             # (wait_for's condition-judge). Keeping this out of the persisted
@@ -422,22 +497,37 @@ class SpawnAgentManager(ToolManager):
                 combined_llm.extend(usage.get("llm", []))
                 combined_service.extend(usage.get("service", []))
 
+            event_data: Dict[str, Any] = {
+                "usage": {
+                    "llm": combined_llm,
+                    "service": combined_service,
+                },
+                "result": explore_result,
+                "unavailable_sources": unavailable_sources,
+            }
+            event_metadata: Dict[str, Any] = {
+                "agentType": "explore",
+                "taskId": task_id,
+                "fullGoal": ui_goal,
+            }
+            if explore_error_reason:
+                event_data["error_reason"] = explore_error_reason
+                event_metadata["error_reason"] = explore_error_reason
+            event_message = (
+                explore_error_reason
+                if (unavailable_sources or explore_failed) and explore_error_reason
+                else explore_result
+            )
+
             # FINISHED with result and usage — or ERROR when a required data
             # source wasn't connected (the explore couldn't finish its job).
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title=ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
-                message=explore_result,
-                status=MessageStatus.ERROR if unavailable_sources else MessageStatus.FINISHED,
-                data={
-                    "usage": {
-                        "llm": combined_llm,
-                        "service": combined_service,
-                    },
-                    "result": explore_result,
-                    "unavailable_sources": unavailable_sources,
-                },
-                metadata={"agentType": "explore", "taskId": task_id, "fullGoal": ui_goal},
+                message=event_message,
+                status=MessageStatus.ERROR if unavailable_sources or explore_failed else MessageStatus.FINISHED,
+                data=event_data,
+                metadata=event_metadata,
             )
 
         except BaseException as e:
@@ -844,8 +934,6 @@ async def _raise_source_connect_gates(workflow_instance, unavailable_sources: Li
             connect_url,
         )
         try:
-            await raise_gate_direct(
-                workflow_instance, gate, gate_key=f"source_connect:{connector}"
-            )
+            await raise_gate_direct(workflow_instance, gate, gate_key=f"source_connect:{connector}")
         except GateRejectedError:
             workflow.logger.info(f"[spawn_agent] source_connect gate declined for {connector}")

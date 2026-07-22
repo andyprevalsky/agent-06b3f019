@@ -518,7 +518,7 @@ const MODELS_INFRA_HOSTS = [
   'perplexity.ai',
   'vapi.ai',
   'googleapis.com',
-  'api.steel.dev',
+  'connect.steelbrowser.com',
 ];
 
 function filterInfra(captures: { url: string }[]): { url: string }[] {

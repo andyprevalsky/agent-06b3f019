@@ -61,6 +61,7 @@ from providers.rose import (
     gpt_auth_from_token,
     pool_for_model,
 )
+from providers.rose.policy import anthropic_family_excluded
 from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
     build_openai_response_format,
@@ -4004,6 +4005,8 @@ def _completed_child_task_structured_response(
             continue
         if tool_name == "spawn_claude_code_agent" and metadata.get("action_type") != "task_complete":
             continue
+        if tool_name == "spawn_claude_code_agent" and metadata.get("success") is not True:
+            continue
         structured_response = metadata.get("structured_response")
         if isinstance(structured_response, dict) and isinstance(structured_response.get("output"), dict):
             structured_response = structured_response["output"]
@@ -5179,8 +5182,7 @@ async def set_response_schema_activity(
         return None
 
 
-@activity.defn
-async def fetch_claude_max_token_activity(user_id: str) -> Optional[Dict[str, Any]]:
+async def fetch_claude_max_token(user_id: str) -> Optional[Dict[str, Any]]:
     """
     Fetch Claude Max OAuth token for a user from the backend.
 
@@ -5189,7 +5191,6 @@ async def fetch_claude_max_token_activity(user_id: str) -> Optional[Dict[str, An
     - poolTokenId: integration ID for pool tokens (used to mark rate-limited on failure)
     """
     config = load_config()
-    _safe_heartbeat("Fetching Claude Max token")
 
     try:
         async with httpx.AsyncClient() as client:
@@ -5221,6 +5222,13 @@ async def fetch_claude_max_token_activity(user_id: str) -> Optional[Dict[str, An
         logger.warning(f"Failed to fetch Claude Max token: {e}")
 
     return None
+
+
+@activity.defn
+async def fetch_claude_max_token_activity(user_id: str) -> Optional[Dict[str, Any]]:
+    """Temporal wrapper for fetching Claude Max OAuth credentials."""
+    _safe_heartbeat("Fetching Claude Max token")
+    return await fetch_claude_max_token(user_id)
 
 
 @activity.defn
@@ -5284,6 +5292,8 @@ async def fetch_compute_token_activity(
                 params["rootAgentId"] = root_agent_id
             if fast_cache_affinity_key:
                 params["fastCacheAffinityKey"] = fast_cache_affinity_key
+            if anthropic_family_excluded():
+                params["tokenType"] = "gpt"
             response = await client.get(
                 f"{config.backend.api_url}/api/integrations/compute-code/credentials/token",
                 headers={

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import re
 import time
 import uuid as uuid_module
@@ -47,6 +48,12 @@ logger = structlog.get_logger()
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
+
+
+def resolve_code_agent_provider(default_provider: str) -> str:
+    """Resolve a local provider override outside Temporal workflow code."""
+    forced = os.getenv("ROSE_CODE_AGENT_PROVIDER", "").strip().lower()
+    return forced if forced in {"claude", "codex"} else default_provider
 
 
 def check_fatal_errors(output: str) -> Optional[str]:
@@ -1265,6 +1272,30 @@ def build_usage_items(
 
 
 @activity.defn
+async def resolve_code_agent_provider_activity(default_provider: str) -> str:
+    """Record provider overrides in activity history for deterministic replay."""
+    return resolve_code_agent_provider(default_provider)
+
+
+async def _resolve_claude_token_for_activity(user_id: str, code_provider: str) -> Optional[str]:
+    """Resolve Claude OAuth inside the activity so it never enters workflow history."""
+    if code_provider != "claude":
+        return None
+
+    from helpers.llm import fetch_claude_max_token
+
+    result = await fetch_claude_max_token(user_id)
+    token = result.get("accessToken") if isinstance(result, dict) else None
+    logger.info(
+        "[ClaudeCode] Activity-local Claude credential resolved",
+        user_id=user_id,
+        source=result.get("source") if isinstance(result, dict) else None,
+        credential_found=bool(token),
+    )
+    return token if isinstance(token, str) and token else None
+
+
+@activity.defn
 @traced("spawn_claude_code_activity")
 async def spawn_claude_code_activity(  # noqa: C901
     user_id: str,
@@ -1275,7 +1306,7 @@ async def spawn_claude_code_activity(  # noqa: C901
     attachments: Optional[List[Dict[str, Any]]] = None,
     model: str = "rose-labs/rose-1-lite",
     github_repo_url: Optional[str] = None,
-    claude_token: Optional[str] = None,
+    _legacy_claude_token: Optional[str] = None,
     code_provider: str = "claude",
     gpt_token: Optional[str] = None,
     gpt_account_id: Optional[str] = None,
@@ -1297,7 +1328,7 @@ async def spawn_claude_code_activity(  # noqa: C901
         attachments: File attachments from context to upload to sandbox
         model: Model to use for verifier (inherited from parent agent)
         github_repo_url: Optional GitHub repo URL to clone before starting Claude Code
-        claude_token: Optional Claude OAuth token for direct Anthropic calls
+        _legacy_claude_token: Ignored compatibility slot for activities scheduled by older workers
         code_provider: "claude" for Claude Code or "codex" for Codex CLI
     """
     structlog.contextvars.bind_contextvars(agent_id=agent_id)
@@ -1329,6 +1360,7 @@ async def spawn_claude_code_activity(  # noqa: C901
 
     try:
         activity.heartbeat("Creating E2B sandbox with Claude Code")
+        claude_token = await _resolve_claude_token_for_activity(user_id, code_provider)
 
         # 1. Create E2B session via back-end API
         logger.info(
@@ -1550,6 +1582,7 @@ async def spawn_claude_code_activity(  # noqa: C901
             "usage_items": usage_items,
             "structured_response": structured_response,
             "output_files": output_files,
+            "code_provider": code_provider,
             "completed_turns": codex_completed_turn_count(code_events) if code_provider == "codex" else None,
         }
         return result
@@ -1604,6 +1637,7 @@ async def spawn_claude_code_activity(  # noqa: C901
             "status": "cancelled",
             "task_id": task_id,
             "message": "Claude Code agent cancelled by user",
+            "code_provider": code_provider,
         }
 
     except Exception as e:

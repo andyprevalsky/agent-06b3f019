@@ -184,12 +184,17 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "'access denied' interstitial, a CAPTCHA wall that keeps reappearing, or repeated 429 "
             "responses. Do NOT use it for ordinary failures - wrong credentials, a 404, a genuine "
             "out-of-stock, a form validation error, or a page that simply didn't load - rotating won't "
-            "fix those and it burns a limited budget. Escalation path (the tool advances automatically "
-            "each call, up to 4 rotations per browser run): calls 1-2 give a fresh residential IP in the "
-            "same region (login and cookies preserved); calls 3-4 escalate to a mobile-carrier IP (the "
-            "strongest, hardest-to-block tier), same region. After 4 rotations the tool returns an error, "
-            "which means the site is hard-blocking our entire proxy pool for this session - stop retrying "
-            "this route and either try a different approach or report the target as unreachable. Each "
+            "fix those and it burns a limited budget. For sessions that began on Kernel, the backend "
+            "advances a fixed recovery ladder: the first call gives a fresh Kernel residential IP; the "
+            "second call gives a fresh Kernel mobile IP; the third call switches Kernel to Steel and gives "
+            "a fresh Steel residential IP; and the fourth call gives another Steel residential IP. A "
+            "session that already began on Steel stays on Steel for every rotation. Provider selection is "
+            "automatic: never try "
+            "to choose Kernel or Steel yourself. After 4 rotations the tool returns an error, which means "
+            "the site is hard-blocking the available recovery paths for this session - stop retrying this "
+            "route and either try a different approach or report the target as unreachable. After every "
+            "successful recovery, inspect the page again and call rotate_ip another time only when concrete "
+            "evidence of an IP block remains. Each "
             "rotation takes a few seconds and discards any unsubmitted form data on the current page, but "
             "keeps you logged in and returns you to the current URL. The result tells you which tier you "
             "landed on and how many rotations remain."
@@ -207,8 +212,10 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "request_payment_card": {
         "description": (
-            "Request a one-time virtual payment card for the current checkout. Call this when you reach a "
-            "checkout/payment page and BEFORE typing any card details. First read the full itemized receipt off "
+            "Request a one-time virtual payment card for the current checkout only if checkout requires you to "
+            "enter new card details. If a valid saved payment method is already selected and no card entry is "
+            "required, do not call this tool; continue with that saved method. Before typing any new card details, "
+            "first read the full itemized receipt off "
             "the page and visit each product page as needed. Every item MUST include its canonical product-detail "
             "URL (never the cart or checkout URL), numeric rating, and numeric review count, plus its name, image "
             "URL if visible, unit price in cents, quantity, and line total in cents. Include every fee, the "
@@ -324,7 +331,13 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                                 "quantity": {"type": "string", "description": "Visible quantity"},
                                 "description": {"type": "string", "description": "Visible variant details"},
                                 "rating": {"type": "string", "description": "Required numeric rating"},
-                                "review_count": {"type": "string", "description": "Required numeric review count"},
+                                "review_count": {
+                                    "type": "string",
+                                    "description": (
+                                        "Required numeric review count followed by 'reviews' or 'ratings', "
+                                        "for example '312 reviews'"
+                                    ),
+                                },
                                 "image_url": {"type": "string", "description": "Best visible product image URL"},
                                 "product_url": {
                                     "type": "string",
@@ -529,6 +542,7 @@ action envelope in text; use the provided tool call.
 - NEVER delete or close any user account
 - NEVER sign legal agreements on the user's behalf (accepting Terms of Service checkboxes is acceptable)
 - When making payments or posting to social media, you may be asked to confirm with the user first
+- Once a requested purchase is visibly placed or an order confirmation is shown, do not open cancellation, return, edit, or modification flows. The pre-write checkout state and prior actions are retained for verification; call attempt_completion promptly from the confirmation or order-details page instead of reopening product or checkout pages solely to reconstruct evidence.
 
 # Authentication
 

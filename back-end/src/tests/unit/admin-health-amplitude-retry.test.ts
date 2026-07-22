@@ -45,7 +45,7 @@ globalThis.fetch = (async (input: string | URL | Request): Promise<Response> => 
         {
           error: {
             metadata: {
-              details: 'Too Many Requests: Exceeded concurrent limit with query of cost 996',
+              details: 'Too Many Requests: Exceeded concurrent limit with query of cost 84',
             },
           },
         },

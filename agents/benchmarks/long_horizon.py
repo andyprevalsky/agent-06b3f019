@@ -120,6 +120,14 @@ def _validate_environment(env: dict[str, Any], item_id: str) -> dict[str, Any]:
                 f"{item_id}: synthetic evals must not declare live_fixtures "
                 f"(live credentials have no meaning for a fully synthetic task)"
             )
+    # live_cookie_domains scopes the browser-credential live-fixture sync to only
+    # the cookies a task actually needs (e.g. ["doordash.com"]) so it syncs ~100
+    # rows in seconds instead of the full ~22k-cookie graph (~13 min, > the sync
+    # budget). Optional and opt-in: when omitted the sync pulls every cookie with a
+    # raised budget. Only meaningful when the browser-credential live_fixture runs.
+    cookie_domains = env.get("live_cookie_domains")
+    if cookie_domains is not None:
+        _require_string_list(env, "live_cookie_domains", item_id, allow_empty=False)
     return env
 
 
@@ -196,10 +204,23 @@ def validate_task_contract(raw: dict[str, Any]) -> None:
     expected_attention_kinds = raw.get("expected_attention_kinds")
     if expected_attention_kinds is not None:
         _require_string_list(raw, "expected_attention_kinds", item_id)
-        if raw.get("expected_attention_kind"):
+    expected_attention_kind_any_of = raw.get("expected_attention_kind_any_of")
+    if expected_attention_kind_any_of is not None:
+        _require_string_list(raw, "expected_attention_kind_any_of", item_id)
+        if raw.get("expected_approval_count") != 1:
             raise ValueError(
-                f"{item_id}: use expected_attention_kind or expected_attention_kinds, not both"
+                f"{item_id}: expected_attention_kind_any_of requires expected_approval_count=1"
             )
+    attention_contracts = [
+        bool(raw.get("expected_attention_kind")),
+        bool(expected_attention_kinds),
+        bool(expected_attention_kind_any_of),
+    ]
+    if sum(attention_contracts) > 1:
+        raise ValueError(
+            f"{item_id}: use exactly one of expected_attention_kind, "
+            "expected_attention_kinds, or expected_attention_kind_any_of"
+        )
     world_model_mode = raw.get("world_model_mode")
     if world_model_mode is not None and world_model_mode not in WORLD_MODEL_MODES:
         raise ValueError(f"{item_id}: world_model_mode must be one of {sorted(WORLD_MODEL_MODES)}")
