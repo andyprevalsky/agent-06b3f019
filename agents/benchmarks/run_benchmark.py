@@ -30,6 +30,7 @@ Auto-debug mode:
 import argparse
 import asyncio
 import csv
+import ipaddress
 import json
 import os
 import re
@@ -43,7 +44,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -3489,6 +3490,80 @@ def _shared_workspace_database_url() -> Optional[str]:
     return database_url if result.returncode == 0 else None
 
 
+def _dotenv_file_value(name: str, env_path: str) -> Optional[str]:
+    """Read one value from a dotenv file without consulting process env.
+
+    ``run.sh`` deliberately overrides ``DATABASE_URL`` with the isolated target
+    before launching the benchmark. Compute-token refresh still needs the
+    credential-bearing source encoded in the injected, digest-verified backend
+    dotenv file, so the ordinary process-env-first ``load_env_var`` helper is
+    not appropriate for this boundary.
+    """
+    try:
+        lines = Path(env_path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    prefix = f"{name}="
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith(prefix):
+            continue
+        value = stripped.split("=", 1)[1].strip().strip('"').strip("'")
+        if " #" in value:
+            value = value[: value.index(" #")].rstrip()
+        return value or None
+    return None
+
+
+def _database_endpoint_identity(database_url: str) -> Optional[tuple[str, int, str]]:
+    """Return a normalized server/database identity without credentials or flags.
+
+    This is deliberately conservative: callers use it to prove that a token
+    source differs from a restored target.  An identity that cannot be parsed
+    must therefore remain unknown rather than being treated as distinct.
+    """
+    try:
+        parsed = urlparse(database_url)
+        if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
+            return None
+        port = parsed.port or 5432
+    except ValueError:
+        return None
+    host = unquote(parsed.hostname).lower().rstrip(".")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        if address.is_loopback:
+            host = "localhost"
+        else:
+            host = address.compressed
+
+    database = unquote(parsed.path.lstrip("/"))
+    if not database:
+        return None
+    return host, port, database
+
+
+def _compute_token_source_database_url(target_database_url: str) -> tuple[Optional[str], Optional[str]]:
+    """Choose a distinct, credential-bearing source for compute-token refresh."""
+    target_identity = _database_endpoint_identity(target_database_url)
+    if target_identity is None:
+        return None, None
+
+    shared_source = _shared_workspace_database_url()
+    shared_identity = _database_endpoint_identity(shared_source or "")
+    if shared_source and shared_identity and shared_identity != target_identity:
+        return shared_source, "shared workspace"
+
+    configured_source = _dotenv_file_value("DATABASE_URL", _BACKEND_ENV)
+    configured_identity = _database_endpoint_identity(configured_source or "")
+    if configured_source and configured_identity and configured_identity != target_identity:
+        return configured_source, "configured backend environment"
+    return None, None
+
+
 def _psql_compatible_database_url(database_url: str) -> str:
     """Drop Prisma-only query params before passing a URL to the psql CLI."""
     parsed = urlparse(database_url)
@@ -3858,11 +3933,12 @@ def _run_seed_subprocess(
 
 def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool:
     """Refresh the compute-token integrations (claude_code / gpt_code + pool)
-    from prod into the isolated benchmark DB. Returns False on any failure so
-    the live-fixture caller can fail closed. A frozen DB
-    fixture or whole-DB snapshot restore can leave stale/expired compute tokens,
-    which forces the agent's claudeAuth fetch to fail into the paid waterfall.
-    Reads the prod source from back-end/.env; writes to the isolated DB.
+    from the verified workspace DB into an isolated benchmark DB. When there is
+    no separate workspace DB (for example, inside a Fly guest), explicitly use
+    the credential-bearing DATABASE_URL from the injected backend dotenv file.
+    Source and target must identify different databases: a restored target can
+    contain fixture rows without any usable live compute credentials.
+    Returns False on any failure so the live-fixture caller can fail closed.
 
     ``tolerate_gpt_code_unavailable`` sets the seed's ``SEED_ALLOW_MISSING_GPT_CODE``
     opt-in so the sync succeeds when there is no bench-usable Codex (gpt_code) —
@@ -3883,9 +3959,11 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
     env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
-    shared_source = _shared_workspace_database_url()
-    if shared_source and shared_source != database_url:
-        env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = shared_source
+    compute_token_source, source_label = _compute_token_source_database_url(database_url)
+    if not compute_token_source:
+        print("    ⚠ Compute-token sync skipped: no distinct credential-bearing source database found")
+        return False
+    env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = compute_token_source
     if tolerate_gpt_code_unavailable:
         env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
     try:
@@ -3907,7 +3985,6 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     if result.returncode != 0:
         print(f"    ⚠ Compute-token sync failed: {_seed_sync_error_detail(result)}")
         return False
-    source_label = "shared workspace" if shared_source else "prod"
     print(f"    🔑 Refreshed compute tokens from {source_label}")
     return True
 

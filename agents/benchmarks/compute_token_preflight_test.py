@@ -18,6 +18,7 @@ These tests pin the tolerance on both paths without needing a live DB.
 
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -76,6 +77,120 @@ def test_sync_uses_verified_shared_workspace_as_compute_token_source():
 
     assert seen["env"]["DATABASE_URL"] == "postgresql://local/victoria"
     assert seen["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://shared/victoria"
+
+
+def test_guest_sync_uses_configured_remote_source_not_restored_target():
+    seen: dict[str, dict[str, str]] = {}
+    isolated = "postgresql://postgres:postgres@localhost:5432/victoria"
+    remote = "postgresql://prod.example.test:6543/postgres?pgbouncer=true"
+
+    def fake_run(_cmd, **kw):
+        seen["env"] = kw.get("env", {})
+        return _Result(0)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        backend_env = Path(temp_dir, "backend.env")
+        backend_env.write_text(f'DATABASE_URL="{remote}"\n', encoding="utf-8")
+        with (
+            patch.object(rb, "_BACKEND_ENV", str(backend_env)),
+            patch.object(rb, "_local_victoria_database_url", return_value=isolated),
+            patch.object(rb, "_shared_workspace_database_url", return_value=None),
+            patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
+        ):
+            assert rb._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is True
+
+    assert seen["env"]["DATABASE_URL"] == isolated
+    assert seen["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == remote
+
+
+def test_guest_sync_fails_closed_when_restored_target_is_only_source():
+    isolated = "postgresql://postgres:postgres@localhost:5432/victoria"
+    seed_called = False
+
+    def fake_run(_cmd, **_kw):
+        nonlocal seed_called
+        seed_called = True
+        return _Result(0)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        backend_env = Path(temp_dir, "backend.env")
+        backend_env.write_text(f"DATABASE_URL={isolated}\n", encoding="utf-8")
+        with (
+            patch.object(rb, "_BACKEND_ENV", str(backend_env)),
+            patch.object(rb, "_local_victoria_database_url", return_value=isolated),
+            patch.object(rb, "_shared_workspace_database_url", return_value=None),
+            patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
+        ):
+            assert rb._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is False
+
+    assert seed_called is False
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "postgresql://other:secret@localhost:5432/victoria?sslmode=require",
+        "postgresql://other:secret@127.0.0.1:5432/victoria",
+        "postgresql://other:secret@[::1]:5432/victoria",
+        "postgresql://other:secret@localhost:5432/vict%6Fria",
+    ],
+)
+def test_guest_sync_rejects_semantically_identical_target_source(source: str):
+    target = "postgresql://postgres:postgres@localhost:5432/victoria"
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        backend_env = Path(temp_dir, "backend.env")
+        backend_env.write_text(f"DATABASE_URL={source}\n", encoding="utf-8")
+        with (
+            patch.object(rb, "_BACKEND_ENV", str(backend_env)),
+            patch.object(rb, "_local_victoria_database_url", return_value=target),
+            patch.object(rb, "_shared_workspace_database_url", return_value=None),
+            patch.object(rb, "_run_seed_subprocess") as seed,
+        ):
+            assert rb._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is False
+
+    seed.assert_not_called()
+
+
+def test_guest_sync_fails_closed_when_target_identity_is_malformed():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        backend_env = Path(temp_dir, "backend.env")
+        backend_env.write_text(
+            "DATABASE_URL=postgresql://prod.example.test:5432/victoria\n",
+            encoding="utf-8",
+        )
+        with (
+            patch.object(rb, "_BACKEND_ENV", str(backend_env)),
+            patch.object(rb, "_local_victoria_database_url", return_value="not-a-database-url"),
+            patch.object(rb, "_shared_workspace_database_url", return_value=None),
+            patch.object(rb, "_run_seed_subprocess") as seed,
+        ):
+            assert rb._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is False
+
+    seed.assert_not_called()
+
+
+def test_guest_sync_ignores_malformed_shared_source_and_uses_configured_source():
+    seen: dict[str, dict[str, str]] = {}
+    target = "postgresql://postgres:postgres@localhost:5432/victoria"
+    configured = "postgresql://prod.example.test:6543/postgres"
+
+    def fake_run(_cmd, **kw):
+        seen["env"] = kw.get("env", {})
+        return _Result(0)
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        backend_env = Path(temp_dir, "backend.env")
+        backend_env.write_text(f"DATABASE_URL={configured}\n", encoding="utf-8")
+        with (
+            patch.object(rb, "_BACKEND_ENV", str(backend_env)),
+            patch.object(rb, "_local_victoria_database_url", return_value=target),
+            patch.object(rb, "_shared_workspace_database_url", return_value="malformed"),
+            patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
+        ):
+            assert rb._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is True
+
+    assert seen["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == configured
 
 
 def test_blanket_preflight_uses_tolerant_sync():

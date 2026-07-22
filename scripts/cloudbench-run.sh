@@ -33,7 +33,7 @@
 #      isolated + simulate + serve-cached-WMH env.
 #   7. Wait for services.json status=running AND curl localhost:3007/healthz.
 #   8. Run run_benchmark.py for the requested tasks (--parallel/--max-concurrency
-#      when >1) --simulate --port 3001 --ci.
+#      when >1) against the catalog-mandated production or isolated target.
 #   9. Print the DONE marker + the report card between BEGIN/END markers.
 #
 # Inputs (all from env, exported by run-bench-cloud's on-box invocation):
@@ -62,6 +62,7 @@ SYNC_PRISMA_SCRIPT="${CLOUDBENCH_SYNC_PRISMA_SCRIPT:-$REPO_DIR/scripts/cloudbenc
 CURRENT_RUN_ARTIFACT_SCRIPT="${CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT:-$REPO_DIR/scripts/cloudbench-current-run-artifact.py}"
 PREPARE_PATCH_SCRIPT="${CLOUDBENCH_PREPARE_PATCH_SCRIPT:-$REPO_DIR/scripts/cloudbench-prepare-patch.sh}"
 STATUS_SERVER_SCRIPT="${CLOUDBENCH_STATUS_SERVER_SCRIPT:-$REPO_DIR/scripts/cloudbench-status-server.py}"
+BENCHMARK_TARGET_SCRIPT="${CLOUDBENCH_BENCHMARK_TARGET_SCRIPT:-$REPO_DIR/scripts/cloudbench-benchmark-target.py}"
 
 # ── Inputs (env) ────────────────────────────────────────────────────────────
 REF="${REF:-}"
@@ -108,11 +109,10 @@ log() { echo "[cloudbench $(date -u +%H:%M:%S)] $*"; }
 # scripts/cloudbench-bring-up-report.py — isolate each bring-up step's cost.
 step() { log "STEP $*"; }
 
-# stack_wait_budget_seconds + cloudbench_seed_dump_restorable: the box's
-# stack-health-wait budget, aligned with run.sh's seed-dump restore gate so that a
-# schema-STALE dump (present but hash-mismatched) gets the long cold-sync budget
-# instead of the tight warm one — run.sh cold-syncs it, and the former "dump file
-# exists?" check killed the box mid-sync. See scripts/tests/cloudbench-seed-budget.test.sh.
+# stack_wait_budget_seconds: the box's fallback-safe stack-health ceiling. A
+# pre-launch dump check cannot prove run.sh will restore instead of cold-syncing,
+# so matching dumps retain the larger ceiling without delaying healthy startup.
+# See scripts/tests/cloudbench-seed-budget.test.sh.
 # run-bench-cloud sftp's this lib to /data/ and overrides CLOUDBENCH_SEED_BUDGET_LIB,
 # exactly like cloudbench-fetch-ref.sh / cloudbench-sync-deps.sh: at driver start the
 # /data/repo checkout is still at the OLD ref (the driver git-fetches the ref later),
@@ -546,11 +546,10 @@ HEALTH_PORT=$((BASE_PORT + 2))
 log "waiting for stack to become healthy (services.json + backend + worker + WMH)..."
 STACK_READY=false
 STATUS="none"
-# No WMH build happens on this path (the cached model is served verbatim). Warm
-# guests keep a 900s ceiling; a newly cloned guest without the persistent seed
-# dump gets a bounded 1800s first-run ceiling for production sync + DB dump +
-# service startup. The live red case finished seeding at t+900s and was killed at
-# t+901s by the former single deadline.
+# No WMH build happens on this path (the cached model is served verbatim). The
+# larger configured first-run ceiling covers production sync + DB dump + service
+# startup even if run.sh rejects a dump that looked restorable at preflight. A
+# successful warm restore still exits this loop as soon as health is ready.
 STACK_WAIT_SECONDS="$(stack_wait_budget_seconds)"
 if [ ! -s "$STACK_SEED_DUMP" ]; then
     log "first-run seed dump absent — using cold stack health budget ${STACK_WAIT_SECONDS}s"
@@ -641,7 +640,21 @@ for task_name in "${BENCH_TASK_LIST[@]}"; do
     BENCH_ARGS+=(--task "$task_name")
 done
 
-BENCH_ARGS+=(--port "$BACKEND_PORT" --ci --keep-failed-agents)
+if ! BENCH_TARGET_PLAN="$(python3 "$BENCHMARK_TARGET_SCRIPT" \
+    "$REPO_DIR/agents/benchmarks/tasks.json" "$BACKEND_PORT" "${BENCH_TASK_LIST[@]}")"; then
+    log "FATAL: could not resolve the catalog-mandated benchmark target"
+    finish 1
+fi
+BENCH_TARGET_MODE="$(printf '%s\n' "$BENCH_TARGET_PLAN" | head -1)"
+BENCH_TARGET_ARGS=()
+while IFS= read -r target_arg; do
+    [ -n "$target_arg" ] && BENCH_TARGET_ARGS+=("$target_arg")
+done < <(printf '%s\n' "$BENCH_TARGET_PLAN" | tail -n +2)
+if [ "${#BENCH_TARGET_ARGS[@]}" -eq 0 ]; then
+    log "FATAL: benchmark target resolver returned no CLI arguments"
+    finish 1
+fi
+BENCH_ARGS+=("${BENCH_TARGET_ARGS[@]}" --ci --keep-failed-agents)
 if [ "${#BENCH_TASK_LIST[@]}" -gt 1 ]; then
     BENCH_ARGS+=(--parallel --max-concurrency "$BENCH_MAX_CONCURRENCY")
 fi
@@ -649,7 +662,7 @@ if [ "$BENCH_SIMULATE" = "1" ]; then
     BENCH_ARGS+=(--simulate --world-model-url "http://localhost:$WMH_PORT" --world-model-name "$WMH_MODEL_NAME")
 fi
 
-log "running benchmark: run_benchmark.py ${BENCH_ARGS[*]}"
+log "running benchmark: target=$BENCH_TARGET_MODE run_benchmark.py ${BENCH_ARGS[*]}"
 # Retouch after checkout/setup so files merely restored or rewritten during
 # clone initialization cannot qualify as output from this benchmark process.
 touch "$RUN_OUTPUT_MARKER"
@@ -675,7 +688,9 @@ fi
 if [ -n '$BENCHMARK_VM_USD_PER_HOUR' ]; then
   export BENCHMARK_VM_USD_PER_HOUR='$BENCHMARK_VM_USD_PER_HOUR'
 fi
-if [ -n '$BENCHMARK_FRONTEND_URL' ]; then
+if [ '$BENCH_TARGET_MODE' = 'prod' ]; then
+  unset BENCHMARK_FRONTEND_URL
+elif [ -n '$BENCHMARK_FRONTEND_URL' ]; then
   export BENCHMARK_FRONTEND_URL='$BENCHMARK_FRONTEND_URL'
 fi
 if [ '$BENCH_SIMULATE' = '1' ]; then

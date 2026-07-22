@@ -7,11 +7,15 @@
 # does the full ~15-min prod COLD-SYNC (its restore gate requires a hash match),
 # but the old budget check only tested whether the dump FILE existed — so it
 # granted the tight 900s warm budget and the box was SIGKILLed mid-sync at t+900s.
-# These cases prove the budget now mirrors run.sh's restore gate:
+# The driver and run.sh evaluate that mutable dump in different processes. Even
+# a matching dump can disappear, fail pg_restore, or be rejected after the
+# driver's preflight, so a warm proof cannot safely shorten the health ceiling.
+# These cases prove the larger configured ceiling always remains available:
 #   case 1 — dump absent            → cold-sync budget (first-run).
 #   case 2 — dump present, hash MISMATCH → cold-sync budget (the bug: was warm).
-#   case 3 — dump present, hash MATCH    → warm budget (fast restore).
+#   case 3 — dump present, hash MATCH    → cold ceiling (fast restore still exits early).
 #   case 4 — schema file missing    → cold-sync budget (fail safe / long).
+#   case 5 — warm ceiling is larger → warm ceiling (true maximum, order independent).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -48,12 +52,18 @@ echo "PASS case 2 — dump present + hash MISMATCH → 2160s cold-sync budget (w
 
 # ── case 3 (fast restore): dump present + hash MATCH → warm budget ────────────
 printf '%s' "$CUR_HASH" > "$STACK_SEED_DUMP.schemahash"
-[ "$(budget)" = "900" ] || fail "case 3: matching dump must use warm budget, got $(budget)"
-echo "PASS case 3 — dump present + hash MATCH → 900s warm budget (fast restore)"
+[ "$(budget)" = "2160" ] || fail "case 3: matching preflight dump must retain the cold fallback ceiling, got $(budget)"
+echo "PASS case 3 — dump present + hash MATCH → 2160s fallback-safe ceiling"
 
 # ── case 4: schema file missing → cold-sync budget (cannot prove a fast restore)
 rm -f "$SCHEMA"
 [ "$(budget)" = "2160" ] || fail "case 4: missing schema must fall to first-run budget, got $(budget)"
 echo "PASS case 4 — schema file missing → 2160s cold-sync budget (fail safe)"
+
+# ── case 5: warm configured above cold → retain the true larger ceiling ──────
+export CLOUDBENCH_STACK_WAIT_SECONDS=2500
+export CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS=2160
+[ "$(budget)" = "2500" ] || fail "case 5: maximum must be order independent, got $(budget)"
+echo "PASS case 5 — warm 2500s > cold 2160s → 2500s true maximum"
 
 echo "ALL PASS: cloudbench seed budget"

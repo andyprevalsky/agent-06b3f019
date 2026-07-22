@@ -63,6 +63,7 @@ cp -R "$ROOT_DIR/agents/benchmarks/fleet_startup_phase.py" "$SANDBOX/scripts/" 2
 # now a fail-closed production contract, so an intentionally minimal fake repo
 # still needs real (minimal) manifests rather than relying on an absent proof.
 mkdir -p "$SANDBOX/back-end" "$SANDBOX/front-end" "$SANDBOX/agents/benchmarks"
+printf '.context/\n**/.env\n' > "$SANDBOX/.gitignore"
 cp "$ROOT_DIR/agents/benchmarks/hub_upload.py" "$SANDBOX/agents/benchmarks/hub_upload.py"
 printf '{}\n' > "$SANDBOX/package.json"
 printf '{}\n' > "$SANDBOX/back-end/package.json"
@@ -72,6 +73,15 @@ printf '{}\n' > "$SANDBOX/back-end/package-lock.json"
 git -C "$SANDBOX" init -q
 git -C "$SANDBOX" -c user.email=test@test -c user.name=test add -A
 git -C "$SANDBOX" -c user.email=test@test -c user.name=test commit -qm "snapshot" >/dev/null
+# Model the real transport boundary: origin/main advertises the shared base,
+# while each Conductor worktree's snapshot commit remains local/unpushed and
+# must travel in the complete workspace patch.
+ORIGIN="$TMP_ROOT/origin.git"
+git init -q --bare "$ORIGIN"
+git -C "$SANDBOX" branch -M main
+git -C "$SANDBOX" remote add origin "$ORIGIN"
+git -C "$SANDBOX" push -q -u origin main
+BASE_REF="$(git -C "$SANDBOX" rev-parse HEAD)"
 # The fake provider exposes snap_0001 as the warm snapshot. Tie the manifest
 # proof to that exact ID, mirroring --refresh-deps without a live donor image.
 (
@@ -134,6 +144,7 @@ reset_fake_state
 
 cat > "$FAKE_DIR/flyctl.py" <<'PY'
 import fcntl
+import glob
 import json
 import os
 import re
@@ -216,6 +227,12 @@ def run_fake_driver(mdir):
     token = rb_export(rb_text, "CLOUDBENCH_RUN_TOKEN")
     barrier = rb_export(rb_text, "CLOUDBENCH_START_BARRIER")
     ref = rb_export(rb_text, "REF")
+    patch_path = os.path.join(mdir, "cloudbench-local.patch")
+    patch_text = open(patch_path).read() if os.path.exists(patch_path) else ""
+    workspace_marker = next(
+        (marker for marker in ("workstream-a", "workstream-b") if f"+{marker}" in patch_text),
+        "",
+    )
     import base64
     tasks_csv = base64.b64decode(rb_export(rb_text, "BENCH_TASKS_B64")).decode()
     bench = tasks_csv.split(",")[0].strip()
@@ -239,6 +256,97 @@ def run_fake_driver(mdir):
             time.sleep(0.5)
         if exit_code == 0:
             log(f"synchronized start barrier released: {barrier}")
+    # Keep the launched-but-unready regression on the boundary it intends to
+    # exercise. Without this handshake the intentionally tiny fake benchmark
+    # can finish before the asynchronous provisioner has issued its launch
+    # command, turning the scenario nondeterministically into the distinct
+    # outstanding-capacity case covered below. Wait for the fake launch
+    # handler's success marker, not its pre-dispatch journal entry, so an
+    # unreachable machine or rejected command cannot satisfy this handshake.
+    if exit_code == 0 and (
+        os.path.exists(os.path.join(FAKE_DIR, "worker-never-ready"))
+        or os.path.exists(os.path.join(FAKE_DIR, "worker-ready-after-child"))
+    ):
+        deadline = time.time() + 30
+        launched = False
+        while time.time() < deadline:
+            try:
+                launched = any(
+                    entry.startswith("worker-launch-succeeded-")
+                    for entry in os.listdir(MARKERS)
+                )
+            except OSError:
+                launched = False
+            if launched:
+                break
+            time.sleep(0.1)
+        if not launched:
+            log("FATAL: autoscaled worker never crossed launch boundary")
+            exit_code = 1
+    # Keep the scale-oscillation regression alive after the provider has
+    # destroyed an in-flight worker. The old provisioner then had enough time
+    # to report a stale fatal launch error against capacity that was no longer
+    # desired; the fixed provisioner observes cancellation and exits quietly.
+    if exit_code == 0 and (
+        os.path.exists(os.path.join(FAKE_DIR, "oscillate-worker-desired"))
+        or os.path.exists(os.path.join(FAKE_DIR, "concurrent-ready-scale-down"))
+    ):
+        deadline = time.time() + 30
+        scaled_down = os.path.join(MARKERS, "worker-scale-down-complete")
+        while not os.path.exists(scaled_down):
+            if time.time() >= deadline:
+                log("FATAL: autoscaled worker never crossed scale-down boundary")
+                exit_code = 1
+                break
+            time.sleep(0.1)
+        if exit_code == 0:
+            time.sleep(8)
+    if exit_code == 0 and os.path.exists(os.path.join(FAKE_DIR, "fail-worker-destroy-once")):
+        deadline = time.time() + 30
+        controller_ws = os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"]
+        fatal_pattern = os.path.join(
+            controller_ws,
+            ".context",
+            "fleet",
+            "runs",
+            "*",
+            "autoscaler-worker-destroy-failure",
+            "autoscaler.failed",
+        )
+        while not glob.glob(fatal_pattern):
+            if time.time() >= deadline:
+                log("FATAL: worker scale-down never published its fail-closed result")
+                exit_code = 1
+                break
+            time.sleep(0.1)
+    # Prove that capacity counts alone cannot substitute for the autoscaler's
+    # causal terminal marker. Finish only after worker-ready.ids is populated;
+    # the autoscaler is then in its normal poll sleep when the child exits.
+    if exit_code == 0 and os.path.exists(
+        os.path.join(FAKE_DIR, "worker-ready-before-child-no-terminal")
+    ):
+        controller_ws = os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"]
+        deadline = time.time() + 30
+        ready = False
+        while time.time() < deadline:
+            ready_files = glob.glob(
+                os.path.join(
+                    controller_ws,
+                    ".context",
+                    "fleet",
+                    "runs",
+                    "*",
+                    bench,
+                    "worker-ready.ids",
+                )
+            )
+            ready = any(os.path.getsize(path) > 0 for path in ready_files)
+            if ready:
+                break
+            time.sleep(0.1)
+        if not ready:
+            log("FATAL: worker capacity never became ready before child completion")
+            exit_code = 1
     if exit_code == 0:
         context = os.path.join(mdir, "data", "repo", ".context", "cloudbench")
         os.makedirs(context, exist_ok=True)
@@ -264,6 +372,7 @@ def run_fake_driver(mdir):
                         "total_cost_cents": 0},
             "tasks": [task],
             "code_ref": ref,
+            "workspace_marker": workspace_marker,
         }
         with open(os.path.join(context, "report-card.json"), "w") as fh:
             json.dump(card, fh)
@@ -279,8 +388,43 @@ def run_fake_driver(mdir):
     log(f"::CLOUDBENCH-DONE:: token={token} exit={exit_code}")
 
 
+def release_worker_after_child(mdir, worker_id):
+    """Make a launched worker healthy only after its controller child is done."""
+    controller_ws = os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"]
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        ledgers = glob.glob(
+            os.path.join(
+                controller_ws,
+                ".context",
+                "fleet",
+                "runs",
+                "*",
+                "*",
+                "worker-clones.ids",
+            )
+        )
+        for ledger in ledgers:
+            try:
+                tracked = open(ledger).read().splitlines()
+            except OSError:
+                continue
+            if worker_id not in tracked:
+                continue
+            child_finished = os.path.join(os.path.dirname(ledger), "benchmark-child.finished")
+            if os.path.exists(child_finished):
+                time.sleep(2)
+                open(os.path.join(mdir, "worker.ready"), "w").close()
+                open(os.path.join(MARKERS, "worker-ready-released-after-child"), "w").close()
+                return
+        time.sleep(0.1)
+
+
 if args[:1] == ["__fake_driver__"]:
     run_fake_driver(args[1])
+    sys.exit(0)
+if args[:1] == ["__release_worker_after_child__"]:
+    release_worker_after_child(args[1], args[2])
     sys.exit(0)
 
 with open(JOURNAL, "a") as journal:
@@ -304,7 +448,12 @@ elif args[:2] == ["apps", "list"]:
     print(json.dumps([{"Name": BENCH_APP}]))
 elif args[:2] == ["machines", "list"]:
     with locked_state() as state:
-        print(json.dumps(state["machines"]))
+        machines = json.loads(json.dumps(state["machines"]))
+    if os.path.exists(os.path.join(FAKE_DIR, "stale-started-inventory")):
+        for machine in machines:
+            if machine.get("name") != "cloudbench-warm" and machine.get("state") == "stopped":
+                machine["state"] = "started"
+    print(json.dumps(machines))
 elif args[:2] == ["volumes", "list"]:
     # Fault injection for the pre-allocation durability boundary: registry init
     # has completed, but persisting the target name must now fail.
@@ -330,6 +479,7 @@ elif args[:3] == ["volume", "snapshots", "list"]:
         print(json.dumps(state["snapshots"]))
 elif args[:2] == ["machine", "clone"]:
     name = flag_value("--name")
+    source_id = args[2]
     # Fault injection (RCA #6): make the FIRST clone attempt fail AMBIGUOUSLY —
     # non-zero exit, NO Machine allocated, and an error that is NOT a recognized
     # "definitively unallocated" string — so the controller's provision loop must
@@ -344,6 +494,17 @@ elif args[:2] == ["machine", "clone"]:
             print("Error: an unexpected error occurred (request timed out)",
                   file=sys.stderr)
             sys.exit(1)
+    if (
+        source_id != "aaaa0000000001"
+        and os.path.exists(os.path.join(FAKE_DIR, "block-worker-clone"))
+    ):
+        open(os.path.join(FAKE_DIR, "worker-clone-blocked"), "w").close()
+        deadline = time.time() + 30
+        while not os.path.exists(os.path.join(FAKE_DIR, "release-worker-clone")):
+            if time.time() >= deadline:
+                print("injected worker clone remained blocked", file=sys.stderr)
+                sys.exit(1)
+            time.sleep(0.1)
     machine_id = uuid.uuid4().hex[:14]
     vm_size = flag_value("--vm-size") or "shared-cpu-4x"
     vm_memory = int(flag_value("--vm-memory") or "8192")
@@ -354,7 +515,8 @@ elif args[:2] == ["machine", "clone"]:
         volume_id = "vol_" + uuid.uuid4().hex[:8]
         state["machines"].append({
             "id": machine_id, "name": name, "state": "stopped",
-            "region": flag_value("--region") or "iad", "private_ip": "",
+            "region": flag_value("--region") or "iad",
+            "private_ip": f"fdaa::fake:{machine_id[:4]}",
             "config": {"mounts": [{"volume": volume_id}],
                        "guest": {"cpu_kind": cpu_kind, "cpus": vm_cpus,
                                  "memory_mb": vm_memory}},
@@ -362,6 +524,10 @@ elif args[:2] == ["machine", "clone"]:
         state["volumes"].append(
             {"id": volume_id, "name": "cloudbench_data_fork", "state": "created"})
     machine_dir(machine_id)
+    if source_id != "aaaa0000000001":
+        with open(os.path.join(MARKERS, "worker-clone-id"), "w") as fh:
+            fh.write(machine_id)
+        open(os.path.join(MARKERS, f"worker-clone-id-{machine_id}"), "w").close()
     with open(os.path.join(MARKERS, name), "w") as fh:
         fh.write(machine_id)
     # Barrier: only release once BOTH workstreams have a clone in flight. A
@@ -393,6 +559,8 @@ elif args[:2] == ["machine", "status"]:
     print(f"  State: {found['state']}")
 elif args[:2] == ["machine", "update"]:
     machine_id = args[2]
+    if os.path.exists(os.path.join(FAKE_DIR, "delay-machine-update")):
+        time.sleep(4)
     boot_env = {}
     for index, value in enumerate(args):
         if value == "--env" and index + 1 < len(args) and "=" in args[index + 1]:
@@ -418,6 +586,12 @@ elif args[:2] == ["machine", "update"]:
                 flag_value("--vm-memory")
             )
     mdir = machine_dir(machine_id)
+    for index, value in enumerate(args):
+        if value != "--file-local" or index + 1 >= len(args):
+            continue
+        guest_path, local_path = args[index + 1].split("=", 1)
+        if guest_path == "/cloudbench-local.patch":
+            shutil.copyfile(local_path, os.path.join(mdir, "cloudbench-local.patch"))
     rb_path = os.path.join(mdir, "tmp", "rb.sh")
     os.makedirs(os.path.dirname(rb_path), exist_ok=True)
     with open(rb_path, "w") as fh:
@@ -425,6 +599,14 @@ elif args[:2] == ["machine", "update"]:
             fh.write(f"export {key}={shlex.quote(value)}\n")
 elif args[:2] == ["machine", "start"]:
     machine_id = args[2]
+    failed_start_marker = os.path.join(FAKE_DIR, f"failed-first-start-{machine_id}")
+    if (
+        os.path.exists(os.path.join(FAKE_DIR, "fail-first-primary-start"))
+        and not os.path.exists(failed_start_marker)
+    ):
+        open(failed_start_marker, "w").close()
+        print("injected first primary start failure", file=sys.stderr)
+        sys.exit(1)
     with locked_state() as state:
         found = find_machine(state, machine_id)
         if found:
@@ -447,8 +629,29 @@ elif args[:2] == ["machine", "stop"]:
             found["state"] = "stopped"
 elif args[:2] == ["machine", "destroy"]:
     target = args[3] if args[2] == "--force" else args[2]
+    worker_marker = os.path.join(MARKERS, f"worker-clone-id-{target}")
+    destroy_failed = os.path.join(MARKERS, "worker-destroy-failed")
+    if (
+        os.path.exists(worker_marker)
+        and os.path.exists(os.path.join(FAKE_DIR, "fail-worker-destroy-once"))
+    ):
+        count_path = os.path.join(MARKERS, "worker-destroy-failure-count")
+        try:
+            destroy_failure_count = int(open(count_path).read().strip()) + 1
+        except (OSError, ValueError):
+            destroy_failure_count = 1
+        with open(count_path, "w") as fh:
+            fh.write(str(destroy_failure_count))
+        open(destroy_failed, "w").close()
+        # Exhaust reap_machine's five-attempt scale-down budget. Controller
+        # cleanup owns the same durable ID and its next (sixth) request succeeds.
+        if destroy_failure_count <= 5:
+            print("injected worker scale-down destroy failure", file=sys.stderr)
+            sys.exit(1)
     with locked_state() as state:
         state["machines"] = [m for m in state["machines"] if m["id"] != target]
+    if os.path.exists(worker_marker):
+        open(os.path.join(MARKERS, "worker-scale-down-complete"), "w").close()
 elif args[:3] == ["ssh", "sftp", "put"]:
     mdir = machine_dir(flag_value("--machine"))
     # positional tail after dropping flag values: [-a APP, --machine ID, -m MODE]
@@ -485,6 +688,29 @@ elif args[:2] == ["ssh", "console"]:
             print("ownership probe failed", file=sys.stderr)
             sys.exit(1)
         print(f"CLOUDBENCH_RUNNER_COUNT={found.get('runner_count', 0)}")
+    elif "setsid bash /tmp/rbw.sh" in command:
+        if os.path.exists(os.path.join(FAKE_DIR, "fail-worker-launch")):
+            print("injected autoscaled-worker launch failure", file=sys.stderr)
+            sys.exit(1)
+        if os.path.exists(os.path.join(FAKE_DIR, "worker-ready-after-child")):
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    os.path.abspath(__file__),
+                    "__release_worker_after_child__",
+                    mdir,
+                    machine_id,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        elif not os.path.exists(os.path.join(FAKE_DIR, "worker-never-ready")):
+            open(os.path.join(mdir, "worker.ready"), "w").close()
+        open(os.path.join(MARKERS, f"worker-launch-succeeded-{machine_id}"), "w").close()
+    elif "http://127.0.0.1:3103/health" in command:
+        if not os.path.exists(os.path.join(mdir, "worker.ready")):
+            sys.exit(1)
     elif "setsid bash" in command and "rb.sh" in command:
         # Detached driver launch: run the fake driver contract in the background.
         subprocess.Popen(
@@ -514,12 +740,74 @@ elif args[:2] == ["tokens", "create"]:
 elif args[:1] == ["proxy"]:
     import http.server
     local_port = int(args[1].split(":", 1)[0])
+    remote_port = int(args[1].split(":", 1)[1])
+    fail_metrics = os.path.exists(os.path.join(FAKE_DIR, "fail-metrics-proxy"))
+    if fail_metrics and remote_port == 3003:
+        print("injected metrics data-plane failure", file=sys.stderr)
+        sys.exit(1)
     remote_host = args[2]
-    machine_id = remote_host.split(".vm.", 1)[0]
+    if os.path.exists(os.path.join(FAKE_DIR, "require-private-ip-proxy")) and ".vm." in remote_host:
+        print(f"{remote_host}: host was not found in DNS", file=sys.stderr)
+        sys.exit(1)
+    with locked_state() as state:
+        target = next(
+            (
+                machine
+                for machine in state["machines"]
+                if machine.get("private_ip") == remote_host
+                or machine.get("id") == remote_host.split(".vm.", 1)[0]
+            ),
+            None,
+        )
+    if target is None:
+        print(f"unknown proxy target: {remote_host}", file=sys.stderr)
+        sys.exit(1)
+    if (
+        os.path.exists(os.path.join(FAKE_DIR, "stale-started-inventory"))
+        and target.get("state") != "started"
+    ):
+        print(f"proxy target is not started: {remote_host}", file=sys.stderr)
+        sys.exit(1)
+    machine_id = target["id"]
     mdir = machine_dir(machine_id)
+    if (
+        remote_port == 3003
+        and os.path.exists(os.path.join(FAKE_DIR, "metrics-require-started"))
+    ):
+        with locked_state() as state:
+            target = find_machine(state, machine_id)
+        if target is None or target.get("state") != "started":
+            print("metrics target is not started", file=sys.stderr)
+            sys.exit(1)
 
     class ProxyHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
+            if self.path == "/metrics":
+                if os.path.exists(os.path.join(FAKE_DIR, "invalid-metrics")):
+                    self.send_error(404)
+                    return
+                worker_clone_count = len(
+                    [entry for entry in os.listdir(MARKERS) if entry.startswith("worker-clone-id-")]
+                )
+                if os.path.exists(os.path.join(FAKE_DIR, "concurrent-ready-scale-down")):
+                    desired = 2 if worker_clone_count >= 2 else 3
+                elif os.path.exists(os.path.join(FAKE_DIR, "fail-worker-destroy-once")):
+                    if worker_clone_count == 0:
+                        desired = 2
+                    elif os.path.exists(os.path.join(MARKERS, "worker-destroy-failed")):
+                        desired = 2
+                    else:
+                        desired = 1
+                elif os.path.exists(os.path.join(FAKE_DIR, "oscillate-worker-desired")):
+                    desired = 1 if os.path.exists(os.path.join(MARKERS, "worker-clone-id")) else 2
+                else:
+                    desired = 2 if os.path.exists(os.path.join(FAKE_DIR, "desired-two")) else 1
+                body = f"desired_machine_count {desired}\n".encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if self.path == "/driver-health":
                 code = 204 if os.path.exists(os.path.join(mdir, "driver.started")) else 410
                 self.send_response(code)
@@ -585,11 +873,18 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
         BENCHMARK_HUB_API_KEY="test-key" \
         CI=1 \
         CLOUDBENCH_FAKE_DIR="$FAKE_DIR" \
+        CLOUDBENCH_FAKE_CONTROLLER_WS="$ws" \
         CLOUDBENCH_FAKE_BREAK_REGISTRY_ROOT="${CLOUDBENCH_FAKE_BREAK_REGISTRY_ROOT:-}" \
         CLOUDBENCH_FAKE_BREAK_POOL_LEDGER="${CLOUDBENCH_FAKE_BREAK_POOL_LEDGER:-}" \
+        CLOUDBENCH_FAKE_FAIL_METRICS_PROXY="${CLOUDBENCH_FAKE_FAIL_METRICS_PROXY:-0}" \
+        CLOUDBENCH_FAKE_INVALID_METRICS="${CLOUDBENCH_FAKE_INVALID_METRICS:-0}" \
+        CLOUDBENCH_CAPACITY_RESERVATION_ROOT="$TMP_ROOT/capacity-reservations" \
         CLOUDBENCH_CLONE_LOOKUP_SECONDS="${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-20}" \
         CLOUDBENCH_POOL_STOP_ATTEMPTS="${CLOUDBENCH_POOL_STOP_ATTEMPTS:-3}" \
         CLOUDBENCH_POOL_STOP_REQUEST_TIMEOUT="${CLOUDBENCH_POOL_STOP_REQUEST_TIMEOUT:-3}" \
+        CLOUDBENCH_DATA_PROXY_READY_TIMEOUT="${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}" \
+        CLOUDBENCH_AUTOSCALER_STARTUP_WAIT_SECONDS="${CLOUDBENCH_AUTOSCALER_STARTUP_WAIT_SECONDS:-600}" \
+        CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS="${CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS:-300}" \
         CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0.1 \
         CLOUDBENCH_POLL_INTERVAL=2 \
         CLOUDBENCH_LAUNCH_SETTLE_SECONDS=1 \
@@ -795,10 +1090,10 @@ for port in "$HUB_PORT_A" "$HUB_PORT_B"; do
     done
 done
 
-run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-run-a.log" bench-alpha --no-autoscale --timeout 240 &
+run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-run-a.log" bench-alpha --timeout 240 &
 PID_A=$!
 PIDS+=("$PID_A")
-run_controller "$WS_B" "$CONDUCTOR_PORT_B" "$TMP_ROOT/controller-run-b.log" bench-beta --no-autoscale --timeout 240 &
+run_controller "$WS_B" "$CONDUCTOR_PORT_B" "$TMP_ROOT/controller-run-b.log" bench-beta --timeout 240 &
 PID_B=$!
 PIDS+=("$PID_B")
 
@@ -814,14 +1109,18 @@ grep -qF "1/1 passed" "$TMP_ROOT/controller-run-a.log" ||
     fail "workstream A's fleet summary must report 1/1 passed"
 grep -qF "1/1 passed" "$TMP_ROOT/controller-run-b.log" ||
     fail "workstream B's fleet summary must report 1/1 passed"
+grep -qF "per-bench autoscaler ON (mandatory prod params" "$TMP_ROOT/controller-run-a.log" ||
+    fail "workstream A must launch its mandatory per-bench autoscaler"
+grep -qF "per-bench autoscaler ON (mandatory prod params" "$TMP_ROOT/controller-run-b.log" ||
+    fail "workstream B must launch its mandatory per-bench autoscaler"
 
-# Each workstream's run record must exist, be PASSED, and carry ITS OWN ref —
-# proof that per-workstream code snapshots thread through to the machines.
-check_run_record() {  # check_run_record <ws> <bench> <expected_ref>
-    local ws="$1" bench="$2" expected_ref="$3" record
+# Each workstream's run record must exist, be PASSED, fetch the advertised base,
+# and carry ITS OWN unpushed content in the injected patch.
+check_run_record() {  # check_run_record <ws> <bench> <expected-ref> <workspace-marker>
+    local ws="$1" bench="$2" expected_ref="$3" workspace_marker="$4" record
     record="$(find "$ws/.context/fleet/runs" -path "*/$bench/cloudbench-run.json" -type f -print 2>/dev/null | head -1)"
     [ -n "$record" ] || fail "$bench: run record was not retrieved"
-    RECORD="$record" BENCH="$bench" EXPECTED_REF="$expected_ref" python3 - <<'PY'
+    RECORD="$record" BENCH="$bench" EXPECTED_REF="$expected_ref" WORKSPACE_MARKER="$workspace_marker" python3 - <<'PY'
 import json, os, sys
 record = json.load(open(os.environ["RECORD"]))
 task = (record.get("tasks") or [{}])[0]
@@ -834,10 +1133,15 @@ if record.get("code_ref") != os.environ["EXPECTED_REF"]:
         f"run executed the wrong code snapshot: {record.get('code_ref')!r} "
         f"!= {os.environ['EXPECTED_REF']!r}"
     )
+if record.get("workspace_marker") != os.environ["WORKSPACE_MARKER"]:
+    sys.exit(
+        f"run omitted the unpushed workspace patch: {record.get('workspace_marker')!r} "
+        f"!= {os.environ['WORKSPACE_MARKER']!r}"
+    )
 PY
 }
-check_run_record "$WS_A" bench-alpha "$REF_A" || fail "workstream A's run record is wrong"
-check_run_record "$WS_B" bench-beta "$REF_B" || fail "workstream B's run record is wrong"
+check_run_record "$WS_A" bench-alpha "$BASE_REF" workstream-a || fail "workstream A's run record is wrong"
+check_run_record "$WS_B" bench-beta "$BASE_REF" workstream-b || fail "workstream B's run record is wrong"
 
 # Per-workspace hubs must not collide: each fleet adopted its own derived port.
 grep -qF "already open on :$HUB_PORT_A" "$TMP_ROOT/controller-run-a.log" ||
@@ -860,6 +1164,363 @@ journal_must_be_read_only "scenario 2"
     fail "no shared app-environment lock file may survive a concurrent run"
 
 echo "PASS: scenario 2 — two concurrent workstream runs FINISHED WITH SUCCESS on distinct code snapshots"
+
+# A freshly cloned Machine can already have its provider-authoritative 6PN
+# address while its derived .internal hostname is absent from Fly DNS. The
+# status and mandatory-autoscaler tunnels must use the indexed private address,
+# otherwise a healthy primary is excluded before the synchronized start barrier.
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/require-private-ip-proxy"
+: > "$FAKE_DIR/stale-started-inventory"
+: > "$FAKE_DIR/fail-first-primary-start"
+private_ip_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_DATA_PROXY_READY_TIMEOUT=4 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-private-ip-proxy.log" \
+    private-ip-proxy --timeout 240 || private_ip_status=$?
+rm -f "$FAKE_DIR/require-private-ip-proxy" "$FAKE_DIR/stale-started-inventory" \
+    "$FAKE_DIR/fail-first-primary-start"
+[ "$private_ip_status" -eq 0 ] || {
+    cat "$TMP_ROOT/controller-private-ip-proxy.log" >&2
+    fail "data-plane tunnels must not depend on eventually consistent machine-name DNS"
+}
+grep -Eq '^proxy [0-9]+:8011 fdaa::fake:' "$FAKE_DIR/journal.log" ||
+    fail "the status tunnel must target the indexed private IP"
+grep -Eq '^proxy [0-9]+:3003 fdaa::fake:' "$FAKE_DIR/journal.log" ||
+    fail "the mandatory-autoscaler tunnel must target the indexed private IP"
+grep -Eq '^machine start [0-9a-f]+' "$FAKE_DIR/journal.log" ||
+    fail "every post-config primary must receive an explicit idempotent start request"
+JOURNAL="$FAKE_DIR/journal.log" python3 - <<'PY' ||
+import os
+
+calls = open(os.environ["JOURNAL"]).read().splitlines()
+starts = [index for index, call in enumerate(calls) if call.startswith("machine start ")]
+metrics = [
+    index
+    for index, call in enumerate(calls)
+    if call.startswith("proxy ") and ":3003 " in call
+]
+if len(starts) < 2:
+    raise SystemExit(f"the injected first start failure did not produce a retry: {starts}")
+if not metrics or min(metrics) <= starts[1]:
+    raise SystemExit(
+        "mandatory autoscaler spent its metrics attach budget before the successful "
+        f"post-config start retry: starts={starts}, metrics={metrics}"
+    )
+PY
+    fail "mandatory autoscaling must wait for the accepted post-config primary start"
+echo "PASS: scenario 2a — post-config starts and data-plane tunnels ignore stale derived identity"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Scenario 2b — mandatory autoscaling fails closed when its data plane cannot
+# attach. A successful benchmark running on one primary is not acceptance: the
+# fleet contract requires the per-bench autoscaler to be operational.
+# ═════════════════════════════════════════════════════════════════════════════
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/fail-metrics-proxy"
+autoscale_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_DATA_PROXY_READY_TIMEOUT=4 \
+    CLOUDBENCH_FAKE_FAIL_METRICS_PROXY=1 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-required.log" \
+    autoscaler-must-start --timeout 240 || autoscale_status=$?
+[ "$autoscale_status" -ne 0 ] ||
+    fail "a fleet must fail when its mandatory autoscaler cannot attach"
+grep -qF "mandatory autoscaler failed to start" "$TMP_ROOT/controller-autoscaler-required.log" ||
+    fail "mandatory autoscaler startup failure must be explicit"
+rm -f "$FAKE_DIR/fail-metrics-proxy"
+echo "PASS: scenario 2b — a fleet fails closed when mandatory autoscaling cannot attach"
+
+# The synchronized boot-config barrier deliberately keeps every primary
+# stopped until the whole fleet is configured. A mandatory metrics proxy must
+# begin its finite attach budget only after that release AND provider-confirmed
+# start; otherwise it can exhaust the budget while configs or its own start are
+# still in flight.
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/delay-machine-update"
+: > "$FAKE_DIR/metrics-require-started"
+boot_wait_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_DATA_PROXY_READY_TIMEOUT=2 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-boot-wait.log" \
+    autoscaler-waits-for-boot-release --timeout 240 || boot_wait_status=$?
+rm -f "$FAKE_DIR/delay-machine-update" "$FAKE_DIR/metrics-require-started"
+[ "$boot_wait_status" -eq 0 ] || {
+    cat "$TMP_ROOT/controller-autoscaler-boot-wait.log" >&2
+    fail "mandatory autoscaler attach budget must not run while its primary is intentionally stopped behind the boot-config barrier"
+}
+echo "PASS: scenario 2b2 — autoscaler attachment begins after synchronized primary start"
+
+# A live WireGuard process is not enough: the worker's metrics contract must be
+# readable before task release, otherwise scaling is still effectively off.
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/invalid-metrics"
+autoscale_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_FAKE_INVALID_METRICS=1 \
+    CLOUDBENCH_AUTOSCALER_STARTUP_WAIT_SECONDS=5 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-metrics-required.log" \
+    autoscaler-metrics-required --timeout 240 || autoscale_status=$?
+[ "$autoscale_status" -ne 0 ] ||
+    fail "a fleet must fail when mandatory autoscaler metrics stay invalid"
+grep -qF "mandatory autoscaler startup timed out" "$TMP_ROOT/controller-autoscaler-metrics-required.log" ||
+    fail "invalid mandatory-autoscaler metrics must produce an explicit startup failure"
+rm -f "$FAKE_DIR/invalid-metrics"
+echo "PASS: scenario 2c — a live proxy without valid metrics fails closed"
+
+# A metrics target of two is not satisfied merely because Fly allocated a
+# worker clone. The clone must actually launch the queue worker and reach its
+# operational marker; otherwise the fleet would run at primary-only capacity
+# while reporting autoscaling as healthy.
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/desired-two"
+: > "$FAKE_DIR/fail-worker-launch"
+autoscale_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=2 \
+    CLOUDBENCH_WORKER_READY_TIMEOUT=5 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-worker-required.log" \
+    autoscaler-worker-required --timeout 240 || autoscale_status=$?
+[ "$autoscale_status" -ne 0 ] ||
+    fail "a fleet must fail when an autoscaled worker clone cannot launch"
+grep -Eq 'mandatory autoscaler.*(worker capacity (incomplete|below desired)|worker .* could not be staged and launched)' \
+    "$TMP_ROOT/controller-autoscaler-worker-required.log" ||
+    fail "an unready autoscaled worker must produce a stable explicit failure"
+clone_count="$(grep -c '^machine clone ' "$FAKE_DIR/journal.log" 2>/dev/null || true)"
+[ "$clone_count" -ge 2 ] ||
+    fail "the scale-up regression must allocate both a primary and an autoscaled worker"
+remaining="$(python3 -c '
+import json, sys
+machines = json.load(open(sys.argv[1]))["machines"]
+print(" ".join(sorted(m["name"] for m in machines)))
+' "$FAKE_DIR/state.json")"
+[ "$remaining" = "cloudbench-warm" ] ||
+    fail "failed autoscaler launch teardown leaked machines: $remaining"
+if find "$SANDBOX/.git/cloudbench-fleet-ownership" -path '*/clones/*' -type f -print -quit 2>/dev/null | grep -q .; then
+    fail "failed autoscaler launch teardown retained a durable clone record"
+fi
+rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/fail-worker-launch"
+echo "PASS: scenario 2d — failed autoscaled-worker launch fails the fleet closed"
+
+# A launch command can succeed even though worker.run() never reaches its
+# Temporal queue-polling health boundary. Allocation and a live machine are not
+# capacity until the worker health endpoint becomes ready.
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/desired-two"
+: > "$FAKE_DIR/worker-never-ready"
+autoscale_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=2 \
+    CLOUDBENCH_WORKER_READY_TIMEOUT=5 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-worker-never-ready.log" \
+    autoscaler-worker-never-ready --timeout 240 || autoscale_status=$?
+[ "$autoscale_status" -ne 0 ] ||
+    fail "a fleet must fail when an autoscaled worker never reaches queue readiness"
+grep -Eq 'mandatory autoscaler.*(worker capacity (incomplete|below desired)|worker .* did not reach queue readiness)' \
+    "$TMP_ROOT/controller-autoscaler-worker-never-ready.log" ||
+    fail "a launched-but-unready worker must produce an explicit readiness failure"
+find "$FAKE_DIR/markers" -maxdepth 1 -name 'worker-launch-succeeded-*' -print -quit |
+    grep -q . ||
+    fail "the launched-but-unready regression never completed the worker launch boundary"
+remaining="$(python3 -c '
+import json, sys
+machines = json.load(open(sys.argv[1]))["machines"]
+print(" ".join(sorted(m["name"] for m in machines)))
+' "$FAKE_DIR/state.json")"
+[ "$remaining" = "cloudbench-warm" ] ||
+    fail "never-ready autoscaler teardown leaked machines: $remaining"
+if find "$SANDBOX/.git/cloudbench-fleet-ownership" -path '*/clones/*' -type f -print -quit 2>/dev/null | grep -q .; then
+    fail "never-ready autoscaler teardown retained a durable clone record"
+fi
+rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/worker-never-ready"
+echo "PASS: scenario 2e — launched-but-unready autoscaler workers fail closed"
+
+# Outstanding desired capacity must be durable before provider allocation. A
+# benchmark can finish while clone_machine_target is still blocked inside Fly;
+# tracked=ready=0 must not be mistaken for a healthy zero-worker target.
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/desired-two"
+: > "$FAKE_DIR/block-worker-clone"
+autoscale_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS=2 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-worker-clone-pending.log" \
+    autoscaler-worker-clone-pending --timeout 240 || autoscale_status=$?
+[ "$autoscale_status" -ne 0 ] ||
+    fail "a fleet must fail while desired worker allocation is still outstanding"
+[ -f "$FAKE_DIR/worker-clone-blocked" ] ||
+    fail "the in-progress allocation regression never blocked inside the worker clone boundary"
+grep -qF "mandatory autoscaler worker capacity below desired: 0/1" \
+    "$TMP_ROOT/controller-autoscaler-worker-clone-pending.log" ||
+    fail "outstanding desired capacity was not enforced at final acceptance"
+remaining="$(python3 -c '
+import json, sys
+machines = json.load(open(sys.argv[1]))["machines"]
+print(" ".join(sorted(m["name"] for m in machines)))
+' "$FAKE_DIR/state.json")"
+[ "$remaining" = "cloudbench-warm" ] ||
+    fail "blocked worker allocation leaked a provider machine: $remaining"
+pending_record="$(find "$SANDBOX/.git/cloudbench-fleet-ownership" -path '*/clones/*' -type f -print -quit 2>/dev/null || true)"
+[ -n "$pending_record" ] ||
+    fail "blocked worker allocation lost its recoverable name-only ownership record"
+[ -z "$(sed -n 's/^id=//p' "$pending_record")" ] ||
+    fail "blocked pre-allocation ownership unexpectedly claimed a provider ID"
+# The fake provider was killed before allocation and can never become visible;
+# remove only this asserted test-owned phantom so later scenarios are isolated.
+rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership"
+rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/block-worker-clone" "$FAKE_DIR/worker-clone-blocked"
+echo "PASS: scenario 2f — in-progress worker allocation cannot pass as zero desired capacity"
+
+# Desired capacity can fall while a worker is still being staged. Once that
+# worker has been intentionally destroyed, its stale provisioner must not turn
+# the whole fleet red, and the child provisioner must not inherit the parent
+# autoscaler's EXIT cleanup trap.
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/oscillate-worker-desired"
+: > "$FAKE_DIR/fail-worker-launch"
+oscillation_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=2 \
+    CLOUDBENCH_WORKER_READY_TIMEOUT=5 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-worker-oscillation.log" \
+    autoscaler-worker-oscillation --timeout 240 || oscillation_status=$?
+[ "$oscillation_status" -eq 0 ] || {
+    cat "$TMP_ROOT/controller-autoscaler-worker-oscillation.log" >&2
+    fail "intentional scale-down must cancel an in-flight provisioner without failing the fleet"
+}
+[ -f "$FAKE_DIR/markers/worker-scale-down-complete" ] ||
+    fail "the scale-oscillation regression never destroyed its in-flight worker"
+if grep -qF 'metrics_lease_owner_pid: unbound variable' \
+    "$TMP_ROOT/controller-autoscaler-worker-oscillation.log"; then
+    fail "worker provisioner inherited the parent autoscaler cleanup trap"
+fi
+remaining="$(python3 -c '
+import json, sys
+machines = json.load(open(sys.argv[1]))["machines"]
+print(" ".join(sorted(m["name"] for m in machines)))
+' "$FAKE_DIR/state.json")"
+[ "$remaining" = "cloudbench-warm" ] ||
+    fail "scale-oscillation teardown leaked machines: $remaining"
+rm -f "$FAKE_DIR/oscillate-worker-desired" "$FAKE_DIR/fail-worker-launch"
+echo "PASS: scenario 2g — scale-down cancels in-flight worker provisioning without a stale fatal error"
+
+# A provider destroy failure after cancellation cannot leave a tracked worker
+# permanently canceled if demand rebounds. The autoscaler must fail closed and
+# retain durable ownership for controller cleanup, which is allowed to retry.
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/fail-worker-destroy-once"
+destroy_failure_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-worker-destroy-failure.log" \
+    autoscaler-worker-destroy-failure --timeout 240 || destroy_failure_status=$?
+[ "$destroy_failure_status" -ne 0 ] ||
+    fail "failed worker scale-down destroy must fail the fleet closed"
+[ -f "$FAKE_DIR/markers/worker-destroy-failed" ] ||
+    fail "the worker destroy-failure regression never crossed its provider boundary"
+grep -qF 'could not be destroyed during scale-down' \
+    "$TMP_ROOT/controller-autoscaler-worker-destroy-failure.log" ||
+    fail "failed worker scale-down destroy did not produce a stable fatal reason"
+remaining="$(python3 -c '
+import json, sys
+machines = json.load(open(sys.argv[1]))["machines"]
+print(" ".join(sorted(m["name"] for m in machines)))
+' "$FAKE_DIR/state.json")"
+[ "$remaining" = "cloudbench-warm" ] ||
+    fail "destroy-failure cleanup leaked machines: $remaining"
+rm -f "$FAKE_DIR/fail-worker-destroy-once"
+echo "PASS: scenario 2h — scale-down destroy failure fails closed and remains recoverable"
+
+# Two provisioners may publish readiness while the autoscaler scales one worker
+# down. Per-worker outcomes plus a sole aggregate writer must preserve the
+# surviving worker's readiness proof without append-vs-rewrite loss.
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/concurrent-ready-scale-down"
+concurrent_ready_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-concurrent-ready-scale-down.log" \
+    autoscaler-concurrent-ready-scale-down --timeout 240 || concurrent_ready_status=$?
+[ "$concurrent_ready_status" -eq 0 ] || {
+    cat "$TMP_ROOT/controller-autoscaler-concurrent-ready-scale-down.log" >&2
+    fail "concurrent worker readiness publication and scale-down must preserve surviving capacity"
+}
+[ -f "$FAKE_DIR/markers/worker-scale-down-complete" ] ||
+    fail "the concurrent readiness regression never scaled one worker down"
+worker_launches="$(grep -c 'setsid bash /tmp/rbw.sh' "$FAKE_DIR/journal.log" 2>/dev/null || true)"
+[ "$worker_launches" -ge 2 ] ||
+    fail "the concurrent readiness regression did not launch two workers"
+remaining="$(python3 -c '
+import json, sys
+machines = json.load(open(sys.argv[1]))["machines"]
+print(" ".join(sorted(m["name"] for m in machines)))
+' "$FAKE_DIR/state.json")"
+[ "$remaining" = "cloudbench-warm" ] ||
+    fail "concurrent readiness teardown leaked machines: $remaining"
+rm -f "$FAKE_DIR/concurrent-ready-scale-down"
+echo "PASS: scenario 2i — concurrent ready publication and scale-down preserve surviving capacity"
+
+# A benchmark may finish after a worker allocation and launch have committed but
+# before that worker crosses the queue-readiness boundary. Child completion must
+# stop new scaling decisions without abandoning committed desired capacity: the
+# autoscaler drains the pending outcome, then proves its final invariant.
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/desired-two"
+: > "$FAKE_DIR/worker-ready-after-child"
+post_child_ready_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_WORKER_READY_TIMEOUT=30 \
+    CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS=25 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-post-child-ready.log" \
+    autoscaler-post-child-ready --timeout 240 || post_child_ready_status=$?
+[ "$post_child_ready_status" -eq 0 ] || {
+    cat "$TMP_ROOT/controller-autoscaler-post-child-ready.log" >&2
+    fail "child completion must drain already-committed worker readiness"
+}
+[ -f "$FAKE_DIR/markers/worker-ready-released-after-child" ] ||
+    fail "the post-child readiness regression never crossed its delayed boundary"
+grep -qF "1/1 passed" "$TMP_ROOT/controller-autoscaler-post-child-ready.log" ||
+    fail "post-child worker readiness must preserve a passing fleet result"
+if grep -qF "mandatory autoscaler worker capacity below desired" \
+    "$TMP_ROOT/controller-autoscaler-post-child-ready.log"; then
+    fail "final acceptance sampled capacity before terminal autoscaler synchronization"
+fi
+remaining="$(python3 -c '
+import json, sys
+machines = json.load(open(sys.argv[1]))["machines"]
+print(" ".join(sorted(m["name"] for m in machines)))
+' "$FAKE_DIR/state.json")"
+[ "$remaining" = "cloudbench-warm" ] ||
+    fail "post-child readiness teardown leaked machines: $remaining"
+rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/worker-ready-after-child"
+echo "PASS: scenario 2j — committed worker readiness drains after benchmark child completion"
+
+# Even fully satisfied capacity is only a mutable snapshot until the autoscaler
+# publishes that it observed child completion after draining committed work.
+# With a zero finalization budget the controller must fail this missing causal
+# marker rather than accept a still-live autoscaler on counts alone.
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/desired-two"
+: > "$FAKE_DIR/worker-ready-before-child-no-terminal"
+missing_terminal_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS=0 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-missing-terminal.log" \
+    autoscaler-missing-terminal --timeout 240 || missing_terminal_status=$?
+[ "$missing_terminal_status" -ne 0 ] ||
+    fail "satisfied capacity must not pass without causal autoscaler completion"
+grep -qF "mandatory autoscaler did not confirm terminal completion" \
+    "$TMP_ROOT/controller-autoscaler-missing-terminal.log" ||
+    fail "missing autoscaler terminal proof did not produce a stable explicit failure"
+remaining="$(python3 -c '
+import json, sys
+machines = json.load(open(sys.argv[1]))["machines"]
+print(" ".join(sorted(m["name"] for m in machines)))
+' "$FAKE_DIR/state.json")"
+[ "$remaining" = "cloudbench-warm" ] ||
+    fail "missing-terminal teardown leaked machines: $remaining"
+rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/worker-ready-before-child-no-terminal"
+echo "PASS: scenario 2k — capacity cannot pass without causal autoscaler completion"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 3 — stopped inventory cannot consume the active-compute ceiling
@@ -905,11 +1566,12 @@ PY
 
 capacity_status=0
 CLOUDBENCH_TEST_BARRIER_MIN=1 \
+CLOUDBENCH_APP_MACHINE_CEILING=1000 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-capacity.log" \
     capacity-a capacity-b capacity-c capacity-d capacity-e capacity-f capacity-g \
-    --no-autoscale --timeout 240 || capacity_status=$?
+    --timeout 240 || capacity_status=$?
 [ "$capacity_status" -eq 0 ] ||
-    fail "stopped inventory must not block a seven-benchmark active fleet (exit=$capacity_status)"
+    fail "stopped inventory must not consume shared-compute capacity in the isolated CPU replay (exit=$capacity_status)"
 grep -qF "7/7 passed" "$TMP_ROOT/controller-capacity.log" ||
     fail "capacity replay fleet summary must report 7/7 passed"
 JOURNAL="$FAKE_DIR/journal.log" python3 - <<'PY' ||
@@ -924,6 +1586,23 @@ if max(updates[:7]) >= min(starts[:7]):
     raise SystemExit("a fleet machine started before every boot config update completed")
 if any("--skip-start" not in calls[index] for index in updates[:7]):
     raise SystemExit("boot config updates must explicitly keep every machine stopped")
+
+# Once every boot config is applied, all readiness pollers must consume the
+# controller-owned Machines/Volumes snapshots.  Direct provider inventory reads
+# in this window must therefore remain bounded by the one snapshot loop instead
+# of growing with the seven run-bench-cloud children.  The loop can refresh a
+# few times while the fake fleet starts, but one Machines + one Volumes request
+# per child would exceed this controller-level ceiling deterministically.
+startup_window = calls[max(updates[:7]) + 1:max(starts[:7]) + 1]
+inventory_reads = [
+    call for call in startup_window
+    if call.startswith("machines list ") or call.startswith("volumes list ")
+]
+if len(inventory_reads) > 8:
+    raise SystemExit(
+        "fleet startup issued child-scaled provider inventory reads "
+        f"({len(inventory_reads)} > 8): {inventory_reads}"
+    )
 PY
     fail "capacity replay must configure the entire stopped fleet before any machine starts"
 
@@ -940,18 +1619,20 @@ PY
 )"
 [ "$capacity_counts" = "54 23 31" ] ||
     fail "capacity replay must reap only its seven machines (got: $capacity_counts)"
-echo "PASS: scenario 3 — stopped inventory does not consume active-compute capacity"
+echo "PASS: scenario 3 — stopped inventory does not consume active-compute capacity (Machine governor isolated)"
 
 # ════════════════════════════════════════════════════════════════════════════
 # Scenario 4 — the shared-CPU governor blocks an over-ceiling burst, while
 # stopped + performance + unknown-state inventory are classified correctly.
-# The elastic guard gates on shared-CPU UNITS (config.guest.cpu_kind=shared →
-# cpus), NOT a flat machine count: only ACTIVE shared units count toward the
-# governor, stopped inventory is free, performance machines draw a SEPARATE
-# reservation, and a non-stopped UNKNOWN state still consumes its shared units.
+# This scenario isolates the shared-CPU half of the dual capacity guard by
+# explicitly lifting the independent Machine-count governor. Only ACTIVE shared
+# units count toward the CPU governor; stopped inventory is compute-free,
+# performance machines draw a SEPARATE reservation, and a non-stopped UNKNOWN
+# state still consumes its shared units. A focused owner test separately proves
+# that stopped inventory still counts toward Fly's physical Machine ceiling.
 #
-# #815 replaced the flat machine-count cap with an ELASTIC shared-CPU-unit governor
-# (ceiling = governor − headroom = 160 − 20 = 140 units). The fixture reaches
+# #815 added the ELASTIC shared-CPU-unit governor (ceiling = governor − headroom
+# = 160 − 20 = 140 units). The fixture reaches
 # 144 active shared units (including one provider-unknown state), so two new
 # primaries project to 148 and must be rejected before any clone.
 # ═════════════════════════════════════════════════════════════════════════════
@@ -995,9 +1676,10 @@ PY
 # 15 stopped + 5 performance machines must NOT contribute (else active_shared > 144).
 capacity_status=0
 CLOUDBENCH_SHARED_CPU_GOVERNOR=160 CLOUDBENCH_SHARED_CPU_HEADROOM=20 \
+CLOUDBENCH_APP_MACHINE_CEILING=1000 \
 CLOUDBENCH_FLEET_PRIMARY_VM_SIZE=shared-cpu-2x \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-active-capacity.log" \
-    capacity-h capacity-i --no-autoscale --timeout 240 || capacity_status=$?
+    capacity-h capacity-i --timeout 240 || capacity_status=$?
 [ "$capacity_status" -eq 1 ] ||
     fail "over-ceiling shared-CPU burst must be blocked (exit=$capacity_status)"
 grep -qF "Shared-CPU capacity governor reached: 144 active shared units" "$TMP_ROOT/controller-active-capacity.log" ||
@@ -1029,7 +1711,7 @@ rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership"
 
 CLOUDBENCH_TEST_BARRIER_MIN=2 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-orphan-source.log" \
-    orphan-source --no-autoscale --timeout 240 &
+    orphan-source --timeout 240 &
 ORPHAN_CONTROLLER_PID=$!
 PIDS+=("$ORPHAN_CONTROLLER_PID")
 
@@ -1109,7 +1791,7 @@ mkdir -p "$FAKE_DIR/markers"
 recovery_status=0
 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_B" "$CONDUCTOR_PORT_B" "$TMP_ROOT/controller-orphan-recovery.log" \
-    orphan-recovery --no-autoscale --timeout 240 || recovery_status=$?
+    orphan-recovery --timeout 240 || recovery_status=$?
 [ "$recovery_status" -eq 0 ] ||
     fail "successor controller must recover a positively owned idle orphan (exit=$recovery_status)"
 
@@ -1140,7 +1822,7 @@ mkdir -p "$FAKE_DIR/markers"
 
 CLOUDBENCH_TEST_BARRIER_MIN=2 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-busy-source.log" \
-    busy-source --no-autoscale --timeout 240 &
+    busy-source --timeout 240 &
 BUSY_CONTROLLER_PID=$!
 PIDS+=("$BUSY_CONTROLLER_PID")
 busy_id=""
@@ -1211,7 +1893,7 @@ mkdir -p "$FAKE_DIR/markers"
 busy_status=0
 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_B" "$CONDUCTOR_PORT_B" "$TMP_ROOT/controller-busy-recovery.log" \
-    must-not-launch --no-autoscale --timeout 240 || busy_status=$?
+    must-not-launch --timeout 240 || busy_status=$?
 [ "$busy_status" -eq 1 ] || fail "active-runner stale ownership must fail closed (exit=$busy_status)"
 grep -qF "refusing to reap stale fleet machine $busy_id: runner count=1" "$TMP_ROOT/controller-busy-recovery.log" ||
     fail "fail-closed recovery must report the exact active-runner reason"
@@ -1234,21 +1916,37 @@ mkdir -p "$FAKE_DIR/markers"
 : > "$FAKE_DIR/journal.log"
 owner_host="$(hostname 2>/dev/null || uname -n)"
 delayed_name="cloudbench-aaa-delayed-provider"
+same_registry_worker_name="cloudbench-aab-same-registry-worker"
+same_registry_worker_id="a5705ca1e00000"
 worker_name="cloudbench-zzz-autoscaler-worker"
 worker_id="a5705ca1e00001"
 write_dead_registry aaa-delayed-name reap "$owner_host" "$delayed_name"
+{
+    printf 'name=%s\n' "$same_registry_worker_name"
+    printf 'id=%s\n' "$same_registry_worker_id"
+    printf 'role=autoscaler-worker\n'
+} > "$SANDBOX/.git/cloudbench-fleet-ownership/aaa-delayed-name/clones/$same_registry_worker_name"
 write_dead_registry zzz-autoscaler-worker reap "$owner_host" "$worker_name" "$worker_id" autoscaler-worker
+add_fake_machine "$same_registry_worker_id" "$same_registry_worker_name" started 0
 add_fake_machine "$worker_id" "$worker_name" started 0
 
 delayed_status=0
 CLOUDBENCH_CLONE_LOOKUP_SECONDS=1 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_B" "$CONDUCTOR_PORT_B" "$TMP_ROOT/controller-delayed-name.log" \
-    must-wait-for-provider --no-autoscale --timeout 240 || delayed_status=$?
+    must-wait-for-provider --timeout 240 || delayed_status=$?
 [ "$delayed_status" -eq 1 ] || fail "name-only provider gap must fail closed (exit=$delayed_status)"
 grep -qF "retaining ownership and refusing to provision" "$TMP_ROOT/controller-delayed-name.log" ||
     fail "name-only provider gap must retain its durable ownership record"
 [ -f "$SANDBOX/.git/cloudbench-fleet-ownership/aaa-delayed-name/clones/$delayed_name" ] ||
     fail "name-only durable record was discarded before provider visibility"
+fake_machine_exists "$same_registry_worker_id" &&
+    fail "one unresolved record must not prevent reaping a later known ID in the same registry"
+fake_machine_exists "$worker_id" &&
+    fail "one unresolved registry must not prevent reaping a later known-ID registry"
+grep -qF "reaping stale fleet machine $same_registry_worker_id" "$TMP_ROOT/controller-delayed-name.log" ||
+    fail "same-registry known-ID cleanup did not continue after the unresolved record"
+grep -qF "reaping stale fleet machine $worker_id" "$TMP_ROOT/controller-delayed-name.log" ||
+    fail "cross-registry known-ID cleanup did not continue after the unresolved registry"
 if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then
     fail "name-only uncertainty must block new provisioning"
 fi
@@ -1259,11 +1957,10 @@ rm -rf "$FAKE_DIR/markers"; mkdir -p "$FAKE_DIR/markers"
 : > "$FAKE_DIR/journal.log"
 CLOUDBENCH_CLONE_LOOKUP_SECONDS=1 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_B" "$CONDUCTOR_PORT_B" "$TMP_ROOT/controller-delayed-visible.log" \
-    delayed-visible --no-autoscale --timeout 240 || fail "late-visible owned clone recovery failed"
+    delayed-visible --timeout 240 || fail "late-visible owned clone recovery failed"
 fake_machine_exists "$delayed_id" && fail "late-visible name-only clone was not reaped"
+fake_machine_exists "$same_registry_worker_id" && fail "same-registry worker was not reaped"
 fake_machine_exists "$worker_id" && fail "durably owned autoscaler worker was not reaped"
-grep -qF "reaping stale fleet machine $worker_id" "$TMP_ROOT/controller-delayed-visible.log" ||
-    fail "autoscaler worker recovery was not reported"
 echo "PASS: scenario 7 — delayed name and autoscaler ownership recover without orphaning"
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1310,7 +2007,7 @@ rm -rf "$WS_A/.context/fleet" "$FAKE_DIR/markers"; mkdir -p "$FAKE_DIR/markers"
 : > "$FAKE_DIR/journal.log"
 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_B" "$CONDUCTOR_PORT_B" "$TMP_ROOT/controller-cross-pool-recovery.log" \
-    cross-pool-recovery --no-autoscale --timeout 240 || fail "WS_B could not recover deleted WS_A pool claim"
+    cross-pool-recovery --timeout 240 || fail "WS_B could not recover deleted WS_A pool claim"
 grep -qF "recovering dead-claimed idle pool machine $pool_id" "$TMP_ROOT/controller-cross-pool-recovery.log" ||
     fail "cross-workspace dead pool claim recovery was not reported"
 [ ! -f "$SANDBOX/.git/cloudbench-pool-claims/$pool_id" ] ||
@@ -1349,7 +2046,7 @@ rm -rf "$FAKE_DIR/markers"; mkdir -p "$FAKE_DIR/markers"
 stop_fail_status=0
 CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_POOL_STOP_ATTEMPTS=1 \
     run_controller "$WS_B" "$CONDUCTOR_PORT_B" "$TMP_ROOT/controller-pool-stop-failure.log" \
-    pool-stop-failure --no-autoscale --timeout 240 || stop_fail_status=$?
+    pool-stop-failure --timeout 240 || stop_fail_status=$?
 [ "$stop_fail_status" -eq 1 ] || fail "unverified pool stop must fail cleanup (exit=$stop_fail_status)"
 [ -f "$SANDBOX/.git/cloudbench-pool-claims/$pool_id" ] ||
     fail "cleanup discarded the claim even though stop never verified"
@@ -1373,7 +2070,7 @@ add_fake_machine "$remote_id" "$remote_name" started 0
 : > "$FAKE_DIR/journal.log"
 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_B" "$CONDUCTOR_PORT_B" "$TMP_ROOT/controller-safe-skips.log" \
-    safe-skips --no-autoscale --timeout 240 || fail "retain/other-host safety run failed"
+    safe-skips --timeout 240 || fail "retain/other-host safety run failed"
 fake_machine_exists "$retain_id" || fail "retain-policy machine was destroyed"
 fake_machine_exists "$remote_id" || fail "other-host machine was destroyed"
 
@@ -1386,7 +2083,7 @@ printf 'version=1\nhost=%s\npid=999999\npid_start=x\ncleanup_policy=reap\n' "$ow
 malformed_status=0
 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_B" "$CONDUCTOR_PORT_B" "$TMP_ROOT/controller-malformed-registry.log" \
-    malformed-registry --no-autoscale --timeout 240 || malformed_status=$?
+    malformed-registry --timeout 240 || malformed_status=$?
 [ "$malformed_status" -eq 1 ] || fail "malformed ownership must fail closed"
 if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then fail "malformed ownership allowed provisioning"; fi
 
@@ -1400,7 +2097,7 @@ add_fake_machine "$probe_id" "$probe_name" started 0 1
 probe_status=0
 CLOUDBENCH_TEST_BARRIER_MIN=1 \
     run_controller "$WS_B" "$CONDUCTOR_PORT_B" "$TMP_ROOT/controller-probe-error.log" \
-    probe-error --no-autoscale --timeout 240 || probe_status=$?
+    probe-error --timeout 240 || probe_status=$?
 [ "$probe_status" -eq 1 ] || fail "unreadable runner probe must fail closed"
 fake_machine_exists "$probe_id" || fail "unreadable-probe machine was destroyed"
 if grep -qE '^machine clone' "$FAKE_DIR/journal.log"; then fail "unreadable probe allowed provisioning"; fi

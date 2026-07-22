@@ -6,8 +6,12 @@ prefers a durable static ``cloudbench-run.json`` over any live upstream.
 """
 
 import json
+import multiprocessing
+import os
+import socket
 import threading
 import time
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -15,6 +19,107 @@ from pathlib import Path
 import pytest
 
 from benchmarks import agent_link_server as als
+
+
+def _hold_allocated_port(preferred: int, release, result) -> None:
+    """Child-process helper proving the host launch lock spans allocation+bind."""
+    with als._host_archive_launch_lock():
+        port = als._free_port(preferred)
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", port))
+        listener.listen(1)
+    result.put(port)
+    release.wait(10)
+    listener.close()
+
+
+def test_free_port_search_continues_past_first_hundred_candidates(monkeypatch) -> None:
+    preferred = 12_000
+
+    class FakeSocket:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def bind(self, address) -> None:
+            if address[1] < preferred + 100:
+                raise OSError("occupied")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(als.socket, "socket", FakeSocket)
+    assert als._free_port(preferred) == preferred + 100
+
+
+def test_free_port_wraps_after_65535_without_trying_invalid_ports(monkeypatch) -> None:
+    attempted = []
+
+    class FakeSocket:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def bind(self, address) -> None:
+            attempted.append(address[1])
+            if address[1] != 1024:
+                raise OSError("occupied")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(als.socket, "socket", FakeSocket)
+    assert als._free_port(65535) == 1024
+    assert attempted == [65535, 1024]
+
+
+def test_archive_port_pair_wraps_after_65535_and_remains_distinct(monkeypatch) -> None:
+    attempted = []
+
+    class FakeSocket:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def bind(self, address) -> None:
+            attempted.append(address[1])
+            if address[1] not in (65535, 1024):
+                raise OSError("occupied")
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(als.socket, "socket", FakeSocket)
+    assert als._allocate_archive_ports(65535) == (65535, 1024)
+    assert all(1024 <= port <= 65535 for port in attempted)
+
+
+def test_host_launch_lock_gives_concurrent_processes_distinct_ports() -> None:
+    ctx = multiprocessing.get_context("fork")
+    release = ctx.Event()
+    result = ctx.Queue()
+    preferred = als._free_port(12_500)
+    processes = [
+        ctx.Process(target=_hold_allocated_port, args=(preferred, release, result))
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    ports = [result.get(timeout=10) for _ in processes]
+    release.set()
+    for process in processes:
+        process.join(10)
+        assert process.exitcode == 0
+    assert len(set(ports)) == 2
+
+
+def test_existing_archive_requires_healthy_frontend_and_api(tmp_path: Path, monkeypatch) -> None:
+    frontend = "http://127.0.0.1:13001"
+    api = "http://127.0.0.1:13000"
+    (tmp_path / "archive-frontend-live.json").write_text(
+        json.dumps({"frontend_url": frontend, "api_url": api, "supervisor_pid": os.getpid()})
+    )
+    monkeypatch.setattr(als, "_healthy", lambda url: url == frontend)
+    assert als._existing_archive_in(tmp_path) == ""
+    monkeypatch.setattr(als, "_healthy", lambda url: url in (frontend, api))
+    assert als._existing_archive_in(tmp_path) == frontend
 
 
 def _make_run(runs_root: Path, run_id: str, per_task: list) -> Path:
@@ -239,6 +344,24 @@ def test_http_open_agent_unknown_is_not_found(hub_server: str) -> None:
     status, body = _get(hub_server + "/open-agent?agent-id=NOPE")
     assert status == 200
     assert "isn't in any local run record" in body
+
+
+def test_http_open_agent_reports_archive_port_exhaustion(
+    hub_server: str, monkeypatch
+) -> None:
+    def fail_launch(*_args, **_kwargs):
+        raise als.PortAllocationError("no free local port found")
+
+    monkeypatch.setattr(als, "_launch_archive_for", fail_launch)
+    with pytest.raises(urllib.error.HTTPError) as error:
+        _get(hub_server + "/open-agent?agent-id=AGENT")
+    assert error.value.code == 503
+    body = error.value.read().decode()
+    assert "No local user port is available" in body
+    assert "http-equiv='refresh'" not in body
+    assert error.value.headers["Retry-After"] == "5"
+    status, index = _get(hub_server + "/")
+    assert status == 200 and "Benchmark runs" in index
 
 
 if __name__ == "__main__":

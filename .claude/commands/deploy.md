@@ -357,6 +357,7 @@ Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barri
 
 ```bash
 bash scripts/tests/cloudbench-env.test.sh
+bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
 agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py \
   -k 'data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or isolated_backend or local_predeploy_skips_wmh'
 ```

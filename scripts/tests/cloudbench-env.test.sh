@@ -129,7 +129,9 @@ production_function() {
     capture && /^}$/ { exit }
   ' "$ROOT_DIR/scripts/run-bench-cloud"
 }
-for function_name in local_port_is_bindable claim_local_port release_local_port_lease \
+PORT_LEASE_HELPER="$ROOT_DIR/scripts/cloudbench-port-lease.py"
+[ -f "$PORT_LEASE_HELPER" ] || fail "production port-lease helper is missing"
+for function_name in claim_local_port release_local_port_lease \
     release_local_port_leases publish_status_proxy_port start_leased_data_plane_proxy; do
   function_source="$(production_function "$function_name")"
   [ -n "$function_source" ] || fail "could not load production function $function_name"
@@ -166,9 +168,9 @@ start_leased_data_plane_proxy 61944 rotated_port 3001 occupied.local \
   fail "the proxy launcher did not preserve the replacement tunnel"
 cloudbench_terminate_and_wait 2 "$rotated_pid"
 release_local_port_leases
-[ ! -d "$PORT_LEASE_ROOT/$rotated_port" ] || fail "replacement proxy lease survived cleanup"
+[ ! -e "$PORT_LEASE_ROOT/$rotated_port" ] || fail "replacement proxy lease survived cleanup"
 unset -f flyctl curl start_data_plane_proxy start_leased_data_plane_proxy \
-  local_port_is_bindable claim_local_port release_local_port_lease \
+  claim_local_port release_local_port_lease \
   release_local_port_leases publish_status_proxy_port production_function
 unset CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS
 
@@ -198,6 +200,8 @@ clone_args="$TMP_ROOT/primary-clone.args"
 fleet_registry_record_name() { return 0; }
 fleet_registry_record_id() { return 0; }
 fleet_registry_release_name() { return 0; }
+machine_storage_ready() { return 0; }
+machine_storage_failed() { return 1; }
 fly_with_timeout() {
   shift
   printf '%s\n' "$*" > "$clone_args"
@@ -215,7 +219,7 @@ primary_cpus="$(sed -nE 's/.*--vm-size ([^ ]+).*/\1/p' "$clone_args" | sed -nE '
 [ $((16 + 37 * primary_cpus)) -le 160 ] ||
   fail "daily fleet primary shape exceeds the observed Fly CPU governor ceiling"
 unset -f clone_machine_target fleet_registry_record_name fleet_registry_record_id \
-  fleet_registry_release_name fly_with_timeout
+  fleet_registry_release_name machine_storage_ready machine_storage_failed fly_with_timeout
 
 resize_function_source="$(awk '
   /^resize_pool_machine\(\)/ { capture = 1 }
@@ -378,6 +382,12 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
 require_text "$ROOT_DIR/scripts/run-predeploy-cloud" \
   'bash "$ROOT_DIR/scripts/tests/cloudbench-multi-workstream.test.sh"' \
   "pre-deploy cloud gate must run the permanent concurrency regression"
+require_text "$ROOT_DIR/scripts/run-predeploy-cloud" \
+  'bash "$ROOT_DIR/scripts/tests/cloudbench-acceptance-autoscale.test.sh"' \
+  "pre-deploy cloud gate must reject every autoscale off-state"
+require_text "$ROOT_DIR/.claude/commands/deploy.md" \
+  'bash scripts/tests/cloudbench-acceptance-autoscale.test.sh' \
+  "deploy must execute the permanent mandatory-autoscale regression"
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'CLOUDBENCH_ENV_VERIFIED=1' \
   "fleet children must receive proof that the controller verified the environment"

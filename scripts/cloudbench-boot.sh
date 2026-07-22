@@ -17,7 +17,7 @@
 #   CLOUDBENCH_BOOT=1        REQUIRED to run the driver; absent → idle (warm/clone source)
 #   CLOUDBENCH_RUN_TOKEN     run token the controller matches in the log
 #   REF                      branch/sha to check out + run
-#   CLOUDBENCH_STATUS_PORT   http.server port serving /data (default 8011)
+#   CLOUDBENCH_STATUS_PORT   IPv6 status-service port serving /data (default 8011)
 #   + every driver input (BENCH_TASKS_B64, BENCH_SIMULATE, WMH_MODEL_NAME,
 #     CLOUDBENCH_START_BARRIER, …) — passed straight through to cloudbench-run.sh.
 #
@@ -28,6 +28,13 @@ set -uo pipefail
 LOG=/data/bench.log
 REPO=/data/repo
 STATUS_PORT="${CLOUDBENCH_STATUS_PORT:-8011}"
+DRIVER_PID_FILE=/data/cloudbench-driver.pid
+DRIVER_STATE_FILE=/data/cloudbench-driver.state
+
+publish_driver_state() {
+    local state="$1" temporary="${DRIVER_STATE_FILE}.tmp.$$"
+    printf '%s\n' "$state" > "$temporary" && mv -f "$temporary" "$DRIVER_STATE_FILE"
+}
 
 # Not a benchmark boot (the warm clone-source machine, or a bare manual start) →
 # idle exactly like the image's original `sleep infinity` CMD.
@@ -44,6 +51,13 @@ for _w in $(seq 1 120); do
     sleep 1
 done
 
+# Publish an explicit lifecycle before the status server starts. PID absence is
+# ambiguous during checkout: it means "not launched yet", not "driver died".
+# Relays and fleet collectors only treat the terminal `exited` state as proof
+# that waiting cannot succeed.
+rm -f "$DRIVER_PID_FILE"
+publish_driver_state booting || exit 1
+
 # RUNSTAMP first — the controller polls the log for this token to confirm the box
 # actually booted into the driver (replaces the old ssh-written RUNSTAMP).
 printf 'RUNSTAMP-%s\n' "${CLOUDBENCH_RUN_TOKEN:-boot}" > "$LOG"
@@ -51,9 +65,15 @@ printf 'RUNSTAMP-%s\n' "${CLOUDBENCH_RUN_TOKEN:-boot}" > "$LOG"
 # Data-plane status server: serve /data (which holds bench.log) over HTTP so the
 # controller reads progress via `flyctl proxy` (WireGuard) — zero Machines-API
 # cost, so N boxes polling can never saturate the control-plane rate limit. Bound
-# to the box's private 6PN address, reachable only through the authenticated proxy.
-pkill -f "http.server $STATUS_PORT" 2>/dev/null || true
-setsid python3 -m http.server "$STATUS_PORT" --directory /data >/dev/null 2>&1 </dev/null &
+# to the box's private IPv6 6PN address, reachable only through the authenticated
+# proxy. The custom service also implements authenticated barrier release and the
+# /driver-health contract consumed by the controller.
+pkill -f "cloudbench-status-server.py.*--port $STATUS_PORT" 2>/dev/null || true
+setsid python3 /cloudbench-status-server.py \
+    --port "$STATUS_PORT" \
+    --directory /data \
+    --barrier "${CLOUDBENCH_START_BARRIER:-}" \
+    >/dev/null 2>&1 </dev/null &
 
 # Bootstrap-checkout the ref so the REF's driver + helper scripts run (not the
 # snapshot's stale copy). Reuse the battle-tested fetch-ref script, which builds a
@@ -85,8 +105,16 @@ rm -f "$REPO/.git/index.lock" "$REPO/.git/"*.lock "$REPO/.git/refs/heads/"*.lock
 # NORESULT. The controller persists the run-scoped marker payloads first and
 # then explicitly stops/returns this Machine to the pool. If the driver crashes
 # before DONE, /driver-health still reports it dead while this supervisor lives.
-bash "$REPO/scripts/cloudbench-run.sh" >> "$LOG" 2>&1
+bash "$REPO/scripts/cloudbench-run.sh" >> "$LOG" 2>&1 &
+driver_pid=$!
+driver_pid_temporary="${DRIVER_PID_FILE}.tmp.$$"
+printf '%s\n' "$driver_pid" > "$driver_pid_temporary" \
+    && mv -f "$driver_pid_temporary" "$DRIVER_PID_FILE"
+publish_driver_state running || exit 1
+wait "$driver_pid"
 driver_rc=$?
+rm -f "$DRIVER_PID_FILE"
+publish_driver_state exited || exit 1
 printf '[boot %s] driver exited rc=%s; holding for controller collection\n' \
     "$(date -u +%H:%M:%S)" "$driver_rc" >> "$LOG"
 exec sleep infinity
