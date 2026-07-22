@@ -805,6 +805,15 @@ def test_purchase_gate_benchmarks_enable_bundled_frontend_before_stack_start():
         assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
 
 
+def test_benchmark_bundled_frontend_build_has_cloud_heap_budget():
+    """Cloud build hosts default near 2GB old-space, below the frontend bundle need."""
+    script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
+
+    assert "BENCHMARK_FRONTEND_BUILD_OLD_SPACE_MB:-3584" in script
+    assert 'NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS"' in script
+    assert "--max-old-space-size=" in script
+
+
 def test_payment_benchmark_preserves_lifecycle_stack_contract():
     """The consolidated local lane must retain the old lifecycle launcher's env."""
     import os
@@ -9557,6 +9566,10 @@ async def run_all_tests():
     r.record(
         "purchase_gate_benchmark_bundled_frontend",
         test_purchase_gate_benchmarks_enable_bundled_frontend_before_stack_start,
+    )
+    r.record(
+        "benchmark_bundled_frontend_cloud_heap_budget",
+        test_benchmark_bundled_frontend_build_has_cloud_heap_budget,
     )
     r.record(
         "payment_benchmark_lifecycle_stack_contract",
