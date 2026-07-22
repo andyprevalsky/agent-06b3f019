@@ -619,6 +619,11 @@ async function legProductionDefaultsRemainPinned(): Promise<void> {
     'production live-snapshot interval default must remain 15 seconds'
   );
   assert(
+    pollerSource.includes('math.isfinite(snapshot_interval)') &&
+      pollerSource.includes('0 < snapshot_interval <= 3600'),
+    'snapshot interval must reject non-finite and oversized sleep values'
+  );
+  assert(
     pollerSource.includes(
       'HUB_UPLOAD_SPOOL_DIR="${HUB_UPLOAD_SPOOL_DIR:-.context/hub-upload-spool}"'
     ),

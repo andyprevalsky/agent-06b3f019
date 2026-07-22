@@ -68,6 +68,11 @@ assert.match(
   'coverage must reserve the live Amplitude budget for the strict weekly assertion'
 );
 assert.match(
+  blackboxScript,
+  /BLACKBOX_TEST_CAPTURE_OUTBOUND="\$\{BLACKBOX_TEST_CAPTURE_OUTBOUND:-1\}"/,
+  'blackbox runs must activate the configured live-slice filter by default'
+);
+assert.match(
   blackboxRunner,
   /spawn\(process\.execPath, \['--import', 'tsx', file\]/,
   'blackbox domains must avoid npm and tsx wrapper processes under V8 coverage'
@@ -81,6 +86,16 @@ assert.match(
   unitRunner,
   /BACKEND_UNIT_CONCURRENCY/,
   'unit runner must expose its bounded process-pool size'
+);
+assert.match(
+  unitRunner,
+  /if \(interrupted\) process\.exit\(130\);[\s\S]*const failures = results\.filter/,
+  'unit runner must report interruption before killed children as failures'
+);
+assert.match(
+  unitRunner,
+  /fileLabel\.replace\(\/\\\.test\\\.ts\$\/, '\.log'\)[\s\S]*mkdir\(dirname\(logPath\)/,
+  'unit logs must preserve nested paths instead of colliding on basenames'
 );
 assert.match(
   coverageScript,

@@ -139,12 +139,14 @@ snapshot_loop() {  # snapshot_loop <request_id> <hub_run_id> <start_epoch> <arti
     # uploader itself (not a wrapper shell with a python child), so teardown can
     # terminate and reap the complete snapshot loop before a terminal PATCH.
     HUB_CODE_SUMMARY="$CODE_SUMMARY" HUB_SNAPSHOT_INTERVAL_SECONDS="$HUB_SNAPSHOT_INTERVAL_SECONDS" exec python3 - "$HUB_URL" "$BACKEND_API_KEY" "$USER_ID" "$req_id" "$hub_run_id" "$start_epoch" "$artifact_root" "$local_artifact_root" "$task_names" <<'PY'
-import collections, glob, json, os, sys, time, urllib.request
+import collections, glob, json, math, os, sys, time, urllib.request
 hub, key, user, req_id, run_id, start, artifact_root, local_artifact_root, expected_raw = sys.argv[1:10]
 start = float(start)
 snapshot_interval = float(os.environ.get("HUB_SNAPSHOT_INTERVAL_SECONDS", "15"))
-if snapshot_interval <= 0:
-    raise ValueError("HUB_SNAPSHOT_INTERVAL_SECONDS must be positive")
+if not math.isfinite(snapshot_interval) or not 0 < snapshot_interval <= 3600:
+    raise ValueError(
+        "HUB_SNAPSHOT_INTERVAL_SECONDS must be finite and between 0 and 3600"
+    )
 expected = collections.Counter(expected_raw.split())
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 def post(path, body, method="POST"):

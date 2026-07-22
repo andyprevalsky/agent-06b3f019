@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
-import { basename, join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 
 type UnitResult = {
   durationMs: number;
@@ -85,8 +85,9 @@ async function main(): Promise<void> {
       output: Buffer.concat(chunks).toString('utf8'),
     };
     const fileLabel = relative(unitDir, file);
-    const logName = `${basename(file, '.test.ts')}.log`;
-    await writeFile(join(logDir, logName), result.output);
+    const logPath = join(logDir, fileLabel.replace(/\.test\.ts$/, '.log'));
+    await mkdir(dirname(logPath), { recursive: true });
+    await writeFile(logPath, result.output);
     console.log(`  ${exitCode === 0 ? 'PASS' : 'FAIL'}  ${fileLabel} (${result.durationMs}ms)`);
     return result;
   }
@@ -101,6 +102,8 @@ async function main(): Promise<void> {
 
   await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
+  if (interrupted) process.exit(130);
+
   const failures = results.filter((result) => result.exitCode !== 0);
   if (failures.length > 0) {
     console.error(`\n${failures.length}/${results.length} unit test file(s) failed.`);
@@ -110,8 +113,6 @@ async function main(): Promise<void> {
     }
     process.exit(1);
   }
-
-  if (interrupted) process.exit(130);
   console.log(`\n${results.length} unit test file(s) passed.`);
 }
 
