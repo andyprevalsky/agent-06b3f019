@@ -1267,6 +1267,28 @@ async def _rebind_browser_tab_runtime(
     return focused_page, rebound_humanizer
 
 
+async def _replace_browser_humanizer(
+    *,
+    current_humanizer: Any,
+    enabled: bool,
+    dom_page: Any,
+    input_page: Any,
+    cursor_observer: Any,
+    humanizer_factory: Any,
+) -> Any:
+    """Rebind synthesized input after a provider handoff without leaking idle work."""
+    if current_humanizer is not None:
+        with contextlib.suppress(Exception):
+            await current_humanizer.close()
+    if not enabled:
+        return None
+    rebound_humanizer = humanizer_factory(dom_page=dom_page, input_page=input_page, fast=False)
+    await rebound_humanizer.initialize_cursor(start_pos=(640, 400))
+    rebound_humanizer.set_cursor_observer(cursor_observer)
+    rebound_humanizer.start_idle_movement()
+    return rebound_humanizer
+
+
 async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
     """Yield browser ownership until the user explicitly hands it back.
 
@@ -6022,10 +6044,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         extra_metadata={"recoveryStage": stage},
                     )
 
-                recovery_storage_state = await _capture_rotation_storage_state(input_page)
-                if recovery_storage_state is None or playwright_browser is None or input_page is None:
-                    raise RuntimeError("Browser state is unavailable for auth-preserving challenge recovery")
-
                 async def search_browser_configs(storage_state: Dict[str, Any]) -> Dict[str, Any]:
                     user_agent = ""
                     with contextlib.suppress(Exception):
@@ -6042,6 +6060,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     return result
 
                 try:
+                    if playwright_browser is None or input_page is None:
+                        raise RuntimeError("Browser state is unavailable for auth-preserving challenge recovery")
+                    recovery_storage_state = await _capture_rotation_storage_state(input_page)
+                    if recovery_storage_state is None:
+                        raise RuntimeError("Browser state is unavailable for auth-preserving challenge recovery")
+
                     recovery = await recover_from_challenge(
                         source_state=recovery_storage_state,
                         target_url=current_url,
@@ -6115,11 +6139,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                     session_id=session_id,
                                 )
 
-                        if _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
-                            humanizer = BrowserHumanizer(dom_page=dom_page, input_page=input_page, fast=False)
-                            await humanizer.initialize_cursor(start_pos=(640, 400))
-                        else:
-                            humanizer = None
+                        humanizer = await _replace_browser_humanizer(
+                            current_humanizer=humanizer,
+                            enabled=_env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True),
+                            dom_page=dom_page,
+                            input_page=input_page,
+                            cursor_observer=observe_cursor,
+                            humanizer_factory=BrowserHumanizer,
+                        )
 
                     browser_state = await dom_service.get_browser_state(include_screenshot=False)
                     current_url = browser_state.get("url", current_url)

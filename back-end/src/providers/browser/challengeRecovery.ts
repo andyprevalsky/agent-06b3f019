@@ -348,9 +348,12 @@ export async function probeCandidateBrowser(
         .goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
         .catch(() => null);
       if (origins.length > 0) {
-        await page.evaluate(
-          'async () => { if (globalThis.__naviRestoreRecoveryStorage) await globalThis.__naviRestoreRecoveryStorage(); }'
-        );
+        await page.evaluate(async () => {
+          const recoveryGlobal = globalThis as typeof globalThis & {
+            __naviRestoreRecoveryStorage?: () => Promise<void>;
+          };
+          await recoveryGlobal.__naviRestoreRecoveryStorage?.();
+        });
       }
       if (!(await waitForProviderSolver(page, response))) break;
       stablePasses += 1;

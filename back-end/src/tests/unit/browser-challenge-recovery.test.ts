@@ -250,10 +250,25 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
       return { status: () => 200 };
     },
     waitForTimeout: async () => undefined,
-    evaluate: async () => {
+    evaluate: async (pageFunction: () => Promise<void>) => {
       assert.ok(initScripts.some((script) => script.includes('signedInCart')));
-      originStorageRestores += 1;
-      originAuthVisible = true;
+      assert.strictEqual(
+        typeof pageFunction,
+        'function',
+        'storage restore must be invoked as a page function'
+      );
+      const recoveryGlobal = globalThis as typeof globalThis & {
+        __naviRestoreRecoveryStorage?: () => Promise<void>;
+      };
+      recoveryGlobal.__naviRestoreRecoveryStorage = async () => {
+        originStorageRestores += 1;
+        originAuthVisible = true;
+      };
+      try {
+        await pageFunction();
+      } finally {
+        delete recoveryGlobal.__naviRestoreRecoveryStorage;
+      }
     },
     title: async () => {
       assert.ok(originAuthVisible, 'origin auth state must be restored before challenge probing');

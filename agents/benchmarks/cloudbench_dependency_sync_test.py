@@ -1299,6 +1299,48 @@ test ! -e "$OUT/worker-abc123.ready"
     )
 
 
+def test_worker_preflight_failure_records_cleanup_failure_and_keeps_retry_handle(tmp_path: Path) -> None:
+    """A token/config failure must not hide an unreaped worker.
+
+    The original provisioning error stays visible, while the worker id remains
+    tracked so controller teardown can retry deletion.
+    """
+    provision = _extract_fleet_function(FLEET_SCRIPT.read_text(), "provision_worker() {")
+    output = tmp_path / "bench"
+    output.mkdir()
+    reaped = tmp_path / "reaped"
+    script = f"""set +e
+FLEET_OWNER_TOKEN=test-owner
+BENCH_REF=test-ref
+FLEET_WORKER_VM_SIZE=shared-cpu-1x
+FLEET_WORKER_VM_MEMORY=1024
+reserve_worker_machine_slot() {{ return 0; }}
+capacity_release_reservation() {{ return 0; }}
+clone_machine_target() {{
+  printf '%s\\n' deadbeef000001 >> "$1"
+  printf '%s' deadbeef000001
+}}
+controller_github_token_b64() {{ return 1; }}
+reap_machine() {{ printf '%s\\n' "$1" > {shlex.quote(str(reaped))}; return 1; }}
+fleet_registry_release_id() {{ return 0; }}
+{provision}
+provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))}
+exit $?
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
+    )
+
+    assert result.returncode != 0
+    assert reaped.read_text().strip() == "deadbeef000001"
+    assert (output / "worker-clones.ids").read_text().splitlines() == ["deadbeef000001"]
+    failure = (output / "autoscaler.failed").read_text()
+    assert "No current controller GitHub token" in failure
+    assert "cleanup failed and remains tracked for controller teardown" in failure
+    assert "cleanup failed and remains tracked" in result.stderr
+
+
 def test_fetch_ref_never_falls_back_to_stale_fetch_head(tmp_path: Path) -> None:
     fetch_env = dict(os.environ, CLOUDBENCH_GIT_MIN_FREE_KB="1")
     origin = tmp_path / "origin.git"

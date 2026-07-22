@@ -5046,6 +5046,94 @@ def test_recovery_restore_failure_is_not_suppressed():
     assert "contextlib.suppress" not in restore_block
 
 
+def test_recovery_preflight_failures_resolve_the_in_progress_tool():
+    """Missing live browser state must take the normal recovery error path."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    start = source.index('if action_name == "recover_from_challenge":')
+    end = source.index('if action_name == "send_message_to_user":', start)
+    recovery_block = source[start:end]
+
+    try_offset = recovery_block.index("try:")
+    guard_offset = recovery_block.index("if playwright_browser is None or input_page is None:")
+    capture_offset = recovery_block.index("await _capture_rotation_storage_state(input_page)")
+    except_offset = recovery_block.index("except Exception as exc:")
+    finish_offset = recovery_block.index("await browser_stream.finish_tools(")
+
+    assert try_offset < guard_offset < capture_offset < except_offset < finish_offset
+    assert 'action_result = {"success": False, "error": error_message}' in recovery_block
+    assert recovery_block.count("tool_call_id=recovery_call_id") >= 2
+
+
+async def test_provider_handoff_replaces_humanizer_without_leaking_idle_work():
+    from domains.spawn_browser_agent_v3.handler import _replace_browser_humanizer
+
+    events = []
+    observer = object()
+
+    class OldHumanizer:
+        async def close(self):
+            events.append("close-old")
+
+    class NewHumanizer:
+        async def initialize_cursor(self, *, start_pos):
+            events.append(("initialize-new", start_pos))
+
+        def set_cursor_observer(self, value):
+            assert value is observer
+            events.append("bind-observer")
+
+        def start_idle_movement(self):
+            events.append("start-idle")
+
+    new_humanizer = NewHumanizer()
+
+    def factory(*, dom_page, input_page, fast):
+        assert dom_page == "new-dom"
+        assert input_page == "new-input"
+        assert fast is False
+        events.append("construct-new")
+        return new_humanizer
+
+    result = await _replace_browser_humanizer(
+        current_humanizer=OldHumanizer(),
+        enabled=True,
+        dom_page="new-dom",
+        input_page="new-input",
+        cursor_observer=observer,
+        humanizer_factory=factory,
+    )
+
+    assert result is new_humanizer
+    assert events == [
+        "close-old",
+        "construct-new",
+        ("initialize-new", (640, 400)),
+        "bind-observer",
+        "start-idle",
+    ]
+
+
+async def test_provider_handoff_closes_humanizer_even_when_disabled():
+    from domains.spawn_browser_agent_v3.handler import _replace_browser_humanizer
+
+    old_humanizer = SimpleNamespace(close=AsyncMock())
+    result = await _replace_browser_humanizer(
+        current_humanizer=old_humanizer,
+        enabled=False,
+        dom_page=None,
+        input_page=None,
+        cursor_observer=None,
+        humanizer_factory=lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not construct")),
+    )
+
+    assert result is None
+    old_humanizer.close.assert_awaited_once()
+
+
 async def test_rotation_storage_state_round_trips_in_real_browser():
     """Cookies, localStorage, and IndexedDB survive a real context replacement."""
     from playwright.async_api import async_playwright
@@ -12290,6 +12378,18 @@ async def run_all_tests():
     r.record(
         "recovery_restore_failure_is_not_suppressed",
         test_recovery_restore_failure_is_not_suppressed,
+    )
+    r.record(
+        "recovery_preflight_failure_resolves_tool",
+        test_recovery_preflight_failures_resolve_the_in_progress_tool,
+    )
+    await r.record_async(
+        "provider_handoff_replaces_humanizer",
+        test_provider_handoff_replaces_humanizer_without_leaking_idle_work,
+    )
+    await r.record_async(
+        "provider_handoff_closes_disabled_humanizer",
+        test_provider_handoff_closes_humanizer_even_when_disabled,
     )
     await r.record_async(
         "rotation_storage_state_real_browser_round_trip",

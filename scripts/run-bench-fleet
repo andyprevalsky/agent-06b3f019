@@ -3310,7 +3310,7 @@ reconcile_worker_failure_outcomes() {  # <bench> <bench-output-dir>
 
 provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <primary_ip> <sim01> <out>
     local bench="$1" ws="$2" primary_id="$3" pip="$4" sim="$5" out="$6"
-    local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file
+    local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file failure_reason
     worker_capacity_token="$FLEET_OWNER_TOKEN-worker-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     if ! reserve_worker_machine_slot "$worker_capacity_token"; then
         printf '%s\n' "Machine-count capacity unavailable for worker clone" > "$out/autoscaler.failed"
@@ -3346,23 +3346,32 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     }
     ready_file="/data/cloudbench-worker-$wid.ready"
     if ! worker_github_token_b64="$(controller_github_token_b64)"; then
-        cleanup_failed_worker "$out" "$wid" || true
-        printf '%s\n' "No current controller GitHub token available for worker ref fetch" > "$out/autoscaler.failed"
-        echo "  ❌ [$bench] mandatory autoscaler: missing worker GitHub token" >&2
+        failure_reason="No current controller GitHub token available for worker ref fetch"
+        if ! cleanup_failed_worker "$out" "$wid"; then
+            failure_reason="$failure_reason; worker $wid cleanup failed and remains tracked for controller teardown"
+        fi
+        printf '%s\n' "$failure_reason" > "$out/autoscaler.failed"
+        echo "  ❌ [$bench] mandatory autoscaler: $failure_reason" >&2
         return 1
     fi
     stage_attempts="$WORKER_STAGE_ATTEMPTS"
     worker_ready_timeout="$WORKER_READY_TIMEOUT"
     case "$stage_attempts:$worker_ready_timeout" in
         *[!0-9:]*|:*|*:)
-            cleanup_failed_worker "$out" "$wid" || true
-            printf '%s\n' "invalid worker stage/readiness timeout configuration" > "$out/autoscaler.failed"
+            failure_reason="invalid worker stage/readiness timeout configuration"
+            if ! cleanup_failed_worker "$out" "$wid"; then
+                failure_reason="$failure_reason; worker $wid cleanup failed and remains tracked for controller teardown"
+            fi
+            printf '%s\n' "$failure_reason" > "$out/autoscaler.failed"
             return 1
             ;;
     esac
     if [ "$stage_attempts" -lt 1 ] || [ "$worker_ready_timeout" -lt 1 ]; then
-        cleanup_failed_worker "$out" "$wid" || true
-        printf '%s\n' "worker stage attempts and readiness timeout must be positive" > "$out/autoscaler.failed"
+        failure_reason="worker stage attempts and readiness timeout must be positive"
+        if ! cleanup_failed_worker "$out" "$wid"; then
+            failure_reason="$failure_reason; worker $wid cleanup failed and remains tracked for controller teardown"
+        fi
+        printf '%s\n' "$failure_reason" > "$out/autoscaler.failed"
         return 1
     fi
     # Allocation is ownership, not capacity. Keep it in worker-clones.ids for
