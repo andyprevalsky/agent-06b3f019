@@ -7,6 +7,7 @@ import type { Browser } from 'playwright';
 import { prisma } from '../database';
 import { logJson } from '../../utils/log';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
+import { retryWithBackoff } from '../retry';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
 import { createLocalBrowserSession, connectValidatedBrowser } from './sessionConnection';
 import { STEEL_API_BASE_URL, steelCdpUrl, steelDebugUrl } from './urls';
@@ -28,6 +29,15 @@ export const steel = new Steel({
 
 // Max retries when session validation fails
 export const MAX_SESSION_RETRIES = 3;
+
+export class SteelSessionCleanupError extends Error {
+  constructor(sessionId: string, cause: unknown) {
+    super(
+      `Failed to release Steel session ${sessionId} after bounded retries: ${cause instanceof Error ? cause.message : String(cause)}`
+    );
+    this.name = 'SteelSessionCleanupError';
+  }
+}
 
 const benchmarkAnonProfilesByAgent = new Map<string, string>();
 
@@ -375,9 +385,9 @@ export async function createSessionWithContext(
       if (validationBrowser === null) {
         log.info(`  ⚠️ Session ${session.id} failed validation, releasing...`);
         try {
-          await steel.sessions.release(session.id);
+          await releaseSteelRemoteSession(session.id);
         } catch (releaseErr) {
-          log.info(`  ⚠️ Failed to release invalid session: ${releaseErr}`);
+          throw new SteelSessionCleanupError(session.id, releaseErr);
         }
         lastError = new Error(`Session validation failed on attempt ${attempt}`);
         continue; // Retry
@@ -468,6 +478,7 @@ export async function createSessionWithContext(
       if (validationBrowser !== null) {
         await validationBrowser.close().catch(() => {});
       }
+      if (error instanceof SteelSessionCleanupError) throw error;
       // Steel 429 = concurrent session limit. Don't retry locally — bubble up so agent can backoff.
       const status =
         (error as Record<string, unknown>)?.status ??
@@ -513,7 +524,7 @@ export async function closeSession(
 
   try {
     // Release the Steel session
-    await steel.sessions.release(sessionId);
+    await releaseSteelRemoteSession(sessionId);
   } catch (error) {
     log.error('Failed to close session in Steel', {
       error: error instanceof Error ? error.message : String(error),
@@ -542,7 +553,25 @@ export async function closeSession(
 
 /** Release only the remote Steel browser without mutating BrowserSession. */
 export async function releaseSteelRemoteSession(sessionId: string): Promise<void> {
-  await steel.sessions.release(sessionId);
+  await retryWithBackoff(
+    async () => {
+      try {
+        await steel.sessions.release(sessionId);
+      } catch (error) {
+        const status =
+          (error as Record<string, unknown>)?.status ??
+          (error as Record<string, unknown>)?.statusCode;
+        if (status === 404) return;
+        throw error;
+      }
+    },
+    {
+      maxRetries: 3,
+      fixedDelays: [250, 500],
+      isRetryable: () => true,
+      component: 'Steel session release',
+    }
+  );
 }
 
 /**

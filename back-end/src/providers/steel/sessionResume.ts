@@ -6,6 +6,7 @@ import type { BrowserProviderName } from '../browser/types';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
 import {
   MAX_SESSION_RETRIES,
+  SteelSessionCleanupError,
   buildSteelProxySettings,
   envEnabled,
   isInvalidSteelProxyConfiguration,
@@ -96,6 +97,7 @@ export interface SteelSessionReplacementDependencies {
     proxySource?: string | null;
   }>;
   validateConnection: (wsUrl: string) => Promise<boolean>;
+  releaseSession?: (sessionId: string) => Promise<void>;
 }
 
 const defaultReplacementDependencies: SteelSessionReplacementDependencies = {
@@ -165,15 +167,7 @@ export async function recreateSession(
       const wsUrl = steelCdpUrl(session.id);
 
       if (!(await dependencies.validateConnection(wsUrl))) {
-        await releaseSteelRemoteSession(session.id).catch((releaseError) => {
-          log.warn('Failed to release invalid Steel session', {
-            sessionId: session.id,
-            error: releaseError instanceof Error ? releaseError.message : String(releaseError),
-          });
-        });
-        createdSessionId = null;
-        lastError = new Error(`Session validation failed on attempt ${attempt}`);
-        continue;
+        throw new Error(`Session validation failed on attempt ${attempt}`);
       }
 
       await navigateToSavedUrl(wsUrl, savedUrl);
@@ -220,12 +214,13 @@ export async function recreateSession(
       };
     } catch (error) {
       if (!committed && createdSessionId !== null) {
-        await releaseSteelRemoteSession(createdSessionId).catch((releaseError) => {
-          log.warn('Failed to release uncommitted Steel replacement session', {
-            sessionId: createdSessionId,
-            error: releaseError instanceof Error ? releaseError.message : String(releaseError),
-          });
-        });
+        const uncommittedSessionId = createdSessionId;
+        try {
+          await (dependencies.releaseSession ?? releaseSteelRemoteSession)(uncommittedSessionId);
+          createdSessionId = null;
+        } catch (releaseError) {
+          throw new SteelSessionCleanupError(uncommittedSessionId, releaseError);
+        }
       }
       if (error instanceof ConcurrentSessionReplacementError) throw error;
 

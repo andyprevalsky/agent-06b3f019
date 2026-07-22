@@ -4,14 +4,12 @@ import {
   closeSession as closeSteelSession,
   createSessionWithContext as createSteelSessionWithContext,
   getSteelSessionHealth,
-  releaseSteelRemoteSession,
   resumeSession as resumeSteelSession,
   steelApiUrl,
 } from '../steel/session';
 import { rotateSession as rotateSteelSession } from '../steel/sessionResume';
 import { getFingerprintInjectionData, listSessionFiles, uploadFileToSession } from '../steel/files';
 import { injectUserData } from '../steel/injection';
-import { createLogger } from '../logger';
 import { selectedBrowserProvider } from './config';
 import { getOrCreateBrowserContext } from './context';
 import {
@@ -21,7 +19,6 @@ import {
   getKernelSessionHealth,
   listKernelSessionFiles,
   readKernelSessionFile,
-  releaseKernelRemoteSession,
   resizeKernelViewport,
   resumeKernelSession,
   rotateKernelSession,
@@ -29,6 +26,7 @@ import {
 } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
 import type { RotationRecoveryAction, RotationStep } from './rotation';
+import { releaseSupersededBrowser } from './sessionCleanup';
 import type {
   BrowserFileInfo,
   BrowserProviderName,
@@ -52,7 +50,6 @@ export { injectUserData, getFingerprintInjectionData };
 
 export const getOrCreateContext = getOrCreateBrowserContext;
 const PROVIDER_FETCH_TIMEOUT_MS = 15_000;
-const log = createLogger('BrowserProvider');
 
 async function fetchProviderApi<T>(
   url: string,
@@ -136,7 +133,14 @@ export async function resumeSession(taskId: string): Promise<BrowserProviderResu
   const provider = await providerForTask(taskId);
   if (provider === 'kernel') return resumeKernelSession(taskId);
 
-  const session = await resumeSteelSession(taskId);
+  const replacement = await resumeSteelSession(taskId);
+  const { previousSessionId, previousProvider, ...session } = replacement;
+  await releaseSupersededBrowser({
+    taskId,
+    previousProvider,
+    previousSessionId,
+    operation: 'resume',
+  });
   return {
     provider: session.sessionId.startsWith('local-') ? 'local' : 'steel',
     debugUrl: session.debugUrl,
@@ -181,17 +185,11 @@ export async function rotateProxy(
 
   const replacement = await rotateSteelSession(taskId);
   const { previousSessionId, previousProvider, ...session } = replacement;
-  const releasePrevious =
-    previousProvider === 'kernel'
-      ? releaseKernelRemoteSession(previousSessionId)
-      : releaseSteelRemoteSession(previousSessionId);
-  await releasePrevious.catch((error) => {
-    log.warn('Failed to release superseded browser after Steel rotation', {
-      taskId,
-      previousProvider,
-      previousSessionId,
-      error: error instanceof Error ? error.message : String(error),
-    });
+  await releaseSupersededBrowser({
+    taskId,
+    previousProvider,
+    previousSessionId,
+    operation: 'rotation',
   });
 
   return {

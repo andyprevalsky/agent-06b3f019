@@ -1,0 +1,48 @@
+import { createLogger } from '../logger';
+import { releaseSteelRemoteSession } from '../steel/session';
+import { releaseKernelRemoteSession } from './kernel';
+import type { BrowserProviderName } from './types';
+
+const log = createLogger('BrowserProvider');
+
+export interface SupersededBrowserRelease {
+  taskId: string;
+  previousProvider: BrowserProviderName;
+  previousSessionId: string;
+  operation: 'resume' | 'rotation';
+}
+
+export interface SupersededBrowserReleaseDependencies {
+  releaseKernel: (sessionId: string) => Promise<void>;
+  releaseSteel: (sessionId: string) => Promise<void>;
+}
+
+const defaultDependencies: SupersededBrowserReleaseDependencies = {
+  releaseKernel: releaseKernelRemoteSession,
+  releaseSteel: releaseSteelRemoteSession,
+};
+
+/** Reap an already-replaced remote browser without hiding cleanup exhaustion. */
+export async function releaseSupersededBrowser(
+  release: SupersededBrowserRelease,
+  dependencies: SupersededBrowserReleaseDependencies = defaultDependencies
+): Promise<boolean> {
+  try {
+    if (release.previousProvider === 'kernel') {
+      await dependencies.releaseKernel(release.previousSessionId);
+    } else {
+      await dependencies.releaseSteel(release.previousSessionId);
+    }
+    return true;
+  } catch (error) {
+    // The replacement is already committed. Returning it keeps the worker in
+    // sync with the DB; provider release helpers have exhausted bounded retries.
+    log.error(`Failed to release superseded browser after ${release.operation}`, {
+      taskId: release.taskId,
+      previousProvider: release.previousProvider,
+      previousSessionId: release.previousSessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}

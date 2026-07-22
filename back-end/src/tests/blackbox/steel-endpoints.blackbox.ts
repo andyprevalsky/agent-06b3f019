@@ -1,18 +1,101 @@
 #!/usr/bin/env tsx
 
 import {
+  releaseSteelRemoteSession,
+  steel,
   steelApiUrl,
   steelCdpConnectionUrl,
   steelCdpUrl,
   steelDebugUrl,
   steelPublicCdpUrl,
 } from '../../providers/steel/session';
+import { releaseSupersededBrowser } from '../../providers/browser/sessionCleanup';
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
 }
 
-function main(): void {
+async function assertReleaseRetriesAreBounded(): Promise<void> {
+  const sessions = steel.sessions as unknown as {
+    release: (sessionId: string) => Promise<unknown>;
+  };
+  const originalRelease = sessions.release;
+  try {
+    let attempts = 0;
+    sessions.release = async () => {
+      attempts += 1;
+      if (attempts < 3) throw new Error('transient release failure');
+      return {};
+    };
+    await releaseSteelRemoteSession('retry-session');
+    assert(attempts === 3, `Steel release used ${attempts} attempts instead of 3`);
+
+    attempts = 0;
+    sessions.release = async () => {
+      attempts += 1;
+      const notFound = new Error('already released') as Error & { status: number };
+      notFound.status = 404;
+      throw notFound;
+    };
+    await releaseSteelRemoteSession('already-released-session');
+    assert(attempts === 1, 'Steel 404 release should be treated as idempotent success');
+  } finally {
+    sessions.release = originalRelease;
+  }
+}
+
+async function assertSupersededProviderCleanupIsExplicit(): Promise<void> {
+  const released: string[] = [];
+  const dependencies = {
+    releaseKernel: async (sessionId: string) => {
+      released.push(`kernel:${sessionId}`);
+    },
+    releaseSteel: async (sessionId: string) => {
+      released.push(`steel:${sessionId}`);
+    },
+  };
+  const kernelReleased = await releaseSupersededBrowser(
+    {
+      taskId: 'task-1',
+      previousProvider: 'kernel',
+      previousSessionId: 'kernel-old',
+      operation: 'rotation',
+    },
+    dependencies
+  );
+  const steelReleased = await releaseSupersededBrowser(
+    {
+      taskId: 'task-2',
+      previousProvider: 'steel',
+      previousSessionId: 'steel-old',
+      operation: 'resume',
+    },
+    dependencies
+  );
+  assert(kernelReleased && steelReleased, 'superseded provider cleanup reported failure');
+  assert(
+    released.join(',') === 'kernel:kernel-old,steel:steel-old',
+    `superseded cleanup selected the wrong provider: ${released.join(',')}`
+  );
+
+  const exhausted = await releaseSupersededBrowser(
+    {
+      taskId: 'task-3',
+      previousProvider: 'steel',
+      previousSessionId: 'steel-unreleasable',
+      operation: 'rotation',
+    },
+    {
+      ...dependencies,
+      releaseSteel: async () => {
+        throw new Error('bounded retries exhausted');
+      },
+    }
+  );
+  assert(exhausted === false, 'cleanup exhaustion was not surfaced to the caller');
+}
+
+async function main(): Promise<void> {
   const previous = process.env.STEEL_API_KEY;
   process.env.STEEL_API_KEY = 'steel-test-key';
   try {
@@ -54,6 +137,8 @@ function main(): void {
       debugUrl.searchParams.get('interactive') === 'false',
       'Steel live view was not read-only'
     );
+    await assertReleaseRetriesAreBounded();
+    await assertSupersededProviderCleanupIsExplicit();
     console.log('PASS Steel URLs keep API keys local to the CDP connection boundary');
   } finally {
     if (previous === undefined) delete process.env.STEEL_API_KEY;
@@ -61,4 +146,7 @@ function main(): void {
   }
 }
 
-main();
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

@@ -11,6 +11,7 @@
 import { buildFingerprintScript } from '../../providers/steel/injectionScripts';
 import { prisma } from '../../providers/database';
 import {
+  SteelSessionCleanupError,
   buildSteelProxySettings,
   isInvalidSteelProxyConfiguration,
 } from '../../providers/steel/session';
@@ -227,6 +228,39 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
     assert(secondGeo?.city === undefined, 'replacement retry did not drop rejected city');
     assert(secondGeo?.state === 'CA', 'replacement retry dropped state with city');
     assert(secondGeo?.country === 'US', 'replacement retry dropped country with city');
+
+    let cleanupCreateAttempts = 0;
+    let cleanupFailure: unknown;
+    try {
+      await recreateSession(
+        'replacement-city-retry-task',
+        { forceManagedRotation: true },
+        {
+          createSession: async () => {
+            cleanupCreateAttempts += 1;
+            return {
+              id: 'steel-invalid-and-unreleasable',
+              debugUrl: 'https://steel.example/debug',
+              profileId: null,
+            };
+          },
+          validateConnection: async () => false,
+          releaseSession: async () => {
+            throw new Error('release unavailable after bounded retries');
+          },
+        }
+      );
+    } catch (error) {
+      cleanupFailure = error;
+    }
+    assert(
+      cleanupFailure instanceof SteelSessionCleanupError,
+      'replacement did not surface a terminal cleanup failure'
+    );
+    assert(
+      cleanupCreateAttempts === 1,
+      `replacement created ${cleanupCreateAttempts} sessions after cleanup failed`
+    );
   } finally {
     (
       prisma.browserSession as unknown as { findUnique: typeof prisma.browserSession.findUnique }
@@ -273,7 +307,7 @@ async function main(): Promise<void> {
       fn: testInvalidProxyConfigurationClassification,
     },
     {
-      name: 'Steel replacement retries a rejected city at country and state scope',
+      name: 'Steel replacement retries rejected cities and stops after cleanup failure',
       fn: testReplacementRetryDropsRejectedCity,
     },
   ];
