@@ -94,6 +94,13 @@ VOLUME_NAME="cloudbench_data"
 # clones mirror prod's performance-1x/2GB shape.
 FLEET_PRIMARY_VM_SIZE="${CLOUDBENCH_FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}"
 FLEET_PRIMARY_VM_MEMORY="${CLOUDBENCH_FLEET_PRIMARY_VM_MEMORY:-4096}"
+# A small subset of benchmarks runs the test-payment frontend bundled inside
+# the primary VM. The Vite production build exceeds the default 4GB guest's
+# physical memory during chunk rendering, so only those primaries use a larger
+# shape. Keep the stopped pool at the capacity-safe default; bundled-frontend
+# tasks bypass the pool and clone fresh with this shape.
+FLEET_BUNDLED_FRONTEND_VM_SIZE="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE:-shared-cpu-4x}"
+FLEET_BUNDLED_FRONTEND_VM_MEMORY="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_MEMORY:-8192}"
 FLEET_WORKER_VM_SIZE="${CLOUDBENCH_FLEET_WORKER_VM_SIZE:-performance-1x}"
 FLEET_WORKER_VM_MEMORY="${CLOUDBENCH_FLEET_WORKER_VM_MEMORY:-2048}"
 FLEET_WORKER_HEALTH_PORT="${CLOUDBENCH_WORKER_HEALTH_PORT:-3103}"
@@ -118,6 +125,45 @@ SELF_MANAGED_HUB_RUN="0"
 # ── Args ─────────────────────────────────────────────────────────────────────
 BENCHES=()
 SIM_ON_CSV=""
+
+bench_needs_bundled_frontend_primary() {  # bench_needs_bundled_frontend_primary <task>
+    case "$1" in
+        agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+primary_vm_size_for_bench() {  # primary_vm_size_for_bench <task>
+    if bench_needs_bundled_frontend_primary "$1"; then
+        printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_SIZE"
+    else
+        printf '%s\n' "$FLEET_PRIMARY_VM_SIZE"
+    fi
+}
+
+primary_vm_memory_for_bench() {  # primary_vm_memory_for_bench <task>
+    if bench_needs_bundled_frontend_primary "$1"; then
+        printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_MEMORY"
+    else
+        printf '%s\n' "$FLEET_PRIMARY_VM_MEMORY"
+    fi
+}
+
+shared_cpu_units_for_vm_size() {  # shared_cpu_units_for_vm_size <vm-size>
+    local vm_size="$1" units
+    case "$vm_size" in
+        shared-cpu-*)
+            units="${vm_size##*-}"
+            units="${units%x}"
+            case "$units" in ''|*[!0-9]*) printf '%s\n' 2 ;; *) printf '%s\n' "$units" ;; esac
+            ;;
+        *)
+            printf '%s\n' 0
+            ;;
+    esac
+}
 BENCH_REF=""
 # Per-workspace hub port: the hub scans THIS workspace's runs-root, so two
 # workspaces must not share a port (the second would adopt the first's hub and
@@ -2796,6 +2842,7 @@ enforce_app_capacity_guard() {
     local shared_cpu_governor shared_cpu_headroom shared_cpu_ceiling
     local app_machine_ceiling primary_nx primary_shared_units requested_machines
     local requested_shared requested_fresh_machines available_pool_machines
+    local requested_pool_eligible_machines bench bench_vm_size bench_shared_units
     local replacement_slots reservation_machine_slots reservation_result reservation_status
     local reservation_outcome reserved_machines reserved_shared
     local capacity_counts active_shared active_perf
@@ -2825,12 +2872,31 @@ enforce_app_capacity_guard() {
     fi
     shared_cpu_ceiling=$(( shared_cpu_governor - shared_cpu_headroom ))
 
-    # Shared units per newly-provisioned primary, parsed from the primary shape
+    # Shared units per default primary, parsed from the primary shape
     # (shared-cpu-Nx → N); default 2 if the shape is non-standard.
     primary_nx="${FLEET_PRIMARY_VM_SIZE##*-}"; primary_nx="${primary_nx%x}"
     case "$primary_nx" in ''|*[!0-9]*) primary_shared_units=2 ;; *) primary_shared_units="$primary_nx" ;; esac
     requested_machines="${PROVISION_POOL:-${#BENCHES[@]}}"
-    requested_shared=$(( requested_machines * primary_shared_units ))
+    requested_pool_eligible_machines="$requested_machines"
+    if [ -n "${PROVISION_POOL:-}" ]; then
+        requested_shared=$(( requested_machines * primary_shared_units ))
+    else
+        requested_shared=0
+        requested_pool_eligible_machines=0
+        for bench in "${BENCHES[@]}"; do
+            bench_vm_size="$(primary_vm_size_for_bench "$bench")"
+            bench_shared_units="$(shared_cpu_units_for_vm_size "$bench_vm_size")"
+            case "$bench_shared_units" in ''|*[!0-9]*)
+                echo "❌ invalid shared-CPU units for primary VM size '$bench_vm_size'" >&2
+                return 1
+                ;;
+            esac
+            requested_shared=$(( requested_shared + bench_shared_units ))
+            if ! bench_needs_bundled_frontend_primary "$bench"; then
+                requested_pool_eligible_machines=$(( requested_pool_eligible_machines + 1 ))
+            fi
+        done
+    fi
     # Pool provisioning does not run the post-clone boot-config update phase.
     [ -n "${PROVISION_POOL:-}" ] && replacement_slots=0
 
@@ -2843,8 +2909,8 @@ enforce_app_capacity_guard() {
         return 1
         ;;
     esac
-    [ "$available_pool_machines" -gt "$requested_machines" ] \
-        && available_pool_machines="$requested_machines"
+    [ "$available_pool_machines" -gt "$requested_pool_eligible_machines" ] \
+        && available_pool_machines="$requested_pool_eligible_machines"
     requested_fresh_machines=$(( requested_machines - available_pool_machines ))
     reservation_machine_slots=$(( requested_fresh_machines + replacement_slots ))
 
@@ -3834,12 +3900,22 @@ for bench in "${BENCHES[@]}"; do
     out="$FLEET_DIR/$bench"
     rm -rf "$out" 2>/dev/null || true; mkdir -p "$out"
     (
+        bench_vm_size="$(primary_vm_size_for_bench "$bench")"
+        bench_vm_memory="$(primary_vm_memory_for_bench "$bench")"
+        pcid=""
         # Prefer a pre-provisioned pool machine (skips the ~300s volume fork);
         # fall back to cloning fresh (bounded + retried) if the pool is empty.
-        pcid="$(claim_pool_machine)"
+        #
+        # Bundled-frontend tasks need a larger primary for the Vite production
+        # build, so they cannot safely claim the default 4GB stopped pool.
+        if bench_needs_bundled_frontend_primary "$bench"; then
+            echo "  ↪️  [$bench] using bundled frontend primary shape ${bench_vm_size}/${bench_vm_memory}MB" >&2
+        else
+            pcid="$(claim_pool_machine)"
+        fi
         if [ -n "$pcid" ]; then
             printf 'pool %s\n' "$pcid" > "$out/.cid"
-        elif pcid="$(clone_machine_target "$out/primary.ids")"; then
+        elif pcid="$(clone_machine_target "$out/primary.ids" "$WARM_ID" "$bench_vm_size" "$bench_vm_memory")"; then
             printf 'clone %s\n' "$pcid" > "$out/.cid"
         fi
     ) &

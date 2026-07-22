@@ -975,7 +975,9 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     assert "scripts/run-predeploy-local" in step
     assert "scripts/run-predeploy-cloud" in step
     assert "Benchmarks → Runs" in step
-    assert "6/6" in step
+    assert "ALL non-skipped Pre-Deploy smoke benchmarks must pass" in step
+    assert "deploy-approved smoke skip is a Claude Code benchmark" in step
+    assert "skippable by future deploys without additional human approval" in step
     assert ".context/predeploy-runs/<run-id>/runner.log" in step
     assert "run_benchmark.py --suite smoke" not in step
     assert "scripts/run-deploy-stage --start" in deploy
@@ -984,7 +986,6 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     assert "bash scripts/run-predeploy-local" in step
     assert "LOCAL isolated benchmark stack" in step
     assert "Use the cloud fleet only as an explicit opt-in" in step
-    assert "6/6" in step
     assert "run_benchmark.py --suite smoke" not in step
 
     predeploy_local = PREDEPLOY_LOCAL_SCRIPT.read_text()
@@ -2100,7 +2101,8 @@ def test_boot_update_always_submits_a_bounded_post_config_start() -> None:
     assert "FLY machine start" not in claim
     assert 'write_pool_claim "$claim_path"' in claim
     worker_provision = _extract_fleet_function(fleet, "provision_worker() {")
-    storage_ready = worker_provision.index('if machine_storage_ready "$wid"; then')
+    storage_ready = worker_provision.index('if ! machine_storage_ready "$wid"; then')
+    assert 'machine_storage_failed "$wid"' in worker_provision[storage_ready:]
     neutralize = worker_provision.index('machine update "$wid"', storage_ready)
     first_start = worker_provision.index('machine start "$wid"', neutralize)
     assert storage_ready < neutralize < first_start
@@ -3899,6 +3901,18 @@ def _extract_fleet_function(source: str, signature: str) -> str:
     return source[start:end]
 
 
+def _fleet_primary_shape_helpers(source: str) -> str:
+    return "".join(
+        _extract_fleet_function(source, signature)
+        for signature in (
+            "bench_needs_bundled_frontend_primary() {",
+            "primary_vm_size_for_bench() {",
+            "primary_vm_memory_for_bench() {",
+            "shared_cpu_units_for_vm_size() {",
+        )
+    )
+
+
 def _clone_index_adapter_fixture() -> str:
     """Model the controller's keyed inventory boundary in isolated clone tests.
 
@@ -4223,6 +4237,39 @@ def test_fleet_provisions_clones_concurrently() -> None:
     # workspace deletion, and it calls reap_machine (which also reaps volumes).
     assert "fleet_registry_record_name" in fleet
     assert "reap_registry_clones" in fleet
+
+
+def test_bundled_frontend_primary_provisioning_bypasses_default_pool() -> None:
+    """A 4GB stopped pool Machine must not be assigned to a bundled Vite build."""
+    fleet = FLEET_SCRIPT.read_text()
+    assert (
+        'FLEET_BUNDLED_FRONTEND_VM_SIZE="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE:-shared-cpu-4x}"'
+        in fleet
+    )
+    assert (
+        'FLEET_BUNDLED_FRONTEND_VM_MEMORY="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_MEMORY:-8192}"'
+        in fleet
+    )
+    classifier = _extract_fleet_function(fleet, "bench_needs_bundled_frontend_primary() {")
+    for task in (
+        "agent-payment-test-shop",
+        "agent-payment-idempotent-abandonment",
+        "agent-payment-abandonment",
+        "agent-payment-setup-resume",
+        "gate-subscription-card-mint",
+        "gate-kyc-card-mint",
+    ):
+        assert task in classifier
+
+    prov = fleet.index("# ── Phase 1:")
+    wait_all = fleet.index('for pp in "${PROVISION_PIDS[@]}"; do wait')
+    phase1 = fleet[prov:wait_all]
+    assert 'bench_needs_bundled_frontend_primary "$bench"' in phase1
+    assert 'pcid="$(claim_pool_machine)"' in phase1
+    assert 'clone_machine_target "$out/primary.ids" "$WARM_ID" "$bench_vm_size" "$bench_vm_memory"' in phase1
+    assert phase1.index('bench_needs_bundled_frontend_primary "$bench"') < phase1.index(
+        'pcid="$(claim_pool_machine)"'
+    )
 
 
 def test_reap_machine_destroys_the_clones_forked_volume(tmp_path: Path) -> None:
@@ -6911,7 +6958,7 @@ def test_capacity_guard_reserves_machine_slots_for_boot_config_replacements(tmp_
     every boot update before the synchronized start barrier.
     """
     fleet = FLEET_SCRIPT.read_text()
-    support = "".join(
+    support = _fleet_primary_shape_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "available_stopped_pool_machine_count() {",
@@ -6978,7 +7025,7 @@ def test_capacity_guard_serializes_cross_workspace_reservations(tmp_path: Path) 
     host-wide reservations must make exactly one controller lose admission.
     """
     fleet = FLEET_SCRIPT.read_text()
-    support = []
+    support = [_fleet_primary_shape_helpers(fleet)]
     for signature in (
         "available_stopped_pool_machine_count() {",
         "capacity_reserve_slots() {",
@@ -7054,7 +7101,7 @@ def test_capacity_guard_does_not_count_available_pool_machines_twice(tmp_path: P
     incorrectly reject the safe boundary as 58 > 56.
     """
     fleet = FLEET_SCRIPT.read_text()
-    support = []
+    support = [_fleet_primary_shape_helpers(fleet)]
     for signature in (
         "available_stopped_pool_machine_count() {",
         "capacity_reserve_slots() {",
@@ -7112,6 +7159,75 @@ enforce_app_capacity_guard
     assert result.returncode == 0, result.stderr
 
 
+def test_capacity_guard_reserves_bundled_frontend_shape_and_pool_eligibility(
+    tmp_path: Path,
+) -> None:
+    """Bundled-frontend benches need larger primaries and cannot use the 4GB pool.
+
+    Two bundled tasks plus two normal tasks request 4 + 4 + 2 + 2 shared CPU
+    units.  The stopped pool can satisfy only the two normal primaries; treating
+    all four benches as default 2x pool-eligible work would under-reserve both
+    shared CPU and fresh Machine slots.
+    """
+    fleet = FLEET_SCRIPT.read_text()
+    support = _fleet_primary_shape_helpers(fleet) + "".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "available_stopped_pool_machine_count() {",
+            "capacity_reserve_slots() {",
+        )
+    )
+    guard = _extract_fleet_function(fleet, "enforce_app_capacity_guard() {")
+    machines = [
+        {
+            "id": f"active-{index}",
+            "state": "started",
+            "config": {"guest": {"cpu_kind": "shared", "cpus": 2}},
+        }
+        for index in range(65)
+    ]
+    pool_ids = [f"{index + 1:014x}" for index in range(4)]
+    machines.extend(
+        {
+            "id": machine_id,
+            "state": "stopped",
+            "config": {"guest": {"cpu_kind": "shared", "cpus": 2}},
+        }
+        for machine_id in pool_ids
+    )
+    pool_file = tmp_path / "pool.ids"
+    pool_file.write_text("\n".join(pool_ids) + "\n")
+    script = f"""set -u
+warm_json={shlex.quote(json.dumps(machines))}
+BENCHES=(gate-subscription-card-mint agent-payment-test-shop ordinary-a ordinary-b)
+PROVISION_POOL=""
+FLEET_PRIMARY_VM_SIZE=shared-cpu-2x
+FLEET_PRIMARY_VM_MEMORY=4096
+FLEET_BUNDLED_FRONTEND_VM_SIZE=shared-cpu-4x
+FLEET_BUNDLED_FRONTEND_VM_MEMORY=8192
+APP=navi-whisper-lux-bench
+RUN_ID=test-bundled-primary-capacity
+FLEET_OWNER_HOST="$(hostname)"
+FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+FLEET_OWNER_TOKEN={'2' * 32}
+POOL_IDS_FILE={shlex.quote(str(pool_file))}
+POOL_CLAIMS_DIR={shlex.quote(str(tmp_path / "claims"))}
+CLOUDBENCH_CAPACITY_RESERVATION_ROOT={shlex.quote(str(tmp_path / "reservations"))}
+CLOUDBENCH_APP_MACHINE_CEILING=200
+CLOUDBENCH_SHARED_CPU_GOVERNOR=160
+CLOUDBENCH_SHARED_CPU_HEADROOM=20
+CLOUDBENCH_BOOT_CONFIG_MAX_IN_FLIGHT=4
+{support}
+{guard}
+enforce_app_capacity_guard
+"""
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 1, result.stderr
+    assert "Shared-CPU capacity governor reached: 130 active shared units" in result.stderr
+    assert "this run's 4 primaries (12 units) = 142" in result.stderr
+
+
 def test_capacity_guard_never_subtracts_unclaimable_pool_ids(tmp_path: Path) -> None:
     """Pool admission must use the exact same Machine-ID contract as claim.
 
@@ -7120,7 +7236,7 @@ def test_capacity_guard_never_subtracts_unclaimable_pool_ids(tmp_path: Path) -> 
     an ID as reusable would under-reserve a physical Machine slot.
     """
     fleet = FLEET_SCRIPT.read_text()
-    support = "".join(
+    support = _fleet_primary_shape_helpers(fleet) + "".join(
         _extract_fleet_function(fleet, signature)
         for signature in (
             "available_stopped_pool_machine_count() {",
