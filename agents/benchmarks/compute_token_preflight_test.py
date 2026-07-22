@@ -37,6 +37,33 @@ class _Result:
         self.stderr = ""
 
 
+class _JsonResponse:
+    def __init__(self, status_code: int, payload: dict) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def _fake_async_client_with(*responses: _JsonResponse):
+    pending = list(responses)
+
+    class _FakeAsyncClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc, _tb):
+            return False
+
+        async def get(self, *_args, **_kwargs):
+            if not pending:
+                raise AssertionError("unexpected extra HTTP request")
+            return pending.pop(0)
+
+    return _FakeAsyncClient
+
+
 def _captured_seed_env(**kwargs) -> dict[str, str]:
     seen: dict[str, dict[str, str]] = {}
 
@@ -268,6 +295,94 @@ def test_blanket_preflight_uses_tolerant_sync():
         asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
 
     assert captured == {"gpt": True, "claude": True}
+
+
+def test_claude_code_preflight_rejects_gpt_only_token_without_anthropic_fallback():
+    with (
+        patch.object(rb, "_api_headers", new=AsyncMock(return_value={})),
+        patch.object(
+            rb.httpx,
+            "AsyncClient",
+            _fake_async_client_with(
+                _JsonResponse(200, {"type": "gpt", "accessToken": "codex-token"}),
+                _JsonResponse(200, {"configured": True, "onCooldown": True}),
+            ),
+        ),
+    ):
+        assert asyncio.run(rb._check_claude_code_credentials("http://localhost:3001")) is False
+
+
+def test_claude_code_preflight_accepts_claude_token():
+    with (
+        patch.object(rb, "_api_headers", new=AsyncMock(return_value={})),
+        patch.object(
+            rb.httpx,
+            "AsyncClient",
+            _fake_async_client_with(_JsonResponse(200, {"type": "claude", "accessToken": "claude-token"})),
+        ),
+    ):
+        assert asyncio.run(rb._check_claude_code_credentials("http://localhost:3001")) is True
+
+
+def test_claude_code_preflight_rejects_anthropic_fallback_without_claude_token():
+    with (
+        patch.object(rb, "_api_headers", new=AsyncMock(return_value={})),
+        patch.object(
+            rb.httpx,
+            "AsyncClient",
+            _fake_async_client_with(
+                _JsonResponse(200, {"type": "gpt", "accessToken": "codex-token"}),
+            ),
+        ),
+    ):
+        assert asyncio.run(rb._check_claude_code_credentials("http://localhost:3001")) is False
+
+
+def test_ci_allows_only_claude_code_credential_skips():
+    skipped = rb.TaskResult(
+        name="claude-code-agent",
+        passed=False,
+        agent_id="",
+        status="SKIPPED",
+        progress_score=0,
+        duration_seconds=0,
+        cost_cents=0,
+        message_count=0,
+        failure_reason=rb.CLAUDE_CODE_CREDENTIAL_SKIP_REASON,
+    )
+    summary = {"failed": 0, "skipped": 1}
+    assert rb._ci_should_fail(summary, [skipped]) is False
+
+
+def test_ci_still_fails_other_skips():
+    skipped = rb.TaskResult(
+        name="chat-mode",
+        passed=False,
+        agent_id="",
+        status="SKIPPED",
+        progress_score=0,
+        duration_seconds=0,
+        cost_cents=0,
+        message_count=0,
+        failure_reason=rb.CLAUDE_CODE_CREDENTIAL_SKIP_REASON,
+    )
+    summary = {"failed": 0, "skipped": 1}
+    assert rb._ci_should_fail(summary, [skipped]) is True
+
+
+def test_cache_ratchet_ignores_skipped_tasks():
+    skipped = rb.TaskResult(
+        name="claude-code-agent",
+        passed=False,
+        agent_id="",
+        status="SKIPPED",
+        progress_score=0,
+        duration_seconds=0,
+        cost_cents=0,
+        message_count=0,
+        failure_reason=rb.CLAUDE_CODE_CREDENTIAL_SKIP_REASON,
+    )
+    assert rb.cache_ratchet_failures([skipped], {"claude-code-agent": 40.0}) == []
 
 
 def test_simulation_preflight_uses_restored_seed_without_prod_sync():

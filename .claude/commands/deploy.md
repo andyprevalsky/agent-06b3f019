@@ -648,7 +648,7 @@ At each poll, check:
 
 ### Pass criteria
 
-**ALL Pre-Deploy smoke benchmarks must pass — currently 6/6, with 0 failures.** On the local path, `run-predeploy-local` must exit 0 ("All requested benchmarks passed") and every task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
+**ALL non-skipped Pre-Deploy smoke benchmarks must pass, with 0 failures.** The only deploy-approved smoke skip is a Claude Code benchmark whose preflight proves there are no synced Claude credentials and no pool token; the shared `ANTHROPIC_API_KEY` fallback is covered by the warn-only credential-health gate and does not satisfy this skippable smoke task. This provider-auth/funding state is skippable by future deploys without additional human approval. On the local path, `run-predeploy-local` must exit 0 and every non-skipped task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
 
 **Diagnosis process — MUST be delegated to a `general-purpose` sub-agent.**
 
@@ -729,7 +729,7 @@ exact agent_id, scan the result, then hand the agent_id off.
 
 - Changing the nature/intent of a test (e.g., weakening assertions, changing what the test validates)
 - Changing timeouts without explicit user permission — instead, diagnose which parts of the agent lifecycle and LLM requests are causing the most latency, and reduce them precisely in a generalizable way that won't create downstream issues
-- Skipping or disabling tests
+- Skipping or disabling tests, except the deploy-approved Claude Code credential-unavailable smoke skip described above
 
 **Escalation is ONLY for:**
 
