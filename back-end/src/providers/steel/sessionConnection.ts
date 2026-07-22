@@ -4,6 +4,7 @@ import { prisma } from '../database';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
 import { retryWithBackoff } from '../retry';
 import { log } from './types';
+import { steelCdpConnectionUrl } from './urls';
 
 const SESSION_VALIDATION_TIMEOUT = 10000;
 const WS_BACKOFF_DELAYS = [100, 400, 800];
@@ -23,7 +24,7 @@ export async function connectValidatedBrowser(wsUrl: string): Promise<Browser | 
         let browser: Browser | undefined;
         try {
           browser = await Promise.race([
-            chromium.connectOverCDP(wsUrl),
+            chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl)),
             new Promise<never>((_, reject) =>
               setTimeout(() => reject(new Error('Connection timeout')), SESSION_VALIDATION_TIMEOUT)
             ),

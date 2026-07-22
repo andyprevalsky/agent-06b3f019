@@ -5,6 +5,7 @@ import {
 } from '../../providers/browser';
 import { createLogger } from '../../providers/logger';
 import { canonicalAuthRealm } from '../../providers/authRealm';
+import { steelPublicCdpUrl } from '../../providers/steel/urls';
 import * as repo from './repo';
 import { serializePasskeys, serializePasswords, toUserSettings } from './service.serializers';
 
@@ -107,7 +108,7 @@ function buildTaskInfoResponse(
     task_id: session.id,
     session_id: session.sessionId,
     debug_url: session.debugUrl,
-    ws_url: session.wsUrl,
+    ws_url: session.wsUrl === null ? null : steelPublicCdpUrl(session.wsUrl),
     status: session.status,
     start_url: startUrl,
     current_url: currentUrl,

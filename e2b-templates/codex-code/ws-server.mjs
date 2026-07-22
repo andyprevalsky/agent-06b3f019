@@ -45,14 +45,14 @@ let eventBuffer = [];
 let exitCode = null;
 let processExited = false;
 let stdoutLineBuffer = "";
-// Set when a Codex turn fails with the ChatGPT usage-limit / quota error. Drives
-// the runtime fallback to the funded OpenAI API key (see the run-with-fallback
-// block below). The ChatGPT OAuth token can be DB-valid yet over quota, so this
-// only surfaces mid-run — a null-credential fallback in the backend can't catch it.
-let sawUsageLimit = false;
+// Set when a Codex turn proves the ChatGPT OAuth credential unusable. Drives the
+// runtime fallback to the funded OpenAI API key (see the run-with-fallback block
+// below). A credential can be DB-valid yet revoked or over quota, so this only
+// surfaces mid-run — a null-credential fallback in the backend cannot catch it.
+let oauthFallbackReason = null;
 const clients = new Set();
 
-function isUsageLimitMessage(message) {
+function classifyOAuthFallbackReason(message) {
   // Restricted to explicit ChatGPT/OpenAI plan-exhaustion wording. Broad terms
   // like a bare "quota" or "hit your usage" can match unrelated sandbox tooling
   // errors (disk/rate quotas) and would trigger a wasteful funded-key retry that
@@ -62,9 +62,22 @@ function isUsageLimitMessage(message) {
   // is the plan-exhaustion message returned on the responses API (only "usage
   // limit"/"purchase more credits" wording was matched before, so this exact
   // message slipped past and the funded-key fallback never fired).
-  return /usage[ _]limit|usage_limit_reached|hit your usage limit|purchase more credits|insufficient[_ ]quota|check your plan and billing/i.test(
-    String(message || ""),
-  );
+  const text = String(message || "");
+  if (
+    /usage[ _]limit|usage_limit_reached|hit your usage limit|purchase more credits|insufficient[_ ]quota|check your plan and billing/i.test(
+      text,
+    )
+  ) {
+    return "usage_limit_reached";
+  }
+  if (
+    /refresh_token_invalidated|refresh token (?:was )?revoked|access token could not be refreshed|your session has ended|log out and sign in again/i.test(
+      text,
+    )
+  ) {
+    return "oauth_refresh_invalid";
+  }
+  return null;
 }
 const wss = new WebSocketServer({ port: PORT });
 
@@ -136,7 +149,7 @@ function renderCodexJsonLine(line) {
   }
   if (event.type === "turn.failed") {
     const message = event.error?.message || event.message || "unknown error";
-    if (isUsageLimitMessage(message)) sawUsageLimit = true;
+    oauthFallbackReason ??= classifyOAuthFallbackReason(message);
     appendEvent({
       type: "error",
       raw_type: event.type,
@@ -148,7 +161,7 @@ function renderCodexJsonLine(line) {
   if (event.type === "error") {
     const message =
       event.message || event.error?.message || JSON.stringify(event);
-    if (isUsageLimitMessage(message)) sawUsageLimit = true;
+    oauthFallbackReason ??= classifyOAuthFallbackReason(message);
     appendEvent({
       type: "error",
       raw_type: event.type,
@@ -567,21 +580,23 @@ let { code, signal } = await runCodex(
   buildCodexArgs({ useFastModeProxy: !usingApiKey }),
 );
 
-// Runtime fallback: the ChatGPT OAuth token hit its usage limit mid-run. Re-login
-// with the funded OpenAI API key and retry ONCE against the default OpenAI endpoint
-// (no ChatGPT proxy). Mirrors the Rose completions compute-token→OpenAI-key fallback
-// so the code agent keeps working when the OAuth quota is exhausted.
-if (code !== 0 && !usingApiKey && OPENAI_API_KEY && sawUsageLimit) {
-  log("info", "Codex OAuth hit usage limit; retrying with OPENAI_API_KEY");
+// Runtime fallback: the ChatGPT OAuth token became unusable mid-run. Re-login
+// with the funded OpenAI API key and retry ONCE against the default OpenAI
+// endpoint (no ChatGPT proxy). Mirrors the Rose compute-token→API-key fallback.
+if (code !== 0 && !usingApiKey && OPENAI_API_KEY && oauthFallbackReason) {
+  const fallbackReason = oauthFallbackReason;
+  log("info", "Codex OAuth unavailable; retrying with OPENAI_API_KEY", {
+    reason: fallbackReason,
+  });
   appendOutput(
     "stdout",
-    "[Codex] ChatGPT usage limit reached — retrying with funded OpenAI API key\n",
+    "[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n",
   );
   appendEvent({
     type: "auth_fallback",
     from: "chatgpt_oauth",
     to: "openai_api_key",
-    reason: "usage_limit_reached",
+    reason: fallbackReason,
   });
   try {
     rmSync(join(codexHome, "auth.json"), { force: true });
@@ -590,8 +605,10 @@ if (code !== 0 && !usingApiKey && OPENAI_API_KEY && sawUsageLimit) {
   }
   if (await loginWithApiKey()) {
     usingApiKey = true;
-    sawUsageLimit = false;
-    ({ code, signal } = await runCodex(buildCodexArgs({ useFastModeProxy: false })));
+    oauthFallbackReason = null;
+    ({ code, signal } = await runCodex(
+      buildCodexArgs({ useFastModeProxy: false }),
+    ));
   }
 }
 

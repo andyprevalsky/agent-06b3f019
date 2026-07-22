@@ -88,6 +88,18 @@ function recordingMsg(extra: Record<string, unknown>): Message {
   };
 }
 
+function recordingMsgWithId(
+  messageId: string,
+  timestamp: string,
+  extra: Record<string, unknown>,
+): Message {
+  return {
+    ...recordingMsg(extra),
+    message_id: messageId,
+    timestamp,
+  };
+}
+
 async function openRecordingTab() {
   fireEvent.click(screen.getByTestId('browser-agent-chip-header'));
   await waitFor(() => expect(screen.getByText('Recording')).toBeInTheDocument());
@@ -218,6 +230,35 @@ describe('BrowserAgentChip recording', () => {
     fireEvent.ended(screen.getByTitle('Browser recording'));
     await waitFor(() =>
       expect((screen.getByTitle('Browser recording') as HTMLVideoElement).src).toBe(seg2),
+    );
+  });
+
+  it('plays approval-split replays from the same browser session in chronological order', async () => {
+    const browserUrl = 'https://proxy.example.onkernel.com:8443/browser/live/session-1';
+    const beforeApproval = `${KERNEL_VIEW_URL}&replay_id=before-approval`;
+    const afterApproval = `${KERNEL_VIEW_URL}&replay_id=after-approval`;
+    const messages = [
+      anchorMsg,
+      recordingMsgWithId('rec-before', '2026-07-16T00:00:00Z', {
+        recording_view_url: beforeApproval,
+        browser_url: browserUrl,
+      }),
+      recordingMsgWithId('rec-after', '2026-07-16T00:00:01Z', {
+        recording_view_url: afterApproval,
+        browser_url: browserUrl,
+      }),
+    ];
+    renderChip(messages, anchorMsg);
+
+    await openRecordingTab();
+
+    const video = (await screen.findByTitle('Browser recording')) as HTMLVideoElement;
+    expect(video.src).toBe(beforeApproval);
+    expect(screen.getByTestId('recording-segments')).toBeInTheDocument();
+
+    fireEvent.ended(video);
+    await waitFor(() =>
+      expect((screen.getByTitle('Browser recording') as HTMLVideoElement).src).toBe(afterApproval),
     );
   });
 

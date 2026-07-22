@@ -13,12 +13,13 @@ task at the fixture before an agent was created — 0/8 on the ecommerce slice.
 These tests pin the tolerance on both paths without needing a live DB.
 """
 
+import asyncio
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -42,7 +43,11 @@ def _captured_seed_env(**kwargs) -> dict[str, str]:
     with (
         patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
         patch.object(rb, "_shared_workspace_database_url", return_value=None),
-        patch.object(rb, "load_env_var", return_value="postgresql://prod/rose"),
+        patch.object(
+            rb,
+            "_production_compute_token_database_url",
+            return_value="postgresql://prod/victoria",
+        ),
         patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
     ):
         rb._sync_compute_tokens(**kwargs)
@@ -52,11 +57,16 @@ def _captured_seed_env(**kwargs) -> dict[str, str]:
 def test_default_sync_does_not_opt_into_missing_gpt_code():
     env = _captured_seed_env()
     assert env.get("SEED_ALLOW_MISSING_GPT_CODE") is None
+    assert env.get("SEED_ALLOW_MISSING_CLAUDE_CODE") is None
 
 
 def test_tolerant_sync_sets_the_seed_env_opt_in():
-    env = _captured_seed_env(tolerate_gpt_code_unavailable=True)
+    env = _captured_seed_env(
+        tolerate_gpt_code_unavailable=True,
+        tolerate_claude_code_unavailable=True,
+    )
     assert env.get("SEED_ALLOW_MISSING_GPT_CODE") == "1"
+    assert env.get("SEED_ALLOW_MISSING_CLAUDE_CODE") == "1"
 
 
 def test_sync_uses_verified_shared_workspace_as_compute_token_source():
@@ -177,7 +187,11 @@ def test_cloud_source_selection_remains_explicit_across_10000_runs():
     with (
         patch.object(rb, "_local_victoria_database_url", side_effect=local_database_url),
         patch.object(rb, "_shared_workspace_database_url", return_value=None),
-        patch.object(rb, "load_env_var", side_effect=source_database_url),
+        patch.object(
+            rb,
+            "_production_compute_token_database_url",
+            side_effect=source_database_url,
+        ),
         patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
         patch("builtins.print"),
     ):
@@ -187,33 +201,101 @@ def test_cloud_source_selection_remains_explicit_across_10000_runs():
     assert calls == 10_000
 
 
+def test_cloud_sync_uses_explicit_production_compute_token_source():
+    env = _captured_seed_env(tolerate_gpt_code_unavailable=True)
+    assert env["DATABASE_URL"] == "postgresql://local/victoria"
+    assert env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://prod/victoria"
+
+
+def test_production_compute_source_preserves_prisma_pooler_parameters():
+    source = "postgresql://prod/db?pgbouncer=true&connection_limit=1"
+    with patch.object(
+        rb,
+        "load_env_var",
+        side_effect=lambda name, _path, **_kwargs: source if name == "DATABASE_URL" else None,
+    ):
+        assert rb._production_compute_token_database_url("postgresql://local/victoria") == source
+
+
+def test_production_compute_source_ignores_isolated_process_database(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("DATABASE_URL=postgresql://prod/rose\n")
+
+    with (
+        patch.dict(os.environ, {"DATABASE_URL": "postgresql://local/victoria"}),
+        patch.object(rb, "_BACKEND_ENV", str(env_file)),
+    ):
+        assert rb._production_compute_token_database_url("postgresql://local/victoria") == "postgresql://prod/rose"
+
+
+def test_sync_fails_before_seed_when_no_explicit_source_exists():
+    calls = []
+    with (
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_shared_workspace_database_url", return_value=None),
+        patch.object(rb, "_production_compute_token_database_url", return_value=None),
+        patch.object(rb, "_run_seed_subprocess", side_effect=lambda *_args, **_kwargs: calls.append(True)),
+    ):
+        assert rb._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is False
+    assert calls == []
+
+
 def test_blanket_preflight_uses_tolerant_sync():
     captured: dict[str, bool] = {}
 
-    def fake_sync(*, tolerate_gpt_code_unavailable: bool = False) -> bool:
-        captured["tolerant"] = tolerate_gpt_code_unavailable
+    def fake_sync(
+        *,
+        tolerate_gpt_code_unavailable: bool = False,
+        tolerate_claude_code_unavailable: bool = False,
+    ) -> bool:
+        captured["gpt"] = tolerate_gpt_code_unavailable
+        captured["claude"] = tolerate_claude_code_unavailable
         return True
 
     with (
         patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(
+            rb,
+            "_has_usable_anthropic_api_key_fallback",
+            new=AsyncMock(return_value=True),
+        ),
         patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
     ):
-        rb._refresh_local_compute_tokens_for_run("http://localhost:3001")
+        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
 
-    assert captured["tolerant"] is True
+    assert captured == {"gpt": True, "claude": True}
+
+
+def test_simulation_preflight_uses_restored_seed_without_prod_sync():
+    """Cloud simulation has a fresh restored seed DB but no second source DB endpoint."""
+    calls = []
+    with (
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(rb, "_is_simulate_mode", return_value=True),
+        patch.object(rb, "_sync_compute_tokens", side_effect=lambda **_kwargs: calls.append(True)),
+    ):
+        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
+
+    assert calls == []
 
 
 def test_live_fixture_sync_tolerates_missing_gpt_code():
     captured: dict[str, bool] = {}
 
-    def fake_sync(*, tolerate_gpt_code_unavailable: bool = False) -> bool:
-        captured["tolerant"] = tolerate_gpt_code_unavailable
+    def fake_sync(
+        *,
+        tolerate_gpt_code_unavailable: bool = False,
+        tolerate_claude_code_unavailable: bool = False,
+    ) -> bool:
+        captured["gpt"] = tolerate_gpt_code_unavailable
+        captured["claude"] = tolerate_claude_code_unavailable
         return True
 
     ctx = rb.LiveFixtureContext(
         base_url="http://localhost:3001",
         user_id=rb.USER_ID if hasattr(rb, "USER_ID") else "u",
         auth_realm="local",
+        tolerate_claude_code_unavailable=True,
     )
     with (
         patch.object(rb, "_is_simulate_mode", return_value=False),
@@ -224,7 +306,7 @@ def test_live_fixture_sync_tolerates_missing_gpt_code():
 
     # The live overlay serves browser/credential tasks (claude_code); an exhausted
     # Codex quota must NOT fail them here. Was strict → 0/8 ecommerce slice.
-    assert captured["tolerant"] is True
+    assert captured == {"gpt": True, "claude": True}
 
 
 def test_live_fixture_still_fails_closed_when_claude_code_sync_fails():
@@ -249,10 +331,15 @@ def test_live_fixture_still_fails_closed_when_claude_code_sync_fails():
 def test_preflight_raises_when_sync_fails():
     with (
         patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(
+            rb,
+            "_has_usable_anthropic_api_key_fallback",
+            new=AsyncMock(return_value=False),
+        ),
         patch.object(rb, "_sync_compute_tokens", return_value=False),
     ):
         try:
-            rb._refresh_local_compute_tokens_for_run("http://localhost:3001")
+            asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
             raise AssertionError("expected RuntimeError when compute-token sync fails")
         except RuntimeError as exc:
             assert "compute tokens" in str(exc).lower()

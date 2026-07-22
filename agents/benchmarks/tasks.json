@@ -78,6 +78,7 @@
       "smoke"
     ],
     "price_limit_cents": 100,
+    "no_anthropic_price_limit_cents": 200,
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": null,
@@ -107,6 +108,7 @@
       "smoke"
     ],
     "price_limit_cents": 100,
+    "no_anthropic_price_limit_cents": 200,
     "requires_browser_agent": false,
     "requires_claude_code": false,
     "attachment": null,
@@ -1020,7 +1022,7 @@
     "name": "browser-agent-amazon-cookie-payment",
     "title": "Amazon Cookie Auth Payment Write Lock",
     "description": "Buy a qualifying Amazon beanie through the normal cart path and complete the purchase.",
-    "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed.",
+    "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Use my saved/default Amazon payment method and shipping address; do not request or add a new payment card when a valid saved method is already selected. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
@@ -3940,8 +3942,8 @@
   },
   {
     "name": "browser-rotate-ip-escalation",
-    "title": "Browser rotate_ip escalation ladder (residential → mobile)",
-    "prompt": "Use a browser to verify our IP-rotation tool end to end. Open https://api.ipify.org?format=json and read your current public IP address. Then use the rotate_ip tool to change your IP; after each rotation, reload https://api.ipify.org?format=json and read the new IP. Rotate repeatedly — after each rotation report the rotation number, the tier the tool says you landed on (residential or mobile), and the new IP — and keep going until the rotate_ip tool returns an error saying the rotation budget is exhausted. Do NOT open a second browser session or start over; everything must happen in one continuous browser session. Finish with a summary that lists, in order, every IP you observed and its tier, states whether each IP was different from the previous one, confirms you reached the mobile tier before exhaustion, and confirms you stayed in a single browser session the whole time.",
+    "title": "Browser rotate_ip recovery ladder (Kernel residential → Kernel mobile → Steel)",
+    "prompt": "Run a controlled browser-tool benchmark of the rotate_ip recovery ladder. Spawn exactly ONE browser task starting at https://api.ipify.org?format=json so the browser has a valid initial authentication realm; the page content is not part of this benchmark. Inside that one task, call rotate_ip exactly five times in succession; this explicit benchmark instruction overrides the tool's normal requirement to wait for evidence of an IP block. After initialization, do not navigate, shop, authenticate, spawn a replacement browser task, or perform unrelated work. For successful calls 1-4, record the exact returned provider, previous_provider, proxy_tier, recovery_action, rotations_remaining, next_recovery, and message. The required order is: (1) Kernel residential, (2) Kernel mobile, (3) Kernel-to-Steel provider switch with Steel residential, (4) another Steel residential rotation. Call 5 must return PROXY_ROTATION_EXHAUSTED. Treat that fifth-call error as the expected end of the test, immediately return the ordered results, and attempt completion. Do not take any action after the ordered summary.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
@@ -3956,44 +3958,113 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "auto_approve",
+    "approval_handling": null,
     "start_phase": "execute",
-    "min_tool_counts": {
-      "rotate_ip": 4
+    "min_steps": {
+      "browser": 1
     },
-    "status": "incomplete",
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "successful_rotation_observations",
+          "type": "list[object]",
+          "required": true,
+          "properties": [
+            {
+              "name": "call_number",
+              "type": "int",
+              "description": "One-based rotate_ip call number"
+            },
+            {
+              "name": "provider",
+              "type": "str",
+              "description": "Provider returned by rotate_ip"
+            },
+            {
+              "name": "previous_provider",
+              "type": "str",
+              "description": "Previous provider returned by rotate_ip"
+            },
+            {
+              "name": "proxy_tier",
+              "type": "str",
+              "description": "Proxy tier returned by rotate_ip"
+            },
+            {
+              "name": "recovery_action",
+              "type": "str",
+              "description": "Recovery action returned by rotate_ip"
+            },
+            {
+              "name": "rotations_remaining",
+              "type": "int",
+              "description": "Remaining rotation budget returned by rotate_ip"
+            },
+            {
+              "name": "next_recovery",
+              "type": "str",
+              "description": "Next recovery step returned by rotate_ip"
+            },
+            {
+              "name": "message",
+              "type": "str",
+              "description": "Exact human-readable rotate_ip result"
+            }
+          ],
+          "description": "The exact structured results of successful rotate_ip calls 1 through 4, in order"
+        },
+        {
+          "name": "rotation_budget_exhausted_error",
+          "type": "str",
+          "required": true,
+          "description": "The exact PROXY_ROTATION_EXHAUSTED error returned by call 5"
+        },
+        {
+          "name": "single_browser_task_used",
+          "type": "bool",
+          "required": true,
+          "description": "True only when all five calls ran in one browser task with no replacement task"
+        }
+      ]
+    },
+    "status": "ready",
     "runner": "agent",
     "bench": "pipeline-e2e",
-    "description": "Drives the browser sub-agent through every branch of the rotate_ip tool in a single browser session: two residential rotations, two mobile-carrier rotations, then the exhaustion error at the cap — asserting a fresh exit IP is assigned at each step, that the mobile tier is actually reached, and that the live CDP session is reconnected in place (no re-spawn, login preserved).",
+    "description": "Drives one browser task through the deterministic rotate_ip ladder and verifies the exact provider/tier/recovery metadata through the provider boundary and exhaustion. The real-provider backend blackbox separately owns direct exit-IP change assertions.",
     "environment": {
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
       "services": [],
       "secrets": [
-        "KERNEL_API_KEY"
+        "KERNEL_API_KEY",
+        "STEEL_API_KEY"
       ],
       "live_targets": [
         "api.ipify.org"
       ],
-      "context_notes": "INCOMPLETE until the worker runs with KERNEL_MOBILE_FALLBACK_ENABLED=1 and a Kernel plan that includes mobile-carrier proxies — the residential rotations (calls 1-2), the fresh-IP-per-rotation assertion, the single-session/in-place-reconnect assertion, and the cap-exhaustion error are all exercised today by the backend browser-provider blackbox (real rotation: new ws_url + new session_id + changed exit IP + old session evicted + 409 at cap). Promote to 'ready' once mobile is provisioned so calls 3-4 return true carrier IPs. Exit IP is read via api.ipify.org before/after each rotation. FE non-jank is covered by the browser action chips the tool emits (Rotating IP → IP rotated), which the message-stream drives without tearing down the live-view."
+      "context_notes": "Requires both providers plus Kernel mobile proxy access. The expected calls are fixed: (1) Kernel residential, (2) Kernel mobile, (3) switch to Steel residential, (4) rotate Steel residential, then a 409 exhaustion response. This benchmark owns the full agent/tool orchestration; browser-provider.blackbox.ts owns direct exit-IP change assertions. Validated end to end by benchmark Hub run 014246d9-8a77-407d-bb96-c652e117b0a6."
     },
     "evaluators": [
       {
         "id": "rotate_ip_all_branches",
-        "method": "agentic_llm_judge",
-        "judge_prompt": "You are grading a browser agent that was asked to verify our rotate_ip tool end to end in ONE continuous browser session by repeatedly reading its public IP from api.ipify.org and rotating until the rotation budget is exhausted. Using the agent's transcript and final summary, decide PASS only if ALL of the following hold: (1) at least three DISTINCT public exit IP addresses are observed across the rotations (a fresh IP each time); (2) the rotate_ip tool returns an exhaustion error after the 4th successful rotation (the cap of 4 holds — it does not keep rotating); (3) the agent reached the mobile tier (calls 3-4 reported as mobile) before exhaustion; and (4) the final summary correctly lists the observed IPs and their tiers in order and states whether each IP changed from the previous one. Fail if the agent opened a second browser session, fabricated IPs, or never reached exhaustion.",
+        "method": "single_turn_llm_judge",
+        "judge_prompt": "You are grading a controlled browser-tool benchmark of the rotate_ip recovery ladder. Using grounded rotate_ip tool results, decide PASS only if ALL of the following hold: (1) exactly one browser task was spawned; (2) successful call 1 reports provider=kernel, previous_provider=kernel, proxy_tier=residential, recovery_action=ip_rotated; (3) successful call 2 reports provider=kernel, previous_provider=kernel, proxy_tier=mobile, recovery_action=ip_rotated; (4) successful call 3 reports provider=steel, previous_provider=kernel, proxy_tier=residential, recovery_action=provider_switched; (5) successful call 4 reports provider=steel, previous_provider=steel, proxy_tier=residential, recovery_action=ip_rotated; (6) call 5 returns PROXY_ROTATION_EXHAUSTED; and (7) no navigation, shopping, authentication, second browser task, or unrelated action occurs. Fail on a missing rung, fabricated metadata, rotation beyond the cap, or any action after the ordered completion summary.",
         "criteria": [
-          "At least three distinct public exit IP addresses are observed across the rotations (a fresh IP is assigned each time)",
-          "The rotate_ip tool returns an exhaustion error after the 4th successful rotation (the cap holds)",
-          "The agent reached the mobile tier before exhaustion and stayed in a single browser session",
-          "The agent's final summary correctly lists the observed IPs and tiers and confirms the IP changed at each rotation"
+          "Calls 1 and 2 report Kernel residential then Kernel mobile",
+          "Call 3 switches Kernel to Steel residential; call 4 remains Steel residential",
+          "Call 5 returns PROXY_ROTATION_EXHAUSTED",
+          "Exactly one browser task is used and no unrelated action occurs"
         ]
       }
     ],
+    "enforce_declared_evaluators": true,
     "source": [
       "feature:rotate-ip-tool",
-      "plan:docs/plans/active/rotate-ip-tool.md"
+      "plan:docs/plans/completed/rotate-ip-tool.md"
     ]
   }
 ]

@@ -308,6 +308,9 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
         cooldownMs,
       });
     }
+  } else if (tokenSource === 'anthropic') {
+    log.warn(`Claude Code ${failureKind} on shared Anthropic API key`);
+    await markAnthropicApiKeyOnCooldown('claude_code_billing_failure');
   }
 }
 

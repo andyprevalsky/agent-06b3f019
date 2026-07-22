@@ -188,28 +188,36 @@ test('missing-Codex bypass warning reports the usable Claude count', async () =>
   assert(warning > bypass, 'expected its warning to report the usable Claude count');
 });
 
-test('missing-Claude bypass is explicit and preserves strict-by-default failure', async () => {
+test('missing-Claude bypass requires the caller-validated Anthropic fallback opt-in', async () => {
   const source = readSeedLocalSource();
   const zeroClaude = source.indexOf('if (usableClaudeCodeCount === 0)');
-  const bypass = source.indexOf("process.env.SEED_ALLOW_MISSING_CLAUDE_CODE !== '1'", zeroClaude);
+  const bypass = source.indexOf("process.env.SEED_ALLOW_MISSING_CLAUDE_CODE === '1'", zeroClaude);
+  const keyValidation = source.indexOf('process.env.ANTHROPIC_API_KEY?.trim()', bypass);
+  const emptyKeyFailure = source.indexOf(
+    'SEED_ALLOW_MISSING_CLAUDE_CODE=1 requires a non-empty ANTHROPIC_API_KEY',
+    keyValidation
+  );
+  const warning = source.indexOf('caller-validated', bypass);
+  const fallback = source.indexOf('ANTHROPIC_API_KEY fallback', warning);
   const strictFailure = source.indexOf(
     "throw new Error('No usable claude_code integrations after sync')",
     bypass
   );
-  const warning = source.indexOf('this run declares requires_claude_code=false', strictFailure);
-  const gptInspection = source.indexOf('await inspectGptCodeIntegrations()', warning);
 
-  assert(zeroClaude > 0, 'expected an explicit zero-Claude branch');
-  assert(bypass > zeroClaude, 'expected the missing-Claude opt-out inside that branch');
-  assert(strictFailure > bypass, 'expected the default path to remain fail-closed');
-  assert(warning > strictFailure, 'expected the opt-out path to explain its task contract');
+  assert(zeroClaude > 0, 'expected an explicit zero-Claude availability check');
+  assert(bypass > zeroClaude, 'expected an explicit missing-Claude opt-in');
+  assert(keyValidation > bypass, 'expected the fallback to validate the Anthropic API key');
+  assert(emptyKeyFailure > keyValidation, 'expected an empty Anthropic API key to fail closed');
+  assert(warning > emptyKeyFailure, 'expected validation before the fallback warning');
+  assert(fallback > warning, 'expected the runtime replacement to be the Anthropic API key');
   assert(
-    gptInspection > warning,
-    'expected gpt_code validation to remain active after the Claude opt-out'
+    strictFailure > fallback,
+    'expected missing Claude OAuth to fail closed without the opt-in'
   );
 });
 
 test('AgentCard launcher scopes the missing-Claude opt-out to non-Claude tasks', async () => {
+  const source = readSeedLocalSource();
   const launcher = readRepoFile('scripts/run-agentcard-lifecycle-task.sh');
   const tasks = JSON.parse(readRepoFile('agents/benchmarks/tasks.json')) as Array<{
     name: string;
@@ -221,10 +229,18 @@ test('AgentCard launcher scopes the missing-Claude opt-out to non-Claude tasks',
     'agent-payment-idempotent-abandonment',
     'agent-payment-abandonment',
   ];
+  const bypass = source.indexOf(
+    "process.env.SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK === '1'"
+  );
+  const warning = source.indexOf('launcher-scoped non-Claude task', bypass);
+  const gptInspection = source.indexOf('await inspectGptCodeIntegrations()', warning);
 
+  assert(bypass > 0, 'expected a distinct non-Claude task opt-out');
+  assert(warning > bypass, 'expected the opt-out to explain its narrow contract');
+  assert(gptInspection > warning, 'expected gpt_code validation to remain active');
   assert(
-    launcher.includes('export SEED_ALLOW_MISSING_CLAUDE_CODE=1'),
-    'expected the AgentCard launcher to opt into the explicit missing-Claude path'
+    launcher.includes('export SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK=1'),
+    'expected the AgentCard launcher to opt into the non-Claude task path'
   );
   for (const taskName of acceptedTasks) {
     const task = tasks.find((candidate) => candidate.name === taskName);

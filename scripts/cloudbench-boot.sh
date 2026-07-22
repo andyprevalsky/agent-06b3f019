@@ -28,7 +28,7 @@ set -uo pipefail
 LOG=/data/bench.log
 REPO=/data/repo
 STATUS_PORT="${CLOUDBENCH_STATUS_PORT:-8011}"
-RUN_SCRIPT="${CLOUDBENCH_RUN_SCRIPT:-$REPO/scripts/cloudbench-run.sh}"
+DRIVER="${CLOUDBENCH_RUN_SCRIPT:-/cloudbench-run.sh}"
 
 # Not a benchmark boot (the warm clone-source machine, or a bare manual start) →
 # idle exactly like the image's original `sleep infinity` CMD.
@@ -80,13 +80,23 @@ rm -f "$REPO/.git/index.lock" "$REPO/.git/"*.lock "$REPO/.git/refs/heads/"*.lock
     fi
 } >> "$LOG" 2>&1
 
-# Run the ref's driver, but keep the Machine alive after it emits DONE. The
+# Run the controller-injected driver, not the copy in the checkout. This matters
+# for dirty-worktree validation: cloudbench-run.sh is the process that applies
+# the uploaded patch, so changing that file via the patch is too late to alter
+# its already-running control flow. Boot launch injects an immutable current
+# copy at /cloudbench-run.sh alongside this boot script.
+#
+# Keep the Machine alive after the driver emits DONE. The
 # controller polls every 15-20 seconds; exiting PID 1 immediately after DONE can
 # stop Fly's data plane before the next poll, turning a genuine verdict into
 # NORESULT. The controller persists the run-scoped marker payloads first and
 # then explicitly stops/returns this Machine to the pool. If the driver crashes
 # before DONE, /driver-health still reports it dead while this supervisor lives.
-bash "$RUN_SCRIPT" >> "$LOG" 2>&1
+if [ ! -s "$DRIVER" ]; then
+    printf '[boot %s] injected driver missing; falling back to checked-out ref\n' "$(date -u +%H:%M:%S)" >> "$LOG"
+    DRIVER="$REPO/scripts/cloudbench-run.sh"
+fi
+bash "$DRIVER" >> "$LOG" 2>&1
 driver_rc=$?
 printf '[boot %s] driver exited rc=%s; holding for controller collection\n' \
     "$(date -u +%H:%M:%S)" "$driver_rc" >> "$LOG"

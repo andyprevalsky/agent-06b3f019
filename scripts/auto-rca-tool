@@ -416,7 +416,7 @@ publish_draft() {
     git -C "$ROOT_DIR" diff --cached --quiet && fail "no tracked RCA changes to commit"
     git -c core.hooksPath=/dev/null -C "$ROOT_DIR" commit -m "auto-RCA: investigate production agent $AGENT_ID"
   fi
-  if [ "$(git -C "$ROOT_DIR" rev-list --count main..HEAD)" -eq 0 ]; then
+  if [ "$(git -C "$ROOT_DIR" rev-list --count origin/main..HEAD)" -eq 0 ]; then
     fail "RCA must commit a fix or a scaffolded reproduction before publishing"
   fi
 
@@ -427,7 +427,7 @@ publish_draft() {
 write_preliminary_scaffold() {
   local report_dir="$ROOT_DIR/docs/rca/preliminary"
   local report_file="$report_dir/${AGENT_ID}-${GITHUB_RUN_ID}.md"
-  if [ "$(git -C "$ROOT_DIR" rev-list --count main..HEAD)" -gt 0 ]; then
+  if [ "$(git -C "$ROOT_DIR" rev-list --count origin/main..HEAD)" -gt 0 ]; then
     return
   fi
   [ ! -e "$report_file" ] || fail "preliminary RCA report path already exists"

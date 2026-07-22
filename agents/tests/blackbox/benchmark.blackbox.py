@@ -834,6 +834,8 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "scripts/setup-benchmark-payment.ts" in helper
     assert "DATABASE_URL=" in helper
     assert "export BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1" in helper
+    assert "unset FAST_MODE_CACHE_DATABASE_URL" in helper
+    assert "export FAST_MODE_CACHE_USE_LOCAL=1" in helper
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():
@@ -1442,7 +1444,7 @@ async def test_agentcard_setup_terminal_check_refreshes_stale_attention_poll():
                 {
                     "id": "setup-1",
                     "metadata": {"attentionKind": "agentcard_user_cardholder_onboarding_required"},
-                }
+                },
             ]
         return [
             {
@@ -1893,14 +1895,20 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
     """Amazon uses the standard completed-commerce runtime and preserves cart-path semantics."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
-    approved_prompt = (
+    completed_purchase_prompt = (
+        "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. "
+        "Use my saved/default Amazon payment method and shipping address; do not request or add a new "
+        "payment card when a valid saved method is already selected. "
+        "Avoid using the Buy Now button as the purchase path, but make sure purchase is completed."
+    )
+    auth_assistance_prompt = (
         "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. "
         "Avoid using the Buy Now button as the purchase path, but make sure purchase is completed."
     )
     task = get_task_by_name("browser-agent-amazon-cookie-payment")
     assert task.description.endswith("complete the purchase.")
-    assert task.prompt == approved_prompt
-    assert get_task_by_name("browser-agent").prompt == approved_prompt
+    assert task.prompt == completed_purchase_prompt
+    assert get_task_by_name("browser-agent").prompt == auth_assistance_prompt
     assert task.approval_handling == "auto_approve"
     assert task.expected_attention_kind is None
     assert task.expected_attention_kind_any_of == ["payment_approval", "write_lock"]
@@ -4370,7 +4378,6 @@ async def test_code_agent_preflight_rejects_missing_compute_token():
 
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
-    original_has_fallback = bench._has_anthropic_api_key_fallback_configured
     try:
 
         async def fake_headers():
@@ -4378,13 +4385,11 @@ async def test_code_agent_preflight_rejects_missing_compute_token():
 
         bench._api_headers = fake_headers
         bench.httpx.AsyncClient = FakeClient
-        bench._has_anthropic_api_key_fallback_configured = lambda: False
 
         assert await bench._check_compute_code_credentials("http://localhost:55120") is False
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
-        bench._has_anthropic_api_key_fallback_configured = original_has_fallback
 
 
 async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
@@ -4413,12 +4418,11 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
             if url.endswith("/api/integrations/compute-code/credentials/token"):
                 return FakeResponse(404, {"error": "NO_TOKENS_AVAILABLE"})
             if url.endswith("/api/integrations/compute-code/anthropic-key/cooldown"):
-                return FakeResponse(200, {"onCooldown": False})
+                return FakeResponse(200, {"configured": True, "onCooldown": False})
             raise AssertionError(f"unexpected URL {url}")
 
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
-    original_has_fallback = bench._has_anthropic_api_key_fallback_configured
     try:
 
         async def fake_headers():
@@ -4426,13 +4430,11 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
 
         bench._api_headers = fake_headers
         bench.httpx.AsyncClient = FakeClient
-        bench._has_anthropic_api_key_fallback_configured = lambda: True
 
         assert await bench._check_compute_code_credentials("http://localhost:55120") is True
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
-        bench._has_anthropic_api_key_fallback_configured = original_has_fallback
 
     assert calls == [
         (
@@ -4446,6 +4448,148 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
             10.0,
         ),
     ]
+
+
+async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback():
+    """Blanket local refresh must accept the same funded fallback as runtime."""
+    import benchmarks.run_benchmark as bench
+
+    http_calls = []
+    sync_options = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"configured": True, "onCooldown": False}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, *, headers, timeout):
+            http_calls.append((url, headers, timeout))
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    original_sync = bench._sync_compute_tokens
+    try:
+
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        def fake_sync(**options):
+            sync_options.append(options)
+            return options.get("tolerate_claude_code_unavailable") is True
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+        bench._sync_compute_tokens = fake_sync
+
+        refresh = bench._refresh_local_compute_tokens_for_run("http://localhost:55120")
+        if asyncio.iscoroutine(refresh):
+            await refresh
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+        bench._sync_compute_tokens = original_sync
+
+    assert sync_options == [
+        {
+            "tolerate_gpt_code_unavailable": True,
+            "tolerate_claude_code_unavailable": True,
+        }
+    ]
+    assert http_calls == [
+        (
+            "http://localhost:55120/api/integrations/compute-code/anthropic-key/cooldown",
+            {"X-API-Key": "test-key"},
+            10.0,
+        )
+    ]
+
+
+def test_compute_token_sync_reads_source_file_not_isolated_process_target():
+    """The isolated target DSN must not shadow the explicit production source."""
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    class SeedResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        env_file = Path(temp_dir) / ".env"
+        env_file.write_text("DATABASE_URL=postgresql://prod/rose\n")
+        with (
+            patch.dict(os.environ, {"DATABASE_URL": "postgresql://local/victoria"}),
+            patch.object(bench, "_BACKEND_ENV", str(env_file)),
+            patch.object(
+                bench,
+                "_local_victoria_database_url",
+                return_value="postgresql://local/victoria",
+            ),
+            patch.object(bench, "_shared_workspace_database_url", return_value=None),
+            patch.object(bench, "_run_seed_subprocess", return_value=SeedResult()) as seed,
+        ):
+            assert bench._sync_compute_tokens() is True
+
+    assert seed.call_args.kwargs["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://prod/rose"
+
+
+async def test_anthropic_api_key_fallback_availability_fails_closed():
+    """Only an explicitly configured, non-cooled backend runtime is usable."""
+    import benchmarks.run_benchmark as bench
+
+    cases = [
+        ("missing-key", 200, {"configured": False, "onCooldown": False}, None),
+        ("cooldown", 200, {"configured": True, "onCooldown": True}, None),
+        ("malformed-empty", 200, {}, None),
+        ("malformed-null", 200, None, None),
+        ("non-200", 503, {"configured": True, "onCooldown": False}, None),
+        ("unreachable", 0, None, RuntimeError("backend unavailable")),
+    ]
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        for name, status_code, body, error in cases:
+
+            class FakeResponse:
+                def __init__(self):
+                    self.status_code = status_code
+
+                def json(self):
+                    return body
+
+            class FakeClient:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return None
+
+                async def get(self, _url, *, headers, timeout):
+                    if error is not None:
+                        raise error
+                    return FakeResponse()
+
+            bench.httpx.AsyncClient = FakeClient
+            assert await bench._has_usable_anthropic_api_key_fallback("http://localhost:55120") is False, name
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
 
 
 def test_normalize_attention_requests_accepts_backend_contract():
@@ -5137,6 +5281,77 @@ def test_local_failed_tasks_from_run_reads_result_json():
     assert [(f.name, f.agent_id, f.failure_reason) for f in failures] == [("browser-agent", "b2", "verifier failed")]
 
 
+def test_local_benchmark_invocation_propagates_cache_ratchet_exit():
+    """A saved all-task-pass artifact must not swallow a post-run ratchet failure.
+
+    Captured from isolated smoke run 1784687608-25918-44421: the runner
+    printed ``CACHE RATCHET FAILED`` and exited 1 after saving a 5/5 task
+    artifact, but local.py returned success because it only re-read task pass
+    fields from that artifact.
+    """
+    from benchmarks import local
+
+    original_popen = local.subprocess.Popen
+    with tempfile.TemporaryDirectory() as raw_dir:
+        result_path = Path(raw_dir) / "cache-ratchet-run.json"
+        result_path.write_text(json.dumps({"tasks": [{"name": "browser-smoke", "passed": True}]}))
+
+        class FailedRatchetProcess:
+            def __init__(self):
+                self.stdout = iter(
+                    [
+                        f"  Results saved: {result_path}\n",
+                        "  ❌ CACHE RATCHET FAILED (per-task repeatable prompt-cache hit floor)\n",
+                    ]
+                )
+
+            @staticmethod
+            def wait():
+                return 1
+
+        try:
+            local.subprocess.Popen = lambda *_args, **_kwargs: FailedRatchetProcess()
+            try:
+                local.run_benchmark_invocation(
+                    local.BenchmarkInvocation("benchmarks", ["browser-smoke"]),
+                    port=55120,
+                    bootstrap=False,
+                    anon=False,
+                    max_concurrency=1,
+                )
+                raise AssertionError("local benchmark wrapper swallowed the runner's exit code 1")
+            except RuntimeError as exc:
+                assert "exit code 1" in str(exc)
+                assert str(result_path) in str(exc)
+
+            # A task-level failure must still return the artifact so main() can
+            # run agent_latency, agent_logs, and agent_cache before exiting 1.
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "tasks": [
+                            {
+                                "name": "browser-smoke",
+                                "passed": False,
+                                "agent_id": "failed-agent",
+                                "failure_reason": "verifier failed",
+                            }
+                        ]
+                    }
+                )
+            )
+            returned = local.run_benchmark_invocation(
+                local.BenchmarkInvocation("benchmarks", ["browser-smoke"]),
+                port=55120,
+                bootstrap=False,
+                anon=False,
+                max_concurrency=1,
+            )
+            assert returned == result_path
+        finally:
+            local.subprocess.Popen = original_popen
+
+
 def test_run_sh_manifest_writer_publishes_wmh_when_served():
     """run.sh's manifest writer carries ports.wmh + urls.wmh + a wmh service entry.
 
@@ -5326,8 +5541,7 @@ def test_runner_fixtures_use_isolated_system_database_identity():
                 return_value=SimpleNamespace(returncode=0, stdout="1\n", stderr=""),
             ):
                 assert run_benchmark._local_victoria_database_url() == (
-                    "postgresql://postgres:postgres@localhost:5432/"
-                    "victoria_bench_1784586845_71851_68350"
+                    "postgresql://postgres:postgres@localhost:5432/victoria_bench_1784586845_71851_68350"
                 )
     finally:
         if prior_context is None:
@@ -5412,9 +5626,7 @@ def test_runner_fixtures_fail_closed_when_isolated_database_is_unavailable():
             os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
             with patch.object(run_benchmark.subprocess, "run", side_effect=probe):
                 assert run_benchmark._local_victoria_database_url() is None
-        assert probed_urls == [
-            "postgresql://postgres:postgres@localhost:5432/victoria_bench_unavailable"
-        ]
+        assert probed_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_bench_unavailable"]
     finally:
         if prior_context is None:
             os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
@@ -5510,13 +5722,10 @@ def test_run_sh_seed_dump_targets_isolated_database_atomically():
     """System-Postgres isolated runs must restore/dump their per-run DB safely."""
     run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
 
-    assert 'bash scripts/restore-seed-dump.sh' in run_script
+    assert "bash scripts/restore-seed-dump.sh" in run_script
     assert '"$_SEED_RESTORE_CONTAINER" >/dev/null' in run_script
     assert '"$_SEED_RESTORE_CONTAINER" >/dev/null 2>&1' not in run_script
-    assert (
-        'pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME"'
-        in run_script
-    )
+    assert 'pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME"' in run_script
     assert 'mv "$_SEED_DUMP_TMP" "$_SEED_DUMP"' in run_script
     required_guard = run_script.index('if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]')
     cold_sync = run_script.index('echo "🌱 Syncing production data to local database (first run)..."')
@@ -5537,20 +5746,15 @@ def test_seed_dump_restore_uses_target_container_pg_restore():
 
         host_restore = tmp_path / "pg_restore"
         host_restore.write_text(
-            '#!/bin/sh\n'
+            "#!/bin/sh\n"
             'echo "host pg_restore $*" >> "$COMMAND_LOG"\n'
-            'echo \'unrecognized configuration parameter "transaction_timeout"\' >&2\n'
-            'exit 1\n'
+            "echo 'unrecognized configuration parameter \"transaction_timeout\"' >&2\n"
+            "exit 1\n"
         )
         host_restore.chmod(0o755)
 
         docker = tmp_path / "docker"
-        docker.write_text(
-            '#!/bin/sh\n'
-            'echo "docker $*" >> "$COMMAND_LOG"\n'
-            'cat >/dev/null\n'
-            'exit 0\n'
-        )
+        docker.write_text('#!/bin/sh\necho "docker $*" >> "$COMMAND_LOG"\ncat >/dev/null\nexit 0\n')
         docker.chmod(0o755)
 
         result = subprocess.run(
@@ -5597,12 +5801,12 @@ def test_workspace_dependency_preflight_respects_hoisted_installs():
         fake_bin.mkdir()
         npm = fake_bin / "npm"
         npm.write_text(
-            '#!/bin/sh\n'
+            "#!/bin/sh\n"
             'echo "$*" >> "$COMMAND_LOG"\n'
             'if [ "$1" = "pkg" ]; then exit 0; fi\n'
             'if [ "$1" = "ls" ]; then [ "${NPM_GRAPH_READY:-0}" = 1 ] || [ -f "$INSTALLED_MARKER" ]; exit; fi\n'
             'if [ "$1" = "install" ]; then touch "$INSTALLED_MARKER"; exit 0; fi\n'
-            'exit 1\n'
+            "exit 1\n"
         )
         npm.chmod(0o755)
         common_env = {
@@ -5651,9 +5855,7 @@ def test_workspace_dependency_preflight_supports_standalone_packages():
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        (tmp_path / "package.json").write_text(
-            '{"name":"test-root","workspaces":["back-end"]}\n'
-        )
+        (tmp_path / "package.json").write_text('{"name":"test-root","workspaces":["back-end"]}\n')
         standalone = tmp_path / "mac-app"
         standalone.mkdir()
         (standalone / "package.json").write_text('{"name":"test-mac-app"}\n')
@@ -5663,12 +5865,12 @@ def test_workspace_dependency_preflight_supports_standalone_packages():
         fake_bin.mkdir()
         npm = fake_bin / "npm"
         npm.write_text(
-            '#!/bin/sh\n'
+            "#!/bin/sh\n"
             'echo "$PWD::$*" >> "$COMMAND_LOG"\n'
             'if [ "$1" = "pkg" ]; then exit 1; fi\n'
             'if [ "$1" = "ls" ]; then [ -f "$INSTALLED_MARKER" ]; exit; fi\n'
             'if [ "$1" = "install" ]; then touch "$INSTALLED_MARKER"; exit 0; fi\n'
-            'exit 1\n'
+            "exit 1\n"
         )
         npm.chmod(0o755)
 
@@ -5719,7 +5921,7 @@ def test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe():
     run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
 
     reachable_probe = 'pg_isready -h localhost -p "$LOCAL_DB_PORT" -U postgres -d victoria -q'
-    ownership_probe = 'workspace_db_container_owns_port &&'
+    ownership_probe = "workspace_db_container_owns_port &&"
     assert 'docker inspect "$DB_CONTAINER"' in run_script
     assert 'container_port" = "$LOCAL_DB_PORT"' in run_script
     assert reachable_probe in run_script
@@ -8612,6 +8814,18 @@ async def run_all_tests():
         "code_agent_preflight_accepts_anthropic_api_key_fallback",
         test_code_agent_preflight_accepts_anthropic_api_key_fallback,
     )
+    await r.record_async(
+        "local_compute_refresh_accepts_anthropic_api_key_fallback",
+        test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback,
+    )
+    r.record(
+        "compute_token_source_ignores_isolated_process_target",
+        test_compute_token_sync_reads_source_file_not_isolated_process_target,
+    )
+    await r.record_async(
+        "anthropic_api_key_fallback_availability_fails_closed",
+        test_anthropic_api_key_fallback_availability_fails_closed,
+    )
     r.record("normalize_attention_requests", test_normalize_attention_requests_accepts_backend_contract)
     r.record("attention_kind_auth_vs_write_lock", test_attention_request_kind_distinguishes_auth_from_write_lock)
     r.record("attention_open_backend_fields", test_attention_request_open_check_honors_backend_answered_fields)
@@ -8649,6 +8863,10 @@ async def run_all_tests():
     r.record("local_args_anon", test_local_benchmark_args_pass_anon_to_run_benchmark)
     r.record("local_args_single_task", test_local_benchmark_args_for_single_task_not_parallel)
     r.record("local_failed_tasks_from_run", test_local_failed_tasks_from_run_reads_result_json)
+    r.record(
+        "local_invocation_propagates_cache_ratchet_exit",
+        test_local_benchmark_invocation_propagates_cache_ratchet_exit,
+    )
     r.record("local_services_manifest_validation", test_local_services_manifest_validation_requires_ports)
     r.record(
         "local_manifest_system_database_identity",

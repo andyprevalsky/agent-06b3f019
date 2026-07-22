@@ -237,6 +237,19 @@ async function testInit_missingStartUrl() {
   }
 }
 
+async function testPrepareAuth_invalidBody() {
+  const res = await request(`${BASE_URL}/api/browser-session/missing-session/prepare-auth`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${ctx.accessToken}` },
+    body: JSON.stringify({ target_url: 'x'.repeat(8193) }),
+  });
+  assertStatus(res.status, 400, res.data);
+  const error = assertSchema(ErrorResponse, res.data, 'prepare-auth invalid request');
+  if (error.error !== 'Invalid prepare-auth request') {
+    throw new Error(`Unexpected prepare-auth validation error: ${error.error}`);
+  }
+}
+
 // ==================== POST /api/browser-session/close ====================
 
 async function testClose_noAuth() {
@@ -619,6 +632,10 @@ async function runAll() {
     {
       name: 'POST /browser-session/init -- invalid agent_id format',
       fn: testInit_invalidAgentIdFormat,
+    },
+    {
+      name: 'POST /browser-session/:sessionId/prepare-auth -- invalid body -> 400',
+      fn: testPrepareAuth_invalidBody,
     },
     { name: 'POST /browser-session/init -- missing start_url', fn: testInit_missingStartUrl },
     // auth boundary — POST /close

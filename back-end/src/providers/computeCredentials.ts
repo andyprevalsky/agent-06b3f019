@@ -33,6 +33,7 @@ type ComputeLeaseOptions = {
   agentId?: string;
   rootAgentId?: string;
   fastCacheAffinityKey?: string;
+  tokenType?: ComputeCodeCredentialType;
 };
 type RequiredLineageLease = Required<
   Pick<ComputeLeaseOptions, 'lineageKey' | 'agentId' | 'rootAgentId'>
@@ -362,7 +363,8 @@ async function persistOrReadFastCacheAffinity(
 }
 
 export async function fetchComputeUserToken(
-  userId: string
+  userId: string,
+  tokenType: ComputeCodeCredentialType | null = null
 ): Promise<ComputeCodeCredentialResult | null> {
   const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
   if (!decryptionKey) return null;
@@ -371,7 +373,7 @@ export async function fetchComputeUserToken(
   const integrations = await prisma.integration.findMany({
     where: {
       userId,
-      name: { in: ['claude_code', 'gpt_code'] },
+      name: { in: integrationNamesForAffinity(tokenType) },
       status: 'CONNECTED',
       OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
     },
@@ -381,7 +383,8 @@ export async function fetchComputeUserToken(
 }
 
 export async function fetchComputePoolToken(
-  excludeIds?: string[]
+  excludeIds?: string[],
+  tokenType: ComputeCodeCredentialType | null = null
 ): Promise<ComputeCodeCredentialResult | null> {
   const decryptionKey = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY;
   if (!decryptionKey) return null;
@@ -389,7 +392,7 @@ export async function fetchComputePoolToken(
   const now = new Date();
   const integrations = await prisma.integration.findMany({
     where: {
-      name: { in: ['claude_code', 'gpt_code'] },
+      name: { in: integrationNamesForAffinity(tokenType) },
       status: 'CONNECTED',
       poolingEnabled: true,
       OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
@@ -405,7 +408,8 @@ export async function fetchComputeTokenForUser(
   options?: { forcePool?: boolean; excludePoolTokenIds?: string[] } & ComputeLeaseOptions
 ): Promise<ComputeCodeCredentialResult | null> {
   const fastCacheAffinityKey = normalizeFastCacheAffinityKey(options?.fastCacheAffinityKey);
-  const pinnedTokenType = await readFastCacheAffinity(fastCacheAffinityKey);
+  const requestedTokenType = options?.tokenType ?? null;
+  const pinnedTokenType = requestedTokenType ?? (await readFastCacheAffinity(fastCacheAffinityKey));
   const lineage =
     options?.lineageKey && options.lineageKey.trim() !== ''
       ? {
@@ -444,6 +448,7 @@ export async function fetchComputeTokenForUser(
         lineage
       );
       if (userToken) {
+        if (requestedTokenType !== null) return userToken;
         const affinityType = await persistOrReadFastCacheAffinity(
           fastCacheAffinityKey,
           userId,
@@ -478,6 +483,7 @@ export async function fetchComputeTokenForUser(
       lineage
     );
     if (!poolToken) return null;
+    if (requestedTokenType !== null) return poolToken;
     const affinityType = await persistOrReadFastCacheAffinity(
       fastCacheAffinityKey,
       userId,
@@ -492,10 +498,10 @@ export async function fetchComputeTokenForUser(
   }
 
   if (options?.forcePool !== true) {
-    const userToken = await fetchComputeUserToken(userId);
+    const userToken = await fetchComputeUserToken(userId, pinnedTokenType);
     if (userToken) return userToken;
   }
-  return fetchComputePoolToken(options?.excludePoolTokenIds);
+  return fetchComputePoolToken(options?.excludePoolTokenIds, pinnedTokenType);
 }
 
 export async function heartbeatComputeTokenLineage(lineageKey: string) {

@@ -2,8 +2,6 @@
 
 import asyncio
 import inspect
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Thread
 
 from _test_utils import BlackboxResult
 
@@ -209,27 +207,34 @@ async def test_usage_endpoint_non_200_is_not_an_empty_success():
     """The real usage fetcher distinguishes an unavailable payload from zero usage."""
     import benchmarks.run_benchmark as runner
 
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(503)
-            self.end_headers()
+    class UnavailableResponse:
+        status_code = 503
 
-        def log_message(self, *_args):
-            return
+    class UnavailableClient:
+        def __init__(self, **_kwargs):
+            pass
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            return UnavailableResponse()
+
     original_headers = runner._api_headers
+    original_client = runner.httpx.AsyncClient
 
     async def no_headers():
         return {}
 
     runner._api_headers = no_headers
+    runner.httpx.AsyncClient = UnavailableClient
     try:
         try:
             await runner.get_agent_tool_usage(
-                f"http://127.0.0.1:{server.server_address[1]}",
+                "http://benchmark.invalid",
                 "agent-fixture",
             )
             raise AssertionError("503 usage response became an empty success")
@@ -237,8 +242,7 @@ async def test_usage_endpoint_non_200_is_not_an_empty_success():
             assert "returned 503" in str(exc)
     finally:
         runner._api_headers = original_headers
-        server.shutdown()
-        server.server_close()
+        runner.httpx.AsyncClient = original_client
 
 
 def test_repeatable_cache_floors_only_ratchet_up():

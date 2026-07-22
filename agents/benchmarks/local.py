@@ -1307,7 +1307,14 @@ def run_benchmark_invocation(
         latest_hint = f"; newest result after start was {latest}" if latest else ""
         raise RuntimeError(f"Benchmark command did not print a result file marker (exit {code}){latest_hint}")
     if code != 0:
-        print(f"Benchmark invocation failed with exit code {code}; result: {result_path}")
+        # The saved run artifact records task outcomes, but post-run gates such
+        # as cache and memory ratchets execute after that save. Never infer
+        # success by re-reading an all-task-pass artifact when the owning runner
+        # exited non-zero. Ordinary task failures still return their artifact so
+        # the caller can run all three per-agent diagnostics before failing.
+        if not failed_tasks_from_run(result_path):
+            raise RuntimeError(f"Benchmark invocation failed with exit code {code}; result: {result_path}")
+        print(f"Benchmark tasks failed with exit code {code}; collecting diagnostics from: {result_path}")
     return result_path
 
 

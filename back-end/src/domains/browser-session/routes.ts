@@ -2,6 +2,7 @@
  * Browser-session routes — thin controller layer.
  *
  * POST /api/browser-session/init                     - Initialize browser session
+ * POST /api/browser-session/:sessionId/prepare-auth  - Prepare all credentials for a target realm
  * POST /api/browser-session/close                    - Close/pause browser session
  * POST /api/browser-session/resume                   - Resume paused browser task
  * POST /api/browser-session/rotate-proxy             - Rotate outbound IP (rotate_ip tool)
@@ -45,6 +46,7 @@ import {
   resumeSessionSchema,
   injectLocalStorageSchema,
 } from './types';
+import { registerBrowserCredentialRoutes } from './routes.credentials';
 import { registerBrowserDataRoutes } from './routes.files';
 import { registerBrowserRotationRoute } from './routes.rotation';
 
@@ -57,12 +59,9 @@ const log = createLogger('BrowserSession');
 
 const router = Router();
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
-const MAX_VIEWPORT_WIDTH = 4096;
-const MAX_VIEWPORT_HEIGHT = 2160;
-
-function isValidViewportDimension(value: unknown, maximum: number): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= maximum;
-}
+const [MAX_VIEWPORT_WIDTH, MAX_VIEWPORT_HEIGHT] = [4096, 2160];
+const isValidViewportDimension = (value: unknown, maximum: number): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= maximum;
 
 /* c8 ignore start -- init, close, resume require Steel SDK; files + inject require Steel/CDP */
 /**
@@ -362,6 +361,7 @@ router.get(
 
 registerBrowserDataRoutes(router);
 registerBrowserRotationRoute(router);
+registerBrowserCredentialRoutes(router);
 
 /**
  * POST /api/browser-session/:sessionId/inject-localStorage

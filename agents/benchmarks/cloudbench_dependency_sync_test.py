@@ -984,8 +984,8 @@ def test_boot_launch_runs_the_current_driver_before_applying_the_patch() -> None
     launch = cloud[boot_start:legacy_start]
     assert '--env CLOUDBENCH_RUN_SCRIPT=/cloudbench-run.sh' in launch
     assert '--file-local "/cloudbench-run.sh=$ROOT_DIR/scripts/cloudbench-run.sh"' in launch
-    assert 'RUN_SCRIPT="${CLOUDBENCH_RUN_SCRIPT:-$REPO/scripts/cloudbench-run.sh}"' in boot
-    assert 'bash "$RUN_SCRIPT" >> "$LOG" 2>&1' in boot
+    assert 'DRIVER="${CLOUDBENCH_RUN_SCRIPT:-/cloudbench-run.sh}"' in boot
+    assert 'bash "$DRIVER" >> "$LOG" 2>&1' in boot
 
 
 def test_autoscaled_worker_failure_is_removed_and_replaceable(tmp_path: Path) -> None:
@@ -1401,6 +1401,31 @@ def test_pool_boot_update_is_bounded_and_skips_redundant_inventory_polling() -> 
     assert storage_ready < neutralize < first_start
     assert "--env CLOUDBENCH_BOOT=0" in worker_provision[neutralize:first_start]
     assert "--skip-start" in worker_provision[neutralize:first_start]
+
+
+def test_boot_launch_delivers_the_advertised_local_workspace_patch() -> None:
+    cloud = CLOUD_SCRIPT.read_text()
+    branch_start = cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then')
+    setup = cloud[:branch_start]
+    branch = cloud[branch_start:]
+
+    assert 'LOCAL_PATCH_FILE="$(mktemp)"' in setup
+    assert '--env "LOCAL_PATCH_FILE=/cloudbench-local.patch"' in branch
+    assert '--file-local "/cloudbench-local.patch=$LOCAL_PATCH_FILE"' in branch
+    assert '--env "LOCAL_PATCH_FILE="' in branch
+
+
+def test_boot_launch_executes_the_current_injected_driver() -> None:
+    """Driver edits must take effect before that driver applies the workspace patch."""
+    cloud = CLOUD_SCRIPT.read_text()
+    boot = (CLOUD_SCRIPT.parent / "cloudbench-boot.sh").read_text()
+    branch_start = cloud.index('if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then')
+    branch = cloud[branch_start:]
+
+    assert '--file-local "/cloudbench-run.sh=$ROOT_DIR/scripts/cloudbench-run.sh"' in branch
+    assert 'DRIVER="${CLOUDBENCH_RUN_SCRIPT:-/cloudbench-run.sh}"' in boot
+    assert 'bash "$DRIVER" >> "$LOG" 2>&1' in boot
+    assert 'bash "$REPO/scripts/cloudbench-run.sh" >> "$LOG" 2>&1' not in boot
 
 
 def test_snapshot_and_pool_dependency_proofs_are_exact() -> None:
@@ -3443,6 +3468,16 @@ start_world_model_harness
     assert not (wmh_root / "agents" / ".context").exists()
 
 
+def test_isolated_stack_forwards_anthropic_exclusion_to_wmh_provider() -> None:
+    """The stack env allow-list must preserve an explicit no-Anthropic run policy."""
+    stack = DRIVER_SCRIPT.read_text()
+    stack_env_start = stack.index("STACK_ENV=(")
+    stack_env_end = stack.index("\n)", stack_env_start)
+    stack_env = stack[stack_env_start:stack_env_end]
+
+    assert '"ROSE_EXCLUDE_ANTHROPIC_FAMILY=${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}"' in stack_env
+
+
 def test_wmh_health_wait_allows_cold_model_load_past_thirty_seconds(tmp_path: Path) -> None:
     """A live WMH process must not be discarded before its cold model finishes loading."""
     stack = STACK_SCRIPT.read_text()
@@ -4279,6 +4314,41 @@ def test_refresh_wmh_bounds_the_archive_scan_by_default() -> None:
     assert "WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES'" in refresh
 
 
+def test_refresh_wmh_can_select_an_exact_attributable_corpus() -> None:
+    """A one-trace delta proof must name the admitted live root explicitly."""
+    cloud = CLOUD_SCRIPT.read_text()
+    refresh = cloud[cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') : cloud.index("# MODE: run (default)")]
+
+    assert 'WMH_REFRESH_ROOT_AGENT_IDS="${WMH_REFRESH_ROOT_AGENT_IDS:-}"' in refresh
+    assert "WMH_REFRESH_ROOT_AGENT_IDS must be comma-separated UUIDs" in refresh
+    assert "explicit WMH root count exceeds WMH_REFRESH_MAX_BUNDLES" in refresh
+    assert "explicit_roots=" in refresh
+    assert "WMH_ROOT_AGENT_IDS='$WMH_REFRESH_ROOT_AGENT_IDS'" in refresh
+    assert "u(root_agent_ids=ids or None" in refresh
+
+
+def test_benchmark_stack_does_not_override_injected_r2_archive_backend() -> None:
+    """Gold live traces must survive disposal of their fleet volume."""
+    stack = STACK_SCRIPT.read_text()
+    benchmark_env = stack[stack.index("if $BENCHMARK_MODE; then") : stack.index("# Build the benchmark frontend")]
+
+    assert 'export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"' in benchmark_env
+    assert 'export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$PWD/.context}"' in benchmark_env
+    assert 'TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"' not in benchmark_env
+    assert "disposable fleet volume" in benchmark_env
+
+
+def test_refresh_wmh_publishes_the_rebuilt_volume_as_the_proven_fleet_snapshot() -> None:
+    """A warm-volume rebuild is useless if fleet clones keep selecting the prior snapshot."""
+    cloud = CLOUD_SCRIPT.read_text()
+    refresh = cloud[cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') : cloud.index("# MODE: run (default)")]
+
+    assert 'create_volume_snapshot_exact "$VOL_ID"' in refresh
+    assert 'NEW_SNAP="$CREATED_SNAPSHOT_ID"' in refresh
+    assert '"$NEW_SNAP" > "$GIT_COMMON_DIR/cloudbench-warm-deps.fp"' in refresh
+    assert "WMH model snapshot published for fleet clones" in refresh
+
+
 def test_start_barrier_tolerates_infra_failures() -> None:
     """RCA (2026-07-15): at fleet width some isolated stacks sporadically fail
     on-box startup (resource/timing races under N concurrent full stacks). The
@@ -4899,8 +4969,8 @@ def test_boot_supervisor_keeps_data_plane_alive_after_done() -> None:
     controller's next data-plane poll, or a real verdict becomes NORESULT."""
     boot = (CLOUD_SCRIPT.parent / "cloudbench-boot.sh").read_text()
 
-    assert 'RUN_SCRIPT="${CLOUDBENCH_RUN_SCRIPT:-$REPO/scripts/cloudbench-run.sh}"' in boot
-    assert 'bash "$RUN_SCRIPT" >> "$LOG" 2>&1' in boot
+    assert 'DRIVER="${CLOUDBENCH_RUN_SCRIPT:-/cloudbench-run.sh}"' in boot
+    assert 'bash "$DRIVER" >> "$LOG" 2>&1' in boot
     assert 'exec bash "$REPO/scripts/cloudbench-run.sh"' not in boot
     assert "holding for controller collection" in boot
     assert boot.rstrip().endswith("exec sleep infinity")

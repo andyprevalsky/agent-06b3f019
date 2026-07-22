@@ -407,14 +407,26 @@ async function syncComputeTokensWithRetries(): Promise<void> {
       const count = await syncIntegrations();
       const usableClaudeCodeCount = await countUsableClaudeCodeIntegrations();
       if (usableClaudeCodeCount === 0) {
-        if (process.env.SEED_ALLOW_MISSING_CLAUDE_CODE !== '1') {
+        if (process.env.SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK === '1') {
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, 0 usable claude_code — ` +
+              `proceeding without Claude Code for a launcher-scoped non-Claude task ` +
+              `(SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK=1)`
+          );
+        } else if (process.env.SEED_ALLOW_MISSING_CLAUDE_CODE === '1') {
+          if (!process.env.ANTHROPIC_API_KEY?.trim()) {
+            throw new Error(
+              'SEED_ALLOW_MISSING_CLAUDE_CODE=1 requires a non-empty ANTHROPIC_API_KEY'
+            );
+          }
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, ` +
+              '0 usable claude_code — proceeding with the caller-validated ' +
+              'ANTHROPIC_API_KEY fallback (SEED_ALLOW_MISSING_CLAUDE_CODE=1)'
+          );
+        } else {
           throw new Error('No usable claude_code integrations after sync');
         }
-        console.warn(
-          `  ⚠️  Compute Tokens (integrations): ${count} synced, 0 usable claude_code — ` +
-            `proceeding without Claude Code ` +
-            `(SEED_ALLOW_MISSING_CLAUDE_CODE=1; this run declares requires_claude_code=false)`
-        );
       }
       const { usable: usableGptCodeCount, rateLimited: rateLimitedGptCodeCount } =
         await inspectGptCodeIntegrations();

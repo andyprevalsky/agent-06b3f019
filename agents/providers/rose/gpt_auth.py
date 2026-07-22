@@ -343,9 +343,9 @@ def _build_cache_namespace(
     call_site: Optional[str],
 ) -> str:
     """Isolate provider cache sessions while preserving per-call prefix growth."""
-    conversation_identity = lineage_key or agent_id
+    stable_lineage = lineage_key or agent_id
     first_non_system_message: Optional[Dict[str, Any]] = None
-    if conversation_identity is None:
+    if stable_lineage is None:
         for message in messages:
             if message.get("role") != "system":
                 first_non_system_message = message
@@ -353,9 +353,16 @@ def _build_cache_namespace(
 
     material = json.dumps(
         {
-            "lineage": conversation_identity or "unbound",
+            # Agent lineage is the cache-session identity. Do not mix mutable
+            # provider-visible message text into an already-bound session:
+            # context-pointer resolution can annotate the first user message
+            # between turns even though the conversation identity is unchanged.
+            "lineage": stable_lineage or "unbound",
             "callSite": call_site or "unspecified",
-            "firstMessage": first_non_system_message,
+            # Unbound helper calls still need content isolation because they
+            # have no agent identity to prevent unrelated requests sharing a
+            # provider cache session.
+            "firstMessage": first_non_system_message if stable_lineage is None else None,
         },
         sort_keys=True,
         default=str,

@@ -29,6 +29,11 @@ MIN_USABLE_EMAIL_OTP_TTL_SECONDS = 30
 CHROMIUM_UNIX_EPOCH_OFFSET_SECONDS = 11644473600
 UNIX_MS_VS_CHROMIUM_MICROSECONDS_BOUNDARY = 10000000000000
 PAYMENT_CARD_SECRET_REFS = ("card_number", "card_name", "card_expiry", "card_cvv")
+PAYMENT_CARD_ENTRY_RULE = (
+    "Use request_payment_card only if checkout requires you to enter new card details. "
+    "If a valid saved payment method is already selected and no card entry is required, "
+    "do not call request_payment_card; continue with that saved method."
+)
 
 
 # ========================================
@@ -538,11 +543,19 @@ def auth_realm_from_url(url: str) -> str:
     """Best-effort realm derivation for the auth-options request."""
     if not url:
         return ""
+    parsed_input = urlparse(url)
+    looks_like_host_port = bool(re.match(r"^[^/?#]+:\d+(?:[/?#]|$)", url))
+    if (
+        parsed_input.scheme
+        and parsed_input.scheme not in {"http", "https"}
+        and not looks_like_host_port
+    ):
+        return ""
     parsed = urlparse(url if url.startswith(("http://", "https://")) else f"https://{url}")
-    host = (parsed.netloc or parsed.path).split("/")[0].lower()
+    host = (parsed.hostname or parsed.path.split("/")[0]).lower()
     if host.startswith("www."):
         host = host[4:]
-    allow_query_override = host.startswith(("localhost", "127.0.0.1")) or host.endswith(
+    allow_query_override = host in {"localhost", "127.0.0.1"} or host.endswith(
         (".ngrok-free.dev", ".ngrok.app", ".ngrok.io", ".loca.lt")
     )
     if allow_query_override:
@@ -552,9 +565,31 @@ def auth_realm_from_url(url: str) -> str:
             override_host = auth_realm_from_url(override)
             if override_host:
                 return override_host
+    if host == "aws.amazon.com" or host.endswith(".aws.amazon.com"):
+        return "aws.amazon.com"
+    if host == "amazon.com" or host.endswith(".amazon.com"):
+        return "amazon.com"
     if host == "uber.com" or host.endswith(".uber.com"):
         return "uber.com"
     return host
+
+
+def auth_realm_matches_url(auth_realm: str, url: str) -> bool:
+    """Return whether a backend-authoritative realm owns this URL host."""
+    if not auth_realm or not url:
+        return False
+    normalized_realm = auth_realm.lower().lstrip(".").removeprefix("www.")
+    parsed = urlparse(url if url.startswith(("http://", "https://")) else f"https://{url}")
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    derived_realm = auth_realm_from_url(url)
+    if derived_realm == normalized_realm:
+        return True
+    # A canonicalizer override (for example signin.aws.amazon.com ->
+    # aws.amazon.com) is an authoritative boundary. Only apply the ordinary
+    # subdomain fallback when canonicalization left the hostname untouched.
+    if derived_realm != host:
+        return False
+    return host == normalized_realm or host.endswith(f".{normalized_realm}")
 
 
 def _password_ref(origin: str, username: str, username_counts: Dict[str, int]) -> str:
@@ -838,7 +873,9 @@ def build_autopay_prompt_section(payment_data: Dict[str, Any], encrypted_envelop
 {billing_address}{contact_info}
 
 ## Payment Information
-AUTOPAY ENABLED (limit: ${autopay_limit_dollars:.2f}): When you reach a checkout/payment page, read the full itemized receipt off the page (each product: name, image URL if visible, unit price in cents, quantity, line total in cents; plus every fee, the subtotal, and the final total) and call request_payment_card with it — BEFORE touching any payment field.
+AUTOPAY ENABLED (limit: ${autopay_limit_dollars:.2f}): {PAYMENT_CARD_ENTRY_RULE}
+
+If new card details are required, first read the full itemized receipt off the page (each product: name, image URL if visible, unit price in cents, quantity, line total in cents; plus every fee, the subtotal, and the final total), then call request_payment_card with it BEFORE touching any payment field.
 
 Do not type any card details yet, and do not ask the user to enter a card. The one-time card is minted on demand only after you call request_payment_card and the user approves; its secret refs are then provided for you to type into the payment fields."""
 

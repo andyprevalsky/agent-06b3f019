@@ -175,6 +175,12 @@ export function resolveClaudeCodeAuthEnvs(
   );
 }
 
+export function resolveClaudeCodeTokenSource(
+  credentialMeta: ClaudeCodeCredentialResult | null
+): 'user' | 'pool' | 'anthropic' {
+  return credentialMeta?.source ?? 'anthropic';
+}
+
 /**
  * Decide which auth env vars the Codex Code CLI sandbox should receive.
  *
@@ -305,6 +311,7 @@ export async function createClaudeCodeSession(
   const apiKeyOnCooldown =
     !credentialMeta && anthropicApiKey ? await isAnthropicApiKeyOnCooldown() : false;
   Object.assign(envs, resolveClaudeCodeAuthEnvs(credentialMeta, anthropicApiKey, apiKeyOnCooldown));
+  const claudeTokenSource = resolveClaudeCodeTokenSource(credentialMeta);
 
   if (credentialMeta) {
     log.info(
@@ -420,7 +427,7 @@ export async function createClaudeCodeSession(
       streamUrl: wsUrl,
       goal,
       status: 'ACTIVE',
-      claudeTokenSource: credentialMeta?.source ?? null,
+      claudeTokenSource,
       claudeTokenIntegrationId:
         credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
     },
