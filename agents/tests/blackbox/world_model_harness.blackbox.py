@@ -2170,6 +2170,7 @@ def test_simulated_browser_resume_payload_is_compact_and_media_free():
         world_model_session_id="wmh-session-1",
         total_input_tokens=123,
         total_output_tokens=45,
+        usage_by_model={"gpt-5.6-sol-gpt": {"input_tokens": 123, "output_tokens": 45}},
     )
 
     encoded = json.dumps(payload)
@@ -2181,6 +2182,9 @@ def test_simulated_browser_resume_payload_is_compact_and_media_free():
     assert len(payload["simulated_visited_urls"]) == 50
     assert payload["simulated_recording_frame_count"] == 51
     assert payload["simulated_action_entry_count"] == 50
+    assert payload["simulated_usage_by_model"] == {
+        "gpt-5.6-sol-gpt": {"input_tokens": 123, "output_tokens": 45}
+    }
     assert len(encoded) < 100_000
 
 

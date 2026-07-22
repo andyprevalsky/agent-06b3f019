@@ -1767,14 +1767,20 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
     """Amazon uses the standard completed-commerce runtime and preserves cart-path semantics."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
-    approved_prompt = (
+    completed_purchase_prompt = (
+        "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. "
+        "Use my saved/default Amazon payment method and shipping address; do not request or add a new "
+        "payment card when a valid saved method is already selected. "
+        "Avoid using the Buy Now button as the purchase path, but make sure purchase is completed."
+    )
+    auth_assistance_prompt = (
         "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. "
         "Avoid using the Buy Now button as the purchase path, but make sure purchase is completed."
     )
     task = get_task_by_name("browser-agent-amazon-cookie-payment")
     assert task.description.endswith("complete the purchase.")
-    assert task.prompt == approved_prompt
-    assert get_task_by_name("browser-agent").prompt == approved_prompt
+    assert task.prompt == completed_purchase_prompt
+    assert get_task_by_name("browser-agent").prompt == auth_assistance_prompt
     assert task.approval_handling == "auto_approve"
     assert task.expected_attention_kind is None
     assert task.expected_attention_kind_any_of == ["payment_approval", "write_lock"]
