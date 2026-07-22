@@ -80,14 +80,18 @@ async function run(): Promise<void> {
     alertError({
       source: 'agent_workflow',
       message: 'db pool timeout after 42ms',
-      agentId: 'agent-def',
+      agentId: 'agent-abc',
     });
     await sleep(30);
     assert.strictEqual(calls.length, 0, 'duplicate signature must be throttled');
 
     // Signatures normalize out UUIDs/numbers, so a message differing ONLY by a
     // number is the same signature and stays throttled.
-    alertError({ source: 'agent_workflow', message: 'db pool timeout after 9001ms', agentId: 'x' });
+    alertError({
+      source: 'agent_workflow',
+      message: 'db pool timeout after 9001ms',
+      agentId: 'agent-abc',
+    });
     await sleep(30);
     assert.strictEqual(calls.length, 0, 'number-only difference collapses to the same signature');
 
@@ -149,6 +153,25 @@ async function run(): Promise<void> {
       'dispatch keeps failure-controlled free text out of the privileged workflow'
     );
 
+    // A broad incident still alerts every affected agent, but its normalized
+    // signature may launch only one RCA workflow per throttle window.
+    process.env.SLACK_ERROR_WEBHOOK_URL = 'https://hooks.slack.test/xxx';
+    calls.length = 0;
+    alertError({ source: 'sms', message: 'provider outage 42', agentId: 'incident-agent-a' });
+    await sleep(30);
+    alertError({ source: 'sms', message: 'provider outage 99', agentId: 'incident-agent-b' });
+    await sleep(30);
+    assert.strictEqual(
+      calls.filter((c) => c.url.includes('api.github.com')).length,
+      1,
+      'one normalized incident signature must launch one RCA'
+    );
+    assert.strictEqual(
+      calls.filter((c) => c.url === 'https://hooks.slack.test/xxx').length,
+      1,
+      'the other affected agent must retain its ordinary Slack fallback'
+    );
+
     // --- 7. Flag off → never dispatches RCA ---
     delete process.env.AUTO_RCA_ENABLED;
     __resetAlertThrottleForTests();
@@ -200,8 +223,8 @@ async function run(): Promise<void> {
       return new Response('ok', { status: 200 });
     }) as typeof fetch;
 
-    // --- 10. Bot token + channel → posts via chat.postMessage; the RCA dispatch
-    //         carries the message handle (ts + channel) for the lifecycle card ---
+    // --- 10. Auto RCA dispatch owns Slack creation. The backend sends only the
+    //         stable agent + target channel and never creates a duplicate card. ---
     delete process.env.SLACK_ERROR_WEBHOOK_URL;
     process.env.SLACK_BOT_TOKEN = 'xoxb-test';
     process.env.SLACK_ERROR_CHANNEL_ID = 'C_INPUT';
@@ -212,24 +235,35 @@ async function run(): Promise<void> {
     alertError({ source: 'agent_workflow', message: 'bot token path', agentId: 'agent-bot' });
     await sleep(30);
     const slackPost = calls.find((c) => c.url.includes('slack.com/api/chat.postMessage'));
-    assert.ok(slackPost !== undefined, 'bot token → posts via chat.postMessage');
-    assert.strictEqual(
-      (slackPost.body as { channel: string }).channel,
-      'C_INPUT',
-      'chat.postMessage targets the configured channel'
-    );
+    assert.strictEqual(slackPost, undefined, 'Auto RCA must not pre-create a Slack card');
     const botDispatch = calls.find((c) => c.url.includes('api.github.com'));
     assert.ok(botDispatch !== undefined, 'flag on → dispatch fires');
     const botPayload = (botDispatch.body as { client_payload: Record<string, string> })
       .client_payload;
-    assert.strictEqual(botPayload.slack_ts, '1700000000.000100', 'dispatch carries the message ts');
+    assert.ok(!('slack_ts' in botPayload), 'dispatch must not carry an unstable message handle');
     assert.strictEqual(
       botPayload.slack_channel,
-      'C_TEST',
-      'dispatch carries the resolved channel from the Slack response'
+      'C_INPUT',
+      'dispatch carries the configured lifecycle channel'
     );
 
-    // --- 11. Bot token unset but webhook set → still uses the webhook path ---
+    // --- 11. A process replay can duplicate dispatch, but it still cannot
+    //         duplicate Slack; the workflow reconciles by agent ID. ---
+    __resetAlertThrottleForTests();
+    alertError({ source: 'agent_workflow', message: 'bot token path', agentId: 'agent-bot' });
+    await sleep(30);
+    assert.strictEqual(
+      calls.filter((c) => c.url.includes('api.github.com')).length,
+      2,
+      'replay is allowed to produce a duplicate idempotent dispatch'
+    );
+    assert.strictEqual(
+      calls.filter((c) => c.url.includes('slack.com/api/chat.postMessage')).length,
+      0,
+      'replay must not produce a backend-owned Slack card'
+    );
+
+    // --- 12. Bot token unset but webhook set → still uses the webhook path ---
     delete process.env.SLACK_BOT_TOKEN;
     delete process.env.SLACK_ERROR_CHANNEL_ID;
     delete process.env.AUTO_RCA_ENABLED;

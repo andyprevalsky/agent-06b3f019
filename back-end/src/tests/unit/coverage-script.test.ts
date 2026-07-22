@@ -68,6 +68,16 @@ for (const [name, harness] of [
     /if \[\[ "\$\{BACKEND_CODEX_SMOKE_SKIP:-0\}" != "1" \]\]; then\s+echo "Syncing local Codex credentials/,
     `${name} harness must not couple credential sync to live-smoke execution`
   );
+  assert.match(
+    harness,
+    /CODEX_AUTH_MODE=.*auth_mode/,
+    `${name} harness must inspect the local Codex auth mode before importing it`
+  );
+  assert.match(
+    harness,
+    /SEEDED_CODEX_COUNT=.*Integration.*gpt_code/s,
+    `${name} harness must preserve a connected isolated gpt_code credential when local auth is incompatible`
+  );
 }
 
 assert.match(
