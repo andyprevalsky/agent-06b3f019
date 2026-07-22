@@ -99,6 +99,7 @@ require_text "$RECONCILE_WORKFLOW" "if [ \"${LITERAL_DOLLAR}repair\" = draft ]" 
 
 # Investigator failures may not become false-green workflows.
 require_text "$WORKFLOW" 'id: investigator_primary' "dedicated investigator attempt is required"
+require_text "$WORKFLOW" 'id-token: write' "investigator actions must be able to exchange the GitHub OIDC token"
 require_text "$WORKFLOW" "claude_code_oauth_token: \${{ secrets.RCA_CLAUDE_CODE_OAUTH_TOKEN }}" "primary attempt must use the dedicated RCA account"
 require_text "$WORKFLOW" 'id: investigator_retry' "incomplete primary attempts must retry"
 require_text "$WORKFLOW" "steps.primary_contract.outputs.complete != 'true'" "retry must derive from the completion contract"
