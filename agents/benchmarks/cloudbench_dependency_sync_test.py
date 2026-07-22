@@ -1182,6 +1182,22 @@ def test_worktree_patch_ignores_append_only_history_ledgers(tmp_path: Path) -> N
     assert "local-descend" not in (guest / "agents/benchmarks/history/descend_steps.jsonl").read_text()
     assert "guest-prior-run" in (guest / "agents/benchmarks/history/descend_steps.jsonl").read_text()
 
+    only_history = tmp_path / "only-history"
+    subprocess.run(["git", "clone", "-q", str(base), str(only_history)], check=True)
+    with (only_history / "agents/benchmarks/history/descend_steps.jsonl").open("a") as handle:
+        handle.write('{"record_type":"factory_event","run_id":"local-descend"}\n')
+    assert subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; cloudbench_worktree_has_changes "$2"',
+            "history-only-check",
+            str(ENV_HELPER_SCRIPT),
+            str(only_history),
+        ],
+        check=False,
+    ).returncode == 1
+
 
 def test_empty_local_patch_cleanup_is_nounset_safe() -> None:
     cloud = CLOUD_SCRIPT.read_text()
