@@ -1601,34 +1601,42 @@ class AgentWorkflow:
                 start_to_close_timeout=timedelta(seconds=15),
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
-            if result and not result.get("has_credits", True):
-                workflow.logger.warning("💰 Credits depleted - pausing agent")
-                self._has_credits = False
-                if result.get("tier") is None:
+        except Exception as e:
+            workflow.logger.warning(f"Credit check failed (continuing): {e}")
+            return
+
+        if result and not result.get("has_credits", True):
+            workflow.logger.warning("💰 Credits depleted - pausing agent")
+            self._has_credits = False
+            self.is_paused = True
+            if result.get("tier") is None:
+                try:
                     checkout_url = await workflow.execute_activity(
                         mint_subscription_checkout_activity,
                         args=[self.user_id],
                         start_to_close_timeout=timedelta(seconds=30),
                         retry_policy=RetryPolicy(maximum_attempts=3),
                     )
-                    try:
-                        await raise_gate_direct(
-                            self,
-                            build_subscription_gate(
-                                checkout_url=checkout_url,
-                                reason="Your free credits are exhausted — subscribe to continue this task.",
-                                title="Subscribe to continue this task",
-                            ),
-                            gate_key="subscription",
-                        )
-                    except GateRejectedError:
-                        self.is_paused = True
-                else:
+                    await raise_gate_direct(
+                        self,
+                        build_subscription_gate(
+                            checkout_url=checkout_url,
+                            reason="Your free credits are exhausted — subscribe to continue this task.",
+                            title="Subscribe to continue this task",
+                        ),
+                        gate_key="subscription",
+                    )
+                    self.is_paused = False
+                except GateRejectedError:
+                    self.is_paused = True
+                except Exception as e:
+                    workflow.logger.warning(f"Credit gate setup failed after depletion (pausing): {e}")
                     self.is_paused = True
             else:
-                self._has_credits = True
-        except Exception as e:
-            workflow.logger.warning(f"Credit check failed (continuing): {e}")
+                self.is_paused = True
+            return
+
+        self._has_credits = True
 
     # Direct compute token TTL: 5 minutes
     COMPUTE_TOKEN_TTL = timedelta(minutes=5)
