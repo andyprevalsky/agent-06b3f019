@@ -56,6 +56,7 @@ AGENT_PAYMENT_TASK_NAMES = {
     "agent-payment-abandonment",
     "agent-payment-setup-resume",
 }
+NON_PURCHASE_GATE_TASK_NAMES = {"gate-source-connect-gmail"}
 BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 _PORT_RANGE_RESERVATIONS: dict[int, tuple[TextIO, ...]] = {}
 _RESERVED_PORTS: set[int] = set()
@@ -673,10 +674,16 @@ def needs_payment_fixture(tasks: Sequence[str]) -> bool:
     return bool(AGENT_PAYMENT_TASK_NAMES & set(tasks))
 
 
+def needs_non_purchase_gates(tasks: Sequence[str]) -> bool:
+    return bool(NON_PURCHASE_GATE_TASK_NAMES & set(tasks))
+
+
 def configure_task_environment(tasks: Sequence[str]) -> None:
     if needs_frontend_tunnel(tasks):
         os.environ["BENCHMARK_BUNDLED_FRONTEND"] = "true"
     selected = set(tasks)
+    if needs_non_purchase_gates(tasks):
+        os.environ["NON_PURCHASE_GATES_ENABLED"] = "1"
     if AGENT_PAYMENT_TASK_NAMES & selected:
         # Keep the consolidated isolated lane behaviorally equivalent to the
         # former per-task lifecycle launcher. Payment tasks share one fixture,

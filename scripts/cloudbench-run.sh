@@ -144,6 +144,14 @@ run_with_heartbeat() {
 # ── Normalize the task list (comma OR space separated) into an array ────────
 # The controller may pass "a,b,c" or "a b c"; accept both.
 read -r -a BENCH_TASK_LIST <<< "$(printf '%s' "$BENCH_TASKS" | tr ',' ' ')"
+BENCH_ENABLE_NON_PURCHASE_GATES=0
+for task_name in "${BENCH_TASK_LIST[@]}"; do
+    case "$task_name" in
+        gate-source-connect-gmail)
+            BENCH_ENABLE_NON_PURCHASE_GATES=1
+            ;;
+    esac
+done
 
 emit_report_and_result() {
     # Always surface whatever report card / run results exist, even on failure,
@@ -501,6 +509,9 @@ fi
 if [ -n "$BENCHMARK_VM_USD_PER_HOUR" ]; then
     STACK_ENV+=("BENCHMARK_VM_USD_PER_HOUR=$BENCHMARK_VM_USD_PER_HOUR")
 fi
+if [ "$BENCH_ENABLE_NON_PURCHASE_GATES" = "1" ]; then
+    STACK_ENV+=("NON_PURCHASE_GATES_ENABLED=1")
+fi
 if [ "$BENCH_SIMULATE" = "1" ]; then
     STACK_ENV+=(
         "BENCHMARK_WORLD_MODEL_MODE=simulate"
@@ -707,6 +718,9 @@ if [ -n '$BENCHMARK_REPORT_FRONTEND_URL' ]; then
   export BENCHMARK_REPORT_FRONTEND_URL='$BENCHMARK_REPORT_FRONTEND_URL'
 else
   unset BENCHMARK_REPORT_FRONTEND_URL
+fi
+if [ '$BENCH_ENABLE_NON_PURCHASE_GATES' = '1' ]; then
+  export NON_PURCHASE_GATES_ENABLED=1
 fi
 if [ '$BENCH_SIMULATE' = '1' ]; then
   export BENCHMARK_WORLD_MODEL_MODE='simulate'

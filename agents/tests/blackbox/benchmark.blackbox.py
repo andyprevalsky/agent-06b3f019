@@ -4916,6 +4916,31 @@ def test_benchmark_env_override_can_disable_approval_handling():
     assert task.approval_handling is None
 
 
+def test_source_connect_gate_benchmark_enables_non_purchase_gates():
+    """Source-connect gate benchmarks must start workers with non-purchase gates enabled."""
+    from benchmarks import local as local_bench
+
+    previous = os.environ.get("NON_PURCHASE_GATES_ENABLED")
+    try:
+        os.environ.pop("NON_PURCHASE_GATES_ENABLED", None)
+        local_bench.configure_task_environment(["gate-source-connect-gmail"])
+        assert os.environ.get("NON_PURCHASE_GATES_ENABLED") == "1"
+    finally:
+        if previous is None:
+            os.environ.pop("NON_PURCHASE_GATES_ENABLED", None)
+        else:
+            os.environ["NON_PURCHASE_GATES_ENABLED"] = previous
+
+
+def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
+    """Cloudbench must pass the same source-connect gate env into run.sh workers."""
+    script = (Path(__file__).resolve().parents[3] / "scripts" / "cloudbench-run.sh").read_text()
+
+    assert "gate-source-connect-gmail" in script
+    assert "BENCH_ENABLE_NON_PURCHASE_GATES" in script
+    assert "NON_PURCHASE_GATES_ENABLED=1" in script
+
+
 async def test_create_agent_sends_write_lock_override_when_env_set():
     """Agent creation includes write_lock_enabled only when explicitly requested by the benchmark."""
     import os
@@ -9299,6 +9324,14 @@ async def run_all_tests():
     r.record("count_only_releases_by_denial", test_count_only_releases_observed_approvals_by_denial)
     r.record("benchmark_env_bool", test_benchmark_env_bool_parses_optional_write_lock_override)
     r.record("benchmark_env_disable_approval", test_benchmark_env_override_can_disable_approval_handling)
+    r.record(
+        "source_connect_gate_benchmark_non_purchase_env",
+        test_source_connect_gate_benchmark_enables_non_purchase_gates,
+    )
+    r.record(
+        "cloudbench_source_connect_gate_benchmark_non_purchase_env",
+        test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates,
+    )
     await r.record_async("create_agent_write_lock_override", test_create_agent_sends_write_lock_override_when_env_set)
     await r.record_async("create_agent_goal_override", test_create_agent_uses_goal_override_when_env_set)
     await r.record_async("create_agent_response_schema", test_create_agent_sends_task_response_schema)
