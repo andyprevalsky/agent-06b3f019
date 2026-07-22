@@ -4015,6 +4015,36 @@ async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback(
     ]
 
 
+def test_compute_token_sync_reads_source_file_not_isolated_process_target():
+    """The isolated target DSN must not shadow the explicit production source."""
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    class SeedResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        env_file = Path(temp_dir) / ".env"
+        env_file.write_text("DATABASE_URL=postgresql://prod/rose\n")
+        with (
+            patch.dict(os.environ, {"DATABASE_URL": "postgresql://local/victoria"}),
+            patch.object(bench, "_BACKEND_ENV", str(env_file)),
+            patch.object(
+                bench,
+                "_local_victoria_database_url",
+                return_value="postgresql://local/victoria",
+            ),
+            patch.object(bench, "_shared_workspace_database_url", return_value=None),
+            patch.object(bench, "_run_seed_subprocess", return_value=SeedResult()) as seed,
+        ):
+            assert bench._sync_compute_tokens() is True
+
+    assert seed.call_args.kwargs["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://prod/rose"
+
+
 async def test_anthropic_api_key_fallback_availability_fails_closed():
     """Only an explicitly configured, non-cooled backend runtime is usable."""
     import benchmarks.run_benchmark as bench
@@ -8246,6 +8276,10 @@ async def run_all_tests():
     await r.record_async(
         "local_compute_refresh_accepts_anthropic_api_key_fallback",
         test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback,
+    )
+    r.record(
+        "compute_token_source_ignores_isolated_process_target",
+        test_compute_token_sync_reads_source_file_not_isolated_process_target,
     )
     await r.record_async(
         "anthropic_api_key_fallback_availability_fails_closed",

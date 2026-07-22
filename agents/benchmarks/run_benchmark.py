@@ -3874,8 +3874,14 @@ def _sync_compute_tokens(
     env["DIRECT_URL"] = database_url
     env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
     env.pop("SEED_ALLOW_MISSING_CLAUDE_CODE", None)
+    env.pop("SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL", None)
     shared_source = _shared_workspace_database_url()
-    source_database_url = shared_source or load_env_var("DATABASE_URL", _BACKEND_ENV)
+    source_database_url = (
+        shared_source
+        or load_env_var("DATABASE_URL", _BACKEND_ENV, include_process_env=False)
+        or load_env_var("DIRECT_URL", _BACKEND_ENV, include_process_env=False)
+        or load_env_var("DIRECT_DATABASE_URL", _BACKEND_ENV, include_process_env=False)
+    )
     if not source_database_url or _psql_compatible_database_url(source_database_url) == _psql_compatible_database_url(
         database_url
     ):

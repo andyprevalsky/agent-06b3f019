@@ -16,6 +16,7 @@ import {
   resolveSteelProfileForSession,
   steel,
   steelCdpUrl,
+  steelDebugUrl,
 } from './session';
 import { validateSessionConnection } from './sessionConnection';
 
@@ -159,7 +160,7 @@ export async function recreateSession(
 
       log.info(`  Created new Steel session: ${session.id}`);
       rememberBenchmarkAnonSteelProfile(oldSession.agentId, session.profileId);
-      const debugUrl = `${session.debugUrl}?interactive=false`;
+      const debugUrl = steelDebugUrl(session.debugUrl);
       const wsUrl = steelCdpUrl(session.id);
 
       if (!(await dependencies.validateConnection(wsUrl))) {

@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 
-import { steelApiUrl, steelCdpUrl } from '../../providers/steel/session';
+import { steelApiUrl, steelCdpUrl, steelDebugUrl } from '../../providers/steel/session';
 
 function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
@@ -20,7 +20,19 @@ function main(): void {
     assert(cdpUrl.hostname === 'connect.steelbrowser.com', 'Steel CDP helper used a stale origin');
     assert(cdpUrl.searchParams.get('apiKey') === 'steel-test-key', 'Steel CDP key missing');
     assert(cdpUrl.searchParams.get('sessionId') === 'session-1', 'Steel session ID missing');
-    console.log('PASS Steel HTTP and CDP helpers use the live steelbrowser.com origin');
+    const debugUrl = new URL(
+      steelDebugUrl('https://api.steel.dev/v1/sessions/session-1/player?legacy=true')
+    );
+    assert(debugUrl.hostname === 'connect.steelbrowser.com', 'Steel live view used a stale origin');
+    assert(
+      debugUrl.searchParams.get('legacy') === 'true',
+      'Steel live-view query parameters were lost'
+    );
+    assert(
+      debugUrl.searchParams.get('interactive') === 'false',
+      'Steel live view was not read-only'
+    );
+    console.log('PASS Steel HTTP, CDP, and live-view helpers use the live steelbrowser.com origin');
   } finally {
     if (previous === undefined) delete process.env.STEEL_API_KEY;
     else process.env.STEEL_API_KEY = previous;

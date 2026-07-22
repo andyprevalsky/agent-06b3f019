@@ -29,6 +29,17 @@ export function steelCdpUrl(sessionId: string): string {
   return url.toString();
 }
 
+export function steelDebugUrl(debugUrl: string): string {
+  const url = new URL(debugUrl);
+  if (url.hostname === 'api.steel.dev' || url.hostname === 'connect.steel.dev') {
+    const liveOrigin = new URL(STEEL_API_BASE_URL);
+    url.protocol = liveOrigin.protocol;
+    url.host = liveOrigin.host;
+  }
+  url.searchParams.set('interactive', 'false');
+  return url.toString();
+}
+
 export const steel = new Steel({
   steelAPIKey: process.env.STEEL_API_KEY,
   baseURL: STEEL_API_BASE_URL,
@@ -368,8 +379,8 @@ export async function createSessionWithContext(
 
       // Steel provides debugUrl for unauthenticated live viewing (anyone with URL can view)
       // sessionViewerUrl requires Steel dashboard login - don't use that
-      // Add ?interactive=true so users can interact with the browser
-      const debugUrl = `${session.debugUrl}?interactive=false`;
+      // Keep the embedded trace viewer read-only.
+      const debugUrl = steelDebugUrl(session.debugUrl);
 
       // IMPORTANT: Per Steel docs, CDP connection URL must include apiKey parameter
       // The session.websocketUrl does NOT include the apiKey, so we construct it manually

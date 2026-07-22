@@ -1606,3 +1606,4 @@
 {"task": "agent-payment-setup-resume", "duration_seconds": 167.6, "cost_cents": 0.0, "timestamp": "2026-07-22T06:17:02.258346+00:00", "agent_id": "0ec77577-cbef-4dad-970e-24c164c2c9c5"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 243.0, "cost_cents": 1.0, "timestamp": "2026-07-22T06:21:10.172566+00:00", "agent_id": "ee285d35-fa11-4596-babb-91b3b5d33041"}
 {"task": "agent-payment-abandonment", "duration_seconds": 197.6, "cost_cents": 1.0, "timestamp": "2026-07-22T06:26:26.219579+00:00", "agent_id": "8d82d40e-cc09-400f-8bb5-f3578024b40f"}
+{"task": "browser-rotate-ip-escalation", "duration_seconds": 222.5, "cost_cents": 3.0, "timestamp": "2026-07-22T06:58:16.864375+00:00", "agent_id": "8de2daed-0f21-41cb-a668-c463b36b0769"}

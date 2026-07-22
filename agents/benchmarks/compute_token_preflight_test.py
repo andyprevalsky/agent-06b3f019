@@ -14,6 +14,7 @@ These tests pin the tolerance on both paths without needing a live DB.
 """
 
 import asyncio
+import os
 import subprocess
 import sys
 import time
@@ -98,10 +99,22 @@ def test_shared_stack_sync_uses_explicit_production_compute_token_source():
         assert rb._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is True
 
     assert seen["env"]["DATABASE_URL"] == "postgresql://local/victoria"
-    assert (
-        seen["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"]
-        == "postgresql://prod/victoria?pgbouncer=true"
-    )
+    assert seen["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://prod/victoria?pgbouncer=true"
+
+
+def test_source_file_lookup_ignores_isolated_process_database(tmp_path: Path):
+    env_file = tmp_path / ".env"
+    env_file.write_text("DATABASE_URL=postgresql://prod/rose\n")
+
+    with patch.dict(os.environ, {"DATABASE_URL": "postgresql://local/victoria"}):
+        assert (
+            rb.load_env_var(
+                "DATABASE_URL",
+                str(env_file),
+                include_process_env=False,
+            )
+            == "postgresql://prod/rose"
+        )
 
 
 def test_sync_fails_closed_without_distinct_compute_token_source():
