@@ -54,6 +54,16 @@ import { useBrowserStatusBarUi } from './browser-status-bar/useBrowserStatusBarU
 import { useRefreshedAuthAssistanceUrl } from './browser-status-bar/useRefreshedAuthAssistanceUrl';
 import type { BrowserStatusBarProps } from './browser-status-bar/types';
 
+function presentedControlState(
+  isUserControlling: boolean,
+  isDisconnected: boolean,
+  isWaitingForAuthAssistance: boolean,
+) {
+  return isUserControlling
+    ? 'active'
+    : resolveBrowserControlState({ isDisconnected, isWaitingForAuthAssistance });
+}
+
 function BrowserStatusBarImpl({
   taskId,
   browserUrl,
@@ -62,22 +72,26 @@ function BrowserStatusBarImpl({
   const { agent, messages, selectedAgentId } = useAgentContext();
   const agentId = agent?.agent_id ?? selectedAgentId ?? null;
   const vm = useBrowserStatusBarState(taskId);
-  const ui = useBrowserStatusBarUi(taskId, forceMinimized);
   const refreshedAuthUrl = useRefreshedAuthAssistanceUrl(vm.pendingAuthAssistance);
-  const activeBrowserUrl = refreshedAuthUrl ?? vm.pendingAuthAssistance?.liveViewUrl ?? browserUrl;
-  const isWaitingForAuthAssistance = vm.pendingAuthAssistance !== null;
-  const controlState = resolveBrowserControlState({
-    isDisconnected: vm.isDisconnected,
+  const sessionBrowserUrl = refreshedAuthUrl ?? vm.pendingAuthAssistance?.liveViewUrl ?? browserUrl;
+  const ui = useBrowserStatusBarUi(taskId, forceMinimized, agentId, sessionBrowserUrl);
+  const activeBrowserUrl = ui.browserUrl;
+  const isWaitingForAuthAssistance = vm.pendingAuthAssistance !== null && !ui.hasReconnected;
+  const isDisconnected = vm.isDisconnected && !ui.hasReconnected;
+  const controlState = presentedControlState(
+    ui.isUserControlling,
+    isDisconnected,
     isWaitingForAuthAssistance,
-  });
-  const handleResume =
-    controlState === 'waiting'
+  );
+  const handleControlAction = ui.isUserControlling
+    ? ui.onHandBackControl
+    : controlState === 'waiting'
       ? () => {
           if (vm.pendingAuthAssistance) {
             void ui.onCompleteAuthAssistance(vm.pendingAuthAssistance.requestId);
           }
         }
-      : ui.onResume;
+      : () => ui.onTakeControl(isDisconnected);
 
   if (ui.isFullscreen) {
     return (
@@ -89,13 +103,14 @@ function BrowserStatusBarImpl({
         outputSchema={vm.outputSchema}
         browserSessionMetadata={vm.browserSessionMetadata}
         stepProgress={vm.stepProgress}
-        isDisconnected={vm.isDisconnected}
+        isDisconnected={isDisconnected}
         isWaitingForAuthAssistance={isWaitingForAuthAssistance}
         authAssistanceRequest={vm.pendingAuthAssistance?.request}
         isResuming={ui.isResuming}
+        isUserControlling={ui.isUserControlling}
         pendingWriteLockApproval={vm.pendingWriteLockApproval}
         onClose={ui.onFullscreenClose}
-        onResume={handleResume}
+        onResume={handleControlAction}
       />
     );
   }
@@ -121,7 +136,7 @@ function BrowserStatusBarImpl({
     <BrowserStatusBarExpanded
       taskId={taskId}
       browserUrl={activeBrowserUrl}
-      isDisconnected={vm.isDisconnected}
+      isDisconnected={isDisconnected}
       isWaitingForAuthAssistance={isWaitingForAuthAssistance}
       outputSchema={vm.outputSchema}
       browserSessionMetadata={vm.browserSessionMetadata}

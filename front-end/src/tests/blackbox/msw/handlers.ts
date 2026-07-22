@@ -8,6 +8,16 @@ import { http, HttpResponse } from 'msw';
 const API_BASE = 'http://localhost:3001/api';
 
 export const handlers = [
+  http.get(`${API_BASE}/browser-session/task/:taskId/control`, () =>
+    HttpResponse.json({ state: 'agent', agentPaused: false }),
+  ),
+  http.post(`${API_BASE}/browser-session/task/:taskId/control`, async ({ request }) => {
+    const body = (await request.json()) as { mode?: string };
+    return HttpResponse.json({
+      state: body.mode === 'user' ? 'user' : 'agent',
+      agentPaused: false,
+    });
+  }),
   // Auth endpoints
   http.post(`${API_BASE}/auth/anonymous`, () => {
     return HttpResponse.json({

@@ -198,6 +198,19 @@ async function testTemplate_pinsCodexCliForGpt56() {
   );
 }
 
+async function testRuntimeFallback_recognizesRevokedOAuthRefreshToken() {
+  const wsServer = readFileSync(
+    join(process.cwd(), '..', 'e2b-templates', 'codex-code', 'ws-server.mjs'),
+    'utf8'
+  );
+  assert(
+    wsServer.includes('refresh_token_invalidated') &&
+      wsServer.includes('oauth_refresh_invalid') &&
+      wsServer.includes('oauthFallbackReason ??= classifyOAuthFallbackReason(message)'),
+    'Codex ws-server must classify revoked refresh tokens for funded-key fallback'
+  );
+}
+
 // ── resolveCodexCodeAuthEnvs (pure auth-env selection) ───────────────────────
 // The sandbox ws-server logs in with CODEX_AUTH_JSON (OAuth) when present, else
 // `codex login --with-api-key` using OPENAI_API_KEY. These assert the backend
@@ -308,16 +321,16 @@ async function testSmoke_codexCompletesE2bTask() {
     );
 
     // Runtime-fallback invariant: if the ChatGPT OAuth token hit its usage limit
-    // mid-run, the sandbox MUST have re-logged-in with the funded OpenAI API key
+    // or proved revoked mid-run, the sandbox MUST re-login with the funded key
     // (auth_fallback event) rather than giving up — otherwise CODEX_E2B_DONE above
     // could never have been produced on an exhausted token. This is exactly the
     // failure that stalled deploy; it passes trivially when the OAuth token is
     // healthy (no usage-limit event → no requirement).
-    const sawUsageLimit = events.some((event) => {
+    const sawRecoverableOAuthFailure = events.some((event) => {
       const typed = event as { type?: string; message?: string };
       return (
         typed.type === 'error' &&
-        /usage[ _]limit|usage_limit_reached|hit your usage limit|purchase more credits/i.test(
+        /usage[ _]limit|usage_limit_reached|hit your usage limit|purchase more credits|refresh_token_invalidated|refresh token (?:was )?revoked|access token could not be refreshed|your session has ended|log out and sign in again/i.test(
           String(typed.message ?? '')
         )
       );
@@ -326,13 +339,13 @@ async function testSmoke_codexCompletesE2bTask() {
       const typed = event as { type?: string; to?: string };
       return typed.type === 'auth_fallback' && typed.to === 'openai_api_key';
     });
-    if (sawUsageLimit) {
+    if (sawRecoverableOAuthFailure) {
       assert(
         sawAuthFallback,
-        `Codex OAuth token hit its usage limit but did NOT fall back to the OpenAI API key. events=${JSON.stringify(events).slice(-1000)}`
+        `Codex OAuth credential failed but did NOT fall back to the OpenAI API key. events=${JSON.stringify(events).slice(-1000)}`
       );
       console.log(
-        '    ↳ codex smoke completed via OPENAI_API_KEY runtime fallback (OAuth usage-limited)'
+        '    ↳ codex smoke completed via OPENAI_API_KEY runtime fallback (OAuth unusable)'
       );
     } else {
       console.log('    ↳ codex smoke completed via ChatGPT OAuth token (no usage limit hit)');
@@ -378,6 +391,10 @@ async function runAll() {
     {
       name: 'template -- pins GPT-5.6-compatible Codex CLI',
       fn: testTemplate_pinsCodexCliForGpt56,
+    },
+    {
+      name: 'auth -- revoked OAuth refresh token triggers funded-key fallback',
+      fn: testRuntimeFallback_recognizesRevokedOAuthRefreshToken,
     },
     {
       name: 'auth -- OAuth primary + OPENAI_API_KEY runtime fallback injected together',

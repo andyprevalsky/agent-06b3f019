@@ -33,6 +33,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { config } from 'dotenv';
+import { writeForeignArtifactRunner, writeStubRunner } from './benchmarks-hub-pipeline.support';
 
 config();
 
@@ -103,18 +104,13 @@ function awaitStatus(
 }
 
 /**
- * Wait for `check` to return a truthy value within `deadlineMs`, polling every
- * second (via the canonical retry provider). Throws with the STAGE name on
- * expiry — the anti-stuck primitive.
+ * Wait for `check` to return a truthy value within `deadlineMs`, polling on a
+ * short test-only interval via the canonical retry provider. Coverage is the
+ * sole deploy execution of this domain, so it must enforce production's same
+ * anti-stuck deadlines even while the implementation is instrumented.
  */
-// Under coverage instrumentation (NODE_V8_COVERAGE is exported to this test
-// process AND inherited by the spawned run-bench-hub-poller child), both the
-// backend and the poller run ~2-3x slower, so the multi-stage poller watchdogs
-// need proportionally longer budgets. Diagnosed: the identical cases pass
-// uninstrumented against the full stack — this is instrumentation overhead, not
-// a product regression. The full-stack blackbox gate keeps the tight timeouts as
-// the real performance signal; only the coverage harness is relaxed.
-const TIMEOUT_SCALE = process.env.NODE_V8_COVERAGE ? 3 : 1;
+const TIMEOUT_SCALE = 1;
+const PIPELINE_POLL_MS = 100;
 
 async function within<T>(
   stage: string,
@@ -122,7 +118,7 @@ async function within<T>(
   check: () => Promise<T | null | false>
 ): Promise<T> {
   const scaledDeadlineMs = deadlineMs * TIMEOUT_SCALE;
-  const attempts = Math.max(2, Math.ceil(scaledDeadlineMs / 1000));
+  const attempts = Math.max(2, Math.ceil(scaledDeadlineMs / PIPELINE_POLL_MS));
   try {
     return await retryWithBackoff(
       async () => {
@@ -134,7 +130,7 @@ async function within<T>(
       },
       {
         maxRetries: attempts,
-        fixedDelays: Array.from({ length: attempts }, () => 1000),
+        fixedDelays: Array.from({ length: attempts }, () => PIPELINE_POLL_MS),
         isRetryable: () => true,
         component: `pipeline:${stage}`,
       }
@@ -142,99 +138,6 @@ async function within<T>(
   } catch {
     throw new Error(`STUCK at stage "${stage}" — no progress within ${scaledDeadlineMs / 1000}s`);
   }
-}
-
-// ── stub runner: real artifact layout, seconds not minutes ──────────────────
-
-function writeStubRunner(dir: string, mode: 'pass' | 'fail' | 'capacity-busy-then-pass'): string {
-  const stub = path.join(dir, 'stub-run-bench');
-  const script = `#!/usr/bin/env bash
-# Stub runner for the pipeline blackbox — emits the REAL artifact layout the
-# poller discovers (report-card.json + run.json in the request-owned context),
-# then exits.
-set -euo pipefail
-${
-  mode === 'capacity-busy-then-pass'
-    ? `ATTEMPT_FILE="\${HUB_PIPELINE_BUSY_ATTEMPT_FILE:?}"
-ATTEMPT="$(cat "$ATTEMPT_FILE" 2>/dev/null || echo 0)"
-ATTEMPT=$((ATTEMPT + 1))
-printf '%s\\n' "$ATTEMPT" > "$ATTEMPT_FILE"
-if [ "$ATTEMPT" -eq 1 ]; then
-  echo "CLOUDBENCH_RETRYABLE_CAPACITY=lease_busy" >&2
-  echo "Cloud benchmark app is leased by another controller (HTTP 409); waiting is safe." >&2
-  exit 75
-fi`
-    : ''
-}
-shift || true  # --local
-TASK="\${1:-chat-mode}"
-STAMP="stub-$(date +%s)-$$"
-ARTIFACT_ROOT="\${BENCHMARK_CONTEXT_DIR:-agents/.context/benchmarks}"
-CARD_DIR="$ARTIFACT_ROOT"
-mkdir -p "$CARD_DIR"
-NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-cat > "$CARD_DIR/report-card.json" <<CARD
-{"run_id":"$STAMP","timestamp":"$NOW","elapsed_s":7.5,
- "cost":{"agents_llm_usd":0.02,"wmh_grounding_usd":0.0,"infra_usd":0.01,"total_usd":0.03,"fast_cache_hit_rate":97},
- "metadata":{"tokens_in":1200,"tokens_out":300},
- "per_task":[{"name":"$TASK","status":"running","duration_s":null,"cost_usd":null,
-   "agent_url":"http://localhost/?agent-id=stub-agent-1","world_model_mode":"real","fast_mode":true}]}
-CARD
-sleep 18  # long enough for one live snapshot (15s cadence) to observe "running"
-${
-  mode === 'fail'
-    ? `echo "stub runner exploding on purpose" >&2
-exit 1`
-    : `cat > "$CARD_DIR/report-card.json" <<CARD
-{"run_id":"$STAMP","timestamp":"$NOW","elapsed_s":19.0,
- "cost":{"agents_llm_usd":0.02,"wmh_grounding_usd":0.0,"infra_usd":0.01,"total_usd":0.03,"fast_cache_hit_rate":97},
- "metadata":{"tokens_in":1200,"tokens_out":300},
- "per_task":[{"name":"$TASK","status":"passed","duration_s":18.0,"cost_usd":0.03,
-   "agent_url":"http://localhost/?agent-id=stub-agent-1","world_model_mode":"real","fast_mode":true}]}
-CARD
-cat > "$ARTIFACT_ROOT/run.json" <<RUN
-{"run_id":"$STAMP","timestamp":"$NOW","suite":"stub",
- "tasks":[{"name":"$TASK","passed":true,"status":"COMPLETED","agent_id":"stub-agent-1",
-   "duration_seconds":18.0,"cost_cents":3,"tokens_in":1200,"tokens_out":300,
-   "fast_mode_cache_enabled":true,"world_model_mode":"real","tree_agent_count":1,
-   "logs":{"messages":[{"role":"USER","message":"stub goal","created_at":"$NOW"},
-                        {"role":"ASSISTANT","message":"stub result","created_at":"$NOW"}]}}]}
-RUN
-exit 0`
-}
-`;
-  fs.writeFileSync(stub, script, { mode: 0o755 });
-  return stub;
-}
-
-function writeForeignArtifactRunner(dir: string): {
-  stub: string;
-  cardDir: string;
-  runFile: string;
-} {
-  const foreignId = `foreign-${process.pid}-${Date.now()}`;
-  const cardDir = path.join(REPO_ROOT, 'agents', '.context', 'benchmarks', foreignId);
-  const runFile = path.join(REPO_ROOT, 'agents', 'benchmarks', 'runs', `${foreignId}.json`);
-  const stub = path.join(dir, 'stub-run-bench-foreign');
-  const script = `#!/usr/bin/env bash
-set -euo pipefail
-shift || true
-TASK="\${1:-chat-mode}"
-NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-mkdir -p "${cardDir}" "$(dirname "${runFile}")"
-cat > "${cardDir}/report-card.json" <<CARD
-{"run_id":"${foreignId}","timestamp":"$NOW","elapsed_s":1,
- "per_task":[{"name":"$TASK","status":"passed"}]}
-CARD
-cat > "${runFile}" <<RUN
-{"run_id":"${foreignId}","timestamp":"$NOW","suite":"foreign",
- "tasks":[{"name":"$TASK","passed":true,"status":"COMPLETED"}]}
-RUN
-echo "foreign artifact emitted; owned runner failed" >&2
-exit 7
-`;
-  fs.writeFileSync(stub, script, { mode: 0o755 });
-  return { stub, cardDir, runFile };
 }
 
 function startPoller(
@@ -253,7 +156,9 @@ function startPoller(
       HUB_URL: hubUrl,
       BACKEND_API_KEY: API_KEY,
       RUN_BENCH_BIN: stubPath,
-      POLL_INTERVAL: '2',
+      POLL_INTERVAL: '1',
+      HUB_CAPACITY_RETRY_SECONDS: '1',
+      HUB_SNAPSHOT_INTERVAL_SECONDS: '0.1',
       HUB_CLAIM_SCOPE: SCOPE,
       // Catalog export is production behavior, not part of this pipeline
       // contract. Keep the black-box hermetic so it cannot rewrite source.
@@ -497,7 +402,7 @@ async function legLatePollerPickup(tmp: string): Promise<void> {
 }
 
 async function legForeignArtifactIsolation(tmp: string): Promise<void> {
-  const foreign = writeForeignArtifactRunner(tmp);
+  const foreign = writeForeignArtifactRunner(tmp, REPO_ROOT);
   let runId: string | null = null;
   let poller: ChildProcess | null = null;
   const log = path.join(tmp, 'poller-foreign.log');
@@ -527,12 +432,22 @@ async function legForeignArtifactIsolation(tmp: string): Promise<void> {
 
 async function legSnapshotStopsBeforeTerminal(tmp: string): Promise<void> {
   const stub = writeStubRunner(tmp, 'pass');
+  const pollerLog = path.join(tmp, 'poller-snapshot-teardown.log');
   let runId: string | null = null;
   let poller: ChildProcess | null = null;
   let snapshotStarted = false;
   let terminalSeen = false;
   let staleProgressAfterTerminal = false;
-  const heldSnapshotTimers = new Set<NodeJS.Timeout>();
+  const heldSnapshotResponses = new Set<http.ServerResponse>();
+
+  const releaseHeldSnapshots = (): void => {
+    for (const response of heldSnapshotResponses) {
+      heldSnapshotResponses.delete(response);
+      if (response.destroyed) continue;
+      response.writeHead(201, { 'Content-Type': 'application/json' });
+      response.end('{}');
+    }
+  };
 
   // Hold the live-snapshot response until after the runner exits. A leaked
   // uploader will then send its progress PATCH after the terminal PATCH; a
@@ -561,13 +476,7 @@ async function legSnapshotStopsBeforeTerminal(tmp: string): Promise<void> {
     if (req.method === 'POST' && requestPath.startsWith('/api/benchmarks/runs?live=1')) {
       snapshotStarted = true;
       req.resume();
-      const timer = setTimeout(() => {
-        heldSnapshotTimers.delete(timer);
-        if (res.destroyed) return;
-        res.writeHead(201, { 'Content-Type': 'application/json' });
-        res.end('{}');
-      }, 7_000);
-      heldSnapshotTimers.add(timer);
+      heldSnapshotResponses.add(res);
       return;
     }
 
@@ -600,18 +509,29 @@ async function legSnapshotStopsBeforeTerminal(tmp: string): Promise<void> {
     const request = await dispatchRequest(['chat-mode']);
     runId = request.runId;
 
-    poller = startPoller(stub, path.join(tmp, 'poller-snapshot-teardown.log'), proxyUrl);
+    poller = startPoller(stub, pollerLog, proxyUrl);
     await within('snapshot upload enters proxy', 30_000, async () => snapshotStarted || null);
     await awaitStatus(request.id, 'completes after snapshot cancel', 60_000, 'completed');
-    await new Promise((resolve) => setTimeout(resolve, 8_000));
-
     assert(terminalSeen, 'terminal completion PATCH never reached the hub');
+    // Release the exact blocked request immediately instead of waiting for a
+    // seven-second timer. The original contract observed one further second:
+    // a leaked uploader resumes and sends its forbidden progress PATCH, while
+    // a correctly reaped uploader has already closed the socket.
+    releaseHeldSnapshots();
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
     assert(
       !staleProgressAfterTerminal,
       'snapshot uploader survived completion and sent stale progress after the terminal PATCH'
     );
+  } catch (error) {
+    const details = fs.existsSync(pollerLog)
+      ? fs.readFileSync(pollerLog, 'utf8')
+      : '(no poller log)';
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)}\npoller log:\n${details}`
+    );
   } finally {
-    for (const timer of heldSnapshotTimers) clearTimeout(timer);
+    releaseHeldSnapshots();
     await stopPoller(poller);
     proxy.close();
     await cleanup(runId);
@@ -675,13 +595,40 @@ async function legHubOutageSpool(tmp: string): Promise<void> {
     // hub is back (BASE_URL was healthy all along) — a fresh poller tick flushes
     flusher = startPoller(stub, path.join(tmp, 'poller-flush.log'), BASE_URL, false, spoolEnv);
     await awaitStatus(request.id, 'spool flushed after recovery', 40_000, 'completed');
-    assert(!fs.existsSync(spoolFile), 'spool file should be removed after flush');
+    // The Hub row becomes completed immediately before the poller unlinks the
+    // durable spool file. Observe both effects instead of racing that cleanup.
+    await within('spool file removed after flush', 5_000, async () =>
+      !fs.existsSync(spoolFile) ? true : null
+    );
   } finally {
     await stopPoller(poller);
     await stopPoller(flusher);
     proxy.close();
     await cleanup(runId);
   }
+}
+
+async function legProductionDefaultsRemainPinned(): Promise<void> {
+  const pollerSource = fs.readFileSync(POLLER, 'utf8');
+  assert(
+    pollerSource.includes('POLL_INTERVAL="${POLL_INTERVAL:-10}"'),
+    'production poll interval default must remain 10 seconds'
+  );
+  assert(
+    pollerSource.includes('HUB_SNAPSHOT_INTERVAL_SECONDS="${HUB_SNAPSHOT_INTERVAL_SECONDS:-15}"'),
+    'production live-snapshot interval default must remain 15 seconds'
+  );
+  assert(
+    pollerSource.includes('math.isfinite(snapshot_interval)') &&
+      pollerSource.includes('0 < snapshot_interval <= 3600'),
+    'snapshot interval must reject non-finite and oversized sleep values'
+  );
+  assert(
+    pollerSource.includes(
+      'HUB_UPLOAD_SPOOL_DIR="${HUB_UPLOAD_SPOOL_DIR:-.context/hub-upload-spool}"'
+    ),
+    'production recovery spool must retain its repo-local default'
+  );
 }
 
 // ── runner ───────────────────────────────────────────────────────────────────
@@ -693,6 +640,7 @@ async function main(): Promise<void> {
   }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-pipeline-'));
   const legs: Array<[string, (tmp: string) => Promise<void>]> = [
+    ['production poll and snapshot defaults remain pinned', legProductionDefaultsRemainPinned],
     ['happy path: dispatch → claim → live → completed (hard deadlines)', legHappyPath],
     ['failure honesty: generic exit 1 → failed + error + dashboard reflects', legFailureHonesty],
     [

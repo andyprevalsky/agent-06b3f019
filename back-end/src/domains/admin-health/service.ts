@@ -1,9 +1,11 @@
-import { fetchAmplitudeFunnel } from './amplitude';
+import { fetchAmplitudeFunnel, unavailableAmplitudeFunnel } from './amplitude';
 import {
   ADMIN_PHONE_DIGITS,
   ADMIN_USER_IDS,
   AMPLITUDE_API_KEY,
   AMPLITUDE_SECRET_KEY,
+  BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES,
+  BLACKBOX_TEST_CAPTURE_OUTBOUND,
 } from './config';
 import { buildConnectorAdoption } from './connectorAdoption';
 import {
@@ -66,11 +68,37 @@ export function buildSignupCohort(
   };
 }
 
-async function fetchInputs(periods: AdminHealthPeriod[], retrievalTime: Date) {
+export function shouldFetchAmplitudeForBlackboxSlice(
+  timeSlice: AdminHealthTimeSlice,
+  configuredSlices: string | undefined,
+  captureOutbound: boolean
+): boolean {
+  if (!captureOutbound || configuredSlices === undefined) return true;
+  return configuredSlices
+    .split(',')
+    .map((slice) => slice.trim())
+    .filter(Boolean)
+    .includes(timeSlice);
+}
+
+async function fetchInputs(
+  timeSlice: AdminHealthTimeSlice,
+  periods: AdminHealthPeriod[],
+  retrievalTime: Date
+) {
   const historyStart = new Date(periods[0].start);
   const historyEnd = new Date(periods.at(-1)?.end ?? periods[0].end);
   const current = periods[periods.length - 1];
   const previous = periods[periods.length - 2];
+  const fetchLiveAmplitude = shouldFetchAmplitudeForBlackboxSlice(
+    timeSlice,
+    BLACKBOX_ADMIN_HEALTH_LIVE_AMPLITUDE_SLICES,
+    BLACKBOX_TEST_CAPTURE_OUTBOUND
+  );
+  const blackboxOfflineAmplitude = () =>
+    unavailableAmplitudeFunnel(
+      `Amplitude live fetch is disabled for the ${timeSlice} blackbox shape case.`
+    );
   const [
     tasks,
     firstTasks,
@@ -90,8 +118,12 @@ async function fetchInputs(periods: AdminHealthPeriod[], retrievalTime: Date) {
     fetchStripeRevenueByPeriod(periods),
     fetchStripeSubscribersByPeriod(periods, retrievalTime),
     fetchVelocityByPeriod(periods),
-    fetchAmplitudeFunnel(new Date(current.start), new Date(current.end)),
-    fetchAmplitudeFunnel(new Date(previous.start), new Date(previous.end)),
+    fetchLiveAmplitude
+      ? fetchAmplitudeFunnel(new Date(current.start), new Date(current.end))
+      : Promise.resolve(blackboxOfflineAmplitude()),
+    fetchLiveAmplitude
+      ? fetchAmplitudeFunnel(new Date(previous.start), new Date(previous.end))
+      : Promise.resolve(blackboxOfflineAmplitude()),
     repo.findConnectedConnectors(),
   ]);
   return {
@@ -116,7 +148,7 @@ async function loadAdminHealth(
   const currentPeriod = periods[periods.length - 1];
   const previousPeriod = periods[periods.length - 2];
   const generatedAt = new Date(retrievalTime);
-  const input = await fetchInputs(periods, retrievalTime);
+  const input = await fetchInputs(timeSlice, periods, retrievalTime);
   const series = buildSeries(
     periods,
     input.tasks,

@@ -75,6 +75,9 @@ const SKIP_BROWSER_AUTH_SYNC =
 // waterfall.
 const PASSKEYS_ONLY = process.argv.includes('--passkeys-only');
 const COMPUTE_TOKEN_SYNC_ATTEMPTS = 5;
+const COMPUTE_TOKEN_REQUIRED_TYPES = parseComputeTokenRequiredTypes(
+  process.env.SEED_REQUIRE_COMPUTE_TOKEN_TYPES
+);
 
 // SEED_COOKIE_DOMAINS scopes every domain-bearing browser-auth table to the
 // domains a benchmark task needs. Set by run_benchmark from the task's
@@ -341,6 +344,29 @@ function hasEncryptedCredentials(config: unknown): boolean {
   return typeof encryptedCredentials === 'string' && encryptedCredentials.length > 0;
 }
 
+function parseComputeTokenRequiredTypes(raw: string | undefined): Set<'claude' | 'gpt'> {
+  const value = raw?.trim() || 'claude,gpt';
+  const types = new Set<'claude' | 'gpt'>();
+  for (const part of value.split(',')) {
+    const token = part.trim().toLowerCase();
+    if (token === '') continue;
+    if (token !== 'claude' && token !== 'gpt') {
+      throw new Error(
+        `SEED_REQUIRE_COMPUTE_TOKEN_TYPES must contain only claude,gpt; received ${JSON.stringify(
+          raw
+        )}`
+      );
+    }
+    types.add(token);
+  }
+  if (types.size === 0) {
+    throw new Error(
+      'SEED_REQUIRE_COMPUTE_TOKEN_TYPES must require at least one compute token type'
+    );
+  }
+  return types;
+}
+
 interface GptCodeAvailability {
   // Connected, credentialed, bench-available, and NOT currently rate-limited.
   usable: number;
@@ -407,11 +433,45 @@ async function syncComputeTokensWithRetries(): Promise<void> {
       const count = await syncIntegrations();
       const usableClaudeCodeCount = await countUsableClaudeCodeIntegrations();
       if (usableClaudeCodeCount === 0) {
-        throw new Error('No usable claude_code integrations after sync');
+        if (!COMPUTE_TOKEN_REQUIRED_TYPES.has('claude')) {
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, ` +
+              '0 usable claude_code — proceeding because this run requires GPT compute only ' +
+              '(SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt)'
+          );
+        } else if (process.env.SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK === '1') {
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, 0 usable claude_code — ` +
+              `proceeding without Claude Code for a launcher-scoped non-Claude task ` +
+              `(SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK=1)`
+          );
+        } else if (process.env.SEED_ALLOW_MISSING_CLAUDE_CODE === '1') {
+          if (!process.env.ANTHROPIC_API_KEY?.trim()) {
+            throw new Error(
+              'SEED_ALLOW_MISSING_CLAUDE_CODE=1 requires a non-empty ANTHROPIC_API_KEY'
+            );
+          }
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, ` +
+              '0 usable claude_code — proceeding with the caller-validated ' +
+              'ANTHROPIC_API_KEY fallback (SEED_ALLOW_MISSING_CLAUDE_CODE=1)'
+          );
+        } else {
+          throw new Error('No usable claude_code integrations after sync');
+        }
       }
       const { usable: usableGptCodeCount, rateLimited: rateLimitedGptCodeCount } =
         await inspectGptCodeIntegrations();
       if (usableGptCodeCount === 0) {
+        if (!COMPUTE_TOKEN_REQUIRED_TYPES.has('gpt')) {
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, ` +
+              `${usableClaudeCodeCount} usable claude_code, 0 usable gpt_code — ` +
+              'proceeding because this run requires Claude compute only ' +
+              '(SEED_REQUIRE_COMPUTE_TOKEN_TYPES=claude)'
+          );
+          return;
+        }
         // A gpt_code (Codex) integration that EXISTS but is merely rate-limited
         // is an external-quota transient (e.g. the ChatGPT quota window), not a
         // misconfiguration. It must never hard-fail the compute-token sync: the

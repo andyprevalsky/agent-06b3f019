@@ -4,8 +4,12 @@ import {
   closeSession as closeSteelSession,
   createSessionWithContext as createSteelSessionWithContext,
   getSteelSessionHealth,
+  getSteelCaptchaTelemetry,
   resumeSession as resumeSteelSession,
+  steelApiUrl,
+  steelSessionFileUrl,
 } from '../steel/session';
+import { rotateSession as rotateSteelSession } from '../steel/sessionResume';
 import { getFingerprintInjectionData, listSessionFiles, uploadFileToSession } from '../steel/files';
 import { injectUserData } from '../steel/injection';
 import { selectedBrowserProvider } from './config';
@@ -15,6 +19,7 @@ import {
   closeKernelSession,
   createKernelSessionWithContext,
   getKernelSessionHealth,
+  getKernelCaptchaTelemetry,
   listKernelSessionFiles,
   readKernelSessionFile,
   resizeKernelViewport,
@@ -23,6 +28,8 @@ import {
   uploadKernelSessionFile,
 } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
+import type { RotationRecoveryAction, RotationStep } from './rotation';
+import { releaseSupersededBrowser } from './sessionCleanup';
 import type {
   BrowserFileInfo,
   BrowserProviderName,
@@ -129,7 +136,14 @@ export async function resumeSession(taskId: string): Promise<BrowserProviderResu
   const provider = await providerForTask(taskId);
   if (provider === 'kernel') return resumeKernelSession(taskId);
 
-  const session = await resumeSteelSession(taskId);
+  const replacement = await resumeSteelSession(taskId);
+  const { previousSessionId, previousProvider, ...session } = replacement;
+  await releaseSupersededBrowser({
+    taskId,
+    previousProvider,
+    previousSessionId,
+    operation: 'resume',
+  });
   return {
     provider: session.sessionId.startsWith('local-') ? 'local' : 'steel',
     debugUrl: session.debugUrl,
@@ -150,17 +164,51 @@ export class ProxyRotationUnsupportedError extends Error {
   }
 }
 
-/**
- * Rotate the session's outbound IP to a fresh managed proxy of `proxyType`.
- * Kernel-only (Steel has no per-session managed-proxy swap). Same profile + geo.
- */
+export interface BrowserProxyRotationResult extends BrowserProviderResumeSession {
+  previousProvider: BrowserProviderName;
+  recoveryAction: RotationRecoveryAction;
+  proxyType: KernelProxyType;
+}
+
+/** Execute one server-selected rotate_ip recovery step. */
 export async function rotateProxy(
   taskId: string,
-  proxyType: KernelProxyType
-): Promise<BrowserProviderResumeSession> {
-  const provider = await providerForTask(taskId);
-  if (provider !== 'kernel') throw new ProxyRotationUnsupportedError(provider);
-  return rotateKernelSession(taskId, proxyType);
+  step: RotationStep
+): Promise<BrowserProxyRotationResult> {
+  const currentProvider = await providerForTask(taskId);
+  if (step.provider === 'kernel') {
+    if (currentProvider !== 'kernel') throw new ProxyRotationUnsupportedError(currentProvider);
+    return {
+      ...(await rotateKernelSession(taskId, step.proxyType)),
+      previousProvider: currentProvider,
+      recoveryAction: step.recoveryAction,
+      proxyType: step.proxyType,
+    };
+  }
+
+  const replacement = await rotateSteelSession(taskId);
+  const { previousSessionId, previousProvider, ...session } = replacement;
+  await releaseSupersededBrowser({
+    taskId,
+    previousProvider,
+    previousSessionId,
+    operation: 'rotation',
+  });
+
+  return {
+    provider: 'steel',
+    debugUrl: session.debugUrl,
+    sessionId: session.sessionId,
+    wsUrl: session.wsUrl,
+    savedUrl: session.savedUrl,
+    proxySource: session.proxySource,
+    proxyLocation: session.proxyLocation,
+    profileId: session.steelProfileId,
+    profileSource: session.profileSource,
+    previousProvider,
+    recoveryAction: previousProvider === 'kernel' ? 'provider_switched' : step.recoveryAction,
+    proxyType: 'residential',
+  };
 }
 
 export async function getSession(sessionId: string) {
@@ -176,6 +224,18 @@ export async function getBrowserSessionHealth(sessionId: string): Promise<Browse
 
   const health = await getSteelSessionHealth(sessionId);
   return { provider: 'steel', ...health };
+}
+
+/** Read provider-native CAPTCHA telemetry for the live session behind a task. */
+export async function getBrowserCaptchaTelemetry(taskId: string) {
+  const session = await prisma.browserSession.findUnique({
+    where: { id: taskId },
+    select: { provider: true, sessionId: true },
+  });
+  if (session === null) throw new Error(`Browser task not found: ${taskId}`);
+  return session.provider === 'kernel'
+    ? getKernelCaptchaTelemetry(session.sessionId)
+    : getSteelCaptchaTelemetry(session.sessionId);
 }
 
 export async function resizeSessionViewport(
@@ -221,7 +281,7 @@ export async function readSessionFile(sessionId: string, filePath: string): Prom
   if (!apiKey) throw new Error('STEEL_API_KEY is required to read Steel session files');
   const relativePath = filePath.replace(/^\/files\//, '').replace(/^\//, '');
   return fetchProviderApi(
-    `https://api.steel.dev/v1/sessions/${encodeURIComponent(sessionId)}/files/${relativePath}`,
+    steelSessionFileUrl(sessionId, relativePath),
     { headers: { 'steel-api-key': apiKey } },
     async (response) => {
       if (!response.ok) throw new Error(`Steel file read failed: HTTP ${response.status}`);
@@ -242,7 +302,7 @@ export async function captureScreenshot(sessionId: string): Promise<{
   const apiKey = process.env.STEEL_API_KEY?.trim();
   if (!apiKey) throw new Error('STEEL_API_KEY is required to capture Steel screenshots');
   return fetchProviderApi(
-    `https://api.steel.dev/v1/sessions/${encodeURIComponent(sessionId)}/computer`,
+    steelApiUrl(`v1/sessions/${encodeURIComponent(sessionId)}/computer`),
     {
       method: 'POST',
       headers: { 'steel-api-key': apiKey, 'Content-Type': 'application/json' },

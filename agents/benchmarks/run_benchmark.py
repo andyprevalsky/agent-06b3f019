@@ -30,6 +30,7 @@ Auto-debug mode:
 import argparse
 import asyncio
 import csv
+import ipaddress
 import json
 import os
 import re
@@ -43,7 +44,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -454,6 +455,20 @@ def _fetch_wmh_usage() -> Optional[dict]:
     return payload if isinstance(payload, dict) else None
 
 
+def _fetch_wmh_retrieval_audit() -> Optional[dict]:
+    """Best-effort exact retrieval evidence from the served WMH."""
+    base = os.environ.get("WMH_BASE_URL", "").strip().rstrip("/")
+    if not base:
+        return None
+    try:
+        resp = httpx.get(f"{base}/retrieval_audit", timeout=5.0)
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _fetch_wmh_grounding_usd() -> Optional[float]:
     """WMH grounding cost (USD) — thin wrapper over `_fetch_wmh_usage`."""
     payload = _fetch_wmh_usage()
@@ -580,7 +595,208 @@ def _receipt_amount(receipt: dict, camel_key: str) -> int | None:
     return value if value is not None else receipt.get(snake_key)
 
 
-def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
+_STRUCTURED_MERCHANT_IDENTITY = re.compile(
+    r"^\s*(?P<business>.+?)\s*\(\s*(?P<platform>.+?)\s+-\s+"
+    r"(?P<host>(?:[a-z0-9-]+\.)+[a-z0-9-]+)\s*\)\s*$",
+    re.IGNORECASE,
+)
+_CONNECTED_MERCHANT_IDENTITY = re.compile(
+    r"^\s*(?P<business>.+?)\s+(?:via|on|through|by|/)\s+(?P<platform>.+?)\s*$",
+    re.IGNORECASE,
+)
+_NAVIGATION_ACTION_TYPES = {"goto", "navigate", "navigation"}
+
+
+def _merchant_identity_tokens(value: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def _merchant_host_matches(expected_host: str, actual_host: str) -> bool:
+    expected = expected_host.casefold().rstrip(".")
+    actual = actual_host.casefold().rstrip(".")
+    return actual == expected or actual.endswith(f".{expected}")
+
+
+def _browser_action_scope(metadata: dict) -> Optional[tuple[str, str]]:
+    candidates = [metadata]
+    if isinstance(metadata.get("auxiliary"), dict):
+        candidates.append(metadata["auxiliary"])
+    scope = next(
+        (
+            candidate.get("subAgentId")
+            or candidate.get("sub_agent_id")
+            or candidate.get("task_id")
+            or candidate.get("taskId")
+            for candidate in candidates
+            if candidate.get("subAgentId")
+            or candidate.get("sub_agent_id")
+            or candidate.get("task_id")
+            or candidate.get("taskId")
+        ),
+        None,
+    )
+    session = next(
+        (
+            candidate.get("browser_session_id") or candidate.get("browser_url")
+            for candidate in candidates
+            if candidate.get("browser_session_id") or candidate.get("browser_url")
+        ),
+        None,
+    )
+    if not scope or not session:
+        return None
+    return str(scope), str(session)
+
+
+def _browser_action_value(metadata: dict, *keys: str) -> object:
+    candidates = [metadata]
+    if isinstance(metadata.get("auxiliary"), dict):
+        candidates.append(metadata["auxiliary"])
+    return next(
+        (candidate.get(key) for candidate in candidates for key in keys if candidate.get(key)),
+        None,
+    )
+
+
+def _navigation_host(metadata: dict) -> Optional[str]:
+    values = [
+        _browser_action_value(metadata, "target_url", "current_url", "final_url", "url"),
+        _browser_action_value(metadata, "title"),
+    ]
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        match = re.search(r"https?://[^\s<>\"']+", value)
+        if not match:
+            continue
+        host = urlparse(match.group(0).rstrip(".,);]")).hostname
+        if host:
+            return host.casefold().rstrip(".")
+    return None
+
+
+def _grounded_payment_navigation_hosts(messages: Optional[List[dict]]) -> set[str]:
+    """Return hosts from the successful payment action's exact browser flow."""
+    navigations: list[tuple[int, tuple[str, str], str]] = []
+    payment_actions: list[tuple[int, tuple[str, str]]] = []
+    for index, message in enumerate(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "TOOL":
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        scope = _browser_action_scope(metadata)
+        if scope is None:
+            continue
+        status = str(_browser_action_value(metadata, "toolStatus", "tool_status") or "").upper()
+        if status != "FINISHED":
+            continue
+        action_type = str(_browser_action_value(metadata, "action_type") or "").casefold()
+        if action_type == "request_payment_card":
+            payment_actions.append((index, scope))
+        elif action_type in _NAVIGATION_ACTION_TYPES:
+            host = _navigation_host(metadata)
+            if host:
+                navigations.append((index, scope, host))
+    if not payment_actions:
+        return set()
+    payment_index, payment_scope = max(payment_actions, key=lambda item: item[0])
+    return {
+        host
+        for navigation_index, navigation_scope, host in navigations
+        if navigation_scope == payment_scope and navigation_index <= payment_index
+    }
+
+
+def _payment_approval_hosts(req: dict) -> set[str]:
+    """Return checkout hosts carried by the pending payment approval itself."""
+    metadata = req.get("metadata") if isinstance(req, dict) else None
+    metadata = metadata if isinstance(metadata, dict) else {}
+    approval = metadata.get("requestUserApproval")
+    if not isinstance(approval, dict):
+        return set()
+
+    values: list[object] = [approval.get("url"), approval.get("approvalUrl")]
+    notification = approval.get("writeLockNotification")
+    if isinstance(notification, dict):
+        service = notification.get("service")
+        if isinstance(service, dict):
+            values.extend([service.get("url"), service.get("domain")])
+
+    hosts: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            continue
+        parsed = urlparse(value if "://" in value else f"https://{value}")
+        if parsed.hostname:
+            hosts.add(parsed.hostname.casefold().rstrip("."))
+    return hosts
+
+
+def _validate_payment_merchant_identity(
+    expected_merchant: object,
+    actual_merchant: object,
+    req: dict,
+    messages: Optional[List[dict]],
+    business_aliases: object = None,
+) -> Optional[str]:
+    if not isinstance(expected_merchant, str) or not isinstance(actual_merchant, str):
+        if actual_merchant != expected_merchant:
+            return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
+        return None
+
+    expected_match = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(expected_merchant)
+    if expected_match is None:
+        if actual_merchant != expected_merchant:
+            return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
+        return None
+
+    expected_businesses = {_merchant_identity_tokens(expected_match.group("business"))}
+    if isinstance(business_aliases, list):
+        expected_businesses.update(
+            _merchant_identity_tokens(alias)
+            for alias in business_aliases
+            if isinstance(alias, str) and alias.strip()
+        )
+    expected_platform = _merchant_identity_tokens(expected_match.group("platform"))
+    expected_host = expected_match.group("host").casefold().rstrip(".")
+    actual_match = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
+    if actual_match is None:
+        actual_match = _CONNECTED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
+    direct_merchant = (
+        expected_platform == ("direct",)
+        and _merchant_identity_tokens(actual_merchant) in expected_businesses
+    )
+    if not direct_merchant:
+        if (
+            actual_match is None
+            or _merchant_identity_tokens(actual_match.group("business")) not in expected_businesses
+            or _merchant_identity_tokens(actual_match.group("platform")) != expected_platform
+        ):
+            return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
+    if actual_match is not None and "host" in actual_match.groupdict():
+        actual_host = actual_match.group("host").casefold().rstrip(".")
+        if not _merchant_host_matches(expected_host, actual_host):
+            return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
+
+    # The approval URL is the terminal payment boundary the benchmark observes.
+    # Prefer it over inferred browser history: click-driven redirects may not emit a
+    # separate navigation tool event, and a prior visit must not rescue a wrong
+    # checkout URL. Legacy attention payloads without an approval URL retain the
+    # scoped, completed-navigation fallback.
+    grounded_hosts = _payment_approval_hosts(req) or _grounded_payment_navigation_hosts(messages)
+    if not any(_merchant_host_matches(expected_host, host) for host in grounded_hosts):
+        observed = ", ".join(sorted(grounded_hosts)) or "none"
+        return f"merchant host not grounded: expected {expected_host}, observed {observed}"
+    return None
+
+
+def _validate_payment_receipt(
+    task: BenchmarkTask,
+    req: dict,
+    *,
+    messages: Optional[List[dict]] = None,
+) -> Optional[str]:
     expected = task.expected_payment_receipt
     if not expected:
         return None
@@ -633,8 +849,16 @@ def _validate_payment_receipt(task: BenchmarkTask, req: dict) -> Optional[str]:
             not isinstance(fingerprint, str) or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
         ):
             return "malformed complete payment receipt field: fingerprint"
-    if "merchant" in expected and receipt.get("merchant") != expected.get("merchant"):
-        return f"merchant mismatch: expected {expected.get('merchant')}, got {receipt.get('merchant')}"
+    if "merchant" in expected:
+        merchant_error = _validate_payment_merchant_identity(
+            expected.get("merchant"),
+            receipt.get("merchant"),
+            req,
+            messages,
+            expected.get("merchantBusinessAliases"),
+        )
+        if merchant_error:
+            return merchant_error
     if "currency" in expected and (receipt.get("currency") or "USD") != expected.get("currency", "USD"):
         return f"currency mismatch: expected {expected.get('currency', 'USD')}, got {receipt.get('currency')}"
     for key in ("subtotalCents", "totalCents"):
@@ -709,9 +933,39 @@ def _validate_payment_lifecycle(task: BenchmarkTask, data: dict) -> Optional[str
     return compare(expected, actual, "payment_lifecycle")
 
 
-def _ci_should_fail(summary: dict) -> bool:
-    """CI must fail on both failed and skipped benchmark tasks."""
-    return summary.get("failed", 0) > 0 or summary.get("skipped", 0) > 0
+CLAUDE_CODE_CREDENTIAL_SKIP_REASON = (
+    "Claude Code credentials unavailable: no synced Claude token and no available pool token"
+)
+
+
+def _is_permitted_claude_code_skip(result: TaskResult) -> bool:
+    """Return whether a skipped task is the deploy-approved Claude credential skip.
+
+    Generic CI remains strict: skipped required benchmarks fail the gate. The only
+    deploy-approved exception is a Claude Code task whose provider credential path
+    is unavailable before launch. That external auth/funding state is covered by
+    credential-health and must not force a human approval loop for every deploy.
+    """
+    if result.status != "SKIPPED":
+        return False
+    try:
+        task = get_task_by_name(result.name)
+    except Exception:
+        return False
+    return bool(task.requires_claude_code and result.failure_reason == CLAUDE_CODE_CREDENTIAL_SKIP_REASON)
+
+
+def _ci_should_fail(summary: dict, task_results: list[TaskResult] | None = None) -> bool:
+    """CI fails on failed tasks and on skipped tasks unless explicitly permitted."""
+    if summary.get("failed", 0) > 0:
+        return True
+    skipped = summary.get("skipped", 0)
+    if skipped <= 0:
+        return False
+    if task_results is None:
+        return True
+    skipped_results = [result for result in task_results if result.status == "SKIPPED"]
+    return any(not _is_permitted_claude_code_skip(result) for result in skipped_results)
 
 
 def _apply_world_model_cli_env(args, parser: argparse.ArgumentParser) -> None:
@@ -1068,7 +1322,7 @@ async def create_agent(
     body: dict = {
         "goal": goal,
         "source": request_source,
-        "price_limit_cents": task.price_limit_cents,
+        "price_limit_cents": task.effective_price_limit_cents(),
         "verifier": {
             "type": "FLOAT_LLM_JUDGE",
         },
@@ -1324,8 +1578,7 @@ async def _get_initial_payment_lifecycle_with_retry(
             if attempt >= max_attempts:
                 break
             print(
-                "    ⚠ Transient initial payment lifecycle read failed "
-                f"({attempt}/{max_attempts}); retrying: {error}"
+                f"    ⚠ Transient initial payment lifecycle read failed ({attempt}/{max_attempts}); retrying: {error}"
             )
             await asyncio.sleep(retry_delay_seconds)
     raise RuntimeError(
@@ -1465,10 +1718,7 @@ async def _agentcard_setup_attention_still_open_after_terminal(
     for attempt in range(1, max_attempts + 1):
         try:
             pending = await fetch_requests(base_url)
-            setup_still_open = any(
-                req.get("id") == request_id and _attention_request_is_open(req)
-                for req in pending
-            )
+            setup_still_open = any(req.get("id") == request_id and _attention_request_is_open(req) for req in pending)
             if not setup_still_open or attempt >= max_attempts:
                 return setup_still_open
         except Exception as error:
@@ -2219,6 +2469,8 @@ async def poll_agent(
     per_agent_state: Dict[str, dict] = {}
     seen_attention_ids: set[str] = set()
     seen_attention_kinds: List[str] = []
+    validated_payment_receipt_request_id: Optional[str] = None
+    expected_gate_evidence: Optional[dict] = None
     agentcard_setup_attention_seen = False
     agentcard_setup_attention_id: Optional[str] = None
     attention_requests_seen: list[dict] = []
@@ -2277,6 +2529,25 @@ async def poll_agent(
             "approvals_resolved": approvals_resolved,
             "attention_requests_seen": list(attention_requests_seen),
         }
+        if seen_attention_kinds:
+            data["_benchmark"]["attention_request_kind_seen"] = seen_attention_kinds[-1]
+            if task.expected_attention_kind:
+                data["_benchmark"]["expected_attention_kind_seen"] = task.expected_attention_kind
+            if task.expected_attention_kind_any_of:
+                data["_benchmark"]["expected_attention_kind_any_of"] = list(
+                    task.expected_attention_kind_any_of
+                )
+            if task.expected_attention_kinds:
+                data["_benchmark"]["expected_attention_kinds_seen"] = list(seen_attention_kinds)
+        if validated_payment_receipt_request_id:
+            data["_benchmark"]["expected_payment_receipt_seen"] = True
+            data["_benchmark"]["expected_payment_receipt_request_id"] = (
+                validated_payment_receipt_request_id
+            )
+        if expected_gate_evidence:
+            data["_benchmark"]["expected_gate_seen"] = True
+            data["_benchmark"]["expected_gate"] = expected_gate_evidence["gate"]
+            data["_benchmark"]["expected_gate_request_id"] = expected_gate_evidence["request_id"]
 
         exact_count_error = _root_exact_tool_count_exceeded(task, messages)
         if exact_count_error:
@@ -2656,14 +2927,6 @@ async def poll_agent(
                                     approvals_resolved,
                                     f"Expected attention kind {expected_kind}, observed {observed_kind}",
                                 )
-                            receipt_error = _validate_payment_receipt(task, req)
-                            if receipt_error:
-                                data["_benchmark"] = {
-                                    **data.get("_benchmark", {}),
-                                    "payment_receipt_validation_error": receipt_error,
-                                    "payment_receipt_request_id": req_id,
-                                }
-                                return data, approvals_triggered, approvals_resolved, receipt_error
                             approvals_triggered += 1
                             observed_kind = _attention_request_kind(req)
                             seen_attention_kinds.append(observed_kind)
@@ -2685,9 +2948,7 @@ async def poll_agent(
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
                                     "expected_attention_kind_seen": observed_kind,
-                                    "expected_attention_kind_any_of": list(
-                                        task.expected_attention_kind_any_of
-                                    ),
+                                    "expected_attention_kind_any_of": list(task.expected_attention_kind_any_of),
                                     "expected_attention_request_id": req_id,
                                 }
                             if task.expected_attention_kinds:
@@ -2696,13 +2957,26 @@ async def poll_agent(
                                     "expected_attention_kinds_seen": list(seen_attention_kinds),
                                 }
                             if task.expected_gate:
+                                expected_gate_evidence = {
+                                    "gate": (req.get("metadata") or {}).get("gate"),
+                                    "request_id": req_id,
+                                }
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
                                     "expected_gate_seen": True,
-                                    "expected_gate": (req.get("metadata") or {}).get("gate"),
+                                    "expected_gate": expected_gate_evidence["gate"],
                                     "expected_gate_request_id": req_id,
                                 }
+                            receipt_error = _validate_payment_receipt(task, req, messages=messages)
+                            if receipt_error:
+                                data["_benchmark"] = {
+                                    **data.get("_benchmark", {}),
+                                    "payment_receipt_validation_error": receipt_error,
+                                    "payment_receipt_request_id": req_id,
+                                }
+                                return data, approvals_triggered, approvals_resolved, receipt_error
                             if task.expected_payment_receipt:
+                                validated_payment_receipt_request_id = req_id
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
                                     "expected_payment_receipt_seen": True,
@@ -3110,8 +3384,8 @@ def evaluate_task(
                     f"Expected {task.expected_attention_kind} attention request (to ignore) but none was triggered",
                 )
             return False, "Expected approval request (to ignore) but none were triggered"
+        benchmark_state = data.get("_benchmark", {})
         if task.expected_attention_kind:
-            benchmark_state = data.get("_benchmark", {})
             if benchmark_state.get("expected_attention_kind_seen") != task.expected_attention_kind:
                 return False, f"Expected {task.expected_attention_kind} attention request but it was not observed"
         if task.expected_attention_kinds:
@@ -3122,6 +3396,8 @@ def evaluate_task(
                     False,
                     f"Expected one of {task.expected_attention_kinds} attention requests, observed {observed_kind}",
                 )
+        if task.expected_payment_receipt and benchmark_state.get("expected_payment_receipt_seen") is not True:
+            return False, "Expected validated payment-card request but none was observed"
         return True, None
 
     if task.name == CALENDLY_TASK_NAME:
@@ -3415,6 +3691,36 @@ def _services_manifest_is_active(services: dict) -> bool:
     return True
 
 
+def _local_database_url_responds(database_url: str) -> bool:
+    """Probe the isolated DB without turning one bounded stall into a crash.
+
+    A restored cloud guest can briefly stop accepting queries while the backend
+    and worker finish opening their pools. ``subprocess.run(timeout=...)`` raises
+    rather than returning a failed result in that case, so retry only that
+    transient boundary. Ordinary query failures still fail closed immediately.
+    """
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            result = subprocess.run(
+                ["psql", database_url, "-t", "-A", "-c", "SELECT 1;"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired:
+            if attempt == attempts:
+                return False
+            print(
+                "    ⚠ Local Victoria DB probe timed out; "
+                f"retrying ({attempt}/{attempts})"
+            )
+            time.sleep(0.25 * attempt)
+            continue
+        return result.returncode == 0
+    return False
+
+
 def _local_victoria_database_url() -> Optional[str]:
     candidates: list[str] = []
     services_path = _benchmark_context_path() / "services.json"
@@ -3439,19 +3745,19 @@ def _local_victoria_database_url() -> Optional[str]:
         if database_url in seen:
             continue
         seen.add(database_url)
-        result = subprocess.run(
-            ["psql", database_url, "-t", "-A", "-c", "SELECT 1;"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
+        if _local_database_url_responds(database_url):
             return database_url
     return None
 
 
 def _shared_workspace_database_url() -> Optional[str]:
-    """Return the healthy top-level workspace DB when a run uses an isolated DB."""
+    """Return a credentialed top-level workspace DB for an isolated run.
+
+    Reachability alone is insufficient: the shared runtime can mark its dev
+    token expired and all pooled tokens rate-limited while production already
+    has a replacement. In that state, preferring the shared DB makes the
+    isolated seed retry deterministic stale data instead of consulting prod.
+    """
     shared_context = REPO_ROOT / ".context"
     try:
         if _benchmark_context_path().resolve() == shared_context.resolve():
@@ -3477,16 +3783,117 @@ def _shared_workspace_database_url() -> Optional[str]:
             return None
         database_url = f"postgresql://postgres:postgres@localhost:{port}/victoria"
 
+    usable_claude_query = f"""
+        SELECT EXISTS (
+          SELECT 1
+          FROM "Integration"
+          WHERE name = 'claude_code'
+            AND status = 'CONNECTED'
+            AND (
+              "userId" = '{USER_ID}'
+              OR "poolingEnabled" = TRUE
+            )
+            AND COALESCE(config->>'encryptedCredentials', '') <> ''
+            AND ("rateLimitedUntil" IS NULL OR "rateLimitedUntil" < NOW())
+        );
+    """.strip()
     try:
         result = subprocess.run(
-            ["psql", database_url, "-t", "-A", "-c", "SELECT 1;"],
+            ["psql", database_url, "-t", "-A", "-c", usable_claude_query],
             capture_output=True,
             text=True,
             timeout=5,
         )
     except Exception:
         return None
-    return database_url if result.returncode == 0 else None
+    usable = result.returncode == 0 and result.stdout.strip().lower() in {"t", "true", "1"}
+    return database_url if usable else None
+
+
+def _database_endpoint_identity(database_url: str) -> Optional[tuple[str, int, str]]:
+    """Return a normalized server/database identity without credentials or flags.
+
+    This is deliberately conservative: callers use it to prove that a token
+    source differs from a restored target.  An identity that cannot be parsed
+    must therefore remain unknown rather than being treated as distinct.
+    """
+    try:
+        parsed = urlparse(database_url)
+        if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
+            return None
+        port = parsed.port or 5432
+    except ValueError:
+        return None
+    host = unquote(parsed.hostname).lower().rstrip(".")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        if address.is_loopback:
+            host = "localhost"
+        else:
+            host = address.compressed
+
+    database = unquote(parsed.path.lstrip("/"))
+    if not database:
+        return None
+    return host, port, database
+
+
+def _production_compute_token_database_url(local_database_url: str) -> Optional[str]:
+    """Return the explicit production source used by cloud benchmark clones.
+
+    Local isolated runs prefer the already-verified top-level workspace DB, but
+    cloud clones do not have that second local service. Their decoded backend
+    env is the only explicit source available to ``seed-local
+    --compute-tokens-only``. Keep the source selection in Python so the seed
+    command never falls back to an ambient ``DATABASE_URL`` that run.sh has
+    overwritten with the isolated destination.
+    """
+    target_identity = _database_endpoint_identity(local_database_url)
+    if target_identity is None:
+        return None
+    configured_url = (
+        load_env_var("DATABASE_URL", _BACKEND_ENV, include_process_env=False)
+        or load_env_var("DIRECT_URL", _BACKEND_ENV, include_process_env=False)
+        or load_env_var("DIRECT_DATABASE_URL", _BACKEND_ENV, include_process_env=False)
+    )
+    if not configured_url:
+        return None
+    configured_identity = _database_endpoint_identity(configured_url)
+    if not configured_identity or configured_identity == target_identity:
+        return None
+    # This URL is consumed by Prisma, not psql. Preserve its pooler contract
+    # (`pgbouncer=true`, connection limits, etc.); stripping those parameters
+    # makes Supabase's transaction pooler reject prepared statements (26000).
+    return (
+        configured_url
+        if not _database_urls_equivalent(configured_url, local_database_url)
+        else None
+    )
+
+
+def _compute_token_source_database_url(target_database_url: str) -> tuple[Optional[str], Optional[str]]:
+    """Choose a distinct, credential-bearing source for compute-token refresh."""
+    target_identity = _database_endpoint_identity(target_database_url)
+    if target_identity is None:
+        return None, None
+
+    shared_source = _shared_workspace_database_url()
+    shared_identity = _database_endpoint_identity(shared_source or "")
+    if (
+        shared_source
+        and shared_identity
+        and shared_identity != target_identity
+        and not _database_urls_equivalent(shared_source, target_database_url)
+    ):
+        return shared_source, "shared workspace"
+
+    configured_source = _production_compute_token_database_url(target_database_url)
+    if configured_source:
+        return configured_source, "prod"
+    return None, None
 
 
 def _psql_compatible_database_url(database_url: str) -> str:
@@ -3499,6 +3906,23 @@ def _psql_compatible_database_url(database_url: str) -> str:
         [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key not in unsupported]
     )
     return urlunparse(parsed._replace(query=query))
+
+
+def _database_urls_equivalent(left: str, right: str) -> bool:
+    """Conservatively identify the same Postgres database across DSN options."""
+
+    def identity(database_url: str) -> tuple:
+        parsed = urlparse(database_url)
+        scheme = "postgresql" if parsed.scheme in {"postgres", "postgresql"} else parsed.scheme
+        port = parsed.port or (5432 if scheme == "postgresql" else None)
+        return (
+            scheme,
+            (parsed.hostname or "").lower(),
+            port,
+            parsed.path or "/",
+        )
+
+    return identity(left) == identity(right)
 
 
 def _run_local_victoria_sql(sql: str) -> str:
@@ -3802,9 +4226,7 @@ def _seed_sync_error_detail(result: object) -> str:
     an unusable 'Invalid `localCookie.upsert()` invocation in <file>' stub.
     Keep the head for context and the tail for the root cause."""
     stderr = _seed_output_text(getattr(result, "stderr", None))
-    stdout = _seed_output_text(
-        getattr(result, "stdout", None) or getattr(result, "output", None)
-    )
+    stdout = _seed_output_text(getattr(result, "stdout", None) or getattr(result, "output", None))
     streams = []
     if stderr.strip():
         streams.append(f"[stderr]\n{stderr.strip()}")
@@ -3856,21 +4278,25 @@ def _run_seed_subprocess(
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
-def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool:
+def _sync_compute_tokens(
+    *,
+    tolerate_gpt_code_unavailable: bool = False,
+    tolerate_claude_code_unavailable: bool = False,
+    required_token_types: tuple[str, ...] | None = None,
+) -> bool:
     """Refresh the compute-token integrations (claude_code / gpt_code + pool)
-    from prod into the isolated benchmark DB. Returns False on any failure so
-    the live-fixture caller can fail closed. A frozen DB
-    fixture or whole-DB snapshot restore can leave stale/expired compute tokens,
-    which forces the agent's claudeAuth fetch to fail into the paid waterfall.
-    Reads the prod source from back-end/.env; writes to the isolated DB.
+    from the verified workspace DB into an isolated benchmark DB. When there is
+    no separate workspace DB (for example, inside a Fly guest), explicitly use
+    the credential-bearing DATABASE_URL from the injected backend dotenv file.
+    Source and target must identify different databases: a restored target can
+    contain fixture rows without any usable live compute credentials.
+    Returns False on any failure so the live-fixture caller can fail closed.
 
-    ``tolerate_gpt_code_unavailable`` sets the seed's ``SEED_ALLOW_MISSING_GPT_CODE``
-    opt-in so the sync succeeds when Codex (gpt_code) is quota-blocked
-    (rateLimitedUntil set), since the agent runtime drives claude_code. Both the
-    blanket pre-flight AND the live-fixture overlay pass it: browser/credential
-    tasks never touch Codex, so an exhausted gpt_code must not abort them here.
-    Codex-dependent tasks fail closed at their own strict credential gate
-    downstream, not at this shared compute-token sync."""
+    The tolerance flags set explicit seed opt-ins for providers whose runtime
+    replacements have already been validated by the caller. Codex-dependent
+    tasks keep their strict credential gate downstream. Missing Claude OAuth is
+    tolerated only after the local backend confirms that the configured funded
+    Anthropic API key is not on cooldown."""
     database_url = _local_victoria_database_url()
     if not database_url:
         print("    ⚠ Compute-token sync skipped: local Victoria DB not found")
@@ -3879,11 +4305,25 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     env["DATABASE_URL"] = database_url
     env["DIRECT_URL"] = database_url
     env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
-    shared_source = _shared_workspace_database_url()
-    if shared_source and shared_source != database_url:
-        env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = shared_source
+    env.pop("SEED_ALLOW_MISSING_CLAUDE_CODE", None)
+    env.pop("SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL", None)
+    compute_token_source, source_label = _compute_token_source_database_url(database_url)
+    if not compute_token_source:
+        print(
+            "    ⚠ Compute-token sync skipped: no explicit source database "
+            "distinct from the isolated target"
+        )
+        return False
+    env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = compute_token_source
+    env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
+    env.pop("SEED_ALLOW_MISSING_CLAUDE_CODE", None)
+    env.pop("SEED_REQUIRE_COMPUTE_TOKEN_TYPES", None)
+    if required_token_types is not None:
+        env["SEED_REQUIRE_COMPUTE_TOKEN_TYPES"] = ",".join(required_token_types)
     if tolerate_gpt_code_unavailable:
         env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
+    if tolerate_claude_code_unavailable:
+        env["SEED_ALLOW_MISSING_CLAUDE_CODE"] = "1"
     try:
         result = _run_seed_subprocess(
             ["npx", "tsx", "scripts/seed-local.ts", "--compute-tokens-only"],
@@ -3892,10 +4332,7 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
             timeout=120,
         )
     except subprocess.TimeoutExpired as exc:
-        print(
-            f"    ⚠ Compute-token sync timed out after {exc.timeout}s: "
-            f"{_seed_sync_error_detail(exc)}"
-        )
+        print(f"    ⚠ Compute-token sync timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
         return False
     except Exception as exc:
         print(f"    ⚠ Compute-token sync error: {exc}")
@@ -3903,7 +4340,6 @@ def _sync_compute_tokens(*, tolerate_gpt_code_unavailable: bool = False) -> bool
     if result.returncode != 0:
         print(f"    ⚠ Compute-token sync failed: {_seed_sync_error_detail(result)}")
         return False
-    source_label = "shared workspace" if shared_source else "prod"
     print(f"    🔑 Refreshed compute tokens from {source_label}")
     return True
 
@@ -3935,10 +4371,7 @@ def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
         # sync is bounded by the task's auth state, not the whole account.
         env["SEED_COOKIE_DOMAINS"] = ",".join(cookie_domains)
         cred_timeout = 300
-        print(
-            f"    🍪 scoping browser-credential sync to {len(cookie_domains)} "
-            f"domain(s): {', '.join(cookie_domains)}"
-        )
+        print(f"    🍪 scoping browser-credential sync to {len(cookie_domains)} domain(s): {', '.join(cookie_domains)}")
     else:
         # No declared domains → full browser-auth graph. It legitimately takes several
         # minutes on a warm box (which skipped run.sh's boot sync), so give it the
@@ -3956,10 +4389,7 @@ def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
             timeout=cred_timeout,
         )
     except subprocess.TimeoutExpired as exc:
-        print(
-            f"    ⚠ Credential sync timed out after {exc.timeout}s: "
-            f"{_seed_sync_error_detail(exc)}"
-        )
+        print(f"    ⚠ Credential sync timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
         return False
     except Exception as exc:
         print(f"    ⚠ Credential sync error: {exc}")
@@ -3993,9 +4423,7 @@ def _sync_passkeys() -> None:
             timeout=120,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"Passkey-only sync timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}"
-        ) from exc
+        raise RuntimeError(f"Passkey-only sync timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}") from exc
     except Exception as exc:
         raise RuntimeError(f"Passkey-only sync failed: {exc}") from exc
     if result.returncode != 0:
@@ -4014,12 +4442,22 @@ class LiveFixtureContext:
     # sync is scoped to just those cookie domains (seconds, not ~13 min). Empty →
     # full cookie sync with a raised budget.
     cookie_domains: tuple[str, ...] = ()
+    tolerate_claude_code_unavailable: bool = False
 
 
 def _is_simulate_mode() -> bool:
     """True when this run's tool execution is served by the World Model Harness.
     Set once at startup (BENCHMARK_WORLD_MODEL_MODE, run_benchmark.py:478)."""
     return os.environ.get("BENCHMARK_WORLD_MODEL_MODE") == "simulate"
+
+
+def _anthropic_family_excluded() -> bool:
+    return os.getenv("ROSE_EXCLUDE_ANTHROPIC_FAMILY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
@@ -4029,6 +4467,15 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     omitting browser auth made the old ``base`` fixture neither reproducible nor
     truthful, and allowed later site-specific fixtures to fail before an agent
     was created.
+
+    ``tolerate_gpt_code_unavailable=True`` matches the run-level pre-flight
+    (``_refresh_local_compute_tokens_for_run``): prod can have zero *bench-usable*
+    gpt_code (Codex) integrations (the usable rows are non-DEV / pooling-off, or
+    Codex is quota-blocked). The live-mode tasks that take this overlay (browser,
+    payment) run on claude_code, not Codex, so gating them on gpt_code is a FALSE
+    infra failure — it dropped every live task while the pre-flight for the same
+    run already tolerated the exact same absence. A genuinely Codex-dependent task
+    still fails at runtime when its Codex call fails, not falsely here.
     """
     if _is_simulate_mode():
         print("    🌍 simulate mode — skipping the live credential overlay")
@@ -4040,26 +4487,44 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     # abort the whole run before an agent is ever created. Codex-dependent tasks
     # keep their own strict credential gates downstream. Without this, an exhausted
     # org-wide Codex quota failed every browser task at the fixture (0/8 ecommerce).
-    if not _sync_compute_tokens(tolerate_gpt_code_unavailable=True):
+    if _anthropic_family_excluded():
+        synced_compute_tokens = _sync_compute_tokens(required_token_types=("gpt",))
+    else:
+        synced_compute_tokens = _sync_compute_tokens(
+            tolerate_gpt_code_unavailable=True,
+            tolerate_claude_code_unavailable=ctx.tolerate_claude_code_unavailable,
+        )
+    if not synced_compute_tokens:
         raise RuntimeError("Live fixture could not refresh compute tokens")
     if not _sync_browser_credentials(ctx.cookie_domains):
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
     return {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
 
 
-def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
+async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     """Refresh agent-infrastructure compute credentials once before local tasks.
 
-    This is required even when no task opts into browser credential state. It is
-    deliberately separate from ``environment.live_fixtures`` so simulated and
-    synthetic runs can still create and drive agents to completion.
+    Real local tasks refresh from the verified shared workspace. Simulated cloud
+    stacks already restore the current dated seed dump and deliberately have no
+    second source DB endpoint, so they use that restored credential state.
     """
     if not _is_local_base_url(base_url):
+        return
+    if _is_simulate_mode():
+        print("    🌍 simulate mode — using compute tokens from the restored seed DB")
+        return
+    if _anthropic_family_excluded():
+        if not _sync_compute_tokens(required_token_types=("gpt",)):
+            raise RuntimeError("Benchmark run could not refresh local compute tokens")
         return
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
     # Codex-dependent tasks keep their own strict credential gates downstream.
-    if not _sync_compute_tokens(tolerate_gpt_code_unavailable=True):
+    tolerate_missing_claude = await _has_usable_anthropic_api_key_fallback(base_url)
+    if not _sync_compute_tokens(
+        tolerate_gpt_code_unavailable=True,
+        tolerate_claude_code_unavailable=tolerate_missing_claude,
+    ):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
 
 
@@ -4306,7 +4771,7 @@ assert set(LIVE_FIXTURE_APPLIERS) == set(LIVE_FIXTURE_NAMES), (
 )
 
 
-def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
+async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
     """Apply every live fixture the task's environment resolves to, in order.
 
     Live fixtures only apply against the local benchmark stack. Scenario-specific
@@ -4321,11 +4786,13 @@ def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dict]:
     auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
     raw_domains = (task.environment or {}).get("live_cookie_domains") or []
     cookie_domains = tuple(str(d).strip() for d in raw_domains if str(d).strip())
+    tolerate_missing_claude = await _has_usable_anthropic_api_key_fallback(base_url)
     ctx = LiveFixtureContext(
         base_url=base_url,
         user_id=USER_ID,
         auth_realm=auth_realm,
         cookie_domains=cookie_domains,
+        tolerate_claude_code_unavailable=tolerate_missing_claude,
     )
     manifests: list[dict] = []
     for name in fixtures:
@@ -6432,7 +6899,7 @@ async def run_single_task(
     resolved_timeout = getattr(task, "_resolved_timeout_seconds", task.timeout_seconds)
     print(f"\n  {'=' * 50}")
     print(f"  📋 {task.name}: {task.title}")
-    print(f"     timeout={resolved_timeout}s, price_limit={task.price_limit_cents}c")
+    print(f"     timeout={resolved_timeout}s, price_limit={task.effective_price_limit_cents()}c")
     all_attachments = task.attachments or ([task.attachment] if task.attachment else [])
     if all_attachments:
         print(f"     attachments={all_attachments}")
@@ -6511,7 +6978,7 @@ async def run_single_task(
         # Apply the live overlay inside the cleanup boundary. The passkey-only
         # scenario intentionally removes shared browser state and must restore it
         # even when agent creation or evaluation fails.
-        live_fixture_manifests = _apply_live_fixtures(task, base_url)
+        live_fixture_manifests = await _apply_live_fixtures(task, base_url)
         if task.browser_profile_mode == "fresh" and not _is_simulate_mode():
             if not _is_local_base_url(base_url):
                 raise RuntimeError(f"{task.name}: fresh browser state requires an isolated local benchmark stack")
@@ -7705,8 +8172,32 @@ async def _fail_stale_active_agents():
         print(f"  ⚠ Could not run stale-agent cleanup: {e}")
 
 
-def _has_anthropic_api_key_fallback_configured() -> bool:
-    return bool(load_env_var("ANTHROPIC_API_KEY", _BACKEND_ENV, _AGENTS_ENV))
+async def _has_usable_anthropic_api_key_fallback(base_url: str) -> bool:
+    """Mirror the backend's funded-fallback selection without probing the key.
+
+    Credential health owns the live Anthropic request. The benchmark preflight
+    owns runtime selection: the key must be configured and the backend's shared
+    out-of-credits circuit breaker must be clear. Any unavailable check fails
+    closed and leaves Claude OAuth mandatory.
+    """
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{base_url}/api/integrations/compute-code/anthropic-key/cooldown",
+                headers=headers,
+                timeout=10.0,
+            )
+        if response.status_code != 200:
+            return False
+        availability = response.json()
+        return (
+            isinstance(availability, dict)
+            and availability.get("configured") is True
+            and availability.get("onCooldown") is False
+        )
+    except Exception:
+        return False
 
 
 async def _check_compute_code_credentials(base_url: str) -> bool:
@@ -7720,6 +8211,37 @@ async def _check_compute_code_credentials(base_url: str) -> bool:
     try:
         headers = await _api_headers()
         async with httpx.AsyncClient() as client:
+            params = {"tokenType": "gpt"} if _anthropic_family_excluded() else None
+            resp = await client.get(
+                f"{base_url}/api/integrations/compute-code/credentials/token",
+                headers=headers,
+                params=params,
+                timeout=10.0,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("type") in ("claude", "gpt") and bool(data.get("accessToken"))
+
+        return await _has_usable_anthropic_api_key_fallback(base_url)
+    except Exception:
+        return False
+
+
+async def _check_claude_code_credentials(base_url: str) -> bool:
+    """Check whether Claude Code can actually create a code session.
+
+    A GPT/Codex compute token is not sufficient for a task that explicitly calls
+    ``spawn_claude_code_agent``. The runtime may have valid GPT credentials for
+    ordinary agent turns while Claude Code still has no user token or pool token.
+    Do not treat the shared Anthropic API-key fallback as sufficient here:
+    credential-health is the live funded-key probe, and Anthropic failures are
+    intentionally warn-only. This smoke gate is skippable when there is no real
+    Claude Code credential, so it should not launch a task that may discover an
+    unfunded or cooled-down fallback only after the benchmark starts.
+    """
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient() as client:
             resp = await client.get(
                 f"{base_url}/api/integrations/compute-code/credentials/token",
                 headers=headers,
@@ -7727,20 +8249,9 @@ async def _check_compute_code_credentials(base_url: str) -> bool:
             )
             if resp.status_code == 200:
                 data = resp.json()
-                return data.get("type") in ("claude", "gpt") and bool(data.get("accessToken"))
-
-            if not _has_anthropic_api_key_fallback_configured():
-                return False
-
-            cooldown_resp = await client.get(
-                f"{base_url}/api/integrations/compute-code/anthropic-key/cooldown",
-                headers=headers,
-                timeout=10.0,
-            )
-            if cooldown_resp.status_code != 200:
-                return False
-            cooldown_data = cooldown_resp.json()
-            return cooldown_data.get("onCooldown") is not True
+                if data.get("type") == "claude" and bool(data.get("accessToken")):
+                    return True
+        return False
     except Exception:
         return False
 
@@ -7752,6 +8263,8 @@ def cache_ratchet_failures(
     """Return repeatable-cache floor violations, including missing telemetry."""
     failures: list[tuple[str, str, float, float]] = []
     for result in task_results:
+        if result.status == "SKIPPED":
+            continue
         floor = floors.get(result.name)
         if floor is None:
             continue
@@ -7927,16 +8440,16 @@ async def main_async(args):
                 print("  ⚠ Temporal stale-workflow cleanup timed out after 30s; continuing")
             await _fail_stale_active_agents()
         await _warmup_edge_functions(base_url)
-        _refresh_local_compute_tokens_for_run(base_url)
+        await _refresh_local_compute_tokens_for_run(base_url)
 
     # Pre-flight: check provider-typed compute credentials for code-agent tests.
     skipped_claude_tasks: List[BenchmarkTask] = []
     claude_code_tasks = [t for t in tasks if t.requires_claude_code]
     if claude_code_tasks:
-        has_compute_creds = await _check_compute_code_credentials(base_url)
-        if not has_compute_creds:
+        has_claude_creds = await _check_claude_code_credentials(base_url)
+        if not has_claude_creds:
             skipped_names = [t.name for t in claude_code_tasks]
-            print(f"  ⚠ Compute code credentials unavailable — skipping: {', '.join(skipped_names)}")
+            print(f"  ⚠ Claude Code credentials unavailable — skipping: {', '.join(skipped_names)}")
             skipped_claude_tasks = claude_code_tasks
             tasks = [t for t in tasks if not t.requires_claude_code]
 
@@ -8049,7 +8562,7 @@ async def main_async(args):
                 duration_seconds=0,
                 cost_cents=0,
                 message_count=0,
-                failure_reason="Compute code credentials unavailable (user needs to re-authenticate)",
+                failure_reason=CLAUDE_CODE_CREDENTIAL_SKIP_REASON,
             )
         )
 
@@ -8320,6 +8833,7 @@ async def main_async(args):
 
         # Always save results — even partial results from interrupted runs are valuable
         if run.task_results:
+            run.world_model_retrieval_audit = _fetch_wmh_retrieval_audit()
             path = run.save()
             print(f"\n  Results saved: {path}")
             try:
@@ -8363,9 +8877,9 @@ async def main_async(args):
 
     enforce_cache_ratchets(run.task_results)
 
-    # CI mode: exit non-zero if any task failed or was skipped. A skipped
-    # required benchmark means the deploy gate did not actually run.
-    if args.ci and _ci_should_fail(s):
+    # CI mode: exit non-zero if any task failed or if an unapproved task was
+    # skipped. Claude Code credential-unavailable skips are explicitly permitted.
+    if args.ci and _ci_should_fail(s, run.task_results):
         sys.exit(1)
 
 

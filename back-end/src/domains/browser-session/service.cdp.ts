@@ -3,6 +3,7 @@
  */
 
 import { createLogger } from '../../providers/logger';
+import { steelCdpConnectionUrl } from '../../providers/steel/urls';
 import type { Browser } from 'playwright';
 import { CdpInjectionError } from './types';
 
@@ -16,7 +17,7 @@ export async function injectLocalStorageViaCdp(
   let browser: Browser | null = null;
   try {
     const { chromium } = await import('playwright');
-    browser = await chromium.connectOverCDP(wsUrl);
+    browser = await chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl));
     const contexts = browser.contexts();
     if (contexts.length === 0) {
       throw new CdpInjectionError('No browser contexts available');

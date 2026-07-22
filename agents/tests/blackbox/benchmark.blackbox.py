@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 from _test_utils import BlackboxResult
 
@@ -233,7 +234,7 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "12 passed" in result.stdout
+    assert "14 passed" in result.stdout
 
 
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
@@ -600,7 +601,7 @@ def test_toast_payment_approval_requires_every_declared_receipt_field():
 
     task = get_task_by_name("browser-toast-nopa-write-lock")
     payload = {
-        "merchant": "Nopa Fish (Toast - order.toasttab.com)",
+        "merchant": "Nopa Fish via Toast",
         "currency": "USD",
         "lineItems": [
             {
@@ -625,25 +626,150 @@ def test_toast_payment_approval_requires_every_declared_receipt_field():
     def request(value):
         return {"metadata": {"requestPaymentCard": value}}
 
-    assert _validate_payment_receipt(task, request(payload)) is None
+    _, grounding_messages = _captured_toast_payment_approval()
+    assert _validate_payment_receipt(task, request(payload), messages=grounding_messages) is None
 
     for field in task.expected_payment_receipt["requiredFields"]:
         sparse = deepcopy(payload)
         sparse.pop(field)
-        reason = _validate_payment_receipt(task, request(sparse))
+        reason = _validate_payment_receipt(task, request(sparse), messages=grounding_messages)
         assert reason is not None and field in reason
 
     for field in task.expected_payment_receipt["requiredLineItemFields"]:
         sparse = deepcopy(payload)
         sparse["lineItems"][0].pop(field)
-        reason = _validate_payment_receipt(task, request(sparse))
+        reason = _validate_payment_receipt(task, request(sparse), messages=grounding_messages)
         assert reason is not None and field in reason
 
     for field in task.expected_payment_receipt["requiredFeeFields"]:
         sparse = deepcopy(payload)
         sparse["fees"][0].pop(field)
-        reason = _validate_payment_receipt(task, request(sparse))
+        reason = _validate_payment_receipt(task, request(sparse), messages=grounding_messages)
         assert reason is not None and field in reason
+
+
+def _captured_toast_payment_approval(
+    *,
+    merchant: str = "Nopa Fish via Toast",
+) -> tuple[dict, list[dict]]:
+    """Replay the grounded payment boundary captured from the Antibot descent."""
+    browser_scope = "toast-browser-task"
+    browser_session = "https://kernel.example/live/toast-session"
+    receipt = {
+        "merchant": merchant,
+        "currency": "USD",
+        "lineItems": [
+            {
+                "name": "The Rocky Sandwich",
+                "imageUrl": "https://images.example/the-rocky-sandwich.jpg",
+                "productUrl": "https://www.nopafish.com/menu?item=the-rocky-sandwich",
+                "rating": "0 stars",
+                "reviewCount": "0 reviews",
+                "unitPriceCents": 2100,
+                "quantity": 1,
+                "lineTotalCents": 2100,
+            }
+        ],
+        "fees": [{"label": "Taxes & Fees", "amountCents": 294}],
+        "subtotalCents": 2100,
+        "totalCents": 2394,
+        "fingerprint": "a" * 64,
+        "userId": "user-123",
+        "agentId": "agent-123",
+    }
+    request = {
+        "id": "toast-payment-attention",
+        "agentId": "agent-123",
+        "metadata": {
+            "requestPaymentCard": receipt,
+            "writePermission": True,
+        },
+    }
+    messages = [
+        {
+            "role": "TOOL",
+            "message": "",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "goto",
+                "title": "Navigated → https://order.toasttab.com/online/nopafish",
+                "subAgentId": browser_scope,
+                "browser_url": browser_session,
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "request_payment_card",
+                "title": "Payment card requested ($23.94)",
+                "subAgentId": browser_scope,
+                "browser_url": browser_session,
+            },
+        },
+    ]
+    return request, messages
+
+
+def test_toast_payment_merchant_identity_accepts_grounded_connector_variant():
+    """Merchant wording may vary only when its exact identity and runtime host agree."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = get_task_by_name("browser-toast-nopa-write-lock")
+    request, messages = _captured_toast_payment_approval()
+
+    assert _validate_payment_receipt(task, request, messages=messages) is None
+
+
+def test_toast_payment_merchant_identity_rejects_wrong_or_ungrounded_variants():
+    """Semantic merchant matching must reject a wrong merchant, host, or browser flow."""
+    from copy import deepcopy
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = get_task_by_name("browser-toast-nopa-write-lock")
+
+    for merchant in ("Nopa Chips via Toast", "Nopa Fish via DoorDash"):
+        request, messages = _captured_toast_payment_approval(merchant=merchant)
+        assert _validate_payment_receipt(task, request, messages=messages) is not None
+
+    wrong_host_request, wrong_host_messages = _captured_toast_payment_approval()
+    wrong_host_messages[0]["metadata"]["title"] = "Navigated → https://order.doordash.com/nopafish"
+    assert _validate_payment_receipt(task, wrong_host_request, messages=wrong_host_messages) is not None
+
+    unobserved_request, unobserved_messages = _captured_toast_payment_approval()
+    assert _validate_payment_receipt(task, unobserved_request, messages=unobserved_messages[1:]) is not None
+
+    cross_session_request, cross_session_messages = _captured_toast_payment_approval()
+    cross_session_messages[1] = deepcopy(cross_session_messages[1])
+    cross_session_messages[1]["metadata"]["browser_url"] = "https://kernel.example/live/other-session"
+    assert _validate_payment_receipt(task, cross_session_request, messages=cross_session_messages) is not None
+
+    wrong_structured_request, wrong_structured_messages = _captured_toast_payment_approval(
+        merchant="Nopa Fish (Toast - order.doordash.com)"
+    )
+    assert _validate_payment_receipt(
+        task,
+        wrong_structured_request,
+        messages=wrong_structured_messages,
+    ) is not None
+
+    current_request, toast_messages = _captured_toast_payment_approval()
+    _, doordash_messages = _captured_toast_payment_approval()
+    for message in doordash_messages:
+        message["metadata"]["subAgentId"] = "doordash-browser-task"
+        message["metadata"]["browser_url"] = "https://kernel.example/live/doordash-session"
+    doordash_messages[0]["metadata"]["title"] = "Navigated → https://order.doordash.com/nopafish"
+    assert _validate_payment_receipt(
+        task,
+        current_request,
+        messages=[*toast_messages, *doordash_messages],
+    ) is not None
 
 
 def test_payment_benchmark_enables_bundled_frontend_before_stack_start():
@@ -657,6 +783,32 @@ def test_payment_benchmark_enables_bundled_frontend_before_stack_start():
         os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
         local.configure_task_environment(["agent-payment-idempotent-abandonment"])
         assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
+
+
+def test_payment_benchmark_preserves_lifecycle_stack_contract():
+    """The consolidated local lane must retain the old lifecycle launcher's env."""
+    import os
+    from unittest.mock import patch
+
+    from benchmarks import local
+
+    keys = (
+        "ALLOW_TEMPORAL_CLEANUP",
+        "BENCHMARK_FAST_MODE_CACHE",
+        "SEED_ALLOW_MISSING_GPT_CODE",
+        "AGENTCARD_ONBOARDING_RETURN_URL",
+    )
+    with patch.dict(os.environ, {}, clear=False):
+        for key in keys:
+            os.environ.pop(key, None)
+        local.configure_task_environment(["agent-payment-test-shop"])
+        assert os.environ["ALLOW_TEMPORAL_CLEANUP"] == "true"
+        assert os.environ["BENCHMARK_FAST_MODE_CACHE"] == "false"
+        assert os.environ["SEED_ALLOW_MISSING_GPT_CODE"] == "1"
+        assert (
+            os.environ["AGENTCARD_ONBOARDING_RETURN_URL"]
+            == "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
+        )
 
 
 def test_isolated_benchmark_services_allow_slow_first_sync():
@@ -709,6 +861,8 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "scripts/setup-benchmark-payment.ts" in helper
     assert "DATABASE_URL=" in helper
     assert "export BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1" in helper
+    assert "unset FAST_MODE_CACHE_DATABASE_URL" in helper
+    assert "export FAST_MODE_CACHE_USE_LOCAL=1" in helper
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():
@@ -759,7 +913,8 @@ def test_payment_receipt_validation_allows_partial_live_receipts():
         }
     }
 
-    assert _validate_payment_receipt(task, req) is None
+    _, grounding_messages = _captured_toast_payment_approval()
+    assert _validate_payment_receipt(task, req, messages=grounding_messages) is None
 
 
 def test_success_on_payment_card_request_passes_before_agent_completion():
@@ -1316,7 +1471,7 @@ async def test_agentcard_setup_terminal_check_refreshes_stale_attention_poll():
                 {
                     "id": "setup-1",
                     "metadata": {"attentionKind": "agentcard_user_cardholder_onboarding_required"},
-                }
+                },
             ]
         return [
             {
@@ -1767,14 +1922,20 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
     """Amazon uses the standard completed-commerce runtime and preserves cart-path semantics."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
-    approved_prompt = (
+    completed_purchase_prompt = (
+        "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. "
+        "Use my saved/default Amazon payment method and shipping address; do not request or add a new "
+        "payment card when a valid saved method is already selected. "
+        "Avoid using the Buy Now button as the purchase path, but make sure purchase is completed."
+    )
+    auth_assistance_prompt = (
         "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. "
         "Avoid using the Buy Now button as the purchase path, but make sure purchase is completed."
     )
     task = get_task_by_name("browser-agent-amazon-cookie-payment")
     assert task.description.endswith("complete the purchase.")
-    assert task.prompt == approved_prompt
-    assert get_task_by_name("browser-agent").prompt == approved_prompt
+    assert task.prompt == completed_purchase_prompt
+    assert get_task_by_name("browser-agent").prompt == auth_assistance_prompt
     assert task.approval_handling == "auto_approve"
     assert task.expected_attention_kind is None
     assert task.expected_attention_kind_any_of == ["payment_approval", "write_lock"]
@@ -1861,6 +2022,132 @@ def test_amazon_beanie_accepts_exactly_one_payment_or_write_lock():
     assert reason == "Expected exactly 1 approval request(s), observed 2"
 
 
+def test_live_paid_bookings_stop_only_at_payment_approval():
+    """Live purchases end at one pending card request, never a generic write lock."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _attention_request_matches_task
+
+    payment = {"metadata": {"requestPaymentCard": {}}}
+    write_lock = {"metadata": {"requestUserApproval": {"writePermission": True}}}
+    auth = {"metadata": {"attentionKind": "auth_assistance"}}
+
+    for task_name in ("browser-alchemy-springs-sauna", "browser-event-ticket"):
+        task = get_task_by_name(task_name)
+        assert task.expected_attention_kinds == []
+        assert task.expected_attention_kind_any_of == []
+        assert task.expected_attention_kind == "payment_approval"
+        assert task.approval_handling == "ignore"
+        assert task.success_on_payment_card_request is True
+        assert task.expected_approval_count == 1
+        assert _attention_request_matches_task(task, payment) is True
+        assert _attention_request_matches_task(task, write_lock) is False
+        assert _attention_request_matches_task(task, auth) is False
+
+
+def _captured_live_paid_payment_approval(task_name: str) -> tuple[dict, list[dict]]:
+    """Replay the two real payment boundaries captured in ecommerce epoch 12."""
+    cases = {
+        "browser-alchemy-springs-sauna": {
+            "merchant": "Alchemy Springs / Momence",
+            "host": "momence.com",
+            "navigation_host": "alchemysprings.com",
+            "item": "Sauna Sundays — Standard ticket (July 26, 2026, 12:00 PM)",
+            "total": 6136,
+        },
+        "browser-event-ticket": {
+            "merchant": "AMC Theatres",
+            "host": "www.amctheatres.com",
+            "navigation_host": "www.amctheatres.com",
+            "item": "Moana — Adult Ticket, AMC Metreon 16, July 24 2026 7:15 PM, Seat D4",
+            "total": 2368,
+        },
+    }
+    case = cases[task_name]
+    browser_scope = f"{task_name}-browser"
+    browser_session = f"https://kernel.example/live/{task_name}"
+    request = {
+        "id": f"{task_name}-payment",
+        "agentId": f"{task_name}-agent",
+        "question": f"Approve {case['item']} from {case['merchant']} for ${case['total'] / 100:.2f}?",
+        "metadata": {
+            "requestUserApproval": {
+                "url": f"https://{case['host']}/checkout/order-123",
+                "requestPaymentCard": {
+                    "merchant": case["merchant"],
+                    "currency": "USD",
+                    "lineItems": [
+                        {
+                            "name": case["item"],
+                            "imageUrl": None,
+                            "productUrl": f"https://{case['host']}/product",
+                            "rating": "0 stars",
+                            "reviewCount": "0 reviews",
+                            "unitPriceCents": case["total"],
+                            "quantity": 1,
+                            "lineTotalCents": case["total"],
+                        }
+                    ],
+                    "fees": [],
+                    "subtotalCents": case["total"],
+                    "totalCents": case["total"],
+                    "fingerprint": "b" * 64,
+                    "userId": "user-123",
+                    "agentId": f"{task_name}-agent",
+                },
+            },
+            "writePermission": True,
+        },
+    }
+    messages = [
+        {
+            "role": "TOOL",
+            "message": "",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "goto",
+                "title": f"Navigated → https://{case['navigation_host']}/checkout",
+                "subAgentId": browser_scope,
+                "browser_url": browser_session,
+            },
+        },
+        {
+            "role": "TOOL",
+            "message": "",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "action_type": "request_payment_card",
+                "title": f"Requesting payment card for {case['merchant']}",
+                "subAgentId": browser_scope,
+                "browser_url": browser_session,
+            },
+        },
+    ]
+    return request, messages
+
+
+def test_live_paid_bookings_require_grounded_payment_site():
+    """The pending payment approval itself must point at the expected checkout host."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    for task_name in ("browser-alchemy-springs-sauna", "browser-event-ticket"):
+        task = get_task_by_name(task_name)
+        request, messages = _captured_live_paid_payment_approval(task_name)
+        assert _validate_payment_receipt(task, request, messages=messages) is None
+
+        if task_name == "browser-alchemy-springs-sauna":
+            request["metadata"]["requestUserApproval"]["requestPaymentCard"]["merchant"] = (
+                "Alchemy Sauna Garden via Momence"
+            )
+            assert _validate_payment_receipt(task, request, messages=messages) is None
+
+        request["metadata"]["requestUserApproval"]["url"] = "https://checkout.attacker.example/order"
+        reason = _validate_payment_receipt(task, request, messages=messages)
+        assert reason is not None and "host" in reason
+
+
 def _amazon_attention_poll_task():
     from dataclasses import replace
 
@@ -1876,13 +2163,21 @@ def _amazon_attention_poll_task():
     )
 
 
-async def _run_amazon_attention_poll(requests: list[dict]):
+async def _run_attention_poll(task, requests: list[dict], *, messages: list[dict] | None = None):
     import benchmarks.run_benchmark as bench
 
     agent_reads = 0
     attention_reads = 0
     responses: list[tuple[str, str]] = []
-    agent_id = "agent-amazon"
+    agent_id = next(
+        (
+            request.get("agentId") or request.get("agent_id")
+            for request in requests
+            if request.get("agentId") or request.get("agent_id")
+        ),
+        "agent-attention-test",
+    )
+    root_messages = list(messages or [])
 
     async def fake_get_agent(_base_url: str, _agent_id: str) -> dict:
         nonlocal agent_reads
@@ -1890,7 +2185,7 @@ async def _run_amazon_attention_poll(requests: list[dict]):
         status = "COMPLETED" if agent_reads > len(requests) else "ACTIVE"
         return {
             "agent": {"status": status, "progress": 1.0},
-            "messages": [],
+            "messages": root_messages,
         }
 
     async def fake_get_attention_requests(_base_url: str) -> list[dict]:
@@ -1905,7 +2200,7 @@ async def _run_amazon_attention_poll(requests: list[dict]):
 
     async def fake_tree_stats(_base_url: str, _agent_id: str) -> dict:
         return {
-            "total_messages": 0,
+            "total_messages": len(root_messages),
             "agent_count": 1,
             "total_cost_cents": 0,
             "active_count": 1,
@@ -1915,7 +2210,7 @@ async def _run_amazon_attention_poll(requests: list[dict]):
                 {
                     "agent_id": agent_id,
                     "status": "ACTIVE",
-                    "message_count": 0,
+                    "message_count": len(root_messages),
                 }
             ],
         }
@@ -1945,7 +2240,7 @@ async def _run_amazon_attention_poll(requests: list[dict]):
         result = await bench.poll_agent(
             "http://localhost:55120",
             agent_id,
-            _amazon_attention_poll_task(),
+            task,
         )
     finally:
         for name, value in originals.items():
@@ -1971,8 +2266,9 @@ async def test_amazon_beanie_poll_rejects_second_or_unrelated_approval_without_r
         "metadata": {"attentionKind": "auth_assistance"},
     }
 
-    (data, triggered, resolved, failure), responses = await _run_amazon_attention_poll(
-        [payment, write_lock]
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        _amazon_attention_poll_task(),
+        [payment, write_lock],
     )
     assert failure is not None and "Expected exactly one attention request" in failure
     assert data["_benchmark"]["attention_kinds_observed"] == [
@@ -1982,15 +2278,90 @@ async def test_amazon_beanie_poll_rejects_second_or_unrelated_approval_without_r
     assert (triggered, resolved) == (1, 1)
     assert responses == [("payment-approval", "approved")]
 
-    (data, triggered, resolved, failure), responses = await _run_amazon_attention_poll([auth])
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        _amazon_attention_poll_task(),
+        [auth],
+    )
     assert failure is not None and "auth_assistance" in failure
     assert data["_benchmark"]["attention_kinds_observed"] == ["auth_assistance"]
     assert (triggered, resolved) == (0, 0)
     assert responses == []
 
 
-def test_alchemy_sauna_catalog_requires_single_clean_completed_booking():
-    """Alchemy requires one clean browser run and a fully described booking approval."""
+async def test_invalid_payment_receipt_still_records_typed_attention_observation():
+    """Receipt validation failures must retain the payment attention that carried them."""
+    from dataclasses import replace
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import evaluate_task
+
+    request, messages = _captured_toast_payment_approval(merchant="Wrong Merchant via Toast")
+    task = replace(get_task_by_name("browser-toast-nopa-write-lock"), timeout_seconds=5)
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        task,
+        [request],
+        messages=messages,
+    )
+
+    assert failure is not None and failure.startswith("merchant mismatch:")
+    assert (triggered, resolved) == (1, 0)
+    assert responses == []
+    assert data["_benchmark"]["attention_request_kind_seen"] == "payment_approval"
+    assert data["_benchmark"]["expected_attention_kind_seen"] == "payment_approval"
+    assert len(data["_benchmark"]["attention_requests_seen"]) == 1
+    assert "expected_payment_receipt_seen" not in data["_benchmark"]
+    passed, reason = evaluate_task(task, data, triggered)
+    assert passed is False
+    assert reason == "Expected validated payment-card request but none was observed"
+
+
+async def test_live_paid_booking_poll_stops_without_approving_payment():
+    """The harness observes the real card gate and returns without answering it."""
+    from dataclasses import replace
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    for task_name in ("browser-alchemy-springs-sauna", "browser-event-ticket"):
+        request, messages = _captured_live_paid_payment_approval(task_name)
+        task = replace(
+            get_task_by_name(task_name),
+            expected_tools=[],
+            expected_tool_counts=None,
+            enforce_declared_evaluators=False,
+            evaluators=[],
+            timeout_seconds=5,
+        )
+
+        (data, triggered, resolved, failure), responses = await _run_attention_poll(
+            task,
+            [request],
+            messages=messages,
+        )
+
+        assert failure is None
+        assert (triggered, resolved) == (1, 0)
+        assert responses == []
+        assert data["_benchmark"]["expected_attention_kind_seen"] == "payment_approval"
+        assert data["_benchmark"]["expected_payment_receipt_seen"] is True
+
+        write_lock = {
+            "id": f"{task_name}-write-lock",
+            "agentId": request["agentId"],
+            "metadata": {"requestUserApproval": {"writePermission": True}},
+        }
+        (data, triggered, resolved, failure), responses = await _run_attention_poll(
+            task,
+            [write_lock],
+            messages=messages,
+        )
+        assert failure == "Expected attention kind payment_approval, observed write_lock"
+        assert (triggered, resolved) == (0, 0)
+        assert responses == []
+
+
+def test_alchemy_sauna_catalog_stops_at_grounded_payment_approval():
+    """Alchemy passes at a detailed, unresolved card request on the right checkout."""
     from copy import deepcopy
 
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -1999,10 +2370,18 @@ def test_alchemy_sauna_catalog_requires_single_clean_completed_booking():
     task = get_task_by_name("browser-alchemy-springs-sauna")
     assert "stop at the payment/write-lock" not in task.prompt.lower()
     assert task.prompt.endswith("Complete the booking.")
-    assert task.approval_handling == "auto_approve"
-    assert task.expected_attention_kinds == ["write_lock"]
+    assert task.approval_handling == "ignore"
+    assert task.expected_attention_kinds == []
+    assert task.expected_attention_kind_any_of == []
+    assert task.expected_attention_kind == "payment_approval"
     assert task.expected_approval_count == 1
-    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.success_on_payment_card_request is True
+    assert task.expected_payment_receipt["merchant"] == "Alchemy Springs (Momence - momence.com)"
+    assert task.expected_payment_receipt["merchantBusinessAliases"] == [
+        "Alchemy Springs",
+        "Alchemy Sauna Garden",
+    ]
+    assert task.expected_tool_counts == {"spawn_agent": 1}
     assert task.tool_count_scope == "root"
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
@@ -2014,18 +2393,18 @@ def test_alchemy_sauna_catalog_requires_single_clean_completed_booking():
     assert static_types == {
         "no_tool_failures",
         "browser_agent_session_count",
-        "agent_status",
+        "expected_payment_receipt",
         "approval_request_count",
         "approval_request_details",
     }
     approval_check = next(check for check in static_evaluator["checks"] if check["type"] == "approval_request_details")
-    assert approval_check["required_strings"] == ["Alchemy Springs", "Sauna Garden"]
+    assert approval_check["required_strings"] == ["Alchemy", "Sauna Garden"]
     assert approval_check["require_date"] is True
     assert approval_check["require_time"] is True
     assert approval_check["require_amount"] is True
 
     good = {
-        "agent": {"status": "COMPLETED"},
+        "agent": {"status": "ACTIVE"},
         "messages": [
             {
                 "role": "TOOL",
@@ -2039,9 +2418,10 @@ def test_alchemy_sauna_catalog_requires_single_clean_completed_booking():
         ],
         "_benchmark": {
             "approvals_triggered": 1,
+            "expected_payment_receipt_seen": True,
             "attention_requests_seen": [
                 {
-                    "kind": "write_lock",
+                    "kind": "payment_approval",
                     "question": (
                         "Approve one Alchemy Springs Sauna Garden session on "
                         "Sunday, July 19, 2026 at 10:00 AM for $45.00?"
@@ -2061,7 +2441,7 @@ def test_alchemy_sauna_catalog_requires_single_clean_completed_booking():
     assert "date" in reason.lower()
 
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
-    for requirement in ("earliest available", "10:00 am", "2:00 pm", "completed", "confirmation"):
+    for requirement in ("earliest available", "10:00 am", "2:00 pm", "payment approval", "unresolved"):
         assert requirement in semantic_criteria
 
 
@@ -2153,17 +2533,21 @@ def test_hotel_catalog_requires_single_clean_completed_reservation():
         assert requirement in semantic_criteria
 
 
-def test_event_ticket_catalog_requires_single_clean_completed_purchase():
-    """Movie ticketing requires one browser and a detailed seat approval."""
+def test_event_ticket_catalog_stops_at_grounded_payment_approval():
+    """Movie ticketing passes at a detailed, unresolved AMC card request."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     task = get_task_by_name("browser-event-ticket")
     assert "stop at the payment/write-lock" not in task.prompt.lower()
     assert task.prompt.endswith("Complete the ticket purchase.")
-    assert task.approval_handling == "auto_approve"
-    assert task.expected_attention_kinds == ["write_lock"]
+    assert task.approval_handling == "ignore"
+    assert task.expected_attention_kinds == []
+    assert task.expected_attention_kind_any_of == []
+    assert task.expected_attention_kind == "payment_approval"
     assert task.expected_approval_count == 1
-    assert task.expected_tool_counts == {"spawn_browser_agent": 1}
+    assert task.success_on_payment_card_request is True
+    assert task.expected_payment_receipt["merchant"] == "AMC Theatres (direct - amctheatres.com)"
+    assert task.expected_tool_counts == {"spawn_agent": 1}
     assert task.tool_count_scope == "root"
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
@@ -2177,8 +2561,11 @@ def test_event_ticket_catalog_requires_single_clean_completed_purchase():
     assert approval_check["require_time"] is True
     assert approval_check["require_amount"] is True
     assert approval_check["require_seat"] is True
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    assert "expected_payment_receipt" in static_types
+    assert "agent_status" not in static_types
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
-    for requirement in ("earliest", "center", "completed", "confirmation"):
+    for requirement in ("earliest", "center", "payment approval", "unresolved"):
         assert requirement in semantic_criteria
 
 
@@ -2247,6 +2634,144 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
             os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
 
     assert raised, "live fixture must fail closed when credential refresh fails"
+
+
+def test_compute_token_sync_passes_explicit_prod_source_without_shared_workspace():
+    """Cloud guests must pass seed-local an explicit production token source."""
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    captured = {}
+
+    def capture_seed(_command, **kwargs):
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(_command, 0, "", "")
+
+    local_url = "postgresql://local/victoria"
+    prod_url = "postgresql://prod/rose"
+    with (
+        patch.object(bench, "_local_victoria_database_url", return_value=local_url),
+        patch.object(bench, "_shared_workspace_database_url", return_value=None),
+        patch.object(bench, "load_env_var", return_value=prod_url),
+        patch.object(bench, "_run_seed_subprocess", side_effect=capture_seed),
+    ):
+        assert bench._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is True
+
+    assert captured["env"]["DATABASE_URL"] == local_url
+    assert captured["env"]["DIRECT_URL"] == local_url
+    assert captured["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == prod_url
+
+
+def test_shared_workspace_compute_source_requires_usable_claude_code():
+    """A reachable shared DB without an agent token must not shadow prod."""
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        root = Path(temp_dir)
+        shared_context = root / ".context"
+        shared_context.mkdir()
+        (shared_context / "services.json").write_text(
+            '{"status":"running","database":{"port":55135,"use_system_postgres":false}}'
+        )
+        isolated_context = shared_context / "benchmarks" / "isolated"
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            sql = command[-1]
+            stdout = "f\n" if 'FROM "Integration"' in sql else "1\n"
+            return subprocess.CompletedProcess(command, 0, stdout, "")
+
+        with (
+            patch.object(bench, "REPO_ROOT", root),
+            patch.object(bench, "_benchmark_context_path", return_value=isolated_context),
+            patch.object(bench.subprocess, "run", side_effect=fake_run),
+        ):
+            assert bench._shared_workspace_database_url() is None
+
+        assert any('FROM "Integration"' in command[-1] for command in commands)
+
+
+def test_compute_token_source_contract_preserves_prisma_dsn_and_rejects_self_source():
+    """Source selection ignores ambient state and never rewrites or self-syncs a DSN."""
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    captured = {}
+
+    def capture_seed(_command, **kwargs):
+        captured["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(_command, 0, "", "")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        env_path = Path(temp_dir) / ".env"
+        prisma_source = (
+            "postgresql://prod-user:secret@pooler.example.com:6543/rose"
+            "?pgbouncer=true&connection_limit=20&pool_timeout=30"
+        )
+        env_path.write_text(f"DATABASE_URL={prisma_source}\n")
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DATABASE_URL": "postgresql://ambient/local",
+                    "SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL": "postgresql://stale/source",
+                },
+            ),
+            patch.object(bench, "_BACKEND_ENV", str(env_path)),
+            patch.object(
+                bench,
+                "_local_victoria_database_url",
+                return_value="postgresql://local/victoria",
+            ),
+            patch.object(bench, "_shared_workspace_database_url", return_value=None),
+            patch.object(bench, "_run_seed_subprocess", side_effect=capture_seed),
+        ):
+            assert bench._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is True
+
+        assert captured["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == prisma_source
+
+        same_database_source = (
+            "postgres://source-user:one@DB.EXAMPLE.COM/victoria"
+            "?sslmode=require&application_name=seed&schema=public"
+        )
+        env_path.write_text(f"DATABASE_URL={same_database_source}\n")
+        seed_called = False
+
+        def reject_seed(*_args, **_kwargs):
+            nonlocal seed_called
+            seed_called = True
+            raise AssertionError("self-source must be rejected before seed-local starts")
+
+        with (
+            patch.object(bench, "_BACKEND_ENV", str(env_path)),
+            patch.object(
+                bench,
+                "_local_victoria_database_url",
+                return_value=(
+                    "postgresql://target-user:two@db.example.com:5432/victoria"
+                    "?connection_limit=50&pool_timeout=30"
+                ),
+            ),
+            patch.object(bench, "_shared_workspace_database_url", return_value=None),
+            patch.object(bench, "_run_seed_subprocess", side_effect=reject_seed),
+        ):
+            assert bench._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is False
+
+        assert seed_called is False
+
+    assert bench._database_urls_equivalent(
+        "postgres://one:first@DB.EXAMPLE.COM/victoria?sslmode=require",
+        "postgresql://two:second@db.example.com:5432/victoria?application_name=bench",
+    )
+    assert not bench._database_urls_equivalent(
+        "postgresql://one:first@db.example.com:5432/victoria",
+        "postgresql://two:second@db.example.com:5432/other",
+    )
 
 
 def test_expected_passkey_credential_ref_is_required_even_when_approval_is_terminal():
@@ -3880,7 +4405,6 @@ async def test_code_agent_preflight_rejects_missing_compute_token():
 
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
-    original_has_fallback = bench._has_anthropic_api_key_fallback_configured
     try:
 
         async def fake_headers():
@@ -3888,13 +4412,11 @@ async def test_code_agent_preflight_rejects_missing_compute_token():
 
         bench._api_headers = fake_headers
         bench.httpx.AsyncClient = FakeClient
-        bench._has_anthropic_api_key_fallback_configured = lambda: False
 
         assert await bench._check_compute_code_credentials("http://localhost:55120") is False
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
-        bench._has_anthropic_api_key_fallback_configured = original_has_fallback
 
 
 async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
@@ -3923,12 +4445,11 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
             if url.endswith("/api/integrations/compute-code/credentials/token"):
                 return FakeResponse(404, {"error": "NO_TOKENS_AVAILABLE"})
             if url.endswith("/api/integrations/compute-code/anthropic-key/cooldown"):
-                return FakeResponse(200, {"onCooldown": False})
+                return FakeResponse(200, {"configured": True, "onCooldown": False})
             raise AssertionError(f"unexpected URL {url}")
 
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
-    original_has_fallback = bench._has_anthropic_api_key_fallback_configured
     try:
 
         async def fake_headers():
@@ -3936,13 +4457,11 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
 
         bench._api_headers = fake_headers
         bench.httpx.AsyncClient = FakeClient
-        bench._has_anthropic_api_key_fallback_configured = lambda: True
 
         assert await bench._check_compute_code_credentials("http://localhost:55120") is True
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
-        bench._has_anthropic_api_key_fallback_configured = original_has_fallback
 
     assert calls == [
         (
@@ -3956,6 +4475,148 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
             10.0,
         ),
     ]
+
+
+async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback():
+    """Blanket local refresh must accept the same funded fallback as runtime."""
+    import benchmarks.run_benchmark as bench
+
+    http_calls = []
+    sync_options = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"configured": True, "onCooldown": False}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, *, headers, timeout):
+            http_calls.append((url, headers, timeout))
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    original_sync = bench._sync_compute_tokens
+    try:
+
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        def fake_sync(**options):
+            sync_options.append(options)
+            return options.get("tolerate_claude_code_unavailable") is True
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+        bench._sync_compute_tokens = fake_sync
+
+        refresh = bench._refresh_local_compute_tokens_for_run("http://localhost:55120")
+        if asyncio.iscoroutine(refresh):
+            await refresh
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+        bench._sync_compute_tokens = original_sync
+
+    assert sync_options == [
+        {
+            "tolerate_gpt_code_unavailable": True,
+            "tolerate_claude_code_unavailable": True,
+        }
+    ]
+    assert http_calls == [
+        (
+            "http://localhost:55120/api/integrations/compute-code/anthropic-key/cooldown",
+            {"X-API-Key": "test-key"},
+            10.0,
+        )
+    ]
+
+
+def test_compute_token_sync_reads_source_file_not_isolated_process_target():
+    """The isolated target DSN must not shadow the explicit production source."""
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    class SeedResult:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        env_file = Path(temp_dir) / ".env"
+        env_file.write_text("DATABASE_URL=postgresql://prod/rose\n")
+        with (
+            patch.dict(os.environ, {"DATABASE_URL": "postgresql://local/victoria"}),
+            patch.object(bench, "_BACKEND_ENV", str(env_file)),
+            patch.object(
+                bench,
+                "_local_victoria_database_url",
+                return_value="postgresql://local/victoria",
+            ),
+            patch.object(bench, "_shared_workspace_database_url", return_value=None),
+            patch.object(bench, "_run_seed_subprocess", return_value=SeedResult()) as seed,
+        ):
+            assert bench._sync_compute_tokens() is True
+
+    assert seed.call_args.kwargs["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == "postgresql://prod/rose"
+
+
+async def test_anthropic_api_key_fallback_availability_fails_closed():
+    """Only an explicitly configured, non-cooled backend runtime is usable."""
+    import benchmarks.run_benchmark as bench
+
+    cases = [
+        ("missing-key", 200, {"configured": False, "onCooldown": False}, None),
+        ("cooldown", 200, {"configured": True, "onCooldown": True}, None),
+        ("malformed-empty", 200, {}, None),
+        ("malformed-null", 200, None, None),
+        ("non-200", 503, {"configured": True, "onCooldown": False}, None),
+        ("unreachable", 0, None, RuntimeError("backend unavailable")),
+    ]
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        for name, status_code, body, error in cases:
+
+            class FakeResponse:
+                def __init__(self):
+                    self.status_code = status_code
+
+                def json(self):
+                    return body
+
+            class FakeClient:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_args):
+                    return None
+
+                async def get(self, _url, *, headers, timeout):
+                    if error is not None:
+                        raise error
+                    return FakeResponse()
+
+            bench.httpx.AsyncClient = FakeClient
+            assert await bench._has_usable_anthropic_api_key_fallback("http://localhost:55120") is False, name
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
 
 
 def test_normalize_attention_requests_accepts_backend_contract():
@@ -4647,6 +5308,77 @@ def test_local_failed_tasks_from_run_reads_result_json():
     assert [(f.name, f.agent_id, f.failure_reason) for f in failures] == [("browser-agent", "b2", "verifier failed")]
 
 
+def test_local_benchmark_invocation_propagates_cache_ratchet_exit():
+    """A saved all-task-pass artifact must not swallow a post-run ratchet failure.
+
+    Captured from isolated smoke run 1784687608-25918-44421: the runner
+    printed ``CACHE RATCHET FAILED`` and exited 1 after saving a 5/5 task
+    artifact, but local.py returned success because it only re-read task pass
+    fields from that artifact.
+    """
+    from benchmarks import local
+
+    original_popen = local.subprocess.Popen
+    with tempfile.TemporaryDirectory() as raw_dir:
+        result_path = Path(raw_dir) / "cache-ratchet-run.json"
+        result_path.write_text(json.dumps({"tasks": [{"name": "browser-smoke", "passed": True}]}))
+
+        class FailedRatchetProcess:
+            def __init__(self):
+                self.stdout = iter(
+                    [
+                        f"  Results saved: {result_path}\n",
+                        "  ❌ CACHE RATCHET FAILED (per-task repeatable prompt-cache hit floor)\n",
+                    ]
+                )
+
+            @staticmethod
+            def wait():
+                return 1
+
+        try:
+            local.subprocess.Popen = lambda *_args, **_kwargs: FailedRatchetProcess()
+            try:
+                local.run_benchmark_invocation(
+                    local.BenchmarkInvocation("benchmarks", ["browser-smoke"]),
+                    port=55120,
+                    bootstrap=False,
+                    anon=False,
+                    max_concurrency=1,
+                )
+                raise AssertionError("local benchmark wrapper swallowed the runner's exit code 1")
+            except RuntimeError as exc:
+                assert "exit code 1" in str(exc)
+                assert str(result_path) in str(exc)
+
+            # A task-level failure must still return the artifact so main() can
+            # run agent_latency, agent_logs, and agent_cache before exiting 1.
+            result_path.write_text(
+                json.dumps(
+                    {
+                        "tasks": [
+                            {
+                                "name": "browser-smoke",
+                                "passed": False,
+                                "agent_id": "failed-agent",
+                                "failure_reason": "verifier failed",
+                            }
+                        ]
+                    }
+                )
+            )
+            returned = local.run_benchmark_invocation(
+                local.BenchmarkInvocation("benchmarks", ["browser-smoke"]),
+                port=55120,
+                bootstrap=False,
+                anon=False,
+                max_concurrency=1,
+            )
+            assert returned == result_path
+        finally:
+            local.subprocess.Popen = original_popen
+
+
 def test_run_sh_manifest_writer_publishes_wmh_when_served():
     """run.sh's manifest writer carries ports.wmh + urls.wmh + a wmh service entry.
 
@@ -4836,14 +5568,100 @@ def test_runner_fixtures_use_isolated_system_database_identity():
                 return_value=SimpleNamespace(returncode=0, stdout="1\n", stderr=""),
             ):
                 assert run_benchmark._local_victoria_database_url() == (
-                    "postgresql://postgres:postgres@localhost:5432/"
-                    "victoria_bench_1784586845_71851_68350"
+                    "postgresql://postgres:postgres@localhost:5432/victoria_bench_1784586845_71851_68350"
                 )
     finally:
         if prior_context is None:
             os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
         else:
             os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
+
+
+def test_compute_token_preflight_uses_credential_source_not_restored_guest_database():
+    """A Fly guest must source live credentials from its verified backend env, not its restored target."""
+
+
+def test_runner_fixtures_retry_transient_local_database_probe_timeout():
+    """One bounded psql stall must not abort the benchmark before agent creation."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from benchmarks import run_benchmark
+
+    manifest = {
+        "ports": {"local_db": 55435},
+        "database": {
+            "use_system_postgres": True,
+            "port": 5432,
+            "name": "victoria_bench_transient_probe",
+        },
+    }
+    database_url = "postgresql://postgres:postgres@localhost:5432/victoria_bench_transient_probe"
+    timeout = subprocess.TimeoutExpired(["psql", database_url], 5)
+    prior_context = os.environ.get("BENCHMARK_CONTEXT_DIR")
+    try:
+        with tempfile.TemporaryDirectory() as context_dir:
+            Path(context_dir, "services.json").write_text(json.dumps(manifest), encoding="utf-8")
+            os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            with (
+                patch.object(
+                    run_benchmark.subprocess,
+                    "run",
+                    side_effect=[
+                        timeout,
+                        SimpleNamespace(returncode=0, stdout="1\n", stderr=""),
+                    ],
+                ) as probe,
+                patch.object(run_benchmark.time, "sleep") as sleep,
+            ):
+                assert run_benchmark._local_victoria_database_url() == database_url
+        assert probe.call_count == 2
+        sleep.assert_called_once()
+    finally:
+        if prior_context is None:
+            os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
+        else:
+            os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
+
+
+def test_compute_token_preflight_uses_credential_source_not_restored_guest_database():
+    """A Fly guest must source live credentials from its verified backend env, not its restored target."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from benchmarks import run_benchmark
+
+    isolated_database = "postgresql://postgres:postgres@localhost:5432/victoria"
+    credential_source = "postgresql://prod.example.test:6543/postgres?pgbouncer=true"
+    captured = {}
+
+    def replay_seed_contract(_command, **kwargs):
+        env = kwargs["env"]
+        captured["source"] = env.get("SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL")
+        if not captured["source"] or captured["source"] == isolated_database:
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="No usable claude_code integrations after sync",
+            )
+        return SimpleNamespace(returncode=0, stdout="compute token sync complete", stderr="")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        backend_env = Path(temp_dir, "backend.env")
+        backend_env.write_text(f'DATABASE_URL="{credential_source}"\n', encoding="utf-8")
+        with (
+            patch.object(run_benchmark, "_BACKEND_ENV", str(backend_env)),
+            patch.object(
+                run_benchmark,
+                "_local_victoria_database_url",
+                return_value=isolated_database,
+            ),
+            patch.object(run_benchmark, "_shared_workspace_database_url", return_value=None),
+            patch.object(run_benchmark, "_run_seed_subprocess", side_effect=replay_seed_contract),
+        ):
+            assert run_benchmark._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is True
+
+    assert captured["source"] == credential_source
 
 
 def test_runner_fixtures_fail_closed_when_isolated_database_is_unavailable():
@@ -4879,9 +5697,7 @@ def test_runner_fixtures_fail_closed_when_isolated_database_is_unavailable():
             os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
             with patch.object(run_benchmark.subprocess, "run", side_effect=probe):
                 assert run_benchmark._local_victoria_database_url() is None
-        assert probed_urls == [
-            "postgresql://postgres:postgres@localhost:5432/victoria_bench_unavailable"
-        ]
+        assert probed_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_bench_unavailable"]
     finally:
         if prior_context is None:
             os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
@@ -4973,17 +5789,328 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             os.environ["BENCHMARK_SEED_DUMP"] = prior_seed_dump
 
 
+def test_local_start_services_reaps_process_when_readiness_fails():
+    """A partially initialized isolated stack must not outlive its launcher."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    class FakeProcess:
+        pass
+
+    process = FakeProcess()
+    with tempfile.TemporaryDirectory() as tmp:
+        context_dir = Path(tmp) / "isolated-run"
+        stack = local_bench.ServiceStack(
+            run_id="isolated-run",
+            context_dir=context_dir,
+            manifest_path=context_dir / "services.json",
+            service_log=context_dir / "services.log",
+            isolated=True,
+            workspace_name="blackbox-bench-isolated-run",
+            base_port=55120,
+        )
+        with (
+            patch.object(local_bench.subprocess, "Popen", return_value=process),
+            patch.object(
+                local_bench,
+                "wait_for_services",
+                side_effect=TimeoutError("services never became ready"),
+            ),
+            patch.object(local_bench, "stop_services") as stop_services,
+        ):
+            try:
+                local_bench.start_services(stack, clean_first=False)
+            except TimeoutError as exc:
+                assert str(exc) == "services never became ready"
+            else:
+                raise AssertionError("start_services unexpectedly ignored the readiness failure")
+
+        stop_services.assert_called_once_with(process, stack=stack)
+
+
+def test_local_start_services_preserves_readiness_failure_when_cleanup_fails():
+    """Cleanup diagnostics must not mask the startup failure that triggered them."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    class FakeProcess:
+        pass
+
+    process = FakeProcess()
+    with tempfile.TemporaryDirectory() as tmp:
+        context_dir = Path(tmp) / "isolated-run"
+        stack = local_bench.ServiceStack(
+            run_id="isolated-run",
+            context_dir=context_dir,
+            manifest_path=context_dir / "services.json",
+            service_log=context_dir / "services.log",
+            isolated=True,
+            workspace_name="blackbox-bench-isolated-run",
+            base_port=55120,
+        )
+        with (
+            patch.object(local_bench.subprocess, "Popen", return_value=process),
+            patch.object(
+                local_bench,
+                "wait_for_services",
+                side_effect=TimeoutError("services never became ready"),
+            ),
+            patch.object(
+                local_bench,
+                "stop_services",
+                side_effect=RuntimeError("cleanup failed"),
+            ) as stop_services,
+        ):
+            try:
+                local_bench.start_services(stack, clean_first=False)
+            except TimeoutError as exc:
+                assert str(exc) == "services never became ready"
+            else:
+                raise AssertionError("cleanup failure replaced the readiness failure")
+
+        stop_services.assert_called_once_with(process, stack=stack)
+
+
+def test_local_start_services_reaps_only_its_real_process_group():
+    """Readiness rollback kills its process tree without touching a sibling."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    real_popen = subprocess.Popen
+    owned_process = None
+    with tempfile.TemporaryDirectory() as process_tmp:
+        child_pid_path = Path(process_tmp) / "child.pid"
+
+        def launch_owned_process(_command, **kwargs):
+            nonlocal owned_process
+            owned_process = real_popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import pathlib, subprocess, sys, time; "
+                        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+                        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+                        "time.sleep(60)"
+                    ),
+                    str(child_pid_path),
+                ],
+                **kwargs,
+            )
+            deadline = time.monotonic() + 5
+            while not child_pid_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert child_pid_path.exists(), "owned process did not launch its child"
+            return owned_process
+
+        class SubprocessFacade:
+            DEVNULL = subprocess.DEVNULL
+            STDOUT = subprocess.STDOUT
+            TimeoutExpired = subprocess.TimeoutExpired
+            Popen = staticmethod(launch_owned_process)
+            run = staticmethod(subprocess.run)
+
+        sibling_process = real_popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            cwd=local_bench.REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                context_dir = Path(tmp) / "cleanup-owned-unique"
+                stack = local_bench.ServiceStack(
+                    run_id="cleanup-owned-unique",
+                    context_dir=context_dir,
+                    manifest_path=context_dir / "services.json",
+                    service_log=context_dir / "services.log",
+                    isolated=True,
+                    workspace_name="blackbox-bench-cleanup-owned-unique",
+                    base_port=55120,
+                )
+                with (
+                    patch.object(local_bench, "subprocess", SubprocessFacade),
+                    patch.object(local_bench, "_stop_owned_db_from_stack_identity"),
+                    patch.object(local_bench, "_release_port_range") as release_port_range,
+                    patch.object(
+                        local_bench,
+                        "wait_for_services",
+                        side_effect=TimeoutError("services never became ready"),
+                    ),
+                ):
+                    try:
+                        local_bench.start_services(stack, clean_first=False)
+                    except TimeoutError:
+                        pass
+                    else:
+                        raise AssertionError("start_services unexpectedly ignored the readiness failure")
+                release_port_range.assert_called_once_with(stack.base_port)
+
+            assert owned_process is not None
+            child_pid = int(child_pid_path.read_text())
+            assert owned_process.poll() is not None, "the partially started process group survived"
+            deadline = time.monotonic() + 5
+            while _pid_is_live(child_pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert not _pid_is_live(child_pid), "a child of the partially started group survived"
+            assert sibling_process.poll() is None, "cleanup terminated an unrelated sibling process"
+        finally:
+            for process in (owned_process, sibling_process):
+                if process is not None and process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=5)
+
+
+def _pid_is_live(pid: int) -> bool:
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "stat="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    status = result.stdout.strip()
+    return bool(status) and not status.startswith("Z")
+
+
+def test_local_stop_services_removes_pre_manifest_owned_database():
+    """Pre-manifest rollback derives only the exact isolated DB resource names."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    class StoppedProcess:
+        pid = 12345
+
+        @staticmethod
+        def poll():
+            return 0
+
+    with tempfile.TemporaryDirectory() as tmp:
+        context_dir = Path(tmp) / "cleanup-owned-unique"
+        stack = local_bench.ServiceStack(
+            run_id="cleanup-owned-unique",
+            context_dir=context_dir,
+            manifest_path=context_dir / "services.json",
+            service_log=context_dir / "services.log",
+            isolated=True,
+            workspace_name="blackbox-bench-cleanup-owned-unique",
+            base_port=55120,
+        )
+        with (
+            patch.object(local_bench.subprocess, "run") as run,
+            patch.object(local_bench, "_kill_scoped_processes_by_run_id"),
+        ):
+            local_bench.stop_services(StoppedProcess(), stack=stack)
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert [
+        "docker",
+        "rm",
+        "-f",
+        "victoria-db-blackbox-bench-cleanup-owned-unique",
+    ] in commands
+    assert [
+        "docker",
+        "volume",
+        "rm",
+        "victoria-pgdata-blackbox-bench-cleanup-owned-unique",
+    ] in commands
+
+
+def test_local_port_range_allocation_is_reserved_across_processes():
+    """Concurrent launchers must not select identical or overlapping ranges."""
+    from benchmarks import local as local_bench
+
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import time; "
+                "from benchmarks.local import allocate_port_range; "
+                "print(allocate_port_range(62000), flush=True); "
+                "time.sleep(60)"
+            ),
+        ],
+        cwd=local_bench.AGENTS_DIR,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    parent_bases = []
+    try:
+        assert child.stdout is not None
+        child_base_text = child.stdout.readline().strip()
+        assert child_base_text.isdigit(), f"child port allocation failed: {child_base_text!r}"
+        child_base = int(child_base_text)
+        occupied = lambda base: {base + offset for offset in local_bench.PORT_RANGE_OFFSETS}
+
+        overlapping_base = local_bench.allocate_port_range(child_base - 1)
+        parent_bases.append(overlapping_base)
+        assert occupied(overlapping_base).isdisjoint(occupied(child_base)), (
+            "concurrent launchers reserved overlapping port ranges"
+        )
+
+        exact_base = local_bench.allocate_port_range(child_base)
+        parent_bases.append(exact_base)
+        assert occupied(exact_base).isdisjoint(occupied(child_base)), (
+            "concurrent launchers reserved the same port range"
+        )
+    finally:
+        release = getattr(local_bench, "_release_port_range", None)
+        if release is not None:
+            for parent_base in parent_bases:
+                release(parent_base)
+        child.terminate()
+        child.wait(timeout=5)
+
+    assert local_bench.PORT_RANGE_LOCK_ROOT.parent == Path(tempfile.gettempdir()), (
+        "port reservations must coordinate sibling worktrees on the same host"
+    )
+
+
+def test_local_start_services_releases_port_reservation_after_readiness():
+    """A ready isolated stack must release its startup-only port reservation."""
+    from unittest.mock import Mock, patch
+
+    from benchmarks import local as local_bench
+
+    with tempfile.TemporaryDirectory() as tmp:
+        context_dir = Path(tmp) / "ready-port-release"
+        stack = local_bench.ServiceStack(
+            run_id="ready-port-release",
+            context_dir=context_dir,
+            manifest_path=context_dir / "services.json",
+            service_log=context_dir / "services.log",
+            isolated=True,
+            workspace_name="blackbox-bench-ready-port-release",
+            base_port=55130,
+        )
+        process = Mock()
+        manifest = {"backend": "http://localhost:55130"}
+        with (
+            patch.object(local_bench.subprocess, "Popen", return_value=process),
+            patch.object(local_bench, "wait_for_services", return_value=manifest),
+            patch.object(local_bench, "_release_port_range") as release_port_range,
+        ):
+            result = local_bench.start_services(stack, clean_first=False)
+
+    assert result == (process, manifest)
+    release_port_range.assert_called_once_with(stack.base_port)
+
+
 def test_run_sh_seed_dump_targets_isolated_database_atomically():
     """System-Postgres isolated runs must restore/dump their per-run DB safely."""
     run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
 
-    assert 'bash scripts/restore-seed-dump.sh' in run_script
+    assert "bash scripts/restore-seed-dump.sh" in run_script
     assert '"$_SEED_RESTORE_CONTAINER" >/dev/null' in run_script
     assert '"$_SEED_RESTORE_CONTAINER" >/dev/null 2>&1' not in run_script
-    assert (
-        'pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME"'
-        in run_script
-    )
+    assert 'pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME"' in run_script
     assert 'mv "$_SEED_DUMP_TMP" "$_SEED_DUMP"' in run_script
     required_guard = run_script.index('if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]')
     cold_sync = run_script.index('echo "🌱 Syncing production data to local database (first run)..."')
@@ -5004,20 +6131,15 @@ def test_seed_dump_restore_uses_target_container_pg_restore():
 
         host_restore = tmp_path / "pg_restore"
         host_restore.write_text(
-            '#!/bin/sh\n'
+            "#!/bin/sh\n"
             'echo "host pg_restore $*" >> "$COMMAND_LOG"\n'
-            'echo \'unrecognized configuration parameter "transaction_timeout"\' >&2\n'
-            'exit 1\n'
+            "echo 'unrecognized configuration parameter \"transaction_timeout\"' >&2\n"
+            "exit 1\n"
         )
         host_restore.chmod(0o755)
 
         docker = tmp_path / "docker"
-        docker.write_text(
-            '#!/bin/sh\n'
-            'echo "docker $*" >> "$COMMAND_LOG"\n'
-            'cat >/dev/null\n'
-            'exit 0\n'
-        )
+        docker.write_text('#!/bin/sh\necho "docker $*" >> "$COMMAND_LOG"\ncat >/dev/null\nexit 0\n')
         docker.chmod(0o755)
 
         result = subprocess.run(
@@ -5064,12 +6186,12 @@ def test_workspace_dependency_preflight_respects_hoisted_installs():
         fake_bin.mkdir()
         npm = fake_bin / "npm"
         npm.write_text(
-            '#!/bin/sh\n'
+            "#!/bin/sh\n"
             'echo "$*" >> "$COMMAND_LOG"\n'
             'if [ "$1" = "pkg" ]; then exit 0; fi\n'
             'if [ "$1" = "ls" ]; then [ "${NPM_GRAPH_READY:-0}" = 1 ] || [ -f "$INSTALLED_MARKER" ]; exit; fi\n'
             'if [ "$1" = "install" ]; then touch "$INSTALLED_MARKER"; exit 0; fi\n'
-            'exit 1\n'
+            "exit 1\n"
         )
         npm.chmod(0o755)
         common_env = {
@@ -5118,9 +6240,7 @@ def test_workspace_dependency_preflight_supports_standalone_packages():
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
-        (tmp_path / "package.json").write_text(
-            '{"name":"test-root","workspaces":["back-end"]}\n'
-        )
+        (tmp_path / "package.json").write_text('{"name":"test-root","workspaces":["back-end"]}\n')
         standalone = tmp_path / "mac-app"
         standalone.mkdir()
         (standalone / "package.json").write_text('{"name":"test-mac-app"}\n')
@@ -5130,12 +6250,12 @@ def test_workspace_dependency_preflight_supports_standalone_packages():
         fake_bin.mkdir()
         npm = fake_bin / "npm"
         npm.write_text(
-            '#!/bin/sh\n'
+            "#!/bin/sh\n"
             'echo "$PWD::$*" >> "$COMMAND_LOG"\n'
             'if [ "$1" = "pkg" ]; then exit 1; fi\n'
             'if [ "$1" = "ls" ]; then [ -f "$INSTALLED_MARKER" ]; exit; fi\n'
             'if [ "$1" = "install" ]; then touch "$INSTALLED_MARKER"; exit 0; fi\n'
-            'exit 1\n'
+            "exit 1\n"
         )
         npm.chmod(0o755)
 
@@ -5186,7 +6306,7 @@ def test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe():
     run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
 
     reachable_probe = 'pg_isready -h localhost -p "$LOCAL_DB_PORT" -U postgres -d victoria -q'
-    ownership_probe = 'workspace_db_container_owns_port &&'
+    ownership_probe = "workspace_db_container_owns_port &&"
     assert 'docker inspect "$DB_CONTAINER"' in run_script
     assert 'container_port" = "$LOCAL_DB_PORT"' in run_script
     assert reachable_probe in run_script
@@ -8079,6 +9199,18 @@ async def run_all_tests():
         "code_agent_preflight_accepts_anthropic_api_key_fallback",
         test_code_agent_preflight_accepts_anthropic_api_key_fallback,
     )
+    await r.record_async(
+        "local_compute_refresh_accepts_anthropic_api_key_fallback",
+        test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback,
+    )
+    r.record(
+        "compute_token_source_ignores_isolated_process_target",
+        test_compute_token_sync_reads_source_file_not_isolated_process_target,
+    )
+    await r.record_async(
+        "anthropic_api_key_fallback_availability_fails_closed",
+        test_anthropic_api_key_fallback_availability_fails_closed,
+    )
     r.record("normalize_attention_requests", test_normalize_attention_requests_accepts_backend_contract)
     r.record("attention_kind_auth_vs_write_lock", test_attention_request_kind_distinguishes_auth_from_write_lock)
     r.record("attention_open_backend_fields", test_attention_request_open_check_honors_backend_answered_fields)
@@ -8116,6 +9248,10 @@ async def run_all_tests():
     r.record("local_args_anon", test_local_benchmark_args_pass_anon_to_run_benchmark)
     r.record("local_args_single_task", test_local_benchmark_args_for_single_task_not_parallel)
     r.record("local_failed_tasks_from_run", test_local_failed_tasks_from_run_reads_result_json)
+    r.record(
+        "local_invocation_propagates_cache_ratchet_exit",
+        test_local_benchmark_invocation_propagates_cache_ratchet_exit,
+    )
     r.record("local_services_manifest_validation", test_local_services_manifest_validation_requires_ports)
     r.record(
         "local_manifest_system_database_identity",
@@ -8126,6 +9262,14 @@ async def run_all_tests():
         test_runner_fixtures_use_isolated_system_database_identity,
     )
     r.record(
+        "compute_token_preflight_isolated_source",
+        test_compute_token_preflight_uses_credential_source_not_restored_guest_database,
+    )
+    r.record(
+        "runner_fixture_transient_database_probe_retry",
+        test_runner_fixtures_retry_transient_local_database_probe_timeout,
+    )
+    r.record(
         "runner_fixture_isolated_database_fail_closed",
         test_runner_fixtures_fail_closed_when_isolated_database_is_unavailable,
     )
@@ -8134,6 +9278,30 @@ async def run_all_tests():
         test_runner_fixtures_reject_manifest_without_database_identity,
     )
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
+    r.record(
+        "local_start_services_readiness_cleanup",
+        test_local_start_services_reaps_process_when_readiness_fails,
+    )
+    r.record(
+        "local_start_services_cleanup_error_preserves_readiness_failure",
+        test_local_start_services_preserves_readiness_failure_when_cleanup_fails,
+    )
+    r.record(
+        "local_start_services_exact_process_group_cleanup",
+        test_local_start_services_reaps_only_its_real_process_group,
+    )
+    r.record(
+        "local_stop_services_pre_manifest_database_cleanup",
+        test_local_stop_services_removes_pre_manifest_owned_database,
+    )
+    r.record(
+        "local_port_range_cross_process_reservation",
+        test_local_port_range_allocation_is_reserved_across_processes,
+    )
+    r.record(
+        "local_start_services_ready_port_release",
+        test_local_start_services_releases_port_reservation_after_readiness,
+    )
     r.record(
         "run_sh_seed_dump_isolated_database",
         test_run_sh_seed_dump_targets_isolated_database_atomically,
@@ -8256,6 +9424,10 @@ async def run_all_tests():
         test_payment_benchmark_enables_bundled_frontend_before_stack_start,
     )
     r.record(
+        "payment_benchmark_lifecycle_stack_contract",
+        test_payment_benchmark_preserves_lifecycle_stack_contract,
+    )
+    r.record(
         "isolated_benchmark_slow_first_sync",
         test_isolated_benchmark_services_allow_slow_first_sync,
     )
@@ -8274,6 +9446,14 @@ async def run_all_tests():
     r.record(
         "toast_payment_approval_complete_receipt",
         test_toast_payment_approval_requires_every_declared_receipt_field,
+    )
+    r.record(
+        "toast_payment_merchant_grounded_connector_variant",
+        test_toast_payment_merchant_identity_accepts_grounded_connector_variant,
+    )
+    r.record(
+        "toast_payment_merchant_rejects_wrong_or_ungrounded",
+        test_toast_payment_merchant_identity_rejects_wrong_or_ungrounded_variants,
     )
     r.record(
         "success_on_payment_card_request",
@@ -8399,13 +9579,29 @@ async def run_all_tests():
         "amazon_beanie_exactly_one_payment_or_write_lock",
         test_amazon_beanie_accepts_exactly_one_payment_or_write_lock,
     )
+    r.record(
+        "live_paid_bookings_payment_only",
+        test_live_paid_bookings_stop_only_at_payment_approval,
+    )
+    r.record(
+        "live_paid_bookings_grounded_site",
+        test_live_paid_bookings_require_grounded_payment_site,
+    )
     await r.record_async(
         "amazon_beanie_poll_rejects_second_or_unrelated_approval",
         test_amazon_beanie_poll_rejects_second_or_unrelated_approval_without_resolving_it,
     )
+    await r.record_async(
+        "invalid_payment_receipt_records_attention",
+        test_invalid_payment_receipt_still_records_typed_attention_observation,
+    )
+    await r.record_async(
+        "live_paid_booking_poll_stops_unapproved",
+        test_live_paid_booking_poll_stops_without_approving_payment,
+    )
     r.record(
-        "alchemy_sauna_clean_completed_booking",
-        test_alchemy_sauna_catalog_requires_single_clean_completed_booking,
+        "alchemy_sauna_grounded_payment_approval",
+        test_alchemy_sauna_catalog_stops_at_grounded_payment_approval,
     )
     r.record(
         "approval_details_multiple_dates_and_seat",
@@ -8416,8 +9612,8 @@ async def run_all_tests():
         test_hotel_catalog_requires_single_clean_completed_reservation,
     )
     r.record(
-        "event_ticket_clean_completed_purchase",
-        test_event_ticket_catalog_requires_single_clean_completed_purchase,
+        "event_ticket_grounded_payment_approval",
+        test_event_ticket_catalog_stops_at_grounded_payment_approval,
     )
     r.record(
         "amazon_return_clean_completed_return",
@@ -8426,6 +9622,18 @@ async def run_all_tests():
     r.record(
         "live_fixture_auth_failure_is_fatal",
         test_live_fixture_fails_when_live_auth_refresh_fails,
+    )
+    r.record(
+        "compute_token_explicit_prod_source",
+        test_compute_token_sync_passes_explicit_prod_source_without_shared_workspace,
+    )
+    r.record(
+        "compute_token_shared_source_requires_claude",
+        test_shared_workspace_compute_source_requires_usable_claude_code,
+    )
+    r.record(
+        "compute_token_source_contract",
+        test_compute_token_source_contract_preserves_prisma_dsn_and_rejects_self_source,
     )
     r.record(
         "expected_passkey_credential_ref",

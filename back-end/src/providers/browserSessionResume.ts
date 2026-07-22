@@ -3,24 +3,20 @@ import { prisma } from './database';
 import { DEFAULT_GEOLOCATION } from './geoip';
 import { createLogger } from './logger';
 import { canonicalAuthRealm } from './authRealm';
-import { getFingerprintInjectionData, injectUserData, resumeSession, rotateProxy } from './browser';
-import { browserProviderEnabled } from './browser/config';
-import type { KernelProxyType } from './browser/kernelProxy';
-
-// rotate_ip escalation ladder (see docs/plans/active/rotate-ip-tool.md):
-// calls 1-2 → fresh residential IP, calls 3-4 → mobile carrier IP, then exhausted.
-export const ROTATION_CAP = 4;
-export const RESIDENTIAL_ROTATIONS = 2;
-
-/**
- * Escalation tier for the Nth rotation of a run. Calls 1..RESIDENTIAL_ROTATIONS
- * stay residential; later calls escalate to mobile when it's enabled, otherwise
- * remain residential (still a fresh exit IP, just not carrier-grade). Pure so the
- * ladder is unit-testable without a DB or the Kernel SDK.
- */
-export function selectRotationTier(rotationsUsed: number, mobileEnabled: boolean): KernelProxyType {
-  return rotationsUsed > RESIDENTIAL_ROTATIONS && mobileEnabled ? 'mobile' : 'residential';
-}
+import {
+  getBrowserCaptchaTelemetry,
+  getFingerprintInjectionData,
+  injectUserData,
+  resumeSession,
+  rotateProxy,
+} from './browser';
+import {
+  ROTATION_CAP,
+  rotationStepLabel,
+  selectRotationStep,
+  type RotationStep,
+} from './browser/rotation';
+import type { BrowserProviderName } from './browser/types';
 
 export class ProxyRotationExhaustedError extends Error {
   constructor(public readonly cap: number) {
@@ -42,9 +38,26 @@ export class RotationSessionNotFoundError extends Error {
 
 const log = createLogger('BrowserSessionResume');
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('CAPTCHA telemetry request timed out')),
+          timeoutMs
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 type InjectionResult = Awaited<ReturnType<typeof injectUserData>>;
 
-interface SerializedPassword {
+export interface SerializedPassword {
   id: string;
   origin: string;
   username: string;
@@ -52,7 +65,7 @@ interface SerializedPassword {
   dateLastUsed: number | null;
 }
 
-interface UserSettings {
+export interface UserSettings {
   name: string | null;
   phone: string | null;
   addressLine1: string | null;
@@ -67,7 +80,7 @@ interface UserSettings {
   customSystemPrompt: string | null;
 }
 
-interface SerializedPasskey {
+export interface SerializedPasskey {
   id: string;
   credentialId: string;
   encryptedPrivateKey: string;
@@ -195,8 +208,8 @@ type RecreatedSession = Awaited<ReturnType<typeof resumeSession>>;
 /**
  * Build the full session-resume response (cookie/fingerprint re-injection,
  * passwords, passkeys, user settings) from a freshly recreated provider session.
- * Shared by resume and rotate_ip — both hand back an identical browser session
- * on the same profile, differing only in the proxy behind it.
+ * Shared by resume and rotate_ip — both hand back an identical response shape,
+ * including when rotate_ip crosses between provider-specific profiles.
  */
 async function assembleResumeResponse(taskId: string, result: RecreatedSession) {
   const session = await prisma.browserSession.findUnique({
@@ -270,16 +283,29 @@ async function assembleResumeResponse(taskId: string, result: RecreatedSession) 
   };
 }
 
-function buildRotationMessage(tier: KernelProxyType, used: number, remaining: number): string {
+function buildRotationMessage(step: RotationStep, used: number, remaining: number): string {
   const left = `${remaining} rotation${remaining === 1 ? '' : 's'} remaining.`;
-  if (tier === 'mobile') {
+  if (step.recoveryAction === 'provider_switched') {
     return (
-      `Escalated to a mobile-carrier IP (${used}/${ROTATION_CAP}) — the strongest, ` +
-      `hardest-to-block tier, same region. Login and cookies preserved. ${left}`
+      `Switched from Kernel to Steel with a fresh Steel residential IP ` +
+      `(${used}/${ROTATION_CAP}) — browser and proxy infrastructure changed, same region. ` +
+      `Login and cookies preserved. ${left}`
+    );
+  }
+  if (step.provider === 'steel') {
+    return (
+      `Rotated to another fresh Steel residential IP (${used}/${ROTATION_CAP}) — same region, ` +
+      `login and cookies preserved. ${left}`
+    );
+  }
+  if (step.proxyType === 'mobile') {
+    return (
+      `Rotated to a fresh Kernel mobile-carrier IP (${used}/${ROTATION_CAP}) — same region. ` +
+      `Login and cookies preserved. ${left}`
     );
   }
   return (
-    `Rotated to a fresh residential IP (${used}/${ROTATION_CAP}) — same region, ` +
+    `Rotated to a fresh Kernel residential IP (${used}/${ROTATION_CAP}) — same region, ` +
     `login and cookies preserved. ${left}`
   );
 }
@@ -287,19 +313,20 @@ function buildRotationMessage(tier: KernelProxyType, used: number, remaining: nu
 /**
  * rotate_ip tool backend. Atomically advances the per-run rotation counter (keyed
  * to the stable BrowserSession row id), enforces the cap, selects the tier
- * (1-2 residential, 3-4 mobile when KERNEL_MOBILE_FALLBACK_ENABLED), recreates the
- * session on that proxy, and returns the resume-shaped response plus escalation
- * state the agent reasons over.
+ * (Kernel residential -> Kernel mobile -> Steel residential -> Steel residential),
+ * recreates the session, and returns the resume-shaped response plus escalation
+ * state the agent reasons over. Provider choice is server-owned, not model-owned.
  */
-export async function rotateBrowserProxy(taskId: string, userId?: string) {
+export async function rotateBrowserProxy(taskId: string, userId?: string, currentUrl?: string) {
   // Reserve one rotation atomically. UPDATE ... RETURNING both enforces the cap
   // under concurrent calls and returns the exact ladder position this request
   // reserved. User calls also constrain the write to their BrowserContext; an
   // ownership mismatch deliberately looks the same as a missing task.
   const ownerUserId = userId ?? null;
-  const reserved = await prisma.$queryRaw<Array<{ proxyRotationCount: number }>>`
+  const reserved = await prisma.$queryRaw<Array<{ proxyRotationCount: number; provider: string }>>`
     UPDATE "BrowserSession"
-       SET "proxyRotationCount" = "proxyRotationCount" + 1
+       SET "proxyRotationCount" = "proxyRotationCount" + 1,
+           "currentUrl" = COALESCE(${currentUrl ?? null}::text, "currentUrl")
      WHERE "id" = ${taskId}
        AND "proxyRotationCount" < ${ROTATION_CAP}
        AND (
@@ -311,7 +338,7 @@ export async function rotateBrowserProxy(taskId: string, userId?: string) {
               AND "BrowserContext"."userId" = ${ownerUserId}
          )
        )
-    RETURNING "proxyRotationCount"
+    RETURNING "proxyRotationCount", "provider"
   `;
 
   const rotationsUsed = reserved[0]?.proxyRotationCount;
@@ -327,16 +354,39 @@ export async function rotateBrowserProxy(taskId: string, userId?: string) {
     throw new ProxyRotationExhaustedError(ROTATION_CAP);
   }
 
-  // Calls 1-2 → residential; 3-4 → mobile (gated). When mobile is disabled the
-  // later rotations stay residential — still a fresh exit IP, just not carrier.
-  const mobileEnabled = browserProviderEnabled('KERNEL_MOBILE_FALLBACK_ENABLED', false);
-  const proxyType = selectRotationTier(rotationsUsed, mobileEnabled);
+  const currentProvider: BrowserProviderName =
+    reserved[0]?.provider === 'kernel' ? 'kernel' : 'steel';
+  const step = selectRotationStep(rotationsUsed, currentProvider);
 
-  log.info('Rotating browser proxy', { taskId, rotationsUsed, proxyType, mobileEnabled });
+  log.info('Executing browser recovery rotation', {
+    taskId,
+    rotationsUsed,
+    currentProvider,
+    targetProvider: step.provider,
+    proxyType: step.proxyType,
+    recoveryAction: step.recoveryAction,
+  });
+
+  const captchaTelemetryBeforeRotation = await withTimeout(
+    getBrowserCaptchaTelemetry(taskId),
+    3_000
+  ).catch((error) => {
+    log.warn('Failed to read CAPTCHA telemetry before browser rotation', {
+      taskId,
+      currentProvider,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  });
+  log.info('Captured CAPTCHA telemetry before browser rotation', {
+    taskId,
+    currentProvider,
+    captchaTelemetry: captchaTelemetryBeforeRotation,
+  });
 
   let result: Awaited<ReturnType<typeof rotateProxy>>;
   try {
-    result = await rotateProxy(taskId, proxyType);
+    result = await rotateProxy(taskId, step);
   } catch (error) {
     // A transient provider failure did not deliver a new IP, so return its
     // reservation to the shared budget. The decrement is atomic and composes
@@ -349,13 +399,32 @@ export async function rotateBrowserProxy(taskId: string, userId?: string) {
   }
   const response = await assembleResumeResponse(taskId, result);
   const rotationsRemaining = ROTATION_CAP - rotationsUsed;
+  const effectiveStep: RotationStep = {
+    provider: result.provider === 'kernel' ? 'kernel' : 'steel',
+    proxyType: result.proxyType,
+    recoveryAction: result.recoveryAction,
+  };
+  const nextRecovery =
+    rotationsRemaining === 0
+      ? 'rotation_budget_exhausted'
+      : rotationStepLabel(
+          selectRotationStep(rotationsUsed + 1, result.provider === 'kernel' ? 'kernel' : 'steel')
+        );
 
   return {
     ...response,
-    proxy_tier: proxyType,
+    provider: effectiveStep.provider,
+    previous_provider: result.previousProvider,
+    recovery_action: effectiveStep.recoveryAction,
+    proxy_tier: effectiveStep.proxyType,
     rotations_used: rotationsUsed,
     rotations_remaining: rotationsRemaining,
-    rotation_message: buildRotationMessage(proxyType, rotationsUsed, rotationsRemaining),
+    next_recovery: nextRecovery,
+    rotation_message: buildRotationMessage(effectiveStep, rotationsUsed, rotationsRemaining),
+    captcha_telemetry_before_rotation: captchaTelemetryBeforeRotation,
+    // Steel exposes an in-flight flag. Kernel currently exposes terminal
+    // outcomes only, so preserve unknown as null instead of reporting false.
+    rotation_interrupted_captcha_solver: captchaTelemetryBeforeRotation?.isSolving ?? null,
   };
 }
 /* c8 ignore stop */

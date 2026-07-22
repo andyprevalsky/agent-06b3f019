@@ -19,7 +19,7 @@ app = Flask(__name__)
 
 # Global state
 worker_status = {
-    "healthy": True,
+    "healthy": False,
     "started_at": datetime.utcnow().isoformat(),
     "last_heartbeat": datetime.utcnow().isoformat(),
 }

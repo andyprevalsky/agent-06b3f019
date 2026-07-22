@@ -9,6 +9,11 @@ import { createLogger } from '../logger';
 import { retryWithBackoff } from '../retry';
 import { connectValidatedBrowser, validateSessionConnection } from '../steel/sessionConnection';
 import { browserProviderEnabled } from './config';
+import {
+  kernelCaptchaTelemetryConfig,
+  summarizeKernelCaptchaEvents,
+  type BrowserCaptchaTelemetry,
+} from './captchaTelemetry';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import {
   getOrCreateKernelProxy,
@@ -33,11 +38,19 @@ class KernelSessionValidationError extends Error {}
 
 /**
  * Kernel profiles persist Chromium's open pages along with cookies and storage.
- * Close only the restored pages so every browser session starts with an empty
- * tab set while retaining the rest of the profile state.
+ * Replace restored pages with one clean bootstrap tab. Kernel destroys the
+ * Playwright context when its final page closes, so creating the clean tab
+ * first is required for the caller to reuse this validated connection for
+ * credential injection.
  */
 export async function resetKernelSessionTabs(browser: Browser): Promise<number> {
-  const pages = browser.contexts().flatMap((context) => context.pages());
+  const contexts = browser.contexts();
+  const primaryContext = contexts[0];
+  if (primaryContext === undefined) {
+    throw new KernelSessionValidationError('Kernel browser has no context after CDP validation');
+  }
+  const pages = contexts.flatMap((context) => context.pages());
+  await primaryContext.newPage();
   await Promise.all(pages.map((page) => page.close({ runBeforeUnload: false })));
   return pages.length;
 }
@@ -67,7 +80,7 @@ function kernelTimeoutSeconds(): number {
   return Number.isFinite(parsed) ? Math.min(259_200, Math.max(10, parsed)) : 900;
 }
 
-async function deleteKernelBrowser(sessionId: string): Promise<void> {
+export async function releaseKernelRemoteSession(sessionId: string): Promise<void> {
   await retryWithBackoff(
     async () => {
       const apiKey = process.env.KERNEL_API_KEY?.trim();
@@ -174,10 +187,11 @@ async function createRemoteSession(
         const session = await client.browsers.create({
           headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
           stealth,
+          telemetry: kernelCaptchaTelemetryConfig(),
           gpu: browserProviderEnabled('KERNEL_GPU_ENABLED', false),
           // Do not let Chromium reopen the profile's previous window. The new-tab
-          // page created by this policy is closed below along with any unexpected
-          // restored pages, leaving the validated session with zero tabs.
+          // page created by this policy is replaced below along with any unexpected
+          // restored pages, leaving one clean bootstrap tab.
           chrome_policy: { RestoreOnStartup: 5 },
           timeout_seconds: kernelTimeoutSeconds(),
           viewport: { width: 1280, height: 800, refresh_rate: 60 },
@@ -208,7 +222,7 @@ async function createRemoteSession(
             };
           } catch (error) {
             await validationBrowser.close().catch(() => {});
-            await deleteKernelBrowser(session.session_id).catch(() => {});
+            await releaseKernelRemoteSession(session.session_id).catch(() => {});
             throw new KernelSessionValidationError(
               `Kernel session ${session.session_id} failed tab reset: ${
                 error instanceof Error ? error.message : String(error)
@@ -217,7 +231,7 @@ async function createRemoteSession(
           }
         }
 
-        await deleteKernelBrowser(session.session_id).catch((error) => {
+        await releaseKernelRemoteSession(session.session_id).catch((error) => {
           log.warn('Failed to evict invalid Kernel session', {
             sessionId: session.session_id,
             error: error instanceof Error ? error.message : String(error),
@@ -319,7 +333,7 @@ export async function createKernelSessionWithContext(
     });
   } catch (error) {
     await Promise.allSettled([
-      deleteKernelBrowser(remote.sessionId),
+      releaseKernelRemoteSession(remote.sessionId),
       remote.validationBrowser.close(),
     ]);
     throw error;
@@ -351,7 +365,7 @@ export async function closeKernelSession(
   currentUrl?: string
 ): Promise<void> {
   try {
-    await deleteKernelBrowser(sessionId);
+    await releaseKernelRemoteSession(sessionId);
   } catch (error) {
     log.warn('Failed to delete Kernel session; finalizing local session state', {
       sessionId,
@@ -407,8 +421,8 @@ async function recreateKernelSession(
   );
   await remote.validationBrowser.close().catch(() => {});
 
-  await prisma.browserSession.update({
-    where: { id: taskId },
+  const replaced = await prisma.browserSession.updateMany({
+    where: { id: taskId, sessionId: previousSessionId },
     data: {
       sessionId: remote.sessionId,
       debugUrl: remote.debugUrl,
@@ -420,11 +434,19 @@ async function recreateKernelSession(
     },
   });
 
+  if (replaced.count !== 1) {
+    await Promise.allSettled([
+      releaseKernelRemoteSession(remote.sessionId),
+      remote.validationBrowser.close(),
+    ]);
+    throw new Error(`Browser session changed concurrently while recreating task ${taskId}`);
+  }
+
   // Evict the superseded Kernel browser so we never leak a paid session. On the
   // resume path the old browser was already deleted at pause time (delete
   // tolerates 404); on the rotate path it is still live and must be reaped.
   if (previousSessionId !== '' && previousSessionId !== remote.sessionId) {
-    await deleteKernelBrowser(previousSessionId).catch((error) => {
+    await releaseKernelRemoteSession(previousSessionId).catch((error) => {
       log.warn('Failed to evict superseded Kernel session after recreate', {
         previousSessionId,
         error: error instanceof Error ? error.message : String(error),
@@ -487,6 +509,22 @@ export async function getKernelSessionHealth(sessionId: string): Promise<Browser
     profileId: session.profile?.id ?? null,
     uptimeMs: session.usage?.uptime_ms ?? null,
   };
+}
+
+export async function getKernelCaptchaTelemetry(
+  sessionId: string
+): Promise<BrowserCaptchaTelemetry> {
+  const events: unknown[] = [];
+  for await (const entry of kernelClient().browsers.telemetry.events(sessionId, {
+    category: ['captcha'],
+    order: 'desc',
+  })) {
+    if (entry.event.type === 'captcha_solve_result') {
+      events.push(entry);
+    }
+    if (events.length >= 50) break;
+  }
+  return summarizeKernelCaptchaEvents(events);
 }
 
 export async function resizeKernelViewport(

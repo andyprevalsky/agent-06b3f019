@@ -300,6 +300,7 @@ async def build_browser_verifier_context(
     config: Any,
     session_id: str,
     payment_card_evidence: Optional[Dict[str, Any]] = None,
+    browser_checkpoints: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     """Assemble the verifier context from final-state browser ground truth.
 
@@ -364,6 +365,33 @@ async def build_browser_verifier_context(
     else:
         files_text += "  (no files downloaded)\n"
 
+    checkpoint_sections = []
+    for checkpoint_number, checkpoint in enumerate(browser_checkpoints or [], 1):
+        if not isinstance(checkpoint, dict):
+            continue
+        checkpoint_dom = str(checkpoint.get("dom_tree") or "")
+        if not checkpoint_dom:
+            continue
+        checkpoint_sections.append(
+            "\n\n".join(
+                [
+                    f"### Pre-write checkpoint {checkpoint_number}",
+                    "This snapshot was extracted directly from the browser before an irreversible action; "
+                    "it is browser ground truth, not an agent claim.",
+                    f"URL: {checkpoint.get('url') or 'Unknown'}",
+                    f"Title: {checkpoint.get('title') or 'Unknown'}",
+                    "DOM Tree:\n" + checkpoint_dom,
+                ]
+            )
+        )
+
+    checkpoints_text = ""
+    if checkpoint_sections:
+        checkpoints_text = (
+            "\n\n## Browser Ground Truth (PRE-WRITE CHECKPOINTS)\n"
+            + "\n\n".join(checkpoint_sections)
+        )
+
     user_prompt = (
         f"Goal: {goal}\n\n"
         "## Browser Ground Truth (FINAL STATE)\n"
@@ -376,6 +404,7 @@ async def build_browser_verifier_context(
         f"Scroll Position: Page {pages_above + 1} of {total_pages}\n\n"
         "### DOM Tree (browser-extracted final-state page content)\n"
         f"{dom_tree}"
+        f"{checkpoints_text}"
     )
 
     # C11: the final-state screenshot rides through to the

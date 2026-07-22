@@ -33,7 +33,7 @@
 #      isolated + simulate + serve-cached-WMH env.
 #   7. Wait for services.json status=running AND curl localhost:3007/healthz.
 #   8. Run run_benchmark.py for the requested tasks (--parallel/--max-concurrency
-#      when >1) --simulate --port 3001 --ci.
+#      when >1) against the catalog-mandated production or isolated target.
 #   9. Print the DONE marker + the report card between BEGIN/END markers.
 #
 # Inputs (all from env, exported by run-bench-cloud's on-box invocation):
@@ -62,6 +62,7 @@ SYNC_PRISMA_SCRIPT="${CLOUDBENCH_SYNC_PRISMA_SCRIPT:-$REPO_DIR/scripts/cloudbenc
 CURRENT_RUN_ARTIFACT_SCRIPT="${CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT:-$REPO_DIR/scripts/cloudbench-current-run-artifact.py}"
 PREPARE_PATCH_SCRIPT="${CLOUDBENCH_PREPARE_PATCH_SCRIPT:-$REPO_DIR/scripts/cloudbench-prepare-patch.sh}"
 STATUS_SERVER_SCRIPT="${CLOUDBENCH_STATUS_SERVER_SCRIPT:-$REPO_DIR/scripts/cloudbench-status-server.py}"
+BENCHMARK_TARGET_SCRIPT="${CLOUDBENCH_BENCHMARK_TARGET_SCRIPT:-$REPO_DIR/scripts/cloudbench-benchmark-target.py}"
 
 # ── Inputs (env) ────────────────────────────────────────────────────────────
 REF="${REF:-}"
@@ -108,20 +109,21 @@ log() { echo "[cloudbench $(date -u +%H:%M:%S)] $*"; }
 # scripts/cloudbench-bring-up-report.py — isolate each bring-up step's cost.
 step() { log "STEP $*"; }
 
-stack_wait_budget_seconds() {
-    local warm_budget first_run_budget
-    warm_budget="${CLOUDBENCH_STACK_WAIT_SECONDS:-900}"
-    first_run_budget="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-2160}"
-    # A newly cloned replacement guest has no persistent seed dump. Its first
-    # production sync is bounded but can legitimately exceed the warm guest's
-    # 900-second startup budget; subsequent claims restore the dump and retain
-    # the tighter deadline.
-    if [ ! -s "$STACK_SEED_DUMP" ] && [ "$first_run_budget" -gt "$warm_budget" ]; then
-        printf '%s\n' "$first_run_budget"
-    else
-        printf '%s\n' "$warm_budget"
-    fi
-}
+# stack_wait_budget_seconds: the box's fallback-safe stack-health ceiling. A
+# pre-launch dump check cannot prove run.sh will restore instead of cold-syncing,
+# so matching dumps retain the larger ceiling without delaying healthy startup.
+# See scripts/tests/cloudbench-seed-budget.test.sh.
+# run-bench-cloud sftp's this lib to /data/ and overrides CLOUDBENCH_SEED_BUDGET_LIB,
+# exactly like cloudbench-fetch-ref.sh / cloudbench-sync-deps.sh: at driver start the
+# /data/repo checkout is still at the OLD ref (the driver git-fetches the ref later),
+# so the lib must come from the controller-staged /data copy, not /data/repo.
+SEED_BUDGET_LIB="${CLOUDBENCH_SEED_BUDGET_LIB:-$REPO_DIR/scripts/lib/cloudbench-seed-budget.sh}"
+if [ ! -f "$SEED_BUDGET_LIB" ]; then
+    echo "[cloudbench] FATAL: seed-budget lib missing: $SEED_BUDGET_LIB" >&2
+    exit 1
+fi
+# shellcheck source=lib/cloudbench-seed-budget.sh
+source "$SEED_BUDGET_LIB"
 
 run_with_heartbeat() {
     local label="$1" command_pid interval
@@ -247,29 +249,31 @@ if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -fd 2>&1 | sed 's/^/   /'; then
     finish 1
 fi
 log "checkout at $(gosu "$APP_USER" git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-if [ -n "${LOCAL_PATCH_FILE:-}" ] && [ -s "$LOCAL_PATCH_FILE" ]; then
+if [ -n "${LOCAL_PATCH_FILE:-}" ]; then
+    [ -s "$LOCAL_PATCH_FILE" ] || {
+        log "FATAL: declared local patch payload is missing or empty"
+        finish 1
+    }
+    [ -n "${LOCAL_PATCH_SHA256:-}" ] || {
+        log "FATAL: local patch payload has no checksum"
+        finish 1
+    }
+    _actual_patch_sha="$(sha256sum "$LOCAL_PATCH_FILE" | awk '{print $1}')"
+    [ "$_actual_patch_sha" = "$LOCAL_PATCH_SHA256" ] || {
+        log "FATAL: patch payload checksum mismatch"
+        finish 1
+    }
     log "applying uploaded local workspace patch on top of checkout"
     if ! bash "$PREPARE_PATCH_SCRIPT" "$REPO_DIR" "$LOCAL_PATCH_FILE"; then
         log "FATAL: could not prepare uploaded local workspace patch"
         finish 1
     fi
-    if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn "$LOCAL_PATCH_FILE" 2>&1 | sed 's/^/   /'; then
+    if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn - \
+        < "$LOCAL_PATCH_FILE" 2>&1 | sed 's/^/   /'; then
         log "FATAL: could not apply uploaded local workspace patch"
         finish 1
     fi
-elif [ -n "${LOCAL_PATCH_B64:-}" ]; then
-    PATCH_FILE="/tmp/cloudbench-local.patch"
-    if printf '%s' "$LOCAL_PATCH_B64" | base64 -d > "$PATCH_FILE" 2>/dev/null && [ -s "$PATCH_FILE" ]; then
-        log "applying local workspace patch on top of checkout"
-        if ! bash "$PREPARE_PATCH_SCRIPT" "$REPO_DIR" "$PATCH_FILE"; then
-            log "FATAL: could not prepare local workspace patch"
-            finish 1
-        fi
-        if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn "$PATCH_FILE" 2>&1 | sed 's/^/   /'; then
-            log "FATAL: could not apply local workspace patch"
-            finish 1
-        fi
-    fi
+    log "verified local workspace patch $_actual_patch_sha"
 fi
 
 # Replace the bootstrap read-only http.server with the ref's authenticated
@@ -481,6 +485,11 @@ STACK_ENV=(
     "WMH_MODEL_NAME=$WMH_MODEL_NAME"
     "WMH_BUILD_DIR=$WMH_DIR"
     "BENCHMARK_SKIP_WMH_DELTA=1"
+    # The isolated stack is launched through `env` with this allow-list. Keep the
+    # controller's provider exclusion inside that environment so the WMH Rose
+    # provider cannot lease/use Claude after the outer runner explicitly disabled
+    # the Anthropic family.
+    "ROSE_EXCLUDE_ANTHROPIC_FAMILY=${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}"
 )
 if [ -n "$BENCHMARK_FAST_MODE_CACHE" ]; then
     STACK_ENV+=("BENCHMARK_FAST_MODE_CACHE=$BENCHMARK_FAST_MODE_CACHE")
@@ -544,11 +553,10 @@ HEALTH_PORT=$((BASE_PORT + 2))
 log "waiting for stack to become healthy (services.json + backend + worker + WMH)..."
 STACK_READY=false
 STATUS="none"
-# No WMH build happens on this path (the cached model is served verbatim). Warm
-# guests keep a 900s ceiling; a newly cloned guest without the persistent seed
-# dump gets a bounded 1800s first-run ceiling for production sync + DB dump +
-# service startup. The live red case finished seeding at t+900s and was killed at
-# t+901s by the former single deadline.
+# No WMH build happens on this path (the cached model is served verbatim). The
+# larger configured first-run ceiling covers production sync + DB dump + service
+# startup even if run.sh rejects a dump that looked restorable at preflight. A
+# successful warm restore still exits this loop as soon as health is ready.
 STACK_WAIT_SECONDS="$(stack_wait_budget_seconds)"
 if [ ! -s "$STACK_SEED_DUMP" ]; then
     log "first-run seed dump absent — using cold stack health budget ${STACK_WAIT_SECONDS}s"
@@ -639,7 +647,21 @@ for task_name in "${BENCH_TASK_LIST[@]}"; do
     BENCH_ARGS+=(--task "$task_name")
 done
 
-BENCH_ARGS+=(--port "$BACKEND_PORT" --ci --keep-failed-agents)
+if ! BENCH_TARGET_PLAN="$(python3 "$BENCHMARK_TARGET_SCRIPT" \
+    "$REPO_DIR/agents/benchmarks/tasks.json" "$BACKEND_PORT" "${BENCH_TASK_LIST[@]}")"; then
+    log "FATAL: could not resolve the catalog-mandated benchmark target"
+    finish 1
+fi
+BENCH_TARGET_MODE="$(printf '%s\n' "$BENCH_TARGET_PLAN" | head -1)"
+BENCH_TARGET_ARGS=()
+while IFS= read -r target_arg; do
+    [ -n "$target_arg" ] && BENCH_TARGET_ARGS+=("$target_arg")
+done < <(printf '%s\n' "$BENCH_TARGET_PLAN" | tail -n +2)
+if [ "${#BENCH_TARGET_ARGS[@]}" -eq 0 ]; then
+    log "FATAL: benchmark target resolver returned no CLI arguments"
+    finish 1
+fi
+BENCH_ARGS+=("${BENCH_TARGET_ARGS[@]}" --ci --keep-failed-agents)
 if [ "${#BENCH_TASK_LIST[@]}" -gt 1 ]; then
     BENCH_ARGS+=(--parallel --max-concurrency "$BENCH_MAX_CONCURRENCY")
 fi
@@ -647,7 +669,7 @@ if [ "$BENCH_SIMULATE" = "1" ]; then
     BENCH_ARGS+=(--simulate --world-model-url "http://localhost:$WMH_PORT" --world-model-name "$WMH_MODEL_NAME")
 fi
 
-log "running benchmark: run_benchmark.py ${BENCH_ARGS[*]}"
+log "running benchmark: target=$BENCH_TARGET_MODE run_benchmark.py ${BENCH_ARGS[*]}"
 # Retouch after checkout/setup so files merely restored or rewritten during
 # clone initialization cannot qualify as output from this benchmark process.
 touch "$RUN_OUTPUT_MARKER"
@@ -673,7 +695,9 @@ fi
 if [ -n '$BENCHMARK_VM_USD_PER_HOUR' ]; then
   export BENCHMARK_VM_USD_PER_HOUR='$BENCHMARK_VM_USD_PER_HOUR'
 fi
-if [ -n '$BENCHMARK_FRONTEND_URL' ]; then
+if [ '$BENCH_TARGET_MODE' = 'prod' ]; then
+  unset BENCHMARK_FRONTEND_URL
+elif [ -n '$BENCHMARK_FRONTEND_URL' ]; then
   export BENCHMARK_FRONTEND_URL='$BENCHMARK_FRONTEND_URL'
 fi
 if [ '$BENCH_SIMULATE' = '1' ]; then

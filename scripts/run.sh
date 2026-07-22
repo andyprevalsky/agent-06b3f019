@@ -743,7 +743,13 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
 fi
 
 if $DB_RESTORED; then
-    :
+    # A restored dump USUALLY already carries the Message trgm/grep indexes, but a
+    # dump published by an older box (before this step existed) or a partially-
+    # applied restore can lack them — so re-ensure idempotently. This gives the
+    # fast-restore path the SAME backend-ready schema as the cold-sync (else) path,
+    # which runs this same step, rather than a subtly different DB.
+    echo "🔎 Ensuring agent-network grep indexes (post-restore)..."
+    (cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts)
 else
 
 # Sync Prisma schema to local DB (idempotent, dev-only)
@@ -1540,7 +1546,12 @@ wait_for_isolated_backend_ready() {
 # Launch each service
 if $BENCHMARK_MODE; then
     export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
-    export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
+    # Do not manufacture a shell-level `local` backend here. Both the backend
+    # and Python worker load their injected .env files, where cloud benchmarks
+    # are configured for R2; an exported fallback wins over dotenv and strands
+    # the only gold trace on the disposable fleet volume. An explicitly
+    # exported caller value is already inherited, and no-env local development
+    # still uses each provider's built-in local default.
     export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$PWD/.context}"
     export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
     export BLACKBOX_TEST_REPLAY_OUTBOUND="${BLACKBOX_TEST_REPLAY_OUTBOUND:-0}"

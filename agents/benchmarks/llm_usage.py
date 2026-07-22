@@ -44,20 +44,23 @@ def classify_usage_item(item: dict[str, Any]) -> tuple[str, str]:
     """Classify usage records whose transport model was not serialized.
 
     Verifier telemetry records the forced Rose Ultra pool alias even though
-    ``check_progress`` supplies the Claude OAuth token, and browser-use telemetry
-    can omit ``model`` while naming the Rose Browser Use provider. Both pools'
-    direct Claude-auth submodel is Fable 5. Preserve that credential/submodel
-    attribution instead of leaking otherwise-known calls into ``unclassified``.
+    ``check_progress`` supplies the Claude OAuth token. Legacy browser-use
+    telemetry can omit ``model`` while naming the Rose Browser Use provider.
+    Preserve those known historical attributions without overriding an explicit
+    browser transport model from current telemetry.
     """
     model = str(item.get("model") or "")
     provider = str(item.get("provider") or "")
     if model == "rose-labs/rose-1-ultra" and provider.startswith("Verifier ("):
         return "claude_oauth_token", POOL_REGISTRY["rose-1-ultra"].claude_auth_model
-    # Browser telemetry is created without a transport model, then
-    # AgentWorkflow._track_usage may persist the parent agent's pool alias in
-    # that field. The provider label survives both paths and is the reliable
-    # credential identity.
+    # New browser telemetry carries its transport model and must win: the pool
+    # can route through GPT, Claude, or OpenRouter. Older artifacts omitted it
+    # (or inherited the parent pool alias), so preserve the historical Claude
+    # fallback only when the model itself is not classifiable.
     if provider == "Rose 1 Browser Use":
+        classified = classify_model(model)
+        if classified[0] != "unclassified":
+            return classified
         return "claude_oauth_token", POOL_REGISTRY["rose-1-browser-use"].claude_auth_model
     return classify_model(model)
 

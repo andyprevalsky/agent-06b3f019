@@ -15,6 +15,7 @@ import {
   markPoolTokenRateLimited,
   markUserTokenRateLimited,
 } from '../../providers/claudeCredentials';
+import { markAnthropicApiKeyOnCooldown } from '../../providers/computeCredentials';
 
 export type { HealthCheckResult } from './health';
 export { checkSandboxHealth } from './health';
@@ -242,7 +243,7 @@ const AUTH_FAILURE_PATTERNS: readonly RegExp[] = [
   /Please run \/login/i,
   /Not logged in/i,
   /Invalid authentication credentials/i,
-  /Credit balance too low/i,
+  /Credit balance(?: is)? too low/i,
   /Add funds:\s*https:\/\/platform\.claude\.com\/settings\/billing/i,
 ];
 
@@ -262,19 +263,29 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
   const isRateLimited = /You've hit your limit/i.test(output);
   const authFailure = AUTH_FAILURE_PATTERNS.some((re) => re.test(output));
   if (!isRateLimited && !authFailure) return;
+  const sharedCredentialReason = authFailure
+    ? 'claude_code_auth_failure'
+    : 'claude_code_rate_limit';
 
   const session = await repo.findSessionById(taskId);
-  const tokenSource = session?.claudeTokenSource ?? '';
+  if (session === null) {
+    log.warn(`Claude Code credential failure detected for unknown session ${taskId}`);
+    return;
+  }
+  const tokenSource = session.claudeTokenSource ?? '';
   if (tokenSource === '') {
-    log.warn(
-      `Claude Code credential failure detected for ${taskId} but no credential source recorded — cannot rotate`
-    );
+    // A successfully created Claude session without a user/pool source used
+    // the funded ANTHROPIC_API_KEY fallback. Back off that shared credential
+    // so every subsequent spawn skips the known-broken key instead of burning
+    // another E2B sandbox with the same terminal failure.
+    log.warn(`Claude Code ${sharedCredentialReason} on funded ANTHROPIC_API_KEY for ${taskId}`);
+    await markAnthropicApiKeyOnCooldown(sharedCredentialReason);
     return;
   }
 
   const resetUntil = rateLimitMatch !== null ? parseUtcResetTime(rateLimitMatch[1]) : null;
   const resetLabel = rateLimitMatch?.[1] ?? (authFailure ? 'auth-failure' : 'unknown');
-  const integrationId = session?.claudeTokenIntegrationId ?? '';
+  const integrationId = session.claudeTokenIntegrationId ?? '';
 
   // Auth-failure cooldown is longer than rate-limit cooldown because the
   // underlying problem (revoked/expired refresh token) won't fix itself.
@@ -289,7 +300,7 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
       rateLimitedUntil: resetUntil,
       cooldownMs,
     });
-  } else if (tokenSource === 'user' && session?.agentId !== undefined) {
+  } else if (tokenSource === 'user' && session.agentId !== undefined) {
     const agent = await repo.findAgentById(session.agentId);
     const ownerId = agent?.userId ?? '';
     if (ownerId !== '') {
@@ -299,6 +310,9 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
         cooldownMs,
       });
     }
+  } else if (tokenSource === 'anthropic') {
+    log.warn(`Claude Code ${failureKind} on shared Anthropic API key`);
+    await markAnthropicApiKeyOnCooldown(sharedCredentialReason);
   }
 }
 

@@ -15,6 +15,42 @@ critical path, binary-search to the first-bad boundary, reproduce, cement).
 Then follow it exactly. Do not skip Step 0 (gather runtime evidence) and do not
 reason from code alone when logs/DB/HTTP evidence exists.
 
+## Timing hooks (mandatory)
+
+Record each state boundary so `/factory-review` measures real wall clock instead
+of inferring phases from tool names:
+
+```bash
+python3 scripts/record_factory_event.py rca stage evidence-trace
+```
+
+Run that immediately after reading the methodology. Before the first local
+reproduction/diagnosis command, run:
+
+```bash
+python3 scripts/record_factory_event.py rca stage reproduce-diagnose
+```
+
+Before post-fix verification and handoff, run:
+
+```bash
+python3 scripts/record_factory_event.py rca stage verify-handoff
+```
+
+If a failed verification sends the RCA back to evidence or diagnosis, run that
+stage's exact command again; the repeat is intentionally counted as a new
+lifecycle. Before the final response, run exactly one outcome command:
+
+```bash
+python3 scripts/record_factory_event.py rca outcome fixed
+# Or, when appropriate:
+python3 scripts/record_factory_event.py rca outcome diagnosis-ready
+python3 scripts/record_factory_event.py rca outcome blocked
+```
+
+The event writer is a hard collection gate: do not silently omit it if writing
+fails.
+
 ## The hard gate — you may NOT report a diagnosis without BOTH:
 
 1. **A LOCAL REPRODUCTION that you actually ran** and observed FAIL on the buggy

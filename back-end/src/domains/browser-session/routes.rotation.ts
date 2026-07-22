@@ -2,7 +2,7 @@
  * Browser-session IP-rotation route — the rotate_ip tool's backend entry point.
  * Split out of routes.ts to keep that controller under the max-lines budget.
  *
- * POST /api/browser-session/rotate-proxy - Rotate outbound IP (residential → mobile)
+ * POST /api/browser-session/rotate-proxy - Advance the IP/provider recovery ladder
  */
 
 import { type Response, type Router } from 'express';
@@ -28,19 +28,20 @@ export function registerBrowserRotationRoute(router: Router): void {
   /**
    * POST /api/browser-session/rotate-proxy
    * rotate_ip tool — swap the browser session's outbound IP to a fresh managed
-   * proxy. Advances the per-run escalation ladder (residential → mobile) and
-   * enforces the rotation cap server-side. Same profile/geo; login preserved.
+   * proxy. Advances the per-run Kernel residential → Kernel mobile → Steel
+   * ladder and enforces the rotation cap server-side.
    */
   router.post(
     '/rotate-proxy',
     authenticate,
     asyncHandler(async (req: AuthRequest, res: Response) => {
       try {
-        const { task_id } = rotateProxySchema.parse(req.body);
+        const { task_id, current_url } = rotateProxySchema.parse(req.body);
 
         const result = await rotateBrowserProxy(
           task_id,
-          req.isInternal === true ? undefined : req.user?.id
+          req.isInternal === true ? undefined : req.user?.id,
+          current_url
         );
 
         res.json({ success: true, ...result });

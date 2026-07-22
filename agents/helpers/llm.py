@@ -28,7 +28,7 @@ from helpers.attachments import (
     get_file_from_pointer,
 )
 from helpers.context_compaction import is_excluded_from_model
-from helpers.context_pointers import resolve_pointers_in_messages
+from helpers.context_pointers import annotate_with_pointer, resolve_pointers_in_messages
 from helpers.context_scope import is_internal_subagent_message
 from helpers.messages import (
     CoalescingStreamBroadcaster,
@@ -61,6 +61,7 @@ from providers.rose import (
     gpt_auth_from_token,
     pool_for_model,
 )
+from providers.rose.policy import anthropic_family_excluded
 from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
     build_openai_response_format,
@@ -1448,6 +1449,14 @@ async def build_llm_messages(  # noqa: C901
     Returns:
         List of OpenAI-compatible messages ready for LLM
     """
+    # Pointer annotations are an LLM-boundary representation, not canonical DB
+    # state. Initial workflow context already carries them, but a cross-worker
+    # activity rebuilds from unannotated DB rows. Normalize a copy here so worker
+    # placement cannot change request bytes (or the provider cache prefix).
+    context = [dict(msg) for msg in context]
+    for msg in context:
+        annotate_with_pointer(msg)
+
     # Filter TOOL messages: skip IN_PROGRESS, keep only latest terminal message
     # (FINISHED/ERROR) per toolCallId.
     context = _filter_superseded_browser_protocol_failures(context)
@@ -5291,6 +5300,8 @@ async def fetch_compute_token_activity(
                 params["rootAgentId"] = root_agent_id
             if fast_cache_affinity_key:
                 params["fastCacheAffinityKey"] = fast_cache_affinity_key
+            if anthropic_family_excluded():
+                params["tokenType"] = "gpt"
             response = await client.get(
                 f"{config.backend.api_url}/api/integrations/compute-code/credentials/token",
                 headers={

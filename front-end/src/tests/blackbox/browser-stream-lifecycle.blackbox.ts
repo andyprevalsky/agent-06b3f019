@@ -22,6 +22,7 @@ import {
   handleToolStream,
   type RealtimeSetters,
 } from '@/features/agent-context/hooks/realtimeHandlers';
+import { coalesceStreamingTools } from '@/features/terminal-component-group/components/useMessageFiltering';
 
 function reduceState<T>(current: T, action: SetStateAction<T>): T {
   return typeof action === 'function' ? (action as (previous: T) => T)(current) : action;
@@ -166,7 +167,7 @@ describe('browser realtime stream lifecycle', () => {
     expect(state.bubbles.has('browser-current')).toBe(true);
   });
 
-  it('clears a tool start delivered after its persisted INSERT', () => {
+  it('does not render a tool start delivered after its persisted INSERT', () => {
     const { state, setters } = makeHarness();
     const persistedTool: InsertMessagePayload = {
       agentId: 'agent',
@@ -177,7 +178,7 @@ describe('browser realtime stream lifecycle', () => {
       metadata: {
         subAgentId: 'browser-task',
         toolCallId: 'browser-call',
-        toolName: 'click',
+        toolName: 'rotate_ip',
         toolStatus: 'IN_PROGRESS',
       },
     };
@@ -188,22 +189,23 @@ describe('browser realtime stream lifecycle', () => {
         agentId: 'agent',
         stream_id: 'browser-stream',
         tool_call_id: 'browser-call',
-        tool_name: 'click',
-        title: 'Starting click...',
+        tool_name: 'rotate_ip',
+        title: 'Starting rotate_ip...',
         subAgentId: 'browser-task',
       },
       'agent',
       setters.setStreamingTools,
     );
     expect(state.tools.has('browser-call')).toBe(true);
+    expect(coalesceStreamingTools(state.tools, state.messages, 'browser-task').size).toBe(0);
 
     handleToolStream(
       {
         agentId: 'agent',
         stream_id: 'browser-stream',
         tool_call_id: 'browser-call',
-        tool_name: 'click',
-        title: 'Finished click',
+        tool_name: 'rotate_ip',
+        title: 'Finished rotate_ip',
         status: 'FINISHED',
         subAgentId: 'browser-task',
       },

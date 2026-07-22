@@ -2,6 +2,7 @@
  * Browser-session routes — thin controller layer.
  *
  * POST /api/browser-session/init                     - Initialize browser session
+ * POST /api/browser-session/:sessionId/prepare-auth  - Prepare all credentials for a target realm
  * POST /api/browser-session/close                    - Close/pause browser session
  * POST /api/browser-session/resume                   - Resume paused browser task
  * POST /api/browser-session/rotate-proxy             - Rotate outbound IP (rotate_ip tool)
@@ -25,7 +26,6 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import {
   initSession,
   closeBrowserSession,
-  resumeBrowserSession,
   getTaskInfo,
   getTaskOwnerUserId,
   getContext,
@@ -39,14 +39,12 @@ import {
   SessionNoWsUrlError,
   CdpInjectionError,
 } from './service';
-import {
-  initSessionSchema,
-  closeSessionSchema,
-  resumeSessionSchema,
-  injectLocalStorageSchema,
-} from './types';
+import { initSessionSchema, closeSessionSchema, injectLocalStorageSchema } from './types';
+import { registerBrowserCredentialRoutes } from './routes.credentials';
 import { registerBrowserDataRoutes } from './routes.files';
 import { registerBrowserRotationRoute } from './routes.rotation';
+import { registerBrowserControlRoutes } from './routes.control';
+import { registerBrowserResumeRoute } from './routes.resume';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -57,12 +55,9 @@ const log = createLogger('BrowserSession');
 
 const router = Router();
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
-const MAX_VIEWPORT_WIDTH = 4096;
-const MAX_VIEWPORT_HEIGHT = 2160;
-
-function isValidViewportDimension(value: unknown, maximum: number): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= maximum;
-}
+const [MAX_VIEWPORT_WIDTH, MAX_VIEWPORT_HEIGHT] = [4096, 2160];
+const isValidViewportDimension = (value: unknown, maximum: number): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value > 0 && value <= maximum;
 
 /* c8 ignore start -- init, close, resume require Steel SDK; files + inject require Steel/CDP */
 /**
@@ -131,41 +126,6 @@ router.post(
   })
 );
 
-/**
- * POST /api/browser-session/resume
- * Resume a paused browser task by creating a new session with the same context.
- * Automatically injects user's stored Chrome cookies if available.
- * Fast operation.
- */
-router.post(
-  '/resume',
-  authenticate,
-  asyncHandler(async (req: AuthRequest, res: Response) => {
-    try {
-      const { task_id } = resumeSessionSchema.parse(req.body);
-
-      const result = await resumeBrowserSession(task_id);
-
-      res.json({ success: true, ...result });
-    } catch (error) {
-      if (error instanceof BrowserProviderRateLimitError) {
-        log.warn('Browser provider rate limit hit during session resume', {
-          provider: error.provider,
-        });
-        res.status(429).json({
-          error: 'browser_provider_rate_limit',
-          provider: error.provider,
-          message: 'Browser session rate limit exceeded. Retry after delay.',
-        });
-        return;
-      }
-      log.error('Failed to resume browser task', { error: String(error) });
-      res.status(500).json({
-        error: error instanceof Error ? error.message : 'Failed to resume browser task',
-      });
-    }
-  })
-);
 /* c8 ignore stop */
 
 /**
@@ -362,6 +322,9 @@ router.get(
 
 registerBrowserDataRoutes(router);
 registerBrowserRotationRoute(router);
+registerBrowserControlRoutes(router);
+registerBrowserResumeRoute(router);
+registerBrowserCredentialRoutes(router);
 
 /**
  * POST /api/browser-session/:sessionId/inject-localStorage

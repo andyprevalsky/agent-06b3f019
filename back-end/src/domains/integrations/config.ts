@@ -17,6 +17,10 @@ function resolveBackendBaseUrl(): string {
 
 export const BACKEND_BASE_URL = resolveBackendBaseUrl();
 
+export function isAnthropicApiKeyConfigured(): boolean {
+  return Boolean(process.env.ANTHROPIC_API_KEY?.trim());
+}
+
 export const EMAIL_PROVIDER_CONFIG: Record<EmailProviderSlug, EmailProviderConfig> = {
   gmail: {
     provider: EmailProvider.GMAIL,
