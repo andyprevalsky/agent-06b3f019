@@ -5079,12 +5079,15 @@ def test_recovery_reconnect_failure_drops_disconnected_browser_handles():
         'if action_name == "send_message_to_user":', 1
     )[0]
     reconnect = recovery_block.index("reconnected = await _reconnect_browser_stack_after_rotation(")
+    close_humanizer = recovery_block.index("await humanizer.close()", reconnect)
+    clear_humanizer = recovery_block.index("humanizer = None", close_humanizer)
     clear_handles = recovery_block.index("dom_service = None", reconnect)
     preserve_error = recovery_block.index("error_message = extract_error_message(exc)", clear_handles)
     history_guard = recovery_block.index("if dom_service is not None:", preserve_error)
     append_turn = recovery_block.index("_append_browser_turn_messages(", history_guard)
 
-    assert reconnect < clear_handles < preserve_error < history_guard < append_turn
+    assert reconnect < close_humanizer < clear_humanizer < clear_handles
+    assert clear_handles < preserve_error < history_guard < append_turn
     disconnected_slice = recovery_block[clear_handles:preserve_error]
     for handle in (
         "dom_service",

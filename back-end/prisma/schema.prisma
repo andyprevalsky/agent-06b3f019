@@ -340,6 +340,7 @@ model PurchaseWalletFunding {
   reclaimProviderTransferId String?
   idempotencyKey            String                      @unique
   reclaimIdempotencyKey     String?
+  reclaimLeaseToken         String?
   metadata                  Json?
   errorMessage              String?
   fundedAt                  DateTime?

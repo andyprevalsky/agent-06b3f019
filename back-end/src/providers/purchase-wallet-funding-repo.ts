@@ -93,16 +93,23 @@ export async function markWalletFundingConsumed(purchaseId: string) {
 
 export async function markWalletFundingReclaiming(
   id: string,
-  data: { reclaimIdempotencyKey: string; allowConsumed: boolean }
+  data: {
+    reclaimIdempotencyKey: string;
+    reclaimLeaseToken: string;
+    expectedReclaimLeaseToken: string | null;
+    allowConsumed: boolean;
+    allowReclaiming: boolean;
+  }
 ) {
   return prisma.purchaseWalletFunding.updateMany({
     where: {
       id,
+      reclaimLeaseToken: data.expectedReclaimLeaseToken,
       status: {
         in: [
           PurchaseWalletFundingStatus.FUNDED,
-          PurchaseWalletFundingStatus.RECLAIMING,
           PurchaseWalletFundingStatus.RECLAIM_FAILED,
+          ...(data.allowReclaiming ? [PurchaseWalletFundingStatus.RECLAIMING] : []),
           ...(data.allowConsumed ? [PurchaseWalletFundingStatus.CONSUMED] : []),
         ],
       },
@@ -110,6 +117,7 @@ export async function markWalletFundingReclaiming(
     data: {
       status: PurchaseWalletFundingStatus.RECLAIMING,
       reclaimIdempotencyKey: data.reclaimIdempotencyKey,
+      reclaimLeaseToken: data.reclaimLeaseToken,
       errorMessage: null,
     },
   });
@@ -124,13 +132,14 @@ export async function markWalletFundingReclaiming(
  */
 export async function claimWalletFundingReclaim(
   id: string,
-  data: { reclaimIdempotencyKey: string }
+  data: { reclaimIdempotencyKey: string; reclaimLeaseToken: string }
 ) {
   return prisma.purchaseWalletFunding.updateMany({
     where: { id, status: PurchaseWalletFundingStatus.FUNDED },
     data: {
       status: PurchaseWalletFundingStatus.RECLAIMING,
       reclaimIdempotencyKey: data.reclaimIdempotencyKey,
+      reclaimLeaseToken: data.reclaimLeaseToken,
       errorMessage: null,
     },
   });
@@ -144,7 +153,11 @@ export async function claimWalletFundingReclaim(
  */
 export async function claimWalletFundingReclaimRetry(
   id: string,
-  data: { reclaimIdempotencyKey: string; staleReclaimingBefore: Date }
+  data: {
+    reclaimIdempotencyKey: string;
+    reclaimLeaseToken: string;
+    staleReclaimingBefore: Date;
+  }
 ) {
   return prisma.purchaseWalletFunding.updateMany({
     where: {
@@ -161,6 +174,7 @@ export async function claimWalletFundingReclaimRetry(
     data: {
       status: PurchaseWalletFundingStatus.RECLAIMING,
       reclaimIdempotencyKey: data.reclaimIdempotencyKey,
+      reclaimLeaseToken: data.reclaimLeaseToken,
       errorMessage: null,
     },
   });
@@ -168,13 +182,14 @@ export async function claimWalletFundingReclaimRetry(
 
 export async function markWalletFundingReclaimed(
   id: string,
+  reclaimLeaseToken: string,
   data: {
     providerTransferId?: string;
     metadata?: Record<string, unknown>;
   }
 ) {
   return prisma.purchaseWalletFunding.updateMany({
-    where: { id, status: PurchaseWalletFundingStatus.RECLAIMING },
+    where: { id, status: PurchaseWalletFundingStatus.RECLAIMING, reclaimLeaseToken },
     data: {
       status: PurchaseWalletFundingStatus.RECLAIMED,
       reclaimProviderTransferId: data.providerTransferId,
@@ -185,9 +200,13 @@ export async function markWalletFundingReclaimed(
   });
 }
 
-export async function markWalletFundingReclaimFailed(id: string, error: string) {
+export async function markWalletFundingReclaimFailed(
+  id: string,
+  reclaimLeaseToken: string,
+  error: string
+) {
   return prisma.purchaseWalletFunding.updateMany({
-    where: { id, status: PurchaseWalletFundingStatus.RECLAIMING },
+    where: { id, status: PurchaseWalletFundingStatus.RECLAIMING, reclaimLeaseToken },
     data: {
       status: PurchaseWalletFundingStatus.RECLAIM_FAILED,
       errorMessage: error,

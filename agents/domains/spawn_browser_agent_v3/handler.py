@@ -6147,6 +6147,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             # the promoted session. Drop every dead handle so the error path cannot
                             # attempt a screenshot/action against the disconnected browser and mask
                             # the original reconnect failure.
+                            if humanizer is not None:
+                                with contextlib.suppress(Exception):
+                                    await humanizer.close()
+                                humanizer = None
                             dom_service = None
                             dom_page = None
                             input_page = None

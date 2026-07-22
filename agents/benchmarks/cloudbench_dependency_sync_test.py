@@ -859,7 +859,8 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     assert "scripts/run-predeploy-local" in step
     assert "scripts/run-predeploy-cloud" in step
     assert "Benchmarks → Runs" in step
-    assert "6/6" in step
+    assert "every non-skipped task" in step
+    assert "every requested task passes" in step
     assert ".context/predeploy-runs/<run-id>/runner.log" in step
     assert "run_benchmark.py --suite smoke" not in step
     assert "scripts/run-deploy-stage --start" in deploy
@@ -868,7 +869,6 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     assert "bash scripts/run-predeploy-local" in step
     assert "LOCAL isolated benchmark stack" in step
     assert "Use the cloud fleet only as an explicit opt-in" in step
-    assert "6/6" in step
     assert "run_benchmark.py --suite smoke" not in step
 
     predeploy_local = PREDEPLOY_LOCAL_SCRIPT.read_text()
@@ -924,6 +924,8 @@ def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
     assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in cloud
     assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF"' in fleet
     assert "cloudbench_fetchable_ref" in fleet
+    assert fleet.index("worker_ledger_lock_acquire() {") < fleet.index("clone_machine_target() {")
+    assert fleet.index("clone_machine_target() {") < fleet.index('if [ -n "$PROVISION_POOL" ]')
 
 
 def test_worktree_patch_includes_unpushed_commits_from_fetchable_base(
@@ -1413,6 +1415,145 @@ test ! -e "$OUT/worker-clones.ids.lock"
         timeout=10,
     )
     assert read_error.returncode == 0, read_error.stderr + read_error.stdout
+
+
+def test_worker_ledger_lock_recovers_dead_owner_and_rejects_foreign_release(
+    tmp_path: Path,
+) -> None:
+    """A killed controller cannot wedge teardown, and only its successor may unlock."""
+    locks = _worker_ledger_lock_bundle(FLEET_SCRIPT.read_text())
+    output = tmp_path / "bench"
+    output.mkdir()
+    lock = output / "worker-clones.ids.lock"
+    lock.mkdir()
+    (lock / "owner").write_text("999999 stale-token 1\n")
+
+    script = f"""set -e
+OUT={shlex.quote(str(output))}
+WORKER_LEDGER_LOCK_ATTEMPTS=5
+WORKER_LEDGER_LOCK_RETRY_SECONDS=0
+WORKER_LEDGER_LOCK_STALE_SECONDS=1
+{locks}
+worker_ledger_lock_acquire "$OUT"
+test -s "$OUT/worker-clones.ids.lock/owner"
+worker_ledger_lock_release "$OUT"
+test ! -e "$OUT/worker-clones.ids.lock"
+
+worker_ledger_lock_acquire "$OUT"
+if ( WORKER_LEDGER_LOCK_TOKEN=forged; worker_ledger_lock_release "$OUT" ); then
+  echo 'foreign owner released lock' >&2
+  exit 2
+fi
+test -d "$OUT/worker-clones.ids.lock"
+worker_ledger_lock_release "$OUT"
+test ! -e "$OUT/worker-clones.ids.lock"
+
+WORKER_LEDGER_LOCK_ATTEMPTS=1:2
+if worker_ledger_lock_acquire "$OUT"; then exit 3; fi
+test ! -e "$OUT/worker-clones.ids.lock"
+WORKER_LEDGER_LOCK_ATTEMPTS=5
+WORKER_LEDGER_LOCK_STALE_SECONDS=1:2
+if worker_ledger_lock_acquire "$OUT"; then exit 4; fi
+test ! -e "$OUT/worker-clones.ids.lock"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_worker_cleanup_reaps_different_workers_without_holding_global_ledger_lock(
+    tmp_path: Path,
+) -> None:
+    """Slow provider deletes for separate workers must overlap without losing either ledger edit."""
+    cleanup = _worker_cleanup_bundle(FLEET_SCRIPT.read_text())
+    output = tmp_path / "bench"
+    output.mkdir()
+    workers = ("deadbeef000010", "deadbeef000011")
+    (output / "worker-clones.ids").write_text("\n".join(workers) + "\n")
+    (output / "worker-ready.ids").write_text("\n".join(workers) + "\n")
+    gate = tmp_path / "gate"
+    gate.mkdir()
+    reaped = tmp_path / "reaped"
+
+    script = f"""set -e
+OUT={shlex.quote(str(output))}
+GATE={shlex.quote(str(gate))}
+REAPED={shlex.quote(str(reaped))}
+WORKER_LEDGER_LOCK_RETRY_SECONDS=0.01
+WORKER_CLEANUP_CLAIM_RETRY_SECONDS=0.01
+reap_machine() {{
+  : > "$GATE/$1"
+  deadline=$((SECONDS + 3))
+  while [ "$(find "$GATE" -type f | wc -l | tr -d ' ')" -lt 2 ]; do
+    [ "$SECONDS" -lt "$deadline" ] || return 90
+    sleep 0.02
+  done
+  printf '%s\n' "$1" >> "$REAPED"
+}}
+fleet_registry_release_id() {{ return 0; }}
+{cleanup}
+cleanup_failed_worker "$OUT" {workers[0]} &
+first=$!
+cleanup_failed_worker "$OUT" {workers[1]} &
+second=$!
+wait "$first"
+wait "$second"
+test ! -s "$OUT/worker-clones.ids"
+test ! -s "$OUT/worker-ready.ids"
+test "$(sort -u "$REAPED" | wc -l | tr -d ' ')" = 2
+test ! -e "$OUT/worker-clones.ids.lock"
+test ! -e "$OUT/worker-{workers[0]}.cleanup-claim"
+test ! -e "$OUT/worker-{workers[1]}.cleanup-claim"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_ready_reconciliation_uses_worker_ledger_lock_and_never_duplicates_id(
+    tmp_path: Path,
+) -> None:
+    """Concurrent readiness publishers serialize with cleanup's ownership ledger."""
+    fleet = FLEET_SCRIPT.read_text()
+    bundle = "\n".join(
+        (
+            _extract_fleet_function(fleet, "worker_is_tracked() {"),
+            _worker_ledger_lock_bundle(fleet),
+            _extract_fleet_function(fleet, "reconcile_worker_ready_outcomes() {"),
+        )
+    )
+    output = tmp_path / "bench"
+    output.mkdir()
+    worker_id = "deadbeef000012"
+    (output / "worker-clones.ids").write_text(f"{worker_id}\n")
+    (output / "worker-ready.ids").write_text("")
+    (output / f"worker-{worker_id}.ready").touch()
+
+    script = f"""set -e
+OUT={shlex.quote(str(output))}
+WORKER_LEDGER_LOCK_RETRY_SECONDS=0.01
+{bundle}
+reconcile_worker_ready_outcomes "$OUT" &
+first=$!
+reconcile_worker_ready_outcomes "$OUT" &
+second=$!
+wait "$first"
+wait "$second"
+test "$(grep -Fxc {worker_id} "$OUT/worker-ready.ids")" = 1
+test ! -e "$OUT/worker-clones.ids.lock"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    lock = cloner.index('worker_ledger_lock_acquire "$(dirname "$ledger")"')
+    append = cloner.index("printf '%s\\n' \"$target_id\" >> \"$ledger\"", lock)
+    unlock = cloner.index('worker_ledger_lock_release "$(dirname "$ledger")"', append)
+    assert lock < append < unlock
 
 
 def test_worker_numeric_settings_are_validated_independently(tmp_path: Path) -> None:
@@ -3452,7 +3593,7 @@ def test_fleet_clone_identity_requires_a_distinct_authoritative_target(
     function_start = fleet.index("machine_id_for_clone_name() {")
     clone_start = fleet.index("clone_machine_target() {", function_start)
     function_end = fleet.index("\n}\n", clone_start) + 3
-    clone_function = fleet[function_start:function_end]
+    clone_function = _worker_ledger_lock_bundle(fleet) + "\n" + fleet[function_start:function_end]
     source_id = "6834251fe05798"
     target_id = "d895d2efe7d418"
 
@@ -3588,7 +3729,7 @@ def test_clone_retries_provider_accepted_failed_snapshot_volume(
 
     fleet = FLEET_SCRIPT.read_text()
     watchdog = _extract_fleet_function(fleet, "fly_with_timeout() {")
-    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    cloner = _clone_machine_bundle(fleet)
     ledger = tmp_path / "owned.ids"
     clone_count = tmp_path / "clone-count"
     reaped = tmp_path / "reaped.ids"
@@ -3653,7 +3794,7 @@ def test_clone_releases_only_definitive_preallocation_failures() -> None:
     launch errors retain ownership fail-closed."""
     fleet = FLEET_SCRIPT.read_text()
     classifier = _extract_fleet_function(fleet, "clone_failure_definitively_unallocated() {")
-    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    cloner = _clone_machine_bundle(fleet)
     script = f"""{classifier}
 for message in \
   'Error: failed to create volume: resource_exhausted: rate limit exceeded' \
@@ -3839,6 +3980,25 @@ def _extract_fleet_function(source: str, signature: str) -> str:
     return source[start:end]
 
 
+def _worker_ledger_lock_bundle(source: str) -> str:
+    return "\n".join(
+        _extract_fleet_function(source, signature)
+        for signature in (
+            "worker_ledger_lock_acquire() {",
+            "worker_ledger_lock_release() {",
+        )
+    )
+
+
+def _clone_machine_bundle(source: str) -> str:
+    return "\n".join(
+        (
+            _worker_ledger_lock_bundle(source),
+            _extract_fleet_function(source, "clone_machine_target() {"),
+        )
+    )
+
+
 def _worker_cleanup_bundle(source: str) -> str:
     return "\n".join(
         _extract_fleet_function(source, signature)
@@ -3955,7 +4115,7 @@ def test_clone_retries_transient_volume_not_found(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
     timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
     resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
-    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    cloner = _clone_machine_bundle(fleet)
     ledger = tmp_path / "owned-clones.ids"
     attempt_file = tmp_path / "attempts"
     machines_file = tmp_path / "machines"
@@ -4027,7 +4187,7 @@ def test_clone_gives_up_after_max_attempts(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
     timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
     resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
-    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    cloner = _clone_machine_bundle(fleet)
     ledger = tmp_path / "owned-clones.ids"
     attempt_file = tmp_path / "attempts"
 
@@ -4081,7 +4241,7 @@ def test_clone_times_out_and_retries_a_hung_clone(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
     timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
     resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
-    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    cloner = _clone_machine_bundle(fleet)
     ledger = tmp_path / "owned-clones.ids"
     attempt_file = tmp_path / "attempts"
     machines_file = tmp_path / "machines"
@@ -6591,7 +6751,7 @@ def test_clone_burst_is_rate_limit_resilient() -> None:
     # Launch burst is staggered, not simultaneous.
     assert "CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS" in fleet
     # Exponential backoff (bit-shift by attempt) with a cap and jitter.
-    clone_fn = _extract_fleet_function(fleet, "clone_machine_target() {")
+    clone_fn = _clone_machine_bundle(fleet)
     assert "1 << (attempt - 1)" in clone_fn
     assert "CLOUDBENCH_CLONE_RETRY_MAX_SECONDS" in clone_fn
     assert "RANDOM % 5" in clone_fn
