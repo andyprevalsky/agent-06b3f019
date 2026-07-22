@@ -1358,8 +1358,29 @@ if [ "$MODE" = "refresh-wmh" ]; then
             exit 2
             ;;
     esac
+    # An explicit corpus makes a one-trace ingestion proof attributable: retain
+    # the exact prior delta-index roots and admit one named live root, instead of
+    # relying on whichever UUIDs happen to fit the archive cap. Restrict values
+    # to UUIDs because this string crosses the remote maintenance shell.
+    WMH_REFRESH_ROOT_AGENT_IDS="${WMH_REFRESH_ROOT_AGENT_IDS:-}"
+    if [ -n "$WMH_REFRESH_ROOT_AGENT_IDS" ]; then
+        IFS=',' read -r -a _wmh_refresh_roots <<< "$WMH_REFRESH_ROOT_AGENT_IDS"
+        for _wmh_root in "${_wmh_refresh_roots[@]}"; do
+            if [[ ! "$_wmh_root" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+                echo "❌ WMH_REFRESH_ROOT_AGENT_IDS must be comma-separated UUIDs (bad value: $_wmh_root)." >&2
+                exit 2
+            fi
+        done
+        if [ "$WMH_REFRESH_MAX_BUNDLES" -gt 0 ] \
+            && [ "${#_wmh_refresh_roots[@]}" -gt "$WMH_REFRESH_MAX_BUNDLES" ]; then
+            echo "❌ explicit WMH root count exceeds WMH_REFRESH_MAX_BUNDLES; raise the cap or set it to 0." >&2
+            exit 2
+        fi
+    fi
     echo "═══ run-bench-cloud --refresh-wmh ═══"
     echo "model=$WMH_MODEL_NAME target=$REMOTE_WMH max_bundles=$WMH_REFRESH_MAX_BUNDLES"
+    [ -n "$WMH_REFRESH_ROOT_AGENT_IDS" ] \
+        && echo "explicit_roots=${#_wmh_refresh_roots[@]} (strict corpus selection)"
     echo ""
     ensure_app
     cleanup_refresh_wmh() {
@@ -1410,8 +1431,8 @@ chown rose:rose '$REMOTE_REPO/agents/.env' '$REMOTE_REPO/back-end/.env' 2>/dev/n
 mkdir -p '$REMOTE_WMH'
 chown -R rose:rose '$REMOTE_WMH' '$REMOTE_REPO/agents/venv' 2>/dev/null || true
 cd '$REMOTE_REPO/agents'
-gosu rose env HOME=/home/rose WMH_BUILD_DIR='$REMOTE_WMH' WMH_MODEL_NAME='$WMH_MODEL_NAME' WMH_GEPA_BUDGET=0 WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES' \\
-  venv/bin/python -u -c \"from benchmarks.world_model_harness import update_world_model_for_simulation as u; import json; print(json.dumps(u(progress=lambda e: print('[WMH]', e.get('title'), e.get('status'), flush=True))))\"
+gosu rose env HOME=/home/rose WMH_BUILD_DIR='$REMOTE_WMH' WMH_MODEL_NAME='$WMH_MODEL_NAME' WMH_GEPA_BUDGET=0 WMH_MAX_BUNDLES='$WMH_REFRESH_MAX_BUNDLES' WMH_ROOT_AGENT_IDS='$WMH_REFRESH_ROOT_AGENT_IDS' \\
+  venv/bin/python -u -c \"from benchmarks.world_model_harness import update_world_model_for_simulation as u; import json, os; ids=[value for value in os.environ.get('WMH_ROOT_AGENT_IDS', '').split(',') if value]; print(json.dumps(u(root_agent_ids=ids or None, progress=lambda e: print('[WMH]', e.get('title'), e.get('status'), flush=True))))\"
 echo '::WMH-REFRESH-DONE::'
 ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
     REFRESH_LOG="$(mktemp)"
@@ -1426,7 +1447,35 @@ ls -la '$REMOTE_WMH/models' 2>/dev/null || true"
         rm -f "$REFRESH_LOG"
         exit 1
     fi
-    # EXIT trap stops the machine.
+
+    # Fleet clones fork a snapshot, not the mutable warm volume. Publish the exact rebuilt
+    # volume only after the model reported ready and the source is proven quiescent; otherwise
+    # successful maintenance silently leaves every benchmark on the previous WMH corpus.
+    read -r RECORDED_NODE_FP RECORDED_PY_FP _ _ \
+        < "$GIT_COMMON_DIR/cloudbench-warm-deps.fp" 2>/dev/null || true
+    if [ -z "${RECORDED_NODE_FP:-}" ] || [ -z "${RECORDED_PY_FP:-}" ]; then
+        echo "❌ cannot publish WMH snapshot without the existing dependency proof" >&2
+        exit 1
+    fi
+    stop_machine_strict "$mid" || exit 1
+    mid=""
+    VOL_ID="$(FLY machines list -a "$APP" --json 2>/dev/null | MN="$MACHINE_NAME" python3 -c '
+import json, os, sys
+for m in json.load(sys.stdin) or []:
+    if m.get("name") == os.environ["MN"]:
+        mounts = m.get("config", {}).get("mounts") or []
+        if mounts: print(mounts[0].get("volume", ""))
+        break
+')"
+    [ -n "$VOL_ID" ] || { echo "❌ could not resolve the rebuilt WMH volume id"; exit 1; }
+    SNAP_START_EPOCH="$(date +%s)"
+    create_volume_snapshot_exact "$VOL_ID" || exit 1
+    NEW_SNAP="$CREATED_SNAPSHOT_ID"
+    printf '%s %s %s %s\n' "$RECORDED_NODE_FP" "$RECORDED_PY_FP" "$SNAP_START_EPOCH" \
+        "$NEW_SNAP" > "$GIT_COMMON_DIR/cloudbench-warm-deps.fp"
+    echo "✅ WMH model snapshot published for fleet clones: $NEW_SNAP"
+
+    # EXIT trap parks the already-stopped source machine.
     exit 0
 fi
 
@@ -1880,6 +1929,26 @@ STATUS_PROXY_PID=""
 LIVE_BACKEND_PORT=""
 LIVE_BACKEND_URL=""
 CLOUDBENCH_API_KEY="$( { grep -h '^BACKEND_API_KEY' "$ROOT_DIR/back-end/.env" "$ROOT_DIR/agents/.env" 2>/dev/null | head -1; } | sed -E 's/^BACKEND_API_KEY=//; s/^"//; s/"$//' )"
+
+# Build the local workspace patch before selecting a launch transport. The
+# legacy SSH path uploads it with SFTP; boot-launch injects the same file into
+# the Machine rootfs as part of its one config update. Keeping this outside the
+# branch makes the printed "+patch" provenance true for both transports.
+STAGED_LOCAL_FILES=()
+cleanup_staged_local_files() {
+    for p in "${STAGED_LOCAL_FILES[@]}"; do
+        [ -n "$p" ] && rm -f "$p" 2>/dev/null || true
+    done
+}
+LOCAL_PATCH_FILE=""
+if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
+   && { ! git -C "$ROOT_DIR" diff --quiet --binary \
+        || [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | head -1)" ]; }; then
+    LOCAL_PATCH_FILE="$(mktemp)"
+    STAGED_LOCAL_FILES+=("$LOCAL_PATCH_FILE")
+    bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$LOCAL_PATCH_FILE"
+fi
+
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     POST_CONFIG_START_MARKER="$OUT_DIR/post-config-start.accepted"
     rm -f "$POST_CONFIG_START_MARKER"
@@ -1904,11 +1973,13 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "CONDUCTOR_WORKSPACE_NAME=$RUN_WORKSPACE_NAME"
         --env "BENCHMARK_HUB_PARENT_RUN_ID=${BENCHMARK_HUB_PARENT_RUN_ID:-}"
         --env "BENCHMARK_FAST_MODE_CACHE=${BENCHMARK_FAST_MODE_CACHE:-}"
+        --env "ROSE_EXCLUDE_ANTHROPIC_FAMILY=${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}"
         --env "BENCHMARK_PEAK_FLY_MACHINES=$OBSERVED_PEAK_FLY_MACHINES"
         --env "BENCHMARK_VM_USD_PER_HOUR=$VM_USD_PER_HOUR"
     )
     _boot_file_args=(
         --file-local "/cloudbench-boot.sh=$ROOT_DIR/scripts/cloudbench-boot.sh"
+        --file-local "/cloudbench-run.sh=$ROOT_DIR/scripts/cloudbench-run.sh"
         --file-local "/cloudbench-status-server.py=$ROOT_DIR/scripts/cloudbench-status-server.py"
         --file-local "/cloudbench-seed-budget.sh=$ROOT_DIR/scripts/lib/cloudbench-seed-budget.sh"
     )
@@ -2116,6 +2187,7 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export BENCH_DASHPORT=$(printf '%q' "$REMOTE_DASH_PORT")"
     echo "export CONDUCTOR_WORKSPACE_NAME=$(printf '%q' "$RUN_WORKSPACE_NAME")"
     echo "export BENCHMARK_FAST_MODE_CACHE=$(printf '%q' "${BENCHMARK_FAST_MODE_CACHE:-}")"
+    echo "export ROSE_EXCLUDE_ANTHROPIC_FAMILY=$(printf '%q' "${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}")"
     echo "export BENCHMARK_PEAK_FLY_MACHINES=$(printf '%q' "$OBSERVED_PEAK_FLY_MACHINES")"
     echo "export BENCHMARK_VM_USD_PER_HOUR=$(printf '%q' "$VM_USD_PER_HOUR")"
     if [ "$DASHBOARD" = "1" ]; then

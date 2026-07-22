@@ -815,6 +815,38 @@ async def test_fetch_compute_token_activity_passes_lineage_params():
     assert "agentId=a-1" in call["url"]
     assert "rootAgentId=root-1" in call["url"]
     assert "fastCacheAffinityKey=affinity-1" in call["url"]
+    assert "tokenType=" not in call["url"]
+
+
+async def test_fetch_compute_token_activity_excludes_claude_tokens_by_policy():
+    """Anthropic exclusion constrains unified compute leases to GPT tokens."""
+    setup_mock(
+        {
+            "/api/integrations/compute-code/credentials/token": {
+                "status": 200,
+                "json": {
+                    "type": "gpt",
+                    "accessToken": "gpt-token",
+                    "accountId": "acct-1",
+                    "source": "pool",
+                    "poolTokenId": "pool-gpt-1",
+                },
+            },
+        }
+    )
+
+    with patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}), patch("temporalio.activity.heartbeat"):
+        from helpers.llm import fetch_compute_token_activity
+
+        result = await fetch_compute_token_activity("user-1")
+
+    assert result is not None
+    assert result["type"] == "gpt"
+    call = assert_captured_call(
+        url_contains="/api/integrations/compute-code/credentials/token",
+        method="GET",
+    )
+    assert "tokenType=gpt" in call["url"]
 
 
 async def test_heartbeat_compute_token_lineage_activity_posts_lineage_key():
@@ -1980,7 +2012,10 @@ async def test_call_llm_structured_streaming_happy_path():
 
     assert response.response == "hello"
     assert response.tool_calls == []
-    assert usage["prompt_tokens"] == 10
+    # OpenAI-compatible transports report an inclusive prompt total. Rose's
+    # provider-neutral contract exposes only the uncached tail for downstream
+    # pricing; the Rose-client regression separately pins the original total.
+    assert usage["prompt_tokens"] == 5
     assert usage["completion_tokens"] == 5
     assert usage["cache_read_input_tokens"] == 2
     assert usage["cache_creation_input_tokens"] == 3
@@ -3055,6 +3090,62 @@ async def test_call_llm_activity_marks_structured_contract_failures_non_retryabl
     # Bounded in-activity re-generation (1 initial + MAX_STRUCTURED_PARSE_RETRIES),
     # then surfaced non-retryable — so it is not multiplied further by Temporal.
     assert completion_calls == 3
+
+
+async def test_call_llm_activity_rejects_wrong_required_tool_non_retryably():
+    """An allowed but wrong tool must never escape a completion-only handoff."""
+    import httpx
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_llm_activity
+    from temporalio.exceptions import ApplicationError
+
+    payload = {
+        "actual_model": "claude-sonnet-4-6",
+        "choices": [
+            {
+                "delta": {
+                    "content": json.dumps(
+                        {
+                            "response": "",
+                            "tool_calls": [{"tool": "web_search", "query": "repeat the completed work"}],
+                        }
+                    )
+                },
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
+    }
+    completion_calls = 0
+
+    def handler(req):
+        nonlocal completion_calls
+        if "/completions" in str(req.url):
+            completion_calls += 1
+            return httpx.Response(200, text=_sse_body([payload]))
+        return httpx.Response(200, json={"ok": True})
+
+    set_mock_handler(handler)
+
+    with patch("temporalio.activity.heartbeat"):
+        try:
+            await call_llm_activity(
+                messages_or_agent_id=[{"role": "user", "content": "Finish from the completed child"}],
+                model="rose-labs/rose-1-lite",
+                tool_names=["web_search", "attempt_completion"],
+                reasoning_max_tokens=0,
+                call_site="required-tool-contract-test",
+                required_tool="attempt_completion",
+            )
+            error = None
+        except ApplicationError as exc:
+            error = exc
+
+    assert error is not None
+    assert error.non_retryable is True
+    assert error.type == "LLMStructuredOutputError"
+    assert "Got: ['web_search']" in str(error)
+    assert completion_calls == 1
 
 
 async def test_call_llm_activity_with_agent_id_reads_shared_context():
@@ -5723,6 +5814,10 @@ async def run_all_tests():
         "fetch_claude_max_token_activity_missing_token_field", test_fetch_claude_max_token_activity_missing_token_field
     )
     await r.record_async(
+        "fetch_compute_token_activity_excludes_claude_tokens_by_policy",
+        test_fetch_compute_token_activity_excludes_claude_tokens_by_policy,
+    )
+    await r.record_async(
         "mark_claude_token_rate_limited_user_success", test_mark_claude_token_rate_limited_user_success
     )
     await r.record_async(
@@ -5960,6 +6055,10 @@ async def run_all_tests():
     await r.record_async(
         "call_llm_activity_structured_contract_non_retryable",
         test_call_llm_activity_marks_structured_contract_failures_non_retryable,
+    )
+    await r.record_async(
+        "call_llm_activity_required_tool_non_retryable",
+        test_call_llm_activity_rejects_wrong_required_tool_non_retryably,
     )
     await r.record_async("mark_claude_token_rate_limited_exception", test_mark_claude_token_rate_limited_exception_path)
     await r.record_async("fetch_claude_max_token_exception", test_fetch_claude_max_token_exception_path)

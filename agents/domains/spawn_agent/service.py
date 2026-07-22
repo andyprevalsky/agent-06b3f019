@@ -471,7 +471,15 @@ async def spawn_explore_agent_activity(  # noqa: C901
                     key = st.get("source") if isinstance(st, dict) else st
                     if key and not any(u.get("source") == key for u in unavailable_sources_collected):
                         unavailable_sources_collected.append(st)
-        elif tool_name == "attempt_completion":
+        elif tool_name in ("attempt_completion", "attempt_completion_with_result"):
+            if not attachment_texts and not has_usable_tool_evidence:
+                return {
+                    "error": True,
+                    "message": (
+                        "Completion rejected: no evidence tool has succeeded yet. "
+                        "Call web_search, people_search, web_fetch, or grep successfully before completing."
+                    ),
+                }
             return {"success": True, "message": "Completion accepted"}
         else:
             return {"error": True, "message": f"Unknown tool: {tool_name}"}
@@ -499,6 +507,10 @@ async def spawn_explore_agent_activity(  # noqa: C901
 
     async def explore_post_message(message: str, role: str, metadata: Optional[Dict] = None):
         """Post messages from the explore agent to DB."""
+        is_tool_error = role == "TOOL" and bool(metadata and metadata.get("error"))
+        message_status = MessageStatus.ERROR if is_tool_error else MessageStatus.FINISHED
+        title = str(metadata.get("title")) if metadata and metadata.get("title") else "Explore agent thinking"
+        tool_call_id = str(metadata.get("toolCallId")) if metadata and metadata.get("toolCallId") else None
         async with span(
             "explore_fe_posts.enqueue",
             agent_id=agent_id,
@@ -511,10 +523,11 @@ async def spawn_explore_agent_activity(  # noqa: C901
                 asyncio.create_task(
                     save_explore_message(
                         agent_id=agent_id,
-                        title="Explore agent thinking",
+                        title=title,
                         message=message[:EXPLORE_MESSAGE_TRUNCATE_LEN],
-                        status=MessageStatus.FINISHED,
+                        status=message_status,
                         task_id=task_id,
+                        tool_call_id=tool_call_id,
                     )
                 )
             )

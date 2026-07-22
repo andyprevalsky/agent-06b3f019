@@ -483,6 +483,11 @@ STACK_ENV=(
     "WMH_MODEL_NAME=$WMH_MODEL_NAME"
     "WMH_BUILD_DIR=$WMH_DIR"
     "BENCHMARK_SKIP_WMH_DELTA=1"
+    # The isolated stack is launched through `env` with this allow-list. Keep the
+    # controller's provider exclusion inside that environment so the WMH Rose
+    # provider cannot lease/use Claude after the outer runner explicitly disabled
+    # the Anthropic family.
+    "ROSE_EXCLUDE_ANTHROPIC_FAMILY=${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}"
 )
 if [ -n "$BENCHMARK_FAST_MODE_CACHE" ]; then
     STACK_ENV+=("BENCHMARK_FAST_MODE_CACHE=$BENCHMARK_FAST_MODE_CACHE")

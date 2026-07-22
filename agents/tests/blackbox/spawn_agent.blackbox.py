@@ -1097,6 +1097,133 @@ async def test_handler_caps_root_explore_for_one_per_city_task():
     assert "already has 3 explore agents" in events[0].message
 
 
+async def test_handler_reserves_final_explore_slot_across_same_turn_calls():
+    """Only one concurrent replacement may claim the final city slot."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    from domains.spawn_agent.handler import SpawnAgentManager
+
+    prior_context = []
+    for idx in range(2):
+        prior_context.append(
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolCallId": f"tc-{idx}",
+                    "toolName": "spawn_agent",
+                    "toolStatus": "FINISHED",
+                    "agentType": "explore",
+                },
+            }
+        )
+    wf = _FakeWFInstance(
+        depth=0,
+        goal=(
+            "I'm comparing three cities: Austin TX, Denver CO, and Lisbon Portugal. "
+            "Use explore sub-agents: spawn one explore sub-agent per city, preferably in parallel. "
+            "Do NOT use Claude Code, a browser agent, or any code sandbox."
+        ),
+        context=prior_context,
+    )
+    manager = SpawnAgentManager()
+
+    async def fake_spawn_explore(_workflow_instance, _tool_call, _tool_call_id):
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Exploring",
+            message="started",
+            status=MessageStatus.IN_PROGRESS,
+        )
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Explored",
+            message="done",
+            status=MessageStatus.FINISHED,
+        )
+
+    manager._spawn_explore = fake_spawn_explore
+    calls = [
+        manager.execute_tool(wf, {"type": "explore", "goal": f"Research Denver {idx}"}, f"replacement-{idx}")
+        for idx in range(4)
+    ]
+
+    first_event = await anext(calls[0])
+    blocked_events = [await anext(call) for call in calls[1:]]
+    assert first_event.status == MessageStatus.IN_PROGRESS
+    assert all(event.status == MessageStatus.ERROR for event in blocked_events)
+    assert all("already has 3 explore agents" in event.message for event in blocked_events)
+
+    assert (await anext(calls[0])).status == MessageStatus.FINISHED
+    try:
+        await anext(calls[0])
+    except StopAsyncIteration:
+        pass
+    else:
+        raise AssertionError("explore generator should finish after releasing its reservation")
+    assert wf._explore_slot_reservations == set()
+
+
+async def test_handler_allows_one_corrective_explore_after_verifier_feedback():
+    """A failed completion opens one reserved remediation slot, not an unbounded retry fanout."""
+    from tools.base import EventType, MessageStatus, ToolEvent
+
+    from domains.spawn_agent.handler import SpawnAgentManager
+
+    prior_context = [
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolCallId": f"tc-{idx}",
+                "toolName": "spawn_agent",
+                "toolStatus": "FINISHED",
+                "agentType": "explore",
+            },
+        }
+        for idx in range(3)
+    ]
+    prior_context.append(
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolCallId": "completion-1",
+                "toolName": "attempt_completion",
+                "toolStatus": "FINISHED",
+                "title": "⚖️ Verifier rejected (50%) — continue task",
+                "verifierMessage": True,
+            },
+        }
+    )
+    wf = _FakeWFInstance(
+        depth=0,
+        goal=(
+            "I'm comparing three cities: Austin TX, Denver CO, and Lisbon Portugal. "
+            "Use explore sub-agents: spawn one explore sub-agent per city, preferably in parallel. "
+            "Do NOT use Claude Code, a browser agent, or any code sandbox."
+        ),
+        context=prior_context,
+    )
+    manager = SpawnAgentManager()
+
+    async def fake_spawn_explore(_workflow_instance, _tool_call, _tool_call_id):
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Exploring",
+            message="started",
+            status=MessageStatus.IN_PROGRESS,
+        )
+
+    manager._spawn_explore = fake_spawn_explore
+    first = manager.execute_tool(wf, {"type": "explore", "goal": "Fix Denver"}, "corrective-1")
+    second = manager.execute_tool(wf, {"type": "explore", "goal": "Fix Denver again"}, "corrective-2")
+
+    assert (await anext(first)).status == MessageStatus.IN_PROGRESS
+    blocked = await anext(second)
+    assert blocked.status == MessageStatus.ERROR
+    assert "already has 4 explore agents" in blocked.message
+    await first.aclose()
+    assert wf._explore_slot_reservations == set()
+
+
 def test_prior_explore_agent_count_ignores_failed_and_in_progress_children():
     """Only FINISHED explore calls consume the one-per-city success budget."""
     from types import SimpleNamespace
@@ -1734,6 +1861,42 @@ async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
     assert "doc.txt" in user_msg["text"]
 
 
+async def test_spawn_explore_agent_activity_rejects_completion_until_evidence_succeeds():
+    """Completion stays visible but is rejected until an evidence tool succeeds."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    completion_results = []
+    fake_ws = MagicMock()
+    fake_ws.execute_tool = AsyncMock(return_value={"result": {"hits": ["grounded result"]}})
+
+    async def fake_run_agent(**kwargs):
+        execute_tool = kwargs["execute_tool"]
+        completion_results.append(
+            await execute_tool("attempt_completion_with_result", {"result": "early"}, "tc1")
+        )
+        await execute_tool("web_search", {"query": "research X"}, "tc2")
+        completion_results.append(await execute_tool("attempt_completion_with_result", {"result": "done"}, "tc3"))
+        return {
+            "status": "completed",
+            "final_response": "grounded summary",
+            "tokens_in": 1,
+            "tokens_out": 1,
+        }
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.web_search.WebSearchManager", return_value=fake_ws),
+    ):
+        await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="research X", model="m")
+
+    assert completion_results[0]["error"] is True
+    assert "no evidence tool has succeeded" in completion_results[0]["message"]
+    assert completion_results[1]["success"] is True
+
+
 async def test_spawn_explore_agent_activity_error_status_returned():
     """run_agent non-completed status returns error while preserving best effort."""
     from unittest.mock import AsyncMock, patch
@@ -1872,6 +2035,17 @@ async def test_spawn_explore_agent_activity_inner_callbacks_work():
         # exercise post_message callback (forwarded to save_explore_message)
         post_message = kwargs["post_message"]
         await post_message("Thinking…", "ASSISTANT", None)
+        await post_message(
+            "Completion rejected",
+            "TOOL",
+            {
+                "toolCallId": "completion-1",
+                "toolName": "attempt_completion_with_result",
+                "toolStatus": "ERROR",
+                "title": "attempt_completion_with_result rejected",
+                "error": True,
+            },
+        )
         post_message_holder["called"] = True
 
         return {"status": "completed", "final_response": "ok", "tokens_in": 0, "tokens_out": 0}
@@ -1894,10 +2068,12 @@ async def test_spawn_explore_agent_activity_inner_callbacks_work():
     assert entry["from_fast_cache"] is True
 
     # post_message dispatched to save_explore_message
-    assert len(save_calls) == 1
+    assert len(save_calls) == 2
     assert save_calls[0]["task_id"] == "task-1"
     assert save_calls[0]["agent_id"] == "a"
     assert save_calls[0]["status"].value == "FINISHED"
+    assert save_calls[1]["status"].value == "ERROR"
+    assert save_calls[1]["tool_call_id"] == "completion-1"
 
 
 async def test_spawn_explore_agent_activity_execute_tool_dispatch():
@@ -2281,6 +2457,14 @@ async def run_all_tests():
         test_handler_caps_root_explore_for_one_per_city_task,
     )
     await r.record_async(
+        "handler_reserves_final_explore_slot_across_same_turn_calls",
+        test_handler_reserves_final_explore_slot_across_same_turn_calls,
+    )
+    await r.record_async(
+        "handler_allows_one_corrective_explore_after_verifier_feedback",
+        test_handler_allows_one_corrective_explore_after_verifier_feedback,
+    )
+    await r.record_async(
         "handler_allows_general_purpose_when_explicitly_required",
         test_handler_allows_general_purpose_when_explicitly_required,
     )
@@ -2305,6 +2489,10 @@ async def run_all_tests():
     await r.record_async("network_metadata_empty", test_fetch_network_metadata_empty_people)
     # service.py
     await r.record_async("explore_activity_happy", test_spawn_explore_agent_activity_runs_run_agent_and_returns_result)
+    await r.record_async(
+        "explore_activity_rejects_completion_until_evidence_succeeds",
+        test_spawn_explore_agent_activity_rejects_completion_until_evidence_succeeds,
+    )
     await r.record_async("explore_activity_error", test_spawn_explore_agent_activity_error_status_returned)
     await r.record_async(
         "explore_activity_rejects_tool_free_completion",

@@ -50,6 +50,7 @@ class BenchmarkRun:
     base_url: str = ""
     task_results: List[TaskResult] = field(default_factory=list)
     memory_summary: Optional[dict] = None
+    world_model_retrieval_audit: Optional[dict] = None
 
     @property
     def summary(self) -> dict:
@@ -105,6 +106,7 @@ class BenchmarkRun:
             "base_url": self.base_url,
             "summary": self.summary,
             "memory_summary": self.memory_summary,
+            "world_model_retrieval_audit": self.world_model_retrieval_audit,
             "tasks": [asdict(r) for r in self.task_results],
         }
 

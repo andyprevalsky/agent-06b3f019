@@ -1,18 +1,37 @@
+import type SteelSDK from 'steel-sdk';
+import type { Browser } from 'playwright';
 import { prisma } from '../database';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
+import { getProviderProfile, rememberProviderProfile } from '../browser/context';
+import type { BrowserProviderName } from '../browser/types';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
 import {
   MAX_SESSION_RETRIES,
+  SteelSessionCleanupError,
   buildSteelProxySettings,
   envEnabled,
+  isInvalidSteelProxyConfiguration,
+  isKnownRejectedProxyCity,
+  releaseSteelRemoteSession,
+  rememberRejectedProxyCity,
   rememberBenchmarkAnonSteelProfile,
   resolveSteelProfileForSession,
   steel,
+  steelCdpUrl,
+  steelDebugUrl,
 } from './session';
 import { validateSessionConnection } from './sessionConnection';
+import { steelCdpConnectionUrl } from './urls';
 
 function hasValue(value: string | null | undefined): value is string {
   return value !== null && value !== undefined && value !== '';
+}
+
+class ConcurrentSessionReplacementError extends Error {
+  constructor(taskId: string) {
+    super(`Browser session changed concurrently while recreating task ${taskId}`);
+    this.name = 'ConcurrentSessionReplacementError';
+  }
 }
 
 async function proxyLocationForAgent(agentId: string | null): Promise<ProxyGeoLocation> {
@@ -39,26 +58,36 @@ async function fingerprintUserAgent(userId: string): Promise<string | undefined>
   return hasValue(fp?.navigator?.userAgent) ? fp.navigator.userAgent : undefined;
 }
 
-async function navigateToSavedUrl(wsUrl: string, savedUrl: string | null): Promise<void> {
+async function connectSteelBrowser(wsUrl: string): Promise<Browser> {
+  const { chromium } = await import('playwright');
+  return chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl));
+}
+
+export async function navigateToSavedUrl(
+  wsUrl: string,
+  savedUrl: string | undefined,
+  connectBrowser: (url: string) => Promise<Browser> = connectSteelBrowser
+): Promise<void> {
   if (!hasValue(savedUrl)) return;
 
   log.info(`  Navigating session to saved URL: ${savedUrl}`);
+  let browser: Browser | undefined;
   try {
-    const { chromium } = await import('playwright');
-    const browser = await chromium.connectOverCDP(wsUrl);
+    browser = await connectBrowser(wsUrl);
     const context = browser.contexts()[0];
-    const page = context.pages()[0];
-    await page.goto(savedUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
+    const page = context.pages()[0] ?? (await context.newPage());
+    await page.goto(savedUrl, { waitUntil: 'domcontentloaded', timeout: 10_000 });
     log.info('  Navigation complete');
-    await browser.close();
   } catch (navError) {
     log.error('Failed to navigate to saved URL', {
       error: navError instanceof Error ? navError.message : String(navError),
     });
+  } finally {
+    if (browser) await browser.close().catch(() => {});
   }
 }
 
-export async function resumeSession(taskId: string): Promise<{
+export interface RecreatedSteelSession {
   debugUrl: string;
   sessionId: string;
   wsUrl: string;
@@ -67,35 +96,67 @@ export async function resumeSession(taskId: string): Promise<{
   proxyLocation: ProxyGeoLocation;
   steelProfileId: string | null;
   profileSource: string;
-}> {
-  log.info(`Resuming browser task ${taskId}...`);
+  previousSessionId: string;
+  previousProvider: BrowserProviderName;
+}
+
+export interface SteelSessionReplacementDependencies {
+  createSession: (input: SteelSDK.SessionCreateParams) => Promise<{
+    id: string;
+    debugUrl: string;
+    profileId?: string | null;
+    proxySource?: string | null;
+  }>;
+  validateConnection: (wsUrl: string) => Promise<boolean>;
+  releaseSession?: (sessionId: string) => Promise<void>;
+}
+
+const defaultReplacementDependencies: SteelSessionReplacementDependencies = {
+  createSession: async (input) => steel.sessions.create(input),
+  validateConnection: validateSessionConnection,
+};
+
+export async function recreateSession(
+  taskId: string,
+  options: { forceManagedRotation: boolean },
+  dependencies: SteelSessionReplacementDependencies = defaultReplacementDependencies
+): Promise<RecreatedSteelSession> {
+  const operation = options.forceManagedRotation ? 'Rotating' : 'Resuming';
+  log.info(`${operation} browser task ${taskId} on Steel...`);
   const oldSession = await prisma.browserSession.findUnique({
     where: { id: taskId },
     include: { context: true },
   });
 
-  if (oldSession === null) {
-    throw new Error(`Browser task not found: ${taskId}`);
-  }
+  if (oldSession === null) throw new Error(`Browser task not found: ${taskId}`);
 
-  log.info(`  Found old session with currentUrl: ${oldSession.currentUrl ?? 'NONE'}`);
+  const previousProvider: BrowserProviderName =
+    oldSession.provider === 'kernel' ? 'kernel' : 'steel';
+  const savedUrl = hasValue(oldSession.currentUrl)
+    ? oldSession.currentUrl
+    : hasValue(oldSession.startUrl)
+      ? oldSession.startUrl
+      : undefined;
+  log.info(`  Found old session with saved URL: ${savedUrl ?? 'NONE'}`);
   const proxyGeo = await proxyLocationForAgent(oldSession.agentId);
   log.info(`  Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`);
   const userAgent = await fingerprintUserAgent(oldSession.context.userId);
-  if (userAgent !== undefined) {
-    log.info(`  Using user's fingerprint User-Agent: ${userAgent.substring(0, 60)}...`);
-  }
+  const persistedProfileId = await getProviderProfile(oldSession.contextId, 'steel');
+  let dropProxyCity = isKnownRejectedProxyCity(proxyGeo);
 
   let lastError: Error | null = null;
   for (let attempt = 1; attempt <= MAX_SESSION_RETRIES; attempt++) {
-    log.info(`  Resume session attempt ${attempt}/${MAX_SESSION_RETRIES}...`);
+    log.info(`  Steel session attempt ${attempt}/${MAX_SESSION_RETRIES}...`);
+    let createdSessionId: string | null = null;
+    let committed = false;
     try {
-      const proxySettings = buildSteelProxySettings(proxyGeo);
-      const profile = resolveSteelProfileForSession(
-        oldSession.agentId,
-        oldSession.context.contextId
+      const proxySettings = buildSteelProxySettings(
+        proxyGeo,
+        dropProxyCity,
+        options.forceManagedRotation
       );
-      const session = await steel.sessions.create({
+      const profile = resolveSteelProfileForSession(oldSession.agentId, persistedProfileId);
+      const session = await dependencies.createSession({
         profileId: profile.profileId,
         persistProfile: envEnabled('BROWSER_AGENT_STEEL_PROFILE_ENABLED', true),
         userAgent:
@@ -109,35 +170,46 @@ export async function resumeSession(taskId: string): Promise<{
         timeout: 900000,
         dimensions: { width: 1288, height: 891 },
       });
+      createdSessionId = session.id;
 
       log.info(`  Created new Steel session: ${session.id}`);
       rememberBenchmarkAnonSteelProfile(oldSession.agentId, session.profileId);
-      const debugUrl = `${session.debugUrl}?interactive=false`;
-      const wsUrl = `wss://connect.steel.dev?apiKey=${process.env.STEEL_API_KEY}&sessionId=${session.id}`;
+      const debugUrl = steelDebugUrl(session.debugUrl);
+      const wsUrl = steelCdpUrl(session.id);
 
-      if (!(await validateSessionConnection(wsUrl))) {
-        log.info(`  Session ${session.id} failed validation, releasing...`);
-        try {
-          await steel.sessions.release(session.id);
-        } catch (releaseErr) {
-          log.info(`  Failed to release invalid session: ${releaseErr}`);
-        }
-        lastError = new Error(`Session validation failed on attempt ${attempt}`);
-        continue;
+      if (!(await dependencies.validateConnection(wsUrl))) {
+        throw new Error(`Session validation failed on attempt ${attempt}`);
       }
 
-      await navigateToSavedUrl(wsUrl, oldSession.currentUrl);
-      await prisma.browserSession.update({
-        where: { id: taskId },
-        data: { sessionId: session.id, debugUrl, wsUrl, status: 'ACTIVE', closedAt: null },
+      await navigateToSavedUrl(wsUrl, savedUrl);
+      const replaced = await prisma.browserSession.updateMany({
+        where: { id: taskId, sessionId: oldSession.sessionId },
+        data: {
+          sessionId: session.id,
+          debugUrl,
+          wsUrl,
+          status: 'ACTIVE',
+          closedAt: null,
+          provider: 'steel',
+          ...(options.forceManagedRotation ? { proxyTier: 'residential' } : {}),
+        },
       });
+      if (replaced.count !== 1) throw new ConcurrentSessionReplacementError(taskId);
+      committed = true;
 
-      log.info(`Task resumed with new session ${session.id}`);
-      const savedUrl = hasValue(oldSession.currentUrl)
-        ? oldSession.currentUrl
-        : hasValue(oldSession.startUrl)
-          ? oldSession.startUrl
-          : undefined;
+      if (session.profileId && !profile.profileSource.startsWith('benchmark_anon')) {
+        await rememberProviderProfile(oldSession.contextId, 'steel', session.profileId).catch(
+          (profileError) => {
+            log.warn('Failed to persist Steel provider profile after session replacement', {
+              taskId,
+              profileId: session.profileId,
+              error: profileError instanceof Error ? profileError.message : String(profileError),
+            });
+          }
+        );
+      }
+
+      log.info(`Task moved to Steel session ${session.id}`);
       return {
         debugUrl,
         sessionId: session.id,
@@ -148,24 +220,48 @@ export async function resumeSession(taskId: string): Promise<{
         proxyLocation: proxyGeo,
         steelProfileId: session.profileId ?? profile.profileId ?? null,
         profileSource: profile.profileSource,
+        previousSessionId: oldSession.sessionId,
+        previousProvider,
       };
     } catch (error) {
+      if (!committed && createdSessionId !== null) {
+        const uncommittedSessionId = createdSessionId;
+        try {
+          await (dependencies.releaseSession ?? releaseSteelRemoteSession)(uncommittedSessionId);
+          createdSessionId = null;
+        } catch (releaseError) {
+          throw new SteelSessionCleanupError(uncommittedSessionId, releaseError);
+        }
+      }
+      if (error instanceof ConcurrentSessionReplacementError) throw error;
+
       const status =
         (error as Record<string, unknown>)?.status ??
         (error as Record<string, unknown>)?.statusCode;
       if (status === 429) {
-        const msg = error instanceof Error ? error.message : 'Steel session rate limit exceeded';
-        log.info(`  Steel rate limit (429): ${msg}`);
-        throw new SteelRateLimitError(msg);
+        const message =
+          error instanceof Error ? error.message : 'Steel session rate limit exceeded';
+        throw new SteelRateLimitError(message);
       }
-      log.info(
-        `  Attempt ${attempt} failed: ${error instanceof Error ? error.message : 'Unknown error'}`
-      );
       lastError = error instanceof Error ? error : new Error('Unknown error');
+      log.info(`  Steel session attempt ${attempt} failed: ${lastError.message}`);
+      if (!dropProxyCity && isInvalidSteelProxyConfiguration(error)) {
+        dropProxyCity = true;
+        rememberRejectedProxyCity(proxyGeo);
+        log.info('  Dropping unsupported Steel proxy city during replacement retry');
+      }
     }
   }
 
   throw new Error(
-    `Failed to resume session after ${MAX_SESSION_RETRIES} attempts: ${lastError?.message}`
+    `Failed to create Steel replacement after ${MAX_SESSION_RETRIES} attempts: ${lastError?.message}`
   );
+}
+
+export async function resumeSession(taskId: string): Promise<RecreatedSteelSession> {
+  return recreateSession(taskId, { forceManagedRotation: false });
+}
+
+export async function rotateSession(taskId: string): Promise<RecreatedSteelSession> {
+  return recreateSession(taskId, { forceManagedRotation: true });
 }

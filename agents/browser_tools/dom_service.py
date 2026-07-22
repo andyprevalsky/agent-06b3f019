@@ -13,7 +13,7 @@ import logging
 import math
 import random
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
@@ -310,6 +310,7 @@ class ActionHistory:
 
     def __init__(self):
         self._entries: List[ActionHistoryEntry] = []
+        self._next_step = 1
 
     async def record_action(
         self,
@@ -341,7 +342,7 @@ class ActionHistory:
         Returns:
             The recorded ActionHistoryEntry
         """
-        step = len(self._entries) + 1
+        step = self._next_step
 
         # Convert between index and coordinates
         coords_dict = None
@@ -390,6 +391,7 @@ class ActionHistory:
         )
 
         self._entries.append(entry)
+        self._next_step = step + 1
         logger.debug(f"Recorded action {step}: {action} (index={index}, coords={coords_dict})")
 
         return entry
@@ -398,9 +400,31 @@ class ActionHistory:
         """Get all entries as dicts for Rose API request."""
         return [entry.to_dict() for entry in self._entries]
 
+    def restore_entries(self, entries: Optional[List[Dict[str, Any]]]) -> None:
+        """Restore action history after a durable workflow pause.
+
+        Browser write approval ends the current Temporal activity and starts a
+        new one after the user responds.  Keeping the compact action entries
+        lets both the resumed browser model and the verifier see the real steps
+        that happened before the pause instead of treating the resumed page as
+        a brand-new session.
+        """
+        restored: List[ActionHistoryEntry] = []
+        allowed_fields = {entry_field.name for entry_field in fields(ActionHistoryEntry)}
+        for raw_entry in entries or []:
+            if not isinstance(raw_entry, dict):
+                continue
+            values = {key: value for key, value in raw_entry.items() if key in allowed_fields}
+            if not isinstance(values.get("step"), int) or not isinstance(values.get("action"), str):
+                continue
+            restored.append(ActionHistoryEntry(**values))
+        self._entries = restored
+        self._next_step = max((entry.step for entry in restored), default=0) + 1
+
     def clear(self) -> None:
         """Clear the action history."""
         self._entries = []
+        self._next_step = 1
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -882,7 +906,7 @@ class DOMService:
         except Exception as e:
             logger.warning(f"⚠️ [anti-detect] Failed to inject anti-detection script: {e}")
 
-    async def inject_passkeys(self, passkeys: List[Dict[str, Any]]) -> None:
+    async def inject_passkeys(self, passkeys: List[Dict[str, Any]]) -> int:
         """Seed a CDP virtual authenticator with cloud-custody passkeys.
 
         Each passkey dict must carry a DECRYPTED PKCS#8 private key (base64),
@@ -893,29 +917,30 @@ class DOMService:
         agent can also click "Sign in with a passkey" for gated flows.
         """
         if not passkeys:
-            return
+            return 0
         if self._webauthn_cdp is None:
-            logger.warning("⚠️ [passkey] no WebAuthn CDP session; cannot inject passkeys")
-            return
-        try:
-            result = await self._send_cdp_command(
-                self._webauthn_cdp,
-                "WebAuthn.addVirtualAuthenticator",
-                {
-                    "options": {
-                        "protocol": "ctap2",
-                        "transport": "internal",
-                        "hasResidentKey": True,
-                        "hasUserVerification": True,
-                        "isUserVerified": True,
-                        "automaticPresenceSimulation": True,
-                    }
-                },
-            )
-            self._passkey_authenticator_id = result.get("authenticatorId")
-        except Exception as e:
-            logger.warning(f"⚠️ [passkey] addVirtualAuthenticator failed: {e}")
-            return
+            raise RuntimeError("No WebAuthn CDP session is available for passkey injection")
+        if self._passkey_authenticator_id is None:
+            try:
+                result = await self._send_cdp_command(
+                    self._webauthn_cdp,
+                    "WebAuthn.addVirtualAuthenticator",
+                    {
+                        "options": {
+                            "protocol": "ctap2",
+                            "transport": "internal",
+                            "hasResidentKey": True,
+                            "hasUserVerification": True,
+                            "isUserVerified": True,
+                            "automaticPresenceSimulation": True,
+                        }
+                    },
+                )
+                self._passkey_authenticator_id = result.get("authenticatorId")
+            except Exception as e:
+                raise RuntimeError("Failed to create the browser passkey authenticator") from e
+            if not self._passkey_authenticator_id:
+                raise RuntimeError("Browser passkey authenticator did not return an id")
 
         seeded = 0
         for pk in passkeys:
@@ -923,6 +948,8 @@ class DOMService:
             private_key = pk.get("privateKey")
             rp_id = pk.get("rpId")
             if not credential_id or not private_key or not rp_id:
+                raise RuntimeError(f"Incomplete passkey payload for relying party {rp_id or 'unknown'}")
+            if credential_id in self._passkey_seed_counts:
                 continue
             credential: Dict[str, Any] = {
                 "credentialId": credential_id,
@@ -943,7 +970,7 @@ class DOMService:
                 self._passkey_seed_counts[credential_id] = int(pk.get("signCount") or 0)
                 seeded += 1
             except Exception as e:
-                logger.warning(f"⚠️ [passkey] addCredential failed for {rp_id}: {e}")
+                raise RuntimeError(f"Failed to inject passkey for {rp_id}") from e
         logger.info(f"🔑 [passkey] seeded {seeded} passkey credential(s) on virtual authenticator for the session")
         if seeded:
             counts = await self.read_passkey_signcounts()
@@ -955,6 +982,11 @@ class DOMService:
                 f"expected_count={len(expected_ids)} observed_count={len(observed_ids)} "
                 f"missing_count={len(missing)}"
             )
+            if missing:
+                raise RuntimeError(
+                    f"Browser passkey readback is missing {len(missing)} injected credential(s)"
+                )
+        return seeded
 
     async def read_passkey_signcounts(self) -> Dict[str, int]:
         """Return {credentialId: signCount} for the seeded authenticator.

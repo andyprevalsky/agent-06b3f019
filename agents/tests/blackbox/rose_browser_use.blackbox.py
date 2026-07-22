@@ -131,6 +131,20 @@ def test_rotate_ip_normalizes_and_preserves_reason():
         assert result["params"].get("reason"), result
 
 
+def test_rotate_ip_prompt_uses_fixed_cross_provider_ladder():
+    description = BROWSER_USE_TOOLS["rotate_ip"]["description"]
+    assert "first call" in description
+    assert "Kernel residential" in description
+    assert "second call" in description
+    assert "Kernel mobile" in description
+    assert "third call" in description
+    assert "Kernel to Steel" in description
+    assert "fourth call" in description
+    assert "another Steel residential" in description
+    assert "already began on Steel stays on Steel" in description
+    assert "if mobile" not in description.lower()
+
+
 def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
     prompt = build_browser_use_system_prompt(["click", "goto"])
     assert "# Role" in prompt
@@ -146,6 +160,8 @@ def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
     assert "call exactly one available browser action tool" in prompt
     assert "# Screenshot Tool" not in prompt
     assert "Use the `screenshot` action" not in prompt
+    assert "do not open cancellation, return, edit, or modification flows" in prompt
+    assert "call attempt_completion promptly" in prompt
 
 
 def test_build_browser_use_system_prompt_does_not_advertise_extract():
@@ -239,6 +255,8 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     assert auth_help["input_schema"]["required"] == []
 
     payment = tools[2]
+    assert "only if checkout requires you to enter new card details" in payment["description"]
+    assert "valid saved payment method is already selected" in payment["description"]
     line_items = payment["input_schema"]["properties"]["line_items"]
     assert line_items["items"]["required"] == [
         "name",
@@ -254,6 +272,9 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
     write_lock = tools[3]
     purchase_item = write_lock["input_schema"]["properties"]["purchase"]["properties"]["items"]["items"]
     assert purchase_item["required"] == ["title", "rating", "review_count", "product_url"]
+    review_count_description = purchase_item["properties"]["review_count"]["description"]
+    assert "followed by 'reviews' or 'ratings'" in review_count_description
+    assert "312 reviews" in review_count_description
     assert "anyOf" not in write_lock["input_schema"]
     assert "oneOf" not in write_lock["input_schema"]
     assert "allOf" not in write_lock["input_schema"]
@@ -1684,6 +1705,12 @@ async def run_all_tests():
     r.record("normalize_click_no_index_raises", test_normalize_click_without_index_raises)
     r.record("normalize_click_coords_missing_y_raises", test_normalize_click_coordinates_missing_y_raises)
     r.record("normalize_non_dict_action_raises", test_normalize_non_dict_action_raises)
+    r.record("advertised_tools_are_normalizable", test_every_advertised_tool_is_normalizable)
+    r.record("rotate_ip_preserves_reason", test_rotate_ip_normalizes_and_preserves_reason)
+    r.record(
+        "rotate_ip_cross_provider_ladder",
+        test_rotate_ip_prompt_uses_fixed_cross_provider_ladder,
+    )
 
     r.record("params_seconds_to_time_ms", test_params_seconds_to_time_ms)
     r.record("params_down_true_direction", test_params_down_true_to_direction_and_amount)

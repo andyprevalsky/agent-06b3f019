@@ -541,6 +541,14 @@ async def anthropic_api_key_complete(
                     raise RoseAuthError(f"Anthropic {status}: {error_body[:2000]}", status=status)
                 if status == 429:
                     raise RoseRateLimitError(f"Anthropic 429: {error_body[:2000]}", status=status)
+                if status == 400 and re.search(
+                    r"credit balance is too low|out of credits|purchase credits",
+                    error_body,
+                    re.IGNORECASE,
+                ):
+                    raise RosePaymentRequiredError(
+                        f"Anthropic 400 (out of credits): {error_body[:2000]}", status=status
+                    )
                 if status == 400:
                     raise RoseInvalidRequest(f"Anthropic 400: {error_body[:2000]}", status=status)
                 if status >= 500:

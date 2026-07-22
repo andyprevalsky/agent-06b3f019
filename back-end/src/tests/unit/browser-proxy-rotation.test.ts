@@ -2,15 +2,12 @@
 /**
  * Unit tests for the rotate_ip building blocks that need no DB or Kernel SDK:
  *  - the mobile proxy-candidate builder (geo relaxation + type-prefixed keys)
- *  - the escalation-ladder tier selector (2× residential → mobile, gate-aware)
+ *  - the deterministic Kernel residential → mobile → Steel ladder
  */
 import assert from 'node:assert';
+import { rotateProxySchema } from '../../domains/browser-session/types';
 import { kernelProxyCandidates } from '../../providers/browser/kernelProxy';
-import {
-  selectRotationTier,
-  ROTATION_CAP,
-  RESIDENTIAL_ROTATIONS,
-} from '../../providers/browserSessionResume';
+import { ROTATION_CAP, selectRotationStep } from '../../providers/browser/rotation';
 
 function testMobileCandidates(): void {
   const candidates = kernelProxyCandidates(
@@ -47,23 +44,55 @@ function testResidentialUnchanged(): void {
 
 function testRotationTierLadder(): void {
   assert.strictEqual(ROTATION_CAP, 4);
-  assert.strictEqual(RESIDENTIAL_ROTATIONS, 2);
+  assert.deepStrictEqual(selectRotationStep(1, 'kernel'), {
+    provider: 'kernel',
+    proxyType: 'residential',
+    recoveryAction: 'ip_rotated',
+  });
+  assert.deepStrictEqual(selectRotationStep(2, 'kernel'), {
+    provider: 'kernel',
+    proxyType: 'mobile',
+    recoveryAction: 'ip_rotated',
+  });
+  assert.deepStrictEqual(selectRotationStep(3, 'kernel'), {
+    provider: 'steel',
+    proxyType: 'residential',
+    recoveryAction: 'provider_switched',
+  });
+  assert.deepStrictEqual(selectRotationStep(4, 'steel'), {
+    provider: 'steel',
+    proxyType: 'residential',
+    recoveryAction: 'ip_rotated',
+  });
 
-  // Mobile enabled: calls 1-2 residential, 3-4 mobile.
-  assert.strictEqual(selectRotationTier(1, true), 'residential');
-  assert.strictEqual(selectRotationTier(2, true), 'residential');
-  assert.strictEqual(selectRotationTier(3, true), 'mobile');
-  assert.strictEqual(selectRotationTier(4, true), 'mobile');
+  // A run that starts on Steel stays on Steel; provider rotation is one-way.
+  assert.deepStrictEqual(selectRotationStep(1, 'steel'), {
+    provider: 'steel',
+    proxyType: 'residential',
+    recoveryAction: 'ip_rotated',
+  });
+  assert.throws(() => selectRotationStep(0, 'kernel'), RangeError);
+  assert.throws(() => selectRotationStep(ROTATION_CAP + 1, 'steel'), RangeError);
+}
 
-  // Mobile disabled: later rotations stay residential (still a fresh IP).
-  assert.strictEqual(selectRotationTier(3, false), 'residential');
-  assert.strictEqual(selectRotationTier(4, false), 'residential');
+function testRotationRequestSchema(): void {
+  const taskId = '00000000-0000-4000-8000-000000000001';
+  assert.deepStrictEqual(rotateProxySchema.parse({ task_id: taskId }), { task_id: taskId });
+  assert.deepStrictEqual(
+    rotateProxySchema.parse({ task_id: taskId, current_url: 'https://example.com/current' }),
+    { task_id: taskId, current_url: 'https://example.com/current' }
+  );
+  assert.strictEqual(
+    rotateProxySchema.safeParse({ task_id: taskId, current_url: '' }).success,
+    false
+  );
 }
 
 function main(): void {
   testMobileCandidates();
   testResidentialUnchanged();
   testRotationTierLadder();
+  testRotationRequestSchema();
   process.stdout.write('PASS rotate_ip mobile candidates + escalation ladder\n');
 }
 

@@ -71,6 +71,10 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import crypto from 'crypto';
 import { prisma } from '../../providers/database';
+import {
+  __resetAnthropicApiKeyCooldown,
+  isAnthropicApiKeyOnCooldown,
+} from '../../providers/computeCredentials';
 import { withComputePoolLock } from './compute-pool-lock.testkit';
 config();
 
@@ -321,7 +325,7 @@ const INFRA_URL_PATTERNS = [
   'e2b.app',
   'stripe.com',
   'parallel.ai',
-  'api.steel.dev',
+  'connect.steelbrowser.com',
   'perplexity.ai',
   'exa.ai',
   'vapi.ai',
@@ -627,6 +631,10 @@ async function testAnthropicApiKeyCooldown_markThenOnCooldown() {
     headers: apiKeyHeaders(),
   });
   assertStatus(status.status, 200, status.data);
+  assert(
+    typeof (status.data as { configured?: unknown }).configured === 'boolean',
+    'anthropic availability should report whether the running backend configured the key'
+  );
   assert(
     (status.data as { onCooldown?: boolean }).onCooldown === true,
     'anthropic key should report on-cooldown after being marked rate-limited'
@@ -4002,6 +4010,19 @@ async function testComputeRotation_poolRotatesAcrossProviders() {
   }
 }
 
+async function testComputeTokenDuplicateProviderConstraint_returns400() {
+  const caller = await createAnonSession();
+  const response = await request(
+    `${BASE_URL}/api/integrations/compute-code/credentials/token?tokenType=gpt&tokenType=claude`,
+    { headers: apiKeyHeaders(caller.userId) }
+  );
+  assertStatus(response.status, 400, response.data);
+  assert(
+    (response.data as { error?: string }).error === 'tokenType must be provided at most once',
+    `Expected duplicate tokenType validation error, got ${JSON.stringify(response.data)}`
+  );
+}
+
 async function testComputeTokenLineageSemaphore_capsLiveGptLeases() {
   const existingPoolIds = await existingComputePoolIds();
   const caller = await createAnonSession();
@@ -4175,6 +4196,66 @@ async function testComputeTokenFastCacheAffinity_pinsProviderFamily() {
     );
   } finally {
     await prisma.computeTokenLineageLease.deleteMany({ where: { lineageKey: { in: lineages } } });
+    await prisma.computeTokenFastCacheAffinity.deleteMany({ where: { affinityKey } });
+    await cleanupIntegrations([gptPool.id, claudePool.id]);
+  }
+}
+
+async function testComputeTokenProviderConstraint_overridesClaudeAffinity() {
+  const existingPoolIds = await existingComputePoolIds();
+  const caller = await createAnonSession();
+  const gptOwner = await createAnonSession();
+  const claudeOwner = await createAnonSession();
+  await completeOnboarding(caller.userId);
+  await completeOnboarding(gptOwner.userId);
+  await completeOnboarding(claudeOwner.userId);
+
+  const affinityKey = `test-provider-constraint-affinity-${crypto.randomUUID()}`;
+  const lineageKey = `test-provider-constraint-lineage-${crypto.randomUUID()}`;
+  const gptPool = await seedGptIntegration(gptOwner.userId, {
+    poolingEnabled: true,
+    lastUsedAt: new Date(Date.now() - 60_000),
+  });
+  const claudePool = await seedClaudeIntegration(claudeOwner.userId, {
+    poolingEnabled: true,
+    lastUsedAt: new Date(Date.now() - 120_000),
+  });
+
+  await prisma.computeTokenFastCacheAffinity.create({
+    data: { affinityKey, userId: caller.userId, tokenType: 'claude' },
+  });
+
+  try {
+    const excluded = existingPoolIds.filter((id) => id !== gptPool.id && id !== claudePool.id);
+    const headers: Record<string, string> = {
+      ...apiKeyHeaders(caller.userId),
+      'X-Force-Pool': 'true',
+    };
+    if (excluded.length > 0) headers['X-Exclude-Pool-Tokens'] = excluded.join(',');
+    const params = new URLSearchParams({
+      lineageKey,
+      agentId: lineageKey,
+      rootAgentId: lineageKey,
+      fastCacheAffinityKey: affinityKey,
+      tokenType: 'gpt',
+    });
+    const response = await request(
+      `${BASE_URL}/api/integrations/compute-code/credentials/token?${params}`,
+      { headers }
+    );
+    assertStatus(response.status, 200, response.data);
+    const body = response.data as { type: string; poolTokenId?: string; lineageKey?: string };
+    assert(body.type === 'gpt', `Expected GPT-only lease, got ${JSON.stringify(body)}`);
+    assert(
+      body.poolTokenId === gptPool.id,
+      `Expected GPT pool ${gptPool.id}, got ${body.poolTokenId}`
+    );
+    assert(
+      body.lineageKey === lineageKey,
+      `Expected lineage ${lineageKey}, got ${body.lineageKey}`
+    );
+  } finally {
+    await prisma.computeTokenLineageLease.deleteMany({ where: { lineageKey } });
     await prisma.computeTokenFastCacheAffinity.deleteMany({ where: { affinityKey } });
     await cleanupIntegrations([gptPool.id, claudePool.id]);
   }
@@ -4538,7 +4619,7 @@ interface SeededSession {
 
 async function seedClaudeCodeSession(
   agentId: string,
-  source: 'user' | 'pool',
+  source: 'user' | 'pool' | 'anthropic',
   poolTokenId: string | null
 ): Promise<SeededSession> {
   const taskId = crypto.randomUUID();
@@ -4725,6 +4806,40 @@ async function testClaudeCodeBillingFailure_marksPoolTokenLongCooldown() {
     await cleanupSessions([session.taskId]);
     await prisma.agent.delete({ where: { id: dummyAgent.id } });
     await cleanupIntegrations([poolInt.id]);
+  }
+}
+
+async function testClaudeCodeBillingFailure_marksSharedAnthropicCooldown() {
+  const caller = await createAnonSession();
+  const dummyAgent = await prisma.agent.create({
+    data: {
+      id: crypto.randomUUID(),
+      userId: caller.userId,
+      goal: 'dummy-for-shared-anthropic-cooldown-test',
+      status: 'STARTING_UP',
+    },
+  });
+  const session = await seedClaudeCodeSession(dummyAgent.id, 'anthropic', null);
+
+  await __resetAnthropicApiKeyCooldown();
+  try {
+    const banner =
+      'Your credit balance is too low to access the Anthropic API. ' +
+      'Please go to Plans & Billing to upgrade or purchase credits.\n';
+    const res = await request(`${BASE_URL}/api/claude-code-session/${session.taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ output: banner }),
+    });
+    assertStatus(res.status, 200, res.data);
+    assert(
+      await isAnthropicApiKeyOnCooldown(),
+      'shared Anthropic API key must enter cooldown after the captured billing banner'
+    );
+  } finally {
+    await cleanupSessions([session.taskId]);
+    await prisma.agent.delete({ where: { id: dummyAgent.id } });
+    await __resetAnthropicApiKeyCooldown();
   }
 }
 
@@ -5674,6 +5789,10 @@ async function runAll() {
       name: 'GET /claude-code/credentials/token no onboarding -> 404',
       fn: testClaudeCodeToken_noOnboarding,
     },
+    {
+      name: 'GET /compute-code/credentials/token duplicate tokenType -> 400',
+      fn: testComputeTokenDuplicateProviderConstraint_returns400,
+    },
   ];
 
   console.log(
@@ -5734,6 +5853,10 @@ async function runAll() {
       fn: testComputeTokenFastCacheAffinity_pinsProviderFamily,
     },
     {
+      name: 'compute token provider constraint -- overrides Claude affinity',
+      fn: testComputeTokenProviderConstraint_overridesClaudeAffinity,
+    },
+    {
       name: 'rotation -- auto-expires after cooldown (time-windowed)',
       fn: testRotation_autoExpiresAfterCooldown,
     },
@@ -5765,6 +5888,10 @@ async function runAll() {
     {
       name: 'claude-code billing-failure -- pool token marked rate-limited with long cooldown',
       fn: testClaudeCodeBillingFailure_marksPoolTokenLongCooldown,
+    },
+    {
+      name: 'claude-code billing-failure -- shared Anthropic key enters cooldown',
+      fn: testClaudeCodeBillingFailure_marksSharedAnthropicCooldown,
     },
   ];
 

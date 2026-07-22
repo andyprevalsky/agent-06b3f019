@@ -451,10 +451,10 @@ async def resume_browser_session(config: Any, task_id: str) -> Dict[str, Any]:
     raise Exception(f"Failed to resume session: {response.text}")
 
 
-async def rotate_browser_proxy(config: Any, task_id: str) -> Dict[str, Any]:
+async def rotate_browser_proxy(config: Any, task_id: str, current_url: str) -> Dict[str, Any]:
     """Rotate the browser session's outbound IP (rotate_ip tool).
 
-    Returns the resume-shaped session (new ws_url on the same profile) plus
+    Returns the resume-shaped replacement session (including provider metadata) plus
     escalation state (proxy_tier, rotations_used, rotations_remaining,
     rotation_message). On a 409 the rotation budget is exhausted — surfaced to the
     caller as {"exhausted": True, ...} so the agent can stop rotating.
@@ -463,7 +463,7 @@ async def rotate_browser_proxy(config: Any, task_id: str) -> Dict[str, Any]:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/rotate-proxy",
             headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
-            json={"task_id": task_id},
+            json={"task_id": task_id, "current_url": current_url},
         )
     if response.status_code in [200, 201]:
         return response.json()
@@ -487,6 +487,35 @@ async def fetch_auth_options(config: Any, user_id: str, realm: str) -> Dict[str,
         data = response.json()
         return data if isinstance(data, dict) else {}
     raise RuntimeError(f"Failed to fetch auth options for {realm}: HTTP {response.status_code} {response.text[:200]}")
+
+
+async def prepare_browser_auth(
+    config: Any,
+    *,
+    user_id: str,
+    session_id: str,
+    target_url: str,
+) -> Dict[str, Any]:
+    """Prepare all saved browser credentials before entering a new auth realm."""
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/browser-session/{session_id}/prepare-auth",
+            headers={
+                "x-api-key": config.backend.api_key or "",
+                "x-user-id": user_id,
+                "Content-Type": "application/json",
+            },
+            json={"target_url": target_url},
+        )
+    if response.status_code in (200, 201):
+        data = response.json()
+        if not isinstance(data, dict):
+            raise RuntimeError("Browser credential preparation returned a non-object payload")
+        return data
+    raise RuntimeError(
+        f"Failed to prepare browser credentials for {target_url}: "
+        f"HTTP {response.status_code} {response.text[:300]}"
+    )
 
 
 async def mark_steel_session_auth_failed(

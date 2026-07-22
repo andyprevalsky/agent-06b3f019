@@ -184,6 +184,34 @@ test('missing-Codex bypass warning reports the usable Claude count', async () =>
   assert(warning > bypass, 'expected its warning to report the usable Claude count');
 });
 
+test('missing-Claude bypass requires the caller-validated Anthropic fallback opt-in', async () => {
+  const source = readSeedLocalSource();
+  const zeroClaude = source.indexOf('if (usableClaudeCodeCount === 0)');
+  const bypass = source.indexOf("process.env.SEED_ALLOW_MISSING_CLAUDE_CODE === '1'", zeroClaude);
+  const keyValidation = source.indexOf('process.env.ANTHROPIC_API_KEY?.trim()', bypass);
+  const emptyKeyFailure = source.indexOf(
+    'SEED_ALLOW_MISSING_CLAUDE_CODE=1 requires a non-empty ANTHROPIC_API_KEY',
+    keyValidation
+  );
+  const warning = source.indexOf('caller-validated', bypass);
+  const fallback = source.indexOf('ANTHROPIC_API_KEY fallback', warning);
+  const strictFailure = source.indexOf(
+    "throw new Error('No usable claude_code integrations after sync')",
+    bypass
+  );
+
+  assert(zeroClaude > 0, 'expected an explicit zero-Claude availability check');
+  assert(bypass > zeroClaude, 'expected an explicit missing-Claude opt-in');
+  assert(keyValidation > bypass, 'expected the fallback to validate the Anthropic API key');
+  assert(emptyKeyFailure > keyValidation, 'expected an empty Anthropic API key to fail closed');
+  assert(warning > emptyKeyFailure, 'expected validation before the fallback warning');
+  assert(fallback > warning, 'expected the runtime replacement to be the Anthropic API key');
+  assert(
+    strictFailure > fallback,
+    'expected missing Claude OAuth to fail closed without the opt-in'
+  );
+});
+
 (async () => {
   let failed = 0;
   for (const { name, fn } of tests) {
