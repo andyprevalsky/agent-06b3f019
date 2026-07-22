@@ -8,11 +8,11 @@
  * webhook (external), and — only when AUTO_RCA_ENABLED=1 — fires a GitHub
  * `repository_dispatch` straight to GitHub's API. No Prisma, no internal route.
  *
- * Dedup is an in-memory, per-process throttle (no DB): the same failure
- * signature pages at most once per THROTTLE_WINDOW_MS per backend instance, so
- * a crash-looping error can't firehose #errors. This is intentionally simple —
- * "get all the failures first, tighten if noisy". At 10k agents this is O(1)
- * per failure and holds no per-agent state (bounded map, opportunistic GC).
+ * With Auto RCA enabled, GitHub owns the one-PR/one-Slack-card lifecycle. This
+ * process dispatches the stable agent ID before creating any Slack side effect;
+ * duplicate dispatches are reconciled downstream. The in-memory throttle is
+ * best-effort noise control, never a correctness boundary. At 10k agents this
+ * stays O(1) per failure with a bounded map.
  *
  * `alertError` is fire-and-forget and NEVER throws — it lives in callers' error
  * paths and must not turn a handled failure into an unhandled one.
@@ -213,16 +213,11 @@ async function postSlackBot(
 }
 
 /**
- * Fire the GitHub repository_dispatch that launches the auto-RCA agent. The
- * Slack message handle (`slackTs`/`slackChannel`) rides in the payload so the
- * workflow can edit that same card through its lifecycle — state travels with
- * the dispatch, never through our own DB.
+ * Fire the GitHub repository_dispatch that launches the auto-RCA lifecycle.
+ * GitHub owns Slack creation so a retry after a lost completion cannot repeat a
+ * backend-created message.
  */
-async function dispatchRca(
-  input: AlertErrorInput,
-  slackTs?: string,
-  slackChannel?: string
-): Promise<boolean> {
+async function dispatchRca(input: AlertErrorInput, slackChannel?: string): Promise<boolean> {
   const token = process.env.GITHUB_DISPATCH_TOKEN;
   const repo = process.env.GITHUB_DISPATCH_REPO ?? 'Rose-Ai-Labs/rose';
   if (token === undefined || token === '') {
@@ -244,7 +239,6 @@ async function dispatchRca(
         event_type: 'agent-failure',
         client_payload: {
           agent_id: input.agentId ?? '',
-          slack_ts: slackTs ?? '',
           slack_channel: slackChannel ?? '',
         },
       }),
@@ -265,24 +259,43 @@ async function dispatchRca(
 }
 
 async function sendAlert(input: AlertErrorInput): Promise<void> {
-  const key = fingerprint(input.source, input.message);
+  // Keep ordinary alerts agent-scoped, but cap auto-RCA dispatches by incident
+  // signature so one provider outage cannot launch one workflow per agent.
+  const signature = fingerprint(input.source, input.message);
+  const key = `alert:${input.agentId ?? '-'}:${signature}`;
   if (!acquireAlertSlot(key, Date.now())) return;
 
+  const rcaKey = `rca:${signature}`;
+  let rcaAcquired = false;
   let delivered = false;
   try {
-    const payload = buildSlackPayload(input);
     const botToken = process.env.SLACK_BOT_TOKEN;
     const channelId = process.env.SLACK_ERROR_CHANNEL_ID;
     const webhook = process.env.SLACK_ERROR_WEBHOOK_URL;
 
+    if (
+      process.env.AUTO_RCA_ENABLED === '1' &&
+      input.agentId !== undefined &&
+      input.agentId !== ''
+    ) {
+      rcaAcquired = acquireAlertSlot(rcaKey, Date.now());
+      if (rcaAcquired) {
+        const dispatched = await dispatchRca(input, channelId);
+        finishAlertSlot(rcaKey, dispatched, Date.now());
+        rcaAcquired = false;
+        if (dispatched) {
+          delivered = true;
+          return;
+        }
+      }
+    }
+
+    const payload = buildSlackPayload(input);
+
     // Prefer the bot token: it yields an editable message handle for the lifecycle
     // card. Fall back to an incoming webhook (post-only, no lifecycle edits).
-    let slackTs: string | undefined;
-    let slackChannel: string | undefined;
     if (botToken !== undefined && botToken !== '' && channelId !== undefined && channelId !== '') {
       const posted = await postSlackBot(botToken, channelId, payload);
-      slackTs = posted.ts;
-      slackChannel = posted.channel ?? channelId;
       delivered = posted.ts !== undefined && posted.ts !== '';
     } else if (webhook !== undefined && webhook !== '') {
       delivered = await postSlackWebhook(webhook, payload);
@@ -293,15 +306,11 @@ async function sendAlert(input: AlertErrorInput): Promise<void> {
         agentId: input.agentId,
       });
     }
-
-    if (
-      process.env.AUTO_RCA_ENABLED === '1' &&
-      input.agentId !== undefined &&
-      input.agentId !== ''
-    ) {
-      delivered = (await dispatchRca(input, slackTs, slackChannel)) || delivered;
-    }
   } finally {
+    if (rcaAcquired) {
+      // Exceptions during dispatch must not suppress the incident retry.
+      finishAlertSlot(rcaKey, false, Date.now());
+    }
     // Failed transports remain eligible for the next occurrence to retry.
     finishAlertSlot(key, delivered, Date.now());
   }

@@ -1,24 +1,13 @@
 name: Auto RCA
+run-name: >-
+  Auto RCA · ${{ github.event.client_payload.agent_id || inputs.agent_id ||
+  github.event.issue.title || github.run_id }}
 
-# Launches the Claude Code harness to root-cause a production agent failure and
-# open a DRAFT PR with a real repro + fix + cemented test.
-#
-# WHERE THE HARNESS RUNS vs WHERE THE REPRO RUNS
-# ----------------------------------------------
-# The coding harness (Claude running /rca — read code, edit, open PR) runs HERE,
-# on a GitHub-hosted runner via `anthropics/claude-code-action@v1` — the same
-# harness `claude-code-review-fallback.yml` uses. We do NOT rebuild an agent.
-#
-# The full-resource REPRODUCTION is a backend the harness *calls*, not a place it
-# lives. When /rca needs to reproduce a live agent failure it runs
-# `scripts/run-bench <task>`, which clones a credentialed warm Fly box (Temporal
-# Cloud + LLM/compute creds + `run.sh` full stack), runs the repro, and tears
-# down. The runner just needs FLY_API_TOKEN to drive it — the creds live on the
-# Fly image, not here. So the harness can reproduce ANY failure at full fidelity
-# without us re-hosting the stack in CI.
-#
-# Inert until AUTO_RCA_ENABLED=1 turns on the dispatch in errorAlert.ts /
-# error_alert.py — safe to merge dormant.
+# State machine:
+# failure -> one draft PR + one Slack card -> running/revising -> blocked|ready
+# -> top-level `/rca ...` Conversation comment -> revising -> blocked|ready
+# -> human merge -> shipped, or close without merge -> cancelled. A trusted
+# verifier, not investigator prose, owns every transition out of draft.
 
 on:
   repository_dispatch:
@@ -29,282 +18,400 @@ on:
         description: Failing agent ID to RCA
         required: true
         type: string
+  issue_comment:
+    types: [created]
 
 concurrency:
-  # One RCA run per agent — a re-dispatch supersedes an in-flight run for the
-  # same agent, and distinct agents never contend.
-  group: auto-rca-${{ github.event.client_payload.agent_id || inputs.agent_id }}
-  cancel-in-progress: true
+  group: "auto-rca-${{ github.event.issue.title || format('auto-RCA: Production agent failure {0}', github.event.client_payload.agent_id || inputs.agent_id || github.run_id) }}"
+  cancel-in-progress: false
 
 jobs:
   rca:
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/rca'))
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
     permissions:
-      contents: write
-      pull-requests: write
-      issues: write
-      id-token: write
       actions: read
+      contents: write
+      issues: write
+      pull-requests: write
 
     env:
-      AGENT_ID: ${{ github.event.client_payload.agent_id || inputs.agent_id }}
-      # Never promote repository_dispatch free text into the privileged prompt.
-      # These trusted values are generated from the validated UUID below.
-      FAILURE_SOURCE: agent_workflow
-      FAILURE_TITLE: Production agent failure
-      GH_TOKEN: ${{ github.token }}
-      # Prod evidence.
-      BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
-      CLICKHOUSE_ENDPOINT: ${{ secrets.CLICKHOUSE_ENDPOINT }}
-      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
-      CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
-      # Drives the fleet for full-resource repro (`scripts/run-bench`).
-      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-      PROD_BACKEND_URL: https://navi-j9a9.onrender.com
-      # Slack lifecycle card — the emitter posts the initial message and passes
-      # its handle here so we edit that SAME message through the lifecycle.
-      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-      SLACK_ERROR_CHANNEL_ID: ${{ secrets.SLACK_ERROR_CHANNEL_ID }}
+      INITIAL_AGENT_ID: ${{ github.event.client_payload.agent_id || inputs.agent_id }}
       DISPATCH_SLACK_TS: ${{ github.event.client_payload.slack_ts }}
       DISPATCH_SLACK_CHANNEL: ${{ github.event.client_payload.slack_channel }}
-      # The broker runs from a root-owned path, but operates on this checkout.
+      PROD_BACKEND_URL: https://navi-j9a9.onrender.com
       AUTO_RCA_ROOT_DIR: ${{ github.workspace }}
       AUTO_RCA_GATE_STATE_DIR: /var/lib/rose-auto-rca/${{ github.run_id }}
 
     steps:
-      - name: Validate dispatch payload
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! [[ "${AGENT_ID:-}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
-            echo "agent_id must be a UUID — refusing untrusted dispatch payload." >&2
-            exit 1
-          fi
-          if [ -n "${DISPATCH_SLACK_TS:-}" ] && ! [[ "$DISPATCH_SLACK_TS" =~ ^[0-9]{10,}\.[0-9]{6}$ ]]; then
-            echo "slack_ts must be a Slack message timestamp." >&2
-            exit 1
-          fi
-          if [ -n "${DISPATCH_SLACK_CHANNEL:-}" ] && ! [[ "$DISPATCH_SLACK_CHANNEL" =~ ^[A-Z0-9]{9,32}$ ]]; then
-            echo "slack_channel must be a Slack channel ID." >&2
-            exit 1
-          fi
-          printf 'FAILURE_TITLE=Production agent failure %s\n' "$AGENT_ID" >> "$GITHUB_ENV"
-          printf 'SLACK_TS=%s\n' "${DISPATCH_SLACK_TS:-}" >> "$GITHUB_ENV"
-          printf 'SLACK_CHANNEL=%s\n' "${DISPATCH_SLACK_CHANNEL:-}" >> "$GITHUB_ENV"
-
-      - name: Checkout main
+      - name: Checkout trusted lifecycle code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: main
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Install trusted RCA lifecycle code
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo install -o root -g root -m 0555 scripts/auto-rca-tool /usr/local/bin/rose-auto-rca-tool
+          sudo install -o root -g root -m 0444 .github/auto-rca-prompt.txt /usr/local/share/rose-auto-rca-prompt.txt
+          sudo install -d -o root -g root -m 0700 "$AUTO_RCA_GATE_STATE_DIR"
+
+      - name: Resolve and validate lifecycle context
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_PR_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          REVIEW_FEEDBACK: ${{ github.event.comment.body }}
+          DEFAULT_SLACK_CHANNEL: ${{ secrets.SLACK_ERROR_CHANNEL_ID }}
+        run: |
+          set -euo pipefail
+          uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+          extract_marker() {
+            printf '%s' "$1" | grep -oE '<!-- rca-slack ts=[^ ]* channel=[^ ]*( agent=[^ ]+ run=[^ ]+)? -->' | head -1 || true
+          }
+          if [ "$EVENT_NAME" = issue_comment ]; then
+            [[ "$COMMENT_PR_NUMBER" =~ ^[0-9]+$ ]] || { echo "Invalid PR number" >&2; exit 1; }
+            printf '%s' "$REVIEW_FEEDBACK" | head -1 | grep -Eq '^/rca([[:space:]]|$)' || {
+              echo "Feedback must start with an exact /rca command" >&2; exit 1;
+            }
+            [ "${#REVIEW_FEEDBACK}" -le 8000 ] || { echo "RCA feedback is too long" >&2; exit 1; }
+            permission="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$COMMENT_AUTHOR/permission" --jq '.permission')"
+            case "$permission" in admin|maintain) ;; *) echo "RCA feedback requires maintain permission" >&2; exit 1 ;; esac
+            pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$COMMENT_PR_NUMBER")"
+            [ "$(printf '%s' "$pr" | jq -r '.state')" = open ] || { echo "RCA PR is not open" >&2; exit 1; }
+            [ "$(printf '%s' "$pr" | jq -r '.base.ref')" = main ] || { echo "RCA PR must target main" >&2; exit 1; }
+            [ "$(printf '%s' "$pr" | jq -r '.head.repo.full_name')" = "$GITHUB_REPOSITORY" ] || { echo "Fork RCA PRs are not trusted" >&2; exit 1; }
+            title="$(printf '%s' "$pr" | jq -r '.title')"
+            agent_id="${title#auto-RCA: Production agent failure }"
+            [[ "$agent_id" =~ $uuid_re ]] || { echo "RCA PR title has no exact agent UUID" >&2; exit 1; }
+            [ "$title" = "auto-RCA: Production agent failure $agent_id" ] || { echo "RCA PR title is not canonical" >&2; exit 1; }
+            short_id="$(printf '%s' "$agent_id" | tr -cd 'a-zA-Z0-9' | cut -c1-12)"
+            branch="$(printf '%s' "$pr" | jq -r '.head.ref')"
+            if [ "$branch" != "auto-rca/$agent_id" ] && ! [[ "$branch" =~ ^auto-rca/${short_id}-[0-9]+$ ]]; then
+              echo "RCA branch does not match its agent" >&2; exit 1
+            fi
+            body="$(printf '%s' "$pr" | jq -r '.body // ""')"
+            marker="$(extract_marker "$body")"
+            marker_agent="$(printf '%s' "$marker" | sed -nE 's/.* agent=([^ ]+) run=.*/\1/p')"
+            marker_run="$(printf '%s' "$marker" | sed -nE 's/.* run=([^ ]+) -->/\1/p')"
+            [ -z "$marker_agent" ] || [ "$marker_agent" = "$agent_id" ] || { echo "RCA marker agent mismatch" >&2; exit 1; }
+            [ -z "$marker_run" ] || [[ "$marker_run" =~ ^[0-9]+$ ]] || { echo "RCA marker run is invalid" >&2; exit 1; }
+            slack_ts="$(printf '%s' "$marker" | sed -nE 's/.*ts=([^ ]*).*/\1/p')"
+            slack_channel="$(printf '%s' "$marker" | sed -nE 's/.*channel=([^ ]*).*/\1/p')"
+            pr_url="$(printf '%s' "$pr" | jq -r '.html_url')"
+            checkout_ref="refs/pull/$COMMENT_PR_NUMBER/head"
+            read -r mode noop < <(EVENT_NAME="$EVENT_NAME" /usr/local/bin/rose-auto-rca-tool dispatch-plan)
+          else
+            agent_id="${INITIAL_AGENT_ID:-}"
+            [[ "$agent_id" =~ $uuid_re ]] || { echo "agent_id must be a UUID" >&2; exit 1; }
+            title="auto-RCA: Production agent failure $agent_id"
+            open_pr_pages="$(gh api --paginate --slurp \
+              "repos/$GITHUB_REPOSITORY/pulls?state=open&base=main&per_page=100")"
+            matching_prs="$(printf '%s' "$open_pr_pages" | AGENT_ID="$agent_id" \
+              /usr/local/bin/rose-auto-rca-tool select-agent-prs)"
+            existing="$(printf '%s' "$matching_prs" | jq -c '.[0] // empty')"
+            if [ -n "$existing" ]; then
+              branch="$(printf '%s' "$existing" | jq -r '.headRefName')"
+              short_id="$(printf '%s' "$agent_id" | tr -cd 'a-zA-Z0-9' | cut -c1-12)"
+              if [ "$branch" != "auto-rca/$agent_id" ] && ! [[ "$branch" =~ ^auto-rca/${short_id}-[0-9]+$ ]]; then
+                echo "Existing RCA branch does not match its agent" >&2; exit 1
+              fi
+              body="$(printf '%s' "$existing" | jq -r '.body // ""')"
+              marker="$(extract_marker "$body")"
+              marker_agent="$(printf '%s' "$marker" | sed -nE 's/.* agent=([^ ]+) run=.*/\1/p')"
+              [ -z "$marker_agent" ] || [ "$marker_agent" = "$agent_id" ] || { echo "Existing RCA marker agent mismatch" >&2; exit 1; }
+              slack_ts="$(printf '%s' "$marker" | sed -nE 's/.*ts=([^ ]*).*/\1/p')"
+              slack_channel="$(printf '%s' "$marker" | sed -nE 's/.*channel=([^ ]*).*/\1/p')"
+              pr_url="$(printf '%s' "$existing" | jq -r '.url')"
+              checkout_ref="$branch"
+              existing_is_draft="$(printf '%s' "$existing" | jq -r '.isDraft')"
+              read -r mode noop < <(EVENT_NAME="$EVENT_NAME" EXISTING_PR_FOUND=true \
+                EXISTING_PR_IS_DRAFT="$existing_is_draft" /usr/local/bin/rose-auto-rca-tool dispatch-plan)
+            else
+              branch="auto-rca/$agent_id"
+              slack_ts="${DISPATCH_SLACK_TS:-}"
+              slack_channel="${DISPATCH_SLACK_CHANNEL:-$DEFAULT_SLACK_CHANNEL}"
+              pr_url=''
+              checkout_ref=main
+              read -r mode noop < <(EVENT_NAME="$EVENT_NAME" EXISTING_PR_FOUND=false \
+                /usr/local/bin/rose-auto-rca-tool dispatch-plan)
+            fi
+          fi
+          [[ "$agent_id" =~ $uuid_re ]] || { echo "agent_id must be a UUID" >&2; exit 1; }
+          if [ -n "$slack_ts" ] && ! [[ "$slack_ts" =~ ^[0-9]{10,}\.[0-9]{6}$ ]]; then
+            echo "slack_ts must be a Slack message timestamp" >&2; exit 1
+          fi
+          if [ -n "$slack_channel" ] && ! [[ "$slack_channel" =~ ^[A-Z0-9]{9,32}$ ]]; then
+            echo "slack_channel must be a Slack channel ID" >&2; exit 1
+          fi
+          {
+            printf 'AGENT_ID=%s\n' "$agent_id"
+            printf 'RCA_BRANCH=%s\n' "$branch"
+            printf 'RCA_CHECKOUT_REF=%s\n' "$checkout_ref"
+            printf 'RCA_MODE=%s\n' "$mode"
+            printf 'RCA_NOOP=%s\n' "$noop"
+            printf 'RCA_PR_URL=%s\n' "$pr_url"
+            printf 'SLACK_TS=%s\n' "$slack_ts"
+            printf 'SLACK_CHANNEL=%s\n' "$slack_channel"
+          } >> "$GITHUB_ENV"
+
       - name: Resolve affected user
         shell: bash
+        env:
+          BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
         run: |
           set -uo pipefail
           response="$(curl -fsS --retry 3 --retry-all-errors --connect-timeout 5 --max-time 20 \
             "$PROD_BACKEND_URL/api/agents/$AGENT_ID/alert-context" \
             -H "X-API-Key: $BACKEND_API_KEY" 2>/dev/null || true)"
           affected_user_name="$(printf '%s' "$response" | jq -r '.affected_user_name // empty' 2>/dev/null || true)"
-          affected_user_name="$(printf '%s' "$affected_user_name" \
-            | tr '\r\n\t' '   ' \
-            | tr -s ' ' \
-            | sed 's/^ *//; s/ *$//; s/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' \
-            | cut -c1-160)"
-          if [ -z "$affected_user_name" ]; then
-            affected_user_name='Affected user unavailable'
-            echo "Agent owner name could not be resolved; preserving the RCA alert with an explicit unavailable state." >&2
-          fi
+          affected_user_name="$(printf '%s' "$affected_user_name" | tr '\r\n\t' '   ' | tr -s ' ' \
+            | sed 's/^ *//; s/ *$//; s/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | cut -c1-160)"
+          [ -n "$affected_user_name" ] || affected_user_name='Affected user unavailable'
           printf 'AFFECTED_USER_NAME=%s\n' "$affected_user_name" >> "$GITHUB_ENV"
 
-      - name: Install immutable RCA command broker
+      - name: Slack — immediately mark reviewer feedback in progress
+        id: slack_revision_active
+        if: env.RCA_MODE == 'revision' && env.RCA_NOOP != 'true' && env.SLACK_CHANNEL != ''
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          RCA_RECONCILE_SLACK: ${{ env.SLACK_TS == '' && 'true' || 'false' }}
+          RCA_STATE: revising
+          RCA_FE_URL: https://roselabs.ai/?agent-id=${{ env.AGENT_ID }}
+          RCA_PR_URL: ${{ env.RCA_PR_URL }}
+          RCA_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: /usr/local/bin/rose-auto-rca-tool slack-update
+
+      - name: Checkout RCA target
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.RCA_CHECKOUT_REF }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare RCA branch
         shell: bash
         run: |
           set -euo pipefail
-          sudo install -o root -g root -m 0555 scripts/auto-rca-tool /usr/local/bin/rose-auto-rca-tool
-          sudo install -d -o root -g root -m 0700 "$AUTO_RCA_GATE_STATE_DIR"
+          git config user.name "rose-auto-rca[bot]"
+          git config user.email "auto-rca@roselabs.ai"
+          if [ "$RCA_MODE" = initial ]; then
+            git checkout -b "$RCA_BRANCH"
+          else
+            git checkout -B "$RCA_BRANCH"
+          fi
+
+      - name: Create or reopen the draft PR
+        id: begin
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
+          AUTO_RCA_PR_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
+        run: |
+          if [ "$RCA_NOOP" = true ]; then
+            printf 'pr_url=%s\n' "$RCA_PR_URL" >> "$GITHUB_OUTPUT"
+            printf '%s\n' "$RCA_PR_URL"
+          else
+            /usr/local/bin/rose-auto-rca-tool begin-draft
+          fi
+
+      - name: Slack — mark investigation active
+        id: slack_active
+        if: env.SLACK_CHANNEL != '' && env.RCA_NOOP != 'true' && env.RCA_MODE != 'revision'
+        shell: bash
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          RCA_RECONCILE_SLACK: ${{ env.RCA_MODE != 'initial' && env.SLACK_TS == '' && 'true' || 'false' }}
+          RCA_STATE: running
+          RCA_FE_URL: https://roselabs.ai/?agent-id=${{ env.AGENT_ID }}
+          RCA_PR_URL: ${{ steps.begin.outputs.pr_url }}
+          RCA_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: /usr/local/bin/rose-auto-rca-tool slack-update
+
+      - name: Bind Slack lifecycle handle to the PR
+        if: steps.slack_active.outcome == 'success' || steps.slack_revision_active.outcome == 'success'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
+          AUTO_RCA_PR_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
+        run: /usr/local/bin/rose-auto-rca-tool bind-slack
+
+      - name: Sync revision branch with current main
+        if: env.RCA_MODE != 'initial' && env.RCA_NOOP != 'true'
+        shell: bash
+        run: git -c core.hooksPath=/dev/null merge --no-edit origin/main
+
+      - name: Collect production evidence outside the investigator process
+        if: env.RCA_NOOP != 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
+          CLICKHOUSE_ENDPOINT: ${{ secrets.CLICKHOUSE_ENDPOINT }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+        run: /usr/local/bin/rose-auto-rca-tool collect-evidence
 
       - name: Setup Node
+        if: env.RCA_NOOP != 'true'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 
       - name: Setup Python
+        if: env.RCA_NOOP != 'true'
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.11"
 
-      - name: Install flyctl (for full-resource repro via scripts/run-bench)
+      - name: Install flyctl
+        if: env.RCA_NOOP != 'true'
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # master
 
-      - name: Install evidence tooling
-        continue-on-error: true
-        run: pip install httpx
-
-      - name: Create RCA branch
+      - name: Build trusted investigator prompt
+        id: prompt
+        if: env.RCA_NOOP != 'true'
         shell: bash
+        env:
+          REVIEW_FEEDBACK: ${{ github.event.comment.body }}
+          ACTIVE_PR_URL: ${{ steps.begin.outputs.pr_url }}
         run: |
           set -euo pipefail
-          short_id="$(echo "$AGENT_ID" | tr -cd 'a-zA-Z0-9' | cut -c1-12)"
-          branch="auto-rca/${short_id}-${GITHUB_RUN_ID}"
-          git config user.name "rose-auto-rca[bot]"
-          git config user.email "auto-rca@roselabs.ai"
-          git checkout -b "$branch"
-          echo "RCA_BRANCH=$branch" >> "$GITHUB_ENV"
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import secrets
 
-      - name: Slack — mark RCA running
-        id: slack
-        if: env.SLACK_BOT_TOKEN != ''
-        shell: bash
-        run: |
-          set -uo pipefail
-          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          channel="${SLACK_CHANNEL:-$SLACK_ERROR_CHANNEL_ID}"
-          text="🟡 *RCA running* — \`${AGENT_ID}\` (${FAILURE_SOURCE})"$'\n'"${FAILURE_TITLE}"$'\n'"<${run_url}|▶ View the RCA run>"
-          if [ -n "${SLACK_TS:-}" ]; then
-            # The emitter already posted the card — edit it in place.
-            curl -sS -X POST https://slack.com/api/chat.update \
-              -H "Authorization: Bearer $SLACK_BOT_TOKEN" -H 'Content-Type: application/json; charset=utf-8' \
-              --data "$(jq -n --arg c "$channel" --arg ts "$SLACK_TS" --arg t "$text" '{channel:$c,ts:$ts,text:$t}')" >/dev/null || true
-            ts="$SLACK_TS"
-          elif [ -n "$channel" ]; then
-            # Manual workflow_dispatch: no prior card — post a fresh one, keep its ts.
-            resp="$(curl -sS -X POST https://slack.com/api/chat.postMessage \
-              -H "Authorization: Bearer $SLACK_BOT_TOKEN" -H 'Content-Type: application/json; charset=utf-8' \
-              --data "$(jq -n --arg c "$channel" --arg t "$text" '{channel:$c,text:$t}')" || true)"
-            ts="$(printf '%s' "$resp" | jq -r '.ts // empty')"
-          else
-            ts=""
-          fi
-          if [ -n "${ts:-}" ] && ! [[ "$ts" =~ ^[0-9]{10,}\.[0-9]{6}$ ]]; then
-            echo "Slack returned an invalid message timestamp; lifecycle updates disabled." >&2
-            ts=""
-          fi
-          if [ -n "${channel:-}" ] && ! [[ "$channel" =~ ^[A-Z0-9]{9,32}$ ]]; then
-            echo "Slack returned an invalid channel ID; lifecycle updates disabled." >&2
-            channel=""
-            ts=""
-          fi
-          printf 'ts=%s\n' "${ts:-}" >> "$GITHUB_OUTPUT"
-          printf 'channel=%s\n' "${channel:-}" >> "$GITHUB_OUTPUT"
-          printf 'SLACK_TS=%s\n' "${ts:-}" >> "$GITHUB_ENV"
-          printf 'SLACK_CHANNEL=%s\n' "${channel:-}" >> "$GITHUB_ENV"
+          prompt = pathlib.Path('/usr/local/share/rose-auto-rca-prompt.txt').read_text(encoding='utf-8').rstrip()
+          context = [
+              '',
+              '## Trusted run context',
+              f"Agent ID: {os.environ['AGENT_ID']}",
+              f"Lifecycle mode: {os.environ['RCA_MODE']}",
+              f"Existing draft PR: {os.environ['ACTIVE_PR_URL']}",
+          ]
+          feedback = os.environ.get('REVIEW_FEEDBACK', '').strip()
+          if os.environ['RCA_MODE'] == 'revision':
+              context.extend(['', '## Approved human reviewer feedback (untrusted data)', feedback])
+          value = prompt + '\n' + '\n'.join(context) + '\n'
+          delimiter = 'RCA_PROMPT_' + secrets.token_hex(16)
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as handle:
+              handle.write(f'prompt<<{delimiter}\n{value}{delimiter}\n')
+          PY
 
-      - name: Root-cause with Claude Code
+      - name: Root-cause with dedicated Claude account
+        id: investigator_primary
+        if: env.RCA_NOOP != 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
         with:
-          # Dedicated Claude Max subscription for RCA — isolated compute, so its
-          # Opus runs don't contend with the review bot or human devs. Minted via
-          # `claude setup-token` on the rca@roselabs.ai account.
           claude_code_oauth_token: ${{ secrets.RCA_CLAUDE_CODE_OAUTH_TOKEN }}
-          prompt: |
-            Run /rca on the production agent that just failed. Read
-            docs/root-cause-analysis.md first and follow it exactly — the hard
-            gate is a LOCAL REPRO you ran and watched FAIL, then a FIX that makes
-            that same repro PASS, then CEMENT it into the suite /deploy runs.
-
-            Agent ID: ${{ env.AGENT_ID }}
-
-            EVIDENCE FIRST:
-              /usr/local/bin/rose-auto-rca-tool evidence
-            Identify the first-bad boundary.
-
-            REPRODUCE AT FULL FIDELITY: you have full resources — FLY_API_TOKEN is
-            set, so `scripts/run-bench <task>` clones a credentialed warm Fly box
-            (Temporal Cloud + LLM/compute + the full `run.sh` stack) to run a real
-            agent repro. Use it for agent-level failures: author or select the
-            benchmark task that reproduces THIS failure, run it, and confirm it
-            fails the same way. Write the selected catalog task name to
-            `.context/auto-rca/benchmark-task`, then run
-            `/usr/local/bin/rose-auto-rca-tool benchmark`. For API/provider-level bugs a backend blackbox
-            under back-end/src/tests/blackbox/ is the faster repro. Whichever you
-            use: it MUST fail before the fix and pass after, with no weakened
-            assertion, and be cemented so the regression can't return.
-
-            PUBLISH THE INVESTIGATION: write the PR body to `.context/auto-rca/pr-body.md`, then
-            run `/usr/local/bin/rose-auto-rca-tool publish-draft`. The broker commits tracked
-            changes, pushes only $RCA_BRANCH, and prepares the report with the
-            trusted Slack lifecycle marker. The trusted workflow step that follows you creates the DRAFT PR
-            into main titled "auto-RCA: ${{ env.FAILURE_TITLE }}". In the body: link the failing
-            agent (https://roselabs.ai/?agent-id=${{ env.AGENT_ID }}), give the
-            root cause, the repro (command + pre/post output), and the fix.
-
-            THEN RUN THE DEPLOY GATES (do not skip): run the /deploy Phase 1 gate
-            suite on your committed draft branch with
-            `/usr/local/bin/rose-auto-rca-tool offline-gates`, then run the fleet smoke gate
-            with `/usr/local/bin/rose-auto-rca-tool smoke-gates`. Fix anything that fails,
-            republish the draft, and re-run both until every gate is green. When
-            ALL gates pass for the current HEAD, finish. The trusted workflow
-            verifies the root-owned attestations and marks the PR ready. Do NOT merge — a human
-            reviews the ready PR and merges; that human merge is the ONLY hard gate.
-
-            If a repro is genuinely impossible, open the DRAFT PR (leave it draft)
-            with the evidence, the first-bad boundary, a scaffolded repro, and the
-            proposed fix — labeled "preliminary + observability gap", never a bare
-            theory. Only leave a PR as draft when a gate is genuinely unfixable
-            here; say exactly which gate and why in the body.
+          prompt: ${{ steps.prompt.outputs.prompt }}
           claude_args: |
             --model opus
             --effort high
             --max-turns 80
-            --allowedTools "Bash(/usr/local/bin/rose-auto-rca-tool evidence),Bash(/usr/local/bin/rose-auto-rca-tool benchmark),Bash(/usr/local/bin/rose-auto-rca-tool offline-gates),Bash(/usr/local/bin/rose-auto-rca-tool smoke-gates),Bash(/usr/local/bin/rose-auto-rca-tool publish-draft)"
+            --allowedTools "Bash(/usr/local/bin/rose-auto-rca-tool evidence),Bash(/usr/local/bin/rose-auto-rca-tool verification),Bash(/usr/local/bin/rose-auto-rca-tool publish-draft)"
 
-      - name: Ensure preliminary RCA draft
-        if: always()
+      - name: Verify unchanged reproduction after primary attempt
+        id: repro_primary
+        if: always() && steps.investigator_primary.outcome != 'skipped'
+        continue-on-error: true
+        shell: bash
+        run: /usr/local/bin/rose-auto-rca-tool verify-repro
+
+      - name: Run offline gate after primary attempt
+        id: offline_primary
+        if: steps.repro_primary.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: /usr/local/bin/rose-auto-rca-tool offline-gates
+
+      - name: Run smoke gate after primary attempt
+        id: smoke_primary
+        if: steps.offline_primary.outcome == 'success'
+        continue-on-error: true
         shell: bash
         env:
-          # Scoped to this trusted step; never expose the PR-capable token to Claude.
+          BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
+        run: /usr/local/bin/rose-auto-rca-tool smoke-gates
+
+      - name: Check primary completion contract
+        id: primary_contract
+        if: always() && env.RCA_NOOP != 'true'
+        shell: bash
+        run: /usr/local/bin/rose-auto-rca-tool completion-status
+
+      - name: Retry incomplete RCA with secondary Claude account
+        id: investigator_retry
+        if: always() && steps.investigator_primary.outcome != 'skipped' && steps.primary_contract.outputs.complete != 'true'
+        continue-on-error: true
+        uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: ${{ steps.prompt.outputs.prompt }}
+          claude_args: |
+            --model opus
+            --effort high
+            --max-turns 80
+            --allowedTools "Bash(/usr/local/bin/rose-auto-rca-tool evidence),Bash(/usr/local/bin/rose-auto-rca-tool verification),Bash(/usr/local/bin/rose-auto-rca-tool publish-draft)"
+
+      - name: Verify unchanged reproduction after retry
+        id: repro_retry
+        if: always() && steps.investigator_retry.outcome != 'skipped'
+        continue-on-error: true
+        shell: bash
+        run: /usr/local/bin/rose-auto-rca-tool verify-repro
+
+      - name: Run offline gate after retry
+        id: offline_retry
+        if: steps.repro_retry.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: /usr/local/bin/rose-auto-rca-tool offline-gates
+
+      - name: Run smoke gate after retry
+        id: smoke_retry
+        if: steps.offline_retry.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        env:
+          BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
+        run: /usr/local/bin/rose-auto-rca-tool smoke-gates
+
+      - name: Finalize PR from trusted completion contract
+        id: finalize
+        if: always() && env.RCA_NOOP != 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
           AUTO_RCA_PR_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
+          PRIMARY_INVESTIGATOR_OUTCOME: ${{ steps.investigator_primary.outcome }}
+          RETRY_INVESTIGATOR_OUTCOME: ${{ steps.investigator_retry.outcome }}
         run: /usr/local/bin/rose-auto-rca-tool ensure-draft
 
-      - name: Require RCA pull request
-        if: always()
-        shell: bash
-        run: |
-          set -euo pipefail
-          pr_url="$(gh pr list --head "$RCA_BRANCH" --state open --json url --jq '.[0].url // empty')"
-          if [ -z "$pr_url" ]; then
-            echo "No RCA pull request was created — failing the workflow." >&2
-            exit 1
-          fi
-          echo "RCA pull request: $pr_url"
-
-      - name: Slack — reflect PR outcome
-        if: always() && env.SLACK_BOT_TOKEN != '' && steps.slack.outputs.ts != ''
+      - name: Slack — reflect trusted final state
+        if: always() && env.RCA_NOOP != 'true' && steps.begin.outputs.pr_url != '' && env.SLACK_CHANNEL != ''
         shell: bash
         env:
-          SLACK_OUTPUT_TS: ${{ steps.slack.outputs.ts }}
-        run: |
-          set -uo pipefail
-          channel="${SLACK_CHANNEL:-$SLACK_ERROR_CHANNEL_ID}"
-          ts="$SLACK_OUTPUT_TS"
-          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
-          pr_url="$(gh pr list --head "$RCA_BRANCH" --state open --json url --jq '.[0].url // empty' 2>/dev/null || true)"
-          is_draft="$(gh pr list --head "$RCA_BRANCH" --state open --json isDraft --jq '.[0].isDraft // empty' 2>/dev/null || true)"
-          if [ -n "$pr_url" ] && [ "$is_draft" = "false" ]; then
-            state='🟢 Ready for review — approve to ship'
-          elif [ -n "$pr_url" ]; then
-            state='🔵 Draft PR open (needs attention)'
-          else
-            text="⚠️ *RCA finished without a PR* · \`${AGENT_ID}\`"$'\n'"<${run_url}|RCA run>"
-          fi
-          if [ -n "$pr_url" ]; then
-            text="$(
-              AFFECTED_USER_NAME="$AFFECTED_USER_NAME" \
-              RCA_STATE="$state" \
-              RCA_FE_URL="https://roselabs.ai/?agent-id=$AGENT_ID" \
-              RCA_PR_URL="$pr_url" \
-              RCA_RUN_URL="$run_url" \
-              /usr/local/bin/rose-auto-rca-tool slack-message
-            )"
-          fi
-          response="$(curl -sS -X POST https://slack.com/api/chat.update \
-            -H "Authorization: Bearer $SLACK_BOT_TOKEN" -H 'Content-Type: application/json; charset=utf-8' \
-            --data "$(jq -n --arg c "$channel" --arg ts "$ts" --arg t "$text" '{channel:$c,ts:$ts,text:$t}')")"
-          if ! printf '%s' "$response" | jq -e '.ok == true' >/dev/null; then
-            echo "Slack chat.update failed: $(printf '%s' "$response" | jq -r '.error // "unknown error"')" >&2
-            exit 1
-          fi
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          RCA_STATE: ${{ steps.finalize.outputs.state || 'blocked' }}
+          RCA_FE_URL: https://roselabs.ai/?agent-id=${{ env.AGENT_ID }}
+          RCA_PR_URL: ${{ steps.finalize.outputs.pr_url || steps.begin.outputs.pr_url }}
+          RCA_RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: /usr/local/bin/rose-auto-rca-tool slack-update
+
+      - name: Require complete evidence-backed RCA
+        if: always() && env.RCA_NOOP != 'true'
+        shell: bash
+        run: /usr/local/bin/rose-auto-rca-tool require-complete
