@@ -113,18 +113,23 @@ def _codex_headers(gpt_token: str, account_id: Optional[str] = None) -> Dict[str
     return headers
 
 
-def _codex_extra_headers_from_body(body: Dict[str, Any]) -> Dict[str, str]:
+def _codex_extra_headers_from_body(
+    body: Dict[str, Any],
+    *,
+    thread_id: Optional[str] = None,
+) -> Dict[str, str]:
     cache_scope = body.get("prompt_cache_key")
     if isinstance(cache_scope, str) and cache_scope.strip():
         scope = cache_scope.strip()
-        # Match Codex's HTTP Responses transport. The hyphenated session and
-        # thread headers provide backend affinity; `session_id` is not a
-        # recognized wire header and left repeatable turns vulnerable to
-        # landing on a cold cache shard.
+        thread_scope = thread_id.strip() if isinstance(thread_id, str) and thread_id.strip() else scope
+        # Match Codex's HTTP Responses transport: prompt_cache_key/session-id
+        # identify the cache session, while thread-id and x-client-request-id
+        # carry the stable thread UUID. Collapsing all three onto the cache
+        # hash prevents the ChatGPT backend from recognizing thread affinity.
         return {
             "session-id": scope,
-            "thread-id": scope,
-            "x-client-request-id": scope,
+            "thread-id": thread_scope,
+            "x-client-request-id": thread_scope,
         }
     return {}
 
@@ -282,7 +287,10 @@ async def post_codex_stream(
     connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S,
 ) -> AsyncIterator[httpx.Response]:
     """Open a streaming POST to Codex's ChatGPT-account Responses backend."""
-    headers = {**_codex_headers(gpt_token, account_id), **_codex_extra_headers_from_body(body)}
+    headers = {
+        **_codex_headers(gpt_token, account_id),
+        **_codex_extra_headers_from_body(body, thread_id=agent_id),
+    }
     timeout = httpx.Timeout(connect=connect_timeout_s, read=None, write=connect_timeout_s, pool=connect_timeout_s)
     logger.info(
         "rose.transport.codex.start",

@@ -6,6 +6,7 @@ import {
   getSteelSessionHealth,
   releaseSteelRemoteSession,
   resumeSession as resumeSteelSession,
+  steelApiUrl,
 } from '../steel/session';
 import { rotateSession as rotateSteelSession } from '../steel/sessionResume';
 import { getFingerprintInjectionData, listSessionFiles, uploadFileToSession } from '../steel/files';
@@ -267,7 +268,7 @@ export async function readSessionFile(sessionId: string, filePath: string): Prom
   if (!apiKey) throw new Error('STEEL_API_KEY is required to read Steel session files');
   const relativePath = filePath.replace(/^\/files\//, '').replace(/^\//, '');
   return fetchProviderApi(
-    `https://api.steel.dev/v1/sessions/${encodeURIComponent(sessionId)}/files/${relativePath}`,
+    steelApiUrl(`v1/sessions/${encodeURIComponent(sessionId)}/files/${relativePath}`),
     { headers: { 'steel-api-key': apiKey } },
     async (response) => {
       if (!response.ok) throw new Error(`Steel file read failed: HTTP ${response.status}`);
@@ -288,7 +289,7 @@ export async function captureScreenshot(sessionId: string): Promise<{
   const apiKey = process.env.STEEL_API_KEY?.trim();
   if (!apiKey) throw new Error('STEEL_API_KEY is required to capture Steel screenshots');
   return fetchProviderApi(
-    `https://api.steel.dev/v1/sessions/${encodeURIComponent(sessionId)}/computer`,
+    steelApiUrl(`v1/sessions/${encodeURIComponent(sessionId)}/computer`),
     {
       method: 'POST',
       headers: { 'steel-api-key': apiKey, 'Content-Type': 'application/json' },

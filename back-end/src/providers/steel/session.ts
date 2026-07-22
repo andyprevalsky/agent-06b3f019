@@ -11,8 +11,27 @@ import { SteelRateLimitError, type FingerprintData, log } from './types';
 import { createLocalBrowserSession, connectValidatedBrowser } from './sessionConnection';
 export { resumeSession } from './sessionResume';
 
+export const STEEL_API_BASE_URL = (
+  process.env.STEEL_BASE_URL ?? 'https://connect.steelbrowser.com'
+).replace(/\/+$/, '');
+export const STEEL_CDP_BASE_URL = (
+  process.env.STEEL_CONNECT_URL ?? 'wss://connect.steelbrowser.com'
+).replace(/\/+$/, '');
+
+export function steelApiUrl(path: string): string {
+  return `${STEEL_API_BASE_URL}/${path.replace(/^\/+/, '')}`;
+}
+
+export function steelCdpUrl(sessionId: string): string {
+  const url = new URL(STEEL_CDP_BASE_URL);
+  url.searchParams.set('apiKey', process.env.STEEL_API_KEY ?? '');
+  url.searchParams.set('sessionId', sessionId);
+  return url.toString();
+}
+
 export const steel = new Steel({
   steelAPIKey: process.env.STEEL_API_KEY,
+  baseURL: STEEL_API_BASE_URL,
 });
 
 // Max retries when session validation fails
@@ -354,8 +373,7 @@ export async function createSessionWithContext(
 
       // IMPORTANT: Per Steel docs, CDP connection URL must include apiKey parameter
       // The session.websocketUrl does NOT include the apiKey, so we construct it manually
-      // Format: wss://connect.steel.dev?apiKey=${STEEL_API_KEY}&sessionId=${session.id}
-      const wsUrl = `wss://connect.steel.dev?apiKey=${process.env.STEEL_API_KEY}&sessionId=${session.id}`;
+      const wsUrl = steelCdpUrl(session.id);
 
       // VALIDATE: Test that the WebSocket connection actually works before
       // proceeding. The connection is kept open so injectUserData can reuse it

@@ -1456,6 +1456,19 @@ def test_browser_agent_recording_inline_export_uses_source_frames_once():
     assert html_text.count("c2Vjb25k") == 1
 
 
+def test_browser_agent_recording_uses_live_steel_api_origin():
+    from domains.spawn_browser_agent_v3.recording import steel_api_url
+
+    previous_base_url = os.environ.pop("STEEL_BASE_URL", None)
+    try:
+        assert steel_api_url("/v1/sessions/session-1/hls") == (
+            "https://connect.steelbrowser.com/v1/sessions/session-1/hls"
+        )
+    finally:
+        if previous_base_url is not None:
+            os.environ["STEEL_BASE_URL"] = previous_base_url
+
+
 def test_browser_agent_recording_steel_video_player_uses_debug_recording_and_window_offsets():
     from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
 
@@ -11744,6 +11757,10 @@ async def run_all_tests():
     r.record(
         "browser_agent_recording_inline_export_source_frames",
         test_browser_agent_recording_inline_export_uses_source_frames_once,
+    )
+    r.record(
+        "browser_agent_recording_live_steel_api_origin",
+        test_browser_agent_recording_uses_live_steel_api_origin,
     )
     await r.record_async(
         "browser_agent_recording_active_tab_url",

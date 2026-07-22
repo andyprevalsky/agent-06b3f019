@@ -23,6 +23,8 @@ function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+const steelUrl = (steel as unknown as { baseURL: string }).baseURL;
+
 function isTransientKernelConnectionError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return (
@@ -148,6 +150,10 @@ const tests: Array<[string, () => void]> = [
         else process.env.STEEL_API_KEY = previous;
       }
     },
+  ],
+  [
+    'Steel API client uses the live steelbrowser.com origin',
+    () => assert(steelUrl === 'https://connect.steelbrowser.com', `stale Steel API: ${steelUrl}`),
   ],
   [
     'rotate_ip uses the fixed Kernel residential, Kernel mobile, Steel, Steel ladder',

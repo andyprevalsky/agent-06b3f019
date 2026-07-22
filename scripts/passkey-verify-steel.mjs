@@ -17,10 +17,12 @@ import { readFileSync } from 'node:fs';
 const REC = JSON.parse(readFileSync(process.env.PASSKEY_IN || '.context/passkey-enroll.json', 'utf8'));
 const API_KEY = process.env.STEEL_API_KEY;
 if (!API_KEY) throw new Error('STEEL_API_KEY env required');
+const STEEL_API_BASE_URL = (process.env.STEEL_BASE_URL || 'https://connect.steelbrowser.com').replace(/\/+$/, '');
+const STEEL_CDP_BASE_URL = (process.env.STEEL_CONNECT_URL || 'wss://connect.steelbrowser.com').replace(/\/+$/, '');
 const log = (...a) => console.log(`[verify-steel] ${new Date().toISOString()}`, ...a);
 
 async function steel(path, method = 'POST', body) {
-  const res = await fetch(`https://api.steel.dev/v1${path}`, {
+  const res = await fetch(`${STEEL_API_BASE_URL}/v1${path}`, {
     method,
     headers: { 'Steel-Api-Key': API_KEY, 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
@@ -31,14 +33,16 @@ async function steel(path, method = 'POST', body) {
 
 const session = await steel('/sessions', 'POST', { solveCaptcha: true, dimensions: { width: 1288, height: 891 } });
 const sessionId = session.id;
-const wsUrl = `wss://connect.steel.dev?apiKey=${API_KEY}&sessionId=${sessionId}`;
+const wsUrl = new URL(STEEL_CDP_BASE_URL);
+wsUrl.searchParams.set('apiKey', API_KEY);
+wsUrl.searchParams.set('sessionId', sessionId);
 const interactiveUrl = `${session.debugUrl}?interactive=true`;
 log(`Steel session ${sessionId} live`);
 
 await (async () => {
 let browser;
 try {
-  browser = await chromium.connectOverCDP(wsUrl);
+  browser = await chromium.connectOverCDP(wsUrl.toString());
   const ctx = browser.contexts()[0];
   const page = ctx.pages()[0] || (await ctx.newPage());
   const client = await ctx.newCDPSession(page);

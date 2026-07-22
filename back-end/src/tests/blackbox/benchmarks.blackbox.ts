@@ -491,7 +491,7 @@ const INFRA_URL_PATTERNS = [
   'perplexity.ai',
   'vapi.ai',
   'googleapis.com',
-  'api.steel.dev',
+  'connect.steelbrowser.com',
 ];
 function filterInfraCalls<T extends { url: string }>(calls: T[]): T[] {
   return calls.filter((c) => !INFRA_URL_PATTERNS.some((p) => c.url.includes(p)));

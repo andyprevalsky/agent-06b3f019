@@ -2295,11 +2295,12 @@ def test_build_codex_responses_body_contract():
 def test_codex_cache_scope_uses_canonical_session_headers():
     """Codex cache affinity must use the HTTP header names its client sends."""
     scope = "rose:7c4fd924ea17566d159427d8"
+    thread_id = "6eb14611-3b1c-45fe-92dd-dde8cefc9768"
 
-    assert _codex_extra_headers_from_body({"prompt_cache_key": scope}) == {
+    assert _codex_extra_headers_from_body({"prompt_cache_key": scope}, thread_id=thread_id) == {
         "session-id": scope,
-        "thread-id": scope,
-        "x-client-request-id": scope,
+        "thread-id": thread_id,
+        "x-client-request-id": thread_id,
     }
     assert _codex_extra_headers_from_body({"prompt_cache_key": "  "}) == {}
 
