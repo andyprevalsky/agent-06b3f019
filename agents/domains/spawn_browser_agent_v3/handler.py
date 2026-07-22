@@ -4253,6 +4253,44 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
         }
 
 
+async def _publish_browser_session_metadata_message(
+    *,
+    agent_id: str,
+    task_id: str,
+    browser_url: str,
+    browser_session_metadata: Dict[str, Any],
+) -> None:
+    """Persist required session provenance after CDP is operable.
+
+    The browser-isolation evaluator and credential audit both consume this
+    record, so unlike optional progress messages it must be acknowledged.
+    """
+    max_attempts = 3
+    tool_call_id = str(uuid_module.uuid4())
+    for attempt in range(1, max_attempts + 1):
+        accepted = await save_browser_action_message(
+            agent_id=agent_id,
+            title="Browser session ready",
+            task_id=task_id,
+            message="Browser session connected and ready.",
+            status=MessageStatus.FINISHED,
+            browser_url=browser_url,
+            action_type="session_init",
+            tool_call_id=tool_call_id,
+            extra_metadata={"browser_session_metadata": dict(browser_session_metadata)},
+        )
+        if accepted:
+            return
+        if attempt < max_attempts:
+            logger.warning(
+                "Retrying required browser session metadata persistence",
+                attempt=attempt,
+                max_attempts=max_attempts,
+            )
+            await asyncio.sleep(0.25 * (2 ** (attempt - 1)))
+    raise RuntimeError("Backend did not acknowledge required browser session metadata after 3 attempts")
+
+
 async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     user_id: str,
     agent_id: str,
@@ -4916,15 +4954,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 "\n\n# User Context\n\n" + "\n\n".join(_user_context_sections) if _user_context_sections else ""
             )
             _base_custom_instructions = _user_context_section + "\n\n" + _auth_options_section
-            if session_credential_ref and task_id:
-                await save_browser_credential_ref_message(
-                    agent_id=agent_id,
-                    task_id=task_id,
-                    message="Browser session credential applied at session start.",
-                    role="TOOL",
-                    tool_name="browser_session_auth",
-                    credential_ref=session_credential_ref,
-                )
             _model_pricing = await get_model_pricing_with_fallback("rose-1-browser-use")
             _record_timing("parallel.data.instructions", t)
 
@@ -4954,6 +4983,24 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             playwright_browser,
             playwright_instance,
         ) = browser_result
+        # Required session provenance is emitted only after both CDP clients
+        # connect, but before any credential-use evidence can be published.
+        # It is intentionally independent of optional browser recording.
+        await _publish_browser_session_metadata_message(
+            agent_id=agent_id,
+            task_id=task_id or tool_call_id,
+            browser_url=browser_url or "",
+            browser_session_metadata=browser_session_metadata,
+        )
+        if session_credential_ref and task_id:
+            await save_browser_credential_ref_message(
+                agent_id=agent_id,
+                task_id=task_id,
+                message="Browser session credential applied at session start.",
+                role="TOOL",
+                tool_name="browser_session_auth",
+                credential_ref=session_credential_ref,
+            )
         input_page = await _synchronize_playwright_page_with_agent_focus(
             dom_service=dom_service,
             playwright_browser=playwright_browser,
