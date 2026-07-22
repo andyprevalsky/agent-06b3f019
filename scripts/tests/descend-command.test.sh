@@ -3,6 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DESCEND_COMMAND="$ROOT_DIR/.claude/commands/descend.md"
+DESCEND_STEP_LOGGER="$ROOT_DIR/scripts/descend_step_log.py"
+DESCEND_STEP_HISTORY="$ROOT_DIR/agents/benchmarks/history/descend_steps.jsonl"
+GIT_ATTRIBUTES="$ROOT_DIR/.gitattributes"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -16,6 +19,13 @@ require_text() {
 }
 
 [ -f "$DESCEND_COMMAND" ] || fail "/descend command is missing"
+[ -f "$DESCEND_STEP_LOGGER" ] || fail "/descend step logger is missing"
+[ -f "$DESCEND_STEP_HISTORY" ] || fail "/descend tracked step history is missing"
+grep -Fq 'agents/benchmarks/history/descend_steps.jsonl merge=union' "$GIT_ATTRIBUTES" || \
+  fail "/descend step history must merge concurrent workspace records with union"
+if git -C "$ROOT_DIR" check-ignore -q "$DESCEND_STEP_HISTORY"; then
+  fail "/descend step history must not be gitignored"
+fi
 
 require_text "Exactly two planned user-input gates." "/descend must define two planned user gates"
 require_text "HARNESS_FIX_DECISION" "/descend must stop for harness-fix approval"
@@ -40,6 +50,16 @@ require_text "The issue is **<root cause at the first-bad boundary>**" "fix appr
 require_text "where we measured **<measurement>**" "fix approval must report the repro measurement"
 require_text "The unchanged local repro now" "fix approval must report post-fix proof"
 require_text "**Is this fix approved?**" "fix approval must ask a clear decision question"
+require_text "agents/benchmarks/history/descend_steps.jsonl" "/descend must write step timings to tracked history"
+require_text "scripts/descend_step_log.py start" "/descend must start its first timed step"
+require_text "scripts/descend_step_log.py transition" "/descend must time every state transition"
+require_text "scripts/descend_step_log.py finish" "/descend must close terminal and parallel timing lanes"
+require_text "scripts/descend_step_log.py report" "/descend must analyze iteration-speed trends"
+require_text 'standard factory telemetry envelope' "/descend timings must use the factory telemetry standard"
+require_text '`stage-start` and `stage-finish`' "/descend timings must record paired stage boundaries"
+require_text 'terminal `outcome`' "/descend timings must record the terminal outcome"
+require_text '`FACTORY_EVENT`' "/descend timing commands must expose factory events"
+require_text '`scripts/factory_review.py` consumes' "/descend timing history must feed factory review"
 
 RESPONSE_CONTRACT=$(sed -n '/^## Response contract/,$p' "$DESCEND_COMMAND")
 STOP_ONE_CONTRACT=$(sed -n '/^## Stop 1 — HARNESS_FIX_DECISION/,/^## Rerun and parallel deploy/p' "$DESCEND_COMMAND")
@@ -55,5 +75,7 @@ grep -Fq '━' <<<"$RESPONSE_CONTRACT" && fail "response header must not use an 
 grep -Fq '| Andy decision |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
 grep -Fq '| Admin approval |' <<<"$RESPONSE_CONTRACT" && fail "Andy and Admin must not be separate columns"
 grep -Fq '| Benchmark |' <<<"$RESPONSE_CONTRACT" && fail "real rerun must replace the ambiguous Benchmark column"
+
+python3 "$ROOT_DIR/scripts/tests/descend-step-log.test.py"
 
 echo "All /descend command checks passed."

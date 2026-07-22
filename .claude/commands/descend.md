@@ -48,6 +48,11 @@ their orchestration, state, user-input gates, and response contract.
    using the taxonomy below. If two independent clusters caused one task
    failure, split them into separate lifecycle rows. Never use a downstream
    symptom such as “timeout” when the RCA proves a deeper cluster.
+10. **Time every state and parallel lane.** Use `scripts/descend_step_log.py`
+    at every state boundary. Completed timings go to the tracked
+    `agents/benchmarks/history/descend_steps.jsonl` ledger; `.context` holds
+    only active clocks. A state transition is incomplete if its timing command
+    did not succeed.
 
 ## Issue clusters
 
@@ -121,10 +126,105 @@ transition. It must contain:
 - `/sync` checkpoint timestamp, pre/post base SHA, origin/main SHA, DB-resync
   result, conflicts resolved, and affected regression gates;
 - Andy decisions and approval snapshot IDs;
-- deploy unit base SHA, exact fix commits, worktree, worker ID, PR, and status.
+- deploy unit base SHA, exact fix commits, worktree, worker ID, PR, and status;
+- active timing lanes, their current steps, and the last completed timing
+  record ID.
 
 Compaction, session restart, or a sub-agent response must not erase or recreate
 state from memory.
+
+## Checked-in step timing
+
+The append-only timing ledger is
+`agents/benchmarks/history/descend_steps.jsonl`. It is intentionally tracked in
+Git and configured with `merge=union`; do not put these measurements under
+`.context`, rewrite old rows, or remove slow/outlier runs. Each completed row
+contains the run, slice, task count, epoch, lane, state, status, Git SHAs, UTC
+boundaries, and measured duration. It contains no prompts, logs, credentials,
+or benchmark output.
+
+Every boundary uses the standard factory telemetry envelope: `workflow`,
+`event`, `value`, `recorded_at`, `recorded_epoch`, `workspace`, `git_sha`, and
+`branch`. The logger emits `stage-start` and `stage-finish` pairs plus a terminal `outcome`,
+prints each record as `FACTORY_EVENT`, and adds only `/descend`
+dimensions such as run, slice, epoch, lane, task count, status, and duration.
+`scripts/factory_review.py` consumes this checked-in stream directly.
+
+Allocate the run ID, then start the main clock immediately before doing
+`RESOLVE_SLICE` work:
+
+~~~bash
+python3 scripts/descend_step_log.py start \
+  --run-id "$RUN_ID" --slice "$SLICE" \
+  --lane main --step RESOLVE_SLICE --epoch "$EPOCH"
+~~~
+
+At every main state boundary, close the old state and start the new state with
+one command. Use the exact state-machine label, including repeated states in a
+new epoch:
+
+~~~bash
+python3 scripts/descend_step_log.py transition \
+  --run-id "$RUN_ID" --lane main \
+  --step SYNC_CHECKPOINT --epoch "$EPOCH" --task-count "$TASK_COUNT"
+~~~
+
+The first transition supplies `--task-count` because resolving the slice is
+what discovers it. Later transitions inherit the resolved count.
+
+Use `--status failed`, `--status blocked`, or `--status interrupted` when that
+describes the state being closed. Do not reset a clock because a step is slow.
+On session resume, inspect the existing active clock in
+`.context/descend/<run-id>/timing/` and continue it; if the work was abandoned,
+close it as interrupted before starting replacement work.
+
+Parallel RCA and deploy work gets an independent stable lane such as
+`rca-I-03` or `deploy-H-02`. Start that lane before its first state, transition
+it independently, and close it when its work ends:
+
+~~~bash
+python3 scripts/descend_step_log.py start \
+  --run-id "$RUN_ID" --slice "$SLICE" --task-count "$TASK_COUNT" \
+  --lane rca-I-03 --step RCA_INFRA_FIX --epoch "$EPOCH"
+python3 scripts/descend_step_log.py finish \
+  --run-id "$RUN_ID" --lane rca-I-03 --status completed
+~~~
+
+When the controller reaches `DONE` or `BLOCKED`, transition into that terminal
+state first so it gets its own row, then close the main lane with
+`--run-terminal` so wall-clock trends include the run. Use `--status completed`
+for `DONE` and `--status blocked` for `BLOCKED`:
+
+~~~bash
+python3 scripts/descend_step_log.py transition \
+  --run-id "$RUN_ID" --lane main --step DONE --epoch "$EPOCH"
+python3 scripts/descend_step_log.py finish \
+  --run-id "$RUN_ID" --lane main --status completed --run-terminal
+~~~
+
+Before every `/sync`, commit any newly appended ledger rows in a log-only
+commit so merging cannot discard them. Commit only the ledger path; never fold
+unrelated work into that commit. After closing the terminal main lane, commit
+the remaining rows before the final response. `DONE` and `BLOCKED` are invalid
+while this ledger has uncommitted rows for the current run.
+
+After each full-slice acceptance attempt and at the terminal boundary, analyze
+the recent window against the preceding window. Negative change is faster;
+positive change is a regression to investigate:
+
+~~~bash
+python3 scripts/descend_step_log.py report \
+  --slice "$SLICE" --task-count "$TASK_COUNT" \
+  --lane main --status completed --window 5
+~~~
+
+The completed-only default keeps a quick failed step or blocked run from
+looking like a speed improvement. Use `--status all` only when investigating
+failure and interruption overhead explicitly.
+
+Report the run wall-clock trend plus the largest step regression and
+improvement. Use this evidence to choose iteration-speed work; it never permits
+changing benchmark contracts, limits, or pass criteria.
 
 ## `/sync` checkpoints
 
