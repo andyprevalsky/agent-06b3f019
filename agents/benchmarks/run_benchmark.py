@@ -546,6 +546,13 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     return "https://roselabs.ai"
 
 
+def _report_frontend_url_for_benchmark(base_url: str) -> str:
+    explicit = os.environ.get("BENCHMARK_REPORT_FRONTEND_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    return _frontend_url_for_benchmark(base_url)
+
+
 def _payment_receipt_from_attention_request(req: dict) -> dict:
     metadata = req.get("metadata") if isinstance(req, dict) else None
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -8581,7 +8588,7 @@ async def main_async(args):
 
     def _report_snapshot(running_names: set[str]) -> RunState:
         finished = {r.name for r in run.task_results}
-        fe = _frontend_url_for_benchmark(base_url)
+        fe = _report_frontend_url_for_benchmark(base_url)
         try:
             peak_fly_raw = os.environ.get("BENCHMARK_PEAK_FLY_MACHINES")
             peak_fly_machines = int(peak_fly_raw) if peak_fly_raw else None

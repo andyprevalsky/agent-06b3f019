@@ -7657,6 +7657,21 @@ def test_production_only_cloud_route_clears_local_frontend_override() -> None:
     ) in driver
 
 
+def test_cloud_dashboard_mirror_does_not_override_benchmark_frontend_url() -> None:
+    """Dashboard links may use the localhost mirror, but task prompts must not.
+
+    Cloud browser agents run outside the controller's localhost namespace. If
+    dashboard mode exports BENCHMARK_FRONTEND_URL=http://localhost:<mirror>, the
+    {frontend_url} prompt placeholder points browser tasks at an unreachable URL
+    even though the child stack has already published a public tunnel.
+    """
+    cloud = CLOUD_SCRIPT.read_text()
+
+    assert "BENCHMARK_FRONTEND_URL=http://localhost:$LOCAL_DASH_PORT" not in cloud
+    assert "BENCHMARK_REPORT_FRONTEND_URL=http://localhost:$LOCAL_DASH_PORT" in cloud
+    assert "BENCHMARK_REPORT_FRONTEND_URL" in DRIVER_SCRIPT.read_text()
+
+
 def test_production_only_cloud_route_rejects_mixed_target_batches() -> None:
     result = subprocess.run(
         [
