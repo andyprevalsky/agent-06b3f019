@@ -1339,6 +1339,54 @@ def test_machine_readiness_publishes_keyed_inventory_index(tmp_path: Path) -> No
     assert len(list(index.glob(".generation-*"))) <= 2
 
 
+def test_machine_inventory_publication_cleans_temp_link_on_replace_failure(
+    tmp_path: Path,
+) -> None:
+    machines = tmp_path / "machines.json"
+    volumes = tmp_path / "volumes.json"
+    index = tmp_path / "inventory"
+    machines.write_text(
+        json.dumps(
+            [
+                {
+                    "id": "machine-1",
+                    "name": "cloudbench-one",
+                    "state": "created",
+                    "private_ip": "fdaa::1",
+                    "config": {"mounts": []},
+                }
+            ]
+        )
+    )
+    volumes.write_text(json.dumps([]))
+
+    spec = importlib.util.spec_from_file_location(
+        "cloudbench_machine_readiness_publication_failure",
+        MACHINE_READINESS_SCRIPT,
+    )
+    assert spec is not None and spec.loader is not None
+    readiness_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(readiness_module)
+
+    original_replace = readiness_module.os.replace
+
+    def fail_replace(src: object, dst: object) -> None:
+        raise OSError(f"forced replace failure: {src} -> {dst}")
+
+    readiness_module.os.replace = fail_replace
+    try:
+        try:
+            readiness_module.publish_index(machines, volumes, index)
+            raise AssertionError("publish_index should fail when os.replace fails")
+        except OSError:
+            pass
+    finally:
+        readiness_module.os.replace = original_replace
+
+    assert not list(index.glob(".current-*"))
+    assert not list(index.glob(".generation-*"))
+
+
 def test_machine_inventory_index_publication_is_linear(tmp_path: Path) -> None:
     """Publishing N keyed records must not rescan all N machines/volumes for
     each record. Instrument list iteration so this proves algorithmic work
@@ -4128,6 +4176,19 @@ with path.open("r+") as handle:
     late_out, late_err = late_holder.communicate(timeout=5)
     assert late_holder.returncode == 0, late_err
     assert late_out.strip() != "old-token", late_out
+
+
+def test_recover_lock_reports_io_errors_without_busy_status(tmp_path: Path) -> None:
+    lock_dir = tmp_path / "lock-is-directory"
+    lock_dir.mkdir()
+    recovered = subprocess.run(
+        [sys.executable, str(MACHINE_READINESS_SCRIPT), "--recover-lock", str(lock_dir)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert recovered.returncode == 3
+    assert "inventory lock recovery failed:" in recovered.stderr
 
 
 def test_keyed_inventory_rejects_stale_or_dead_publisher(tmp_path: Path) -> None:

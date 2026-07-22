@@ -169,6 +169,7 @@ def publish_index(machines_path: Path, volumes_path: Path, root: Path) -> None:
     root.mkdir(parents=True, exist_ok=True)
     fence, fence_token = _publication_fence()
     generation: Path | None = None
+    next_link: Path | None = None
     try:
         current_before_name = _current_generation_name(root)
         # With the publication fence held, no live publisher can own any
@@ -248,6 +249,11 @@ def publish_index(machines_path: Path, volumes_path: Path, root: Path) -> None:
             if candidate.name not in keep_names:
                 shutil.rmtree(candidate, ignore_errors=True)
     except Exception:
+        if next_link is not None:
+            try:
+                next_link.unlink()
+            except FileNotFoundError:
+                pass
         if generation is not None:
             shutil.rmtree(generation, ignore_errors=True)
         raise
@@ -258,7 +264,11 @@ def publish_index(machines_path: Path, volumes_path: Path, root: Path) -> None:
 
 def main(argv: list[str]) -> int:
     if len(argv) == 3 and argv[1] == "--recover-lock":
-        return recover_lock(Path(argv[2]))
+        try:
+            return recover_lock(Path(argv[2]))
+        except OSError as exc:
+            print(f"inventory lock recovery failed: {exc}", file=sys.stderr)
+            return 3
     if len(argv) == 5 and argv[1] == "--publish-index":
         try:
             publish_index(Path(argv[2]), Path(argv[3]), Path(argv[4]))
