@@ -4,6 +4,7 @@ import {
   closeSession as closeSteelSession,
   createSessionWithContext as createSteelSessionWithContext,
   getSteelSessionHealth,
+  getSteelCaptchaTelemetry,
   resumeSession as resumeSteelSession,
   steelApiUrl,
   steelSessionFileUrl,
@@ -18,6 +19,7 @@ import {
   closeKernelSession,
   createKernelSessionWithContext,
   getKernelSessionHealth,
+  getKernelCaptchaTelemetry,
   listKernelSessionFiles,
   readKernelSessionFile,
   resizeKernelViewport,
@@ -222,6 +224,18 @@ export async function getBrowserSessionHealth(sessionId: string): Promise<Browse
 
   const health = await getSteelSessionHealth(sessionId);
   return { provider: 'steel', ...health };
+}
+
+/** Read provider-native CAPTCHA telemetry for the live session behind a task. */
+export async function getBrowserCaptchaTelemetry(taskId: string) {
+  const session = await prisma.browserSession.findUnique({
+    where: { id: taskId },
+    select: { provider: true, sessionId: true },
+  });
+  if (session === null) throw new Error(`Browser task not found: ${taskId}`);
+  return session.provider === 'kernel'
+    ? getKernelCaptchaTelemetry(session.sessionId)
+    : getSteelCaptchaTelemetry(session.sessionId);
 }
 
 export async function resizeSessionViewport(

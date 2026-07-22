@@ -619,26 +619,71 @@ async function testClaudeCodeRateLimited_noAuth() {
 // The shared ANTHROPIC_API_KEY funded default: marking it out-of-credits via
 // the rate-limited endpoint (type=anthropic) backs off a shared DB cooldown the
 // agents Rose client reads (it has no DB). Mark → cooldown GET reports true.
-async function testAnthropicApiKeyCooldown_markThenOnCooldown() {
-  const mark = await request(`${BASE_URL}/api/integrations/compute-code/token/rate-limited`, {
-    method: 'POST',
-    headers: apiKeyHeaders(),
-    body: JSON.stringify({ type: 'anthropic', source: 'pool', failureReason: 'out_of_credits' }),
-  });
-  assertStatus(mark.status, 200, mark.data);
+const ANTHROPIC_COOLDOWN_USER_ID = '00000000-0000-0000-0000-000000000000';
+const ANTHROPIC_COOLDOWN_NAME = 'anthropic_api_key_cooldown';
 
-  const status = await request(`${BASE_URL}/api/integrations/compute-code/anthropic-key/cooldown`, {
-    headers: apiKeyHeaders(),
+async function snapshotAnthropicApiKeyCooldown() {
+  return prisma.integration.findUnique({
+    where: {
+      userId_name: {
+        userId: ANTHROPIC_COOLDOWN_USER_ID,
+        name: ANTHROPIC_COOLDOWN_NAME,
+      },
+    },
+    select: { id: true, rateLimitedUntil: true, failureReason: true, updatedAt: true },
   });
-  assertStatus(status.status, 200, status.data);
-  assert(
-    typeof (status.data as { configured?: unknown }).configured === 'boolean',
-    'anthropic availability should report whether the running backend configured the key'
-  );
-  assert(
-    (status.data as { onCooldown?: boolean }).onCooldown === true,
-    'anthropic key should report on-cooldown after being marked rate-limited'
-  );
+}
+
+async function restoreAnthropicApiKeyCooldown(
+  previous: Awaited<ReturnType<typeof snapshotAnthropicApiKeyCooldown>>
+) {
+  if (previous === null) {
+    await prisma.integration.deleteMany({
+      where: {
+        userId: ANTHROPIC_COOLDOWN_USER_ID,
+        name: ANTHROPIC_COOLDOWN_NAME,
+      },
+    });
+    return;
+  }
+  await prisma.integration.update({
+    where: { id: previous.id },
+    data: {
+      rateLimitedUntil: previous.rateLimitedUntil,
+      failureReason: previous.failureReason,
+      updatedAt: previous.updatedAt,
+    },
+  });
+}
+
+async function testAnthropicApiKeyCooldown_markThenOnCooldown() {
+  const previous = await snapshotAnthropicApiKeyCooldown();
+  try {
+    const mark = await request(`${BASE_URL}/api/integrations/compute-code/token/rate-limited`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ type: 'anthropic', source: 'pool', failureReason: 'out_of_credits' }),
+    });
+    assertStatus(mark.status, 200, mark.data);
+
+    const status = await request(
+      `${BASE_URL}/api/integrations/compute-code/anthropic-key/cooldown`,
+      {
+        headers: apiKeyHeaders(),
+      }
+    );
+    assertStatus(status.status, 200, status.data);
+    assert(
+      typeof (status.data as { configured?: unknown }).configured === 'boolean',
+      'anthropic availability should report whether the running backend configured the key'
+    );
+    assert(
+      (status.data as { onCooldown?: boolean }).onCooldown === true,
+      'anthropic key should report on-cooldown after being marked rate-limited'
+    );
+  } finally {
+    await restoreAnthropicApiKeyCooldown(previous);
+  }
 }
 
 async function testClaudeCodePoolRateLimited_noAuth() {
@@ -4782,8 +4827,7 @@ async function testClaudeCodeBillingFailure_marksPoolTokenLongCooldown() {
   const session = await seedClaudeCodeSession(dummyAgent.id, 'pool', poolInt.id);
 
   try {
-    const banner =
-      'Credit balance too low · Add funds: https://platform.claude.com/settings/billing\n';
+    const banner = 'Credit balance is too low\n';
     const res = await request(`${BASE_URL}/api/claude-code-session/${session.taskId}/output`, {
       method: 'POST',
       headers: apiKeyHeaders(),
@@ -4806,6 +4850,51 @@ async function testClaudeCodeBillingFailure_marksPoolTokenLongCooldown() {
     await cleanupSessions([session.taskId]);
     await prisma.agent.delete({ where: { id: dummyAgent.id } });
     await cleanupIntegrations([poolInt.id]);
+  }
+}
+
+async function testClaudeCodeBillingFailure_backsOffFundedApiKey() {
+  const previousCooldown = await snapshotAnthropicApiKeyCooldown();
+  const caller = await createAnonSession();
+  const dummyAgent = await prisma.agent.create({
+    data: {
+      id: crypto.randomUUID(),
+      userId: caller.userId,
+      goal: 'dummy-for-funded-claude-code-test',
+      status: 'STARTING_UP',
+    },
+  });
+  const session = await seedClaudeCodeSession(dummyAgent.id, 'anthropic', null);
+
+  try {
+    const banner = 'Credit balance is too low\n';
+    const res = await request(`${BASE_URL}/api/claude-code-session/${session.taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ output: banner }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    const cooldown = await prisma.integration.findUnique({
+      where: {
+        userId_name: {
+          userId: ANTHROPIC_COOLDOWN_USER_ID,
+          name: ANTHROPIC_COOLDOWN_NAME,
+        },
+      },
+    });
+    assert(
+      cooldown?.failureReason === 'claude_code_auth_failure',
+      `funded API key failure must set the shared cooldown reason, got ${cooldown?.failureReason}`
+    );
+    assert(
+      cooldown.rateLimitedUntil instanceof Date && cooldown.rateLimitedUntil.getTime() > Date.now(),
+      'funded API key failure must set a future shared cooldown'
+    );
+  } finally {
+    await restoreAnthropicApiKeyCooldown(previousCooldown);
+    await cleanupSessions([session.taskId]);
+    await prisma.agent.delete({ where: { id: dummyAgent.id } });
   }
 }
 
@@ -5811,6 +5900,10 @@ async function runAll() {
     {
       name: 'anthropic api-key cooldown -- mark then on-cooldown',
       fn: testAnthropicApiKeyCooldown_markThenOnCooldown,
+    },
+    {
+      name: 'claude-code billing-failure -- funded API key backed off globally',
+      fn: testClaudeCodeBillingFailure_backsOffFundedApiKey,
     },
   ];
 

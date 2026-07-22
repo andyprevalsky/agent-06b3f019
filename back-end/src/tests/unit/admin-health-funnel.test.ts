@@ -13,6 +13,7 @@ import { buildFunnelSteps, compareFunnelSteps } from '../../domains/admin-health
 import {
   buildSignupCohort,
   isCacheableAdminHealthResponse,
+  shouldFetchAmplitudeForBlackboxSlice,
 } from '../../domains/admin-health/service';
 import type { AdminHealthPeriod, AdminHealthResponse } from '../../domains/admin-health/types';
 
@@ -40,6 +41,18 @@ assert.strictEqual(
   isAmplitudeFunnelQueryWithinBudget(queryStart, after84Days),
   false,
   'Amplitude periods above 83 days must fail closed before issuing an impossible query'
+);
+assert.strictEqual(shouldFetchAmplitudeForBlackboxSlice('weekly', 'weekly', true), true);
+assert.strictEqual(shouldFetchAmplitudeForBlackboxSlice('monthly', 'weekly', true), false);
+assert.strictEqual(
+  shouldFetchAmplitudeForBlackboxSlice('monthly', 'weekly', false),
+  true,
+  'the blackbox-only slice override must never alter production behavior'
+);
+assert.strictEqual(
+  shouldFetchAmplitudeForBlackboxSlice('monthly', undefined, true),
+  true,
+  'an unset override must preserve every production Amplitude slice'
 );
 
 const compared = compareFunnelSteps(

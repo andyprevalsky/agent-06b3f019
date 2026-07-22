@@ -26,9 +26,9 @@ export default defineConfig({
     globals: true,
     css: false,
     // /deploy verifies the front-end alongside backend, agents, and both Mac
-    // suites. Eight workers here can starve user-event timers and turn valid
-    // interaction tests into timeouts on shared developer machines.
-    maxWorkers: 2,
+    // suites. Four is the measured local optimum: lower widths leave a long
+    // serial tail, while higher widths add contention without reducing wall time.
+    maxWorkers: 4,
     minWorkers: 1,
     // Coverage instrumentation plus the deploy workflow's concurrent backend
     // verifier can push the full Terminal interaction tests past Vitest's 5s

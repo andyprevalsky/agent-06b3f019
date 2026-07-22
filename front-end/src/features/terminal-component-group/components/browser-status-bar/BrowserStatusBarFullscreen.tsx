@@ -16,6 +16,7 @@
  * AGENT CONTROL STATE:
  * [DESKTOP_ACTIVE|WAITING|DISCONNECTED] -> controls overlay the browser
  * [MOBILE_ACTIVE|WAITING|DISCONNECTED] -> controls render in the footer below it
+ * [USER_CONTROL] -> interactive iframe + Hand back control on both form factors
  *
  * VIEWPORT STATE:
  * [DESKTOP] -> observe browser pane -> debounce dimensions -> resize remote provider viewport
@@ -60,14 +61,22 @@ interface FullscreenProps {
   isWaitingForAuthAssistance: boolean;
   authAssistanceRequest?: string;
   isResuming: boolean;
+  isUserControlling: boolean;
   pendingWriteLockApproval: PendingWriteLockApproval | null;
   onClose: (e: MouseEvent) => void;
   onResume: () => void;
 }
 
-function ActiveIndicator({ controlState }: { controlState: BrowserControlState }) {
-  const label =
-    controlState === 'disconnected'
+function ActiveIndicator({
+  controlState,
+  isUserControlling,
+}: {
+  controlState: BrowserControlState;
+  isUserControlling: boolean;
+}) {
+  const label = isUserControlling
+    ? 'You have control'
+    : controlState === 'disconnected'
       ? 'Disconnected'
       : controlState === 'waiting'
         ? 'Waiting for assistance'
@@ -90,14 +99,16 @@ function DesktopFrameHeader({
   controlState,
   browserSessionMetadata,
   onClose,
+  isUserControlling,
 }: {
   controlState: BrowserControlState;
   browserSessionMetadata: BrowserSessionMetadata | null;
   onClose: (e: MouseEvent) => void;
+  isUserControlling: boolean;
 }) {
   return (
     <div className="flex items-center justify-between border-b border-border p-4">
-      <ActiveIndicator controlState={controlState} />
+      <ActiveIndicator controlState={controlState} isUserControlling={isUserControlling} />
       <div className="flex items-center gap-2">
         <BrowserProxyLocationChip metadata={browserSessionMetadata} tooltipPosition="bottom" />
         <button onClick={onClose} className="rounded p-2 transition-colors hover:bg-muted">
@@ -112,13 +123,15 @@ function DesktopFrameHeader({
 function MobileFrameHeader({
   controlState,
   onClose,
+  isUserControlling,
 }: {
   controlState: BrowserControlState;
   onClose: (e: MouseEvent) => void;
+  isUserControlling: boolean;
 }) {
   return (
     <div className="flex flex-shrink-0 items-center justify-between gap-2 border-b border-border p-3">
-      <ActiveIndicator controlState={controlState} />
+      <ActiveIndicator controlState={controlState} isUserControlling={isUserControlling} />
       <button onClick={onClose} className="rounded p-1.5 transition-colors hover:bg-muted">
         <X className="h-5 w-5 text-muted-foreground" />
       </button>
@@ -134,6 +147,7 @@ type PaneProps = Pick<
   | 'messages'
   | 'authAssistanceRequest'
   | 'isResuming'
+  | 'isUserControlling'
   | 'onResume'
 > & {
   paneRef: RefObject<HTMLDivElement>;
@@ -151,6 +165,7 @@ function BrowserPaneBody({
   controlState,
   authAssistanceRequest,
   isResuming,
+  isUserControlling,
   isMobile,
   onResume,
 }: PaneProps) {
@@ -166,18 +181,23 @@ function BrowserPaneBody({
     >
       <div ref={paneRef} className="relative flex-1 bg-white">
         <iframe
+          key={`${taskId}:${browserUrl}`}
           src={browserUrl}
           className="h-full w-full border-0"
           allow="clipboard-read; clipboard-write"
           sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals"
           title="Browser"
         />
-        {controlState === 'active' && <BrowserBorderGlow />}
-        {controlState === 'active' && (
+        {controlState === 'active' && !isUserControlling && <BrowserBorderGlow />}
+        {controlState === 'active' && !isUserControlling && (
           <BrowserCursorOverlay agentId={agentId} taskId={taskId} messages={messages} />
         )}
         {!isMobile && controlState === 'active' && (
-          <TakeControlChip onResume={onResume} isResuming={isResuming} />
+          <TakeControlChip
+            onResume={onResume}
+            isResuming={isResuming}
+            isUserControlling={isUserControlling}
+          />
         )}
         {!isMobile && controlState === 'waiting' && (
           <WaitingForAssistanceChip
@@ -208,7 +228,11 @@ function MobileFullscreen({
 }) {
   return createPortal(
     <div className="fixed inset-0 z-50 flex flex-col bg-background">
-      <MobileFrameHeader controlState={controlState} onClose={props.onClose} />
+      <MobileFrameHeader
+        controlState={controlState}
+        isUserControlling={props.isUserControlling}
+        onClose={props.onClose}
+      />
       <div className="flex min-h-0 flex-1 flex-col">
         {pane}
         <MobileBrowserControlFooter
@@ -216,6 +240,7 @@ function MobileFullscreen({
           isResuming={props.isResuming}
           controlState={controlState}
           request={props.authAssistanceRequest}
+          isUserControlling={props.isUserControlling}
         />
         <div className="min-h-0 flex-1 border-t border-border bg-background">{progressPanel}</div>
       </div>
@@ -242,6 +267,7 @@ function DesktopFullscreen({
         <DesktopFrameHeader
           controlState={controlState}
           browserSessionMetadata={props.browserSessionMetadata}
+          isUserControlling={props.isUserControlling}
           onClose={props.onClose}
         />
         {pane}
@@ -254,7 +280,9 @@ function DesktopFullscreen({
 export function BrowserStatusBarFullscreen(props: FullscreenProps) {
   const browserPaneRef = useRef<HTMLDivElement>(null);
   const isMobile = useIsMobile();
-  const controlState = resolveBrowserControlState(props);
+  // Confirmed user ownership outranks stale disconnect/auth-assistance signals.
+  // Those signals can remain in the message stream while the user is driving.
+  const controlState = props.isUserControlling ? 'active' : resolveBrowserControlState(props);
   useBrowserViewportSync(props.taskId, browserPaneRef, !isMobile);
 
   const pane = (
@@ -267,6 +295,7 @@ export function BrowserStatusBarFullscreen(props: FullscreenProps) {
       controlState={controlState}
       authAssistanceRequest={props.authAssistanceRequest}
       isResuming={props.isResuming}
+      isUserControlling={props.isUserControlling}
       isMobile={isMobile}
       onResume={props.onResume}
     />

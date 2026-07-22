@@ -1,7 +1,7 @@
 {
   "name": "rose-desktop",
   "productName": "Rose",
-  "version": "1.1.39",
+  "version": "1.1.40",
   "engines": {
     "node": "20.10.0"
   },

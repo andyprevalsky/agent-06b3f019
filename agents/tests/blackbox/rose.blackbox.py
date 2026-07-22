@@ -2436,7 +2436,6 @@ async def test_gpt_auth_cache_namespace_isolates_concurrent_agent_prefixes():
             messages=grown_messages,
             cache_namespace="browser-task:task-a:write_lock_notification",
         )
-
     cache_keys = [body["prompt_cache_key"] for body in captured_bodies]
     assert cache_keys[0] == cache_keys[1], "A growing conversation must reuse its prior Codex cache session"
     assert cache_keys[0] == cache_keys[2], "Resolved message references must not reset the cache session"

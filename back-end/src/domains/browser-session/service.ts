@@ -20,7 +20,6 @@ import {
   getFingerprintInjectionData,
 } from '../../providers/browser';
 import {
-  resumeBrowserSession as resumeBrowserSessionProvider,
   rotateBrowserProxy,
   ProxyRotationExhaustedError,
   RotationSessionNotFoundError,
@@ -35,6 +34,12 @@ import {
 } from './service.local-storage';
 import { serializePasskeys, serializePasswords, toUserSettings } from './service.serializers';
 export { getTaskInfo, getTaskOwnerUserId } from './service.task-info';
+export {
+  BrowserControlUnavailableError,
+  getBrowserControlState,
+  resumeOwnedBrowserSession as resumeBrowserSession,
+  setBrowserControlState,
+} from './service.control';
 export { injectLocalStorage, SessionNotFoundError, SessionNoUserError };
 export { CdpInjectionError, SessionNoWsUrlError } from './types';
 
@@ -279,12 +284,6 @@ export async function closeBrowserSession(sessionId: string, pause: boolean, cur
 
   return { status: pause ? ('PAUSED' as const) : ('CLOSED' as const) };
 }
-
-// ---------------------------------------------------------------------------
-// Resume
-// ---------------------------------------------------------------------------
-
-export const resumeBrowserSession = resumeBrowserSessionProvider;
 
 // rotate_ip tool — swap the browser session's outbound IP (see
 // providers/browserSessionResume.ts and docs/plans/active/rotate-ip-tool.md).

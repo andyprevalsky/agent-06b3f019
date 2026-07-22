@@ -15,9 +15,10 @@ Push the current branch, create a PR, obtain a CodeRabbit review (or Claude Code
 Before running tests or creating/updating a PR, capture the current Conductor workspace title so it can be restored after merge (the deploy flow mutates `pr_title_locked` to the PR title; without this capture the pre-deploy title is lost):
 
 ```bash
-WORKSPACE_DIR="$(basename "$PWD")"
+ESCAPED_WORKSPACE_PATH=$(printf "%s" "$PWD" | sed "s/'/''/g")
+ESCAPED_BRANCH=$(printf "%s" "$(git branch --show-current)" | sed "s/'/''/g")
 ORIGINAL_WORKSPACE_TITLE="$(sqlite3 "$HOME/Library/Application Support/com.conductor.app/conductor.db" \
-  "SELECT pr_title FROM workspaces WHERE directory_name = '$WORKSPACE_DIR' LIMIT 1;")"
+  "SELECT pr_title FROM workspaces WHERE workspace_path = '$ESCAPED_WORKSPACE_PATH' AND branch = '$ESCAPED_BRANCH' LIMIT 1;")"
 echo "ORIGINAL_WORKSPACE_TITLE=$ORIGINAL_WORKSPACE_TITLE"
 ```
 
@@ -68,6 +69,12 @@ bash scripts/run-deploy-stage --start
 ```
 
 Artifacts land under `.context/deploy-runs/<run-id>/`. `bash scripts/run-deploy-stage --summary` prints the active run, and `bash scripts/run-deploy-stage --history` prints successful-stage p50/p90 plus end-to-end spans from finalized runs (active/aborted runs are reported separately).
+
+Every `record_factory_event.py` command in this workflow is a hard collection
+gate. Run it as the exact standalone command shown, require exit 0 and its
+`FACTORY_EVENT` confirmation line, and fix/retry the writer before continuing if
+either is missing. Search output, quoted command text, and failed tool calls are
+not telemetry.
 
 **You must fix ALL non-overridden failing tests, even if they are not caused by the changes in this branch.** The deploy flow defaults to keeping main green. If a test was already broken before your branch, that is now your responsibility to fix before merging unless the user explicitly overrides that exact gate. This includes infrastructure issues, flaky tests, timeout tuning, missing credentials, third-party integration problems, and anything else.
 
@@ -136,7 +143,7 @@ CHANGED_TS=$(
       [ -f "back-end/$file" ] && echo "$file"
     done || true
 )
-CHANGED_BACKEND=$(echo "$CHANGED" | grep -E '^back-end/' || true)
+CHANGED_BACKEND=$(echo "$CHANGED" | grep -E '^(back-end/|scripts/run-bench-hub-poller$)' || true)
 CHANGED_BACKEND_LINT_INPUTS=$(echo "$CHANGED" | grep -E \
   '^(package(-lock)?\.json|back-end/(package(-lock)?\.json|tsconfig[^/]*\.json|eslint\.config\.(mjs|js|cjs|ts)|prisma/schema\.prisma))$' || true)
 LINT_TS="$CHANGED_TS"
@@ -145,12 +152,38 @@ if [ -n "$CHANGED_BACKEND_LINT_INPUTS" ]; then
     sed 's|^back-end/||' | sort)
 fi
 CHANGED_AGENTS=$(echo "$CHANGED" | grep -E '^agents/' || true)
-CHANGED_RESEARCH=$(echo "$CHANGED" | grep -E '^research/' || true)
 CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
 CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
 CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)' || true)
-CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS$CHANGED_RESEARCH" ] && echo "yes" || echo "")
+CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS" ] && echo "yes" || echo "")
 CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
+
+# Keep the aggregate coverage worker pool within this 14-core deploy host.
+# Backend blackboxes and unit files overlap, so both pools count. An uncapped
+# all-repo run starts 18+ workers and makes every lane slower.
+BACKEND_BLACKBOX_WORKERS=4
+BACKEND_UNIT_WORKERS=6
+AGENTS_COVERAGE_WORKERS=6
+FRONTEND_COVERAGE_WORKERS=4
+MAC_COVERAGE_WORKERS=4
+if [ -n "$CHANGED_BACKEND" ] && [ -n "$CHANGED_AGENTS" ]; then
+  BACKEND_BLACKBOX_WORKERS=4
+  if [ -n "$CHANGED_FRONTEND" ] && [ -n "$CHANGED_MAC_APP" ]; then
+    BACKEND_BLACKBOX_WORKERS=5
+    BACKEND_UNIT_WORKERS=2
+    AGENTS_COVERAGE_WORKERS=3
+    FRONTEND_COVERAGE_WORKERS=2
+    MAC_COVERAGE_WORKERS=1
+  elif [ -n "$CHANGED_FRONTEND$CHANGED_MAC_APP" ]; then
+    BACKEND_UNIT_WORKERS=2
+    AGENTS_COVERAGE_WORKERS=4
+  else
+    BACKEND_UNIT_WORKERS=4
+    AGENTS_COVERAGE_WORKERS=6
+  fi
+elif [ -n "$CHANGED_BACKEND" ] && [ -n "$CHANGED_FRONTEND$CHANGED_MAC_APP" ]; then
+  BACKEND_UNIT_WORKERS=4
+fi
 ```
 
 ## Step 0p: Prompt human-approval guard (no skip — always runs)
@@ -163,7 +196,7 @@ Prompt modifications are high-risk behavior changes. **Any prompt modification M
 
 1. Examine every flagged hunk and classify it: does it change (or change the construction of) text an LLM ever sees — at compile time or runtime?
 2. If NO hunk changes LLM-visible text: state that determination in the deploy log (per file, one line on why it is code-behavior only), then pass the guard with the mandatory flag WITHOUT waiting for human approval. Record `Prompt Human Approval Guard | Pass | flagged files are code-behavior only (no LLM-visible text changed): <files>` in `TEST_REPORT`.
-3. If ANY hunk changes LLM-visible text — or you are unsure (runtime string construction counts) — stop and request human approval for those hunks, **each presented as a clickable `path:line` link** (per the mandatory file-link rule above). When mixed, list which hunks need review (with links) and which are code-behavior-only so the human reviews only what matters.
+3. If ANY hunk changes LLM-visible text — or you are unsure (runtime string construction counts) — stop and request human approval for those hunks, **each presented as a clickable `path:line` link** (per the mandatory file-link rule above). Immediately before sending the request, run `python3 scripts/record_factory_event.py deploy approval-request prompt-approval`. When mixed, list which hunks need review (with links) and which are code-behavior-only so the human reviews only what matters.
 
 **Operational gate maintenance is pre-authorized and MUST NOT block for human approval.** Changes limited to `.claude/commands/deploy.md` instructions that detect changed paths, select or invoke tests, record verification evidence, or tighten CI/deploy gates do not alter product or agent prompts. Classify those hunks as operational code behavior, rerun the guard with the mandatory flag immediately, and continue. Never stop an active implementation, RCA, benchmark, or deploy goal to ask permission for test-gate wiring.
 
@@ -179,7 +212,7 @@ If it fails, apply the classification above. For hunks that change LLM-visible t
 
 Human approval is scoped only to the prompt diff that exists when approval is requested. If LLM-visible text in any prompt, instruction, command, skill, or prompt-related file changes later — including changes made to fix tests or smoke benchmarks — re-run the guard without the approval flag, show the new prompt diff, and wait for fresh explicit approval before continuing. Later code-behavior-only changes to flagged files follow rule 2 above (classify, log, proceed).
 
-After the human explicitly approves the current prompt changes, rerun the guard with the mandatory flag:
+After the human responds, first run `python3 scripts/record_factory_event.py deploy approval-decision approved` (or `rejected`). A rejection remains blocked. After an approval, rerun the guard with the mandatory flag:
 
 ```bash
 bash scripts/run-deploy-stage prompt-approval -- bash scripts/check-prompt-human-approval.sh mandatory-human-approval-retrieved=true
@@ -201,7 +234,7 @@ bash scripts/run-deploy-stage agent-behavior-approval -- bash scripts/check-agen
 
 If it passes (no watched-file change, or no recovery/terminal-semantics hunk), record `Agent Behavior Approval Guard | Pass | no agent-behavior changes detected` in `TEST_REPORT`.
 
-If it fails, examine every flagged hunk. Unlike Step 0p there is no "code-behavior only" bypass — a flagged hunk **is** an agent-behavior change by construction. Stop and request explicit human approval for it — **presenting each hunk as a clickable `path:line` link** (per the mandatory file-link rule in Step 0p) — and state, in one line, how it changes when the agent gives up vs. keeps iterating. Approval is snapshot-scoped exactly like the prompt gate: if later fixes add or change recovery/terminal hunks, re-run without the flag and request fresh approval. After the human approves, rerun with the mandatory flag:
+If it fails, examine every flagged hunk. Unlike Step 0p there is no "code-behavior only" bypass — a flagged hunk **is** an agent-behavior change by construction. Stop and request explicit human approval for it — **presenting each hunk as a clickable `path:line` link** (per the mandatory file-link rule in Step 0p) — and state, in one line, how it changes when the agent gives up vs. keeps iterating. Immediately before sending the request, run `python3 scripts/record_factory_event.py deploy approval-request agent-behavior-approval`. Approval is snapshot-scoped exactly like the prompt gate: if later fixes add or change recovery/terminal hunks, re-run without the flag and request fresh approval. After the human responds, first run `python3 scripts/record_factory_event.py deploy approval-decision approved` (or `rejected`); a rejection remains blocked. After approval, rerun with the mandatory flag:
 
 ```bash
 bash scripts/run-deploy-stage agent-behavior-approval -- bash scripts/check-agent-behavior-approval.sh mandatory-human-approval-retrieved=true
@@ -213,19 +246,59 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
 
 1. **Prompt approval gate** (read-only, always first): Step 0p. If prompt edits are detected, stop until a human approves them, then rerun Step 0p with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change prompt/instruction files, return to Step 0p without the flag and request fresh approval for those additional prompt changes.
 1b. **Agent-behavior approval gate** (read-only, runs alongside Step 0p): Step 0b. If recovery/terminal-semantics hunks are detected, stop until a human approves them, then rerun Step 0b with `mandatory-human-approval-retrieved=true`. If later fixes introduce or change agent-behavior hunks, return to Step 0b without the flag and request fresh approval.
-2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1r (`research fmt/lint --fix`, skip if `CHANGED_RESEARCH` is empty) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
-3. **Parallel verifiers** (all read-only, independent — run in a single message with multiple Bash tool calls):
+2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
+3. **Parallel Group 3** (all read-only after the mutators; start every applicable
+   lane in one assistant message with separate Bash tool calls, using the worker
+   budgets computed above). Every repository
+   coverage command executes its blackbox suite under instrumentation, so that
+   one command satisfies both the Coverage and Runtime blackbox rows. Never run
+   the same blackbox suite again without coverage. Before the combined lanes,
+   record their shared runtime wall-clock boundary:
+
+   ```bash
+   python3 scripts/record_factory_event.py deploy stage-start runtime-blackbox
+   ```
+
+   Then start static verification and every applicable combined
+   coverage-blackbox command together. Do not start the Group 4 semantic/smoke
+   workloads until Group 3 ends: their own worker pools oversubscribe the host
+   and lengthen the critical path. The semantic stack no longer runs a duplicate
+   backend blackbox suite.
+
+   **Static verify:**
    - Step 2b: `eslint` verify (0 errors)
    - Step 3: `tsc --noEmit`
    - Step 4: structural tests (skip if `CHANGED_TS` is empty)
    - Step 4s: deploy environment + command structural tests (no skip)
-   - Step 4a: back-end coverage (skip if `CHANGED_BACKEND` is empty)
-   - Step 4b: front-end coverage (skip if `CHANGED_FRONTEND` is empty)
    - Step 4m-lint: mac-app format:check + lint + type-check (skip if `CHANGED_MAC_APP` is empty)
-   - Step 4m-coverage: mac-app coverage (skip if `CHANGED_MAC_APP` is empty)
-   - Step 4m: mac-app blackbox (skip if `CHANGED_MAC_APP` is empty)
-   - Step 4r: research lint + structural (skip if `CHANGED_RESEARCH` is empty)
    - Step 4cb: cloud benchmark controller regressions (skip if `CHANGED_CLOUDBENCH` is empty)
+
+   **Coverage + Runtime blackbox (one execution, reported in both rows):**
+   - Step 4a: back-end blackbox + unit tests under coverage (skip if
+     `CHANGED_BACKEND` is empty)
+   - Step 4b: front-end blackbox + structural tests under coverage (skip if
+     `CHANGED_FRONTEND` is empty)
+   - Step 4g: agents blackbox + fast-cache + unit tests under coverage (skip if
+     `CHANGED_AGENTS` is empty)
+   - Step 4m-coverage: mac-app blackbox tests under coverage (skip if
+     `CHANGED_MAC_APP` is empty)
+
+   After those parallel branches finish, run Step 4c's focused credential
+   health probe and Step 4h's focused live Amplitude probe once each. Coverage
+   intentionally keeps external providers offline; these focused tails preserve
+   the real assertions without letting a provider retry rerun every repository
+   suite.
+
+   When every applicable runtime-blackbox branch ends, pass or fail, record:
+
+   ```bash
+   python3 scripts/record_factory_event.py deploy stage-finish runtime-blackbox
+   ```
+
+   A failure followed by a fix is a new lifecycle: emit a new start/finish pair
+   around the rerun. Never leave a started runtime boundary unfinished. The
+   factory report attributes each combined command to both semantic rows but
+   unions it only once in Group 3 wall clock.
 
 If any verifier fails, fix and re-run the full Step 0 → verifier flow. Do not proceed until all verifiers are green.
 
@@ -297,33 +370,48 @@ If any invariant fails, fix the violation. The test output includes remediation 
 bash scripts/tests/workspace-env.test.sh
 bash scripts/tests/semantic-deploy-gate.test.sh
 bash scripts/tests/check-agent-behavior-approval.test.sh
+python3 scripts/tests/factory-review.test.py
+bash scripts/tests/run-deploy-stage.test.sh
 ```
 
 These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
 
-## Step 4a: Code coverage check (skip if no back-end/ changes)
+## Step 4a: Back-end coverage + blackbox (skip if no back-end/ changes)
 
 ```bash
-cd back-end && bash ../scripts/run-deploy-stage backend-coverage -- npm run test:coverage
+cd back-end && bash ../scripts/run-deploy-stage backend-coverage-blackbox -- \
+  env BLACKBOX_TEST_CONCURRENCY="$BACKEND_BLACKBOX_WORKERS" \
+      CONTRACT_TEST_CONCURRENCY="$BACKEND_BLACKBOX_WORKERS" \
+      BACKEND_UNIT_CONCURRENCY="$BACKEND_UNIT_WORKERS" \
+      npm run test:coverage
 ```
 
-Coverage must meet the configured thresholds in `back-end/.c8rc.json`. If it fails, add tests to cover the gap before proceeding.
+This one command runs all 91 deterministic back-end blackbox domains plus unit
+tests under V8 coverage. It must both pass every test and meet
+`back-end/.c8rc.json`; the real provider credential probe runs once in Step 4c.
 
-## Step 4b: Front-end code coverage check (skip if no front-end/ changes)
+## Step 4b: Front-end coverage + blackbox (skip if no front-end/ changes)
 
 ```bash
-cd front-end && bash ../scripts/run-deploy-stage frontend-coverage -- npm run test:coverage
+cd front-end && bash ../scripts/run-deploy-stage frontend-coverage-blackbox -- \
+  npm run test:coverage -- --maxWorkers="$FRONTEND_COVERAGE_WORKERS"
 ```
 
-Coverage must meet the thresholds configured in `front-end/vitest.config.ts` (`coverage.thresholds`). Thresholds ratchet toward a target of 80% — if the gate fails, add tests to cover the gap before proceeding. Never loosen the threshold.
+This one command runs every front-end blackbox and structural Vitest under
+coverage. Every test must pass and coverage must meet `front-end/vitest.config.ts`.
+Never loosen the threshold or rerun the same blackbox suite separately.
 
-## Step 4g: Agents code coverage check (skip if no agents/ changes)
+## Step 4g: Agents coverage + blackbox (skip if no agents/ changes)
 
 ```bash
-cd agents && bash ../scripts/run-deploy-stage agents-coverage -- bash scripts/run-coverage.sh
+cd agents && bash ../scripts/run-deploy-stage agents-coverage-blackbox -- \
+  env AGENTS_COVERAGE_CONCURRENCY="$AGENTS_COVERAGE_WORKERS" \
+      bash scripts/run-coverage.sh
 ```
 
-Coverage must meet the `fail_under` threshold in `agents/pyproject.toml` (`[tool.coverage.report]`). Threshold ratchets toward a target of 80% — if the gate fails, add tests to cover the gap before proceeding. Never loosen the threshold.
+This one command runs every agents blackbox plus fast-cache and unit tests under
+coverage. Every test must pass and coverage must meet `agents/pyproject.toml`.
+Never loosen the threshold or rerun the blackbox suite separately.
 
 ## Step 1m: Mac-app format + lint auto-fix (skip if `$CHANGED_MAC_APP` is empty)
 
@@ -346,42 +434,18 @@ cd mac-app && bash ../scripts/run-deploy-stage mac-static -- bash -c 'npm run fo
 
 If any check fails, fix and re-run. `npm run lint` applies both base rules and the type-aware strict overlay defined by `STRICT_DOMAIN_FILES` in `mac-app/eslint.config.mjs` (max-lines, max-lines-per-function, no-floating-promises, strict-boolean-expressions, etc.).
 
-## Step 4m-coverage: Mac-app code coverage check (skip if `$CHANGED_MAC_APP` is empty)
+## Step 4m-coverage: Mac-app coverage + blackbox (skip if `$CHANGED_MAC_APP` is empty)
 
 ```bash
-cd mac-app && bash ../scripts/run-deploy-stage mac-coverage -- npm run test:coverage
+cd mac-app && bash ../scripts/run-deploy-stage mac-coverage-blackbox -- \
+  npm run test:coverage -- --maxWorkers="$MAC_COVERAGE_WORKERS"
 ```
 
-Coverage must meet the thresholds configured in `mac-app/vitest.config.ts` (`coverage.thresholds`). Thresholds ratchet toward a target of 80% — if the gate fails, add tests to cover the gap before proceeding. Never loosen the threshold.
-
-## Step 4m: Mac-app blackbox tests (skip if `$CHANGED_MAC_APP` is empty)
-
-The mac-app has its own vitest + MSW + jsdom blackbox suite covering every renderer and main-process domain (see `mac-app/tests/blackbox/`). Run the full suite:
-
-```bash
-cd mac-app && bash ../scripts/run-deploy-stage mac-blackbox -- bash scripts/run-blackbox-tests.sh
-```
-
-**ALL domains must pass — 0 failures.** Same rule as backend blackbox (Step 5a): "pre-existing" is not an excuse, fix every failure. The runner writes artifacts to `mac-app/.context/test-runs/<run-id>/` with a `manifest.json` + `runner.log` for diagnosis.
+This one command runs the complete mac-app Vitest/MSW/jsdom blackbox suite under
+coverage. Every domain must pass and coverage must meet `mac-app/vitest.config.ts`.
+Never loosen the threshold or launch `scripts/run-blackbox-tests.sh` afterward.
 
 If the failure is renderer-only (jsdom + React), check `mac-app/tests/blackbox/test-wrapper.tsx` and the relevant MSW handlers in `mac-app/tests/blackbox/msw/handlers.ts`. If it's main-process (Node + Electron stubs), check `mac-app/tests/blackbox/electron-stubs.ts` and `mac-app/tests/blackbox/fetch-capture.ts`.
-
-## Step 4r: Research lint + structural (skip if `$CHANGED_RESEARCH` is empty)
-
-If the diff touches `research/`, run the research-side check harness. It enforces fmt/lint (base + strict overlay), structural invariants (max 300 lines per file, 80 per function), and Python ruff.
-
-```bash
-cd research && bash ../scripts/run-deploy-stage research-static -- bash scripts/lint-check.sh
-```
-
-If anything fails, re-run with `--fix` to auto-apply format/lint fixes, then re-run without `--fix` to verify:
-
-```bash
-cd research && bash ../scripts/run-deploy-stage research-fix -- bash scripts/lint-check.sh --fix
-cd research && bash ../scripts/run-deploy-stage research-static -- bash scripts/lint-check.sh
-```
-
-Commit any auto-fix changes before proceeding. "Pre-existing" violations in touched files are your responsibility — the same 0-failure rule from Steps 2/3/4 applies here.
 
 ## Step 4cb: Cloud benchmark controller regressions (skip if `$CHANGED_CLOUDBENCH` is empty)
 
@@ -389,39 +453,45 @@ Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barri
 
 ```bash
 bash scripts/tests/cloudbench-env.test.sh
+bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
 agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py \
-  -k 'data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or isolated_backend or local_predeploy_skips_wmh'
+  -k 'cloud_patch_detection_and_payload_include_staged_only_changes or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or autoscaled_worker_failure_is_removed_and_replaceable or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh'
+cd agents && python scripts/run_blackbox_tests.py benchmark
 ```
 
-Both commands must pass. This operational verification wiring is pre-authorized by Step 0p and must never pause for human approval.
+All three commands must pass. This operational verification wiring is pre-authorized by Step 0p and must never pause for human approval.
 
 ## Step 4c: Credential health check (runs unless explicitly overridden)
 
-Before spinning up services or spending money on smoke benchmarks, validate every external credential (E2B, Steel, Parallel.ai, Anthropic, OpenRouter, Supabase). This runs standalone against real provider endpoints — no local backend needed. Finishes in ~3s and fails fast on 401/402/403.
+After all parallel Group 3 branches finish, validate every external credential
+(E2B, Steel, Parallel.ai, Anthropic, OpenRouter, Supabase) with the focused test
+below. The deterministic Step 4a batch excludes this provider-dependent domain,
+so this runs exactly once and a provider outage can be retried without rerunning
+all 91 instrumented back-end domains.
 
 ```bash
 cd back-end && bash ../scripts/run-deploy-stage credential-health -- npx tsx src/tests/blackbox/integration-health.blackbox.ts
 ```
 
-**If ANY credential is rejected** the error message names the exact env var to refresh and the provider dashboard URL. Escalate to the user immediately and do not proceed to Step 5 unless the user explicitly overrides that credential gate. If overridden, record the rejection as `⚠️ Overridden`, use the narrow gate-specific harness override, and continue every other check. Do not change production auth behavior merely to make a rejected credential appear healthy.
+**If any hard credential is rejected** the error message names the exact env var to refresh and the provider dashboard URL. Escalate to the user immediately and do not proceed to Step 5 unless the user explicitly overrides that credential gate. If overridden, record the rejection as `⚠️ Overridden`, use the narrow gate-specific harness override, and continue every other check. Do not change production auth behavior merely to make a rejected credential appear healthy.
 
-This same file is also part of the full blackbox suite (Step 5a), so it will run again there when the backend-change path fires. Running it twice is harmless (~3s).
+Anthropic/Claude is intentionally non-blocking in this gate: the probe should still run by default and report `WARN` on exhausted credits, rejected auth, or provider availability problems, but future deploys may proceed without human approval when only this provider fails. The optional `DEPLOY_GATE_OVERRIDES=credential-health:anthropic` path remains available when an operator wants an explicit audited skip instead of a live probe. Parallel.ai is also warn-only.
 
-## Step 4d: Push PR early, start CodeRabbit in parallel with runtime tests
+## Step 4h: Live Amplitude admin-health probe (no skip)
 
-Static checks (1–4a) are now green. **Do not wait for Steps 5–6 to finish before pushing** — CodeRabbit review is usually the longest idle block in the whole flow (~5–15 min). Push the branch and open the PR **now**, so CodeRabbit reviews while the local smoke/blackbox runs happen.
+Run this once after all parallel Group 3 branches finish and before recording
+the `runtime-blackbox` finish boundary:
 
-1. Commit any uncommitted changes from Phase 1a (prettier/eslint fixes, coverage-driven test additions), using the test-report commit format from Step 7.
-2. If on `main`, create a new branch; push with `-u`:
-   ```bash
-   git push -u origin $(git branch --show-current)
-   ```
-3. Create the PR now (same body/title format as Step 8). Persist `pr_title_locked` as described in Step 8.
-4. **In parallel**, proceed to Steps 5, 5a, 6 (runtime tests) AND begin Step 9 (CodeRabbit wait). Do not serialize them. Both must be green before merging.
+```bash
+cd back-end && bash ../scripts/run-deploy-stage amplitude-live -- \
+  env ADMIN_HEALTH_LIVE_ONLY=1 BLACKBOX_TEST_CONCURRENCY=1 \
+      bash scripts/run-blackbox-tests.sh admin-health
+```
 
-**If runtime tests (5/5a/6) fail** after the PR is already open: fix the issue, push the fix commit, and restart the Test Loop from Step 0. The new push re-arms CodeRabbit automatically — Step 9's poll-until-re-armed logic handles that correctly.
-
-**Consequence for Phase 2:** by the time you reach Step 7/8, the push and PR already exist. Treat Steps 7 and 8 as "verify already done" unless an earlier test-loop iteration failed and forced a restart.
+This starts an isolated local backend and executes only the strict weekly
+admin-health case. Missing credentials fail closed; all six Amplitude funnel
+steps must be `ready` with real counts. A 429 blocks deploy, but its rerun
+repeats only this focused probe—not the complete coverage suite.
 
 ## Step 5: Spin up local services
 
@@ -435,10 +505,14 @@ bash scripts/kill-services.sh           # kill the whole tree; preserves DB cont
 
 `scripts/kill-services.sh` is worktree-scoped (uses `$PWD` as the filter), walks descendants via `pgrep -P`, SIGTERMs then SIGKILLs survivors, and deliberately leaves the Postgres container intact. Re-run it any time you need a clean slate — it is idempotent.
 
-Spin up the local stack through `scripts/run.sh --benchmark`. This stack serves blackbox and semantic gates; Pre-Deploy smoke runs on its own separate isolated stack via `run-bench --local` (or, opt-in, the cloud fleet). In benchmark mode, `run.sh` starts `back-end`, `front-end`, and `agents`, and skips `mac-app`. When this command is used inside Conductor, `run.sh` derives the backend, frontend, and worker-health ports from `CONDUCTOR_PORT`.
+Spin up the local stack through `scripts/run.sh --benchmark`. This stack serves
+the Group 4 semantic gate; coverage commands already ran every repository
+blackbox exactly once. Pre-Deploy smoke runs on its own separate isolated stack
+via `run-bench --local` (or, opt-in, the cloud fleet). In benchmark mode,
+`run.sh` starts `back-end`, `front-end`, and `agents`, and skips `mac-app`.
 
 ```bash
-# Conductor provides the base port; run.sh fans out backend/frontend/health/research from it.
+# Conductor provides the base port; run.sh fans out backend/frontend/health from it.
 if [ -z "$CONDUCTOR_PORT" ]; then
   echo "CONDUCTOR_PORT must be set (run this from Conductor)." >&2
   exit 1
@@ -482,16 +556,10 @@ echo "DB pre-started: $DB_CONTAINER on port $LOCAL_DB_PORT"
 # Keep all service output redirected so the managed session cannot exhaust its output budget.
 # run.sh will detect the DB as already-running and won't stop it on cleanup.
 # Use run_in_background=true for this command:
-BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_REPLAY_OUTBOUND=1 \
+BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 \
   BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8 TRACE_ARCHIVE_ENABLED=0 \
   bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1
 ```
-
-The replay opt-in is required because Step 5a runs the fixture-backed blackbox
-suite against this existing backend. Benchmark mode otherwise captures outbound
-calls without consuming fixtures, which would make seeded auth cases dial live
-Twilio/Supabase endpoints. This is a local test-stack opt-in only; ordinary
-benchmark stacks keep replay disabled by default.
 
 Poll the background Bash call at least every 30 seconds while Steps 5-6b run. This keeps the managed process session active without streaming the high-volume service logs; use `.context/deploy-smoke.log` only for targeted diagnosis. `BENCHMARK_BUNDLED_FRONTEND=true` builds and serves the frontend so the browser-agent lifecycle gates have a stable target.
 
@@ -522,27 +590,41 @@ bash scripts/kill-services.sh                    # kills run.sh tree, preserves 
 
 `kill-services.sh` is a superset of the old `pkill -f "scripts/run.sh --benchmark"` approach: `pkill` only signals bash wrappers, so detached node/python grandchildren survive (the real root cause of the zombie-run.sh problem). `kill-services.sh` walks descendants explicitly. Use `scripts/teardown.sh` instead if you also want to delete the DB container + volume (destructive).
 
-## Step 5a: Blackbox API tests + fix
+## Step 4d: Open the PR and launch parallel Group 4
 
-**Skip if `$CHANGED_BACKEND` is empty** (blackbox tests only exercise back-end routes; front-end/mac-app-only PRs don't need them).
+The read-only static, coverage, and runtime-blackbox lanes in Group 3 are now
+green. Commit all intended files, push, and open the PR using the Step 7/8 body
+and title format. Persist `pr_title_locked` as described in Step 8. The push
+starts CodeRabbit.
 
-With the backend running from Step 5:
+Immediately before the push, record the review lifecycle start:
 
 ```bash
-cd back-end
-BLACKBOX_TEST_USE_EXISTING_BACKEND=1 TEST_BASE_URL=$SMOKE_BASE_URL \
-  bash ../scripts/run-deploy-stage backend-blackbox -- bash scripts/run-blackbox-tests.sh
+python3 scripts/record_factory_event.py deploy stage-start code-review
 ```
 
-**ALL domains must pass — 0 failures.** If ANY domain fails, you must fix it before proceeding, even if the failing domain was not modified in this PR. "Pre-existing" is not an excuse. Fix it, re-run, get 100%. If you cannot fix a failure, STOP and escalate to the user — do NOT proceed to Phase 2.
+Immediately after the PR exists, launch all applicable Group 4 lanes together
+in one assistant message with separate parallel Bash tool calls:
 
-**ESCALATE IMMEDIATELY on third-party credit/billing errors.** If any test fails with "insufficient credits", "402", "quota exceeded", or similar billing errors from external providers (OpenRouter, OpenAI, E2B, Twilio, etc.), STOP and tell the user immediately. Do NOT try to fix this in code (e.g., accepting 500s). The user needs to add credits to the provider account.
+1. Code review polling (Step 9).
+2. Smoke benchmarks (Step 6; skip only under its documented classifier).
+3. AgentCard lifecycle (Step 6a; skip only when its classifier is empty).
+4. Semantic tests (Step 6b; never skip).
+
+Matching Group 4 rows in `/factory-review` therefore share a real start phase.
+Do not wait for one lane before starting another. All applicable lanes must be
+green before merge. If any lane changes code, push the fix, restart the Test
+Loop from Step 0, and relaunch the whole applicable Group 4 batch; the push
+re-arms CodeRabbit.
+
+By Phase 2, the push and PR already exist. Treat Steps 7 and 8 as “verify
+already done” unless a failed test-loop iteration forced a restart.
 
 ## Step 6: Smoke benchmarks + fix
 
 ### When smoke can be skipped
 
-Smoke benchmarks exercise the full agent runtime (backend API → Temporal → worker activities → LLM calls → research completions). Skip them **only** when the PR diff cannot possibly affect that runtime. Confirm by running `git diff --name-only main...HEAD` and checking every path against the table below.
+Smoke benchmarks exercise the full agent runtime (backend API → Temporal → worker activities → in-process Rose LLM calls). Skip them **only** when the PR diff cannot possibly affect that runtime. Confirm by running `git diff --name-only main...HEAD` and checking every path against the table below.
 
 **SAFE TO SKIP** when the diff is limited to paths that don't ship or don't affect agent behavior:
 
@@ -571,7 +653,6 @@ Smoke benchmarks exercise the full agent runtime (backend API → Temporal → w
 | `agents/worker.py`, `agents/config.py`, `agents/health_server.py`                    | Composition root / worker wiring                                                             |
 | `agents/requirements.txt`, `agents/pyproject.toml` (non-lint sections)               | Runtime dep changes can break imports at startup                                             |
 | `agents/Dockerfile`, `agents/fly.toml`, `agents/deploy.sh`                           | Worker deployment shape                                                                      |
-| `research/supabase/functions/**`                                                     | Rose completions endpoint — all A* / S* LLM calls route through here                         |
 | `scripts/run.sh`                                                                     | Service startup and env wiring that smoke depends on                                         |
 | `back-end/.env.example` **when it adds a new required env var**                      | Runtime config contract change                                                               |
 
@@ -644,7 +725,7 @@ At each poll, check:
 
 ### Pass criteria
 
-**ALL Pre-Deploy smoke benchmarks must pass — currently 6/6, with 0 failures.** On the local path, `run-predeploy-local` must exit 0 ("All requested benchmarks passed") and every task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
+**ALL non-skipped Pre-Deploy smoke benchmarks must pass, with 0 failures.** The only deploy-approved smoke skip is a Claude Code benchmark whose preflight proves there are no synced Claude credentials and no pool token; the shared `ANTHROPIC_API_KEY` fallback is covered by the warn-only credential-health gate and does not satisfy this skippable smoke task. This provider-auth/funding state is skippable by future deploys without additional human approval. On the local path, `run-predeploy-local` must exit 0 and every non-skipped task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
 
 **Diagnosis process — MUST be delegated to a `general-purpose` sub-agent.**
 
@@ -682,11 +763,11 @@ Steps 1–5 — do them all, do not stop early:
      slowest LLM calls, slowest backend HTTP, deduped errors. Best for
      "why was this slow/stalled."
    - `cd agents && source venv/bin/activate && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics`
-     — event-timeline tree across worker/backend/research/messages. Best
+     — event-timeline tree across worker/backend/messages. Best
      for raw error context.
    - For full detail when the summary points at a layer:
      `agent_latency.py <agent_id> -v` for the full span tree, or
-     `agent_logs.py <agent_id> --tree --source worker|backend|research|messages`
+     `agent_logs.py <agent_id> --tree --source worker|backend|messages`
      for per-source raw events.
    - To compare cost/cache against a passing run:
      `python benchmarks/run_benchmark.py --compare <fail.json> <pass.json>`.
@@ -725,7 +806,7 @@ exact agent_id, scan the result, then hand the agent_id off.
 
 - Changing the nature/intent of a test (e.g., weakening assertions, changing what the test validates)
 - Changing timeouts without explicit user permission — instead, diagnose which parts of the agent lifecycle and LLM requests are causing the most latency, and reduce them precisely in a generalizable way that won't create downstream issues
-- Skipping or disabling tests
+- Skipping or disabling tests, except the deploy-approved Claude Code credential-unavailable smoke skip described above
 
 **Escalation is ONLY for:**
 
@@ -748,12 +829,12 @@ Failed benchmark agents are intentionally retained long enough for diagnostics. 
 
 When any local smoke benchmark fails, start with the run artifacts before making code changes:
 
-| Surface | Artifact | What to look for |
-| ------- | -------- | ---------------- |
-| Runner | `local.py` report card / `RESULTS:` line | which task failed + evaluator reason |
-| Result | `agents/benchmarks/runs/<run>.json` + `runs/<run>_diagnostics/` | failed agent ID and failure_reason |
-| Worker | `agents/navi-worker-log.txt` | tracebacks, tool errors, LLM-call failures |
-| Backend | `back-end/backend-logs.log` | 500s, Prisma errors, route failures |
+| Surface | Artifact                                                        | What to look for                           |
+| ------- | --------------------------------------------------------------- | ------------------------------------------ |
+| Runner  | `local.py` report card / `RESULTS:` line                        | which task failed + evaluator reason       |
+| Result  | `agents/benchmarks/runs/<run>.json` + `runs/<run>_diagnostics/` | failed agent ID and failure_reason         |
+| Worker  | `agents/navi-worker-log.txt`                                    | tracebacks, tool errors, LLM-call failures |
+| Backend | `back-end/backend-logs.log`                                     | 500s, Prisma errors, route failures        |
 
 For benchmark-specific diagnostics, run ALL three summaries in parallel — they answer different questions (LOCAL, so no `--prod` / `--url`):
 
@@ -768,54 +849,49 @@ cd agents && python benchmarks/agent_logs.py <agent_id> --tree --diagnostics
 cd agents && python benchmarks/run_benchmark.py --compare <run_a.json> <run_b.json>
 ```
 
-Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree, or `agent_logs.py <agent_id> --tree --source worker|backend|research|messages` for per-source raw events.
+Expand the relevant one: `agent_latency.py <agent_id> -v` for the full span tree, or `agent_logs.py <agent_id> --tree --source worker|backend|messages` for per-source raw events.
 
 ## Step 6a: AgentCard sandbox lifecycle gate
 
-Skip only when `$CHANGED_AGENTCARD_PAYMENT` is empty. Otherwise, tear down the shared Step 5 stack, then run each payment lifecycle task in its own bounded stack through the agent benchmark harness. **Execute each command below as a separate foreground Bash call; do not combine them into a loop or one tool call.** The launcher owns startup, bundled frontend readiness, benchmark execution, and teardown, preventing process-session limits or stale workers from interrupting another lifecycle.
+Skip only when `$CHANGED_AGENTCARD_PAYMENT` is empty. Otherwise, start this as
+one Group 4 lane alongside smoke, semantic, and code review. Its local benchmark
+runner owns one isolated backend/frontend/worker/Postgres stack, so it never
+tears down or contends with the shared Step 5 stack used by semantic tests.
+The four payment tasks stay sequential inside this lane because they mutate one
+payment fixture; top-level parallelism comes from running the lane alongside its
+Group 4 siblings.
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
-bash scripts/kill-services.sh
-```
-
-```bash
 CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
-  bash scripts/run-deploy-stage agentcard-test-shop -- \
-  bash scripts/run-agentcard-lifecycle-task.sh agent-payment-test-shop --bootstrap
+  ROSE_EXCLUDE_ANTHROPIC_FAMILY=1 \
+  SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt \
+  BENCHMARK_SKIP_WMH_BUILD=1 \
+  bash scripts/run-deploy-stage agentcard-lifecycle -- \
+  bash scripts/run-bench --local agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment --bootstrap --max-concurrency 1 --no-dashboard
 ```
 
-```bash
-CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
-  bash scripts/run-deploy-stage agentcard-setup-resume -- \
-  bash scripts/run-agentcard-lifecycle-task.sh agent-payment-setup-resume
-```
+These four real-mode payment tasks never use the simulated World Model Harness.
+The explicit opt-out prevents every fresh deploy workspace from downloading the
+full trace archive and running a first-time GEPA build before the payment gate.
 
-```bash
-CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
-  bash scripts/run-deploy-stage agentcard-idempotent-abandonment -- \
-  bash scripts/run-agentcard-lifecycle-task.sh agent-payment-idempotent-abandonment
-```
-
-```bash
-CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
-  bash scripts/run-deploy-stage agentcard-abandonment -- \
-  bash scripts/run-agentcard-lifecycle-task.sh agent-payment-abandonment
-```
-
-The first bootstrap command must also report an AgentCard sandbox pool of at least $500. This is test-only float provisioned through the authenticated admin session; it does not bypass Organization MCP in the purchase path. All four tasks must pass with their full purchase, Stripe, AgentCard card, organization transfer, attention, and cleanup assertions. A missing lifecycle snapshot, skipped task, unreclaimed abandonment transfer, or unrefunded Stripe capture blocks deploy. Record the four task results and total cost in `TEST_REPORT`.
-
-After all four pass, relaunch the Step 5 stack and readiness checks before Step 6b. Keep that background Bash call actively polled as described in Step 5.
+The bootstrap must report an AgentCard sandbox pool of at least $500. This is
+test-only float provisioned through the authenticated admin session; it does not
+bypass Organization MCP in the purchase path. All four tasks must pass with
+their full purchase, Stripe, AgentCard card, organization transfer, attention,
+and cleanup assertions. A missing lifecycle snapshot, skipped task, unreclaimed
+abandonment transfer, or unrefunded Stripe capture blocks deploy. Record the
+four task results and total cost in `TEST_REPORT`.
 
 ## Step 6b: Semantic tests + fix
 
-Semantic tests exercise real user flows through Playwright/Chromium against the full local stack (backend + worker + research + **frontend**). They are the only gate that proves realtime broadcasts reach the UI and that the login path still works end-to-end.
+Semantic tests exercise real user flows through Playwright/Chromium against the full local stack (backend + worker + **frontend**). They are the only gate that proves realtime broadcasts reach the UI and that the login path still works end-to-end.
 
 **Semantic tests run on every /deploy unless the user explicitly overrides that gate.** This is independent of the smoke-benchmark change classifier: documentation-only, test-only, frontend-only, and backend-only deploys all run the complete semantic suite by default. A deploy changes production state even when the app diff is small, so the user-visible frontend contract is normally re-proven.
 
 ### Running semantic tests
 
-With the full stack from Step 5 still running (backend, worker, research, **and frontend on `$SMOKE_FRONTEND_URL`**):
+With the full stack from Step 5 still running (backend, worker, **and frontend on `$SMOKE_FRONTEND_URL`**):
 
 ```bash
 cd "$(git rev-parse --show-toplevel)"
@@ -845,7 +921,9 @@ If Chromium is missing, install once: `cd front-end && npx playwright install ch
 3. Fix the root cause in code.
 4. Restart services (Step 5) and re-run the failed semantic test.
 
-After Steps 6a and 6b pass, run the mandatory Step 5 teardown. If either fails, preserve the failed agent long enough to collect diagnostics, complete any payment lifecycle cleanup, then tear down before restarting the Test Loop.
+After all Group 4 lanes pass, run the mandatory Step 5 teardown. If any lane
+fails, preserve the failed agent long enough to collect diagnostics, complete
+any payment lifecycle cleanup, then tear down before restarting the Test Loop.
 
 Finalize and print the timing summary before evaluating the Phase 2 hard gate. The interval-union metrics separate true parallel overlap from untimed gaps:
 
@@ -875,17 +953,15 @@ bash scripts/run-deploy-stage --finish
 
 # ║ 4s. Deploy environment + command structural tests: 100% pass ║
 
-# ║ 4a. Code coverage: meets thresholds in .c8rc.json ║
+# ║ 4a. Back-end coverage + blackbox: threshold + all pass ║
 
-# ║ 4g. Agents code coverage: meets pyproject.toml threshold ║
+# ║ 4b. Front-end coverage + blackbox: threshold + all pass ║
+
+# ║ 4g. Agents coverage + blackbox: threshold + all pass ║
 
 # ║ 4c. Credential health: all integrations authenticate ║
 
-# ║ 4m-coverage. Mac-app coverage: meets vitest thresholds ║
-
-# ║ 4m. Mac-app blackbox: 100% pass (skip if no mac-app/ changes) ║
-
-# ║ 5. Blackbox API tests: 100% pass (ALL domains) ║
+# ║ 4m-coverage. Mac coverage + blackbox: threshold + all pass ║
 
 # ║ 6. Smoke benchmarks: complete Pre-Deploy group passes ║
 
@@ -925,7 +1001,7 @@ bash scripts/run-deploy-stage --finish
 
 # ║ - "The code changes don't touch agent/Temporal code" (check the ║
 
-# ║ Step 6 table — back-end/ and research/ changes ALSO require ║
+# ║ Step 6 table — back-end/ changes ALSO require              ║
 
 # ║ smoke, not just agents/) ║
 
@@ -1012,15 +1088,19 @@ Store the title in the `pr_title_locked` column — this column is ours and is n
 ```bash
 # Escape single quotes for SQL
 ESCAPED_TITLE=$(printf "%s" "$PR_TITLE" | sed "s/'/''/g")
+ESCAPED_WORKSPACE_PATH=$(printf "%s" "$PWD" | sed "s/'/''/g")
+ESCAPED_BRANCH=$(printf "%s" "$(git branch --show-current)" | sed "s/'/''/g")
 sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
-  "UPDATE workspaces SET pr_title_locked = '$ESCAPED_TITLE' WHERE directory_name = '$(basename "$PWD")'"
+  "UPDATE workspaces SET pr_title_locked = '$ESCAPED_TITLE' WHERE workspace_path = '$ESCAPED_WORKSPACE_PATH' AND branch = '$ESCAPED_BRANCH'"
 ```
 
 From this point on, Steps 9–13 should read the PR title from this record (rather than querying GitHub) so the workspace and the deploy flow agree on what's shipping:
 
 ```bash
+ESCAPED_WORKSPACE_PATH=$(printf "%s" "$PWD" | sed "s/'/''/g")
+ESCAPED_BRANCH=$(printf "%s" "$(git branch --show-current)" | sed "s/'/''/g")
 PR_TITLE=$(sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
-  "SELECT pr_title_locked FROM workspaces WHERE directory_name = '$(basename "$PWD")'")
+  "SELECT pr_title_locked FROM workspaces WHERE workspace_path = '$ESCAPED_WORKSPACE_PATH' AND branch = '$ESCAPED_BRANCH'")
 ```
 
 ## Step 9: Wait for code review
@@ -1115,12 +1195,22 @@ gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels/claude-review-fallback \
 
 Look across all three endpoints for review feedback from CodeRabbit or the Claude fallback. Either reviewer may post findings as formal reviews or regular comments.
 
+As soon as a reviewer reaches a terminal result (clean or findings), record the
+review lifecycle finish before proceeding or fixing anything:
+
+```bash
+python3 scripts/record_factory_event.py deploy stage-finish code-review
+```
+
+If findings require a new push, the restarted Test Loop records a new review
+start; that retry is intentionally a separate run in `/factory-review`.
+
 - **APPROVED** with no critical issues → proceed to Phase 3.
 - **CHANGES_REQUESTED** or any comment flagging issues → fix them, push, **re-run the full Test Loop (Phase 1)**, then come back to Step 9.
 - **CODE RABBIT UNAVAILABLE** (quota, spending cap, rate limit, service failure, or false-green check) → use the Claude fallback from Step 9a.
 - **REVIEW SKIPPED** (e.g., "Too many files!") → first try filtering, then use the Claude fallback if filtering doesn't fit. CodeRabbit Free caps reviews at 150 files. Add safe path filters to `.coderabbit.yaml`'s `reviews.path_filters` block, push, and let the next CodeRabbit run pick up the new filter. The list below is the canonical safe-filter set — these paths are already gated by /deploy's local checks, so excluding them from CodeRabbit doesn't lose coverage:
   ```yaml
-  # Tests (gated by Step 5a / Step 6 / Step 6b locally)
+  # Tests (gated by combined Step 4 coverage-blackbox / Step 6 / Step 6b locally)
   - "!**/tests/**"
   - "!**/*.blackbox.ts"
   - "!**/*.blackbox.tsx"
@@ -1226,6 +1316,12 @@ if [ -n "$(git log @{u}..HEAD --oneline 2>/dev/null)" ]; then
 fi
 ```
 
+Immediately before merging, start the production-verification lifecycle:
+
+```bash
+python3 scripts/record_factory_event.py deploy stage-start production-verify
+```
+
 Merge without deleting the branch. Do not delete the local branch or the remote branch unless the user explicitly asks for that.
 
 ```bash
@@ -1249,7 +1345,6 @@ git fetch origin main
 Determine which deploy workflows are relevant based on what files changed in the PR. Check using `git diff main~1..main --name-only`:
 
 - Changes in `agents/` → poll `deploy-agents.yml`
-- Changes in `research/supabase/functions/` or `research/deploy.sh` → poll `deploy-research.yml`
 - Changes in `back-end/` → Render auto-deploys (no workflow to poll). **Do NOT just "wait ~60s" — run Step 13a to confirm the merged commit went live AND the app is functionally healthy.**
 - Changes in `front-end/` → Vercel auto-deploys. Wait for a successful GitHub deployment status tied to the merged SHA; a fixed sleep is not proof that the new frontend is live.
 - Changes in `mac-app/` → check if PR had `MAC-APP-RELEASE` label; if so, poll `release-mac-app.yml`
@@ -1432,6 +1527,13 @@ This production-only task reserves exactly $1.00 from the existing AgentCard org
 
 The runner performs the abandon/reclaim/refund action idempotently on success, failure, cancellation, and verifier errors before deleting the benchmark agent. Any missing cleanup snapshot or non-terminal lifecycle state fails the command. Do not declare the deploy complete until this task passes; if the process is forcibly killed, recover the printed agent ID through `/api/test-payment/lifecycle/abandon` and verify the same terminal assertions before rerunning.
 
+After every applicable production deployment, health, semantic, release, and
+AgentCard gate is green, close the production-verification lifecycle:
+
+```bash
+python3 scripts/record_factory_event.py deploy stage-finish production-verify
+```
+
 ## Step 14: New branch
 
 Run `/new_branch_with_context` to sync with main and create a new branch so we can keep working.
@@ -1449,6 +1551,12 @@ fi
 If `ORIGINAL_WORKSPACE_TITLE` was empty in Step 0, skip this step.
 
 ## Step 15: Done
+
+Record the completed lifecycle before the final response:
+
+```bash
+python3 scripts/record_factory_event.py deploy outcome completed
+```
 
 After the new branch is created, report to the user:
 

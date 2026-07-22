@@ -147,6 +147,26 @@ if (envTimeoutMs !== undefined && (!Number.isInteger(envTimeoutMs) || envTimeout
 }
 const timeoutMs = envTimeoutMs ?? 15 * 60 * 1000;
 const artifactDir = readEnv('BLACKBOX_TEST_ARTIFACT_DIR', 'CONTRACT_TEST_ARTIFACT_DIR');
+// These domains assert whole-database aggregates, so running them while other
+// domains create fixtures makes the assertion and the backend's per-day cache
+// observe different snapshots. Keep only those aggregate domains exclusive;
+// every fixture-scoped domain still uses the parallel pool.
+const lateExclusiveDomainNames = new Set(['admin-health', 'benchmarks-test-prompts']);
+const domainWeights = new Map<string, number>([
+  ['benchmarks-hub-pipeline', 90],
+  ['browser-provider', 60],
+  ['agents', 40],
+  ['plaid', 32],
+  ['codex-code', 28],
+  ['proactive-sms', 20],
+]);
+const lateExclusiveDomains = requested.filter((domain) => lateExclusiveDomainNames.has(domain));
+const parallelDomains = requested
+  .filter((domain) => !lateExclusiveDomainNames.has(domain))
+  .sort(
+    (left, right) =>
+      (domainWeights.get(right) ?? 0) - (domainWeights.get(left) ?? 0) || left.localeCompare(right)
+  );
 const rawCaseConcurrency = readEnv(
   'BLACKBOX_TEST_CASE_CONCURRENCY',
   'CONTRACT_TEST_CASE_CONCURRENCY'
@@ -167,6 +187,10 @@ if (artifactDir) {
 process.stdout.write(
   `Running black-box tests for ${requested.length} domain(s) with domainConcurrency=${concurrency}, caseConcurrency=${caseConcurrency} (runId=${runId})...\n\n`
 );
+const exclusiveDomains = [...lateExclusiveDomains];
+if (exclusiveDomains.length > 0) {
+  process.stdout.write(`Exclusive lifecycle domains: ${exclusiveDomains.join(', ')}\n\n`);
+}
 
 interface Result {
   domain: string;
@@ -182,10 +206,12 @@ function runDomain(domain: string, workerIndex: number): Promise<Result> {
     const cwd = resolve(blackboxDir, '../../..');
     const start = Date.now();
     const chunks: Buffer[] = [];
-    const npxCmd = process.platform === 'win32' ? 'npx.cmd' : 'npx';
     let settled = false;
 
-    const child = spawn(npxCmd, ['tsx', file], {
+    // `npx tsx` creates npm + tsx wrapper processes for every domain. Under
+    // NODE_V8_COVERAGE those wrappers emit irrelevant coverage blobs that slow
+    // merging without exercising product code.
+    const child = spawn(process.execPath, ['--import', 'tsx', file], {
       cwd,
       env: {
         ...process.env,
@@ -266,7 +292,15 @@ async function runWithConcurrency<T, R>(
 }
 
 async function main(): Promise<void> {
-  const results = await runWithConcurrency(requested, concurrency, runDomain);
+  const parallelResults = await runWithConcurrency(parallelDomains, concurrency, runDomain);
+  // Aggregate assertions run after every parallel fixture writer has finished.
+  // This also lets coverage run isolated unit processes during the long
+  // provider domains without invalidating admin-health's whole-DB snapshot.
+  const lateExclusiveResults = await runWithConcurrency(lateExclusiveDomains, 1, runDomain);
+  const resultsByDomain = new Map(
+    [...parallelResults, ...lateExclusiveResults].map((result) => [result.domain, result])
+  );
+  const results = requested.map((domain) => resultsByDomain.get(domain)!);
   if (artifactDir) {
     for (const result of results) {
       const logPath = join(artifactDir, `${result.domain}.log`);
@@ -299,6 +333,7 @@ async function main(): Promise<void> {
           requested,
           domainConcurrency: concurrency,
           caseConcurrency,
+          exclusiveDomains,
           timeoutMs,
           passed,
           failed,

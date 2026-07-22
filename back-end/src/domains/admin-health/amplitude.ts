@@ -76,6 +76,10 @@ function emptyCounts(value: number | null): Record<AmplitudeFunnelStepId, number
   >;
 }
 
+export function unavailableAmplitudeFunnel(detail: string): AmplitudeFunnelResult {
+  return { counts: emptyCounts(null), detail };
+}
+
 function authHeader(): string {
   return `Basic ${Buffer.from(`${AMPLITUDE_API_KEY}:${AMPLITUDE_SECRET_KEY}`).toString('base64')}`;
 }

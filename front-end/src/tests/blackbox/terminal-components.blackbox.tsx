@@ -146,10 +146,13 @@ function makeMockAgentContext(messages: Message[] = []): AgentContextValue {
   };
 }
 
-function withAgentCtx(messages: Message[], children: React.ReactNode) {
-  return (
-    <AgentContext.Provider value={makeMockAgentContext(messages)}>{children}</AgentContext.Provider>
-  );
+function withAgentCtx(messages: Message[], children: React.ReactNode, agentId?: string) {
+  const context = makeMockAgentContext(messages);
+  if (agentId !== undefined) {
+    context.agent = makeAgentDetail({ agent_id: agentId });
+    context.selectedAgentId = agentId;
+  }
+  return <AgentContext.Provider value={context}>{children}</AgentContext.Provider>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1743,14 +1746,33 @@ describe('BrowserStatusBar (blackbox)', () => {
     await waitFor(() => expect(rejectCalled).toBe(true));
   });
 
-  it('clicking "Take control" in fullscreen calls browser-session/resume', async () => {
+  it('clicking "Take control" on a live browser enables interaction and can hand control back', async () => {
     let resumeCalled = false;
+    const controlModes: string[] = [];
+    let controlStateReads = 0;
+    let controlRequested = false;
     server.use(
       http.post(`${API_BASE}/browser-session/resume`, async ({ request }) => {
         resumeCalled = true;
         const body = (await request.json()) as { task_id?: string };
         expect(body.task_id).toBe('task-1');
-        return HttpResponse.json({ success: true });
+        return HttpResponse.json({ success: true, debug_url: 'https://unexpected.example' });
+      }),
+      http.post(`${API_BASE}/browser-session/task/task-1/control`, async ({ request }) => {
+        const body = (await request.json()) as { mode?: string };
+        controlModes.push(body.mode ?? '');
+        controlRequested = body.mode === 'user';
+        return HttpResponse.json({
+          state: controlRequested ? 'requested' : 'agent',
+          agentPaused: false,
+        });
+      }),
+      http.get(`${API_BASE}/browser-session/task/task-1/control`, () => {
+        controlStateReads += 1;
+        return HttpResponse.json({
+          state: controlRequested ? 'user' : 'agent',
+          agentPaused: false,
+        });
       }),
     );
 
@@ -1783,7 +1805,66 @@ describe('BrowserStatusBar (blackbox)', () => {
     // In fullscreen + not disconnected: "Take control" chip is visible
     await waitFor(() => expect(screen.getByText('Take control')).toBeInTheDocument());
     await user.click(screen.getByText('Take control'));
-    await waitFor(() => expect(resumeCalled).toBe(true));
+    expect(resumeCalled).toBe(false);
+    expect(await screen.findByRole('button', { name: 'Hand back control' })).toBeInTheDocument();
+    expect(controlModes).toEqual(['user']);
+    expect(controlStateReads).toBeGreaterThan(0);
+    expect(screen.getByTitle('Browser')).toHaveAttribute(
+      'src',
+      expect.stringContaining('interactive=true'),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Hand back control' }));
+    expect(await screen.findByRole('button', { name: 'Take control' })).toBeInTheDocument();
+    expect(controlModes).toEqual(['user', 'agent']);
+    expect(screen.getByTitle('Browser')).toHaveAttribute('src', 'about:blank');
+  });
+
+  it('restores hand-back control after the frontend reloads during a leased handoff', async () => {
+    let agentResumeCalls = 0;
+    server.use(
+      http.get(`${API_BASE}/browser-session/task/task-1/control`, () =>
+        HttpResponse.json({
+          state: 'user',
+          agentPaused: true,
+          debugUrl: 'https://steel.example/replacement-live',
+        }),
+      ),
+      http.post(`${API_BASE}/agents/agent-reload-control/resume`, () => {
+        agentResumeCalls += 1;
+        return HttpResponse.json({ success: true });
+      }),
+    );
+    const user = userEvent.setup();
+    renderWithProviders(
+      withAgentCtx(
+        [
+          {
+            message_id: 'reload-control',
+            timestamp: '2026-01-01T00:00:00Z',
+            text: '',
+            role: 'TOOL',
+            metadata: { task_id: 'task-1', action_type: 'session_paused', title: 'Paused' },
+          },
+        ],
+        <BrowserStatusBar taskId="task-1" browserUrl="https://kernel.example/dead-live" />,
+        'agent-reload-control',
+      ),
+    );
+
+    await user.click(screen.getByText('Paused'));
+    const header = await screen.findByText("Agent's Browser");
+    const buttons = within(header.closest('div')!.parentElement!).getAllByRole('button');
+    await user.click(buttons[buttons.length - 2]);
+
+    expect(await screen.findByRole('button', { name: 'Hand back control' })).toBeInTheDocument();
+    expect(screen.getByTitle('Browser')).toHaveAttribute(
+      'src',
+      expect.stringContaining('steel.example/replacement-live'),
+    );
+    await user.click(screen.getByRole('button', { name: 'Hand back control' }));
+    await waitFor(() => expect(agentResumeCalls).toBe(1));
+    expect(await screen.findByRole('button', { name: 'Take control' })).toBeInTheDocument();
   });
 
   it('fullscreen with disconnected session shows Disconnected state + Take Control overlay button', async () => {
@@ -1818,12 +1899,82 @@ describe('BrowserStatusBar (blackbox)', () => {
     expect(screen.getByText('Take Control')).toBeInTheDocument();
   });
 
+  it('automatically reconnects the iframe when a replacement session arrives', async () => {
+    const paused: Message = {
+      message_id: 'paused-old-session',
+      timestamp: '2026-01-01T00:00:00Z',
+      text: '',
+      role: 'TOOL',
+      metadata: {
+        task_id: 'task-1',
+        action_type: 'session_paused',
+        title: 'Paused',
+      },
+    };
+    const user = userEvent.setup();
+    const view = renderWithProviders(
+      withAgentCtx(
+        [paused],
+        <BrowserStatusBar
+          taskId="task-1"
+          browserUrl="https://kernel.example/live/old?readOnly=true"
+        />,
+      ),
+    );
+
+    await user.click(screen.getByText('Paused'));
+    const header = await screen.findByText("Agent's Browser");
+    const hdrButtons = within(header.closest('div')!.parentElement!).getAllByRole('button');
+    await user.click(hdrButtons[hdrButtons.length - 2]);
+    const oldIframe = await screen.findByTitle('Browser');
+    expect(screen.getByText('Disconnected')).toBeInTheDocument();
+
+    const replacement: Message = {
+      message_id: 'replacement-session',
+      timestamp: '2026-01-01T00:00:01Z',
+      text: '',
+      role: 'TOOL',
+      metadata: {
+        task_id: 'task-1',
+        action_type: 'browser',
+        title: 'Browser provider switched',
+        browser_url: 'https://steel.example/live/new?interactive=false',
+      },
+    };
+    view.rerender(
+      withAgentCtx(
+        // Realtime and hydration can merge out of array order; timestamps are
+        // authoritative for the current session lifecycle.
+        [replacement, paused],
+        <BrowserStatusBar
+          taskId="task-1"
+          browserUrl="https://steel.example/live/new?interactive=false"
+        />,
+      ),
+    );
+
+    const newIframe = await screen.findByTitle('Browser');
+    expect(newIframe).not.toBe(oldIframe);
+    expect(newIframe).toHaveAttribute('src', 'https://steel.example/live/new?interactive=false');
+    expect(screen.getByText('Active')).toBeInTheDocument();
+    expect(screen.queryByText('Disconnected')).not.toBeInTheDocument();
+  });
+
   it('resumes a disconnected fullscreen session instead of completing stale auth assistance', async () => {
     let resumeCalls = 0;
+    let agentResumeCalls = 0;
     let authCompletionCalls = 0;
     server.use(
       http.post(`${API_BASE}/browser-session/resume`, () => {
         resumeCalls += 1;
+        return HttpResponse.json({ success: true, debug_url: 'https://kernel.example/resumed' });
+      }),
+      http.post(`${API_BASE}/browser-session/task/task-1/control`, async ({ request }) => {
+        const body = (await request.json()) as { mode?: string };
+        return HttpResponse.json({ state: body.mode === 'user' ? 'user' : 'agent' });
+      }),
+      http.post(`${API_BASE}/agents/agent-control-test/resume`, () => {
+        agentResumeCalls += 1;
         return HttpResponse.json({ success: true });
       }),
       http.post(`${API_BASE}/auth-assistance/:id/complete`, () => {
@@ -1877,7 +2028,11 @@ describe('BrowserStatusBar (blackbox)', () => {
 
     const user = userEvent.setup();
     renderWithProviders(
-      withAgentCtx(messages, <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />),
+      withAgentCtx(
+        messages,
+        <BrowserStatusBar taskId="task-1" browserUrl="about:blank" />,
+        'agent-control-test',
+      ),
     );
 
     await user.click(screen.getByText('Paused after login request'));
@@ -1888,7 +2043,16 @@ describe('BrowserStatusBar (blackbox)', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Take Control' }));
     await waitFor(() => expect(resumeCalls).toBe(1));
+    expect(await screen.findByRole('button', { name: 'Hand back control' })).toBeInTheDocument();
+    expect(screen.getByTitle('Browser')).toHaveAttribute(
+      'src',
+      expect.stringContaining('kernel.example/resumed'),
+    );
     expect(authCompletionCalls).toBe(0);
+
+    await user.click(screen.getByRole('button', { name: 'Hand back control' }));
+    await waitFor(() => expect(agentResumeCalls).toBe(1));
+    expect(await screen.findByRole('button', { name: 'Take control' })).toBeInTheDocument();
   });
 
   it('closing fullscreen via X button returns to expanded view', async () => {

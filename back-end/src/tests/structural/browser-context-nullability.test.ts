@@ -80,7 +80,8 @@ function testSteelDoesNotCreateEmptyContextId() {
     'Steel provider must detect concurrent first-profile creation'
   );
   assert(
-    source.includes('steel.sessions.release(session.id)'),
+    source.includes('await releaseSteelRemoteSession(session.id)') &&
+      source.includes('await steel.sessions.release(sessionId)'),
     'Steel provider must release a superseded first-profile session before retrying'
   );
   const disabledSystemCursorCount =
