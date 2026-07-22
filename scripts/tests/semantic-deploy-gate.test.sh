@@ -150,6 +150,7 @@ if grep -Fq 'BLACKBOX_TEST_REPLAY_OUTBOUND=1' "$DEPLOY_COMMAND"; then
 fi
 require_text "$DEPLOY_COMMAND" 'bash scripts/run-deploy-stage agentcard-lifecycle --' "/deploy must record AgentCard as one lifecycle lane"
 require_text "$DEPLOY_COMMAND" 'bash scripts/run-bench --local' "/deploy AgentCard lane must own an isolated local stack"
+require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1' "/deploy AgentCard lane must not cold-build an unused simulated world model"
 require_text "$DEPLOY_COMMAND" 'agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment' "/deploy must keep all four AgentCard lifecycle tasks in one lane"
 require_text "$DEPLOY_COMMAND" '--max-concurrency 1 --no-dashboard' "/deploy must preserve sequential payment state inside the isolated AgentCard lane"
 if grep -Fq 'bash scripts/run-agentcard-lifecycle-task.sh' "$DEPLOY_COMMAND"; then
