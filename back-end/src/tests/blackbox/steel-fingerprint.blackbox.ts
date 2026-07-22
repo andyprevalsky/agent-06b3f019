@@ -15,7 +15,7 @@ import {
   buildSteelProxySettings,
   isInvalidSteelProxyConfiguration,
 } from '../../providers/steel/session';
-import { recreateSession } from '../../providers/steel/sessionResume';
+import { navigateToSavedUrl, recreateSession } from '../../providers/steel/sessionResume';
 import type { FingerprintData } from '../../providers/steel/types';
 
 function makeFingerprint(): FingerprintData {
@@ -288,6 +288,36 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
   }
 }
 
+async function testSavedUrlNavigationAlwaysClosesBrowser(): Promise<void> {
+  let closeCount = 0;
+  const browser = {
+    contexts: () => [
+      {
+        pages: () => [
+          {
+            goto: async () => {
+              throw new Error('navigation timeout');
+            },
+          },
+        ],
+        newPage: async () => {
+          throw new Error('unexpected new page');
+        },
+      },
+    ],
+    close: async () => {
+      closeCount += 1;
+    },
+  };
+
+  await navigateToSavedUrl(
+    'wss://connect.steelbrowser.com?sessionId=session-1',
+    'https://example.com/saved',
+    async () => browser as unknown as import('playwright').Browser
+  );
+  assert(closeCount === 1, `failed saved-URL navigation closed browser ${closeCount} times`);
+}
+
 async function main(): Promise<void> {
   const tests = [
     {
@@ -309,6 +339,10 @@ async function main(): Promise<void> {
     {
       name: 'Steel replacement retries rejected cities and stops after cleanup failure',
       fn: testReplacementRetryDropsRejectedCity,
+    },
+    {
+      name: 'saved URL navigation closes its browser after failure',
+      fn: testSavedUrlNavigationAlwaysClosesBrowser,
     },
   ];
   const failures: string[] = [];

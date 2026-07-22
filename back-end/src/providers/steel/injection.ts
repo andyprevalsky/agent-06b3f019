@@ -383,6 +383,9 @@ export async function injectUserData(
       },
     });
     if (cookies.length === 0) {
+      if (options?.browser) {
+        await options.browser.close().catch(() => {});
+      }
       throw new Error(
         `Cookie bundle ${authSource.id} was selected for ${authRealm} but contains no cookie rows`
       );

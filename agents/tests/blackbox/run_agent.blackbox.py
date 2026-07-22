@@ -41,10 +41,15 @@ async def _run_single_iteration(
     llm_tool_calls_sequence=None,
     llm_tool_calls_factory=None,
     llm_chunk_texts_sequence=None,
+    llm_usages_sequence=None,
+    llm_response_models=None,
     fast_mode_cache_enabled=False,
     goal_text=None,
     poll_messages_override=None,
     is_inside_temporal_activity=True,
+    response_model=None,
+    on_tokens_override=None,
+    check_paused_override=None,
 ):
     from loop.run_agent import run_agent
 
@@ -94,6 +99,8 @@ async def _run_single_iteration(
         default_execute_tool = default_mock_execute_tool
 
     async def mock_call_llm_structured_streaming(**kwargs):
+        if llm_response_models is not None:
+            llm_response_models.append(kwargs["response_model"])
         selected_tool_calls = tool_calls
         if llm_tool_calls_factory is not None:
             selected_tool_calls = llm_tool_calls_factory()
@@ -102,9 +109,14 @@ async def _run_single_iteration(
         if llm_chunk_texts_sequence is not None:
             chunk_text = llm_chunk_texts_sequence.pop(0)
             await kwargs["on_chunk"](chunk_text, len(chunk_text))
+        selected_usage = (
+            llm_usages_sequence.pop(0)
+            if llm_usages_sequence is not None
+            else {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        )
         return (
             _DummyLLMResult("", selected_tool_calls),
-            {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            selected_usage,
             detected_tools_ordered,
         )
 
@@ -148,8 +160,11 @@ async def _run_single_iteration(
             skip_status_updates=True,
             is_plan_loop=is_plan_loop,
             response_schema=response_schema,
+            response_model=response_model,
             fast_mode_cache_enabled=fast_mode_cache_enabled,
             goal_text=goal_text,
+            on_tokens=on_tokens_override,
+            check_paused=check_paused_override,
         )
 
     return result, posted_messages, executed_tools
@@ -1357,6 +1372,9 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
     cache_contexts = []
     stream_sequences = []
     stream_final_sequences = []
+    response_models = []
+    usage_reports = []
+    event_order = []
     llm_call_count = 0
     original_set_context = fast_cache_context.set_context
 
@@ -1384,10 +1402,26 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
     def replay_while_cache_is_active():
         nonlocal llm_call_count
         llm_call_count += 1
+        event_order.append(f"llm_{llm_call_count}")
         cache_context = fast_cache_context.current_context()
         if cache_context is not None and cache_context.active:
             return [{"tool": "web_search", "query": "replayed rejected response"}]
         return [{"tool": "attempt_completion"}]
+
+    async def capture_usage(tokens_in, tokens_out, actual_model, **metadata):
+        usage_reports.append((tokens_in, tokens_out, actual_model, metadata))
+        event_order.append(f"usage_{actual_model}")
+
+    async def capture_pause_check():
+        if event_order and event_order[-1].startswith("usage_"):
+            event_order.append("pause_check_after_usage")
+        return False
+
+    from pydantic import BaseModel, Field
+
+    class CustomBrowserAction(BaseModel):
+        response: str = ""
+        tool_calls: list = Field(default_factory=list)
 
     with (
         patch.object(fast_cache_context, "set_context", side_effect=capture_cache_context),
@@ -1404,8 +1438,28 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
             verifier_structured_response=child_result,
             llm_tool_calls_factory=replay_while_cache_is_active,
             llm_chunk_texts_sequence=["wrong tool", "required tool"],
+            llm_usages_sequence=[
+                {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 2,
+                    "total_tokens": 13,
+                    "cache_read_input_tokens": 3,
+                    "actual_model": "rejected-model",
+                    "gpt_token_rotated": True,
+                },
+                {
+                    "prompt_tokens": 7,
+                    "completion_tokens": 5,
+                    "total_tokens": 12,
+                    "actual_model": "accepted-model",
+                },
+            ],
+            llm_response_models=response_models,
             fast_mode_cache_enabled=True,
             goal_text="complete from verified child",
+            response_model=CustomBrowserAction,
+            on_tokens_override=capture_usage,
+            check_paused_override=capture_pause_check,
         )
     original_set_context(None)
 
@@ -1415,6 +1469,16 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
     assert cache_contexts == [(True, True, 1), (False, False, 1)]
     assert stream_sequences == [1, 2]
     assert stream_final_sequences == [3]
+    assert response_models == [CustomBrowserAction, CustomBrowserAction]
+    assert usage_reports[0][:3] == (11, 2, "rejected-model")
+    assert usage_reports[0][3]["cache_read_input_tokens"] == 3
+    assert usage_reports[0][3]["gpt_token_rotated"] is True
+    assert usage_reports[1][:3] == (7, 5, "accepted-model")
+    assert event_order.index("llm_1") < event_order.index("usage_rejected-model")
+    assert event_order.index("usage_rejected-model") < event_order.index("pause_check_after_usage")
+    assert event_order.index("pause_check_after_usage") < event_order.index("llm_2")
+    assert result["tokens_in"] >= 18
+    assert result["tokens_out"] >= 7
 
 
 async def test_max_iterations_runs_final_verifier():

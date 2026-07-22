@@ -5401,21 +5401,31 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             # request the agent acts on.
             observed_auth_realm = auth_realm_from_url(current_url)
             if observed_auth_realm and not auth_realm_matches_url(auth_realm, current_url):
-                await _prepare_credentials_for_url(current_url)
-                from browser_use.browser.events import NavigateToUrlEvent
+                try:
+                    await _prepare_credentials_for_url(current_url)
+                    from browser_use.browser.events import NavigateToUrlEvent
 
-                reload_event = dom_service.session.event_bus.dispatch(
-                    NavigateToUrlEvent(url=current_url, wait_until="commit")
-                )
-                await reload_event
-                await reload_event.event_result(raise_if_any=True, raise_if_none=False)
-                await wait_for_navigation_ready(dom_service, url=current_url)
-                logger.info(
-                    "Reloaded page after redirected realm credential preparation",
-                    auth_realm=auth_realm,
-                    current_url=current_url,
-                )
-                continue
+                    reload_event = dom_service.session.event_bus.dispatch(
+                        NavigateToUrlEvent(url=current_url, wait_until="commit")
+                    )
+                    await reload_event
+                    await reload_event.event_result(raise_if_any=True, raise_if_none=False)
+                    await wait_for_navigation_ready(dom_service, url=current_url)
+                    logger.info(
+                        "Reloaded page after redirected realm credential preparation",
+                        auth_realm=auth_realm,
+                        current_url=current_url,
+                    )
+                    continue
+                except Exception as prep_error:
+                    recovered = await _recover_browser_step(
+                        f"credential_prep_error:{type(prep_error).__name__}:"
+                        f"{extract_error_message(prep_error)[:160]}",
+                        reload_page=False,
+                    )
+                    if recovered:
+                        continue
+                    raise
 
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
                 visited_urls.append(current_url)

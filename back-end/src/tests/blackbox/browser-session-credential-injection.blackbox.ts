@@ -256,6 +256,10 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
       rejectedEmptyCookieBundle,
       'credential boundary accepted a selected cookie bundle with no cookie rows'
     );
+    assert(
+      callerBrowserCloseCount === 1,
+      'empty selected cookie bundle leaked the caller-provided browser'
+    );
 
     let rejectedWrongOwner = false;
     try {

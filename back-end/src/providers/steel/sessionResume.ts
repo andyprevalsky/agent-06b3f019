@@ -1,4 +1,5 @@
 import type SteelSDK from 'steel-sdk';
+import type { Browser } from 'playwright';
 import { prisma } from '../database';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
 import { getProviderProfile, rememberProviderProfile } from '../browser/context';
@@ -57,22 +58,32 @@ async function fingerprintUserAgent(userId: string): Promise<string | undefined>
   return hasValue(fp?.navigator?.userAgent) ? fp.navigator.userAgent : undefined;
 }
 
-async function navigateToSavedUrl(wsUrl: string, savedUrl: string | undefined): Promise<void> {
+async function connectSteelBrowser(wsUrl: string): Promise<Browser> {
+  const { chromium } = await import('playwright');
+  return chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl));
+}
+
+export async function navigateToSavedUrl(
+  wsUrl: string,
+  savedUrl: string | undefined,
+  connectBrowser: (url: string) => Promise<Browser> = connectSteelBrowser
+): Promise<void> {
   if (!hasValue(savedUrl)) return;
 
   log.info(`  Navigating session to saved URL: ${savedUrl}`);
+  let browser: Browser | undefined;
   try {
-    const { chromium } = await import('playwright');
-    const browser = await chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl));
+    browser = await connectBrowser(wsUrl);
     const context = browser.contexts()[0];
     const page = context.pages()[0] ?? (await context.newPage());
     await page.goto(savedUrl, { waitUntil: 'domcontentloaded', timeout: 10_000 });
     log.info('  Navigation complete');
-    await browser.close();
   } catch (navError) {
     log.error('Failed to navigate to saved URL', {
       error: navError instanceof Error ? navError.message : String(navError),
     });
+  } finally {
+    if (browser) await browser.close().catch(() => {});
   }
 }
 
