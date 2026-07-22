@@ -43,6 +43,7 @@ async def _run_single_iteration(
     llm_chunk_texts_sequence=None,
     llm_usages_sequence=None,
     llm_response_models=None,
+    llm_auth_calls=None,
     fast_mode_cache_enabled=False,
     goal_text=None,
     poll_messages_override=None,
@@ -50,6 +51,8 @@ async def _run_single_iteration(
     response_model=None,
     on_tokens_override=None,
     check_paused_override=None,
+    gpt_token=None,
+    gpt_account_id=None,
 ):
     from loop.run_agent import run_agent
 
@@ -101,6 +104,18 @@ async def _run_single_iteration(
     async def mock_call_llm_structured_streaming(**kwargs):
         if llm_response_models is not None:
             llm_response_models.append(kwargs["response_model"])
+        if llm_auth_calls is not None:
+            llm_auth_calls.append(
+                {
+                    "claude_token": kwargs["claude_token"],
+                    "claude_token_source": kwargs["claude_token_source"],
+                    "claude_token_pool_id": kwargs["claude_token_pool_id"],
+                    "gpt_token": kwargs["gpt_token"],
+                    "gpt_account_id": kwargs["gpt_account_id"],
+                    "gpt_token_source": kwargs["gpt_token_source"],
+                    "gpt_token_pool_id": kwargs["gpt_token_pool_id"],
+                }
+            )
         selected_tool_calls = tool_calls
         if llm_tool_calls_factory is not None:
             selected_tool_calls = llm_tool_calls_factory()
@@ -165,6 +180,8 @@ async def _run_single_iteration(
             goal_text=goal_text,
             on_tokens=on_tokens_override,
             check_paused=check_paused_override,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
         )
 
     return result, posted_messages, executed_tools
@@ -1373,6 +1390,7 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
     stream_sequences = []
     stream_final_sequences = []
     response_models = []
+    auth_calls = []
     usage_reports = []
     event_order = []
     llm_call_count = 0
@@ -1446,6 +1464,13 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
                     "cache_read_input_tokens": 3,
                     "actual_model": "rejected-model",
                     "gpt_token_rotated": True,
+                    "compute_token_used": {
+                        "type": "gpt",
+                        "accessToken": "rotated-gpt-token",
+                        "accountId": "rotated-gpt-account",
+                        "source": "pool",
+                        "poolTokenId": "pool-token-2",
+                    },
                 },
                 {
                     "prompt_tokens": 7,
@@ -1455,11 +1480,14 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
                 },
             ],
             llm_response_models=response_models,
+            llm_auth_calls=auth_calls,
             fast_mode_cache_enabled=True,
             goal_text="complete from verified child",
             response_model=CustomBrowserAction,
             on_tokens_override=capture_usage,
             check_paused_override=capture_pause_check,
+            gpt_token="stale-gpt-token",
+            gpt_account_id="stale-gpt-account",
         )
     original_set_context(None)
 
@@ -1470,6 +1498,13 @@ async def test_completed_child_required_tool_is_enforced_inside_direct_activity(
     assert stream_sequences == [1, 2]
     assert stream_final_sequences == [3]
     assert response_models == [CustomBrowserAction, CustomBrowserAction]
+    assert [call["gpt_token"] for call in auth_calls] == ["stale-gpt-token", "rotated-gpt-token"]
+    assert [call["gpt_account_id"] for call in auth_calls] == [
+        "stale-gpt-account",
+        "rotated-gpt-account",
+    ]
+    assert auth_calls[1]["gpt_token_source"] == "pool"
+    assert auth_calls[1]["gpt_token_pool_id"] == "pool-token-2"
     assert usage_reports[0][:3] == (11, 2, "rejected-model")
     assert usage_reports[0][3]["cache_read_input_tokens"] == 3
     assert usage_reports[0][3]["gpt_token_rotated"] is True

@@ -23,6 +23,14 @@ export function steelApiUrl(path: string): string {
   return `${STEEL_API_BASE_URL}/${path.replace(/^\/+/, '')}`;
 }
 
+export function steelSessionFileUrl(sessionId: string, relativePath: string): string {
+  const encodedPath = relativePath
+    .split('/')
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+  return steelApiUrl(`v1/sessions/${encodeURIComponent(sessionId)}/files/${encodedPath}`);
+}
+
 /** Return the non-secret URL that is safe to persist and expose to workers. */
 export function steelCdpUrl(sessionId: string): string {
   const url = new URL(STEEL_CDP_BASE_URL);

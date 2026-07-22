@@ -19,6 +19,7 @@ export {
   steelCdpConnectionUrl,
   steelCdpUrl,
   steelDebugUrl,
+  steelSessionFileUrl,
   steelPublicCdpUrl,
 } from './urls';
 
@@ -417,9 +418,10 @@ export async function createSessionWithContext(
             await validationBrowser.close().catch(() => {});
             validationBrowser = null;
             try {
-              await steel.sessions.release(session.id);
+              await releaseSteelRemoteSession(session.id);
             } catch (releaseErr) {
               log.info(`  ⚠️ Failed to release superseded session: ${releaseErr}`);
+              throw new SteelSessionCleanupError(session.id, releaseErr);
             }
             dbContext = winningContext;
             lastError = new Error(

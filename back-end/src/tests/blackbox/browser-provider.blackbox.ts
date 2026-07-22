@@ -12,7 +12,7 @@ import {
   resolveKernelProxyMode,
 } from '../../providers/browser/kernelProxy';
 import { retryWithBackoff } from '../../providers/retry';
-import { steel } from '../../providers/steel/session';
+import { steel, steelCdpConnectionUrl } from '../../providers/steel/session';
 import {
   assertFixedRotationLadder,
   deleteKernelResource,
@@ -330,7 +330,10 @@ async function runLiveProviderParity(): Promise<void> {
 
     // ----- rotate_ip: real IP rotation on the same profile (residential tier) -----
     const readExitIp = async (wsUrl: string): Promise<string> => {
-      const b = await chromium.connectOverCDP(wsUrl);
+      // Production workers add the Steel key only at this process-local CDP
+      // boundary. The live parity harness must exercise that same contract;
+      // persisted/API ws_url values are deliberately secret-free.
+      const b = await chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl));
       try {
         const ctx = b.contexts()[0];
         const p = ctx.pages()[0] ?? (await ctx.newPage());

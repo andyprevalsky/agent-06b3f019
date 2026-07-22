@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 
+import { readFileSync } from 'node:fs';
 import {
   releaseSteelRemoteSession,
   steel,
@@ -7,6 +8,7 @@ import {
   steelCdpConnectionUrl,
   steelCdpUrl,
   steelDebugUrl,
+  steelSessionFileUrl,
   steelPublicCdpUrl,
 } from '../../providers/steel/session';
 import { releaseSupersededBrowser } from '../../providers/browser/sessionCleanup';
@@ -95,6 +97,26 @@ async function assertSupersededProviderCleanupIsExplicit(): Promise<void> {
   assert(exhausted === false, 'cleanup exhaustion was not surfaced to the caller');
 }
 
+function assertConcurrentProfileCleanupUsesBoundedRelease(): void {
+  const source = readFileSync(new URL('../../providers/steel/session.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('Concurrent profile init detected');
+  const end = source.indexOf('dbContext = winningContext', start);
+  const concurrentClaimBlock = source.slice(start, end);
+  assert(start >= 0 && end > start, 'concurrent Steel profile cleanup branch was not found');
+  assert(
+    concurrentClaimBlock.includes('await releaseSteelRemoteSession(session.id)'),
+    'concurrent Steel profile cleanup bypassed bounded/idempotent release'
+  );
+  assert(
+    !concurrentClaimBlock.includes('await steel.sessions.release(session.id)'),
+    'concurrent Steel profile cleanup called the SDK release directly'
+  );
+  assert(
+    concurrentClaimBlock.includes('throw new SteelSessionCleanupError(session.id, releaseErr)'),
+    'concurrent Steel profile cleanup failure did not stop replacement retries'
+  );
+}
+
 async function main(): Promise<void> {
   const previous = process.env.STEEL_API_KEY;
   process.env.STEEL_API_KEY = 'steel-test-key';
@@ -137,8 +159,14 @@ async function main(): Promise<void> {
       debugUrl.searchParams.get('interactive') === 'false',
       'Steel live view was not read-only'
     );
+    assert(
+      steelSessionFileUrl('session/one', 'reports/a?b#c.txt') ===
+        'https://connect.steelbrowser.com/v1/sessions/session%2Fone/files/reports/a%3Fb%23c.txt',
+      'Steel file URL did not encode session IDs and reserved path characters'
+    );
     await assertReleaseRetriesAreBounded();
     await assertSupersededProviderCleanupIsExplicit();
+    assertConcurrentProfileCleanupUsesBoundedRelease();
     console.log('PASS Steel URLs keep API keys local to the CDP connection boundary');
   } finally {
     if (previous === undefined) delete process.env.STEEL_API_KEY;

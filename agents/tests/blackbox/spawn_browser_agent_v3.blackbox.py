@@ -4559,6 +4559,24 @@ async def test_rotation_storage_state_survives_provider_switch():
     )
 
 
+def test_rotation_restore_failure_aborts_replacement_session():
+    """A replacement session without restored auth state must not run actions."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    start = source.index("reconnected = await _reconnect_browser_stack_after_rotation(")
+    end = source.index("# Follow the rotation in the recording", start)
+    restore_block = source[start:end]
+
+    assert "await _restore_rotation_storage_state(" in restore_block
+    assert "except Exception as exc:" in restore_block
+    assert "Browser state restoration failed after IP rotation; refusing to continue" in restore_block
+    assert "raise RuntimeError(" in restore_block
+    assert ") from exc" in restore_block
+
+
 async def test_rotation_storage_state_round_trips_in_real_browser():
     """Cookies, localStorage, and IndexedDB survive a real context replacement."""
     from playwright.async_api import async_playwright
@@ -7044,7 +7062,7 @@ def test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary():
 
 
 def test_redirect_realm_credential_prep_uses_browser_recovery():
-    """A transient realm-prep/reload error must preserve the live session."""
+    """A realm-prep/reload error recovers and reloads the live document."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
@@ -7058,7 +7076,7 @@ def test_redirect_realm_credential_prep_uses_browser_recovery():
     assert "await _prepare_credentials_for_url(current_url)" in redirect_block
     assert 'f"credential_prep_error:' in redirect_block
     assert "recovered = await _recover_browser_step(" in redirect_block
-    assert "reload_page=False" in redirect_block
+    assert "reload_page=True" in redirect_block
     assert "if recovered:" in redirect_block
     assert "raise" in redirect_block
 
@@ -11605,6 +11623,10 @@ async def run_all_tests():
     await r.record_async(
         "rotation_storage_state_provider_switch",
         test_rotation_storage_state_survives_provider_switch,
+    )
+    r.record(
+        "rotation_restore_failure_aborts_replacement_session",
+        test_rotation_restore_failure_aborts_replacement_session,
     )
     await r.record_async(
         "rotation_storage_state_real_browser_round_trip",

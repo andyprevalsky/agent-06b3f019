@@ -5421,7 +5421,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     recovered = await _recover_browser_step(
                         f"credential_prep_error:{type(prep_error).__name__}:"
                         f"{extract_error_message(prep_error)[:160]}",
-                        reload_page=False,
+                        reload_page=True,
                     )
                     if recovered:
                         continue
@@ -5911,6 +5911,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         provider=rotate_result.get("provider"),
                         error=str(exc),
                     )
+                    raise RuntimeError(
+                        "Browser state restoration failed after IP rotation; refusing to continue"
+                    ) from exc
 
                 # Follow the rotation in the recording: rebind to the new page and
                 # start a fresh replay segment on the rotated session, so the saved

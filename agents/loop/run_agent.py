@@ -366,6 +366,56 @@ async def run_agent(  # noqa: C901
             pool_token_id=token.get("poolTokenId"),
         )
 
+    def _resolve_current_compute_credentials(*, prefer_remembered: bool = False):
+        """Resolve credentials for the next provider attempt.
+
+        An immediate semantic retry must prefer the token that the rejected
+        provider attempt actually used. Workflow getters may not have observed
+        that in-call rotation yet.
+        """
+        if prefer_remembered:
+            return (
+                remembered_claude_token,
+                remembered_claude_token_source,
+                remembered_claude_token_pool_id,
+                remembered_gpt_token,
+                remembered_gpt_account_id,
+                remembered_gpt_token_source,
+                remembered_gpt_token_pool_id,
+            )
+
+        current_claude = get_claude_token() if get_claude_token else remembered_claude_token
+        current_gpt = get_gpt_token() if get_gpt_token else remembered_gpt_token
+        return (
+            current_claude,
+            (
+                get_claude_token_source()
+                if get_claude_token_source and current_claude
+                else remembered_claude_token_source
+            ),
+            (
+                get_claude_token_pool_id()
+                if get_claude_token_pool_id and current_claude
+                else remembered_claude_token_pool_id
+            ),
+            current_gpt,
+            (
+                get_gpt_account_id()
+                if get_gpt_account_id and current_gpt
+                else remembered_gpt_account_id
+            ),
+            (
+                get_gpt_token_source()
+                if get_gpt_token_source and current_gpt
+                else remembered_gpt_token_source
+            ),
+            (
+                get_gpt_token_pool_id()
+                if get_gpt_token_pool_id and current_gpt
+                else remembered_gpt_token_pool_id
+            ),
+        )
+
     async def _account_llm_usage(attempt_usage: Dict[str, Any], *, label: str) -> bool:
         """Account one provider attempt before another attempt can be issued."""
         nonlocal tokens_in
@@ -897,27 +947,15 @@ async def run_agent(  # noqa: C901
 
         # Resolve direct compute tokens dynamically when the workflow provides
         # getters; otherwise use this loop's remembered successful token state.
-        current_claude_token = get_claude_token() if get_claude_token else remembered_claude_token
-        current_claude_token_source = (
-            get_claude_token_source()
-            if get_claude_token_source and current_claude_token
-            else remembered_claude_token_source
-        )
-        current_claude_token_pool_id = (
-            get_claude_token_pool_id()
-            if get_claude_token_pool_id and current_claude_token
-            else remembered_claude_token_pool_id
-        )
-        current_gpt_token = get_gpt_token() if get_gpt_token else remembered_gpt_token
-        current_gpt_account_id = (
-            get_gpt_account_id() if get_gpt_account_id and current_gpt_token else remembered_gpt_account_id
-        )
-        current_gpt_token_source = (
-            get_gpt_token_source() if get_gpt_token_source and current_gpt_token else remembered_gpt_token_source
-        )
-        current_gpt_token_pool_id = (
-            get_gpt_token_pool_id() if get_gpt_token_pool_id and current_gpt_token else remembered_gpt_token_pool_id
-        )
+        (
+            current_claude_token,
+            current_claude_token_source,
+            current_claude_token_pool_id,
+            current_gpt_token,
+            current_gpt_account_id,
+            current_gpt_token_source,
+            current_gpt_token_pool_id,
+        ) = _resolve_current_compute_credentials()
 
         # 7. Call LLM with structured streaming
         try:
@@ -1099,6 +1137,19 @@ async def run_agent(  # noqa: C901
                                             goal=goal_text or "",
                                             base_step=fast_cache_step,
                                             write_enabled=False,
+                                        )
+                                    )
+                                    (
+                                        current_claude_token,
+                                        current_claude_token_source,
+                                        current_claude_token_pool_id,
+                                        current_gpt_token,
+                                        current_gpt_account_id,
+                                        current_gpt_token_source,
+                                        current_gpt_token_pool_id,
+                                    ) = _resolve_current_compute_credentials(
+                                        prefer_remembered=bool(
+                                            attempt_usage and attempt_usage.get("compute_token_used")
                                         )
                                     )
                                 # Keep sequence monotonic because this retry reuses
