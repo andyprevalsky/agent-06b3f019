@@ -297,7 +297,7 @@ PY
   head_dir="$temp_root/head"
   before_log="$temp_root/before.log"
   after_log="$temp_root/after.log"
-  mkdir -p "$base_dir" "$head_dir"
+  mkdir -p "$base_dir" "$head_dir" "$temp_root/home"
   trap 'rm -rf "$temp_root"' RETURN
   git -C "$ROOT_DIR" archive "$base" | tar -x -C "$base_dir"
   git -C "$ROOT_DIR" archive "$head" | tar -x -C "$head_dir"

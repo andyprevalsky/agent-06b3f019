@@ -153,6 +153,25 @@ async function run(): Promise<void> {
       'dispatch keeps failure-controlled free text out of the privileged workflow'
     );
 
+    // A broad incident still alerts every affected agent, but its normalized
+    // signature may launch only one RCA workflow per throttle window.
+    process.env.SLACK_ERROR_WEBHOOK_URL = 'https://hooks.slack.test/xxx';
+    calls.length = 0;
+    alertError({ source: 'sms', message: 'provider outage 42', agentId: 'incident-agent-a' });
+    await sleep(30);
+    alertError({ source: 'sms', message: 'provider outage 99', agentId: 'incident-agent-b' });
+    await sleep(30);
+    assert.strictEqual(
+      calls.filter((c) => c.url.includes('api.github.com')).length,
+      1,
+      'one normalized incident signature must launch one RCA'
+    );
+    assert.strictEqual(
+      calls.filter((c) => c.url === 'https://hooks.slack.test/xxx').length,
+      1,
+      'the other affected agent must retain its ordinary Slack fallback'
+    );
+
     // --- 7. Flag off → never dispatches RCA ---
     delete process.env.AUTO_RCA_ENABLED;
     __resetAlertThrottleForTests();

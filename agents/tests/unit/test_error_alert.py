@@ -176,6 +176,21 @@ def test_same_incident_text_does_not_throttle_distinct_agents(monkeypatch):
     assert len([c for c in FakeClient.calls if "hooks.slack.test" in c["url"]]) == 2
 
 
+def test_same_incident_dispatches_one_rca_and_falls_back_for_other_agents(monkeypatch):
+    monkeypatch.setenv("AUTO_RCA_ENABLED", "1")
+    monkeypatch.setenv("GITHUB_DISPATCH_TOKEN", "ghp_test")
+    monkeypatch.setenv("SLACK_ERROR_WEBHOOK_URL", "https://hooks.slack.test/xxx")
+
+    first = _run(error_alert.report_failure_activity("agent-a", "sms", "provider outage 42"))
+    second = _run(error_alert.report_failure_activity("agent-b", "sms", "provider outage 99"))
+
+    assert first["rca_dispatched"] is True
+    assert second["alerted"] is True
+    assert second.get("rca_dispatched") is not True
+    assert len([c for c in FakeClient.calls if "api.github.com" in c["url"]]) == 1
+    assert len([c for c in FakeClient.calls if "hooks.slack.test" in c["url"]]) == 1
+
+
 def test_temporal_replay_dispatches_but_never_duplicates_worker_slack(monkeypatch):
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.setenv("SLACK_ERROR_CHANNEL_ID", "C_INPUT")

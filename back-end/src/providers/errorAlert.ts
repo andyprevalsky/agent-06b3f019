@@ -259,10 +259,14 @@ async function dispatchRca(input: AlertErrorInput, slackChannel?: string): Promi
 }
 
 async function sendAlert(input: AlertErrorInput): Promise<void> {
-  // Never collapse distinct affected users during a common provider incident.
-  const key = `${input.agentId ?? '-'}:${fingerprint(input.source, input.message)}`;
+  // Keep ordinary alerts agent-scoped, but cap auto-RCA dispatches by incident
+  // signature so one provider outage cannot launch one workflow per agent.
+  const signature = fingerprint(input.source, input.message);
+  const key = `alert:${input.agentId ?? '-'}:${signature}`;
   if (!acquireAlertSlot(key, Date.now())) return;
 
+  const rcaKey = `rca:${signature}`;
+  let rcaAcquired = false;
   let delivered = false;
   try {
     const botToken = process.env.SLACK_BOT_TOKEN;
@@ -274,10 +278,15 @@ async function sendAlert(input: AlertErrorInput): Promise<void> {
       input.agentId !== undefined &&
       input.agentId !== ''
     ) {
-      const dispatched = await dispatchRca(input, channelId);
-      if (dispatched) {
-        delivered = true;
-        return;
+      rcaAcquired = acquireAlertSlot(rcaKey, Date.now());
+      if (rcaAcquired) {
+        const dispatched = await dispatchRca(input, channelId);
+        finishAlertSlot(rcaKey, dispatched, Date.now());
+        rcaAcquired = false;
+        if (dispatched) {
+          delivered = true;
+          return;
+        }
       }
     }
 
@@ -298,6 +307,10 @@ async function sendAlert(input: AlertErrorInput): Promise<void> {
       });
     }
   } finally {
+    if (rcaAcquired) {
+      // Exceptions during dispatch must not suppress the incident retry.
+      finishAlertSlot(rcaKey, false, Date.now());
+    }
     // Failed transports remain eligible for the next occurrence to retry.
     finishAlertSlot(key, delivered, Date.now());
   }

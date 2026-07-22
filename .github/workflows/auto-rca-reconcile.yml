@@ -143,9 +143,10 @@ jobs:
             response="$(curl -fsS --retry 3 --retry-all-errors --connect-timeout 5 --max-time 20 \
               "https://navi-j9a9.onrender.com/api/agents/$agent_id/alert-context" \
               -H "X-API-Key: $BACKEND_API_KEY" 2>/dev/null || true)"
-            affected_user_name="$(printf '%s' "$response" | jq -r '.affected_user_name // "Affected user unavailable"' \
-              | tr '\r\n\t' '   ' | tr -s ' ' \
+            affected_user_name="$(printf '%s' "$response" | jq -r '.affected_user_name // empty' 2>/dev/null || true)"
+            affected_user_name="$(printf '%s' "$affected_user_name" | tr '\r\n\t' '   ' | tr -s ' ' \
               | sed 's/^ *//; s/ *$//; s/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | cut -c1-160)"
+            [ -n "$affected_user_name" ] || affected_user_name='Affected user unavailable'
             output="$(mktemp "${RUNNER_TEMP:-/tmp}/auto-rca-reconcile.XXXXXX")"
             GITHUB_OUTPUT="$output" GITHUB_ENV='' \
             AGENT_ID="$agent_id" AFFECTED_USER_NAME="$affected_user_name" RCA_STATE="$state" \

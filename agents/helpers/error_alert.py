@@ -183,10 +183,13 @@ async def report_failure_activity(
 
     Best-effort — always returns, never raises. Deduped by the in-memory throttle.
     """
-    # A common provider incident may fail thousands of distinct agents with the
-    # same normalized text. Never collapse those independent user lifecycles.
-    key = f"{agent_id or '-'}:{_fingerprint(source, message)}"
+    # Keep ordinary alerts agent-scoped, but cap auto-RCA dispatches by incident
+    # signature so one provider outage cannot launch one workflow per agent.
+    signature = _fingerprint(source, message)
+    key = f"alert:{agent_id or '-'}:{signature}"
     acquired = False
+    rca_key = f"rca:{signature}"
+    rca_acquired = False
     delivered = False
     try:
         acquired = _acquire_alert_slot(key, time.time())
@@ -202,10 +205,14 @@ async def report_failure_activity(
         # retry cannot duplicate the user's lifecycle. If dispatch is down, we
         # still fall back to the ordinary direct alert below.
         if os.environ.get("AUTO_RCA_ENABLED") == "1" and agent_id:
-            dispatched = await _dispatch_rca(agent_id, channel_id or "")
-            if dispatched:
-                delivered = True
-                return {"alerted": True, "rca_dispatched": True}
+            rca_acquired = _acquire_alert_slot(rca_key, time.time())
+            if rca_acquired:
+                dispatched = await _dispatch_rca(agent_id, channel_id or "")
+                _finish_alert_slot(rca_key, dispatched, time.time())
+                rca_acquired = False
+                if dispatched:
+                    delivered = True
+                    return {"alerted": True, "rca_dispatched": True}
 
         payload = _slack_payload(source, message, agent_id, context)
 
@@ -235,6 +242,9 @@ async def report_failure_activity(
         activity.logger.warning(f"report_failure_activity non-fatal: {e}")
         return {"alerted": False, "error": str(e)}
     finally:
+        if rca_acquired:
+            # Exceptions during dispatch must not suppress the incident retry.
+            _finish_alert_slot(rca_key, False, time.time())
         if acquired:
             # Failed transports remain eligible for the next occurrence to retry.
             _finish_alert_slot(key, delivered, time.time())
