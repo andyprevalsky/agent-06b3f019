@@ -493,7 +493,9 @@ def test_claude_code_preflight_accepts_claude_token():
         patch.object(
             rb.httpx,
             "AsyncClient",
-            _fake_async_client_with(_JsonResponse(200, {"type": "claude", "accessToken": "claude-token"})),
+            _fake_async_client_with(
+                _JsonResponse(200, {"source": "user", "accessToken": "claude-token"})
+            ),
         ),
     ):
         assert asyncio.run(rb._check_claude_code_credentials("http://localhost:3001")) is True
@@ -511,6 +513,21 @@ def test_claude_code_preflight_rejects_anthropic_fallback_without_claude_token()
         ),
     ):
         assert asyncio.run(rb._check_claude_code_credentials("http://localhost:3001")) is False
+
+
+def test_claude_code_task_rechecks_credentials_when_its_execution_slot_opens():
+    task = rb.get_task_by_name("claude-code-agent")
+    with patch.object(
+        rb,
+        "_check_claude_code_credentials",
+        new=AsyncMock(return_value=False),
+    ) as credential_check:
+        result = asyncio.run(rb.run_single_task("http://localhost:3001", task))
+
+    credential_check.assert_awaited_once_with("http://localhost:3001")
+    assert result.status == "SKIPPED"
+    assert result.agent_id == ""
+    assert result.failure_reason == rb.CLAUDE_CODE_CREDENTIAL_SKIP_REASON
 
 
 def test_ci_allows_only_claude_code_credential_skips():
