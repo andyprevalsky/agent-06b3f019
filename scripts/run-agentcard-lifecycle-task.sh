@@ -48,6 +48,13 @@ export FAST_MODE_CACHE_USE_LOCAL=1
 # boundary to the stable backend callback registered for the Rose Labs org so a
 # workspace-local `.env` URL cannot turn setup/resume into an opaque mint 500.
 export AGENTCARD_ONBOARDING_RETURN_URL="${AGENTCARD_ONBOARDING_RETURN_URL:-https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback}"
+# These payment-lifecycle tasks drive browser checkout, not Claude Code. The
+# deploy-approved Claude smoke owns real Claude coverage and is skippable when
+# Claude credentials are unavailable; AgentCard should still run against the
+# available GPT compute lane instead of blocking on absent Claude OAuth or a
+# cooled-down shared Anthropic fallback.
+export ROSE_EXCLUDE_ANTHROPIC_FAMILY=1
+export SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt
 # The catalog pins every task accepted by this launcher to
 # requires_claude_code=false. A missing Claude Code integration must not block
 # these root/browser lifecycle checks before an agent exists; Claude-dependent
@@ -63,6 +70,11 @@ export SEED_ALLOW_MISSING_GPT_CODE=1
 # Skipping that unrelated graph prevents a warm local database from spending
 # minutes upserting every production cookie before the lifecycle stack starts.
 export BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1
+# AgentCard lifecycle tasks do not simulate against the World Model Harness. A
+# WMH build/delta refresh can consume the entire lifecycle readiness window
+# before the public tunnel smoke runs, blocking the payment gate even though the
+# backend, frontend, and worker are healthy.
+export BENCHMARK_SKIP_WMH_BUILD=1
 
 LOG_FILE="$ROOT_DIR/.context/agentcard-lifecycle-$TASK_NAME.log"
 STACK_PID=""

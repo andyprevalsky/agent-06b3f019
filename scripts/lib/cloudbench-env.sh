@@ -146,6 +146,66 @@ os.execvp(argv[0], argv)
 PY
 }
 
+cloudbench_fleet_workspace_name() {  # <bench-name> <controller-id> <ordinal>
+  # Temporal task queues inherit this workspace name and cap it at 48 chars.
+  # Truncate only the human-readable bench segment: the controller + ordinal
+  # suffix is the isolation boundary and must remain complete for every name.
+  local bench="$1" controller_id="$2" ordinal="$3"
+  local suffix sanitized max_bench_length
+  case "$controller_id:$ordinal" in
+    *[!0-9:]*)
+      echo "FATAL: fleet workspace controller and ordinal must be numeric" >&2
+      return 1
+      ;;
+    :*|*:)
+      echo "FATAL: fleet workspace controller and ordinal must be non-empty" >&2
+      return 1
+      ;;
+  esac
+  suffix="-$controller_id-$ordinal"
+  max_bench_length=$((48 - 4 - ${#suffix}))
+  [ "$max_bench_length" -ge 1 ] || {
+    echo "FATAL: fleet workspace uniqueness suffix exceeds the 48-character limit" >&2
+    return 1
+  }
+  sanitized="$(printf '%s' "$bench" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')"
+  sanitized="${sanitized:0:$max_bench_length}"
+  [ -n "$sanitized" ] || sanitized="bench"
+  printf 'flt-%s%s' "$sanitized" "$suffix"
+}
+
+cloudbench_fetchable_ref() {  # <repo-root> <requested-ref> <allow-local-patch-01>
+  # Fly guests can fetch only objects reachable from an advertised origin ref.
+  # When the requested local commit is unpushed, run from its fetchable
+  # origin/main ancestor and let create-worktree-patch carry the complete
+  # committed + uncommitted workspace delta.
+  local root="$1" requested="$2" allow_patch="$3" resolved base
+  if ! resolved="$(git -C "$root" rev-parse --verify "${requested}^{commit}" 2>/dev/null)"; then
+    # Preserve remote-only branch/tag names that this checkout cannot resolve.
+    printf '%s' "$requested"
+    return 0
+  fi
+  if git -C "$root" branch -r --contains "$resolved" --format='%(refname:short)' 2>/dev/null \
+      | grep -q '^origin/'; then
+    printf '%s' "$resolved"
+    return 0
+  fi
+  if [ "$allow_patch" != "1" ]; then
+    echo "FATAL: requested benchmark commit $resolved is not fetchable from origin and local patch shipping is disabled" >&2
+    return 1
+  fi
+  base="$(git -C "$root" merge-base "$resolved" origin/main 2>/dev/null)" || {
+    echo "FATAL: requested benchmark commit $resolved has no fetchable origin/main base" >&2
+    return 1
+  }
+  [ -n "$base" ] || {
+    echo "FATAL: requested benchmark commit $resolved has no fetchable origin/main base" >&2
+    return 1
+  }
+  echo "📦 local commit $resolved is not on origin; guest will fetch $base and receive the complete workspace delta as a patch" >&2
+  printf '%s' "$base"
+}
+
 cloudbench_retry_command() {
   local max_attempts="$1" retry_delay_seconds="$2"
   shift 2

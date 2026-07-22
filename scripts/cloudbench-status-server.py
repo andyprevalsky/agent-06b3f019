@@ -65,6 +65,19 @@ def main() -> int:
                 super().do_GET()
                 return
             try:
+                state = (root / "cloudbench-driver.state").read_text().strip()
+            except OSError:
+                state = ""
+            if state in {"", "booting"}:
+                self.send_error(425, "driver has not launched")
+                return
+            if state == "exited":
+                self.send_error(410, "driver has exited")
+                return
+            if state != "running":
+                self.send_error(503, "driver lifecycle state is invalid")
+                return
+            try:
                 pid = int((root / "cloudbench-driver.pid").read_text().strip())
                 os.kill(pid, 0)
             except (OSError, ValueError):

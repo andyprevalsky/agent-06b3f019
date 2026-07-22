@@ -92,6 +92,14 @@ POOL_IDS_FILE="$ROOT_DIR/.context/cloudbench-pool.ids"
 GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || echo "$ROOT_DIR/.git")"
 case "$GIT_COMMON_DIR" in /*) ;; *) GIT_COMMON_DIR="$ROOT_DIR/$GIT_COMMON_DIR" ;; esac
 APP_ENV_LOCK_FILE="$GIT_COMMON_DIR/cloudbench-app-env.lock"
+# Cross-workspace app-environment lock primitive (acquire/release/assert). Its
+# wait budget must outlast a peer's warm-dep refresh so concurrent fleets queue
+# rather than abort — see scripts/tests/cloudbench-app-env-lock.test.sh. Prefer
+# the immutable per-invocation script snapshot (set by run-bench-fleet) so a
+# mid-run edit to the live lib can't shift bytes under an in-flight controller;
+# fall back to the live lib dir for direct run-bench-cloud invocations.
+# shellcheck source=lib/cloudbench-app-env-lock.sh
+source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-app-env-lock.sh"
 
 # On-box paths (mirror scripts/cloudbench-run.sh).
 REMOTE_REPO="/data/repo"
@@ -278,9 +286,50 @@ RESULT_END="::CLOUDBENCH-RESULT-END:: token=$RUN_LOG_TOKEN"
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Print the JSON list of machines in the app (empty array on any error).
+# Standalone maintenance commands read provider inventories directly. Fleet
+# children never call these helpers: they receive one O(1) keyed machine record
+# from the controller-owned inventory index.
 _machines_json() {
     FLY machines list -a "$APP" --json 2>/dev/null || echo '[]'
+}
+
+_volumes_json() {
+    FLY volumes list -a "$APP" --json 2>/dev/null
+}
+
+INVENTORY_LOCAL_CLOCK_EPOCH="$(date +%s)"
+INVENTORY_LOCAL_CLOCK_SECONDS="$SECONDS"
+
+_inventory_index_healthy() {
+    local pid="${CLOUDBENCH_INVENTORY_OWNER_PID:-}"
+    local expected_token="${CLOUDBENCH_INVENTORY_PUBLISHER_TOKEN:-}"
+    local health_path="${CLOUDBENCH_INVENTORY_HEALTH:-}"
+    local key value publisher_token="" valid_until="" now
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ -n "$expected_token" ] && [ -s "$health_path" ] || return 1
+    while IFS='=' read -r key value; do
+        case "$key" in
+            publisher_token) publisher_token="$value" ;;
+            valid_until) valid_until="$value" ;;
+        esac
+    done < "$health_path"
+    case "$valid_until" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$publisher_token" = "$expected_token" ] || return 1
+    now=$((INVENTORY_LOCAL_CLOCK_EPOCH + SECONDS - INVENTORY_LOCAL_CLOCK_SECONDS))
+    [ "$valid_until" -ge "$now" ]
+}
+
+_machine_record_field() {  # _machine_record_field <id> <field>
+    local key value
+    _inventory_index_healthy || return 1
+    [ -n "${CLOUDBENCH_MACHINE_RECORD:-}" ] || return 1
+    [ "$1" = "$FLEET_MACHINE_ID" ] || return 1
+    [ -s "$CLOUDBENCH_MACHINE_RECORD" ] || return 1
+    while IFS='=' read -r key value; do
+        [ "$key" = "$2" ] && { printf '%s' "$value"; return 0; }
+    done < "$CLOUDBENCH_MACHINE_RECORD"
+    return 1
 }
 
 # Resolve the persistent warm machine id from the provider-authoritative name.
@@ -319,6 +368,10 @@ print("")
 
 machine_state() {  # machine_state <id>
     local id="$1"
+    if [ -n "${CLOUDBENCH_MACHINE_RECORD:-}" ]; then
+        _machine_record_field "$id" state 2>/dev/null || echo "gone"
+        return 0
+    fi
     _machines_json | ID="$id" python3 -c '
 import json,os,sys
 try: data=json.load(sys.stdin) or []
@@ -341,6 +394,10 @@ machine_storage_ready() {  # machine_storage_ready <id>
     # Re-reading Machines+Volumes from every one of 30 children recreates the
     # control-plane burst pooling is meant to eliminate.
     [ "${CLOUDBENCH_STORAGE_READY:-0}" = "1" ] && return 0
+    if [ -n "${CLOUDBENCH_MACHINE_RECORD:-}" ]; then
+        [ "$(_machine_record_field "$1" storage_ready 2>/dev/null || true)" = "1" ]
+        return $?
+    fi
     local id="$1" machines volumes
     local inventory_timeout="${CLOUDBENCH_STORAGE_QUERY_TIMEOUT:-20}"
     # A single read-only flyctl process can wedge while the same API remains
@@ -622,15 +679,6 @@ activate_owned_machine_images() {  # activate_owned_machine_images <image_ref>
     done <<< "$activation_targets"
 }
 
-assert_app_environment_lock_ownership() {
-    local actual_owner
-    actual_owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
-    if [ "$actual_owner" != "$$" ] || ! kill -0 "$$" 2>/dev/null; then
-        echo "❌ Lost ownership of shared benchmark app environment lock." >&2
-        return 1
-    fi
-}
-
 # Inject the two base64 .env blobs + GITHUB_TOKEN as active Fly secrets (present
 # on machine init + in ssh sessions). The benchmark app uses the Machines API,
 # not Fly Launch releases: stage app secrets, then update each stopped machine
@@ -704,28 +752,6 @@ with open(path, "w") as handle:
     handle.write("\n")
 PY
     echo "✅ Secrets set (active)"
-}
-
-acquire_app_environment_lock() {
-    local attempt owner
-    command -v shlock >/dev/null 2>&1 || {
-        echo "❌ shlock is required for cross-workspace benchmark environment locking." >&2
-        return 1
-    }
-    for attempt in $(seq 1 60); do
-        shlock -p "$$" -f "$APP_ENV_LOCK_FILE" && return 0
-        owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
-        [ "$attempt" -eq 1 ] && echo "⏳ waiting for shared benchmark app environment lock (owner=${owner:-unknown})..."
-        sleep 2
-    done
-    echo "❌ Timed out waiting for shared benchmark app environment lock." >&2
-    return 1
-}
-
-release_app_environment_lock() {
-    local owner
-    owner="$(cat "$APP_ENV_LOCK_FILE" 2>/dev/null || true)"
-    [ "$owner" = "$$" ] && rm -f "$APP_ENV_LOCK_FILE" 2>/dev/null || true
 }
 
 inject_secrets() {
@@ -1515,17 +1541,18 @@ echo "tasks=[$TASKS_DISPLAY] simulate=$BENCH_SIMULATE parallel=$BENCH_PARALLEL m
 echo "ref=${BENCH_REF:-<HEAD>} model=$WMH_MODEL_NAME app=$APP dashboard=$DASHBOARD workspace=$RUN_WORKSPACE_NAME"
 echo ""
 
-ensure_app
 # READ-ONLY env preflight (concurrent-workstream safe): the run path only
 # verifies the prod-aligned app secrets exist — it never stages them. Fleet
-# children inherit their controller's verification; direct runs verify here.
+# children inherit their controller's app/environment proof and perform no
+# app-wide provider read; direct runs verify here.
 if [ -n "$FLEET_MACHINE_ID" ]; then
     if [ "${CLOUDBENCH_ENV_VERIFIED:-0}" != "1" ]; then
         echo "❌ Fleet child has no controller environment-verification proof." >&2
         exit 1
     fi
-    echo "🔎 Environment verified by fleet controller."
+    echo "🔎 App and environment verified by fleet controller."
 else
+    ensure_app
     verify_app_environment || exit 1
 fi
 
@@ -1596,6 +1623,7 @@ stop_all_local_viewers() {
 
 PORT_LEASE_ROOT="${TMPDIR:-/tmp}/rose-cloudbench-port-leases"
 PORT_LEASE_NONCE="$RUN_LOG_TOKEN"
+PORT_LEASE_HELPER="${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts}/cloudbench-port-lease.py"
 PORT_LEASES=()
 
 local_port_is_bindable() {
@@ -1877,7 +1905,7 @@ acquire_boot_config_update_slot() {
     local wait_seconds deadline slots_dir slot
     [ -n "$barrier" ] || return 0
     max_in_flight="${CLOUDBENCH_BOOT_CONFIG_MAX_IN_FLIGHT:-4}"
-    wait_seconds="${CLOUDBENCH_BOOT_CONFIG_SLOT_WAIT_SECONDS:-300}"
+    wait_seconds="${CLOUDBENCH_BOOT_CONFIG_SLOT_WAIT_SECONDS:-${CLOUDBENCH_BOOT_CONFIG_BARRIER_WAIT_SECONDS:-1800}}"
     case "$max_in_flight:$wait_seconds" in
         *[!0-9:]*|0:*|*:0) echo "❌ invalid boot config update concurrency/wait contract" >&2; return 1 ;;
     esac
@@ -1894,6 +1922,49 @@ acquire_boot_config_update_slot() {
         sleep 0.2
     done
     echo "❌ timed out waiting for a boot config update slot" >&2
+    return 1
+}
+boot_update_with_capacity_recovery() {
+    local update_log="$1" regular_attempts max_regular timeout_seconds
+    local capacity_wait capacity_retry regular_retry capacity_deadline
+    shift
+    max_regular="${CLOUDBENCH_BOOT_UPDATE_ATTEMPTS:-10}"
+    timeout_seconds="${CLOUDBENCH_BOOT_UPDATE_TIMEOUT:-90}"
+    capacity_wait="${CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS:-1200}"
+    capacity_retry="${CLOUDBENCH_BOOT_UPDATE_CAPACITY_RETRY_SECONDS:-8}"
+    regular_retry="${CLOUDBENCH_BOOT_UPDATE_RETRY_SECONDS:-8}"
+    case "$max_regular:$timeout_seconds:$capacity_wait" in
+        *[!0-9:]*|0:*|*:0:*|*:*:0)
+            echo "❌ invalid boot update retry/capacity-wait contract" >&2
+            return 2
+            ;;
+    esac
+    case "$capacity_retry:$regular_retry" in
+        *[!0-9:]*|:*|*:)
+            echo "❌ invalid boot update retry interval" >&2
+            return 2
+            ;;
+    esac
+    regular_attempts=0
+    capacity_deadline=$((SECONDS + capacity_wait))
+    while [ "$regular_attempts" -lt "$max_regular" ]; do
+        if _with_timeout "$timeout_seconds" "$@" > "$update_log" 2>&1; then
+            return 0
+        fi
+        if grep -Eiq \
+            'reached (its|the) machine limit|machine limit[^[:alnum:]]+reached|cpu_overcommit_exceeded|shared[ -]cpu.*(limit|overcommit)' \
+            "$update_log" 2>/dev/null; then
+            if [ "$SECONDS" -ge "$capacity_deadline" ]; then
+                echo "❌ boot update replacement capacity did not return within ${capacity_wait}s" >&2
+                return 1
+            fi
+            echo "⏳ boot update waiting for provider replacement capacity (${capacity_wait}s ceiling) ..." >&2
+            sleep "$capacity_retry"
+            continue
+        fi
+        regular_attempts=$((regular_attempts + 1))
+        [ "$regular_attempts" -lt "$max_regular" ] && sleep "$regular_retry"
+    done
     return 1
 }
 release_boot_config_update_slot() {
@@ -2024,6 +2095,8 @@ if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
 fi
 
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
+    POST_CONFIG_START_MARKER="$OUT_DIR/post-config-start.accepted"
+    rm -f "$POST_CONFIG_START_MARKER"
     _ghb64="$(printf '%s' "$(gh auth token 2>/dev/null || resolve_github_token)" | base64 | tr -d '\n')"
     [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
     _envargs=(
@@ -2037,6 +2110,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "CLOUDBENCH_BARRIER_TOKEN=${CLOUDBENCH_BARRIER_TOKEN:-}"
         --env "CLOUDBENCH_START_BARRIER_WAIT_SECONDS=${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}"
         --env "CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS=${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-2160}"
+        --env "CLOUDBENCH_SEED_BUDGET_LIB=/cloudbench-seed-budget.sh"
         --env "CLOUDBENCH_STATUS_PORT=$REMOTE_STATUS_PORT"
         --env "WMH_MODEL_NAME=$WMH_MODEL_NAME"
         --env "BENCH_TASKS_B64=$TASKS_CSV_B64"
@@ -2050,13 +2124,18 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         --env "BENCHMARK_PEAK_FLY_MACHINES=$OBSERVED_PEAK_FLY_MACHINES"
         --env "BENCHMARK_VM_USD_PER_HOUR=$VM_USD_PER_HOUR"
     )
-    _local_patch_file_args=()
+    _boot_file_args=(
+        --file-local "/cloudbench-boot.sh=$ROOT_DIR/scripts/cloudbench-boot.sh"
+        --file-local "/cloudbench-run.sh=$ROOT_DIR/scripts/cloudbench-run.sh"
+        --file-local "/cloudbench-status-server.py=$ROOT_DIR/scripts/cloudbench-status-server.py"
+        --file-local "/cloudbench-seed-budget.sh=$ROOT_DIR/scripts/lib/cloudbench-seed-budget.sh"
+    )
     if [ -n "$LOCAL_PATCH_FILE" ]; then
         _envargs+=(
             --env "LOCAL_PATCH_FILE=/cloudbench-local.patch"
             --env "LOCAL_PATCH_SHA256=$LOCAL_PATCH_SHA256"
         )
-        _local_patch_file_args+=(--file-local "/cloudbench-local.patch=$LOCAL_PATCH_FILE")
+        _boot_file_args+=(--file-local "/cloudbench-local.patch=$LOCAL_PATCH_FILE")
     else
         # A pooled Machine can retain config from an older run. Clear the path
         # and digest explicitly so it cannot apply a stale rootfs patch.
@@ -2090,18 +2169,12 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     # Machine. Bound those provider mutations across the fleet; the separate
     # boot-config barrier still releases all guest starts together afterward.
     acquire_boot_config_update_slot || exit 1
-    for _u in $(seq 1 "${CLOUDBENCH_BOOT_UPDATE_ATTEMPTS:-10}"); do
-        if _with_timeout "${CLOUDBENCH_BOOT_UPDATE_TIMEOUT:-90}" \
-              flyctl machine update "$mid" -a "$APP" "${_envargs[@]}" \
-              --file-local "/cloudbench-boot.sh=$ROOT_DIR/scripts/cloudbench-boot.sh" \
-              --file-local "/cloudbench-run.sh=$ROOT_DIR/scripts/cloudbench-run.sh" \
-              "${_local_patch_file_args[@]}" \
-              --command "bash /cloudbench-boot.sh" --skip-health-checks --skip-start --yes \
-              > "$_update_log" 2>&1; then
-            _upd=1; break
-        fi
-        sleep 8
-    done
+    if boot_update_with_capacity_recovery "$_update_log" \
+          flyctl machine update "$mid" -a "$APP" "${_envargs[@]}" \
+          "${_boot_file_args[@]}" \
+          --command "bash /cloudbench-boot.sh" --skip-health-checks --skip-start --yes; then
+        _upd=1
+    fi
     release_boot_config_update_slot
     [ "$_upd" = 1 ] || {
         echo "❌ boot-launch: could not set machine env/command after retries." >&2
@@ -2113,7 +2186,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     if [ -n "${CLOUDBENCH_BOOT_CONFIG_BARRIER:-}" ]; then
         mkdir -p "$CLOUDBENCH_BOOT_CONFIG_BARRIER/ready"
         : > "$CLOUDBENCH_BOOT_CONFIG_BARRIER/ready/$mid"
-        _config_barrier_deadline=$((SECONDS + ${CLOUDBENCH_BOOT_CONFIG_BARRIER_WAIT_SECONDS:-300}))
+        _config_barrier_deadline=$((SECONDS + ${CLOUDBENCH_BOOT_CONFIG_BARRIER_WAIT_SECONDS:-1800}))
         while [ ! -f "$CLOUDBENCH_BOOT_CONFIG_BARRIER/release" ]; do
             if [ "$SECONDS" -ge "$_config_barrier_deadline" ]; then
                 echo "❌ boot config barrier release timed out for $mid" >&2
@@ -2122,35 +2195,32 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
             sleep 0.2
         done
     fi
-    # `machine update` may leave the box stopped; start it (retry storage-provisioning
-    # + eventual-consistency flicker) and wait until Fly reports it started. No ssh.
-    if [ "${CLOUDBENCH_STORAGE_READY:-0}" = "1" ]; then
-        # Pool update is the sole required mutation and normally restarts the
-        # stopped machine, but Fly may leave it stopped. Submit one bounded,
-        # idempotent start request; do not follow it with 30 independent state/
-        # storage polling loops. The data-plane status poll is the proof that
-        # boot actually ran.
-        _with_timeout "${CLOUDBENCH_BOOT_START_TIMEOUT:-60}" \
-            flyctl machine start "$mid" -a "$APP" >/dev/null 2>&1 || true
-        echo "✅ boot-launch: $mid update/start accepted — booting into the driver (polling over the data plane)."
-    else
-        start_ts="$(date +%s)"; READY_TIMEOUT="${CLOUDBENCH_READY_TIMEOUT:-600}"; last_start_ts=0
-        while :; do
-            st="$(machine_state "$mid")"
-            [ "$st" = "started" ] && break
-            now="$(date +%s)"
-            if machine_storage_ready "$mid" && { [ "$last_start_ts" -eq 0 ] || [ $((now - last_start_ts)) -ge 15 ]; }; then
-                request_machine_start "$mid" >/dev/null 2>&1 || true
-                last_start_ts="$now"
-            fi
-            if [ $((now - start_ts)) -ge "$READY_TIMEOUT" ]; then
-                echo "❌ boot-launch: machine $mid did not start within ${READY_TIMEOUT}s (state=$st)." >&2
-                exit 1
-            fi
-            sleep 5
-        done
-        echo "✅ boot-launch: $mid started — booting into the driver (polling over the data plane)."
-    fi
+    # The update above is explicitly `--skip-start`, so every child must submit
+    # a post-barrier start mutation. Never let the shared inventory suppress it:
+    # a generation published just before the update can still say `started`
+    # after the provider has committed the Machine to `stopped`. The bounded,
+    # idempotent start is the transition request; the data-plane health probe
+    # below is the post-request proof that this exact Machine really booted.
+    _start_log="$OUT_DIR/cloudbench-boot-start.log"
+    : > "$_start_log"
+    _start_ok=0
+    for _s in $(seq 1 "${CLOUDBENCH_BOOT_START_ATTEMPTS:-4}"); do
+        if _with_timeout "${CLOUDBENCH_BOOT_START_TIMEOUT:-60}" \
+              flyctl machine start "$mid" -a "$APP" >> "$_start_log" 2>&1; then
+            _start_ok=1
+            break
+        fi
+        sleep $(( _s * 2 ))
+    done
+    [ "$_start_ok" = 1 ] || {
+        echo "❌ boot-launch: provider did not accept the required post-config start for $mid." >&2
+        tail -30 "$_start_log" 2>/dev/null | sed 's/^/   /' >&2 || true
+        exit 1
+    }
+    printf '%s\n' "$mid" > "$POST_CONFIG_START_MARKER.tmp.$$"
+    mv "$POST_CONFIG_START_MARKER.tmp.$$" "$POST_CONFIG_START_MARKER"
+    rm -f "$_start_log"
+    echo "✅ boot-launch: $mid post-config start accepted — booting into the driver (polling over the data plane)."
 else
 # ── 1. Start the warm machine + wait until it is start+ssh-ready ────────────
 # Generous timeout: ~10s warm, minutes on a cold image pull. Gate on BOTH the Fly
@@ -2225,6 +2295,10 @@ fi
 for helper in cloudbench-fetch-ref.sh cloudbench-sync-deps.sh cloudbench-current-run-artifact.py; do
     [ -f "$ROOT_DIR/scripts/$helper" ] || { echo "❌ Missing scripts/$helper locally." >&2; exit 1; }
 done
+# The on-box driver sources this lib from the controller-staged /data copy (the
+# /data/repo checkout is still at the old ref when the driver starts).
+[ -f "$ROOT_DIR/scripts/lib/cloudbench-seed-budget.sh" ] || { echo "❌ Missing scripts/lib/cloudbench-seed-budget.sh locally." >&2; exit 1; }
+
 # Proxy the box BACKEND (not its frontend) to the Mac. The local archive frontend
 # talks to a local archive API which proxies live agent reads here with the
 # benchmark API key — RLS-free, single-origin, no CORS. (flyctl proxy of the box
@@ -2239,12 +2313,18 @@ WRAPPER_LOCAL="$(mktemp)"
 STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
 {
     echo "set -e"
+    echo 'publish_driver_state() {'
+    echo '    state="$1"'
+    echo '    state_tmp="/data/cloudbench-driver.state.tmp.$$"'
+    echo '    printf "%s\n" "$state" > "$state_tmp" && mv -f "$state_tmp" /data/cloudbench-driver.state'
+    echo '}'
     echo "chmod +x /data/cloudbench-run.sh"
     echo "export REF=$(printf '%q' "$BENCH_REF")"
     echo "export CLOUDBENCH_GITHUB_TOKEN_B64=$(printf '%q' "$CONTROLLER_GITHUB_TOKEN_B64")"
     echo "export CLOUDBENCH_FETCH_REF_SCRIPT=/data/cloudbench-fetch-ref.sh"
     echo "export CLOUDBENCH_SYNC_DEPS_SCRIPT=/data/cloudbench-sync-deps.sh"
     echo "export CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT=/data/cloudbench-current-run-artifact.py"
+    echo "export CLOUDBENCH_SEED_BUDGET_LIB=/data/cloudbench-seed-budget.sh"
     echo "export CLOUDBENCH_RUN_TOKEN=$(printf '%q' "$RUN_LOG_TOKEN")"
     echo "export CLOUDBENCH_START_BARRIER=$(printf '%q' "${CLOUDBENCH_START_BARRIER:-}")"
     echo "export CLOUDBENCH_BARRIER_TOKEN=$(printf '%q' "${CLOUDBENCH_BARRIER_TOKEN:-}")"
@@ -2274,8 +2354,17 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     else
         echo "unset LOCAL_PATCH_FILE LOCAL_PATCH_SHA256"
     fi
+    echo 'driver_pid_tmp="/data/cloudbench-driver.pid.tmp.$$"'
+    echo 'printf "%s\n" "$$" > "$driver_pid_tmp" && mv -f "$driver_pid_tmp" /data/cloudbench-driver.pid'
+    echo 'publish_driver_state running'
     echo "rm -f $(printf '%q' "$REMOTE_TMP_SCRIPT")"
-    echo "exec bash /data/cloudbench-run.sh"
+    echo 'set +e'
+    echo "bash /data/cloudbench-run.sh"
+    echo 'driver_rc=$?'
+    echo 'set -e'
+    echo 'rm -f /data/cloudbench-driver.pid'
+    echo 'publish_driver_state exited'
+    echo 'exit "$driver_rc"'
 } > "$WRAPPER_LOCAL"
 
 # Upload the driver/wrapper/patch, truncate the log, launch detached.
@@ -2303,11 +2392,13 @@ STAGED_LOCAL_FILES+=("$stage_err")
 STAGE_ATTEMPTS="${CLOUDBENCH_STAGE_ATTEMPTS:-20}"
 for _ in $(seq 1 "$STAGE_ATTEMPTS"); do
     : > "$stage_err"
-    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-current-run-artifact.py '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
+    ssh_read "$mid" "rm -f /data/cloudbench-run.sh /data/cloudbench-fetch-ref.sh /data/cloudbench-sync-deps.sh /data/cloudbench-seed-budget.sh /data/cloudbench-current-run-artifact.py /data/cloudbench-status-server.py '$REMOTE_TMP_SCRIPT' /tmp/cloudbench-local.patch" >/dev/null 2>&1 || true
     if FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/$REMOTE_RUN_SCRIPT" /data/cloudbench-run.sh >"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-sync-deps.sh" /data/cloudbench-sync-deps.sh >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/lib/cloudbench-seed-budget.sh" /data/cloudbench-seed-budget.sh >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-current-run-artifact.py" /data/cloudbench-current-run-artifact.py >>"$stage_err" 2>&1 \
+        && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-status-server.py" /data/cloudbench-status-server.py >>"$stage_err" 2>&1 \
         && FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 "$WRAPPER_LOCAL" "$REMOTE_TMP_SCRIPT" >>"$stage_err" 2>&1; then
         if [ -n "$LOCAL_PATCH_FILE" ]; then
             FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0644 "$LOCAL_PATCH_FILE" /tmp/cloudbench-local.patch >>"$stage_err" 2>&1 || { sleep 3; continue; }
@@ -2344,7 +2435,7 @@ done
 # the box's private 6PN address, reachable only through the authenticated proxy.
 STATUS_PROXY_PID=""
 # LOCAL_STATUS_PORT was selected once above and is shared by both launch paths.
-FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"pkill -f 'http.server ${REMOTE_STATUS_PORT}' 2>/dev/null; sleep 1; setsid python3 -m http.server ${REMOTE_STATUS_PORT} --directory /data >/dev/null 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
+FLY ssh console -a "$APP" --machine "$mid" -C "bash -c \"rm -f /data/cloudbench-driver.pid; printf 'booting\\n' > /data/cloudbench-driver.state.tmp; mv -f /data/cloudbench-driver.state.tmp /data/cloudbench-driver.state; pkill -f 'cloudbench-status-server.py.*--port ${REMOTE_STATUS_PORT}' 2>/dev/null; sleep 1; setsid python3 /data/cloudbench-status-server.py --port ${REMOTE_STATUS_PORT} --directory /data --barrier '${CLOUDBENCH_START_BARRIER:-}' >/dev/null 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
 
 launch_attempts="${CLOUDBENCH_DRIVER_LAUNCH_ATTEMPTS:-4}"
 _ok=0
@@ -2452,7 +2543,18 @@ start_leased_data_plane_proxy() {  # <preferred> <port-var> <remote-port> <host>
     return 1
 }
 
+# Fleet children already receive the controller's provider-authoritative keyed
+# Machine record. Prefer its 6PN address: a newly cloned Machine can be started
+# and reachable before Fly's derived .internal hostname appears in DNS. Direct
+# maintenance runs have no fleet inventory owner and retain the hostname path.
 REMOTE_STATUS_HOST="${mid}.vm.${APP}.internal"
+if [ -n "$FLEET_MACHINE_ID" ]; then
+    REMOTE_STATUS_HOST="$(_machine_record_field "$mid" private_ip 2>/dev/null || true)"
+    [ -n "$REMOTE_STATUS_HOST" ] || {
+        echo "❌ Fleet machine $mid has no provider-authoritative private IP for data-plane proxies." >&2
+        exit 1
+    }
+fi
 start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 3))" LOCAL_STATUS_PORT \
     "$REMOTE_STATUS_PORT" "$REMOTE_STATUS_HOST" "$OUT_DIR/cloudbench-status-proxy.log" \
     STATUS_PROXY_PID status || exit 1
@@ -2462,7 +2564,7 @@ echo "🛰️  status proxy: 127.0.0.1:$LOCAL_STATUS_PORT → fly:$REMOTE_STATUS
 # The local archive frontend renders benchmark agents by reading a local archive
 # API that proxies live GETs here with the benchmark API key (bypassing RLS).
 if [ "$DASHBOARD" = "1" ] || [ "$NEEDS_IMESSAGE_RELAY" = "1" ]; then
-        REMOTE_BACKEND_HOST="${mid}.vm.${APP}.internal"
+        REMOTE_BACKEND_HOST="$REMOTE_STATUS_HOST"
         start_leased_data_plane_proxy "$((LOCAL_DASH_PORT + 1))" LIVE_BACKEND_PORT \
             "$REMOTE_BACKEND_PORT" "$REMOTE_BACKEND_HOST" "$OUT_DIR/cloudbench-backend-proxy.log" \
             PROXY_PID backend || exit 1
@@ -2531,6 +2633,13 @@ if [ "$NEEDS_IMESSAGE_RELAY" = "1" ]; then
         if grep -q 'bridge heartbeat established' "$IMESSAGE_RELAY_LOG" 2>/dev/null; then
             RELAY_READY="1"
             break
+        fi
+        relay_driver_health="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
+            "http://127.0.0.1:$LOCAL_STATUS_PORT/driver-health" 2>/dev/null || true)"
+        if [ "$relay_driver_health" = "410" ]; then
+            echo "❌ remote benchmark driver exited before relay heartbeat." >&2
+            tail -80 "$IMESSAGE_RELAY_LOG" 2>/dev/null | sed 's/^/   /' || true
+            exit 1
         fi
         if ! kill -0 "$IMESSAGE_RELAY_PID" 2>/dev/null; then
             echo "❌ Mac iMessage relay exited before establishing its heartbeat." >&2
@@ -2716,11 +2825,12 @@ status_proxy_transport_healthy() {
     # flyctl proxy can survive while its lazy DNS/GraphQL setup is wedged. PID
     # liveness alone is therefore not a transport contract. Both 204 (driver
     # alive) and 410 (server reachable, driver not yet/already gone) prove that
-    # the tunnel reaches the authenticated on-box status service.
+    # the tunnel reaches the authenticated on-box status service. 425 is the
+    # explicit pre-launch lifecycle state while boot checkout is still running.
     health_code="$(curl --noproxy '*' -sS --max-time 3 -o /dev/null -w '%{http_code}' \
         "http://127.0.0.1:$LOCAL_STATUS_PORT/driver-health" 2>/dev/null || true)"
     case "$health_code" in
-        204|410) return 0 ;;
+        204|410|425) return 0 ;;
         *) return 1 ;;
     esac
 }

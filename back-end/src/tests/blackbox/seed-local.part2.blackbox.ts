@@ -216,6 +216,33 @@ test('missing-Claude bypass requires the caller-validated Anthropic fallback opt
   );
 });
 
+test('compute-token sync can require GPT without requiring Claude OAuth', async () => {
+  const source = readSeedLocalSource();
+  const parser = source.indexOf('function parseComputeTokenRequiredTypes');
+  const env = source.indexOf('SEED_REQUIRE_COMPUTE_TOKEN_TYPES', parser);
+  const zeroClaude = source.indexOf('if (usableClaudeCodeCount === 0)');
+  const gptOnlyBypass = source.indexOf("!COMPUTE_TOKEN_REQUIRED_TYPES.has('claude')", zeroClaude);
+  const gptOnlyWarning = source.indexOf('this run requires GPT compute only', gptOnlyBypass);
+  const keyValidation = source.indexOf('process.env.ANTHROPIC_API_KEY?.trim()', gptOnlyWarning);
+  const strictFailure = source.indexOf(
+    "throw new Error('No usable claude_code integrations after sync')",
+    gptOnlyWarning
+  );
+
+  assert(parser > 0, 'expected a parser for required compute token types');
+  assert(env > parser, 'expected required token types to be read from env');
+  assert(gptOnlyBypass > zeroClaude, 'expected GPT-only sync to bypass missing Claude rows');
+  assert(gptOnlyWarning > gptOnlyBypass, 'expected GPT-only bypass to be explicit in logs');
+  assert(
+    keyValidation > gptOnlyWarning,
+    'expected Anthropic fallback validation to apply only after the GPT-only bypass'
+  );
+  assert(
+    strictFailure > keyValidation,
+    'expected missing Claude to stay fail-closed when Claude remains required'
+  );
+});
+
 test('AgentCard launcher scopes the missing-Claude opt-out to non-Claude tasks', async () => {
   const source = readSeedLocalSource();
   const launcher = readRepoFile('scripts/run-agentcard-lifecycle-task.sh');

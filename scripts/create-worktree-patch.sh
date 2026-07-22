@@ -3,8 +3,10 @@
 set -euo pipefail
 
 ROOT_DIR="${1:-$(git rev-parse --show-toplevel)}"
+PATCH_BASE="${2:-HEAD}"
 
-git -C "$ROOT_DIR" diff --binary --no-ext-diff HEAD
+git -C "$ROOT_DIR" rev-parse --verify "${PATCH_BASE}^{commit}" >/dev/null
+git -C "$ROOT_DIR" diff --binary --no-ext-diff "$PATCH_BASE"
 
 while IFS= read -r -d '' relative_path; do
     rc=0

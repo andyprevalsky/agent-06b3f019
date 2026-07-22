@@ -234,7 +234,7 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "12 passed" in result.stdout
+    assert "14 passed" in result.stdout
 
 
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
@@ -5577,6 +5577,10 @@ def test_runner_fixtures_use_isolated_system_database_identity():
             os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
 
 
+def test_compute_token_preflight_uses_credential_source_not_restored_guest_database():
+    """A Fly guest must source live credentials from its verified backend env, not its restored target."""
+
+
 def test_runner_fixtures_retry_transient_local_database_probe_timeout():
     """One bounded psql stall must not abort the benchmark before agent creation."""
     from types import SimpleNamespace
@@ -5618,6 +5622,46 @@ def test_runner_fixtures_retry_transient_local_database_probe_timeout():
             os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
         else:
             os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
+
+
+def test_compute_token_preflight_uses_credential_source_not_restored_guest_database():
+    """A Fly guest must source live credentials from its verified backend env, not its restored target."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from benchmarks import run_benchmark
+
+    isolated_database = "postgresql://postgres:postgres@localhost:5432/victoria"
+    credential_source = "postgresql://prod.example.test:6543/postgres?pgbouncer=true"
+    captured = {}
+
+    def replay_seed_contract(_command, **kwargs):
+        env = kwargs["env"]
+        captured["source"] = env.get("SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL")
+        if not captured["source"] or captured["source"] == isolated_database:
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="No usable claude_code integrations after sync",
+            )
+        return SimpleNamespace(returncode=0, stdout="compute token sync complete", stderr="")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        backend_env = Path(temp_dir, "backend.env")
+        backend_env.write_text(f'DATABASE_URL="{credential_source}"\n', encoding="utf-8")
+        with (
+            patch.object(run_benchmark, "_BACKEND_ENV", str(backend_env)),
+            patch.object(
+                run_benchmark,
+                "_local_victoria_database_url",
+                return_value=isolated_database,
+            ),
+            patch.object(run_benchmark, "_shared_workspace_database_url", return_value=None),
+            patch.object(run_benchmark, "_run_seed_subprocess", side_effect=replay_seed_contract),
+        ):
+            assert run_benchmark._sync_compute_tokens(tolerate_gpt_code_unavailable=True) is True
+
+    assert captured["source"] == credential_source
 
 
 def test_runner_fixtures_fail_closed_when_isolated_database_is_unavailable():
@@ -9216,6 +9260,10 @@ async def run_all_tests():
     r.record(
         "runner_fixture_system_database_identity",
         test_runner_fixtures_use_isolated_system_database_identity,
+    )
+    r.record(
+        "compute_token_preflight_isolated_source",
+        test_compute_token_preflight_uses_credential_source_not_restored_guest_database,
     )
     r.record(
         "runner_fixture_transient_database_probe_retry",

@@ -504,6 +504,7 @@ test('browser-state natural-key sync crosses the real Prisma uniqueness boundary
         ...localCookie,
         id: `remote-cookie-${suffix}`,
         value: 'fresh-production-value',
+        syncedAt: new Date(localCookie.syncedAt.getTime() + 1),
       },
     ]);
     await syncOriginCredentials(prisma.localStorageOrigin, [
@@ -512,6 +513,7 @@ test('browser-state natural-key sync crosses the real Prisma uniqueness boundary
         id: `remote-origin-${suffix}`,
         entries: [{ key: 'session', value: 'fresh' }],
         hash: 'fresh-hash',
+        updatedAt: new Date(localOrigin.updatedAt.getTime() + 1),
       },
     ]);
 

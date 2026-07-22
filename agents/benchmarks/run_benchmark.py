@@ -30,6 +30,7 @@ Auto-debug mode:
 import argparse
 import asyncio
 import csv
+import ipaddress
 import json
 import os
 import re
@@ -43,7 +44,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
-from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -932,9 +933,39 @@ def _validate_payment_lifecycle(task: BenchmarkTask, data: dict) -> Optional[str
     return compare(expected, actual, "payment_lifecycle")
 
 
-def _ci_should_fail(summary: dict) -> bool:
-    """CI must fail on both failed and skipped benchmark tasks."""
-    return summary.get("failed", 0) > 0 or summary.get("skipped", 0) > 0
+CLAUDE_CODE_CREDENTIAL_SKIP_REASON = (
+    "Claude Code credentials unavailable: no synced Claude token and no available pool token"
+)
+
+
+def _is_permitted_claude_code_skip(result: TaskResult) -> bool:
+    """Return whether a skipped task is the deploy-approved Claude credential skip.
+
+    Generic CI remains strict: skipped required benchmarks fail the gate. The only
+    deploy-approved exception is a Claude Code task whose provider credential path
+    is unavailable before launch. That external auth/funding state is covered by
+    credential-health and must not force a human approval loop for every deploy.
+    """
+    if result.status != "SKIPPED":
+        return False
+    try:
+        task = get_task_by_name(result.name)
+    except Exception:
+        return False
+    return bool(task.requires_claude_code and result.failure_reason == CLAUDE_CODE_CREDENTIAL_SKIP_REASON)
+
+
+def _ci_should_fail(summary: dict, task_results: list[TaskResult] | None = None) -> bool:
+    """CI fails on failed tasks and on skipped tasks unless explicitly permitted."""
+    if summary.get("failed", 0) > 0:
+        return True
+    skipped = summary.get("skipped", 0)
+    if skipped <= 0:
+        return False
+    if task_results is None:
+        return True
+    skipped_results = [result for result in task_results if result.status == "SKIPPED"]
+    return any(not _is_permitted_claude_code_skip(result) for result in skipped_results)
 
 
 def _apply_world_model_cli_env(args, parser: argparse.ArgumentParser) -> None:
@@ -3779,6 +3810,37 @@ def _shared_workspace_database_url() -> Optional[str]:
     return database_url if usable else None
 
 
+def _database_endpoint_identity(database_url: str) -> Optional[tuple[str, int, str]]:
+    """Return a normalized server/database identity without credentials or flags.
+
+    This is deliberately conservative: callers use it to prove that a token
+    source differs from a restored target.  An identity that cannot be parsed
+    must therefore remain unknown rather than being treated as distinct.
+    """
+    try:
+        parsed = urlparse(database_url)
+        if parsed.scheme not in {"postgres", "postgresql"} or not parsed.hostname:
+            return None
+        port = parsed.port or 5432
+    except ValueError:
+        return None
+    host = unquote(parsed.hostname).lower().rstrip(".")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        if address.is_loopback:
+            host = "localhost"
+        else:
+            host = address.compressed
+
+    database = unquote(parsed.path.lstrip("/"))
+    if not database:
+        return None
+    return host, port, database
+
+
 def _production_compute_token_database_url(local_database_url: str) -> Optional[str]:
     """Return the explicit production source used by cloud benchmark clones.
 
@@ -3789,12 +3851,18 @@ def _production_compute_token_database_url(local_database_url: str) -> Optional[
     command never falls back to an ambient ``DATABASE_URL`` that run.sh has
     overwritten with the isolated destination.
     """
+    target_identity = _database_endpoint_identity(local_database_url)
+    if target_identity is None:
+        return None
     configured_url = (
         load_env_var("DATABASE_URL", _BACKEND_ENV, include_process_env=False)
         or load_env_var("DIRECT_URL", _BACKEND_ENV, include_process_env=False)
         or load_env_var("DIRECT_DATABASE_URL", _BACKEND_ENV, include_process_env=False)
     )
     if not configured_url:
+        return None
+    configured_identity = _database_endpoint_identity(configured_url)
+    if not configured_identity or configured_identity == target_identity:
         return None
     # This URL is consumed by Prisma, not psql. Preserve its pooler contract
     # (`pgbouncer=true`, connection limits, etc.); stripping those parameters
@@ -3804,6 +3872,28 @@ def _production_compute_token_database_url(local_database_url: str) -> Optional[
         if not _database_urls_equivalent(configured_url, local_database_url)
         else None
     )
+
+
+def _compute_token_source_database_url(target_database_url: str) -> tuple[Optional[str], Optional[str]]:
+    """Choose a distinct, credential-bearing source for compute-token refresh."""
+    target_identity = _database_endpoint_identity(target_database_url)
+    if target_identity is None:
+        return None, None
+
+    shared_source = _shared_workspace_database_url()
+    shared_identity = _database_endpoint_identity(shared_source or "")
+    if (
+        shared_source
+        and shared_identity
+        and shared_identity != target_identity
+        and not _database_urls_equivalent(shared_source, target_database_url)
+    ):
+        return shared_source, "shared workspace"
+
+    configured_source = _production_compute_token_database_url(target_database_url)
+    if configured_source:
+        return configured_source, "prod"
+    return None, None
 
 
 def _psql_compatible_database_url(database_url: str) -> str:
@@ -4192,13 +4282,15 @@ def _sync_compute_tokens(
     *,
     tolerate_gpt_code_unavailable: bool = False,
     tolerate_claude_code_unavailable: bool = False,
+    required_token_types: tuple[str, ...] | None = None,
 ) -> bool:
     """Refresh the compute-token integrations (claude_code / gpt_code + pool)
-    from prod into the isolated benchmark DB. Returns False on any failure so
-    the live-fixture caller can fail closed. A frozen DB
-    fixture or whole-DB snapshot restore can leave stale/expired compute tokens,
-    which forces the agent's claudeAuth fetch to fail into the paid waterfall.
-    Reads the prod source from back-end/.env; writes to the isolated DB.
+    from the verified workspace DB into an isolated benchmark DB. When there is
+    no separate workspace DB (for example, inside a Fly guest), explicitly use
+    the credential-bearing DATABASE_URL from the injected backend dotenv file.
+    Source and target must identify different databases: a restored target can
+    contain fixture rows without any usable live compute credentials.
+    Returns False on any failure so the live-fixture caller can fail closed.
 
     The tolerance flags set explicit seed opt-ins for providers whose runtime
     replacements have already been validated by the caller. Codex-dependent
@@ -4215,19 +4307,19 @@ def _sync_compute_tokens(
     env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
     env.pop("SEED_ALLOW_MISSING_CLAUDE_CODE", None)
     env.pop("SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL", None)
-    shared_source = _shared_workspace_database_url()
-    source_database_url = (
-        shared_source
-        if shared_source and not _database_urls_equivalent(shared_source, database_url)
-        else _production_compute_token_database_url(database_url)
-    )
-    if not source_database_url:
+    compute_token_source, source_label = _compute_token_source_database_url(database_url)
+    if not compute_token_source:
         print(
             "    ⚠ Compute-token sync skipped: no explicit source database "
             "distinct from the isolated target"
         )
         return False
-    env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = source_database_url
+    env["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] = compute_token_source
+    env.pop("SEED_ALLOW_MISSING_GPT_CODE", None)
+    env.pop("SEED_ALLOW_MISSING_CLAUDE_CODE", None)
+    env.pop("SEED_REQUIRE_COMPUTE_TOKEN_TYPES", None)
+    if required_token_types is not None:
+        env["SEED_REQUIRE_COMPUTE_TOKEN_TYPES"] = ",".join(required_token_types)
     if tolerate_gpt_code_unavailable:
         env["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
     if tolerate_claude_code_unavailable:
@@ -4248,11 +4340,6 @@ def _sync_compute_tokens(
     if result.returncode != 0:
         print(f"    ⚠ Compute-token sync failed: {_seed_sync_error_detail(result)}")
         return False
-    source_label = (
-        "shared workspace"
-        if shared_source and _database_urls_equivalent(source_database_url, shared_source)
-        else "prod"
-    )
     print(f"    🔑 Refreshed compute tokens from {source_label}")
     return True
 
@@ -4364,6 +4451,15 @@ def _is_simulate_mode() -> bool:
     return os.environ.get("BENCHMARK_WORLD_MODEL_MODE") == "simulate"
 
 
+def _anthropic_family_excluded() -> bool:
+    return os.getenv("ROSE_EXCLUDE_ANTHROPIC_FAMILY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     """Apply the one complete, current production-credential overlay.
 
@@ -4371,6 +4467,15 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     omitting browser auth made the old ``base`` fixture neither reproducible nor
     truthful, and allowed later site-specific fixtures to fail before an agent
     was created.
+
+    ``tolerate_gpt_code_unavailable=True`` matches the run-level pre-flight
+    (``_refresh_local_compute_tokens_for_run``): prod can have zero *bench-usable*
+    gpt_code (Codex) integrations (the usable rows are non-DEV / pooling-off, or
+    Codex is quota-blocked). The live-mode tasks that take this overlay (browser,
+    payment) run on claude_code, not Codex, so gating them on gpt_code is a FALSE
+    infra failure — it dropped every live task while the pre-flight for the same
+    run already tolerated the exact same absence. A genuinely Codex-dependent task
+    still fails at runtime when its Codex call fails, not falsely here.
     """
     if _is_simulate_mode():
         print("    🌍 simulate mode — skipping the live credential overlay")
@@ -4382,10 +4487,14 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     # abort the whole run before an agent is ever created. Codex-dependent tasks
     # keep their own strict credential gates downstream. Without this, an exhausted
     # org-wide Codex quota failed every browser task at the fixture (0/8 ecommerce).
-    if not _sync_compute_tokens(
-        tolerate_gpt_code_unavailable=True,
-        tolerate_claude_code_unavailable=ctx.tolerate_claude_code_unavailable,
-    ):
+    if _anthropic_family_excluded():
+        synced_compute_tokens = _sync_compute_tokens(required_token_types=("gpt",))
+    else:
+        synced_compute_tokens = _sync_compute_tokens(
+            tolerate_gpt_code_unavailable=True,
+            tolerate_claude_code_unavailable=ctx.tolerate_claude_code_unavailable,
+        )
+    if not synced_compute_tokens:
         raise RuntimeError("Live fixture could not refresh compute tokens")
     if not _sync_browser_credentials(ctx.cookie_domains):
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
@@ -4403,6 +4512,10 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
         return
     if _is_simulate_mode():
         print("    🌍 simulate mode — using compute tokens from the restored seed DB")
+        return
+    if _anthropic_family_excluded():
+        if not _sync_compute_tokens(required_token_types=("gpt",)):
+            raise RuntimeError("Benchmark run could not refresh local compute tokens")
         return
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
@@ -8098,9 +8211,11 @@ async def _check_compute_code_credentials(base_url: str) -> bool:
     try:
         headers = await _api_headers()
         async with httpx.AsyncClient() as client:
+            params = {"tokenType": "gpt"} if _anthropic_family_excluded() else None
             resp = await client.get(
                 f"{base_url}/api/integrations/compute-code/credentials/token",
                 headers=headers,
+                params=params,
                 timeout=10.0,
             )
             if resp.status_code == 200:
@@ -8112,6 +8227,35 @@ async def _check_compute_code_credentials(base_url: str) -> bool:
         return False
 
 
+async def _check_claude_code_credentials(base_url: str) -> bool:
+    """Check whether Claude Code can actually create a code session.
+
+    A GPT/Codex compute token is not sufficient for a task that explicitly calls
+    ``spawn_claude_code_agent``. The runtime may have valid GPT credentials for
+    ordinary agent turns while Claude Code still has no user token or pool token.
+    Do not treat the shared Anthropic API-key fallback as sufficient here:
+    credential-health is the live funded-key probe, and Anthropic failures are
+    intentionally warn-only. This smoke gate is skippable when there is no real
+    Claude Code credential, so it should not launch a task that may discover an
+    unfunded or cooled-down fallback only after the benchmark starts.
+    """
+    try:
+        headers = await _api_headers()
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{base_url}/api/integrations/compute-code/credentials/token",
+                headers=headers,
+                timeout=10.0,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("type") == "claude" and bool(data.get("accessToken")):
+                    return True
+        return False
+    except Exception:
+        return False
+
+
 def cache_ratchet_failures(
     task_results: list[TaskResult],
     floors: dict[str, float] = PER_TASK_CACHE_HIT_RATCHET,
@@ -8119,6 +8263,8 @@ def cache_ratchet_failures(
     """Return repeatable-cache floor violations, including missing telemetry."""
     failures: list[tuple[str, str, float, float]] = []
     for result in task_results:
+        if result.status == "SKIPPED":
+            continue
         floor = floors.get(result.name)
         if floor is None:
             continue
@@ -8300,10 +8446,10 @@ async def main_async(args):
     skipped_claude_tasks: List[BenchmarkTask] = []
     claude_code_tasks = [t for t in tasks if t.requires_claude_code]
     if claude_code_tasks:
-        has_compute_creds = await _check_compute_code_credentials(base_url)
-        if not has_compute_creds:
+        has_claude_creds = await _check_claude_code_credentials(base_url)
+        if not has_claude_creds:
             skipped_names = [t.name for t in claude_code_tasks]
-            print(f"  ⚠ Compute code credentials unavailable — skipping: {', '.join(skipped_names)}")
+            print(f"  ⚠ Claude Code credentials unavailable — skipping: {', '.join(skipped_names)}")
             skipped_claude_tasks = claude_code_tasks
             tasks = [t for t in tasks if not t.requires_claude_code]
 
@@ -8416,7 +8562,7 @@ async def main_async(args):
                 duration_seconds=0,
                 cost_cents=0,
                 message_count=0,
-                failure_reason="Compute code credentials unavailable (user needs to re-authenticate)",
+                failure_reason=CLAUDE_CODE_CREDENTIAL_SKIP_REASON,
             )
         )
 
@@ -8731,9 +8877,9 @@ async def main_async(args):
 
     enforce_cache_ratchets(run.task_results)
 
-    # CI mode: exit non-zero if any task failed or was skipped. A skipped
-    # required benchmark means the deploy gate did not actually run.
-    if args.ci and _ci_should_fail(s):
+    # CI mode: exit non-zero if any task failed or if an unapproved task was
+    # skipped. Claude Code credential-unavailable skips are explicitly permitted.
+    if args.ci and _ci_should_fail(s, run.task_results):
         sys.exit(1)
 
 

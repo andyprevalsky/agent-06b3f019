@@ -15,9 +15,10 @@ Push the current branch, create a PR, obtain a CodeRabbit review (or Claude Code
 Before running tests or creating/updating a PR, capture the current Conductor workspace title so it can be restored after merge (the deploy flow mutates `pr_title_locked` to the PR title; without this capture the pre-deploy title is lost):
 
 ```bash
-WORKSPACE_DIR="$(basename "$PWD")"
+ESCAPED_WORKSPACE_PATH=$(printf "%s" "$PWD" | sed "s/'/''/g")
+ESCAPED_BRANCH=$(printf "%s" "$(git branch --show-current)" | sed "s/'/''/g")
 ORIGINAL_WORKSPACE_TITLE="$(sqlite3 "$HOME/Library/Application Support/com.conductor.app/conductor.db" \
-  "SELECT pr_title FROM workspaces WHERE directory_name = '$WORKSPACE_DIR' LIMIT 1;")"
+  "SELECT pr_title FROM workspaces WHERE workspace_path = '$ESCAPED_WORKSPACE_PATH' AND branch = '$ESCAPED_BRANCH' LIMIT 1;")"
 echo "ORIGINAL_WORKSPACE_TITLE=$ORIGINAL_WORKSPACE_TITLE"
 ```
 
@@ -452,6 +453,7 @@ Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barri
 
 ```bash
 bash scripts/tests/cloudbench-env.test.sh
+bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
 agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py \
   -k 'cloud_patch_detection_and_payload_include_staged_only_changes or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or autoscaled_worker_failure_is_removed_and_replaceable or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh'
 cd agents && python scripts/run_blackbox_tests.py benchmark
@@ -471,7 +473,9 @@ all 91 instrumented back-end domains.
 cd back-end && bash ../scripts/run-deploy-stage credential-health -- npx tsx src/tests/blackbox/integration-health.blackbox.ts
 ```
 
-**If ANY credential is rejected** the error message names the exact env var to refresh and the provider dashboard URL. Escalate to the user immediately and do not proceed to Step 5 unless the user explicitly overrides that credential gate. If overridden, record the rejection as `⚠️ Overridden`, use the narrow gate-specific harness override, and continue every other check. Do not change production auth behavior merely to make a rejected credential appear healthy.
+**If any hard credential is rejected** the error message names the exact env var to refresh and the provider dashboard URL. Escalate to the user immediately and do not proceed to Step 5 unless the user explicitly overrides that credential gate. If overridden, record the rejection as `⚠️ Overridden`, use the narrow gate-specific harness override, and continue every other check. Do not change production auth behavior merely to make a rejected credential appear healthy.
+
+Anthropic/Claude is intentionally non-blocking in this gate: the probe should still run by default and report `WARN` on exhausted credits, rejected auth, or provider availability problems, but future deploys may proceed without human approval when only this provider fails. The optional `DEPLOY_GATE_OVERRIDES=credential-health:anthropic` path remains available when an operator wants an explicit audited skip instead of a live probe. Parallel.ai is also warn-only.
 
 ## Step 4h: Live Amplitude admin-health probe (no skip)
 
@@ -721,7 +725,7 @@ At each poll, check:
 
 ### Pass criteria
 
-**ALL Pre-Deploy smoke benchmarks must pass — currently 6/6, with 0 failures.** On the local path, `run-predeploy-local` must exit 0 ("All requested benchmarks passed") and every task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
+**ALL non-skipped Pre-Deploy smoke benchmarks must pass, with 0 failures.** The only deploy-approved smoke skip is a Claude Code benchmark whose preflight proves there are no synced Claude credentials and no pool token; the shared `ANTHROPIC_API_KEY` fallback is covered by the warn-only credential-health gate and does not satisfy this skippable smoke task. This provider-auth/funding state is skippable by future deploys without additional human approval. On the local path, `run-predeploy-local` must exit 0 and every non-skipped task's FE link must show the agent actually ran. (Cloud alternate: the Hub run must be final — `live=false`, dispatch `completed` — and visible in Benchmarks → Runs.) Timeouts, stalls, wrong tool usage, backend crashes, or any other failure mode must be diagnosed and fixed. You are expected to root-cause every failure and fix it in code. This is not optional — smoke failures are real bugs.
 
 **Diagnosis process — MUST be delegated to a `general-purpose` sub-agent.**
 
@@ -802,7 +806,7 @@ exact agent_id, scan the result, then hand the agent_id off.
 
 - Changing the nature/intent of a test (e.g., weakening assertions, changing what the test validates)
 - Changing timeouts without explicit user permission — instead, diagnose which parts of the agent lifecycle and LLM requests are causing the most latency, and reduce them precisely in a generalizable way that won't create downstream issues
-- Skipping or disabling tests
+- Skipping or disabling tests, except the deploy-approved Claude Code credential-unavailable smoke skip described above
 
 **Escalation is ONLY for:**
 
@@ -825,12 +829,12 @@ Failed benchmark agents are intentionally retained long enough for diagnostics. 
 
 When any local smoke benchmark fails, start with the run artifacts before making code changes:
 
-| Surface | Artifact | What to look for |
-| ------- | -------- | ---------------- |
-| Runner | `local.py` report card / `RESULTS:` line | which task failed + evaluator reason |
-| Result | `agents/benchmarks/runs/<run>.json` + `runs/<run>_diagnostics/` | failed agent ID and failure_reason |
-| Worker | `agents/navi-worker-log.txt` | tracebacks, tool errors, LLM-call failures |
-| Backend | `back-end/backend-logs.log` | 500s, Prisma errors, route failures |
+| Surface | Artifact                                                        | What to look for                           |
+| ------- | --------------------------------------------------------------- | ------------------------------------------ |
+| Runner  | `local.py` report card / `RESULTS:` line                        | which task failed + evaluator reason       |
+| Result  | `agents/benchmarks/runs/<run>.json` + `runs/<run>_diagnostics/` | failed agent ID and failure_reason         |
+| Worker  | `agents/navi-worker-log.txt`                                    | tracebacks, tool errors, LLM-call failures |
+| Backend | `back-end/backend-logs.log`                                     | 500s, Prisma errors, route failures        |
 
 For benchmark-specific diagnostics, run ALL three summaries in parallel — they answer different questions (LOCAL, so no `--prod` / `--url`):
 
@@ -860,6 +864,8 @@ Group 4 siblings.
 ```bash
 cd "$(git rev-parse --show-toplevel)"
 CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
+  ROSE_EXCLUDE_ANTHROPIC_FAMILY=1 \
+  SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt \
   BENCHMARK_SKIP_WMH_BUILD=1 \
   bash scripts/run-deploy-stage agentcard-lifecycle -- \
   bash scripts/run-bench --local agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment --bootstrap --max-concurrency 1 --no-dashboard
@@ -1082,15 +1088,19 @@ Store the title in the `pr_title_locked` column — this column is ours and is n
 ```bash
 # Escape single quotes for SQL
 ESCAPED_TITLE=$(printf "%s" "$PR_TITLE" | sed "s/'/''/g")
+ESCAPED_WORKSPACE_PATH=$(printf "%s" "$PWD" | sed "s/'/''/g")
+ESCAPED_BRANCH=$(printf "%s" "$(git branch --show-current)" | sed "s/'/''/g")
 sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
-  "UPDATE workspaces SET pr_title_locked = '$ESCAPED_TITLE' WHERE directory_name = '$(basename "$PWD")'"
+  "UPDATE workspaces SET pr_title_locked = '$ESCAPED_TITLE' WHERE workspace_path = '$ESCAPED_WORKSPACE_PATH' AND branch = '$ESCAPED_BRANCH'"
 ```
 
 From this point on, Steps 9–13 should read the PR title from this record (rather than querying GitHub) so the workspace and the deploy flow agree on what's shipping:
 
 ```bash
+ESCAPED_WORKSPACE_PATH=$(printf "%s" "$PWD" | sed "s/'/''/g")
+ESCAPED_BRANCH=$(printf "%s" "$(git branch --show-current)" | sed "s/'/''/g")
 PR_TITLE=$(sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db \
-  "SELECT pr_title_locked FROM workspaces WHERE directory_name = '$(basename "$PWD")'")
+  "SELECT pr_title_locked FROM workspaces WHERE workspace_path = '$ESCAPED_WORKSPACE_PATH' AND branch = '$ESCAPED_BRANCH'")
 ```
 
 ## Step 9: Wait for code review
