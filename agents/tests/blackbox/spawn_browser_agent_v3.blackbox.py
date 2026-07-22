@@ -4485,6 +4485,37 @@ async def test_rotation_storage_state_round_trips_in_real_browser():
                 })"""
             )
             assert indexed_db_token == "idb-secret"
+
+            await new_page.evaluate("localStorage.setItem('checkout', 'site-updated')")
+            await new_page.evaluate(
+                """async () => await new Promise((resolve, reject) => {
+                  const request = indexedDB.open('auth-db');
+                  request.onerror = () => reject(request.error);
+                  request.onsuccess = () => {
+                    const db = request.result;
+                    const tx = db.transaction('sessions', 'readwrite');
+                    tx.objectStore('sessions').put({id: 'primary', token: 'site-updated'});
+                    tx.oncomplete = () => { db.close(); resolve(); };
+                    tx.onerror = () => { db.close(); reject(tx.error); };
+                  };
+                })"""
+            )
+            await new_page.reload(wait_until="domcontentloaded")
+            assert await new_page.evaluate("localStorage.getItem('checkout')") == "site-updated"
+            reloaded_token = await new_page.evaluate(
+                """async () => await new Promise((resolve, reject) => {
+                  const request = indexedDB.open('auth-db');
+                  request.onerror = () => reject(request.error);
+                  request.onsuccess = () => {
+                    const db = request.result;
+                    const tx = db.transaction('sessions', 'readonly');
+                    const get = tx.objectStore('sessions').get('primary');
+                    get.onsuccess = () => { db.close(); resolve(get.result?.token); };
+                    get.onerror = () => { db.close(); reject(get.error); };
+                  };
+                })"""
+            )
+            assert reloaded_token == "site-updated"
             await new_context.close()
             await old_context.close()
         finally:

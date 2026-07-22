@@ -110,6 +110,7 @@ def test_worker_and_backend_use_the_same_canonical_auth_realms() -> None:
     assert auth_realm_matches_url("doordash.com", "https://identity.doordash.com/login")
     assert auth_realm_matches_url("example.co.uk", "https://shop.example.co.uk/checkout")
     assert not auth_realm_matches_url("example.co.uk", "https://notexample.co.uk/")
+    assert not auth_realm_matches_url("amazon.com", "https://signin.aws.amazon.com/")
 
 
 async def test_realm_payload_hydrates_password_and_passkey_without_exposing_plaintext() -> None:

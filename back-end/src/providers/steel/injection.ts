@@ -439,7 +439,7 @@ export async function injectUserData(
     // Run all injections in parallel for performance
     log.info(`  [4/5] Injecting browser state in parallel...`);
     const injectionPromises: Promise<void>[] = [];
-    const injectionErrors: Error[] = [];
+    const credentialInjectionErrors: Error[] = [];
 
     // 1. Inject cookies if available
     if (hasCookies) {
@@ -472,12 +472,18 @@ export async function injectUserData(
 
             const invalidCookies = playwrightCookies.filter((cookie) => cookie.name === '');
             if (invalidCookies.length > 0) {
+              log.warn('Ignoring cookie rows without names', {
+                cookieBundleId: selectedCookieBundleId ?? 'unknown',
+                invalidCookieCount: invalidCookies.length,
+              });
+            }
+            const validCookies = playwrightCookies.filter((cookie) => cookie.name !== '');
+            if (validCookies.length === 0) {
               throw new Error(
                 `Cookie bundle ${selectedCookieBundleId ?? 'unknown'} contains ${invalidCookies.length} cookie row(s) without a name`
               );
             }
             // Empty cookie values are valid and must not be filtered out.
-            const validCookies = playwrightCookies;
             log.info(
               `  [cookies] Transform complete, ${validCookies.length} valid (${Date.now() - startTime}ms)`
             );
@@ -496,7 +502,7 @@ export async function injectUserData(
             log.error('Failed to inject cookies', {
               error: error instanceof Error ? error.message : String(error),
             });
-            injectionErrors.push(
+            credentialInjectionErrors.push(
               new Error('Failed to inject cookies', {
                 cause: error instanceof Error ? error : new Error(String(error)),
               })
@@ -533,11 +539,6 @@ export async function injectUserData(
             log.error('Failed to inject localStorage', {
               error: error instanceof Error ? error.message : String(error),
             });
-            injectionErrors.push(
-              new Error('Failed to inject localStorage', {
-                cause: error instanceof Error ? error : new Error(String(error)),
-              })
-            );
           }
         })()
       );
@@ -553,11 +554,6 @@ export async function injectUserData(
             log.error('Failed to inject indexedDB', {
               error: error instanceof Error ? error.message : String(error),
             });
-            injectionErrors.push(
-              new Error('Failed to inject indexedDB', {
-                cause: error instanceof Error ? error : new Error(String(error)),
-              })
-            );
           }
         })()
       );
@@ -574,11 +570,6 @@ export async function injectUserData(
             log.error('Failed to inject permissions', {
               error: error instanceof Error ? error.message : String(error),
             });
-            injectionErrors.push(
-              new Error('Failed to inject permissions', {
-                cause: error instanceof Error ? error : new Error(String(error)),
-              })
-            );
           }
         })()
       );
@@ -599,11 +590,6 @@ export async function injectUserData(
             log.error('Failed to inject cacheStorage', {
               error: error instanceof Error ? error.message : String(error),
             });
-            injectionErrors.push(
-              new Error('Failed to inject cacheStorage', {
-                cause: error instanceof Error ? error : new Error(String(error)),
-              })
-            );
           }
         })()
       );
@@ -625,8 +611,8 @@ export async function injectUserData(
 
     // Wait for all injections to complete in parallel
     await Promise.all(injectionPromises);
-    if (injectionErrors.length > 0) {
-      throw new AggregateError(injectionErrors, 'Browser credential/state injection failed');
+    if (credentialInjectionErrors.length > 0) {
+      throw new AggregateError(credentialInjectionErrors, 'Browser credential injection failed');
     }
     log.info(`  [4/5] ✅ All injections complete (${Date.now() - startTime}ms)`);
     return {

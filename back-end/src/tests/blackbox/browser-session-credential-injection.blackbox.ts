@@ -80,6 +80,17 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
       creationUtc: BigInt(Date.now()),
     },
   });
+  await prisma.cookie.create({
+    data: {
+      userId,
+      domain: '.example.co.uk',
+      name: '',
+      value: 'invalid-row',
+      browserSource,
+      browserProfile,
+      creationUtc: BigInt(Date.now()),
+    },
+  });
   await prisma.localStorageOrigin.createMany({
     data: [
       {
@@ -127,6 +138,7 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
     assert(result.auth_realm === 'example.co.uk', 'expected canonical UK auth realm');
     assert(result.auth_credential_ref?.id === cookieBundle.id, 'expected selected cookie bundle');
     assert(result.cookies_injected === true && result.cookies_count === 1, 'cookie not injected');
+    assert(addedCookies.length === 1, 'invalid cookie row was not filtered');
     assert(addedCookies[0]?.name === 'uk-session', 'wrong cookie injected');
     assert(addedCookies[0]?.value === '', 'valid empty cookie value was filtered out');
     assert(
@@ -163,6 +175,56 @@ async function verifyUnifiedCredentialBoundary(): Promise<void> {
       !allScripts.includes('origin.includes') && !allScripts.includes('currentOrigin.includes'),
       'injected state still uses substring origin matching'
     );
+
+    const bestEffortBrowser = {
+      contexts: () => [
+        {
+          addCookies: async () => undefined,
+          addInitScript: async () => {
+            throw new Error('best-effort browser state failed');
+          },
+        },
+      ],
+      close: async () => undefined,
+    } as unknown as Browser;
+    const bestEffortResult = await prepareSessionCredentials(
+      sessionId,
+      userId,
+      'https://www.example.co.uk/store/example',
+      { browser: bestEffortBrowser }
+    );
+    assert(bestEffortResult.cookies_injected, 'cookie injection did not survive state failure');
+    assert(
+      !bestEffortResult.browser_state_injection.localStorage.injected,
+      'failed best-effort localStorage was reported as injected'
+    );
+
+    const serviceSource = prepareSessionCredentials.toString();
+    const completenessCheck = serviceSource.indexOf('missingPasswordIds.length');
+    const browserInjection = serviceSource.indexOf('injectUserData', completenessCheck);
+    assert(completenessCheck > 0, 'credential completeness check is missing');
+    assert(
+      browserInjection > completenessCheck,
+      'browser state injection runs before credential completeness validation'
+    );
+
+    await prisma.cookie.deleteMany({ where: { userId, name: { not: '' } } });
+    let rejectedAllInvalidCookies = false;
+    try {
+      await prepareSessionCredentials(
+        sessionId,
+        userId,
+        'https://www.example.co.uk/store/example',
+        { browser: fakeBrowser }
+      );
+    } catch (error) {
+      rejectedAllInvalidCookies =
+        error instanceof AggregateError &&
+        error.errors.some((innerError) =>
+          String(innerError?.cause ?? innerError).includes('without a name')
+        );
+    }
+    assert(rejectedAllInvalidCookies, 'credential boundary accepted only invalid cookie rows');
 
     await prisma.cookie.deleteMany({ where: { userId } });
     let rejectedEmptyCookieBundle = false;

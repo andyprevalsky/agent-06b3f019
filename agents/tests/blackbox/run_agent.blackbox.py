@@ -35,7 +35,10 @@ async def _run_single_iteration(
     execute_tool_override=None,
     verifier_score=1.0,
     verifier_reasoning="done",
+    verifier_structured_response=None,
     winddown_window=0,
+    response_schema=None,
+    llm_tool_calls_sequence=None,
 ):
     from loop.run_agent import run_agent
 
@@ -85,8 +88,11 @@ async def _run_single_iteration(
         default_execute_tool = default_mock_execute_tool
 
     async def mock_call_llm_structured_streaming(**kwargs):
+        selected_tool_calls = tool_calls
+        if llm_tool_calls_sequence is not None:
+            selected_tool_calls = llm_tool_calls_sequence.pop(0)
         return (
-            _DummyLLMResult("", tool_calls),
+            _DummyLLMResult("", selected_tool_calls),
             {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             detected_tools_ordered,
         )
@@ -95,7 +101,7 @@ async def _run_single_iteration(
         return {
             "score": verifier_score,
             "reasoning": verifier_reasoning,
-            "structured_response": None,
+            "structured_response": verifier_structured_response,
             "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
         }
 
@@ -129,6 +135,7 @@ async def _run_single_iteration(
             skip_verification=skip_verification,
             skip_status_updates=True,
             is_plan_loop=is_plan_loop,
+            response_schema=response_schema,
         )
 
     return result, posted_messages, executed_tools
@@ -1163,6 +1170,68 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
     assert llm_calls[0][2] == ["spawn_agent", "attempt_completion"]
     assert llm_calls[0][11] == "attempt_completion"
     assert "already completed" in llm_calls[0][10]
+
+
+async def test_completed_child_required_tool_is_enforced_inside_direct_activity():
+    """The inline activity path retries instead of dispatching a non-completion tool."""
+    response_schema = {
+        "fields": [
+            {"name": "purchase_completed", "type": "bool", "required": True},
+            {"name": "order_confirmation_id", "type": "str", "required": True},
+        ]
+    }
+    child_result = {
+        "purchase_completed": True,
+        "order_confirmation_id": "111-2222222-3333333",
+    }
+    context = [
+        {"role": "USER", "text": "Buy the item", "timestamp": "2026-07-21T00:00:00Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-07-21T00:00:01Z",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_agent",
+                        "tool_call_id": "browser-one",
+                        "type": "browser",
+                        "goal": "Complete checkout",
+                        "output_schema": response_schema,
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "Browser automation complete",
+            "timestamp": "2026-07-21T00:00:02Z",
+            "metadata": {
+                "toolCallId": "browser-one",
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "structured_response": child_result,
+            },
+        },
+    ]
+    tool_call_attempts = [
+        [{"tool": "web_search", "query": "repeat completed work"}],
+        [{"tool": "attempt_completion"}],
+    ]
+
+    result, _, executed = await _run_single_iteration(
+        [],
+        [("attempt_completion", "completion-tool", 1.0)],
+        skip_verification=False,
+        initial_context=context,
+        response_schema=response_schema,
+        verifier_structured_response=child_result,
+        llm_tool_calls_sequence=tool_call_attempts,
+    )
+
+    assert result["status"] == "completed"
+    assert [item["tool_name"] for item in executed] == ["attempt_completion"]
+    assert tool_call_attempts == []
 
 
 async def test_max_iterations_runs_final_verifier():

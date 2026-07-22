@@ -946,9 +946,17 @@ def _rotation_storage_restore_script(storage_state: Dict[str, Any]) -> str:
     return f"""
 (() => {{
   const originStates = {origins_json};
+  const completionKey = "__naviRotationStorageRestoredV1";
+  let restorePromise;
   const restoreCurrentOrigin = async () => {{
     const state = originStates.find((entry) => entry.origin === location.origin);
     if (!state) return;
+    try {{
+      if (sessionStorage.getItem(completionKey) === "1") return;
+    }} catch {{
+      // Some origins disable sessionStorage. The per-document promise below
+      // still prevents the init script and explicit restore from racing.
+    }}
     for (const item of state.localStorage || []) localStorage.setItem(item.name, item.value);
     for (const database of state.indexedDB || []) {{
       await new Promise((resolve, reject) => {{
@@ -993,9 +1001,13 @@ def _rotation_storage_restore_script(storage_state: Dict[str, Any]) -> str:
         }};
       }});
     }}
+    try {{ sessionStorage.setItem(completionKey, "1"); }} catch {{}}
   }};
-  globalThis.__naviRestoreRotationStorage = restoreCurrentOrigin;
-  void restoreCurrentOrigin().catch(() => undefined);
+  globalThis.__naviRestoreRotationStorage = () => {{
+    restorePromise ||= restoreCurrentOrigin();
+    return restorePromise;
+  }};
+  void globalThis.__naviRestoreRotationStorage().catch(() => undefined);
 }})();
 """
 

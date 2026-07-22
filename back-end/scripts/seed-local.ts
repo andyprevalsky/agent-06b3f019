@@ -408,6 +408,11 @@ async function syncComputeTokensWithRetries(): Promise<void> {
       const usableClaudeCodeCount = await countUsableClaudeCodeIntegrations();
       if (usableClaudeCodeCount === 0) {
         if (process.env.SEED_ALLOW_MISSING_CLAUDE_CODE === '1') {
+          if (!process.env.ANTHROPIC_API_KEY?.trim()) {
+            throw new Error(
+              'SEED_ALLOW_MISSING_CLAUDE_CODE=1 requires a non-empty ANTHROPIC_API_KEY'
+            );
+          }
           console.warn(
             `  ⚠️  Compute Tokens (integrations): ${count} synced, ` +
               '0 usable claude_code — proceeding with the caller-validated ' +

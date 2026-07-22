@@ -31,6 +31,7 @@ from helpers.attachments import extract_file_pointer_dicts, resolve_attachments_
 from helpers.context_pointers import annotate_with_pointer
 from helpers.handle_tool_event import handle_tool_event
 from helpers.llm import (
+    LLMStructuredOutputError,
     _completed_child_task_structured_response,
     _pending_llm_context,
     build_llm_messages,
@@ -57,6 +58,25 @@ from utils.llm_timeouts import (
 from utils.tool_schemas import PLAN_TOOL_MODELS, create_agent_action_model
 
 logger = structlog.get_logger()
+
+
+def _validate_required_turn_tool(result: Any, required_tool: Optional[str]) -> None:
+    """Reject direct-activity responses that violate a required-tool handoff."""
+    if not required_tool:
+        return
+    tool_names = []
+    for tool_call in getattr(result, "tool_calls", None) or []:
+        if hasattr(tool_call, "model_dump"):
+            payload = tool_call.model_dump()
+        elif isinstance(tool_call, dict):
+            payload = tool_call
+        else:
+            payload = {}
+        tool_names.append(payload.get("tool"))
+    if len(tool_names) != 1 or tool_names[0] != required_tool:
+        raise LLMStructuredOutputError(
+            f"LLM must call exactly one tool, '{required_tool}'. Got: {tool_names}"
+        )
 
 
 # Check credits every N iterations
@@ -974,12 +994,17 @@ async def run_agent(  # noqa: C901
                                     call_site=cache_call_site,
                                     _exclude_anthropic_family=exclude_anthropic_family_on_llm_retry,
                                 )
+                                _validate_required_turn_tool(pydantic_result, required_turn_tool)
                             break  # Success
                         except Exception as e:
                             error_message = extract_error_message(e)
-                            if llm_attempt < max_llm_attempts and "Failed to parse" in error_message:
+                            retryable_structured_result = "Failed to parse" in error_message or (
+                                required_turn_tool is not None
+                                and error_chain_has_type(e, "LLMStructuredOutputError")
+                            )
+                            if llm_attempt < max_llm_attempts and retryable_structured_result:
                                 logger.warning(
-                                    f"[run_agent] LLM parse failed (attempt {llm_attempt}/{max_llm_attempts}), retrying",
+                                    f"[run_agent] LLM structured result rejected (attempt {llm_attempt}/{max_llm_attempts}), retrying",
                                     error=error_message,
                                 )
                                 # Reset streaming state for retry

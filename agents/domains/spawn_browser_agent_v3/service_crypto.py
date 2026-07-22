@@ -573,12 +573,17 @@ def auth_realm_matches_url(auth_realm: str, url: str) -> bool:
     """Return whether a backend-authoritative realm owns this URL host."""
     if not auth_realm or not url:
         return False
-    derived_realm = auth_realm_from_url(url)
-    if derived_realm == auth_realm:
-        return True
+    normalized_realm = auth_realm.lower().lstrip(".").removeprefix("www.")
     parsed = urlparse(url if url.startswith(("http://", "https://")) else f"https://{url}")
     host = (parsed.hostname or "").lower().removeprefix("www.")
-    normalized_realm = auth_realm.lower().lstrip(".").removeprefix("www.")
+    derived_realm = auth_realm_from_url(url)
+    if derived_realm == normalized_realm:
+        return True
+    # A canonicalizer override (for example signin.aws.amazon.com ->
+    # aws.amazon.com) is an authoritative boundary. Only apply the ordinary
+    # subdomain fallback when canonicalization left the hostname untouched.
+    if derived_realm != host:
+        return False
     return host == normalized_realm or host.endswith(f".{normalized_realm}")
 
 

@@ -5,6 +5,7 @@
  */
 
 import { type Response, type Router } from 'express';
+import { ZodError } from 'zod';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
@@ -29,6 +30,10 @@ export function registerBrowserCredentialRoutes(router: Router): void {
         const result = await prepareSessionCredentials(req.params.sessionId, userId, targetUrl);
         res.json({ success: true, ...result });
       } catch (error) {
+        if (error instanceof ZodError) {
+          res.status(400).json({ error: 'Invalid prepare-auth request', issues: error.issues });
+          return;
+        }
         if (error instanceof SessionNotFoundError) {
           res.status(404).json({ error: error.message });
           return;

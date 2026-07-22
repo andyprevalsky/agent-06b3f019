@@ -130,11 +130,10 @@ export async function prepareSessionCredentials(
     throw new Error('Target URL must have an authentication realm');
   }
 
-  const [authOptions, storedPasswords, passkeys, injectionResult] = await Promise.all([
+  const [authOptions, storedPasswords, passkeys] = await Promise.all([
     getAuthOptions(userId, authRealm),
     repo.findPasswords(userId),
     repo.reservePasskeysForRealm(userId, authRealm),
-    injectUserData(sessionId, userId, targetUrl, options),
   ]);
 
   const enabledPasswordIds = new Set(
@@ -157,6 +156,8 @@ export async function prepareSessionCredentials(
         `missing passkeys [${missingPasskeyIds.join(', ')}]`
     );
   }
+
+  const injectionResult = await injectUserData(sessionId, userId, targetUrl, options);
 
   return {
     auth_realm: authRealm,
