@@ -29,6 +29,47 @@ function isStripeMissingCustomerError(error: unknown): boolean {
   );
 }
 
+type AgentCardProviderErrorFields = {
+  message: string;
+  status?: number;
+  code?: string;
+  details: Record<string, unknown>;
+};
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function agentCardProviderErrorFields(error: unknown): AgentCardProviderErrorFields | undefined {
+  if (error instanceof AgentCardProviderError) {
+    return {
+      message: error.message,
+      status: error.status,
+      code: error.code,
+      details: error.details,
+    };
+  }
+
+  const candidate = asRecord(error);
+  if (candidate === undefined) return undefined;
+  const code = typeof candidate.code === 'string' ? candidate.code : undefined;
+  const isAgentCardError =
+    candidate.name === 'AgentCardProviderError' ||
+    (code !== undefined && code.startsWith('agentcard_'));
+  if (!isAgentCardError) return undefined;
+
+  const status = candidate.status;
+  const details = asRecord(candidate.details);
+  return {
+    message: typeof candidate.message === 'string' ? candidate.message : String(error),
+    ...(typeof status === 'number' && Number.isFinite(status) ? { status } : {}),
+    ...(code !== undefined ? { code } : {}),
+    details: details ?? {},
+  };
+}
+
 /** Map any thrown value onto the typed purchase-boundary error surfaced to callers. */
 export function toPurchaseBoundaryError(error: unknown): Error {
   if (error instanceof PurchaseError) return error;
@@ -38,10 +79,20 @@ export function toPurchaseBoundaryError(error: unknown): Error {
       402
     );
   }
-  if (error instanceof AgentCardProviderError) {
+  const agentCardError = agentCardProviderErrorFields(error);
+  if (agentCardError !== undefined) {
     const statusCode =
-      error.status !== undefined && error.status >= 400 && error.status < 500 ? error.status : 502;
-    return new PurchaseError(error.message, statusCode, error.code, error.details);
+      agentCardError.status !== undefined &&
+      agentCardError.status >= 400 &&
+      agentCardError.status < 500
+        ? agentCardError.status
+        : 502;
+    return new PurchaseError(
+      agentCardError.message,
+      statusCode,
+      agentCardError.code,
+      agentCardError.details
+    );
   }
   if (error instanceof WalletFundingProviderError) {
     const statusCode = error.status >= 400 && error.status < 500 ? error.status : 502;
@@ -61,9 +112,10 @@ export function companyFundingInProgressDetails(error: unknown):
       agentcardResult?: Record<string, unknown>;
     }
   | undefined {
-  if (!(error instanceof AgentCardProviderError)) return undefined;
-  if (error.code !== 'agentcard_company_funding_in_progress') return undefined;
-  const details = error.details ?? {};
+  const agentCardError = agentCardProviderErrorFields(error);
+  if (agentCardError === undefined) return undefined;
+  if (agentCardError.code !== 'agentcard_company_funding_in_progress') return undefined;
+  const details = agentCardError.details;
   const transferId = details.transferId;
   if (typeof transferId !== 'string' || transferId.trim() === '') return undefined;
   const retryAfterSeconds = details.retryAfterSeconds;

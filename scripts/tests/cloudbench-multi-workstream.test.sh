@@ -1286,6 +1286,13 @@ CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=2 \
 grep -Eq 'mandatory autoscaler.*(worker capacity (incomplete|below desired)|worker .* could not be staged and launched)' \
     "$TMP_ROOT/controller-autoscaler-worker-required.log" ||
     fail "an unready autoscaled worker must produce a stable explicit failure"
+stage_log="$(find "$WS_A/.context/fleet/runs" -path '*/autoscaler-worker-required/worker-*.stage.log' -type f -print -quit 2>/dev/null || true)"
+[ -n "$stage_log" ] ||
+    fail "failed autoscaled-worker launch must preserve a per-worker stage log"
+grep -qF "launch worker wrapper failed rc=1" "$stage_log" ||
+    fail "autoscaled-worker stage log must identify the failing launch command"
+grep -qF "injected autoscaled-worker launch failure" "$stage_log" ||
+    fail "autoscaled-worker stage log must preserve the provider command stderr"
 clone_count="$(grep -c '^machine clone ' "$FAKE_DIR/journal.log" 2>/dev/null || true)"
 [ "$clone_count" -ge 2 ] ||
     fail "the scale-up regression must allocate both a primary and an autoscaled worker"
