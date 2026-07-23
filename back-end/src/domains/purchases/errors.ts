@@ -102,12 +102,14 @@ export function toPurchaseBoundaryError(error: unknown): Error {
 }
 
 /**
- * Extract the in-progress company-funding transfer details from an AgentCard error, or `undefined`
- * when the error is not a `agentcard_company_funding_in_progress` signal with a usable transfer id.
+ * Extract the in-progress company-funding details from an AgentCard error, or `undefined` when the
+ * error is not a retryable `agentcard_company_funding_in_progress` signal. Older provider responses
+ * included a transfer id immediately; production can also return only retry timing while the
+ * transfer/card is still materializing.
  */
 export function companyFundingInProgressDetails(error: unknown):
   | {
-      transferId: string;
+      transferId?: string;
       retryAfterSeconds?: number;
       agentcardResult?: Record<string, unknown>;
     }
@@ -116,15 +118,18 @@ export function companyFundingInProgressDetails(error: unknown):
   if (agentCardError === undefined) return undefined;
   if (agentCardError.code !== 'agentcard_company_funding_in_progress') return undefined;
   const details = agentCardError.details;
-  const transferId = details.transferId;
-  if (typeof transferId !== 'string' || transferId.trim() === '') return undefined;
+  const rawTransferId = details.transferId;
+  const transferId =
+    typeof rawTransferId === 'string' && rawTransferId.trim() !== ''
+      ? rawTransferId.trim()
+      : undefined;
   const retryAfterSeconds = details.retryAfterSeconds;
+  const hasRetryAfter = typeof retryAfterSeconds === 'number' && Number.isFinite(retryAfterSeconds);
+  if (transferId === undefined && !hasRetryAfter) return undefined;
   const agentcardResult = details.agentcardResult;
   return {
-    transferId,
-    ...(typeof retryAfterSeconds === 'number' && Number.isFinite(retryAfterSeconds)
-      ? { retryAfterSeconds }
-      : {}),
+    ...(transferId !== undefined ? { transferId } : {}),
+    ...(hasRetryAfter ? { retryAfterSeconds } : {}),
     ...(typeof agentcardResult === 'object' && agentcardResult !== null
       ? { agentcardResult: agentcardResult as Record<string, unknown> }
       : {}),
