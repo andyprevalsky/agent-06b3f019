@@ -42,6 +42,37 @@ export type LocalUserModel = {
   }): Promise<unknown>;
 };
 
+export type ScopedUserRecord = {
+  id: string;
+  userId: string;
+  phone: string | null;
+  usedInviteCode: number | null;
+};
+
+export type ScopedLocalUserModel = {
+  upsert(args: {
+    where: { userId: string };
+    create: ScopedUserRecord;
+    update: Omit<ScopedUserRecord, 'id'>;
+  }): Promise<unknown>;
+};
+
+export async function syncScopedUserRecords(
+  localUser: ScopedLocalUserModel,
+  users: readonly ScopedUserRecord[]
+): Promise<number> {
+  for (const user of users) {
+    const { id: remoteId, ...rest } = user;
+    void remoteId;
+    await localUser.upsert({
+      where: { userId: user.userId },
+      create: user,
+      update: rest,
+    });
+  }
+  return users.length;
+}
+
 export async function syncUserRecord(
   remoteUser: RemoteUserModel,
   localUser: LocalUserModel,

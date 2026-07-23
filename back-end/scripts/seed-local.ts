@@ -23,7 +23,12 @@ import {
   syncRequiredCredentialTable,
   syncSteelSessionAuthCredentials,
 } from './seed-local-credentials';
-import { runSyncStep, syncRowsWithConcurrency, syncUserRecord } from './seed-local-helpers';
+import {
+  runSyncStep,
+  syncRowsWithConcurrency,
+  syncScopedUserRecords,
+  syncUserRecord,
+} from './seed-local-helpers';
 import {
   createScopedBrowserAuthReaders,
   parseCookieDomains,
@@ -863,7 +868,7 @@ async function sync() {
         where: { phone: { in: phones } },
         select: { id: true, userId: true, phone: true, usedInviteCode: true },
       });
-      await upsertById(local.user, accounts);
+      await syncScopedUserRecords(local.user, accounts);
     }
     return synced;
   });
