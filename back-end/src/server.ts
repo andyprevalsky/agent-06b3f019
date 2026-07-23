@@ -65,6 +65,7 @@ import { BAZAAR_DESCRIPTION } from './providers/bazaarDescription';
 import { grep as userDataGrep } from './domains/data/service';
 import { registerUserDataGrep } from './providers/userDataSearch';
 import { registerCronJobs } from './serverCron';
+import { cleanupBenchmarkKernelProfiles } from './providers/browser/kernel';
 // x402 payment middleware
 import { paymentMiddleware } from 'x402-express';
 import { facilitator } from '@coinbase/x402';
@@ -583,6 +584,7 @@ app.listen(PORT, () => {
 // Graceful shutdown
 const shutdown = async (signal: string) => {
   log.info(`${signal} received, closing server...`);
+  await cleanupBenchmarkKernelProfiles();
   await prisma.$disconnect();
   process.exit(0);
 };

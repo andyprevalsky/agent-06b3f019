@@ -7849,18 +7849,23 @@ def _parallel_task_runners(
     max_concurrency: int | None,
     runner: Callable[[BenchmarkTask], Awaitable[TaskResult]],
 ) -> list[Awaitable[TaskResult]]:
-    """Build task runners with batch and shared browser-profile limits.
+    """Build task runners with the configured batch concurrency.
 
-    Browser sessions persist changes into the benchmark user's provider profile.
-    Two browser-backed tasks therefore cannot safely overlap: whichever session
-    closes last can overwrite cookies, storage, and tabs written by its sibling.
-    Keep that resource exclusive while allowing non-browser work to use the rest
-    of the configured batch concurrency.
+    Isolated local stacks key browser-provider profiles by agent, so browser
+    tasks consume ordinary batch slots and may overlap. Shared/prod stacks keep
+    the legacy one-writer guard because their user profile is intentionally
+    persistent across runs.
     """
     semaphore = (
         asyncio.Semaphore(max_concurrency) if max_concurrency is not None and max_concurrency < len(tasks) else None
     )
-    browser_profile_writer = asyncio.Semaphore(1)
+    isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    browser_profile_writer = None if isolated_browser_profiles else asyncio.Semaphore(1)
 
     async def run_with_batch_limit(task: BenchmarkTask) -> TaskResult:
         if semaphore is None:
@@ -7869,7 +7874,7 @@ def _parallel_task_runners(
             return await runner(task)
 
     async def run_limited(task: BenchmarkTask) -> TaskResult:
-        if task.requires_browser_agent:
+        if task.requires_browser_agent and browser_profile_writer is not None:
             # Acquire the resource-specific lock first so a queued browser task
             # does not consume a general slot that non-browser work can use.
             async with browser_profile_writer:
@@ -7890,8 +7895,37 @@ def _parallel_task_phases(
     shared rows during the fixture. Starting the exclusive phase first makes the
     clean-stack boundary real without sacrificing failed-tree diagnostics.
     """
-    exclusive = [task for task in tasks if task.name in EXCLUSIVE_SHARED_DB_TASK_NAMES]
-    parallel = [task for task in tasks if task.name not in EXCLUSIVE_SHARED_DB_TASK_NAMES]
+    isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+    def uses_shared_browser_auth(task: BenchmarkTask) -> bool:
+        if not getattr(task, "requires_browser_agent", False):
+            return False
+        if getattr(task, "browser_profile_mode", "persistent") == "fresh":
+            return False
+        environment = getattr(task, "environment", None) or {}
+        return bool(
+            getattr(task, "browser_auth_realm", None)
+            or environment.get("live_cookie_domains")
+            or resolve_live_fixtures(environment)
+        )
+
+    exclusive_names = set(EXCLUSIVE_SHARED_DB_TASK_NAMES)
+    if isolated_browser_profiles and any(task.name == BIOMETRICS_WEBDECOY_TASK_NAME for task in tasks):
+        auth_reading_siblings = [
+            task
+            for task in tasks
+            if task.name != BIOMETRICS_WEBDECOY_TASK_NAME and uses_shared_browser_auth(task)
+        ]
+        if not auth_reading_siblings:
+            exclusive_names.discard(BIOMETRICS_WEBDECOY_TASK_NAME)
+
+    exclusive = [task for task in tasks if task.name in exclusive_names]
+    parallel = [task for task in tasks if task.name not in exclusive_names]
     return [("exclusive", exclusive), ("parallel", parallel)]
 
 

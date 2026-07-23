@@ -26,10 +26,38 @@ import {
   type BrowserSessionHealth,
   type BrowserViewport,
 } from './types';
+import { benchmarkIsolatedBrowserProfilesEnabled } from './benchmarkProfileIsolation';
 
 const log = createLogger('Kernel');
 
 class KernelSessionValidationError extends Error {}
+
+// Local benchmark stacks share one backend process. Keying provider profiles by
+// agent preserves in-agent session/rotation continuity without funneling every
+// concurrent benchmark through the benchmark user's one persistent profile.
+const benchmarkProfilesByAgent = new Map<string, Promise<string>>();
+
+export async function cleanupBenchmarkKernelProfiles(): Promise<void> {
+  if (benchmarkProfilesByAgent.size === 0) return;
+
+  const profiles = [...benchmarkProfilesByAgent.entries()];
+  benchmarkProfilesByAgent.clear();
+  const results = await Promise.allSettled(
+    profiles.map(async ([agentId, pending]) => {
+      const profileId = await pending;
+      await kernelClient().profiles.delete(profileId);
+      return { agentId, profileId };
+    })
+  );
+  for (const [index, result] of results.entries()) {
+    if (result.status === 'fulfilled') continue;
+    const [agentId] = profiles[index];
+    log.warn('Failed to delete isolated benchmark Kernel profile during shutdown', {
+      agentId,
+      error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+    });
+  }
+}
 
 /**
  * Kernel profiles persist Chromium's open pages along with cookies and storage.
@@ -113,19 +141,63 @@ export async function releaseKernelRemoteSession(sessionId: string): Promise<voi
   );
 }
 
-async function createProfile(contextId: string): Promise<{
+async function createBenchmarkProfile(
+  client: Kernel,
+  agentId: string
+): Promise<{
+  profileId: string;
+  profileSource: string;
+}> {
+  const existing = benchmarkProfilesByAgent.get(agentId);
+  if (existing !== undefined) {
+    return { profileId: await existing, profileSource: 'user_persistent' };
+  }
+
+  const pending = client.profiles.create({}).then((profile) => profile.id);
+  benchmarkProfilesByAgent.set(agentId, pending);
+  try {
+    return { profileId: await pending, profileSource: 'new_user_persistent' };
+  } catch (error) {
+    if (benchmarkProfilesByAgent.get(agentId) === pending) {
+      benchmarkProfilesByAgent.delete(agentId);
+    }
+    throw error;
+  }
+}
+
+async function createProfile(
+  contextId: string,
+  agentId: string
+): Promise<{
   profileId: string | null;
   profileSource: string;
 }> {
   if (!browserProviderEnabled('KERNEL_PROFILE_ENABLED', true)) {
     return { profileId: null, profileSource: 'disabled' };
   }
+  const client = kernelClient();
+  if (benchmarkIsolatedBrowserProfilesEnabled()) {
+    try {
+      // Deliberately bypass BrowserProviderProfile: that row is shared by every
+      // benchmark agent because BrowserContext is unique per user.
+      return await createBenchmarkProfile(client, agentId);
+    } catch (error) {
+      if (error instanceof PermissionDeniedError) {
+        const message = `Kernel profiles are required but unavailable: ${error.message}`;
+        if (browserProviderEnabled('KERNEL_PROFILE_REQUIRED', true)) {
+          throw new Error(message, { cause: error });
+        }
+        log.warn(`${message}; using an ephemeral browser`);
+        return { profileId: null, profileSource: 'unavailable_plan' };
+      }
+      throw error;
+    }
+  }
   const existing = await getProviderProfile(contextId, 'kernel');
   if (existing !== null) {
     return { profileId: existing, profileSource: 'user_persistent' };
   }
 
-  const client = kernelClient();
   let profile;
   try {
     profile = await client.profiles.create({});
@@ -173,7 +245,7 @@ async function createRemoteSession(
   validationBrowser: Browser;
 }> {
   const client = kernelClient();
-  const profile = await createProfile(contextId);
+  const profile = await createProfile(contextId, agentId);
   const stealth = browserProviderEnabled('KERNEL_STEALTH_ENABLED', true);
 
   const createValidatedSession = async (proxy: KernelProxySelection) =>

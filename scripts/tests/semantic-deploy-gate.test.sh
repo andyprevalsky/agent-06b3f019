@@ -7,8 +7,15 @@ RUN_SH="$ROOT_DIR/scripts/run.sh"
 HELPERS="$ROOT_DIR/front-end/tests-e2e/helpers.ts"
 LIFECYCLE_SPEC="$ROOT_DIR/front-end/tests-e2e/chat-lifecycle-latency.spec.ts"
 WORKFLOW="$ROOT_DIR/.github/workflows/chat-lifecycle-ratchet.yml"
+PROD_SESSION_GENERATOR="$ROOT_DIR/front-end/scripts/generate-prod-test-session.mjs"
+PROD_SESSION_TEST="$ROOT_DIR/scripts/tests/prod-semantic-session.test.mjs"
 DEPLOY_COMMAND="$ROOT_DIR/.claude/commands/deploy.md"
+CODERABBIT_CONFIG="$ROOT_DIR/.coderabbit.yaml"
+REVIEW_WAITER="$ROOT_DIR/scripts/wait_for_code_review.py"
+REVIEW_CYCLES="$ROOT_DIR/scripts/deploy_review_cycle.py"
 DEPLOY_ENV="$ROOT_DIR/scripts/lib/deploy-local-env.sh"
+DEPLOY_STRUCTURAL_RUNNER="$ROOT_DIR/scripts/run-deploy-structural-gates.py"
+DEPLOY_LIVE_PROBE_RUNNER="$ROOT_DIR/scripts/run_deploy_live_probes.py"
 DESCEND_COMMAND_TEST="$ROOT_DIR/scripts/tests/descend-command.test.sh"
 AUTO_RCA_WORKFLOW_TEST="$ROOT_DIR/scripts/tests/auto-rca-workflow.test.sh"
 
@@ -24,7 +31,7 @@ require_text() {
   grep -Fq -- "$text" "$file" || fail "$description"
 }
 
-for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$DEPLOY_COMMAND" "$DEPLOY_ENV" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST"; do
+for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_LIVE_PROBE_RUNNER" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST"; do
   [ -f "$file" ] || fail "required semantic deploy gate file is missing: $file"
 done
 
@@ -58,7 +65,10 @@ require_text "$LIFECYCLE_SPEC" "waitForTemporalWorkflow" "agent lifecycle termin
 # become part of the product latency measurement.
 require_text "$WORKFLOW" "workflow_dispatch:" "production semantic gate must support /deploy dispatch"
 require_text "$WORKFLOW" "github.event.deployment.production_environment == true" "automatic semantic runs must be gated to production Vercel deploys"
-require_text "$WORKFLOW" "npm install --ignore-scripts --no-package-lock" "semantic workflow must install without the intentionally untracked package lock"
+require_text "$WORKFLOW" "npm install --ignore-scripts --no-package-lock --prefix front-end" "semantic workflow must install only frontend dependencies"
+require_text "$WORKFLOW" "actions/cache@v4" "semantic workflow must reuse npm downloads"
+require_text "$WORKFLOW" "front-end/package.json" "semantic cache must invalidate with frontend dependencies"
+require_text "$RUNNER" 'node scripts/generate-prod-test-session.mjs' "production semantics must not install backend dependencies only to generate auth"
 require_text "$WORKFLOW" "SEMANTIC_WORKERS: 4" "production semantic gate must use four concurrent workers"
 require_text "$WORKFLOW" "bash front-end/scripts/run-semantic-tests.sh --prod" "production gate must run every semantic spec"
 require_text "$WORKFLOW" "SEMANTIC_GREP_INVERT: chat full-lifecycle latency" "UI semantic job must exclude the separately gated latency spec"
@@ -88,7 +98,25 @@ require_text "$DEPLOY_COMMAND" 'configure_deploy_local_env' "/deploy must normal
 require_text "$DEPLOY_COMMAND" 'bash scripts/tests/workspace-env.test.sh' "/deploy must run the behavioral workspace identity regression"
 require_text "$DEPLOY_COMMAND" 'bash scripts/tests/semantic-deploy-gate.test.sh' "/deploy must keep its command invariants in the static gate"
 require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/factory-review.test.py' "/deploy must protect factory-review telemetry collection"
+require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/wait-for-code-review.test.py' "/deploy must protect exact-HEAD reviewer waiting"
+require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/deploy-review-cycle.test.py' "/deploy must protect the bounded reviewer state machine"
 require_text "$DEPLOY_COMMAND" 'bash scripts/tests/run-deploy-stage.test.sh' "/deploy must protect deploy-stage telemetry collection"
+require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/deploy-live-probes.test.py' "/deploy must protect concurrent live-probe scheduling"
+require_text "$DEPLOY_COMMAND" 'python3 scripts/run-deploy-structural-gates.py' "/deploy must schedule independent command-structural suites concurrently"
+require_text "$DEPLOY_STRUCTURAL_RUNNER" 'max_workers=len(GATES)' "command-structural runner must default to full independent-suite concurrency"
+require_text "$CODERABBIT_CONFIG" 'auto_incremental_review: false' "CodeRabbit must not review every intermediate deploy push"
+require_text "$CODERABBIT_CONFIG" 'auto_pause_after_reviewed_commits: 2' "CodeRabbit must retain a defensive automatic review cap"
+require_text "$DEPLOY_COMMAND" 'scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD"' "/deploy must wait for CodeRabbit on one exact HEAD"
+require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py start --reset --kind initial' "/deploy must initialize a bounded review ledger"
+require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py require-mergeable --head' "/deploy must reject an unreviewed merge HEAD"
+require_text "$REVIEW_CYCLES" 'MAX_REVIEW_CYCLES = 3' "review cycle enforcement must hard-cap each deploy at three"
+require_text "$REVIEW_WAITER" 'actual_head != expected_head' "review waiter must reject stale or changed PR heads"
+if grep -Fq 'gh pr checks <PR_NUMBER> --watch' "$DEPLOY_COMMAND"; then
+  fail "/deploy must not wait on every PR check"
+fi
+if grep -Fq 'gh api "repos/<OWNER>/<REPO>/pulls/<PR_NUMBER>"' "$DEPLOY_COMMAND"; then
+  fail "/deploy must not request GraphQL-only statusCheckRollup from the REST PR endpoint"
+fi
 require_text "$DEPLOY_ENV" 'normalize_conductor_workspace_env' "/deploy environment must normalize stale workspace identity"
 require_text "$DEPLOY_ENV" 'export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMANTIC_QUEUE_WORKSPACE}-deploy-' "/deploy must mint a unique Temporal queue from normalized identity"
 require_text "$DEPLOY_ENV" 'export DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"' "/deploy DB container must use normalized identity"
@@ -113,13 +141,13 @@ require_text "$DEPLOY_COMMAND" 'BLACKBOX_TEST_CONCURRENCY="$BACKEND_BLACKBOX_WOR
 require_text "$DEPLOY_COMMAND" 'AGENTS_COVERAGE_CONCURRENCY="$AGENTS_COVERAGE_WORKERS"' "/deploy must apply the computed agents worker budget"
 require_text "$DEPLOY_COMMAND" '--maxWorkers="$FRONTEND_COVERAGE_WORKERS"' "/deploy must apply the computed frontend worker budget"
 require_text "$DEPLOY_COMMAND" '--maxWorkers="$MAC_COVERAGE_WORKERS"' "/deploy must apply the computed Mac worker budget"
-require_text "$DEPLOY_COMMAND" 'run-deploy-stage amplitude-live' "/deploy must retain the focused live Amplitude probe"
+require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"amplitude-live"' "/deploy must retain the focused live Amplitude probe"
 require_text "$DEPLOY_COMMAND" 'ADMIN_HEALTH_LIVE_ONLY=1' "/deploy live Amplitude probe must run only the strict weekly endpoint case"
 require_text "$DEPLOY_COMMAND" 'Missing credentials fail closed' "/deploy must document fail-closed live Amplitude credentials"
 require_text "$DEPLOY_COMMAND" "scripts/run-bench-hub-poller\$" "/deploy must classify poller-only changes into backend coverage"
 require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'integration-health"' "backend coverage must isolate live credential health from deterministic coverage"
 require_text "$DEPLOY_COMMAND" 'Step 4c: Credential health check (runs unless explicitly overridden)' "/deploy must retain one focused credential probe unless the user explicitly overrides it"
-require_text "$DEPLOY_COMMAND" 'run-deploy-stage credential-health' "/deploy must record the focused credential probe"
+require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"credential-health"' "/deploy must record the focused credential probe"
 if grep -Fq 'credential-health blackbox only when Step 4a is skipped' "$DEPLOY_COMMAND"; then
   fail "/deploy must not retain the retired conditional credential-health wiring"
 fi
@@ -158,10 +186,13 @@ if grep -Fq 'bash scripts/run-agentcard-lifecycle-task.sh' "$DEPLOY_COMMAND"; th
 fi
 require_text "$DEPLOY_COMMAND" "gh workflow run chat-lifecycle-ratchet.yml" "/deploy must dispatch the production semantic gate"
 require_text "$DEPLOY_COMMAND" 'gh run watch "$SEMANTIC_RUN_ID" --exit-status' "/deploy must block on production semantic success"
+require_text "$DEPLOY_COMMAND" "Start every applicable provider lane concurrently" "/deploy must not serialize independent production providers"
+require_text "$DEPLOY_COMMAND" "Do not wait for the independent Mac release lane" "production semantics must overlap Mac release work"
 
 # /descend is part of the deploy orchestration surface. Keep its two user gates,
 # parallel deploy handoff, sorting, and rendered response contract cemented.
 bash "$DESCEND_COMMAND_TEST"
 bash "$AUTO_RCA_WORKFLOW_TEST"
+node --test "$PROD_SESSION_TEST"
 
 echo "All semantic deploy gate checks passed."

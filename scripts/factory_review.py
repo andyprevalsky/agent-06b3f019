@@ -246,12 +246,18 @@ STEP_DESCRIPTIONS = {
         "Coverage": "Thresholds for backend, frontend, agents, and mac.",
         "Runtime blackbox": "The same four blackbox suites, run once under coverage.",
         "Group 3 wall clock": "Wall clock while any Group 3 lane was running.",
-        "Code review": "CodeRabbit or Claude reviews the PR.",
+        "Code review": (
+            "Explicit request → terminal reviewer result; uninstrumented history "
+            "is not estimated."
+        ),
         "Smoke benchmarks": "Agent benchmarks on isolated local stacks.",
         "AgentCard lifecycle": "Payment issuance, recovery, and cleanup E2E.",
         "Semantic tests": "Playwright flows on the full local stack.",
         "Group 4 wall clock": "Wall clock while any Group 4 lane was running.",
-        "Production verify": "Deploy waits, probes, and production checks.",
+        "Production verify": (
+            "Merge → last verified production signal; explicit lifecycle hooks "
+            "replace inference going forward."
+        ),
         "Total": "Logical deploy, including cross-turn approval waits.",
     },
     "rca": {
@@ -785,6 +791,8 @@ def shell_command(invocation: Invocation) -> str:
 
 
 def classify_deploy_gates(invocation: Invocation) -> set[str]:
+    if "reused passed deploy stage" in invocation.result.lower():
+        return set()
     command = shell_command(invocation)
     if not command:
         return set()
@@ -800,6 +808,7 @@ def classify_deploy_gates(invocation: Invocation) -> set[str]:
         "eslint": "eslint",
         "typescript": "typescript",
         "backend-structural": "structural",
+        "deploy-command-structural": "structural",
         "backend-coverage": "backend-coverage",
         "backend-coverage-blackbox": "backend-coverage",
         "frontend-coverage": "frontend-coverage",
@@ -826,6 +835,8 @@ def classify_deploy_gates(invocation: Invocation) -> set[str]:
         "agentcard-abandonment": "agentcard-lifecycle",
     }
     gates.update(wrapped_names[name] for name in wrapped if name in wrapped_names)
+    if "run_deploy_live_probes.py" in command:
+        gates.add("credential-health")
     if wrapped:
         return gates
 
@@ -903,23 +914,105 @@ def classify_deploy_gates(invocation: Invocation) -> set[str]:
     return gates
 
 
+PRODUCTION_SIGNAL_RE = re.compile(
+    r"deploy-agents(?:\.yml)?|Deploy Agents to Fly\.io|"
+    r"release-mac-app(?:\.yml)?|Release Mac App|auto-tag-mac-app(?:\.yml)?|"
+    r"chat-lifecycle-ratchet(?:\.yml)?|Production Semantic Frontend Gate|"
+    r"prod-endpoint-smoke|prod-health\.ts|agent-payment-production-abandonment|"
+    r"api\.render\.com/v1/(?:services/.+?/deploys|logs)|"
+    r"RENDER_(?:API_KEY|SERVICE_ID|OWNER_ID)|"
+    r"repos/.+?/deployments(?:\?|/)|vercel\s+(?:inspect|logs|ls)|"
+    r"gh\s+release\s+(?:view|list)|roselabs\.ai|navi-j9a9\.onrender\.com",
+    re.IGNORECASE,
+)
+PRODUCTION_ROLLOVER_RE = re.compile(
+    r"new_branch_with_context|\bgit\s+(?:switch|checkout)\b[^\n]*"
+    r"(?:origin/main|--create|-[bc]\b)",
+    re.IGNORECASE,
+)
+
+
+def production_signal(invocation: Invocation) -> bool:
+    return bool(
+        PRODUCTION_SIGNAL_RE.search(
+            f"{invocation.name} {invocation.detail}\n{invocation.result}"
+        )
+    )
+
+
 def deploy_stage(invocation: Invocation) -> str:
     detail = f"{invocation.name} {invocation.detail}"
-    if re.search(
-        r"gh\s+pr\s+merge|chat-lifecycle-ratchet|prod-endpoint-smoke|/deploys\?|"
-        r"vercel.*deployment|gh\s+run\s+watch|new_branch_with_context|/rename\b",
-        detail,
-        re.IGNORECASE,
+    if re.search(r"\bgh\s+pr\s+merge\b", detail, re.IGNORECASE) or production_signal(
+        invocation
     ):
         return "production"
-    if re.search(
-        r"coderabbit|claude-review-fallback|gh\s+pr\s+(checks|view|create)|"
-        r"pulls/.+/(reviews|comments)|issues/.+/comments|git\s+push",
-        detail,
-        re.IGNORECASE,
-    ):
-        return "review"
     return "other"
+
+
+def historical_production_timing(
+    invocations: Sequence[Invocation],
+) -> StepTiming:
+    """Backfill merge-to-verification wall time without enveloping pre-merge work.
+
+    Old transcripts predate explicit production stage events. Each successful
+    merge starts one lifecycle; provider/workflow/probe evidence closes it. A
+    bare ``gh run watch`` is accepted only before branch rollover, where it is
+    the deploy workflow selected immediately after merge. Named production
+    signals remain valid after rollover because old agents sometimes started a
+    new branch while concurrently polling the still-running release jobs.
+    """
+
+    ordered = sorted(invocations, key=lambda value: value.start)
+    merge_indexes = [
+        index
+        for index, item in enumerate(ordered)
+        if re.search(r"\bgh\s+pr\s+merge\b", shell_command(item), re.IGNORECASE)
+    ]
+    if not merge_indexes:
+        return StepTiming(0, (), 0.0, incomplete=True)
+
+    intervals: list[tuple[float, float]] = []
+    incomplete = False
+    for position, merge_index in enumerate(merge_indexes):
+        merge = ordered[merge_index]
+        next_merge_index = (
+            merge_indexes[position + 1]
+            if position + 1 < len(merge_indexes)
+            else len(ordered)
+        )
+        after_merge = ordered[merge_index + 1 : next_merge_index]
+        rollover_start = next(
+            (
+                item.start
+                for item in after_merge
+                if PRODUCTION_ROLLOVER_RE.search(shell_command(item))
+            ),
+            float("inf"),
+        )
+        verified = [
+            item
+            for item in after_merge
+            if production_signal(item)
+            or (
+                item.start < rollover_start
+                and re.search(
+                    r"\bgh\s+run\s+watch\b", shell_command(item), re.IGNORECASE
+                )
+            )
+        ]
+        if not verified:
+            incomplete = True
+            continue
+        intervals.append((merge.start, max(item.end for item in verified)))
+
+    durations = tuple(max(0.0, end - start) for start, end in intervals)
+    return StepTiming(
+        runs=len(intervals),
+        durations=durations,
+        wall_seconds=interval_union_seconds(intervals),
+        incomplete=incomplete,
+        intervals=tuple(intervals),
+    )
 
 
 def deploy_invocation_labels(invocation: Invocation) -> tuple[str, ...]:
@@ -944,18 +1037,6 @@ def deploy_invocation_label(invocation: Invocation) -> str | None:
     """Compatibility helper for callers that expect one semantic family."""
     labels = deploy_invocation_labels(invocation)
     return labels[0] if len(labels) == 1 else HISTORICAL_UNSPLIT_LABEL
-
-
-def review_groups(invocations: Sequence[Invocation]) -> list[list[Invocation]]:
-    """Treat each push/re-arm as a new review lifecycle."""
-    groups: list[list[Invocation]] = []
-    for item in sorted(invocations, key=lambda value: value.start):
-        command = shell_command(item)
-        starts_cycle = bool(re.search(r"\bgit\s+push\b|\bgh\s+pr\s+create\b", command))
-        if not groups or (starts_cycle and groups[-1]):
-            groups.append([])
-        groups[-1].append(item)
-    return groups
 
 
 def combine_timings(timings: Sequence[StepTiming]) -> StepTiming:
@@ -1073,11 +1154,13 @@ def deploy_cycle_timings(
     values: dict[str, StepTiming] = {}
     for label in DEPLOY_VALUE_LABELS:
         if label == "Code review":
-            values[label] = grouped_timing(review_groups(special_items[label]))
+            # Git pushes, PR reads, and polling commands are not reviewer
+            # lifecycles. Historical transcripts do not expose a reliable
+            # CodeRabbit start/end boundary, so report them as unavailable
+            # instead of manufacturing a push-to-last-poll envelope.
+            values[label] = StepTiming(0, (), 0.0, incomplete=True)
         elif label == "Production verify":
-            values[label] = grouped_timing(
-                failure_separated_groups(special_items[label])
-            )
+            values[label] = historical_production_timing(invocations)
         elif label == HISTORICAL_UNSPLIT_LABEL:
             values[label] = invocation_timing(special_items[label])
         else:
@@ -1460,6 +1543,13 @@ def metric_row(
     incomplete_commands: int = 0,
 ) -> dict[str, Any]:
     denominator = command_count or 1
+    unavailable = bool(
+        command_count
+        and incomplete_commands == command_count
+        and runs == 0
+        and not durations
+        and wall_seconds == 0
+    )
     return {
         "step": label,
         "samples": len(durations),
@@ -1468,6 +1558,7 @@ def metric_row(
         "avg_minutes": (sum(durations) / len(durations) / 60 if durations else 0.0),
         "total_minutes": wall_seconds / denominator / 60,
         "incomplete_commands": incomplete_commands,
+        "unavailable": unavailable,
     }
 
 
@@ -1845,6 +1936,12 @@ def build_trends(
                             sum(durations) / len(durations) / 60 if durations else 0.0
                         ),
                         "total_minutes": total_wall / command_count / 60,
+                        "unavailable": bool(
+                            all(values[label].incomplete for _, values, _ in turns_for_period)
+                            and total_runs == 0
+                            and not durations
+                            and total_wall == 0
+                        ),
                     }
                 )
     return trends
@@ -2021,15 +2118,25 @@ def render_table(
             f'<span class="sequence-badge {badge_class}" '
             f'aria-label="{stage_name}">{stage}</span>'
         )
+        unavailable_cell = (
+            '<td class="metric-chart-cell unavailable-cell">'
+            '<span class="cell-value">—</span></td>'
+        )
         total_time_cell = (
-            '<td class="metric-chart-cell"><span class="cell-metric">'
-            f'<span class="cell-value">{format_minutes(step["total_minutes"])}</span>'
-            '<span class="percent-delta" data-metric="total_minutes">—</span></span>'
-            '<div class="cell-chart" data-key="total_minutes"></div></td>'
+            unavailable_cell
+            if step.get("unavailable")
+            else (
+                '<td class="metric-chart-cell"><span class="cell-metric">'
+                f'<span class="cell-value">{format_minutes(step["total_minutes"])}</span>'
+                '<span class="percent-delta" data-metric="total_minutes">—</span></span>'
+                '<div class="cell-chart" data-key="total_minutes"></div></td>'
+            )
         )
         runs_cell = (
             '<td class="wall-only-cell"></td>'
             if is_group_summary
+            else unavailable_cell
+            if step.get("unavailable")
             else (
                 '<td class="metric-chart-cell"><span class="cell-metric">'
                 f'<span class="cell-value">{step["runs"]:.1f}</span>'
@@ -2040,6 +2147,8 @@ def render_table(
         avg_cell = (
             '<td class="wall-only-cell"></td>'
             if is_group_summary
+            else unavailable_cell
+            if step.get("unavailable")
             else (
                 '<td class="metric-chart-cell"><span class="cell-metric">'
                 f'<span class="cell-value">{format_minutes(step["avg_minutes"])}</span>'
@@ -2465,6 +2574,9 @@ def print_summary(payload: dict[str, Any]) -> None:
                     f"{step['step']:<26} {'—':>4}  {'—':>7}  "
                     f"{step['total_minutes']:>5.1f}m"
                 )
+                continue
+            if step.get("unavailable"):
+                print(f"{step['step']:<26} {'—':>4}  {'—':>7}  {'—':>6}")
                 continue
             print(
                 f"{step['step']:<26} {step['runs']:>4.1f}  "

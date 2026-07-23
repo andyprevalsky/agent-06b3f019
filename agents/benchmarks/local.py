@@ -719,6 +719,7 @@ def start_services(
         assert stack.workspace_name
         assert stack.base_port
         env["BENCHMARK_ISOLATED_RUN"] = "true"
+        env["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = "true"
         env["BENCHMARK_CONTEXT_DIR"] = _context_dir_env_value(stack.context_dir)
         env["BENCHMARK_RUN_ID"] = stack.run_id
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
@@ -1549,6 +1550,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     dashboard: DashboardServer | None = None
     result_paths: list[Path] = []
     stack = build_service_stack(args)
+    previous_isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES")
+    if stack.isolated:
+        # Both the service stack and run_benchmark.py inherit this. Provider
+        # profiles are keyed per agent, so browser benchmarks can use the same
+        # concurrency width as non-browser tasks without cross-run state writes.
+        os.environ["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = "true"
 
     def handle_shutdown(signum: int, _frame: object) -> None:
         print(f"\nReceived signal {signum}; tearing down benchmark services...", file=sys.stderr)
@@ -1663,6 +1670,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("\nAll requested benchmarks passed.")
         return 0
     finally:
+        if previous_isolated_browser_profiles is None:
+            os.environ.pop("BENCHMARK_ISOLATED_BROWSER_PROFILES", None)
+        else:
+            os.environ["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = previous_isolated_browser_profiles
         signal.signal(signal.SIGTERM, previous_sigterm)
         signal.signal(signal.SIGINT, previous_sigint)
         stop_imessage_relay(imessage_relay)

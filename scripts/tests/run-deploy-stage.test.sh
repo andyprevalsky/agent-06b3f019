@@ -15,6 +15,15 @@ run_stage() {
     DEPLOY_RUN_ROOT="$RUN_ROOT" bash "$ROOT_DIR/scripts/run-deploy-stage" "$@"
 }
 
+# Timed stages stay in one Python supervisor process. Reintroducing the old
+# shell -> logger -> three lifecycle-CLI process chain adds almost a second to
+# every deploy gate and makes signal ownership ambiguous.
+grep -Fq 'exec python3 "$STAGE_RUNNER"' "$ROOT_DIR/scripts/run-deploy-stage" \
+    || fail "timed stages are not delegated to the single-process runner"
+grep -Fq 'ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"' \
+    "$ROOT_DIR/scripts/run-deploy-stage" \
+    || fail "stage wrapper pays for git root discovery on every invocation"
+
 # A successful finish closes the run and prevents later stages from corrupting it.
 RUN_ROOT="$TEST_ROOT/lifecycle"
 run_stage --start --run-id lifecycle >/dev/null
@@ -31,6 +40,26 @@ if run_stage late -- true >"$TEST_ROOT/late.out" 2>&1; then
 fi
 grep -q "no active deploy timing run" "$TEST_ROOT/late.out" \
     || fail "missing inactive-run diagnostic"
+
+# Successful deterministic gates may be reused only for an identical command
+# and exact worktree snapshot in the same deploy. Failures are never reusable.
+RUN_ROOT="$TEST_ROOT/reuse"
+run_stage --start --run-id reuse >/dev/null
+counter="$TEST_ROOT/reuse-counter"
+run_stage cached --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$counter" >/dev/null
+run_stage cached --reuse-passed -- bash -c 'printf "run\n" >> "$1"' _ "$counter" >"$TEST_ROOT/reused.out"
+[ "$(wc -l < "$counter" | tr -d ' ')" = 1 ] || fail "identical passed gate executed twice"
+grep -q "reused passed deploy stage" "$TEST_ROOT/reused.out" || fail "cache hit was not disclosed"
+run_stage cached --reuse-passed -- bash -c 'printf "changed-command\n" >> "$1"' _ "$counter" >/dev/null
+[ "$(wc -l < "$counter" | tr -d ' ')" = 2 ] || fail "changed command reused stale evidence"
+failed_counter="$TEST_ROOT/reuse-failed-counter"
+for _ in 1 2; do
+    if run_stage failed-cache --reuse-passed -- bash -c 'printf "failed\n" >> "$1"; exit 1' _ "$failed_counter" >/dev/null; then
+        fail "failing cache fixture reported success"
+    fi
+done
+[ "$(wc -l < "$failed_counter" | tr -d ' ')" = 2 ] || fail "failed gate was reused"
+run_stage --finish >/dev/null
 
 # A failed finalize must remain non-zero even though summary rendering succeeds,
 # and the pointer stays available so the operator can repair/retry the run.

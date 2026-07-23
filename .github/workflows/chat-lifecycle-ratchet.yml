@@ -44,8 +44,16 @@ jobs:
         with:
           node-version: 22
 
+      - name: Restore frontend package cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node22-production-semantic-${{ hashFiles('front-end/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node22-production-semantic-
+
       - name: Install test dependencies
-        run: npm install --ignore-scripts --no-package-lock
+        run: npm install --ignore-scripts --no-package-lock --prefix front-end
 
       - name: Install Chromium
         working-directory: front-end
@@ -94,8 +102,16 @@ jobs:
         with:
           node-version: 22
 
+      - name: Restore frontend package cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-node22-production-semantic-${{ hashFiles('front-end/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node22-production-semantic-
+
       - name: Install test dependencies
-        run: npm install --ignore-scripts --no-package-lock
+        run: npm install --ignore-scripts --no-package-lock --prefix front-end
 
       - name: Install Chromium
         working-directory: front-end

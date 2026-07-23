@@ -576,18 +576,12 @@ Each LLM call site, the context chunks it receives, and which `context_gates` ke
 
 ## CodeRabbit Review
 
-PRs are reviewed by CodeRabbit (`.coderabbit.yaml`). After creating a PR:
-
-```
-1. Push branch + create PR
-2. Poll check status via `gh pr checks <N> --json name,state`
-   - Wait for "CodeRabbit" check to reach SUCCESS (poll every 30s)
-3. Read the review:
-   - `gh api repos/<owner/repo>/pulls/<N>/reviews` → bot reviews
-   - `gh api repos/<owner/repo>/pulls/<N>/comments` → inline comments
-4. Fix critical/major issues from CodeRabbit comments, push, go to step 2
-5. Skip trivial nitpicks
-```
+`/deploy` owns CodeRabbit's bounded state machine: one automatic initial review,
+one batched incremental review, and at most one verification review. Never
+review every intermediate push or use `gh pr checks --watch`; use
+`scripts/wait-for-code-review` for the exact immutable HEAD, batch all valid
+findings before pushing, and require `deploy_review_cycle.py require-mergeable`
+before merge. A fourth cycle blocks the deploy as review-unstable.
 
 ## Ralph Instructions
 

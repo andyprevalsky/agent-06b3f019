@@ -289,6 +289,43 @@ class ApprovalLifecycleTest(unittest.TestCase):
             set(FACTORY_REVIEW.deploy_invocation_labels(amplitude)),
             {"Static verify", "Runtime blackbox"},
         )
+        structural_bundle = FACTORY_REVIEW.Invocation(
+            "structural-bundle",
+            "Bash",
+            "bash scripts/run-deploy-stage deploy-command-structural -- "
+            "python3 scripts/run-deploy-structural-gates.py",
+            "",
+            0.0,
+            3.0,
+            False,
+        )
+        self.assertEqual(
+            FACTORY_REVIEW.deploy_invocation_label(structural_bundle),
+            "Static verify",
+        )
+        live_probe_bundle = FACTORY_REVIEW.Invocation(
+            "live-probes",
+            "Bash",
+            "python3 scripts/run_deploy_live_probes.py",
+            "",
+            0.0,
+            9.0,
+            False,
+        )
+        self.assertEqual(
+            set(FACTORY_REVIEW.deploy_invocation_labels(live_probe_bundle)),
+            {"Static verify", "Runtime blackbox"},
+        )
+        reused = FACTORY_REVIEW.Invocation(
+            "reused",
+            "Bash",
+            "bash scripts/run-deploy-stage backend-coverage-blackbox --reuse-passed -- test",
+            "== reused passed deploy stage: backend-coverage-blackbox (exact worktree + command) ==",
+            0.0,
+            0.4,
+            False,
+        )
+        self.assertEqual(FACTORY_REVIEW.deploy_invocation_labels(reused), ())
 
     def test_combined_coverage_blackbox_gates_are_attributed_to_both_rows(self) -> None:
         for repository in ("backend", "frontend", "agents", "mac"):
@@ -343,9 +380,135 @@ class ApprovalLifecycleTest(unittest.TestCase):
         )
         mixed_values = FACTORY_REVIEW.deploy_cycle_timings((mixed_review,))
         self.assertEqual(mixed_values["Code review"].runs, 0)
+        self.assertEqual(mixed_values["Coverage"].runs, 1)
+        self.assertEqual(mixed_values["Runtime blackbox"].runs, 1)
         self.assertEqual(
-            mixed_values[FACTORY_REVIEW.HISTORICAL_UNSPLIT_LABEL].runs, 1
+            mixed_values[FACTORY_REVIEW.HISTORICAL_UNSPLIT_LABEL].runs, 0
         )
+
+    def test_uninstrumented_pr_activity_is_not_invented_as_review_time(self) -> None:
+        invocations = tuple(
+            FACTORY_REVIEW.Invocation(
+                identifier,
+                "Bash",
+                command,
+                "",
+                started,
+                started + 1.0,
+                False,
+            )
+            for identifier, command, started in (
+                ("push", "git push origin HEAD", 0.0),
+                ("view", "gh pr view 123 --json statusCheckRollup", 600.0),
+                ("checks", "gh pr checks 123 --watch", 1200.0),
+                (
+                    "comments",
+                    "gh api repos/example/repo/pulls/123/comments",
+                    1800.0,
+                ),
+            )
+        )
+
+        values = FACTORY_REVIEW.deploy_cycle_timings(invocations)
+
+        self.assertEqual(values["Code review"].runs, 0)
+        self.assertEqual(values["Code review"].wall_seconds, 0.0)
+        self.assertTrue(values["Code review"].incomplete)
+        turn = FACTORY_REVIEW.Turn(
+            "deploy",
+            "fixture-workspace",
+            "session",
+            "uninstrumented-review",
+            "2026-07-12T00:00:00Z",
+            1801.0,
+            "completed",
+            "completed",
+            invocations,
+        )
+        review_row = next(
+            row
+            for row in FACTORY_REVIEW.deploy_metrics((turn,))["steps"]
+            if row["step"] == "Code review"
+        )
+        self.assertTrue(review_row["unavailable"])
+
+    def test_historical_production_time_is_anchored_to_merge_and_verified_signals(
+        self,
+    ) -> None:
+        def invocation(
+            identifier: str,
+            command: str,
+            started: float,
+            ended: float,
+            result: str = "",
+        ) -> object:
+            return FACTORY_REVIEW.Invocation(
+                identifier,
+                "Bash",
+                command,
+                result,
+                started,
+                ended,
+                False,
+            )
+
+        invocations = (
+            invocation(
+                "premerge-static-read",
+                "sed -n '1,120p' back-end/scripts/prod-endpoint-smoke.ts",
+                0.0,
+                1.0,
+            ),
+            invocation(
+                "premerge-review-watch",
+                "gh run watch 100",
+                600.0,
+                900.0,
+                "Claude Code Review Fallback",
+            ),
+            invocation("merge", "gh pr merge 123 --merge", 1200.0, 1202.0),
+            invocation(
+                "vercel",
+                "gh api 'repos/example/repo/deployments?sha=abc'",
+                1210.0,
+                1211.0,
+            ),
+            invocation(
+                "fly-watch",
+                "gh run watch 200 --exit-status",
+                1220.0,
+                1280.0,
+                "Deploy Agents to Fly.io",
+            ),
+            invocation(
+                "rollover",
+                "git switch --create next origin/main",
+                1290.0,
+                1291.0,
+            ),
+            invocation(
+                "semantic-finish",
+                "gh run view 300 --json conclusion",
+                1300.0,
+                1301.0,
+                "Production Semantic Frontend Gate success",
+            ),
+            invocation(
+                "late-review-watch",
+                "gh run watch 400",
+                2000.0,
+                2600.0,
+                "Claude Code Review Fallback",
+            ),
+            invocation("rename", "/rename next task", 3000.0, 3001.0),
+        )
+
+        timing = FACTORY_REVIEW.historical_production_timing(invocations)
+
+        self.assertEqual(timing.runs, 1)
+        self.assertEqual(timing.durations, (101.0,))
+        self.assertEqual(timing.wall_seconds, 101.0)
+        self.assertFalse(timing.incomplete)
 
     def test_parallel_group_wall_clock_unions_member_envelopes(self) -> None:
         aligned = {
@@ -1081,6 +1244,24 @@ class ApprovalLifecycleTest(unittest.TestCase):
         self.assertEqual(event["value"], "evidence-trace")
         self.assertIn("recorded_at", event)
 
+        production_result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/record_factory_event.py"),
+                "deploy",
+                "production-start",
+                "semantic",
+            ],
+            cwd=ROOT,
+            env={"FACTORY_EVENT_LOG": str(event_log)},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(production_result.returncode, 0, production_result.stderr)
+        production_event = json.loads(event_log.read_text().splitlines()[-1])
+        self.assertEqual(production_event["event"], "production-start")
+        self.assertEqual(production_event["value"], "semantic")
+
     def test_workflow_commands_require_structured_collection_hooks(self) -> None:
         deploy_command = (ROOT / ".claude/commands/deploy.md").read_text()
         rca_command = (ROOT / ".claude/commands/rca.md").read_text()
@@ -1095,6 +1276,20 @@ class ApprovalLifecycleTest(unittest.TestCase):
             "deploy stage-finish code-review",
             "deploy stage-start production-verify",
             "deploy stage-finish production-verify",
+            "deploy production-start vercel",
+            "deploy production-finish vercel",
+            "deploy production-start render",
+            "deploy production-finish render",
+            "deploy production-start fly",
+            "deploy production-finish fly",
+            "deploy production-start mac-release",
+            "deploy production-finish mac-release",
+            "deploy production-start backend-probes",
+            "deploy production-finish backend-probes",
+            "deploy production-start semantic",
+            "deploy production-finish semantic",
+            "deploy production-start agentcard",
+            "deploy production-finish agentcard",
             "deploy outcome completed",
         ):
             self.assertIn(marker, deploy_command)
