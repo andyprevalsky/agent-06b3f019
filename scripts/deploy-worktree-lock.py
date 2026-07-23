@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import os
 from pathlib import Path
-import subprocess
 
 
 def main() -> int:
@@ -21,8 +21,13 @@ def main() -> int:
     args.lock.parent.mkdir(parents=True, exist_ok=True)
     with args.lock.open("a+", encoding="utf-8") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        result = subprocess.run(command, check=False)
-    return result.returncode
+        # Keep the lock descriptor open across exec and every descendant. If
+        # the shell wrapper is terminated while a child command is still
+        # running, that child retains the lock until the transaction actually
+        # stops instead of allowing a second preparation to overlap it.
+        os.set_inheritable(handle.fileno(), True)
+        os.execvp(command[0], command)
+    raise AssertionError("execvp returned unexpectedly")
 
 
 if __name__ == "__main__":

@@ -188,6 +188,51 @@ PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
 )
 expect_eq "$(sed -n '3p' "$fake_docker_state/container")" "$deploy_one" "owned database carries the canonical worktree label"
 
+foreign_state="$TMP_ROOT/foreign-container"
+cp "$fake_docker_state/container" "$foreign_state"
+awk 'NR == 3 {$0 = "/tmp/foreign-worktree"} {print}' \
+  "$fake_docker_state/container" >"$fake_docker_state/container.tmp"
+mv "$fake_docker_state/container.tmp" "$fake_docker_state/container"
+set +e
+foreign_check_output="$(
+  cd "$deploy_one"
+  PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+    CONDUCTOR_PORT=55040 CONDUCTOR_WORKSPACE_PATH="$controller" \
+    bash "$PREFLIGHT" --check 2>&1
+)"
+foreign_check_status=$?
+foreign_prepare_output="$(
+  PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+    bash "$PREFLIGHT" --worktree "$deploy_one" --source "$controller" \
+      --port-registry "$registry" --skip-dependencies 2>&1
+)"
+foreign_prepare_status=$?
+set -e
+[ "$foreign_check_status" -ne 0 ] || fail "preflight check must reject a foreign database owner"
+[ "$foreign_prepare_status" -ne 0 ] || fail "preparation must refuse to adopt a foreign database owner"
+[[ "$foreign_check_output" == *"not labeled for"* ]] || fail "foreign database check failure must name the ownership boundary"
+[[ "$foreign_prepare_output" == *"Refusing to adopt or delete a foreign container"* ]] || fail "foreign database preparation failure must explain non-adoption"
+expect_eq "$(sed -n '3p' "$fake_docker_state/container")" "/tmp/foreign-worktree" "foreign database metadata remains untouched"
+cp "$foreign_state" "$fake_docker_state/container"
+echo "PASS: foreign database ownership fails closed without adoption or deletion"
+
+rm -f "$fake_docker_state/container"
+set +e
+missing_db_output="$(
+  cd "$deploy_one"
+  PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+    CONDUCTOR_PORT=55040 CONDUCTOR_WORKSPACE_PATH="$controller" \
+    bash "$PREFLIGHT" --check 2>&1
+)"
+missing_db_status=$?
+set -e
+[ "$missing_db_status" -ne 0 ] || fail "preflight check must reject a missing owned database"
+[[ "$missing_db_output" == *"is not labeled for"* ]] || fail "missing database check failure must be explicit"
+echo "PASS: missing owned database fails the deploy preflight"
+
+PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+  bash "$PREFLIGHT" --worktree "$deploy_one" --source "$controller" \
+    --port-registry "$registry" --skip-dependencies >/dev/null
 set +e
 ln -sfn "$controller/front-end/.env" "$deploy_one/agents/.env"
 wrong_env_output="$(
@@ -219,6 +264,41 @@ second_pid=$!
 wait "$first_pid"
 wait "$second_pid"
 echo "PASS: same-owner concurrent preparation is serialized"
+
+critical_dir="$TMP_ROOT/critical-section"
+lock_path="$TMP_ROOT/direct-owner.lock"
+python3 "$ROOT_DIR/scripts/deploy-worktree-lock.py" --lock "$lock_path" -- \
+  bash -c 'mkdir "$1" || exit 91; sleep 0.3; rmdir "$1"' _ "$critical_dir" &
+critical_one=$!
+sleep 0.05
+python3 "$ROOT_DIR/scripts/deploy-worktree-lock.py" --lock "$lock_path" -- \
+  bash -c 'mkdir "$1" || exit 91; sleep 0.3; rmdir "$1"' _ "$critical_dir" &
+critical_two=$!
+wait "$critical_one"
+wait "$critical_two"
+echo "PASS: owner lock prevents measurable critical-section overlap"
+
+signal_lock="$TMP_ROOT/signal-owner.lock"
+first_entered="$TMP_ROOT/first-entered"
+second_entered="$TMP_ROOT/second-entered"
+python3 "$ROOT_DIR/scripts/deploy-worktree-lock.py" --lock "$signal_lock" -- \
+  bash -c 'touch "$1"; sleep 0.5' _ "$first_entered" &
+signal_wrapper=$!
+for _ in $(seq 1 50); do
+  [ -e "$first_entered" ] && break
+  sleep 0.01
+done
+[ -e "$first_entered" ] || fail "signal-retention fixture did not enter its transaction"
+kill "$signal_wrapper"
+wait "$signal_wrapper" 2>/dev/null || true
+python3 "$ROOT_DIR/scripts/deploy-worktree-lock.py" --lock "$signal_lock" -- \
+  touch "$second_entered" &
+signal_second=$!
+sleep 0.1
+[ ! -e "$second_entered" ] || fail "terminating the wrapper must not release the lock while its child is alive"
+wait "$signal_second"
+[ -e "$second_entered" ] || fail "waiting preparation must enter after the orphaned child exits"
+echo "PASS: owner lock survives wrapper termination until the transaction child exits"
 
 require_text "$DESCEND_COMMAND" 'bash scripts/prepare-deploy-worktree.sh' "/descend must hydrate and provision each isolated deploy worktree"
 require_text "$DEPLOY_COMMAND" 'bash scripts/prepare-deploy-worktree.sh --check' "/deploy must fail closed when isolated-worktree preparation is incomplete"
