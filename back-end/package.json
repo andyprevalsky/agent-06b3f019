@@ -61,6 +61,7 @@
     "@types/multer": "^2.0.0",
     "@types/node": "^22.7.4",
     "@types/node-cron": "^3.0.11",
+    "@types/ws": "^8.18.1",
     "@with-logic/fast-forward": "^0.1.13",
     "adm-zip": "^0.5.16",
     "cors": "^2.8.5",
@@ -85,6 +86,7 @@
     "tldts": "^7.4.9",
     "typescript": "^5.6.2",
     "vcards-js": "^2.10.0",
+    "ws": "^8.21.1",
     "x402-express": "^0.7.3",
     "zod": "^3.23.8"
   },

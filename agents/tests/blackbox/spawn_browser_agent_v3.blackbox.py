@@ -11978,10 +11978,16 @@ class _FakePaymentGateHandle:
         return _result().__await__()
 
 
-async def _drive_payment_card_gate(*, mint_results, reject_gate=False, agentcard_connected=True):
+async def _drive_payment_card_gate(
+    *,
+    mint_results,
+    reject_gate=False,
+    agentcard_connected=True,
+    checkout_error=None,
+):
     """Drive execute_tool through the payment-card gate branch.
 
-    Returns (events, activity_calls, gate_keys). ``mint_results`` is a list
+    Returns (events, activity_calls, gate_keys, gate_payloads). ``mint_results`` is a list
     of dicts returned by successive ``mint_purchase_card_activity`` calls
     (the last value repeats once exhausted).
     """
@@ -11990,6 +11996,7 @@ async def _drive_payment_card_gate(*, mint_results, reject_gate=False, agentcard
 
     activity_calls = []
     gate_keys = []
+    gate_payloads = []
     mint_iter = iter(mint_results)
     last_mint = {}
 
@@ -12050,6 +12057,8 @@ async def _drive_payment_card_gate(*, mint_results, reject_gate=False, agentcard
         if activity_name == "resolve_attention_request_activity":
             return {}
         if not isinstance(activity_name, str):  # mint_subscription_checkout_activity
+            if checkout_error is not None:
+                raise checkout_error
             return "https://checkout.example/subscribe"
         raise AssertionError(f"unexpected activity: {activity_name}")
 
@@ -12062,6 +12071,7 @@ async def _drive_payment_card_gate(*, mint_results, reject_gate=False, agentcard
 
     async def fake_raise_gate_direct(_wf, _gate, *, gate_key):
         gate_keys.append(gate_key)
+        gate_payloads.append(_gate)
         if reject_gate:
             raise GateRejectedError(gate_key)
         return {"resolved": True}
@@ -12105,11 +12115,11 @@ async def _drive_payment_card_gate(*, mint_results, reject_gate=False, agentcard
             "tool-1",
         ):
             events.append(event)
-    return events, activity_calls, gate_keys
+    return events, activity_calls, gate_keys, gate_payloads
 
 
 async def test_manager_payment_gate_agentcard_setup_required_prompts_and_retries():
-    events, activity_calls, _ = await _drive_payment_card_gate(
+    events, activity_calls, _, _ = await _drive_payment_card_gate(
         mint_results=[
             {
                 "status": "agentcard_setup_required",
@@ -12136,7 +12146,7 @@ async def test_manager_payment_gate_agentcard_setup_required_prompts_and_retries
 
 
 async def test_manager_payment_gate_agentcard_setup_times_out_when_never_connected():
-    events, activity_calls, _ = await _drive_payment_card_gate(
+    events, activity_calls, _, _ = await _drive_payment_card_gate(
         mint_results=[{"status": "agentcard_setup_required", "connectUrl": "https://x/connect"}],
         agentcard_connected=False,
     )
@@ -12148,7 +12158,7 @@ async def test_manager_payment_gate_agentcard_setup_times_out_when_never_connect
 
 
 async def test_manager_payment_gate_subscription_rejected_cancels_purchase():
-    events, activity_calls, gate_keys = await _drive_payment_card_gate(
+    events, activity_calls, gate_keys, _ = await _drive_payment_card_gate(
         mint_results=[{"status": "subscription_required"}],
         reject_gate=True,
     )
@@ -12159,7 +12169,7 @@ async def test_manager_payment_gate_subscription_rejected_cancels_purchase():
 
 
 async def test_manager_payment_gate_subscription_still_inactive_after_retry_blocks():
-    events, activity_calls, gate_keys = await _drive_payment_card_gate(
+    events, activity_calls, gate_keys, _ = await _drive_payment_card_gate(
         mint_results=[{"status": "subscription_required"}, {"status": "subscription_required"}],
         reject_gate=False,
     )
@@ -12169,8 +12179,23 @@ async def test_manager_payment_gate_subscription_still_inactive_after_retry_bloc
     assert activity_calls.count("mint_purchase_card_activity") == 2
 
 
+async def test_manager_payment_gate_subscription_checkout_failure_still_raises_gate():
+    events, activity_calls, gate_keys, gate_payloads = await _drive_payment_card_gate(
+        mint_results=[{"status": "subscription_required"}],
+        checkout_error=RuntimeError("STRIPE_SUBSCRIPTION_PRICE_ID is required"),
+        reject_gate=True,
+    )
+    assert gate_keys == ["subscription"]
+    assert gate_payloads[0]["type"] == "subscription"
+    assert gate_payloads[0]["gateKey"] == "subscription"
+    assert gate_payloads[0]["action"]["url"] == "https://roselabs.ai/subscribe"
+    assert "mint_subscription_checkout_activity" in activity_calls
+    cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
+    assert cancelled.metadata["action_type"] == "purchase_cancelled"
+
+
 async def test_manager_payment_gate_kyc_rejected_cancels_purchase():
-    events, _, gate_keys = await _drive_payment_card_gate(
+    events, _, gate_keys, _ = await _drive_payment_card_gate(
         mint_results=[{"status": "kyc_required"}],
         reject_gate=True,
     )
@@ -12180,7 +12205,7 @@ async def test_manager_payment_gate_kyc_rejected_cancels_purchase():
 
 
 async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
-    events, activity_calls, gate_keys = await _drive_payment_card_gate(
+    events, activity_calls, gate_keys, _ = await _drive_payment_card_gate(
         mint_results=[{"status": "kyc_required"}, {"status": "kyc_required"}],
         reject_gate=False,
     )
@@ -13521,6 +13546,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_payment_gate_subscription_still_inactive",
         test_manager_payment_gate_subscription_still_inactive_after_retry_blocks,
+    )
+    await r.record_async(
+        "manager_payment_gate_subscription_checkout_failure_still_raises_gate",
+        test_manager_payment_gate_subscription_checkout_failure_still_raises_gate,
     )
     await r.record_async(
         "manager_payment_gate_kyc_rejected",

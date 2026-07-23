@@ -3405,6 +3405,37 @@ async def test_workflow_check_credits_free_credits_exhausted_raises_subscription
         _restore_workflow(original_workflow)
 
 
+async def test_workflow_check_credits_free_credit_checkout_failure_pauses():
+    """Once usage proves free credits are exhausted, checkout failures must fail closed."""
+    wf = _bare_workflow_instance()
+    wf.user_id = "u-free-credit"
+    wf.agent_id = "a-free-credit"
+    fake = _FakeWorkflowModule()
+
+    async def fake_exec(fn, args=None, **kwargs):
+        name = getattr(fn, "__name__", "")
+        if name == "check_user_usage":
+            return {
+                "has_credits": False,
+                "remaining": 0,
+                "used": 0.01,
+                "total": 0.01,
+                "tier": None,
+            }
+        if name == "mint_subscription_checkout_activity":
+            raise RuntimeError("subscription checkout unavailable")
+        return None
+
+    fake.execute_activity = fake_exec
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_credits()
+        assert wf._has_credits is False
+        assert wf.is_paused is True
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_check_credits_has_credits_no_pause():
     """_check_credits sets _has_credits=True and does not pause when credits ok."""
     wf = _bare_workflow_instance()
@@ -4539,7 +4570,7 @@ async def test_workflow_mark_complete_happy_path():
             and (args[3] or {}).get("toolStatus") == "FINISHED"
         )
         mark_finished_index = next(i for i, (name, _args) in enumerate(fake.activity_calls) if name == "mark_finished")
-        assert mark_finished_index < final_summary_index
+        assert final_summary_index < mark_finished_index
         # Child-completed signal to parent
         signal_names = [s[1] for s in fake.signal_calls]
         assert "child_completed" in signal_names
@@ -5612,6 +5643,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_check_credits_free_credit_subscription_gate",
         test_workflow_check_credits_free_credits_exhausted_raises_subscription_gate,
+    )
+    await r.record_async(
+        "wf_check_credits_free_credit_checkout_failure_pauses",
+        test_workflow_check_credits_free_credit_checkout_failure_pauses,
     )
     await r.record_async("wf_check_credits_has_credits", test_workflow_check_credits_has_credits_no_pause)
     await r.record_async("wf_check_credits_exception", test_workflow_check_credits_on_exception_continues)

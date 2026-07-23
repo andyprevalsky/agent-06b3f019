@@ -75,6 +75,15 @@ function optionalNumber(record: Record<string, unknown>, names: string[]): numbe
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+function companyTransferId(record: Record<string, unknown>): string | undefined {
+  return optionalString(record, [
+    'transfer_id',
+    'transferId',
+    'provider_transfer_id',
+    'providerTransferId',
+  ]);
+}
+
 function recordArray(record: Record<string, unknown>, names: string[]): Record<string, unknown>[] {
   const value = field(record, names);
   if (!Array.isArray(value)) return [];
@@ -140,7 +149,7 @@ function throwForGate(record: Record<string, unknown>, result: unknown): void {
   const text = resultText(result);
   const code = errorCode(record, text);
   if (code === 'funding_in_progress') {
-    const transferId = optionalString(record, ['transfer_id', 'transferId']);
+    const transferId = companyTransferId(record);
     if (transferId === undefined) {
       throw new AgentCardProviderError(
         'AgentCard company funding is in progress without a transfer id'
@@ -257,7 +266,7 @@ export class AgentCardOrgMcpProvider implements CardProvider {
     throwForGate(record, result);
     const cardId = requiredString(field(record, ['card_id', 'cardId', 'id']), 'card_id');
     const details = await this.getDetails(cardId);
-    let transferId = optionalString(record, ['transfer_id', 'transferId']);
+    let transferId = companyTransferId(record);
     if (fundsSource === 'company_flow' && transferId === undefined) {
       transferId = await this.findCompanyTransferId(cardId);
       if (transferId === undefined) {
@@ -294,7 +303,13 @@ export class AgentCardOrgMcpProvider implements CardProvider {
         const transferId =
           transfer === undefined
             ? undefined
-            : optionalString(transfer, ['id', 'transfer_id', 'transferId']);
+            : optionalString(transfer, [
+                'id',
+                'transfer_id',
+                'transferId',
+                'provider_transfer_id',
+                'providerTransferId',
+              ]);
         if (transferId !== undefined) {
           if (attempt > 1) {
             log.info('Observed delayed AgentCard organization transfer', {

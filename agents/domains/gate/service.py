@@ -69,7 +69,7 @@ def build_kyc_gate(kyc_url: Optional[str] = None, reason: Optional[str] = None) 
             "cta": "Verify identity",
         },
         "action": {"kind": "link", "url": kyc_url or DEFAULT_KYC_URL},
-        "detection": {"method": "agentcard_error", "probeKey": "customers_needed_kyc"},
+        "detection": {"method": "kyc_webhook", "probeKey": "customers_needed_kyc"},
     }
 
 

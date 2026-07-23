@@ -91,6 +91,7 @@ require_text "$DEPLOY_COMMAND" '. "$DEPLOY_ROOT/scripts/lib/workspace-env.sh"' "
 require_text "$DEPLOY_COMMAND" '. "$DEPLOY_ROOT/scripts/lib/deploy-local-env.sh"' "/deploy must load the tested local environment boundary"
 require_text "$DEPLOY_COMMAND" 'configure_deploy_local_env' "/deploy must normalize identity before resolving local resources"
 require_text "$DEPLOY_COMMAND" 'bash scripts/tests/workspace-env.test.sh' "/deploy must run the behavioral workspace identity regression"
+require_text "$DEPLOY_COMMAND" 'bash scripts/tests/deploy-worktree-preflight.test.sh' "/deploy must cement isolated deploy-worktree preparation"
 require_text "$DEPLOY_COMMAND" 'bash scripts/tests/semantic-deploy-gate.test.sh' "/deploy must keep its command invariants in the static gate"
 require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/factory-review.test.py' "/deploy must protect factory-review telemetry collection"
 require_text "$DEPLOY_COMMAND" 'bash scripts/tests/run-deploy-stage.test.sh' "/deploy must protect deploy-stage telemetry collection"
@@ -125,6 +126,9 @@ require_text "$DEPLOY_COMMAND" "scripts/run-bench-hub-poller\$" "/deploy must cl
 require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'integration-health"' "backend coverage must isolate live credential health from deterministic coverage"
 require_text "$DEPLOY_COMMAND" 'Step 4c: Credential health check (runs unless explicitly overridden)' "/deploy must retain one focused credential probe unless the user explicitly overrides it"
 require_text "$DEPLOY_COMMAND" 'run-deploy-stage credential-health' "/deploy must record the focused credential probe"
+require_text "$DEPLOY_COMMAND" 'create-worktree-patch\.sh' "/deploy must classify worktree patch controller changes into cloudbench coverage"
+require_text "$DEPLOY_COMMAND" 'cloud_patch_includes_tracked_and_untracked_changes' "/deploy must gate the cloud patch base-ref contract"
+require_text "$DEPLOY_COMMAND" 'worktree_patch_ignores_append_only_history_ledgers' "/deploy must gate the append-only history ledger cloud patch RCA regression"
 if grep -Fq 'credential-health blackbox only when Step 4a is skipped' "$DEPLOY_COMMAND"; then
   fail "/deploy must not retain the retired conditional credential-health wiring"
 fi
