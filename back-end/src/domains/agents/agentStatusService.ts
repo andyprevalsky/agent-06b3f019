@@ -1,10 +1,9 @@
-import type { Prisma } from '@prisma/client';
 import { broadcastAgentUpdate } from '../../providers/chat';
 import { classifyAgentFailureForSurface } from '../../providers/credentialPropagation';
 import { createLogger } from '../../providers/logger';
 import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
 import { finalizeAgent } from '../../providers/traceArchiveLifecycle';
-import type { UpdateStatusBody } from './types';
+import type { Prisma, UpdateStatusBody } from './types';
 import * as repo from './repo';
 
 const log = createLogger('Agents');
