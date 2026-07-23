@@ -9,14 +9,14 @@ import structlog
 from temporalio import activity
 
 from config import load_config
+from domains.request_payment_card.contracts import (
+    MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS,
+)
 from helpers.trace_archive import archive_json
 from helpers.tracing import current_root_agent_id
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 
 logger = structlog.get_logger()
-MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS = 60.0
-MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS = 90.0
-MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS = 85.0
 KYC_REQUIRED_CODES = {
     "kyc_required",
     "customer_kyc_required",
@@ -127,8 +127,7 @@ async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dic
             # main (gate feature): org-managed KYC gate — surface as a signal so the
             # workflow raises a KYC gate and retries rather than failing.
             if code in KYC_REQUIRED_CODES or (
-                response.status_code in (400, 403, 409, 422)
-                and "kyc" in f"{code} {detail}".lower()
+                response.status_code in (400, 403, 409, 422) and "kyc" in f"{code} {detail}".lower()
             ):
                 logger.info("Mint requires KYC", code=code, detail=detail[:200])
                 return {"status": "kyc_required", "error": detail, "code": code or "kyc_required"}

@@ -32,6 +32,10 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from browser_tools.schemas import AVAILABLE_ACTIONS
 from config import load_config
+from domains.request_payment_card.contracts import (
+    MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
+)
+from domains.request_payment_card.handler import build_payment_question, normalize_payment_payload
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from helpers.file_resolution import (
     resolve_file_pointers_from_extracted,
@@ -5845,9 +5849,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 with contextlib.suppress(Exception):
                     browser_network_recorder = network_recorder_task.result()
             provider_exit_rejection = (
-                browser_network_recorder.pop_provider_exit_rejection()
-                if browser_network_recorder is not None
-                else None
+                browser_network_recorder.pop_provider_exit_rejection() if browser_network_recorder is not None else None
             )
             if provider_exit_rejection is not None:
                 # The streamed model action was superseded before execution;
@@ -6172,9 +6174,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         ),
                         search_configs=search_browser_configs,
                         progress=emit_recovery_progress,
-                        provider_exit_rejected=bool(
-                            unified_action.get("params", {}).get("provider_exit_rejected")
-                        ),
+                        provider_exit_rejected=bool(unified_action.get("params", {}).get("provider_exit_rejected")),
                     )
 
                     config_result = recovery.config_result
@@ -7696,11 +7696,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         return
 
                 if result and result.get("status") == "awaiting_payment_card_approval":
-                    from tools.request_payment_card import (
-                        MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
-                        build_payment_question,
-                        normalize_payment_payload,
-                    )
                     from tools.request_user_approval import (
                         request_user_approval_direct,
                         request_user_attention_direct,
@@ -7773,9 +7768,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         return await workflow.execute_activity(
                             "mint_purchase_card_activity",
                             args=[workflow_instance.user_id or "", payment_payload],
-                            start_to_close_timeout=timedelta(
-                                seconds=MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS
-                            ),
+                            start_to_close_timeout=timedelta(seconds=MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS),
                             retry_policy=RetryPolicy(maximum_attempts=1),
                         )
 
