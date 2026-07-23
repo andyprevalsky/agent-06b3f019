@@ -111,6 +111,7 @@ class WebFetchManager(ToolManager):
         fast_mode_cache_enabled: bool = False,
         fast_mode_goal: Optional[str] = None,
         fast_mode_cache_write_enabled: bool = False,
+        world_model_mode: str = "real",
     ) -> Dict[str, Any]:
         """Execute web fetch and post events via handle_tool_event."""
         url = tool_call.get("url", "")
@@ -141,9 +142,17 @@ class WebFetchManager(ToolManager):
             logger.info("Calling web_fetch_activity", url=url, objective_len=len(objective))
 
             # 1) Firecrawl scrape (Fast Mode caches the scrape by normalized URL)
+            scrape_args = [
+                url,
+                fast_mode_cache_enabled,
+                fast_mode_goal,
+                fast_mode_cache_write_enabled,
+            ]
+            if world_model_mode != "real":
+                scrape_args.extend([agent_id, world_model_mode])
             scrape_result = await execute_activity(
                 web_fetch_activity,
-                args=[url, fast_mode_cache_enabled, fast_mode_goal, fast_mode_cache_write_enabled],
+                args=scrape_args,
                 start_to_close_timeout=timedelta(seconds=180),
                 retry_policy=RetryPolicy(
                     maximum_attempts=2,
@@ -158,9 +167,12 @@ class WebFetchManager(ToolManager):
                 scrape_result.get("metadata", {}) if isinstance(scrape_result, dict) else {}
             )
             scrape_cache_hit = isinstance(scrape_result, dict) and bool(scrape_result.get(FAST_CACHE_HIT_FIELD))
+            scrape_simulated = isinstance(scrape_result, dict) and bool(scrape_result.get("world_model_simulated"))
             service_provider = scrape_metadata.get("provider") or "Firecrawl scrape"
-            service_cost_cents = 0 if scrape_cache_hit else (
-                PARALLEL_EXTRACT_COST_CENTS if service_provider == "Parallel Extract" else FIRECRAWL_COST_CENTS
+            service_cost_cents = (
+                0
+                if scrape_cache_hit or scrape_simulated
+                else (PARALLEL_EXTRACT_COST_CENTS if service_provider == "Parallel Extract" else FIRECRAWL_COST_CENTS)
             )
 
             # 2) Haiku filter — structured output via WebFetchHaikuResponse
@@ -195,15 +207,18 @@ class WebFetchManager(ToolManager):
             # 3) Download Haiku-curated files (no-op when list is empty)
             file_pointers: List[Dict[str, Any]] = []
             if files_to_download:
+                download_args = [
+                    files_to_download,
+                    user_id,
+                    fast_mode_cache_enabled,
+                    fast_mode_goal,
+                    fast_mode_cache_write_enabled,
+                ]
+                if world_model_mode != "real":
+                    download_args.extend([agent_id, world_model_mode])
                 file_pointers = await execute_activity(
                     web_fetch_download_activity,
-                    args=[
-                        files_to_download,
-                        user_id,
-                        fast_mode_cache_enabled,
-                        fast_mode_goal,
-                        fast_mode_cache_write_enabled,
-                    ],
+                    args=download_args,
                     start_to_close_timeout=timedelta(seconds=180),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
@@ -265,7 +280,9 @@ class WebFetchManager(ToolManager):
 
             usage_dict: Dict[str, Any] = {
                 "llm": [summarizer_llm_item] if summarizer_llm_item else [],
-                "service": [] if scrape_cache_hit else [{"cost_cents": service_cost_cents, "provider": service_provider}],
+                "service": []
+                if scrape_cache_hit or scrape_simulated
+                else [{"cost_cents": service_cost_cents, "provider": service_provider}],
             }
             # Surface raw Haiku usage so the workflow can route claude_token_error /
             # claude_token_rotated / compute_token_used signals through _on_tokens
@@ -335,6 +352,7 @@ async def web_fetch(
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_cache_write_enabled: bool = False,
+    world_model_mode: str = "real",
 ) -> Dict[str, Any]:
     """Execute web fetch tool."""
     manager = get_manager()
@@ -354,6 +372,7 @@ async def web_fetch(
         fast_mode_cache_enabled=fast_mode_cache_enabled,
         fast_mode_goal=fast_mode_goal,
         fast_mode_cache_write_enabled=fast_mode_cache_write_enabled,
+        world_model_mode=world_model_mode,
     )
 
 
@@ -367,6 +386,8 @@ async def web_fetch_activity(
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_cache_write_enabled: bool = False,
+    agent_id: Optional[str] = None,
+    world_model_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Activity: Firecrawl scrape (JS rendering, main-content extraction).
 
@@ -402,11 +423,15 @@ async def web_fetch_activity(
         return await scrape_url(url)
 
     try:
-        result = await WorldModelToolExecutionAdapter.from_env().execute(
+        result = await WorldModelToolExecutionAdapter.from_env(
+            agent_id=agent_id,
+            mode=world_model_mode,
+        ).execute(
             "web_fetch",
             {"url": url},
             "web_fetch_activity",
             real_executor,
+            allow_real_fallback=world_model_mode is None,
         )
     except WebFetchProvidersFailed as e:
         logger.error("Web fetch scrape failed", error=str(e), url=url, retryable=e.retryable)
@@ -433,16 +458,38 @@ async def web_fetch_download_activity(
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_cache_write_enabled: bool = False,
+    agent_id: Optional[str] = None,
+    world_model_mode: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Activity: download Haiku-curated file URLs and upload to Supabase storage.
 
     Returns file_pointer dicts. Best-effort — individual download failures are
     logged and skipped, not raised.
     """
-    return await download_and_attach(
-        file_urls=file_urls,
-        user_id=user_id,
-        fast_mode_cache_enabled=fast_mode_cache_enabled,
-        fast_mode_goal=fast_mode_goal,
-        fast_mode_cache_write_enabled=fast_mode_cache_write_enabled,
+
+    async def real_executor(
+        _tool_name: str,
+        _tool_args: Dict[str, Any],
+        _tool_call_id: str,
+    ) -> Dict[str, Any]:
+        files = await download_and_attach(
+            file_urls=file_urls,
+            user_id=user_id,
+            fast_mode_cache_enabled=fast_mode_cache_enabled,
+            fast_mode_goal=fast_mode_goal,
+            fast_mode_cache_write_enabled=fast_mode_cache_write_enabled,
+        )
+        return {"files": files}
+
+    result = await WorldModelToolExecutionAdapter.from_env(
+        agent_id=agent_id,
+        mode=world_model_mode,
+    ).execute(
+        "web_fetch_download",
+        {"file_urls": file_urls, "user_id": user_id},
+        "web_fetch_download_activity",
+        real_executor,
+        allow_real_fallback=world_model_mode is None,
     )
+    files = result.get("files") if isinstance(result, dict) else None
+    return files if isinstance(files, list) else []

@@ -118,6 +118,9 @@ export const createAgentSchema = z.object({
   // Fast Mode aggressive cache: record/replay third-party responses for clean demos.
   // Own first-class flag — NOT a context gate. Default off (no read, no write).
   fast_mode_cache_enabled: z.boolean().optional(),
+  // Provider/environment execution mode. Defaults to real at the DB and
+  // workflow boundaries; sub-agents inherit their parent's persisted mode.
+  world_model_mode: z.enum(['real', 'simulate', 'shadow']).optional(),
 });
 
 export const postMessageSchema = z.object({

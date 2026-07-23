@@ -44,6 +44,7 @@ model Agent {
   ownCostCents              Float           @default(0)
   writeLockEnabled          Boolean         @default(true)
   fastModeCacheEnabled      Boolean         @default(false)
+  worldModelMode            String          @default("real")
   isBenchmark               Boolean         @default(false)
   githubRepoUrl             String?
   parent                    Agent?          @relation("AgentHierarchy", fields: [parentAgentId], references: [id])

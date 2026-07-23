@@ -19,6 +19,7 @@ function optionalAgentCreateFields(params: {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  worldModelMode?: 'real' | 'simulate' | 'shadow';
   isBenchmark?: boolean;
 }): Partial<Prisma.AgentUncheckedCreateInput> {
   return {
@@ -32,6 +33,7 @@ function optionalAgentCreateFields(params: {
     ...(params.fastModeCacheEnabled !== undefined
       ? { fastModeCacheEnabled: params.fastModeCacheEnabled }
       : {}),
+    ...(params.worldModelMode !== undefined ? { worldModelMode: params.worldModelMode } : {}),
     ...(params.isBenchmark === true ? { isBenchmark: true } : {}),
   };
 }
@@ -76,6 +78,7 @@ export async function createAgentTransaction(params: {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  worldModelMode?: 'real' | 'simulate' | 'shadow';
   verifierType: string;
   isBenchmark?: boolean;
   attachments?: Array<Record<string, unknown>>;
@@ -157,6 +160,7 @@ export interface BatchCreateAgentParams {
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
+  worldModelMode?: 'real' | 'simulate' | 'shadow';
   verifierType: string;
   attachments?: Array<Record<string, unknown>>;
   temporalWorkflowId: string;
@@ -201,6 +205,7 @@ export async function createAgentBatchTransaction(items: BatchCreateAgentParams[
         ...(params.fastModeCacheEnabled !== undefined
           ? { fastModeCacheEnabled: params.fastModeCacheEnabled }
           : {}),
+        ...(params.worldModelMode !== undefined ? { worldModelMode: params.worldModelMode } : {}),
       })),
     });
 

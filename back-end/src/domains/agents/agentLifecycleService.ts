@@ -14,9 +14,14 @@ import { getPromptSecret } from './config';
 import * as repo from './repo';
 import { resolveCreateMetadata } from './agentCreateMetadata';
 import { prepareAgentStartArchive } from '../../providers/traceArchiveLifecycle';
+import {
+  applyFastModeDefault,
+  applyFastModeInheritance,
+  applyWorldModelModeInheritance,
+  disableFastModeForWorldModel,
+} from './agentExecutionMode';
 
 const log = createLogger('Agents');
-const DEFAULT_FAST_MODE_USER_IDS = new Set(['1f85ff25-6e29-4c1b-8739-f917bd101a30']);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -33,26 +38,6 @@ export function resolvePromptSecrets(text: string): string {
     log.warn(`Unresolved prompt secret: {{${varName}}} (env var PROMPT_SECRET_${varName} not set)`);
     return `{{${varName}}}`;
   });
-}
-
-/** Apply account-scoped Fast Mode defaults for root agents only. */
-export function applyFastModeDefault(body: CreateAgentBody, userId: string): void {
-  if (body.fast_mode_cache_enabled !== undefined) return;
-  if (body.parent_agent_id !== undefined) return;
-  if (!DEFAULT_FAST_MODE_USER_IDS.has(userId)) return;
-  body.fast_mode_cache_enabled = true;
-}
-
-/** A sub-agent inherits Fast Mode reads from its parent unless explicitly set. */
-export function applyFastModeInheritance(
-  body: CreateAgentBody,
-  parentFastModeCacheEnabled: boolean | null | undefined
-): void {
-  if (body.fast_mode_cache_enabled !== undefined) return;
-  if (body.parent_agent_id === undefined) return;
-  if (parentFastModeCacheEnabled === true) {
-    body.fast_mode_cache_enabled = true;
-  }
 }
 
 /* c8 ignore start -- startSubAgentWorkflow, startDirectWorkflow, startChatMode require Temporal/GitHub/LLM infrastructure */
@@ -85,6 +70,7 @@ async function startSubAgentWorkflow(
     ...(body.fast_mode_cache_enabled !== undefined
       ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
       : {}),
+    ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
   });
 }
 
@@ -109,6 +95,7 @@ async function startDirectWorkflow(
     ...(body.fast_mode_cache_enabled !== undefined
       ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
       : {}),
+    ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
     ...(body.context_gates !== undefined ? { contextGates: body.context_gates } : {}),
   });
   // temporalWorkflowId was set during createAgentTransaction (see comment on
@@ -184,16 +171,18 @@ export async function createAgent(
   const isSubAgent = body.parent_agent_id !== undefined;
   applyFastModeDefault(body, userId);
 
-  // Fast Mode inheritance (#6): a sub-agent with no explicit flag inherits the
-  // parent's persisted setting, so the whole agent tree records/replays together.
+  // Execution settings inherit with one parent lookup, so a 10k fan-out does
+  // not pay separate reads for Fast Mode and world-model mode.
   if (
     isSubAgent &&
-    body.fast_mode_cache_enabled === undefined &&
+    (body.fast_mode_cache_enabled === undefined || body.world_model_mode === undefined) &&
     body.parent_agent_id !== undefined
   ) {
     const parent = await repo.findAgentById(body.parent_agent_id);
     applyFastModeInheritance(body, parent?.fastModeCacheEnabled);
+    applyWorldModelModeInheritance(body, parent?.worldModelMode);
   }
+  disableFastModeForWorldModel(body);
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null, userId);
   const agentId = body.agent_id ?? randomUUID();
@@ -224,6 +213,7 @@ export async function createAgent(
     priceLimitCents: body.price_limit_cents,
     writeLockEnabled: body.write_lock_enabled,
     fastModeCacheEnabled: body.fast_mode_cache_enabled,
+    worldModelMode: body.world_model_mode,
     verifierType: verifier.type,
     isBenchmark,
     attachments: body.attachments as Array<Record<string, unknown>> | undefined,
@@ -246,6 +236,7 @@ export async function createAgent(
     status_message: agent.agent.statusMessage,
     temporal_workflow_id: workflowId,
     fast_mode_cache_enabled: agent.agent.fastModeCacheEnabled,
+    world_model_mode: agent.agent.worldModelMode,
     created_at: agent.agent.createdAt,
     updated_at: agent.agent.updatedAt,
     available_endpoints: getX402Endpoints(agent.agent.id),

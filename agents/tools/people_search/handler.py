@@ -62,6 +62,7 @@ class PeopleSearchManager(ToolManager):
         tool_call_id: str,
         agent_id: str,
         user_id: Optional[str] = None,
+        world_model_mode: str = "real",
     ) -> dict[str, Any]:
         """Execute people search and post events via handle_tool_event.
 
@@ -108,9 +109,12 @@ class PeopleSearchManager(ToolManager):
         # 2. Execute people search activity
         try:
             logger.info("Calling people_search_activity", mode=mode, provider=provider, query_len=len(query))
+            activity_args = [query, mode, provider, limit, fields]
+            if world_model_mode != "real":
+                activity_args.extend([agent_id, world_model_mode])
             result = await execute_activity(
                 people_search_activity,
-                args=[query, mode, provider, limit, fields],
+                args=activity_args,
                 start_to_close_timeout=timedelta(seconds=ACTIVITY_TIMEOUT_SECONDS),
                 retry_policy=RetryPolicy(
                     maximum_attempts=RETRY_MAX_ATTEMPTS,
@@ -122,7 +126,8 @@ class PeopleSearchManager(ToolManager):
 
             elapsed_time = _safe_time() - start_time
             provider_used = result.get("provider_used", "") if isinstance(result, dict) else ""
-            total_cost_cents = _cost_for_provider(provider_used)
+            simulated = isinstance(result, dict) and bool(result.get("world_model_simulated"))
+            total_cost_cents = 0.0 if simulated else _cost_for_provider(provider_used)
 
             message = format_tool_message(
                 params=tool_call, result=result, time_elapsed=elapsed_time, cost_cents=total_cost_cents
@@ -146,7 +151,9 @@ class PeopleSearchManager(ToolManager):
                 "result": result,
                 "usage": {
                     "llm": [],
-                    "service": [
+                    "service": []
+                    if simulated
+                    else [
                         {
                             "cost_cents": total_cost_cents,
                             "provider": f"People Search ({provider_used})" if provider_used else "People Search",
@@ -205,6 +212,7 @@ async def people_search(
     tool_call_id: str,
     agent_id: str,
     user_id: Optional[str] = None,
+    world_model_mode: str = "real",
 ) -> dict[str, Any]:
     """Execute people search tool.
 
@@ -226,6 +234,7 @@ async def people_search(
         tool_call_id=tool_call_id,
         agent_id=agent_id,
         user_id=user_id,
+        world_model_mode=world_model_mode,
     )
 
 
@@ -242,6 +251,8 @@ async def people_search_activity(
     provider: str,
     limit: Optional[int] = None,
     fields: Optional[List[str]] = None,
+    agent_id: Optional[str] = None,
+    world_model_mode: Optional[str] = None,
 ) -> dict[str, Any]:
     """Activity: Find or enrich people via Exa or Parallel (sync, sub-minute).
 
@@ -259,6 +270,7 @@ async def people_search_activity(
     Returns:
         Dict with query, mode_used, provider_used, providers_attempted, results, warnings.
     """
+
     async def real_executor(_tool_name: str, _tool_args: dict[str, Any], _tool_call_id: str) -> dict[str, Any]:
         return await execute_people_search(
             query=query,
@@ -269,11 +281,15 @@ async def people_search_activity(
         )
 
     try:
-        return await WorldModelToolExecutionAdapter.from_env().execute(
+        return await WorldModelToolExecutionAdapter.from_env(
+            agent_id=agent_id,
+            mode=world_model_mode,
+        ).execute(
             "people_search",
             {"query": query, "mode": mode, "provider": provider, "limit": limit, "fields": fields},
             "people_search_activity",
             real_executor,
+            allow_real_fallback=world_model_mode is None,
         )
     except Exception:
         logger.error("People search failed", query=query, mode=mode, provider=provider)

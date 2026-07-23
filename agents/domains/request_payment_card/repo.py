@@ -35,15 +35,23 @@ def _error_payload(response: httpx.Response) -> Dict[str, Any]:
 
 
 @activity.defn
-async def lookup_purchase_activity(user_id: str, fingerprint: str) -> Dict[str, Any]:
+async def lookup_purchase_activity(
+    user_id: str,
+    fingerprint: str,
+    world_model_mode: str | None = None,
+) -> Dict[str, Any]:
     async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
         return await _lookup_purchase_real(user_id, fingerprint)
 
-    return await WorldModelToolExecutionAdapter.from_env(agent_id=user_id).execute(
+    return await WorldModelToolExecutionAdapter.from_env(
+        agent_id=user_id,
+        mode=world_model_mode,
+    ).execute(
         "payment_lookup",
         {"user_id": user_id, "fingerprint": fingerprint},
         f"payment_lookup:{fingerprint}",
         real_executor,
+        allow_real_fallback=world_model_mode is None,
     )
 
 
@@ -71,17 +79,25 @@ async def _lookup_purchase_real(user_id: str, fingerprint: str) -> Dict[str, Any
 
 
 @activity.defn
-async def mint_purchase_card_activity(user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+async def mint_purchase_card_activity(
+    user_id: str,
+    payload: Dict[str, Any],
+    world_model_mode: str | None = None,
+) -> Dict[str, Any]:
     fingerprint = str(payload.get("fingerprint") or "")
 
     async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
         return await _mint_purchase_card_real(user_id, payload)
 
-    return await WorldModelToolExecutionAdapter.from_env(agent_id=str(payload.get("agentId") or user_id)).execute(
+    return await WorldModelToolExecutionAdapter.from_env(
+        agent_id=str(payload.get("agentId") or user_id),
+        mode=world_model_mode,
+    ).execute(
         "payment_mint",
         {"user_id": user_id, "payload": payload},
         f"payment_mint:{fingerprint}",
         real_executor,
+        allow_real_fallback=world_model_mode is None,
     )
 
 
@@ -124,8 +140,7 @@ async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dic
             # main (gate feature): org-managed KYC gate — surface as a signal so the
             # workflow raises a KYC gate and retries rather than failing.
             if code in KYC_REQUIRED_CODES or (
-                response.status_code in (400, 403, 409, 422)
-                and "kyc" in f"{code} {detail}".lower()
+                response.status_code in (400, 403, 409, 422) and "kyc" in f"{code} {detail}".lower()
             ):
                 logger.info("Mint requires KYC", code=code, detail=detail[:200])
                 return {"status": "kyc_required", "error": detail, "code": code or "kyc_required"}

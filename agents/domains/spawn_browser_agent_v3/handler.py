@@ -171,12 +171,16 @@ def _build_payment_card_verifier_evidence(last4: Any) -> Optional[Dict[str, Any]
 async def _lookup_payment_purchase(
     user_id: str,
     payment_payload: Dict[str, Any],
+    world_model_mode: Optional[str] = None,
 ) -> tuple[Dict[str, Any], str]:
     """Look up the canonical key and retain a matched pre-canonicalization key for mint."""
     fingerprint = str(payment_payload.get("fingerprint") or "")
+    activity_args = [user_id, fingerprint]
+    if world_model_mode not in {None, "real"}:
+        activity_args.append(world_model_mode)
     result = await workflow.execute_activity(
         "lookup_purchase_activity",
-        args=[user_id, fingerprint],
+        args=activity_args,
         start_to_close_timeout=timedelta(seconds=30),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
@@ -3037,6 +3041,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
+    world_model_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     # A browser is its own stateful environment. Do not inherit either the
     # benchmark runner's explicit session or the parent agent's module-cached
@@ -3048,6 +3053,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     world_model = WorldModelToolExecutionAdapter.from_env(
         agent_id=f"{agent_id}:browser:{tool_call_id}",
         inherit_explicit_session=False,
+        mode=world_model_mode,
     )
     if world_model.should_simulate("browser_action"):
         return await _spawn_browser_agent_activity_v3_simulated(
@@ -5795,9 +5801,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 with contextlib.suppress(Exception):
                     browser_network_recorder = network_recorder_task.result()
             provider_exit_rejection = (
-                browser_network_recorder.pop_provider_exit_rejection()
-                if browser_network_recorder is not None
-                else None
+                browser_network_recorder.pop_provider_exit_rejection() if browser_network_recorder is not None else None
             )
             if provider_exit_rejection is not None:
                 # The streamed model action was superseded before execution;
@@ -6122,9 +6126,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         ),
                         search_configs=search_browser_configs,
                         progress=emit_recovery_progress,
-                        provider_exit_rejected=bool(
-                            unified_action.get("params", {}).get("provider_exit_rejected")
-                        ),
+                        provider_exit_rejected=bool(unified_action.get("params", {}).get("provider_exit_rejected")),
                     )
 
                     config_result = recovery.config_result
@@ -7471,6 +7473,31 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             result = None
 
             while True:
+                activity_args = [
+                    user_id,
+                    agent_id,
+                    goal,
+                    tool_call_id,
+                    (write_lock_resume_state.get("task_id") if write_lock_resume_state else None),
+                    (write_lock_resume_state.get("session_id") if write_lock_resume_state else None),
+                    (write_lock_resume_state.get("cdp_url") if write_lock_resume_state else None),
+                    write_lock_resume_state is not None,
+                    output_schema,
+                    attachments if attachments else None,
+                    write_lock_enabled,
+                    current_start_url,
+                    write_lock_resume_state,
+                    system_name,
+                    bool(active_claude_token) and not bool(active_gpt_token),
+                    active_gpt_token,
+                    active_gpt_account_id,
+                    active_gpt_source,
+                    active_gpt_pool_id,
+                    False,
+                ]
+                world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+                if world_model_mode != "real":
+                    activity_args.append(world_model_mode)
                 async with span(
                     "browser_activity_wait",
                     agent_id=agent_id,
@@ -7482,28 +7509,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 ):
                     activity_handle = workflow.start_activity(
                         spawn_browser_agent_activity_v3,
-                        args=[
-                            user_id,
-                            agent_id,
-                            goal,
-                            tool_call_id,
-                            (write_lock_resume_state.get("task_id") if write_lock_resume_state else None),
-                            (write_lock_resume_state.get("session_id") if write_lock_resume_state else None),
-                            (write_lock_resume_state.get("cdp_url") if write_lock_resume_state else None),
-                            write_lock_resume_state is not None,
-                            output_schema,
-                            attachments if attachments else None,
-                            write_lock_enabled,
-                            current_start_url,
-                            write_lock_resume_state,
-                            system_name,
-                            bool(active_claude_token) and not bool(active_gpt_token),
-                            active_gpt_token,
-                            active_gpt_account_id,
-                            active_gpt_source,
-                            active_gpt_pool_id,
-                            False,
-                        ],
+                        args=activity_args,
                         start_to_close_timeout=timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES),
                         heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
                         cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
@@ -7684,6 +7690,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     lookup_result, matched_fingerprint = await _lookup_payment_purchase(
                         workflow_instance.user_id or "",
                         payment_payload,
+                        getattr(workflow_instance, "world_model_mode", "real"),
                     )
                     # Mint uses the same fingerprint as lookup. When a held
                     # purchase was created before canonicalization shipped,
@@ -7719,9 +7726,13 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
 
                     async def mint_payment_card() -> Dict[str, Any]:
+                        activity_args = [workflow_instance.user_id or "", payment_payload]
+                        world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+                        if world_model_mode != "real":
+                            activity_args.append(world_model_mode)
                         return await workflow.execute_activity(
                             "mint_purchase_card_activity",
-                            args=[workflow_instance.user_id or "", payment_payload],
+                            args=activity_args,
                             start_to_close_timeout=timedelta(seconds=90),
                             retry_policy=RetryPolicy(maximum_attempts=1),
                         )

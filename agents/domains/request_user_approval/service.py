@@ -231,19 +231,23 @@ async def request_user_approval_direct(
             try:
                 from helpers.sms_activities import notify_sms_event_activity
 
+                notification_args = [
+                    user_id,
+                    "write_lock",
+                    agent_id,
+                    {
+                        "question": question,
+                        "attention_request_id": request_id,
+                        "workflow_id": workflow_id,
+                        "metadata": metadata or None,
+                    },
+                ]
+                world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+                if world_model_mode != "real":
+                    notification_args.append(world_model_mode)
                 await workflow.execute_activity(
                     notify_sms_event_activity,
-                    args=[
-                        user_id,
-                        "write_lock",
-                        agent_id,
-                        {
-                            "question": question,
-                            "attention_request_id": request_id,
-                            "workflow_id": workflow_id,
-                            "metadata": metadata or None,
-                        },
-                    ],
+                    args=notification_args,
                     start_to_close_timeout=timedelta(seconds=SMS_NOTIFY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=SMS_NOTIFY_MAX_ATTEMPTS),
                 )
@@ -396,19 +400,23 @@ async def request_user_attention_direct(
         try:
             from helpers.sms_activities import notify_sms_event_activity
 
+            notification_args = [
+                user_id,
+                sms_event_type,
+                agent_id,
+                {
+                    "question": question,
+                    "attention_request_id": request_id,
+                    "workflow_id": workflow_id,
+                    **dict(sms_payload or {}),
+                },
+            ]
+            world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+            if world_model_mode != "real":
+                notification_args.append(world_model_mode)
             await workflow.execute_activity(
                 notify_sms_event_activity,
-                args=[
-                    user_id,
-                    sms_event_type,
-                    agent_id,
-                    {
-                        "question": question,
-                        "attention_request_id": request_id,
-                        "workflow_id": workflow_id,
-                        **dict(sms_payload or {}),
-                    },
-                ],
+                args=notification_args,
                 start_to_close_timeout=timedelta(seconds=SMS_NOTIFY_TIMEOUT_SECONDS),
                 retry_policy=RetryPolicy(maximum_attempts=SMS_NOTIFY_MAX_ATTEMPTS),
             )

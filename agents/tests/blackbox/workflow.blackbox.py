@@ -321,7 +321,13 @@ async def mock_get_agent_source(agent_id: str) -> str:
 
 
 @activity.defn(name="notify_sms_event_activity")
-async def mock_notify_sms_event_activity(user_id: str, event_type: str, agent_id: str, payload: dict) -> None:
+async def mock_notify_sms_event_activity(
+    user_id: str,
+    event_type: str,
+    agent_id: str,
+    payload: dict,
+    world_model_mode: str | None = None,
+) -> None:
     return None
 
 

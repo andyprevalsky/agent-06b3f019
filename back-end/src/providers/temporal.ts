@@ -77,6 +77,7 @@ export async function startAgentWorkflow(params: {
     shared_files?: boolean;
   };
   fastModeCacheEnabled?: boolean; // Optional: Fast Mode aggressive cache (own flag, not a gate)
+  worldModelMode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
 }): Promise<string> {
   const client = await getTemporalClient();
   // Use provided task queue or default to environment-specific queue
@@ -115,6 +116,9 @@ export async function startAgentWorkflow(params: {
       params.priceLimitCents || 100, // Price limit in cents (default $1.00)
       params.contextGates || null, // Context gates: which user context sections to include
       params.fastModeCacheEnabled ?? false, // Fast Mode aggressive cache flag
+      ...(params.worldModelMode !== undefined && params.worldModelMode !== 'real'
+        ? [params.worldModelMode]
+        : []),
     ],
   });
 

@@ -269,6 +269,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
     max_context_tokens: int = 200_000,
     depth: Optional[str] = None,
     max_iterations: Optional[int] = None,
+    world_model_mode: str = "real",
 ) -> Dict[str, Any]:
     """Run the explore agent loop inside a Temporal activity.
 
@@ -428,6 +429,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
                 fast_mode_cache_enabled=_explore_fast_mode_enabled,
                 fast_mode_goal=_explore_fast_mode_goal,
                 fast_mode_cache_write_enabled=_explore_fast_mode_write_enabled,
+                world_model_mode=world_model_mode,
             )
         elif tool_name == "people_search":
             manager = PeopleSearchManager()
@@ -437,6 +439,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
                 tool_call_id=tool_call_id,
                 agent_id=agent_id,
                 user_id=user_id,
+                world_model_mode=world_model_mode,
             )
         elif tool_name == "web_fetch":
             manager = WebFetchManager()
@@ -456,6 +459,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
                 fast_mode_cache_enabled=_explore_fast_mode_enabled,
                 fast_mode_goal=_explore_fast_mode_goal,
                 fast_mode_cache_write_enabled=_explore_fast_mode_write_enabled,
+                world_model_mode=world_model_mode,
             )
         elif tool_name == "grep":
             manager = GrepManager()

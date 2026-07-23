@@ -79,6 +79,7 @@ const AgentListItem = z.object({
   tokens_out: z.number(),
   context_size: z.number(),
   message_count: z.number(),
+  world_model_mode: z.enum(['real', 'simulate', 'shadow']),
   created_at: DATE_LIKE,
   updated_at: DATE_LIKE,
 });
@@ -118,6 +119,7 @@ const CreateAgentResponse = z.object({
   status: z.string(),
   status_message: z.string().nullable(),
   temporal_workflow_id: z.string().nullable(),
+  world_model_mode: z.enum(['real', 'simulate', 'shadow']),
   created_at: DATE_LIKE,
   updated_at: DATE_LIKE,
   available_endpoints: z.record(z.any()),
@@ -166,6 +168,7 @@ const AgentDetail = z.object({
   message_count: z.number(),
   price_limit_cents: z.number(),
   tree_cost_cents: z.number(),
+  world_model_mode: z.enum(['real', 'simulate', 'shadow']),
   token_in_price_microdollars: z.number().nullable(),
   token_out_price_microdollars: z.number().nullable(),
   created_at: DATE_LIKE,
@@ -721,6 +724,33 @@ test('POST / — happy path — full response schema', async () => {
   trackedAgentIds.add(body.agent_id);
 
   await deleteTestAgent(body.agent_id, session.user.id);
+});
+
+test('POST / — Simulator mode persists and disables real-provider cache reads', async () => {
+  const session = await createAnonymousSession('create-simulator');
+  const agentId = await createTestAgent(session.user.id, `Simulator test ${RUN_ID}`, {
+    world_model_mode: 'simulate',
+    fast_mode_cache_enabled: true,
+  });
+
+  const row = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+  assert(
+    row.worldModelMode === 'simulate',
+    `Expected persisted simulate mode, got ${row.worldModelMode}`
+  );
+  assert(
+    row.fastModeCacheEnabled === false,
+    'Simulator must disable Fast Mode provider-cache reads'
+  );
+
+  const detailRes = await request(`${BASE_URL}/api/agents/${agentId}`, {
+    headers: apiKeyHeaders(session.user.id),
+  });
+  assertStatus(detailRes.status, 200, detailRes.data);
+  const detail = assertSchema(GetAgentResponse, detailRes.data, 'POST / simulator detail');
+  assert(detail.agent.world_model_mode === 'simulate', 'Agent detail must expose simulate mode');
+
+  await deleteTestAgent(agentId, session.user.id);
 });
 
 test('POST / — creates initial goal message', async () => {

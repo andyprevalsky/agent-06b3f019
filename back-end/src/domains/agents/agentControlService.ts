@@ -11,17 +11,13 @@ import { finalizeAgent } from '../../providers/traceArchiveLifecycle';
 import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
 import type { Prisma, UpdateStatusBody } from './types';
 import * as repo from './repo';
+import { normalizeWorldModelMode } from './agentExecutionMode';
 
 export { updateAgentConfig } from './agentConfigService';
 
 const log = createLogger('Agents');
 const TERMINAL_STATUSES = new Set(['COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED']);
-const IRREVERSIBLE_STATUSES = new Set([
-  'COMPLETED',
-  'FAILED',
-  'OUT_OF_CREDITS',
-  'COST_LIMIT_REACHED',
-]);
+const IRREVERSIBLE_STATUSES = TERMINAL_STATUSES;
 const NON_TERMINAL_STATUSES = new Set(['STARTING_UP', 'ACTIVE', 'PAUSED']);
 
 // ---------------------------------------------------------------------------
@@ -137,6 +133,7 @@ export async function startAgentMode(agentId: string, userId: string) {
     },
     priceLimitCents: agent.priceLimitCents,
     fastModeCacheEnabled: agent.fastModeCacheEnabled,
+    worldModelMode: normalizeWorldModelMode(agent.worldModelMode),
   });
 
   await repo.updateAgent(agentId, { temporalWorkflowId: workflowId });
@@ -214,6 +211,7 @@ export async function restartAgent(agentId: string, userId?: string) {
     depth: agent.depth,
     priceLimitCents: agent.priceLimitCents,
     fastModeCacheEnabled: agent.fastModeCacheEnabled,
+    worldModelMode: normalizeWorldModelMode(agent.worldModelMode),
   });
 
   await repo.updateAgent(agentId, { temporalWorkflowId: workflowId });

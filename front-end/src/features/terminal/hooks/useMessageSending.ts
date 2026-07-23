@@ -9,7 +9,8 @@
  *                              +-- selected-id-scoped failure ---------> [ROLLED BACK]
  *
  * The staged transition is synchronous. Agent creation, canonical detail,
- * and the sidebar refresh happen after the new conversation is visible.
+ * and the sidebar refresh happen after the new conversation is visible. Fast
+ * Mode and Simulator Mode are captured in the create request for that agent.
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react';
@@ -114,14 +115,25 @@ export function useMessageSending({
   const setFastMode = useCallback((enabled: boolean) => {
     fastModeUserOverrideRef.current = true;
     setFastModeState(enabled);
+    if (enabled) setSimulatorModeState(false);
   }, []);
 
   useEffect(() => {
-    if (!userCanUseSimulator) setSimulatorModeState(false);
-  }, [userCanUseSimulator]);
+    if (!userCanUseSimulator) {
+      setSimulatorModeState(false);
+      return;
+    }
+    if (selectedAgentId !== null && agentDetail?.agent_id === selectedAgentId) {
+      setSimulatorModeState(agentDetail.world_model_mode === 'simulate');
+    }
+  }, [agentDetail?.agent_id, agentDetail?.world_model_mode, selectedAgentId, userCanUseSimulator]);
 
   const setSimulatorMode = useCallback((enabled: boolean) => {
     setSimulatorModeState(enabled);
+    if (enabled) {
+      fastModeUserOverrideRef.current = true;
+      setFastModeState(false);
+    }
   }, []);
 
   // Sync model from agent detail
@@ -174,6 +186,9 @@ export function useMessageSending({
               attachments: attachments && attachments.length > 0 ? attachments : undefined,
               price_limit_cents: pendingPriceLimitCents,
               ...(userCanUseFastMode ? { fast_mode_cache_enabled: fastMode } : {}),
+              ...(userCanUseSimulator
+                ? { world_model_mode: simulatorMode ? 'simulate' : 'real' }
+                : {}),
             });
             if (newAgent.agent_id !== agentId) {
               throw new Error('Created agent ID did not match the requested agent ID');
@@ -232,11 +247,13 @@ export function useMessageSending({
       selectedAgentId,
       selectedModel,
       fastMode,
+      simulatorMode,
       canSubmitGoals,
       clientSource,
       pendingPriceLimitCents,
       agentDetail,
       userCanUseFastMode,
+      userCanUseSimulator,
       loadAgents,
       setCurrentView,
       setLoginModalOpen,

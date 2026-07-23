@@ -116,14 +116,18 @@ class SendMessageToUserManager(ToolManager):
                 agent_id=workflow_instance.agent_id,  # type: ignore[union-attr]
             )
             try:
+                notification_args = [
+                    workflow_instance.user_id,  # type: ignore[union-attr]
+                    "planner_message",
+                    workflow_instance.agent_id,  # type: ignore[union-attr]
+                    {"message": message, "is_question": True},
+                ]
+                world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+                if world_model_mode != "real":
+                    notification_args.append(world_model_mode)
                 await workflow.execute_activity(
                     notify_sms_event_activity,
-                    args=[
-                        workflow_instance.user_id,  # type: ignore[union-attr]
-                        "planner_message",
-                        workflow_instance.agent_id,  # type: ignore[union-attr]
-                        {"message": message, "is_question": True},
-                    ],
+                    args=notification_args,
                     start_to_close_timeout=timedelta(seconds=30),
                     retry_policy=RetryPolicy(maximum_attempts=3),
                 )
@@ -151,14 +155,18 @@ class SendMessageToUserManager(ToolManager):
                     agent_id=workflow_instance.agent_id,  # type: ignore[union-attr]
                 )
                 try:
+                    notification_args = [
+                        workflow_instance.user_id,  # type: ignore[union-attr]
+                        "planner_message",
+                        workflow_instance.agent_id,  # type: ignore[union-attr]
+                        {"message": message, "is_question": True},
+                    ]
+                    world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+                    if world_model_mode != "real":
+                        notification_args.append(world_model_mode)
                     await workflow.execute_activity(
                         notify_sms_event_activity,
-                        args=[
-                            workflow_instance.user_id,  # type: ignore[union-attr]
-                            "planner_message",
-                            workflow_instance.agent_id,  # type: ignore[union-attr]
-                            {"message": message, "is_question": True},
-                        ],
+                        args=notification_args,
                         start_to_close_timeout=timedelta(seconds=30),
                         retry_policy=RetryPolicy(maximum_attempts=3),
                     )
