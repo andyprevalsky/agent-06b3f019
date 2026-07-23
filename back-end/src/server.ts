@@ -52,6 +52,7 @@ import { ensureBenchmarkTasksSeeded } from './domains/benchmarks/service';
 import fastCacheRouter from './domains/fast-cache/routes';
 import archiveRouter from './domains/archive/routes';
 import worldModelsRouter from './domains/world-models/routes';
+import slackAutoRcaRouter from './domains/slack-auto-rca/routes';
 import { anthropicProxyRouter, codexProxyRouter } from './domains/fast-cache/routes.proxy';
 import { prisma } from './providers/database';
 import { createDeepHealthHandler } from './providers/deepHealth';
@@ -397,6 +398,7 @@ app.use('/api/waitlist', waitlistRouter);
 app.use('/api/models', modelsRouter); // Models list is public
 app.use('/api/tools', toolsRouter); // Tools list is public read
 app.use('/api/benchmarks', benchmarksRouter); // Benchmark tasks are public
+app.use('/api/webhooks/slack/auto-rca', slackAutoRcaRouter);
 app.use('/api/vcard', vcardRouter); // vCard for contact card (public for Twilio MMS)
 
 // x402 Payment Routes Setup

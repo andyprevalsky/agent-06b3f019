@@ -6,8 +6,11 @@ import gzip
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -117,6 +120,262 @@ def test_local_store_writes_ciphertext_and_metadata():
             assert stored_metadata == metadata
             assert json.loads(decrypt_and_validate_artifact(stored_ciphertext, stored_metadata).decode("utf-8")) == {"ok": True}
         finally:
+            restore()
+
+
+def test_local_store_publishes_metadata_atomically():
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        target = Path(tmp) / "agent-atomic" / "llm" / "atomic.json.gz.enc"
+        meta = Path(str(target) + ".meta.json")
+        original_open = Path.open
+        metadata_opened = threading.Event()
+        release_metadata_write = threading.Event()
+        errors = []
+
+        def blocking_open(path: Path, *args, **kwargs):
+            handle = original_open(path, *args, **kwargs)
+            mode = args[0] if args else kwargs.get("mode", "r")
+            if "w" in mode and path.name.startswith(meta.name):
+                metadata_opened.set()
+                if not release_metadata_write.wait(timeout=5):
+                    handle.close()
+                    raise TimeoutError("metadata write was not released")
+            return handle
+
+        def write_artifact():
+            try:
+                trace_archive._write_local("agent-atomic", "llm/atomic.json.gz.enc", b"ciphertext", {"ok": True})
+            except BaseException as exc:
+                errors.append(exc)
+
+        Path.open = blocking_open
+        writer = threading.Thread(target=write_artifact)
+        try:
+            writer.start()
+            assert metadata_opened.wait(timeout=2), "metadata writer never opened its output"
+            assert not meta.exists(), "final metadata path became visible before its JSON was complete"
+        finally:
+            release_metadata_write.set()
+            writer.join(timeout=5)
+            Path.open = original_open
+            restore()
+
+        assert not writer.is_alive(), "metadata writer did not finish"
+        assert not errors, errors
+        assert json.loads(meta.read_text()) == {"ok": True}
+
+
+def test_artifact_transaction_recovers_crash_between_pair_replacements():
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        target = Path(tmp) / "agent-recovery" / "llm" / "recover.json.gz.enc"
+        meta_path = target.with_suffix(target.suffix + ".meta.json")
+        transaction_path = trace_archive._artifact_transaction_path(target)
+        old_ciphertext = b"old-ciphertext"
+        new_ciphertext = b"new-ciphertext"
+        old_metadata = {"ciphertext_sha256": hashlib.sha256(old_ciphertext).hexdigest()}
+        new_metadata = {"ciphertext_sha256": hashlib.sha256(new_ciphertext).hexdigest()}
+        original_replace = Path.replace
+        interrupted = False
+
+        def interrupt_metadata_replace(source: Path, destination: Path):
+            nonlocal interrupted
+            if Path(destination) == meta_path and not interrupted:
+                interrupted = True
+                raise OSError("simulated crash between pair replacements")
+            return original_replace(source, destination)
+
+        try:
+            trace_archive._write_local("agent-recovery", "llm/recover.json.gz.enc", old_ciphertext, old_metadata)
+            Path.replace = interrupt_metadata_replace
+            try:
+                trace_archive._write_local(
+                    "agent-recovery",
+                    "llm/recover.json.gz.enc",
+                    new_ciphertext,
+                    new_metadata,
+                )
+            except OSError as exc:
+                assert "simulated crash" in str(exc)
+            else:
+                raise AssertionError("pair publication should have been interrupted")
+            finally:
+                Path.replace = original_replace
+
+            assert transaction_path.exists(), "recoverable transaction was removed after interrupted commit"
+            stored = trace_archive.read_local_artifact(
+                root_agent_id="agent-recovery",
+                path="llm/recover.json.gz.enc",
+            )
+            assert stored == (new_ciphertext, new_metadata)
+            assert not transaction_path.exists(), "successful recovery did not clear the transaction"
+            assert target.read_bytes() == new_ciphertext
+            assert json.loads(meta_path.read_text()) == new_metadata
+        finally:
+            Path.replace = original_replace
+            restore()
+
+
+def test_local_artifact_listing_hides_transaction_and_temporary_files():
+    from helpers.trace_archive import list_local_artifact_paths
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(tmp)
+        bundle = Path(tmp) / "agent-listing" / "llm"
+        bundle.mkdir(parents=True)
+        try:
+            (bundle / "visible.json.gz.enc").write_bytes(b"ciphertext")
+            (bundle / "visible.json.gz.enc.meta.json").write_text("{}")
+            (bundle / "hidden.json.gz.enc.transaction").write_bytes(b"transaction")
+            (bundle / "hidden.json.gz.enc.transaction.123.tmp").write_bytes(b"temporary")
+
+            assert list_local_artifact_paths("agent-listing") == ["llm/visible.json.gz.enc"]
+        finally:
+            restore()
+
+
+def test_artifact_lock_pool_is_bounded():
+    import helpers.trace_archive as trace_archive
+
+    assert trace_archive._ARTIFACT_LOCK_STRIPES == 256
+    assert len(trace_archive._ARTIFACT_WRITE_LOCKS) == trace_archive._ARTIFACT_LOCK_STRIPES
+    indexes = {
+        trace_archive._artifact_lock_index(Path(f"/tmp/trace-archive/agent-{idx}/artifact.enc"))
+        for idx in range(10_000)
+    }
+    assert indexes
+    assert max(indexes) < trace_archive._ARTIFACT_LOCK_STRIPES
+
+
+def test_cross_process_reader_waits_for_matched_artifact_pair():
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        archive_root = Path(tmp) / "archive"
+        restore = _with_archive_env(str(archive_root))
+        target = archive_root / "agent-process" / "llm" / "shared.json.gz.enc"
+        marker = Path(tmp) / "ciphertext-published"
+        release = Path(tmp) / "release-writer"
+        ciphertext = b"cross-process-ciphertext"
+        expected_sha = hashlib.sha256(ciphertext).hexdigest()
+        worker_script = r"""
+import hashlib
+import sys
+import time
+from pathlib import Path
+
+import helpers.trace_archive as trace_archive
+
+target = Path(sys.argv[1])
+marker = Path(sys.argv[2])
+release = Path(sys.argv[3])
+original_replace = Path.replace
+
+def blocking_replace(source, destination):
+    result = original_replace(source, destination)
+    if Path(destination) == target:
+        marker.write_text("ready", encoding="utf-8")
+        deadline = time.monotonic() + 5
+        while not release.exists():
+            if time.monotonic() >= deadline:
+                raise TimeoutError("reader never released cross-process writer")
+            time.sleep(0.01)
+    return result
+
+Path.replace = blocking_replace
+ciphertext = b"cross-process-ciphertext"
+trace_archive._write_local(
+    "agent-process",
+    "llm/shared.json.gz.enc",
+    ciphertext,
+    {"ciphertext_sha256": hashlib.sha256(ciphertext).hexdigest()},
+)
+"""
+        env = os.environ.copy()
+        env["TRACE_ARCHIVE_LOCAL_ROOT"] = str(archive_root)
+        worker = subprocess.Popen(
+            [sys.executable, "-c", worker_script, str(target), str(marker), str(release)],
+            env=env,
+        )
+        reader_started = threading.Event()
+        reader_finished = threading.Event()
+        result = []
+        errors = []
+
+        def read_artifact():
+            reader_started.set()
+            try:
+                result.append(
+                    trace_archive.read_local_artifact(
+                        root_agent_id="agent-process",
+                        path="llm/shared.json.gz.enc",
+                    )
+                )
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                reader_finished.set()
+
+        reader = threading.Thread(target=read_artifact)
+        try:
+            deadline = time.monotonic() + 3
+            while not marker.exists() and worker.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert marker.exists(), "writer never paused between ciphertext and metadata publication"
+
+            reader.start()
+            assert reader_started.wait(timeout=1), "reader thread did not start"
+            assert not reader_finished.wait(timeout=0.2), "reader bypassed the cross-process artifact lock"
+            release.touch()
+            worker.wait(timeout=5)
+            reader.join(timeout=5)
+        finally:
+            release.touch(exist_ok=True)
+            if worker.poll() is None:
+                worker.terminate()
+                worker.wait(timeout=5)
+            reader.join(timeout=5)
+            restore()
+
+        assert worker.returncode == 0
+        assert not reader.is_alive(), "reader stayed blocked after writer released the lock"
+        assert not errors, errors
+        assert result == [(ciphertext, {"ciphertext_sha256": expected_sha})]
+
+
+def test_outbox_drain_does_not_delete_newer_generation():
+    import helpers.trace_archive as trace_archive
+
+    with tempfile.TemporaryDirectory() as tmp:
+        restore = _with_archive_env(str(Path(tmp) / "archive"))
+        original_post = trace_archive._post_backend_artifact
+        path = "llm/retry.json.gz.enc"
+        old_ciphertext = b"old-ciphertext"
+        new_ciphertext = b"new-ciphertext"
+        old_metadata = {"ciphertext_sha256": hashlib.sha256(old_ciphertext).hexdigest()}
+        new_metadata = {"ciphertext_sha256": hashlib.sha256(new_ciphertext).hexdigest()}
+
+        def post_then_replace(**kwargs):
+            assert kwargs["ciphertext"] == old_ciphertext
+            trace_archive._write_outbox("agent-generation", path, new_ciphertext, new_metadata)
+            return "r2://bucket/retry"
+
+        try:
+            trace_archive._write_outbox("agent-generation", path, old_ciphertext, old_metadata)
+            trace_archive._post_backend_artifact = post_then_replace
+            trace_archive._drain_backend_outbox()
+
+            target = trace_archive._outbox_root() / "agent-generation" / path
+            with trace_archive._artifact_lock(target):
+                stored = trace_archive._read_artifact_pair_unlocked(target)
+            assert stored == (new_ciphertext, new_metadata)
+        finally:
+            trace_archive._post_backend_artifact = original_post
             restore()
 
 
@@ -931,6 +1190,21 @@ async def run_all_tests():
     r.record("encrypt_json_gzip_roundtrip", test_encrypt_json_gzip_roundtrip)
     r.record("encrypt_media_skips_gzip", test_encrypt_media_skips_gzip)
     r.record("local_store_writes_ciphertext_and_metadata", test_local_store_writes_ciphertext_and_metadata)
+    r.record("local_store_publishes_metadata_atomically", test_local_store_publishes_metadata_atomically)
+    r.record(
+        "artifact_transaction_recovers_crash_between_pair_replacements",
+        test_artifact_transaction_recovers_crash_between_pair_replacements,
+    )
+    r.record(
+        "local_artifact_listing_hides_transaction_and_temporary_files",
+        test_local_artifact_listing_hides_transaction_and_temporary_files,
+    )
+    r.record("artifact_lock_pool_is_bounded", test_artifact_lock_pool_is_bounded)
+    r.record(
+        "cross_process_reader_waits_for_matched_artifact_pair",
+        test_cross_process_reader_waits_for_matched_artifact_pair,
+    )
+    r.record("outbox_drain_does_not_delete_newer_generation", test_outbox_drain_does_not_delete_newer_generation)
     r.record("local_store_gold_io_validates_integrity", test_local_store_gold_io_validates_integrity)
     r.record("observability_writes_dev_dump_and_archive_updates", test_observability_writes_dev_dump_and_archive_updates)
     r.record("observability_archives_subagent_dumps_under_root_bundle", test_observability_archives_subagent_dumps_under_root_bundle)

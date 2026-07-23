@@ -49,17 +49,24 @@ echo "$RESTORE_BRANCH" | grep -q 'ensure-agent-network-grep-indexes.ts' \
   || fail "fast-restore branch does not run ensure-agent-network-grep-indexes.ts (readiness/index parity skipped)"
 echo "PASS 1 — fast-restore branch ensures agent-network grep indexes"
 
-# ── 2: pg_restore must target the app's $LOCAL_DB_NAME, never a hardcoded name ─
-RESTORE_LINE="$(grep -E 'pg_restore .*"\$_SEED_DUMP"' "$RUN_SH" || true)"
-[ -n "$RESTORE_LINE" ] || fail "could not find the pg_restore command in run.sh"
-echo "$RESTORE_LINE" | grep -qE -- '-d "\$LOCAL_DB_NAME"' \
-  || fail "pg_restore must restore into -d \"\$LOCAL_DB_NAME\" (found: $RESTORE_LINE)"
-echo "$RESTORE_LINE" | grep -qE -- '-d victoria( |$)' \
-  && fail "pg_restore still hardcodes -d victoria instead of \$LOCAL_DB_NAME (found: $RESTORE_LINE)"
-echo "PASS 2 — pg_restore targets \$LOCAL_DB_NAME (not a hardcoded db)"
+# ── 2: restore helper must receive and target the app's $LOCAL_DB_NAME ────────
+RESTORE_HELPER="$ROOT_DIR/scripts/restore-seed-dump.sh"
+[ -f "$RESTORE_HELPER" ] || fail "missing restore-seed-dump.sh"
+RESTORE_CALL="$(grep -A2 -E 'bash scripts/restore-seed-dump\.sh' "$RUN_SH" || true)"
+[ -n "$RESTORE_CALL" ] || fail "could not find the restore-seed-dump.sh call in run.sh"
+echo "$RESTORE_CALL" | grep -q '"\$LOCAL_DB_NAME"' \
+  || fail "restore helper must receive \$LOCAL_DB_NAME (found: $RESTORE_CALL)"
+RESTORE_DB_ARG="$(grep -E -- '-d "\$DB_NAME"' "$RESTORE_HELPER" || true)"
+[ -n "$RESTORE_DB_ARG" ] \
+  || fail "restore helper must pass its database argument to pg_restore"
+grep -q -- '--exit-on-error' "$RESTORE_HELPER" \
+  || fail "restore helper must fail on the first pg_restore error"
+grep -q -- '--single-transaction' "$RESTORE_HELPER" \
+  || fail "restore helper must make the restore atomic"
+echo "PASS 2 — restore helper targets \$LOCAL_DB_NAME atomically (not a hardcoded db)"
 
 # ── 3: the seed-dump pg_dump must dump the app's $LOCAL_DB_NAME ───────────────
-DUMP_LINE="$(grep -E 'pg_dump .*-Fc .*> "\$_SEED_DUMP"' "$RUN_SH" || true)"
+DUMP_LINE="$(grep -E 'pg_dump .*-Fc "\$LOCAL_DB_NAME"' "$RUN_SH" || true)"
 [ -n "$DUMP_LINE" ] || fail "could not find the seed-dump pg_dump command in run.sh"
 echo "$DUMP_LINE" | grep -qE -- '-Fc "\$LOCAL_DB_NAME"' \
   || fail "seed-dump pg_dump must dump \"\$LOCAL_DB_NAME\" (found: $DUMP_LINE)"
@@ -67,9 +74,11 @@ echo "$DUMP_LINE" | grep -qE -- '-Fc victoria( |$|>)' \
   && fail "seed-dump pg_dump still hardcodes victoria instead of \$LOCAL_DB_NAME (found: $DUMP_LINE)"
 echo "PASS 3 — seed-dump pg_dump dumps \$LOCAL_DB_NAME (not a hardcoded db)"
 
-# ── 4: pg_restore must NOT swallow stderr to /dev/null (keep it diagnosable) ──
-echo "$RESTORE_LINE" | grep -qE '2>&1' \
-  && fail "pg_restore still merges stderr into /dev/null (>/dev/null 2>&1) — partial-restore errors are hidden"
+# ── 4: restore must NOT swallow stderr to /dev/null (keep it diagnosable) ─────
+echo "$RESTORE_CALL" | grep -qE '2>&1' \
+  && fail "restore call merges stderr into /dev/null — partial-restore errors are hidden"
+grep -E 'pg_restore' "$RESTORE_HELPER" | grep -qE '2>&1' \
+  && fail "restore helper merges pg_restore stderr into /dev/null"
 echo "PASS 4 — pg_restore surfaces stderr (partial-restore failures are visible)"
 
 echo "ALL PASS: cloudbench restore readiness"

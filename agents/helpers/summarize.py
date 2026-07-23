@@ -640,6 +640,7 @@ async def summarize_tool_result(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    cache_sequence_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Summarize a verbose tool result (e.g. web_fetch body) before it lands in context.
 
@@ -697,6 +698,7 @@ Output the summary only — no preamble."""
             call_site=f"summarize_{tool_name}",
             agent_id=agent_id,
             user_id=claude_token_user_id or gpt_token_user_id,
+            cache_sequence_id=cache_sequence_id,
         )
 
         summary = (result.get("content") or "").strip()
@@ -830,6 +832,7 @@ Rules for files_to_download:
             call_site="summarize_web_fetch",
             agent_id=agent_id,
             user_id=claude_token_user_id or gpt_token_user_id,
+            cache_sequence_id=cache_sequence_id,
         )
 
         content_str = (result.get("content") or "").strip()

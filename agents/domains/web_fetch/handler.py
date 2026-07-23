@@ -183,6 +183,7 @@ class WebFetchManager(ToolManager):
                     gpt_token_pool_id,
                     user_id,  # gpt_token_user_id
                     agent_id,
+                    f"agent:{agent_id}:tool:{tool_call_id}:call:summarize_web_fetch",
                 ],
                 start_to_close_timeout=timedelta(seconds=90),
                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -238,6 +239,7 @@ class WebFetchManager(ToolManager):
                     # zeroes a replayed summarize call instead of billing the
                     # replayed output tokens (mirrors the planner fix).
                     "from_fast_cache": haiku_usage.get("from_fast_cache", False),
+                    "cache_sequence_id": haiku_usage.get("cache_sequence_id"),
                 }
 
             elapsed_time = _safe_time() - start_time

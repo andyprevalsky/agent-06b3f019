@@ -3134,11 +3134,13 @@ async def test_call_llm_activity_happy_path_with_messages_list():
             agent_id="agent-llm-act",
             stream_id="stream-1",
             call_site="test_cla",
+            cache_sequence_id="agent:agent-llm-act:call:test_cla",
         )
 
     assert result["response"] == "hello world"
     assert result["tool_calls"] == []
     assert result["usage"]["total_tokens"] == 30
+    assert result["usage"]["cache_sequence_id"] == "agent:agent-llm-act:call:test_cla"
     assert result["detected_tools_ordered"] == []
     first_stream = stream_mock.await_args_list[0].kwargs
     assert first_stream["delta"] == ""
@@ -5282,10 +5284,25 @@ async def test_call_llm_structured_streaming_fast_cache_writes_only_after_valida
             response_model=AgentAction,
             on_chunk=on_chunk,
             call_site="validation-cache",
+            cache_sequence_id="sequence-a",
         )
         assert response.response == "ok"
         assert set_calls == 1
         assert len(store) == 1
+
+        response, _, _ = await call_llm_structured_streaming(
+            messages=[{"role": "user", "content": "q"}],
+            model="rose",
+            temperature=0.7,
+            max_tokens=512,
+            response_model=AgentAction,
+            on_chunk=on_chunk,
+            call_site="validation-cache",
+            cache_sequence_id="sequence-b",
+        )
+        assert response.response == "ok"
+        assert set_calls == 2
+        assert len(store) == 2, "structured cache keys must remain isolated by sequence"
     finally:
         reset_context(token)
         fast_cache_client.cache_get = original_client_get

@@ -138,6 +138,21 @@ def _is_refusal_error(exc: BaseException) -> bool:
     return False
 
 
+def _resolve_cache_sequence_id(
+    *,
+    agent_id: str,
+    task_id: Optional[str],
+    call_site: str,
+    override: Optional[str] = None,
+) -> str:
+    """Return the stable identity for one append-only LLM conversation."""
+    if override and override.strip():
+        return override.strip()
+    if task_id and task_id.strip():
+        return f"agent:{agent_id}:task:{task_id.strip()}:call:{call_site}"
+    return f"agent:{agent_id}:call:{call_site}"
+
+
 @traced("run_agent")
 async def run_agent(  # noqa: C901
     # Identity
@@ -217,6 +232,7 @@ async def run_agent(  # noqa: C901
     get_gpt_token_pool_id: Optional[Callable[[], Optional[str]]] = None,
     compute_token_lineage_key: Optional[str] = None,
     compute_token_fast_cache_affinity_key: Optional[str] = None,
+    cache_sequence_id: Optional[str] = None,
     # Override the call_site label used when emitting llm.cache. Defaults to
     # "plan_loop"/"execute_loop" based on is_plan_loop. Sub-agents that share
     # this loop (e.g. explore_agent) set this to surface as their own row in
@@ -245,6 +261,12 @@ async def run_agent(  # noqa: C901
     # Resolve the cache call_site once. Override wins when set, otherwise
     # the standard PLAN/EXECUTE loop labels.
     cache_call_site = call_site_override or ("plan_loop" if is_plan_loop else "execute_loop")
+    resolved_cache_sequence_id = _resolve_cache_sequence_id(
+        agent_id=agent_id,
+        task_id=task_id,
+        call_site=cache_call_site,
+        override=cache_sequence_id,
+    )
 
     tokens_in = 0
     tokens_out = 0
@@ -465,6 +487,7 @@ async def run_agent(  # noqa: C901
                     compute_token_used=attempt_usage.get("compute_token_used"),
                     from_fast_cache=attempt_usage.get("from_fast_cache", False),
                     iteration=iteration,
+                    cache_sequence_id=attempt_usage.get("cache_sequence_id") or resolved_cache_sequence_id,
                 )
             except Exception as e:
                 logger.warning(f"on_tokens callback failed: {e}")
@@ -1118,6 +1141,7 @@ async def run_agent(  # noqa: C901
                                     gpt_token_user_id=user_id,
                                     compute_token_lineage_key=compute_token_lineage_key,
                                     compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                                    cache_sequence_id=resolved_cache_sequence_id,
                                     call_site=cache_call_site,
                                     _exclude_anthropic_family=exclude_anthropic_family_on_llm_retry,
                                 )
@@ -1245,6 +1269,9 @@ async def run_agent(  # noqa: C901
                         fast_mode_cache_enabled,
                         goal_text,
                         fast_cache_step,
+                        False,
+                        False,
+                        resolved_cache_sequence_id,
                     ],
                     start_to_close_timeout=timedelta(seconds=STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS),
                     retry_policy=RetryPolicy(maximum_attempts=3),
@@ -1960,6 +1987,7 @@ async def run_agent(  # noqa: C901
                             gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
                             compute_token_used=v_usage.get("compute_token_used"),
                             from_fast_cache=v_usage.get("from_fast_cache", False),
+                            cache_sequence_id=v_usage.get("cache_sequence_id") or resolved_cache_sequence_id,
                         )
                     except Exception as e:
                         logger.warning(f"on_tokens callback failed for verifier: {e}")
@@ -2182,6 +2210,7 @@ async def run_agent(  # noqa: C901
                         gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
                         compute_token_used=v_usage.get("compute_token_used"),
                         from_fast_cache=v_usage.get("from_fast_cache", False),
+                        cache_sequence_id=v_usage.get("cache_sequence_id") or resolved_cache_sequence_id,
                     )
                 except Exception as e:
                     logger.warning(f"on_tokens callback failed for final verifier: {e}")
@@ -2317,6 +2346,7 @@ async def _compress_context(
                     gpt_token_rotated=usage.get("gpt_token_rotated", False),
                     compute_token_used=usage.get("compute_token_used"),
                     from_fast_cache=usage.get("from_fast_cache", False),
+                    cache_sequence_id=usage.get("cache_sequence_id"),
                 )
             except Exception as e:
                 logger.warning(f"on_tokens callback failed for context_compression: {e}")

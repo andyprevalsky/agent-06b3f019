@@ -1676,6 +1676,7 @@ class AgentWorkflow:
                         gpt_token_rotated=v_usage.get("gpt_token_rotated", False),
                         compute_token_used=v_usage.get("compute_token_used"),
                         from_fast_cache=v_usage.get("from_fast_cache", False),
+                        cache_sequence_id=v_usage.get("cache_sequence_id"),
                     )
                 except Exception as e:
                     workflow.logger.warning(f"[DAG] _on_tokens failed for post-DAG verifier: {e}")
@@ -2482,6 +2483,7 @@ class AgentWorkflow:
                             gpt_token_rotated=rotation_signal.get("gpt_token_rotated", False),
                             compute_token_used=rotation_signal.get("compute_token_used"),
                             from_fast_cache=rotation_signal.get("from_fast_cache", False),
+                            cache_sequence_id=rotation_signal.get("cache_sequence_id"),
                         )
                     except Exception as e:
                         workflow.logger.warning(f"_on_tokens failed for {tool_name} summarizer: {e}")
@@ -2637,6 +2639,7 @@ class AgentWorkflow:
                 None,
                 True,
                 True,
+                f"agent:{self.agent_id}:call:approval_param_populator",
             ],
             start_to_close_timeout=timedelta(seconds=600),
             retry_policy=RetryPolicy(maximum_attempts=2),
@@ -2671,6 +2674,7 @@ class AgentWorkflow:
                     gpt_token_rotated=usage.get("gpt_token_rotated", False),
                     compute_token_used=usage.get("compute_token_used"),
                     from_fast_cache=usage.get("from_fast_cache", False),
+                    cache_sequence_id=usage.get("cache_sequence_id"),
                 )
             except Exception as error:
                 workflow.logger.warning(f"on_tokens failed for approval_param_populator: {error}")
@@ -2864,6 +2868,7 @@ class AgentWorkflow:
             effective_call_site = call_site or tool_name or "unknown"
             cache_read = llm.get("cache_read_input_tokens", 0)
             cache_write = llm.get("cache_creation_input_tokens", 0)
+            cache_sequence_id = llm.get("cache_sequence_id")
             from_fast_cache = bool(llm.get("from_fast_cache"))
 
             if from_fast_cache:
@@ -2883,6 +2888,7 @@ class AgentWorkflow:
                         "cache_read_input_tokens": cache_read,
                         "cache_creation_input_tokens": cache_write,
                         "from_fast_cache": True,
+                        **({"cache_sequence_id": cache_sequence_id} if cache_sequence_id else {}),
                     }
                 )
                 continue
@@ -2903,6 +2909,7 @@ class AgentWorkflow:
                         "model": model,
                         "cache_read_input_tokens": cache_read,
                         "cache_creation_input_tokens": cache_write,
+                        **({"cache_sequence_id": cache_sequence_id} if cache_sequence_id else {}),
                     }
                 )
                 continue
@@ -2939,6 +2946,7 @@ class AgentWorkflow:
                 "model": model,
                 "cache_read_input_tokens": cache_read,
                 "cache_creation_input_tokens": cache_write,
+                **({"cache_sequence_id": cache_sequence_id} if cache_sequence_id else {}),
             }
             if cost_cents > 0:
                 total_cost_cents += cost_cents
@@ -3130,6 +3138,7 @@ class AgentWorkflow:
         compute_token_used: Optional[Dict[str, Any]] = None,
         from_fast_cache: bool = False,
         iteration: Optional[int] = None,
+        cache_sequence_id: Optional[str] = None,
     ) -> None:
         """Callback for run_agent to report token usage after each LLM call.
 
@@ -3373,6 +3382,7 @@ class AgentWorkflow:
                             "cache_creation_input_tokens": cache_creation_input_tokens,
                             "from_fast_cache": from_fast_cache,
                             "iteration": iteration,
+                            **({"cache_sequence_id": cache_sequence_id} if cache_sequence_id else {}),
                         }
                     ],
                 ],

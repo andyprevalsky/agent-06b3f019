@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import fcntl
 import gzip
 import hashlib
 import json
@@ -18,10 +19,10 @@ import os
 import tempfile
 import threading
 import time
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 import httpx
 import structlog
@@ -37,7 +38,10 @@ _TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
 _MEDIA_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".m4a", ".mp3", ".wav", ".m3u8"}
 _R2_CLIENT: Any = None
 _BACKEND_CLIENTS = threading.local()
-_OUTBOX_LOCKS: dict[str, threading.Lock] = defaultdict(threading.Lock)
+_ARTIFACT_LOCK_STRIPES = 256
+_ARTIFACT_WRITE_LOCKS = tuple(threading.Lock() for _ in range(_ARTIFACT_LOCK_STRIPES))
+_ARTIFACT_TRANSACTION_MAGIC = b"ROSE-TRACE-PAIR-V1\n"
+_ARTIFACT_TRANSACTION_SUFFIX = ".transaction"
 
 
 def _safe_segment(value: str) -> str:
@@ -152,14 +156,130 @@ def encrypt_artifact(
     return ciphertext, metadata
 
 
+def _artifact_lock_index(target: Path) -> int:
+    digest = hashlib.sha256(str(target).encode("utf-8")).digest()
+    return int.from_bytes(digest[:4], "big") % _ARTIFACT_LOCK_STRIPES
+
+
+@contextmanager
+def _artifact_lock(target: Path) -> Iterator[None]:
+    lock_index = _artifact_lock_index(target)
+    lock_root = _local_root().parent / "trace-archive-locks"
+    lock_root.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_root / f"{lock_index:03d}.lock"
+    with _ARTIFACT_WRITE_LOCKS[lock_index]:
+        with lock_path.open("a+b") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _artifact_transaction_path(target: Path) -> Path:
+    return target.with_suffix(target.suffix + _ARTIFACT_TRANSACTION_SUFFIX)
+
+
+def _encode_artifact_transaction(ciphertext: bytes, metadata: dict[str, Any]) -> bytes:
+    metadata_bytes = json.dumps(metadata, indent=2, sort_keys=True).encode("utf-8")
+    return _ARTIFACT_TRANSACTION_MAGIC + len(metadata_bytes).to_bytes(8, "big") + metadata_bytes + ciphertext
+
+
+def _decode_artifact_transaction(payload: bytes) -> tuple[bytes, dict[str, Any]]:
+    header_offset = len(_ARTIFACT_TRANSACTION_MAGIC)
+    if not payload.startswith(_ARTIFACT_TRANSACTION_MAGIC) or len(payload) < header_offset + 8:
+        raise ValueError("Archive transaction is invalid")
+    metadata_size = int.from_bytes(payload[header_offset : header_offset + 8], "big")
+    metadata_start = header_offset + 8
+    metadata_end = metadata_start + metadata_size
+    if metadata_size <= 0 or metadata_end > len(payload):
+        raise ValueError("Archive transaction metadata is invalid")
+    metadata = json.loads(payload[metadata_start:metadata_end].decode("utf-8"))
+    if not isinstance(metadata, dict):
+        raise ValueError("Archive transaction metadata must be an object")
+    return payload[metadata_end:], metadata
+
+
+def _write_file_durable(path: Path, payload: bytes) -> None:
+    with path.open("wb") as handle:
+        handle.write(payload)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _fsync_parent(path: Path) -> None:
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _replace_durable(source: Path, target: Path) -> None:
+    source.replace(target)
+    _fsync_parent(target)
+
+
+def _recover_artifact_transaction_unlocked(target: Path) -> bool:
+    transaction_path = _artifact_transaction_path(target)
+    if not transaction_path.exists():
+        return False
+    ciphertext, metadata = _decode_artifact_transaction(transaction_path.read_bytes())
+    meta_path = target.with_suffix(target.suffix + ".meta.json")
+    unique_suffix = f".{os.getpid()}.{threading.get_ident()}.recover.tmp"
+    target_tmp = target.with_suffix(target.suffix + unique_suffix)
+    meta_tmp = meta_path.with_suffix(meta_path.suffix + unique_suffix)
+    try:
+        _write_file_durable(target_tmp, ciphertext)
+        _write_file_durable(meta_tmp, json.dumps(metadata, indent=2, sort_keys=True).encode("utf-8"))
+        _replace_durable(target_tmp, target)
+        _replace_durable(meta_tmp, meta_path)
+        transaction_path.unlink()
+        _fsync_parent(transaction_path)
+    finally:
+        for temporary in (target_tmp, meta_tmp):
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+    return True
+
+
+def _read_artifact_pair_unlocked(target: Path) -> Optional[tuple[bytes, dict[str, Any]]]:
+    _recover_artifact_transaction_unlocked(target)
+    if not target.exists():
+        return None
+    meta_path = target.with_suffix(target.suffix + ".meta.json")
+    if not meta_path.exists():
+        raise ValueError(f"Archive metadata missing for {target.name}")
+    ciphertext = target.read_bytes()
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    if hashlib.sha256(ciphertext).hexdigest() != metadata.get("ciphertext_sha256"):
+        raise ValueError(f"Archive ciphertext/metadata mismatch for {target.name}")
+    return ciphertext, metadata
+
+
+def _write_artifact_pair(target: Path, ciphertext: bytes, metadata: dict[str, Any]) -> str:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    unique_suffix = f".{os.getpid()}.{threading.get_ident()}.tmp"
+    transaction_path = _artifact_transaction_path(target)
+    transaction_tmp = transaction_path.with_suffix(transaction_path.suffix + unique_suffix)
+    with _artifact_lock(target):
+        try:
+            _write_file_durable(transaction_tmp, _encode_artifact_transaction(ciphertext, metadata))
+            _replace_durable(transaction_tmp, transaction_path)
+            _recover_artifact_transaction_unlocked(target)
+        finally:
+            try:
+                transaction_tmp.unlink()
+            except FileNotFoundError:
+                pass
+    return str(target)
+
+
 def _write_local(root_agent_id: str, path: str, ciphertext: bytes, metadata: dict[str, Any]) -> str:
     root = _local_root() / _safe_segment(root_agent_id)
-    target = root / path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(ciphertext)
-    meta_path = target.with_suffix(target.suffix + ".meta.json")
-    meta_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
-    return str(target)
+    return _write_artifact_pair(root / path, ciphertext, metadata)
 
 
 def _outbox_root() -> Path:
@@ -168,27 +288,28 @@ def _outbox_root() -> Path:
 
 def _write_outbox(root_agent_id: str, path: str, ciphertext: bytes, metadata: dict[str, Any]) -> str:
     root = _outbox_root() / _safe_segment(root_agent_id)
-    target = root / path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    lock_key = f"{root_agent_id}:{path}"
-    with _OUTBOX_LOCKS[lock_key]:
-        tmp = target.with_suffix(target.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
-        tmp.write_bytes(ciphertext)
-        tmp.replace(target)
-        meta_path = target.with_suffix(target.suffix + ".meta.json")
-        meta_tmp = meta_path.with_suffix(meta_path.suffix + f".{os.getpid()}.{threading.get_ident()}.tmp")
-        meta_tmp.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
-        meta_tmp.replace(meta_path)
-    return str(target)
+    return _write_artifact_pair(root / path, ciphertext, metadata)
 
 
-def _delete_outbox(root_agent_id: str, path: str) -> None:
+def _delete_outbox(root_agent_id: str, path: str, *, expected_ciphertext_sha256: str) -> bool:
     target = _outbox_root() / _safe_segment(root_agent_id) / path
-    for item in (target, target.with_suffix(target.suffix + ".meta.json")):
-        try:
-            item.unlink()
-        except FileNotFoundError:
-            pass
+    with _artifact_lock(target):
+        pair = _read_artifact_pair_unlocked(target)
+        if pair is None:
+            return False
+        _, metadata = pair
+        if metadata.get("ciphertext_sha256") != expected_ciphertext_sha256:
+            return False
+        for item in (
+            _artifact_transaction_path(target),
+            target.with_suffix(target.suffix + ".meta.json"),
+            target,
+        ):
+            try:
+                item.unlink()
+            except FileNotFoundError:
+                pass
+    return True
 
 
 def _safe_path(path: str) -> str:
@@ -269,12 +390,8 @@ def read_local_artifact(*, root_agent_id: str, path: str) -> Optional[tuple[byte
     safe_root = _safe_segment(root_agent_id)
     safe_path = _safe_path(path)
     target = _local_root() / safe_root / safe_path
-    if not target.exists():
-        return None
-    meta_path = target.with_suffix(target.suffix + ".meta.json")
-    if not meta_path.exists():
-        raise ValueError(f"Archive metadata missing for {path}")
-    return target.read_bytes(), json.loads(meta_path.read_text(encoding="utf-8"))
+    with _artifact_lock(target):
+        return _read_artifact_pair_unlocked(target)
 
 
 def read_r2_artifact(*, root_agent_id: str, path: str) -> Optional[tuple[bytes, dict[str, Any]]]:
@@ -318,7 +435,11 @@ def list_local_artifact_paths(root_agent_id: str) -> list[str]:
         return []
     paths: list[str] = []
     for item in bundle.rglob("*"):
-        if item.is_file() and not item.name.endswith(".meta.json"):
+        if (
+            item.is_file()
+            and not item.name.endswith(".meta.json")
+            and _ARTIFACT_TRANSACTION_SUFFIX not in item.name
+        ):
             paths.append(item.relative_to(bundle).as_posix())
     return sorted(paths)
 
@@ -488,16 +609,25 @@ def _drain_backend_outbox(limit: int = 8) -> None:
             root_agent_id = bundle.name
             path = item.relative_to(bundle).as_posix()
             try:
-                metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+                with _artifact_lock(item):
+                    pair = _read_artifact_pair_unlocked(item)
+                if pair is None:
+                    continue
+                ciphertext, metadata = pair
+                expected_ciphertext_sha256 = str(metadata["ciphertext_sha256"])
                 ref = _post_backend_artifact(
                     root_agent_id=root_agent_id,
                     path=path,
-                    ciphertext=item.read_bytes(),
+                    ciphertext=ciphertext,
                     metadata=metadata,
                 )
                 if ref:
-                    _delete_outbox(root_agent_id, path)
-                    drained += 1
+                    if _delete_outbox(
+                        root_agent_id,
+                        path,
+                        expected_ciphertext_sha256=expected_ciphertext_sha256,
+                    ):
+                        drained += 1
             except Exception as exc:
                 logger.warning(
                     "trace_archive.outbox_drain_error",

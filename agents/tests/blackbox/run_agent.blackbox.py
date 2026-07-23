@@ -36,6 +36,7 @@ async def _run_single_iteration(
     verifier_score=1.0,
     verifier_reasoning="done",
     verifier_structured_response=None,
+    verifier_usage=None,
     winddown_window=0,
     response_schema=None,
     llm_tool_calls_sequence=None,
@@ -142,7 +143,9 @@ async def _run_single_iteration(
             "score": verifier_score,
             "reasoning": verifier_reasoning,
             "structured_response": verifier_structured_response,
-            "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
+            "usage": verifier_usage
+            if verifier_usage is not None
+            else {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
         }
 
     ctx = (
@@ -1421,6 +1424,33 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
         assert call[2] == ["spawn_agent", "attempt_completion"]
         assert call[11] == "attempt_completion"
         assert "already completed" in call[10]
+        assert call[30] == "agent:amazon-parent:call:execute_loop"
+
+
+async def test_verifier_usage_preserves_cache_sequence_identity():
+    usage_calls = []
+
+    async def capture_usage(_tokens_in, _tokens_out, _model, **metadata):
+        usage_calls.append(metadata)
+
+    await _run_single_iteration(
+        [{"tool": "web_search", "query": "x"}],
+        [("web_search", "tc-1", 1.0)],
+        skip_verification=False,
+        max_iterations=1,
+        verifier_score=0.3,
+        verifier_usage={
+            "prompt_tokens": 5,
+            "completion_tokens": 6,
+            "total_tokens": 11,
+            "cache_sequence_id": "verifier-sequence",
+        },
+        on_tokens_override=capture_usage,
+    )
+
+    verifier_calls = [call for call in usage_calls if call["call_site"].startswith("verifier_")]
+    assert verifier_calls
+    assert all(call["cache_sequence_id"] == "verifier-sequence" for call in verifier_calls)
 
 
 async def test_completed_child_required_tool_is_enforced_inside_direct_activity():
@@ -1857,6 +1887,10 @@ async def run_all_tests():
         test_completed_child_required_tool_is_enforced_inside_direct_activity,
     )
     await r.record_async("max_iterations_runs_final_verifier", test_max_iterations_runs_final_verifier)
+    await r.record_async(
+        "verifier_usage_preserves_cache_sequence_identity",
+        test_verifier_usage_preserves_cache_sequence_identity,
+    )
     await r.record_async("winddown_injects_one_message_near_cap", test_winddown_injects_one_message_near_cap)
     await r.record_async("winddown_disabled_by_default", test_winddown_disabled_by_default)
     await r.record_async(

@@ -118,18 +118,18 @@ def _codex_extra_headers_from_body(
     *,
     thread_id: Optional[str] = None,
 ) -> Dict[str, str]:
+    del thread_id  # Provider affinity follows the cache session, never the root agent.
     cache_scope = body.get("prompt_cache_key")
     if isinstance(cache_scope, str) and cache_scope.strip():
         scope = cache_scope.strip()
-        thread_scope = thread_id.strip() if isinstance(thread_id, str) and thread_id.strip() else scope
-        # Match Codex's HTTP Responses transport: prompt_cache_key/session-id
-        # identify the cache session, while thread-id and x-client-request-id
-        # carry the stable thread UUID. Collapsing all three onto the cache
-        # hash prevents the ChatGPT backend from recognizing thread affinity.
+        # These three headers jointly select the provider's cache-affinity lane.
+        # A root agent can own several independent conversations at once
+        # (execute loop, browser child, parallel explores), so using agent_id for
+        # either thread header aliases those lanes and lets one evict another.
         return {
             "session-id": scope,
-            "thread-id": thread_scope,
-            "x-client-request-id": thread_scope,
+            "thread-id": scope,
+            "x-client-request-id": scope,
         }
     return {}
 

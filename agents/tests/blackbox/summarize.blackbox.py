@@ -418,7 +418,10 @@ async def test_summarize_tool_result_happy():
     from helpers import summarize
     import helpers.llm as llm_mod
 
+    observed_kwargs = {}
+
     async def fake_llm(messages, **kwargs):
+        observed_kwargs.update(kwargs)
         return {"content": "concise summary", "usage": {"total_tokens": 200}}
 
     with patch("temporalio.activity.heartbeat"):
@@ -428,9 +431,11 @@ async def test_summarize_tool_result_happy():
                 tool_result_text="x" * 6000,
                 parent_objective="learn things",
                 model="rose-labs/rose-1-lite",
+                cache_sequence_id="agent:agent-1:tool:fetch-1:call:summarize_web_fetch",
             )
     assert out["summarized"] is True
     assert out["summary"] == "concise summary"
+    assert observed_kwargs["cache_sequence_id"] == "agent:agent-1:tool:fetch-1:call:summarize_web_fetch"
 
 
 async def test_summarize_tool_result_llm_failure_truncates():
