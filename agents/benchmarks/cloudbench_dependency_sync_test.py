@@ -910,6 +910,7 @@ def test_deploy_always_gates_changed_cloudbench_controllers() -> None:
     assert "cloud_patch_detection_and_payload_include_staged_only_changes" in gate
     assert "patch_delivery_clears_stale_base64_configuration" in gate
     assert "shared_patch_digest_is_pinned_and_verified" in gate
+    assert "fleet_shared_patch_remains_authoritative_until_transport_selection" in gate
     assert "declared_patch_payload_cannot_be_missing_or_empty" in gate
     assert "empty_local_patch_cleanup_is_nounset_safe" in gate
     assert "autoscaled_worker_failure_is_removed_and_replaceable" in gate
@@ -1086,6 +1087,72 @@ touch {shlex.quote(str(marker))}
     assert fleet.count('CLOUDBENCH_LOCAL_PATCH_SHA256="$FLEET_PATCH_SHA256"') == 1
     assert 'LOCAL_PATCH_SHA256="$CLOUDBENCH_LOCAL_PATCH_SHA256"' in patch_block
     assert 'if [ -n "$LOCAL_PATCH_FILE" ] && [ -z "$LOCAL_PATCH_SHA256" ]; then' in patch_block
+
+
+def test_fleet_shared_patch_remains_authoritative_until_transport_selection(
+    tmp_path: Path,
+) -> None:
+    """A child must not rebuild a fleet-pinned payload from its own HEAD."""
+    cloud = CLOUD_SCRIPT.read_text()
+    block_start = cloud.index("STAGED_LOCAL_FILES=()")
+    block_end = cloud.index(
+        'if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then', block_start
+    )
+    pre_transport = cloud[block_start:block_end]
+
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts/create-worktree-patch.sh").write_text(
+        WORKTREE_PATCH_SCRIPT.read_text()
+    )
+    tracked = repo / "tracked.txt"
+    tracked.write_text("committed\n")
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "bench@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Bench"], check=True
+    )
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", "baseline"],
+        check=True,
+        capture_output=True,
+    )
+    tracked.write_text("child-head-differs\n")
+
+    payload = tmp_path / "fleet.patch"
+    payload.write_text("fleet-authoritative-payload\n")
+    digest = hashlib.sha256(payload.read_bytes()).hexdigest()
+    marker = tmp_path / "preserved"
+    script = f"""
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+ROOT_DIR={shlex.quote(str(repo))}
+LOCAL_DASH_PORT=8765
+claim_local_port() {{ :; }}
+CLOUDBENCH_LOCAL_PATCH_SOURCE={shlex.quote(str(payload))}
+CLOUDBENCH_LOCAL_PATCH_SHA256={shlex.quote(digest)}
+{pre_transport}
+[ "$LOCAL_PATCH_FILE" = {shlex.quote(str(payload))} ] || {{
+    echo "fleet patch was replaced before transport selection" >&2
+    exit 91
+}}
+[ "$LOCAL_PATCH_SHA256" = {shlex.quote(digest)} ] || exit 92
+touch {shlex.quote(str(marker))}
+cleanup_staged_local_files
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert marker.exists()
+    assert payload.exists(), "child cleanup removed the fleet-owned shared patch"
 
 
 def test_declared_patch_payload_cannot_be_missing_or_empty(tmp_path: Path) -> None:
