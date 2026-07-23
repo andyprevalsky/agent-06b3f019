@@ -132,9 +132,18 @@ async function main(): Promise<void> {
       companyFundingInProgressDetails(
         new AgentCardProviderError('x', 409, undefined, 'agentcard_company_funding_in_progress', {})
       ),
-      {},
-      'transferless funding remains a retryable in-progress signal'
+      undefined,
+      'an unstructured error without a transfer or retry delay must fail closed'
     );
+    const transferlessRetry = companyFundingInProgressDetails(
+      new AgentCardProviderError('x', 409, undefined, 'agentcard_company_funding_in_progress', {
+        retryAfterSeconds: 5,
+        agentcardResult: { status: 'funding_in_progress' },
+      })
+    );
+    assert.equal(transferlessRetry?.transferId, undefined);
+    assert.equal(transferlessRetry?.retryAfterSeconds, 5);
+    assert.deepEqual(transferlessRetry?.agentcardResult, { status: 'funding_in_progress' });
     const details = companyFundingInProgressDetails(
       new AgentCardProviderError('x', 409, undefined, 'agentcard_company_funding_in_progress', {
         transferId: 'owt_1',

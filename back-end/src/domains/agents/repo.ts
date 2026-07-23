@@ -20,6 +20,13 @@ export {
   replaceAgentTools,
 } from './repoMutations';
 export type { BatchCreateAgentParams } from './repoMutations';
+export { findExistingAgentsByIds } from './repoDescendantStarts';
+export {
+  pauseAgentUnderWorkflowLock,
+  updateAgentConfigMutation,
+  updateAgentForWorkflow,
+  updateAgentUnderWorkflowLock,
+} from './repoWorkflowMutations';
 
 // ---------------------------------------------------------------------------
 // Agent queries
@@ -222,28 +229,6 @@ export async function findUserDeliveryAddress(userId: string) {
       city: true,
       state: true,
       country: true,
-    },
-  });
-}
-
-/** Look up existing agents by IDs scoped to a user. Used by the batch-create
- *  endpoint to skip duplicate inserts on retry — the worker mints stable
- *  agent_ids upfront, so a re-POST with the same ids returns the existing
- *  row's status instead of creating duplicates or 409ing. */
-export async function findExistingAgentsByIds(agentIds: string[], userId: string) {
-  return prisma.agent.findMany({
-    where: { id: { in: agentIds }, userId },
-    select: {
-      id: true,
-      status: true,
-      temporalWorkflowId: true,
-      createdAt: true,
-      updatedAt: true,
-      goal: true,
-      model: true,
-      source: true,
-      reasoningMaxTokens: true,
-      fastModeCacheEnabled: true,
     },
   });
 }

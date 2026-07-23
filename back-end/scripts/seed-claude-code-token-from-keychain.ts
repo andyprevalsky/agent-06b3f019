@@ -78,11 +78,6 @@ async function main(): Promise<void> {
   const encryptedCredentials = encryptCredentialEnvelope(plaintext);
   await ensureUserExists();
 
-  // Drop competing gpt_code row so getComputeCodeToken always returns claude.
-  const deleted = await prisma.integration.deleteMany({
-    where: { userId, name: 'gpt_code' },
-  });
-
   const integration = await prisma.integration.upsert({
     where: { userId_name: { userId, name: 'claude_code' } },
     create: {
@@ -115,7 +110,7 @@ async function main(): Promise<void> {
       ok: true,
       integrationId: integration.id,
       userId,
-      removedGptCode: deleted.count,
+      preservedOtherProviders: true,
     })
   );
 }

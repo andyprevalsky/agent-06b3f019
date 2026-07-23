@@ -48,7 +48,7 @@ export class FakeCardProvider implements CardProvider {
       cardId: this.cardId,
       last4: '4242',
       expiry: this.expiry,
-      spendLimitCents: 1000,
+      spendLimitCents: request.amountCents,
       status: 'active',
       providerTransferId: this.providerTransferId,
     };
@@ -61,7 +61,7 @@ export class FakeCardProvider implements CardProvider {
       pan: this.pan,
       cvv: this.cvv,
       expiry: this.expiry,
-      balanceCents: 1000,
+      balanceCents: this.mintRequests.at(-1)?.amountCents ?? 1000,
       status: 'active',
     };
   }
@@ -312,6 +312,15 @@ export interface FakeStripeCalls {
   retrieves: string[];
 }
 
+export function capturedPaymentIntent(id: string, amountReceived = 1000) {
+  return {
+    id,
+    status: 'succeeded',
+    amount_capturable: 0,
+    amount_received: amountReceived,
+  };
+}
+
 /**
  * Run `fn` with stripe.paymentIntents (create/capture/cancel) + refunds + customers stubbed;
  * records charge params and the hold capture/cancel/refund calls. `create` returns a stable
@@ -322,6 +331,7 @@ export async function withFakeStripe<T>(
   opts: {
     retrievePaymentIntent?: (id: string) => Promise<unknown> | unknown;
     refundError?: Error;
+    cancelError?: Error;
     fixedPaymentIntentId?: string;
     afterCapture?: (id: string) => void;
   } = {}
@@ -392,13 +402,20 @@ export async function withFakeStripe<T>(
     return { id, status: 'succeeded' };
   };
   paymentIntents.cancel = async (id: string) => {
+    if (opts.cancelError !== undefined) throw opts.cancelError;
     calls.cancels.push(id);
     return { id, status: 'canceled' };
   };
   paymentIntents.retrieve = async (id: string) => {
     calls.retrieves.push(id);
     if (opts.retrievePaymentIntent !== undefined) return opts.retrievePaymentIntent(id);
-    return { id, status: 'requires_capture', amount_capturable: 1000 };
+    const captured = calls.captures.includes(id);
+    return {
+      id,
+      status: captured ? 'succeeded' : 'requires_capture',
+      amount_capturable: captured ? 0 : 1000,
+      amount_received: captured ? 1000 : 0,
+    };
   };
   paymentIntents.search = async ({ query }) => {
     const purchaseId = query.match(/metadata\['purchaseSpendId'\]:'([^']+)'/)?.[1];

@@ -317,6 +317,35 @@ async function main(): Promise<void> {
       error.details.retryAfterSeconds === 4
   );
 
+  const transferlessFundingGateProvider = new AgentCardOrgMcpProvider(
+    'cardholder-123',
+    async (name) => {
+      if (name === 'create_card') {
+        return toolResult({
+          status: 'funding_in_progress',
+          message: 'Company funding is still settling',
+          retryAfterSeconds: 5,
+        });
+      }
+      throw new Error(`unexpected transferless funding-gate tool ${name}`);
+    }
+  );
+  await assert.rejects(
+    () =>
+      transferlessFundingGateProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:transferless-funding-gate',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_company_funding_in_progress' &&
+      'details' in error &&
+      error.details.transferId === undefined &&
+      error.details.retryAfterSeconds === 5
+  );
+
   const textFundingGateProvider = new AgentCardOrgMcpProvider('cardholder-123', async (name) => {
     if (name === 'create_card') {
       return {

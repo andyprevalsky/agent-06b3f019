@@ -189,6 +189,9 @@ async def save_browser_action_message(
 
         if status == MessageStatus.ERROR:
             metadata["error"] = True
+        from helpers.workflow_generation import stamp_tool_workflow_generation
+
+        metadata = stamp_tool_workflow_generation(metadata) or metadata
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(
@@ -276,6 +279,9 @@ async def save_browser_credential_ref_message(
                     "auxiliary": {},
                 }
             )
+            from helpers.workflow_generation import stamp_tool_workflow_generation
+
+            metadata = stamp_tool_workflow_generation(metadata) or metadata
 
         async with httpx.AsyncClient(timeout=5.0) as client:
             response = await client.post(

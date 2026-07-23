@@ -218,7 +218,7 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'organization MCP structured errors surface the upstream failure message',
+    'organization MCP prose-only setup errors fail closed after provider mutation starts',
     async () => {
       const calls: string[] = [];
       const provider = new AgentCardOrgMcpProvider('cardholder-missing', async (name) => {
@@ -253,10 +253,9 @@ const tests: Array<[string, () => Promise<void>]> = [
       );
       assert(
         caught instanceof AgentCardProviderError &&
-          caught.status === 409 &&
-          caught.code === 'agentcard_setup_required' &&
-          caught.details.agentcardStatus === 'org_onboarding_required',
-        'organization onboarding must surface as a typed 409 setup gate'
+          caught.status === undefined &&
+          caught.code === undefined,
+        'prose-only onboarding text must remain an ambiguous provider failure'
       );
       assert(
         calls.length === 1 && calls[0] === 'create_card',

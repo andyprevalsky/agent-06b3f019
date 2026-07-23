@@ -549,6 +549,18 @@ async def test_mint_purchase_card_activity_returns_agentcard_setup_state():
     assert result["setupTool"] == "start_kyc"
 
 
+def test_mint_purchase_card_timeout_budget_exceeds_backend_retry_window():
+    """The activity HTTP client must outwait backend AgentCard funding retries."""
+    from domains.request_payment_card import repo
+
+    assert repo.MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS >= 60
+    assert (
+        repo.MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS
+        < repo.MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS
+        < repo.MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS
+    )
+
+
 async def test_agentcard_status_activity_boundary():
     setup_mock(
         {
@@ -646,6 +658,10 @@ async def run_all_tests():
     await result.record_async(
         "mint_agentcard_setup_state",
         test_mint_purchase_card_activity_returns_agentcard_setup_state,
+    )
+    result.record(
+        "mint_timeout_budget_exceeds_backend_retry_window",
+        test_mint_purchase_card_timeout_budget_exceeds_backend_retry_window,
     )
     await result.record_async("agentcard_status_boundary", test_agentcard_status_activity_boundary)
     teardown_mock()

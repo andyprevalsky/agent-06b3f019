@@ -14,6 +14,9 @@ from helpers.tracing import current_root_agent_id
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 
 logger = structlog.get_logger()
+MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS = 60.0
+MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS = 90.0
+MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS = 85.0
 KYC_REQUIRED_CODES = {
     "kyc_required",
     "customer_kyc_required",
@@ -97,9 +100,7 @@ async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dic
         "subtotalCents": payload.get("subtotalCents") or 0,
         "totalCents": payload.get("totalCents") or 0,
     }
-    # Backend bounds the AgentCard company-flow attempt to 45s. Keep explicit transport
-    # headroom so its typed retry response arrives before the 90s Temporal activity deadline.
-    async with httpx.AsyncClient(timeout=70.0) as client:
+    async with httpx.AsyncClient(timeout=MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/purchases/mint",
             json=body,

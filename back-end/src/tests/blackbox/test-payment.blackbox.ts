@@ -282,17 +282,20 @@ const tests: Array<[string, () => Promise<void>]> = [
         listStripeRefunds: async () => ({
           data: [{ id: 're-1', status: 'succeeded', amount: 4396 }],
         }),
-        listOrgTransfers: async () => {
+        listOrgTransfers: async ({ status }) => {
           transferReads += 1;
+          if (status !== 'consumed' && status !== 'reclaimed') {
+            return { structuredContent: { transfers: [] } };
+          }
           return {
             structuredContent: {
               transfers: [
                 {
                   id: 'transfer-1',
-                  status: transferReads === 1 ? 'consumed' : 'reclaimed',
+                  status,
                   amount_cents: 4396,
                   transferred_cents: 4396,
-                  released_cents: transferReads === 1 ? 0 : 4396,
+                  released_cents: status === 'reclaimed' ? 4396 : 0,
                   card_id: 'card-1',
                   livemode: false,
                 },
@@ -311,7 +314,7 @@ const tests: Array<[string, () => Promise<void>]> = [
       assert(result.agentCard?.balanceCents === 0, 'expected empty card balance');
       assert(result.orgTransfer?.status === 'reclaimed', 'expected newest reclaimed org transfer');
       assert(result.orgTransfer?.releasedCents === 4396, 'expected full released transfer amount');
-      assert(transferReads === 2, 'expected lifecycle transfer cross-check');
+      assert(transferReads === 5, 'expected lifecycle cross-check across every transfer status');
       assert(result.orgTransfer?.livemode === false, 'expected sandbox transfer');
       assert(result.attention.openKinds.length === 0, 'setup attention should be resolved');
       assert(

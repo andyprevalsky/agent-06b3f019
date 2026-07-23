@@ -23,6 +23,7 @@ import {
 import * as purchasesService from '../../domains/purchases/service';
 import {
   assert,
+  capturedPaymentIntent,
   FakeCardProvider,
   FakeWalletFundingProvider,
   StubCardStateProvider,
@@ -155,14 +156,12 @@ test('failed Stripe refund is recorded specifically and retried idempotently', a
     { refundError: new Error('temporary Stripe refund failure') }
   );
 
+  const stripe = { retrievePaymentIntent: capturedPaymentIntent };
   await withFakeStripe(async (calls) => {
     await reconcileFailedPurchaseRefunds({ userId });
     assert(calls.refunds.length === 1, `expected one refund retry, got ${calls.refunds.length}`);
-    assert(
-      calls.refundIdempotencyKeys[0] === `purchase-refund:${purchaseId}`,
-      'refund retry must retain its purchase-scoped idempotency key'
-    );
-  });
+    assert(calls.refundIdempotencyKeys[0] === `purchase-refund:${purchaseId}`, 'wrong refund key');
+  }, stripe);
   const recovered = await prisma.purchaseSpend.findUnique({ where: { id: purchaseId } });
   assert(recovered?.status === 'REFUNDED', `expected REFUNDED, got ${recovered?.status}`);
 });
@@ -211,11 +210,7 @@ test('failed company release is retried before the captured charge is refunded',
       assert(matchingRefunds.length === 1, 'expected one refund after confirmed reclaim');
     },
     {
-      retrievePaymentIntent: () => ({
-        id: paymentIntentId,
-        status: 'succeeded',
-        amount_received: 1000,
-      }),
+      retrievePaymentIntent: capturedPaymentIntent,
     }
   );
   const recovered = await prisma.purchaseSpend.findUnique({ where: { id: purchase.id } });
@@ -367,6 +362,7 @@ test('cleanup refunds the captured charge and voids an un-spent funded card', as
   // FakeCardProvider.getDetails reports a live (unspent) card, so cleanup must refund it.
   const provider = new FakeCardProvider();
   const fingerprint = `cleanup-${randomUUID()}`;
+  const paymentIntentId = `pi_${randomUUID()}`;
 
   await prisma.purchaseSpend.create({
     data: {
@@ -378,11 +374,12 @@ test('cleanup refunds the captured charge and voids an un-spent funded card', as
       lineItemsJson: { totalCents: 1000 },
       totalCents: 1000,
       status: PurchaseSpendStatus.HELD,
-      stripePaymentIntentId: `pi_${randomUUID()}`,
+      stripePaymentIntentId: paymentIntentId,
     },
   });
 
   await withFakeStripe(async (calls) => {
+    calls.captures.push(paymentIntentId);
     await cleanupAgentPurchaseCards(agentId, provider);
 
     assert(provider.closeCalls === 1, `expected one provider close, got ${provider.closeCalls}`);
@@ -405,6 +402,7 @@ test('terminal-agent reconciler finds and cleans up an abandoned funded card', a
   const agentId = await createAgent(userId, 'terminal-reconcile');
   const provider = new FakeCardProvider();
   const walletFundingProvider = new FakeWalletFundingProvider();
+  const paymentIntentId = `pi_${randomUUID()}`;
   const purchase = await prisma.purchaseSpend.create({
     data: {
       userId,
@@ -415,7 +413,7 @@ test('terminal-agent reconciler finds and cleans up an abandoned funded card', a
       lineItemsJson: { totalCents: 1000 },
       totalCents: 1000,
       status: PurchaseSpendStatus.HELD,
-      stripePaymentIntentId: `pi_${randomUUID()}`,
+      stripePaymentIntentId: paymentIntentId,
     },
   });
   await prisma.purchaseWalletFunding.create({
@@ -433,6 +431,7 @@ test('terminal-agent reconciler finds and cleans up an abandoned funded card', a
   await prisma.agent.update({ where: { id: agentId }, data: { status: 'COMPLETED' } });
 
   await withFakeStripe(async (calls) => {
+    calls.captures.push(paymentIntentId);
     await reconcileTerminalAgentPurchaseCards(provider, walletFundingProvider, { userId });
     assert(provider.closeCalls === 1, `expected one card close, got ${provider.closeCalls}`);
     assert(calls.refunds.length === 1, `expected one refund, got ${calls.refunds.length}`);

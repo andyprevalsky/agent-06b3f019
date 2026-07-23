@@ -169,13 +169,13 @@ const tests: Array<[string, () => Promise<void>]> = [
           )
         );
         assert(error.message.includes('card details failed'), 'the mint failure must surface');
-        // Card was minted + funding recorded + charge captured, then getDetails failed. The
-        // compensating close throws, so the payment reversal is deliberately skipped for manual
-        // reconciliation.
+        // Card was minted and funding recorded, then getDetails failed before capture. The
+        // compensating close throws, so the hold is deliberately preserved until funding
+        // reconciliation can safely release it.
         assert(provider.closeCalls === 1, 'rollback must attempt to close the issued card');
-        assert(calls.captures.length === 1, 'the hold was captured before the failure');
-        assert(calls.cancels.length === 0, 'a captured charge is never canceled');
-        assert(calls.refunds.length === 0, 'reversal is skipped when the card close fails');
+        assert(calls.captures.length === 0, 'card details must be verified before capture');
+        assert(calls.cancels.length === 0, 'the hold stays while funding reclaim is unresolved');
+        assert(calls.refunds.length === 0, 'an uncaptured hold is never refunded');
 
         const row = await prisma.purchaseSpend.findFirst({ where: { userId, fingerprint } });
         assert(
@@ -186,7 +186,7 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'mint records REFUND_FAILED when the captured charge cannot be reversed',
+    'mint records REFUND_FAILED when the uncaptured hold cannot be canceled',
     async () => {
       const userId = await createSubscribedUser('refund-fail');
       const provider = new FailingDetailsCardProvider();
@@ -203,15 +203,16 @@ const tests: Array<[string, () => Promise<void>]> = [
             )
           );
           assert(error.message.includes('card details failed'), 'the mint failure must surface');
-          // Card minted + captured, getDetails failed; the card closed cleanly and its funding was
-          // reclaimed, so the captured charge must be refunded — but the refund fails here.
+          // Card minted, then getDetails failed before capture. The card closed cleanly and its
+          // funding was reclaimed, so the hold must be canceled — but cancellation fails here.
           assert(provider.closeCalls === 1, 'the issued card must be closed on rollback');
           assert(
             walletProvider.reclaimCalls.length === 1,
             'the recorded funding must be reclaimed before the refund attempt'
           );
-          assert(calls.captures.length === 1, 'the hold was captured before the failure');
-          assert(calls.refunds.length === 0, 'the refund attempt threw, so none was recorded');
+          assert(calls.captures.length === 0, 'card details must be verified before capture');
+          assert(calls.cancels.length === 0, 'the cancel attempt threw, so none was recorded');
+          assert(calls.refunds.length === 0, 'an uncaptured hold is never refunded');
 
           const row = await prisma.purchaseSpend.findFirst({ where: { userId, fingerprint } });
           assert(
@@ -219,7 +220,7 @@ const tests: Array<[string, () => Promise<void>]> = [
             `expected REFUND_FAILED, got ${row?.status}`
           );
         },
-        { refundError: new Error('temporary Stripe refund failure') }
+        { cancelError: new Error('temporary Stripe cancellation failure') }
       );
     },
   ],

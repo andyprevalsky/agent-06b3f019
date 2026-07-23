@@ -22,17 +22,18 @@ import {
   reconcileStaleChargingPurchases,
   reconcileTerminalAgentPurchaseCards,
 } from '../../providers/purchaseCleanup';
+import { WalletFundingProviderError } from '../../providers/wallet-funding';
 import {
-  WalletFundingProviderError,
-  type WalletFundingReclaimRequest,
-  type WalletFundingResult,
-} from '../../providers/wallet-funding';
-import {
+  capturedPaymentIntent,
   FailingDetailsCardProvider,
   FakeWalletFundingProvider,
   StubCardStateProvider,
   withFakeStripe,
 } from '../blackbox/purchases.testkit';
+import {
+  ConcurrentlyVoidedWalletProvider,
+  ReclaimErrorWalletProvider,
+} from './purchase-cleanup.testkit';
 
 const createdUserIds: string[] = [];
 let passed = 0;
@@ -46,41 +47,6 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
   } catch (error) {
     failures.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
     process.stdout.write(`  FAIL ${name}\n`);
-  }
-}
-
-class ReclaimErrorWalletProvider extends FakeWalletFundingProvider {
-  constructor(private readonly error: Error) {
-    super();
-  }
-  async reclaimUserWalletFunding(
-    request: WalletFundingReclaimRequest
-  ): Promise<WalletFundingResult> {
-    this.reclaimCalls.push(request);
-    throw this.error;
-  }
-}
-
-class ConcurrentlyVoidedWalletProvider extends FakeWalletFundingProvider {
-  async reclaimUserWalletFunding(
-    request: WalletFundingReclaimRequest
-  ): Promise<WalletFundingResult> {
-    this.reclaimCalls.push(request);
-    await prisma.$transaction([
-      prisma.purchaseWalletFunding.update({
-        where: { purchaseId: request.purchaseId },
-        data: { status: PurchaseWalletFundingStatus.RECLAIMED },
-      }),
-      prisma.purchaseSpend.update({
-        where: { id: request.purchaseId },
-        data: { status: PurchaseSpendStatus.VOIDED },
-      }),
-    ]);
-    throw new WalletFundingProviderError(
-      'stale concurrent reclaim result',
-      409,
-      'agentcard_company_transfer_consumed_during_reclaim'
-    );
   }
 }
 
@@ -191,14 +157,17 @@ async function main(): Promise<void> {
     const purchaseId = await seedHeld(userId, { agentId });
     await seedFunding(purchaseId, userId, PurchaseWalletFundingStatus.FUNDED);
     const wallet = new FakeWalletFundingProvider();
-    await withFakeStripe(async (calls) => {
-      await cleanupAgentPurchaseCards(
-        agentId,
-        new StubCardStateProvider({ status: 'OPEN', balanceCents: 1080 }),
-        wallet
-      );
-      assert.equal(calls.refunds.length, 1, 'unspent cleanup must refund the captured charge');
-    });
+    await withFakeStripe(
+      async (calls) => {
+        await cleanupAgentPurchaseCards(
+          agentId,
+          new StubCardStateProvider({ status: 'OPEN', balanceCents: 1080 }),
+          wallet
+        );
+        assert.equal(calls.refunds.length, 1, 'unspent cleanup must refund the captured charge');
+      },
+      { retrievePaymentIntent: capturedPaymentIntent }
+    );
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.VOIDED);
     assert.equal(wallet.reclaimCalls.length, 1);
     const funding = await prisma.purchaseWalletFunding.findUnique({ where: { purchaseId } });
@@ -294,11 +263,25 @@ async function main(): Promise<void> {
   await test('reconcileFailedPurchaseRefunds retries and marks REFUNDED', async () => {
     const userId = await seedUser();
     const purchaseId = await seedHeld(userId, { status: PurchaseSpendStatus.REFUND_FAILED });
+    await withFakeStripe(
+      async (calls) => {
+        await reconcileFailedPurchaseRefunds({ userId });
+        assert.equal(calls.refunds.length, 1);
+      },
+      { retrievePaymentIntent: capturedPaymentIntent }
+    );
+    assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.REFUNDED);
+  });
+
+  await test('reconcileFailedPurchaseRefunds cancels an uncaptured hold and marks FAILED', async () => {
+    const userId = await seedUser();
+    const purchaseId = await seedHeld(userId, { status: PurchaseSpendStatus.REFUND_FAILED });
     await withFakeStripe(async (calls) => {
       await reconcileFailedPurchaseRefunds({ userId });
-      assert.equal(calls.refunds.length, 1);
+      assert.equal(calls.cancels.length, 1);
+      assert.equal(calls.refunds.length, 0);
     });
-    assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.REFUNDED);
+    assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.FAILED);
   });
 
   await test('reconcileFailedPurchaseFundingReclaims reclaims then voids', async () => {
@@ -308,10 +291,13 @@ async function main(): Promise<void> {
     });
     await seedFunding(purchaseId, userId, PurchaseWalletFundingStatus.FUNDED);
     const wallet = new FakeWalletFundingProvider();
-    await withFakeStripe(async (calls) => {
-      await reconcileFailed(wallet, userId);
-      assert.equal(calls.cancels.length, 1);
-    });
+    await withFakeStripe(
+      async (calls) => {
+        await reconcileFailed(wallet, userId);
+        assert.equal(calls.refunds.length, 1);
+      },
+      { retrievePaymentIntent: capturedPaymentIntent }
+    );
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.VOIDED);
     assert.equal(wallet.reclaimCalls.length, 1);
   });
@@ -408,7 +394,10 @@ async function main(): Promise<void> {
           new FakeWalletFundingProvider()
         );
       },
-      { refundError: new Error('stripe refund unavailable') }
+      {
+        refundError: new Error('stripe refund unavailable'),
+        retrievePaymentIntent: capturedPaymentIntent,
+      }
     );
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.REFUND_FAILED);
   });
@@ -421,25 +410,28 @@ async function main(): Promise<void> {
     // merchant settled it. A concurrent cleanup must leave the active release owner alone.
     await seedFunding(purchaseId, userId, PurchaseWalletFundingStatus.RECLAIMING);
     const wallet = new FakeWalletFundingProvider();
-    await withFakeStripe(async (calls) => {
-      await cleanupAgentPurchaseCards(
-        agentId,
-        new StubCardStateProvider({ status: 'CLOSED', balanceCents: 0 }),
-        wallet
-      );
-      assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.HELD);
-      assert.equal(wallet.reclaimCalls.length, 0);
-      assert.equal(calls.refunds.length, 0);
-      await reconcileFailed(wallet, userId);
-      assert.equal(wallet.reclaimCalls.length, 0, 'minute cron must skip a fresh reclaim owner');
+    await withFakeStripe(
+      async (calls) => {
+        await cleanupAgentPurchaseCards(
+          agentId,
+          new StubCardStateProvider({ status: 'CLOSED', balanceCents: 0 }),
+          wallet
+        );
+        assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.HELD);
+        assert.equal(wallet.reclaimCalls.length, 0);
+        assert.equal(calls.refunds.length, 0);
+        await reconcileFailed(wallet, userId);
+        assert.equal(wallet.reclaimCalls.length, 0, 'minute cron must skip a fresh reclaim owner');
 
-      await prisma.purchaseWalletFunding.update({
-        where: { purchaseId },
-        data: { updatedAt: new Date(Date.now() - 3 * 60 * 1000) },
-      });
-      await reconcileFailed(wallet, userId);
-      assert.equal(calls.cancels.length, 1);
-    });
+        await prisma.purchaseWalletFunding.update({
+          where: { purchaseId },
+          data: { updatedAt: new Date(Date.now() - 3 * 60 * 1000) },
+        });
+        await reconcileFailed(wallet, userId);
+        assert.equal(calls.refunds.length, 1);
+      },
+      { retrievePaymentIntent: capturedPaymentIntent }
+    );
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.VOIDED);
     assert.equal(wallet.reclaimCalls.length, 1);
   });
@@ -449,6 +441,7 @@ async function main(): Promise<void> {
     const purchaseId = await seedHeld(userId, { status: PurchaseSpendStatus.REFUND_FAILED });
     await withFakeStripe(async () => await reconcileFailedPurchaseRefunds({ userId }), {
       refundError: new Error('still failing'),
+      retrievePaymentIntent: capturedPaymentIntent,
     });
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.REFUND_FAILED);
   });

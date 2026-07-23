@@ -67,7 +67,9 @@ export async function create(data: CreateAttentionRequestInput) {
     }
     try {
       const created = await repo.create(data);
-      if (gate !== undefined) await emitGateMessage(data.agentId, gate, created.id);
+      if (gate !== undefined) {
+        await emitGateMessage(data.agentId, data.workflowId, gate, created.id);
+      }
       const gateSms = gate !== undefined ? await maybeDispatchGateSms(data, gate) : undefined;
       log.info('Attention request created (gate)', {
         request_id: created.id,
@@ -90,7 +92,9 @@ export async function create(data: CreateAttentionRequestInput) {
   }
 
   const request = await repo.create(data);
-  if (gate !== undefined) await emitGateMessage(data.agentId, gate, request.id);
+  if (gate !== undefined) {
+    await emitGateMessage(data.agentId, data.workflowId, gate, request.id);
+  }
   const gateSms = gate !== undefined ? await maybeDispatchGateSms(data, gate) : undefined;
   log.info('Attention request created', {
     request_id: request.id,

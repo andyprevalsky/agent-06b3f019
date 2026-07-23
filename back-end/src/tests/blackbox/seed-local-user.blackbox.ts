@@ -1,6 +1,10 @@
 #!/usr/bin/env tsx
 
-import { runSyncStep, syncUserRecord } from '../../../scripts/seed-local-helpers';
+import {
+  runSyncStep,
+  syncUserRecord,
+  syncWaitlistAccounts,
+} from '../../../scripts/seed-local-helpers';
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -83,10 +87,44 @@ async function testMissingOptionalUser(): Promise<void> {
   assert(!upserted, 'expected no local upsert for a missing optional user');
 }
 
+async function testScopedUsersPreserveLocalIdentity(): Promise<void> {
+  const existing = {
+    id: 'local-user-row',
+    userId: 'seed-user',
+    phone: '+15555550123',
+    usedInviteCode: null,
+  };
+  const remote = {
+    ...existing,
+    id: 'remote-user-row',
+    usedInviteCode: 42,
+  };
+  let stored = existing;
+
+  await syncWaitlistAccounts(
+    {
+      findMany: async () => [remote],
+    },
+    {
+      upsert: async ({ where, create, update }) => {
+        if (where.userId !== stored.userId && create.userId === stored.userId) {
+          throw new Error('Unique constraint failed on the fields: (`userId`)');
+        }
+        stored = { ...stored, ...update };
+      },
+    },
+    [remote.phone]
+  );
+
+  assert(stored.id === existing.id, 'expected the local primary key to be preserved');
+  assert(stored.usedInviteCode === 42, 'expected remote account fields to be refreshed');
+}
+
 async function main(): Promise<void> {
   await testProductionColumnCompatibility();
   await testSyncFailureIsFatal();
   await testMissingOptionalUser();
+  await testScopedUsersPreserveLocalIdentity();
   console.log('PASS seed-local user compatibility');
 }
 

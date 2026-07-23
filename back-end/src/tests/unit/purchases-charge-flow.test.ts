@@ -13,7 +13,9 @@ import { prisma } from '../../providers/database';
 import { lookupPurchase, mintPurchaseCard, PurchaseError } from '../../domains/purchases/service';
 import type { MintPurchaseInput } from '../../domains/purchases/types';
 import {
+  AgentCardProviderError,
   AgentCardRoutingProvider,
+  type CardProviderMintRequest,
   createCardProviderForAgent,
   StaticRoseAgentCardProvider,
 } from '../../providers/card-provider';
@@ -37,6 +39,29 @@ const STATIC_CARD_ENV = {
 const createdUserIds: string[] = [];
 let passed = 0;
 const failures: string[] = [];
+
+class TransferlessFundingInProgressCardProvider extends FakeCardProvider {
+  private returnedFundingGate = false;
+
+  async mintCard(request: CardProviderMintRequest) {
+    if (!this.returnedFundingGate) {
+      this.returnedFundingGate = true;
+      this.mintCalls += 1;
+      this.mintRequests.push(request);
+      throw new AgentCardProviderError(
+        'AgentCard company funding is in progress',
+        409,
+        undefined,
+        'agentcard_company_funding_in_progress',
+        {
+          agentcardStatus: 'funding_in_progress',
+          retryAfterSeconds: 0,
+        }
+      );
+    }
+    return super.mintCard(request);
+  }
+}
 
 async function test(name: string, fn: () => Promise<void>): Promise<void> {
   try {
@@ -111,15 +136,16 @@ async function main(): Promise<void> {
     assert.equal(await latestStatus(userId, input.fingerprint), PurchaseSpendStatus.HELD);
   });
 
-  await test('mintPurchaseCard rolls back and refunds when card details fail', async () => {
+  await test('mintPurchaseCard reclaims and cancels when pre-capture card details fail', async () => {
     const userId = await seedSubscribedUser();
     const provider = new FailingDetailsCardProvider();
     const wallet = new FakeWalletFundingProvider();
     const input = mintInput(userId);
     await withFakeStripe(async (calls) => {
       await assert.rejects(() => mintPurchaseCard(input, provider, wallet), /card details failed/);
-      assert.equal(calls.captures.length, 1, 'capture happened before details failed');
-      assert.equal(calls.refunds.length, 1, 'the captured charge is refunded on rollback');
+      assert.equal(calls.captures.length, 0, 'card details are verified before capture');
+      assert.equal(calls.cancels.length, 1, 'the uncaptured hold is canceled on rollback');
+      assert.equal(calls.refunds.length, 0, 'an uncaptured hold must never be refunded');
     });
     assert.equal(provider.closeCalls, 1, 'the issued card is closed on failure');
     assert.equal(wallet.reclaimCalls.length, 1, 'the funding is reclaimed on failure');
@@ -139,6 +165,21 @@ async function main(): Promise<void> {
       'the settling company transfer is confirmed before the card mints'
     );
     assert.equal(provider.mintCalls, 2, 'mint retried after the funding-in-progress signal');
+  });
+
+  await test('mintPurchaseCard retries transferless AgentCard funding-in-progress', async () => {
+    const userId = await seedSubscribedUser();
+    const provider = new TransferlessFundingInProgressCardProvider();
+    const wallet = new FakeWalletFundingProvider();
+    const input = mintInput(userId);
+    const result = await withFakeStripe(async () => mintPurchaseCard(input, provider, wallet));
+    assert.equal(result.status, PurchaseSpendStatus.HELD);
+    assert.equal(provider.mintCalls, 2, 'mint retried after transferless funding signal');
+    assert.equal(
+      wallet.confirmCalls.length,
+      0,
+      'no transfer is confirmed until AgentCard returns a concrete transfer id'
+    );
   });
 
   await test('mintPurchaseCard validates its inputs before touching Stripe', async () => {

@@ -217,7 +217,7 @@ async function closeIssuedCardOnFailure(
   }
 }
 
-/** Reverse the Stripe charge (refund if captured, else cancel the hold) after a mint failure. */
+/** Reverse Stripe (refund if captured, else cancel the hold) after a mint failure. */
 async function reverseStripePaymentOnFailure(
   state: ChargeState,
   purchaseId: string
@@ -276,7 +276,7 @@ async function rollbackChargeFailure(
       ? PurchaseSpendStatus.FUNDING_PENDING
       : state.walletReclaimFailed
         ? PurchaseSpendStatus.FUNDING_RECLAIM_FAILED
-        : state.paymentIntentCaptured && state.paymentReversalFailed
+        : state.paymentReversalFailed
           ? PurchaseSpendStatus.REFUND_FAILED
           : PurchaseSpendStatus.FAILED,
     {
@@ -293,9 +293,9 @@ async function rollbackChargeFailure(
 }
 
 /**
- * Authorize the user's saved card, mint the company-funded single-use card, then capture the
- * user's charge as soon as AgentCard confirms the transfer. A returned card is therefore always
- * fully funded. If any later setup step fails, close/reclaim the card and refund the charge.
+ * Authorize the user's saved card, mint the company-funded single-use card, verify that the
+ * returned card is live and fully funded, then capture the charge. Failures before capture close
+ * and reclaim the card before canceling the hold; failures after capture refund the charge.
  */
 export async function chargeAndIssueCard(
   purchase: PurchaseSpend,

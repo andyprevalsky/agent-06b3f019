@@ -100,9 +100,9 @@ export async function mintCompanyFlowCard(
         });
       }
 
-      // Honor a provider-requested retry-after as the MINIMUM delay (never shorten it below the
-      // default interval, which would hammer/throttle AgentCard). If we cannot wait that long
-      // within the remaining deadline, give up now with the typed 409 instead of over-sleeping.
+      // Honor a provider-requested retry-after as the minimum delay. If it would overshoot this
+      // HTTP attempt, return the durable retry state now; the workflow owns the longer retry window
+      // and will replay this exact purchase/card key after the provider-requested delay.
       const retryMs =
         funding.retryAfterSeconds !== undefined
           ? Math.max(AGENTCARD_COMPANY_FLOW_RETRY_MS, funding.retryAfterSeconds * 1000)

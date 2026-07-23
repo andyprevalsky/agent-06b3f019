@@ -8,7 +8,7 @@ import {
 } from './card-provider';
 import { prisma } from './database';
 import { createLogger } from './logger';
-import { cancelAuthorizedHold, refundCapturedPurchase, stripe } from './stripe';
+import { cancelAuthorizedHold, reversePurchasePaymentIntent, stripe } from './stripe';
 import {
   isWalletFundingConsumedDuringReclaimError,
   isWalletFundingReleasePendingError,
@@ -98,22 +98,6 @@ function hasDissolvedHold(paymentIntent: unknown): boolean {
     return true;
   }
   return false;
-}
-
-async function reverseUnreturnedPurchasePayment(
-  purchaseId: string,
-  paymentIntentId: string
-): Promise<void> {
-  const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-  const candidate = paymentIntent as { status?: unknown; amount_received?: unknown };
-  if (
-    candidate.status === 'succeeded' ||
-    (typeof candidate.amount_received === 'number' && candidate.amount_received > 0)
-  ) {
-    await refundCapturedPurchase(paymentIntentId, purchaseId);
-  } else {
-    await cancelAuthorizedHold(paymentIntentId);
-  }
 }
 
 /**
@@ -227,7 +211,7 @@ export async function cleanupAgentPurchaseCards(
         }
         if (purchase.stripePaymentIntentId) {
           try {
-            await refundCapturedPurchase(purchase.stripePaymentIntentId, purchase.id);
+            await reversePurchasePaymentIntent(purchase.stripePaymentIntentId, purchase.id);
           } catch (refundError) {
             await prisma.purchaseSpend.update({
               where: { id: purchase.id },
@@ -252,7 +236,7 @@ export async function cleanupAgentPurchaseCards(
   }
 }
 
-/** Retry captured funding charges whose AgentCard transfer was already reclaimed. */
+/** Retry Stripe reversals whose AgentCard transfer was already reclaimed. */
 export async function reconcileFailedPurchaseRefunds(
   scope?: PurchaseReconcileScope
 ): Promise<void> {
@@ -268,13 +252,19 @@ export async function reconcileFailedPurchaseRefunds(
   for (const purchase of failedRefunds) {
     if (purchase.stripePaymentIntentId === null) continue;
     try {
-      await refundCapturedPurchase(purchase.stripePaymentIntentId, purchase.id);
+      const reversal = await reversePurchasePaymentIntent(
+        purchase.stripePaymentIntentId,
+        purchase.id
+      );
       await prisma.purchaseSpend.update({
         where: { id: purchase.id },
-        data: { status: PurchaseSpendStatus.REFUNDED },
+        data: {
+          status:
+            reversal === 'refunded' ? PurchaseSpendStatus.REFUNDED : PurchaseSpendStatus.FAILED,
+        },
       });
     } catch (error) {
-      log.warn('Failed to retry captured purchase refund', {
+      log.warn('Failed to retry purchase payment reversal', {
         purchase_id: purchase.id,
         stripe_payment_intent_id: purchase.stripePaymentIntentId,
         error: error instanceof Error ? error.message : String(error),
@@ -369,7 +359,7 @@ export async function reconcileFailedPurchaseFundingReclaims(
           : {}
       );
       if (purchase.stripePaymentIntentId !== null) {
-        await reverseUnreturnedPurchasePayment(purchase.id, purchase.stripePaymentIntentId);
+        await reversePurchasePaymentIntent(purchase.stripePaymentIntentId, purchase.id);
       }
       await prisma.purchaseSpend.update({
         where: { id: purchase.id },

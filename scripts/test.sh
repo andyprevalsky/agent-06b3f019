@@ -280,6 +280,7 @@ run_suite "Cloud Benchmark Seed Budget" bash scripts/tests/cloudbench-seed-budge
 run_suite "Cloud Benchmark Restore Readiness" bash scripts/tests/cloudbench-restore-readiness.test.sh
 run_suite "Cloud Benchmark Orphan-Proxy Reaper" bash scripts/tests/fleet-orphan-proxy-reaper.test.sh
 run_suite "Seed-Dump Cache Decision" bash scripts/tests/seed-cache-decision.test.sh
+run_suite "Seed-Dump Toolchain Compatibility" bash scripts/tests/seed-dump-toolchain.test.sh
 run_suite "Fast-Mode Cache Schema Retry" bash scripts/tests/fast-mode-cache-schema-retry.test.sh
 run_suite "Workspace Dependency Preflight" bash scripts/tests/workspace-dependencies.test.sh
 
