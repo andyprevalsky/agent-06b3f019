@@ -40,6 +40,20 @@ export class GitHubAccessDeniedError extends Error {
   }
 }
 
+export class AgentOwnerMismatchError extends Error {
+  constructor() {
+    super('The supplied user_id does not own this agent');
+    this.name = 'AgentOwnerMismatchError';
+  }
+}
+
+export class AgentContextLookupError extends Error {
+  constructor() {
+    super('Failed to resolve the agent owner and GitHub repository');
+    this.name = 'AgentContextLookupError';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Create session
 // ---------------------------------------------------------------------------
@@ -67,36 +81,45 @@ export async function resolveAgentContext(
 ): Promise<{ repoUrl: string | undefined; userId: string | undefined }> {
   try {
     const agent = await repo.findAgentGithubInfo(agentId);
-    const resolvedUserId =
-      userId !== undefined && userId !== '' ? userId : (agent?.userId ?? undefined);
-    if (agent?.githubRepoUrl !== undefined && agent.githubRepoUrl !== null) {
-      return {
-        repoUrl: agent.githubRepoUrl,
-        userId: resolvedUserId,
-      };
-    }
+    let storedOwnerId = agent?.userId ?? undefined;
+    let repoUrl = agent?.githubRepoUrl ?? undefined;
+
     if (
+      repoUrl === undefined &&
       agent?.busId !== undefined &&
       agent.busId !== null &&
       agent.busId !== '' &&
       agent.busId !== agentId
     ) {
       const rootAgent = await repo.findRootAgentGithubInfo(agent.busId);
-      if (rootAgent?.githubRepoUrl !== undefined && rootAgent.githubRepoUrl !== null) {
-        return {
-          repoUrl: rootAgent.githubRepoUrl,
-          userId: resolvedUserId ?? rootAgent.userId,
-        };
-      }
-      return { repoUrl: undefined, userId: resolvedUserId ?? rootAgent?.userId };
+      repoUrl = rootAgent?.githubRepoUrl ?? undefined;
+      storedOwnerId ??= rootAgent?.userId;
     }
-    return { repoUrl: undefined, userId: resolvedUserId };
+
+    const callerUserId = userId !== undefined && userId !== '' ? userId : undefined;
+    if (
+      storedOwnerId !== undefined &&
+      callerUserId !== undefined &&
+      callerUserId !== storedOwnerId
+    ) {
+      throw new AgentOwnerMismatchError();
+    }
+    const resolvedUserId = storedOwnerId ?? callerUserId;
+
+    if (agent?.githubRepoUrl !== undefined && agent.githubRepoUrl !== null) {
+      return {
+        repoUrl,
+        userId: resolvedUserId,
+      };
+    }
+    return { repoUrl, userId: resolvedUserId };
   } catch (err) {
     log.error('Failed to look up agent owner and GitHub repo', {
       error: err instanceof Error ? err.message : String(err),
     });
+    if (err instanceof AgentOwnerMismatchError) throw err;
+    throw new AgentContextLookupError();
   }
-  return { repoUrl: undefined, userId };
 }
 
 export async function createSession(params: CreateSessionParams): Promise<CreateSessionResult> {

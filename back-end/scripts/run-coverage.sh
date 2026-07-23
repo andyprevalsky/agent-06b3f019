@@ -193,7 +193,8 @@ SQL
   fi
   echo "Syncing Prisma schema to local test database..."
   npx prisma db push --skip-generate --accept-data-loss >/dev/null
-  bash "$SCRIPT_DIR/apply-local-workflow-ddl.sh"
+  DB_CONTAINER="$DB_CONTAINER" LOCAL_DB_NAME=victoria \
+    bash "$SCRIPT_DIR/apply-local-workflow-ddl.sh"
   # Credential seeding and smoke execution are separate controls. A caller may
   # pre-seed a valid production credential without disabling the real Codex
   # black-box test that consumes it.

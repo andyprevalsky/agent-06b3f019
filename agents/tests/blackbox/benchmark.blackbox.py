@@ -1,6 +1,7 @@
 """Blackbox tests for benchmark helpers."""
 
 import asyncio
+import hashlib
 import json
 import importlib.util
 import os
@@ -6305,10 +6306,14 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
 
     original_popen = local_bench.subprocess.Popen
     original_wait = local_bench.wait_for_services
+    original_prime = local_bench._prime_local_seed_dump_from_shared_stack
     prior_seed_dump = os.environ.pop("BENCHMARK_SEED_DUMP", None)
     try:
         local_bench.subprocess.Popen = fake_popen
         local_bench.wait_for_services = lambda *_args, **_kwargs: {"ports": {}}
+        local_bench._prime_local_seed_dump_from_shared_stack = (
+            lambda path: captured.setdefault("primed_seed_dump", path) is path
+        )
         with tempfile.TemporaryDirectory() as tmp:
             context_dir = Path(tmp) / "isolated-run"
             stack = local_bench.ServiceStack(
@@ -6326,13 +6331,64 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             assert seed_dump.parent == local_bench.BENCHMARK_CONTEXT_ROOT / "seed-cache"
             assert seed_dump.name.endswith(".dump")
             assert seed_dump.parent.is_dir()
+            assert captured["primed_seed_dump"] == seed_dump
             assert captured["env"]["BENCHMARK_REQUIRE_SEED_DUMP"] == "1"
             assert captured["command"] == ["bash", "scripts/run.sh", "--benchmark"]
     finally:
         local_bench.subprocess.Popen = original_popen
         local_bench.wait_for_services = original_wait
+        local_bench._prime_local_seed_dump_from_shared_stack = original_prime
         if prior_seed_dump is not None:
             os.environ["BENCHMARK_SEED_DUMP"] = prior_seed_dump
+
+
+def test_local_seed_dump_primes_once_from_healthy_shared_stack():
+    """Concurrent isolated launches reuse one schema-matched shared-stack snapshot."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        seed_dump = root / "seed-cache" / "current.dump"
+        manifest_path = root / "services.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "status": "running",
+                    "worktree": str(local_bench.REPO_ROOT),
+                    "ports": {"backend": 55100, "local_db": 55105},
+                    "database": {
+                        "container": "victoria-db-test",
+                        "name": "victoria",
+                        "port": 55105,
+                        "use_system_postgres": False,
+                    },
+                }
+            )
+        )
+        commands = []
+
+        def save_dump(command, **_kwargs):
+            commands.append(command)
+            Path(command[2]).parent.mkdir(parents=True, exist_ok=True)
+            Path(command[2]).write_bytes(b"seed-dump")
+            return subprocess.CompletedProcess(command, 0)
+
+        with (
+            patch.object(local_bench, "SERVICES_MANIFEST", manifest_path),
+            patch.object(local_bench, "http_ok", return_value=True),
+            patch.object(local_bench.subprocess, "run", side_effect=save_dump),
+        ):
+            assert local_bench._prime_local_seed_dump_from_shared_stack(seed_dump)
+            assert local_bench._prime_local_seed_dump_from_shared_stack(seed_dump)
+
+        assert len(commands) == 1
+        assert commands[0][-1] == "victoria-db-test"
+        schema_hash = hashlib.sha1(
+            (local_bench.REPO_ROOT / "back-end" / "prisma" / "schema.prisma").read_bytes()
+        ).hexdigest()
+        assert Path(f"{seed_dump}.schemahash").read_text() == schema_hash
 
 
 def test_local_start_services_reaps_process_when_readiness_fails():
@@ -9988,6 +10044,10 @@ async def run_all_tests():
     r.record(
         "local_start_services_readiness_cleanup",
         test_local_start_services_reaps_process_when_readiness_fails,
+    )
+    r.record(
+        "local_seed_dump_primes_from_shared_stack",
+        test_local_seed_dump_primes_once_from_healthy_shared_stack,
     )
     r.record(
         "local_start_services_cleanup_error_preserves_readiness_failure",

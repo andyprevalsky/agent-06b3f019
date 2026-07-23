@@ -824,6 +824,71 @@ def local_seed_dump_path() -> Path:
     return BENCHMARK_CONTEXT_ROOT / "seed-cache" / f"{schema_hash}-{day}.dump"
 
 
+def _prime_local_seed_dump_from_shared_stack(seed_dump: Path) -> bool:
+    """Snapshot a healthy shared stack when today's isolated seed cache is cold."""
+    schema = REPO_ROOT / "back-end" / "prisma" / "schema.prisma"
+    schema_hash = hashlib.sha1(schema.read_bytes()).hexdigest()
+    sidecar = Path(f"{seed_dump}.schemahash")
+    lock_path = Path(f"{seed_dump}.lock")
+    seed_dump.parent.mkdir(parents=True, exist_ok=True)
+
+    def current_dump_exists() -> bool:
+        try:
+            return seed_dump.stat().st_size > 0 and sidecar.read_text().strip() == schema_hash
+        except OSError:
+            return False
+
+    if current_dump_exists():
+        return True
+
+    with open(lock_path, "a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        if current_dump_exists():
+            return True
+        try:
+            manifest = json.loads(SERVICES_MANIFEST.read_text())
+            if manifest.get("status") != "running":
+                return False
+            manifest_worktree = manifest.get("worktree")
+            if manifest_worktree and Path(str(manifest_worktree)).resolve() != REPO_ROOT.resolve():
+                return False
+            ports = manifest.get("ports") if isinstance(manifest.get("ports"), dict) else {}
+            backend_port = ports.get("backend")
+            if not backend_port or not http_ok(f"http://localhost:{backend_port}/health"):
+                return False
+            database = (
+                manifest.get("database") if isinstance(manifest.get("database"), dict) else {}
+            )
+            database_name = database.get("name")
+            database_port = database.get("port") or ports.get("local_db")
+            if not database_name or not database_port:
+                return False
+            command = [
+                "bash",
+                str(REPO_ROOT / "scripts" / "save-seed-dump.sh"),
+                str(seed_dump),
+                "localhost",
+                str(database_port),
+                "postgres",
+                str(database_name),
+            ]
+            container = database.get("container")
+            if not database.get("use_system_postgres") and isinstance(container, str) and container:
+                command.append(container)
+            subprocess.run(command, cwd=REPO_ROOT, check=True)
+            sidecar_tmp = Path(f"{sidecar}.tmp-{os.getpid()}")
+            sidecar_tmp.write_text(schema_hash)
+            os.replace(sidecar_tmp, sidecar)
+            print(f"Primed isolated benchmark seed dump from shared stack: {seed_dump}")
+            return True
+        except Exception as exc:
+            print(
+                f"Warning: could not prime isolated benchmark seed dump from shared stack: {exc}",
+                file=sys.stderr,
+            )
+            return False
+
+
 def start_services(
     stack: ServiceStack,
     clean_first: bool = True,
@@ -855,6 +920,7 @@ def start_services(
         # records before services.json can be published.
         seed_dump = Path(env.get("BENCHMARK_SEED_DUMP") or local_seed_dump_path())
         seed_dump.parent.mkdir(parents=True, exist_ok=True)
+        _prime_local_seed_dump_from_shared_stack(seed_dump)
         env["BENCHMARK_SEED_DUMP"] = str(seed_dump)
         env["BENCHMARK_REQUIRE_SEED_DUMP"] = "1"
         if simulate:

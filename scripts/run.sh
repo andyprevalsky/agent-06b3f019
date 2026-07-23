@@ -781,7 +781,6 @@ else
 # Sync Prisma schema to local DB (idempotent, dev-only)
 echo "🐘 Syncing Prisma schema..."
 (cd back-end && npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
-(cd back-end && bash scripts/apply-local-workflow-ddl.sh)
 echo "🔎 Ensuring agent-network grep indexes..."
 (cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts)
 
@@ -858,6 +857,11 @@ if [ -n "$_SEED_DUMP" ]; then
 fi
 
 fi   # end: if $DB_RESTORED / else (push + seed + dump)
+
+# Restored dumps and schema pushes must both carry the hand-written production
+# functions/triggers that Prisma cannot represent.
+(cd back-end && DB_CONTAINER="$DB_CONTAINER" LOCAL_DB_NAME="$LOCAL_DB_NAME" \
+    bash scripts/apply-local-workflow-ddl.sh)
 
 # ── Pre-flight: ensure node_modules exist for all JS services ──
 JS_SVC_DIRS=(back-end front-end)
