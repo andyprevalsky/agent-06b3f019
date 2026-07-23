@@ -736,6 +736,10 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
         echo "   ✅ DB restored from dump"
     else
         echo "   ⚠️ restore failed — falling back to push + seed"
+        # The target database's own pg_restore just proved this archive bad.
+        # Invalidate it so a failed regeneration cannot make every later boot
+        # retry the same unreadable archive and matching schema sidecar.
+        rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
         if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]; then
             fail_required_seed_dump "Required isolated benchmark seed dump could not be restored; refusing a slow production cold-sync."
         fi
@@ -814,7 +818,7 @@ if [ -n "$_SEED_DUMP" ]; then
     fi
     if PGPASSWORD=postgres bash scripts/save-seed-dump.sh \
         "$_SEED_DUMP" localhost "$LOCAL_DB_ACTUAL_PORT" postgres "$LOCAL_DB_NAME" \
-        "$_SEED_DUMP_CONTAINER" 2>/dev/null; then
+        "$_SEED_DUMP_CONTAINER"; then
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
         echo "   ✅ seed dump saved ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}'))"
         # Publish to the shared cache so the NEXT clone (any workspace — including a
@@ -825,6 +829,8 @@ if [ -n "$_SEED_DUMP" ]; then
                 echo "   ☁️ published seed dump to shared cache ($_SEED_CACHE_TOKEN)"
             fi
         fi
+    else
+        echo "   ⚠️ seed dump save failed; no partial archive was published"
     fi
 fi
 

@@ -42,16 +42,24 @@ printf 'partial'
 exit 17
 EOF
 chmod +x "$TMP/bin/docker"
+printf 'known-good-archive' > "$TMP/out/failed.dump"
 if bash "$SAVE" "$TMP/out/failed.dump" localhost 5432 postgres victoria postgres-16; then
     echo "FAIL: failed pg_dump unexpectedly succeeded" >&2
     exit 1
 fi
-[ ! -e "$TMP/out/failed.dump" ]
+grep -qx 'known-good-archive' "$TMP/out/failed.dump"
 if find "$TMP/out" -name 'failed.dump.tmp.*' -print -quit | grep -q .; then
     echo "FAIL: failed pg_dump left a partial archive" >&2
     exit 1
 fi
-echo "PASS: failed dumps leave no publishable or partial archive"
+echo "PASS: failed dumps preserve a known-good archive and leave no partial"
 
-grep -q 'scripts/save-seed-dump.sh' "$RUN_SH"
-echo "PASS: run.sh uses the version-matched seed-dump helper"
+grep -q '_SEED_DUMP_CONTAINER="$DB_CONTAINER"' "$RUN_SH"
+SAVE_CALL="$(grep -A2 'bash scripts/save-seed-dump.sh' "$RUN_SH")"
+echo "$SAVE_CALL" | grep -q '"$LOCAL_DB_NAME"'
+echo "$SAVE_CALL" | grep -q '"$_SEED_DUMP_CONTAINER"'
+echo "PASS: run.sh passes the exact database and Docker container to the helper"
+
+RESTORE_FAILURE="$(grep -A7 'restore failed — falling back' "$RUN_SH")"
+echo "$RESTORE_FAILURE" | grep -q 'rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash"'
+echo "PASS: run.sh invalidates an archive already proven unrestorable"
