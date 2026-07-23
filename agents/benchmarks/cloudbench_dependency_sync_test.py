@@ -8124,6 +8124,25 @@ def test_cloud_dashboard_mirror_does_not_override_benchmark_frontend_url() -> No
     assert "BENCHMARK_REPORT_FRONTEND_URL" in DRIVER_SCRIPT.read_text()
 
 
+def test_cloud_driver_exports_reachable_public_frontend_before_start_barrier() -> None:
+    """Payment browser tasks must not start with localhost in {frontend_url}.
+
+    The stack can report backend/worker health before the public tunnel manifest
+    is usable. Browser agents run outside the Fly guest's localhost namespace, so
+    the driver must block before the synchronized start barrier and export the
+    reachable public frontend URL into run_benchmark.py.
+    """
+    driver = DRIVER_SCRIPT.read_text()
+
+    assert "manifest_public_frontend_url()" in driver
+    assert 'curl -fsS --max-time 5 "$public_url/test_payment"' in driver
+    assert 'BENCHMARK_FRONTEND_URL="$public_url"' in driver
+    assert "export BENCHMARK_FRONTEND_URL" in driver
+    assert driver.index("wait_for_benchmark_frontend_url || finish 1") < driver.index(
+        "synchronized start barrier ready"
+    )
+
+
 def test_cloud_test_payment_tasks_launch_bundled_frontend_with_supabase_env() -> None:
     """Cloud test-payment tasks must not expose Vite's dev module graph."""
     driver = DRIVER_SCRIPT.read_text()

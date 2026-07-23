@@ -141,6 +141,55 @@ run_with_heartbeat() {
     wait "$command_pid"
 }
 
+manifest_public_frontend_url() {
+    python3 - "$MANIFEST" <<'PY'
+import json
+import sys
+from urllib.parse import urlparse
+
+try:
+    with open(sys.argv[1]) as f:
+        manifest = json.load(f)
+except Exception:
+    sys.exit(0)
+
+url = (((manifest.get("urls") or {}).get("public")) or "").strip().rstrip("/")
+parsed = urlparse(url)
+if parsed.scheme != "https":
+    sys.exit(0)
+host = (parsed.hostname or "").lower()
+if host in {"localhost", "127.0.0.1"}:
+    sys.exit(0)
+print(url)
+PY
+}
+
+wait_for_benchmark_frontend_url() {
+    if [ "$BENCH_NEEDS_BUNDLED_FRONTEND" != "1" ]; then
+        return 0
+    fi
+    if [ "$BENCH_SIMULATE" = "1" ]; then
+        return 0
+    fi
+
+    local public_url
+    public_url=""
+    log "waiting for public frontend URL required by bundled browser/payment benchmark prompts..."
+    for _ in $(seq 1 180); do
+        public_url="$(manifest_public_frontend_url || true)"
+        if [ -n "$public_url" ] && curl -fsS --max-time 5 "$public_url/test_payment" >/dev/null 2>&1; then
+            BENCHMARK_FRONTEND_URL="$public_url"
+            export BENCHMARK_FRONTEND_URL
+            log "public benchmark frontend ready: $BENCHMARK_FRONTEND_URL"
+            return 0
+        fi
+        sleep 1
+    done
+
+    log "FATAL: bundled browser/payment benchmark requires a public frontend URL, but $MANIFEST did not publish a reachable https urls.public"
+    return 1
+}
+
 # ── Normalize the task list (comma OR space separated) into an array ────────
 # The controller may pass "a,b,c" or "a b c"; accept both.
 read -r -a BENCH_TASK_LIST <<< "$(printf '%s' "$BENCH_TASKS" | tr ',' ' ')"
@@ -648,6 +697,7 @@ if ! $STACK_READY; then
     finish 1
 fi
 log "stack healthy — backend :$BACKEND_PORT, WMH :$WMH_PORT, dashboard :$BENCH_DASHPORT"
+wait_for_benchmark_frontend_url || finish 1
 
 # Fleet batches hold every task here until every isolated stack is healthy.
 # The controller releases all machines together, so slow database/bootstrap
