@@ -76,6 +76,7 @@ require_text "$CANDIDATE_VALIDATOR" "activityTaskScheduledEventAttributes != nul
 require_text "$PROD_VALIDATOR" "workflowTaskFailedEventAttributes != null" "production validator must ignore protobuf nulls while rejecting real workflow-task failures"
 require_text "$PROD_VALIDATOR" "assertSameInstant" "production validator must compare restored timestamps as instants, not format strings"
 require_text "$PROD_VALIDATOR" "tokensIn: 1_360" "production validator must model legacy subtree token counters"
+require_text "$PROD_VALIDATOR" 'WorkflowType="RoseWorkerDeploymentActivationMarker" AND ExecutionStatus="Running"' "production validator must wait with the same visibility query used by marker cleanup"
 require_text "$CANDIDATE_VALIDATOR" "toolUsage.count" "candidate validator must prove no LLM/tool usage was billed"
 require_text "$CANDIDATE_VALIDATOR" "candidate_fixture_cleanup" "candidate validator must report fixture cleanup"
 
