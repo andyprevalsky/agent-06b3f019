@@ -95,8 +95,7 @@ async function testEarlyMissStartsLiveImmediately(): Promise<void> {
 async function testSlowMissNeverGatesFirstLiveChunk(): Promise<void> {
   const cache = deferred<CacheLookupResult<string>>();
   const winners: string[] = [];
-  const startedAt = Date.now();
-  const chunks = await collect(
+  const liveChunks = collect(
     hedge({
       cache: cache.promise,
       graceMs: 5,
@@ -104,10 +103,19 @@ async function testSlowMissNeverGatesFirstLiveChunk(): Promise<void> {
       createLive: async () => stream([{ content: 'first-live', marker: 'live' }]),
     })
   );
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  const outcome = await Promise.race([
+    liveChunks.then((chunks) => ({ kind: 'live' as const, chunks })),
+    new Promise<{ kind: 'timeout' }>((resolve) => {
+      watchdog = setTimeout(() => resolve({ kind: 'timeout' }), 1_000);
+    }),
+  ]);
+  if (watchdog) clearTimeout(watchdog);
 
-  assert.deepEqual(chunks, [{ content: 'first-live', marker: 'live' }]);
+  assert.equal(outcome.kind, 'live', 'unresolved cache lookup must not gate live content');
+  if (outcome.kind !== 'live') return;
+  assert.deepEqual(outcome.chunks, [{ content: 'first-live', marker: 'live' }]);
   assert.deepEqual(winners, ['live']);
-  assert.ok(Date.now() - startedAt < 80, 'late cache lookup must not gate live content');
   cache.resolve({ hit: false });
 }
 

@@ -1556,6 +1556,61 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
     return "$rc"
 }
 
+worker_ledger_lock_acquire() {  # worker_ledger_lock_acquire <bench-output-dir>
+    local lock="$1/worker-clones.ids.lock" owner="$1/worker-clones.ids.lock/owner"
+    local attempts="${WORKER_LEDGER_LOCK_ATTEMPTS:-100}" delay="${WORKER_LEDGER_LOCK_RETRY_SECONDS:-0.1}"
+    local stale_seconds="${WORKER_LEDGER_LOCK_STALE_SECONDS:-300}"
+    local self_pid="${BASHPID:-$$}" token now observed owner_pid owner_token owner_started age
+    case "$attempts" in ''|*[!0-9]*|0) echo "❌ invalid worker ledger lock attempts" >&2; return 1 ;; esac
+    case "$stale_seconds" in ''|*[!0-9]*) echo "❌ invalid worker ledger stale timeout" >&2; return 1 ;; esac
+    token="$self_pid.$(date +%s).$RANDOM"
+    for _ in $(seq 1 "$attempts"); do
+        if mkdir "$lock" 2>/dev/null; then
+            now="$(date +%s)"
+            if ! printf '%s %s %s\n' "$self_pid" "$token" "$now" > "$owner"; then
+                rmdir "$lock" 2>/dev/null || true
+                return 1
+            fi
+            WORKER_LEDGER_LOCK_TOKEN="$token"
+            return 0
+        fi
+
+        # Recover only an old lock whose owning process is definitely gone. The observed owner
+        # record is compared again before removal so a successor can never delete a newer lock.
+        observed="$(cat "$owner" 2>/dev/null || true)"
+        owner_pid=""; owner_token=""; owner_started=""
+        if [ -n "$observed" ]; then
+            read -r owner_pid owner_token owner_started < "$owner" 2>/dev/null || true
+        else
+            owner_started="$(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || true)"
+        fi
+        now="$(date +%s)"
+        case "$owner_started" in ''|*[!0-9]*) owner_started="$now" ;; esac
+        age=$((now - owner_started))
+        if [ "$age" -ge "$stale_seconds" ] \
+            && { [ -z "$owner_pid" ] || ! kill -0 "$owner_pid" 2>/dev/null; } \
+            && [ "$(cat "$owner" 2>/dev/null || true)" = "$observed" ]; then
+            rm -f "$owner" 2>/dev/null || true
+            rmdir "$lock" 2>/dev/null || true
+            continue
+        fi
+        sleep "$delay"
+    done
+    echo "❌ timed out acquiring worker ledger lock: $lock" >&2
+    return 1
+}
+
+worker_ledger_lock_release() {  # worker_ledger_lock_release <bench-output-dir>
+    local lock="$1/worker-clones.ids.lock" owner="$1/worker-clones.ids.lock/owner"
+    local expected="${WORKER_LEDGER_LOCK_TOKEN:-}" owner_pid actual owner_started
+    [ -n "$expected" ] || return 1
+    read -r owner_pid actual owner_started < "$owner" 2>/dev/null || return 1
+    [ "$actual" = "$expected" ] || return 1
+    rm -f "$owner" || return 1
+    rmdir "$lock" || return 1
+    WORKER_LEDGER_LOCK_TOKEN=""
+}
+
 clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] [vm-size] [memory-mb]
     local ledger="$1" source_id="${2:-$WARM_ID}"
     local vm_size="${3:-${FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}}" vm_memory="${4:-${FLEET_PRIMARY_VM_MEMORY:-4096}}"
@@ -1644,7 +1699,16 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
                 echo "❌ could not persist provider ID $target_id; name ownership remains for teardown" >&2
                 return 1
             fi
-            grep -Fxq "$target_id" "$ledger" 2>/dev/null || printf '%s\n' "$target_id" >> "$ledger"
+            if ! worker_ledger_lock_acquire "$(dirname "$ledger")"; then
+                echo "❌ could not lock clone ownership ledger for $target_id" >&2
+                return 1
+            fi
+            if ! grep -Fxq "$target_id" "$ledger" 2>/dev/null \
+                && ! printf '%s\n' "$target_id" >> "$ledger"; then
+                worker_ledger_lock_release "$(dirname "$ledger")" || true
+                return 1
+            fi
+            worker_ledger_lock_release "$(dirname "$ledger")" || return 1
             grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
             mv "$names_ledger.tmp" "$names_ledger"
         else
@@ -3044,7 +3108,7 @@ FLEET_PATCH_SHA256=""
 if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
    && cloudbench_worktree_has_changes "$ROOT_DIR"; then
     FLEET_PATCH_FILE="$(mktemp)"
-    if ! bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$FLEET_PATCH_FILE" \
+    if ! bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF" > "$FLEET_PATCH_FILE" \
         || [ ! -s "$FLEET_PATCH_FILE" ]; then
         echo "❌ could not create the fleet local workspace patch" >&2
         exit 1
@@ -3270,24 +3334,151 @@ worker_is_tracked() {  # worker_is_tracked <bench-output-dir> <worker-id>
         && grep -Fxq "$wid" "$out/worker-clones.ids" 2>/dev/null
 }
 
-# Provisioners publish only unique per-worker outcomes. The autoscaler process
-# is the sole writer of worker-ready.ids and autoscaler.failed, eliminating
-# append-vs-rewrite loss and making desired-capacity reconciliation authoritative
-# over a stale child outcome.
+cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
+    local cleanup_out="$1" cleanup_wid="$2" tracking_tmp ready_tmp grep_status rc=0
+    local claim="$1/worker-$2.cleanup-claim" self_pid="${BASHPID:-$$}"
+    local claim_token claim_line claim_pid claim_owner claim_started
+    claim_token="$self_pid.$(date +%s).$RANDOM"
+    local now age attempt=0 claimed=0
+    local claim_attempts="${WORKER_CLEANUP_CLAIM_ATTEMPTS:-300}"
+    local claim_delay="${WORKER_CLEANUP_CLAIM_RETRY_SECONDS:-0.1}"
+    local claim_stale="${WORKER_CLEANUP_CLAIM_STALE_SECONDS:-300}"
+    case "$claim_attempts" in ''|*[!0-9]*|0) echo "❌ invalid worker cleanup claim attempts" >&2; return 1 ;; esac
+    case "$claim_stale" in ''|*[!0-9]*) echo "❌ invalid worker cleanup stale timeout" >&2; return 1 ;; esac
+
+    # Claim only the target worker while holding the short ledger lock. Provider deletion is slow,
+    # so it runs after releasing that lock; other workers can be reconciled concurrently.
+    while [ "$attempt" -lt "$claim_attempts" ]; do
+        worker_ledger_lock_acquire "$cleanup_out" || return 1
+        if [ ! -f "$cleanup_out/worker-clones.ids" ]; then
+            worker_ledger_lock_release "$cleanup_out" || true
+            return 1
+        fi
+        if grep -Fxq "$cleanup_wid" "$cleanup_out/worker-clones.ids"; then
+            grep_status=0
+        else
+            grep_status=$?
+        fi
+        if [ "$grep_status" != "0" ]; then
+            worker_ledger_lock_release "$cleanup_out" || return 1
+            [ "$grep_status" = "1" ] && return 0
+            return 1
+        fi
+
+        if [ -f "$claim" ]; then
+            claim_line="$(cat "$claim" 2>/dev/null || true)"
+            claim_pid=""; claim_owner=""; claim_started=""
+            read -r claim_pid claim_owner claim_started < "$claim" 2>/dev/null || true
+            now="$(date +%s)"
+            case "$claim_started" in ''|*[!0-9]*) claim_started="$now" ;; esac
+            age=$((now - claim_started))
+            if [ "$age" -ge "$claim_stale" ] \
+                && { [ -z "$claim_pid" ] || ! kill -0 "$claim_pid" 2>/dev/null; } \
+                && [ "$(cat "$claim" 2>/dev/null || true)" = "$claim_line" ]; then
+                rm -f "$claim" || { worker_ledger_lock_release "$cleanup_out" || true; return 1; }
+            fi
+        fi
+        if [ ! -e "$claim" ]; then
+            now="$(date +%s)"
+            if printf '%s %s %s\n' "$self_pid" "$claim_token" "$now" > "$claim"; then
+                claimed=1
+            fi
+        fi
+        worker_ledger_lock_release "$cleanup_out" || return 1
+        [ "$claimed" = "1" ] && break
+        sleep "$claim_delay"
+        attempt=$((attempt + 1))
+    done
+    if [ "$claimed" != "1" ]; then
+        echo "❌ timed out claiming worker cleanup: $cleanup_wid" >&2
+        return 1
+    fi
+
+    reap_machine "$cleanup_wid" || rc=1
+    [ "$rc" = "0" ] && fleet_registry_release_id "$cleanup_wid" || rc=1
+
+    worker_ledger_lock_acquire "$cleanup_out" || return 1
+    claim_owner=""
+    read -r claim_pid claim_owner claim_started < "$claim" 2>/dev/null || true
+    if [ "$claim_owner" != "$claim_token" ]; then
+        worker_ledger_lock_release "$cleanup_out" || true
+        return 1
+    fi
+    if [ "$rc" != "0" ]; then
+        rm -f "$claim" || rc=1
+        worker_ledger_lock_release "$cleanup_out" || rc=1
+        return "$rc"
+    fi
+
+    # Cancellation belongs to the autoscaler/controller. A cancellation can arrive after a child
+    # provisioner's last check; preserving it keeps that intentional scale-down from becoming a
+    # retryable provisioning failure.
+    if [ "$rc" = "0" ] && ! rm -f \
+        "$cleanup_out/worker-$cleanup_wid.pending" \
+        "$cleanup_out/worker-$cleanup_wid.ready"; then
+        rc=1
+    fi
+
+    # Keep readiness and ownership under the same short ledger lock so the two files cannot
+    # disagree after successful provider cleanup.
+    ready_tmp="$cleanup_out/worker-ready.ids.tmp.$cleanup_wid.$$"
+    if [ "$rc" = "0" ] && [ -f "$cleanup_out/worker-ready.ids" ]; then
+        if awk -v id="$cleanup_wid" '$0 != id' "$cleanup_out/worker-ready.ids" > "$ready_tmp" \
+            && mv "$ready_tmp" "$cleanup_out/worker-ready.ids"; then
+            :
+        else
+            rm -f "$ready_tmp"
+            rc=1
+        fi
+    fi
+
+    # Drop the durable teardown handle last. Distinguish grep's normal no-output status (1) from
+    # read/I/O errors so a damaged ledger is never replaced with an empty partial file.
+    tracking_tmp="$cleanup_out/worker-clones.ids.tmp.$cleanup_wid.$$"
+    if [ "$rc" = "0" ]; then
+        if grep -Fxv "$cleanup_wid" "$cleanup_out/worker-clones.ids" > "$tracking_tmp"; then
+            grep_status=0
+        else
+            grep_status=$?
+        fi
+        if [ "$grep_status" -le 1 ]; then
+            mv "$tracking_tmp" "$cleanup_out/worker-clones.ids" || rc=1
+        else
+            rm -f "$tracking_tmp"
+            rc=1
+        fi
+    fi
+
+    # This process still owns the claim even when a local finalize write failed. Release that
+    # claim so the durable ledger entry can be retried immediately instead of waiting for expiry.
+    rm -f "$claim" || rc=1
+    worker_ledger_lock_release "$cleanup_out" || rc=1
+    return "$rc"
+}
+
+# Provisioners publish only unique per-worker outcomes. Readiness reconciliation and cleanup share
+# the worker-ledger lock, eliminating append-vs-rewrite loss and keeping desired-capacity state
+# authoritative over stale child outcomes.
 reconcile_worker_ready_outcomes() {  # <bench-output-dir>
-    local out="$1" marker name wid
+    local out="$1" marker name wid rc=0
+    worker_ledger_lock_acquire "$out" || return 1
     for marker in "$out"/worker-*.ready; do
         [ -e "$marker" ] || continue
         name="${marker##*/}"
         wid="${name#worker-}"; wid="${wid%.ready}"
         if worker_is_tracked "$out" "$wid" \
             && [ ! -e "$out/worker-$wid.cancelled" ]; then
-            grep -Fxq "$wid" "$out/worker-ready.ids" 2>/dev/null \
-                || printf '%s\n' "$wid" >> "$out/worker-ready.ids"
+            if ! grep -Fxq "$wid" "$out/worker-ready.ids" 2>/dev/null \
+                && ! printf '%s\n' "$wid" >> "$out/worker-ready.ids"; then
+                rc=1
+                break
+            fi
         else
-            rm -f "$marker"
+            rm -f "$marker" || { rc=1; break; }
         fi
     done
+    worker_ledger_lock_release "$out" || rc=1
+    return "$rc"
 }
 
 reconcile_worker_failure_outcomes() {  # <bench> <bench-output-dir>
@@ -3310,7 +3501,7 @@ reconcile_worker_failure_outcomes() {  # <bench> <bench-output-dir>
 
 provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <primary_ip> <sim01> <out>
     local bench="$1" ws="$2" primary_id="$3" pip="$4" sim="$5" out="$6"
-    local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file
+    local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file failure_reason
     worker_capacity_token="$FLEET_OWNER_TOKEN-worker-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     if ! reserve_worker_machine_slot "$worker_capacity_token"; then
         printf '%s\n' "Machine-count capacity unavailable for worker clone" > "$out/autoscaler.failed"
@@ -3333,20 +3524,42 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     echo "  ➕ [$bench] worker $wid created"
     ready_file="/data/cloudbench-worker-$wid.ready"
     if ! worker_github_token_b64="$(controller_github_token_b64)"; then
-        printf '%s\n' "No current controller GitHub token available for worker ref fetch" > "$out/autoscaler.failed"
-        echo "  ❌ [$bench] mandatory autoscaler: missing worker GitHub token" >&2
+        failure_reason="No current controller GitHub token available for worker ref fetch"
+        if ! cleanup_failed_worker "$out" "$wid"; then
+            failure_reason="$failure_reason; worker $wid cleanup failed and remains tracked for controller teardown"
+        fi
+        printf '%s\n' "$failure_reason" > "$out/autoscaler.failed"
+        echo "  ❌ [$bench] mandatory autoscaler: $failure_reason" >&2
         return 1
     fi
     stage_attempts="$WORKER_STAGE_ATTEMPTS"
     worker_ready_timeout="$WORKER_READY_TIMEOUT"
-    case "$stage_attempts:$worker_ready_timeout" in
-        *[!0-9:]*|:*|*:)
-            printf '%s\n' "invalid worker stage/readiness timeout configuration" > "$out/autoscaler.failed"
+    case "$stage_attempts" in
+        ''|*[!0-9]*)
+            failure_reason="invalid worker stage/readiness timeout configuration"
+            if ! cleanup_failed_worker "$out" "$wid"; then
+                failure_reason="$failure_reason; worker $wid cleanup failed and remains tracked for controller teardown"
+            fi
+            printf '%s\n' "$failure_reason" > "$out/autoscaler.failed"
+            return 1
+            ;;
+    esac
+    case "$worker_ready_timeout" in
+        ''|*[!0-9]*)
+            failure_reason="invalid worker stage/readiness timeout configuration"
+            if ! cleanup_failed_worker "$out" "$wid"; then
+                failure_reason="$failure_reason; worker $wid cleanup failed and remains tracked for controller teardown"
+            fi
+            printf '%s\n' "$failure_reason" > "$out/autoscaler.failed"
             return 1
             ;;
     esac
     if [ "$stage_attempts" -lt 1 ] || [ "$worker_ready_timeout" -lt 1 ]; then
-        printf '%s\n' "worker stage attempts and readiness timeout must be positive" > "$out/autoscaler.failed"
+        failure_reason="worker stage attempts and readiness timeout must be positive"
+        if ! cleanup_failed_worker "$out" "$wid"; then
+            failure_reason="$failure_reason; worker $wid cleanup failed and remains tracked for controller teardown"
+        fi
+        printf '%s\n' "$failure_reason" > "$out/autoscaler.failed"
         return 1
     fi
     # Allocation is ownership, not capacity. Keep it in worker-clones.ids for
@@ -3397,6 +3610,16 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
           printf '%s\n' "$reason" > "$failure_tmp" \
               && mv "$failure_tmp" "$out/worker-$wid.failed"
       }
+      discard_replaceable_worker() {
+          local reason="$1"
+          rm -f "$wrapper" "$worker_env" 2>/dev/null || true
+          if cleanup_failed_worker "$out" "$wid"; then
+              echo "  ⚠️  [$bench] $reason; removed worker $wid so capacity can be retried" >&2
+              exit 1
+          fi
+          publish_worker_failure "$reason; worker $wid could not be reaped"
+          exit 1
+      }
       publish_worker_ready() {
           local ready_tmp="$out/worker-$wid.ready.tmp.$$"
           : > "$ready_tmp" && mv "$ready_tmp" "$out/worker-$wid.ready"
@@ -3425,7 +3648,13 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
              && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh >/dev/null 2>&1 \
              && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env >/dev/null 2>&1 \
              && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh >/dev/null 2>&1; then
-              [ -n "$FLEET_PATCH_FILE" ] && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1 || true
+              if [ -n "$FLEET_PATCH_FILE" ]; then
+                  if ! fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1; then
+                      worker_provision_cancelled && finish_cancelled_worker_provision
+                      sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+                      continue
+                  fi
+              fi
               if fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
                   -C "bash -c \"begin=\$(date +%s); : > /data/worker.log; printf '%s\\n' \\\"\$begin\\\" > /data/worker.started-at; setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\"" >/dev/null 2>&1; then
                   launched=1
@@ -3438,8 +3667,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
       rm -f "$wrapper" "$worker_env" 2>/dev/null || true
       if [ "$launched" != "1" ]; then
           worker_provision_cancelled && finish_cancelled_worker_provision
-          publish_worker_failure "worker $wid could not be staged and launched"
-          exit 1
+          discard_replaceable_worker "worker $wid could not be staged and launched"
       fi
 
       ready_deadline=$((SECONDS + worker_ready_timeout))
@@ -3455,8 +3683,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
           sleep 5
       done
       worker_provision_cancelled && finish_cancelled_worker_provision
-      publish_worker_failure "worker $wid did not reach queue readiness within ${worker_ready_timeout}s"
-      exit 1
+      discard_replaceable_worker "worker $wid did not reach queue readiness within ${worker_ready_timeout}s"
     ) &
     return 0
 }
@@ -3484,7 +3711,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
         # invariant used by final acceptance is stable.
         terminal_deadline=$((SECONDS + AUTOSCALER_FINALIZATION_WAIT_SECONDS))
         while :; do
-            reconcile_worker_ready_outcomes "$out"
+            reconcile_worker_ready_outcomes "$out" || return 1
             reconcile_worker_failure_outcomes "$bench" "$out" || return 1
             [ ! -s "$out/autoscaler.failed" ] || return 1
             desired_workers="$(cat "$out/desired-worker-count" 2>/dev/null || true)"
@@ -3635,7 +3862,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     # lookup failure is not normal termination: a stale/failed publisher must
     # fail closed unless this autoscaler has itself observed child completion.
     while :; do
-        reconcile_worker_ready_outcomes "$out"
+        reconcile_worker_ready_outcomes "$out" || return 1
         if [ -e "$out/benchmark-child.finished" ]; then
             complete_autoscaler_after_child
             return $?
@@ -3720,9 +3947,8 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
             local n=$((cur - want))
             echo "  ⤵️  [$bench] scale down -$n (desired=$desired, pool=$cur)"
             for _ in $(seq 1 "$n"); do
-                local ready_state wid
-                ready_state="$(find "$out/worker-ready" -type f 2>/dev/null | tail -1)"
-                wid="${ready_state##*/}"
+                local wid
+                wid="$(tail -1 "$out/worker-ready.ids" 2>/dev/null)"
                 [ -n "$wid" ] || break
                 # Publish cancellation before provider destroy. A provisioner
                 # staging this worker can then distinguish intentional scale-in
@@ -3736,19 +3962,14 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
                 # Only drop the id from tracking once the destroy is CONFIRMED —
                 # an untracked-but-alive machine is a billed-forever zombie. On
                 # failure keep it listed and retry on the next autoscaler tick.
-                if ! reap_machine "$wid"; then
+                if ! cleanup_failed_worker "$out" "$wid"; then
                     printf '%s\n' "worker $wid could not be destroyed during scale-down" > "$out/autoscaler.failed"
                     echo "  ❌ [$bench] mandatory autoscaler: worker $wid could not be destroyed during scale-down" >&2
                     return 1
                 fi
-                fleet_registry_release_id "$wid"
-                sed '$d' "$out/worker-clones.ids" > "$out/worker-clones.ids.tmp" 2>/dev/null && mv "$out/worker-clones.ids.tmp" "$out/worker-clones.ids" || true
-                awk -v id="$wid" '$0 != id' "$out/worker-ready.ids" > "$out/worker-ready.ids.tmp" 2>/dev/null \
-                    && mv "$out/worker-ready.ids.tmp" "$out/worker-ready.ids" || true
-                rm -f "$out/worker-$wid.pending"
             done
         fi
-        reconcile_worker_ready_outcomes "$out"
+        reconcile_worker_ready_outcomes "$out" || return 1
         reconcile_worker_failure_outcomes "$bench" "$out" || return 1
         sleep "$AUTOSCALE_POLL"
     done

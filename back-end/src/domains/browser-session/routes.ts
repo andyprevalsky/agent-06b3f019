@@ -45,6 +45,7 @@ import { registerBrowserDataRoutes } from './routes.files';
 import { registerBrowserRotationRoute } from './routes.rotation';
 import { registerBrowserControlRoutes } from './routes.control';
 import { registerBrowserResumeRoute } from './routes.resume';
+import { registerBrowserChallengeRecoveryRoutes } from './routes.challenge-recovery';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -321,6 +322,7 @@ router.get(
 );
 
 registerBrowserDataRoutes(router);
+registerBrowserChallengeRecoveryRoutes(router);
 registerBrowserRotationRoute(router);
 registerBrowserControlRoutes(router);
 registerBrowserResumeRoute(router);

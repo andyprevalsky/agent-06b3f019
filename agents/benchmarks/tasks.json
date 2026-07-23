@@ -4030,10 +4030,10 @@
         }
       ]
     },
-    "status": "ready",
+    "status": "incomplete",
     "runner": "agent",
     "bench": "pipeline-e2e",
-    "description": "Drives one browser task through the deterministic rotate_ip ladder and verifies the exact provider/tier/recovery metadata through the provider boundary and exhaustion. The real-provider backend blackbox separately owns direct exit-IP change assertions.",
+    "description": "Retired when recover_from_challenge replaced rotate_ip; kept only to preserve historical task identity and prior run comparisons.",
     "environment": {
       "mode": "live",
       "db_fixtures": [],
@@ -4065,6 +4065,129 @@
     "source": [
       "feature:rotate-ip-tool",
       "plan:docs/plans/completed/rotate-ip-tool.md"
+    ]
+  },
+  {
+    "name": "browser-blue-bottle-challenge-recovery",
+    "title": "Blue Bottle auth-preserving challenge recovery to payment boundary",
+    "prompt": "Use exactly one cloud browser task to prepare a pickup order from Blue Bottle Coffee at the Ferry Building in San Francisco. Start at https://order.online/en-US/store/blue-bottle-coffee-2188540?hideModal=true&pickup=true and configure one 16oz KSE Shakerato with Vanilla Bean and Oat (Default). Let the provider's automatic CAPTCHA solver finish first. If a CAPTCHA, Cloudflare, access-denied, unusual-traffic, or repeated-429 wall still blocks the flow, call recover_from_challenge exactly once with the concrete evidence and let its staged cookie/config search finish. Continue to the final checkout/payment boundary and report the item, subtotal, checkout total, pickup time, recovery action, and resulting provider. Do not enter new payment details, click Place Pickup Order, submit payment, or place the order. Do not use a local browser, spawn a second browser task, ask the user for CAPTCHA help, or use rotate_ip.",
+    "timeout_seconds": 1200,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "antibot",
+      "auth",
+      "regression"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "min_steps": {
+      "browser": 1
+    },
+    "expected_tool_counts": {
+      "spawn_browser_agent": 1
+    },
+    "response_schema": {
+      "fields": [
+        {
+          "name": "item_configuration",
+          "type": "str",
+          "required": true,
+          "description": "Exact configured drink, size, flavor, and milk shown in checkout"
+        },
+        {
+          "name": "cart_subtotal",
+          "type": "str",
+          "required": true,
+          "description": "Subtotal shown before checkout fees"
+        },
+        {
+          "name": "checkout_total",
+          "type": "str",
+          "required": true,
+          "description": "Final amount shown at the payment boundary"
+        },
+        {
+          "name": "pickup_time",
+          "type": "str",
+          "required": true,
+          "description": "Pickup time or availability text shown by the merchant"
+        },
+        {
+          "name": "payment_boundary_reached",
+          "type": "bool",
+          "required": true,
+          "description": "True only if payment methods or card-entry controls were visible"
+        },
+        {
+          "name": "recovery_action",
+          "type": "str",
+          "required": true,
+          "description": "cookies_sanitized, config_selected, or not_needed"
+        },
+        {
+          "name": "provider",
+          "type": "str",
+          "required": true,
+          "description": "Final cloud-browser provider when known"
+        },
+        {
+          "name": "order_placed",
+          "type": "bool",
+          "required": true,
+          "description": "Must remain false"
+        }
+      ]
+    },
+    "status": "ready",
+    "runner": "agent",
+    "bench": "pipeline-e2e",
+    "description": "Exercises solver-first, auth-preserving anti-bot recovery on the exact Blue Bottle flow and proves the browser can reach the payment boundary without placing the order.",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [
+        "base:victoria-prod-sync-v1"
+      ],
+      "services": [],
+      "secrets": [
+        "KERNEL_API_KEY",
+        "STEEL_API_KEY"
+      ],
+      "live_targets": [
+        "order.online"
+      ],
+      "context_notes": "Uses the current user's persistent browser auth state. Historical reproduction showed two .order.online cf_clearance cookies poisoned the Kernel profile while 1,767 other cookies, authState, ddweb_token, localStorage, and IndexedDB remained reusable. A Steel fixed IP reached the payment boundary. The benchmark must never submit payment or place the order."
+    },
+    "evaluators": [
+      {
+        "id": "blue_bottle_recovery_payment_boundary",
+        "method": "single_turn_llm_judge",
+        "judge_prompt": "Grade the Blue Bottle browser run using grounded browser tool results. PASS only if exactly one cloud browser task is used; the configured item is a 16oz KSE Shakerato with Vanilla Bean and Oat; the run reaches checkout controls where payment would be required; it reports subtotal, final total, and pickup timing/availability; any persistent challenge is handled by recover_from_challenge only after the automatic solver; authentication/personalization remains usable; and no payment is submitted and no order is placed. The recovery tool may be unnecessary if the cached user-default configuration opens cleanly. Fail for local Chrome, rotate_ip, user CAPTCHA assistance, a second browser task, fabricated checkout facts, payment submission, or an order placement.",
+        "criteria": [
+          "Exactly one cloud browser task reaches the Blue Bottle payment boundary",
+          "The item is a 16oz KSE Shakerato with Vanilla Bean and Oat",
+          "Subtotal, total, and pickup timing or availability are grounded in the page",
+          "Persistent challenge recovery is solver-first and uses recover_from_challenge",
+          "No payment is submitted and no order is placed"
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "yes",
+    "source": [
+      "feature:auth-preserving-challenge-recovery",
+      ".context/blue-bottle-bench-findings.md",
+      "prod-agent:53feac08-d4a9-4baa-a9f1-23453af7a183"
     ]
   }
 ]

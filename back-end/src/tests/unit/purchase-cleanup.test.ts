@@ -393,20 +393,32 @@ async function main(): Promise<void> {
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.REFUND_FAILED);
   });
 
-  await test('cleanup treats a reclaim-in-progress closed card as unspent', async () => {
+  await test('fresh reclaim ownership suppresses duplicate close until stale reconciliation', async () => {
     const userId = await seedUser();
     const agentId = await seedAgent(userId, 'COMPLETED');
     const purchaseId = await seedHeld(userId, { agentId });
     // Funding already RECLAIMING: the card reads CLOSED because Rose closed it, not because a
-    // merchant settled it, so cleanup must reclaim/refund rather than mark it settled.
+    // merchant settled it. A concurrent cleanup must leave the active release owner alone.
     await seedFunding(purchaseId, userId, PurchaseWalletFundingStatus.RECLAIMING);
     const wallet = new FakeWalletFundingProvider();
-    await withFakeStripe(async () => {
+    await withFakeStripe(async (calls) => {
       await cleanupAgentPurchaseCards(
         agentId,
         new StubCardStateProvider({ status: 'CLOSED', balanceCents: 0 }),
         wallet
       );
+      assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.HELD);
+      assert.equal(wallet.reclaimCalls.length, 0);
+      assert.equal(calls.refunds.length, 0);
+      await reconcileFailedPurchaseFundingReclaims(wallet, { userId });
+      assert.equal(wallet.reclaimCalls.length, 0, 'minute cron must skip a fresh reclaim owner');
+
+      await prisma.purchaseWalletFunding.update({
+        where: { purchaseId },
+        data: { updatedAt: new Date(Date.now() - 3 * 60 * 1000) },
+      });
+      await reconcileFailedPurchaseFundingReclaims(wallet, { userId });
+      assert.equal(calls.refunds.length, 1);
     });
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.VOIDED);
     assert.equal(wallet.reclaimCalls.length, 1);

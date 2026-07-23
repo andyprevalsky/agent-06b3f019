@@ -457,28 +457,45 @@ async def resume_browser_session(config: Any, task_id: str) -> Dict[str, Any]:
     raise Exception(f"Failed to resume session: {response.text}")
 
 
-async def rotate_browser_proxy(config: Any, task_id: str, current_url: str) -> Dict[str, Any]:
-    """Rotate the browser session's outbound IP (rotate_ip tool).
+async def fetch_browser_captcha_telemetry(config: Any, task_id: str) -> Dict[str, Any]:
+    """Read provider-native CAPTCHA solver state for the current browser task."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        response = await client.get(
+            f"{config.backend.api_url}/api/browser-session/{task_id}/captcha-telemetry",
+            headers={"x-api-key": config.backend.api_key or ""},
+        )
+    if response.status_code == 200:
+        return response.json()
+    raise RuntimeError(f"Failed to read CAPTCHA telemetry: {response.text}")
 
-    Returns the resume-shaped replacement session (including provider metadata) plus
-    escalation state (proxy_tier, rotations_used, rotations_remaining,
-    rotation_message). On a 409 the rotation budget is exhausted — surfaced to the
-    caller as {"exhausted": True, ...} so the agent can stop rotating.
-    """
-    async with httpx.AsyncClient(timeout=180.0) as client:
+
+async def recover_browser_challenge(
+    config: Any,
+    task_id: str,
+    current_url: str,
+    storage_state: Dict[str, Any],
+    user_agent: str = "",
+) -> Dict[str, Any]:
+    """Run the backend's parallel Kernel/Steel browser-configuration search."""
+    # A challenged candidate can spend up to two 45s navigations plus two 45s
+    # provider-solver windows. The six candidates run concurrently, so this is
+    # a bounded wall-clock allowance for one search rather than six serial waits.
+    async with httpx.AsyncClient(timeout=300.0) as client:
         response = await client.post(
-            f"{config.backend.api_url}/api/browser-session/rotate-proxy",
+            f"{config.backend.api_url}/api/browser-session/recover-challenge",
             headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
-            json={"task_id": task_id, "current_url": current_url},
+            json={
+                "task_id": task_id,
+                "current_url": current_url,
+                "storage_state": storage_state,
+                **({"user_agent": user_agent} if user_agent else {}),
+            },
         )
     if response.status_code in [200, 201]:
         return response.json()
-    if response.status_code == 409:
-        body = response.json()
-        return {"exhausted": True, "status_code": 409, "message": body.get("message", ""), **body}
     if response.status_code == 429:
         return {"rate_limited": True, "status_code": 429}
-    raise Exception(f"Failed to rotate proxy: {response.text}")
+    raise Exception(f"Failed to recover from browser challenge: {response.text}")
 
 
 async def fetch_auth_options(config: Any, user_id: str, realm: str) -> Dict[str, Any]:

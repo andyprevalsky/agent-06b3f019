@@ -1,5 +1,6 @@
 import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
+import { createLogger } from '../logger';
 import {
   closeSession as closeSteelSession,
   createSessionWithContext as createSteelSessionWithContext,
@@ -12,6 +13,7 @@ import {
 import { rotateSession as rotateSteelSession } from '../steel/sessionResume';
 import { getFingerprintInjectionData, listSessionFiles, uploadFileToSession } from '../steel/files';
 import { injectUserData } from '../steel/injection';
+import { compatiblePreferredBrowserConfig } from './challengeRecovery';
 import { selectedBrowserProvider } from './config';
 import { getOrCreateBrowserContext } from './context';
 import {
@@ -53,6 +55,27 @@ export { injectUserData, getFingerprintInjectionData };
 
 export const getOrCreateContext = getOrCreateBrowserContext;
 const PROVIDER_FETCH_TIMEOUT_MS = 15_000;
+const log = createLogger('BrowserProvider');
+
+export interface BrowserSessionCreationDependencies {
+  readPreferredConfig: (contextId: string) => Promise<unknown>;
+  defaultProvider: () => BrowserProviderName;
+  createKernel: typeof createKernelSessionWithContext;
+  createSteel: typeof createSteelSessionWithContext;
+}
+
+const browserSessionCreationDependencies: BrowserSessionCreationDependencies = {
+  readPreferredConfig: async (contextId) => {
+    const context = await prisma.browserContext.findUnique({
+      where: { id: contextId },
+      select: { preferredBrowserConfig: true },
+    });
+    return context?.preferredBrowserConfig;
+  },
+  defaultProvider: selectedBrowserProvider,
+  createKernel: createKernelSessionWithContext,
+  createSteel: createSteelSessionWithContext,
+};
 
 async function fetchProviderApi<T>(
   url: string,
@@ -94,29 +117,78 @@ export async function createSessionWithContext(
   startUrl?: string,
   options?: { keepValidationConnection?: boolean }
 ): Promise<BrowserProviderSession> {
-  if (selectedBrowserProvider() === 'kernel') {
-    return createKernelSessionWithContext(contextId, agentId, proxyLocation, startUrl, options);
-  }
-
-  const session = await createSteelSessionWithContext(
+  return createSessionWithContextUsingDependencies(
     contextId,
     agentId,
     proxyLocation,
     startUrl,
-    options
+    options,
+    browserSessionCreationDependencies
   );
-  return {
-    provider: session.sessionId.startsWith('local-') ? 'local' : 'steel',
-    sessionId: session.sessionId,
-    debugUrl: session.debugUrl,
-    taskId: session.taskId,
-    wsUrl: session.wsUrl,
-    proxySource: session.proxySource,
-    proxyLocation: session.proxyLocation,
-    profileId: session.steelProfileId,
-    profileSource: session.profileSource,
-    validationBrowser: session.validationBrowser,
+}
+
+/** Actual next-session preference consumer, dependency-injected for contract tests. */
+export async function createSessionWithContextUsingDependencies(
+  contextId: string,
+  agentId: string,
+  proxyLocation: ProxyGeoLocation,
+  startUrl: string | undefined,
+  options: { keepValidationConnection?: boolean } | undefined,
+  dependencies: BrowserSessionCreationDependencies
+): Promise<BrowserProviderSession> {
+  const preferred = compatiblePreferredBrowserConfig(
+    await dependencies.readPreferredConfig(contextId),
+    proxyLocation
+  );
+  const createForProvider = async (
+    provider: BrowserProviderName,
+    usePreference: typeof preferred
+  ): Promise<BrowserProviderSession> => {
+    if (provider === 'kernel') {
+      return dependencies.createKernel(contextId, agentId, proxyLocation, startUrl, {
+        ...options,
+        ...(usePreference?.kernelProxyType && usePreference.kernelSpecificity
+          ? {
+              exactManagedProxy: {
+                type: usePreference.kernelProxyType,
+                specificity: usePreference.kernelSpecificity,
+              },
+            }
+          : {}),
+      });
+    }
+
+    const session = await dependencies.createSteel(contextId, agentId, proxyLocation, startUrl, {
+      ...options,
+      ...(usePreference?.steelProxyMode ? { proxyMode: usePreference.steelProxyMode } : {}),
+    });
+    return {
+      provider: session.sessionId.startsWith('local-') ? 'local' : 'steel',
+      sessionId: session.sessionId,
+      debugUrl: session.debugUrl,
+      taskId: session.taskId,
+      wsUrl: session.wsUrl,
+      proxySource: session.proxySource,
+      proxyLocation: session.proxyLocation,
+      profileId: session.steelProfileId,
+      profileSource: session.profileSource,
+      validationBrowser: session.validationBrowser,
+    };
   };
+
+  if (preferred !== null) {
+    try {
+      return await createForProvider(preferred.provider, preferred);
+    } catch (error) {
+      log.warn('Preferred browser config unavailable; falling back to deployment default', {
+        contextId,
+        preferredProvider: preferred.provider,
+        preferredProxyMode: preferred.proxyMode,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return createForProvider(dependencies.defaultProvider(), null);
 }
 
 export async function closeSession(

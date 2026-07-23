@@ -158,11 +158,9 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
     private readonly releaseRetry: {
       attempts: number;
       delayMs: number;
-      replayCloseEvery: number;
     } = {
       attempts: RELEASE_LOOKUP_ATTEMPTS,
       delayMs: RELEASE_LOOKUP_DELAY_MS,
-      replayCloseEvery: 5,
     }
   ) {}
 
@@ -254,6 +252,15 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
         .find((value) => value.id === request.providerTransferId);
       const releasedCents = transfer?.released_cents;
       const status = transfer?.status;
+      log.info('Observed AgentCard company-wallet funding release state', {
+        purchase_id: request.purchaseId,
+        transfer_id: maskId(request.providerTransferId),
+        attempt,
+        status: typeof status === 'string' ? status : undefined,
+        transferred_cents:
+          typeof transfer?.transferred_cents === 'number' ? transfer.transferred_cents : undefined,
+        released_cents: typeof releasedCents === 'number' ? releasedCents : undefined,
+      });
       if (
         typeof releasedCents === 'number' &&
         releasedCents >= request.amountCents &&
@@ -268,10 +275,6 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
             agentcard_transfer: transfer,
           }),
         };
-      }
-      if (request.cardId !== undefined && attempt % this.releaseRetry.replayCloseEvery === 0) {
-        const closeResult = await this.toolCaller('close_card', { card_id: request.cardId });
-        assertToolSuccess('close_card', closeResult);
       }
       if (attempt < this.releaseRetry.attempts) await delay(this.releaseRetry.delayMs);
     }

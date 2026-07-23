@@ -80,10 +80,17 @@ export async function closePurchaseCard(
   // Funded but unspent card: reclaim AgentCard funds before refunding the user's captured charge.
   // Claim the reclaim before closing so a concurrent cleanup pass can't read the now not-live card
   // as merchant-spent while the funding is still FUNDED.
-  await beginPurchaseWalletReclaim(purchase.id);
+  const reclaimClaim = await beginPurchaseWalletReclaim(purchase.id);
+  if (reclaimClaim.status === 'already_owned') {
+    return { ok: true, status: purchase.status };
+  }
   await activeCardProvider.closeCard(cardId);
   try {
-    await reclaimPurchaseWalletFunding(purchase, 'purchase_card_closed', walletFundingProvider);
+    await reclaimPurchaseWalletFunding(purchase, 'purchase_card_closed', walletFundingProvider, {
+      ...(reclaimClaim.status === 'owned'
+        ? { reclaimLeaseToken: reclaimClaim.reclaimLeaseToken }
+        : {}),
+    });
   } catch (error) {
     if (isWalletFundingConsumedDuringReclaimError(error)) {
       await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CLEARED);
