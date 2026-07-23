@@ -1574,6 +1574,99 @@ async def test_expected_gate_auto_approve_task_returns_without_resolving_gate():
     assert evaluate_task(task, data, approvals_triggered) == (True, None)
 
 
+def test_expected_gate_message_evidence_is_terminal_before_browser_min_steps():
+    """Expected-gate tasks stop at the open gate even when checkout browser work is intentionally short."""
+    import copy
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+        evaluate_task,
+    )
+
+    task = copy.deepcopy(get_task_by_name("gate-kyc-card-mint"))
+    browser_task_id = "browser-kyc-short-trajectory"
+    data = {
+        "agent": {"status": "ACTIVE", "progress": 0.03},
+        "messages": [
+            {
+                "role": "ASSISTANT",
+                "metadata": {
+                    "tool_calls": [
+                        {
+                            "tool": "spawn_agent",
+                            "type": "browser",
+                            "tool_call_id": "browser-root",
+                        }
+                    ]
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolCallId": "browser-root",
+                    "task_id": browser_task_id,
+                    "toolStatus": "IN_PROGRESS",
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolCallId": "browser-action-0",
+                    "task_id": browser_task_id,
+                    "subAgentId": browser_task_id,
+                    "steps_taken": 0,
+                    "toolStatus": "FINISHED",
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolCallId": "browser-action-1",
+                    "task_id": browser_task_id,
+                    "subAgentId": browser_task_id,
+                    "steps_taken": 1,
+                    "toolStatus": "FINISHED",
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "gate",
+                    "toolCallId": "gate-kyc-1",
+                    "attentionRequestId": "gate-kyc-1",
+                    "toolStatus": "IN_PROGRESS",
+                    "gate": {
+                        "type": "kyc",
+                        "gateKey": "kyc",
+                        "severity": "blocking",
+                        "status": "PENDING",
+                        "detection": {
+                            "method": "kyc_webhook",
+                            "probeKey": "customers_needed_kyc",
+                        },
+                    },
+                },
+            },
+        ],
+    }
+
+    counts = _agent_class_step_counts(data)
+    assert counts == {"browser": {browser_task_id: 2}}
+    assert task.min_steps == {"browser": 5}
+    assert _validate_agent_class_min_steps(task.min_steps, counts) is not None
+
+    passed, reason = evaluate_task(task, data, approvals_triggered=1)
+
+    assert passed is True, reason
+    assert data["_benchmark"]["expected_gate_seen"] is True
+    assert data["_benchmark"]["expected_gate_request_id"] == "gate-kyc-1"
+
+
 async def test_agentcard_setup_terminal_check_refreshes_stale_attention_poll():
     from benchmarks.run_benchmark import _agentcard_setup_attention_still_open_after_terminal
 
@@ -9792,6 +9885,10 @@ async def run_all_tests():
     r.record(
         "kyc_gate_benchmark_uses_canonical_detection_contract",
         test_kyc_gate_benchmark_uses_canonical_detection_contract,
+    )
+    r.record(
+        "expected_gate_message_evidence_terminal_before_browser_min_steps",
+        test_expected_gate_message_evidence_is_terminal_before_browser_min_steps,
     )
     await r.record_async(
         "expected_gate_auto_approve_returns_without_resolving_gate",
