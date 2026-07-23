@@ -15,6 +15,7 @@ archive
 node_modules
 package-lock.json
 **/package-lock.json
+!front-end/package-lock.json
 dist
 dist-ssr
 *.local
