@@ -873,9 +873,15 @@ class RoseClient:
                     progress_timeout = idle_timeout_s if idle_timeout_s is not None else r
                 else:
                     progress_timeout = ttft_budget
+                wait_timeout = min(r, progress_timeout)
+                outer_deadline_limited = r <= progress_timeout
                 try:
-                    chunk = await asyncio.wait_for(it.__anext__(), timeout=min(r, progress_timeout))
+                    chunk = await asyncio.wait_for(it.__anext__(), timeout=wait_timeout)
                 except asyncio.TimeoutError as exc:
+                    if outer_deadline_limited:
+                        raise RoseDeadlineError(
+                            f"rose.complete deadline exceeded after {deadline_s}s"
+                        ) from exc
                     if saw_productive_chunk:
                         raise RoseDeadlineError(
                             f"rose.complete idle for {progress_timeout}s (deadline {deadline_s}s)"
