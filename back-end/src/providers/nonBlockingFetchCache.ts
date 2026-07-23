@@ -95,10 +95,14 @@ export class NonBlockingFileCache {
   set(key: string | undefined, value: unknown, args?: unknown): void {
     if (key === undefined) return;
     this.mem.set(key, value);
-    const entry: CacheEntry = { key, value, timestamp: Date.now(), args };
-    const data = JSON.stringify(entry, null, 2);
-    void fsPromises.writeFile(this.pathFor(key), data, 'utf8').catch(() => {
-      /* best-effort recording; a failed write just forces a real call later */
+    setImmediate(() => {
+      // A delete/clear or newer object value supersedes this deferred write.
+      if (this.mem.get(key) !== value) return;
+      const entry: CacheEntry = { key, value, timestamp: Date.now(), args };
+      const data = JSON.stringify(entry, null, 2);
+      void fsPromises.writeFile(this.pathFor(key), data, 'utf8').catch(() => {
+        /* best-effort recording; a failed write just forces a real call later */
+      });
     });
   }
 

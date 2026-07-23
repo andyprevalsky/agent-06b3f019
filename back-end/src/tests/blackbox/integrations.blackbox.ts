@@ -2124,8 +2124,10 @@ async function testClaudeCodeUpload_rejectsUndecryptable() {
 
 async function testClaudeCodeToken_notFound() {
   const { accessToken } = await createAnonSession();
-  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
-    headers: await authHeadersWithoutExistingClaudePools(accessToken),
+  const res = await withComputePoolLock(async () => {
+    return request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
+      headers: await authHeadersWithoutExistingClaudePools(accessToken),
+    });
   });
   assertStatus(res.status, 404, res.data);
   assertSchema(ErrorResponse, res.data, 'claude-code token not found');
@@ -3224,8 +3226,10 @@ async function testClaudeCodeCredentials_upload() {
 // 17. Claude Code credentials get token: returns 404 for anon user without onboarding
 async function testClaudeCodeCredentials_getToken() {
   const { accessToken } = await createAnonSession();
-  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
-    headers: await authHeadersWithoutExistingClaudePools(accessToken),
+  const res = await withComputePoolLock(async () => {
+    return request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
+      headers: await authHeadersWithoutExistingClaudePools(accessToken),
+    });
   });
   assertStatus(res.status, 404, res.data);
   assertSchema(ErrorResponse, res.data, 'claude-code token anon missing');
@@ -5226,8 +5230,10 @@ async function testPasswordRequest_happy() {
 // 10. Claude Code credentials token for user without onboarding
 async function testClaudeCodeToken_noOnboarding() {
   const session = await createAnonSession();
-  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
-    headers: await authHeadersWithoutExistingClaudePools(session.accessToken),
+  const res = await withComputePoolLock(async () => {
+    return request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
+      headers: await authHeadersWithoutExistingClaudePools(session.accessToken),
+    });
   });
   assertStatus(res.status, 404, res.data);
   assertSchema(ErrorResponse, res.data, 'claude-code token no onboarding missing');
