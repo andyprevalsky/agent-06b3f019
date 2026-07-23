@@ -3431,6 +3431,7 @@ async def test_workflow_post_dag_completion_dispatches_attempt_completion_tool()
 
     dispatched_tools = []
     verifier_kwargs = {}
+    token_calls = []
 
     async def fake_execute_tool(tool_name, tool_args, tool_call_id):
         dispatched_tools.append((tool_name, tool_args, tool_call_id))
@@ -3446,14 +3447,19 @@ async def test_workflow_post_dag_completion_dispatches_attempt_completion_tool()
             "reasoning": "Complete",
             "structured_response": {"done": True},
             "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
+                "prompt_tokens": 5,
+                "completion_tokens": 2,
+                "total_tokens": 7,
+                "cache_sequence_id": "post-dag-verifier-sequence",
             },
         }
 
+    async def fake_on_tokens(*args, **kwargs):
+        token_calls.append({"args": args, "kwargs": kwargs})
+
     wf._execute_tool = fake_execute_tool
     wf._refresh_compute_token = fake_refresh_compute_token
+    wf._on_tokens = fake_on_tokens
 
     fake = _FakeWorkflowModule()
     fake.activity_returns["poll_new_messages"] = [
@@ -3488,6 +3494,7 @@ async def test_workflow_post_dag_completion_dispatches_attempt_completion_tool()
     assert verifier_kwargs["tool_call_id"] == expected_tool_call_id
     assert verifier_kwargs["post_message"] == wf._post_message
     assert result["score"] == 1.0
+    assert token_calls[0]["kwargs"]["cache_sequence_id"] == "post-dag-verifier-sequence"
 
 
 async def test_workflow_post_dag_completion_verifier_error_closes_attempt_tool():
@@ -4179,6 +4186,7 @@ async def test_workflow_approval_text_repopulates_same_tool_then_executes_once()
             "cache_read_input_tokens": 100,
             "cache_creation_input_tokens": 0,
             "actual_model": "anthropic/claude-sonnet-4.6",
+            "cache_sequence_id": "approval-param-sequence",
         },
     }
     original_workflow = _patch_workflow(fake)
@@ -4215,9 +4223,11 @@ async def test_workflow_approval_text_repopulates_same_tool_then_executes_once()
         assert llm_args[26] == "Call the restaurant and book dinner"
         assert llm_args[28] is True, "JIT calls must force canonical backend context on every worker"
         assert llm_args[29] is True, "JIT must cache the stable context before its unique feedback suffix"
+        assert llm_args[30] == "agent:agent-approval-jit:call:approval_param_populator"
         assert len(token_calls) == 1
         assert token_calls[0]["kwargs"]["cache_read_input_tokens"] == 100
         assert token_calls[0]["kwargs"]["call_site"] == "approval_param_populator"
+        assert token_calls[0]["kwargs"]["cache_sequence_id"] == "approval-param-sequence"
     finally:
         workflow_module.request_user_approval_direct = original_approval
         workflow_module.TOOL_EXECUTORS["call_phone_number"] = original_executor

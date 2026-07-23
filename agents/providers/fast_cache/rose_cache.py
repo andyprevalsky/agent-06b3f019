@@ -169,6 +169,7 @@ def request_key_material(complete_kwargs: Dict[str, Any]) -> Dict[str, Any]:
         "thinking": complete_kwargs.get("thinking"),
         "effort": complete_kwargs.get("effort"),
         "provider_fast_mode": complete_kwargs.get("provider_fast_mode"),
+        "cache_namespace": complete_kwargs.get("cache_namespace"),
         "exclude_anthropic_family": anthropic_family_excluded(
             bool(complete_kwargs.get("_exclude_anthropic_family", False))
         ),

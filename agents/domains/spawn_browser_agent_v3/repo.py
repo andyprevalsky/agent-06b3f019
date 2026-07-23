@@ -136,8 +136,12 @@ async def save_browser_action_message(
     total_steps: Optional[int] = None,
     tool_name_override: Optional[str] = None,
     extra_metadata: Optional[Dict[str, Any]] = None,
-) -> None:
+) -> bool:
     """Save browser sub-action message directly to DB.
+
+    Returns whether the backend acknowledged the message. Most progress
+    callers intentionally ignore this; required provenance callers retry and
+    fail closed when it is false.
 
     Args:
         is_init_message: If True, don't set subAgentId (shows in main chat as init)
@@ -187,13 +191,21 @@ async def save_browser_action_message(
             metadata["error"] = True
 
         async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(
+            response = await client.post(
                 f"{config.backend.api_url}/api/agents/{agent_id}/messages",
                 headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
                 json={"message": message, "role": "TOOL", "metadata": metadata},
             )
+            if not response.is_success:
+                logger.error(
+                    "Failed to save browser action message",
+                    status_code=response.status_code,
+                )
+                return False
+        return True
     except Exception as e:
         logger.error("Failed to save browser action message", error=extract_error_message(e))
+        return False
 
 
 async def save_browser_assistant_message(

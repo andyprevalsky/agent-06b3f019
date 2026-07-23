@@ -2042,6 +2042,7 @@ async def call_llm_structured_streaming(  # noqa: C901
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
     compute_token_fast_cache_affinity_key: Optional[str] = None,
+    cache_sequence_id: Optional[str] = None,
     on_model_detected: Optional[Callable[[str], None]] = None,  # Called with actual_model when first chunk reveals it
     skip_cache_write: bool = False,  # Skip prompt caching (for single-use calls like planner)
     call_site: str = "unknown",  # Label identifying the caller (e.g., plan_loop, execute_loop, planner)
@@ -2208,6 +2209,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                     "thinking": thinking,
                     "effort": effort,
                     "provider_fast_mode": bool(fast_cache_context.provider_fast_mode),
+                    "cache_namespace": cache_sequence_id,
                     **rose_kwargs,
                 }
                 deferred_fast_cache_key = fast_cache_context.llm_key(
@@ -2250,6 +2252,7 @@ async def call_llm_structured_streaming(  # noqa: C901
             request_id=request_id,
             thinking=thinking,
             effort=effort,
+            cache_namespace=cache_sequence_id,
             _exclude_anthropic_family=_exclude_anthropic_family,
             **rose_kwargs,
         ).__aiter__()
@@ -2622,6 +2625,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 gpt_token_user_id=gpt_token_user_id,
                 compute_token_lineage_key=compute_token_lineage_key,
                 compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                cache_sequence_id=cache_sequence_id,
                 on_model_detected=on_model_detected,
                 skip_cache_write=skip_cache_write,
                 call_site=call_site,
@@ -2856,6 +2860,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                     gpt_token_user_id=gpt_token_user_id,
                     compute_token_lineage_key=compute_token_lineage_key,
                     compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                    cache_sequence_id=cache_sequence_id,
                     on_model_detected=on_model_detected,
                     skip_cache_write=skip_cache_write,
                     call_site=call_site,
@@ -2896,6 +2901,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 # Cache metrics from Anthropic prompt caching
                 "cache_creation_input_tokens": stream_usage.get("cache_creation_input_tokens", 0),
                 "cache_read_input_tokens": stream_usage.get("cache_read_input_tokens", 0),
+                "cache_sequence_id": stream_usage.get("cache_sequence_id") or cache_sequence_id,
             }
         else:
             usage = {
@@ -2915,6 +2921,7 @@ async def call_llm_structured_streaming(  # noqa: C901
                 "from_fast_cache": False,
                 "cache_creation_input_tokens": 0,
                 "cache_read_input_tokens": 0,
+                "cache_sequence_id": cache_sequence_id,
             }
 
         if (
@@ -3253,6 +3260,7 @@ async def call_llm(
     gpt_token_user_id: Optional[str] = None,
     compute_token_lineage_key: Optional[str] = None,
     compute_token_fast_cache_affinity_key: Optional[str] = None,
+    cache_sequence_id: Optional[str] = None,
     skip_cache_write: bool = False,
     call_site: str = "unknown",
     agent_id: Optional[str] = None,
@@ -3338,6 +3346,7 @@ async def call_llm(
                     agent_id=agent_id,
                     request_id=request_id,
                     call_site=call_site,
+                    cache_namespace=cache_sequence_id,
                 )
             except RoseError as exc:
                 logger.error(
@@ -3380,6 +3389,7 @@ async def call_llm(
                     "compute_token_rotated": usage.get("compute_token_rotated", False),
                     "compute_token_used": usage.get("compute_token_used"),
                     "from_fast_cache": usage.get("from_fast_cache", False),
+                    "cache_sequence_id": usage.get("cache_sequence_id") or cache_sequence_id,
                 },
             }
 
@@ -3405,6 +3415,7 @@ async def call_llm(
                         "temperature": temperature,
                         "max_tokens": max_tokens,
                         "provider_fast_mode": bool(ctx.provider_fast_mode),
+                        "cache_namespace": cache_sequence_id,
                     }
                     key = ctx.llm_key(call_site, fast_cache_request_key_material(fast_cache_kwargs))
                     stored_ok = await fast_cache_client.cache_set(
@@ -4693,6 +4704,7 @@ async def call_llm_activity(  # noqa: C901
     fast_mode_step: Optional[int] = None,
     force_backend_context: bool = False,
     cache_before_extra_user_message: bool = False,
+    cache_sequence_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Activity wrapper for LLM calls with structured output and streaming.
@@ -4948,6 +4960,7 @@ async def call_llm_activity(  # noqa: C901
                 on_model_detected=on_model_detected,
                 call_site=call_site,
                 skip_cache_write=skip_cache_write,
+                cache_sequence_id=cache_sequence_id,
             )
         finally:
             # Guarantee the background drainer never leaks if streaming raises.

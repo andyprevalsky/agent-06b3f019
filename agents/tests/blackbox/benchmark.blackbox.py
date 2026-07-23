@@ -4732,6 +4732,100 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
     ]
 
 
+async def test_claude_code_preflight_uses_runtime_credential_route():
+    """Claude Code smoke gating must use the same credential route as session creation."""
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"accessToken": "claude-token"}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, *, headers, timeout):
+            calls.append((url, headers, timeout))
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+
+        assert await bench._check_claude_code_credentials("http://localhost:55120") is True
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+
+    assert calls == [
+        (
+            "http://localhost:55120/api/integrations/claude-code/credentials/token",
+            {"X-API-Key": "test-key"},
+            10.0,
+        )
+    ]
+
+
+async def test_claude_code_preflight_rejects_generic_claude_compute_token():
+    """A generic Claude compute token cannot prove Claude Code session credentials exist."""
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+
+    class FakeResponse:
+        status_code = 404
+
+        def json(self):
+            return {"error": "Claude Code credentials not found"}
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, *, headers, timeout):
+            calls.append((url, headers, timeout))
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+
+        assert await bench._check_claude_code_credentials("http://localhost:55120") is False
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+
+    assert calls == [
+        (
+            "http://localhost:55120/api/integrations/claude-code/credentials/token",
+            {"X-API-Key": "test-key"},
+            10.0,
+        )
+    ]
+
+
 async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback():
     """Blanket local refresh must accept the same funded fallback as runtime."""
     import benchmarks.run_benchmark as bench
@@ -9615,6 +9709,14 @@ async def run_all_tests():
     await r.record_async(
         "code_agent_preflight_accepts_anthropic_api_key_fallback",
         test_code_agent_preflight_accepts_anthropic_api_key_fallback,
+    )
+    await r.record_async(
+        "claude_code_preflight_uses_runtime_credential_route",
+        test_claude_code_preflight_uses_runtime_credential_route,
+    )
+    await r.record_async(
+        "claude_code_preflight_rejects_generic_claude_compute_token",
+        test_claude_code_preflight_rejects_generic_claude_compute_token,
     )
     await r.record_async(
         "local_compute_refresh_accepts_anthropic_api_key_fallback",

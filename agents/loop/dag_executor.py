@@ -822,6 +822,7 @@ async def _execute_single_task(
                             gpt_token_rotated=reasoning_usage.get("gpt_token_rotated", False),
                             compute_token_used=reasoning_usage.get("compute_token_used"),
                             from_fast_cache=reasoning_usage.get("from_fast_cache", False),
+                            cache_sequence_id=reasoning_usage.get("cache_sequence_id"),
                         )
                     except Exception as e:
                         workflow.logger.warning(f"on_tokens failed for dag_reasoning: {e}")
@@ -906,6 +907,7 @@ async def _execute_single_task(
                 task.index,
                 False,
                 True,
+                f"agent:{agent_id}:task:{task.index}:call:dag_param_populator",
             ]
 
             async def track_param_usage(param_usage: Dict[str, Any]) -> None:
@@ -929,6 +931,7 @@ async def _execute_single_task(
                         gpt_token_rotated=param_usage.get("gpt_token_rotated", False),
                         compute_token_used=param_usage.get("compute_token_used"),
                         from_fast_cache=param_usage.get("from_fast_cache", False),
+                        cache_sequence_id=param_usage.get("cache_sequence_id"),
                     )
                 except Exception as e:
                     workflow.logger.warning(f"on_tokens failed for dag_param_populator: {e}")
