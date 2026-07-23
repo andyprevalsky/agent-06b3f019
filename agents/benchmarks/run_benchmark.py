@@ -939,6 +939,21 @@ CLAUDE_CODE_CREDENTIAL_SKIP_REASON = (
 )
 
 
+def _claude_code_credential_skip_result(task: BenchmarkTask) -> TaskResult:
+    """Build the one deploy-approved provider-credential skip result."""
+    return TaskResult(
+        name=task.name,
+        passed=False,
+        agent_id="",
+        status="SKIPPED",
+        progress_score=0,
+        duration_seconds=0,
+        cost_cents=0,
+        message_count=0,
+        failure_reason=CLAUDE_CODE_CREDENTIAL_SKIP_REASON,
+    )
+
+
 def _is_permitted_claude_code_skip(result: TaskResult) -> bool:
     """Return whether a skipped task is the deploy-approved Claude credential skip.
 
@@ -6887,6 +6902,14 @@ async def run_single_task(
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     _validate_task_target(task, base_url)
+    # Parallel suites can queue a long-running Claude task for several minutes.
+    # A credential that was available during the suite-level preflight may be
+    # invalidated or enter cooldown before this task obtains its execution slot.
+    # Re-check at dispatch so credential loss produces the deploy-approved skip
+    # instead of an agent recursively retrying an impossible code session.
+    if task.requires_claude_code and not await _check_claude_code_credentials(base_url):
+        print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
+        return _claude_code_credential_skip_result(task)
     previous_benchmark_user_id = os.environ.get("BENCHMARK_RUN_USER_ID")
     if task.name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
         os.environ["BENCHMARK_RUN_USER_ID"] = _free_credit_subscription_gate_user_id()
@@ -8310,14 +8333,13 @@ async def _check_claude_code_credentials(base_url: str) -> bool:
         headers = await _api_headers()
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{base_url}/api/integrations/compute-code/credentials/token",
+                f"{base_url}/api/integrations/claude-code/credentials/token",
                 headers=headers,
                 timeout=10.0,
             )
             if resp.status_code == 200:
                 data = resp.json()
-                if data.get("type") == "claude" and bool(data.get("accessToken")):
-                    return True
+                return bool(data.get("accessToken"))
         return False
     except Exception:
         return False
@@ -8653,19 +8675,7 @@ async def main_async(args):
 
     # Record skipped Claude Code tasks in results
     for t in skipped_claude_tasks:
-        run.task_results.append(
-            TaskResult(
-                name=t.name,
-                passed=False,
-                agent_id="",
-                status="SKIPPED",
-                progress_score=0,
-                duration_seconds=0,
-                cost_cents=0,
-                message_count=0,
-                failure_reason=CLAUDE_CODE_CREDENTIAL_SKIP_REASON,
-            )
-        )
+        run.task_results.append(_claude_code_credential_skip_result(t))
 
     # Live report card: a standardized progress snapshot emitted to stdout + the run's
     # context dir once per second (and once, forced, at the end). Purely observational —

@@ -2075,25 +2075,6 @@ LIVE_BACKEND_PORT=""
 LIVE_BACKEND_URL=""
 CLOUDBENCH_API_KEY="$( { grep -h '^BACKEND_API_KEY' "$ROOT_DIR/back-end/.env" "$ROOT_DIR/agents/.env" 2>/dev/null | head -1; } | sed -E 's/^BACKEND_API_KEY=//; s/^"//; s/"$//' )"
 
-# Build the local workspace patch before selecting a launch transport. The
-# legacy SSH path uploads it with SFTP; boot-launch injects the same file into
-# the Machine rootfs as part of its one config update. Keeping this outside the
-# branch makes the printed "+patch" provenance true for both transports.
-STAGED_LOCAL_FILES=()
-cleanup_staged_local_files() {
-    for p in "${STAGED_LOCAL_FILES[@]}"; do
-        [ -n "$p" ] && rm -f "$p" 2>/dev/null || true
-    done
-}
-LOCAL_PATCH_FILE=""
-if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
-   && { ! git -C "$ROOT_DIR" diff --quiet --binary \
-        || [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | head -1)" ]; }; then
-    LOCAL_PATCH_FILE="$(mktemp)"
-    STAGED_LOCAL_FILES+=("$LOCAL_PATCH_FILE")
-    bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$LOCAL_PATCH_FILE"
-fi
-
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     POST_CONFIG_START_MARKER="$OUT_DIR/post-config-start.accepted"
     rm -f "$POST_CONFIG_START_MARKER"

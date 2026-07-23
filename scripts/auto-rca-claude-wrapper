@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Claude Code receives the OAuth credential it needs, but its coding tools run
+# as an unprivileged OS user. The account has a writable home, workspace, and
+# network access for package installation; it is not a sudoer and cannot alter
+# the root-owned lifecycle broker or trusted gate attestations.
+INVESTIGATOR_USER="rose-auto-rca"
+INVESTIGATOR_HOME="/home/$INVESTIGATOR_USER"
+CLAUDE_BIN="$INVESTIGATOR_HOME/.local/bin/claude"
+
+sudo -n -u "$INVESTIGATOR_USER" test -x "$CLAUDE_BIN" || {
+  printf 'Auto-RCA Claude executable is missing: %s\n' "$CLAUDE_BIN" >&2
+  exit 1
+}
+
+# Agent mode normally configures a GitHub credential in the checkout before it
+# launches Claude. Remove that transport before crossing the user boundary: the
+# investigator needs local git, not PR/push authority. The action's subprocess
+# isolation then keeps the parent OAuth credential out of Bash tool processes.
+if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE/.git" ]; then
+  if [[ "${GITHUB_REPOSITORY:-}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+    git -C "$GITHUB_WORKSPACE" remote set-url origin \
+      "https://github.com/$GITHUB_REPOSITORY.git"
+  fi
+  git -C "$GITHUB_WORKSPACE" config --local --unset-all credential.helper 2>/dev/null || true
+  git -C "$GITHUB_WORKSPACE" config --local --unset-all \
+    'http.https://github.com/.extraheader' 2>/dev/null || true
+  runner_group="$(id -gn)"
+  sudo -n chown "$INVESTIGATOR_USER:$runner_group" "$GITHUB_WORKSPACE/.git/config"
+  sudo -n chmod 0660 "$GITHUB_WORKSPACE/.git/config"
+fi
+unset GH_TOKEN GITHUB_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN
+
+exec sudo -n -H \
+  --preserve-env=CLAUDE_CODE_OAUTH_TOKEN,ANTHROPIC_API_KEY,ANTHROPIC_BASE_URL,ANTHROPIC_CUSTOM_HEADERS,ANTHROPIC_DEFAULT_HAIKU_MODEL,ANTHROPIC_DEFAULT_OPUS_MODEL,ANTHROPIC_DEFAULT_SONNET_MODEL,CLAUDE_CODE_USE_BEDROCK,CLAUDE_CODE_USE_VERTEX,CLAUDE_CODE_USE_FOUNDRY,CLAUDE_CODE_ACTION,CLAUDE_CODE_ENTRYPOINT,CLAUDE_CODE_ENABLE_TELEMETRY,CLAUDE_CODE_SCRIPT_CAPS,DETAILED_PERMISSION_MESSAGES,MCP_TIMEOUT,MCP_TOOL_TIMEOUT,MAX_MCP_OUTPUT_TOKENS \
+  -u "$INVESTIGATOR_USER" env \
+  HOME="$INVESTIGATOR_HOME" \
+  USER="$INVESTIGATOR_USER" \
+  LOGNAME="$INVESTIGATOR_USER" \
+  PATH="$INVESTIGATOR_HOME/.local/bin:$INVESTIGATOR_HOME/.cargo/bin:$INVESTIGATOR_HOME/go/bin:$PATH" \
+  SHELL=/bin/bash \
+  LANG="${LANG:-C.UTF-8}" \
+  CI="${CI:-true}" \
+  GITHUB_ACTIONS="${GITHUB_ACTIONS:-true}" \
+  GITHUB_WORKSPACE="${GITHUB_WORKSPACE:-}" \
+  RUNNER_TEMP="$INVESTIGATOR_HOME/tmp" \
+  TMPDIR="$INVESTIGATOR_HOME/tmp" \
+  AUTO_RCA_ROOT_DIR="${AUTO_RCA_ROOT_DIR:-}" \
+  AUTO_RCA_CONTEXT_DIR="${AUTO_RCA_CONTEXT_DIR:-}" \
+  AUTO_RCA_GATE_STATE_DIR="${AUTO_RCA_GATE_STATE_DIR:-}" \
+  AGENT_ID="${AGENT_ID:-}" \
+  RCA_BRANCH="${RCA_BRANCH:-}" \
+  RCA_CHECKOUT_REF="${RCA_CHECKOUT_REF:-}" \
+  RCA_MODE="${RCA_MODE:-}" \
+  RCA_NOOP="${RCA_NOOP:-}" \
+  RCA_PR_URL="${RCA_PR_URL:-}" \
+  SLACK_TS="${SLACK_TS:-}" \
+  SLACK_CHANNEL="${SLACK_CHANNEL:-}" \
+  AFFECTED_USER_NAME="${AFFECTED_USER_NAME:-}" \
+  GITHUB_RUN_ID="${GITHUB_RUN_ID:-}" \
+  GITHUB_REPOSITORY="${GITHUB_REPOSITORY:-}" \
+  DISABLE_UPDATES=1 \
+  CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 \
+  "$CLAUDE_BIN" "$@"

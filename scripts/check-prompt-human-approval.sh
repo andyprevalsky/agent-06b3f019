@@ -2,6 +2,7 @@
 set -euo pipefail
 
 APPROVAL_RETRIEVED="false"
+DEFER_TO_EXACT_HEAD_REVIEW="false"
 BASE_REF="${PROMPT_APPROVAL_BASE_REF:-}"
 
 for arg in "$@"; do
@@ -12,12 +13,15 @@ for arg in "$@"; do
     mandatory-human-approval-retrieved=false|--mandatory-human-approval-retrieved=false)
       APPROVAL_RETRIEVED="false"
       ;;
+    defer-human-approval-to-exact-head-pr-review=true|--defer-human-approval-to-exact-head-pr-review=true)
+      DEFER_TO_EXACT_HEAD_REVIEW="true"
+      ;;
     --base-ref=*)
       BASE_REF="${arg#--base-ref=}"
       ;;
     *)
       echo "Unknown flag: $arg" >&2
-      echo "Usage: bash scripts/check-prompt-human-approval.sh [mandatory-human-approval-retrieved=true] [--base-ref=REF]" >&2
+      echo "Usage: bash scripts/check-prompt-human-approval.sh [mandatory-human-approval-retrieved=true|--defer-human-approval-to-exact-head-pr-review=true] [--base-ref=REF]" >&2
       exit 2
       ;;
   esac
@@ -53,10 +57,13 @@ while IFS= read -r file; do
       ;;
   esac
   case "$file" in
+    .github/workflows/auto-rca.yml)
+      PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
+      ;;
     CLAUDE.md|AGENTS.md|.claude/commands/*.md|.cursor/rules/*.mdc|*/CLAUDE.md|*/AGENTS.md|*/SKILL.md)
       PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
       ;;
-    */prompts/*|*/prompt/*|*prompt*.py|*prompt*.ts|*prompt*.tsx|*prompt*.js|*prompt*.jsx|*prompt*.md|*prompt*.mdc|*system-prompt*|*system_prompt*|*strategy_override*.txt)
+    */prompts/*|*/prompt/*|*prompt*.py|*prompt*.ts|*prompt*.tsx|*prompt*.js|*prompt*.jsx|*prompt*.md|*prompt*.mdc|*prompt*.txt|*system-prompt*|*system_prompt*|*strategy_override*.txt)
       PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
       ;;
     *tool_schemas*.py|*tool_schemas*.ts|*tool_schemas*.tsx|*toolSchemas*.ts|*toolSchemas*.tsx)
@@ -182,16 +189,30 @@ if [ -z "$ALL_PROMPT_FILES" ]; then
   exit 0
 fi
 
+if [ "$DEFER_TO_EXACT_HEAD_REVIEW" = "true" ]; then
+  [ "$APPROVAL_RETRIEVED" = "false" ] || {
+    echo "Prompt approval cannot be both retrieved and deferred." >&2
+    exit 2
+  }
+  [ "${AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED:-false}" = "true" ] || {
+    echo "Exact-head approval deferral is restricted to the trusted Auto RCA gate." >&2
+    exit 2
+  }
+  echo "Prompt human-approval guard: deferred to a formal APPROVED review of the exact verified PR HEAD:"
+  printf '  - %s\n' "${ALL_PROMPT_FILES//$'\n'/$'\n  - '}"
+  exit 0
+fi
+
 if [ "$APPROVAL_RETRIEVED" = "true" ]; then
   echo "Prompt human-approval guard: approval flag present for prompt edits / coverage deletions:"
-  echo "$ALL_PROMPT_FILES" | sed 's/^/  - /'
+  printf '  - %s\n' "${ALL_PROMPT_FILES//$'\n'/$'\n  - '}"
   exit 0
 fi
 
 echo "Prompt human-approval guard failed: prompt edits or test/benchmark deletions require explicit human approval." >&2
 echo "" >&2
 echo "Detected prompt-related changes and/or deleted test coverage:" >&2
-echo "$ALL_PROMPT_FILES" | sed 's/^/  - /' >&2
+printf '  - %s\n' "${ALL_PROMPT_FILES//$'\n'/$'\n  - '}" >&2
 echo "" >&2
 echo "After a human approves these prompt modifications, re-run with:" >&2
 echo "  bash scripts/check-prompt-human-approval.sh mandatory-human-approval-retrieved=true" >&2

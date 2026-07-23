@@ -859,6 +859,7 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     assert "scripts/run-predeploy-local" in step
     assert "scripts/run-predeploy-cloud" in step
     assert "Benchmarks → Runs" in step
+    assert "every catalog entry tagged `smoke`" in step
     assert "every non-skipped task" in step
     assert "every requested task passes" in step
     assert ".context/predeploy-runs/<run-id>/runner.log" in step
@@ -924,6 +925,7 @@ def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
     assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in cloud
     assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF"' in fleet
     assert "cloudbench_fetchable_ref" in fleet
+    assert '[ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ]' in fleet
     assert fleet.index("worker_ledger_lock_acquire() {") < fleet.index("clone_machine_target() {")
     assert fleet.index("clone_machine_target() {") < fleet.index('if [ -n "$PROVISION_POOL" ]')
 
@@ -1181,6 +1183,7 @@ def test_boot_launch_delivers_the_exact_worktree_patch_to_every_guest() -> None:
         assert "patch payload checksum mismatch" in guest
 
     worker_stage = fleet[fleet.index("provision_worker() {") : fleet.index("bench_autoscaler() {")]
+    assert cloud.count('LOCAL_PATCH_FILE=""') == 1
     assert 'LOCAL_PATCH_SHA256=$FLEET_PATCH_SHA256' in worker_stage
     assert 'sftp put' in worker_stage
     patch_upload = next(
@@ -1236,10 +1239,10 @@ FLEET_WORKER_VM_MEMORY=1024
 FLEET_PATCH_FILE={shlex.quote(str(patch_file))}
 FLEET_PATCH_SHA256=expected
 FLEET_OWNER_TOKEN=test-owner
-WORKER_STAGE_ATTEMPTS=3
-WORKER_READY_TIMEOUT=1
 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=3
 CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS=0
+WORKER_STAGE_ATTEMPTS=3
+WORKER_READY_TIMEOUT=1
 MODE={shlex.quote(mode)}
 OUT={shlex.quote(str(out))}
 REAPED={shlex.quote(str(reaped))}
@@ -1301,6 +1304,32 @@ test ! -e "$OUT/worker-abc123.ready"
     assert worker.index("patch payload checksum mismatch") < worker.index(
         'printf \'%s\\n\' "$$" > "$WORKER_READY_FILE"'
     )
+
+
+def test_worker_token_falls_back_to_workspace_env_without_gh(tmp_path: Path) -> None:
+    fleet = FLEET_SCRIPT.read_text()
+    resolver = _extract_fleet_function(fleet, "controller_github_token_b64() {")
+    (tmp_path / "back-end").mkdir()
+    (tmp_path / "back-end/.env").write_text('GITHUB_TOKEN="workspace-token"\n')
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f"""
+ROOT_DIR={shlex.quote(str(tmp_path))}
+CONTROLLER_GITHUB_TOKEN_B64_CACHE=""
+unset GITHUB_TOKEN GH_TOKEN
+{resolver}
+controller_github_token_b64 | base64 --decode
+""",
+        ],
+        env={"PATH": "/usr/bin:/bin"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "workspace-token"
 
 
 def test_worker_preflight_failure_records_cleanup_failure_and_keeps_retry_handle(tmp_path: Path) -> None:

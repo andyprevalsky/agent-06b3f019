@@ -300,6 +300,9 @@ BACKEND_LOG="${BLACKBOX_TEST_BACKEND_LOG:-${CONTRACT_TEST_BACKEND_LOG:-$ARTIFACT
 export SURGE_API_KEY="${SURGE_API_KEY:-blackbox-surge-key}"
 export SURGE_ACCOUNT_ID="${SURGE_ACCOUNT_ID:-blackbox-surge-account}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+export BLACKBOX_TEST_CAPTURE_OUTBOUND=1
+export BLACKBOX_TEST_REPLAY_OUTBOUND=1
+source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
 # The isolated backend must not inherit a developer's workspace tunnel. E2B
 # cannot reach localhost, and stale ngrok URLs turn the direct Codex smoke into
 # a test of unrelated local Fast Mode infrastructure. Explicit BLACKBOX_*
@@ -318,7 +321,9 @@ echo "Starting isolated backend for black-box tests on port $PORT"
 echo "Backend log: $BACKEND_LOG"
 echo "Artifacts: $ARTIFACT_DIR"
 
-PORT="$PORT" DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_CAPTURE_OUTBOUND=1 BLACKBOX_TEST_REPLAY_OUTBOUND=1 npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
+PORT="$PORT" \
+DISABLE_GMAIL_SYNC=1 \
+npx tsx src/bootstrap.ts >"$BACKEND_LOG" 2>&1 &
 BACKEND_PID=$!
 
 cleanup() {

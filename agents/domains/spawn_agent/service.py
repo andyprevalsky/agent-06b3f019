@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 import io
 import json
 from datetime import datetime, timezone
@@ -307,6 +308,8 @@ async def spawn_explore_agent_activity(  # noqa: C901
 
     # Accumulate per-iteration LLM usage with actual_model from Rose response
     llm_iteration_usage: List[Dict] = []
+    explore_task_key = task_id or init_tool_call_id or hashlib.sha256(goal.encode()).hexdigest()[:16]
+    explore_cache_sequence_id = f"agent:{agent_id}:task:{explore_task_key}:call:explore_agent"
 
     # Collect raw tool call results for callers that need evidence
     tool_call_results: List[str] = []
@@ -330,6 +333,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
         gpt_token_rotated: bool = False,
         compute_token_used: Optional[Dict[str, Any]] = None,
         from_fast_cache: bool = False,
+        cache_sequence_id: Optional[str] = None,
     ):
         """Track each LLM call's tokens with the actual model used."""
         llm_iteration_usage.append(
@@ -342,6 +346,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
                 "cache_read_input_tokens": cache_read_input_tokens,
                 "cache_creation_input_tokens": cache_creation_input_tokens,
                 "from_fast_cache": from_fast_cache,
+                "cache_sequence_id": cache_sequence_id or explore_cache_sequence_id,
             }
         )
 
@@ -578,6 +583,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
             get_gpt_token_pool_id=(lambda: gpt_token_pool_id),
             on_tokens=on_tokens,
             call_site_override="explore_agent",
+            cache_sequence_id=explore_cache_sequence_id,
             # Fast Mode: key this explore agent by ITS OWN goal (not the shared parent
             # agent_id), so the N parallel explore agents under one sub-agent don't all
             # collide on (parent_goal, explore_agent, iteration) and bust each other.
