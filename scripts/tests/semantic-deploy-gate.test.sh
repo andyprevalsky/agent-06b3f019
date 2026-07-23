@@ -86,8 +86,10 @@ require_text "$WORKFLOW" "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
 LOCK_TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/semantic-lock.XXXXXX")
 trap 'rm -rf "$LOCK_TEST_DIR"' EXIT
 cp "$ROOT_DIR/front-end/package.json" "$FRONTEND_LOCK" "$LOCK_TEST_DIR/"
-npm ci --prefix "$LOCK_TEST_DIR" --dry-run --ignore-scripts --no-audit --no-fund >/dev/null ||
-  fail "frontend lockfile must support a standalone clean install"
+(
+  cd "$LOCK_TEST_DIR"
+  npm ci --dry-run --ignore-scripts --no-audit --no-fund >/dev/null
+) || fail "frontend lockfile must support a standalone clean install"
 if grep -Fq -- "--no-package-lock" "$WORKFLOW"; then
   fail "production semantic installs must not bypass the workspace lockfile"
 fi

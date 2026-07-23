@@ -172,6 +172,19 @@ assert.match(
   /export FAST_MODE_CACHE_DATABASE_URL="\$LOCAL_DB_URL"/,
   'coverage must isolate Fast Mode cache fixtures in the local test database'
 );
+assert.ok(
+  coverageScript.indexOf('npx prisma db push --skip-generate --accept-data-loss') <
+    coverageScript.indexOf(
+      'psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f "$WORKFLOW_TRIGGER_MIGRATION"'
+    ),
+  'coverage must install migration-owned database triggers after Prisma schema sync'
+);
+assert.ok(
+  coverageScript.indexOf(
+    'psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f "$WORKFLOW_TRIGGER_MIGRATION"'
+  ) < coverageScript.indexOf('node --import tsx src/bootstrap.ts'),
+  'coverage must install workflow cleanup triggers before backend and unit tests start'
+);
 assert.doesNotMatch(
   coverageScript,
   /ENV_DATABASE_URL=.*DATABASE_URL/,

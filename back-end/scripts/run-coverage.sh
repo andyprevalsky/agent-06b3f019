@@ -193,6 +193,16 @@ SQL
   fi
   echo "Syncing Prisma schema to local test database..."
   npx prisma db push --skip-generate --accept-data-loss >/dev/null
+  # `prisma db push` creates tables and columns but cannot create the database
+  # triggers owned by this migration. Install those triggers before unit and
+  # blackbox processes start; otherwise workflow cleanup tests race the
+  # migration-structure suite and can observe zero durable obligations.
+  WORKFLOW_TRIGGER_MIGRATION="$BACKEND_DIR/prisma/migrations/20260723000000_add_workflow_iteration_offset/migration.sql"
+  command -v psql >/dev/null 2>&1 || {
+    echo "❌ psql is required to install local workflow trigger contracts." >&2
+    exit 1
+  }
+  psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -f "$WORKFLOW_TRIGGER_MIGRATION" >/dev/null
   # Credential seeding and smoke execution are separate controls. A caller may
   # pre-seed a valid production credential without disabling the real Codex
   # black-box test that consumes it.
