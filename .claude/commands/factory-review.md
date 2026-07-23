@@ -1,11 +1,12 @@
 ---
-description: "Analyze local Conductor /deploy and /RCA history as concise state-machine retry and timing tables."
-argument-hint: "[--deploy-since YYYY-MM-DD] [--limit N]"
+description: "Analyze /deploy, /RCA, and checked-in /descend factory telemetry as concise retry and timing tables."
+argument-hint: "[--deploy-since YYYY-MM-DD] [--limit N] [--descend-window N]"
 ---
 
 # Factory Review
 
-Generate the factory workflow review from local Conductor history:
+Generate the factory workflow review from local Conductor history and the
+checked-in `/descend` factory-event ledger:
 
 ```bash
 python3 scripts/factory_review.py --self-test
@@ -13,6 +14,12 @@ python3 scripts/factory_review.py --open $ARGUMENTS
 ```
 
 The report must keep each gate family separate and show exactly these columns:
+
+Add a `/descend` section sourced from
+`agents/benchmarks/history/descend_steps.jsonl`. It must use canonical
+`stage-start`, `stage-finish`, and terminal `outcome` factory events, report
+completed main-lane wall clock and per-state timing, and compare the latest
+window with the immediately preceding window. Negative change means faster.
 
 Put one short, plain-English description directly under every step title. State
 what actually runs; for example, Auto-fix formats files and applies lint fixes.

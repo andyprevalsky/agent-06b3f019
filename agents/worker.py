@@ -944,7 +944,6 @@ async def main():
 
     # Start health check server
     _health_thread = run_health_server(config.health_check_port)
-    set_worker_status(True)
 
     logger.info(
         "Starting Temporal worker",
@@ -1194,12 +1193,25 @@ async def main():
     loop.add_signal_handler(signal.SIGINT, handle_shutdown)
     loop.add_signal_handler(signal.SIGTERM, handle_shutdown)
 
-    # Run worker
-    logger.info("Worker started, waiting for tasks...")
-
     try:
         # Run worker and shutdown event concurrently
         worker_task = asyncio.create_task(worker.run())
+        # Temporal's Worker object does not become operational until run() has
+        # completed its namespace validation and started its internal poller
+        # tasks. Publishing healthy (or a readiness log) before this boundary
+        # let autoscaled clones count as capacity even when run() failed on its
+        # first event-loop turn.
+        while not worker.is_running:
+            await asyncio.sleep(0.05)
+            if worker_task.done():
+                await worker_task
+                raise RuntimeError("Temporal worker stopped before reaching readiness")
+        set_worker_status(True)
+        # Preserve the long-standing readiness string consumed by local E2E and
+        # operator workflows, but emit it only after the real readiness boundary.
+        logger.info("Worker started, waiting for tasks...")
+        logger.info("Worker ready, polling Temporal task queue")
+
         shutdown_task = asyncio.create_task(shutdown_event.wait())
 
         # Wait for either worker to stop or shutdown signal

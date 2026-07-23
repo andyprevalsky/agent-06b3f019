@@ -14,6 +14,88 @@ import type {
 
 type PasskeyRecord = PasskeyCredential;
 
+function rowSignature(parts: readonly unknown[]): string {
+  return JSON.stringify(parts);
+}
+
+type SnapshotLookupModel<T extends { userId: string }> = {
+  findMany?(args: { where: { userId: { in: string[] } } }): Promise<T[]>;
+};
+
+async function rowsNeedingContentSync<T extends { userId: string }>(
+  remoteRows: T[],
+  localModel: SnapshotLookupModel<T>,
+  identity: (row: T) => string,
+  contentMatches: (remote: T, local: T) => boolean
+): Promise<T[]> {
+  if (!localModel.findMany || remoteRows.length === 0) return remoteRows;
+  const userIds = [...new Set(remoteRows.map((row) => row.userId))];
+  const localRows = await localModel.findMany({ where: { userId: { in: userIds } } });
+  const localByIdentity = new Map(localRows.map((row) => [identity(row), row]));
+  return remoteRows.filter((row) => {
+    const local = localByIdentity.get(identity(row));
+    return !local || !contentMatches(row, local);
+  });
+}
+
+function cookieContent(cookie: Cookie): string {
+  return rowSignature([
+    cookie.value,
+    cookie.expiresUtc?.toString() ?? null,
+    cookie.isSecure,
+    cookie.isHttpOnly,
+    cookie.creationUtc?.toString() ?? null,
+    cookie.hasExpires,
+    cookie.isPersistent,
+    cookie.lastAccessUtc?.toString() ?? null,
+    cookie.lastUpdateUtc?.toString() ?? null,
+    cookie.priority,
+    cookie.sameSite,
+    cookie.sourcePort,
+    cookie.sourceScheme,
+  ]);
+}
+
+function cookieBundleContent(bundle: CookieBundle): string {
+  return rowSignature([
+    bundle.accountLabel,
+    bundle.disabledAt?.toISOString() ?? null,
+    bundle.disabledReason,
+  ]);
+}
+
+function steelSessionContent(session: SteelSessionAuth): string {
+  return rowSignature([
+    session.authenticatedAt.toISOString(),
+    session.disabledAt?.toISOString() ?? null,
+    session.disabledReason,
+  ]);
+}
+
+function browserPasswordContent(password: BrowserPassword): string {
+  return rowSignature([
+    password.encryptedPassword,
+    password.dateLastUsed?.toString() ?? null,
+    password.dateCreated?.toString() ?? null,
+    password.browserSource,
+    password.browserProfile,
+    password.disabledAt?.toISOString() ?? null,
+    password.disabledReason,
+  ]);
+}
+
+function passkeyContent(passkey: PasskeyRecord): string {
+  return rowSignature([
+    passkey.authRealm,
+    passkey.encryptedPrivateKey,
+    passkey.userHandle,
+    passkey.origin,
+    passkey.browserSource,
+    passkey.disabledAt?.toISOString() ?? null,
+    passkey.disabledReason,
+  ]);
+}
+
 export async function syncRequiredCredentialTable<T>(
   tableName: string,
   sync: () => Promise<T>
@@ -54,7 +136,7 @@ export async function syncIntegrationCredentials(
   return syncedIds;
 }
 
-export type CookieModel = {
+export type CookieModel = SnapshotLookupModel<Cookie> & {
   upsert(args: Prisma.CookieUpsertArgs): Promise<unknown>;
 };
 
@@ -62,10 +144,25 @@ export async function syncCookieCredentials(
   localCookie: CookieModel,
   cookies: Cookie[]
 ): Promise<number> {
+  const cookiesToSync = await rowsNeedingContentSync(
+    cookies,
+    localCookie,
+    (cookie) =>
+      rowSignature([
+        cookie.userId,
+        cookie.domain,
+        cookie.name,
+        cookie.path,
+        cookie.topFrameSiteKey,
+        cookie.browserSource,
+        cookie.browserProfile,
+      ]),
+    (remote, local) => cookieContent(remote) === cookieContent(local)
+  );
   const concurrency = 8;
-  for (let index = 0; index < cookies.length; index += concurrency) {
+  for (let index = 0; index < cookiesToSync.length; index += concurrency) {
     await Promise.all(
-      cookies.slice(index, index + concurrency).map(async (cookie) => {
+      cookiesToSync.slice(index, index + concurrency).map(async (cookie) => {
         const { id: remoteId, ...updateData } = cookie;
         void remoteId;
         await localCookie.upsert({
@@ -89,7 +186,7 @@ export async function syncCookieCredentials(
   return cookies.length;
 }
 
-export type CookieBundleModel = {
+export type CookieBundleModel = SnapshotLookupModel<CookieBundle> & {
   upsert(args: Prisma.CookieBundleUpsertArgs): Promise<unknown>;
 };
 
@@ -97,7 +194,14 @@ export async function syncCookieBundleCredentials(
   localCookieBundle: CookieBundleModel,
   bundles: CookieBundle[]
 ): Promise<number> {
-  for (const bundle of bundles) {
+  const bundlesToSync = await rowsNeedingContentSync(
+    bundles,
+    localCookieBundle,
+    (bundle) =>
+      rowSignature([bundle.userId, bundle.authRealm, bundle.browserSource, bundle.browserProfile]),
+    (remote, local) => cookieBundleContent(remote) === cookieBundleContent(local)
+  );
+  for (const bundle of bundlesToSync) {
     const { id: remoteId, ...updateData } = bundle;
     void remoteId;
     await localCookieBundle.upsert({
@@ -116,7 +220,7 @@ export async function syncCookieBundleCredentials(
   return bundles.length;
 }
 
-export type SteelSessionAuthModel = {
+export type SteelSessionAuthModel = SnapshotLookupModel<SteelSessionAuth> & {
   upsert(args: Prisma.SteelSessionAuthUpsertArgs): Promise<unknown>;
 };
 
@@ -124,7 +228,13 @@ export async function syncSteelSessionAuthCredentials(
   localSteelSessionAuth: SteelSessionAuthModel,
   sessions: SteelSessionAuth[]
 ): Promise<number> {
-  for (const session of sessions) {
+  const sessionsToSync = await rowsNeedingContentSync(
+    sessions,
+    localSteelSessionAuth,
+    (session) => rowSignature([session.userId, session.contextId, session.authRealm]),
+    (remote, local) => steelSessionContent(remote) === steelSessionContent(local)
+  );
+  for (const session of sessionsToSync) {
     const { id: remoteId, ...updateData } = session;
     void remoteId;
     await localSteelSessionAuth.upsert({
@@ -144,7 +254,7 @@ export async function syncSteelSessionAuthCredentials(
 
 type BrowserOriginRecord = LocalStorageOrigin | IndexedDBOrigin | CacheStorageOrigin;
 
-export type OriginModel<T extends BrowserOriginRecord> = {
+export type OriginModel<T extends BrowserOriginRecord> = SnapshotLookupModel<T> & {
   upsert(args: {
     where: { userId_origin: { userId: string; origin: string } };
     create: T;
@@ -156,7 +266,13 @@ export async function syncOriginCredentials<T extends BrowserOriginRecord>(
   localOrigin: OriginModel<T>,
   origins: T[]
 ): Promise<number> {
-  for (const origin of origins) {
+  const originsToSync = await rowsNeedingContentSync(
+    origins,
+    localOrigin,
+    (origin) => rowSignature([origin.userId, origin.origin]),
+    (remote, local) => remote.hash === local.hash
+  );
+  for (const origin of originsToSync) {
     const { id: remoteId, ...updateData } = origin;
     void remoteId;
     await localOrigin.upsert({
@@ -168,7 +284,7 @@ export async function syncOriginCredentials<T extends BrowserOriginRecord>(
   return origins.length;
 }
 
-export type BrowserPermissionModel = {
+export type BrowserPermissionModel = SnapshotLookupModel<BrowserPermission> & {
   upsert(args: {
     where: {
       userId_origin_permission: { userId: string; origin: string; permission: string };
@@ -182,7 +298,13 @@ export async function syncBrowserPermissionCredentials(
   localPermission: BrowserPermissionModel,
   permissions: BrowserPermission[]
 ): Promise<number> {
-  for (const permission of permissions) {
+  const permissionsToSync = await rowsNeedingContentSync(
+    permissions,
+    localPermission,
+    (permission) => rowSignature([permission.userId, permission.origin, permission.permission]),
+    (remote, local) => remote.setting === local.setting
+  );
+  for (const permission of permissionsToSync) {
     const { id: remoteId, ...updateData } = permission;
     void remoteId;
     await localPermission.upsert({
@@ -200,7 +322,7 @@ export async function syncBrowserPermissionCredentials(
   return permissions.length;
 }
 
-export type BrowserPasswordModel = {
+export type BrowserPasswordModel = SnapshotLookupModel<BrowserPassword> & {
   upsert(args: {
     where: { userId_origin_username: { userId: string; origin: string; username: string } };
     create: BrowserPassword;
@@ -212,7 +334,13 @@ export async function syncBrowserPasswordCredentials(
   localPassword: BrowserPasswordModel,
   passwords: BrowserPassword[]
 ): Promise<number> {
-  for (const password of passwords) {
+  const passwordsToSync = await rowsNeedingContentSync(
+    passwords,
+    localPassword,
+    (password) => rowSignature([password.userId, password.origin, password.username]),
+    (remote, local) => browserPasswordContent(remote) === browserPasswordContent(local)
+  );
+  for (const password of passwordsToSync) {
     const { id: remoteId, ...updateData } = password;
     void remoteId;
     await localPassword.upsert({
@@ -252,7 +380,15 @@ export async function syncPasskeyCredentials(
   remoteWhere: Prisma.PasskeyCredentialWhereInput = { userId }
 ): Promise<number> {
   const passkeys = await remotePasskeyCredential.findMany({ where: remoteWhere });
-  return syncPasskeyCredentialRows(localPasskeyCredential, passkeys);
+  const passkeysToSync = await rowsNeedingContentSync(
+    passkeys,
+    localPasskeyCredential,
+    (passkey) => rowSignature([passkey.userId, passkey.rpId, passkey.credentialId]),
+    (remote, local) =>
+      passkeyContent(remote) === passkeyContent(local) && local.signCount >= remote.signCount
+  );
+  await syncPasskeyCredentialRows(localPasskeyCredential, passkeysToSync);
+  return passkeys.length;
 }
 
 export async function syncPasskeyCredentialRows(

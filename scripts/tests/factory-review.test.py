@@ -1262,6 +1262,117 @@ class ApprovalLifecycleTest(unittest.TestCase):
         self.assertEqual(production_event["event"], "production-start")
         self.assertEqual(production_event["value"], "semantic")
 
+        descend_log = Path(self.temp_dir.name) / "descend-events.jsonl"
+        descend = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/record_factory_event.py"),
+                "descend",
+                "stage-start",
+                "RESOLVE_SLICE",
+            ],
+            cwd=ROOT,
+            env={"FACTORY_EVENT_LOG": str(descend_log)},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(descend.returncode, 0, descend.stderr)
+        descend_event = json.loads(descend_log.read_text().strip())
+        self.assertEqual(descend_event["workflow"], "descend")
+        self.assertEqual(descend_event["event"], "stage-start")
+        self.assertEqual(descend_event["value"], "RESOLVE_SLICE")
+        self.assertIn("FACTORY_EVENT ", descend.stdout)
+        for field in (
+            "recorded_at",
+            "recorded_epoch",
+            "workspace",
+            "git_sha",
+            "branch",
+        ):
+            self.assertIn(field, descend_event)
+
+    def test_factory_review_consumes_checked_in_descend_events(self) -> None:
+        records = [
+            {
+                "schema_version": 1,
+                "record_type": "factory_event",
+                "record_id": "start-a",
+                "workflow": "descend",
+                "event": "stage-start",
+                "value": "RUN_SLICE",
+                "recorded_at": "2026-07-21T00:00:00Z",
+                "recorded_epoch": 1753056000.0,
+                "run_id": "run-a",
+                "slice": "daily",
+                "task_count": 42,
+                "lane": "main",
+                "step": "RUN_SLICE",
+                "epoch": "1",
+                "status": "running",
+            },
+            {
+                "schema_version": 1,
+                "record_type": "factory_event",
+                "record_id": "finish-a",
+                "workflow": "descend",
+                "event": "stage-finish",
+                "value": "RUN_SLICE",
+                "recorded_at": "2026-07-21T00:00:40Z",
+                "recorded_epoch": 1753056040.0,
+                "run_id": "run-a",
+                "slice": "daily",
+                "task_count": 42,
+                "lane": "main",
+                "step": "RUN_SLICE",
+                "epoch": "1",
+                "status": "completed",
+                "started_at": "2026-07-21T00:00:00Z",
+                "finished_at": "2026-07-21T00:00:40Z",
+                "duration_seconds": 40.0,
+                "run_terminal": True,
+            },
+            {
+                "schema_version": 1,
+                "record_type": "factory_event",
+                "record_id": "outcome-a",
+                "workflow": "descend",
+                "event": "outcome",
+                "value": "completed",
+                "recorded_at": "2026-07-21T00:00:40Z",
+                "recorded_epoch": 1753056040.0,
+                "run_id": "run-a",
+                "slice": "daily",
+                "task_count": 42,
+                "lane": "main",
+                "step": "RUN_SLICE",
+                "epoch": "1",
+                "status": "completed",
+            },
+        ]
+
+        history = Path(self.temp_dir.name) / "descend-steps.jsonl"
+        history.write_text(
+            "\n".join(
+                json.dumps(record)
+                for record in [
+                    {
+                        "record_type": "factory_event_schema",
+                        "schema_version": 1,
+                        "workflow": "descend",
+                    },
+                    *records,
+                    records[-1],
+                ]
+            )
+            + "\n"
+        )
+        loaded = FACTORY_REVIEW.load_descend_factory_events(history)
+        self.assertEqual(len(loaded), 3)
+        payload = FACTORY_REVIEW.analyze([], "2026-07-01", 20, descend_records=loaded)
+        self.assertEqual(payload["descend"]["run_wall_clock"]["completed_runs"], 1)
+        self.assertEqual(payload["descend"]["steps"][0]["step"], "RUN_SLICE")
+        self.assertIn("/descend", FACTORY_REVIEW.render_html(payload))
+
     def test_workflow_commands_require_structured_collection_hooks(self) -> None:
         deploy_command = (ROOT / ".claude/commands/deploy.md").read_text()
         rca_command = (ROOT / ".claude/commands/rca.md").read_text()

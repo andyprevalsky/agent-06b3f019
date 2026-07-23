@@ -21,7 +21,7 @@ import time
 import traceback
 import uuid as uuid_module
 from datetime import timedelta
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import structlog
 import structlog.contextvars
@@ -50,6 +50,12 @@ from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, Tool
 from utils.error_utils import extract_error_message
 from utils.prompts import build_verifier_prompt
 
+from .cdp_urls import steel_cdp_connection_url
+from .challenge_recovery import (
+    commit_cookie_removals,
+    probe_storage_state,
+    recover_from_challenge,
+)
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
     ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
@@ -71,7 +77,6 @@ from .config import (
     VERIFIER_ULTRA_MODEL,
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
 )
-from .cdp_urls import steel_cdp_connection_url
 from .credential_runtime import build_realm_credential_state
 from .recording import (
     BrowserAgentRecorder,
@@ -81,17 +86,20 @@ from .recording import (
     normalize_simulated_browser_frame,
 )
 from .repo import (
+    acknowledge_browser_user_control,
     close_browser_session,
     create_user_auth_assistance_request,
     fetch_auth_options,
+    fetch_browser_captcha_telemetry,
+    fetch_browser_control_state,
     fetch_claude_token,
     fetch_session_info,
     init_browser_session,
     prepare_browser_auth,
     propagate_browser_run_credentials,
+    recover_browser_challenge,
     report_claude_token_rate_limited,
     resume_browser_session,
-    rotate_browser_proxy,
     save_browser_action_message,
     save_browser_assistant_message,
     save_browser_credential_ref_message,
@@ -119,8 +127,8 @@ from .service_actions import (
     wait_for_navigation_ready,
 )
 from .service_crypto import (
-    ExtractedOTP,
     PAYMENT_CARD_ENTRY_RULE,
+    ExtractedOTP,
     auth_realm_from_url,
     auth_realm_matches_url,
     build_autopay_prompt_section,
@@ -1068,6 +1076,7 @@ async def _restore_rotation_storage_state(
     storage_state: Optional[Dict[str, Any]],
     *,
     current_url: str,
+    restore_cookies: bool = True,
 ) -> None:
     """Restore captured auth/storage into a replacement provider session."""
     if page is None or not storage_state or getattr(page, "context", None) is None:
@@ -1075,7 +1084,7 @@ async def _restore_rotation_storage_state(
 
     context = page.context
     cookies = storage_state.get("cookies") or []
-    if cookies:
+    if restore_cookies and cookies:
         await context.add_cookies(cookies)
 
     origins = storage_state.get("origins") or []
@@ -1156,7 +1165,11 @@ async def _reconnect_browser_stack_after_rotation(
             await dom_service.disconnect()
         raise
     pw_context = pw_browser.contexts[0]
-    pw_page = pw_context.pages[0]
+    pw_page = await _synchronize_playwright_page_with_agent_focus(
+        dom_service=dom_service,
+        playwright_browser=pw_browser,
+        current_page=pw_context.pages[0],
+    )
 
     # 3. Re-apply the device fingerprint (anti-bot essential on the new IP).
     if fingerprint_injection and _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True):
@@ -1174,6 +1187,168 @@ async def _reconnect_browser_stack_after_rotation(
         "playwright_instance": pw_instance,
         "playwright_driver_pid": driver_pid,
     }
+
+
+async def _synchronize_playwright_page_with_agent_focus(
+    *,
+    dom_service: Any,
+    playwright_browser: Any,
+    current_page: Any,
+) -> Any:
+    """Make Playwright input and the provider live view follow browser-use focus.
+
+    browser-use tracks tabs by CDP target id, while Playwright was historically
+    pinned to ``context.pages[0]``. After a switch_tab that split meant the DOM
+    observer could see tab B while humanized input and the provider live view
+    remained on tab A. Resolve the shared CDP target and explicitly foreground
+    it; fall back to the current page if a provider cannot expose target info.
+    """
+    session = getattr(dom_service, "session", None)
+    focused_target_id = getattr(session, "agent_focus_target_id", None)
+    contexts = getattr(playwright_browser, "contexts", None) or []
+    if not focused_target_id or not contexts:
+        return current_page
+
+    pages = getattr(contexts[0], "pages", None) or []
+    for page in pages:
+        cdp_session = None
+        try:
+            cdp_session = await contexts[0].new_cdp_session(page)
+            target_info = await cdp_session.send("Target.getTargetInfo")
+            target_id = target_info.get("targetInfo", {}).get("targetId")
+            if target_id != focused_target_id:
+                continue
+            await page.bring_to_front()
+            return page
+        except Exception as exc:
+            logger.debug(
+                "Unable to compare Playwright page with browser-use focus",
+                error=str(exc),
+            )
+        finally:
+            if cdp_session is not None:
+                with contextlib.suppress(Exception):
+                    await cdp_session.detach()
+
+    return current_page
+
+
+async def _rebind_browser_tab_runtime(
+    *,
+    dom_service: Any,
+    dom_page: Any,
+    playwright_browser: Any,
+    current_page: Any,
+    humanizer: Any,
+    browser_recorder: Any,
+    cursor_observer: Any,
+    humanizer_factory: Any = None,
+) -> Tuple[Any, Any]:
+    """Atomically move live view, recorder, and synthesized input to agent focus."""
+    focused_page = await _synchronize_playwright_page_with_agent_focus(
+        dom_service=dom_service,
+        playwright_browser=playwright_browser,
+        current_page=current_page,
+    )
+    if focused_page is current_page:
+        return current_page, humanizer
+    if browser_recorder is not None:
+        browser_recorder.page = focused_page
+    if humanizer is not None:
+        await humanizer.close()
+    factory = humanizer_factory
+    if factory is None:
+        from browser_tools.humanizer import BrowserHumanizer
+
+        factory = BrowserHumanizer
+    rebound_humanizer = factory(dom_page=dom_page, input_page=focused_page, fast=False)
+    await rebound_humanizer.initialize_cursor(start_pos=(640, 400))
+    rebound_humanizer.set_cursor_observer(cursor_observer)
+    return focused_page, rebound_humanizer
+
+
+async def _replace_browser_humanizer(
+    *,
+    current_humanizer: Any,
+    enabled: bool,
+    dom_page: Any,
+    input_page: Any,
+    cursor_observer: Any,
+    humanizer_factory: Any,
+) -> Any:
+    """Rebind synthesized input after a provider handoff without leaking idle work."""
+    if current_humanizer is not None:
+        with contextlib.suppress(Exception):
+            await current_humanizer.close()
+    if not enabled:
+        return None
+    rebound_humanizer = humanizer_factory(dom_page=dom_page, input_page=input_page, fast=False)
+    await rebound_humanizer.initialize_cursor(start_pos=(640, 400))
+    rebound_humanizer.set_cursor_observer(cursor_observer)
+    rebound_humanizer.start_idle_movement()
+    return rebound_humanizer
+
+
+async def _wait_for_browser_user_control(config: Any, task_id: str) -> bool:
+    """Yield browser ownership until the user explicitly hands it back.
+
+    Returns whether ownership changed, allowing callers to discard any DOM
+    snapshot or LLM action computed before the user interaction.
+    """
+    try:
+        state = await fetch_browser_control_state(config, task_id)
+    except Exception as exc:
+        logger.warning("Unable to read browser control state; keeping agent ownership", error=str(exc))
+        return False
+    yielded = False
+    while state in {"requested", "user"}:
+        if state == "requested":
+            try:
+                state = await acknowledge_browser_user_control(config, task_id)
+            except Exception as exc:
+                logger.warning("Unable to acknowledge browser user control", error=str(exc))
+        if state == "user":
+            yielded = True
+        activity.heartbeat("Waiting for user to hand browser control back")
+        await asyncio.sleep(0.5)
+        try:
+            state = await fetch_browser_control_state(config, task_id)
+        except Exception as exc:
+            logger.warning("Unable to refresh browser control state; continuing to yield", error=str(exc))
+    return yielded
+
+
+def _browser_action_tool_call_id(llm_result: Dict[str, Any]) -> str:
+    """Return the one streamed tool-call id used for an action's full lifecycle."""
+    return str(llm_result.get("tool_call_id") or uuid_module.uuid4())
+
+
+async def _wait_for_provider_captcha_solver(config: Any, task_id: str) -> None:
+    """Give provider-native auto-solving the first chance before recovery probes."""
+    deadline = asyncio.get_running_loop().time() + 45
+    saw_active_solver = False
+    inactive_polls = 0
+    while asyncio.get_running_loop().time() < deadline:
+        activity.heartbeat("Waiting for provider CAPTCHA auto-solver")
+        try:
+            telemetry = await fetch_browser_captcha_telemetry(config, task_id)
+        except Exception as exc:
+            logger.warning("CAPTCHA telemetry unavailable during challenge recovery", error=str(exc))
+            await asyncio.sleep(2)
+            return
+        is_solving = telemetry.get("isSolving")
+        if is_solving is True:
+            saw_active_solver = True
+            inactive_polls = 0
+        elif saw_active_solver:
+            return
+        else:
+            inactive_polls += 1
+            # Steel can take a moment to register a new task. Kernel only emits
+            # terminal outcomes, so three grace polls are its solver-first wait.
+            if inactive_polls >= 3:
+                return
+        await asyncio.sleep(2)
 
 
 def _playwright_driver_command_matches(command: str) -> bool:
@@ -3518,9 +3693,7 @@ def _simulated_browser_usage_items(
     model_pricing: Dict[str, Any],
     usage_by_model: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> List[Dict[str, Any]]:
-    model_rows = usage_by_model or {
-        "": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}
-    }
+    model_rows = usage_by_model or {"": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}}
     items: List[Dict[str, Any]] = []
     for model, usage in model_rows.items():
         input_tokens = int(usage.get("input_tokens") or 0)
@@ -4235,9 +4408,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         payment_card_last4 = _normalize_payment_card_last4(write_lock_resume_state.get("payment_card_last4"))
         action_history.restore_entries(write_lock_resume_state.get("action_history"))
         visited_urls = [
-            str(url)
-            for url in (write_lock_resume_state.get("visited_urls") or [])
-            if isinstance(url, str) and url
+            str(url) for url in (write_lock_resume_state.get("visited_urls") or []) if isinstance(url, str) and url
         ][-30:]
         verifier_checkpoints = [
             checkpoint
@@ -4840,6 +5011,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             playwright_browser,
             playwright_instance,
         ) = browser_result
+        input_page = await _synchronize_playwright_page_with_agent_focus(
+            dom_service=dom_service,
+            playwright_browser=playwright_browser,
+            current_page=input_page,
+        )
         recording_output_dir = browser_recording_output_dir(agent_id, task_id) if task_id else None
 
         async def _create_network_recorder():
@@ -4852,7 +5028,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 session_id=session_id,
                 output_dir=recording_output_dir,
             )
-            if recorder and task_id:
+            if recorder and recorder.persists_network_log and task_id:
                 await save_browser_action_message(
                     agent_id=agent_id,
                     title="Browser network recording started",
@@ -5280,9 +5456,29 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         while iteration < MAX_ITERATIONS:
             iteration += 1
             activity.heartbeat(f"Step {iteration}")
+            await _wait_for_browser_user_control(config, task_id)
+
+            # TAB/INPUT/LIVE-VIEW STATE MACHINE:
+            # browser-use focus changes -> resolve matching Playwright target
+            # -> foreground provider tab -> rebind humanizer + recorder.
+            # This runs before observation so the LLM, synthesized input, and
+            # customer live view all refer to the same authoritative tab.
+            input_page, humanizer = await _rebind_browser_tab_runtime(
+                dom_service=dom_service,
+                dom_page=dom_page,
+                playwright_browser=playwright_browser,
+                current_page=input_page,
+                humanizer=humanizer,
+                browser_recorder=browser_recorder,
+                cursor_observer=observe_cursor,
+            )
 
             # Handle pending write lock action
             if pending_write_lock_action:
+                if await _wait_for_browser_user_control(config, task_id):
+                    # The approved target may have changed under user control;
+                    # retain it and re-resolve against a fresh DOM next step.
+                    continue
                 logger.info("Executing pending write lock action after approval")
                 unified_action, browser_state, current_url = await _prepare_pending_write_lock_action(
                     dom_service,
@@ -5419,8 +5615,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     continue
                 except Exception as prep_error:
                     recovered = await _recover_browser_step(
-                        f"credential_prep_error:{type(prep_error).__name__}:"
-                        f"{extract_error_message(prep_error)[:160]}",
+                        f"credential_prep_error:{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}",
                         reload_page=True,
                     )
                     if recovered:
@@ -5575,6 +5770,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
             _rose_request_id = llm_result.get("request_id", "unknown")
 
+            if await _wait_for_browser_user_control(config, task_id):
+                # Never execute an action planned against the pre-handoff DOM.
+                await browser_stream.finish_tools(status="ERROR")
+                continue
+
             # 4. Extract action from response
             unified_action = llm_result.get("action", {})
             unified_action = _remap_cached_browser_action_target(
@@ -5585,6 +5785,46 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             if unified_action is not llm_result.get("action"):
                 llm_result = dict(llm_result)
                 llm_result["action"] = unified_action
+
+            # Some anti-bot services return an explicit network-reputation
+            # verdict even when the rendered page no longer looks challenged.
+            # Reject that exit deterministically before executing the model's
+            # next action. The synthetic recovery gets its own stable tool-call
+            # lifecycle and takes the solver -> config-search fast path below.
+            if browser_network_recorder is None and network_recorder_task is not None and network_recorder_task.done():
+                with contextlib.suppress(Exception):
+                    browser_network_recorder = network_recorder_task.result()
+            provider_exit_rejection = (
+                browser_network_recorder.pop_provider_exit_rejection()
+                if browser_network_recorder is not None
+                else None
+            )
+            if provider_exit_rejection is not None:
+                # The streamed model action was superseded before execution;
+                # close it accurately instead of stitching its tool id onto the
+                # independently generated recovery lifecycle below.
+                await browser_stream.finish_tools(status="ERROR")
+                rejected_action = unified_action.get("action", "")
+                recovery_tool_call_id = f"provider-exit-recovery-{uuid_module.uuid4()}"
+                unified_action = {
+                    "action": "recover_from_challenge",
+                    "thinking": "",
+                    "params": {
+                        "reason": "The current provider IP was explicitly rejected for fingerprint reuse.",
+                        "provider_exit_rejected": True,
+                    },
+                }
+                llm_result = {
+                    **llm_result,
+                    "action": unified_action,
+                    "tool_call_id": recovery_tool_call_id,
+                }
+                logger.warning(
+                    "Replacing browser action with provider-exit recovery",
+                    rejected_action=rejected_action,
+                    rejection=provider_exit_rejection,
+                    tool_call_id=recovery_tool_call_id,
+                )
             action_name = unified_action.get("action", "")
             thinking = unified_action.get("thinking", "")
 
@@ -5816,158 +6056,206 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     ),
                 }
 
-            if action_name == "rotate_ip":
-                rotate_reason = unified_action.get("params", {}).get("reason", "")
-                rotate_call_id = str(uuid_module.uuid4())
-                logger.info("Browser agent requested IP rotation", reason=rotate_reason)
-                await save_browser_action_message(
-                    agent_id=agent_id,
-                    title="Rotating IP",
-                    task_id=task_id,
-                    message=rotate_reason,
-                    status=MessageStatus.IN_PROGRESS,
-                    browser_url=browser_url,
-                    action_type="browser",
-                    tool_call_id=rotate_call_id,
-                )
+            if action_name == "recover_from_challenge":
+                recovery_reason = unified_action.get("params", {}).get("reason", "")
+                recovery_call_id = _browser_action_tool_call_id(llm_result)
+                logger.info("Browser agent requested staged challenge recovery", reason=recovery_reason)
 
-                rotation_storage_state = await _capture_rotation_storage_state(input_page)
-                rotate_result = await rotate_browser_proxy(config, task_id, current_url)
+                progress_titles = {
+                    "captcha_solver": "Waiting for CAPTCHA auto-solver",
+                    "known_challenge_cookies": "Testing challenge cookies",
+                    "all_target_cookies": "Testing target-site cookies",
+                    "non_auth_cookies": "Testing non-auth cookies",
+                    "cookie_isolation": "Isolating poisoned cookie state",
+                    "apply_cookie_fix": "Applying safe cookie recovery",
+                    "browser_config_search": "Searching browser configurations",
+                }
 
-                # Budget exhausted or provider busy: surface the error to the run and
-                # let the model decide to stop — never tear down the live session.
-                if rotate_result.get("exhausted") or rotate_result.get("rate_limited"):
-                    err_msg = rotate_result.get("message") or (
-                        "Browser slots are busy; IP rotation could not complete. Retry shortly."
-                        if rotate_result.get("rate_limited")
-                        else "PROXY_ROTATION_EXHAUSTED"
+                async def emit_recovery_progress(stage: str, message: str) -> None:
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title=progress_titles.get(stage, "Recovering from browser challenge"),
+                        task_id=task_id,
+                        message=message,
+                        status=MessageStatus.IN_PROGRESS,
+                        browser_url=browser_url,
+                        action_type="browser_challenge_recovery",
+                        tool_call_id=recovery_call_id,
+                        extra_metadata={"recoveryStage": stage},
+                    )
+
+                async def search_browser_configs(storage_state: Dict[str, Any]) -> Dict[str, Any]:
+                    user_agent = ""
+                    with contextlib.suppress(Exception):
+                        user_agent = str(await input_page.evaluate("() => navigator.userAgent"))
+                    result = await recover_browser_challenge(
+                        config,
+                        task_id,
+                        current_url,
+                        storage_state,
+                        user_agent,
+                    )
+                    if result.get("rate_limited"):
+                        raise RuntimeError("Browser provider slots are busy; challenge recovery could not run")
+                    return result
+
+                try:
+                    if playwright_browser is None or input_page is None:
+                        raise RuntimeError("Browser state is unavailable for auth-preserving challenge recovery")
+                    recovery_storage_state = await _capture_rotation_storage_state(input_page)
+                    if recovery_storage_state is None:
+                        raise RuntimeError("Browser state is unavailable for auth-preserving challenge recovery")
+
+                    recovery = await recover_from_challenge(
+                        source_state=recovery_storage_state,
+                        target_url=current_url,
+                        wait_for_solver=lambda: _wait_for_provider_captcha_solver(config, task_id),
+                        probe=lambda candidate: probe_storage_state(
+                            playwright_browser,
+                            candidate,
+                            current_url,
+                        ),
+                        commit_cookie_removals=lambda keys: commit_cookie_removals(
+                            input_page,
+                            keys,
+                            current_url,
+                        ),
+                        search_configs=search_browser_configs,
+                        progress=emit_recovery_progress,
+                        provider_exit_rejected=bool(
+                            unified_action.get("params", {}).get("provider_exit_rejected")
+                        ),
+                    )
+
+                    config_result = recovery.config_result
+                    if config_result is not None:
+                        new_cdp_url = config_result.get("ws_url")
+                        if not isinstance(new_cdp_url, str) or not new_cdp_url:
+                            raise RuntimeError("Challenge recovery selected a browser without a CDP URL")
+                        try:
+                            reconnected = await _reconnect_browser_stack_after_rotation(
+                                new_cdp_url=new_cdp_url,
+                                old_dom_service=dom_service,
+                                old_playwright_browser=playwright_browser,
+                                old_playwright_instance=playwright_instance,
+                                old_driver_pid=playwright_driver_pid,
+                                fingerprint_injection=fingerprint_injection,
+                                agent_id=agent_id,
+                            )
+                        except Exception:
+                            # The reconnect helper disconnects the old stack before attaching to
+                            # the promoted session. Drop every dead handle so the error path cannot
+                            # attempt a screenshot/action against the disconnected browser and mask
+                            # the original reconnect failure.
+                            if humanizer is not None:
+                                with contextlib.suppress(Exception):
+                                    await humanizer.close()
+                                humanizer = None
+                            dom_service = None
+                            dom_page = None
+                            input_page = None
+                            playwright_browser = None
+                            playwright_instance = None
+                            playwright_driver_pid = None
+                            raise
+                        dom_service = reconnected["dom_service"]
+                        dom_page = reconnected["dom_page"]
+                        input_page = reconnected["input_page"]
+                        playwright_browser = reconnected["playwright_browser"]
+                        playwright_instance = reconnected["playwright_instance"]
+                        playwright_driver_pid = reconnected["playwright_driver_pid"]
+                        session_id = config_result.get("session_id", session_id)
+                        browser_url = config_result.get("debug_url", browser_url)
+                        cdp_url = new_cdp_url
+                        browser_session_metadata = _updated_rotation_session_metadata(
+                            browser_session_metadata,
+                            dict(config_result),
+                        )
+                        await _restore_rotation_storage_state(
+                            input_page,
+                            recovery_storage_state,
+                            current_url=current_url,
+                            restore_cookies=not bool(config_result.get("storage_state_preloaded")),
+                        )
+
+                        if browser_recorder is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_recorder.transition_browser(
+                                    page=input_page,
+                                    session_id=session_id,
+                                    browser_url=browser_url or "",
+                                    session_metadata=browser_session_metadata,
+                                )
+                        if browser_network_recorder is None and network_recorder_task is not None:
+                            with contextlib.suppress(Exception):
+                                browser_network_recorder = await asyncio.wait_for(
+                                    asyncio.shield(network_recorder_task),
+                                    timeout=10,
+                                )
+                        if browser_network_recorder is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_network_recorder.transition_browser(
+                                    browser_session=dom_service.session,
+                                    session_id=session_id,
+                                )
+
+                        humanizer = await _replace_browser_humanizer(
+                            current_humanizer=humanizer,
+                            enabled=_env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True),
+                            dom_page=dom_page,
+                            input_page=input_page,
+                            cursor_observer=observe_cursor,
+                            humanizer_factory=BrowserHumanizer,
+                        )
+
+                    browser_state = await dom_service.get_browser_state(include_screenshot=False)
+                    current_url = browser_state.get("url", current_url)
+                    recovery_message = (
+                        "Recovered by selecting a stable browser configuration; signed-in state was preserved."
+                        if config_result is not None
+                        else "Recovered by removing a proven non-auth cookie subset; signed-in state was preserved."
                     )
                     await save_browser_action_message(
                         agent_id=agent_id,
-                        title="IP rotation unavailable",
+                        title="Browser challenge recovered",
                         task_id=task_id,
-                        message=err_msg,
+                        message=recovery_message,
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url,
+                        action_type="browser_challenge_recovery",
+                        tool_call_id=recovery_call_id,
+                        extra_metadata={"recoveryStage": "complete"},
+                    )
+                    action_result = {
+                        "success": True,
+                        "message": recovery_message,
+                        "recovery_action": recovery.recovery,
+                        "provider": config_result.get("provider") if config_result else None,
+                        "proxy_tier": config_result.get("proxy_tier") if config_result else None,
+                        "removed_cookie_count": len(recovery.removed_cookie_keys),
+                    }
+                except Exception as exc:
+                    error_message = extract_error_message(exc)
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Browser challenge recovery failed",
+                        task_id=task_id,
+                        message=error_message,
                         status=MessageStatus.ERROR,
                         browser_url=browser_url,
-                        action_type="browser",
-                        tool_call_id=rotate_call_id,
+                        action_type="browser_challenge_recovery",
+                        tool_call_id=recovery_call_id,
                     )
-                    action_result = {"success": False, "error": err_msg}
+                    action_result = {"success": False, "error": error_message}
+
+                if dom_service is not None:
                     await action_history.record_action(
                         dom_service=dom_service,
-                        action="rotate_ip",
+                        action="recover_from_challenge",
                         thinking=thinking,
-                        params={"reason": rotate_reason},
+                        params={"reason": recovery_reason},
                         result=action_result,
                     )
-                    _append_browser_turn_messages(
-                        browser_turn_messages,
-                        task=task_prompt,
-                        browser_state=browser_state,
-                        include_screenshot=False,
-                        unified_action=unified_action,
-                        result=action_result,
-                        tool_call_id=rotate_call_id,
-                    )
-                    await browser_stream.finish_tools(status="ERROR")
-                    continue
-
-                # Success: swap the live CDP/Playwright stack to the replacement
-                # session; captured storage preserves login across provider profiles.
-                new_cdp_url = rotate_result.get("ws_url")
-                if not isinstance(new_cdp_url, str) or not new_cdp_url:
-                    raise RuntimeError("rotate_ip succeeded without a replacement ws_url")
-                reconnected = await _reconnect_browser_stack_after_rotation(
-                    new_cdp_url=new_cdp_url,
-                    old_dom_service=dom_service,
-                    old_playwright_browser=playwright_browser,
-                    old_playwright_instance=playwright_instance,
-                    old_driver_pid=playwright_driver_pid,
-                    fingerprint_injection=fingerprint_injection,
-                    agent_id=agent_id,
-                )
-                dom_service = reconnected["dom_service"]
-                dom_page = reconnected["dom_page"]
-                input_page = reconnected["input_page"]
-                playwright_browser = reconnected["playwright_browser"]
-                playwright_instance = reconnected["playwright_instance"]
-                playwright_driver_pid = reconnected["playwright_driver_pid"]
-                session_id = rotate_result.get("session_id", session_id)
-                browser_url = rotate_result.get("debug_url", browser_url)
-                cdp_url = new_cdp_url
-                browser_session_metadata = _updated_rotation_session_metadata(
-                    browser_session_metadata,
-                    rotate_result,
-                )
-                try:
-                    await _restore_rotation_storage_state(
-                        input_page,
-                        rotation_storage_state,
-                        current_url=current_url,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "Failed to restore browser storage after IP rotation",
-                        provider=rotate_result.get("provider"),
-                        error=str(exc),
-                    )
-                    raise RuntimeError(
-                        "Browser state restoration failed after IP rotation; refusing to continue"
-                    ) from exc
-
-                # Follow the rotation in the recording: rebind to the new page and
-                # start a fresh replay segment on the rotated session, so the saved
-                # recording actually shows the exit IP changing across rotations
-                # instead of freezing on the first (now-evicted) session's IP.
-                if browser_recorder is not None:
-                    browser_recorder.page = input_page
-                    with contextlib.suppress(Exception):
-                        if rotate_result.get("provider") == "kernel":
-                            await browser_recorder.rotate_kernel_replay(session_id)
-                        elif getattr(browser_recorder, "uses_kernel_replay", False):
-                            await browser_recorder.stop_kernel_replay()
-
-                # Rebuild the humanizer against the new pages (input events must
-                # target the live page, not the torn-down one).
-                if _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
-                    humanizer = BrowserHumanizer(dom_page=dom_page, input_page=input_page, fast=False)
-                    await humanizer.initialize_cursor(start_pos=(640, 400))
-                else:
-                    humanizer = None
-
-                browser_state = await dom_service.get_browser_state(include_screenshot=False)
-                current_url = browser_state.get("url", current_url)
-
-                rotation_message = rotate_result.get("rotation_message", "Rotated to a fresh IP.")
-                recovery_action = rotate_result.get("recovery_action", "ip_rotated")
-                await save_browser_action_message(
-                    agent_id=agent_id,
-                    title=("Browser provider switched" if recovery_action == "provider_switched" else "IP rotated"),
-                    task_id=task_id,
-                    message=rotation_message,
-                    status=MessageStatus.FINISHED,
-                    browser_url=browser_url,
-                    action_type="browser",
-                    tool_call_id=rotate_call_id,
-                )
-
-                action_result = {
-                    "success": True,
-                    "message": rotation_message,
-                    "provider": rotate_result.get("provider"),
-                    "previous_provider": rotate_result.get("previous_provider"),
-                    "recovery_action": recovery_action,
-                    "proxy_tier": rotate_result.get("proxy_tier", "residential"),
-                    "rotations_remaining": rotate_result.get("rotations_remaining"),
-                    "next_recovery": rotate_result.get("next_recovery"),
-                }
-                await action_history.record_action(
-                    dom_service=dom_service,
-                    action="rotate_ip",
-                    thinking=thinking,
-                    params={"reason": rotate_reason},
-                    result=action_result,
-                )
                 _append_browser_turn_messages(
                     browser_turn_messages,
                     task=task_prompt,
@@ -5975,9 +6263,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     include_screenshot=False,
                     unified_action=unified_action,
                     result=action_result,
-                    tool_call_id=rotate_call_id,
+                    tool_call_id=recovery_call_id,
                 )
-                await browser_stream.finish_tools(status="FINISHED")
+                await browser_stream.finish_tools(status="FINISHED" if action_result.get("success") else "ERROR")
                 continue
 
             if action_name == "send_message_to_user":
@@ -6333,7 +6621,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 continue
 
             # 6. Execute regular action
-            tool_call_id_action = str(llm_result.get("tool_call_id") or uuid_module.uuid4())
+            tool_call_id_action = _browser_action_tool_call_id(llm_result)
 
             idx = unified_action.get("index")
             coords = unified_action.get("coordinates")
@@ -6544,9 +6832,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
 
                 checkpoint = _browser_ground_truth_checkpoint(browser_state, current_url)
-                if checkpoint and (
-                    not verifier_checkpoints or checkpoint != verifier_checkpoints[-1]
-                ):
+                if checkpoint and (not verifier_checkpoints or checkpoint != verifier_checkpoints[-1]):
                     verifier_checkpoints.append(checkpoint)
 
                 if dom_service:
@@ -6664,9 +6950,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     )
 
                 checkpoint = _browser_ground_truth_checkpoint(browser_state, current_url)
-                if checkpoint and (
-                    not verifier_checkpoints or checkpoint != verifier_checkpoints[-1]
-                ):
+                if checkpoint and (not verifier_checkpoints or checkpoint != verifier_checkpoints[-1]):
                     verifier_checkpoints.append(checkpoint)
 
                 if dom_service:

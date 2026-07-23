@@ -12,7 +12,7 @@
 # --sim-on <csv> to turn the world-model simulator ON for specific benches.
 #
 # This is the DEFAULT cloud-bench path (scripts/run-bench delegates here). Autoscaling
-# is ON by default and the whole run is shown in ONE aggregated batch dashboard,
+# is mandatory and the whole run is shown in ONE aggregated batch dashboard,
 # served on the central hub (no browser window is opened — view runs in the
 # in-app Benchmarks tab, or open the printed URL manually).
 #
@@ -39,9 +39,8 @@
 #                       so concurrent workspaces get non-colliding hubs)
 #   --keep-clones      do NOT destroy the per-bench machines on exit (debugging)
 #   --timeout <s>      per-bench ceiling passed to run-bench-cloud (default 3600)
-#   --autoscale        per-bench worker autoscaling, prod params, scoped to the bench queue (DEFAULT ON)
-#   --no-autoscale     keep each bench at its single machine
-#   --autoscale-max N  per-bench ceiling of worker machines (default 15 = prod MAX_MACHINES)
+#   --autoscale-max N  per-bench ceiling including the primary; must be >=2
+#                      (default 15 = prod MAX_MACHINES)
 #
 # Prereq: a warm box exists (bash scripts/run-bench-cloud --setup).
 # ─────────────────────────────────────────────────────────────────────────────
@@ -62,12 +61,22 @@ if [ -z "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ]; then
     CLOUDBENCH_SCRIPT_SNAPSHOT="$(mktemp -d "${TMPDIR:-/tmp}/cloudbench-scripts.XXXXXX")"
     cp "$ROOT_DIR/scripts/run-bench-fleet" \
        "$ROOT_DIR/scripts/run-bench-cloud" \
+       "$ROOT_DIR/scripts/cloudbench-port-lease.py" \
        "$ROOT_DIR/scripts/lib/cloudbench-env.sh" \
+       "$ROOT_DIR/scripts/lib/cloudbench-app-env-lock.sh" \
        "$CLOUDBENCH_SCRIPT_SNAPSHOT/"
     export CLOUDBENCH_SCRIPT_SNAPSHOT CLOUDBENCH_FLEET_ROOT="$ROOT_DIR"
     exec bash "$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-fleet" "$@"
 fi
+
+# Bash 3.2 preserves an inherited export attribute when a shell variable is
+# reassigned (including through `local`). Provider inventory is unbounded JSON;
+# never let a caller's generic exported name turn one of these internal buffers
+# into exec environment and trigger E2BIG in Python, sed, sleep, or Fly itself.
+export -n inventory machines machines_json warm_json POOL_INVENTORY_JSON SNAPSHOTS_JSON 2>/dev/null || true
+
 RUN_BENCH_CLOUD_BIN="$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-cloud"
+AUTOSCALER_PORT_LEASE_HELPER="$CLOUDBENCH_SCRIPT_SNAPSHOT/cloudbench-port-lease.py"
 MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"
 
 APP="navi-whisper-lux-bench"
@@ -87,6 +96,7 @@ FLEET_PRIMARY_VM_SIZE="${CLOUDBENCH_FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}"
 FLEET_PRIMARY_VM_MEMORY="${CLOUDBENCH_FLEET_PRIMARY_VM_MEMORY:-4096}"
 FLEET_WORKER_VM_SIZE="${CLOUDBENCH_FLEET_WORKER_VM_SIZE:-performance-1x}"
 FLEET_WORKER_VM_MEMORY="${CLOUDBENCH_FLEET_WORKER_VM_MEMORY:-2048}"
+FLEET_WORKER_HEALTH_PORT="${CLOUDBENCH_WORKER_HEALTH_PORT:-3103}"
 WARM_PARKED_VM_SIZE="${CLOUDBENCH_WARM_PARKED_VM_SIZE:-shared-cpu-1x}"
 WARM_PARKED_VM_MEMORY="${CLOUDBENCH_WARM_PARKED_VM_MEMORY:-2048}"
 # Every run lands in its OWN dir under the runs-root; the central hub (one
@@ -115,9 +125,17 @@ BENCH_REF=""
 DASH_BASE="${CLOUDBENCH_DASH_BASE:-$(( ${CONDUCTOR_PORT:-3001} + 5764 ))}"
 KEEP_CLONES="0"
 RUN_TIMEOUT="3600"
-AUTOSCALE="1"           # per-bench worker autoscaling (prod params, scoped to the bench queue) — ON by default
 AUTOSCALE_MAX="15"      # prod MAX_MACHINES; per-bench ceiling of worker machines
 AUTOSCALE_POLL="10"     # seconds between desired-count reads off the box /metrics
+AUTOSCALER_STARTUP_WAIT_SECONDS="${CLOUDBENCH_AUTOSCALER_STARTUP_WAIT_SECONDS:-600}"
+WORKER_STAGE_ATTEMPTS="${CLOUDBENCH_WORKER_STAGE_ATTEMPTS:-40}"
+WORKER_READY_TIMEOUT="${CLOUDBENCH_WORKER_READY_TIMEOUT:-300}"
+# One failed staging attempt can consume five 20s provider calls, watchdog
+# teardown, and retry sleep when a dirty patch is present. Keep the terminal
+# drain budget tied to that bounded lifecycle so child completion cannot kill a
+# legitimately in-flight worker before its own failure/ready outcome is due.
+WORKER_STAGE_ATTEMPT_WALL_SECONDS="120"
+AUTOSCALER_FINALIZATION_WAIT_SECONDS="${CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS:-}"
 SYNCHRONIZED_START="${CLOUDBENCH_SYNCHRONIZED_START:-1}"
 CONTROLLER_RETRY_SECONDS="${CLOUDBENCH_CONTROLLER_RETRY_SECONDS:-10}"
 PROVISION_POOL=""       # --provision-pool N: pre-provision N stopped clones (current image) then exit
@@ -141,10 +159,20 @@ FLEET_OWNER_PID_START="$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^[[:space:]]*/
 if [ "${CLOUDBENCH_TEST_FLEET_OWNER_TOKEN+x}" = "x" ]; then
     FLEET_OWNER_TOKEN="$CLOUDBENCH_TEST_FLEET_OWNER_TOKEN"
 else
-    FLEET_OWNER_TOKEN="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+FLEET_OWNER_TOKEN="$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
 fi
 FLEET_REGISTRY_DIR="$FLEET_OWNERSHIP_ROOT/$FLEET_OWNER_TOKEN"
 FLEET_REGISTRY_PUBLISHED=0
+# Capacity admission is host-wide, not workspace-local.  Conductor worktrees
+# have distinct .context directories, so a workspace lock cannot prevent two
+# controllers from admitting against the same Fly inventory snapshot.  Keep
+# short durable reservations under the host temp root; fcntl serializes their
+# read/prune/write transaction and owner PID birth identity makes crash recovery
+# safe against PID reuse.
+CAPACITY_RESERVATION_ROOT="${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}"
+CAPACITY_RESERVATION_TOKEN="$FLEET_OWNER_TOKEN-primary"
+CAPACITY_RESERVATION_PUBLISHED=0
+CLEANUP_DISK_RESERVE_FILE="$FLEET_REGISTRY_DIR/cleanup-disk-reserve"
 while [ $# -gt 0 ]; do
     case "$1" in
         --detach)         DETACH="1"; shift ;;
@@ -153,9 +181,10 @@ while [ $# -gt 0 ]; do
         --dash-base)      DASH_BASE="${2:-}"; shift 2 ;;
         --keep-clones)    KEEP_CLONES="1"; shift ;;
         --timeout)        RUN_TIMEOUT="${2:-}"; shift 2 ;;
-        --autoscale)      AUTOSCALE="1"; shift ;;
-        --no-autoscale)   AUTOSCALE="0"; shift ;;   # each bench stays at its single machine
-        --autoscale-max)  AUTOSCALE_MAX="${2:-}"; shift 2 ;;
+        --autoscale-max)
+            AUTOSCALE_MAX="${2:-}"
+            if [ "$#" -ge 2 ]; then shift 2; else shift; fi
+            ;;
         --provision-pool) PROVISION_POOL="${2:-}"; shift 2 ;;   # one-time: create N stopped clones, then exit
         -h|--help)        sed -n '2,47p' "$0"; exit 0 ;;
         --*)              echo "❌ Unknown flag: $1" >&2; exit 2 ;;
@@ -170,6 +199,51 @@ while [ $# -gt 0 ]; do
                           shift ;;
     esac
 done
+case "$AUTOSCALE_MAX" in
+    ''|*[!0-9]*)
+        echo "❌ --autoscale-max must be an integer of at least 2" >&2
+        exit 2
+        ;;
+esac
+if [ "$AUTOSCALE_MAX" -lt 2 ]; then
+    echo "❌ --autoscale-max must be an integer of at least 2" >&2
+    exit 2
+fi
+case "$AUTOSCALER_STARTUP_WAIT_SECONDS" in
+    ''|*[!0-9]*)
+        echo "❌ CLOUDBENCH_AUTOSCALER_STARTUP_WAIT_SECONDS must be a non-negative integer" >&2
+        exit 2
+        ;;
+esac
+case "$WORKER_STAGE_ATTEMPTS" in
+    ''|*[!0-9]*|0)
+        echo "❌ CLOUDBENCH_WORKER_STAGE_ATTEMPTS must be a positive integer" >&2
+        exit 2
+        ;;
+esac
+case "$WORKER_READY_TIMEOUT" in
+    ''|*[!0-9]*|0)
+        echo "❌ CLOUDBENCH_WORKER_READY_TIMEOUT must be a positive integer" >&2
+        exit 2
+        ;;
+esac
+if [ -z "$AUTOSCALER_FINALIZATION_WAIT_SECONDS" ]; then
+    AUTOSCALER_FINALIZATION_WAIT_SECONDS=$((
+        WORKER_STAGE_ATTEMPTS * WORKER_STAGE_ATTEMPT_WALL_SECONDS \
+        + WORKER_READY_TIMEOUT + 60
+    ))
+fi
+case "$AUTOSCALER_FINALIZATION_WAIT_SECONDS" in
+    ''|*[!0-9]*)
+        echo "❌ CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS must be a non-negative integer" >&2
+        exit 2
+        ;;
+esac
+case "$FLEET_WORKER_HEALTH_PORT" in
+    ''|*[!0-9]*|0) echo "❌ CLOUDBENCH_WORKER_HEALTH_PORT must be a positive integer" >&2; exit 2 ;;
+esac
+[ "$FLEET_WORKER_HEALTH_PORT" -le 65535 ] \
+    || { echo "❌ CLOUDBENCH_WORKER_HEALTH_PORT must be at most 65535" >&2; exit 2; }
 # Dedupe bench names (preserve first-seen order). Each bench gets ONE isolated
 # machine keyed on $FLEET_DIR/$bench, so a duplicate name (e.g. a duplicate
 # catalog entry) would share an out-dir/machine and trip the isolation guard
@@ -204,6 +278,11 @@ canonicalize_bench_ref() {
     fi
 }
 BENCH_REF="$(canonicalize_bench_ref "$BENCH_REF")"
+REQUESTED_BENCH_REF="$BENCH_REF"
+if ! BENCH_REF="$(cloudbench_fetchable_ref "$ROOT_DIR" "$BENCH_REF" \
+    "$([ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" = "1" ] && printf 0 || printf 1)")"; then
+    exit 1
+fi
 
 # --detach: re-exec THIS invocation in its own session before acquiring any
 # lock or machine, so the controller (and its cleanup traps) survive the
@@ -246,19 +325,24 @@ per_box_barrier_wait_seconds() {
 # does a full production DB sync (~19 min for the ecommerce/browser slice) that
 # only gets slower as N stacks contend on the sync concurrently. 2160s (= 1800s
 # + 20% headroom) keeps a slow-but-healthy stack from being excluded at the
-# start barrier. The durable fix is to bake the seed dump into the warm snapshot
-# so clones RESTORE instead of re-sync (see cloudbench-run.sh:stack_wait_budget_seconds
-# — the tighter 900s budget applies the moment a seed dump is present).
+# start barrier. A cached dump still makes healthy startup fast, but cannot
+# shorten this ceiling because run.sh may reject it or fall back after restore.
 FIRST_RUN_STACK_WAIT_SECONDS="${CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS:-2160}"
 PER_BOX_BARRIER_WAIT_SECONDS="$(per_box_barrier_wait_seconds)" || exit 2
 START_BARRIER_WAIT_SECONDS="${CLOUDBENCH_START_BARRIER_WAIT_SECONDS:-$RUN_TIMEOUT}"
-for seconds in "$RUN_TIMEOUT" "$FIRST_RUN_STACK_WAIT_SECONDS" "$PER_BOX_BARRIER_WAIT_SECONDS" "$START_BARRIER_WAIT_SECONDS"; do
+BOOT_UPDATE_CAPACITY_WAIT_SECONDS="${CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS:-1200}"
+BOOT_CONFIG_BARRIER_WAIT_SECONDS="${CLOUDBENCH_BOOT_CONFIG_BARRIER_WAIT_SECONDS:-1800}"
+for seconds in "$RUN_TIMEOUT" "$FIRST_RUN_STACK_WAIT_SECONDS" "$PER_BOX_BARRIER_WAIT_SECONDS" "$START_BARRIER_WAIT_SECONDS" "$BOOT_UPDATE_CAPACITY_WAIT_SECONDS" "$BOOT_CONFIG_BARRIER_WAIT_SECONDS"; do
     case "$seconds" in
         ''|*[!0-9]*) echo "❌ benchmark and barrier timeouts must be positive integers" >&2; exit 2 ;;
     esac
     [ "$seconds" -gt 0 ] \
         || { echo "❌ benchmark and barrier timeouts must be positive integers" >&2; exit 2; }
 done
+if [ "$BOOT_CONFIG_BARRIER_WAIT_SECONDS" -le "$BOOT_UPDATE_CAPACITY_WAIT_SECONDS" ]; then
+    echo "❌ boot config barrier must outlive the provider-capacity recovery budget" >&2
+    exit 2
+fi
 # The global barrier cannot expire before a legitimate cold guest's per-box
 # budget. This clamps an undersized default or override to the shared contract.
 if [ "$START_BARRIER_WAIT_SECONDS" -lt "$PER_BOX_BARRIER_WAIT_SECONDS" ]; then
@@ -292,46 +376,231 @@ FLY_API_TOKEN="$(resolve_fly_token)"
 export FLY_API_TOKEN
 FLY() { flyctl "$@"; }
 
-# ── ONE shared machines snapshot for every read-only poller ─────────────────
-# 28 autoscalers + clone resolvers each running their own `flyctl machines
-# list` was ~28× redundant Fly API load per interval — the direct source of
-# resource_exhausted throttling at fleet width. A single controller-owned loop
-# refreshes $FLEET_DIR/machines.json atomically on one cadence (with backoff on
-# API failure, keeping the last good snapshot), and every read-only consumer
-# reads the snapshot. Mutating paths that need post-write freshness (reap
-# verification, pool claims) intentionally stay live.
+# ── ONE shared inventory stream for every read-only poller ──────────────────
+# A single controller-owned loop reads Fly's Machines/Volumes APIs and publishes
+# an atomic, keyed per-machine index. Hot consumers read one tiny record instead
+# of issuing N provider calls or parsing an N-machine array in each of N children.
+# Provider load stays O(1) and local index work stays O(N) at fleet width.
+# Mutating paths that need post-write freshness (reap verification, pool claims)
+# intentionally stay live and bounded.
 MACHINES_SNAPSHOT="$FLEET_DIR/machines.json"
 VOLUMES_SNAPSHOT="$FLEET_DIR/volumes.json"
+INVENTORY_INDEX="$FLEET_DIR/inventory"
 SNAPSHOT_POLL="${CLOUDBENCH_SNAPSHOT_POLL_SECONDS:-5}"
-machines_snapshot_loop() {
-    local tmp backoff=0 ok
+SNAPSHOT_REFRESH_TIMEOUT="${CLOUDBENCH_SNAPSHOT_REFRESH_TIMEOUT_SECONDS:-30}"
+INVENTORY_REFRESH_LOCK="$FLEET_DIR/machines-refresh.lock"
+INVENTORY_WAIT_FIFO="$FLEET_DIR/inventory-refresh.wait"
+INVENTORY_MAX_STALE_SECONDS="${CLOUDBENCH_INVENTORY_MAX_STALE_SECONDS:-$((SNAPSHOT_REFRESH_TIMEOUT * 5 + 30))}"
+INVENTORY_CLOCK_EPOCH="$(date +%s)"
+INVENTORY_CLOCK_SECONDS="$SECONDS"
+
+_refresh_inventory_snapshot_unlocked() {
+    local suffix machines_tmp volumes_tmp
+    suffix="${BASHPID:-$$}.$RANDOM"
+    machines_tmp="$MACHINES_SNAPSHOT.tmp.$suffix"
+    volumes_tmp="$VOLUMES_SNAPSHOT.tmp.$suffix"
+    if ! fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
+            machines list -a "$APP" --json > "$machines_tmp" \
+        || [ ! -s "$machines_tmp" ]; then
+        rm -f "$machines_tmp" "$volumes_tmp"
+        return 1
+    fi
+    if ! fly_with_timeout "$SNAPSHOT_REFRESH_TIMEOUT" \
+            volumes list -a "$APP" --json > "$volumes_tmp" \
+        || [ ! -s "$volumes_tmp" ]; then
+        rm -f "$machines_tmp" "$volumes_tmp"
+        return 1
+    fi
+    if ! python3 "$MACHINE_READINESS_SCRIPT" --publish-index \
+            "$machines_tmp" "$volumes_tmp" "$INVENTORY_INDEX"; then
+        rm -f "$machines_tmp" "$volumes_tmp"
+        return 1
+    fi
+    mv "$machines_tmp" "$MACHINES_SNAPSHOT"
+    mv "$volumes_tmp" "$VOLUMES_SNAPSHOT"
+}
+
+inventory_refresh_wait_tick() {
+    # A read timeout on a read/write FIFO is a Bash builtin wait: no child
+    # process per clone-name waiter while another publisher owns the lock.
+    [ -p "$INVENTORY_WAIT_FIFO" ] || return 1
+    exec 19<> "$INVENTORY_WAIT_FIFO" || return 1
+    IFS= read -r -t 1 -u 19 _inventory_wait_value || true
+    exec 19>&-
+}
+
+inventory_refresh_lock_acquire() {  # inventory_refresh_lock_acquire [prior-generation]
+    # Publish complete ownership metadata as an atomic hard link. A SIGKILL can
+    # leave either no lock or a complete lock file, never the metadata-less
+    # directory window that previously outlived the waiter budget.
+    local lock="$INVENTORY_REFRESH_LOCK" prior="${1:-}" candidate=""
+    local owner_pid="" owner_start="" token="" initialized=0 current
+    local status lock_host lock_pid key value wait_seconds deadline
+    wait_seconds="${CLOUDBENCH_SNAPSHOT_REFRESH_WAIT_SECONDS:-$((SNAPSHOT_REFRESH_TIMEOUT * 3 + 5))}"
+    case "$wait_seconds" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    deadline=$((SECONDS + wait_seconds))
     while :; do
-        ok=1
-        tmp="$MACHINES_SNAPSHOT.tmp.$$"
-        if FLY machines list -a "$APP" --json > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-            mv "$tmp" "$MACHINES_SNAPSHOT"
-        else rm -f "$tmp"; ok=0; fi
-        tmp="$VOLUMES_SNAPSHOT.tmp.$$"
-        if FLY volumes list -a "$APP" --json > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-            mv "$tmp" "$VOLUMES_SNAPSHOT"
-        else rm -f "$tmp"; ok=0; fi
-        if [ "$ok" = 1 ]; then backoff=0; else
+        if [ -n "$prior" ]; then
+            current="$(machines_snapshot_identity)"
+            if [ "$current" != "$prior" ]; then
+                [ -n "$candidate" ] && rm -f "$candidate"
+                return 2
+            fi
+        fi
+
+        if [ ! -e "$lock" ]; then
+            if [ "$initialized" = "0" ]; then
+                owner_pid="${BASHPID:-$$}"
+                owner_start="$(ps -p "$owner_pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+                [ -n "$owner_start" ] || return 1
+                token="$owner_pid.$RANDOM.$RANDOM.$SECONDS"
+                candidate="$lock.candidate.$owner_pid.$RANDOM"
+                {
+                    printf 'host=%s\n' "$FLEET_OWNER_HOST"
+                    printf 'pid=%s\n' "$owner_pid"
+                    printf 'pid_start=%s\n' "$owner_start"
+                    printf 'token=%s\n' "$token"
+                } > "$candidate" || { rm -f "$candidate"; return 1; }
+                initialized=1
+            fi
+            if ln "$candidate" "$lock" 2>/dev/null; then
+                rm -f "$candidate"
+                INVENTORY_REFRESH_LOCK_TOKEN="$token"
+                export CLOUDBENCH_INVENTORY_REFRESH_LOCK="$lock"
+                export CLOUDBENCH_INVENTORY_REFRESH_LOCK_TOKEN="$token"
+                return 0
+            fi
+        fi
+
+        lock_host=""; lock_pid=""
+        if [ -f "$lock" ]; then
+            while IFS='=' read -r key value; do
+                case "$key" in host) lock_host="$value" ;; pid) lock_pid="$value" ;; esac
+            done < "$lock"
+        fi
+        if [ -n "$lock_host" ] && [ "$lock_host" != "$FLEET_OWNER_HOST" ]; then
+            [ -n "$candidate" ] && rm -f "$candidate"
+            echo "❌ inventory refresh lock belongs to another host" >&2
+            return 1
+        fi
+        case "$lock_pid" in
+            ''|*[!0-9]*) status=1 ;;
+            *) kill -0 "$lock_pid" 2>/dev/null && status=0 || status=1 ;;
+        esac
+        if [ "$status" = "1" ]; then
+            if python3 "$MACHINE_READINESS_SCRIPT" --recover-lock "$lock"; then
+                continue
+            else
+                status=$?
+                [ "$status" -eq 1 ] || {
+                    [ -n "$candidate" ] && rm -f "$candidate"
+                    echo "❌ unsafe inventory refresh lock recovery" >&2
+                    return 1
+                }
+            fi
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            [ -n "$candidate" ] && rm -f "$candidate"
+            echo "❌ timed out waiting for the serialized inventory refresh" >&2
+            return 1
+        fi
+        inventory_refresh_wait_tick || {
+            [ -n "$candidate" ] && rm -f "$candidate"
+            return 1
+        }
+    done
+}
+
+inventory_refresh_lock_release() {
+    local lock="$INVENTORY_REFRESH_LOCK" owner_pid owner_start
+    owner_pid="${BASHPID:-$$}"
+    owner_start="$(ps -p "$owner_pid" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [ "$(registry_meta_value "$lock" host)" = "$FLEET_OWNER_HOST" ] \
+        && [ "$(registry_meta_value "$lock" pid)" = "$owner_pid" ] \
+        && [ "$(registry_meta_value "$lock" pid_start)" = "$owner_start" ] \
+        && [ "$(registry_meta_value "$lock" token)" = "${INVENTORY_REFRESH_LOCK_TOKEN:-}" ] \
+        || return 1
+    rm -f "$lock"
+    unset INVENTORY_REFRESH_LOCK_TOKEN
+    unset CLOUDBENCH_INVENTORY_REFRESH_LOCK CLOUDBENCH_INVENTORY_REFRESH_LOCK_TOKEN
+}
+
+refresh_inventory_snapshot() {
+    local status=0
+    inventory_refresh_lock_acquire || return 1
+    _refresh_inventory_snapshot_unlocked || status=$?
+    inventory_refresh_lock_release || return 1
+    return "$status"
+}
+
+machines_snapshot_loop() {
+    local backoff=0
+    while :; do
+        if refresh_inventory_snapshot; then
+            backoff=0
+        else
             # rate-limited/transient API failure: back off (bounded) and keep
-            # serving the last good snapshot rather than hammering the API
+            # serving the last good index rather than hammering the API.
             backoff=$(( backoff < 30 ? backoff + SNAPSHOT_POLL : 30 ))
         fi
         sleep $(( SNAPSHOT_POLL + backoff + (RANDOM % 3) ))
     done
 }
+
+start_machines_snapshot_loop() {
+    [ -n "${SNAPSHOT_LOOP_PID:-}" ] && kill -0 "$SNAPSHOT_LOOP_PID" 2>/dev/null \
+        && return 0
+    SNAPSHOT_LOOP_TOKEN="${SNAPSHOT_LOOP_TOKEN:-$RANDOM.$RANDOM.$$.${SECONDS}}"
+    export CLOUDBENCH_INVENTORY_PUBLISHER_TOKEN="$SNAPSHOT_LOOP_TOKEN"
+    export CLOUDBENCH_INVENTORY_MAX_STALE_SECONDS="$INVENTORY_MAX_STALE_SECONDS"
+    if [ -e "$INVENTORY_WAIT_FIFO" ] && [ ! -p "$INVENTORY_WAIT_FIFO" ]; then
+        echo "❌ invalid inventory refresh wait path" >&2
+        return 1
+    fi
+    [ -p "$INVENTORY_WAIT_FIFO" ] || mkfifo "$INVENTORY_WAIT_FIFO" || return 1
+    if ! refresh_inventory_snapshot; then
+        echo "❌ shared inventory snapshot did not initialize" >&2
+        return 1
+    fi
+    machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!
+    SNAPSHOT_LOOP_PID_START="$(ps -p "$SNAPSHOT_LOOP_PID" -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    if [ -z "$SNAPSHOT_LOOP_PID_START" ]; then
+        kill "$SNAPSHOT_LOOP_PID" 2>/dev/null || true
+        SNAPSHOT_LOOP_PID=""
+        return 1
+    fi
+}
+
+inventory_index_healthy() {
+    local pid="${SNAPSHOT_LOOP_PID:-}" expected_token="${SNAPSHOT_LOOP_TOKEN:-}"
+    local key value publisher_token="" valid_until="" now
+    case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ -n "$expected_token" ] && [ -s "$INVENTORY_INDEX/current/health" ] || return 1
+    while IFS='=' read -r key value; do
+        case "$key" in
+            publisher_token) publisher_token="$value" ;;
+            valid_until) valid_until="$value" ;;
+        esac
+    done < "$INVENTORY_INDEX/current/health"
+    case "$valid_until" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$publisher_token" = "$expected_token" ] || return 1
+    now=$((INVENTORY_CLOCK_EPOCH + SECONDS - INVENTORY_CLOCK_SECONDS))
+    [ "$valid_until" -ge "$now" ]
+}
+
 _fresh_snapshot_or() {  # _fresh_snapshot_or <snapshot-file> <live-cmd...>
-    # Serve the shared snapshot when fresh; fall back to a live call when the
-    # loop hasn't started (early preflight) or died — readers never block on
-    # snapshot plumbing.
-    local f="$1" now mt; shift
-    if [ -f "$f" ]; then
-        now=$(date +%s)
-        mt=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null || echo 0)
-        if [ $(( now - mt )) -le $(( SNAPSHOT_POLL * 4 )) ]; then cat "$f"; return 0; fi
+    # Once shared mode starts, every consumer either reads the last good snapshot
+    # or fails closed. A stale/missing snapshot must never fan out into one live
+    # provider request per child during the exact rate-limit condition we absorb.
+    local f="$1"; shift
+    if [ -n "${SNAPSHOT_LOOP_PID:-}" ]; then
+        inventory_index_healthy || return 1
+        [ -s "$f" ] || return 1
+        cat "$f"
+        return 0
     fi
     "$@" 2>/dev/null
 }
@@ -339,70 +608,80 @@ fleet_machines_json() { _fresh_snapshot_or "$MACHINES_SNAPSHOT" FLY machines lis
 fleet_volumes_json()  { _fresh_snapshot_or "$VOLUMES_SNAPSHOT" FLY volumes list -a "$APP" --json; }
 
 machines_snapshot_identity() {
-    [ -f "$MACHINES_SNAPSHOT" ] || { printf 'missing'; return; }
-    stat -f '%i:%m' "$MACHINES_SNAPSHOT" 2>/dev/null \
-        || stat -c '%i:%Y' "$MACHINES_SNAPSHOT" 2>/dev/null \
-        || printf 'unknown'
+    local key value generation="missing"
+    [ -s "$INVENTORY_INDEX/current/health" ] || { printf '%s' "$generation"; return; }
+    while IFS='=' read -r key value; do
+        [ "$key" = "generation" ] && generation="$value"
+    done < "$INVENTORY_INDEX/current/health"
+    printf '%s' "$generation"
 }
 
 refresh_machines_snapshot_after() {  # refresh_machines_snapshot_after <prior-identity>
-    # Clone output very rarely omits the target id.  In that exceptional path,
-    # all concurrent resolvers share one live refresh instead of issuing one
-    # Machines API list call per clone.  A renamed snapshot changes inode, so
-    # waiters can prove they observed a refresh newer than their prior view.
-    local prior="$1" lock="$FLEET_DIR/machines-refresh.lock" tmp current i
-    for i in $(seq 1 100); do
-        current="$(machines_snapshot_identity)"
-        [ "$current" != "$prior" ] && return 0
-        if mkdir "$lock" 2>/dev/null; then
-            # A peer may have refreshed between our read and lock acquisition.
-            current="$(machines_snapshot_identity)"
-            if [ "$current" = "$prior" ]; then
-                tmp="$MACHINES_SNAPSHOT.refresh.$$"
-                if FLY machines list -a "$APP" --json > "$tmp" 2>/dev/null && [ -s "$tmp" ]; then
-                    mv "$tmp" "$MACHINES_SNAPSHOT"
-                else
-                    rm -f "$tmp" "$lock"
-                    return 1
-                fi
-            fi
-            rmdir "$lock" 2>/dev/null || true
-            return 0
-        fi
-        sleep 0.1
-    done
-    echo "❌ timed out waiting for the coalesced Machines API refresh" >&2
+    # Clone output very rarely omits the target id. All exceptional resolvers
+    # coalesce behind one bounded refresh. The lock carries a process-start
+    # identity so a SIGKILLed owner can never wedge every later refresh.
+    local prior="$1" current status=0
+    current="$(machines_snapshot_identity)"
+    [ "$current" != "$prior" ] && return 0
+    if inventory_refresh_lock_acquire "$prior"; then
+        :
+    else
+        status=$?
+        [ "$status" = "2" ] && return 0
+        return 1
+    fi
+    current="$(machines_snapshot_identity)"
+    if [ "$current" = "$prior" ]; then
+        _refresh_inventory_snapshot_unlocked || status=$?
+    fi
+    inventory_refresh_lock_release || return 1
+    return "$status"
+}
+
+inventory_machine_record_path() {  # inventory_machine_record_path <id>
+    case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    printf '%s' "$INVENTORY_INDEX/current/machines/$1"
+}
+
+inventory_machine_field() {  # inventory_machine_field <id> <field>
+    local path key value
+    inventory_index_healthy || return 1
+    path="$(inventory_machine_record_path "$1")" || return 1
+    [ -s "$path" ] || return 1
+    while IFS='=' read -r key value; do
+        [ "$key" = "$2" ] && { printf '%s' "$value"; return 0; }
+    done < "$path"
     return 1
+}
+
+inventory_machine_exists() {
+    local path
+    inventory_index_healthy || return 1
+    path="$(inventory_machine_record_path "$1")" || return 1
+    [ -s "$path" ]
+}
+
+inventory_machine_id_for_name() {
+    case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+    inventory_index_healthy || return 1
+    [ -s "$INVENTORY_INDEX/current/names/$1" ] || return 1
+    IFS= read -r REPLY < "$INVENTORY_INDEX/current/names/$1"
+    printf '%s' "$REPLY"
 }
 
 # A clone ID is allocated before its snapshot-backed volume becomes mountable.
 # Keep every clone start behind the same storage lifecycle contract as the
 # per-benchmark child runner.
 machine_storage_ready() {  # machine_storage_ready <id>
-    local id="$1" machines volumes
-    machines="$(fleet_machines_json)" || return 1
-    volumes="$(fleet_volumes_json)" || return 1
-    python3 "$MACHINE_READINESS_SCRIPT" "$id" \
-        <(printf '%s' "$machines") <(printf '%s' "$volumes") >/dev/null
+    [ "$(inventory_machine_field "$1" storage_ready 2>/dev/null || true)" = "1" ]
+}
+
+machine_storage_failed() {  # machine_storage_failed <id>
+    [ "$(inventory_machine_field "$1" storage_failed 2>/dev/null || true)" = "1" ]
 }
 
 snapshot_machine_state() {  # snapshot_machine_state <id>; 0=state, 1=absent, 2=unsafe
-    local id="$1"
-    fleet_machines_json | MACHINE_ID="$id" python3 -c '
-import json, os, sys
-try:
-    machines = json.load(sys.stdin)
-except (TypeError, ValueError):
-    raise SystemExit(2)
-if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
-    raise SystemExit(2)
-matches = [machine for machine in machines if machine.get("id") == os.environ["MACHINE_ID"]]
-if not matches:
-    raise SystemExit(1)
-if len(matches) != 1 or not isinstance(matches[0].get("state"), str):
-    raise SystemExit(2)
-print(matches[0]["state"])
-'
+    inventory_machine_field "$1" state
 }
 
 is_sim_on() { case ",$SIM_ON_CSV," in *",$1,"*) return 0 ;; esac; return 1; }
@@ -431,24 +710,29 @@ print_code_provenance() {
     head_sub="$(git -C "$ROOT_DIR" log -1 --pretty=%s 2>/dev/null || echo '')"
     if git -C "$ROOT_DIR" branch -r --contains HEAD 2>/dev/null | grep -q origin/; then
         pushed="on origin ✓"
+    elif [ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ]; then
+        pushed="not on origin; complete workspace is packaged on fetchable base $BENCH_REF"
     else
         pushed="⚠ NOT on origin — unpushed commits will NOT run on the box (only uncommitted changes ship)"
     fi
     echo "════════════════════ CODE UNDER TEST ════════════════════"
     echo "  branch : $branch"
     echo "  ref    : $BENCH_REF  ($head_sha $head_sub)"
+    if [ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ]; then
+        echo "  local  : $REQUESTED_BENCH_REF (complete delta ships on fetchable base)"
+    fi
     echo "  pushed : $pushed"
     untracked_count="$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | wc -l | tr -d ' ')"
     if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" = "1" ]; then
         echo "  diff   : local changes intentionally excluded (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (pinned; local patch excluded)"
-    elif git -C "$ROOT_DIR" diff --quiet 2>/dev/null && [ "$untracked_count" = "0" ]; then
+    elif ! cloudbench_worktree_has_changes "$ROOT_DIR"; then
         echo "  diff   : clean working tree (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (clean)"
     else
-        dirtystat="$(git -C "$ROOT_DIR" diff --shortstat 2>/dev/null | sed 's/^ *//')"
-        echo "  diff   : DIRTY — shipped as a patch on top of $head_sha: $dirtystat, $untracked_count untracked"
-        git -C "$ROOT_DIR" diff --stat 2>/dev/null | sed 's/^/           /' | tail -30
+        dirtystat="$(git -C "$ROOT_DIR" diff --shortstat "$BENCH_REF" 2>/dev/null | sed 's/^ *//')"
+        echo "  diff   : DIRTY — shipped as a patch on top of $BENCH_REF: $dirtystat, $untracked_count untracked"
+        git -C "$ROOT_DIR" diff --stat "$BENCH_REF" 2>/dev/null | sed 's/^/           /' | tail -30
         git -C "$ROOT_DIR" ls-files --others --exclude-standard | sed 's/^/           + /' | tail -30
         CODE_SUMMARY="$branch@$head_sha +patch($dirtystat, $untracked_count untracked)"
     fi
@@ -631,6 +915,255 @@ registry_owner_alive() {  # registry_owner_alive <meta-file>; 0=alive, 1=dead, 2
     [ -n "$actual_start" ] && [ "$actual_start" = "$expected_start" ]
 }
 
+available_stopped_pool_machine_count() {  # <provider-machines-json>
+    # A stopped pool Machine is already present in provider inventory.  It
+    # consumes one physical Machine slot but no active shared CPU, so admission
+    # must not add it a second time as a fresh primary.  Count only this
+    # workspace's verified, unclaimed, stopped pool entries; reconcile_pool has
+    # already recovered stale claims before this function runs.
+    [ -z "${PROVISION_POOL:-}" ] || { printf '0'; return 0; }
+    [ -s "${POOL_IDS_FILE:-}" ] || { printf '0'; return 0; }
+    printf '%s' "$1" \
+        | POOL_FILE="$POOL_IDS_FILE" CLAIMS_DIR="${POOL_CLAIMS_DIR:-}" python3 -c '
+import json
+import os
+import re
+import sys
+
+try:
+    machines = json.load(sys.stdin)
+    if not isinstance(machines, list) or any(not isinstance(item, dict) for item in machines):
+        raise ValueError("invalid provider inventory")
+    states = dict()
+    for machine in machines:
+        machine_id = machine.get("id")
+        if isinstance(machine_id, str) and machine_id:
+            states[machine_id] = machine.get("state")
+    with open(os.environ["POOL_FILE"], encoding="utf-8") as handle:
+        pool_ids = list(dict.fromkeys(line.strip() for line in handle if line.strip()))
+    claims_dir = os.environ.get("CLAIMS_DIR", "")
+    available = 0
+    for machine_id in pool_ids:
+        # Keep this byte-for-byte equivalent to the claim_pool_machine shell
+        # contract (`case "$id" in *[!0-9a-f]*) continue`).
+        if re.fullmatch(r"[0-9a-f]+", machine_id) is None:
+            continue
+        claimed = bool(claims_dir) and os.path.exists(os.path.join(claims_dir, machine_id))
+        if states.get(machine_id) == "stopped" and not claimed:
+            available += 1
+    print(available)
+except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    print(f"pool capacity classification failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+'
+}
+
+capacity_reserve_slots() {  # <token> <machines> <shared> <machine-ceiling> <shared-ceiling> <current-machines> <current-shared> <kind>
+    # One fcntl transaction prunes reservations whose exact same-host owner is
+    # dead, sums every live workstream's pending slots, performs admission, and
+    # atomically publishes this owner.  The reservation survives workspace
+    # deletion and SIGKILL; the next controller recovers it by PID birth identity.
+    local token="$1" machine_slots="$2" shared_units="$3"
+    local machine_ceiling="$4" shared_ceiling="$5"
+    local current_machines="$6" current_shared="$7" kind="$8"
+    python3 - "$CAPACITY_RESERVATION_ROOT" "$token" "$APP" \
+        "$FLEET_OWNER_HOST" "$$" "$FLEET_OWNER_PID_START" "$RUN_ID" \
+        "$machine_slots" "$shared_units" "$machine_ceiling" "$shared_ceiling" \
+        "$current_machines" "$current_shared" "$kind" <<'PY'
+import fcntl
+import os
+import re
+import subprocess
+import sys
+import tempfile
+
+(root, token, app, host, pid, pid_start, run_id, machine_slots,
+ shared_units, machine_ceiling, shared_ceiling, current_machines,
+ current_shared, kind) = sys.argv[1:]
+
+def fail(message):
+    print("ERROR", message.replace("\n", " "))
+    raise SystemExit(2)
+
+if not re.fullmatch(r"[A-Za-z0-9._-]+", token):
+    fail("invalid capacity reservation token")
+try:
+    pid_number = int(pid)
+    numeric = [int(value) for value in (
+        machine_slots, shared_units, machine_ceiling, shared_ceiling,
+        current_machines, current_shared,
+    )]
+except ValueError:
+    fail("non-integer capacity reservation input")
+(machine_slots_number, shared_units_number, machine_ceiling_number,
+ shared_ceiling_number, current_machines_number, current_shared_number) = numeric
+if pid_number < 1 or min(numeric) < 0:
+    fail("negative capacity reservation input")
+if machine_ceiling_number < 1 or shared_ceiling_number < 1:
+    fail("capacity ceilings must be positive")
+if not host or not pid_start or "\n" in host or "\n" in pid_start:
+    fail("invalid capacity reservation owner identity")
+
+reservations = os.path.join(root, "reservations")
+os.makedirs(reservations, exist_ok=True)
+lock_path = os.path.join(root, "admission.lock")
+with open(lock_path, "a+", encoding="utf-8") as lock_handle:
+    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    reserved_machines = 0
+    reserved_shared = 0
+    for name in sorted(os.listdir(reservations)):
+        if name.startswith("."):
+            continue
+        path = os.path.join(reservations, name)
+        if not os.path.isfile(path) or not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+            fail(f"malformed capacity reservation entry: {name}")
+        try:
+            fields = dict(
+                line.rstrip("\n").split("=", 1)
+                for line in open(path, encoding="utf-8")
+                if "=" in line
+            )
+            required = ("version", "app", "host", "pid", "pid_start", "run_id",
+                        "token", "machine_slots", "shared_units", "kind")
+            if any(key not in fields for key in required):
+                raise ValueError("missing metadata")
+            if fields["version"] != "1" or fields["app"] != app or fields["token"] != name:
+                raise ValueError("identity mismatch")
+            if fields["host"] != host:
+                raise ValueError("reservation belongs to another host")
+            owner_pid = int(fields["pid"])
+            owner_start = fields["pid_start"]
+            record_machines = int(fields["machine_slots"])
+            record_shared = int(fields["shared_units"])
+            if owner_pid < 1 or record_machines < 0 or record_shared < 0:
+                raise ValueError("invalid numeric metadata")
+        except (OSError, TypeError, ValueError) as exc:
+            fail(f"malformed capacity reservation {name}: {exc}")
+        probe = subprocess.run(
+            ["ps", "-p", str(owner_pid), "-o", "lstart="],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        actual_start = probe.stdout.strip()
+        if probe.returncode != 0 or not actual_start or actual_start != owner_start:
+            os.unlink(path)
+            continue
+        if name == token:
+            if owner_pid != pid_number or owner_start != pid_start:
+                fail(f"capacity reservation token collision: {name}")
+            continue
+        reserved_machines += record_machines
+        reserved_shared += record_shared
+
+    projected_machines = current_machines_number + reserved_machines + machine_slots_number
+    projected_shared = current_shared_number + reserved_shared + shared_units_number
+    if projected_machines > machine_ceiling_number:
+        print("DENY_MACHINE", reserved_machines, reserved_shared,
+              projected_machines, projected_shared)
+        raise SystemExit(1)
+    if projected_shared > shared_ceiling_number:
+        print("DENY_SHARED", reserved_machines, reserved_shared,
+              projected_machines, projected_shared)
+        raise SystemExit(1)
+
+    destination = os.path.join(reservations, token)
+    fd, temporary = tempfile.mkstemp(prefix=f".{token}.", dir=reservations, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("version=1\n")
+            handle.write(f"app={app}\n")
+            handle.write(f"host={host}\n")
+            handle.write(f"pid={pid_number}\n")
+            handle.write(f"pid_start={pid_start}\n")
+            handle.write(f"run_id={run_id}\n")
+            handle.write(f"token={token}\n")
+            handle.write(f"machine_slots={machine_slots_number}\n")
+            handle.write(f"shared_units={shared_units_number}\n")
+            handle.write(f"kind={kind}\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+    print("OK", reserved_machines, reserved_shared, projected_machines, projected_shared)
+PY
+}
+
+capacity_release_reservation() {  # <token>
+    local token="$1"
+    python3 - "$CAPACITY_RESERVATION_ROOT" "$token" "$APP" \
+        "$FLEET_OWNER_HOST" "$$" "$FLEET_OWNER_PID_START" <<'PY'
+import fcntl
+import os
+import re
+import sys
+
+root, token, app, host, pid, pid_start = sys.argv[1:]
+if not re.fullmatch(r"[A-Za-z0-9._-]+", token):
+    raise SystemExit(1)
+reservations = os.path.join(root, "reservations")
+if not os.path.isdir(reservations):
+    raise SystemExit(0)
+with open(os.path.join(root, "admission.lock"), "a+", encoding="utf-8") as lock_handle:
+    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    path = os.path.join(reservations, token)
+    if not os.path.exists(path):
+        raise SystemExit(0)
+    try:
+        fields = dict(
+            line.rstrip("\n").split("=", 1)
+            for line in open(path, encoding="utf-8")
+            if "=" in line
+        )
+    except OSError:
+        raise SystemExit(1)
+    expected = (fields.get("version") == "1" and fields.get("app") == app
+                and fields.get("host") == host and fields.get("pid") == pid
+                and fields.get("pid_start") == pid_start and fields.get("token") == token)
+    if not expected:
+        raise SystemExit(1)
+    os.unlink(path)
+PY
+}
+
+capacity_release_owner_reservations() {
+    # Normal teardown also sweeps an interrupted autoscaler child reservation.
+    # Remove only records carrying this controller's exact PID birth identity.
+    python3 - "$CAPACITY_RESERVATION_ROOT" "$APP" "$FLEET_OWNER_HOST" \
+        "$$" "$FLEET_OWNER_PID_START" "$FLEET_OWNER_TOKEN-" <<'PY'
+import fcntl
+import os
+import sys
+
+root, app, host, pid, pid_start, prefix = sys.argv[1:]
+reservations = os.path.join(root, "reservations")
+if not os.path.isdir(reservations):
+    raise SystemExit(0)
+with open(os.path.join(root, "admission.lock"), "a+", encoding="utf-8") as lock_handle:
+    fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+    for name in os.listdir(reservations):
+        if not name.startswith(prefix):
+            continue
+        path = os.path.join(reservations, name)
+        try:
+            fields = dict(
+                line.rstrip("\n").split("=", 1)
+                for line in open(path, encoding="utf-8")
+                if "=" in line
+            )
+        except OSError:
+            raise SystemExit(1)
+        expected = (fields.get("version") == "1" and fields.get("app") == app
+                    and fields.get("host") == host and fields.get("pid") == pid
+                    and fields.get("pid_start") == pid_start and fields.get("token") == name)
+        if not expected:
+            raise SystemExit(1)
+        os.unlink(path)
+PY
+}
+
 registry_resolve_name() {  # registry_resolve_name <clone-name>; 0=found, 1=absent, 2=unsafe read
     local clone_name="$1" deadline result status
     deadline=$((SECONDS + ${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-10}))
@@ -715,7 +1248,7 @@ registry_record_is_stale_phantom() {  # <record-file>; 0 = absent long enough to
 }
 
 reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale>
-    local registry="${1%/}" root="${FLEET_OWNERSHIP_ROOT%/}" mode="$2" record clone_name id resolved details detail_status state actual_name runner_count
+    local registry="${1%/}" root="${FLEET_OWNERSHIP_ROOT%/}" mode="$2" record clone_name id resolved details detail_status state actual_name runner_count unresolved=0
     [ "$registry" != "$root" ] \
         && [ "${registry%/*}" = "$root" ] \
         || { echo "❌ refusing non-child fleet registry cleanup path: $registry" >&2; return 1; }
@@ -755,7 +1288,13 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale>
                         continue
                     fi
                     echo "❌ owned clone name '$clone_name' is not provider-visible yet; retaining ownership and refusing to provision" >&2
-                    return 1
+                    # This record must keep the overall cleanup fail-closed, but
+                    # it is independent of later records whose exact machine IDs
+                    # are already proven. Returning here leaked every known clone
+                    # sorted after one young name-only record. Retain this record,
+                    # continue reaping those known IDs, then report failure.
+                    unresolved=1
+                    continue
                     ;;
                 *) echo "❌ ambiguous/unreadable stale clone name '$clone_name'; refusing to provision" >&2; return 1 ;;
             esac
@@ -799,6 +1338,7 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale>
         reap_machine "$id" || return 1
         rm -f "$record"
     done
+    [ "$unresolved" = "0" ]
 }
 
 fleet_registry_remove_if_empty() {  # fleet_registry_remove_if_empty <registry-dir>
@@ -843,6 +1383,28 @@ acquire_registry_recovery_lock() {  # acquire_registry_recovery_lock <registry-d
     return 1
 }
 
+reserve_cleanup_disk_space() {
+    # The controller can run for hours while sibling workspaces generate coverage,
+    # dependencies, and trace archives. Keep one physically allocated local file
+    # that teardown releases before invoking asdf/flyctl, so a mid-run ENOSPC does
+    # not strand paid machines merely because those CLIs need shell temporaries.
+    local reserve_mb="${CLOUDBENCH_CLEANUP_DISK_RESERVE_MB:-512}"
+    case "$reserve_mb" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$reserve_mb" -ge 1 ] && [ "$reserve_mb" -le 4096 ] || return 1
+    rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || return 1
+    if ! dd if=/dev/zero of="$CLEANUP_DISK_RESERVE_FILE" \
+        bs=1048576 count="$reserve_mb" conv=fsync >/dev/null 2>&1; then
+        rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || true
+        return 1
+    fi
+}
+
+release_cleanup_disk_reserve() {  # [exact reserve path for a proven-dead registry]
+    local reserve_file="${1:-${CLEANUP_DISK_RESERVE_FILE:-}}"
+    [ -n "$reserve_file" ] || return 0
+    rm -f "$reserve_file" 2>/dev/null || return 1
+}
+
 reap_orphaned_fleet_proxies() {
     # A controller reaps its `flyctl proxy` (WireGuard data-plane) children via an
     # EXIT trap — but SIGKILL / a laptop sleep-crash bypasses that trap, orphaning
@@ -866,7 +1428,7 @@ reap_orphaned_fleet_proxies() {
 }
 
 reconcile_stale_fleet_registries() {
-    local registry meta version app policy host owner_status recovery_lock_status
+    local registry meta version app policy host owner_status recovery_lock_status unresolved=0
     mkdir -p "$FLEET_OWNERSHIP_ROOT"
     for registry in "$FLEET_OWNERSHIP_ROOT"/*; do
         [ -d "$registry" ] || continue
@@ -878,10 +1440,15 @@ reconcile_stale_fleet_registries() {
         host="$(registry_meta_value "$meta" host)"
         [ "$version" = "1" ] && [ "$app" = "$APP" ] && [ -n "$host" ] || {
             echo "❌ malformed fleet ownership registry $registry; refusing to provision" >&2
-            return 1
+            unresolved=1
+            continue
         }
         [ "$policy" = "retain" ] && continue
-        [ "$policy" = "reap" ] || { echo "❌ unknown cleanup policy '$policy' in $registry" >&2; return 1; }
+        if [ "$policy" != "reap" ]; then
+            echo "❌ unknown cleanup policy '$policy' in $registry" >&2
+            unresolved=1
+            continue
+        fi
         # A local git-common registry can positively disprove only same-host
         # process ownership. Other-host records remain untouched and still count
         # against the app capacity guard.
@@ -889,19 +1456,36 @@ reconcile_stale_fleet_registries() {
         registry_owner_alive "$meta"
         owner_status=$?
         [ "$owner_status" -eq 0 ] && continue
-        [ "$owner_status" -eq 1 ] || { echo "❌ invalid controller identity in $registry" >&2; return 1; }
+        if [ "$owner_status" -ne 1 ]; then
+            echo "❌ invalid controller identity in $registry" >&2
+            unresolved=1
+            continue
+        fi
+        release_cleanup_disk_reserve "$registry/cleanup-disk-reserve" || {
+            echo "❌ could not release stale fleet cleanup reserve in $registry" >&2
+            unresolved=1
+            continue
+        }
         acquire_registry_recovery_lock "$registry"
         recovery_lock_status=$?
         [ "$recovery_lock_status" -eq 2 ] && continue
-        [ "$recovery_lock_status" -eq 0 ] || return 1
+        if [ "$recovery_lock_status" -ne 0 ]; then
+            unresolved=1
+            continue
+        fi
         echo "🧭 recovering stale fleet registry $(basename "$registry") (same-host controller identity is dead)"
         if ! reap_registry_clones "$registry" stale; then
             rm -rf "$registry/recovery-lock"
-            return 1
+            # Registries are independent ownership scopes. Preserve this one
+            # and keep the overall startup fail-closed, but continue cleaning
+            # later registries whose exact IDs and dead owners can be proven.
+            unresolved=1
+            continue
         fi
         rm -rf "$registry/recovery-lock"
-        fleet_registry_remove_if_empty "$registry"
+        fleet_registry_remove_if_empty "$registry" || unresolved=1
     done
+    [ "$unresolved" = "0" ]
 }
 
 # ── Pre-provisioned pool: stopped clones (current image) claimed on demand ───
@@ -910,7 +1494,7 @@ reconcile_stale_fleet_registries() {
 # the CURRENT branch code — the baked image only supplies deps. Stopped pool
 # machines cost $0 compute (volumes only) between runs.
 machine_id_for_clone_name() {  # machine_id_for_clone_name <name> <absolute-seconds-deadline>
-    local target_name="$1" deadline="$2" matches prior_snapshot
+    local target_name="$1" deadline="$2" match prior_snapshot
     prior_snapshot=""
     declare -F machines_snapshot_identity >/dev/null && prior_snapshot="$(machines_snapshot_identity)"
     while :; do
@@ -918,19 +1502,19 @@ machine_id_for_clone_name() {  # machine_id_for_clone_name <name> <absolute-seco
         # authoritative target id.  Coalesce one fresh API read into the shared
         # snapshot; the normal clone-output path does not call this at all.
         if declare -F refresh_machines_snapshot_after >/dev/null; then
-            refresh_machines_snapshot_after "$prior_snapshot" || true
+            if ! refresh_machines_snapshot_after "$prior_snapshot"; then
+                if [ "$SECONDS" -ge "$deadline" ]; then
+                    echo "❌ unresolved clone name '$target_name' after inventory refresh failure" >&2
+                    return 1
+                fi
+                prior_snapshot="$(machines_snapshot_identity)"
+                sleep 1
+                continue
+            fi
         fi
-        matches="$(fleet_machines_json \
-            | TARGET_NAME="$target_name" python3 -c '
-import json, os, sys
-try: machines = json.load(sys.stdin) or []
-except Exception: machines = []
-for machine in machines:
-    if machine.get("name") == os.environ["TARGET_NAME"] and machine.get("id"):
-        print(machine["id"])
-' 2>/dev/null || true)"
-        if [ "$(printf '%s\n' "$matches" | grep -c . 2>/dev/null || true)" = "1" ]; then
-            printf '%s' "$matches"
+        match="$(inventory_machine_id_for_name "$target_name" 2>/dev/null || true)"
+        if [ -n "$match" ]; then
+            printf '%s' "$match"
             return 0
         fi
         if [ "$SECONDS" -ge "$deadline" ]; then
@@ -972,10 +1556,66 @@ fly_with_timeout() {  # fly_with_timeout <seconds> <FLY args...>
     return "$rc"
 }
 
+worker_ledger_lock_acquire() {  # worker_ledger_lock_acquire <bench-output-dir>
+    local lock="$1/worker-clones.ids.lock" owner="$1/worker-clones.ids.lock/owner"
+    local attempts="${WORKER_LEDGER_LOCK_ATTEMPTS:-100}" delay="${WORKER_LEDGER_LOCK_RETRY_SECONDS:-0.1}"
+    local stale_seconds="${WORKER_LEDGER_LOCK_STALE_SECONDS:-300}"
+    local self_pid="${BASHPID:-$$}" token now observed owner_pid owner_token owner_started age
+    case "$attempts" in ''|*[!0-9]*|0) echo "❌ invalid worker ledger lock attempts" >&2; return 1 ;; esac
+    case "$stale_seconds" in ''|*[!0-9]*) echo "❌ invalid worker ledger stale timeout" >&2; return 1 ;; esac
+    token="$self_pid.$(date +%s).$RANDOM"
+    for _ in $(seq 1 "$attempts"); do
+        if mkdir "$lock" 2>/dev/null; then
+            now="$(date +%s)"
+            if ! printf '%s %s %s\n' "$self_pid" "$token" "$now" > "$owner"; then
+                rmdir "$lock" 2>/dev/null || true
+                return 1
+            fi
+            WORKER_LEDGER_LOCK_TOKEN="$token"
+            return 0
+        fi
+
+        # Recover only an old lock whose owning process is definitely gone. The observed owner
+        # record is compared again before removal so a successor can never delete a newer lock.
+        observed="$(cat "$owner" 2>/dev/null || true)"
+        owner_pid=""; owner_token=""; owner_started=""
+        if [ -n "$observed" ]; then
+            read -r owner_pid owner_token owner_started < "$owner" 2>/dev/null || true
+        else
+            owner_started="$(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || true)"
+        fi
+        now="$(date +%s)"
+        case "$owner_started" in ''|*[!0-9]*) owner_started="$now" ;; esac
+        age=$((now - owner_started))
+        if [ "$age" -ge "$stale_seconds" ] \
+            && { [ -z "$owner_pid" ] || ! kill -0 "$owner_pid" 2>/dev/null; } \
+            && [ "$(cat "$owner" 2>/dev/null || true)" = "$observed" ]; then
+            rm -f "$owner" 2>/dev/null || true
+            rmdir "$lock" 2>/dev/null || true
+            continue
+        fi
+        sleep "$delay"
+    done
+    echo "❌ timed out acquiring worker ledger lock: $lock" >&2
+    return 1
+}
+
+worker_ledger_lock_release() {  # worker_ledger_lock_release <bench-output-dir>
+    local lock="$1/worker-clones.ids.lock" owner="$1/worker-clones.ids.lock/owner"
+    local expected="${WORKER_LEDGER_LOCK_TOKEN:-}" owner_pid actual owner_started
+    [ -n "$expected" ] || return 1
+    read -r owner_pid actual owner_started < "$owner" 2>/dev/null || return 1
+    [ "$actual" = "$expected" ] || return 1
+    rm -f "$owner" || return 1
+    rmdir "$lock" || return 1
+    WORKER_LEDGER_LOCK_TOKEN=""
+}
+
 clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] [vm-size] [memory-mb]
     local ledger="$1" source_id="${2:-$WARM_ID}"
     local vm_size="${3:-${FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}}" vm_memory="${4:-${FLEET_PRIMARY_VM_MEMORY:-4096}}"
     local clone_out clone_status target_id target_name diagnostic_log names_ledger deadline
+    local storage_deadline
     local attempt max_attempts retry_delay clone_timeout
     # Fly API throttles (resource_exhausted/429) and clone-from-snapshot can lose a create-volume→launch-VM race
     # ("failed to launch VM: volume not found") or leaves the new machine
@@ -1059,7 +1699,16 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
                 echo "❌ could not persist provider ID $target_id; name ownership remains for teardown" >&2
                 return 1
             fi
-            grep -Fxq "$target_id" "$ledger" 2>/dev/null || printf '%s\n' "$target_id" >> "$ledger"
+            if ! worker_ledger_lock_acquire "$(dirname "$ledger")"; then
+                echo "❌ could not lock clone ownership ledger for $target_id" >&2
+                return 1
+            fi
+            if ! grep -Fxq "$target_id" "$ledger" 2>/dev/null \
+                && ! printf '%s\n' "$target_id" >> "$ledger"; then
+                worker_ledger_lock_release "$(dirname "$ledger")" || true
+                return 1
+            fi
+            worker_ledger_lock_release "$(dirname "$ledger")" || return 1
             grep -Fxv "$target_name" "$names_ledger" > "$names_ledger.tmp" 2>/dev/null || true
             mv "$names_ledger.tmp" "$names_ledger"
         else
@@ -1069,8 +1718,40 @@ clone_machine_target() {  # clone_machine_target <ownership-ledger> [source-id] 
         # returned non-zero after allocation. Retrying here would provision a
         # duplicate clone despite already owning the recovered target.
         if [ -n "$target_id" ]; then
-            printf '%s' "$target_id"
-            return 0
+            # A successful Fly clone response only proves that the Machine
+            # object was allocated. Snapshot restoration continues
+            # asynchronously and can already be terminal `failed` while the
+            # Machine remains `created`. Never publish that unusable target to
+            # the boot-config barrier: reap it under this run's durable
+            # ownership and spend the next bounded clone attempt instead.
+            storage_deadline=$((SECONDS + ${CLOUDBENCH_CLONE_STORAGE_READY_SECONDS:-600}))
+            while ! machine_storage_ready "$target_id"; do
+                if machine_storage_failed "$target_id"; then
+                    printf 'clone id=%s snapshot storage entered terminal failed state\n' \
+                        "$target_id" >> "$diagnostic_log"
+                    if ! reap_machine "$target_id"; then
+                        echo "❌ failed snapshot clone $target_id could not be reaped; retaining ownership and refusing another allocation" >&2
+                        return 1
+                    fi
+                    fleet_registry_release_id "$target_id" || return 1
+                    grep -Fxv "$target_id" "$ledger" > "$ledger.tmp.$$" 2>/dev/null || true
+                    mv "$ledger.tmp.$$" "$ledger"
+                    clone_out="$clone_out
+Error: snapshot storage entered terminal failed state"
+                    clone_status=75
+                    target_id=""
+                    break
+                fi
+                if [ "$SECONDS" -ge "$storage_deadline" ]; then
+                    echo "❌ clone $target_id snapshot storage was not mountable within the provisioning deadline; retaining ownership" >&2
+                    return 1
+                fi
+                sleep 2
+            done
+            if [ -n "$target_id" ]; then
+                printf '%s' "$target_id"
+                return 0
+            fi
         fi
         if [ "$attempt" -ge "$max_attempts" ]; then
             echo "❌ Fly clone did not return a distinct authoritative target after $attempt attempt(s) (last name=$target_name, source=$source_id, status=$clone_status)" >&2
@@ -1323,6 +2004,7 @@ print(state)
 }
 pool_machine_state() {  # pool_machine_state <id>: prints state; 1=absent, 2=invalid read
     local id="$1" machines
+    export -n machines 2>/dev/null || true
     machines="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
     printf '%s' "$machines" | pool_machine_state_from_json "$id"
 }
@@ -1330,6 +2012,7 @@ pool_machine_state() {  # pool_machine_state <id>: prints state; 1=absent, 2=inv
 POOL_INVENTORY_JSON=""
 reconcile_pool() {
     local pool_file id st presence claim_path claim_host owner_status runner_count machines
+    export -n machines POOL_INVENTORY_JSON 2>/dev/null || true
     # Normal reconciliation is one shared inventory read, not one Machines-API
     # list per pooled box. Only the rare stop-and-recover branch re-reads live
     # state for the single machine being changed.
@@ -1437,10 +2120,11 @@ resize_pool_machine() {  # resize_pool_machine <id>
 }
 
 normalize_current_pool_shape() {
-    [ -f "$POOL_IDS_FILE" ] || return 0
     local id shape state kind cpus memory failed=0 inventory
     local target_kind="shared" target_cpus
     local -a resize_ids=() resize_pids=()
+    export -n inventory POOL_INVENTORY_JSON 2>/dev/null || true
+    [ -f "$POOL_IDS_FILE" ] || return 0
     target_cpus="$(printf '%s' "$FLEET_PRIMARY_VM_SIZE" | sed -nE 's/.*-([0-9]+)x$/\1/p')"
     case "$FLEET_PRIMARY_VM_SIZE" in performance-*) target_kind="performance" ;; esac
     [ -n "$target_cpus" ] || { echo "❌ invalid fleet primary VM size: $FLEET_PRIMARY_VM_SIZE" >&2; return 1; }
@@ -1555,8 +2239,9 @@ json.dump(card, open(sys.argv[1], "w"), indent=1)
 PY
 }
 start_central_hub() {
-    local preferred_dash_base selected_dash_base attempt launch_pid wait_attempt
+    local preferred_dash_base selected_dash_base attempt launch_pid wait_attempt pid_file
     mkdir -p "$HUB_CTX_DIR"
+    pid_file="$HUB_CTX_DIR/agent-link-server.pid"
     preferred_dash_base="$DASH_BASE"
     for attempt in $(seq 1 20); do
         selected_dash_base="$(cloudbench_select_central_hub_port "$preferred_dash_base" "$RUNS_ROOT")" || return 1
@@ -1571,31 +2256,45 @@ start_central_hub() {
             return 0
         fi
 
-        python3 "$ROOT_DIR/agents/benchmarks/agent_link_server.py" \
-            --root "$RUNS_ROOT" --host 127.0.0.1 --port "$DASH_BASE" \
-            --repo-root "$ROOT_DIR" --context-dir "$HUB_CTX_DIR" \
-            --frontend-dir "$ROOT_DIR/front-end" --hub-runs-dir "$RUNS_ROOT" \
-            --preferred-archive-port "$((DASH_BASE + 200))" \
-            > "$HUB_CTX_DIR/hub.log" 2>&1 & launch_pid=$!
+        # The hub intentionally outlives this controller. A plain background job
+        # remains in the controller's terminal session and receives SIGHUP when a
+        # PTY-backed launcher closes, which leaves every terminal open-agent link
+        # dead. Re-exec it in its own session and have that process publish the PID
+        # it retains across exec so startup/race cleanup remains exact.
+        rm -f "$pid_file"
+        cloudbench_detach_reexec "$HUB_CTX_DIR/hub.log" bash -c '
+            pid_file="$1"
+            shift
+            printf "%s\n" "$$" > "$pid_file"
+            exec "$@"
+        ' _ "$pid_file" \
+            python3 "$ROOT_DIR/agents/benchmarks/agent_link_server.py" \
+                --root "$RUNS_ROOT" --host 127.0.0.1 --port "$DASH_BASE" \
+                --repo-root "$ROOT_DIR" --context-dir "$HUB_CTX_DIR" \
+                --frontend-dir "$ROOT_DIR/front-end" --hub-runs-dir "$RUNS_ROOT" \
+                --preferred-archive-port "$((DASH_BASE + 200))"
+        launch_pid=""
         for wait_attempt in $(seq 1 50); do
             if cloudbench_central_hub_matches "$DASH_BASE" "$RUNS_ROOT"; then
+                launch_pid="$(cat "$pid_file" 2>/dev/null || true)"
                 if kill -0 "$launch_pid" 2>/dev/null; then
                     UNIFIED_DASH_PID="$launch_pid"
-                    printf '%s\n' "$UNIFIED_DASH_PID" > "$HUB_CTX_DIR/agent-link-server.pid"
                 else
                     UNIFIED_DASH_PID=""
                 fi
                 echo "🖥️  local benchmark diagnostics: http://localhost:$DASH_BASE/ — run visible as STARTING"
                 return 0
             fi
-            kill -0 "$launch_pid" 2>/dev/null || break
+            launch_pid="$(cat "$pid_file" 2>/dev/null || true)"
+            [ -z "$launch_pid" ] || kill -0 "$launch_pid" 2>/dev/null || break
             sleep 0.1
         done
 
         # A concurrent workspace may have won the check-then-bind race. Stop only
         # the process we launched (never an unidentified listener), then select
         # again; the winner's runs-root identity will make us skip its port.
-        if kill -0 "$launch_pid" 2>/dev/null; then
+        launch_pid="$(cat "$pid_file" 2>/dev/null || true)"
+        if [ -n "$launch_pid" ] && kill -0 "$launch_pid" 2>/dev/null; then
             kill "$launch_pid" 2>/dev/null || true
             wait "$launch_pid" 2>/dev/null || true
         fi
@@ -1670,6 +2369,7 @@ CHILD_MACHINE=()
 cleanup() {
     local ec=$? id claim_path st presence machines round stop_pid
     local -a claimed_pool_ids pending_pool_ids next_pending_pool_ids stop_pids
+    export -n machines 2>/dev/null || true
     claimed_pool_ids=()
     pending_pool_ids=()
     next_pending_pool_ids=()
@@ -1678,9 +2378,10 @@ cleanup() {
     # let a second signal interrupt teardown after the EXIT trap has begun.
     trap - EXIT
     trap '' HUP INT TERM
+    release_cleanup_disk_reserve || ec=1
     [ -n "${UNIFIED_AGG_PID:-}" ] && kill "$UNIFIED_AGG_PID" 2>/dev/null || true
     [ -n "${SNAPSHOT_LOOP_PID:-}" ] && kill "$SNAPSHOT_LOOP_PID" 2>/dev/null || true
-    [ -n "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ] && rm -rf "$CLOUDBENCH_SCRIPT_SNAPSHOT" 2>/dev/null || true
+    [ -n "${INVENTORY_WAIT_FIFO:-}" ] && rm -f "$INVENTORY_WAIT_FIFO" 2>/dev/null || true
     # Do NOT kill the central hub (UNIFIED_DASH_PID): it is THE one persistent
     # dashboard — shared across every run, carrying the user's open tab, resolving
     # "open agent" from local run data long after teardown. The next fleet run
@@ -1688,6 +2389,12 @@ cleanup() {
     cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${AUTOSCALER_PIDS[@]:-}"
     cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${PROVISION_PIDS[@]:-}"
     cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${CHILD_PIDS[@]:-}"
+    # SIGKILL cannot run an autoscaler's EXIT trap. Release any remaining
+    # complete lease records owned by this exact controller/run under the same
+    # allocator lock before the snapshotted helper is removed.
+    python3 "$AUTOSCALER_PORT_LEASE_HELPER" release-prefix \
+        --root "${AUTOSCALER_PORT_LEASE_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-autoscaler-port-leases}" \
+        --owner-pid "$$" --token "$RUN_ID-" 2>/dev/null || true
     record_tainted_claimed_pool_machines
     # Return only machines this fleet actually claimed. The pool ledger can be
     # shared by sibling workspaces, so stopping every listed ID would interrupt
@@ -1829,6 +2536,14 @@ for v in vols:
     # post-run). Per-bench viewers are reaped by their own run-bench-cloud child's
     # exit trap when we SIGTERM CHILD_PIDS above; the batch resolver lives on.
     [ -n "${FLEET_PATCH_FILE:-}" ] && rm -f "$FLEET_PATCH_FILE" 2>/dev/null || true
+    if ! capacity_release_owner_reservations; then
+        echo "❌ could not release this controller's durable capacity reservations" >&2
+        ec=1
+    fi
+    CAPACITY_RESERVATION_PUBLISHED=0
+    # Autoscaler EXIT cleanup calls the snapshotted port-lease helper. Remove
+    # the immutable script bundle only after every child/autoscaler is reaped.
+    [ -n "${CLOUDBENCH_SCRIPT_SNAPSHOT:-}" ] && rm -rf "$CLOUDBENCH_SCRIPT_SNAPSHOT" 2>/dev/null || true
     cloudbench_controller_lock_release "$LOCK_DIR"
     exit "$ec"
 }
@@ -1852,6 +2567,10 @@ if [ ! -f "$POOL_IDS_FILE" ] && [ -f "$LEGACY_POOL_IDS_FILE" ]; then
 fi
 fleet_registry_init || {
     echo "❌ could not atomically publish durable fleet ownership under $FLEET_OWNERSHIP_ROOT; refusing provider mutation" >&2
+    exit 1
+}
+reserve_cleanup_disk_space || {
+    echo "❌ could not allocate the emergency fleet teardown disk reserve; refusing provider mutation" >&2
     exit 1
 }
 reconcile_pool || exit 1   # stop + verify this workspace's pool before machine start
@@ -2117,35 +2836,71 @@ warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null)" || {
     exit 1
 }
 
-# ── App-wide capacity guard — ELASTIC, shared-CPU-unit based ─────────────────
-# The real Fly constraint is NOT a flat machine count: it is the org-wide
-# shared-CPU OVERCOMMIT GOVERNOR (~160 units — Fly rejected the 37th
-# shared-cpu-4x primary at 148 + prod's ~16 = 164 > 160). Primaries are
-# shared-cpu-2x (2 shared units each); workers are performance-1x, which draw a
-# SEPARATE performance reservation and do NOT count against the shared governor.
-#
-# So instead of a conservative flat count (the old CLOUDBENCH_APP_MAX_MACHINES=60,
-# which blocked legitimate concurrent workstreams long before Fly would), we gate
-# PRIMARY provisioning on shared-CPU units and let a run auto-expand into ALL
-# available shared capacity — enough to hold many concurrent daily-scale
-# workstreams. Stopped warm/pool inventory costs no compute and is excluded.
-# Unknown/transitioning states stay capacity-consuming (fail closed). Below the
-# governor we NEVER block: a new workstream auto-reserves the capacity it needs.
-# The ONLY hard block is the true physical governor — past it no script can
-# conjure capacity; that requires actually raising the Fly org reservation and
-# then bumping CLOUDBENCH_SHARED_CPU_GOVERNOR to match.
-SHARED_CPU_GOVERNOR="${CLOUDBENCH_SHARED_CPU_GOVERNOR:-160}"
-# Governor is org-wide but this guard only sees the bench app; reserve headroom
-# for prod's active shared units + a safety margin.
-SHARED_CPU_HEADROOM="${CLOUDBENCH_SHARED_CPU_HEADROOM:-20}"
-SHARED_CPU_CEILING=$(( SHARED_CPU_GOVERNOR - SHARED_CPU_HEADROOM ))
-# Shared units per newly-provisioned primary, parsed from the primary shape
-# (shared-cpu-Nx → N); default 2 if the shape is non-standard.
-_primary_nx="${FLEET_PRIMARY_VM_SIZE##*-}"; _primary_nx="${_primary_nx%x}"
-case "$_primary_nx" in ''|*[!0-9]*) PRIMARY_SHARED_UNITS=2 ;; *) PRIMARY_SHARED_UNITS="$_primary_nx" ;; esac
-requested_machines="${PROVISION_POOL:-${#BENCHES[@]}}"
-requested_shared=$(( requested_machines * PRIMARY_SHARED_UNITS ))
-capacity_counts="$(printf '%s' "$warm_json" | python3 -c '
+# ── App-wide capacity guard — shared CPU + physical Machine count ────────────
+# Fly independently enforces an org Machine-count ceiling and a shared-CPU
+# overcommit governor. Live inventory at the epoch-13 failure was 100 org
+# Machines: 56 in this benchmark app and 44 outside it. Model 56 truthfully as
+# the benchmark app's explicit allocation, not as a fictional 60−4 org limit.
+# Stopped inventory is compute-free but still occupies a Machine slot, while a
+# config-only `machine update --skip-start` briefly allocates a replacement.
+# Host-wide durable reservations close the cross-workspace check-then-act race.
+enforce_app_capacity_guard() {
+    local shared_cpu_governor shared_cpu_headroom shared_cpu_ceiling
+    local app_machine_ceiling primary_nx primary_shared_units requested_machines
+    local requested_shared requested_fresh_machines available_pool_machines
+    local replacement_slots reservation_machine_slots reservation_result reservation_status
+    local reservation_outcome reserved_machines reserved_shared
+    local capacity_counts active_shared active_perf
+    local running_machines stopped_machines total_machines projected_shared
+    local projected_machines soft_line
+
+    CAPACITY_RESERVATION_ROOT="${CAPACITY_RESERVATION_ROOT:-${CLOUDBENCH_CAPACITY_RESERVATION_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-capacity-$APP}}"
+    CAPACITY_RESERVATION_TOKEN="${CAPACITY_RESERVATION_TOKEN:-$FLEET_OWNER_TOKEN-primary}"
+    CAPACITY_RESERVATION_PUBLISHED="${CAPACITY_RESERVATION_PUBLISHED:-0}"
+    shared_cpu_governor="${CLOUDBENCH_SHARED_CPU_GOVERNOR:-160}"
+    # The shared-CPU governor is org-wide while this guard sees only the
+    # benchmark app, so retain the separately established production headroom.
+    shared_cpu_headroom="${CLOUDBENCH_SHARED_CPU_HEADROOM:-20}"
+    app_machine_ceiling="${CLOUDBENCH_APP_MACHINE_CEILING:-56}"
+    replacement_slots="${CLOUDBENCH_BOOT_CONFIG_MAX_IN_FLIGHT:-4}"
+    case "$shared_cpu_governor:$shared_cpu_headroom:$app_machine_ceiling:$replacement_slots" in
+        *[!0-9:]*)
+            echo "❌ capacity ceilings, governors, and headroom must be non-negative integers" >&2
+            return 1
+            ;;
+    esac
+    if [ "$shared_cpu_governor" -le "$shared_cpu_headroom" ] \
+        || [ "$app_machine_ceiling" -lt 1 ] \
+        || [ "$replacement_slots" -lt 1 ]; then
+        echo "❌ invalid capacity ceiling/governor contract" >&2
+        return 1
+    fi
+    shared_cpu_ceiling=$(( shared_cpu_governor - shared_cpu_headroom ))
+
+    # Shared units per newly-provisioned primary, parsed from the primary shape
+    # (shared-cpu-Nx → N); default 2 if the shape is non-standard.
+    primary_nx="${FLEET_PRIMARY_VM_SIZE##*-}"; primary_nx="${primary_nx%x}"
+    case "$primary_nx" in ''|*[!0-9]*) primary_shared_units=2 ;; *) primary_shared_units="$primary_nx" ;; esac
+    requested_machines="${PROVISION_POOL:-${#BENCHES[@]}}"
+    requested_shared=$(( requested_machines * primary_shared_units ))
+    # Pool provisioning does not run the post-clone boot-config update phase.
+    [ -n "${PROVISION_POOL:-}" ] && replacement_slots=0
+
+    available_pool_machines="$(available_stopped_pool_machine_count "$warm_json")" || {
+        echo "❌ App capacity guard could not classify available stopped pool Machines." >&2
+        return 1
+    }
+    case "$available_pool_machines" in ''|*[!0-9]*)
+        echo "❌ App capacity guard received an invalid available-pool count." >&2
+        return 1
+        ;;
+    esac
+    [ "$available_pool_machines" -gt "$requested_machines" ] \
+        && available_pool_machines="$requested_machines"
+    requested_fresh_machines=$(( requested_machines - available_pool_machines ))
+    reservation_machine_slots=$(( requested_fresh_machines + replacement_slots ))
+
+    capacity_counts="$(printf '%s' "$warm_json" | python3 -c '
 import json, sys
 try:
     machines = json.load(sys.stdin)
@@ -2164,35 +2919,164 @@ try:
             active_shared += cpus
         else:
             active_perf += cpus
-    print(active_shared, active_perf, running, stopped)
+    print(active_shared, active_perf, running, stopped, len(machines))
 except Exception:
     print("")
 ' 2>/dev/null || true)"
-if [ -z "$capacity_counts" ]; then
-    echo "❌ App capacity guard could not classify current machine states; refusing to provision." >&2
-    exit 1
-fi
-read -r active_shared active_perf running_machines stopped_machines <<< "$capacity_counts"
-projected_shared=$(( active_shared + requested_shared ))
-if [ "$projected_shared" -gt "$SHARED_CPU_CEILING" ]; then
-    # The only hard block: at the physical Fly shared-CPU governor. Provisioning
-    # more primaries here would be rejected by Fly (resource_exhausted) anyway.
-    echo "❌ Shared-CPU capacity governor reached: $active_shared active shared units" >&2
-    echo "   + this run's $requested_machines primaries ($requested_shared units) = $projected_shared" >&2
-    echo "   > ceiling $SHARED_CPU_CEILING (governor $SHARED_CPU_GOVERNOR − headroom $SHARED_CPU_HEADROOM)." >&2
-    echo "   Auto-reserve cannot exceed the org's Fly shared-CPU reservation. To lift it:" >&2
-    echo "   raise the Fly org reservation, then set CLOUDBENCH_SHARED_CPU_GOVERNOR to match." >&2
-    echo "   (Or wait for another workstream to drain: flyctl machines list -a $APP.)" >&2
-    exit 1
-fi
-# Elastic auto-reserve: below the governor we never block a legitimate workstream.
-# Announce when we dip into the top quarter of shared capacity so concurrent runs
-# stay visible.
-_soft_line=$(( SHARED_CPU_CEILING * 3 / 4 ))
-if [ "$projected_shared" -gt "$_soft_line" ]; then
-    echo "🧵 auto-reserving shared capacity for this workstream: $projected_shared/$SHARED_CPU_CEILING units" >&2
-    echo "   ($active_shared active shared + $requested_shared requested; $active_perf perf units; running=$running_machines stopped=$stopped_machines) — proceeding." >&2
-fi
+    if [ -z "$capacity_counts" ]; then
+        echo "❌ App capacity guard could not classify current machine states; refusing to provision." >&2
+        return 1
+    fi
+    read -r active_shared active_perf running_machines stopped_machines total_machines <<< "$capacity_counts"
+
+    reservation_status=0
+    reservation_result="$(capacity_reserve_slots "$CAPACITY_RESERVATION_TOKEN" \
+        "$reservation_machine_slots" "$requested_shared" \
+        "$app_machine_ceiling" "$shared_cpu_ceiling" \
+        "$total_machines" "$active_shared" primary)" || reservation_status=$?
+    read -r reservation_outcome reserved_machines reserved_shared \
+        projected_machines projected_shared <<< "$reservation_result"
+    if [ "$reservation_status" -ne 0 ]; then
+        case "$reservation_outcome" in
+            DENY_MACHINE)
+                echo "❌ Machine-count capacity admission denied: $total_machines app Machines" >&2
+                [ "${reserved_machines:-0}" -gt 0 ] \
+                    && echo "   + $reserved_machines slots reserved by live workstreams" >&2
+                echo "   + this run's $requested_fresh_machines fresh primaries ($available_pool_machines from stopped pool)" >&2
+                echo "   + $replacement_slots boot-config replacement slots = $projected_machines" >&2
+                echo "   > benchmark-app Machine ceiling $app_machine_ceiling." >&2
+                echo "   Wait for another workstream to drain or adjust this app allocation after the org reservation changes." >&2
+                ;;
+            DENY_SHARED)
+                echo "❌ Shared-CPU capacity governor reached: $active_shared active shared units" >&2
+                [ "${reserved_shared:-0}" -gt 0 ] \
+                    && echo "   + $reserved_shared units reserved by live workstreams" >&2
+                echo "   + this run's $requested_machines primaries ($requested_shared units) = $projected_shared" >&2
+                echo "   > ceiling $shared_cpu_ceiling (governor $shared_cpu_governor − headroom $shared_cpu_headroom)." >&2
+                echo "   Raise the Fly org reservation and CLOUDBENCH_SHARED_CPU_GOVERNOR together, or wait for another workstream to drain." >&2
+                ;;
+            *)
+                echo "❌ App capacity reservation failed closed: ${reservation_result#ERROR }" >&2
+                ;;
+        esac
+        return 1
+    fi
+    CAPACITY_RESERVATION_PUBLISHED=1
+
+    if [ "$projected_shared" -gt "$shared_cpu_ceiling" ]; then
+        # Defensive: capacity_reserve_slots owns this decision atomically.  A
+        # contradictory success is an internal contract failure, not admission.
+        echo "❌ Shared-CPU capacity reservation returned an invalid projection." >&2
+        capacity_release_reservation "$CAPACITY_RESERVATION_TOKEN" || true
+        CAPACITY_RESERVATION_PUBLISHED=0
+        return 1
+    fi
+    if [ "$reservation_outcome" != "OK" ]; then
+        echo "❌ App capacity reservation returned an invalid result." >&2
+        capacity_release_reservation "$CAPACITY_RESERVATION_TOKEN" || true
+        CAPACITY_RESERVATION_PUBLISHED=0
+        return 1
+    fi
+
+    # Announce pressure on either physical boundary so concurrent runs stay visible.
+    soft_line=$(( shared_cpu_ceiling * 3 / 4 ))
+    if [ "$projected_shared" -gt "$soft_line" ]; then
+        echo "🧵 auto-reserving shared capacity for this workstream: $projected_shared/$shared_cpu_ceiling units" >&2
+        echo "   ($active_shared active + $reserved_shared live-reserved + $requested_shared requested; $active_perf perf units; running=$running_machines stopped=$stopped_machines; Machines=$total_machines+$reserved_machines+$reservation_machine_slots/$app_machine_ceiling) — proceeding." >&2
+    elif [ "$available_pool_machines" -gt 0 ] || [ "$reserved_machines" -gt 0 ]; then
+        echo "🧵 capacity admitted with $available_pool_machines stopped pool Machine(s) and $reserved_machines live cross-workstream slot(s) already accounted."
+    fi
+
+    return 0
+}
+enforce_app_capacity_guard || exit 1
+
+release_capacity_reservation_after_primary_start_accounted() {
+    # Replacement slots are no longer needed once every stopped boot config is
+    # committed.  Keep the shared-unit reservation until Fly inventory itself
+    # shows each accepted primary start as non-stopped; releasing on the local
+    # barrier alone would let a neighbor admit during provider-state lag.
+    local deadline accounted out
+    [ "$CAPACITY_RESERVATION_PUBLISHED" = "1" ] || return 0
+    [ "${CHILD_MACHINE[0]+set}" = "set" ] || return 1
+    if [ "${#CHILD_MACHINE[@]}" -ne "${#BENCHES[@]}" ] \
+        || [ "${#CHILD_OUT[@]}" -ne "${#BENCHES[@]}" ]; then
+        echo "⚠️  retaining startup capacity reservation: only ${#CHILD_MACHINE[@]}/${#BENCHES[@]} requested primaries provisioned" >&2
+        return 1
+    fi
+    deadline=$((SECONDS + ${CLOUDBENCH_CAPACITY_START_ACCOUNTING_SECONDS:-120}))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        accounted=1
+        for out in "${CHILD_OUT[@]}"; do
+            [ -s "$out/post-config-start.accepted" ] || { accounted=0; break; }
+        done
+        if [ "$accounted" = "1" ]; then
+            accounted="$({ FLY machines list -a "$APP" --json 2>/dev/null || true; } \
+                | MACHINE_IDS="${CHILD_MACHINE[*]}" python3 -c '
+import json
+import os
+import sys
+
+try:
+    machines = json.load(sys.stdin)
+    if not isinstance(machines, list):
+        raise ValueError
+    states = dict(
+        (machine.get("id"), machine.get("state"))
+        for machine in machines
+        if isinstance(machine, dict) and machine.get("id")
+    )
+    ids = os.environ["MACHINE_IDS"].split()
+    print(1 if ids and all(states.get(machine_id) not in (None, "stopped") for machine_id in ids) else 0)
+except (TypeError, ValueError, json.JSONDecodeError):
+    print(0)
+'
+)"
+            if [ "$accounted" = "1" ]; then
+                if capacity_release_reservation "$CAPACITY_RESERVATION_TOKEN"; then
+                    CAPACITY_RESERVATION_PUBLISHED=0
+                    echo "🧵 released startup capacity reservation after all primary starts became provider-visible"
+                    return 0
+                fi
+                echo "❌ could not release the startup capacity reservation" >&2
+                return 1
+            fi
+        fi
+        sleep 0.2
+    done
+    echo "⚠️  retaining startup capacity reservation: primary starts did not become provider-visible within the accounting window" >&2
+    return 1
+}
+
+reserve_worker_machine_slot() {  # <unique-reservation-token>
+    # Autoscaler workers are created after startup admission is released.  Give
+    # every dynamic clone the same serialized one-Machine check so concurrent
+    # autoscalers cannot refill the Machine ceiling behind the startup guard.
+    local token="$1" app_machine_ceiling current_machines result status outcome
+    local reserved_machines reserved_shared projected_machines projected_shared
+    app_machine_ceiling="${CLOUDBENCH_APP_MACHINE_CEILING:-56}"
+    case "$app_machine_ceiling" in ''|*[!0-9]*|0) return 1 ;; esac
+    current_machines="$(FLY machines list -a "$APP" --json 2>/dev/null | python3 -c '
+import json, sys
+try:
+    machines = json.load(sys.stdin)
+    if not isinstance(machines, list) or any(not isinstance(machine, dict) for machine in machines):
+        raise ValueError
+    print(len(machines))
+except Exception:
+    print("")
+' 2>/dev/null)"
+    case "$current_machines" in ''|*[!0-9]*) return 1 ;; esac
+    result="$(capacity_reserve_slots "$token" 1 0 "$app_machine_ceiling" \
+        2147483647 "$current_machines" 0 autoscaler-worker)"
+    status=$?
+    read -r outcome reserved_machines reserved_shared projected_machines projected_shared <<< "$result"
+    if [ "$status" -ne 0 ] || [ "$outcome" != "OK" ]; then
+        echo "❌ dynamic worker capacity denied: $current_machines app Machines + ${reserved_machines:-0} reserved + 1 requested > ceiling $app_machine_ceiling" >&2
+        return 1
+    fi
+    return 0
+}
 
 # --provision-pool: one-time pre-provision of N stopped clones, then exit.
 if [ -n "$PROVISION_POOL" ]; then
@@ -2200,15 +3084,7 @@ if [ -n "$PROVISION_POOL" ]; then
     # 30 readiness loops each issued machine+volume list calls every five
     # seconds (90 API reads/cycle), recreating resource_exhausted before the
     # benchmark even started.
-    machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!
-    for _ in $(seq 1 30); do
-        [ -s "$MACHINES_SNAPSHOT" ] && [ -s "$VOLUMES_SNAPSHOT" ] && break
-        sleep 0.2
-    done
-    [ -s "$MACHINES_SNAPSHOT" ] && [ -s "$VOLUMES_SNAPSHOT" ] || {
-        echo "❌ shared inventory snapshots did not initialize for pool provisioning" >&2
-        exit 1
-    }
+    start_machines_snapshot_loop || exit 1
     provision_pool "$PROVISION_POOL"
     exit $?
 fi
@@ -2228,28 +3104,167 @@ BOX_HEALTH_PORT="3003"     # cloudbench-run.sh HEALTH_PORT = CONDUCTOR_PORT(3001
 BOX_BACKEND_PORT="3001"
 BOX_WMH_PORT="3007"        # run.sh WMH_PORT = base+6
 FLEET_PATCH_FILE=""
+FLEET_PATCH_SHA256=""
 if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
-   && { ! git -C "$ROOT_DIR" diff --quiet --binary 2>/dev/null \
-        || [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | head -1)" ]; }; then
+   && cloudbench_worktree_has_changes "$ROOT_DIR"; then
     FLEET_PATCH_FILE="$(mktemp)"
-    bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$FLEET_PATCH_FILE"
+    if ! bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF" > "$FLEET_PATCH_FILE" \
+        || [ ! -s "$FLEET_PATCH_FILE" ]; then
+        echo "❌ could not create the fleet local workspace patch" >&2
+        exit 1
+    fi
+    FLEET_PATCH_SHA256="$(cloudbench_env_sha256 "$FLEET_PATCH_FILE")"
+    [ -n "$FLEET_PATCH_SHA256" ] || {
+        echo "❌ could not fingerprint the fleet local workspace patch" >&2
+        exit 1
+    }
 fi
 
 _machine_priv_ip() {  # _machine_priv_ip <machine_id>
-    fleet_machines_json | MID="$1" python3 -c '
-import json,os,sys
-try: d=json.load(sys.stdin) or []
-except Exception: d=[]
-mid=os.environ["MID"]
-for m in d:
-    if m.get("id")==mid: print(m.get("private_ip") or ""); break
-' 2>/dev/null || true
+    inventory_machine_field "$1" private_ip 2>/dev/null || true
 }
 
 _box_desired() {  # _box_desired <local-metrics-url> → desired_machine_count or empty
     curl --noproxy '*' -fsS --max-time 3 "$1/metrics" 2>/dev/null \
         | awk '/^desired_machine_count / {print $2; exit}' \
         | tr -dc '0-9'
+}
+
+claim_autoscaler_metrics_port() {  # <output-variable> <owner-pid> <owner-token>
+    local output_var="$1" owner_pid="$2" owner_token="$3"
+    local root port
+    root="${AUTOSCALER_PORT_LEASE_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-autoscaler-port-leases}"
+    port="$(python3 "$AUTOSCALER_PORT_LEASE_HELPER" claim \
+        --root "$root" --owner-pid "$owner_pid" --token "$owner_token" \
+        --start "${CLOUDBENCH_AUTOSCALER_PORT_START:-0}")" || return 1
+    case "$port" in ''|*[!0-9]*) return 1 ;; esac
+    printf -v "$output_var" '%s' "$port"
+}
+
+release_autoscaler_metrics_port() {  # <port> <owner-pid> <owner-token>
+    local port="$1" owner_pid="$2" owner_token="$3" root
+    [ -n "$port" ] || return 0
+    root="${AUTOSCALER_PORT_LEASE_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-autoscaler-port-leases}"
+    python3 "$AUTOSCALER_PORT_LEASE_HELPER" release \
+        --root "$root" --owner-pid "$owner_pid" --token "$owner_token" \
+        --port "$port"
+}
+
+release_autoscaler_metrics_owner() {  # <owner-pid> <owner-token>
+    local owner_pid="$1" owner_token="$2" root
+    root="${AUTOSCALER_PORT_LEASE_ROOT:-${TMPDIR:-/tmp}/rose-cloudbench-autoscaler-port-leases}"
+    python3 "$AUTOSCALER_PORT_LEASE_HELPER" release-owner \
+        --root "$root" --owner-pid "$owner_pid" --token "$owner_token"
+}
+
+# `kill -0` alone is not a sufficient liveness check for these background jobs:
+# a just-exited child's PID can be reused by one of the controller's frequent
+# short-lived probes before the liveness check. `jobs -pr` tracks the shell job
+# identity, not merely the numeric PID, so only the actual proxy/autoscaler can
+# satisfy the mandatory-autoscaling health gate.
+fleet_job_running() {  # fleet_job_running <pid>
+    local pid="${1:-}"
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    jobs -pr | grep -qx "$pid"
+}
+
+terminate_fleet_runner_group() {  # <runner-pgid> <HUP|INT|TERM>
+    local runner_pid="$1" signal_name="$2" grace deadline kill_deadline
+    grace="${CLOUDBENCH_RUNNER_TERM_SECONDS:-15}"
+    case "$grace" in ''|*[!0-9]*) grace=15 ;; esac
+    # Stay strictly inside cleanup's 30s supervisor ceiling, leaving time for
+    # SIGKILL propagation, reaping, and marker publication.
+    [ "$grace" -le 20 ] || grace=20
+
+    kill -s "$signal_name" -- "-$runner_pid" 2>/dev/null \
+        || kill -s "$signal_name" "$runner_pid" 2>/dev/null \
+        || true
+    deadline=$((SECONDS + grace))
+    while kill -0 -- "-$runner_pid" 2>/dev/null; do
+        [ "$SECONDS" -lt "$deadline" ] || break
+        sleep 0.1
+    done
+    if kill -0 -- "-$runner_pid" 2>/dev/null; then
+        kill -KILL -- "-$runner_pid" 2>/dev/null \
+            || kill -KILL "$runner_pid" 2>/dev/null \
+            || true
+    fi
+    wait "$runner_pid" 2>/dev/null || true
+
+    # Include descendants in the proof: the direct runner can be reaped while
+    # one of its former proxies remains briefly visible in the process group.
+    kill_deadline=$((SECONDS + 3))
+    while kill -0 -- "-$runner_pid" 2>/dev/null; do
+        [ "$SECONDS" -lt "$kill_deadline" ] || break
+        sleep 0.1
+    done
+    if kill -0 -- "-$runner_pid" 2>/dev/null; then
+        echo "❌ runner process group $runner_pid survived bounded teardown" >&2
+        return 1
+    fi
+    return 0
+}
+
+run_fleet_child_supervised() {  # <finished-marker> <command> [args...]
+    local finished_marker="$1" runner_pid="" runner_rc=125 marker_tmp
+    local forwarded_signal_name="" forwarded_signal_rc="" runner_cleanup_failed=0
+    shift
+
+    # The asynchronous Bash function is the PID tracked by CHILD_PIDS. Its
+    # command is a distinct process, so terminating only the function subshell
+    # reparents run-bench-cloud to PID 1. Forward controller teardown signals
+    # and wait for run-bench-cloud's own EXIT cleanup before declaring that the
+    # child finished.
+    trap 'trap "" HUP INT TERM; forwarded_signal_name=HUP; forwarded_signal_rc=129; [ -z "$runner_pid" ] || terminate_fleet_runner_group "$runner_pid" HUP || runner_cleanup_failed=1' HUP
+    trap 'trap "" HUP INT TERM; forwarded_signal_name=INT; forwarded_signal_rc=130; [ -z "$runner_pid" ] || terminate_fleet_runner_group "$runner_pid" INT || runner_cleanup_failed=1' INT
+    trap 'trap "" HUP INT TERM; forwarded_signal_name=TERM; forwarded_signal_rc=143; [ -z "$runner_pid" ] || terminate_fleet_runner_group "$runner_pid" TERM || runner_cleanup_failed=1' TERM
+
+    # Start the runner as a dedicated session/process-group leader. Python is
+    # already a fleet prerequisite and os.setsid avoids Bash's asynchronous
+    # job-control edge cases (which can bypass a subshell's signal traps).
+    python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$@" &
+    runner_pid=$!
+    if [ -n "$forwarded_signal_name" ]; then
+        # A signal can arrive after traps are armed but before `$!` is assigned.
+        # Replay it now instead of launching an untracked runner after teardown.
+        terminate_fleet_runner_group "$runner_pid" "$forwarded_signal_name" \
+            || runner_cleanup_failed=1
+        runner_rc="$forwarded_signal_rc"
+    else
+        wait "$runner_pid"
+        runner_rc=$?
+        [ -z "$forwarded_signal_rc" ] || runner_rc="$forwarded_signal_rc"
+        # Normal runner exit should execute its own cleanup. Prove no process in
+        # the isolated group survived before publishing the finished marker.
+        if kill -0 -- "-$runner_pid" 2>/dev/null; then
+            terminate_fleet_runner_group "$runner_pid" TERM \
+                || runner_cleanup_failed=1
+        fi
+    fi
+    runner_pid=""
+    trap - HUP INT TERM
+    [ "$runner_cleanup_failed" -eq 0 ] || runner_rc=125
+
+    marker_tmp="$finished_marker.tmp.$$"
+    if ! printf '%s\n' "$runner_rc" > "$marker_tmp"; then
+        return 125
+    fi
+    if ! mv "$marker_tmp" "$finished_marker"; then
+        rm -f "$marker_tmp" 2>/dev/null || true
+        return 125
+    fi
+    return "$runner_rc"
+}
+
+mandatory_autoscaler_process_acceptable() {  # <bench-output-dir> <autoscaler-pid>
+    local out="$1" pid="$2"
+    fleet_job_running "$pid" && return 0
+    # A child-finished marker is independent and can arrive after an autoscaler
+    # silently died. Only the marker published BY the autoscaler after it
+    # observed child completion proves that its exit was causally clean.
+    [ -e "$out/autoscaler.completed-after-child" ]
 }
 
 # The worker-clones id-file is the SOURCE OF TRUTH for the pool size: a machine
@@ -2263,50 +3278,474 @@ _pool_ids() {  # count of tracked worker machines (clean single integer)
     printf '\n'
 }
 
+_ready_pool_ids() {  # count of workers proven to have joined the queue
+    local f="$1/worker-ready.ids" n
+    [ -f "$f" ] || { echo 0; return; }
+    n="$(grep -c . "$f" 2>/dev/null)"
+    printf '%s\n' "${n:-0}" | tr -dc '0-9\n'
+}
+
+worker_operational() {  # worker_operational <machine-id>
+    local wid="$1"
+    # /health is 200 only after worker.run() has passed Temporal validation and
+    # started its poller tasks; worker.py flips it back to 503 on fatal exit.
+    # Pair it with the live process check so a stale HTTP response can never
+    # preserve capacity after the worker process has gone away.
+    fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
+        -C "bash -c \"pgrep -f 'python [w]orker.py' >/dev/null && curl -fsS --max-time 2 -o /dev/null http://127.0.0.1:$FLEET_WORKER_HEALTH_PORT/health\"" \
+        >/dev/null 2>&1
+}
+
+ready_workers_operational() {  # ready_workers_operational <bench-output-dir>
+    local out="$1" wid pid failed=0
+    local -a probe_pids=()
+    [ -s "$out/worker-ready.ids" ] || return 0
+    while read -r wid; do
+        [ -n "$wid" ] || continue
+        worker_operational "$wid" &
+        probe_pids+=("$!")
+    done < "$out/worker-ready.ids"
+    for pid in "${probe_pids[@]}"; do
+        wait "$pid" || failed=1
+    done
+    [ "$failed" = "0" ]
+}
+
+CONTROLLER_GITHUB_TOKEN_B64_CACHE="${CLOUDBENCH_GITHUB_TOKEN_B64:-}"
+controller_github_token_b64() {
+    local token=""
+    if [ -n "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" ]; then
+        printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
+        return 0
+    fi
+    if command -v gh >/dev/null 2>&1; then
+        token="$(gh auth token 2>/dev/null || true)"
+    fi
+    [ -n "$token" ] || token="${GITHUB_TOKEN:-}"
+    [ -n "$token" ] || token="${GH_TOKEN:-}"
+    [ -n "$token" ] || return 1
+    CONTROLLER_GITHUB_TOKEN_B64_CACHE="$(printf '%s' "$token" | base64 | tr -d '\n')"
+    printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
+}
+
+worker_is_tracked() {  # worker_is_tracked <bench-output-dir> <worker-id>
+    local out="$1" wid="$2"
+    [ -s "$out/worker-clones.ids" ] \
+        && grep -Fxq "$wid" "$out/worker-clones.ids" 2>/dev/null
+}
+
+cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
+    local cleanup_out="$1" cleanup_wid="$2" tracking_tmp ready_tmp grep_status rc=0
+    local claim="$1/worker-$2.cleanup-claim" self_pid="${BASHPID:-$$}"
+    local claim_token claim_line claim_pid claim_owner claim_started
+    claim_token="$self_pid.$(date +%s).$RANDOM"
+    local now age attempt=0 claimed=0
+    local claim_attempts="${WORKER_CLEANUP_CLAIM_ATTEMPTS:-300}"
+    local claim_delay="${WORKER_CLEANUP_CLAIM_RETRY_SECONDS:-0.1}"
+    local claim_stale="${WORKER_CLEANUP_CLAIM_STALE_SECONDS:-300}"
+    case "$claim_attempts" in ''|*[!0-9]*|0) echo "❌ invalid worker cleanup claim attempts" >&2; return 1 ;; esac
+    case "$claim_stale" in ''|*[!0-9]*) echo "❌ invalid worker cleanup stale timeout" >&2; return 1 ;; esac
+
+    # Claim only the target worker while holding the short ledger lock. Provider deletion is slow,
+    # so it runs after releasing that lock; other workers can be reconciled concurrently.
+    while [ "$attempt" -lt "$claim_attempts" ]; do
+        worker_ledger_lock_acquire "$cleanup_out" || return 1
+        if [ ! -f "$cleanup_out/worker-clones.ids" ]; then
+            worker_ledger_lock_release "$cleanup_out" || true
+            return 1
+        fi
+        if grep -Fxq "$cleanup_wid" "$cleanup_out/worker-clones.ids"; then
+            grep_status=0
+        else
+            grep_status=$?
+        fi
+        if [ "$grep_status" != "0" ]; then
+            worker_ledger_lock_release "$cleanup_out" || return 1
+            [ "$grep_status" = "1" ] && return 0
+            return 1
+        fi
+
+        if [ -f "$claim" ]; then
+            claim_line="$(cat "$claim" 2>/dev/null || true)"
+            claim_pid=""; claim_owner=""; claim_started=""
+            read -r claim_pid claim_owner claim_started < "$claim" 2>/dev/null || true
+            now="$(date +%s)"
+            case "$claim_started" in ''|*[!0-9]*) claim_started="$now" ;; esac
+            age=$((now - claim_started))
+            if [ "$age" -ge "$claim_stale" ] \
+                && { [ -z "$claim_pid" ] || ! kill -0 "$claim_pid" 2>/dev/null; } \
+                && [ "$(cat "$claim" 2>/dev/null || true)" = "$claim_line" ]; then
+                rm -f "$claim" || { worker_ledger_lock_release "$cleanup_out" || true; return 1; }
+            fi
+        fi
+        if [ ! -e "$claim" ]; then
+            now="$(date +%s)"
+            if printf '%s %s %s\n' "$self_pid" "$claim_token" "$now" > "$claim"; then
+                claimed=1
+            fi
+        fi
+        worker_ledger_lock_release "$cleanup_out" || return 1
+        [ "$claimed" = "1" ] && break
+        sleep "$claim_delay"
+        attempt=$((attempt + 1))
+    done
+    if [ "$claimed" != "1" ]; then
+        echo "❌ timed out claiming worker cleanup: $cleanup_wid" >&2
+        return 1
+    fi
+
+    reap_machine "$cleanup_wid" || rc=1
+    [ "$rc" = "0" ] && fleet_registry_release_id "$cleanup_wid" || rc=1
+
+    worker_ledger_lock_acquire "$cleanup_out" || return 1
+    claim_owner=""
+    read -r claim_pid claim_owner claim_started < "$claim" 2>/dev/null || true
+    if [ "$claim_owner" != "$claim_token" ]; then
+        worker_ledger_lock_release "$cleanup_out" || true
+        return 1
+    fi
+    if [ "$rc" != "0" ]; then
+        rm -f "$claim" || rc=1
+        worker_ledger_lock_release "$cleanup_out" || rc=1
+        return "$rc"
+    fi
+
+    # Cancellation belongs to the autoscaler/controller. A cancellation can arrive after a child
+    # provisioner's last check; preserving it keeps that intentional scale-down from becoming a
+    # retryable provisioning failure.
+    if [ "$rc" = "0" ] && ! rm -f \
+        "$cleanup_out/worker-$cleanup_wid.pending" \
+        "$cleanup_out/worker-$cleanup_wid.ready"; then
+        rc=1
+    fi
+
+    # Keep readiness and ownership under the same short ledger lock so the two files cannot
+    # disagree after successful provider cleanup.
+    ready_tmp="$cleanup_out/worker-ready.ids.tmp.$cleanup_wid.$$"
+    if [ "$rc" = "0" ] && [ -f "$cleanup_out/worker-ready.ids" ]; then
+        if awk -v id="$cleanup_wid" '$0 != id' "$cleanup_out/worker-ready.ids" > "$ready_tmp" \
+            && mv "$ready_tmp" "$cleanup_out/worker-ready.ids"; then
+            :
+        else
+            rm -f "$ready_tmp"
+            rc=1
+        fi
+    fi
+
+    # Drop the durable teardown handle last. Distinguish grep's normal no-output status (1) from
+    # read/I/O errors so a damaged ledger is never replaced with an empty partial file.
+    tracking_tmp="$cleanup_out/worker-clones.ids.tmp.$cleanup_wid.$$"
+    if [ "$rc" = "0" ]; then
+        if grep -Fxv "$cleanup_wid" "$cleanup_out/worker-clones.ids" > "$tracking_tmp"; then
+            grep_status=0
+        else
+            grep_status=$?
+        fi
+        if [ "$grep_status" -le 1 ]; then
+            mv "$tracking_tmp" "$cleanup_out/worker-clones.ids" || rc=1
+        else
+            rm -f "$tracking_tmp"
+            rc=1
+        fi
+    fi
+
+    # This process still owns the claim even when a local finalize write failed. Release that
+    # claim so the durable ledger entry can be retried immediately instead of waiting for expiry.
+    rm -f "$claim" || rc=1
+    worker_ledger_lock_release "$cleanup_out" || rc=1
+    return "$rc"
+}
+
+# Provisioners publish only unique per-worker outcomes. Readiness reconciliation and cleanup share
+# the worker-ledger lock, eliminating append-vs-rewrite loss and keeping desired-capacity state
+# authoritative over stale child outcomes.
+reconcile_worker_ready_outcomes() {  # <bench-output-dir>
+    local out="$1" marker name wid rc=0
+    worker_ledger_lock_acquire "$out" || return 1
+    for marker in "$out"/worker-*.ready; do
+        [ -e "$marker" ] || continue
+        name="${marker##*/}"
+        wid="${name#worker-}"; wid="${wid%.ready}"
+        if worker_is_tracked "$out" "$wid" \
+            && [ ! -e "$out/worker-$wid.cancelled" ]; then
+            if ! grep -Fxq "$wid" "$out/worker-ready.ids" 2>/dev/null \
+                && ! printf '%s\n' "$wid" >> "$out/worker-ready.ids"; then
+                rc=1
+                break
+            fi
+        else
+            rm -f "$marker" || { rc=1; break; }
+        fi
+    done
+    worker_ledger_lock_release "$out" || rc=1
+    return "$rc"
+}
+
+reconcile_worker_failure_outcomes() {  # <bench> <bench-output-dir>
+    local bench="$1" out="$2" marker name wid reason
+    for marker in "$out"/worker-*.failed; do
+        [ -e "$marker" ] || continue
+        name="${marker##*/}"
+        wid="${name#worker-}"; wid="${wid%.failed}"
+        if worker_is_tracked "$out" "$wid" \
+            && [ ! -e "$out/worker-$wid.cancelled" ]; then
+            reason="$(head -1 "$marker" 2>/dev/null)"
+            printf '%s\n' "${reason:-worker $wid provisioning failed}" > "$out/autoscaler.failed"
+            echo "  ❌ [$bench] mandatory autoscaler: ${reason:-worker $wid provisioning failed}" >&2
+            return 1
+        fi
+        rm -f "$marker"
+    done
+    return 0
+}
+
 provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <primary_ip> <sim01> <out>
     local bench="$1" ws="$2" primary_id="$3" pip="$4" sim="$5" out="$6"
-    local wid
+    local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file failure_reason
+    worker_capacity_token="$FLEET_OWNER_TOKEN-worker-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
+    if ! reserve_worker_machine_slot "$worker_capacity_token"; then
+        printf '%s\n' "Machine-count capacity unavailable for worker clone" > "$out/autoscaler.failed"
+        echo "  ❌ [$bench] mandatory autoscaler: Machine-count capacity unavailable" >&2
+        return 1
+    fi
     if ! wid="$(clone_machine_target "$out/worker-clones.ids" "$primary_id" \
         "$FLEET_WORKER_VM_SIZE" "$FLEET_WORKER_VM_MEMORY")"; then
-        echo "  ⚠️ [$bench] worker clone did not appear" >&2
+        # Keep the reservation until controller teardown: an ambiguous clone
+        # failure can still become provider-visible after the lookup deadline.
+        printf '%s\n' "could not allocate worker clone" > "$out/autoscaler.failed"
+        echo "  ❌ [$bench] mandatory autoscaler: worker clone did not appear" >&2
+        return 1
+    fi
+    if ! capacity_release_reservation "$worker_capacity_token"; then
+        printf '%s\n' "could not release worker capacity reservation" > "$out/autoscaler.failed"
+        echo "  ❌ [$bench] mandatory autoscaler: worker capacity handoff was not durable" >&2
         return 1
     fi
     echo "  ➕ [$bench] worker $wid created"
-    # Stage the boot script + patch + env wrapper, then launch (best-effort;
-    # counted regardless — a laggy volume just delays this worker joining).
-    local wrapper; wrapper="$(mktemp)"
+    ready_file="/data/cloudbench-worker-$wid.ready"
+    if ! worker_github_token_b64="$(controller_github_token_b64)"; then
+        failure_reason="No current controller GitHub token available for worker ref fetch"
+        if ! cleanup_failed_worker "$out" "$wid"; then
+            failure_reason="$failure_reason; worker $wid cleanup failed and remains tracked for controller teardown"
+        fi
+        printf '%s\n' "$failure_reason" > "$out/autoscaler.failed"
+        echo "  ❌ [$bench] mandatory autoscaler: $failure_reason" >&2
+        return 1
+    fi
+    stage_attempts="$WORKER_STAGE_ATTEMPTS"
+    worker_ready_timeout="$WORKER_READY_TIMEOUT"
+    case "$stage_attempts" in
+        ''|*[!0-9]*)
+            failure_reason="invalid worker stage/readiness timeout configuration"
+            if ! cleanup_failed_worker "$out" "$wid"; then
+                failure_reason="$failure_reason; worker $wid cleanup failed and remains tracked for controller teardown"
+            fi
+            printf '%s\n' "$failure_reason" > "$out/autoscaler.failed"
+            return 1
+            ;;
+    esac
+    case "$worker_ready_timeout" in
+        ''|*[!0-9]*)
+            failure_reason="invalid worker stage/readiness timeout configuration"
+            if ! cleanup_failed_worker "$out" "$wid"; then
+                failure_reason="$failure_reason; worker $wid cleanup failed and remains tracked for controller teardown"
+            fi
+            printf '%s\n' "$failure_reason" > "$out/autoscaler.failed"
+            return 1
+            ;;
+    esac
+    if [ "$stage_attempts" -lt 1 ] || [ "$worker_ready_timeout" -lt 1 ]; then
+        failure_reason="worker stage attempts and readiness timeout must be positive"
+        if ! cleanup_failed_worker "$out" "$wid"; then
+            failure_reason="$failure_reason; worker $wid cleanup failed and remains tracked for controller teardown"
+        fi
+        printf '%s\n' "$failure_reason" > "$out/autoscaler.failed"
+        return 1
+    fi
+    # Allocation is ownership, not capacity. Keep it in worker-clones.ids for
+    # teardown, but count it as operational only after the worker health endpoint
+    # proves that Temporal worker.run() reached its queue-polling boundary.
+    : > "$out/worker-$wid.pending"
+    rm -f "$out/worker-$wid.cancelled"
+    local wrapper worker_env; wrapper="$(mktemp)"; worker_env="$(mktemp)"
+    chmod 600 "$worker_env" 2>/dev/null || true
+    printf 'CLOUDBENCH_GITHUB_TOKEN_B64=%q\n' "$worker_github_token_b64" > "$worker_env"
     {
         echo "set -e"
+        echo 'if [ -f /tmp/rbw.env ]; then'
+        echo '    set -a'
+        echo '    . /tmp/rbw.env'
+        echo '    set +a'
+        echo '    rm -f /tmp/rbw.env'
+        echo 'fi'
         echo "export REF=$(printf '%q' "$BENCH_REF")"
+        echo "export CLOUDBENCH_FETCH_REF_SCRIPT=/data/cloudbench-fetch-ref.sh"
         echo "export WORKSPACE_NAME=$(printf '%q' "$ws")"
         echo "export PRIMARY_HOST=$(printf '%q' "$pip")"
         echo "export BACKEND_PORT=$(printf '%q' "$BOX_BACKEND_PORT")"
         echo "export WMH_PORT=$(printf '%q' "$BOX_WMH_PORT")"
+        echo "export HEALTH_PORT=$(printf '%q' "$FLEET_WORKER_HEALTH_PORT")"
         echo "export BENCH_SIMULATE=$(printf '%q' "$sim")"
+        echo "export WORKER_READY_FILE=$(printf '%q' "$ready_file")"
+        echo "rm -f $(printf '%q' "$ready_file")"
         [ -n "$FLEET_PATCH_FILE" ] && echo "export LOCAL_PATCH_FILE=/tmp/cloudbench-local.patch" || echo "unset LOCAL_PATCH_FILE"
+        [ -n "$FLEET_PATCH_FILE" ] && echo "export LOCAL_PATCH_SHA256=$FLEET_PATCH_SHA256" || echo "unset LOCAL_PATCH_SHA256"
         echo "exec bash /data/cloudbench-worker.sh"
     } > "$wrapper"
-    ( for _ in $(seq 1 40); do
+    (
+      # This is a child provisioner, not the autoscaler owner. Bash can carry
+      # the caller's EXIT trap into an async function subshell; clear it so a
+      # worker exit never runs controller-owned proxy/lease cleanup with locals
+      # whose dynamic scope has already ended.
+      trap - EXIT HUP INT TERM
+      worker_provision_cancelled() {
+          [ -e "$out/worker-$wid.cancelled" ]
+      }
+      finish_cancelled_worker_provision() {
+          rm -f "$wrapper" "$worker_env" "$out/worker-$wid.pending" 2>/dev/null || true
+          exit 0
+      }
+      publish_worker_failure() {
+          local reason="$1" failure_tmp="$out/worker-$wid.failed.tmp.$$"
+          printf '%s\n' "$reason" > "$failure_tmp" \
+              && mv "$failure_tmp" "$out/worker-$wid.failed"
+      }
+      discard_replaceable_worker() {
+          local reason="$1"
+          rm -f "$wrapper" "$worker_env" 2>/dev/null || true
+          if cleanup_failed_worker "$out" "$wid"; then
+              echo "  ⚠️  [$bench] $reason; removed worker $wid so capacity can be retried" >&2
+              exit 1
+          fi
+          publish_worker_failure "$reason; worker $wid could not be reaped"
+          exit 1
+      }
+      publish_worker_ready() {
+          local ready_tmp="$out/worker-$wid.ready.tmp.$$"
+          : > "$ready_tmp" && mv "$ready_tmp" "$out/worker-$wid.ready"
+      }
+      launched=0
+      worker_neutralized=0
+      for _ in $(seq 1 "$stage_attempts"); do
+        worker_provision_cancelled && finish_cancelled_worker_provision
         if machine_storage_ready "$wid"; then
+            # A worker is cloned from this benchmark's primary, whose config is
+            # already set to auto-run cloudbench-boot.sh. Neutralize that copied
+            # command before its first start or staging could race a duplicate
+            # primary benchmark driver on the same task queue/run token.
+            if [ "$worker_neutralized" != "1" ]; then
+                if ! fly_with_timeout 30 machine update "$wid" -a "$APP" \
+                    --env CLOUDBENCH_BOOT=0 --command "sleep infinity" \
+                    --skip-health-checks --skip-start --yes >/dev/null 2>&1; then
+                    sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+                    continue
+                fi
+                worker_neutralized=1
+            fi
             fly_with_timeout 20 machine start "$wid" -a "$APP" >/dev/null 2>&1 || true
         fi
-        if fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-worker.sh" /data/cloudbench-worker.sh >/dev/null 2>&1 \
-           && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh >/dev/null 2>&1; then
-            [ -n "$FLEET_PATCH_FILE" ] && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1 || true
-            fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" -C "bash -c \"setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\"" >/dev/null 2>&1 || true
-            echo "  ✅ [$bench] worker $wid staged + launched"
-            break
-        fi
-        sleep 3
-      done; rm -f "$wrapper" 2>/dev/null || true ) &
+          if fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-worker.sh" /data/cloudbench-worker.sh >/dev/null 2>&1 \
+             && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh >/dev/null 2>&1 \
+             && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env >/dev/null 2>&1 \
+             && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh >/dev/null 2>&1; then
+              if [ -n "$FLEET_PATCH_FILE" ]; then
+                  if ! fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1; then
+                      worker_provision_cancelled && finish_cancelled_worker_provision
+                      sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+                      continue
+                  fi
+              fi
+              if fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
+                  -C "bash -c \"begin=\$(date +%s); : > /data/worker.log; printf '%s\\n' \\\"\$begin\\\" > /data/worker.started-at; setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\"" >/dev/null 2>&1; then
+                  launched=1
+                  break
+              fi
+          fi
+          worker_provision_cancelled && finish_cancelled_worker_provision
+          sleep 3
+      done
+      rm -f "$wrapper" "$worker_env" 2>/dev/null || true
+      if [ "$launched" != "1" ]; then
+          worker_provision_cancelled && finish_cancelled_worker_provision
+          discard_replaceable_worker "worker $wid could not be staged and launched"
+      fi
+
+      ready_deadline=$((SECONDS + worker_ready_timeout))
+      while [ "$SECONDS" -lt "$ready_deadline" ]; do
+          worker_provision_cancelled && finish_cancelled_worker_provision
+          if worker_operational "$wid"; then
+              publish_worker_ready
+              worker_provision_cancelled && finish_cancelled_worker_provision
+              rm -f "$out/worker-$wid.pending"
+              echo "  ✅ [$bench] worker $wid joined queue navi-agent-tasks-$ws"
+              exit 0
+          fi
+          sleep 5
+      done
+      worker_provision_cancelled && finish_cancelled_worker_provision
+      discard_replaceable_worker "worker $wid did not reach queue readiness within ${worker_ready_timeout}s"
+    ) &
     return 0
 }
 
 bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim01> <out> <local-port-base>
     local bench="$1" cid="$2" ws="$3" sim="$4" out="$5" port_base="$6"
-    local pip="" metrics_proxy_pid="" metrics_port="" metrics_url="" offset
-    local metrics_started_at candidate
+    local pip="" metrics_proxy_pid="" metrics_port="" metrics_url=""
+    local metrics_started_at scrape_failures=0 metrics_lease_owner_pid metrics_lease_token
+    # Bash 3.2 preserves $$ from the controller in async function subshells.
+    # Controller ownership is intentional: per-autoscaler EXIT releases the
+    # exact token, while controller cleanup sweeps the run prefix after SIGKILL.
+    metrics_lease_owner_pid="$$"
+    metrics_lease_token="$RUN_ID-$bench-$RANDOM"
     : > "$out/worker-clones.ids"
+    : > "$out/worker-ready.ids"
+    rm -f "$out/autoscaler.ready" "$out/autoscaler.failed" \
+        "$out/autoscaler.completed-after-child"
+    complete_autoscaler_after_child() {
+        local completed_tmp="$out/autoscaler.completed-after-child.tmp.$$"
+        local desired_workers tracked_workers ready_workers terminal_deadline
+        [ -e "$out/benchmark-child.finished" ] || return 1
+        # Child completion stops new metrics decisions; it does not revoke
+        # capacity already committed by a prior desired-count observation. Keep
+        # provisioners alive and reconcile their durable outcomes until the same
+        # invariant used by final acceptance is stable.
+        terminal_deadline=$((SECONDS + AUTOSCALER_FINALIZATION_WAIT_SECONDS))
+        while :; do
+            reconcile_worker_ready_outcomes "$out" || return 1
+            reconcile_worker_failure_outcomes "$bench" "$out" || return 1
+            [ ! -s "$out/autoscaler.failed" ] || return 1
+            desired_workers="$(cat "$out/desired-worker-count" 2>/dev/null || true)"
+            if ! printf '%s' "$desired_workers" | grep -Eq '^[0-9]+$'; then
+                printf '%s\n' "autoscaler never observed valid desired capacity" \
+                    > "$out/autoscaler.failed"
+                echo "  ❌ [$bench] mandatory autoscaler: no valid desired capacity before child completion" >&2
+                return 1
+            fi
+            tracked_workers="$(_pool_ids "$out")"
+            ready_workers="$(_ready_pool_ids "$out")"
+            if [ "$ready_workers" -ge "$desired_workers" ] \
+                && [ "$tracked_workers" = "$ready_workers" ] \
+                && ! find "$out" -maxdepth 1 -name 'worker-*.pending' \
+                    -print -quit 2>/dev/null | grep -q .; then
+                break
+            fi
+            if [ "$SECONDS" -ge "$terminal_deadline" ]; then
+                printf '%s\n' \
+                    "autoscaler did not settle committed capacity after child completion" \
+                    > "$out/autoscaler.failed"
+                echo "  ❌ [$bench] mandatory autoscaler: committed capacity did not settle after child completion" >&2
+                return 1
+            fi
+            sleep 0.2
+        done
+        if ! cat "$out/benchmark-child.finished" > "$completed_tmp" \
+            || ! mv "$completed_tmp" "$out/autoscaler.completed-after-child"; then
+            rm -f "$completed_tmp"
+            printf '%s\n' "could not persist causal child-completion proof" > "$out/autoscaler.failed"
+            return 1
+        fi
+        return 0
+    }
     cleanup_autoscaler_jobs() {
         local job_pid
         local -a live_jobs
@@ -2318,11 +3757,48 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
         done < <(jobs -pr)
         cloudbench_terminate_and_wait 30 "${live_jobs[@]:-}"
         cloudbench_terminate_and_wait 5 "${metrics_proxy_pid:-}"
+        if [ -n "${metrics_lease_owner_pid:-}" ] && [ -n "${metrics_lease_token:-}" ]; then
+            release_autoscaler_metrics_owner \
+                "$metrics_lease_owner_pid" "$metrics_lease_token" || true
+        fi
     }
     trap cleanup_autoscaler_jobs EXIT
     trap 'exit 129' HUP
     trap 'exit 130' INT
     trap 'exit 143' TERM
+    # Boot-launch intentionally configures the entire fleet while every primary
+    # is stopped, then releases all starts together. A shared inventory generation
+    # can still say `started` after the config mutation has committed `stopped`,
+    # so it is not an ordering proof. Wait for run-bench-cloud to publish the exact
+    # post-config start acceptance before spending the finite proxy attach budget.
+    if [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" = "1" ]; then
+        while [ ! -f "$BOOT_CONFIG_BARRIER/release" ]; do sleep 0.2; done
+        primary_start_deadline=$((SECONDS + ${CLOUDBENCH_READY_TIMEOUT:-600}))
+        while [ ! -f "$out/post-config-start.accepted" ]; do
+            if [ "$SECONDS" -ge "$primary_start_deadline" ]; then
+                printf '%s\n' "primary post-config start was not accepted before autoscaler attachment" > "$out/autoscaler.failed"
+                echo "  ❌ [$bench] mandatory autoscaler: primary post-config start was not accepted" >&2
+                return 1
+            fi
+            sleep 0.2
+        done
+        IFS= read -r accepted_primary < "$out/post-config-start.accepted" || accepted_primary=""
+        if [ "$accepted_primary" != "$cid" ]; then
+            printf '%s\n' "primary start acceptance marker did not match allocated machine" > "$out/autoscaler.failed"
+            echo "  ❌ [$bench] mandatory autoscaler: primary start acceptance marker mismatched" >&2
+            return 1
+        fi
+    fi
+    # The keyed inventory already carries Fly's provider-authoritative 6PN
+    # address. Resolve it before spending the finite attach budget and target it
+    # directly: newly cloned Machines can be reachable before their derived
+    # .internal names have propagated through Fly DNS.
+    for _ in $(seq 1 60); do pip="$(_machine_priv_ip "$cid")"; [ -n "$pip" ] && break; sleep 5; done
+    if [ -z "$pip" ]; then
+        printf '%s\n' "primary machine has no private IP" > "$out/autoscaler.failed"
+        echo "  ❌ [$bench] mandatory autoscaler: primary machine has no private IP" >&2
+        return 1
+    fi
     # One persistent WireGuard tunnel replaces one `flyctl ssh` metrics read per
     # task every poll interval. At daily width that removes 180 Machines-API SSH
     # sessions/minute and the rate-limit/launch interference they caused.
@@ -2331,16 +3807,16 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
         local timeout="${1:-${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}}"
         metrics_started_at="$(date +%s)"
         while [ $(( $(date +%s) - metrics_started_at )) -lt "$timeout" ]; do
+            # Token-wide release also recovers a claim helper interrupted after
+            # atomic publication but before its port reached this shell variable.
+            release_autoscaler_metrics_owner \
+                "$metrics_lease_owner_pid" "$metrics_lease_token" \
+                || { sleep 2; continue; }
             metrics_port=""
-            for offset in $(seq 10 18); do
-                candidate=$((port_base + offset))
-                if ! lsof -tiTCP:"$candidate" -sTCP:LISTEN >/dev/null 2>&1; then
-                    metrics_port="$candidate"
-                    break
-                fi
-            done
-            [ -n "$metrics_port" ] || { sleep 2; continue; }
-            flyctl proxy "$metrics_port:$BOX_HEALTH_PORT" "${cid}.vm.${APP}.internal" \
+            claim_autoscaler_metrics_port metrics_port \
+                "$metrics_lease_owner_pid" "$metrics_lease_token" \
+                || { sleep 2; continue; }
+            flyctl proxy "$metrics_port:$BOX_HEALTH_PORT" "$pip" \
                 -a "$APP" --bind-addr 127.0.0.1 -q \
                 >> "$out/autoscaler-metrics-proxy.log" 2>&1 &
             metrics_proxy_pid=$!
@@ -2350,36 +3826,118 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
             curl --noproxy '*' -sS --max-time 2 -o /dev/null \
                 "http://127.0.0.1:$metrics_port/metrics" 2>/dev/null || true
             sleep 0.5
-            if kill -0 "$metrics_proxy_pid" 2>/dev/null; then
+            if fleet_job_running "$metrics_proxy_pid"; then
                 metrics_url="http://127.0.0.1:$metrics_port"
                 return 0
             fi
             wait "$metrics_proxy_pid" 2>/dev/null || true
             metrics_proxy_pid=""
+            release_autoscaler_metrics_owner \
+                "$metrics_lease_owner_pid" "$metrics_lease_token" || true
+            metrics_port=""
             sleep 2
         done
         return 1
     }
-    start_metrics_proxy || {
-        echo "  ⚠️ [$bench] autoscaler: could not bind a data-plane metrics proxy; disabled" >&2
-        return 0
-    }
+    # Before the first desired-capacity observation the guest may legitimately
+    # still be restoring its stack, and Fly can drop an otherwise valid proxy
+    # while no process listens on /metrics yet. Retry in short, observable
+    # windows under the child+inventory lifecycle instead of imposing an
+    # unrelated 30/180-second transport deadline on a 2160-second bootstrap.
+    until start_metrics_proxy 30; do
+        if [ -e "$out/benchmark-child.finished" ]; then
+            complete_autoscaler_after_child
+            return $?
+        fi
+        if ! inventory_machine_exists "$cid"; then
+            printf '%s\n' "primary disappeared from provider inventory before child completion" > "$out/autoscaler.failed"
+            echo "  ❌ [$bench] mandatory autoscaler: primary inventory disappeared during proxy startup" >&2
+            return 1
+        fi
+        echo "  ⚠️ [$bench] mandatory autoscaler: metrics proxy unavailable before first desired count; retrying" >&2
+        sleep 2
+    done
     echo "  🛰️ [$bench] autoscaler metrics via data plane :$metrics_port → fly:$BOX_HEALTH_PORT"
-    # Wait for the box /metrics to answer (stack up) before scaling.
-    for _ in $(seq 1 60); do pip="$(_machine_priv_ip "$cid")"; [ -n "$pip" ] && break; sleep 5; done
-    [ -n "$pip" ] || { echo "  ⚠️ [$bench] autoscaler: no primary IP; disabled" >&2; return 0; }
-    while fleet_machines_json | grep -q "\"$cid\""; do
-        if [ -z "$metrics_proxy_pid" ] || ! kill -0 "$metrics_proxy_pid" 2>/dev/null; then
+    # Wait for the box /metrics to answer (stack up) before scaling. Inventory
+    # lookup failure is not normal termination: a stale/failed publisher must
+    # fail closed unless this autoscaler has itself observed child completion.
+    while :; do
+        reconcile_worker_ready_outcomes "$out" || return 1
+        if [ -e "$out/benchmark-child.finished" ]; then
+            complete_autoscaler_after_child
+            return $?
+        fi
+        if ! inventory_machine_exists "$cid"; then
+            if [ -e "$out/benchmark-child.finished" ]; then
+                complete_autoscaler_after_child
+                return $?
+            fi
+            printf '%s\n' "primary disappeared from provider inventory before child completion" > "$out/autoscaler.failed"
+            echo "  ❌ [$bench] mandatory autoscaler: primary inventory disappeared during the run" >&2
+            return 1
+        fi
+        if [ -s "$out/autoscaler.failed" ]; then
+            return 1
+        fi
+        if ! fleet_job_running "$metrics_proxy_pid"; then
             metrics_proxy_pid=""
-            start_metrics_proxy 30 || {
-                echo "  ⚠️ [$bench] autoscaler metrics proxy died and did not recover; disabled" >&2
-                return 0
-            }
+            if [ -e "$out/autoscaler.ready" ]; then
+                start_metrics_proxy 30 || {
+                    if [ -e "$out/benchmark-child.finished" ]; then
+                        complete_autoscaler_after_child
+                        return $?
+                    fi
+                    printf '%s\n' "metrics proxy died and did not recover" > "$out/autoscaler.failed"
+                    echo "  ❌ [$bench] mandatory autoscaler: metrics proxy died and did not recover" >&2
+                    return 1
+                }
+            else
+                if ! start_metrics_proxy 30; then
+                    if [ -e "$out/benchmark-child.finished" ]; then
+                        complete_autoscaler_after_child
+                        return $?
+                    fi
+                    echo "  ⚠️ [$bench] mandatory autoscaler: metrics proxy unavailable before first desired count; retrying" >&2
+                    continue
+                fi
+            fi
             echo "  🛰️ [$bench] autoscaler metrics proxy recovered on :$metrics_port"
         fi
-        local desired want cur; desired="$(_box_desired "$metrics_url")"; [ -z "$desired" ] && { sleep "$AUTOSCALE_POLL"; continue; }
+        local desired want cur; desired="$(_box_desired "$metrics_url")"
+        if [ -z "$desired" ]; then
+            # The child marker can land between the loop-head check and this
+            # scrape. Recheck before advancing the terminal failure counter.
+            if [ -e "$out/benchmark-child.finished" ]; then
+                complete_autoscaler_after_child
+                return $?
+            fi
+            if [ -e "$out/autoscaler.ready" ]; then
+                scrape_failures=$((scrape_failures + 1))
+                if [ "$scrape_failures" -ge 6 ]; then
+                    printf '%s\n' "metrics returned no valid desired_machine_count for 6 consecutive polls" > "$out/autoscaler.failed"
+                    echo "  ❌ [$bench] mandatory autoscaler: metrics became unreadable for 6 consecutive polls" >&2
+                    return 1
+                fi
+            fi
+            sleep "$AUTOSCALE_POLL"
+            continue
+        fi
+        scrape_failures=0
         want=$((desired - 1)); [ "$want" -lt 0 ] && want=0
         [ "$want" -gt $((AUTOSCALE_MAX - 1)) ] && want=$((AUTOSCALE_MAX - 1))
+        # Publish outstanding demand before readiness or provider allocation.
+        # Final acceptance therefore cannot see tracked=ready=0 and pass while
+        # clone_machine_target is still retrying or hung for desired capacity.
+        if ! printf '%s\n' "$want" > "$out/desired-worker-count.tmp" \
+            || ! mv "$out/desired-worker-count.tmp" "$out/desired-worker-count"; then
+            printf '%s\n' "could not persist desired worker capacity" > "$out/autoscaler.failed"
+            echo "  ❌ [$bench] mandatory autoscaler: could not persist desired worker capacity" >&2
+            return 1
+        fi
+        if [ ! -e "$out/autoscaler.ready" ]; then
+            : > "$out/autoscaler.ready"
+            echo "  ✅ [$bench] mandatory autoscaler observed desired_machine_count=$desired"
+        fi
         cur="$(_pool_ids "$out")"
         if [ "$want" -gt "$cur" ]; then
             local n=$((want - cur))
@@ -2389,19 +3947,30 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
             local n=$((cur - want))
             echo "  ⤵️  [$bench] scale down -$n (desired=$desired, pool=$cur)"
             for _ in $(seq 1 "$n"); do
-                local wid; wid="$(tail -1 "$out/worker-clones.ids" 2>/dev/null)"
+                local wid
+                wid="$(tail -1 "$out/worker-ready.ids" 2>/dev/null)"
                 [ -n "$wid" ] || break
+                # Publish cancellation before provider destroy. A provisioner
+                # staging this worker can then distinguish intentional scale-in
+                # from a real launch/readiness failure and must never poison the
+                # autoscaler's shared failure marker afterward.
+                if ! : > "$out/worker-$wid.cancelled"; then
+                    printf '%s\n' "could not persist worker $wid scale-down cancellation" > "$out/autoscaler.failed"
+                    echo "  ❌ [$bench] mandatory autoscaler: could not persist cancellation for worker $wid" >&2
+                    return 1
+                fi
                 # Only drop the id from tracking once the destroy is CONFIRMED —
                 # an untracked-but-alive machine is a billed-forever zombie. On
                 # failure keep it listed and retry on the next autoscaler tick.
-                if ! reap_machine "$wid"; then
-                    echo "  ⚠️ [$bench] failed to destroy worker $wid — kept in tracking, retrying next tick" >&2
-                    break
+                if ! cleanup_failed_worker "$out" "$wid"; then
+                    printf '%s\n' "worker $wid could not be destroyed during scale-down" > "$out/autoscaler.failed"
+                    echo "  ❌ [$bench] mandatory autoscaler: worker $wid could not be destroyed during scale-down" >&2
+                    return 1
                 fi
-                fleet_registry_release_id "$wid"
-                sed '$d' "$out/worker-clones.ids" > "$out/worker-clones.ids.tmp" 2>/dev/null && mv "$out/worker-clones.ids.tmp" "$out/worker-clones.ids" || true
             done
         fi
+        reconcile_worker_ready_outcomes "$out" || return 1
+        reconcile_worker_failure_outcomes "$bench" "$out" || return 1
         sleep "$AUTOSCALE_POLL"
     done
 }
@@ -2409,7 +3978,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
 # ── Clone one machine per bench + launch its isolated run ────────────────────
 mkdir -p "$FLEET_DIR"
 : > "$CLAIMED_POOL_FILE"
-machines_snapshot_loop & SNAPSHOT_LOOP_PID=$!
+start_machines_snapshot_loop || exit 1
 echo ""
 echo "═══ run-bench-fleet — ${#BENCHES[@]} bench(es), one isolated machine each ═══"
 # ── Phase 1: provision every bench's isolated machine CONCURRENTLY ───────────
@@ -2487,19 +4056,35 @@ for bench in "${BENCHES[@]}"; do
 
     # Deterministic per-bench workspace → deterministic Temporal queue, so the
     # autoscaler knows which queue its worker pool must poll.
-    local_ws="$(printf 'flt-%s-%s-%s' "$bench" "$$" "$i" | tr -c 'a-z0-9-' '-' | cut -c1-48)"
-    (
-        CLOUDBENCH_WORKSPACE_NAME="$local_ws" \
-        CLOUDBENCH_ENV_VERIFIED=1 \
-        CLOUDBENCH_STORAGE_READY="$([ "$src" = "pool" ] && printf 1 || printf 0)" \
-        CLOUDBENCH_START_BARRIER="$([ "$SYNCHRONIZED_START" = "1" ] && printf '%s' "$RUN_ID")" \
-        CLOUDBENCH_BARRIER_TOKEN="$BARRIER_RELEASE_TOKEN" \
-        CLOUDBENCH_START_BARRIER_WAIT_SECONDS="$START_BARRIER_WAIT_SECONDS" \
-        CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS="$FIRST_RUN_STACK_WAIT_SECONDS" \
-        CLOUDBENCH_BOOT_LAUNCH="${CLOUDBENCH_BOOT_LAUNCH:-1}" \
-        CLOUDBENCH_BOOT_CONFIG_BARRIER="$BOOT_CONFIG_BARRIER" \
-        NO_OPEN=1 \
-        bash "$RUN_BENCH_CLOUD_BIN" "$bench" \
+    if ! local_ws="$(cloudbench_fleet_workspace_name "$bench" "$$" "$i")"; then
+        echo "❌ [$bench] could not derive an isolated Temporal workspace" >&2
+        exit 1
+    fi
+    # The guest intentionally tears down /metrics when its benchmark driver
+    # finishes. Publish that child lifecycle atomically so the autoscaler can
+    # stop cleanly instead of turning expected post-run teardown into six
+    # consecutive scrape failures. The supervisor also forwards controller
+    # teardown and awaits the runner, preventing local PID-1 orphans.
+    CLOUDBENCH_WORKSPACE_NAME="$local_ws" \
+    CLOUDBENCH_ENV_VERIFIED=1 \
+    CLOUDBENCH_STORAGE_READY="$([ "$src" = "pool" ] && printf 1 || printf 0)" \
+    CLOUDBENCH_MACHINE_RECORD="$INVENTORY_INDEX/current/machines/$cid" \
+    CLOUDBENCH_INVENTORY_OWNER_PID="$SNAPSHOT_LOOP_PID" \
+    CLOUDBENCH_INVENTORY_PUBLISHER_TOKEN="$SNAPSHOT_LOOP_TOKEN" \
+    CLOUDBENCH_INVENTORY_HEALTH="$INVENTORY_INDEX/current/health" \
+    CLOUDBENCH_START_BARRIER="$([ "$SYNCHRONIZED_START" = "1" ] && printf '%s' "$RUN_ID")" \
+    CLOUDBENCH_BARRIER_TOKEN="$BARRIER_RELEASE_TOKEN" \
+    CLOUDBENCH_START_BARRIER_WAIT_SECONDS="$START_BARRIER_WAIT_SECONDS" \
+    CLOUDBENCH_FIRST_RUN_STACK_WAIT_SECONDS="$FIRST_RUN_STACK_WAIT_SECONDS" \
+    CLOUDBENCH_BOOT_LAUNCH="${CLOUDBENCH_BOOT_LAUNCH:-1}" \
+    CLOUDBENCH_BOOT_CONFIG_BARRIER="$BOOT_CONFIG_BARRIER" \
+    CLOUDBENCH_BOOT_UPDATE_CAPACITY_WAIT_SECONDS="$BOOT_UPDATE_CAPACITY_WAIT_SECONDS" \
+    CLOUDBENCH_BOOT_CONFIG_BARRIER_WAIT_SECONDS="$BOOT_CONFIG_BARRIER_WAIT_SECONDS" \
+    CLOUDBENCH_LOCAL_PATCH_SOURCE="$FLEET_PATCH_FILE" \
+    CLOUDBENCH_LOCAL_PATCH_SHA256="$FLEET_PATCH_SHA256" \
+    NO_OPEN=1 \
+        run_fleet_child_supervised "$out/benchmark-child.finished" \
+            bash "$RUN_BENCH_CLOUD_BIN" "$bench" \
             --machine "$cid" \
             --out-dir "$out" \
             --dash-port "$port" \
@@ -2507,8 +4092,8 @@ for bench in "${BENCHES[@]}"; do
             --no-open \
             "$mode_flag" \
             --ref "$BENCH_REF" \
-            --timeout "$CHILD_RUN_TIMEOUT"
-    ) > "$out/fleet-child.log" 2>&1 &
+            --timeout "$CHILD_RUN_TIMEOUT" \
+        > "$out/fleet-child.log" 2>&1 &
     CHILD_PIDS+=("$!")
     CHILD_OUT+=("$out")
     CHILD_BENCH+=("$bench")
@@ -2526,27 +4111,72 @@ for bench in "${BENCHES[@]}"; do
         sleep "${CLOUDBENCH_LAUNCH_STAGGER_SECONDS:-3.5}"
     fi
 
-    if [ "$AUTOSCALE" = "1" ]; then
-        local_sim=0; [ "$mode_label" = "SIM" ] && local_sim=1
-        echo "   ⚖️  [$bench] per-bench autoscaler ON (prod params, max=$AUTOSCALE_MAX, queue=navi-agent-tasks-$local_ws)"
-        ( bench_autoscaler "$bench" "$cid" "$local_ws" "$local_sim" "$out" "$port" ) >> "$out/autoscaler.log" 2>&1 &
-        AUTOSCALER_PIDS+=("$!")
-    fi
+    local_sim=0; [ "$mode_label" = "SIM" ] && local_sim=1
+    echo "   ⚖️  [$bench] per-bench autoscaler ON (mandatory prod params, max=$AUTOSCALE_MAX, queue=navi-agent-tasks-$local_ws)"
+    ( bench_autoscaler "$bench" "$cid" "$local_ws" "$local_sim" "$out" "$port" ) >> "$out/autoscaler.log" 2>&1 &
+    AUTOSCALER_PIDS+=("$!")
     i=$((i + 1))
 done
 
 [ "${#CHILD_PIDS[@]}" -ge 1 ] || { echo "❌ no benches launched (all clones failed)." >&2; exit 1; }
+
+wait_for_mandatory_autoscaler_startup() {
+    local deadline=$((SECONDS + AUTOSCALER_STARTUP_WAIT_SECONDS)) ready_count j reason
+    local -a indices=("$@")
+    if [ "${#indices[@]}" -eq 0 ]; then
+        indices=("${!AUTOSCALER_PIDS[@]}")
+    fi
+    while :; do
+        ready_count=0
+        for j in "${indices[@]}"; do
+            if [ -s "${CHILD_OUT[$j]}/autoscaler.failed" ]; then
+                reason="$(head -1 "${CHILD_OUT[$j]}/autoscaler.failed" 2>/dev/null)"
+                echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler failed to start: ${reason:-unknown error}" >&2
+                return 1
+            fi
+            if [ -e "${CHILD_OUT[$j]}/autoscaler.ready" ]; then
+                ready_count=$((ready_count + 1))
+            elif ! fleet_job_running "${AUTOSCALER_PIDS[$j]}"; then
+                echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler failed to start: process exited without readiness" >&2
+                return 1
+            fi
+        done
+        [ "$ready_count" -eq "${#indices[@]}" ] && return 0
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "❌ mandatory autoscaler startup timed out: $ready_count/${#indices[@]} ready" >&2
+            return 1
+        fi
+        sleep 1
+    done
+}
 
 # Configure the entire stopped fleet before starting any guest. Fly can reserve
 # replacement CPU while applying a machine update; interleaving update/start at
 # width made later config-only updates hit cpu_overcommit_exceeded even though
 # the final 37-machine shape fit. Each child publishes its completed update and
 # waits here; one release then lets every explicit start proceed concurrently.
+boot_config_failed_child() {
+    local j out mid
+    for j in "${!CHILD_OUT[@]}"; do
+        out="${CHILD_OUT[$j]}"
+        mid="${CHILD_MACHINE[$j]}"
+        if [ -f "$out/benchmark-child.finished" ] \
+            && [ ! -f "$BOOT_CONFIG_BARRIER/ready/$mid" ]; then
+            printf '%s\n' "${CHILD_BENCH[$j]}"
+            return 0
+        fi
+    done
+    return 1
+}
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" = "1" ]; then
-    boot_config_deadline=$((SECONDS + ${CLOUDBENCH_BOOT_CONFIG_BARRIER_WAIT_SECONDS:-300}))
+    boot_config_deadline=$((SECONDS + BOOT_CONFIG_BARRIER_WAIT_SECONDS))
     while :; do
         boot_config_ready="$(find "$BOOT_CONFIG_BARRIER/ready" -type f 2>/dev/null | wc -l | tr -d ' ')"
         [ "$boot_config_ready" = "${#CHILD_PIDS[@]}" ] && break
+        if boot_config_failed_bench="$(boot_config_failed_child)"; then
+            echo "❌ boot config failed before barrier release: $boot_config_failed_bench exited without a ready marker (${boot_config_ready:-0}/${#CHILD_PIDS[@]} ready)" >&2
+            exit 1
+        fi
         if [ "$SECONDS" -ge "$boot_config_deadline" ]; then
             echo "❌ boot config barrier timed out: ${boot_config_ready:-0}/${#CHILD_PIDS[@]} updates ready" >&2
             exit 1
@@ -2555,6 +4185,7 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-1}" = "1" ]; then
     done
     : > "$BOOT_CONFIG_BARRIER/release"
     echo "⚙️  ${#CHILD_PIDS[@]}/${#CHILD_PIDS[@]} boot configs applied while stopped; releasing concurrent starts"
+    release_capacity_reservation_after_primary_start_accounted || true
 fi
 
 echo ""
@@ -2763,6 +4394,14 @@ release_start_barrier() {
         sleep 2
     done
     echo "✅ $ready/$total isolated stacks reached the barrier ($(( total - ready )) excluded as infra failures)"
+    local autoscaler_ready_indices=()
+    for j in "${!CHILD_PIDS[@]}"; do
+        [ "${is_ready[$j]}" = "1" ] && autoscaler_ready_indices+=("$j")
+    done
+    if ! wait_for_mandatory_autoscaler_startup "${autoscaler_ready_indices[@]}"; then
+        return 1
+    fi
+    echo "⚖️  ${#autoscaler_ready_indices[@]}/${#autoscaler_ready_indices[@]} mandatory per-bench autoscalers ready"
     echo "🚦 releasing synchronized start barrier on the ready machines..."
     local release_pids=() release_failed=0 release_port_file
     for j in "${!CHILD_MACHINE[@]}"; do
@@ -2802,6 +4441,59 @@ for j in "${!CHILD_PIDS[@]}"; do
         CHILD_EXIT_CODES[$j]="0"
     else
         CHILD_EXIT_CODES[$j]="$?"
+    fi
+done
+# The child marker is only the start of autoscaler terminalization. Poll all
+# autoscalers together so a synchronous provider clone or an async worker stage
+# can settle before we sample final capacity. A timeout never forgives shortage:
+# the unchanged checks below still fail closed on live, incomplete state.
+autoscaler_finalization_deadline=$((SECONDS + AUTOSCALER_FINALIZATION_WAIT_SECONDS))
+while :; do
+    autoscalers_finalizing=0
+    for j in "${!AUTOSCALER_PIDS[@]}"; do
+        out="${CHILD_OUT[$j]}"
+        [ -s "$out/autoscaler.failed" ] && continue
+        [ -e "$out/autoscaler.completed-after-child" ] && continue
+        if fleet_job_running "${AUTOSCALER_PIDS[$j]}"; then
+            autoscalers_finalizing=$((autoscalers_finalizing + 1))
+        fi
+    done
+    [ "$autoscalers_finalizing" -eq 0 ] && break
+    [ "$SECONDS" -ge "$autoscaler_finalization_deadline" ] && break
+    sleep 0.2
+done
+AUTOSCALER_FAILURE=0
+for j in "${!AUTOSCALER_PIDS[@]}"; do
+    tracked_workers="$(_pool_ids "${CHILD_OUT[$j]}")"
+    ready_workers="$(_ready_pool_ids "${CHILD_OUT[$j]}")"
+    desired_workers="$(cat "${CHILD_OUT[$j]}/desired-worker-count" 2>/dev/null || true)"
+    if [ -s "${CHILD_OUT[$j]}/autoscaler.failed" ]; then
+        reason="$(head -1 "${CHILD_OUT[$j]}/autoscaler.failed" 2>/dev/null)"
+        echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler failed during the run: ${reason:-unknown error}" >&2
+        AUTOSCALER_FAILURE=1
+    elif ! printf '%s' "$desired_workers" | grep -Eq '^[0-9]+$'; then
+        echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler did not persist desired worker capacity" >&2
+        AUTOSCALER_FAILURE=1
+    elif ! mandatory_autoscaler_process_acceptable \
+        "${CHILD_OUT[$j]}" "${AUTOSCALER_PIDS[$j]}"; then
+        echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler exited during the run" >&2
+        AUTOSCALER_FAILURE=1
+    elif ! ready_workers_operational "${CHILD_OUT[$j]}"; then
+        echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler worker became unhealthy before final acceptance" >&2
+        AUTOSCALER_FAILURE=1
+    elif [ "$ready_workers" -lt "$desired_workers" ]; then
+        echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler worker capacity below desired: $ready_workers/$desired_workers workers queue-ready" >&2
+        AUTOSCALER_FAILURE=1
+    elif [ "$tracked_workers" != "$ready_workers" ] \
+        || find "${CHILD_OUT[$j]}" -maxdepth 1 -name 'worker-*.pending' -print -quit 2>/dev/null | grep -q .; then
+        echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler worker capacity incomplete: $ready_workers/$tracked_workers workers queue-ready" >&2
+        AUTOSCALER_FAILURE=1
+    elif [ ! -e "${CHILD_OUT[$j]}/autoscaler.completed-after-child" ]; then
+        # A live process is acceptable during the bounded drain, but never after
+        # it. Counts alone are a mutable snapshot; only the autoscaler's causal
+        # completion marker proves that no committed transition remains.
+        echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler did not confirm terminal completion" >&2
+        AUTOSCALER_FAILURE=1
     fi
 done
 # Normal completion has already reaped every child. Clear the ownership list so
@@ -2855,4 +4547,4 @@ done
 echo "  ────────────────────────────────────────────────────"
 echo "  $FLEET_PASS/$FLEET_TOTAL passed"
 echo "════════════════════════════════════════════════════════"
-[ "$FLEET_PASS" = "$FLEET_TOTAL" ]
+[ "$FLEET_PASS" = "$FLEET_TOTAL" ] && [ "$AUTOSCALER_FAILURE" = "0" ]

@@ -9,6 +9,11 @@ import { createLogger } from '../logger';
 import { retryWithBackoff } from '../retry';
 import { connectValidatedBrowser, validateSessionConnection } from '../steel/sessionConnection';
 import { browserProviderEnabled } from './config';
+import {
+  kernelCaptchaTelemetryConfig,
+  summarizeKernelCaptchaEvents,
+  type BrowserCaptchaTelemetry,
+} from './captchaTelemetry';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import {
   getOrCreateKernelProxy,
@@ -84,6 +89,17 @@ type KernelProxySelection = {
   proxySource: string;
   proxyLocation: ProxyGeoLocation;
 };
+
+export type KernelRecoveryProxySpecificity = 'city' | 'state' | 'country';
+
+interface KernelRemoteSessionOptions {
+  forceManagedProxyType?: KernelProxyType;
+  exactManagedProxy?: {
+    type: KernelProxyType;
+    specificity: KernelRecoveryProxySpecificity;
+  };
+  omitProfile?: boolean;
+}
 
 function kernelClient(): Kernel {
   const apiKey = process.env.KERNEL_API_KEY?.trim();
@@ -233,7 +249,7 @@ async function createRemoteSession(
   // managed proxy of this tier is resolved. Used by rotateKernelSession so
   // rotate_ip deterministically lands on residential/mobile instead of inheriting
   // the deployment's default proxy mode.
-  forceManagedProxyType?: KernelProxyType
+  options: KernelRemoteSessionOptions = {}
 ): Promise<{
   sessionId: string;
   debugUrl: string;
@@ -245,7 +261,9 @@ async function createRemoteSession(
   validationBrowser: Browser;
 }> {
   const client = kernelClient();
-  const profile = await createProfile(contextId, agentId);
+  const profile = options.omitProfile
+    ? { profileId: null, profileSource: 'challenge_candidate_ephemeral' }
+    : await createProfile(contextId, agentId);
   const stealth = browserProviderEnabled('KERNEL_STEALTH_ENABLED', true);
 
   const createValidatedSession = async (proxy: KernelProxySelection) =>
@@ -254,6 +272,7 @@ async function createRemoteSession(
         const session = await client.browsers.create({
           headless: browserProviderEnabled('KERNEL_HEADLESS_ENABLED', false),
           stealth,
+          telemetry: kernelCaptchaTelemetryConfig(),
           gpu: browserProviderEnabled('KERNEL_GPU_ENABLED', false),
           // Do not let Chromium reopen the profile's previous window. The new-tab
           // page created by this policy is replaced below along with any unexpected
@@ -321,7 +340,7 @@ async function createRemoteSession(
   ): ReturnType<typeof createValidatedSession> => {
     const candidate = candidates[index];
     if (candidate === undefined) {
-      const proxyType = forceManagedProxyType ?? candidates[0]?.type ?? 'residential';
+      const proxyType = options.forceManagedProxyType ?? candidates[0]?.type ?? 'residential';
       throw new Error(`Kernel has no available ${proxyType} proxy for ${proxyLocation.country}`);
     }
 
@@ -346,9 +365,20 @@ async function createRemoteSession(
   };
 
   try {
-    if (forceManagedProxyType !== undefined) {
+    if (options.exactManagedProxy !== undefined) {
+      const exact = kernelProxyCandidates(proxyLocation, options.exactManagedProxy.type).find(
+        (candidate) => candidate.source.endsWith(`_${options.exactManagedProxy?.specificity}`)
+      );
+      if (exact === undefined) {
+        throw new Error(
+          `Kernel ${options.exactManagedProxy.type} ${options.exactManagedProxy.specificity} proxy is unavailable for the requested location`
+        );
+      }
+      return await createWithManagedProxy([exact], 0);
+    }
+    if (options.forceManagedProxyType !== undefined) {
       return await createWithManagedProxy(
-        kernelProxyCandidates(proxyLocation, forceManagedProxyType),
+        kernelProxyCandidates(proxyLocation, options.forceManagedProxyType),
         0
       );
     }
@@ -380,9 +410,19 @@ export async function createKernelSessionWithContext(
   agentId: string,
   proxyLocation: ProxyGeoLocation = DEFAULT_GEOLOCATION,
   _startUrl?: string,
-  options?: { keepValidationConnection?: boolean }
+  options?: {
+    keepValidationConnection?: boolean;
+    forceManagedProxyType?: KernelProxyType;
+    exactManagedProxy?: {
+      type: KernelProxyType;
+      specificity: KernelRecoveryProxySpecificity;
+    };
+  }
 ): Promise<BrowserProviderSession> {
-  const remote = await createRemoteSession(contextId, agentId, proxyLocation);
+  const remote = await createRemoteSession(contextId, agentId, proxyLocation, {
+    forceManagedProxyType: options?.forceManagedProxyType,
+    exactManagedProxy: options?.exactManagedProxy,
+  });
   let dbSession;
   try {
     dbSession = await prisma.browserSession.create({
@@ -423,6 +463,18 @@ export async function createKernelSessionWithContext(
     ...remote,
     validationBrowser,
   };
+}
+
+/** Create a solver-enabled, profile-free Kernel candidate for challenge search. */
+export async function createKernelRecoverySession(
+  agentId: string,
+  proxyLocation: ProxyGeoLocation,
+  proxy: { type: KernelProxyType; specificity: KernelRecoveryProxySpecificity }
+) {
+  return createRemoteSession('', agentId, proxyLocation, {
+    exactManagedProxy: proxy,
+    omitProfile: true,
+  });
 }
 
 export async function closeKernelSession(
@@ -483,7 +535,7 @@ async function recreateKernelSession(
     oldSession.contextId,
     oldSession.agentId,
     proxyLocation,
-    opts.forceManagedProxyType
+    { forceManagedProxyType: opts.forceManagedProxyType }
   );
   await remote.validationBrowser.close().catch(() => {});
 
@@ -575,6 +627,22 @@ export async function getKernelSessionHealth(sessionId: string): Promise<Browser
     profileId: session.profile?.id ?? null,
     uptimeMs: session.usage?.uptime_ms ?? null,
   };
+}
+
+export async function getKernelCaptchaTelemetry(
+  sessionId: string
+): Promise<BrowserCaptchaTelemetry> {
+  const events: unknown[] = [];
+  for await (const entry of kernelClient().browsers.telemetry.events(sessionId, {
+    category: ['captcha'],
+    order: 'desc',
+  })) {
+    if (entry.event.type === 'captcha_solve_result') {
+      events.push(entry);
+    }
+    if (events.length >= 50) break;
+  }
+  return summarizeKernelCaptchaEvents(events);
 }
 
 export async function resizeKernelViewport(

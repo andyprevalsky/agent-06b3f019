@@ -176,28 +176,20 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         ),
         "params": {},
     },
-    "rotate_ip": {
+    "recover_from_challenge": {
         "description": (
-            "Replace the browser's outbound IP address when the current one is being blocked or "
-            "rate-limited by the site. Use this ONLY when you have concrete evidence the IP itself is "
-            "the problem - a 'too many requests' / rate-limit page, an 'unusual traffic detected' or "
-            "'access denied' interstitial, a CAPTCHA wall that keeps reappearing, or repeated 429 "
-            "responses. Do NOT use it for ordinary failures - wrong credentials, a 404, a genuine "
-            "out-of-stock, a form validation error, or a page that simply didn't load - rotating won't "
-            "fix those and it burns a limited budget. For sessions that began on Kernel, the backend "
-            "advances a fixed recovery ladder: the first call gives a fresh Kernel residential IP; the "
-            "second call gives a fresh Kernel mobile IP; the third call switches Kernel to Steel and gives "
-            "a fresh Steel residential IP; and the fourth call gives another Steel residential IP. A "
-            "session that already began on Steel stays on Steel for every rotation. Provider selection is "
-            "automatic: never try "
-            "to choose Kernel or Steel yourself. After 4 rotations the tool returns an error, which means "
-            "the site is hard-blocking the available recovery paths for this session - stop retrying this "
-            "route and either try a different approach or report the target as unreachable. After every "
-            "successful recovery, inspect the page again and call rotate_ip another time only when concrete "
-            "evidence of an IP block remains. Each "
-            "rotation takes a few seconds and discards any unsubmitted form data on the current page, but "
-            "keeps you logged in and returns you to the current URL. The result tells you which tier you "
-            "landed on and how many rotations remain."
+            "Recover from a persistent CAPTCHA, bot challenge, access-denied interstitial, unusual-traffic "
+            "page, or repeated 429 after the browser provider's automatic CAPTCHA solver had a chance to "
+            "finish. Use this ONLY with concrete challenge evidence, never for bad credentials, a 404, "
+            "out-of-stock, form validation, or an ordinary load failure. The tool first waits for Kernel or "
+            "Steel's native auto-solver. If the challenge remains, it tests isolated copies of browser state: "
+            "known challenge cookies, all target-site cookies, then parallel cookie-group reductions. The "
+            "signed-in source context is not changed during testing, and anything that may carry authentication "
+            "is always preserved. If no safe cookie fix is proven, it searches permission-compatible Kernel "
+            "residential, Kernel mobile, Kernel ISP, and Steel managed/fixed-IP browsers in parallel, selects a configuration "
+            "that passes repeated stability probes, and caches that configuration as this user's default for "
+            "future browser sessions. Provider CAPTCHA solving remains enabled throughout. The successful "
+            "recovery returns to the current URL with cookies, localStorage, and IndexedDB preserved."
         ),
         "params": {
             "reason": {
@@ -885,10 +877,10 @@ _VALID_ACTIONS = frozenset(
         "request_user_assistance_for_authentication",
         "request_payment_card",
         "generate_write_lock_notification",
-        # rotate_ip is advertised in BROWSER_USE_TOOLS (see above); keep it in the
+        # recover_from_challenge is advertised in BROWSER_USE_TOOLS; keep it in the
         # allowlist or normalize_browser_use_response() rejects the model's call and
-        # the browser step aborts before the handler can rotate the proxy.
-        "rotate_ip",
+        # the browser step aborts before the handler can run staged recovery.
+        "recover_from_challenge",
         "read_network_requests",
     }
 )

@@ -12,6 +12,10 @@ import { SteelRateLimitError, type FingerprintData, log } from './types';
 import { createLocalBrowserSession, connectValidatedBrowser } from './sessionConnection';
 import { STEEL_API_BASE_URL, steelCdpUrl, steelDebugUrl } from './urls';
 import { benchmarkIsolatedBrowserProfilesEnabled } from '../browser/benchmarkProfileIsolation';
+import {
+  summarizeSteelCaptchaStatus,
+  type BrowserCaptchaTelemetry,
+} from '../browser/captchaTelemetry';
 export { resumeSession } from './sessionResume';
 export {
   STEEL_API_BASE_URL,
@@ -119,7 +123,7 @@ interface SteelSessionCookieSummary {
   checkedAt: string;
 }
 
-type SteelProxyConfig =
+export type SteelProxyConfig =
   | false
   | { server: string }
   // Steel Dedicated IPs: { type: 'fixed' } lets Steel pick one of our leased
@@ -134,7 +138,7 @@ type SteelProxyConfig =
       };
     };
 
-type SteelProxySettings = {
+export type SteelProxySettings = {
   config: SteelProxyConfig;
   source: 'none' | 'steel' | 'byop' | 'dedicated';
 };
@@ -191,10 +195,11 @@ export function isInvalidSteelProxyConfiguration(error: unknown): boolean {
 export function buildSteelProxySettings(
   geolocation: ProxyGeoLocation,
   dropCity = false,
-  forceManagedRotation = false
+  forceManagedRotation = false,
+  forcedMode?: 'managed' | 'fixed'
 ): SteelProxySettings {
   const byopProxyServer = process.env.STEEL_PROXY_SERVER?.trim();
-  if (byopProxyServer && !forceManagedRotation) {
+  if (byopProxyServer && !forceManagedRotation && forcedMode === undefined) {
     log.info(`  Using BYOP proxy server: ${redactProxyServerForLog(byopProxyServer)}`);
     return { config: { server: byopProxyServer }, source: 'byop' };
   }
@@ -203,7 +208,12 @@ export function buildSteelProxySettings(
   // a per-user profileId, Steel pins one IP to each user's profile on first use,
   // giving every user a stable egress identity (and making cf_clearance reuse
   // work). An explicit STEEL_DEDICATED_IP_ID pins one shared IP instead.
-  if (!forceManagedRotation && envEnabled('BROWSER_AGENT_STEEL_DEDICATED_IP_ENABLED', false)) {
+  if (
+    forcedMode === 'fixed' ||
+    (!forceManagedRotation &&
+      forcedMode === undefined &&
+      envEnabled('BROWSER_AGENT_STEEL_DEDICATED_IP_ENABLED', false))
+  ) {
     const pinnedId = process.env.STEEL_DEDICATED_IP_ID?.trim();
     log.info(
       `  Using Steel dedicated IP${pinnedId ? ` (pinned ${pinnedId})` : ' (auto-pin to profile)'}`
@@ -215,7 +225,9 @@ export function buildSteelProxySettings(
   }
 
   const useSteelProxy =
-    forceManagedRotation || envEnabled('BROWSER_AGENT_STEEL_PROXY_ENABLED', true);
+    forceManagedRotation ||
+    forcedMode === 'managed' ||
+    envEnabled('BROWSER_AGENT_STEEL_PROXY_ENABLED', true);
   if (!useSteelProxy) {
     return { config: false, source: 'none' };
   }
@@ -290,7 +302,7 @@ export async function createSessionWithContext(
   agentId: string,
   geolocation: ProxyGeoLocation = DEFAULT_GEOLOCATION,
   startUrl?: string,
-  options?: { keepValidationConnection?: boolean }
+  options?: { keepValidationConnection?: boolean; proxyMode?: 'managed' | 'fixed' }
 ): Promise<{
   sessionId: string;
   debugUrl: string;
@@ -345,7 +357,12 @@ export async function createSessionWithContext(
       // Steel's headful mode has ~91px chrome (toolbar). To get 1280x800 content area:
       // - Width: 1280 + 8 = 1288 (fine-tuned: was 1303→1295, need -15)
       // - Height: 800 + 91 = 891 (accounts for browser toolbar) ✓ working
-      const proxySettings = buildSteelProxySettings(geolocation, dropProxyCity);
+      const proxySettings = buildSteelProxySettings(
+        geolocation,
+        dropProxyCity,
+        false,
+        options?.proxyMode
+      );
       const profile = resolveSteelProfileForSession(agentId, dbContext.contextId);
       const session = (await steel.sessions.create({
         profileId: profile.profileId, // Use existing profile if available
@@ -516,6 +533,60 @@ export async function createSessionWithContext(
   );
 }
 
+/** Create a solver-enabled, profile-free Steel candidate for challenge search. */
+export function buildSteelRecoveryBrowserOptions(input: {
+  proxy: SteelProxyConfig;
+  userAgent?: string;
+}) {
+  return {
+    persistProfile: false,
+    userAgent: input.userAgent,
+    useProxy: input.proxy,
+    solveCaptcha: true,
+    debugConfig: { systemCursor: false },
+    stealthConfig: { humanizeInteractions: false, skipFingerprintInjection: true },
+    timeout: 900000,
+    dimensions: { width: 1288, height: 891 },
+  };
+}
+
+export async function createSteelRecoverySession(input: {
+  proxyLocation: ProxyGeoLocation;
+  proxyMode: 'managed' | 'fixed';
+  userAgent?: string;
+}) {
+  const proxySettings = buildSteelProxySettings(
+    input.proxyLocation,
+    input.proxyMode === 'managed' && isKnownRejectedProxyCity(input.proxyLocation),
+    false,
+    input.proxyMode
+  );
+  // Challenge search must never bypass the provider-native auto solver, even
+  // when normal sessions have it disabled for a local experiment.
+  const session = (await steel.sessions.create(
+    buildSteelRecoveryBrowserOptions({
+      proxy: proxySettings.config,
+      userAgent: input.userAgent,
+    })
+  )) as SteelSessionResult;
+  const wsUrl = steelCdpUrl(session.id);
+  const validationBrowser = await connectValidatedBrowser(wsUrl);
+  if (validationBrowser === null) {
+    await releaseSteelRemoteSession(session.id).catch(() => {});
+    throw new Error(`Steel recovery candidate ${session.id} failed CDP validation`);
+  }
+  return {
+    sessionId: session.id,
+    debugUrl: steelDebugUrl(session.debugUrl),
+    wsUrl,
+    proxySource: session.proxySource ?? proxySettings.source,
+    proxyLocation: input.proxyLocation,
+    profileId: null,
+    profileSource: 'challenge_candidate_ephemeral',
+    validationBrowser,
+  };
+}
+
 /**
  * Close a browser session.
  * @param pause - If true, sets status to PAUSED (resumable). If false, sets to CLOSED (terminal).
@@ -620,6 +691,13 @@ export async function getSteelSessionHealth(sessionId: string): Promise<SteelSes
     ttlMs: Number.isFinite(expiresAtMs) ? Math.max(0, expiresAtMs - Date.now()) : null,
     profileId: remote.profileId ?? null,
   };
+}
+
+export async function getSteelCaptchaTelemetry(
+  sessionId: string
+): Promise<BrowserCaptchaTelemetry> {
+  const statuses = await steel.sessions.captchas.status(sessionId);
+  return summarizeSteelCaptchaStatus(statuses);
 }
 
 export async function getSteelSessionCookieSummary(

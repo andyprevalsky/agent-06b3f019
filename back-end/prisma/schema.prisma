@@ -340,6 +340,7 @@ model PurchaseWalletFunding {
   reclaimProviderTransferId String?
   idempotencyKey            String                      @unique
   reclaimIdempotencyKey     String?
+  reclaimLeaseToken         String?
   metadata                  Json?
   errorMessage              String?
   fundedAt                  DateTime?
@@ -355,13 +356,14 @@ model PurchaseWalletFunding {
 }
 
 model BrowserContext {
-  id               String                   @id @default(uuid())
-  userId           String                   @unique
-  contextId        String?                  @unique
-  createdAt        DateTime                 @default(now())
-  updatedAt        DateTime                 @updatedAt
-  sessions         BrowserSession[]
-  providerProfiles BrowserProviderProfile[]
+  id                     String                   @id @default(uuid())
+  userId                 String                   @unique
+  contextId              String?                  @unique
+  preferredBrowserConfig Json?
+  createdAt              DateTime                 @default(now())
+  updatedAt              DateTime                 @updatedAt
+  sessions               BrowserSession[]
+  providerProfiles       BrowserProviderProfile[]
 
   @@index([userId])
   @@index([contextId])
@@ -397,26 +399,28 @@ model BrowserProviderProxy {
 }
 
 model BrowserSession {
-  id              String               @id @default(uuid())
-  contextId       String
-  agentId         String
-  sessionId       String               @unique
-  status          BrowserSessionStatus @default(ACTIVE)
-  debugUrl        String?
-  startUrl        String?
-  currentUrl      String?
-  createdAt       DateTime             @default(now())
-  closedAt        DateTime?
-  wsUrl           String?
-  provider        String               @default("steel")
-  injectedOrigins Json?
+  id                    String               @id @default(uuid())
+  contextId             String
+  agentId               String
+  sessionId             String               @unique
+  status                BrowserSessionStatus @default(ACTIVE)
+  debugUrl              String?
+  startUrl              String?
+  currentUrl            String?
+  createdAt             DateTime             @default(now())
+  closedAt              DateTime?
+  wsUrl                 String?
+  provider              String               @default("steel")
+  injectedOrigins       Json?
+  controlState          BrowserControlState  @default(AGENT)
+  controlLeaseExpiresAt DateTime?
   // Model-driven IP rotation (rotate_ip tool). Count + current tier are keyed to
   // this stable row id (the browser sub-agent run), surviving session recycles so
   // the cap is authoritative across rotations. proxyTier: null → original session,
   // 'residential' | 'mobile' after a rotation. See docs/plans/active/rotate-ip-tool.md.
-  proxyRotationCount Int               @default(0)
-  proxyTier          String?
-  context         BrowserContext       @relation(fields: [contextId], references: [id], onDelete: Cascade)
+  proxyRotationCount    Int                  @default(0)
+  proxyTier             String?
+  context               BrowserContext       @relation(fields: [contextId], references: [id], onDelete: Cascade)
 
   @@index([contextId])
   @@index([agentId])
@@ -1234,6 +1238,12 @@ enum BrowserSessionStatus {
   CLOSED
   ERROR
   PAUSED
+}
+
+enum BrowserControlState {
+  AGENT
+  USER_REQUESTED
+  USER
 }
 
 enum ClaudeCodeSessionStatus {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize /deploy and /RCA state retries and timing from Conductor history."""
+"""Summarize /deploy, /RCA, and /descend timing from factory telemetry."""
 
 from __future__ import annotations
 
@@ -20,6 +20,10 @@ from typing import Any, Callable, Iterable, Sequence
 DEFAULT_DB = Path.home() / "Library/Application Support/com.conductor.app/conductor.db"
 DEFAULT_REPO = "navi-whisper-lux-v2"
 DEFAULT_DEPLOY_SINCE = "2026-07-11"
+DEFAULT_DESCEND_HISTORY = (
+    Path(__file__).resolve().parents[1]
+    / "agents/benchmarks/history/descend_steps.jsonl"
+)
 COMMAND_RE = re.compile(r"^\s*/(deploy|rca)\b", re.IGNORECASE)
 FACTORY_EVENT_RE = re.compile(
     r"^\s*(?:python(?:3)?|[^\s]*/python(?:3)?)\s+"
@@ -1947,7 +1951,151 @@ def build_trends(
     return trends
 
 
-def analyze(turns: Sequence[Turn], deploy_since: str, limit: int) -> dict[str, Any]:
+def percentage_change(recent: float | None, previous: float | None) -> float | None:
+    if recent is None or previous is None or previous == 0:
+        return None
+    return round((recent - previous) / previous * 100, 1)
+
+
+def descend_trend(values: Sequence[float], window: int) -> dict[str, Any]:
+    recent_values = values[-window:]
+    previous_values = values[-2 * window : -window]
+    recent = round(statistics.median(recent_values), 3) if recent_values else None
+    previous = round(statistics.median(previous_values), 3) if previous_values else None
+    return {
+        "samples": len(values),
+        "latest_seconds": round(values[-1], 3) if values else None,
+        "recent_median_seconds": recent,
+        "previous_median_seconds": previous,
+        "change_percent": percentage_change(recent, previous),
+    }
+
+
+def load_descend_factory_events(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    records: dict[str, dict[str, Any]] = {}
+    for line_number, line in enumerate(
+        path.read_text(errors="replace").splitlines(), 1
+    ):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise ValueError(
+                f"invalid JSONL at {path}:{line_number}: {error}"
+            ) from error
+        if record.get("workflow") != "descend":
+            continue
+        if record.get("record_type") != "factory_event":
+            continue
+        identifier = record.get("record_id")
+        if not isinstance(identifier, str):
+            raise ValueError(
+                f"missing descend factory-event record_id at {path}:{line_number}"
+            )
+        records.setdefault(identifier, record)
+    return sorted(
+        records.values(),
+        key=lambda record: (
+            float(record.get("recorded_epoch", 0)),
+            record["record_id"],
+        ),
+    )
+
+
+def descend_metrics(
+    records: Sequence[dict[str, Any]], window: int = 5
+) -> dict[str, Any]:
+    canonical = [
+        record
+        for record in records
+        if record.get("workflow") == "descend"
+        and record.get("record_type") == "factory_event"
+        and record.get("lane") == "main"
+    ]
+    finishes = [
+        record
+        for record in canonical
+        if record.get("event") == "stage-finish"
+        and record.get("status") == "completed"
+        and isinstance(record.get("duration_seconds"), (int, float))
+    ]
+    by_step: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in finishes:
+        by_step[str(record.get("value") or record.get("step"))].append(record)
+
+    steps = []
+    for step, step_records in by_step.items():
+        step_records.sort(key=lambda record: float(record.get("recorded_epoch", 0)))
+        durations = [float(record["duration_seconds"]) for record in step_records]
+        steps.append({"step": step, **descend_trend(durations, window)})
+    steps.sort(
+        key=lambda row: (
+            row["change_percent"] is None,
+            -(row["change_percent"] or 0),
+            row["step"],
+        )
+    )
+
+    by_run: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in canonical:
+        run_id = record.get("run_id")
+        if isinstance(run_id, str):
+            by_run[run_id].append(record)
+    runs = []
+    for run_id, run_records in by_run.items():
+        outcomes = [
+            record
+            for record in run_records
+            if record.get("event") == "outcome" and record.get("value") == "completed"
+        ]
+        starts = [
+            record
+            for record in run_records
+            if record.get("event") == "stage-start"
+            and isinstance(record.get("recorded_epoch"), (int, float))
+        ]
+        if not outcomes or not starts:
+            continue
+        outcome = max(
+            outcomes, key=lambda record: float(record.get("recorded_epoch", 0))
+        )
+        started_epoch = min(float(record["recorded_epoch"]) for record in starts)
+        finished_epoch = float(outcome.get("recorded_epoch", started_epoch))
+        if finished_epoch < started_epoch:
+            continue
+        runs.append(
+            {
+                "run_id": run_id,
+                "slice": outcome.get("slice", ""),
+                "status": "completed",
+                "finished_at": outcome.get("recorded_at", ""),
+                "duration_seconds": round(finished_epoch - started_epoch, 3),
+            }
+        )
+    runs.sort(key=lambda run: run["finished_at"])
+    wall_clock = descend_trend([float(run["duration_seconds"]) for run in runs], window)
+    wall_clock["completed_runs"] = len(runs)
+    return {
+        "history_file": "agents/benchmarks/history/descend_steps.jsonl",
+        "window": window,
+        "step_records": len(finishes),
+        "run_wall_clock": wall_clock,
+        "steps": steps,
+        "runs": runs,
+    }
+
+
+def analyze(
+    turns: Sequence[Turn],
+    deploy_since: str,
+    limit: int,
+    *,
+    descend_records: Sequence[dict[str, Any]] = (),
+    descend_window: int = 5,
+) -> dict[str, Any]:
     all_deploy_attempts = [turn for turn in turns if turn.command == "deploy"]
     all_deploys = [
         turn
@@ -2046,6 +2194,7 @@ def analyze(turns: Sequence[Turn], deploy_since: str, limit: int) -> dict[str, A
         "deploy_since": deploy_since,
         "deploy": deploy,
         "rca": rca,
+        "descend": descend_metrics(descend_records, descend_window),
         "deploy_runs": [
             {
                 "workspace": turn.workspace,
@@ -2200,6 +2349,56 @@ def render_table(
     )
 
 
+def format_seconds(value: float | None) -> str:
+    if value is None:
+        return "—"
+    if value >= 60:
+        return f"{value / 60:.1f}m"
+    return f"{value:.1f}s"
+
+
+def render_descend_table(metrics: dict[str, Any]) -> str:
+    wall = metrics["run_wall_clock"]
+    wall_change = wall["change_percent"]
+    wall_change_text = "—" if wall_change is None else f"{wall_change:+.1f}%"
+    rows = []
+    for step in metrics["steps"]:
+        change = step["change_percent"]
+        change_text = "—" if change is None else f"{change:+.1f}%"
+        rows.append(
+            '<tr class="descend-metric-row">'
+            f'<td>{html.escape(step["step"])}</td>'
+            f'<td>{step["samples"]}</td>'
+            f'<td>{format_seconds(step["latest_seconds"])}</td>'
+            f'<td>{format_seconds(step["recent_median_seconds"])}</td>'
+            f'<td>{format_seconds(step["previous_median_seconds"])}</td>'
+            f"<td>{change_text}</td>"
+            "</tr>"
+        )
+    if not rows:
+        rows.append(
+            '<tr class="descend-metric-row"><td>No completed steps</td>'
+            "<td>0</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>"
+        )
+    summary = (
+        f'{wall["completed_runs"]} completed · '
+        f'recent {format_seconds(wall["recent_median_seconds"])} · '
+        f'previous {format_seconds(wall["previous_median_seconds"])} · '
+        f"change {wall_change_text}"
+    )
+    return (
+        '<section class="flow">'
+        '<div class="heading"><h2>/descend</h2>'
+        f"<p>{summary}</p></div>"
+        '<p class="note">Completed main-lane factory events from the checked-in '
+        "append-only timing ledger. Negative change is faster.</p>"
+        '<table class="descend-table" aria-label="/descend iteration timing">'
+        "<thead><tr><th>Step</th><th>Samples</th><th>Latest</th>"
+        "<th>Recent median</th><th>Previous median</th><th>Change</th></tr></thead>"
+        f'<tbody>{"".join(rows)}</tbody></table></section>'
+    )
+
+
 def render_html(payload: dict[str, Any]) -> str:
     deploy = payload["deploy"]
     deploy_note = (
@@ -2217,6 +2416,8 @@ def render_html(payload: dict[str, Any]) -> str:
         payload["rca"],
         "All times are phase start → next phase start (or command finish).",
     )
+    if "descend" in payload:
+        content += render_descend_table(payload["descend"])
     trend_data = json.dumps(
         {
             "generated_at": payload["generated_at"],
@@ -2285,6 +2486,8 @@ def render_html(payload: dict[str, Any]) -> str:
     .group-total-row .cell-chart { margin-top: 2px; }
     .group-total-row .trend-chart { height: 22px; }
     .wall-only-cell { color: var(--muted); vertical-align: middle; }
+    .descend-table th:nth-child(1), .descend-table td:nth-child(1) { width: 31%; }
+    .descend-table th:nth-child(n+2), .descend-table td:nth-child(n+2) { width: 13.8%; }
     .sr-only { clip: rect(0, 0, 0, 0); clip-path: inset(50%); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px; }
     .total-row td { border-top: 2px solid var(--border); font-weight: 600; }
     .cell-chart { margin-top: 6px; }
@@ -2583,6 +2786,28 @@ def print_summary(payload: dict[str, Any]) -> None:
                 f"{step['avg_minutes']:>6.1f}m  {step['total_minutes']:>5.1f}m"
             )
         print()
+    descend = payload.get("descend")
+    if descend is not None:
+        wall = descend["run_wall_clock"]
+        change = wall["change_percent"]
+        change_text = "—" if change is None else f"{change:+.1f}%"
+        print(
+            f"/descend {wall['completed_runs']} completed; "
+            f"recent {format_seconds(wall['recent_median_seconds'])}; "
+            f"change {change_text}"
+        )
+        print("Step                       Samples  Latest  Recent  Previous  Change")
+        for step in descend["steps"]:
+            step_change = step["change_percent"]
+            step_change_text = "—" if step_change is None else f"{step_change:+.1f}%"
+            print(
+                f"{step['step']:<26} {step['samples']:>7}  "
+                f"{format_seconds(step['latest_seconds']):>6}  "
+                f"{format_seconds(step['recent_median_seconds']):>6}  "
+                f"{format_seconds(step['previous_median_seconds']):>8}  "
+                f"{step_change_text:>6}"
+            )
+        print()
 
 
 def self_test() -> None:
@@ -2812,6 +3037,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--deploy-since", default=DEFAULT_DEPLOY_SINCE)
     parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--descend-history", type=Path, default=DEFAULT_DESCEND_HISTORY)
+    parser.add_argument("--descend-window", type=int, default=5)
     parser.add_argument(
         "--output-dir", type=Path, default=Path(".context/factory-review")
     )
@@ -2827,8 +3054,16 @@ def main() -> int:
         return 0
     if args.limit < 1:
         raise SystemExit("--limit must be positive")
+    if args.descend_window < 1:
+        raise SystemExit("--descend-window must be positive")
     turns = load_turns(args.db, args.repo)
-    payload = analyze(turns, args.deploy_since, args.limit)
+    payload = analyze(
+        turns,
+        args.deploy_since,
+        args.limit,
+        descend_records=load_descend_factory_events(args.descend_history),
+        descend_window=args.descend_window,
+    )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     json_path = (args.output_dir / "factory-review.json").resolve()
     html_path = (args.output_dir / "factory-review.html").resolve()

@@ -20,6 +20,7 @@ set -uo pipefail
 
 REPO_DIR="/data/repo"
 APP_USER="rose"
+FETCH_REF_SCRIPT="${CLOUDBENCH_FETCH_REF_SCRIPT:-/data/cloudbench-fetch-ref.sh}"
 log() { echo "[cloudbench-worker] $*"; }
 
 cd "$REPO_DIR" 2>/dev/null || { log "FATAL: no $REPO_DIR"; exit 1; }
@@ -31,30 +32,47 @@ cd "$REPO_DIR" 2>/dev/null || { log "FATAL: no $REPO_DIR"; exit 1; }
 # /data/worker.log and the pool just stays one worker short).
 if [ -n "${REF:-}" ]; then
     log "git-syncing → $REF"
-    REF_FETCHED=1
-    if ! gosu "$APP_USER" git -C "$REPO_DIR" fetch origin "$REF" 2>&1 | sed 's/^/   /'; then
-        REF_FETCHED=0
-        gosu "$APP_USER" git -C "$REPO_DIR" fetch origin 2>&1 | sed 's/^/   /' || \
-            log "WARN: git fetch failed — trying checkout from the existing clone"
+    if [ ! -x "$FETCH_REF_SCRIPT" ]; then
+        FETCH_REF_SCRIPT="$REPO_DIR/scripts/cloudbench-fetch-ref.sh"
     fi
-    if ! gosu "$APP_USER" git -C "$REPO_DIR" checkout -f "$REF" 2>&1 | sed 's/^/   /'; then
-        # A bare sha that was just fetched lands in FETCH_HEAD — but FETCH_HEAD
-        # only points at $REF when the ref-specific fetch succeeded; otherwise
-        # it would silently check out some OTHER head (= wrong code).
-        if [ "$REF_FETCHED" != "1" ] || \
-           ! gosu "$APP_USER" git -C "$REPO_DIR" checkout -f FETCH_HEAD 2>&1 | sed 's/^/   /'; then
-            log "FATAL: could not check out $REF — refusing to run this bench's queue on wrong code"
-            exit 1
-        fi
+    if [ ! -x "$FETCH_REF_SCRIPT" ]; then
+        log "FATAL: missing executable cloudbench-fetch-ref helper"
+        exit 1
     fi
-    gosu "$APP_USER" git -C "$REPO_DIR" reset --hard 2>&1 | sed 's/^/   /' || true
+    if ! CLOUDBENCH_APP_USER="$APP_USER" bash "$FETCH_REF_SCRIPT" "$REPO_DIR" "$REF" 2>&1 | sed 's/^/   /'; then
+        log "FATAL: could not verify requested ref $REF"
+        exit 1
+    fi
 fi
-if [ -n "${LOCAL_PATCH_FILE:-}" ] && [ -s "$LOCAL_PATCH_FILE" ]; then
+# The controller credential is needed only for the exact ref fetch. Do not let
+# it flow into the benchmark worker or agent subprocess environments.
+unset CLOUDBENCH_GITHUB_TOKEN_B64
+rm -f /tmp/rbw.env 2>/dev/null || true
+if ! gosu "$APP_USER" git -C "$REPO_DIR" clean -fd 2>&1 | sed 's/^/   /'; then
+    log "FATAL: could not remove stale untracked worktree files"
+    exit 1
+fi
+if [ -n "${LOCAL_PATCH_FILE:-}" ]; then
+    [ -s "$LOCAL_PATCH_FILE" ] || {
+        log "FATAL: declared local patch payload is missing or empty"
+        exit 1
+    }
+    [ -n "${LOCAL_PATCH_SHA256:-}" ] || {
+        log "FATAL: local patch payload has no checksum"
+        exit 1
+    }
+    _actual_patch_sha="$(sha256sum "$LOCAL_PATCH_FILE" | awk '{print $1}')"
+    [ "$_actual_patch_sha" = "$LOCAL_PATCH_SHA256" ] || {
+        log "FATAL: patch payload checksum mismatch"
+        exit 1
+    }
     log "applying local workspace patch"
-    if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn "$LOCAL_PATCH_FILE" 2>&1 | sed 's/^/   /'; then
+    if ! gosu "$APP_USER" git -C "$REPO_DIR" apply --whitespace=nowarn - \
+        < "$LOCAL_PATCH_FILE" 2>&1 | sed 's/^/   /'; then
         log "FATAL: local workspace patch failed to apply — worker would run mismatched code"
         exit 1
     fi
+    log "verified local workspace patch $_actual_patch_sha"
 fi
 
 # Every autoscaled worker clone starts from a volume snapshot that may predate
@@ -103,8 +121,16 @@ else
     export BENCHMARK_WORLD_MODEL_MODE="real"
 fi
 
-log "worker-only → queue=$TEMPORAL_TASK_QUEUE backend=$BACKEND_URL sim=${BENCH_SIMULATE:-0}"
 cd "$REPO_DIR/agents" || { log "FATAL: no agents dir"; exit 1; }
+# Readiness is a post-patch, post-environment contract. The controller does not
+# count this worker ready until this marker exists, and clears it before launch.
+if [ -n "${WORKER_READY_FILE:-}" ]; then
+    printf '%s\n' "$$" > "$WORKER_READY_FILE" || {
+        log "FATAL: could not publish worker readiness"
+        exit 1
+    }
+fi
+log "worker-only → queue=$TEMPORAL_TASK_QUEUE backend=$BACKEND_URL sim=${BENCH_SIMULATE:-0}"
 # Foreground: the machine lives as long as the worker does; the controller
 # destroys it on scale-down / teardown.
 exec gosu "$APP_USER" env \

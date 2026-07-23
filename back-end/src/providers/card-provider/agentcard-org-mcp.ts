@@ -353,5 +353,9 @@ export class AgentCardOrgMcpProvider implements CardProvider {
     const result = await this.toolCaller('close_card', { card_id: cardId });
     const record = resultRecord(result);
     throwForGate(record, result);
+    log.info('Closed card through AgentCard Organization MCP', {
+      card_id: maskId(cardId),
+      status: optionalString(record, ['cardStatus', 'status']),
+    });
   }
 }

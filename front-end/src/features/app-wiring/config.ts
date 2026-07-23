@@ -1,3 +1,4 @@
+import { createElement } from 'react';
 import type { RouteEntry } from './types';
 import { BACKEND_BASE_URL } from '@/lib/backendUrl';
 
@@ -12,13 +13,22 @@ import ResearchBlogPost from '@/features/research-blog-post';
 import Download from '@/features/download';
 import TestPayment from '@/features/test-payment';
 import GatePlayground from '@/features/gate-playground';
-import MobilePreview from '@/features/mobile-preview';
+import MobilePreview, { PREVIEW_AGENT_CONTEXT } from '@/features/mobile-preview';
+import { AgentContext, type AgentContextValue } from '@/features/agent-context';
 import { PlaidOAuthRedirect } from '@/features/integrations';
 import Waitlist from '@/pages/Waitlist';
 
+function MobilePreviewRoute() {
+  return createElement(
+    AgentContext.Provider,
+    { value: PREVIEW_AGENT_CONTEXT as unknown as AgentContextValue },
+    createElement(MobilePreview),
+  );
+}
+
 /** Dev-only design harness routes (stripped from production builds). */
 const DEV_ROUTES: readonly RouteEntry[] = import.meta.env.DEV
-  ? [{ path: '/mobile-preview', component: MobilePreview }]
+  ? [{ path: '/mobile-preview', component: MobilePreviewRoute }]
   : [];
 
 /**

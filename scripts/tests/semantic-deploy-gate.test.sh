@@ -18,6 +18,7 @@ DEPLOY_STRUCTURAL_RUNNER="$ROOT_DIR/scripts/run-deploy-structural-gates.py"
 DEPLOY_LIVE_PROBE_RUNNER="$ROOT_DIR/scripts/run_deploy_live_probes.py"
 DESCEND_COMMAND_TEST="$ROOT_DIR/scripts/tests/descend-command.test.sh"
 AUTO_RCA_WORKFLOW_TEST="$ROOT_DIR/scripts/tests/auto-rca-workflow.test.sh"
+AGENTCARD_LIFECYCLE_SCRIPT="$ROOT_DIR/scripts/run-agentcard-lifecycle-task.sh"
 
 fail() {
   echo "FAIL: $1" >&2
@@ -31,7 +32,7 @@ require_text() {
   grep -Fq -- "$text" "$file" || fail "$description"
 }
 
-for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_LIVE_PROBE_RUNNER" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST"; do
+for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_LIVE_PROBE_RUNNER" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
   [ -f "$file" ] || fail "required semantic deploy gate file is missing: $file"
 done
 
@@ -91,6 +92,10 @@ require_text "$DEPLOY_COMMAND" "may override **any** \`/deploy\` gate" "/deploy 
 require_text "$DEPLOY_COMMAND" 'Record `⚠️ Overridden` in `TEST_REPORT`' "/deploy must disclose overridden gates instead of reporting them as passing"
 require_text "$DEPLOY_COMMAND" 'DEPLOY_GATE_OVERRIDES=credential-health:anthropic' "/deploy must document the narrow Anthropic credential override"
 require_text "$DEPLOY_COMMAND" "Semantic tests run on every /deploy unless the user explicitly overrides that gate." "/deploy must make semantic tests default-on while honoring explicit overrides"
+require_text "$DEPLOY_COMMAND" "WHERE workspace_path = '\$ESCAPED_WORKSPACE_PATH' AND branch = '\$ESCAPED_BRANCH'" "/deploy must lock PR titles to the exact Conductor workspace path and branch"
+if grep -Fq "WHERE directory_name =" "$DEPLOY_COMMAND"; then
+  fail "/deploy must not update Conductor PR title locks by basename; multiple archived workspaces can share the same directory name"
+fi
 require_text "$DEPLOY_COMMAND" "SEMANTIC_WORKERS=4" "/deploy local semantic gate must use four workers"
 require_text "$DEPLOY_COMMAND" '. "$DEPLOY_ROOT/scripts/lib/workspace-env.sh"' "/deploy must load canonical workspace identity normalization"
 require_text "$DEPLOY_COMMAND" '. "$DEPLOY_ROOT/scripts/lib/deploy-local-env.sh"' "/deploy must load the tested local environment boundary"
@@ -178,6 +183,8 @@ if grep -Fq 'BLACKBOX_TEST_REPLAY_OUTBOUND=1' "$DEPLOY_COMMAND"; then
 fi
 require_text "$DEPLOY_COMMAND" 'bash scripts/run-deploy-stage agentcard-lifecycle --' "/deploy must record AgentCard as one lifecycle lane"
 require_text "$DEPLOY_COMMAND" 'bash scripts/run-bench --local' "/deploy AgentCard lane must own an isolated local stack"
+require_text "$DEPLOY_COMMAND" 'ROSE_EXCLUDE_ANTHROPIC_FAMILY=1' "/deploy AgentCard lane must use the non-Claude compute lane when Claude credentials are unavailable"
+require_text "$DEPLOY_COMMAND" 'SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt' "/deploy AgentCard lane must pass GPT-only seed policy into the isolated stack"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1' "/deploy AgentCard lane must not cold-build an unused simulated world model"
 require_text "$DEPLOY_COMMAND" 'agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment' "/deploy must keep all four AgentCard lifecycle tasks in one lane"
 require_text "$DEPLOY_COMMAND" '--max-concurrency 1 --no-dashboard' "/deploy must preserve sequential payment state inside the isolated AgentCard lane"
@@ -188,6 +195,9 @@ require_text "$DEPLOY_COMMAND" "gh workflow run chat-lifecycle-ratchet.yml" "/de
 require_text "$DEPLOY_COMMAND" 'gh run watch "$SEMANTIC_RUN_ID" --exit-status' "/deploy must block on production semantic success"
 require_text "$DEPLOY_COMMAND" "Start every applicable provider lane concurrently" "/deploy must not serialize independent production providers"
 require_text "$DEPLOY_COMMAND" "Do not wait for the independent Mac release lane" "production semantics must overlap Mac release work"
+require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export BENCHMARK_SKIP_WMH_BUILD=1' "AgentCard lifecycle stacks must skip unrelated WMH build/refresh before readiness"
+require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export ROSE_EXCLUDE_ANTHROPIC_FAMILY=1' "AgentCard lifecycle helper must not block on Claude credentials"
+require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt' "AgentCard lifecycle helper must pass GPT-only seed policy into run.sh"
 
 # /descend is part of the deploy orchestration surface. Keep its two user gates,
 # parallel deploy handoff, sorting, and rendered response contract cemented.

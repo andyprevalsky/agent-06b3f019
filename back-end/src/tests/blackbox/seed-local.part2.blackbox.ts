@@ -20,6 +20,10 @@ function readSeedLocalSource(): string {
   return readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
 }
 
+function readRepoFile(path: string): string {
+  return readFileSync(resolve(__dirname, '../../../../', path), 'utf8');
+}
+
 test('full sync defers browser-auth failure until later tables finish', async () => {
   const source = readSeedLocalSource();
   const fullSyncCollector = source.indexOf('const browserAuthSyncFailures: Error[] = [];');
@@ -116,6 +120,30 @@ test('browser-auth sync includes every durable credential reference', async () =
   }
 });
 
+test('browser-context seed uses a cross-version projection before production migration', async () => {
+  const source = readSeedLocalSource();
+  const browserContextStart = source.indexOf("'Browser Context'");
+  const browserProfilesStart = source.indexOf("'Browser Provider Profiles'", browserContextStart);
+  const browserContextSync = source.slice(browserContextStart, browserProfilesStart);
+
+  assert(browserContextStart > 0, 'expected the Browser Context sync step');
+  assert(browserProfilesStart > browserContextStart, 'expected the provider-profile sync after it');
+  assert(
+    browserContextSync.includes('select: {'),
+    'expected an explicit projection so a newly generated client never selects unmigrated columns'
+  );
+  for (const stableColumn of ['id: true', 'userId: true', 'contextId: true']) {
+    assert(
+      browserContextSync.includes(stableColumn),
+      `expected the cross-version BrowserContext projection to include ${stableColumn}`
+    );
+  }
+  assert(
+    !browserContextSync.includes('preferredBrowserConfig: true'),
+    'production-only seed reads must not request the new preference before its migration deploys'
+  );
+});
+
 test('passkeys-only seed mode never enters browser state or password sync', async () => {
   const source = readSeedLocalSource();
   const flag = source.indexOf("process.argv.includes('--passkeys-only')");
@@ -210,6 +238,69 @@ test('missing-Claude bypass requires the caller-validated Anthropic fallback opt
     strictFailure > fallback,
     'expected missing Claude OAuth to fail closed without the opt-in'
   );
+});
+
+test('compute-token sync can require GPT without requiring Claude OAuth', async () => {
+  const source = readSeedLocalSource();
+  const parser = source.indexOf('function parseComputeTokenRequiredTypes');
+  const env = source.indexOf('SEED_REQUIRE_COMPUTE_TOKEN_TYPES', parser);
+  const zeroClaude = source.indexOf('if (usableClaudeCodeCount === 0)');
+  const gptOnlyBypass = source.indexOf("!COMPUTE_TOKEN_REQUIRED_TYPES.has('claude')", zeroClaude);
+  const gptOnlyWarning = source.indexOf('this run requires GPT compute only', gptOnlyBypass);
+  const keyValidation = source.indexOf('process.env.ANTHROPIC_API_KEY?.trim()', gptOnlyWarning);
+  const strictFailure = source.indexOf(
+    "throw new Error('No usable claude_code integrations after sync')",
+    gptOnlyWarning
+  );
+
+  assert(parser > 0, 'expected a parser for required compute token types');
+  assert(env > parser, 'expected required token types to be read from env');
+  assert(gptOnlyBypass > zeroClaude, 'expected GPT-only sync to bypass missing Claude rows');
+  assert(gptOnlyWarning > gptOnlyBypass, 'expected GPT-only bypass to be explicit in logs');
+  assert(
+    keyValidation > gptOnlyWarning,
+    'expected Anthropic fallback validation to apply only after the GPT-only bypass'
+  );
+  assert(
+    strictFailure > keyValidation,
+    'expected missing Claude to stay fail-closed when Claude remains required'
+  );
+});
+
+test('AgentCard launcher scopes the missing-Claude opt-out to non-Claude tasks', async () => {
+  const source = readSeedLocalSource();
+  const launcher = readRepoFile('scripts/run-agentcard-lifecycle-task.sh');
+  const tasks = JSON.parse(readRepoFile('agents/benchmarks/tasks.json')) as Array<{
+    name: string;
+    requires_claude_code: boolean;
+  }>;
+  const acceptedTasks = [
+    'agent-payment-test-shop',
+    'agent-payment-setup-resume',
+    'agent-payment-idempotent-abandonment',
+    'agent-payment-abandonment',
+  ];
+  const bypass = source.indexOf(
+    "process.env.SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK === '1'"
+  );
+  const warning = source.indexOf('launcher-scoped non-Claude task', bypass);
+  const gptInspection = source.indexOf('await inspectGptCodeIntegrations()', warning);
+
+  assert(bypass > 0, 'expected a distinct non-Claude task opt-out');
+  assert(warning > bypass, 'expected the opt-out to explain its narrow contract');
+  assert(gptInspection > warning, 'expected gpt_code validation to remain active');
+  assert(
+    launcher.includes('export SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK=1'),
+    'expected the AgentCard launcher to opt into the non-Claude task path'
+  );
+  for (const taskName of acceptedTasks) {
+    const task = tasks.find((candidate) => candidate.name === taskName);
+    assert(task !== undefined, `expected ${taskName} in the benchmark catalog`);
+    assert(
+      task.requires_claude_code === false,
+      `expected ${taskName} to remain explicitly non-Claude before using the opt-out`
+    );
+  }
 });
 
 (async () => {
