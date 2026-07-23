@@ -492,7 +492,7 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'mint cancels the Stripe hold if AgentCard card issuance fails before company transfer',
+    'mint preserves an ambiguous AgentCard failure for same-key reconciliation',
     async () => {
       const userId = await createSubscribedUser('mint-card-failure');
       const fingerprint = `mint-card-failure-${randomUUID()}`;
@@ -510,7 +510,8 @@ const tests: Array<[string, () => Promise<void>]> = [
         } catch (error) {
           threw = true;
           assert(
-            error instanceof Error && error.message.includes('card mint failed'),
+            error instanceof purchasesService.PurchaseError &&
+              error.code === 'agentcard_company_funding_in_progress',
             `unexpected error: ${error instanceof Error ? error.message : String(error)}`
           );
         }
@@ -524,19 +525,22 @@ const tests: Array<[string, () => Promise<void>]> = [
           walletFundingProvider.reclaimCalls.length === 0,
           'no AgentCard funding should be reclaimed before create_card returns a transfer'
         );
-        assert(calls.cancels.length === 1, 'Stripe hold should be canceled');
+        assert(calls.cancels.length === 0, 'an ambiguous provider outcome must keep the hold');
 
         const row = await prisma.purchaseSpend.findFirst({
           where: { userId, fingerprint },
           orderBy: { createdAt: 'desc' },
         });
-        assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);
+        assert(
+          row?.status === PurchaseSpendStatus.FUNDING_PENDING,
+          `expected FUNDING_PENDING, got ${row?.status}`
+        );
         const funding = await prisma.purchaseWalletFunding.findUnique({
           where: { purchaseId: row?.id ?? '' },
         });
         assert(
-          funding === null,
-          'no wallet funding row should be created before a transfer exists'
+          funding?.status === 'PENDING',
+          `the pre-provider marker must remain resumable, got ${funding?.status}`
         );
       });
     },

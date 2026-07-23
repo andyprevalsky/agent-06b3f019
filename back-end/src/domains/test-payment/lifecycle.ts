@@ -1,89 +1,30 @@
 import { callOrgTool } from '../../providers/agentcard/org-runtime';
+import { getOrgManagedCardholderId } from '../../providers/agentcard/store';
 import { stripe } from '../../providers/stripe';
 import { TestPaymentError } from './errors';
+import {
+  asRecord,
+  integerField,
+  mcpResultRecord,
+  providerIntegrity,
+  stringField,
+} from './lifecycleProviderRecords';
 import * as testPaymentRepo from './repo';
+import type {
+  LifecycleAttention,
+  LifecyclePurchase,
+  StripeHold,
+  StripeRefundList,
+  TestPaymentLifecycleDependencies,
+} from './lifecycleDependencies';
 import type { TestPaymentLifecycle } from './types';
 
-type LifecyclePurchase = Awaited<
-  ReturnType<typeof testPaymentRepo.findLatestPurchaseLifecycleByAgentId>
->;
-type LifecycleAttention = Awaited<
-  ReturnType<typeof testPaymentRepo.findAttentionRequestsByAgentId>
->;
 type LifecycleIntegrity = Awaited<
   ReturnType<typeof testPaymentRepo.findPurchaseLifecycleIntegrityByAgentId>
 >;
 type LoadedPurchase = NonNullable<LifecyclePurchase>;
 
-type StripeHold = {
-  id: string;
-  status: string;
-  amount: number;
-  amount_capturable: number;
-  amount_received: number;
-};
-type StripeRefundList = {
-  data: Array<{ id: string; status: string | null; amount: number }>;
-};
-
-export interface TestPaymentLifecycleDependencies {
-  findPurchase?: (agentId: string) => Promise<LifecyclePurchase>;
-  findAttentionRequests?: (agentId: string) => Promise<LifecycleAttention>;
-  getCardSummary?: (
-    userId: string,
-    cardId: string
-  ) => Promise<{ status: string; balanceCents: number }>;
-  retrieveStripeHold?: (paymentIntentId: string) => Promise<StripeHold>;
-  listStripeRefunds?: (paymentIntentId: string) => Promise<StripeRefundList>;
-  listOrgTransfers?: (args: { status?: 'consumed'; limit: number }) => Promise<unknown>;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === 'object' && value !== null
-    ? (value as Record<string, unknown>)
-    : undefined;
-}
-
-function mcpResultRecord(result: unknown): Record<string, unknown> {
-  const envelope = asRecord(result) ?? {};
-  const structured = asRecord(envelope.toolResult) ?? asRecord(envelope.structuredContent);
-  if (structured !== undefined) return structured;
-  const content = Array.isArray(envelope.content) ? envelope.content : [];
-  const text = content
-    .map((part) => asRecord(part))
-    .filter((part): part is Record<string, unknown> => part !== undefined)
-    .map((part) => (typeof part.text === 'string' ? part.text : ''))
-    .filter(Boolean)
-    .join('\n');
-  if (text !== '') {
-    let parsedText: unknown;
-    try {
-      parsedText = JSON.parse(text);
-    } catch {
-      // Malformed provider JSON is a bad-gateway condition, not a raw SyntaxError.
-      throw new TestPaymentError('AgentCard transfer lifecycle response was invalid', 502);
-    }
-    const parsed = asRecord(parsedText);
-    if (parsed !== undefined) return parsed;
-  }
-  throw new TestPaymentError('AgentCard transfer lifecycle response was invalid', 502);
-}
-
-function integerField(record: Record<string, unknown>, key: string): number {
-  const value = record[key];
-  if (typeof value !== 'number' || !Number.isInteger(value)) {
-    throw new TestPaymentError(`AgentCard transfer lifecycle missing ${key}`, 502);
-  }
-  return value;
-}
-
-function stringField(record: Record<string, unknown>, key: string): string {
-  const value = record[key];
-  if (typeof value !== 'string' || value === '') {
-    throw new TestPaymentError(`AgentCard transfer lifecycle missing ${key}`, 502);
-  }
-  return value;
-}
+export type { TestPaymentLifecycleDependencies } from './lifecycleDependencies';
 
 function attentionKind(metadata: unknown): string | null {
   const value = asRecord(metadata)?.attentionKind;
@@ -126,7 +67,13 @@ function resolveDependencies(
 ): Required<
   Pick<
     TestPaymentLifecycleDependencies,
-    'getCardSummary' | 'retrieveStripeHold' | 'listStripeRefunds' | 'listOrgTransfers'
+    | 'getCardSummary'
+    | 'retrieveStripeHold'
+    | 'listStripeRefunds'
+    | 'listOrgTransfers'
+    | 'listOrgCards'
+    | 'getOrgCardholderId'
+    | 'searchStripeHolds'
   >
 > {
   return {
@@ -142,6 +89,15 @@ function resolveDependencies(
         stripe.refunds.list({ payment_intent: paymentIntentId, limit: 10 })),
     listOrgTransfers:
       dependencies.listOrgTransfers ?? ((args) => callOrgTool('list_transfers', args)),
+    listOrgCards: dependencies.listOrgCards ?? ((args) => callOrgTool('list_cards', args)),
+    getOrgCardholderId: dependencies.getOrgCardholderId ?? getOrgManagedCardholderId,
+    searchStripeHolds:
+      dependencies.searchStripeHolds ??
+      ((agentId) =>
+        stripe.paymentIntents.search({
+          query: `metadata['agentId']:'${agentId}'`,
+          limit: 10,
+        })),
   };
 }
 
@@ -157,9 +113,7 @@ function mapStripeHold(hold: StripeHold | null): TestPaymentLifecycle['stripeHol
 }
 
 function mapStripeRefund(refunds: StripeRefundList): TestPaymentLifecycle['stripeRefund'] {
-  // Prefer a succeeded refund (the happy path), but still surface a failed or
-  // pending refund when that is all that exists — reporting `null` there would
-  // make a broken refund indistinguishable from no refund at all.
+  // Prefer a succeeded refund, but still surface a failed/pending refund when that is all we have.
   const refund =
     refunds.data.find((entry) => entry.status === 'succeeded') ?? refunds.data[0] ?? null;
   if (refund === null) return null;
@@ -252,29 +206,45 @@ async function buildLoadedLifecycle(
   integrity: LifecycleIntegrity,
   dependencies: TestPaymentLifecycleDependencies
 ): Promise<TestPaymentLifecycle> {
-  const { getCardSummary, retrieveStripeHold, listStripeRefunds, listOrgTransfers } =
-    resolveDependencies(dependencies);
+  const {
+    getCardSummary,
+    retrieveStripeHold,
+    listStripeRefunds,
+    listOrgTransfers,
+    listOrgCards,
+    getOrgCardholderId,
+    searchStripeHolds,
+  } = resolveDependencies(dependencies);
   const cardId = purchase.cardId;
   const intentId = purchase.stripePaymentIntentId;
   const emptyRefunds: StripeRefundList = { data: [] };
-  const [cardDetails, stripeHold, stripeRefunds, transferResults] = await Promise.all([
-    cardId !== null && cardId !== ''
-      ? getCardSummary(purchase.userId, cardId)
-      : Promise.resolve(null),
-    intentId !== null && intentId !== '' ? retrieveStripeHold(intentId) : Promise.resolve(null),
-    intentId !== null && intentId !== ''
-      ? listStripeRefunds(intentId)
-      : Promise.resolve(emptyRefunds),
-    cardId !== null && cardId !== ''
-      ? Promise.all([
-          listOrgTransfers({ status: 'consumed', limit: 100 }),
-          listOrgTransfers({ limit: 100 }),
-        ])
-      : Promise.resolve<unknown[]>([]),
-  ]);
+  const cardholderId = await getOrgCardholderId(purchase.userId);
+  const [cardDetails, stripeHold, stripeRefunds, stripeResults, cardResults, transferResults] =
+    await Promise.all([
+      cardId !== null && cardId !== ''
+        ? getCardSummary(purchase.userId, cardId)
+        : Promise.resolve(null),
+      intentId !== null && intentId !== '' ? retrieveStripeHold(intentId) : Promise.resolve(null),
+      intentId !== null && intentId !== ''
+        ? listStripeRefunds(intentId)
+        : Promise.resolve(emptyRefunds),
+      searchStripeHolds(agentId),
+      cardholderId !== undefined
+        ? Promise.all([listOrgCards({ cardholder_id: cardholderId, limit: 100 })])
+        : Promise.resolve<unknown[]>([]),
+      (cardId !== null && cardId !== '') || cardholderId !== undefined
+        ? Promise.all([
+            listOrgTransfers({ status: 'consumed', limit: 100 }),
+            listOrgTransfers({ limit: 100 }),
+          ])
+        : Promise.resolve<unknown[]>([]),
+    ]);
   return {
     agentId,
-    integrity,
+    integrity: {
+      ...integrity,
+      ...providerIntegrity(purchase, cardholderId, stripeResults, cardResults, transferResults),
+    },
     purchase: {
       id: purchase.id,
       status: purchase.status,
@@ -309,7 +279,13 @@ export async function getTestPaymentLifecycle(
   if (purchase === null) {
     return {
       agentId,
-      integrity,
+      integrity: {
+        ...integrity,
+        stripeProviderPaymentIntentCount: 0,
+        agentCardProviderCardCount: 0,
+        agentCardProviderTransferCount: 0,
+        agentCardProviderUnlinkedTransferCount: 0,
+      },
       purchase: null,
       walletFunding: null,
       stripeHold: null,

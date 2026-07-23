@@ -6,5 +6,6 @@ export {
   fundPurchaseWallet,
   preparePurchaseWalletCollection,
   reclaimPurchaseWalletFunding,
+  recordIssuedPurchaseCardFunding,
   recordPurchaseWalletFunding,
 } from '../../providers/purchase-wallet-funding';

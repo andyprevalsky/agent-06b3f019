@@ -67,6 +67,10 @@ export interface TestPaymentLifecycle {
     walletFundingCount: number;
     stripePaymentIntentCount: number;
     cardCount: number;
+    stripeProviderPaymentIntentCount: number;
+    agentCardProviderCardCount: number;
+    agentCardProviderTransferCount: number;
+    agentCardProviderUnlinkedTransferCount: number;
   };
   purchase: null | {
     id: string;

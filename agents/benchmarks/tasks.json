@@ -3160,7 +3160,11 @@
         "purchaseCount": 1,
         "walletFundingCount": 1,
         "stripePaymentIntentCount": 1,
-        "cardCount": 1
+        "cardCount": 1,
+        "stripeProviderPaymentIntentCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
       },
       "purchase": {
         "status": "VOIDED",

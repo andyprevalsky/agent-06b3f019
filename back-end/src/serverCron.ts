@@ -2,6 +2,8 @@ import cron from 'node-cron';
 import { runAgentCardOrgWalletMonitor } from './providers/agentcard/org-wallet-monitor';
 import { createLogger } from './providers/logger';
 import {
+  abandonStaleFundingPending,
+  reconcileAbandonedPurchaseFunding,
   reconcileDissolvedPurchaseHolds,
   reconcileFailedPurchaseFundingReclaims,
   reconcileFailedPurchaseRefunds,
@@ -70,6 +72,8 @@ function schedulePurchaseHoldReconcile(): void {
   const reconcilers: Array<[string, () => Promise<void>]> = [
     ['reconcileDissolvedPurchaseHolds', reconcileDissolvedPurchaseHolds],
     ['reconcileStaleChargingPurchases', reconcileStaleChargingPurchases],
+    ['abandonStaleFundingPending', abandonStaleFundingPending],
+    ['reconcileAbandonedPurchaseFunding', reconcileAbandonedPurchaseFunding],
     ['reconcileFailedPurchaseRefunds', reconcileFailedPurchaseRefunds],
     ['reconcileFailedPurchaseFundingReclaims', reconcileFailedPurchaseFundingReclaims],
     ['reconcileTerminalAgentPurchaseCards', reconcileTerminalAgentPurchaseCards],

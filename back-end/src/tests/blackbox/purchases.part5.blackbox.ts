@@ -3,8 +3,7 @@
  * Black-box tests (part 5) for the purchases domain.
  *
  * Exercises the charge/rollback compensation branches, the mint recovery guards, the Stripe
- * customer resolver, KYC classification, and the wallet-funding collection helper — all through
- * fake card/wallet providers + local Postgres, so no live AgentCard or Stripe network is touched.
+ * KYC and wallet-funding helpers through local fakes, so no live provider is touched.
  * Split from purchases.blackbox.ts to stay under the max-lines cap.
  */
 
@@ -115,7 +114,7 @@ async function expectThrow(fn: () => Promise<unknown>): Promise<Error> {
 
 const tests: Array<[string, () => Promise<void>]> = [
   [
-    'mint fails and cancels the hold when the card is issued without a company transfer id',
+    'mint preserves an ambiguous provider result without opening a second external attempt',
     async () => {
       const userId = await createSubscribedUser('no-transfer-id');
       const provider = new NoTransferIdCardProvider();
@@ -131,16 +130,25 @@ const tests: Array<[string, () => Promise<void>]> = [
           )
         );
         assert(
-          error.code === 'agentcard_company_transfer_missing',
-          `expected transfer-missing code, got ${error.code}`
+          error.code === 'agentcard_company_funding_in_progress',
+          `expected funding-in-progress code, got ${error.code}`
         );
-        assert(provider.closeCalls === 1, 'the issued card must be closed on rollback');
+        assert(
+          provider.closeCalls === 0,
+          'an unpersisted provider result must be replayed, not guessed'
+        );
         assert(calls.captures.length === 0, 'a card without a transfer must never be captured');
-        assert(calls.cancels.length === 1, 'the authorized hold must be canceled');
+        assert(
+          calls.cancels.length === 0,
+          'the hold stays while the exact provider key is retryable'
+        );
         assert(calls.refunds.length === 0, 'an uncaptured hold is canceled, not refunded');
 
         const row = await prisma.purchaseSpend.findFirst({ where: { userId, fingerprint } });
-        assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);
+        assert(
+          row?.status === PurchaseSpendStatus.FUNDING_PENDING,
+          `expected FUNDING_PENDING, got ${row?.status}`
+        );
       });
     },
   ],
@@ -295,7 +303,7 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'stale-charging recovery that cannot reclaim funding surfaces a 409 for manual reconciliation',
+    'request recovery leaves an interrupted issued card to the cron compensator',
     async () => {
       const userId = await createSubscribedUser('stale-reclaim-fail');
       const fingerprint = `stale-reclaim-fail-${randomUUID()}`;
@@ -335,20 +343,18 @@ const tests: Array<[string, () => Promise<void>]> = [
           )
         );
         assert(error.statusCode === 409, `expected 409, got ${error.statusCode}`);
-        assert(
-          error.message.includes('manual reconciliation'),
-          'error should ask for manual reconciliation'
-        );
+        assert(error.code === 'purchase_funding_reconciliation_in_progress');
         const row = await prisma.purchaseSpend.findUnique({ where: { id: stale.id } });
         assert(
-          row?.status === PurchaseSpendStatus.FUNDING_RECLAIM_FAILED,
-          `expected FUNDING_RECLAIM_FAILED, got ${row?.status}`
+          row?.status === PurchaseSpendStatus.CHARGING,
+          `expected CHARGING, got ${row?.status}`
         );
+        assert(walletProvider.reclaimCalls.length === 0, 'HTTP recovery must not own card cleanup');
       });
     },
   ],
   [
-    'stale-charging recovery tolerates a failed Stripe hold cancel and still re-mints',
+    'stale recovery blocks a new purchase while Stripe cancellation is failing',
     async () => {
       const userId = await createSubscribedUser('stale-cancel-fail');
       const fingerprint = `stale-cancel-fail-${randomUUID()}`;
@@ -373,24 +379,26 @@ const tests: Array<[string, () => Promise<void>]> = [
           throw new Error('stripe cancel unavailable');
         };
         try {
-          const result = await purchasesService.mintPurchaseCard(
-            mintBody(userId, { fingerprint }) as never,
-            provider,
-            walletProvider
+          const error = await expectPurchaseError(() =>
+            purchasesService.mintPurchaseCard(
+              mintBody(userId, { fingerprint }) as never,
+              provider,
+              walletProvider
+            )
           );
-          assert(result.cardId === provider.cardId, 'recovery should still mint a fresh card');
+          assert(error.code === 'purchase_stripe_reconciliation_in_progress');
         } finally {
           (stripe.paymentIntents as unknown as { cancel: unknown }).cancel = originalCancel;
         }
         const staleRow = await prisma.purchaseSpend.findUnique({ where: { id: stale.id } });
         assert(
-          staleRow?.status === PurchaseSpendStatus.FAILED,
-          `stale row should be FAILED, got ${staleRow?.status}`
+          staleRow?.status === PurchaseSpendStatus.CHARGING,
+          `stale row should remain CHARGING, got ${staleRow?.status}`
         );
         const held = await prisma.purchaseSpend.findFirst({
           where: { userId, fingerprint, status: PurchaseSpendStatus.HELD },
         });
-        assert(held !== null, 'a fresh HELD purchase should exist after recovery');
+        assert(held === null, 'a failed cancellation must not allow a fresh purchase');
       });
     },
   ],
@@ -588,10 +596,7 @@ const tests: Array<[string, () => Promise<void>]> = [
           failingProvider
         )
       );
-      assert(
-        providerError.message.includes('provider unavailable'),
-        'a provider failure must propagate'
-      );
+      assert(providerError.message.includes('provider unavailable'));
       const failedRow = await prisma.purchaseWalletFunding.findUnique({
         where: { purchaseId: pending.id },
       });

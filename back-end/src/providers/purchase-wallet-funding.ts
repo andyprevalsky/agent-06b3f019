@@ -146,6 +146,23 @@ export async function recordPurchaseWalletFunding(
   });
 }
 
+export async function recordIssuedPurchaseCardFunding(
+  purchase: PurchaseSpend,
+  currency: string,
+  cardId: string,
+  providerTransferId: string,
+  metadata: Record<string, unknown> | undefined
+) {
+  const funding = await preparePurchaseWalletCollection(purchase, currency);
+  return repo.recordIssuedCardAndFunding({
+    purchaseId: purchase.id,
+    fundingId: funding.id,
+    cardId,
+    providerTransferId,
+    metadata,
+  });
+}
+
 export async function consumePurchaseWalletFunding(purchaseId: string): Promise<void> {
   await repo.markWalletFundingConsumed(purchaseId);
 }

@@ -329,6 +329,7 @@ export async function withFakeStripe<T>(
     capture: (id: string, params?: unknown) => Promise<{ id: string; status: string }>;
     cancel: (id: string, params?: unknown) => Promise<{ id: string; status: string }>;
     retrieve: (id: string) => Promise<unknown>;
+    search: (params: { query: string; limit?: number }) => Promise<{ data: Array<{ id: string }> }>;
   };
   const refunds = stripe.refunds as unknown as {
     create: (params: unknown, options?: { idempotencyKey?: string }) => Promise<{ id: string }>;
@@ -344,6 +345,7 @@ export async function withFakeStripe<T>(
   const originalPaymentIntentCapture = paymentIntents.capture;
   const originalPaymentIntentCancel = paymentIntents.cancel;
   const originalPaymentIntentRetrieve = paymentIntents.retrieve;
+  const originalPaymentIntentSearch = paymentIntents.search;
   const originalRefundCreate = refunds.create;
   const originalCustomerRetrieve = customers.retrieve;
   const calls: FakeStripeCalls = {
@@ -362,6 +364,7 @@ export async function withFakeStripe<T>(
     invoice_settings: { default_payment_method: 'pm_fake_default' },
   });
   const paymentIntentIdsByIdempotencyKey = new Map<string, string>();
+  const paymentIntentParamsById = new Map<string, Record<string, unknown>>();
   paymentIntents.create = async (params: unknown, options?: { idempotencyKey?: string }) => {
     const idempotencyKey = options?.idempotencyKey;
     const id =
@@ -374,6 +377,9 @@ export async function withFakeStripe<T>(
     calls.charges.push(JSON.stringify(params));
     calls.chargeIdempotencyKeys.push(idempotencyKey);
     calls.chargeResultIds.push(id);
+    if (typeof params === 'object' && params !== null) {
+      paymentIntentParamsById.set(id, params as Record<string, unknown>);
+    }
     return { id };
   };
   paymentIntents.capture = async (id: string) => {
@@ -388,6 +394,22 @@ export async function withFakeStripe<T>(
     calls.retrieves.push(id);
     if (opts.retrievePaymentIntent !== undefined) return opts.retrievePaymentIntent(id);
     return { id, status: 'requires_capture', amount_capturable: 1000 };
+  };
+  paymentIntents.search = async ({ query }) => {
+    const purchaseId = query.match(/metadata\['purchaseSpendId'\]:'([^']+)'/)?.[1];
+    return {
+      data: [...paymentIntentParamsById.entries()]
+        .filter(([, params]) => {
+          const metadata = params.metadata;
+          return (
+            purchaseId !== undefined &&
+            typeof metadata === 'object' &&
+            metadata !== null &&
+            (metadata as Record<string, unknown>).purchaseSpendId === purchaseId
+          );
+        })
+        .map(([id]) => ({ id })),
+    };
   };
   refunds.create = async (params: unknown, options?: { idempotencyKey?: string }) => {
     if (opts.refundError !== undefined) throw opts.refundError;
@@ -404,6 +426,7 @@ export async function withFakeStripe<T>(
     paymentIntents.capture = originalPaymentIntentCapture;
     paymentIntents.cancel = originalPaymentIntentCancel;
     paymentIntents.retrieve = originalPaymentIntentRetrieve;
+    paymentIntents.search = originalPaymentIntentSearch;
     refunds.create = originalRefundCreate;
     customers.retrieve = originalCustomerRetrieve;
   }

@@ -27,6 +27,15 @@ export const PURCHASE_STALE_CHARGING_MS = parsePositiveIntEnv(
   15 * 60 * 1000
 );
 
+// A retryable company-funding attempt keeps its Stripe authorization while the agent is actively
+// retrying. Once that window expires, the compensator cancels the hold and continues reconciling
+// AgentCard under FUNDING_ABANDONED so a late provider success can never become an orphan.
+export const PURCHASE_FUNDING_PENDING_ABANDON_MS = parsePositiveIntEnv(
+  'PURCHASE_FUNDING_PENDING_ABANDON_MS',
+  process.env.PURCHASE_FUNDING_PENDING_ABANDON_MS,
+  12 * 60 * 1000
+);
+
 // Bounds for the AgentCard company-funding confirmation retry loop.
 export const AGENTCARD_COMPANY_FLOW_MAX_WAIT_MS = parsePositiveIntEnv(
   'AGENTCARD_COMPANY_FLOW_MAX_WAIT_MS',

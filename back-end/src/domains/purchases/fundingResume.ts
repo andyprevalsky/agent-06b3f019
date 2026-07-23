@@ -6,6 +6,7 @@ import {
 } from './types';
 import { PurchaseError, toPurchaseBoundaryError } from './errors';
 import { canonicalStoredPurchaseFingerprint } from './fingerprint';
+import { isKycRequiredError } from './kyc';
 import { PURCHASE_STALE_CHARGING_MS } from './config';
 import {
   discardPendingPurchaseWalletCollection,
@@ -36,12 +37,49 @@ export function canonicalInputFingerprint(input: MintPurchaseInput): string {
   return canonicalFingerprint;
 }
 
+function hasSafeProviderFailureCode(error: Error): boolean {
+  if (!(error instanceof PurchaseError) || error.code === undefined) return false;
+  return new Set([
+    'agentcard_setup_required',
+    'agentcard_kyc_required',
+    'agentcard_org_wallet_funding_required',
+    'agentcard_wallet_funding_required',
+    'agentcard_payment_method_required',
+    'kyc_required',
+  ]).has(error.code);
+}
+
+function hasSafeStripeFailureType(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null || !('type' in error)) return false;
+  const type = (error as { type?: unknown }).type;
+  return (
+    type === 'StripeCardError' ||
+    type === 'StripeInvalidRequestError' ||
+    type === 'StripeAuthenticationError' ||
+    type === 'StripePermissionError'
+  );
+}
+
+function hasAmbiguousExternalOutcome(
+  error: unknown,
+  boundaryError: Error,
+  state: { providerCallStarted: boolean; stripeAuthorizationStarted: boolean }
+): boolean {
+  // Once an external mutation starts, ambiguity is a phase fact, not an error-message guess.
+  // MCP 500/malformed may follow an AgentCard commit; a lost Stripe response may hide a PI.
+  return state.providerCallStarted
+    ? !hasSafeProviderFailureCode(boundaryError) && !isKycRequiredError(error)
+    : state.stripeAuthorizationStarted && !hasSafeStripeFailureType(error);
+}
+
 export async function classifyFundingResumeFailure(
   purchase: PurchaseSpend,
   error: unknown,
   state: {
     walletFundingPrepared: boolean;
     fundingRetryClaimed: boolean;
+    providerCallStarted: boolean;
+    stripeAuthorizationStarted: boolean;
     issuedCardId?: string;
   }
 ): Promise<{
@@ -57,17 +95,14 @@ export async function classifyFundingResumeFailure(
   const walletWasFunded =
     funding?.status === PurchaseWalletFundingStatus.FUNDED ||
     funding?.status === PurchaseWalletFundingStatus.CONSUMED;
-  const ambiguousProviderOutcome =
-    /\btimeout|timed out|network|fetch|socket|connection|econn|aborted?\b/i.test(
-      boundaryError.message
-    );
+  const ambiguousExternalOutcome = hasAmbiguousExternalOutcome(error, boundaryError, state);
   const fundingResumeRequired =
     state.issuedCardId === undefined &&
     state.walletFundingPrepared &&
     ((boundaryError instanceof PurchaseError &&
       boundaryError.code === 'agentcard_company_funding_in_progress') ||
       state.fundingRetryClaimed ||
-      ambiguousProviderOutcome ||
+      ambiguousExternalOutcome ||
       funding?.status === PurchaseWalletFundingStatus.FAILED ||
       walletWasFunded);
   if (
@@ -148,7 +183,6 @@ export async function tryClaimFundingResume(
     const funding = await repo.findWalletFundingByPurchaseId(candidate.id);
     if (
       candidate.cardId !== null ||
-      candidate.stripePaymentIntentId === null ||
       funding === null ||
       !isResumableWalletFundingStatus(funding.status)
     ) {
@@ -164,7 +198,7 @@ export async function tryClaimFundingResume(
 
   if (candidate.status !== PurchaseSpendStatus.FUNDING_PENDING) return null;
   assertFundingResumeMatchesInput(candidate, input);
-  if (candidate.cardId !== null || candidate.stripePaymentIntentId === null) {
+  if (candidate.cardId !== null) {
     throw new PurchaseError(
       'Purchase funding state requires manual reconciliation',
       409,

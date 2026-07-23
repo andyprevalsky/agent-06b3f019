@@ -7,8 +7,14 @@ const IDEMPOTENT_PURCHASE_STATUSES = [
   PurchaseSpendStatus.PENDING_APPROVAL,
   PurchaseSpendStatus.CHARGING,
   PurchaseSpendStatus.FUNDING_PENDING,
+  PurchaseSpendStatus.FUNDING_ABANDONED,
   PurchaseSpendStatus.HELD,
+  PurchaseSpendStatus.CAPTURE_FAILED,
+  PurchaseSpendStatus.FUNDING_RECLAIM_FAILED,
+  PurchaseSpendStatus.REFUND_FAILED,
 ];
+
+export { createPendingPurchaseWithLock } from './repoOpen';
 
 function legacyFingerprintWhere(
   userId: string,
@@ -157,7 +163,6 @@ export async function markStalePurchaseFundingPending(id: string, observedUpdate
       id,
       status: PurchaseSpendStatus.CHARGING,
       cardId: null,
-      stripePaymentIntentId: { not: null },
       updatedAt: observedUpdatedAt,
     },
     data: { status: PurchaseSpendStatus.FUNDING_PENDING },
@@ -171,12 +176,24 @@ export async function claimFundingPendingPurchase(id: string) {
       id,
       status: PurchaseSpendStatus.FUNDING_PENDING,
       cardId: null,
-      stripePaymentIntentId: { not: null },
     },
     data: { status: PurchaseSpendStatus.CHARGING },
   });
   if (claimed.count !== 1) return null;
   return prisma.purchaseSpend.findUniqueOrThrow({ where: { id } });
+}
+
+/** Stop user retries before canceling their Stripe hold; the compensator owns the provider replay. */
+export async function markFundingPendingAbandoned(id: string, observedUpdatedAt: Date) {
+  return prisma.purchaseSpend.updateMany({
+    where: {
+      id,
+      status: PurchaseSpendStatus.FUNDING_PENDING,
+      cardId: null,
+      updatedAt: observedUpdatedAt,
+    },
+    data: { status: PurchaseSpendStatus.FUNDING_ABANDONED },
+  });
 }
 
 export async function createOrGetWalletFunding(data: {
@@ -292,26 +309,7 @@ export async function markWalletFundingReclaimFailed(id: string, error: string) 
   });
 }
 
-export async function findSubscriptionByUserId(userId: string) {
-  return prisma.subscription.findUnique({
-    where: { userId },
-  });
-}
-
-export async function findPurchaseByCardId(cardId: string) {
-  return prisma.purchaseSpend.findFirst({
-    where: { cardId },
-    orderBy: { createdAt: 'desc' },
-  });
-}
-
-export async function findHeldPurchasesByTotal(totalCents: number, limit = 10) {
-  return prisma.purchaseSpend.findMany({
-    where: { totalCents, status: PurchaseSpendStatus.HELD, cardId: { not: null } },
-    orderBy: { createdAt: 'desc' },
-    take: limit,
-  });
-}
+export * from './repoRead';
 
 export {
   settlePurchaseAfterTransactionCleared,

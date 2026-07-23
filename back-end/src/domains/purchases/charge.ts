@@ -20,7 +20,7 @@ import { classifyFundingResumeFailure } from './fundingResume';
 import {
   discardPendingPurchaseWalletCollection,
   preparePurchaseWalletCollection,
-  recordPurchaseWalletFunding,
+  recordIssuedPurchaseCardFunding,
   reclaimPurchaseWalletFunding,
 } from './walletFunding';
 import {
@@ -45,6 +45,8 @@ interface ChargeState {
   walletFundingPrepared: boolean;
   fundingResumeRequired: boolean;
   fundingRetryClaimed: boolean;
+  providerCallStarted: boolean;
+  stripeAuthorizationStarted: boolean;
   activeWalletFundingProvider?: WalletFundingProvider;
   activeCardProvider?: CardProvider;
   issuedCardId?: string;
@@ -88,6 +90,7 @@ async function authorizeStripeHold(
       purchaseSpendId: purchase.id,
     },
   };
+  state.stripeAuthorizationStarted = true;
   const paymentIntent = await stripe.paymentIntents.create(
     stripeRequest,
     // Per-row idempotency: a retried mint of the SAME purchase never double-charges Stripe.
@@ -118,10 +121,7 @@ async function mintCaptureAndIssue(
   state.activeCardProvider =
     cardProvider ?? (await createCardProviderForAgent(input.userId, input.agentId));
   const preparedFunding = await preparePurchaseWalletCollection(purchase, 'usd');
-  state.walletFundingPrepared = true;
-  state.walletWasFunded =
-    preparedFunding.status === PurchaseWalletFundingStatus.FUNDED ||
-    preparedFunding.status === PurchaseWalletFundingStatus.CONSUMED;
+  state.providerCallStarted = true;
   const { cardRequest, minted, providerTransferId } = await mintCompanyFlowCard(
     purchase,
     input,
@@ -131,22 +131,15 @@ async function mintCaptureAndIssue(
   );
   const transferId = minted.providerTransferId ?? providerTransferId;
   const isStaticCard = minted.metadata?.staticCard === true;
-  state.issuedCardId = minted.cardId;
-  state.issuedStaticCard = isStaticCard;
   if (isStaticCard) {
     await discardPendingPurchaseWalletCollection(purchaseId);
     state.walletFundingPrepared = false;
-  }
-  // Persist the issued card id immediately, before capture or any later failure point. A crash
-  // between minting and the HELD write would otherwise orphan the funded card with no durable
-  // pointer for reconcilers to close it and reclaim its funding.
-  await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.CHARGING, {
-    cardId: minted.cardId,
-  });
-  // The static Rose Agent Card (mint cutoff) is company-funded out-of-band: no AgentCard company
-  // transfer exists, so there is nothing to require or wallet-fund. Real AgentCard cards MUST carry
-  // a company transfer id. Either way the user's Stripe hold is captured below.
-  if (!isStaticCard) {
+    state.issuedCardId = minted.cardId;
+    state.issuedStaticCard = true;
+    await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.CHARGING, {
+      cardId: minted.cardId,
+    });
+  } else {
     if (transferId === undefined || transferId.trim() === '') {
       throw new PurchaseError(
         'AgentCard issued a card without a company transfer id',
@@ -154,8 +147,19 @@ async function mintCaptureAndIssue(
         'agentcard_company_transfer_missing'
       );
     }
+    // Card + transfer are one durable fact. If the process dies before this transaction, replaying
+    // create_card with the same purchase idempotency key recovers them; after it commits, cleanup
+    // always has both identifiers required to close and release the card.
+    await recordIssuedPurchaseCardFunding(
+      purchase,
+      'usd',
+      minted.cardId,
+      transferId,
+      minted.metadata
+    );
+    state.issuedCardId = minted.cardId;
+    state.issuedStaticCard = false;
     state.walletWasFunded = true;
-    await recordPurchaseWalletFunding(purchase, 'usd', transferId, minted.metadata);
   }
   await captureAuthorizedHold(paymentIntent.id);
   state.paymentIntentCaptured = true;
@@ -309,9 +313,16 @@ export async function chargeAndIssueCard(
     walletFundingPrepared: fundingRetryClaimed,
     fundingResumeRequired: false,
     fundingRetryClaimed,
+    providerCallStarted: false,
+    stripeAuthorizationStarted: false,
     issuedStaticCard: false,
   };
   try {
+    const preparedFunding = await preparePurchaseWalletCollection(purchase, 'usd');
+    state.walletFundingPrepared = true;
+    state.walletWasFunded =
+      preparedFunding.status === PurchaseWalletFundingStatus.FUNDED ||
+      preparedFunding.status === PurchaseWalletFundingStatus.CONSUMED;
     const paymentIntent = await authorizeStripeHold(state, purchase, input, stripeCustomerId);
     return await mintCaptureAndIssue(
       state,

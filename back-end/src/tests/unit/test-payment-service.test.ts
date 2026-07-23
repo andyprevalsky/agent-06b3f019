@@ -379,6 +379,7 @@ async function main(): Promise<void> {
 
   await test('getTestPaymentLifecycle cross-checks purchase, hold, refund, card, and transfer', async () => {
     const cardId = 'card-life-1';
+    const createdAt = new Date();
     const lifecycle = await getTestPaymentLifecycle('agent-life', {
       findPurchase: async () => ({
         id: 'p1',
@@ -388,6 +389,7 @@ async function main(): Promise<void> {
         totalCents: 4396,
         cardId,
         stripePaymentIntentId: 'pi_life',
+        createdAt,
         walletFunding: {
           status: 'CONSUMED',
           amountCents: 4396,
@@ -410,6 +412,20 @@ async function main(): Promise<void> {
       listStripeRefunds: async () => ({
         data: [{ id: 're_1', status: 'succeeded', amount: 4396 }],
       }),
+      getOrgCardholderId: async () => 'cardholder-life',
+      searchStripeHolds: async () => ({ data: [{ id: 'pi_life' }] }),
+      listOrgCards: async () => ({
+        structuredContent: {
+          cards: [
+            {
+              id: cardId,
+              cardholderId: 'cardholder-life',
+              spendLimitCents: 4396,
+              createdAt: createdAt.toISOString(),
+            },
+          ],
+        },
+      }),
       listOrgTransfers: async () => ({
         structuredContent: {
           transfers: [
@@ -420,6 +436,19 @@ async function main(): Promise<void> {
               transferred_cents: 4396,
               released_cents: 0,
               card_id: cardId,
+              cardholder_id: 'cardholder-life',
+              created_at: createdAt.toISOString(),
+              livemode: false,
+            },
+            {
+              id: 'owt-unlinked',
+              status: 'pending',
+              amount_cents: 4396,
+              transferred_cents: 4396,
+              released_cents: 0,
+              card_id: null,
+              cardholder_id: 'cardholder-life',
+              created_at: createdAt.toISOString(),
               livemode: false,
             },
           ],
@@ -434,6 +463,10 @@ async function main(): Promise<void> {
     assert.equal(lifecycle.orgTransfer?.id, 'owt_life');
     assert.equal(lifecycle.orgTransfer?.transferredCents, 4396);
     assert.equal(lifecycle.orgTransfer?.cardId, cardId);
+    assert.equal(lifecycle.integrity.stripeProviderPaymentIntentCount, 1);
+    assert.equal(lifecycle.integrity.agentCardProviderCardCount, 1);
+    assert.equal(lifecycle.integrity.agentCardProviderTransferCount, 2);
+    assert.equal(lifecycle.integrity.agentCardProviderUnlinkedTransferCount, 1);
   });
 
   process.stdout.write(

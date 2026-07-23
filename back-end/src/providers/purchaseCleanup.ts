@@ -23,6 +23,13 @@ import {
   claimWalletFundingReclaimRetry,
   findWalletFundingByPurchaseId,
 } from './purchase-wallet-funding-repo';
+import {
+  abandonAgentFundingPending,
+  abandonStaleFundingPending,
+  reconcileAbandonedPurchaseFunding,
+} from './purchaseFundingCompensation';
+
+export { abandonStaleFundingPending, reconcileAbandonedPurchaseFunding };
 
 const log = createLogger('PurchaseCleanup');
 const STALE_CHARGING_MS = Number(process.env.PURCHASE_STALE_CHARGING_MS ?? 15 * 60 * 1000);
@@ -68,10 +75,13 @@ async function purchaseCardWasSpent(
  * and run domains concurrently, so they pass `{ userId }` to keep each test's global-scan reconciler
  * from picking up rows another concurrently-running purchase test created.
  */
-export type PurchaseReconcileScope = { userId?: string };
+export type PurchaseReconcileScope = { userId?: string; agentId?: string };
 
-function reconcileUserFilter(scope?: PurchaseReconcileScope): { userId?: string } {
-  return scope?.userId !== undefined ? { userId: scope.userId } : {};
+function reconcileUserFilter(scope?: PurchaseReconcileScope): PurchaseReconcileScope {
+  return {
+    ...(scope?.userId !== undefined ? { userId: scope.userId } : {}),
+    ...(scope?.agentId !== undefined ? { agentId: scope.agentId } : {}),
+  };
 }
 
 function hasDissolvedHold(paymentIntent: unknown): boolean {
@@ -90,6 +100,22 @@ function hasDissolvedHold(paymentIntent: unknown): boolean {
   return false;
 }
 
+async function reverseUnreturnedPurchasePayment(
+  purchaseId: string,
+  paymentIntentId: string
+): Promise<void> {
+  const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+  const candidate = paymentIntent as { status?: unknown; amount_received?: unknown };
+  if (
+    candidate.status === 'succeeded' ||
+    (typeof candidate.amount_received === 'number' && candidate.amount_received > 0)
+  ) {
+    await refundCapturedPurchase(paymentIntentId, purchaseId);
+  } else {
+    await cancelAuthorizedHold(paymentIntentId);
+  }
+}
+
 /**
  * Reconcile a HELD agent's purchase cards at session end — the primary "cancel on fail" hook (no
  * cron needed). For each still-HELD card we ask the card itself whether it was used:
@@ -102,6 +128,11 @@ export async function cleanupAgentPurchaseCards(
   cardProvider?: CardProvider,
   walletFundingProvider?: WalletFundingProvider
 ): Promise<void> {
+  // A terminal agent will no longer retry its funding 409. Transfer ownership to the compensator
+  // immediately so the user's Stripe hold is released without waiting for the stale cron window.
+  await abandonAgentFundingPending(agentId);
+  await reconcileAbandonedPurchaseFunding(cardProvider, walletFundingProvider, { agentId });
+
   const openPurchases = await prisma.purchaseSpend.findMany({
     where: {
       agentId,
@@ -255,7 +286,8 @@ export async function reconcileFailedPurchaseRefunds(
 /** Retry company-transfer release failures; refund only after MCP confirms released funds. */
 export async function reconcileFailedPurchaseFundingReclaims(
   walletFundingProvider?: WalletFundingProvider,
-  scope?: PurchaseReconcileScope
+  scope?: PurchaseReconcileScope,
+  cardProvider?: CardProvider
 ): Promise<void> {
   const staleReclaimingBefore = new Date(Date.now() - STALE_RECLAIMING_MS);
   const purchases = await prisma.purchaseSpend.findMany({
@@ -264,7 +296,13 @@ export async function reconcileFailedPurchaseFundingReclaims(
       OR: [
         { status: PurchaseSpendStatus.FUNDING_RECLAIM_FAILED },
         {
-          status: PurchaseSpendStatus.HELD,
+          status: {
+            in: [
+              PurchaseSpendStatus.HELD,
+              PurchaseSpendStatus.CHARGING,
+              PurchaseSpendStatus.FUNDING_ABANDONED,
+            ],
+          },
           walletFunding: {
             is: { status: 'RECLAIMING', updatedAt: { lte: staleReclaimingBefore } },
           },
@@ -274,6 +312,7 @@ export async function reconcileFailedPurchaseFundingReclaims(
     },
     select: {
       id: true,
+      status: true,
       userId: true,
       agentId: true,
       cardId: true,
@@ -284,6 +323,13 @@ export async function reconcileFailedPurchaseFundingReclaims(
 
   for (const purchase of purchases) {
     try {
+      if (purchase.cardId !== null) {
+        const activeCardProvider =
+          cardProvider ?? (await createCardProviderForAgent(purchase.userId, purchase.agentId));
+        // close_card is provider-idempotent. Retrying it closes the crash window where a reclaim
+        // lease committed but the worker died before the original close call.
+        await activeCardProvider.closeCard(purchase.cardId);
+      }
       const funding = await findWalletFundingByPurchaseId(purchase.id);
       let reclaimLeaseToken: string | undefined;
       if (
@@ -323,7 +369,7 @@ export async function reconcileFailedPurchaseFundingReclaims(
           : {}
       );
       if (purchase.stripePaymentIntentId !== null) {
-        await refundCapturedPurchase(purchase.stripePaymentIntentId, purchase.id);
+        await reverseUnreturnedPurchasePayment(purchase.id, purchase.stripePaymentIntentId);
       }
       await prisma.purchaseSpend.update({
         where: { id: purchase.id },
@@ -331,14 +377,17 @@ export async function reconcileFailedPurchaseFundingReclaims(
       });
     } catch (error) {
       if (isWalletFundingConsumedDuringReclaimError(error)) {
+        const consumedStatus =
+          purchase.status === PurchaseSpendStatus.CHARGING ||
+          purchase.status === PurchaseSpendStatus.FUNDING_ABANDONED
+            ? PurchaseSpendStatus.CAPTURE_FAILED
+            : PurchaseSpendStatus.CLEARED;
         await prisma.purchaseSpend.updateMany({
           where: {
             id: purchase.id,
-            status: {
-              in: [PurchaseSpendStatus.HELD, PurchaseSpendStatus.FUNDING_RECLAIM_FAILED],
-            },
+            status: purchase.status,
           },
-          data: { status: PurchaseSpendStatus.CLEARED },
+          data: { status: consumedStatus },
         });
         continue;
       }
@@ -359,7 +408,13 @@ export async function reconcileTerminalAgentPurchaseCards(
   const purchases = await prisma.purchaseSpend.findMany({
     where: {
       ...reconcileUserFilter(scope),
-      status: PurchaseSpendStatus.HELD,
+      status: {
+        in: [
+          PurchaseSpendStatus.HELD,
+          PurchaseSpendStatus.FUNDING_PENDING,
+          PurchaseSpendStatus.FUNDING_ABANDONED,
+        ],
+      },
       agentId: { not: null },
       agent: {
         status: { in: ['COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED'] },
@@ -520,9 +575,25 @@ export async function reconcileStaleChargingPurchases(
   });
 
   for (const purchase of stalePurchases) {
+    if (purchase.cardId !== null) {
+      const marked = await prisma.purchaseSpend.updateMany({
+        where: {
+          id: purchase.id,
+          status: PurchaseSpendStatus.CHARGING,
+          cardId: purchase.cardId,
+          updatedAt: purchase.updatedAt,
+        },
+        data: { status: PurchaseSpendStatus.FUNDING_ABANDONED },
+      });
+      log.warn('Transferred interrupted issued card to funding compensation', {
+        purchase_id: purchase.id,
+        claimed: marked.count === 1,
+      });
+      continue;
+    }
+
     if (
       purchase.cardId === null &&
-      purchase.stripePaymentIntentId !== null &&
       purchase.walletFunding !== null &&
       (purchase.walletFunding.status === PurchaseWalletFundingStatus.PENDING ||
         purchase.walletFunding.status === PurchaseWalletFundingStatus.FUNDED ||

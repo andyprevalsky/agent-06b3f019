@@ -1,4 +1,4 @@
-import { PurchaseWalletFundingStatus, type Prisma } from '@prisma/client';
+import { PurchaseSpendStatus, PurchaseWalletFundingStatus, type Prisma } from '@prisma/client';
 import { prisma } from './database';
 
 export async function createOrGetWalletFunding(data: {
@@ -63,6 +63,66 @@ export async function markWalletFundingFunded(
   // Return the current row regardless: a no-op update means the funding already advanced past the
   // in-flight window (e.g. a concurrent reclaim), and callers must observe that real state.
   return prisma.purchaseWalletFunding.findUniqueOrThrow({ where: { id } });
+}
+
+/**
+ * Persist the two external facts returned by one successful AgentCard create call in one DB
+ * transaction. A crash can therefore leave neither pointer or both pointers, never a card without
+ * its transfer (or a transfer without the card needed to close it).
+ */
+export async function recordIssuedCardAndFunding(data: {
+  purchaseId: string;
+  fundingId: string;
+  cardId: string;
+  providerTransferId: string;
+  metadata?: Record<string, unknown>;
+}) {
+  return prisma.$transaction(async (transaction) => {
+    const funding = await transaction.purchaseWalletFunding.findUniqueOrThrow({
+      where: { id: data.fundingId },
+    });
+    if (
+      funding.status === PurchaseWalletFundingStatus.PENDING ||
+      funding.status === PurchaseWalletFundingStatus.FAILED ||
+      (funding.status === PurchaseWalletFundingStatus.FUNDED && funding.providerTransferId === null)
+    ) {
+      await transaction.purchaseWalletFunding.update({
+        where: { id: funding.id },
+        data: {
+          status: PurchaseWalletFundingStatus.FUNDED,
+          providerTransferId: data.providerTransferId,
+          metadata: {
+            ...(data.metadata ?? {}),
+            status: 'company_flow_transfer_recorded',
+            transfer_id: data.providerTransferId,
+          } as Prisma.InputJsonValue,
+          errorMessage: null,
+          fundedAt: new Date(),
+        },
+      });
+    } else if (
+      funding.status !== PurchaseWalletFundingStatus.FUNDED ||
+      (funding.providerTransferId !== null &&
+        funding.providerTransferId !== data.providerTransferId)
+    ) {
+      throw new Error('Purchase wallet funding changed before issued-card persistence');
+    }
+
+    const cardWrite = await transaction.purchaseSpend.updateMany({
+      where: {
+        id: data.purchaseId,
+        status: {
+          in: [PurchaseSpendStatus.CHARGING, PurchaseSpendStatus.FUNDING_ABANDONED],
+        },
+        OR: [{ cardId: null }, { cardId: data.cardId }],
+      },
+      data: { cardId: data.cardId },
+    });
+    if (cardWrite.count !== 1) {
+      throw new Error('Purchase changed before issued-card persistence');
+    }
+    return transaction.purchaseWalletFunding.findUniqueOrThrow({ where: { id: funding.id } });
+  });
 }
 
 export async function markWalletFundingFailed(id: string, error: string) {
