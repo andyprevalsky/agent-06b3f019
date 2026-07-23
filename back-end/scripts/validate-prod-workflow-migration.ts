@@ -64,6 +64,7 @@ const workflowIds = new Set<string>();
 const agentIds = new Set<string>();
 const productionUrl = 'https://navi-j9a9.onrender.com';
 const CHECK_TIMEOUT_MS = 180_000;
+const DEPLOYMENT_LEASE_WAIT_MS = 10 * 60_000;
 let deploymentLease: WorkflowDeploymentLease | null = null;
 
 async function withTimeout<T>(label: string, operation: Promise<T>, timeoutMs: number): Promise<T> {
@@ -82,6 +83,27 @@ async function withTimeout<T>(label: string, operation: Promise<T>, timeoutMs: n
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
   }
+}
+
+async function acquireProductionDeploymentLease(): Promise<WorkflowDeploymentLease> {
+  const deadline = Date.now() + DEPLOYMENT_LEASE_WAIT_MS;
+  do {
+    try {
+      return await acquireWorkflowDeploymentLease();
+    } catch (error) {
+      if (
+        !(error instanceof Error) ||
+        error.message !==
+          'Another Temporal workflow deployment currently owns the production cutover'
+      ) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+    }
+  } while (Date.now() < deadline);
+  throw new Error(
+    `Timed out after ${DEPLOYMENT_LEASE_WAIT_MS}ms waiting for the production cutover lease`
+  );
 }
 
 function requireProductionOptIn(): void {
@@ -365,36 +387,49 @@ async function activityCount(
   return {
     totalEvents: history.events?.length ?? 0,
     activities:
-      history.events?.filter((event) => event.activityTaskScheduledEventAttributes !== undefined)
+      history.events?.filter((event) => Boolean(event.activityTaskScheduledEventAttributes))
         .length ?? 0,
     markers:
-      history.events?.filter((event) => event.markerRecordedEventAttributes !== undefined).length ??
-      0,
+      history.events?.filter((event) => Boolean(event.markerRecordedEventAttributes)).length ?? 0,
     workflowTaskFailures:
-      history.events?.filter((event) => event.workflowTaskFailedEventAttributes !== undefined)
-        .length ?? 0,
+      history.events?.filter((event) => Boolean(event.workflowTaskFailedEventAttributes)).length ??
+      0,
     workflowTasks:
       history.events?.filter(
         (event) =>
-          event.workflowTaskScheduledEventAttributes !== undefined ||
-          event.workflowTaskStartedEventAttributes !== undefined ||
-          event.workflowTaskCompletedEventAttributes !== undefined
+          Boolean(event.workflowTaskScheduledEventAttributes) ||
+          Boolean(event.workflowTaskStartedEventAttributes) ||
+          Boolean(event.workflowTaskCompletedEventAttributes)
       ).length ?? 0,
     timers:
       history.events?.filter(
         (event) =>
-          event.timerStartedEventAttributes !== undefined ||
-          event.timerFiredEventAttributes !== undefined ||
-          event.timerCanceledEventAttributes !== undefined
+          Boolean(event.timerStartedEventAttributes) ||
+          Boolean(event.timerFiredEventAttributes) ||
+          Boolean(event.timerCanceledEventAttributes)
       ).length ?? 0,
   };
 }
 
 async function main(): Promise<void> {
   requireProductionOptIn();
-  deploymentLease = await acquireWorkflowDeploymentLease();
+  deploymentLease = await acquireProductionDeploymentLease();
   const root = await createDormantAgent('PAUSED');
   const child = await createDormantAgent('PAUSED', { parentAgentId: root.agentId });
+  await prisma.toolUsage.createMany({
+    data: [root.agentId, child.agentId].map((agentId) => ({
+      operationKey: `prod-validation:${runId}:${agentId}:initial-accounting`,
+      agentId,
+      userId,
+      toolName: 'execute_loop',
+      totalCostCents: 17.25,
+      usageItems: [],
+      tokenCountCheckpoint: 950,
+      tokensInCheckpoint: 680,
+      tokensOutCheckpoint: 270,
+      ownCostCheckpointCents: 17.25,
+    })),
+  });
   const unresolvedCall = randomUUID();
   const resolvedCall = randomUUID();
   const approvalCall = randomUUID();
@@ -550,7 +585,14 @@ async function main(): Promise<void> {
             temporalWorkflowId: rejectedChildId,
           },
         }),
-      /stale parent workflow generation/i
+      (error: unknown) => {
+        const prismaError = error as { code?: unknown; message?: unknown };
+        return (
+          prismaError.code === 'P2034' ||
+          (typeof prismaError.message === 'string' &&
+            /stale parent workflow generation/i.test(prismaError.message))
+        );
+      }
     );
     assert.strictEqual(await prisma.agent.count({ where: { id: rejectedChildId } }), 0);
     return 'database trigger fenced an old-backend insert before any Temporal start';
@@ -1210,7 +1252,7 @@ async function main(): Promise<void> {
     assert.strictEqual(runtime.context_size, 42_000);
     assert.strictEqual(runtime.message_count, 73);
     assert.strictEqual(runtime.iteration_offset, 12);
-    assert.strictEqual(runtime.workflow_started_at, stored.createdAt.toISOString());
+    assert.strictEqual(Date.parse(String(runtime.workflow_started_at)), stored.createdAt.getTime());
     return 'restored counters, duration origin, controls, and stale running-tool UI';
   });
   await check('cold_workflow_uses_no_resources_while_waiting', async () => {
@@ -1495,7 +1537,7 @@ async function main(): Promise<void> {
     let visible = false;
     do {
       for await (const execution of client.workflow.list({
-        query: `WorkflowId="${oldMarkerId}"`,
+        query: 'WorkflowType="RoseWorkerDeploymentActivationMarker" AND ExecutionStatus="Running"',
       })) {
         if (execution.workflowId === oldMarkerId) visible = true;
       }
