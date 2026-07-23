@@ -232,8 +232,8 @@ const tests: Array<[string, () => Promise<void>]> = [
           )
         );
         assert(
-          error.message.includes('company funding is in progress'),
-          'the in-progress funding error must surface'
+          error instanceof PurchaseError && error.code === 'agentcard_company_funding_in_progress',
+          'the typed in-progress funding error must surface'
         );
         // No card was issued and the funding is treated as reclaim-required, so Stripe must not be
         // reversed automatically.

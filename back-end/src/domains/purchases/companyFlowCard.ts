@@ -40,7 +40,7 @@ export async function mintCompanyFlowCard(
       const funding = companyFundingInProgressDetails(error);
       if (funding === undefined) throw error;
 
-      if (confirmedTransferId !== funding.transferId) {
+      if (funding.transferId !== undefined && confirmedTransferId !== funding.transferId) {
         const walletFunding = await confirmPurchaseWalletCollection(
           purchase,
           'usd',
@@ -68,7 +68,7 @@ export async function mintCompanyFlowCard(
           'AgentCard company funding is still in progress; retry this purchase shortly',
           409,
           'agentcard_company_funding_in_progress',
-          { transferId: funding.transferId }
+          funding.transferId !== undefined ? { transferId: funding.transferId } : {}
         );
       }
       await sleep(retryMs);

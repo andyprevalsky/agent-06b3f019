@@ -107,7 +107,7 @@ export function toPurchaseBoundaryError(error: unknown): Error {
  */
 export function companyFundingInProgressDetails(error: unknown):
   | {
-      transferId: string;
+      transferId?: string;
       retryAfterSeconds?: number;
       agentcardResult?: Record<string, unknown>;
     }
@@ -117,11 +117,10 @@ export function companyFundingInProgressDetails(error: unknown):
   if (agentCardError.code !== 'agentcard_company_funding_in_progress') return undefined;
   const details = agentCardError.details;
   const transferId = details.transferId;
-  if (typeof transferId !== 'string' || transferId.trim() === '') return undefined;
   const retryAfterSeconds = details.retryAfterSeconds;
   const agentcardResult = details.agentcardResult;
   return {
-    transferId,
+    ...(typeof transferId === 'string' && transferId.trim() !== '' ? { transferId } : {}),
     ...(typeof retryAfterSeconds === 'number' && Number.isFinite(retryAfterSeconds)
       ? { retryAfterSeconds }
       : {}),

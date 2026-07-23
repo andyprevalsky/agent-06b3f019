@@ -174,6 +174,50 @@ async function cleanup(): Promise<void> {
 
 const tests: Array<[string, () => Promise<void>]> = [
   [
+    'organization MCP preserves transferless company-funding retries',
+    async () => {
+      const provider = new AgentCardOrgMcpProvider('cardholder-funding', async () => ({
+        content: [
+          {
+            type: 'text',
+            text: 'Company-wallet funding is in progress — call create_card again with the SAME arguments and the SAME idempotency_key in ~10s to collect the card.',
+          },
+        ],
+        structuredContent: {
+          message:
+            'Company-wallet funding is in progress — call create_card again with the SAME arguments and the SAME idempotency_key in ~10s to collect the card.',
+          status: 'funding_in_progress',
+          retryAfterSeconds: 10,
+        },
+      }));
+
+      let caught: unknown;
+      try {
+        await provider.mintCard({
+          amountCents: 100,
+          fundsSource: 'company_flow',
+          idempotencyKey: 'purchase:transferless-funding',
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      assert(
+        caught instanceof AgentCardProviderError &&
+          caught.status === 409 &&
+          caught.code === 'agentcard_company_funding_in_progress' &&
+          caught.details.transferId === undefined &&
+          caught.details.retryAfterSeconds === 10,
+        `expected a typed transferless funding retry, got "${caught instanceof Error ? caught.message : String(caught)}"`
+      );
+      const funding = companyFundingInProgressDetails(caught);
+      assert(
+        funding?.transferId === undefined && funding?.retryAfterSeconds === 10,
+        'the purchase retry loop must accept a transferless funding response'
+      );
+    },
+  ],
+  [
     'organization MCP structured errors surface the upstream failure message',
     async () => {
       const calls: string[] = [];

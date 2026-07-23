@@ -204,9 +204,9 @@ export class FundingInProgressCardProvider extends FakeCardProvider {
 }
 
 /**
- * Rejects mint with an `agentcard_company_funding_in_progress` error that carries NO usable transfer
- * id, so the company-flow loop rethrows immediately (no retry/sleep) and the charge rollback takes
- * its funding-reclaim-required branch.
+ * Rejects mint with an `agentcard_company_funding_in_progress` error that carries no usable
+ * transfer id and a retry delay at the full company-flow deadline, so the loop times out without
+ * sleeping and charge rollback takes its funding-reclaim-required branch.
  */
 export class FundingInProgressNoTransferCardProvider extends FakeCardProvider {
   async mintCard(request: CardProviderMintRequest): Promise<never> {
@@ -217,7 +217,7 @@ export class FundingInProgressNoTransferCardProvider extends FakeCardProvider {
       409,
       undefined,
       'agentcard_company_funding_in_progress',
-      { agentcardStatus: 'funding_in_progress' }
+      { agentcardStatus: 'funding_in_progress', retryAfterSeconds: 60 }
     );
   }
 }
