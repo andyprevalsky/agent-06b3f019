@@ -26,8 +26,11 @@ import {
   recordPurchaseWalletFunding,
 } from '../../providers/purchase-wallet-funding';
 import {
+  claimWalletFundingReclaimRetry,
   findWalletFundingByPurchaseId,
   markWalletFundingFailed,
+  markWalletFundingReclaimed,
+  markWalletFundingReclaimFailed,
 } from '../../providers/purchase-wallet-funding-repo';
 import {
   WalletFundingProviderError,
@@ -82,24 +85,6 @@ class ThrowingReclaimProvider extends FakeProvider {
   ): Promise<WalletFundingResult> {
     this.reclaimCalls.push(request);
     throw this.error;
-  }
-}
-
-class ConcurrentReclaimProvider extends FakeProvider {
-  private entered = 0;
-  private releaseBoth!: () => void;
-  private readonly bothEntered = new Promise<void>((resolve) => {
-    this.releaseBoth = resolve;
-  });
-
-  async reclaimUserWalletFunding(
-    request: WalletFundingReclaimRequest
-  ): Promise<WalletFundingResult> {
-    this.reclaimCalls.push(request);
-    this.entered += 1;
-    if (this.entered === 2) this.releaseBoth();
-    await this.bothEntered;
-    return { providerTransferId: request.providerTransferId, metadata: { reclaimed: true } };
   }
 }
 
@@ -287,11 +272,11 @@ async function main(): Promise<void> {
     assert.equal(funding?.reclaimProviderTransferId, `wfr_${purchase.id}`);
   });
 
-  await test('concurrent reclaim completion is idempotent for the CAS loser', async () => {
+  await test('concurrent reclaim calls share one provider release loop', async () => {
     const userId = await seedUser();
     const purchase = await seedPurchase(userId);
     await recordPurchaseWalletFunding(purchase, 'usd', 'owt_concurrent_reclaim', {});
-    const provider = new ConcurrentReclaimProvider();
+    const provider = new FakeProvider();
 
     await Promise.all([
       reclaimPurchaseWalletFunding(purchase, 'cleanup_a', provider),
@@ -300,7 +285,7 @@ async function main(): Promise<void> {
 
     const funding = await findWalletFundingByPurchaseId(purchase.id);
     assert.equal(funding?.status, PurchaseWalletFundingStatus.RECLAIMED);
-    assert.equal(provider.reclaimCalls.length, 2);
+    assert.equal(provider.reclaimCalls.length, 1, 'only one provider mutation may run at a time');
   });
 
   await test('reclaim skips PENDING/FAILED/RECLAIMED funding', async () => {
@@ -382,7 +367,9 @@ async function main(): Promise<void> {
     const userId = await seedUser();
     const purchase = await seedPurchase(userId);
     await recordPurchaseWalletFunding(purchase, 'usd', 'owt_begin', {});
-    await beginPurchaseWalletReclaim(purchase.id);
+    const claim = await beginPurchaseWalletReclaim(purchase.id);
+    assert.equal(claim.status, 'owned');
+    assert.ok(claim.status === 'owned' && claim.reclaimLeaseToken.length > 0);
     let funding = await findWalletFundingByPurchaseId(purchase.id);
     assert.equal(
       funding?.status,
@@ -391,9 +378,181 @@ async function main(): Promise<void> {
     );
     // Non-FUNDED rows are left untouched (idempotent no-op).
     await setFundingStatus(purchase.id, PurchaseWalletFundingStatus.CONSUMED);
-    await beginPurchaseWalletReclaim(purchase.id);
+    assert.equal((await beginPurchaseWalletReclaim(purchase.id)).status, 'not_applicable');
     funding = await findWalletFundingByPurchaseId(purchase.id);
     assert.equal(funding?.status, PurchaseWalletFundingStatus.CONSUMED);
+  });
+
+  await test('beginPurchaseWalletReclaim grants exactly one concurrent close owner', async () => {
+    const userId = await seedUser();
+    const purchase = await seedPurchase(userId);
+    await recordPurchaseWalletFunding(purchase, 'usd', 'owt_close_owner', {});
+    const claims = await Promise.all([
+      beginPurchaseWalletReclaim(purchase.id),
+      beginPurchaseWalletReclaim(purchase.id),
+      beginPurchaseWalletReclaim(purchase.id),
+    ]);
+    assert.equal(claims.filter((claim) => claim.status === 'owned').length, 1);
+    assert.equal(claims.filter((claim) => claim.status === 'already_owned').length, 2);
+  });
+
+  await test('an unleased caller cannot join an active cross-worker reclaim', async () => {
+    const userId = await seedUser();
+    const purchase = await seedPurchase(userId);
+    await recordPurchaseWalletFunding(purchase, 'usd', 'owt_active_owner', {});
+    const owner = await beginPurchaseWalletReclaim(purchase.id);
+    assert.equal(owner.status, 'owned');
+    const provider = new FakeProvider();
+    await assert.rejects(
+      () => reclaimPurchaseWalletFunding(purchase, 'unleased_duplicate', provider),
+      (error: unknown) =>
+        error instanceof WalletFundingProviderError &&
+        error.code === 'agentcard_company_transfer_release_pending'
+    );
+    assert.equal(provider.reclaimCalls.length, 0, 'the duplicate never reaches the provider');
+    const funding = await findWalletFundingByPurchaseId(purchase.id);
+    assert.equal(funding?.status, PurchaseWalletFundingStatus.RECLAIMING);
+    assert.equal(
+      funding?.reclaimLeaseToken,
+      owner.status === 'owned' ? owner.reclaimLeaseToken : undefined
+    );
+  });
+
+  await test('a superseded provider poll cannot commit after stale-lease takeover', async () => {
+    const userId = await seedUser();
+    const purchase = await seedPurchase(userId);
+    await recordPurchaseWalletFunding(purchase, 'usd', 'owt_slow_owner', {});
+
+    let signalStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      signalStarted = resolve;
+    });
+    let finishProvider: ((result: WalletFundingResult) => void) | undefined;
+    const providerResult = new Promise<WalletFundingResult>((resolve) => {
+      finishProvider = resolve;
+    });
+    const provider = new FakeProvider();
+    provider.reclaimUserWalletFunding = async (request) => {
+      provider.reclaimCalls.push(request);
+      signalStarted?.();
+      return providerResult;
+    };
+
+    const oldOwner = reclaimPurchaseWalletFunding(purchase, 'slow_owner', provider);
+    await started;
+    const firstLease = await findWalletFundingByPurchaseId(purchase.id);
+    assert.ok(firstLease?.reclaimLeaseToken);
+    await prisma.purchaseWalletFunding.update({
+      where: { purchaseId: purchase.id },
+      data: { updatedAt: new Date(Date.now() - 5 * 60 * 1000) },
+    });
+    const successorLeaseToken = randomUUID();
+    const takeover = await claimWalletFundingReclaimRetry(firstLease.id, {
+      reclaimIdempotencyKey: `purchase-wallet-reclaim:${purchase.id}`,
+      reclaimLeaseToken: successorLeaseToken,
+      staleReclaimingBefore: new Date(Date.now() - 2 * 60 * 1000),
+    });
+    assert.equal(takeover.count, 1);
+
+    finishProvider?.({ providerTransferId: 'owt_old_owner_late_success' });
+    await assert.rejects(
+      () => oldOwner,
+      (error: unknown) =>
+        error instanceof WalletFundingProviderError &&
+        error.code === 'agentcard_company_transfer_release_pending'
+    );
+    const current = await findWalletFundingByPurchaseId(purchase.id);
+    assert.equal(current?.status, PurchaseWalletFundingStatus.RECLAIMING);
+    assert.equal(current?.reclaimLeaseToken, successorLeaseToken);
+    assert.equal(current?.reclaimProviderTransferId, null);
+  });
+
+  await test('stale reclaim retry CAS grants exactly one cross-worker lease owner', async () => {
+    const userId = await seedUser();
+    const purchase = await seedPurchase(userId);
+    await recordPurchaseWalletFunding(purchase, 'usd', 'owt_retry_owner', {});
+    const staleUpdatedAt = new Date(Date.now() - 5 * 60 * 1000);
+    await prisma.purchaseWalletFunding.update({
+      where: { purchaseId: purchase.id },
+      data: {
+        status: PurchaseWalletFundingStatus.RECLAIMING,
+        updatedAt: staleUpdatedAt,
+      },
+    });
+    const funding = await findWalletFundingByPurchaseId(purchase.id);
+    assert.ok(funding);
+
+    const staleReclaimingBefore = new Date(Date.now() - 2 * 60 * 1000);
+    const retryLeaseTokens = Array.from({ length: 8 }, () => randomUUID());
+    const claims = await Promise.all(
+      retryLeaseTokens.map(async (reclaimLeaseToken) =>
+        claimWalletFundingReclaimRetry(funding.id, {
+          reclaimIdempotencyKey: `purchase-wallet-reclaim:${purchase.id}`,
+          reclaimLeaseToken,
+          staleReclaimingBefore,
+        })
+      )
+    );
+    const retryOwner = await findWalletFundingByPurchaseId(purchase.id);
+    assert.ok(retryOwner?.reclaimLeaseToken);
+    assert.ok(retryLeaseTokens.includes(retryOwner.reclaimLeaseToken));
+    assert.equal(
+      claims.reduce((count, claim) => count + claim.count, 0),
+      1,
+      'the timestamp CAS must elect one retry owner across concurrent processes'
+    );
+
+    const freshLeaseClaim = await claimWalletFundingReclaimRetry(funding.id, {
+      reclaimIdempotencyKey: `purchase-wallet-reclaim:${purchase.id}`,
+      reclaimLeaseToken: randomUUID(),
+      staleReclaimingBefore,
+    });
+    assert.equal(freshLeaseClaim.count, 0, 'a fresh RECLAIMING lease is not stealable');
+
+    await setFundingStatus(purchase.id, PurchaseWalletFundingStatus.RECLAIM_FAILED);
+    const failedRetryLeaseTokens = Array.from({ length: 8 }, () => randomUUID());
+    const failedRetryClaims = await Promise.all(
+      failedRetryLeaseTokens.map(async (reclaimLeaseToken) =>
+        claimWalletFundingReclaimRetry(funding.id, {
+          reclaimIdempotencyKey: `purchase-wallet-reclaim:${purchase.id}`,
+          reclaimLeaseToken,
+          staleReclaimingBefore,
+        })
+      )
+    );
+    assert.equal(
+      failedRetryClaims.reduce((count, claim) => count + claim.count, 0),
+      1,
+      'a RECLAIM_FAILED row must also elect one retry owner'
+    );
+
+    const secondOwner = await findWalletFundingByPurchaseId(purchase.id);
+    assert.ok(secondOwner?.reclaimLeaseToken);
+    assert.ok(failedRetryLeaseTokens.includes(secondOwner.reclaimLeaseToken));
+    assert.notEqual(secondOwner.reclaimLeaseToken, retryOwner.reclaimLeaseToken);
+
+    const staleSuccess = await markWalletFundingReclaimed(
+      funding.id,
+      retryOwner.reclaimLeaseToken,
+      { providerTransferId: 'owt_stale_success' }
+    );
+    const staleFailure = await markWalletFundingReclaimFailed(
+      funding.id,
+      retryOwner.reclaimLeaseToken,
+      'stale owner failed late'
+    );
+    assert.equal(staleSuccess.count, 0, 'a superseded owner cannot commit success');
+    assert.equal(staleFailure.count, 0, 'a superseded owner cannot commit failure');
+    const stillOwned = await findWalletFundingByPurchaseId(purchase.id);
+    assert.equal(stillOwned?.status, PurchaseWalletFundingStatus.RECLAIMING);
+    assert.equal(stillOwned?.reclaimLeaseToken, secondOwner.reclaimLeaseToken);
+
+    const currentSuccess = await markWalletFundingReclaimed(
+      funding.id,
+      secondOwner.reclaimLeaseToken,
+      { providerTransferId: 'owt_current_success' }
+    );
+    assert.equal(currentSuccess.count, 1, 'the current lease owner commits exactly once');
   });
 
   await test('recordPurchaseWalletFunding never resurrects a reclaimed transfer', async () => {

@@ -978,6 +978,8 @@ def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
     assert "ALL non-skipped Pre-Deploy smoke benchmarks must pass" in step
     assert "deploy-approved smoke skip is a Claude Code benchmark" in step
     assert "skippable by future deploys without additional human approval" in step
+    assert "every non-skipped task" in step
+    assert "every requested task passes" in step
     assert ".context/predeploy-runs/<run-id>/runner.log" in step
     assert "run_benchmark.py --suite smoke" not in step
     assert "scripts/run-deploy-stage --start" in deploy
@@ -1046,6 +1048,8 @@ def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
     assert "cloudbench_fetchable_ref" in fleet
     assert cloud.count('LOCAL_PATCH_FILE=""') == 1
     assert cloud.count('STAGED_LOCAL_FILES=()') == 1
+    assert fleet.index("worker_ledger_lock_acquire() {") < fleet.index("clone_machine_target() {")
+    assert fleet.index("clone_machine_target() {") < fleet.index('if [ -n "$PROVISION_POOL" ]')
 
 
 def test_worktree_patch_includes_unpushed_commits_from_fetchable_base(
@@ -1404,6 +1408,7 @@ def test_autoscaled_worker_failure_publishes_durable_failure_marker(tmp_path: Pa
     must publish a durable failure before it can be counted as ready capacity."""
     fleet = FLEET_SCRIPT.read_text()
     pool_count = _extract_fleet_function(fleet, "_pool_ids() {")
+    cleanup = _worker_cleanup_bundle(fleet)
     provision = _extract_fleet_function(fleet, "provision_worker() {")
     root = tmp_path / "root"
     (root / "scripts").mkdir(parents=True)
@@ -1413,6 +1418,7 @@ def test_autoscaled_worker_failure_publishes_durable_failure_marker(tmp_path: Pa
 
     for mode in ("storage-not-ready", "upload-failure", "readiness-failure"):
         out = tmp_path / mode
+        reaped = tmp_path / f"{mode}.reaped"
         calls = tmp_path / f"{mode}.calls"
         script = f"""set -euo pipefail
 ROOT_DIR={shlex.quote(str(root))}
@@ -1428,10 +1434,14 @@ WORKER_READY_TIMEOUT=1
 FLEET_WORKER_HEALTH_PORT=3103
 FLEET_PATCH_FILE={shlex.quote(str(patch_file))}
 FLEET_PATCH_SHA256=expected
+FLEET_OWNER_TOKEN=test-owner
+WORKER_STAGE_ATTEMPTS=3
+WORKER_READY_TIMEOUT=1
 CLOUDBENCH_WORKER_STAGE_ATTEMPTS=3
 CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS=0
 MODE={shlex.quote(mode)}
 OUT={shlex.quote(str(out))}
+REAPED={shlex.quote(str(reaped))}
 CALLS={shlex.quote(str(calls))}
 : > "$CALLS"
 reserve_worker_machine_slot() {{ return 0; }}
@@ -1454,15 +1464,18 @@ fly_with_timeout() {{
   esac
 }}
 worker_operational() {{ [ "$MODE" != readiness-failure ]; }}
+reap_machine() {{ printf '%s\n' "$1" > "$REAPED"; }}
 fleet_registry_release_id() {{ :; }}
 sleep() {{ :; }}
 {pool_count}
+{cleanup}
 {provision}
 provision_worker bench workspace primary fd00::1 0 "$OUT"
 wait || true
-test "$(_pool_ids "$OUT")" = 1
-test -s "$OUT/worker-abc123.failed"
 test -s "$OUT/worker-abc123.stage.log"
+test "$(_pool_ids "$OUT")" = 0
+test -s "$REAPED"
+test ! -e "$OUT/worker-abc123.pending"
 test ! -e "$OUT/worker-abc123.ready"
 """
         result = subprocess.run(
@@ -1478,9 +1491,6 @@ test ! -e "$OUT/worker-abc123.ready"
         if mode == "storage-not-ready":
             assert fly_calls == []
             assert "storage not ready" in stage_log
-            assert "could not be staged and launched; see worker-abc123.stage.log" in (
-                out / "worker-abc123.failed"
-            ).read_text()
             continue
         neutralize = next(i for i, call in enumerate(fly_calls) if "machine update abc123" in call)
         first_start = next(i for i, call in enumerate(fly_calls) if "machine start abc123" in call)
@@ -1509,10 +1519,305 @@ test ! -e "$OUT/worker-abc123.ready"
             assert launch_calls == []
             assert "upload local patch failed" in stage_log
 
+        assert 'ready_deadline=$((SECONDS + worker_ready_timeout))' in provision
+        assert 'if worker_operational "$wid"; then' in provision
+
     worker = WORKER_SCRIPT.read_text()
     assert worker.index("patch payload checksum mismatch") < worker.index(
         'printf \'%s\\n\' "$$" > "$WORKER_READY_FILE"'
     )
+
+
+def test_worker_preflight_failure_records_cleanup_failure_and_keeps_retry_handle(tmp_path: Path) -> None:
+    """A token/config failure must not hide an unreaped worker.
+
+    The original provisioning error stays visible, while the worker id remains
+    tracked so controller teardown can retry deletion.
+    """
+    fleet = FLEET_SCRIPT.read_text()
+    cleanup = _worker_cleanup_bundle(fleet)
+    provision = _extract_fleet_function(fleet, "provision_worker() {")
+    output = tmp_path / "bench"
+    output.mkdir()
+    reaped = tmp_path / "reaped"
+    script = f"""set +e
+FLEET_OWNER_TOKEN=test-owner
+BENCH_REF=test-ref
+FLEET_WORKER_VM_SIZE=shared-cpu-1x
+FLEET_WORKER_VM_MEMORY=1024
+reserve_worker_machine_slot() {{ return 0; }}
+capacity_release_reservation() {{ return 0; }}
+clone_machine_target() {{
+  printf '%s\\n' deadbeef000001 >> "$1"
+  printf '%s' deadbeef000001
+}}
+controller_github_token_b64() {{ return 1; }}
+reap_machine() {{ printf '%s\\n' "$1" > {shlex.quote(str(reaped))}; return 1; }}
+fleet_registry_release_id() {{ return 0; }}
+{cleanup}
+{provision}
+provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))}
+exit $?
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
+    )
+
+    assert result.returncode != 0
+    assert reaped.read_text().strip() == "deadbeef000001"
+    assert (output / "worker-clones.ids").read_text().splitlines() == ["deadbeef000001"]
+    failure = (output / "autoscaler.failed").read_text()
+    assert "No current controller GitHub token" in failure
+    assert "cleanup failed and remains tracked for controller teardown" in failure
+    assert "cleanup failed and remains tracked" in result.stderr
+
+
+def test_worker_cleanup_serializes_ledger_and_preserves_cancellation(tmp_path: Path) -> None:
+    """Two cleanup owners must reap once and keep a late cancellation durable."""
+    cleanup = _worker_cleanup_bundle(FLEET_SCRIPT.read_text())
+    output = tmp_path / "bench"
+    output.mkdir()
+    worker_id = "deadbeef000002"
+    (output / "worker-clones.ids").write_text(f"{worker_id}\n")
+    (output / "worker-ready.ids").write_text(f"{worker_id}\n")
+    (output / f"worker-{worker_id}.pending").touch()
+    (output / f"worker-{worker_id}.ready").touch()
+    (output / f"worker-{worker_id}.cancelled").touch()
+    reaps = tmp_path / "reaps"
+    releases = tmp_path / "releases"
+    script = f"""set -e
+OUT={shlex.quote(str(output))}
+WID={worker_id}
+REAPS={shlex.quote(str(reaps))}
+RELEASES={shlex.quote(str(releases))}
+reap_machine() {{ printf '%s\n' "$1" >> "$REAPS"; sleep 0.1; }}
+fleet_registry_release_id() {{ printf '%s\n' "$1" >> "$RELEASES"; }}
+{cleanup}
+cleanup_failed_worker "$OUT" "$WID" &
+first=$!
+cleanup_failed_worker "$OUT" "$WID" &
+second=$!
+wait "$first"
+wait "$second"
+test ! -s "$OUT/worker-clones.ids"
+test ! -s "$OUT/worker-ready.ids"
+test ! -e "$OUT/worker-$WID.pending"
+test ! -e "$OUT/worker-$WID.ready"
+test -e "$OUT/worker-$WID.cancelled"
+test ! -e "$OUT/worker-clones.ids.lock"
+test "$(wc -l < "$REAPS" | tr -d ' ')" = 1
+test "$(wc -l < "$RELEASES" | tr -d ' ')" = 1
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+
+    unreadable = tmp_path / "unreadable"
+    unreadable.mkdir()
+    (unreadable / "worker-clones.ids").write_text(f"{worker_id}\n")
+    read_error_script = f"""set +e
+OUT={shlex.quote(str(unreadable))}
+WID={worker_id}
+grep() {{ return 2; }}
+reap_machine() {{ return 99; }}
+fleet_registry_release_id() {{ return 99; }}
+{cleanup}
+cleanup_failed_worker "$OUT" "$WID"
+rc=$?
+test "$rc" -ne 0
+test "$(cat "$OUT/worker-clones.ids")" = "$WID"
+test ! -e "$OUT/worker-clones.ids.lock"
+"""
+    read_error = subprocess.run(
+        ["bash", "-c", read_error_script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert read_error.returncode == 0, read_error.stderr + read_error.stdout
+
+
+def test_worker_ledger_lock_recovers_dead_owner_and_rejects_foreign_release(
+    tmp_path: Path,
+) -> None:
+    """A killed controller cannot wedge teardown, and only its successor may unlock."""
+    locks = _worker_ledger_lock_bundle(FLEET_SCRIPT.read_text())
+    output = tmp_path / "bench"
+    output.mkdir()
+    lock = output / "worker-clones.ids.lock"
+    lock.mkdir()
+    (lock / "owner").write_text("999999 stale-token 1\n")
+
+    script = f"""set -e
+OUT={shlex.quote(str(output))}
+WORKER_LEDGER_LOCK_ATTEMPTS=5
+WORKER_LEDGER_LOCK_RETRY_SECONDS=0
+WORKER_LEDGER_LOCK_STALE_SECONDS=1
+{locks}
+worker_ledger_lock_acquire "$OUT"
+test -s "$OUT/worker-clones.ids.lock/owner"
+worker_ledger_lock_release "$OUT"
+test ! -e "$OUT/worker-clones.ids.lock"
+
+worker_ledger_lock_acquire "$OUT"
+if ( WORKER_LEDGER_LOCK_TOKEN=forged; worker_ledger_lock_release "$OUT" ); then
+  echo 'foreign owner released lock' >&2
+  exit 2
+fi
+test -d "$OUT/worker-clones.ids.lock"
+worker_ledger_lock_release "$OUT"
+test ! -e "$OUT/worker-clones.ids.lock"
+
+WORKER_LEDGER_LOCK_ATTEMPTS=1:2
+if worker_ledger_lock_acquire "$OUT"; then exit 3; fi
+test ! -e "$OUT/worker-clones.ids.lock"
+WORKER_LEDGER_LOCK_ATTEMPTS=5
+WORKER_LEDGER_LOCK_STALE_SECONDS=1:2
+if worker_ledger_lock_acquire "$OUT"; then exit 4; fi
+test ! -e "$OUT/worker-clones.ids.lock"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_worker_cleanup_reaps_different_workers_without_holding_global_ledger_lock(
+    tmp_path: Path,
+) -> None:
+    """Slow provider deletes for separate workers must overlap without losing either ledger edit."""
+    cleanup = _worker_cleanup_bundle(FLEET_SCRIPT.read_text())
+    output = tmp_path / "bench"
+    output.mkdir()
+    workers = ("deadbeef000010", "deadbeef000011")
+    (output / "worker-clones.ids").write_text("\n".join(workers) + "\n")
+    (output / "worker-ready.ids").write_text("\n".join(workers) + "\n")
+    gate = tmp_path / "gate"
+    gate.mkdir()
+    reaped = tmp_path / "reaped"
+
+    script = f"""set -e
+OUT={shlex.quote(str(output))}
+GATE={shlex.quote(str(gate))}
+REAPED={shlex.quote(str(reaped))}
+WORKER_LEDGER_LOCK_RETRY_SECONDS=0.01
+WORKER_CLEANUP_CLAIM_RETRY_SECONDS=0.01
+reap_machine() {{
+  : > "$GATE/$1"
+  deadline=$((SECONDS + 3))
+  while [ "$(find "$GATE" -type f | wc -l | tr -d ' ')" -lt 2 ]; do
+    [ "$SECONDS" -lt "$deadline" ] || return 90
+    sleep 0.02
+  done
+  printf '%s\n' "$1" >> "$REAPED"
+}}
+fleet_registry_release_id() {{ return 0; }}
+{cleanup}
+cleanup_failed_worker "$OUT" {workers[0]} &
+first=$!
+cleanup_failed_worker "$OUT" {workers[1]} &
+second=$!
+wait "$first"
+wait "$second"
+test ! -s "$OUT/worker-clones.ids"
+test ! -s "$OUT/worker-ready.ids"
+test "$(sort -u "$REAPED" | wc -l | tr -d ' ')" = 2
+test ! -e "$OUT/worker-clones.ids.lock"
+test ! -e "$OUT/worker-{workers[0]}.cleanup-claim"
+test ! -e "$OUT/worker-{workers[1]}.cleanup-claim"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_ready_reconciliation_uses_worker_ledger_lock_and_never_duplicates_id(
+    tmp_path: Path,
+) -> None:
+    """Concurrent readiness publishers serialize with cleanup's ownership ledger."""
+    fleet = FLEET_SCRIPT.read_text()
+    bundle = "\n".join(
+        (
+            _extract_fleet_function(fleet, "worker_is_tracked() {"),
+            _worker_ledger_lock_bundle(fleet),
+            _extract_fleet_function(fleet, "reconcile_worker_ready_outcomes() {"),
+        )
+    )
+    output = tmp_path / "bench"
+    output.mkdir()
+    worker_id = "deadbeef000012"
+    (output / "worker-clones.ids").write_text(f"{worker_id}\n")
+    (output / "worker-ready.ids").write_text("")
+    (output / f"worker-{worker_id}.ready").touch()
+
+    script = f"""set -e
+OUT={shlex.quote(str(output))}
+WORKER_LEDGER_LOCK_RETRY_SECONDS=0.01
+{bundle}
+reconcile_worker_ready_outcomes "$OUT" &
+first=$!
+reconcile_worker_ready_outcomes "$OUT" &
+second=$!
+wait "$first"
+wait "$second"
+test "$(grep -Fxc {worker_id} "$OUT/worker-ready.ids")" = 1
+test ! -e "$OUT/worker-clones.ids.lock"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+
+    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    lock = cloner.index('worker_ledger_lock_acquire "$(dirname "$ledger")"')
+    append = cloner.index("printf '%s\\n' \"$target_id\" >> \"$ledger\"", lock)
+    unlock = cloner.index('worker_ledger_lock_release "$(dirname "$ledger")"', append)
+    assert lock < append < unlock
+
+
+def test_worker_numeric_settings_are_validated_independently(tmp_path: Path) -> None:
+    """Colon-bearing values must never reach numeric tests or seq."""
+    fleet = FLEET_SCRIPT.read_text()
+    cleanup = _worker_cleanup_bundle(fleet)
+    provision = _extract_fleet_function(fleet, "provision_worker() {")
+
+    for index, (stage_attempts, ready_timeout) in enumerate((("1:2", "3"), ("2", "3:4"))):
+        output = tmp_path / f"invalid-{index}"
+        output.mkdir()
+        reaped = tmp_path / f"invalid-{index}.reaped"
+        script = f"""set +e
+FLEET_OWNER_TOKEN=test-owner
+BENCH_REF=test-ref
+FLEET_WORKER_VM_SIZE=shared-cpu-1x
+FLEET_WORKER_VM_MEMORY=1024
+WORKER_STAGE_ATTEMPTS={shlex.quote(stage_attempts)}
+WORKER_READY_TIMEOUT={shlex.quote(ready_timeout)}
+reserve_worker_machine_slot() {{ return 0; }}
+capacity_release_reservation() {{ return 0; }}
+clone_machine_target() {{ printf '%s\n' deadbeef000003 >> "$1"; printf '%s' deadbeef000003; }}
+controller_github_token_b64() {{ printf token; }}
+reap_machine() {{ printf '%s\n' "$1" > {shlex.quote(str(reaped))}; }}
+fleet_registry_release_id() {{ return 0; }}
+{cleanup}
+{provision}
+provision_worker task workspace primary-id fdaa::1 0 {shlex.quote(str(output))}
+rc=$?
+test "$rc" -ne 0
+test ! -s {shlex.quote(str(output / "worker-clones.ids"))}
+grep -q 'invalid worker stage/readiness timeout configuration' {shlex.quote(str(output / "autoscaler.failed"))}
+exit 0
+"""
+        result = subprocess.run(
+            ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
+        )
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert reaped.read_text().strip() == "deadbeef000003"
 
 
 def test_fetch_ref_never_falls_back_to_stale_fetch_head(tmp_path: Path) -> None:
@@ -3514,7 +3819,7 @@ def test_fleet_clone_identity_requires_a_distinct_authoritative_target(
     function_start = fleet.index("machine_id_for_clone_name() {")
     clone_start = fleet.index("clone_machine_target() {", function_start)
     function_end = fleet.index("\n}\n", clone_start) + 3
-    clone_function = fleet[function_start:function_end]
+    clone_function = _worker_ledger_lock_bundle(fleet) + "\n" + fleet[function_start:function_end]
     source_id = "6834251fe05798"
     target_id = "d895d2efe7d418"
 
@@ -3650,7 +3955,7 @@ def test_clone_retries_provider_accepted_failed_snapshot_volume(
 
     fleet = FLEET_SCRIPT.read_text()
     watchdog = _extract_fleet_function(fleet, "fly_with_timeout() {")
-    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    cloner = _clone_machine_bundle(fleet)
     ledger = tmp_path / "owned.ids"
     clone_count = tmp_path / "clone-count"
     reaped = tmp_path / "reaped.ids"
@@ -3715,7 +4020,7 @@ def test_clone_releases_only_definitive_preallocation_failures() -> None:
     launch errors retain ownership fail-closed."""
     fleet = FLEET_SCRIPT.read_text()
     classifier = _extract_fleet_function(fleet, "clone_failure_definitively_unallocated() {")
-    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    cloner = _clone_machine_bundle(fleet)
     script = f"""{classifier}
 for message in \
   'Error: failed to create volume: resource_exhausted: rate limit exceeded' \
@@ -3913,6 +4218,37 @@ def _fleet_primary_shape_helpers(source: str) -> str:
     )
 
 
+def _worker_ledger_lock_bundle(source: str) -> str:
+    return "\n".join(
+        _extract_fleet_function(source, signature)
+        for signature in (
+            "worker_ledger_lock_acquire() {",
+            "worker_ledger_lock_release() {",
+        )
+    )
+
+
+def _clone_machine_bundle(source: str) -> str:
+    return "\n".join(
+        (
+            _worker_ledger_lock_bundle(source),
+            _extract_fleet_function(source, "clone_machine_target() {"),
+        )
+    )
+
+
+def _worker_cleanup_bundle(source: str) -> str:
+    return "\n".join(
+        _extract_fleet_function(source, signature)
+        for signature in (
+            "worker_is_tracked() {",
+            "worker_ledger_lock_acquire() {",
+            "worker_ledger_lock_release() {",
+            "cleanup_failed_worker() {",
+        )
+    )
+
+
 def _clone_index_adapter_fixture() -> str:
     """Model the controller's keyed inventory boundary in isolated clone tests.
 
@@ -4017,7 +4353,7 @@ def test_clone_retries_transient_volume_not_found(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
     timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
     resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
-    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    cloner = _clone_machine_bundle(fleet)
     ledger = tmp_path / "owned-clones.ids"
     attempt_file = tmp_path / "attempts"
     machines_file = tmp_path / "machines"
@@ -4089,7 +4425,7 @@ def test_clone_gives_up_after_max_attempts(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
     timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
     resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
-    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    cloner = _clone_machine_bundle(fleet)
     ledger = tmp_path / "owned-clones.ids"
     attempt_file = tmp_path / "attempts"
 
@@ -4143,7 +4479,7 @@ def test_clone_times_out_and_retries_a_hung_clone(tmp_path: Path) -> None:
     fleet = FLEET_SCRIPT.read_text()
     timeout_fn = _extract_fleet_function(fleet, "fly_with_timeout() {")
     resolver = _extract_fleet_function(fleet, "machine_id_for_clone_name() {")
-    cloner = _extract_fleet_function(fleet, "clone_machine_target() {")
+    cloner = _clone_machine_bundle(fleet)
     ledger = tmp_path / "owned-clones.ids"
     attempt_file = tmp_path / "attempts"
     machines_file = tmp_path / "machines"
@@ -6686,7 +7022,7 @@ def test_clone_burst_is_rate_limit_resilient() -> None:
     # Launch burst is staggered, not simultaneous.
     assert "CLOUDBENCH_CLONE_LAUNCH_STAGGER_SECONDS" in fleet
     # Exponential backoff (bit-shift by attempt) with a cap and jitter.
-    clone_fn = _extract_fleet_function(fleet, "clone_machine_target() {")
+    clone_fn = _clone_machine_bundle(fleet)
     assert "1 << (attempt - 1)" in clone_fn
     assert "CLOUDBENCH_CLONE_RETRY_MAX_SECONDS" in clone_fn
     assert "RANDOM % 5" in clone_fn

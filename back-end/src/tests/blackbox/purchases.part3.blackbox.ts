@@ -49,7 +49,7 @@ async function main(): Promise<void> {
 
   try {
     await withFakeStripe(async (calls) => {
-      await purchasesService.mintPurchaseCard(
+      const minted = await purchasesService.mintPurchaseCard(
         {
           userId,
           fingerprint,
@@ -79,6 +79,12 @@ async function main(): Promise<void> {
       assert(pending?.status === PurchaseSpendStatus.HELD, 'purchase must remain HELD');
       assert(pending?.walletFunding?.status === 'RECLAIMING', 'funding must be RECLAIMING');
 
+      // The minute reconciler intentionally leaves a live provider polling loop alone. Age the
+      // durable lease to model the next eligible retry after that owner has exited pending.
+      await prisma.purchaseWalletFunding.update({
+        where: { purchaseId: minted.purchaseId },
+        data: { updatedAt: new Date(Date.now() - 3 * 60 * 1000) },
+      });
       await reconcileFailedPurchaseFundingReclaims(walletFundingProvider, { userId });
       assert(calls.refunds.length === 1, 'confirmed release must refund Stripe exactly once');
     });
@@ -88,6 +94,65 @@ async function main(): Promise<void> {
     console.log(
       'PASS pending company release remains in progress until reconciliation confirms it'
     );
+
+    const overlapFingerprint = `single-close-owner-${randomUUID()}`;
+    const overlapCardProvider = new FakeCardProvider();
+    const overlapWalletProvider = new FakeWalletFundingProvider();
+    await withFakeStripe(async (calls) => {
+      await purchasesService.mintPurchaseCard(
+        {
+          userId,
+          fingerprint: overlapFingerprint,
+          merchant: 'Single Close Owner Merchant',
+          currency: 'USD',
+          lineItems: [{ label: 'Widget', amountCents: 1000 }],
+          fees: [],
+          subtotalCents: 1000,
+          totalCents: 1000,
+        } as never,
+        overlapCardProvider,
+        overlapWalletProvider
+      );
+
+      let notifyProviderEntered!: () => void;
+      let releaseProvider!: () => void;
+      const providerEntered = new Promise<void>((resolve) => {
+        notifyProviderEntered = resolve;
+      });
+      const providerRelease = new Promise<void>((resolve) => {
+        releaseProvider = resolve;
+      });
+      overlapWalletProvider.reclaimUserWalletFunding = async (request) => {
+        overlapWalletProvider.reclaimCalls.push(request);
+        notifyProviderEntered();
+        await providerRelease;
+        return { providerTransferId: request.providerTransferId };
+      };
+
+      const owner = purchasesService.closePurchaseCard(
+        overlapCardProvider.cardId,
+        overlapCardProvider,
+        overlapWalletProvider
+      );
+      await providerEntered;
+      const loser = await purchasesService.closePurchaseCard(
+        overlapCardProvider.cardId,
+        overlapCardProvider,
+        overlapWalletProvider
+      );
+      assert(loser.status === PurchaseSpendStatus.HELD, `got ${loser.status}`);
+      assert(overlapCardProvider.closeCalls === 1, 'only the FUNDED CAS owner may close the card');
+      assert(
+        overlapWalletProvider.reclaimCalls.length === 1,
+        'provider release must be single-flight'
+      );
+      assert(calls.refunds.length === 0, 'Stripe cannot refund before AgentCard release');
+      releaseProvider();
+      const ownerResult = await owner;
+      assert(ownerResult.status === PurchaseSpendStatus.VOIDED, `got ${ownerResult.status}`);
+      assert(calls.refunds.length === 1, 'the release owner refunds Stripe exactly once');
+    });
+    console.log('PASS overlapping cleanup paths elect one close/reclaim owner');
 
     const raceFingerprint = `reclaim-cleared-race-${randomUUID()}`;
     const raceCardProvider = new FakeCardProvider();

@@ -460,7 +460,7 @@ async def test_parallel_benchmark_scheduler_serializes_browser_profile_writers()
                 two_browser_tasks_running.set()
             try:
                 await asyncio.wait_for(two_browser_tasks_running.wait(), timeout=0.05)
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 pass
             finally:
                 active_browser_tasks -= 1
@@ -1111,6 +1111,35 @@ async def test_abandonment_retries_a_pending_company_release():
 
     assert result["purchase"]["status"] == "VOIDED"
     assert recoveries == 1
+
+
+async def test_abandonment_timeout_surfaces_the_last_durable_mismatch():
+    """A bounded cleanup wait cannot report success while funding remains in flight."""
+    import pytest
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    lifecycle = {
+        "purchase": {"status": "HELD"},
+        "walletFunding": {"status": "RECLAIMING"},
+    }
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "did not reach the expected terminal state before timeout: "
+            "payment_lifecycle.purchase.status mismatch: expected 'VOIDED', got 'HELD'"
+        ),
+    ):
+        await _wait_for_expected_payment_lifecycle(
+            "http://localhost:55120",
+            "agent-123",
+            get_task_by_name("agent-payment-abandonment"),
+            lifecycle,
+            timeout_seconds=0,
+            poll_interval_seconds=0,
+        )
 
 
 async def test_abandonment_waits_between_funding_reclaim_and_purchase_void():
@@ -4450,7 +4479,7 @@ async def test_code_agent_preflight_accepts_gpt_compute_token():
             return None
 
         async def get(self, url, *, headers, params=None, timeout):
-            calls.append((url, headers, timeout))
+            calls.append((url, headers, params, timeout))
             return FakeResponse()
 
     original_headers = bench._api_headers
@@ -4472,6 +4501,7 @@ async def test_code_agent_preflight_accepts_gpt_compute_token():
         (
             "http://localhost:55120/api/integrations/compute-code/credentials/token",
             {"X-API-Key": "test-key"},
+            None,
             10.0,
         )
     ]
@@ -4498,6 +4528,7 @@ async def test_code_agent_preflight_rejects_missing_compute_token():
             return None
 
         async def get(self, _url, *, headers, params=None, timeout):
+            assert params is None
             return FakeResponse()
 
     original_headers = bench._api_headers
@@ -4541,7 +4572,7 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
             return None
 
         async def get(self, url, *, headers, params=None, timeout):
-            calls.append((url, headers, timeout))
+            calls.append((url, headers, params, timeout))
             if url.endswith("/api/integrations/compute-code/credentials/token"):
                 return FakeResponse(404, {"error": "NO_TOKENS_AVAILABLE"})
             if url.endswith("/api/integrations/compute-code/anthropic-key/cooldown"):
@@ -4567,11 +4598,13 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
         (
             "http://localhost:55120/api/integrations/compute-code/credentials/token",
             {"X-API-Key": "test-key"},
+            None,
             10.0,
         ),
         (
             "http://localhost:55120/api/integrations/compute-code/anthropic-key/cooldown",
             {"X-API-Key": "test-key"},
+            None,
             10.0,
         ),
     ]
@@ -8866,6 +8899,7 @@ def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
         "browser-biometrics-webdecoy",
         "browser-toast-nopa-write-lock",
         "browser-agent-amazon-cookie-payment",
+        "browser-blue-bottle-challenge-recovery",
     }
     assert "ecommerce" in by_name["browser-agent-amazon-cookie-payment"].tags
     assert all(task.tags.count("antibot") == 1 for task in tasks)
@@ -9702,6 +9736,10 @@ async def run_all_tests():
     await r.record_async(
         "abandonment_retries_pending_company_release",
         test_abandonment_retries_a_pending_company_release,
+    )
+    await r.record_async(
+        "abandonment_timeout_surfaces_durable_mismatch",
+        test_abandonment_timeout_surfaces_the_last_durable_mismatch,
     )
     await r.record_async(
         "abandonment_waits_between_reclaim_and_void",

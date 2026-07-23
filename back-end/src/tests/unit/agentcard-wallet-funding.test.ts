@@ -5,14 +5,10 @@ import { AgentCardCompanyWalletFundingProvider } from '../../providers/wallet-fu
 
 async function main(): Promise<void> {
   let reads = 0;
-  let closeReplayed = false;
+  const calls: string[] = [];
   const provider = new AgentCardCompanyWalletFundingProvider(
     async (name, args) => {
-      if (name === 'close_card') {
-        assert.deepEqual(args, { card_id: 'card-123' });
-        closeReplayed = true;
-        return { structuredContent: { status: 'closed' } };
-      }
+      calls.push(name);
       assert.equal(name, 'list_transfers');
       assert.deepEqual(args, { limit: 100 });
       reads += 1;
@@ -21,16 +17,16 @@ async function main(): Promise<void> {
           transfers: [
             {
               id: 'owt-123',
-              status: closeReplayed ? 'reclaimed' : 'consumed',
+              status: reads >= 3 ? 'reclaimed' : 'consumed',
               amount_cents: 4396,
               transferred_cents: 4396,
-              released_cents: closeReplayed ? 4396 : 0,
+              released_cents: reads >= 3 ? 4396 : 0,
             },
           ],
         },
       };
     },
-    { attempts: 4, delayMs: 0, replayCloseEvery: 2 }
+    { attempts: 4, delayMs: 0 }
   );
 
   const result = await provider.reclaimUserWalletFunding({
@@ -45,7 +41,8 @@ async function main(): Promise<void> {
     reason: 'agent_cleanup_unspent_card',
   });
 
-  assert.equal(reads, 3, 'provider must replay close and wait for MCP transfer release');
+  assert.equal(reads, 3, 'provider must wait for MCP transfer release');
+  assert.deepEqual(calls, ['list_transfers', 'list_transfers', 'list_transfers']);
   assert.equal(result.providerTransferId, 'owt-123');
   assert.equal(result.metadata?.status, 'release_confirmed');
 
@@ -68,7 +65,7 @@ async function main(): Promise<void> {
         },
       };
     },
-    { attempts: 3, delayMs: 0, replayCloseEvery: 3 }
+    { attempts: 3, delayMs: 0 }
   );
   const rateLimitedResult = await rateLimitedProvider.reclaimUserWalletFunding({
     userId: 'user-123',

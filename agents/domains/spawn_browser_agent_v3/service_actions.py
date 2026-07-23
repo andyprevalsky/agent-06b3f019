@@ -415,7 +415,9 @@ async def execute_action(  # noqa: C901
             }
 
         elif action_name == "read_network_requests":
-            if browser_network_recorder is None:
+            if browser_network_recorder is None or not getattr(
+                browser_network_recorder, "persists_network_log", True
+            ):
                 return {
                     "success": False,
                     "error": (
