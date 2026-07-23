@@ -128,12 +128,12 @@ async function main(): Promise<void> {
       companyFundingInProgressDetails(new AgentCardProviderError('x', 409, undefined, 'other')),
       undefined
     );
-    assert.equal(
+    assert.deepEqual(
       companyFundingInProgressDetails(
         new AgentCardProviderError('x', 409, undefined, 'agentcard_company_funding_in_progress', {})
       ),
-      undefined,
-      'missing transfer id yields undefined'
+      {},
+      'transferless funding remains a retryable in-progress signal'
     );
     const details = companyFundingInProgressDetails(
       new AgentCardProviderError('x', 409, undefined, 'agentcard_company_funding_in_progress', {

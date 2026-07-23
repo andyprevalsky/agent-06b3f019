@@ -103,7 +103,8 @@ export function toPurchaseBoundaryError(error: unknown): Error {
 
 /**
  * Extract the in-progress company-funding transfer details from an AgentCard error, or `undefined`
- * when the error is not a `agentcard_company_funding_in_progress` signal with a usable transfer id.
+ * when the error is not an `agentcard_company_funding_in_progress` signal. AgentCard may omit the
+ * transfer id while still requiring the caller to retry the same idempotent card request.
  */
 export function companyFundingInProgressDetails(error: unknown):
   | {
