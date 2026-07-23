@@ -786,7 +786,7 @@
       "gateKey": "kyc",
       "severity": "blocking",
       "detection": {
-        "method": "agentcard_error",
+        "method": "kyc_webhook",
         "probeKey": "customers_needed_kyc"
       }
     },
@@ -815,7 +815,7 @@
           "A payment-card approval prerequisite may be auto-approved",
           "An open attention request is observed with metadata.gate.type=kyc",
           "The gate is blocking and uses gateKey=kyc",
-          "The gate detection path records agentcard_error/customers_needed_kyc"
+          "The gate detection path records kyc_webhook/customers_needed_kyc"
         ],
         "checks": [
           {

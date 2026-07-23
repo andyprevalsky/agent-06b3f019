@@ -8658,6 +8658,24 @@ def test_suite_selection_excludes_incomplete_entries():
     assert len(suite_names) == len([t for t in all_tasks() if t.status == "ready" and not t.production_only])
 
 
+def test_kyc_gate_benchmark_uses_canonical_detection_contract():
+    """The KYC benchmark must assert the same durable contract the gate builder emits."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from domains.gate.service import build_kyc_gate
+
+    task = get_task_by_name("gate-kyc-card-mint")
+    expected_gate = task.expected_gate or {}
+    builder_gate = build_kyc_gate()
+
+    assert expected_gate["type"] == "kyc"
+    assert expected_gate["gateKey"] == "kyc"
+    assert expected_gate["detection"] == {
+        "method": "kyc_webhook",
+        "probeKey": "customers_needed_kyc",
+    }
+    assert expected_gate["detection"] == builder_gate["detection"]
+
+
 def test_every_task_has_base_image_fixture_by_default():
     """Every eval runs on a reproducible base image; undeclared environments inherit the default."""
     from benchmarks.benchmark_tasks import all_tasks
@@ -9732,6 +9750,10 @@ async def run_all_tests():
     r.record(
         "agentcard_setup_attention_not_auto_approved",
         test_agentcard_setup_attention_is_not_auto_approved,
+    )
+    r.record(
+        "kyc_gate_benchmark_uses_canonical_detection_contract",
+        test_kyc_gate_benchmark_uses_canonical_detection_contract,
     )
     await r.record_async(
         "expected_gate_auto_approve_returns_without_resolving_gate",
