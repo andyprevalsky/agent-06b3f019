@@ -917,6 +917,7 @@ def test_deploy_always_gates_changed_cloudbench_controllers() -> None:
     assert "autoscaled_worker_failure_is_removed_and_replaceable" in gate
     assert "autoscaler_scale_down_cancels_pending_worker" in gate
     assert "fleet_registry_release_id_is_idempotent_with_other_records" in gate
+    assert "refresh_deps_tracks_exact_created_snapshot" in gate
     assert "must never pause for human approval" in gate
     assert "Operational gate maintenance is pre-authorized" in deploy
 
@@ -5604,6 +5605,68 @@ echo "EXACT=$CREATED_SNAPSHOT_ID"
     assert "EXACT=snap-owned" in result.stdout
     assert "snap-unrelated-older" not in result.stdout
 
+    # Once the first unambiguous poll binds this transaction to snap-owned,
+    # another controller/provider snapshot that appears later must not erase
+    # that ownership. Completion polling must stay pinned to snap-owned.
+    created.unlink()
+    polls = tmp_path / "polls"
+    polls.write_text("0\n")
+    late_racer_script = f"""set -uo pipefail
+APP=bench-app
+CLOUDBENCH_SNAPSHOT_READY_ATTEMPTS=2
+FLY() {{
+  echo "$*" >> "$CALLS"
+  if [ "$1 $2 $3" = "volumes snapshots create" ]; then
+    touch "$CREATED"
+    return 0
+  elif [ -f "$CREATED" ]; then
+    poll=$(( $(cat "$POLLS") + 1 ))
+    printf '%s\n' "$poll" > "$POLLS"
+    if [ "$poll" = 1 ]; then
+      echo '[{{"id":"snap-unrelated-older","status":"created","size":99}},{{"id":"snap-owned","status":"running","size":0}}]'
+    else
+      echo '[{{"id":"snap-unrelated-older","status":"created","size":99}},{{"id":"snap-owned","status":"created","size":10}},{{"id":"snap-racing-later","status":"running","size":0}}]'
+    fi
+  else
+    echo '[{{"id":"snap-unrelated-older","status":"created","size":99}}]'
+  fi
+}}
+sleep() {{ :; }}
+{create_snapshot}
+create_volume_snapshot_exact vol-1 || exit $?
+echo "EXACT=$CREATED_SNAPSHOT_ID"
+"""
+    late_racer = subprocess.run(
+        ["bash", "-c", late_racer_script],
+        env={
+            "CALLS": str(calls),
+            "CREATED": str(created),
+            "POLLS": str(polls),
+            "PATH": os.environ["PATH"],
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert late_racer.returncode == 0, late_racer.stderr
+    assert "transaction snapshot: snap-owned" in late_racer.stdout
+    assert "EXACT=snap-owned" in late_racer.stdout
+
+    created.unlink()
+    duplicate_record_script = script.replace(
+        '{"id":"snap-owned","status":"created","size":10}]',
+        '{"id":"snap-owned","status":"running","size":0},{"id":"snap-owned","status":"created","size":10}]',
+    )
+    duplicate_record = subprocess.run(
+        ["bash", "-c", duplicate_record_script],
+        env={"CALLS": str(calls), "CREATED": str(created), "PATH": os.environ["PATH"]},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert duplicate_record.returncode == 0, duplicate_record.stderr
+    assert "EXACT=snap-owned" in duplicate_record.stdout
+
     created.unlink()
     ambiguous_script = script.replace(
         '{"id":"snap-owned","status":"created","size":10}]',
@@ -5618,6 +5681,7 @@ echo "EXACT=$CREATED_SNAPSHOT_ID"
     )
     assert ambiguous.returncode != 0
     assert "multiple new snapshots appeared" in ambiguous.stderr
+    assert "snap-owned,snap-racing" in ambiguous.stderr
     assert "EXACT=" not in ambiguous.stdout
 
 
