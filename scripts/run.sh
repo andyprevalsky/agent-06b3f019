@@ -189,6 +189,28 @@ port_range_can_reassign() {
     return 0
 }
 
+resolve_frontend_dist_dir() {
+    local workspace_root=$1
+    local isolated_run=$2
+    local benchmark_run_id=${3:-}
+    local frontend_port=${4:-}
+    local dist_key
+    if [ "$isolated_run" = "true" ]; then
+        [ -n "$benchmark_run_id" ] || {
+            echo "❌ BENCHMARK_RUN_ID is required for an isolated bundled frontend." >&2
+            return 1
+        }
+        dist_key=$(printf '%s' "$benchmark_run_id" | tr -c '[:alnum:]_.-' '_')
+    else
+        [ -n "$frontend_port" ] || {
+            echo "❌ FRONTEND_PORT is required for a shared bundled frontend." >&2
+            return 1
+        }
+        dist_key="shared_${frontend_port}"
+    fi
+    printf '%s/.context/frontend-builds/%s\n' "${workspace_root%/}" "$dist_key"
+}
+
 if [ "${RUN_SH_SOURCE_ONLY:-false}" = "true" ]; then
     return 0 2>/dev/null || exit 0
 fi
@@ -1443,6 +1465,15 @@ if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
     export NAVI_WORKER_LOG_STREAM=false
 fi
 
+# Every concurrent benchmark stack owns its production frontend bundle. Vite
+# empties its output directory while building, so sharing front-end/dist lets an
+# isolated smoke/payment build delete chunks that the semantic preview is
+# actively serving.
+FRONTEND_DIST_DIR=$(resolve_frontend_dist_dir \
+    "$PWD" "$BENCHMARK_ISOLATED_RUN" "${BENCHMARK_RUN_ID:-}" "$FRONTEND_PORT")
+export FRONTEND_DIST_DIR
+mkdir -p "$(dirname "$FRONTEND_DIST_DIR")"
+
 # A few fleet-width cold starts have left `tsx src/server.ts` alive but stuck
 # during module loading (backend log contains only the first Supabase warning).
 # The public-tunnel smoke used to discover that indirectly after 60 blank curls
@@ -1587,14 +1618,15 @@ if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
             ;;
     esac
     (cd front-end && rm -f "$FRONTEND_LOG_FILE" && \
-        NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" VITE_REALTIME_PRIVATE=false npx vite build > "$FRONTEND_LOG_FILE" 2>&1)
+        NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" VITE_REALTIME_PRIVATE=false \
+        npx vite build --outDir "$FRONTEND_DIST_DIR" --emptyOutDir > "$FRONTEND_LOG_FILE" 2>&1)
 fi
 launch_backend_service
 
 # Front-end is always launched. Public payment benchmarks use a production bundle
 # so the cloud browser does not fetch the Vite development module graph over ngrok.
 if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
-    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && npx vite preview --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE" 2>&1' &
+    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && npx vite preview --outDir "$FRONTEND_DIST_DIR" --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE" 2>&1' &
 elif [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
     run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_DEV_PORT=$FRONTEND_PORT npx vite > "$FRONTEND_LOG_FILE" 2>&1' &
 else

@@ -1,6 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
-
 import assert from 'node:assert/strict';
 import { AGENTCARD_MCP_RESOURCE } from '../../providers/agentcard/config';
 import {
@@ -22,8 +20,8 @@ async function main(): Promise<void> {
   const original = Object.fromEntries(ENV_NAMES.map((name) => [name, process.env[name]]));
   try {
     for (const name of ENV_NAMES) delete process.env[name];
-    process.env.AGENTCARD_OAUTH_CLIENT_ID = 'wizard-client';
-    process.env.AGENTCARD_OAUTH_CLIENT_SECRET = 'wizard-secret';
+    process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID = 'wizard-client';
+    process.env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET = 'wizard-secret';
 
     let tokenRequests = 0;
     let calledWithToken = '';
@@ -124,7 +122,33 @@ async function main(): Promise<void> {
         error.code === 'agentcard_org_token_unavailable'
     );
 
-    console.log('AgentCard org runtime tests passed');
+    for (const name of ENV_NAMES) delete process.env[name];
+    process.env.AGENTCARD_API_KEY = 'sk_test_retired';
+    const retiredKeyRuntime = new AgentCardOrgRuntime(async () => {
+      throw new Error('retired API key must never reach the Organization MCP transport');
+    });
+    await assert.rejects(
+      () => retiredKeyRuntime.callTool('get_company_wallet', {}),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.status === 409 &&
+        error.details.missingEnv === 'AGENTCARD_ORG_OAUTH_CLIENT_ID'
+    );
+
+    for (const name of ENV_NAMES) delete process.env[name];
+    process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN = 'sk_test_retired';
+    const retiredDirectTokenRuntime = new AgentCardOrgRuntime(async () => {
+      throw new Error('retired direct token must never reach the Organization MCP transport');
+    });
+    await assert.rejects(
+      () => retiredDirectTokenRuntime.callTool('get_company_wallet', {}),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.status === 409 &&
+        error.details.missingEnv === 'AGENTCARD_ORG_OAUTH_CLIENT_ID'
+    );
+
+    process.stdout.write('AgentCard org runtime tests passed\n');
   } finally {
     for (const name of ENV_NAMES) {
       const value = original[name];

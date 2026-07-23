@@ -11,6 +11,7 @@ import { retryWithBackoff } from '../retry';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
 import { createLocalBrowserSession, connectValidatedBrowser } from './sessionConnection';
 import { STEEL_API_BASE_URL, steelCdpUrl, steelDebugUrl } from './urls';
+import { benchmarkIsolatedBrowserProfilesEnabled } from '../browser/benchmarkProfileIsolation';
 import {
   summarizeSteelCaptchaStatus,
   type BrowserCaptchaTelemetry,
@@ -53,8 +54,11 @@ export function envEnabled(name: string, defaultValue = true): boolean {
 }
 
 function benchmarkAnonSteelProfileEnabled(): boolean {
-  return ['1', 'true', 'yes'].includes(
-    (process.env.BENCHMARK_ANON_STEEL_PROFILE ?? '').trim().toLowerCase()
+  return (
+    benchmarkIsolatedBrowserProfilesEnabled() ||
+    ['1', 'true', 'yes'].includes(
+      (process.env.BENCHMARK_ANON_STEEL_PROFILE ?? '').trim().toLowerCase()
+    )
   );
 }
 

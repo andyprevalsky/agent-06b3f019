@@ -5746,7 +5746,7 @@ def test_local_predeploy_skips_wmh_and_wmh_logs_survive_agent_chdir(tmp_path: Pa
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert capture.read_text().splitlines() == ["1", "--local smoke-fixture --max-concurrency 2"]
+    assert capture.read_text().splitlines() == ["1", "--local smoke-fixture --max-concurrency 1"]
 
     wmh = _extract_fleet_function(stack, "start_world_model_harness() {")
     wmh_root = tmp_path / "wmh"

@@ -25,7 +25,12 @@ reviews:
 
   auto_review:
     enabled: true
-    auto_incremental_review: true
+    # /deploy batches all post-open changes and requests one incremental review
+    # only after the local gates stabilize. Reviewing every intermediate push
+    # wastes reviewer capacity and repeatedly rate-limits later deploys.
+    auto_incremental_review: false
+    # Defense in depth if a human explicitly resumes automatic reviews.
+    auto_pause_after_reviewed_commits: 2
     drafts: false
     ignore_title_keywords:
       - "WIP"

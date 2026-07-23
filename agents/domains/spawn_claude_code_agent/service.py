@@ -1465,6 +1465,21 @@ async def spawn_claude_code_activity(  # noqa: C901
         filtered_output = terminal.get_display()
         await persist_terminal_output(task_id, filtered_output, agent_id, code_provider)
 
+        # A fast CLI failure can set ``exit_code`` before the one-second silence
+        # window in ``_run_agentic_loop`` gets a chance to inspect the terminal.
+        # Re-check the final snapshot here so a revoked OAuth token is surfaced
+        # as a terminal tool error instead of going through the verifier as an
+        # ordinary incomplete result. The latter makes the parent believe the
+        # tool executed successfully and repeatedly spawn new paid sandboxes.
+        fatal_error = check_fatal_errors(filtered_output)
+        if fatal_error:
+            action_summary.append(f"FATAL: {fatal_error}")
+            raise ApplicationError(
+                fatal_error,
+                type="CLAUDE_CODE_FATAL",
+                non_retryable=True,
+            )
+
         # 5. Close session and extract output files before verifier so the
         # verifier sees the SDK event JSON plus the actual extracted artifacts.
         close_data = await close_e2b_session(
