@@ -9,6 +9,9 @@
 
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import {
@@ -117,8 +120,12 @@ async function main(): Promise<void> {
   });
 
   await test('loadAgentCardBenchmarkAdmin reads the env JWT + API url override', async () => {
+    const prevUnifiedJwt = process.env.AGENT_CARDS_JWT;
     const prevJwt = process.env.AGENT_CARDS_ADMIN_JWT;
+    const prevUnifiedUrl = process.env.AGENT_CARDS_API_URL;
     const prevUrl = process.env.ADMIN_API_URL;
+    delete process.env.AGENT_CARDS_JWT;
+    delete process.env.AGENT_CARDS_API_URL;
     process.env.AGENT_CARDS_ADMIN_JWT = 'env-jwt';
     process.env.ADMIN_API_URL = 'https://admin.override.test';
     try {
@@ -126,10 +133,53 @@ async function main(): Promise<void> {
       assert.equal(admin.token, 'env-jwt');
       assert.equal(admin.apiUrl, 'https://admin.override.test');
     } finally {
+      if (prevUnifiedJwt === undefined) delete process.env.AGENT_CARDS_JWT;
+      else process.env.AGENT_CARDS_JWT = prevUnifiedJwt;
       if (prevJwt === undefined) delete process.env.AGENT_CARDS_ADMIN_JWT;
       else process.env.AGENT_CARDS_ADMIN_JWT = prevJwt;
+      if (prevUnifiedUrl === undefined) delete process.env.AGENT_CARDS_API_URL;
+      else process.env.AGENT_CARDS_API_URL = prevUnifiedUrl;
       if (prevUrl === undefined) delete process.env.ADMIN_API_URL;
       else process.env.ADMIN_API_URL = prevUrl;
+    }
+  });
+
+  await test('loadAgentCardBenchmarkAdmin prefers the unified CLI session', async () => {
+    const homeDirectory = await mkdtemp(path.join(tmpdir(), 'agentcard-admin-config-'));
+    const previous = {
+      unifiedJwt: process.env.AGENT_CARDS_JWT,
+      adminJwt: process.env.AGENT_CARDS_ADMIN_JWT,
+      unifiedUrl: process.env.AGENT_CARDS_API_URL,
+      adminUrl: process.env.ADMIN_API_URL,
+    };
+    delete process.env.AGENT_CARDS_JWT;
+    delete process.env.AGENT_CARDS_ADMIN_JWT;
+    delete process.env.AGENT_CARDS_API_URL;
+    delete process.env.ADMIN_API_URL;
+    try {
+      await mkdir(path.join(homeDirectory, '.agent-cards'), { recursive: true });
+      await writeFile(
+        path.join(homeDirectory, '.agent-cards', 'config.json'),
+        JSON.stringify({ jwt: 'unified-jwt', apiUrl: 'https://unified.agentcard.test' })
+      );
+      await writeFile(
+        path.join(homeDirectory, '.agent-cards-admin.json'),
+        JSON.stringify({ jwt: 'retired-jwt', apiUrl: 'https://retired.agentcard.test' })
+      );
+
+      const admin = await loadAgentCardBenchmarkAdmin(homeDirectory);
+      assert.equal(admin.token, 'unified-jwt');
+      assert.equal(admin.apiUrl, 'https://unified.agentcard.test');
+    } finally {
+      if (previous.unifiedJwt === undefined) delete process.env.AGENT_CARDS_JWT;
+      else process.env.AGENT_CARDS_JWT = previous.unifiedJwt;
+      if (previous.adminJwt === undefined) delete process.env.AGENT_CARDS_ADMIN_JWT;
+      else process.env.AGENT_CARDS_ADMIN_JWT = previous.adminJwt;
+      if (previous.unifiedUrl === undefined) delete process.env.AGENT_CARDS_API_URL;
+      else process.env.AGENT_CARDS_API_URL = previous.unifiedUrl;
+      if (previous.adminUrl === undefined) delete process.env.ADMIN_API_URL;
+      else process.env.ADMIN_API_URL = previous.adminUrl;
+      await rm(homeDirectory, { recursive: true, force: true });
     }
   });
 

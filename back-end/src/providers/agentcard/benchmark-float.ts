@@ -48,22 +48,36 @@ async function adminRequest(
   return body;
 }
 
-export async function loadAgentCardBenchmarkAdmin(): Promise<AgentCardBenchmarkAdmin> {
-  let config: AdminConfig = {};
+async function readAdminConfig(configPath: string): Promise<AdminConfig> {
   try {
-    config = JSON.parse(
-      await readFile(path.join(homedir(), '.agent-cards-admin.json'), 'utf8')
-    ) as AdminConfig;
+    return JSON.parse(await readFile(configPath, 'utf8')) as AdminConfig;
   } catch {
-    // The env token below supports CI and fresh developer machines.
+    return {};
   }
+}
+
+export async function loadAgentCardBenchmarkAdmin(
+  homeDirectory = homedir()
+): Promise<AgentCardBenchmarkAdmin> {
+  const config = await readAdminConfig(path.join(homeDirectory, '.agent-cards', 'config.json'));
+  const legacyConfig = await readAdminConfig(path.join(homeDirectory, '.agent-cards-admin.json'));
   const token =
-    process.env.AGENT_CARDS_ADMIN_JWT?.trim() || config.accessToken?.trim() || config.jwt?.trim();
+    process.env.AGENT_CARDS_JWT?.trim() ||
+    process.env.AGENT_CARDS_ADMIN_JWT?.trim() ||
+    config.accessToken?.trim() ||
+    config.jwt?.trim() ||
+    legacyConfig.accessToken?.trim() ||
+    legacyConfig.jwt?.trim();
   if (!token) {
-    throw new Error('AgentCard admin login required; run npx agent-cards-admin login');
+    throw new Error('AgentCard admin login required; run npx agent-cards login');
   }
   return {
-    apiUrl: process.env.ADMIN_API_URL?.trim() || config.apiUrl?.trim() || DEFAULT_ADMIN_API_URL,
+    apiUrl:
+      process.env.AGENT_CARDS_API_URL?.trim() ||
+      process.env.ADMIN_API_URL?.trim() ||
+      config.apiUrl?.trim() ||
+      legacyConfig.apiUrl?.trim() ||
+      DEFAULT_ADMIN_API_URL,
     token,
   };
 }
