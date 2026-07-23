@@ -148,6 +148,13 @@ ensure_dependencies() {
   local source_workspace="$2"
   (
     cd "$target"
+    # Nested .context worktrees can accidentally resolve dependencies by
+    # walking up into the controller's node_modules. Require an installation
+    # rooted in the deploy worktree before the generic workspace verifier.
+    if [ ! -d node_modules ]; then
+      echo "📦 Installing deploy-worktree root dependencies..."
+      npm install --no-audit --no-fund
+    fi
     local workspaces=(back-end front-end)
     if [ "$(uname -s)" = "Darwin" ] &&
       git rev-parse --verify origin/main >/dev/null 2>&1 &&
