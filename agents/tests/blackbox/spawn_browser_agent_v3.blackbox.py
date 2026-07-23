@@ -9115,7 +9115,16 @@ async def test_wait_for_navigation_ready_reloads_blank_spa_shell_once():
     dom = MagicMock()
     dom.session = session
 
-    with patch.object(service_actions.asyncio, "sleep", AsyncMock()):
+    monotonic_time = 0.0
+
+    async def advance_clock(_seconds):
+        nonlocal monotonic_time
+        monotonic_time += 1.0
+
+    with (
+        patch.object(service_actions.asyncio, "sleep", advance_clock),
+        patch.object(service_actions.time_module, "monotonic", lambda: monotonic_time),
+    ):
         out = await service_actions.wait_for_navigation_ready(
             dom_service=dom,
             url="https://x.com/app",
@@ -9170,7 +9179,16 @@ async def test_wait_for_navigation_ready_regotos_stuck_loading_document_once():
     dom = MagicMock()
     dom.session = session
 
-    with patch.object(service_actions.asyncio, "sleep", AsyncMock()):
+    monotonic_time = 0.0
+
+    async def advance_clock(_seconds):
+        nonlocal monotonic_time
+        monotonic_time += 1.0
+
+    with (
+        patch.object(service_actions.asyncio, "sleep", advance_clock),
+        patch.object(service_actions.time_module, "monotonic", lambda: monotonic_time),
+    ):
         out = await service_actions.wait_for_navigation_ready(
             dom_service=dom,
             url="https://x.com/app",
