@@ -13,7 +13,9 @@ import { prisma } from '../../providers/database';
 import { lookupPurchase, mintPurchaseCard, PurchaseError } from '../../domains/purchases/service';
 import type { MintPurchaseInput } from '../../domains/purchases/types';
 import {
+  AgentCardProviderError,
   AgentCardRoutingProvider,
+  type CardProviderMintRequest,
   createCardProviderForAgent,
   StaticRoseAgentCardProvider,
 } from '../../providers/card-provider';
@@ -37,6 +39,29 @@ const STATIC_CARD_ENV = {
 const createdUserIds: string[] = [];
 let passed = 0;
 const failures: string[] = [];
+
+class TransferlessFundingInProgressCardProvider extends FakeCardProvider {
+  private returnedFundingGate = false;
+
+  async mintCard(request: CardProviderMintRequest) {
+    if (!this.returnedFundingGate) {
+      this.returnedFundingGate = true;
+      this.mintCalls += 1;
+      this.mintRequests.push(request);
+      throw new AgentCardProviderError(
+        'AgentCard company funding is in progress',
+        409,
+        undefined,
+        'agentcard_company_funding_in_progress',
+        {
+          agentcardStatus: 'funding_in_progress',
+          retryAfterSeconds: 0,
+        }
+      );
+    }
+    return super.mintCard(request);
+  }
+}
 
 async function test(name: string, fn: () => Promise<void>): Promise<void> {
   try {
@@ -139,6 +164,21 @@ async function main(): Promise<void> {
       'the settling company transfer is confirmed before the card mints'
     );
     assert.equal(provider.mintCalls, 2, 'mint retried after the funding-in-progress signal');
+  });
+
+  await test('mintPurchaseCard retries transferless AgentCard funding-in-progress', async () => {
+    const userId = await seedSubscribedUser();
+    const provider = new TransferlessFundingInProgressCardProvider();
+    const wallet = new FakeWalletFundingProvider();
+    const input = mintInput(userId);
+    const result = await withFakeStripe(async () => mintPurchaseCard(input, provider, wallet));
+    assert.equal(result.status, PurchaseSpendStatus.HELD);
+    assert.equal(provider.mintCalls, 2, 'mint retried after transferless funding signal');
+    assert.equal(
+      wallet.confirmCalls.length,
+      0,
+      'no transfer is confirmed until AgentCard returns a concrete transfer id'
+    );
   });
 
   await test('mintPurchaseCard validates its inputs before touching Stripe', async () => {

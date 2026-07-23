@@ -265,14 +265,12 @@ function throwForGate(record: Record<string, unknown>, result: unknown): void {
   const code = errorCode(record, text);
   if (code === 'funding_in_progress') {
     const transferId = companyTransferId(record, text);
+    const retryAfterSeconds = optionalNumber(record, ['retry_after_seconds', 'retryAfterSeconds']);
     if (transferId === undefined) {
       log.warn('AgentCard funding_in_progress response omitted a recognized transfer id', {
         top_level_keys: Object.keys(record),
         result_shape: recordShape(record),
       });
-      throw new AgentCardProviderError(
-        'AgentCard company funding is in progress without a transfer id'
-      );
     }
     throw new AgentCardProviderError(
       'AgentCard company funding is in progress',
@@ -281,8 +279,8 @@ function throwForGate(record: Record<string, unknown>, result: unknown): void {
       'agentcard_company_funding_in_progress',
       {
         agentcardStatus: code,
-        transferId,
-        retryAfterSeconds: optionalNumber(record, ['retry_after_seconds', 'retryAfterSeconds']),
+        ...(transferId !== undefined ? { transferId } : {}),
+        ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
         agentcardResult: record,
       }
     );
