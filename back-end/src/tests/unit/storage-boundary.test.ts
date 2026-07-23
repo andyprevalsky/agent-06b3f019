@@ -51,6 +51,51 @@ async function main(): Promise<void> {
     }
   });
 
+  await test('processUploadedFile works when native WebSocket is unavailable', async () => {
+    const oldUrl = process.env.SUPABASE_URL;
+    const oldKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const oldFetch = globalThis.fetch;
+    const globalWithWebSocket = globalThis as typeof globalThis & { WebSocket?: unknown };
+    const oldWebSocket = globalWithWebSocket.WebSocket;
+    const requests: { url: string; method: string | undefined }[] = [];
+    try {
+      process.env.SUPABASE_URL = 'https://example.supabase.co';
+      process.env.SUPABASE_SERVICE_ROLE_KEY = 'dummy';
+      globalWithWebSocket.WebSocket = undefined;
+      globalThis.fetch = (async (input, init) => {
+        requests.push({ url: String(input), method: init?.method });
+        return new Response(JSON.stringify({ Key: 'attachments/user-1/fake_small.txt' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        });
+      }) as typeof fetch;
+
+      const pointer = await processUploadedFile(
+        'user-1',
+        Buffer.from('small'),
+        'small.txt',
+        'text/plain'
+      );
+
+      assert.equal(pointer.original_filename, 'small.txt');
+      assert.equal(pointer.mime_type, 'text/plain');
+      assert.equal(requests.length, 1);
+      assert.match(
+        requests[0].url,
+        /https:\/\/example\.supabase\.co\/storage\/v1\/object\/attachments\/user-1\//
+      );
+      assert.equal(requests[0].method, 'POST');
+    } finally {
+      if (oldUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = oldUrl;
+      if (oldKey === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+      else process.env.SUPABASE_SERVICE_ROLE_KEY = oldKey;
+      globalThis.fetch = oldFetch;
+      if (oldWebSocket === undefined) delete globalWithWebSocket.WebSocket;
+      else globalWithWebSocket.WebSocket = oldWebSocket;
+    }
+  });
+
   await test('validateTotalSize accepts boundary and rejects oversized totals', () => {
     const atLimit: FilePointer[] = [
       {
@@ -76,5 +121,5 @@ void main().then(() => {
     process.exit(1);
   }
 
-  console.log(`\n${passed}/3 storage boundary tests passed`);
+  console.log(`\n${passed}/4 storage boundary tests passed`);
 });

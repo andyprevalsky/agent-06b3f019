@@ -202,6 +202,32 @@ async function main(): Promise<void> {
       error instanceof Error && error.message.includes('idempotencyKey is required')
   );
 
+  const fundingGateProvider = new AgentCardOrgMcpProvider('cardholder-123', async (name) => {
+    if (name === 'create_card') {
+      return toolResult({
+        status: 'funding_in_progress',
+        provider_transfer_id: 'owt-provider-snake',
+        retry_after_seconds: 3,
+      });
+    }
+    throw new Error(`unexpected funding-gate tool ${name}`);
+  });
+  await assert.rejects(
+    () =>
+      fundingGateProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:funding-gate',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_company_funding_in_progress' &&
+      'details' in error &&
+      error.details.transferId === 'owt-provider-snake' &&
+      error.details.retryAfterSeconds === 3
+  );
+
   // An MCP error with no textual content must still surface the fallback message rather than an
   // empty string.
   const emptyErrorProvider = new AgentCardOrgMcpProvider('cardholder-123', async (name) => {

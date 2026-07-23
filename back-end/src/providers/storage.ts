@@ -1,5 +1,7 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import type { WebSocketLikeConstructor } from '@supabase/realtime-js';
 import crypto from 'crypto';
+import WebSocket from 'ws';
 import { createLogger } from './logger';
 import { retryWithBackoff } from './retry';
 
@@ -17,7 +19,11 @@ function getSupabaseClient(): SupabaseClient {
       throw new Error('Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY environment variable');
     }
 
-    supabaseClient = createClient(supabaseUrl, supabaseServiceKey);
+    supabaseClient = createClient(supabaseUrl, supabaseServiceKey, {
+      realtime: {
+        transport: WebSocket as unknown as WebSocketLikeConstructor,
+      },
+    });
   }
   return supabaseClient;
 }
