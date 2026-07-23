@@ -60,17 +60,19 @@ export interface CreateSessionResult {
   github_repo_url: string | null;
 }
 
-/** Attempt to auto-inject GitHub repo URL from agent or root agent. */
-async function resolveGithubRepo(
+/** Resolve the owning user and optional GitHub repo from the agent tree. */
+export async function resolveAgentContext(
   agentId: string,
   userId: string | undefined
 ): Promise<{ repoUrl: string | undefined; userId: string | undefined }> {
   try {
     const agent = await repo.findAgentGithubInfo(agentId);
+    const resolvedUserId =
+      userId !== undefined && userId !== '' ? userId : (agent?.userId ?? undefined);
     if (agent?.githubRepoUrl !== undefined && agent.githubRepoUrl !== null) {
       return {
         repoUrl: agent.githubRepoUrl,
-        userId: userId !== undefined && userId !== '' ? userId : agent.userId,
+        userId: resolvedUserId,
       };
     }
     if (
@@ -83,12 +85,14 @@ async function resolveGithubRepo(
       if (rootAgent?.githubRepoUrl !== undefined && rootAgent.githubRepoUrl !== null) {
         return {
           repoUrl: rootAgent.githubRepoUrl,
-          userId: userId !== undefined && userId !== '' ? userId : rootAgent.userId,
+          userId: resolvedUserId ?? rootAgent.userId,
         };
       }
+      return { repoUrl: undefined, userId: resolvedUserId ?? rootAgent?.userId };
     }
+    return { repoUrl: undefined, userId: resolvedUserId };
   } catch (err) {
-    log.error('Failed to look up agent GitHub repo', {
+    log.error('Failed to look up agent owner and GitHub repo', {
       error: err instanceof Error ? err.message : String(err),
     });
   }
@@ -100,12 +104,16 @@ export async function createSession(params: CreateSessionParams): Promise<Create
   let effectiveGithubRepoUrl = params.github_repo_url;
   let effectiveUserId = user_id;
 
-  // Auto-inject GitHub repo URL from agent record if not explicitly provided.
+  // The agents service does not need to duplicate the user ID on every internal
+  // code-session request. Resolve ownership from the authoritative Agent row so
+  // repo-less agents can still consume their user's stored OAuth credential.
+  const resolved = await resolveAgentContext(agent_id, effectiveUserId);
+  effectiveUserId = resolved.userId;
+
+  // Auto-inject GitHub repo URL from the agent tree if not explicitly provided.
   if (effectiveGithubRepoUrl === undefined || effectiveGithubRepoUrl === '') {
-    const resolved = await resolveGithubRepo(agent_id, effectiveUserId);
     if (resolved.repoUrl !== undefined) {
       effectiveGithubRepoUrl = resolved.repoUrl;
-      effectiveUserId = resolved.userId;
       log.info(`Auto-injecting GitHub repo from agent tree: ${effectiveGithubRepoUrl}`);
     }
   }

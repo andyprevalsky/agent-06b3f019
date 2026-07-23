@@ -4,6 +4,7 @@ import { PreContentFallThroughError, runWithFallThrough } from './fallThroughStr
 import { hedgeStreams } from './hedgedStream';
 import { createLogger } from '../logger';
 import { exclusiveOpenRouterCerebrasCompletion } from './openrouterCerebrasRoute';
+import { exclusiveOpenRouterFastChatCompletion } from './openrouterFastRoute';
 import { exclusiveOpenRouterWaterfall } from './openrouterRoute';
 import type { PoolSpec } from './pools';
 import type { CompletionChunk, CompletionOptions, RoseStreamChunk } from './types';
@@ -79,12 +80,12 @@ function withBranchAbort(options: CompletionOptions, branchSignal: AbortSignal):
 }
 
 /**
- * Race the same-model OpenRouter GLM spill against the generic model
- * waterfall. This branch is entered only after direct Cerebras has remained
- * silent long enough to arm the outer hedge, so the normal fast path still
- * makes one provider request. Individual OpenRouter providers can have long
- * generation tails; racing the two existing fallbacks keeps either tail from
- * serializing a synchronous chat turn.
+ * Race the same-model OpenRouter GLM spill against a paid, low-latency Gemini
+ * model. This branch is entered only after direct Cerebras has remained silent
+ * long enough to arm the outer hedge, so the normal fast path still makes one
+ * provider request. The former Gemini 3.5 fallback took 6–10s to first token
+ * under burst; this route's dedicated model keeps the same schema/tool contract
+ * with a measured sub-1.4s first-token tail.
  */
 export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   poolSpec: PoolSpec;
@@ -112,11 +113,13 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
         }),
     },
     hedge: {
-      name: 'waterfall',
+      name: 'openrouter-fast-chat',
       produce: (signal) =>
-        exclusiveOpenRouterWaterfall({
-          ...params,
+        exclusiveOpenRouterFastChatCompletion({
           options: withBranchAbort(params.options, signal),
+          openrouterKey,
+          requestId: params.requestId,
+          callSite: params.callSite,
         }),
     },
     // Both branches are already delayed behind the outer Cerebras hedge. Start
@@ -129,7 +132,7 @@ export async function* raceDirectCerebrasOpenRouterFallbacks(params: {
   });
 
   for await (const chunk of raced) yield chunk;
-  log.info('cerebras_chat.openrouter_fallback_race_done', {
+  log.info('cerebras_chat.fallback_race_done', {
     request_id: params.requestId,
     winner: winnerName,
   });
@@ -201,7 +204,7 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
         onWinner: (name) => {
           winnerName = name;
           if (name !== 'cerebras') {
-            log.warn('cerebras_chat.hedge_waterfall_won', {
+            log.warn('cerebras_chat.hedge_fallback_won', {
               request_id: params.requestId,
               pool: params.pool,
               hedge_ms: hedgeMs,
@@ -218,7 +221,7 @@ export async function* runCerebrasChatWithWaterfallFallback(params: {
         log.info(
           winnerName === 'cerebras'
             ? params.cerebrasRoute.doneEvent
-            : 'cerebras_chat.hedge_waterfall.done',
+            : 'cerebras_chat.hedge_fallback.done',
           {
             request_id: params.requestId,
             pool: params.pool,
