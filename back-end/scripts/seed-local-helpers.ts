@@ -40,11 +40,7 @@ type UserIdentityRecord = {
 };
 
 type UserIdentityModel<T extends UserIdentityRecord> = {
-  upsert(args: {
-    where: { userId: string };
-    create: T;
-    update: Omit<T, 'id'>;
-  }): Promise<unknown>;
+  upsert(args: { where: { userId: string }; create: T; update: Omit<T, 'id'> }): Promise<unknown>;
 };
 
 export type LocalUserModel = UserIdentityModel<RemoteUserRecord>;
