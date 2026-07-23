@@ -1,15 +1,17 @@
-import { type AgentStatus } from '@prisma/client';
+import { Prisma, type AgentStatus } from '@prisma/client';
 import { prisma } from './database';
+import { getTemporalClient } from './temporal';
 
 const TERMINAL_AGENT_STATUSES: AgentStatus[] = ['COMPLETED', 'FAILED'];
 
 export interface WorkflowDeploymentCandidate {
   agentId: string;
   workflowId: string;
+  status?: AgentStatus;
 }
 
 export interface WorkflowDeploymentOutcome extends WorkflowDeploymentCandidate {
-  outcome: 'prepared' | 'migrated' | 'skipped' | 'failed';
+  outcome: 'validated' | 'prepared' | 'migrated' | 'skipped' | 'failed';
   error?: string;
 }
 
@@ -23,6 +25,9 @@ export interface WorkflowDeploymentSkip {
 }
 
 export interface WorkflowDeploymentCutoverDependencies<T> {
+  preflight: (
+    candidate: WorkflowDeploymentCandidate
+  ) => Promise<{ outcome: 'ready' } | WorkflowDeploymentSkip>;
   prepare: (
     candidate: WorkflowDeploymentCandidate
   ) => Promise<WorkflowDeploymentPreparation<T> | WorkflowDeploymentSkip>;
@@ -34,7 +39,7 @@ export interface WorkflowDeploymentCutoverDependencies<T> {
 export interface WorkflowDeploymentCutoverResult {
   outcomes: WorkflowDeploymentOutcome[];
   activated: boolean;
-  haltedAfter: 'prepare' | 'activation' | 'canary' | null;
+  haltedAfter: 'preflight' | 'prepare' | 'activation' | 'canary' | null;
   activationError?: string;
 }
 
@@ -49,6 +54,8 @@ interface WorkflowReplacementBootstrapWaitOptions {
     status: AgentStatus;
     statusMessage: string | null;
   } | null>;
+  requireInitialized?: boolean;
+  readInitialized?: (workflowId: string) => Promise<boolean>;
 }
 
 /**
@@ -68,28 +75,73 @@ export async function snapshotOpenRootWorkflows(
       status: { notIn: TERMINAL_AGENT_STATUSES },
     },
     orderBy: { id: 'asc' },
-    select: { id: true, temporalWorkflowId: true },
+    select: { id: true, temporalWorkflowId: true, status: true },
   });
   return agents.flatMap((agent) =>
     agent.temporalWorkflowId === null
       ? []
-      : [{ agentId: agent.id, workflowId: agent.temporalWorkflowId }]
+      : [{ agentId: agent.id, workflowId: agent.temporalWorkflowId, status: agent.status }]
   );
 }
 
 /** Refuse activation if an orphan/late descendant escaped every root cleanup. */
-export async function assertNoUnsafeOpenDescendantWorkflows(): Promise<void> {
-  const unsafe = await prisma.agent.findMany({
-    where: {
-      deletedAt: null,
-      parentAgentId: { not: null },
-      temporalWorkflowId: { not: null },
-      status: { notIn: TERMINAL_AGENT_STATUSES },
-    },
-    orderBy: { id: 'asc' },
-    take: 20,
-    select: { id: true, temporalWorkflowId: true },
-  });
+export async function assertNoUnsafeOpenDescendantWorkflows(
+  rootAgentIds?: string[]
+): Promise<void> {
+  const unsafe =
+    rootAgentIds === undefined
+      ? await prisma.agent.findMany({
+          where: {
+            deletedAt: null,
+            parentAgentId: { not: null },
+            OR: [
+              { temporalWorkflowStartPending: true },
+              {
+                temporalWorkflowId: { not: null },
+                status: { notIn: TERMINAL_AGENT_STATUSES },
+              },
+            ],
+          },
+          orderBy: { id: 'asc' },
+          take: 20,
+          select: {
+            id: true,
+            temporalWorkflowId: true,
+            temporalWorkflowStartPending: true,
+          },
+        })
+      : rootAgentIds.length === 0
+        ? []
+        : await prisma.$queryRaw<
+            Array<{
+              id: string;
+              temporalWorkflowId: string | null;
+              temporalWorkflowStartPending: boolean;
+            }>
+          >(Prisma.sql`
+            WITH RECURSIVE descendants AS (
+              SELECT child.*
+              FROM "Agent" child
+              WHERE child."parentAgentId" IN (${Prisma.join(rootAgentIds)})
+                AND child."deletedAt" IS NULL
+
+              UNION ALL
+
+              SELECT child.*
+              FROM "Agent" child
+              INNER JOIN descendants parent ON child."parentAgentId" = parent.id
+              WHERE child."deletedAt" IS NULL
+            )
+            SELECT id, "temporalWorkflowId", "temporalWorkflowStartPending"
+            FROM descendants
+            WHERE "temporalWorkflowStartPending" = true
+               OR (
+                 "temporalWorkflowId" IS NOT NULL
+                 AND status NOT IN ('COMPLETED'::"AgentStatus", 'FAILED'::"AgentStatus")
+               )
+            ORDER BY id ASC
+            LIMIT 20
+          `);
   if (unsafe.length > 0) {
     throw new Error(
       `Refusing worker activation while ${unsafe.length}${unsafe.length === 20 ? '+' : ''} open descendant workflow row(s) remain: ${unsafe.map((row) => `${row.id}=${row.temporalWorkflowId}`).join(', ')}`
@@ -145,9 +197,25 @@ export async function runWorkflowDeploymentCutover<T>(
     throw new Error('Migration canary count must be a positive integer');
   }
 
-  const preparedByAgent = new Map<string, T>();
   const outcomes = await migrateWorkflowCandidates(
     candidates,
+    async (candidate) => {
+      const result = await dependencies.preflight(candidate);
+      if (result.outcome === 'skipped') return { ...candidate, outcome: 'skipped' };
+      return { ...candidate, outcome: 'validated' };
+    },
+    options.concurrency
+  );
+  if (outcomes.some((outcome) => outcome.outcome === 'failed')) {
+    return { outcomes, activated: false, haltedAfter: 'preflight' };
+  }
+
+  const preparedByAgent = new Map<string, T>();
+  const validatedIndexes = outcomes.flatMap((outcome, index) =>
+    outcome.outcome === 'validated' ? [index] : []
+  );
+  const preparationOutcomes = await migrateWorkflowCandidates(
+    validatedIndexes.map((index) => candidates[index]),
     async (candidate) => {
       const result = await dependencies.prepare(candidate);
       if (result.outcome === 'skipped') return { ...candidate, outcome: 'skipped' };
@@ -156,6 +224,9 @@ export async function runWorkflowDeploymentCutover<T>(
     },
     options.concurrency
   );
+  validatedIndexes.forEach((index, outcomeIndex) => {
+    outcomes[index] = preparationOutcomes[outcomeIndex];
+  });
   if (outcomes.some((outcome) => outcome.outcome === 'failed')) {
     return { outcomes, activated: false, haltedAfter: 'prepare' };
   }
@@ -183,7 +254,7 @@ export async function runWorkflowDeploymentCutover<T>(
     return { ...candidate, outcome: 'migrated' };
   };
 
-  const canaryIndexes = preparedIndexes.slice(0, options.canaryCount);
+  const canaryIndexes = selectCanaryIndexes(candidates, preparedIndexes, options.canaryCount);
   for (const index of canaryIndexes) {
     try {
       outcomes[index] = await migratePrepared(index);
@@ -197,7 +268,8 @@ export async function runWorkflowDeploymentCutover<T>(
     }
   }
 
-  const bulkIndexes = preparedIndexes.slice(options.canaryCount);
+  const canarySet = new Set(canaryIndexes);
+  const bulkIndexes = preparedIndexes.filter((index) => !canarySet.has(index));
   const bulkOutcomes = await migrateWorkflowCandidates(
     bulkIndexes.map((index) => candidates[index]),
     async (candidate) => {
@@ -210,6 +282,32 @@ export async function runWorkflowDeploymentCutover<T>(
     outcomes[index] = bulkOutcomes[outcomeIndex];
   });
   return { outcomes, activated: true, haltedAfter: null };
+}
+
+function selectCanaryIndexes(
+  candidates: WorkflowDeploymentCandidate[],
+  preparedIndexes: number[],
+  canaryCount: number
+): number[] {
+  const selected: number[] = [];
+  for (const status of [
+    'ACTIVE',
+    'PAUSED',
+    'COST_LIMIT_REACHED',
+    'OUT_OF_CREDITS',
+    'STARTING_UP',
+  ] satisfies AgentStatus[]) {
+    const match = preparedIndexes.find(
+      (index) => candidates[index].status === status && !selected.includes(index)
+    );
+    if (match !== undefined) selected.push(match);
+    if (selected.length >= canaryCount) return selected;
+  }
+  for (const index of preparedIndexes) {
+    if (!selected.includes(index)) selected.push(index);
+    if (selected.length >= canaryCount) break;
+  }
+  return selected;
 }
 
 /**
@@ -246,6 +344,12 @@ export async function waitForWorkflowReplacementBootstrap(
           statusMessage: true,
         },
       }));
+  const readInitialized =
+    options.readInitialized ??
+    (async (id: string) => {
+      const temporalClient = await getTemporalClient();
+      return temporalClient.workflow.getHandle(id).query<boolean>('deployment_initialized_query');
+    });
   const deadline = now() + timeoutMs;
 
   while (true) {
@@ -267,7 +371,13 @@ export async function waitForWorkflowReplacementBootstrap(
           `${agentId}: candidate acknowledged bootstrap before durable readiness (status ${state.status})`
         );
       }
-      return;
+      if (!options.requireInitialized || state.status !== 'ACTIVE') return;
+      try {
+        if (await readInitialized(workflowId)) return;
+      } catch {
+        // A candidate can briefly be between bootstrap acknowledgement and
+        // query-handler availability. Stay inside the same bounded wait.
+      }
     }
     if (now() >= deadline) {
       throw new Error(`${agentId}: candidate did not bootstrap within ${timeoutMs}ms`);

@@ -85,7 +85,8 @@ async function routeUserMessage(agentId: string, messageText: string): Promise<v
     const { count } = await repo.clearWorkflowForTerminalAgent(
       agentId,
       agentForChat.status,
-      agentForChat.temporalWorkflowId
+      agentForChat.temporalWorkflowId,
+      agentForChat.temporalFirstExecutionRunId
     );
     if (count > 0) {
       agentForChat.temporalWorkflowId = null;
@@ -208,12 +209,17 @@ export async function postMessage(
       (body.attachments ?? []) as Array<Record<string, unknown>>,
       generation
     );
-    if (!result.accepted || result.message === null) {
+    if (result.message === null) {
       return {
         error: 'Workflow generation is no longer current',
         status: 409,
       };
     }
+    // A stale TOOL lifecycle write is not accepted as the worker's requested
+    // transition, but the generation fence returns its canonical terminal row.
+    // Return that row to the stale worker so the LLM observes the deployment
+    // interruption and decides whether to retry. Non-TOOL stale writes have no
+    // canonical row and still take the 409 path above.
     message = result.message;
   } else {
     message = await createMessage(messageParams);

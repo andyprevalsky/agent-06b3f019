@@ -78,6 +78,38 @@ async function main(): Promise<void> {
     }
   });
 
+  await test('activity retry operation key stores one usage and one cumulative checkpoint', async () => {
+    const fixture = await createAgent(null, 0);
+    const operationKey = `${fixture.agentId}:run-1:activity-7`;
+    const input = {
+      agent_id: fixture.agentId,
+      user_id: fixture.userId,
+      tool_name: 'execute_loop',
+      total_cost_cents: 3,
+      workflow_generation: fixture.agentId,
+      operation_key: operationKey,
+      accounting_checkpoint: {
+        token_count: 125,
+        tokens_in: 90,
+        tokens_out: 35,
+        own_cost_cents: 3.5,
+      },
+      usage_items: [{ type: 'llm', iteration: 2, tokens_in: 90, tokens_out: 35 }],
+    };
+    try {
+      const [first, retried] = await Promise.all([saveToolUsage(input), saveToolUsage(input)]);
+      assert.strictEqual(first.id, retried.id);
+      const rows = await prisma.toolUsage.findMany({ where: { operationKey } });
+      assert.strictEqual(rows.length, 1);
+      assert.strictEqual(rows[0].tokenCountCheckpoint, 125);
+      assert.strictEqual(rows[0].tokensInCheckpoint, 90);
+      assert.strictEqual(rows[0].tokensOutCheckpoint, 35);
+      assert.strictEqual(rows[0].ownCostCheckpointCents, 3.5);
+    } finally {
+      await prisma.agent.deleteMany({ where: { id: fixture.agentId } });
+    }
+  });
+
   await test('stale generation inserts no usage and cannot advance iteration state', async () => {
     const fixture = await createAgent(null, 6);
     const currentGeneration = `${fixture.agentId}:replacement:${randomUUID()}`;

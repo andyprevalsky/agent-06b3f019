@@ -1,34 +1,24 @@
 import { randomUUID } from 'node:crypto';
 import { Prisma, type Agent, type AgentStatus } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from './database';
-import { stringMetadataValue } from './toolLifecycleMessages';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
 import type { TemporalWorkflowExecutionRef } from './temporal';
+import { savedResumeState, type WorkflowResumeState } from './workflowReplacementResumeState';
 
-export interface WorkflowResumeState {
-  version: 1;
-  kind: 'deployment';
-  prior_status: AgentStatus;
-  prior_status_message: string | null;
-  progress: number;
-  token_count: number;
-  tokens_in: number;
-  tokens_out: number;
-  tree_tokens_in: number;
-  tree_tokens_out: number;
-  context_size: number;
-  message_count: number;
-  own_cost_cents: number;
-  subtree_cost_cents: number;
-  children_cost_cents: Record<string, number>;
-  children_tokens_in: Record<string, number>;
-  children_tokens_out: Record<string, number>;
-  child_last_tokens: Record<string, { tokens_in: number; tokens_out: number; token_count: number }>;
-  child_tool_counts: Record<string, number>;
-  iteration_offset: number;
-  max_iterations: number | null;
-  context_gates: Record<string, boolean> | null;
-}
+export type { WorkflowResumeState } from './workflowReplacementResumeState';
+export {
+  recordWorkflowResumeIntent,
+  rollbackWorkflowResumeIntent,
+  type WorkflowResumeIntentResult,
+} from './workflowReplacementControlState';
+export {
+  acknowledgeWorkflowReplacementBootstrap,
+  finalizeWorkflowReplacementBootstrap,
+  markWorkflowReplacementFailed,
+  recordWorkflowReplacementStartAcceptance,
+  type WorkflowReplacementBootstrapAcknowledgement,
+  type WorkflowReplacementBootstrapState,
+} from './workflowReplacementBootstrapState';
 
 export interface WorkflowLaunchConfig {
   maxIterations: number | null;
@@ -55,9 +45,6 @@ export interface WorkflowReplacementClaimOptions {
   expectedWorkflowId: string;
 }
 
-export type WorkflowReplacementBootstrapAcknowledgement =
-  'acknowledged' | 'already_acknowledged' | 'not_found' | 'stale_generation';
-
 const EXCLUDED_CHILD_TOOL_COUNTS = new Set([
   'completion_summary',
   'attempt_completion',
@@ -69,6 +56,7 @@ interface DescendantAccountingRow {
   id: string;
   parentAgentId: string;
   depth: number;
+  status: AgentStatus;
   tokenCount: number;
   tokensIn: number;
   tokensOut: number;
@@ -82,28 +70,20 @@ interface DurableAccounting {
   tokensOut: number;
   ownCostCents: number;
   hasLlmUsage: boolean;
+  hasCheckpoint: boolean;
 }
 
-function savedResumeState(value: Prisma.JsonValue | null): WorkflowResumeState {
-  if (
-    value === null ||
-    typeof value !== 'object' ||
-    Array.isArray(value) ||
-    value.version !== 1 ||
-    value.kind !== 'deployment'
-  ) {
-    throw new Error('Workflow replacement claim is missing its durable resume state');
-  }
-  const childToolCounts =
-    value.child_tool_counts !== null &&
-    typeof value.child_tool_counts === 'object' &&
-    !Array.isArray(value.child_tool_counts)
-      ? value.child_tool_counts
-      : {};
-  return {
-    ...value,
-    child_tool_counts: childToolCounts,
-  } as unknown as WorkflowResumeState;
+interface UsageAccountingRow {
+  agentId: string;
+  legacyTokenCount: bigint;
+  legacyTokensIn: bigint;
+  legacyTokensOut: bigint;
+  legacyOwnCostCents: number;
+  legacyLlmItems: bigint;
+  tokenCountCheckpoint: number | null;
+  tokensInCheckpoint: number | null;
+  tokensOutCheckpoint: number | null;
+  ownCostCheckpointCents: number | null;
 }
 
 function booleanRecord(value: Prisma.JsonValue | null): Record<string, boolean> | null {
@@ -114,69 +94,6 @@ function booleanRecord(value: Prisma.JsonValue | null): Record<string, boolean> 
   return Object.fromEntries(entries);
 }
 
-function terminalChildToolCounts(
-  messages: Array<{
-    agentId: string;
-    workflowGeneration: string | null;
-    metadata: Prisma.JsonValue | null;
-  }>
-): Record<string, number> {
-  const terminalCalls = new Map<string, string>();
-  for (const message of messages) {
-    const metadata =
-      message.metadata !== null &&
-      typeof message.metadata === 'object' &&
-      !Array.isArray(message.metadata)
-        ? (message.metadata as Record<string, unknown>)
-        : null;
-    const toolCallId = stringMetadataValue(metadata, 'toolCallId');
-    const toolName = stringMetadataValue(metadata, 'toolName');
-    if (
-      toolCallId === null ||
-      toolName === null ||
-      metadata?.toolStatus !== 'FINISHED' ||
-      metadata.verifierMessage === true ||
-      EXCLUDED_CHILD_TOOL_COUNTS.has(toolName)
-    ) {
-      continue;
-    }
-    const generation =
-      message.workflowGeneration ??
-      stringMetadataValue(metadata, 'workflowGeneration') ??
-      message.agentId;
-    terminalCalls.set(`${message.agentId}:${generation}:${toolCallId}`, toolName);
-  }
-  const counts: Record<string, number> = {};
-  for (const toolName of terminalCalls.values()) {
-    counts[toolName] = (counts[toolName] ?? 0) + 1;
-  }
-  return counts;
-}
-
-function llmAccounting(
-  usageItems: Prisma.JsonValue,
-  current: DurableAccounting
-): DurableAccounting {
-  if (!Array.isArray(usageItems)) return current;
-  for (const item of usageItems) {
-    if (item === null || typeof item !== 'object' || Array.isArray(item) || item.type !== 'llm') {
-      continue;
-    }
-    const tokensIn =
-      typeof item.tokens_in === 'number' && Number.isFinite(item.tokens_in) ? item.tokens_in : 0;
-    const tokensOut =
-      typeof item.tokens_out === 'number' && Number.isFinite(item.tokens_out) ? item.tokens_out : 0;
-    const cost =
-      typeof item.cost_cents === 'number' && Number.isFinite(item.cost_cents) ? item.cost_cents : 0;
-    current.tokensIn += Math.max(0, Math.trunc(tokensIn));
-    current.tokensOut += Math.max(0, Math.trunc(tokensOut));
-    current.tokenCount += Math.max(0, Math.trunc(tokensIn)) + Math.max(0, Math.trunc(tokensOut));
-    current.ownCostCents += Math.max(0, cost);
-    current.hasLlmUsage = true;
-  }
-  return current;
-}
-
 function durableOwnAccounting(
   rows: Array<{
     id: string;
@@ -185,19 +102,24 @@ function durableOwnAccounting(
     tokensOut: number;
     ownCostCents: number;
   }>,
-  usages: Array<{ agentId: string | null; usageItems: Prisma.JsonValue }>
+  usages: UsageAccountingRow[]
 ): Map<string, DurableAccounting> {
   const usageByAgent = new Map<string, DurableAccounting>();
   for (const usage of usages) {
-    if (usage.agentId === null) continue;
-    const current = usageByAgent.get(usage.agentId) ?? {
-      tokenCount: 0,
-      tokensIn: 0,
-      tokensOut: 0,
-      ownCostCents: 0,
-      hasLlmUsage: false,
-    };
-    usageByAgent.set(usage.agentId, llmAccounting(usage.usageItems, current));
+    const hasCheckpoint =
+      usage.tokenCountCheckpoint !== null &&
+      usage.tokensInCheckpoint !== null &&
+      usage.tokensOutCheckpoint !== null &&
+      usage.ownCostCheckpointCents !== null;
+    const hasLegacyUsage = usage.legacyLlmItems > 0n;
+    usageByAgent.set(usage.agentId, {
+      tokenCount: hasCheckpoint ? usage.tokenCountCheckpoint! : Number(usage.legacyTokenCount),
+      tokensIn: hasCheckpoint ? usage.tokensInCheckpoint! : Number(usage.legacyTokensIn),
+      tokensOut: hasCheckpoint ? usage.tokensOutCheckpoint! : Number(usage.legacyTokensOut),
+      ownCostCents: hasCheckpoint ? usage.ownCostCheckpointCents! : usage.legacyOwnCostCents,
+      hasLlmUsage: hasCheckpoint || hasLegacyUsage,
+      hasCheckpoint,
+    });
   }
 
   return new Map(
@@ -206,13 +128,17 @@ function durableOwnAccounting(
       return [
         row.id,
         {
-          tokenCount: usage?.hasLlmUsage === true ? usage.tokenCount : row.tokenCount,
+          // tokenCount and ownCostCents were always own-agent DB fields.
+          // Historical tokensIn/tokensOut were sometimes subtree counters, so
+          // use the durable billed ledger (or a new cumulative checkpoint) when
+          // it exists instead of blindly taking a maximum and double-counting
+          // descendants.
+          tokenCount: Math.max(row.tokenCount, usage?.tokenCount ?? 0),
           tokensIn: usage?.hasLlmUsage === true ? usage.tokensIn : row.tokensIn,
           tokensOut: usage?.hasLlmUsage === true ? usage.tokensOut : row.tokensOut,
-          // ownCostCents is explicitly an own-agent DB field. ToolUsage closes
-          // its debounce window; max prevents either durable source regressing.
           ownCostCents: Math.max(row.ownCostCents, usage?.ownCostCents ?? 0),
           hasLlmUsage: usage?.hasLlmUsage === true,
+          hasCheckpoint: usage?.hasCheckpoint === true,
         },
       ];
     })
@@ -223,17 +149,35 @@ function descendantSubtreeAccounting(
   descendants: DescendantAccountingRow[],
   ownAccounting: Map<string, DurableAccounting>
 ): Map<string, DurableAccounting> {
-  const totals = new Map(
-    descendants.map((descendant) => [descendant.id, { ...ownAccounting.get(descendant.id)! }])
-  );
+  const childrenByParent = new Map<string, DescendantAccountingRow[]>();
+  for (const descendant of descendants) {
+    const children = childrenByParent.get(descendant.parentAgentId) ?? [];
+    children.push(descendant);
+    childrenByParent.set(descendant.parentAgentId, children);
+  }
+  const totals = new Map<string, DurableAccounting>();
   for (const descendant of descendants.slice().sort((left, right) => right.depth - left.depth)) {
-    const ownSubtree = totals.get(descendant.id);
-    const parentSubtree = totals.get(descendant.parentAgentId);
-    if (ownSubtree === undefined || parentSubtree === undefined) continue;
-    parentSubtree.tokenCount += ownSubtree.tokenCount;
-    parentSubtree.tokensIn += ownSubtree.tokensIn;
-    parentSubtree.tokensOut += ownSubtree.tokensOut;
-    parentSubtree.ownCostCents += ownSubtree.ownCostCents;
+    const own = ownAccounting.get(descendant.id)!;
+    const children = childrenByParent.get(descendant.id) ?? [];
+    const childTotals = children.map((child) => totals.get(child.id)!);
+    const childTokensIn = childTotals.reduce((sum, child) => sum + child.tokensIn, 0);
+    const childTokensOut = childTotals.reduce((sum, child) => sum + child.tokensOut, 0);
+    if (
+      !own.hasLlmUsage &&
+      !['COST_LIMIT_REACHED', 'OUT_OF_CREDITS', 'COMPLETED', 'FAILED'].includes(descendant.status)
+    ) {
+      own.tokensIn = Math.max(0, descendant.tokensIn - childTokensIn);
+      own.tokensOut = Math.max(0, descendant.tokensOut - childTokensOut);
+    }
+    totals.set(descendant.id, {
+      tokenCount: own.tokenCount + childTotals.reduce((sum, child) => sum + child.tokenCount, 0),
+      tokensIn: Math.max(descendant.tokensIn, own.tokensIn + childTokensIn),
+      tokensOut: Math.max(descendant.tokensOut, own.tokensOut + childTokensOut),
+      ownCostCents:
+        own.ownCostCents + childTotals.reduce((sum, child) => sum + child.ownCostCents, 0),
+      hasLlmUsage: own.hasLlmUsage,
+      hasCheckpoint: own.hasCheckpoint,
+    });
   }
   return totals;
 }
@@ -249,6 +193,7 @@ async function buildResumeState(
         child.id,
         child."parentAgentId",
         child.depth,
+        child.status,
         child."tokenCount",
         child."tokensIn",
         child."tokensOut",
@@ -264,6 +209,7 @@ async function buildResumeState(
         child.id,
         child."parentAgentId",
         child.depth,
+        child.status,
         child."tokenCount",
         child."tokensIn",
         child."tokensOut",
@@ -276,26 +222,122 @@ async function buildResumeState(
     SELECT * FROM descendants
   `;
   const accountingAgentIds = [agent.id, ...descendants.map((descendant) => descendant.id)];
-  const [terminalChildToolMessages, toolUsages] = await Promise.all([
+  const [terminalChildToolCounts, toolUsages] = await Promise.all([
     descendants.length === 0
       ? Promise.resolve([])
-      : tx.message.findMany({
-          where: {
-            agentId: { in: descendants.map((descendant) => descendant.id) },
-            role: 'TOOL',
-            metadata: { path: ['toolStatus'], equals: 'FINISHED' },
-          },
-          select: {
-            agentId: true,
-            workflowGeneration: true,
-            metadata: true,
-          },
-          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        }),
-    tx.toolUsage.findMany({
-      where: { agentId: { in: accountingAgentIds } },
-      select: { agentId: true, usageItems: true },
-    }),
+      : tx.$queryRaw<Array<{ toolName: string; count: bigint }>>(Prisma.sql`
+          WITH terminal_calls AS (
+            SELECT DISTINCT ON (
+              message."agentId",
+              COALESCE(
+                message."workflowGeneration",
+                message.metadata->>'workflowGeneration',
+                message."agentId"
+              ),
+              message.metadata->>'toolCallId'
+            )
+              message.metadata->>'toolName' AS "toolName"
+            FROM "Message" message
+            WHERE message."agentId" IN (${Prisma.join(
+              descendants.map((descendant) => descendant.id)
+            )})
+              AND message.role = 'TOOL'::"MessageRole"
+              AND message.metadata->>'toolStatus' = 'FINISHED'
+              AND message.metadata->>'toolCallId' IS NOT NULL
+              AND message.metadata->>'toolName' IS NOT NULL
+              AND COALESCE(message.metadata->>'verifierMessage', 'false') <> 'true'
+              AND message.metadata->>'toolName' NOT IN (${Prisma.join([
+                ...EXCLUDED_CHILD_TOOL_COUNTS,
+              ])})
+            ORDER BY
+              message."agentId",
+              COALESCE(
+                message."workflowGeneration",
+                message.metadata->>'workflowGeneration',
+                message."agentId"
+              ),
+              message.metadata->>'toolCallId',
+              message."createdAt" DESC,
+              message.id DESC
+          )
+          SELECT "toolName", COUNT(*)::bigint AS count
+          FROM terminal_calls
+          GROUP BY "toolName"
+        `),
+    tx.$queryRaw<UsageAccountingRow[]>(Prisma.sql`
+      WITH llm_usage AS (
+        SELECT
+          usage."agentId",
+          usage."tokenCountCheckpoint",
+          usage."tokensInCheckpoint",
+          usage."tokensOutCheckpoint",
+          usage."ownCostCheckpointCents",
+          item
+        FROM "ToolUsage" usage
+        LEFT JOIN LATERAL jsonb_array_elements(
+          CASE
+            WHEN jsonb_typeof(usage."usageItems") = 'array' THEN usage."usageItems"
+            ELSE '[]'::jsonb
+          END
+        ) item ON true
+        WHERE usage."agentId" IN (${Prisma.join(accountingAgentIds)})
+      )
+      SELECT
+        "agentId",
+        COALESCE(SUM(
+          CASE
+            WHEN "tokenCountCheckpoint" IS NULL
+              AND item->>'type' = 'llm'
+              AND item->>'tokens_in' ~ '^[0-9]+$'
+            THEN (item->>'tokens_in')::bigint
+            ELSE 0
+          END
+          +
+          CASE
+            WHEN "tokenCountCheckpoint" IS NULL
+              AND item->>'type' = 'llm'
+              AND item->>'tokens_out' ~ '^[0-9]+$'
+            THEN (item->>'tokens_out')::bigint
+            ELSE 0
+          END
+        ), 0)::bigint AS "legacyTokenCount",
+        COALESCE(SUM(
+          CASE
+            WHEN "tokensInCheckpoint" IS NULL
+              AND item->>'type' = 'llm'
+              AND item->>'tokens_in' ~ '^[0-9]+$'
+            THEN (item->>'tokens_in')::bigint
+            ELSE 0
+          END
+        ), 0)::bigint AS "legacyTokensIn",
+        COALESCE(SUM(
+          CASE
+            WHEN "tokensOutCheckpoint" IS NULL
+              AND item->>'type' = 'llm'
+              AND item->>'tokens_out' ~ '^[0-9]+$'
+            THEN (item->>'tokens_out')::bigint
+            ELSE 0
+          END
+        ), 0)::bigint AS "legacyTokensOut",
+        COALESCE(SUM(
+          CASE
+            WHEN "ownCostCheckpointCents" IS NULL
+              AND item->>'type' = 'llm'
+              AND item->>'cost_cents' ~ '^[0-9]+([.][0-9]+)?$'
+            THEN (item->>'cost_cents')::double precision
+            ELSE 0
+          END
+        ), 0)::double precision AS "legacyOwnCostCents",
+        COUNT(*) FILTER (
+          WHERE "tokenCountCheckpoint" IS NULL AND item->>'type' = 'llm'
+        )::bigint AS "legacyLlmItems",
+        MAX("tokenCountCheckpoint") AS "tokenCountCheckpoint",
+        MAX("tokensInCheckpoint") AS "tokensInCheckpoint",
+        MAX("tokensOutCheckpoint") AS "tokensOutCheckpoint",
+        MAX("ownCostCheckpointCents") AS "ownCostCheckpointCents"
+      FROM llm_usage
+      GROUP BY "agentId"
+    `),
   ]);
   const children = descendants.filter((descendant) => descendant.parentAgentId === agent.id);
   const ownAccounting = durableOwnAccounting([agent, ...descendants], toolUsages);
@@ -337,6 +379,13 @@ async function buildResumeState(
     (total, value) => total + value,
     0
   );
+  if (
+    !rootAccounting.hasLlmUsage &&
+    !['COST_LIMIT_REACHED', 'OUT_OF_CREDITS', 'COMPLETED', 'FAILED'].includes(agent.status)
+  ) {
+    rootAccounting.tokensIn = Math.max(0, agent.tokensIn - childTokensIn);
+    rootAccounting.tokensOut = Math.max(0, agent.tokensOut - childTokensOut);
+  }
 
   return {
     version: 1,
@@ -347,10 +396,11 @@ async function buildResumeState(
     token_count: rootAccounting.tokenCount,
     tokens_in: rootAccounting.tokensIn,
     tokens_out: rootAccounting.tokensOut,
-    tree_tokens_in: rootAccounting.tokensIn + childTokensIn,
-    tree_tokens_out: rootAccounting.tokensOut + childTokensOut,
+    tree_tokens_in: Math.max(agent.tokensIn, rootAccounting.tokensIn + childTokensIn),
+    tree_tokens_out: Math.max(agent.tokensOut, rootAccounting.tokensOut + childTokensOut),
     context_size: agent.contextSize,
     message_count: agent.messageCount,
+    workflow_started_at: agent.createdAt.toISOString(),
     own_cost_cents: rootAccounting.ownCostCents,
     subtree_cost_cents: Math.max(
       agent.treeCostCents,
@@ -361,7 +411,9 @@ async function buildResumeState(
     children_tokens_in: childrenTokensIn,
     children_tokens_out: childrenTokensOut,
     child_last_tokens: childLastTokens,
-    child_tool_counts: terminalChildToolCounts(terminalChildToolMessages),
+    child_tool_counts: Object.fromEntries(
+      terminalChildToolCounts.map((row) => [row.toolName, Number(row.count)])
+    ),
     iteration_offset: agent.workflowIterationOffset,
     max_iterations: agent.workflowMaxIterations ?? historicalLaunchConfig?.maxIterations ?? null,
     context_gates:
@@ -388,6 +440,18 @@ export async function claimWorkflowReplacement(
     await lockAgentWorkflowGeneration(tx, agentId);
     const agent = await tx.agent.findUnique({ where: { id: agentId } });
     if (agent === null) throw new Error(`Agent ${agentId} was deleted during restart`);
+
+    if (
+      options !== undefined &&
+      (agent.deletedAt !== null || agent.status === 'COMPLETED' || agent.status === 'FAILED')
+    ) {
+      return {
+        skipped: true,
+        expectedWorkflowId: options.expectedWorkflowId,
+        currentWorkflowId: agent.temporalWorkflowId,
+        frozenWorkflowId: agent.staleTemporalWorkflowId,
+      };
+    }
 
     if (
       options !== undefined &&
@@ -436,6 +500,7 @@ export async function claimWorkflowReplacement(
         staleTemporalFirstExecutionRunId: agent.temporalFirstExecutionRunId,
         temporalWorkflowId: plannedWorkflowId,
         temporalFirstExecutionRunId: null,
+        toolsInUse: [],
         status: 'STARTING_UP',
         statusMessage: 'Updating agent code',
       },
@@ -507,81 +572,5 @@ export async function recordStaleWorkflowChain(
       staleTemporalWorkflowId: execution.workflowId,
     },
     data: { staleTemporalFirstExecutionRunId: execution.firstExecutionRunId },
-  });
-}
-
-/**
- * Persist Temporal's acceptance without consuming the recovery snapshot.
- * A worker can remain unscheduled or fail its first task after this returns.
- */
-export async function recordWorkflowReplacementStartAcceptance(
-  claim: WorkflowReplacementClaim,
-  execution: TemporalWorkflowExecutionRef
-): Promise<boolean> {
-  const result = await prisma.agent.updateMany({
-    where: {
-      id: claim.agentId,
-      temporalWorkflowId: claim.plannedWorkflowId,
-    },
-    data: {
-      temporalWorkflowId: execution.workflowId,
-      temporalFirstExecutionRunId: execution.firstExecutionRunId,
-    },
-  });
-  return result.count === 1;
-}
-
-/**
- * Consume a replacement claim only after the candidate worker restored its
- * snapshot and reached the explicit bootstrap acknowledgement activity.
- */
-export async function acknowledgeWorkflowReplacementBootstrap(
-  agentId: string,
-  workflowGeneration: string
-): Promise<WorkflowReplacementBootstrapAcknowledgement> {
-  return runTransactionWithRetry(async (tx) => {
-    await lockAgentWorkflowGeneration(tx, agentId);
-    const agent = await tx.agent.findUnique({
-      where: { id: agentId },
-      select: {
-        temporalWorkflowId: true,
-        workflowReplacementToken: true,
-      },
-    });
-    if (agent === null) return 'not_found';
-    if (agent.temporalWorkflowId !== workflowGeneration) return 'stale_generation';
-    if (agent.workflowReplacementToken === null) return 'already_acknowledged';
-
-    const result = await tx.agent.updateMany({
-      where: {
-        id: agentId,
-        temporalWorkflowId: workflowGeneration,
-        workflowReplacementToken: agent.workflowReplacementToken,
-      },
-      data: {
-        workflowReplacementToken: null,
-        workflowReplacementState: Prisma.DbNull,
-        staleTemporalWorkflowId: null,
-        staleTemporalFirstExecutionRunId: null,
-      },
-    });
-    return result.count === 1 ? 'acknowledged' : 'stale_generation';
-  });
-}
-
-/** Keep the claim resumable and the old generation sealed after a failed start. */
-export async function markWorkflowReplacementFailed(
-  claim: WorkflowReplacementClaim,
-  error: unknown
-): Promise<void> {
-  await prisma.agent.updateMany({
-    where: {
-      id: claim.agentId,
-      workflowReplacementToken: claim.token,
-      temporalWorkflowId: claim.plannedWorkflowId,
-    },
-    data: {
-      statusMessage: `Workflow update failed: ${error instanceof Error ? error.message : String(error)}`,
-    },
   });
 }

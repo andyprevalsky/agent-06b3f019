@@ -75,8 +75,16 @@ function maxLlmIteration(toolName: string, usageItems: unknown[]): number | null
 }
 
 export async function saveToolUsage(input: SaveToolUsageInput): Promise<ToolUsageCreated> {
-  const { agent_id, user_id, tool_name, total_cost_cents, usage_items, workflow_generation } =
-    input;
+  const {
+    agent_id,
+    user_id,
+    tool_name,
+    total_cost_cents,
+    usage_items,
+    operation_key,
+    accounting_checkpoint,
+    workflow_generation,
+  } = input;
 
   const result = await repo.createToolUsageForWorkflow({
     userId: user_id,
@@ -85,6 +93,8 @@ export async function saveToolUsage(input: SaveToolUsageInput): Promise<ToolUsag
     toolName: tool_name,
     totalCostCents: total_cost_cents,
     usageItems: usage_items as Prisma.InputJsonValue,
+    operationKey: operation_key,
+    accountingCheckpoint: accounting_checkpoint,
     maxLlmIteration: maxLlmIteration(tool_name, usage_items),
   });
   if (result.status === 'agent_not_found') {

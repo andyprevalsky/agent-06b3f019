@@ -153,21 +153,33 @@ export async function finishAttentionMessages(
 export async function resolveAndSignal(
   request: ResolvableGateRequest,
   response: string
-): Promise<void> {
-  const { fresh, finishedMessageCount } = await prisma.$transaction(async (tx) => {
-    const updated = await tx.agentAttentionRequest.update({
-      where: { id: request.id },
+): Promise<{ resolved: boolean }> {
+  const { fresh, finishedMessageCount, resolved } = await prisma.$transaction(async (tx) => {
+    const updated = await tx.agentAttentionRequest.updateMany({
+      where: { id: request.id, userResponse: null },
       data: { userResponse: response },
     });
+    const current = await tx.agentAttentionRequest.findUnique({
+      where: { id: request.id },
+    });
+    if (current === null) {
+      throw new Error(`Attention request ${request.id} disappeared during resolution`);
+    }
+    if (updated.count === 0) {
+      return { fresh: current, finishedMessageCount: 0, resolved: false };
+    }
     const finishedCount = await finishAttentionMessages(tx, request);
-    return { fresh: updated, finishedMessageCount: finishedCount };
+    return { fresh: current, finishedMessageCount: finishedCount, resolved: true };
   });
   log.info('Resolved attention request read model', {
     request_id: request.id,
     agent_id: request.agentId,
     finished_message_count: finishedMessageCount,
+    resolved,
   });
+  if (!resolved) return { resolved: false };
   await signalAllWaiters(fresh, response);
+  return { resolved: true };
 }
 
 /**
@@ -186,6 +198,8 @@ export async function resolvePendingGateByKey(
   });
   if (request === null) return { resolved: false };
 
-  await resolveAndSignal(request, response);
-  return { resolved: true, request_id: request.id };
+  const result = await resolveAndSignal(request, response);
+  return result.resolved
+    ? { resolved: true, request_id: request.id }
+    : { resolved: false };
 }

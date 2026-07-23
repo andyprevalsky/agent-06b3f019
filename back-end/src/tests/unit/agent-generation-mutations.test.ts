@@ -6,6 +6,7 @@ import { updateAgentConfig } from '../../domains/agents/agentConfigService';
 import * as agentRepo from '../../domains/agents/repo';
 import { prisma, runTransactionWithRetry } from '../../providers/database';
 import { lockAgentWorkflowGeneration } from '../../providers/workflowGeneration';
+import { claimWorkflowReplacement } from '../../providers/workflowReplacementState';
 import { createTestHarness } from './trace-archive-test-utils';
 
 const { test, finish } = createTestHarness('agent generation mutation fence unit tests');
@@ -419,6 +420,36 @@ async function main(): Promise<void> {
       assert.strictEqual(stored.priceLimitCents, 250);
     } finally {
       releaseCutover();
+      await prisma.agent.deleteMany({ where: { id: agentId } });
+    }
+  });
+
+  await test('price-limit raise during a replacement claim durably resumes candidate', async () => {
+    const agentId = await createAgent();
+    const signals: Array<{ workflowId: string; limit: number }> = [];
+    try {
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: { status: 'COST_LIMIT_REACHED', priceLimitCents: 100 },
+      });
+      await claimWorkflowReplacement(agentId);
+      const result = await updateAgentConfig(
+        agentId,
+        { price_limit_cents: 250 },
+        undefined,
+        undefined,
+        {
+          signalPriceLimit: async (workflowId, limit) => {
+            signals.push({ workflowId, limit });
+          },
+        }
+      );
+      assert.strictEqual(result.mutation_accepted, true);
+      assert.deepStrictEqual(signals, []);
+      const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      assert.strictEqual(stored.priceLimitCents, 250);
+      assert.strictEqual(stored.status, 'ACTIVE');
+    } finally {
       await prisma.agent.deleteMany({ where: { id: agentId } });
     }
   });

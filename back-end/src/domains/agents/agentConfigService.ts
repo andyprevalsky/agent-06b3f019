@@ -164,7 +164,8 @@ export async function updateAgentConfig(
   if (
     accepted &&
     body.price_limit_cents !== undefined &&
-    updatedAgent?.status === 'COST_LIMIT_REACHED' &&
+    agent.status === 'COST_LIMIT_REACHED' &&
+    updatedAgent !== null &&
     updatedAgent.temporalWorkflowId !== null
   ) {
     try {

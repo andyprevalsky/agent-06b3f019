@@ -5,12 +5,10 @@
 
 import { type Response, Router } from 'express';
 import { z } from 'zod';
-// eslint-disable-next-line no-restricted-imports -- Express file upload middleware, configured per-route
-import multer from 'multer';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { MAX_FILE_SIZE } from '../../providers/storage';
 import { createLogger } from '../../providers/logger';
+import { agentMessageUpload } from '../../providers/agentMessageUpload';
 import type { ResponseSchemaDirectAuth } from '../../providers/setResponseSchema';
 import { postMessageSchema, generateSchemaRequestSchema } from './types';
 import * as controlService from './agentControlService';
@@ -19,11 +17,6 @@ import * as messageService from './agentMessageService';
 const log = createLogger('Agents');
 const router = Router({ mergeParams: true });
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
-
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_FILE_SIZE },
-});
 
 function handleRouteError(
   res: Response,
@@ -96,7 +89,7 @@ router.post(
 router.post(
   '/:id/attachments',
   auth,
-  upload.single('file'),
+  agentMessageUpload.single('file'),
   asyncHandler<HybridAuthRequest>(async (req, res) => {
     try {
       if (req.file === undefined) {

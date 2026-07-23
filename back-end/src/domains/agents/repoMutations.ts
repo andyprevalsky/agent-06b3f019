@@ -4,6 +4,7 @@
 
 import type { Prisma, AgentSource, AgentStatus, VerifierType } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from '../../providers/database';
+import { assertCurrentParentWorkflowGenerations } from './repoParentWorkflowFence';
 
 // ---------------------------------------------------------------------------
 // Agent mutations
@@ -18,6 +19,8 @@ function optionalAgentCreateFields(params: {
   temporalWorkflowId?: string | null;
   workflowMaxIterations?: number;
   workflowContextGates?: Record<string, boolean>;
+  workflowStartPhase?: string;
+  workflowTaskQueue?: string;
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
@@ -32,6 +35,12 @@ function optionalAgentCreateFields(params: {
       : {}),
     ...(params.workflowContextGates !== undefined
       ? { workflowContextGates: params.workflowContextGates }
+      : {}),
+    ...(params.workflowStartPhase !== undefined
+      ? { workflowStartPhase: params.workflowStartPhase }
+      : {}),
+    ...(params.workflowTaskQueue !== undefined
+      ? { workflowTaskQueue: params.workflowTaskQueue }
       : {}),
     ...(params.priceLimitCents !== undefined && params.priceLimitCents !== 0
       ? { priceLimitCents: params.priceLimitCents }
@@ -62,8 +71,7 @@ async function createAttachmentMessages(
   }
 }
 
-/** Create an agent with verifier and goal message in a transaction. */
-export async function createAgentTransaction(params: {
+export interface CreateAgentParams {
   agentId: string;
   userId: string;
   parentAgentId: string | null;
@@ -90,7 +98,12 @@ export async function createAgentTransaction(params: {
   temporalWorkflowId?: string | null;
   workflowMaxIterations?: number;
   workflowContextGates?: Record<string, boolean>;
-}) {
+  workflowStartPhase?: string;
+  workflowTaskQueue?: string;
+}
+
+/** Create an agent with verifier and goal message in a transaction. */
+export async function createAgentTransaction(params: CreateAgentParams) {
   // runTransactionWithRetry (not raw prisma.$transaction): interactive
   // transactions bypass the client's per-query retry extension, so a momentary
   // pool-pressure "Unable to start a transaction" (P2028) would 500 the whole
@@ -98,6 +111,12 @@ export async function createAgentTransaction(params: {
   // the chat-lifecycle ratchet) — retrying the side-effect-free start makes it
   // resilient to transient pool saturation.
   return runTransactionWithRetry(async (tx) => {
+    await assertCurrentParentWorkflowGenerations(tx, [params]);
+    const tracksDescendantStart =
+      params.parentAgentId !== null &&
+      params.parentWorkflowId !== null &&
+      params.temporalWorkflowId !== undefined &&
+      params.temporalWorkflowId !== null;
     const newAgent = await tx.agent.create({
       data: {
         id: params.agentId,
@@ -118,6 +137,7 @@ export async function createAgentTransaction(params: {
         proxyCountry: params.proxyCountry,
         proxyState: params.proxyState,
         proxyCity: params.proxyCity,
+        temporalWorkflowStartPending: tracksDescendantStart,
         ...optionalAgentCreateFields(params),
       },
     });
@@ -172,6 +192,8 @@ export interface BatchCreateAgentParams {
   temporalWorkflowId: string;
   workflowMaxIterations?: number;
   workflowContextGates?: Record<string, boolean>;
+  workflowStartPhase?: string;
+  workflowTaskQueue?: string;
 }
 
 /** Create N agents (each with verifier + goal message) in a single transaction.
@@ -182,6 +204,7 @@ export async function createAgentBatchTransaction(items: BatchCreateAgentParams[
   // Same rationale as createAgentTransaction: a batch fan-out is exactly when
   // the pool is most contended, so guard the interactive-transaction start.
   return runTransactionWithRetry(async (tx) => {
+    await assertCurrentParentWorkflowGenerations(tx, items);
     const goalMessageTimestamp = new Date();
     await tx.agent.createMany({
       data: items.map((params) => ({
@@ -203,6 +226,8 @@ export async function createAgentBatchTransaction(items: BatchCreateAgentParams[
         proxyCountry: params.proxyCountry,
         proxyState: params.proxyState,
         proxyCity: params.proxyCity,
+        temporalWorkflowStartPending:
+          params.parentAgentId !== null && params.parentWorkflowId !== null,
         ...optionalAgentCreateFields(params),
       })),
     });
@@ -271,7 +296,8 @@ export async function failAgentIfStillActive(agentId: string, statusMessage: str
 export async function clearWorkflowForTerminalAgent(
   agentId: string,
   observedStatus: AgentStatus,
-  observedWorkflowId: string
+  observedWorkflowId: string,
+  _observedFirstExecutionRunId: string | null
 ) {
   return prisma.agent.updateMany({
     where: {
@@ -279,7 +305,11 @@ export async function clearWorkflowForTerminalAgent(
       status: observedStatus,
       temporalWorkflowId: observedWorkflowId,
     },
-    data: { temporalWorkflowId: null, status: 'ACTIVE' },
+    data: {
+      temporalWorkflowId: null,
+      temporalFirstExecutionRunId: null,
+      status: 'ACTIVE',
+    },
   });
 }
 

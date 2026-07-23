@@ -63,12 +63,31 @@ export async function updateAgentConfigMutation(
         deletedAt: null,
         ...(workflowGeneration === undefined ? {} : { OR: workflowMatches }),
       },
-      select: { id: true },
+      select: { id: true, status: true, workflowReplacementState: true },
     });
     if (accepted === null) return false;
 
     if (Object.keys(data).length > 0) {
-      await tx.agent.update({ where: { id: agentId }, data });
+      const raisedCostLimit =
+        (accepted.status === 'COST_LIMIT_REACHED' ||
+          (accepted.status === 'STARTING_UP' &&
+            accepted.workflowReplacementState !== null &&
+            typeof accepted.workflowReplacementState === 'object' &&
+            !Array.isArray(accepted.workflowReplacementState) &&
+            accepted.workflowReplacementState.prior_status === 'COST_LIMIT_REACHED')) &&
+        typeof data.priceLimitCents === 'number';
+      await tx.agent.update({
+        where: { id: agentId },
+        data: {
+          ...data,
+          ...(raisedCostLimit
+            ? {
+                status: 'ACTIVE',
+                statusMessage: 'Cost limit increased',
+              }
+            : {}),
+        },
+      });
     }
     if (toolIds !== undefined) {
       await tx.agentTool.deleteMany({ where: { agentId } });

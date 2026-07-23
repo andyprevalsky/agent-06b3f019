@@ -26,7 +26,17 @@ def _setup():
 async def test_happy_path():
     """save_tool_usage sends POST to /api/tool-usage."""
     _setup()
-    with patch("temporalio.activity.heartbeat"):
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch(
+            "temporalio.activity.info",
+            return_value=SimpleNamespace(
+                workflow_id="workflow-1",
+                workflow_run_id="run-1",
+                activity_id="activity-1",
+            ),
+        ),
+    ):
         from helpers.save_tool_usage import save_tool_usage
 
         await save_tool_usage(
@@ -48,7 +58,17 @@ async def test_happy_path():
 async def test_boundary():
     """Verify POST body contains agent_id, user_id, tool_name, usage_items, total_cost_cents."""
     _setup()
-    with patch("temporalio.activity.heartbeat"):
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch(
+            "temporalio.activity.info",
+            return_value=SimpleNamespace(
+                workflow_id="workflow-2",
+                workflow_run_id="run-2",
+                activity_id="activity-2",
+            ),
+        ),
+    ):
         from helpers.save_tool_usage import save_tool_usage
 
         await save_tool_usage(
@@ -59,6 +79,12 @@ async def test_boundary():
                 {"description": "Search call 1", "cost_cents": 3},
                 {"description": "Search call 2", "cost_cents": 7},
             ],
+            accounting_checkpoint={
+                "token_count": 120,
+                "tokens_in": 90,
+                "tokens_out": 30,
+                "own_cost_cents": 10.5,
+            },
         )
 
     call = assert_captured_call(
@@ -71,6 +97,13 @@ async def test_boundary():
     assert body["tool_name"] == "web_search"
     assert body["total_cost_cents"] == 10  # 3 + 7
     assert len(body["usage_items"]) == 2
+    assert body["operation_key"] == "workflow-2:run-2:activity-2"
+    assert body["accounting_checkpoint"] == {
+        "token_count": 120,
+        "tokens_in": 90,
+        "tokens_out": 30,
+        "own_cost_cents": 10.5,
+    }
 
 
 async def test_stamps_workflow_generation():
@@ -81,7 +114,11 @@ async def test_stamps_workflow_generation():
         patch("temporalio.activity.heartbeat"),
         patch(
             "temporalio.activity.info",
-            return_value=SimpleNamespace(workflow_id=generation),
+            return_value=SimpleNamespace(
+                workflow_id=generation,
+                workflow_run_id="usage-run",
+                activity_id="usage-activity",
+            ),
         ),
     ):
         from helpers.save_tool_usage import save_tool_usage

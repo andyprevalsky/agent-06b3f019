@@ -23,21 +23,38 @@ router.post(
       res.status(400).json({ error: 'X-Agent-Workflow-Generation header is required' });
       return;
     }
-    const result = await controlService.acknowledgeWorkflowReplacementBootstrap(
+    let restoredState;
+    try {
+      restoredState =
+        req.body !== null &&
+        typeof req.body === 'object' &&
+        Object.keys(req.body as Record<string, unknown>).length > 0
+          ? updateStatusSchema.parse(req.body)
+          : undefined;
+    } catch (error) {
+      if (error instanceof z.ZodError) {
+        res.status(400).json({ error: 'Invalid request body', details: error.issues });
+        return;
+      }
+      throw error;
+    }
+    const result = await controlService.finalizeWorkflowReplacementBootstrap(
       req.params.id,
-      generation
+      generation,
+      restoredState
     );
-    if (result === 'not_found') {
+    if (result.outcome === 'not_found') {
       res.status(404).json({ error: 'Agent not found' });
       return;
     }
-    if (result === 'stale_generation') {
+    if (result.outcome === 'stale_generation') {
       res.status(409).json({ error: 'Workflow generation is no longer current' });
       return;
     }
     res.json({
       acknowledged: true,
-      already_acknowledged: result === 'already_acknowledged',
+      already_acknowledged: result.outcome === 'already_acknowledged',
+      status: result.status,
     });
   })
 );

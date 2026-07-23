@@ -369,7 +369,7 @@ def test_extract_nested_agent_json_blob_none_cases():
     """Returns None for non-string or non-JSON content."""
     from helpers.llm import _extract_nested_agent_json_blob
 
-    assert _extract_nested_agent_json_blob(None) is None  # type: ignore[arg-type]
+    assert _extract_nested_agent_json_blob(None) is None
     assert _extract_nested_agent_json_blob("") is None
     assert _extract_nested_agent_json_blob("no json here") is None
 
@@ -1507,9 +1507,9 @@ async def test_build_llm_messages_normalizes_pointer_annotations_across_context_
     backend_messages = await build_llm_messages(canonical_context, "System prompt")
 
     assert backend_messages == in_memory_messages
-    assert '<resolved-ref pointer="@ref:message:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"/>' in backend_messages[
-        1
-    ]["content"]
+    assert (
+        '<resolved-ref pointer="@ref:message:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"/>' in backend_messages[1]["content"]
+    )
     assert canonical_context[0]["text"] == "Buy the benchmark item"
 
 

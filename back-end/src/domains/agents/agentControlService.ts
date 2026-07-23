@@ -16,6 +16,7 @@ export { updateAgentConfig } from './agentConfigService';
 export { updateAgentStatus } from './agentStatusService';
 export {
   acknowledgeWorkflowReplacementBootstrap,
+  finalizeWorkflowReplacementBootstrap,
   restartAgent,
   type RestartAgentOptions,
 } from './agentRestartService';

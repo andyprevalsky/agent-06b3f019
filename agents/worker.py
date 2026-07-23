@@ -95,13 +95,13 @@ from helpers import (
     fetch_agent_tools,
     fetch_child_terminal_result_activity,
     fetch_model_pricing,
+    finalize_workflow_replacement_bootstrap,
     generate_completion_summary,
     get_model_context_window,
     get_user_context,
     get_user_custom_system_prompt,
     get_user_system_name,
     mark_finished,
-    finalize_workflow_replacement_bootstrap,
     poll_new_messages,
     post_agent_message,
     resolve_fast_cache_goal_activity,
@@ -973,26 +973,6 @@ async def main():
     logger.info("Connected to Temporal Cloud")
 
     build_id = os.getenv("TEMPORAL_WORKER_BUILD_ID")
-    if os.getenv("TEMPORAL_WORKER_REQUIRE_ACTIVATION") == "1":
-        if not build_id:
-            raise RuntimeError("TEMPORAL_WORKER_BUILD_ID is required when worker activation is enabled")
-        set_worker_status(True, phase="standby", build_id=build_id)
-        logger.info(
-            "Worker standby ready; Temporal polling is activation-gated",
-            worker_build_id=build_id,
-            task_queue=config.temporal.task_queue,
-        )
-        marker_id = await wait_for_worker_build_activation(
-            client,
-            build_id,
-            timeout_seconds=float(os.getenv("TEMPORAL_WORKER_ACTIVATION_TIMEOUT_SECONDS", "1800")),
-            poll_interval_seconds=float(os.getenv("TEMPORAL_WORKER_ACTIVATION_POLL_SECONDS", "1")),
-        )
-        logger.info(
-            "Worker build activated; constructing Temporal pollers",
-            worker_build_id=build_id,
-            activation_marker_workflow_id=marker_id,
-        )
 
     # Make client available to query_parent_state_activity
     set_temporal_client(client)
@@ -1052,6 +1032,128 @@ async def main():
         nexus_supplier=FixedSizeSlotSupplier(100),
     )
 
+    registered_activities = [
+        spawn_sub_agent_activity,
+        spawn_sub_agents_batch_activity,
+        fetch_parent_attachments_activity,
+        create_approval_request_activity,
+        resolve_attention_request_activity,
+        agentcard_status_activity,
+        create_gate_request_activity,
+        has_message_corpus_activity,
+        source_status_activity,
+        mint_subscription_checkout_activity,
+        mint_gmail_connect_activity,
+        lookup_purchase_activity,
+        mint_purchase_card_activity,
+        spawn_browser_agent_activity_v3,
+        resolve_code_agent_provider_activity,
+        spawn_claude_code_activity,
+        web_search_activity,
+        people_search_activity,
+        web_fetch_activity,
+        web_fetch_download_activity,
+        save_tool_usage,
+        read_message_history_activity,
+        generate_message_activity,
+        fetch_recent_messages_activity,
+        queue_imessage_activity,
+        send_agent_sms_activity,
+        call_phone_number_activity,
+        poll_new_messages,
+        post_agent_message,
+        call_llm,
+        check_progress,
+        call_llm_activity,
+        call_planner_llm_activity,
+        set_response_schema_activity,
+        fetch_claude_max_token_activity,
+        fetch_compute_token_activity,
+        fetch_gpt_code_token_activity,
+        heartbeat_compute_token_lineage_activity,
+        mark_claude_token_rate_limited_activity,
+        mark_compute_token_rate_limited_activity,
+        mark_gpt_token_rate_limited_activity,
+        update_agent_status,
+        acknowledge_workflow_replacement_bootstrap,
+        finalize_workflow_replacement_bootstrap,
+        compress_context,
+        generate_completion_summary,
+        summarize_tool_result,
+        summarize_and_filter_links,
+        spawn_explore_agent_activity,
+        _resolve_explore_attachments_activity,
+        fetch_full_network_metadata,
+        evaluate_condition_activity,
+        grep_activity,
+        fetch_local_data_summary,
+        get_model_context_window,
+        fetch_agent_tools,
+        query_blueprints_activity,
+        save_blueprint_activity,
+        resolve_attachments_activity,
+        mark_finished,
+        fetch_agent_config,
+        fetch_child_terminal_result_activity,
+        fetch_model_pricing,
+        check_user_usage,
+        get_user_context,
+        get_user_system_name,
+        get_user_custom_system_prompt,
+        update_agent_tree_cost_activity,
+        update_agent_tree_state,
+        resolve_fast_cache_goal_activity,
+        get_agent_source,
+        send_direct_sms_activity,
+        notify_sms_event_activity,
+        populate_tool_params_activity,
+        execute_reasoning_activity,
+        query_parent_state_activity,
+        world_model_step_activity,
+        report_failure_activity,
+    ]
+
+    if os.getenv("TEMPORAL_WORKER_REQUIRE_ACTIVATION") == "1":
+        if not build_id:
+            raise RuntimeError("TEMPORAL_WORKER_BUILD_ID is required when worker activation is enabled")
+        deployment_token = os.getenv("TEMPORAL_WORKER_DEPLOYMENT_TOKEN")
+        if not deployment_token:
+            raise RuntimeError(
+                "TEMPORAL_WORKER_DEPLOYMENT_TOKEN is required when worker activation is enabled"
+            )
+        validation_task_queue = os.getenv("TEMPORAL_WORKER_VALIDATION_TASK_QUEUE")
+        if not validation_task_queue:
+            raise RuntimeError(
+                "TEMPORAL_WORKER_VALIDATION_TASK_QUEUE is required when worker activation is enabled"
+            )
+        validation_worker = Worker(
+            client,
+            task_queue=validation_task_queue,
+            workflows=[AgentWorkflow],
+            activities=registered_activities,
+            workflow_runner=SandboxedWorkflowRunner(restrictions=sandbox_restrictions),
+        )
+        set_worker_status(True, phase="standby", build_id=build_id)
+        logger.info(
+            "Candidate worker ready on isolated validation queue; production polling is activation-gated",
+            worker_build_id=build_id,
+            task_queue=config.temporal.task_queue,
+            validation_task_queue=validation_task_queue,
+        )
+        async with validation_worker:
+            marker_id = await wait_for_worker_build_activation(
+                client,
+                build_id,
+                deployment_token,
+                timeout_seconds=float(os.getenv("TEMPORAL_WORKER_ACTIVATION_TIMEOUT_SECONDS", "7200")),
+                poll_interval_seconds=float(os.getenv("TEMPORAL_WORKER_ACTIVATION_POLL_SECONDS", "1")),
+            )
+        logger.info(
+            "Worker build activated; constructing production Temporal pollers",
+            worker_build_id=build_id,
+            activation_marker_workflow_id=marker_id,
+        )
+
     # Start background queue metrics poller (feeds /metrics for fly-autoscaler)
     asyncio.create_task(
         poll_queue_metrics(
@@ -1072,95 +1174,7 @@ async def main():
         client,
         task_queue=config.temporal.task_queue,
         workflows=[AgentWorkflow],
-        activities=[
-            spawn_sub_agent_activity,
-            spawn_sub_agents_batch_activity,
-            fetch_parent_attachments_activity,
-            create_approval_request_activity,
-            resolve_attention_request_activity,
-            agentcard_status_activity,
-            create_gate_request_activity,
-            has_message_corpus_activity,
-            source_status_activity,
-            mint_subscription_checkout_activity,
-            mint_gmail_connect_activity,
-            lookup_purchase_activity,
-            mint_purchase_card_activity,
-            spawn_browser_agent_activity_v3,  # V3: browser-use + Rose API
-            resolve_code_agent_provider_activity,
-            spawn_claude_code_activity,  # Claude Code in E2B sandbox
-            # New event-driven tool activities
-            web_search_activity,
-            people_search_activity,
-            web_fetch_activity,
-            web_fetch_download_activity,
-            save_tool_usage,
-            read_message_history_activity,
-            generate_message_activity,
-            fetch_recent_messages_activity,
-            queue_imessage_activity,
-            send_agent_sms_activity,
-            # Phone call activity
-            call_phone_number_activity,
-            # Helper activities
-            poll_new_messages,
-            post_agent_message,
-            call_llm,
-            check_progress,
-            call_llm_activity,
-            call_planner_llm_activity,
-            set_response_schema_activity,
-            fetch_claude_max_token_activity,
-            fetch_compute_token_activity,
-            fetch_gpt_code_token_activity,
-            heartbeat_compute_token_lineage_activity,
-            mark_claude_token_rate_limited_activity,
-            mark_compute_token_rate_limited_activity,
-            mark_gpt_token_rate_limited_activity,
-            update_agent_status,
-            acknowledge_workflow_replacement_bootstrap,
-            finalize_workflow_replacement_bootstrap,
-            compress_context,
-            generate_completion_summary,
-            summarize_tool_result,
-            summarize_and_filter_links,
-            spawn_explore_agent_activity,
-            _resolve_explore_attachments_activity,
-            fetch_full_network_metadata,
-            evaluate_condition_activity,
-            grep_activity,
-            fetch_local_data_summary,
-            get_model_context_window,
-            fetch_agent_tools,
-            query_blueprints_activity,
-            save_blueprint_activity,
-            resolve_attachments_activity,
-            mark_finished,
-            fetch_agent_config,
-            fetch_child_terminal_result_activity,
-            fetch_model_pricing,
-            check_user_usage,
-            get_user_context,
-            get_user_system_name,
-            get_user_custom_system_prompt,
-            update_agent_tree_cost_activity,
-            update_agent_tree_state,
-            # Fast Mode cache goal resolution (persisted Agent-row goal)
-            resolve_fast_cache_goal_activity,
-            # SMS activities
-            get_agent_source,
-            send_direct_sms_activity,
-            notify_sms_event_activity,
-            # DAG executor activities
-            populate_tool_params_activity,
-            execute_reasoning_activity,
-            # Parent state query (for sub-agent → parent communication)
-            query_parent_state_activity,
-            # World-model runtime shim
-            world_model_step_activity,
-            # Failure alerting (direct-to-Slack, no backend hop)
-            report_failure_activity,
-        ],
+        activities=registered_activities,
         tuner=tuner,
         max_cached_workflows=config.temporal.max_cached_workflows,
         sticky_queue_schedule_to_start_timeout=timedelta(

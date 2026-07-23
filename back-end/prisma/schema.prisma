@@ -24,9 +24,14 @@ model Agent {
   workflowReplacementState         Json?
   staleTemporalWorkflowId          String?
   staleTemporalFirstExecutionRunId String?
+  temporalWorkflowStartPending     Boolean         @default(false)
+  temporalWorkflowStartLeaseUntil  DateTime?
+  temporalCleanupPending           Boolean         @default(false)
   workflowIterationOffset          Int             @default(0)
   workflowMaxIterations            Int?
   workflowContextGates             Json?
+  workflowStartPhase               String?
+  workflowTaskQueue                String?
   model                            String          @default("rose-labs/rose-1-ultra")
   contextSize                      Int             @default(0)
   messageCount                     Int             @default(0)
@@ -59,6 +64,7 @@ model Agent {
   tools                            AgentTool[]
   messages                         Message[]
   toolUsages                       ToolUsage[]
+  temporalWorkflowCleanups         TemporalWorkflowCleanup[]
   purchaseSpends                   PurchaseSpend[]
   verifier                         Verifier?
 
@@ -66,9 +72,29 @@ model Agent {
   @@index([createdAt])
   @@index([temporalWorkflowId])
   @@index([workflowReplacementToken])
+  @@index([temporalWorkflowStartPending])
+  @@index([temporalCleanupPending, id])
   @@index([parentAgentId])
   @@index([parentAgentId, createdAt])
   @@index([busId])
+}
+
+model TemporalWorkflowCleanup {
+  agentId             String
+  workflowId          String
+  firstExecutionRunId String?
+  notBefore           DateTime
+  leaseToken          String?
+  leaseUntil          DateTime?
+  attemptCount        Int      @default(0)
+  lastError           String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  agent               Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, workflowId])
+  @@index([notBefore, agentId, workflowId])
+  @@index([leaseUntil])
 }
 
 model Tool {
@@ -197,14 +223,19 @@ model ModelPricingCache {
 }
 
 model ToolUsage {
-  id             String   @id @default(uuid())
-  agentId        String?
-  toolName       String
-  totalCostCents Int
-  usageItems     Json
-  createdAt      DateTime @default(now())
-  userId         String
-  agent          Agent?   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  id                     String   @id @default(uuid())
+  operationKey           String?  @unique
+  agentId                String?
+  toolName               String
+  totalCostCents         Int
+  usageItems             Json
+  tokenCountCheckpoint   Int?
+  tokensInCheckpoint     Int?
+  tokensOutCheckpoint    Int?
+  ownCostCheckpointCents Float?
+  createdAt              DateTime @default(now())
+  userId                 String
+  agent                  Agent?   @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([agentId])

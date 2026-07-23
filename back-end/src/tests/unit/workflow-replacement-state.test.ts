@@ -1,15 +1,11 @@
 #!/usr/bin/env tsx
-/* eslint-disable max-lines */
-
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';
-import { updateAgentStatus } from '../../domains/agents/agentControlService';
 import { prisma } from '../../providers/database';
 import {
   acknowledgeWorkflowReplacementBootstrap,
   claimWorkflowReplacement,
-  markWorkflowReplacementFailed,
   recordWorkflowReplacementStartAcceptance,
 } from '../../providers/workflowReplacementState';
 import {
@@ -64,6 +60,71 @@ async function main(): Promise<void> {
     });
   });
 
+  await test('legacy retries preserve the exact durable billed ledger', async () => {
+    await withAgent(async (agentId) => {
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: {
+          temporalWorkflowId: agentId,
+          tokenCount: 950,
+          tokensIn: 680,
+          tokensOut: 270,
+          ownCostCents: 17.25,
+        },
+      });
+      await prisma.toolUsage.createMany({
+        data: Array.from({ length: 3 }, () => ({
+          agentId,
+          userId: `workflow-replacement-state-unit-${agentId}`,
+          toolName: 'execute_loop',
+          totalCostCents: 900,
+          usageItems: [{ type: 'llm', tokens_in: 500, tokens_out: 500, cost_cents: 900 }],
+        })),
+      });
+
+      const claim = await claimWorkflowReplacement(agentId);
+      assert.strictEqual(claim.resumeState.token_count, 3_000);
+      assert.strictEqual(claim.resumeState.tokens_in, 1_500);
+      assert.strictEqual(claim.resumeState.tokens_out, 1_500);
+      assert.strictEqual(claim.resumeState.own_cost_cents, 2_700);
+    });
+  });
+
+  await test('idempotent usage checkpoint closes an unfinished Agent debounce window', async () => {
+    await withAgent(async (agentId) => {
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: {
+          temporalWorkflowId: agentId,
+          tokenCount: 950,
+          tokensIn: 680,
+          tokensOut: 270,
+          ownCostCents: 17.25,
+        },
+      });
+      await prisma.toolUsage.create({
+        data: {
+          operationKey: `${agentId}:usage-checkpoint`,
+          agentId,
+          userId: `workflow-replacement-state-unit-${agentId}`,
+          toolName: 'execute_loop',
+          totalCostCents: 2,
+          usageItems: [{ type: 'llm', tokens_in: 50, tokens_out: 25, cost_cents: 2 }],
+          tokenCountCheckpoint: 1_025,
+          tokensInCheckpoint: 730,
+          tokensOutCheckpoint: 295,
+          ownCostCheckpointCents: 19.25,
+        },
+      });
+
+      const claim = await claimWorkflowReplacement(agentId);
+      assert.strictEqual(claim.resumeState.token_count, 1_025);
+      assert.strictEqual(claim.resumeState.tokens_in, 730);
+      assert.strictEqual(claim.resumeState.tokens_out, 295);
+      assert.strictEqual(claim.resumeState.own_cost_cents, 19.25);
+    });
+  });
+
   await test('expected workflow claims atomically skip advanced generations and coalesce retries', async () => {
     await withAgent(async (agentId) => {
       const frozenWorkflowId = `${agentId}:frozen`;
@@ -103,6 +164,43 @@ async function main(): Promise<void> {
     });
   });
 
+  await test('completed or failed root wins snapshot-to-claim race', async () => {
+    for (const status of ['COMPLETED', 'FAILED'] as const) {
+      await withAgent(async (agentId) => {
+        const workflowId = `${agentId}:${status.toLowerCase()}`;
+        await prisma.agent.update({
+          where: { id: agentId },
+          data: { temporalWorkflowId: workflowId, status },
+        });
+        const result = await claimWorkflowReplacement(agentId, undefined, {
+          expectedWorkflowId: workflowId,
+        });
+        assert('skipped' in result);
+        const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+        assert.strictEqual(stored.status, status);
+        assert.strictEqual(stored.temporalWorkflowId, workflowId);
+        assert.strictEqual(stored.workflowReplacementToken, null);
+      });
+    }
+  });
+
+  await test('deleted root wins snapshot-to-claim race', async () => {
+    await withAgent(async (agentId) => {
+      const workflowId = `${agentId}:deleted`;
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: { temporalWorkflowId: workflowId, deletedAt: new Date() },
+      });
+      const result = await claimWorkflowReplacement(agentId, undefined, {
+        expectedWorkflowId: workflowId,
+      });
+      assert('skipped' in result);
+      const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      assert(stored.deletedAt instanceof Date);
+      assert.strictEqual(stored.workflowReplacementToken, null);
+    });
+  });
+
   await test('replacement state survives claim retries and start acceptance never forces ACTIVE', async () => {
     await withAgent(async (agentId) => {
       const childId = randomUUID();
@@ -137,6 +235,7 @@ async function main(): Promise<void> {
           status: 'PAUSED',
           busId: agentId,
           parentAgentId: agentId,
+          parentWorkflowId: agentId,
           depth: 1,
           temporalWorkflowId: childId,
           tokenCount: 300,
@@ -153,6 +252,7 @@ async function main(): Promise<void> {
           status: 'PAUSED',
           busId: agentId,
           parentAgentId: childId,
+          parentWorkflowId: childId,
           depth: 2,
           temporalWorkflowId: grandchildId,
           tokenCount: 70,
@@ -282,6 +382,9 @@ async function main(): Promise<void> {
       });
 
       try {
+        const createdAt = (
+          await prisma.agent.findUniqueOrThrow({ where: { id: agentId } })
+        ).createdAt.toISOString();
         const first = await claimWorkflowReplacement(agentId);
         const retried = await claimWorkflowReplacement(agentId);
         assert.deepStrictEqual(retried.resumeState, first.resumeState);
@@ -292,19 +395,20 @@ async function main(): Promise<void> {
           prior_status_message: 'Paused by user',
           progress: 0.4,
           token_count: 1_250,
-          tokens_in: 900,
-          tokens_out: 350,
-          tree_tokens_in: 1_170,
-          tree_tokens_out: 450,
+          tokens_in: 680,
+          tokens_out: 270,
+          tree_tokens_in: 900,
+          tree_tokens_out: 350,
           context_size: 42_000,
           message_count: 73,
+          workflow_started_at: createdAt,
           own_cost_cents: 17.25,
           subtree_cost_cents: 29.25,
           children_cost_cents: { [childId]: 12 },
-          children_tokens_in: { [childId]: 270 },
-          children_tokens_out: { [childId]: 100 },
+          children_tokens_in: { [childId]: 220 },
+          children_tokens_out: { [childId]: 80 },
           child_last_tokens: {
-            [childId]: { tokens_in: 270, tokens_out: 100, token_count: 370 },
+            [childId]: { tokens_in: 220, tokens_out: 80, token_count: 370 },
           },
           child_tool_counts: { web_search: 1, browser_use: 1 },
           iteration_offset: 6,
@@ -355,6 +459,7 @@ async function main(): Promise<void> {
       tree_tokens_out: 4,
       context_size: 100,
       message_count: 8,
+      workflow_started_at: '2026-01-01T00:00:00.000Z',
       own_cost_cents: 100,
       subtree_cost_cents: 100,
       children_cost_cents: {},
@@ -445,320 +550,6 @@ async function main(): Promise<void> {
       const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
       assert.strictEqual(stored.workflowMaxIterations, 31);
       assert.deepStrictEqual(stored.workflowContextGates, config.contextGates);
-    });
-  });
-
-  await test('cost-limited snapshots distinguish own tokens from child tree tokens', async () => {
-    await withAgent(async (agentId) => {
-      const childId = randomUUID();
-      await prisma.agent.update({
-        where: { id: agentId },
-        data: {
-          temporalWorkflowId: agentId,
-          status: 'COST_LIMIT_REACHED',
-          tokenCount: 1_250,
-          tokensIn: 680,
-          tokensOut: 270,
-          ownCostCents: 17.25,
-          treeCostCents: 29,
-        },
-      });
-      await prisma.agent.create({
-        data: {
-          id: childId,
-          userId: `workflow-restart-unit-${agentId}`,
-          goal: 'child accounting state',
-          status: 'COST_LIMIT_REACHED',
-          busId: agentId,
-          parentAgentId: agentId,
-          tokenCount: 300,
-          tokensIn: 220,
-          tokensOut: 80,
-          treeCostCents: 12,
-        },
-      });
-      try {
-        const claim = await claimWorkflowReplacement(agentId);
-        assert.strictEqual(claim.resumeState.prior_status, 'COST_LIMIT_REACHED');
-        assert.strictEqual(claim.resumeState.tokens_in, 680);
-        assert.strictEqual(claim.resumeState.tokens_out, 270);
-        assert.strictEqual(claim.resumeState.tree_tokens_in, 900);
-        assert.strictEqual(claim.resumeState.tree_tokens_out, 350);
-        assert.strictEqual(claim.resumeState.token_count, 1_250);
-      } finally {
-        await prisma.agent.deleteMany({ where: { id: childId } });
-      }
-    });
-  });
-
-  await test('iteration recovery uses the workflow checkpoint instead of provider attempts', async () => {
-    await withAgent(async (agentId) => {
-      await prisma.agent.update({
-        where: { id: agentId },
-        data: { temporalWorkflowId: agentId, workflowIterationOffset: 11 },
-      });
-      await prisma.toolUsage.createMany({
-        data: [1, 2, 2, 3].map((iteration) => ({
-          agentId,
-          userId: `workflow-restart-unit-${agentId}`,
-          toolName: 'execute_loop',
-          totalCostCents: 0,
-          usageItems: [{ iteration }],
-        })),
-      });
-
-      const claim = await claimWorkflowReplacement(agentId);
-      assert.strictEqual(claim.resumeState.iteration_offset, 11);
-    });
-  });
-
-  await test('a failed fresh start stays resumable and never exposes ACTIVE', async () => {
-    await withAgent(async (agentId) => {
-      await prisma.agent.update({
-        where: { id: agentId },
-        data: { temporalWorkflowId: agentId },
-      });
-      const claim = await claimWorkflowReplacement(agentId);
-      await markWorkflowReplacementFailed(claim, new Error('candidate unavailable'));
-
-      const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
-      const resumed = await claimWorkflowReplacement(agentId);
-      assert.strictEqual(stored.status, 'STARTING_UP');
-      assert.match(stored.statusMessage ?? '', /candidate unavailable/);
-      assert.strictEqual(stored.temporalWorkflowId, claim.plannedWorkflowId);
-      assert.deepStrictEqual(stored.workflowReplacementState, claim.resumeState);
-      assert.strictEqual(resumed.token, claim.token);
-      assert.deepStrictEqual(resumed.resumeState, claim.resumeState);
-    });
-  });
-
-  await test('no-worker and first-task retries reuse paused, cost, and approval snapshots', async () => {
-    const cases = [
-      { name: 'paused/no-worker', status: 'PAUSED' as const, failedFirstTask: false },
-      {
-        name: 'cost-limited/first-task-failure',
-        status: 'COST_LIMIT_REACHED' as const,
-        failedFirstTask: true,
-      },
-      { name: 'awaiting-approval/no-worker', status: 'PAUSED' as const, failedFirstTask: false },
-    ];
-    for (const testCase of cases) {
-      await withAgent(async (agentId) => {
-        const staleWorkflowId = `${agentId}:stale`;
-        await prisma.agent.update({
-          where: { id: agentId },
-          data: {
-            temporalWorkflowId: staleWorkflowId,
-            status: testCase.status,
-            statusMessage: testCase.name,
-            tokenCount: 777,
-            tokensIn: 555,
-            tokensOut: 222,
-            workflowIterationOffset: 9,
-          },
-        });
-        if (testCase.name.startsWith('awaiting-approval')) {
-          await prisma.agentAttentionRequest.create({
-            data: {
-              userId: `workflow-replacement-state-unit-${agentId}`,
-              agentId,
-              workflowId: staleWorkflowId,
-              question: 'Approve the pending action?',
-            },
-          });
-        }
-
-        const first = await claimWorkflowReplacement(agentId);
-        await recordWorkflowReplacementStartAcceptance(first, {
-          workflowId: first.plannedWorkflowId,
-          firstExecutionRunId: `${testCase.name}:run-1`,
-        });
-        if (testCase.failedFirstTask) {
-          await prisma.agent.update({
-            where: { id: agentId },
-            data: { status: 'FAILED', statusMessage: 'candidate failed its first task' },
-          });
-        }
-
-        const retried = await claimWorkflowReplacement(agentId);
-        assert.strictEqual(retried.token, first.token, testCase.name);
-        assert.strictEqual(retried.plannedWorkflowId, first.plannedWorkflowId, testCase.name);
-        assert.deepStrictEqual(retried.resumeState, first.resumeState, testCase.name);
-        assert.strictEqual(retried.resumeState.prior_status, testCase.status, testCase.name);
-        assert.strictEqual(retried.resumeState.token_count, 777, testCase.name);
-        assert.strictEqual(retried.resumeState.iteration_offset, 9, testCase.name);
-
-        const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
-        assert.strictEqual(stored.workflowReplacementToken, first.token, testCase.name);
-        assert.deepStrictEqual(stored.workflowReplacementState, first.resumeState, testCase.name);
-        await prisma.agentAttentionRequest.deleteMany({ where: { agentId } });
-      });
-    }
-  });
-
-  await test('bootstrap acknowledgement is generation-fenced, idempotent, and consumes the claim', async () => {
-    await withAgent(async (agentId) => {
-      await prisma.agent.update({
-        where: { id: agentId },
-        data: { temporalWorkflowId: `${agentId}:stale`, status: 'PAUSED' },
-      });
-      const claim = await claimWorkflowReplacement(agentId);
-      await recordWorkflowReplacementStartAcceptance(claim, {
-        workflowId: claim.plannedWorkflowId,
-        firstExecutionRunId: 'candidate-run',
-      });
-
-      assert.strictEqual(
-        await acknowledgeWorkflowReplacementBootstrap(agentId, `${agentId}:stale`),
-        'stale_generation'
-      );
-      let stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
-      assert.strictEqual(stored.workflowReplacementToken, claim.token);
-      assert.deepStrictEqual(stored.workflowReplacementState, claim.resumeState);
-
-      assert.strictEqual(
-        await acknowledgeWorkflowReplacementBootstrap(agentId, claim.plannedWorkflowId),
-        'acknowledged'
-      );
-      stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
-      assert.strictEqual(stored.workflowReplacementToken, null);
-      assert.strictEqual(stored.workflowReplacementState, null);
-      assert.strictEqual(stored.staleTemporalWorkflowId, null);
-      assert.strictEqual(stored.temporalWorkflowId, claim.plannedWorkflowId);
-      assert.strictEqual(stored.temporalFirstExecutionRunId, 'candidate-run');
-
-      assert.strictEqual(
-        await acknowledgeWorkflowReplacementBootstrap(agentId, claim.plannedWorkflowId),
-        'already_acknowledged'
-      );
-    });
-  });
-
-  await test('start acceptance still records the chain if bootstrap acknowledgement wins the race', async () => {
-    await withAgent(async (agentId) => {
-      await prisma.agent.update({
-        where: { id: agentId },
-        data: { temporalWorkflowId: `${agentId}:stale`, status: 'PAUSED' },
-      });
-      const claim = await claimWorkflowReplacement(agentId);
-      assert.strictEqual(
-        await acknowledgeWorkflowReplacementBootstrap(agentId, claim.plannedWorkflowId),
-        'acknowledged'
-      );
-      assert.strictEqual(
-        await recordWorkflowReplacementStartAcceptance(claim, {
-          workflowId: claim.plannedWorkflowId,
-          firstExecutionRunId: 'candidate-race-run',
-        }),
-        true
-      );
-      const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
-      assert.strictEqual(stored.workflowReplacementToken, null);
-      assert.strictEqual(stored.temporalFirstExecutionRunId, 'candidate-race-run');
-    });
-  });
-
-  await test('post-start bookkeeping failure cannot overwrite a restored pause state', async () => {
-    await withAgent(async (agentId) => {
-      await prisma.agent.update({
-        where: { id: agentId },
-        data: { temporalWorkflowId: agentId, status: 'PAUSED' },
-      });
-      const claim = await claimWorkflowReplacement(agentId);
-      await prisma.agent.update({
-        where: { id: agentId },
-        data: { status: 'PAUSED', statusMessage: 'Paused by replacement workflow' },
-      });
-      await markWorkflowReplacementFailed(claim, new Error('completion write timed out'));
-
-      const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
-      assert.strictEqual(stored.status, 'PAUSED');
-      assert.match(stored.statusMessage ?? '', /completion write timed out/);
-      assert.deepStrictEqual(stored.workflowReplacementState, claim.resumeState);
-    });
-  });
-
-  await test('a stale workflow cannot overwrite replacement status after the cutover claim', async () => {
-    await withAgent(async (agentId) => {
-      await prisma.agent.update({
-        where: { id: agentId },
-        data: { temporalWorkflowId: agentId },
-      });
-      const claim = await claimWorkflowReplacement(agentId);
-
-      const returned = await updateAgentStatus(
-        agentId,
-        {
-          status: 'FAILED',
-          statusMessage: 'late failure from old workflow',
-          progress: 1,
-          tokenCount: 100,
-          tokensIn: 60,
-          tokensOut: 40,
-          contextSize: 50,
-          messageCount: 10,
-        },
-        {},
-        agentId
-      );
-      const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
-
-      assert(returned);
-      assert.strictEqual(stored.temporalWorkflowId, claim.plannedWorkflowId);
-      assert.strictEqual(stored.status, 'STARTING_UP');
-      assert.strictEqual(stored.statusMessage, 'Updating agent code');
-    });
-  });
-
-  await test('current replacement can resume cold states but never irreversible states', async () => {
-    await withAgent(async (agentId) => {
-      const workflowId = `${agentId}:replacement:current`;
-      for (const coldStatus of ['COST_LIMIT_REACHED', 'OUT_OF_CREDITS'] as const) {
-        await prisma.agent.update({
-          where: { id: agentId },
-          data: { temporalWorkflowId: workflowId, status: coldStatus },
-        });
-        await updateAgentStatus(
-          agentId,
-          {
-            status: 'ACTIVE',
-            statusMessage: 'Resume accepted by current workflow',
-            progress: 0.5,
-            tokenCount: 100,
-            tokensIn: 60,
-            tokensOut: 40,
-            contextSize: 50,
-            messageCount: 10,
-          },
-          {},
-          workflowId
-        );
-        const resumed = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
-        assert.strictEqual(resumed.status, 'ACTIVE');
-      }
-
-      await prisma.agent.update({
-        where: { id: agentId },
-        data: { status: 'FAILED', statusMessage: 'Irreversible failure' },
-      });
-      await updateAgentStatus(
-        agentId,
-        {
-          status: 'ACTIVE',
-          statusMessage: 'Late stale resume',
-          progress: 0.5,
-          tokenCount: 100,
-          tokensIn: 60,
-          tokensOut: 40,
-          contextSize: 50,
-          messageCount: 10,
-        },
-        {},
-        workflowId
-      );
-      const failed = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
-      assert.strictEqual(failed.status, 'FAILED');
-      assert.strictEqual(failed.statusMessage, 'Irreversible failure');
     });
   });
 

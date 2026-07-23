@@ -254,7 +254,7 @@ def build_for_each_goal(base_goal: str, item: Any) -> str:
 
 @activity.defn
 @traced("spawn_explore_agent_activity")
-async def spawn_explore_agent_activity(  # noqa: C901
+async def spawn_explore_agent_activity(
     agent_id: str,
     user_id: str,
     goal: str,

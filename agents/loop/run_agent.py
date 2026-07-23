@@ -154,7 +154,7 @@ def _resolve_cache_sequence_id(
 
 
 @traced("run_agent")
-async def run_agent(  # noqa: C901
+async def run_agent(
     # Identity
     agent_id: str,
     user_id: str,
@@ -1017,7 +1017,7 @@ async def run_agent(  # noqa: C901
                     llm_started_at_ms=llm_started_at_ms,
                 )
 
-                async def _send_stream_start() -> None:
+                async def _send_stream_start(_start_event: ToolEvent = start_event) -> None:
                     async with span(
                         "stream.start_event",
                         agent_id=agent_id,
@@ -1025,7 +1025,7 @@ async def run_agent(  # noqa: C901
                         agent_type="explore" if cache_call_site == "explore_agent" else None,
                     ):
                         await handle_tool_event(
-                            event=start_event,
+                            event=_start_event,
                             agent_id=agent_id,
                             tool_call_id=stream_id,
                             tool_name="llm_call",
@@ -1052,7 +1052,14 @@ async def run_agent(  # noqa: C901
                     llm_started_at_ms=llm_started_at_ms,
                 )
 
-                async def on_chunk(text_so_far: str, token_count_chunk: int):  # noqa: B023
+                async def on_chunk(
+                    text_so_far: str,
+                    token_count_chunk: int,
+                    *,
+                    _last_text: List[str] = last_text,
+                    _broadcaster: CoalescingStreamBroadcaster = broadcaster,
+                    _sequence: List[int] = sequence,
+                ):
                     # Heartbeat so Temporal knows the activity is alive during long LLM calls
                     if is_inside_temporal_activity:
                         activity.heartbeat(f"LLM streaming: {token_count_chunk} tokens")
@@ -1064,11 +1071,11 @@ async def run_agent(  # noqa: C901
                         if paused:
                             raise asyncio.CancelledError("Paused")
 
-                    delta = text_so_far[len(last_text[0]) :]  # noqa: B023
+                    delta = text_so_far[len(_last_text[0]) :]
                     if delta:
-                        broadcaster.update(delta, sequence[0])  # noqa: B023 — non-blocking
-                        sequence[0] += 1  # noqa: B023
-                        last_text[0] = text_so_far  # noqa: B023
+                        _broadcaster.update(delta, _sequence[0])
+                        _sequence[0] += 1
+                        _last_text[0] = text_so_far
 
                 # Fast Mode: the inline path (explore / browser sub-agents that run
                 # run_agent INSIDE an activity) bypasses call_llm_activity, so it must
@@ -1307,14 +1314,8 @@ async def run_agent(  # noqa: C901
 
             fast_cache_llm_position = fast_cache_step
 
-            # Calculate tree tokens (own + children's accumulated tokens)
-            children_tokens_in, children_tokens_out = (0, 0)
-            if get_children_tokens:
-                children_tokens_in, children_tokens_out = get_children_tokens()
-            tree_tokens_in = tokens_in + children_tokens_in
-            tree_tokens_out = tokens_out + children_tokens_out
-
-            # Persist + broadcast tree tokens after each LLM call.
+            # Persist + broadcast own tokens after each LLM call. Descendant
+            # subtree totals have their own durable maps in AgentWorkflow.
             # Fire-and-forget: this is a UI progress broadcast — it doesn't gate
             # the loop's correctness, and awaiting it adds ~80–120ms to every LLM
             # iteration (PATCH /status RTT). With 10+ iterations per task that's
@@ -1335,8 +1336,8 @@ async def run_agent(  # noqa: C901
                                     token_count,
                                     context_size,
                                     len(context),
-                                    tree_tokens_in,
-                                    tree_tokens_out,
+                                    tokens_in,
+                                    tokens_out,
                                 ],
                                 start_to_close_timeout=timedelta(seconds=15),
                                 retry_policy=RetryPolicy(maximum_attempts=2),
@@ -1356,8 +1357,8 @@ async def run_agent(  # noqa: C901
                                 token_count,
                                 context_size,
                                 len(context),
-                                tree_tokens_in,
-                                tree_tokens_out,
+                                tokens_in,
+                                tokens_out,
                             ],
                             start_to_close_timeout=timedelta(seconds=15),
                             retry_policy=RetryPolicy(maximum_attempts=2),

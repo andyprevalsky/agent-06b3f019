@@ -10,6 +10,13 @@ export interface SaveToolUsageInput {
   tool_name: string;
   total_cost_cents: number;
   usage_items: unknown[];
+  operation_key?: string;
+  accounting_checkpoint?: {
+    token_count: number;
+    tokens_in: number;
+    tokens_out: number;
+    own_cost_cents: number;
+  };
   workflow_generation?: string;
 }
 

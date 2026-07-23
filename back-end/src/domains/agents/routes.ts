@@ -10,6 +10,7 @@ import { canReadBenchmarkArchive } from '../../providers/benchmarkHubStore';
 import { getClientIP } from '../../providers/geoip';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
+import { StaleParentWorkflowGenerationError } from '../../providers/workflowGeneration';
 import { createAgentSchema, updateAgentSchema } from './types';
 import * as routeGuards from './routes.guards';
 import * as lifecycleService from './agentLifecycleService';
@@ -43,6 +44,10 @@ function handleRouteError(
 ): void {
   if (error instanceof z.ZodError) {
     res.status(400).json({ error: 'Invalid request body', details: error.issues });
+    return;
+  }
+  if (error instanceof StaleParentWorkflowGenerationError) {
+    res.status(409).json({ error: error.message });
     return;
   }
   log.error(msg, {

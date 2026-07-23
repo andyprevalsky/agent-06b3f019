@@ -260,6 +260,15 @@ async function completeDescendantCleanup(snapshot: DescendantWorkflowSnapshot): 
         staleTemporalFirstExecutionRunId: null,
       },
     });
+    await tx.agent.updateMany({
+      where: {
+        id: snapshot.agentId,
+        temporalWorkflowId: snapshot.sealedWorkflowId,
+        staleTemporalWorkflowId: null,
+        status: 'FAILED',
+      },
+      data: { temporalCleanupPending: false },
+    });
   });
 }
 

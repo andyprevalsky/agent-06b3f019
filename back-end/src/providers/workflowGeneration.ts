@@ -4,6 +4,13 @@ const WORKFLOW_GENERATION_LOCK_SEED = 6_901_733;
 
 export const DEPLOY_INTERRUPTED_TOOL_MESSAGE = 'new code version deployed, retry this tool';
 
+export class StaleParentWorkflowGenerationError extends Error {
+  constructor(message = 'Parent workflow generation is no longer current') {
+    super(message);
+    this.name = 'StaleParentWorkflowGenerationError';
+  }
+}
+
 export function messageWorkflowGeneration(message: Message): string {
   return message.workflowGeneration ?? message.agentId;
 }

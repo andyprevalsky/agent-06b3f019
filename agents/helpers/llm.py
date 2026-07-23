@@ -188,9 +188,7 @@ def _add_cache_breakpoint_before_extra_user_message(messages: List[Dict[str, Any
             continue
         content = message.get("content")
         if isinstance(content, str) and content:
-            message["content"] = [
-                {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
-            ]
+            message["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
             return True
         if isinstance(content, list):
             for block in reversed(content):
@@ -720,7 +718,7 @@ async def _generate_response_schema_with_rose(
     raise last_error or ValueError("Unknown error generating response schema")
 
 
-def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]:  # noqa: C901
+def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]:
     """
     Convert a Pydantic model to a JSON schema ready for OpenAI strict structured outputs.
 
@@ -835,7 +833,7 @@ def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]
     return schema
 
 
-def build_verifier_context_messages(  # noqa: C901
+def build_verifier_context_messages(
     context: List[Dict[str, Any]],
     system_prompt: str,
     verifier_file_evidence_by_message: Optional[Dict[str, List[Dict[str, Any]]]] = None,
@@ -1201,7 +1199,7 @@ def _verifier_context_has_successful_browser_result(context: List[Dict[str, Any]
     return any(_is_successful_browser_tool_result(msg) for msg in context)
 
 
-def convert_context_to_messages(  # noqa: C901
+def convert_context_to_messages(
     context: List[Dict[str, Any]],
     include_system: bool = True,
     # Default False: including assistant messages is prone to reward hacking
@@ -1419,7 +1417,7 @@ def inject_llm_only_user_preamble(
     return messages
 
 
-async def build_llm_messages(  # noqa: C901
+async def build_llm_messages(
     context: List[Dict],
     system_prompt: str,
     pre_resolved_ids: Optional[set] = None,
@@ -2012,7 +2010,7 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
     return result
 
 
-async def call_llm_structured_streaming(  # noqa: C901
+async def call_llm_structured_streaming(
     messages: List[Dict[str, Any]],
     model: Optional[str],
     temperature: float,
@@ -3210,7 +3208,7 @@ def _extract_response_from_partial_json(reasoning: str, json_content: str) -> Op
     return "\n\n".join(parts) if parts else None
 
 
-def _extract_nested_agent_json_blob(text: str) -> Optional[Dict[str, Any]]:
+def _extract_nested_agent_json_blob(text: Any) -> Optional[Dict[str, Any]]:
     """
     Best-effort extraction of a nested agent JSON object from text.
     Handles raw JSON and markdown-fenced ```json blocks.
@@ -3534,7 +3532,7 @@ def _content_from_structured_rose_response(
 # The run_agent loop handles LLM calls directly via call_llm_structured_streaming
 
 
-async def _call_llm_verifier(  # noqa: C901
+async def _call_llm_verifier(
     messages: List[Dict[str, Any]],
     model: str,
     config: Any,
@@ -4351,7 +4349,7 @@ VERIFIER_TOTAL_TIMEOUT_S = 180.0
 
 @activity.defn
 @traced("check_progress")
-async def check_progress(  # noqa: C901
+async def check_progress(
     context: List[Dict[str, Any]],
     verifier_system_prompt: str,
     model: str = VERIFIER_MODEL,  # IGNORED — verifier always forces rose-1-ultra. Kept for backward compat.
@@ -4696,7 +4694,7 @@ async def check_progress(  # noqa: C901
 
 @activity.defn
 @traced("call_llm_activity")
-async def call_llm_activity(  # noqa: C901
+async def call_llm_activity(
     messages_or_agent_id: Any,
     model: str,
     tool_names: List[str],
@@ -5018,9 +5016,7 @@ async def call_llm_activity(  # noqa: C901
         if required_tool:
             got = [tc.get("tool") for tc in tool_calls_dict]
             if len(tool_calls_dict) != 1 or got[0] != required_tool:
-                raise LLMStructuredOutputError(
-                    f"LLM must call exactly one tool, '{required_tool}'. Got: {got}"
-                )
+                raise LLMStructuredOutputError(f"LLM must call exactly one tool, '{required_tool}'. Got: {got}")
 
         logger.info(
             "LLM activity completed",

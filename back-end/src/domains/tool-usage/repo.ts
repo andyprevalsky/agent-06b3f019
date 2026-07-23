@@ -24,6 +24,15 @@ export async function createToolUsageForWorkflow(params: {
   toolName: string;
   totalCostCents: number;
   usageItems: Prisma.InputJsonValue;
+  operationKey: string | undefined;
+  accountingCheckpoint:
+    | {
+        token_count: number;
+        tokens_in: number;
+        tokens_out: number;
+        own_cost_cents: number;
+      }
+    | undefined;
   maxLlmIteration: number | null;
 }) {
   return runTransactionWithRetry(async (tx) => {
@@ -45,15 +54,33 @@ export async function createToolUsageForWorkflow(params: {
         (params.workflowGeneration === params.agentId && agent.temporalWorkflowId === null));
     if (!generationMatches) return { status: 'stale_generation' as const };
 
-    const toolUsage = await tx.toolUsage.create({
-      data: {
-        userId: params.userId,
-        agentId: params.agentId,
-        toolName: params.toolName,
-        totalCostCents: params.totalCostCents,
-        usageItems: params.usageItems,
-      },
-    });
+    const data = {
+      userId: params.userId,
+      agentId: params.agentId,
+      toolName: params.toolName,
+      totalCostCents: params.totalCostCents,
+      usageItems: params.usageItems,
+      operationKey: params.operationKey,
+      tokenCountCheckpoint: params.accountingCheckpoint?.token_count,
+      tokensInCheckpoint: params.accountingCheckpoint?.tokens_in,
+      tokensOutCheckpoint: params.accountingCheckpoint?.tokens_out,
+      ownCostCheckpointCents: params.accountingCheckpoint?.own_cost_cents,
+    };
+    const toolUsage =
+      params.operationKey === undefined
+        ? await tx.toolUsage.create({ data })
+        : await tx.toolUsage.upsert({
+            where: { operationKey: params.operationKey },
+            create: data,
+            update: {},
+          });
+    if (
+      toolUsage.agentId !== params.agentId ||
+      toolUsage.userId !== params.userId ||
+      toolUsage.toolName !== params.toolName
+    ) {
+      throw new Error('Tool usage operation key conflicts with a different durable operation');
+    }
     if (params.maxLlmIteration !== null) {
       await tx.agent.updateMany({
         where: {

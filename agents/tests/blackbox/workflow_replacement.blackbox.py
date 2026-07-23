@@ -1,8 +1,9 @@
 """Blackbox tests for workflow replacement bootstrap acknowledgement."""
 
 import asyncio
+import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import httpx
 
@@ -74,17 +75,17 @@ async def test_finalize_persists_restored_state_before_acknowledgement():
         {
             "/workflow-replacement/bootstrap-ack": {
                 "status": 200,
-                "json": {"acknowledged": True, "already_acknowledged": False},
+                "json": {
+                    "acknowledged": True,
+                    "already_acknowledged": False,
+                    "status": "COST_LIMIT_REACHED",
+                },
             }
         }
     )
-    persist = AsyncMock()
-    with (
-        patch(
-            "temporalio.activity.info",
-            return_value=SimpleNamespace(workflow_id="agent-1:replacement:candidate-2"),
-        ),
-        patch("helpers.workflow_replacement._update_agent_status_impl", persist),
+    with patch(
+        "temporalio.activity.info",
+        return_value=SimpleNamespace(workflow_id="agent-1:replacement:candidate-2"),
     ):
         from helpers.workflow_replacement import finalize_workflow_replacement_bootstrap
 
@@ -101,31 +102,34 @@ async def test_finalize_persists_restored_state_before_acknowledgement():
             12,
         )
 
-    persist.assert_awaited_once_with(
-        agent_id="agent-1",
-        status="COST_LIMIT_REACHED",
-        progress=0.6,
-        status_message="Waiting for a higher cost limit",
-        token_count=123,
-        context_size=456,
-        message_count=7,
-        tokens_in=80,
-        tokens_out=43,
-        iteration_offset=12,
-    )
-    assert len(get_captured_requests()) == 1
+    request = get_captured_requests()[0]
+    body = json.loads(request["requestBody"])
+    assert body == {
+        "status": "COST_LIMIT_REACHED",
+        "progress": 0.6,
+        "statusMessage": "Waiting for a higher cost limit",
+        "tokenCount": 123,
+        "contextSize": 456,
+        "messageCount": 7,
+        "tokensIn": 80,
+        "tokensOut": 43,
+        "iterationOffset": 12,
+    }
     assert result["acknowledged"] is True
 
 
 async def test_finalize_never_acknowledges_when_state_persistence_fails():
-    setup_mock({})
-    persist = AsyncMock(side_effect=RuntimeError("durable status write failed"))
-    with (
-        patch(
-            "temporalio.activity.info",
-            return_value=SimpleNamespace(workflow_id="agent-1:replacement:candidate-2"),
-        ),
-        patch("helpers.workflow_replacement._update_agent_status_impl", persist),
+    setup_mock(
+        {
+            "/workflow-replacement/bootstrap-ack": {
+                "status": 500,
+                "json": {"error": "durable finalize failed"},
+            }
+        }
+    )
+    with patch(
+        "temporalio.activity.info",
+        return_value=SimpleNamespace(workflow_id="agent-1:replacement:candidate-2"),
     ):
         from helpers.workflow_replacement import finalize_workflow_replacement_bootstrap
 
@@ -143,9 +147,9 @@ async def test_finalize_never_acknowledges_when_state_persistence_fails():
                 12,
             )
             raise AssertionError("failed state persistence must fail bootstrap")
-        except RuntimeError as exc:
-            assert "durable status write failed" in str(exc)
-    assert get_captured_requests() == []
+        except httpx.HTTPStatusError:
+            pass
+    assert len(get_captured_requests()) == 1
 
 
 async def run_all_tests():

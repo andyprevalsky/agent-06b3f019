@@ -7,13 +7,15 @@ import structlog
 from temporalio import activity
 
 from config import load_config
-from helpers.update_status import _update_agent_status_impl
 from helpers.workflow_generation import workflow_generation_headers
 
 logger = structlog.get_logger()
 
 
-async def _acknowledge_workflow_replacement_bootstrap(agent_id: str) -> Dict[str, Any]:
+async def _acknowledge_workflow_replacement_bootstrap(
+    agent_id: str,
+    restored_state: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
     generation_headers = workflow_generation_headers()
     if "X-Agent-Workflow-Generation" not in generation_headers:
         raise RuntimeError("Workflow replacement acknowledgement requires a Temporal workflow generation")
@@ -27,6 +29,7 @@ async def _acknowledge_workflow_replacement_bootstrap(agent_id: str) -> Dict[str
                 "Content-Type": "application/json",
                 **generation_headers,
             },
+            json=restored_state,
             timeout=30.0,
         )
         response.raise_for_status()
@@ -62,17 +65,18 @@ async def finalize_workflow_replacement_bootstrap(
     tokens_out: int,
     iteration_offset: int,
 ) -> Dict[str, Any]:
-    """Persist restored state before consuming the claim used by deploy canaries."""
-    await _update_agent_status_impl(
-        agent_id=agent_id,
-        status=status,
-        progress=progress,
-        status_message=status_message,
-        token_count=token_count,
-        context_size=context_size,
-        message_count=message_count,
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        iteration_offset=iteration_offset,
+    """Atomically persist restored state and consume the deploy canary claim."""
+    return await _acknowledge_workflow_replacement_bootstrap(
+        agent_id,
+        {
+            "status": status,
+            "progress": progress,
+            "statusMessage": status_message,
+            "tokenCount": token_count,
+            "contextSize": context_size,
+            "messageCount": message_count,
+            "tokensIn": tokens_in,
+            "tokensOut": tokens_out,
+            "iterationOffset": iteration_offset,
+        },
     )
-    return await _acknowledge_workflow_replacement_bootstrap(agent_id)

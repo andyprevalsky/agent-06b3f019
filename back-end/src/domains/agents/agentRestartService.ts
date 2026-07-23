@@ -22,12 +22,14 @@ import {
 import {
   acknowledgeWorkflowReplacementBootstrap as acknowledgeReplacementBootstrap,
   claimWorkflowReplacement,
+  finalizeWorkflowReplacementBootstrap as finalizeReplacementBootstrap,
   markWorkflowReplacementFailed,
   refreshWorkflowReplacementResumeState,
   recordStaleWorkflowChain,
   recordWorkflowReplacementStartAcceptance,
   type WorkflowReplacementClaim,
 } from '../../providers/workflowReplacementState';
+import type { UpdateStatusBody } from './types';
 import * as repo from './repo';
 
 const log = createLogger('Agents');
@@ -169,7 +171,19 @@ export async function prepareAgentWorkflowReplacement(
 ) {
   assertRestartDeadline(options.deadlineAtMs, 'candidate read');
   const agent = await repo.findAgentWithVerifier(agentId, userId);
-  if (agent === null) return { error: 'Agent not found', status: 404 };
+  if (agent === null) {
+    if (options.expectedWorkflowId !== undefined) {
+      return {
+        success: true,
+        skipped: true,
+        agent_id: agentId,
+        workflow_id: null,
+        expected_workflow_id: options.expectedWorkflowId,
+        message: 'Workflow disappeared after the deployment snapshot; no replacement was started',
+      };
+    }
+    return { error: 'Agent not found', status: 404 };
+  }
   if (agent.verifier === null) return { error: 'Agent has no verifier configured', status: 400 };
 
   const capturedStaleWorkflowId =
@@ -267,5 +281,14 @@ export async function acknowledgeWorkflowReplacementBootstrap(
   workflowGeneration: string
 ) {
   return acknowledgeReplacementBootstrap(agentId, workflowGeneration);
+}
+
+/** Atomically persist restored counters, preserve newer control state, and READY-ack. */
+export async function finalizeWorkflowReplacementBootstrap(
+  agentId: string,
+  workflowGeneration: string,
+  restoredState: UpdateStatusBody | undefined
+) {
+  return finalizeReplacementBootstrap(agentId, workflowGeneration, restoredState);
 }
 /* c8 ignore stop */

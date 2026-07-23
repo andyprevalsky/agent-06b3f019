@@ -320,6 +320,7 @@ async def mock_update_agent_status(
     tokens_in: int = 0,
     tokens_out: int = 0,
     structured_response: Optional[Dict] = None,
+    iteration_offset: Optional[int] = None,
 ) -> None:
     _record_workflow_env_activity(agent_id, "update_agent_status")
     return None
@@ -345,7 +346,7 @@ async def mock_finalize_workflow_replacement_bootstrap(
     iteration_offset: int,
 ) -> Dict[str, Any]:
     _record_workflow_env_activity(agent_id, "finalize_workflow_replacement_bootstrap")
-    return {"acknowledged": True, "already_acknowledged": False}
+    return {"acknowledged": True, "already_acknowledged": False, "status": status}
 
 
 @activity.defn(name="get_agent_source")
@@ -436,7 +437,13 @@ async def mock_check_user_usage(user_id: str) -> dict:
 
 
 @activity.defn(name="save_tool_usage")
-async def mock_save_tool_usage(agent_id: str, user_id: str, tool_name: str, usage_items: list) -> None:
+async def mock_save_tool_usage(
+    agent_id: str,
+    user_id: str,
+    tool_name: str,
+    usage_items: list,
+    accounting_checkpoint: Optional[Dict[str, Any]] = None,
+) -> None:
     return None
 
 
@@ -601,6 +608,7 @@ async def mock_check_progress(
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
+    *additional_args: Any,
 ) -> Dict[str, Any]:
     return {
         "score": 1.0,
@@ -775,14 +783,13 @@ DEFAULT_WF_ARGS: list = [
 
 TASK_QUEUE = "test-workflow-queue"
 
-# Monotonic counter to generate unique workflow IDs across tests
-_wf_counter = 0
+# Mutable holder avoids rebinding module state across tests.
+_wf_counter = [0]
 
 
 def _next_wf_id(prefix: str = "test") -> str:
-    global _wf_counter
-    _wf_counter += 1
-    return f"{prefix}-wf-{_wf_counter}"
+    _wf_counter[0] += 1
+    return f"{prefix}-wf-{_wf_counter[0]}"
 
 
 async def _cancel_workflow(handle) -> None:
@@ -1220,8 +1227,21 @@ def test_workflow_restore_deployment_state_rejects_unknown_contract():
         assert "Unsupported workflow resume state" in str(exc)
 
 
+def test_workflow_restore_candidate_validation_stops_before_llm():
+    state = _deployment_resume_fixture()
+    state["kind"] = "validation"
+    state["workflow_started_at"] = "2025-01-01T10:00:00+00:00"
+    state["runtime_state"] = {"deployment_validation": True}
+    wf = _bare_workflow_instance()
+    wf._restore_deployment_state(state)
+
+    assert wf._deployment_resume is True
+    assert wf._deployment_validation is True
+    assert wf.start_time == datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+
+
 def test_workflow_continuation_state_round_trips_complete_runtime():
-    """A continue-as-new boundary must not reset counters, children, signals, or credentials."""
+    """A continue-as-new boundary preserves runtime state but never credentials."""
     wf = _bare_workflow_instance()
     wf.agent_id = "agent-continuation"
     wf.user_id = "user-continuation"
@@ -1310,8 +1330,11 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert restored._response_schema_revision == 3
     assert restored.pending_children == {"child-1"}
     assert restored.child_workflow_ids == {"child-1": "child-workflow"}
-    assert restored.gpt_code_token == "cached-token"
-    assert restored.compute_token_fetched_at == wf.compute_token_fetched_at
+    assert "gpt_code_token" not in state["runtime_state"]
+    assert "claude_max_token" not in state["runtime_state"]
+    assert restored.compute_token_provider is None
+    assert restored.gpt_code_token is None
+    assert restored.compute_token_fetched_at is None
     assert restored.start_time == wf.start_time
     assert restored.user_context_section == "cached user context"
     assert restored.context == context
@@ -1400,7 +1423,17 @@ def test_workflow_get_status_query():
     wf.goal = "test goal"
     wf.token_count = 500
     status = wf.get_status()
-    assert status == {"agent_id": "agent-1", "goal": "test goal", "tokens": 500}
+    assert status == {
+        "agent_id": "agent-1",
+        "goal": "test goal",
+        "tokens": 500,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "context_size": 0,
+        "message_count": 0,
+        "iteration_offset": 0,
+        "workflow_started_at": None,
+    }
 
 
 def test_workflow_is_paused_query_default_false():
@@ -1727,7 +1760,7 @@ class _FakeExternalHandle:
 class _FakeWorkflowModule:
     """Stand-in for temporalio.workflow inside a workflow method. Captures activities + signals."""
 
-    def __init__(self, *, patched: bool = True):
+    def __init__(self):
         self.logger = _FakeWorkflowLogger()
         self.activity_calls: List[tuple] = []  # (fn_name, args)
         self.signal_calls: List[tuple] = []  # (wf_id, name, data)
@@ -1735,7 +1768,6 @@ class _FakeWorkflowModule:
         self.activity_returns: Dict[str, Any] = {}  # fn_name -> return value override
         self.activity_blockers: Dict[str, asyncio.Event] = {}
         self.now_value = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        self._patched = patched
 
     async def execute_activity(self, fn, args=None, **kwargs):
         fn_name = getattr(fn, "__name__", str(fn))
@@ -1760,9 +1792,6 @@ class _FakeWorkflowModule:
 
     def uuid4(self):
         return "00000000-0000-0000-0000-000000000001"
-
-    def patched(self, patch_id):
-        return self._patched
 
 
 def _patch_workflow(fake: _FakeWorkflowModule):
@@ -2314,9 +2343,15 @@ async def test_workflow_signal_child_cost_update_aggregates():
         _restore_workflow(original)
 
 
-async def test_workflow_signal_child_progress_tracks_deltas():
+async def test_workflow_signal_child_progress_keeps_parent_usage_own_only():
     wf = _bare_workflow_instance()
     wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.tokens_in = 40
+    wf.tokens_out = 10
+    wf.token_count = 50
+    wf.max_iterations = 25
+    wf.context_gates = {}
     wf.child_tool_ids = {"child-1": "tool-call-1"}
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
@@ -2331,11 +2366,14 @@ async def test_workflow_signal_child_progress_tracks_deltas():
                 "goal": "subtask",
             }
         )
-        assert wf.tokens_in == 100
-        assert wf.tokens_out == 50
-        assert wf.token_count == 150
+        assert (wf.tokens_in, wf.tokens_out, wf.token_count) == (40, 10, 50)
+        assert wf.child_last_tokens["child-1"] == {
+            "tokens_in": 100,
+            "tokens_out": 50,
+            "token_count": 150,
+        }
 
-        # Second progress update with higher cumulative — deltas should apply
+        # A later cumulative observation replaces only the child's bookkeeping.
         await wf.child_progress(
             {
                 "child_agent_id": "child-1",
@@ -2346,9 +2384,48 @@ async def test_workflow_signal_child_progress_tracks_deltas():
                 "goal": "subtask",
             }
         )
-        assert wf.tokens_in == 250
-        assert wf.tokens_out == 120
-        assert wf.token_count == 370
+        assert (wf.tokens_in, wf.tokens_out, wf.token_count) == (40, 10, 50)
+        assert wf.child_last_tokens["child-1"] == {
+            "tokens_in": 250,
+            "tokens_out": 120,
+            "token_count": 370,
+        }
+
+        # The next parent LLM write checkpoints only the parent's own counters.
+        await wf._on_tokens(
+            tokens_in_delta=20,
+            tokens_out_delta=5,
+            call_site="execute_loop",
+            iteration=3,
+        )
+        save_call = next(call for call in fake.activity_calls if call[0] == "save_tool_usage")
+        assert save_call[1][4] == {
+            "token_count": 75,
+            "tokens_in": 60,
+            "tokens_out": 15,
+            "own_cost_cents": 0.0,
+        }
+        assert (wf.tree_tokens_in, wf.tree_tokens_out) == (60, 15)
+
+        # Child subtree counters remain separate and produce the tree-only view.
+        await wf.child_cost_update(
+            {
+                "child_agent_id": "child-1",
+                "subtree_cost_cents": 0,
+                "subtree_tokens_in": 250,
+                "subtree_tokens_out": 120,
+            }
+        )
+        assert (wf.tree_tokens_in, wf.tree_tokens_out) == (310, 135)
+
+        # Continue-as-new preserves both views without folding the tree into own.
+        state = wf._continuation_resume_state([])
+        restored = _bare_workflow_instance()
+        restored._restore_deployment_state(state)
+        assert (restored.token_count, restored.tokens_in, restored.tokens_out) == (75, 60, 15)
+        assert (restored.tree_tokens_in, restored.tree_tokens_out) == (310, 135)
+        assert restored.children_tokens_in == {"child-1": 250}
+        assert restored.children_tokens_out == {"child-1": 120}
     finally:
         _restore_workflow(original)
 
@@ -2891,7 +2968,7 @@ async def test_workflow_on_tokens_calculates_cost_with_pricing():
             actual_model=None,
             cache_read_input_tokens=0,
             cache_creation_input_tokens=0,
-            call_site="test",
+            call_site="execute_loop",
             iteration=7,
         )
         assert wf.tokens_in == 1000
@@ -2902,6 +2979,14 @@ async def test_workflow_on_tokens_calculates_cost_with_pricing():
         assert "save_tool_usage" in activity_names
         save_call = next(call for call in fake.activity_calls if call[0] == "save_tool_usage")
         assert save_call[1][3][0]["iteration"] == 7
+        await wf._on_tokens(
+            tokens_in_delta=0,
+            tokens_out_delta=0,
+            actual_model=None,
+            call_site="plan_loop",
+            iteration=99,
+        )
+        assert wf.iteration_offset == 7, "PLAN iterations must not consume the EXECUTE budget"
     finally:
         _restore_workflow(original)
 
@@ -3096,13 +3181,13 @@ async def test_workflow_paused_continue_as_new_preserves_deployment_state():
         fake = _FakeWorkflowModule()
         continued = []
 
-        async def fake_wait_condition(condition, **_kwargs):
+        async def fake_wait_condition(condition, _wf=wf, **_kwargs):
             assert condition() is False
-            wf.is_paused = False
-            wf._cost_limit_reached = False
+            _wf.is_paused = False
+            _wf._cost_limit_reached = False
 
-        def fake_continue_as_new(*, args):
-            continued.append(args)
+        def fake_continue_as_new(*, args, _continued=continued):
+            _continued.append(args)
 
         async def wait_for_refresh():
             return None
@@ -3129,7 +3214,8 @@ async def test_workflow_paused_continue_as_new_preserves_deployment_state():
             assert resume_state["token_count"] == 950
             assert resume_state["own_cost_cents"] == 17.25
             assert resume_state["iteration_offset"] == 19
-            assert resume_state["runtime_state"]["claude_max_token"] == "cached-claude"
+            assert "claude_max_token" not in resume_state["runtime_state"]
+            assert "gpt_code_token" not in resume_state["runtime_state"]
             assert resume_state["runtime_state"]["pending_children"] == ["child-1"]
         finally:
             _restore_workflow(original)
@@ -3174,7 +3260,8 @@ async def test_workflow_context_overflow_uses_complete_continuation_contract():
         assert args[12] is None
         assert args[16]["iteration_offset"] == 27
         assert args[16]["token_count"] == 500
-        assert args[16]["runtime_state"]["gpt_code_token"] == "cached-gpt"
+        assert "gpt_code_token" not in args[16]["runtime_state"]
+        assert "claude_max_token" not in args[16]["runtime_state"]
     finally:
         _restore_workflow(original)
 
@@ -3677,6 +3764,11 @@ async def test_workflow_run_deployment_resume_skips_startup_replay_and_restores_
                 "response_schema": {"fields": []},
                 "write_lock_enabled": True,
             },
+            "finalize_workflow_replacement_bootstrap": {
+                "acknowledged": True,
+                "already_acknowledged": False,
+                "status": "ACTIVE",
+            },
             "generate_completion_summary": {
                 "summary": "Resumed and finished.",
                 "tool_counts": {},
@@ -3731,7 +3823,10 @@ async def test_workflow_run_deployment_resume_skips_startup_replay_and_restores_
         assert "is_plan_loop" not in run_agent_calls[0]
 
         activity_names = [call[0] for call in fake.activity_calls]
-        assert activity_names[0] == "finalize_workflow_replacement_bootstrap"
+        assert activity_names[:2] == [
+            "fetch_agent_config",
+            "finalize_workflow_replacement_bootstrap",
+        ]
         started_sms = [
             call
             for call in fake.activity_calls
@@ -3752,9 +3847,15 @@ async def test_workflow_run_deployment_resume_skips_startup_replay_and_restores_
             for call in fake.activity_calls
             if call[0] == "finalize_workflow_replacement_bootstrap"
         )
+        persisted_startup = next(
+            call
+            for call in fake.activity_calls
+            if call[0] == "update_agent_status"
+        )
         assert startup_status[1][1] == "ACTIVE"
         assert startup_status[1][2] == 0.4
-        assert startup_status[1][4:9] == [950, 42_000, 73, 900, 350]
+        assert startup_status[1][4:9] == [950, 42_000, 73, 680, 270]
+        assert persisted_startup[1][4:9] == [950, 42_000, 73, 680, 270]
         assert started_sms == []
         assert init_posts == []
         assert hidden_prompt_posts == []
@@ -4586,7 +4687,7 @@ async def test_workflow_execute_tool_unknown_tool_returns_error():
     async def fake_handle(event, tool_call_id, tool_name):
         handle_calls.append((event, tool_call_id, tool_name))
 
-    wf._handle_tool_event = fake_handle  # type: ignore[assignment]
+    setattr(wf, "_handle_tool_event", fake_handle)
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
@@ -4644,7 +4745,7 @@ async def test_workflow_execute_tool_invalid_params_returns_error_and_posts_tool
     async def fake_handle(event, tool_call_id, tool_name):
         handle_calls.append((event, tool_call_id, tool_name))
 
-    wf._handle_tool_event = fake_handle  # type: ignore[assignment]
+    setattr(wf, "_handle_tool_event", fake_handle)
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
@@ -5016,56 +5117,6 @@ async def test_workflow_rejection_fails_tool_with_feedback_without_jit_or_execut
         _restore_workflow(original_workflow)
 
 
-async def test_workflow_pre_patch_replay_skips_new_jit_command():
-    """Old Temporal histories replay their original approval -> executor command order."""
-    wf = _bare_workflow_instance()
-    wf.agent_id = "agent-legacy-replay"
-    wf.user_id = "user-1"
-    wf.current_phase = "EXECUTE"
-    tool_args = {
-        "to": "+15555550123",
-        "system_prompt": "Book dinner at the proposed time.",
-        "output_schema": {
-            "fields": [
-                {
-                    "name": "status",
-                    "type": "str",
-                    "required": True,
-                    "description": "Booking status",
-                }
-            ]
-        },
-    }
-    executor_calls: List[Dict[str, Any]] = []
-
-    import workflows.agent_workflow as workflow_module
-
-    async def fake_approval(workflow_instance, question, metadata=None, **kwargs):
-        return {"response": "its 1:45pm local time", "question": question}
-
-    async def fake_call_executor(**kwargs):
-        executor_calls.append(kwargs)
-        return {"result": {"status": "queued"}}
-
-    fake = _FakeWorkflowModule(patched=False)
-    original_workflow = _patch_workflow(fake)
-    original_approval = workflow_module.request_user_approval_direct
-    original_executor = workflow_module.TOOL_EXECUTORS["call_phone_number"]
-    workflow_module.request_user_approval_direct = fake_approval
-    workflow_module.TOOL_EXECUTORS["call_phone_number"] = fake_call_executor
-    try:
-        result = await wf._execute_tool("call_phone_number", tool_args, "tc-legacy-replay")
-
-        assert result["success"] is True
-        assert len(executor_calls) == 1
-        assert executor_calls[0]["tool_call"] == {"tool": "call_phone_number", **tool_args}
-        assert not any(call[0] == "call_llm_activity" for call in fake.activity_calls)
-    finally:
-        workflow_module.request_user_approval_direct = original_approval
-        workflow_module.TOOL_EXECUTORS["call_phone_number"] = original_executor
-        _restore_workflow(original_workflow)
-
-
 async def test_workflow_refresh_claude_token_missing_fetches_and_sets():
     wf = _bare_workflow_instance()
     wf.claude_max_token = None
@@ -5393,6 +5444,10 @@ async def run_all_tests():
     r.record("wf_restore_deploy_pause", test_workflow_restore_deployment_state_preserves_pause_modes)
     r.record("wf_restore_deploy_version", test_workflow_restore_deployment_state_rejects_unknown_contract)
     r.record(
+        "wf_restore_candidate_validation",
+        test_workflow_restore_candidate_validation_stops_before_llm,
+    )
+    r.record(
         "wf_continuation_state_round_trip",
         test_workflow_continuation_state_round_trips_complete_runtime,
     )
@@ -5491,7 +5546,10 @@ async def run_all_tests():
     )
     await r.record_async("wf_signal_signup", test_workflow_signal_signup_completed_and_dismissed)
     await r.record_async("wf_signal_child_cost_update", test_workflow_signal_child_cost_update_aggregates)
-    await r.record_async("wf_signal_child_progress", test_workflow_signal_child_progress_tracks_deltas)
+    await r.record_async(
+        "wf_signal_child_progress",
+        test_workflow_signal_child_progress_keeps_parent_usage_own_only,
+    )
     await r.record_async("wf_signal_child_completed_success", test_workflow_signal_child_completed_success)
     await r.record_async("wf_signal_child_completed_failure", test_workflow_signal_child_completed_failure)
     await r.record_async(
@@ -5651,10 +5709,6 @@ async def run_all_tests():
     await r.record_async(
         "wf_rejection_fails_with_feedback",
         test_workflow_rejection_fails_tool_with_feedback_without_jit_or_execution,
-    )
-    await r.record_async(
-        "wf_pre_patch_replay_skips_jit",
-        test_workflow_pre_patch_replay_skips_new_jit_command,
     )
     await r.record_async("wf_refresh_claude_token_missing", test_workflow_refresh_claude_token_missing_fetches_and_sets)
     await r.record_async(

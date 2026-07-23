@@ -92,8 +92,6 @@ async def fetch_full_network_metadata(user_id: str) -> str:
 
     Cached with 5-minute TTL.
     """
-    global _network_metadata_cache  # noqa: PLW0603
-
     now = datetime.utcnow()
     if user_id in _network_metadata_cache:
         cached = _network_metadata_cache[user_id]
