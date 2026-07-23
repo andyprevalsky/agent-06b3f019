@@ -31,6 +31,7 @@ async function createTree(): Promise<TestTree> {
   const grandchildId = randomUUID();
   const childWorkflowId = `${childId}:workflow`;
   const grandchildWorkflowId = `${grandchildId}:workflow`;
+  const rootWorkflowId = `${rootId}:workflow`;
   await prisma.agent.createMany({
     data: [
       {
@@ -39,7 +40,7 @@ async function createTree(): Promise<TestTree> {
         goal: 'root',
         status: 'ACTIVE',
         busId: rootId,
-        temporalWorkflowId: `${rootId}:workflow`,
+        temporalWorkflowId: rootWorkflowId,
         temporalFirstExecutionRunId: `${rootId}:run`,
       },
       {
@@ -49,6 +50,7 @@ async function createTree(): Promise<TestTree> {
         status: 'ACTIVE',
         busId: rootId,
         parentAgentId: rootId,
+        parentWorkflowId: rootWorkflowId,
         depth: 1,
         temporalWorkflowId: childWorkflowId,
         temporalFirstExecutionRunId: `${childId}:run`,
@@ -60,6 +62,7 @@ async function createTree(): Promise<TestTree> {
         status: 'PAUSED',
         busId: rootId,
         parentAgentId: childId,
+        parentWorkflowId: childWorkflowId,
         depth: 2,
         temporalWorkflowId: grandchildWorkflowId,
         temporalFirstExecutionRunId: `${grandchildId}:run`,
