@@ -22,6 +22,7 @@ async def mark_finished(
     tokens_out: int = 0,
     summary: str = "",
     structured_response: Optional[Dict] = None,
+    iteration_offset: Optional[int] = None,
 ) -> Dict:
     """
     Activity: Mark an agent task as finished.
@@ -62,6 +63,7 @@ async def mark_finished(
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             structured_response=structured_response,
+            iteration_offset=iteration_offset,
         )
 
         logger.info("Agent status updated to COMPLETED", agent_id=agent_id)

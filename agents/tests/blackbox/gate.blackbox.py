@@ -49,6 +49,20 @@ async def test_flag_reenables_suppressible():
     _clear_flag()
 
 
+async def test_kyc_gate_uses_canonical_detection_contract():
+    """KYC gates use the public gate method; provider details stay in probeKey."""
+    from domains.gate import service
+
+    gate = service.build_kyc_gate()
+
+    assert gate["type"] == "kyc"
+    assert gate["gateKey"] == "kyc"
+    assert gate["detection"] == {
+        "method": "kyc_webhook",
+        "probeKey": "customers_needed_kyc",
+    }
+
+
 async def test_activity_suppresses_source_connect_without_network():
     """The activity short-circuits a suppressed gate to the sentinel, no HTTP."""
     from domains.gate import repo
@@ -115,6 +129,7 @@ async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("suppressible_allowlist_defaults_off", test_suppressible_allowlist_defaults_off)
     await r.record_async("flag_reenables_suppressible", test_flag_reenables_suppressible)
+    await r.record_async("kyc_gate_uses_canonical_detection_contract", test_kyc_gate_uses_canonical_detection_contract)
     await r.record_async("activity_suppresses_source_connect", test_activity_suppresses_source_connect_without_network)
     await r.record_async("raise_gate_direct_noop_on_sentinel", test_raise_gate_direct_noop_on_sentinel)
     await r.record_async("raise_gate_direct_blocks_on_real_request", test_raise_gate_direct_blocks_on_real_request)

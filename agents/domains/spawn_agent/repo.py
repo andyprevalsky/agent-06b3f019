@@ -19,6 +19,7 @@ from domains.spawn_agent.config import (
 )
 from helpers.attachments import FilePointer, resolve_attachments_for_llm
 from helpers.http_client import get_http_client
+from helpers.workflow_generation import stamp_tool_workflow_generation
 from tools.base import MessageStatus
 
 logger = structlog.get_logger()
@@ -57,6 +58,7 @@ async def save_explore_message(
 
         if status == MessageStatus.ERROR:
             metadata["error"] = True
+        metadata = stamp_tool_workflow_generation(metadata) or metadata
 
         await get_http_client().post(
             f"{config.backend.api_url}/api/agents/{agent_id}/messages",
@@ -90,8 +92,6 @@ async def fetch_full_network_metadata(user_id: str) -> str:
 
     Cached with 5-minute TTL.
     """
-    global _network_metadata_cache  # noqa: PLW0603
-
     now = datetime.utcnow()
     if user_id in _network_metadata_cache:
         cached = _network_metadata_cache[user_id]

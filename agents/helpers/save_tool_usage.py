@@ -7,12 +7,19 @@ import structlog
 from temporalio import activity
 
 from config import load_config
+from helpers.workflow_generation import workflow_generation_headers
 
 logger = structlog.get_logger()
 
 
 @activity.defn
-async def save_tool_usage(agent_id: str, user_id: str, tool_name: str, usage_items: List[Dict[str, Any]]) -> None:
+async def save_tool_usage(
+    agent_id: str,
+    user_id: str,
+    tool_name: str,
+    usage_items: List[Dict[str, Any]],
+    accounting_checkpoint: Dict[str, Any] | None = None,
+) -> None:
     """
     Activity: Save tool usage to database.
 
@@ -28,6 +35,8 @@ async def save_tool_usage(agent_id: str, user_id: str, tool_name: str, usage_ite
     """
     try:
         activity.heartbeat(f"Saving usage for {tool_name}")
+        info = activity.info()
+        operation_key = f"{info.workflow_id}:{info.workflow_run_id}:{info.activity_id}"
 
         # Calculate total cost from usage items
         total_cost_cents = sum(item.get("cost_cents", 0) for item in usage_items)
@@ -51,13 +60,19 @@ async def save_tool_usage(agent_id: str, user_id: str, tool_name: str, usage_ite
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{backend_url}/api/tool-usage",
-                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+                headers={
+                    "X-API-Key": api_key,
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
                 json={
                     "agent_id": agent_id,
                     "user_id": user_id,
                     "tool_name": tool_name,
                     "total_cost_cents": total_cost_cents,
                     "usage_items": usage_items,
+                    "operation_key": operation_key,
+                    **({"accounting_checkpoint": accounting_checkpoint} if accounting_checkpoint is not None else {}),
                 },
             )
 

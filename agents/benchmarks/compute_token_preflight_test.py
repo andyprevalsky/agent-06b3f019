@@ -413,10 +413,87 @@ def test_blanket_preflight_uses_tolerant_sync():
             new=AsyncMock(return_value=True),
         ),
         patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_refresh_local_claude_token_from_keychain", return_value=True),
     ):
         asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
 
     assert captured == {"gpt": True, "claude": True}
+
+
+def test_keychain_refresh_targets_only_the_isolated_database():
+    seen: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        seen["cwd"] = kwargs["cwd"]
+        seen["env"] = kwargs["env"]
+        return _Result(0)
+
+    with (
+        patch.object(rb.sys, "platform", "darwin"),
+        patch.object(rb.shutil, "which", return_value="/usr/bin/security"),
+        patch.object(
+            rb,
+            "load_env_var",
+            return_value="test-only-credential-encryption-key",
+        ),
+        patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
+        patch("builtins.print"),
+    ):
+        assert (
+            rb._refresh_local_claude_token_from_keychain(
+                "postgresql://postgres:postgres@localhost:55005/victoria"
+            )
+            is True
+        )
+
+    assert seen["command"] == [
+        "npx",
+        "tsx",
+        "scripts/seed-claude-code-token-from-keychain.ts",
+    ]
+    assert seen["cwd"] == rb.REPO_ROOT / "back-end"
+    env = seen["env"]
+    assert isinstance(env, dict)
+    assert env["DATABASE_URL"] == "postgresql://postgres:postgres@localhost:55005/victoria"
+    assert env["DIRECT_URL"] == "postgresql://postgres:postgres@localhost:55005/victoria"
+    assert env["CLAUDE_CREDENTIAL_DECRYPTION_KEY"] == "test-only-credential-encryption-key"
+
+
+def test_keychain_refresh_is_inert_without_macos_security():
+    with (
+        patch.object(rb.sys, "platform", "linux"),
+        patch.object(rb, "_run_seed_subprocess") as seed,
+    ):
+        assert rb._refresh_local_claude_token_from_keychain("postgresql://local/victoria") is False
+    seed.assert_not_called()
+
+
+def test_blanket_preflight_overlays_fresh_local_claude_credentials_after_source_sync():
+    calls: list[str] = []
+
+    with (
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(
+            rb,
+            "_has_usable_anthropic_api_key_fallback",
+            new=AsyncMock(return_value=False),
+        ),
+        patch.object(
+            rb,
+            "_sync_compute_tokens",
+            side_effect=lambda **_kwargs: calls.append("source-sync") or True,
+        ),
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(
+            rb,
+            "_refresh_local_claude_token_from_keychain",
+            side_effect=lambda _url: calls.append("keychain-overlay") or True,
+        ),
+    ):
+        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
+
+    assert calls == ["source-sync", "keychain-overlay"]
 
 
 def test_anthropic_excluded_preflight_requires_gpt_only_sync():
@@ -524,19 +601,20 @@ def test_claude_code_task_rechecks_credentials_when_its_execution_slot_opens():
 
 
 def test_ci_allows_only_claude_code_credential_skips():
-    skipped = rb.TaskResult(
-        name="claude-code-agent",
-        passed=False,
-        agent_id="",
-        status="SKIPPED",
-        progress_score=0,
-        duration_seconds=0,
-        cost_cents=0,
-        message_count=0,
-        failure_reason=rb.CLAUDE_CODE_CREDENTIAL_SKIP_REASON,
-    )
-    summary = {"failed": 0, "skipped": 1}
-    assert rb._ci_should_fail(summary, [skipped]) is False
+    for task_name in ("claude-code-agent", "cache-coverage"):
+        skipped = rb.TaskResult(
+            name=task_name,
+            passed=False,
+            agent_id="",
+            status="SKIPPED",
+            progress_score=0,
+            duration_seconds=0,
+            cost_cents=0,
+            message_count=0,
+            failure_reason=rb.CLAUDE_CODE_CREDENTIAL_SKIP_REASON,
+        )
+        summary = {"failed": 0, "skipped": 1}
+        assert rb._ci_should_fail(summary, [skipped]) is False
 
 
 def test_ci_still_fails_other_skips():

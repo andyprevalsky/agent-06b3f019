@@ -76,6 +76,21 @@ gate. Run it as the exact standalone command shown, require exit 0 and its
 either is missing. Search output, quoted command text, and failed tool calls are
 not telemetry.
 
+## Step 0i: Isolated deploy-worktree preparation gate
+
+Before any test or mutation, verify that a `/descend`-created deploy worktree
+has its own persistent identity, local port range, credential links,
+dependencies, and ready Postgres container. Primary Conductor worktrees pass
+this check without extra setup:
+
+```bash
+bash scripts/prepare-deploy-worktree.sh --check
+```
+
+If an isolated worktree fails, return it to `/descend` preparation. Do not run
+`scripts/setup-db.sh` with an inherited parent identity and do not borrow a
+different worktree's database.
+
 **You must fix ALL non-overridden failing tests, even if they are not caused by the changes in this branch.** The deploy flow defaults to keeping main green. If a test was already broken before your branch, that is now your responsibility to fix before merging unless the user explicitly overrides that exact gate. This includes infrastructure issues, flaky tests, timeout tuning, missing credentials, third-party integration problems, and anything else.
 
 Run all checks locally. If any step fails, fix the issue and re-run that step. If fixing required code changes, re-run the entire Test Loop from the top.
@@ -152,9 +167,11 @@ if [ -n "$CHANGED_BACKEND_LINT_INPUTS" ]; then
     sed 's|^back-end/||' | sort)
 fi
 CHANGED_AGENTS=$(echo "$CHANGED" | grep -E '^agents/' || true)
+CHANGED_AGENT_RUNTIME=$(printf '%s\n' "$CHANGED_AGENTS" |
+  bash "$(git rev-parse --show-toplevel)/scripts/classify-agent-runtime-changes.sh")
 CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
 CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
-CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)' || true)
+CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)' || true)
 CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS" ] && echo "yes" || echo "")
 CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
 
@@ -170,11 +187,15 @@ if [ -n "$CHANGED_BACKEND" ] && [ -n "$CHANGED_AGENTS" ]; then
   BACKEND_BLACKBOX_WORKERS=4
   if [ -n "$CHANGED_FRONTEND" ] && [ -n "$CHANGED_MAC_APP" ]; then
     BACKEND_BLACKBOX_WORKERS=5
-    BACKEND_UNIT_WORKERS=2
+    BACKEND_UNIT_WORKERS=3
     AGENTS_COVERAGE_WORKERS=3
     FRONTEND_COVERAGE_WORKERS=2
     MAC_COVERAGE_WORKERS=1
-  elif [ -n "$CHANGED_FRONTEND$CHANGED_MAC_APP" ]; then
+  elif [ -n "$CHANGED_FRONTEND" ]; then
+    BACKEND_UNIT_WORKERS=3
+    AGENTS_COVERAGE_WORKERS=4
+    FRONTEND_COVERAGE_WORKERS=3
+  elif [ -n "$CHANGED_MAC_APP" ]; then
     BACKEND_UNIT_WORKERS=2
     AGENTS_COVERAGE_WORKERS=4
   else
@@ -224,7 +245,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisf
 
 The prompt guard (Step 0p) only catches changes to **LLM-visible text**. It cannot catch a change to **agent control-flow semantics** — flipping a recoverable failure into a terminal one, deleting a recovery fall-through, or inverting a recovery-invariant test. Those are as consequential as a prompt change but invisible to a text-only gate, and **an automated test cannot validate that the new behavior is the correct product decision** (the author just updates the test to match — all green). Regression precedent: commit `500715a5f` turned every single-planned-task DAG failure into a terminal agent FAILED instead of continuing iteration, and shipped green because its blackbox test was rewritten to bless the new behavior.
 
-This guard scans the narrow agent control-flow layer (`agents/loop/run_agent.py`, `agents/loop/dag_executor.py`, `agents/workflows/agent_workflow.py`) and its behavior tests (`agents/tests/blackbox/{workflow,dag_executor,workflow_determinism}.blackbox.py`) for **hunks that change recovery vs. terminal semantics** — status/reason literals (`error`/`failed`/`aborted`/`max_iterations`/`needs_llm`/`completed`/`paused`), `_handle_incomplete`/`_mark_failed`/`_mark_complete`/`run_agent(` fall-through, `continue_as_new`, or a recovery-invariant test assertion (`run_agent_calls`, "must not run", `recovers_via`, result-status dicts). Comment- and logging-only edits are stripped so they do not trip it.
+This guard scans the narrow agent control-flow layer (`agents/loop/run_agent.py`, `agents/loop/dag_executor.py`, `agents/workflows/agent_workflow.py`) and its behavior tests (`agents/tests/blackbox/{workflow,dag_executor,workflow_determinism}.blackbox.py`) for **hunks that change recovery vs. terminal semantics** — status/reason literals (`error`/`failed`/`aborted`/`max_iterations`/`needs_llm`/`completed`/`paused`), `_handle_incomplete`/`_mark_failed`/`_mark_complete`/`run_agent(` fall-through, `continue_as_new`, or a removed/replaced recovery-invariant test assertion (`run_agent_calls`, "must not run", `recovers_via`, result-status dicts). Purely additive tests do not require approval because they cannot change runtime behavior or rewrite an existing expectation. Comment- and logging-only edits are also stripped.
 
 Run the guard without the approval flag first:
 
@@ -283,8 +304,8 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
    - Step 4m-coverage: mac-app blackbox tests under coverage (skip if
      `CHANGED_MAC_APP` is empty)
 
-   After those parallel branches finish, run Step 4c's focused credential
-   health probe and Step 4h's focused live Amplitude probe once each. Coverage
+   After those parallel branches finish, Step 4p launches Step 4c's focused credential
+   health probe and Step 4h's focused live Amplitude probe concurrently once each. Coverage
    intentionally keeps external providers offline; these focused tails preserve
    the real assertions without letting a provider retry rerun every repository
    suite.
@@ -335,7 +356,7 @@ cd back-end && bash ../scripts/run-deploy-stage eslint-fix -- node scripts/lint-
 **Step 2b (verifier — runs in parallel with Steps 3, 4, 4a):**
 
 ```bash
-cd back-end && bash ../scripts/run-deploy-stage eslint -- node scripts/lint-affected.mjs $LINT_TS
+cd back-end && bash ../scripts/run-deploy-stage eslint --reuse-passed -- node scripts/lint-affected.mjs $LINT_TS
 ```
 
 If there are remaining errors, fix them manually. Loop until the affected-file lint reports 0 errors.
@@ -347,7 +368,7 @@ If any files were modified by this step, stage and commit them (can combine with
 ## Step 3: TypeScript type check
 
 ```bash
-cd back-end && bash ../scripts/run-deploy-stage typescript -- npx tsc --noEmit
+cd back-end && bash ../scripts/run-deploy-stage typescript --reuse-passed -- npx tsc --noEmit
 ```
 
 Catches type errors that ESLint misses (wrong argument types, missing properties, bad generics). Fix any errors before proceeding — pre-existing type errors in touched files are your responsibility.
@@ -357,7 +378,7 @@ Catches type errors that ESLint misses (wrong argument types, missing properties
 **Skip if `$CHANGED_TS` is empty** (structural invariants only apply to back-end TS changes).
 
 ```bash
-cd back-end && bash ../scripts/run-deploy-stage backend-structural -- npx tsx src/tests/structural/layer-deps.test.ts
+cd back-end && bash ../scripts/run-deploy-stage backend-structural --reuse-passed -- npx tsx src/tests/structural/layer-deps.test.ts
 ```
 
 This enforces architectural invariants across all domains: import direction, cross-domain isolation, provider/util boundaries, domain completeness, Prisma/Express encapsulation, and circular import detection.
@@ -366,20 +387,30 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 4s: Deploy environment + command structural tests (no skip)
 
+The concurrent runner executes exactly these eleven independent suites without
+changing their assertions or test counts: `bash scripts/tests/workspace-env.test.sh`,
+`bash scripts/tests/deploy-worktree-preflight.test.sh`,
+`bash scripts/tests/semantic-deploy-gate.test.sh`,
+`bash scripts/tests/check-agent-behavior-approval.test.sh`,
+`bash scripts/tests/workflow-deployment-migration.test.sh`,
+`python3 scripts/tests/factory-review.test.py`,
+`python3 scripts/tests/wait-for-code-review.test.py`,
+`python3 scripts/tests/deploy-review-cycle.test.py`, and
+`bash scripts/tests/run-deploy-stage.test.sh`, and
+`python3 scripts/tests/run-deploy-structural-gates.test.py`, and
+`python3 scripts/tests/deploy-live-probes.test.py`.
+
 ```bash
-bash scripts/tests/workspace-env.test.sh
-bash scripts/tests/semantic-deploy-gate.test.sh
-bash scripts/tests/check-agent-behavior-approval.test.sh
-python3 scripts/tests/factory-review.test.py
-bash scripts/tests/run-deploy-stage.test.sh
+bash scripts/run-deploy-stage deploy-command-structural --reuse-passed -- \
+  python3 scripts/run-deploy-structural-gates.py
 ```
 
-These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
+These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate and the bounded production workflow migration wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
 
 ## Step 4a: Back-end coverage + blackbox (skip if no back-end/ changes)
 
 ```bash
-cd back-end && bash ../scripts/run-deploy-stage backend-coverage-blackbox -- \
+cd back-end && bash ../scripts/run-deploy-stage backend-coverage-blackbox --reuse-passed -- \
   env BLACKBOX_TEST_CONCURRENCY="$BACKEND_BLACKBOX_WORKERS" \
       CONTRACT_TEST_CONCURRENCY="$BACKEND_BLACKBOX_WORKERS" \
       BACKEND_UNIT_CONCURRENCY="$BACKEND_UNIT_WORKERS" \
@@ -393,7 +424,7 @@ tests under V8 coverage. It must both pass every test and meet
 ## Step 4b: Front-end coverage + blackbox (skip if no front-end/ changes)
 
 ```bash
-cd front-end && bash ../scripts/run-deploy-stage frontend-coverage-blackbox -- \
+cd front-end && bash ../scripts/run-deploy-stage frontend-coverage-blackbox --reuse-passed -- \
   npm run test:coverage -- --maxWorkers="$FRONTEND_COVERAGE_WORKERS"
 ```
 
@@ -404,7 +435,7 @@ Never loosen the threshold or rerun the same blackbox suite separately.
 ## Step 4g: Agents coverage + blackbox (skip if no agents/ changes)
 
 ```bash
-cd agents && bash ../scripts/run-deploy-stage agents-coverage-blackbox -- \
+cd agents && bash ../scripts/run-deploy-stage agents-coverage-blackbox --reuse-passed -- \
   env AGENTS_COVERAGE_CONCURRENCY="$AGENTS_COVERAGE_WORKERS" \
       bash scripts/run-coverage.sh
 ```
@@ -429,7 +460,7 @@ Commit any resulting changes (can combine with Step 1's commit).
 Parallel verifier. Enforces the same 0-error bar as back-end Step 2b — "pre-existing" violations in the mac-app files you touched are your responsibility.
 
 ```bash
-cd mac-app && bash ../scripts/run-deploy-stage mac-static -- bash -c 'npm run format:check && npm run lint && npm run type-check'
+cd mac-app && bash ../scripts/run-deploy-stage mac-static --reuse-passed -- bash -c 'npm run format:check && npm run lint && npm run type-check'
 ```
 
 If any check fails, fix and re-run. `npm run lint` applies both base rules and the type-aware strict overlay defined by `STRICT_DOMAIN_FILES` in `mac-app/eslint.config.mjs` (max-lines, max-lines-per-function, no-floating-promises, strict-boolean-expressions, etc.).
@@ -437,7 +468,7 @@ If any check fails, fix and re-run. `npm run lint` applies both base rules and t
 ## Step 4m-coverage: Mac-app coverage + blackbox (skip if `$CHANGED_MAC_APP` is empty)
 
 ```bash
-cd mac-app && bash ../scripts/run-deploy-stage mac-coverage-blackbox -- \
+cd mac-app && bash ../scripts/run-deploy-stage mac-coverage-blackbox --reuse-passed -- \
   npm run test:coverage -- --maxWorkers="$MAC_COVERAGE_WORKERS"
 ```
 
@@ -455,12 +486,13 @@ Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barri
 bash scripts/tests/cloudbench-env.test.sh
 bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
 bash scripts/tests/cloudbench-multi-workstream.test.sh
+bash scripts/tests/seed-dump-toolchain.test.sh
 agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py \
-  -k 'cloud_patch_detection_and_payload_include_staged_only_changes or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or autoscaled_worker_failure_is_removed_and_replaceable or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh'
+  -k 'cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or autoscaled_worker_failure_publishes_durable_failure_marker or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or exact_volume_ownership_survives_delayed_visibility_and_failed_delete or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env'
 cd agents && python scripts/run_blackbox_tests.py benchmark
 ```
 
-All four commands must pass. This operational verification wiring is pre-authorized by Step 0p and must never pause for human approval.
+All six commands must pass. This operational verification wiring is pre-authorized by Step 0p and must never pause for human approval.
 
 ## Step 4c: Credential health check (runs unless explicitly overridden)
 
@@ -470,9 +502,8 @@ below. The deterministic Step 4a batch excludes this provider-dependent domain,
 so this runs exactly once and a provider outage can be retried without rerunning
 all 91 instrumented back-end domains.
 
-```bash
-cd back-end && bash ../scripts/run-deploy-stage credential-health -- npx tsx src/tests/blackbox/integration-health.blackbox.ts
-```
+Step 4p launches the exact `run-deploy-stage credential-health` command with
+`npx tsx src/tests/blackbox/integration-health.blackbox.ts`.
 
 **If any hard credential is rejected** the error message names the exact env var to refresh and the provider dashboard URL. Escalate to the user immediately and do not proceed to Step 5 unless the user explicitly overrides that credential gate. If overridden, record the rejection as `⚠️ Overridden`, use the narrow gate-specific harness override, and continue every other check. Do not change production auth behavior merely to make a rejected credential appear healthy.
 
@@ -481,18 +512,26 @@ Anthropic/Claude is intentionally non-blocking in this gate: the probe should st
 ## Step 4h: Live Amplitude admin-health probe (no skip)
 
 Run this once after all parallel Group 3 branches finish and before recording
-the `runtime-blackbox` finish boundary:
-
-```bash
-cd back-end && bash ../scripts/run-deploy-stage amplitude-live -- \
-  env ADMIN_HEALTH_LIVE_ONLY=1 BLACKBOX_TEST_CONCURRENCY=1 \
-      bash scripts/run-blackbox-tests.sh admin-health
-```
+the `runtime-blackbox` finish boundary. Step 4p launches the exact
+`run-deploy-stage amplitude-live` command with the strict
+`ADMIN_HEALTH_LIVE_ONLY=1` and `BLACKBOX_TEST_CONCURRENCY=1` environment.
 
 This starts an isolated local backend and executes only the strict weekly
 admin-health case. Missing credentials fail closed; all six Amplitude funnel
 steps must be `ready` with real counts. A 429 blocks deploy, but its rerun
 repeats only this focused probe—not the complete coverage suite.
+
+## Step 4p: Concurrent focused live probes
+
+The credential and Amplitude probes are independent and both read-only. Launch
+them under one foreground supervisor so a failing lane cannot interrupt or hide
+the sibling's evidence:
+
+```bash
+python3 scripts/run_deploy_live_probes.py
+```
+
+Both stage records must pass before closing the `runtime-blackbox` boundary.
 
 ## Step 5: Spin up local services
 
@@ -594,15 +633,30 @@ bash scripts/kill-services.sh                    # kills run.sh tree, preserves 
 ## Step 4d: Open the PR and launch parallel Group 4
 
 The read-only static, coverage, and runtime-blackbox lanes in Group 3 are now
-green. Commit all intended files, push, and open the PR using the Step 7/8 body
-and title format. Persist `pr_title_locked` as described in Step 8. The push
-starts CodeRabbit.
+green. Commit all intended files. CodeRabbit automatically reviews a new PR
+once, but `.coderabbit.yaml` deliberately disables review-on-every-push. `/deploy`
+owns every later review request so intermediate gate fixes cannot create an
+unbounded reviewer loop.
 
-Immediately before the push, record the review lifecycle start:
+Initialize the durable three-cycle ledger and the first explicit timing
+boundary immediately before the push. If this branch already has a PR, request
+the first incremental review manually after pushing; otherwise opening the new
+PR starts the initial review automatically.
 
 ```bash
+HEAD_SHA=$(git rev-parse HEAD)
+EXISTING_PR=$(gh pr view --json number --jq .number 2>/dev/null || true)
+python3 scripts/deploy_review_cycle.py start --reset --kind initial --head "$HEAD_SHA"
 python3 scripts/record_factory_event.py deploy stage-start code-review
+git push -u origin "$(git branch --show-current)"
+# Create the PR using Step 8 when EXISTING_PR is empty, then set PR_NUMBER.
+[ -z "$EXISTING_PR" ] || gh pr comment "$EXISTING_PR" --body '@coderabbitai review'
 ```
+
+Do not push a second commit while a review cycle is open. Let the current
+review finish, collect all Group 4 results, and batch every valid review/gate
+fix into one stabilization pass. This keeps the PR HEAD immutable while the
+exact-HEAD waiter is running.
 
 Immediately after the PR exists, launch all applicable Group 4 lanes together
 in one assistant message with separate parallel Bash tool calls:
@@ -614,9 +668,10 @@ in one assistant message with separate parallel Bash tool calls:
 
 Matching Group 4 rows in `/factory-review` therefore share a real start phase.
 Do not wait for one lane before starting another. All applicable lanes must be
-green before merge. If any lane changes code, push the fix, restart the Test
-Loop from Step 0, and relaunch the whole applicable Group 4 batch; the push
-re-arms CodeRabbit.
+green before merge. If any lane requires a code change, wait for the open review
+to finish, batch all fixes, restart the Test Loop from Step 0, and relaunch the
+applicable test lanes. Do not request another review until those lanes stabilize.
+The later manual review covers every commit accumulated since the prior review.
 
 By Phase 2, the push and PR already exist. Treat Steps 7 and 8 as “verify
 already done” unless a failed test-loop iteration forced a restart.
@@ -674,7 +729,7 @@ cd "$(git rev-parse --show-toplevel)"
 bash scripts/run-deploy-stage smoke -- bash scripts/run-predeploy-local
 ```
 
-`scripts/run-predeploy-local` derives the task set from every catalog entry tagged `smoke` (identical selection to the cloud path, so they can't drift) and runs them through `scripts/run-bench --local` at max concurrency 2 on this machine. It orders tasks longest-recent-median first, using the pass ledger, to target a shorter two-lane idle tail without increasing simultaneous load. It exits non-zero unless every requested task passes, so the command IS the gate.
+`scripts/run-predeploy-local` derives the task set from every catalog entry tagged `smoke` (identical selection to the cloud path, so they can't drift) and runs them through `scripts/run-bench --local` at full selected-task concurrency on the isolated stack. It orders tasks longest-recent-median first when an emergency/debug concurrency cap is supplied. It exits non-zero unless every requested task passes, so the command IS the gate.
 
 Every invocation tees its console output to `.context/predeploy-runs/<run-id>/runner.log` and writes actual start/end time, total wall duration, status, concurrency, task set, and schedule to `summary.json` beside it. Inspect the accumulated actual totals plus per-task pass history at any time:
 
@@ -1106,34 +1161,23 @@ PR_TITLE=$(sqlite3 ~/Library/Application\ Support/com.conductor.app/conductor.db
 
 ## Step 9: Wait for code review
 
-**CRITICAL — avoid the stale-check race.** `gh pr checks --watch` watches a single check entry. If CodeRabbit hasn't yet flipped the check to PENDING for your newest push, `--watch` will see the prior SUCCESS from the previous commit and return instantly — you'd proceed to merge on a stale review.
-
-Use this **poll-until-re-armed, then watch** sequence:
+Never use `gh pr checks --watch` here: it watches unrelated PR checks, and the
+old stale-check loop queried `statusCheckRollup` from a REST endpoint that does
+not expose that field. Wait only for CodeRabbit on the immutable HEAD stored in
+the open cycle. GitHub statuses are commit-scoped, so legacy StatusContext
+successes do not need a `startedAt` timestamp to prove freshness.
 
 ```bash
-# 1. Capture the HEAD SHA you just pushed.
-HEAD_SHA=$(git rev-parse HEAD)
-
-# 2. Poll until the CodeRabbit check is either PENDING (re-armed for HEAD) or
-#    a terminal state whose startedAt is after your push (i.e. it already finished
-#    reviewing the new commit). This guarantees we are not looking at a stale
-#    SUCCESS from a prior commit.
-PUSH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-for i in $(seq 1 40); do  # up to ~10 min at 15s
-  read -r STATE STARTED < <(gh api "repos/<OWNER>/<REPO>/pulls/<PR_NUMBER>" \
-    --jq '[.statusCheckRollup[]? | select(.context=="CodeRabbit")][-1] | "\(.state // "NONE") \(.startedAt // "")"')
-  # Re-armed for new commit (PENDING) OR already finished past our push timestamp.
-  if [ "$STATE" = "PENDING" ] || { [ -n "$STARTED" ] && [[ "$STARTED" > "$PUSH_TS" ]]; }; then
-    break
-  fi
-  sleep 15
-done
-
-# 3. Now safe to block on --watch (it will wait for PENDING → terminal).
-gh pr checks <PR_NUMBER> --watch
+REVIEW_STATE=$(python3 scripts/deploy_review_cycle.py status)
+REVIEW_HEAD=$(printf '%s' "$REVIEW_STATE" | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["cycles"][-1]["head"])')
+bash scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD" --timeout 600 --poll 5
 ```
 
-This blocks until the CodeRabbit check completes for the current HEAD. **A green check alone does not prove a review happened.** Once it returns, read reviews from ALL three comment locations:
+This fails if the PR HEAD changes while waiting, preventing an older success
+from satisfying the gate. **A green check alone does not prove a substantive
+review happened.** Once it returns, read reviews from ALL three comment
+locations:
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/reviews
@@ -1141,17 +1185,20 @@ gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/comments
 gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/comments
 ```
 
-Filter reviews/comments by `submitted_at > PUSH_TS` (or `commit_id == HEAD_SHA` for inline comments) so you only act on findings for the newest commit.
+Filter reviews/comments by `commit_id == REVIEW_HEAD` / `original_commit_id ==
+REVIEW_HEAD`. For issue comments, use the open cycle's `started_at` from
+`.context/deploy-review-cycle.json`. Never use the current mutable shell time as
+a freshness boundary.
 
 ### Step 9a: Verify CodeRabbit delivered a substantive review
 
-Inspect the newest CodeRabbit-authored content from all three endpoints. Treat CodeRabbit as unavailable and run the Claude fallback when any of these is true:
+Inspect the newest CodeRabbit-authored content from all three endpoints. Treat CodeRabbit as unavailable and run the Claude fallback for the same `REVIEW_HEAD` when any of these is true:
 
 - The check is missing, failed, or timed out.
 - The newest bot output contains `Review limit reached`, `rate limited`, `usage spending cap`, `review skipped`, or a service/internal error.
-- The check is green but there is no substantive review result for `HEAD_SHA`. A quota/error comment is not a review.
+- The check is green but there is no substantive review result for `REVIEW_HEAD`. A quota/error comment is not a review.
 
-Do not repeatedly request more CodeRabbit reviews during a quota window. Trigger exactly one Claude review for the current HEAD by toggling the opt-in label:
+Do not repeatedly request more CodeRabbit reviews during a quota window. Trigger exactly one Claude review for `REVIEW_HEAD` by toggling the opt-in label. The fallback remains part of the already-open lifecycle; it does not consume another review cycle:
 
 ```bash
 FALLBACK_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -1174,7 +1221,7 @@ for i in $(seq 1 40); do
     --event pull_request \
     --limit 20 \
     --json databaseId,createdAt,headSha \
-    --jq ".[] | select(.headSha == \"$HEAD_SHA\" and .createdAt > \"$FALLBACK_TS\") | .databaseId" \
+    --jq ".[] | select(.headSha == \"$REVIEW_HEAD\" and .createdAt > \"$FALLBACK_TS\") | .databaseId" \
     | head -1)
   [ -n "$FALLBACK_RUN_ID" ] && break
   sleep 15
@@ -1197,19 +1244,35 @@ gh api repos/{owner}/{repo}/issues/<PR_NUMBER>/labels/claude-review-fallback \
 Look across all three endpoints for review feedback from CodeRabbit or the Claude fallback. Either reviewer may post findings as formal reviews or regular comments.
 
 As soon as a reviewer reaches a terminal result (clean or findings), record the
-review lifecycle finish before proceeding or fixing anything:
+review lifecycle finish before proceeding or fixing anything, then close the
+same exact HEAD in the durable ledger:
 
 ```bash
 python3 scripts/record_factory_event.py deploy stage-finish code-review
+# Choose exactly one after classifying every valid finding:
+python3 scripts/deploy_review_cycle.py finish --head "$REVIEW_HEAD" --result clean
+# python3 scripts/deploy_review_cycle.py finish --head "$REVIEW_HEAD" --result findings
 ```
 
-If findings require a new push, the restarted Test Loop records a new review
-start; that retry is intentionally a separate run in `/factory-review`.
+The normal budget is the initial review plus one batched incremental review. A
+third verification review is allowed only when the second review found a valid
+issue that required another code change. `deploy_review_cycle.py` hard-stops a
+fourth cycle. If cycle three still has valid findings, record `deploy outcome
+blocked` and stop this deploy as **review-unstable**; never merge an unreviewed
+fix. Stabilize the branch as development work, then start a fresh `/deploy`.
 
-- **APPROVED** with no critical issues → proceed to Phase 3.
-- **CHANGES_REQUESTED** or any comment flagging issues → fix them, push, **re-run the full Test Loop (Phase 1)**, then come back to Step 9.
+- **APPROVED / no issues** → close the cycle as `clean`. Proceed only when every
+  test lane is green and `HEAD == REVIEW_HEAD`.
+- **CHANGES_REQUESTED / valid findings** → close the cycle as `findings`, reply
+  to every comment, and fix all findings together with any gate failures. **Do
+  not push each fix.** Re-run the full Test Loop locally, commit the complete
+  stabilization batch, then push once and request one incremental review.
 - **CODE RABBIT UNAVAILABLE** (quota, spending cap, rate limit, service failure, or false-green check) → use the Claude fallback from Step 9a.
-- **REVIEW SKIPPED** (e.g., "Too many files!") → first try filtering, then use the Claude fallback if filtering doesn't fit. CodeRabbit Free caps reviews at 150 files. Add safe path filters to `.coderabbit.yaml`'s `reviews.path_filters` block, push, and let the next CodeRabbit run pick up the new filter. The list below is the canonical safe-filter set — these paths are already gated by /deploy's local checks, so excluding them from CodeRabbit doesn't lose coverage:
+- **REVIEW SKIPPED** (e.g., "Too many files!") → finish the current immutable
+  HEAD through the Claude fallback. Do not push filter edits while its review
+  cycle is open. CodeRabbit Free caps reviews at 150 files; the list below is
+  the canonical safe-filter set for a later stabilized commit because those
+  paths are already gated locally:
   ```yaml
   # Tests (gated by combined Step 4 coverage-blackbox / Step 6 / Step 6b locally)
   - "!**/tests/**"
@@ -1251,8 +1314,31 @@ start; that retry is intentionally a separate run in `/factory-review`.
   print(f'{len(files)} -> {len(remaining)}')
   "
   ```
-  If the projected count is still ≥150 after applying the canonical set, escalate to the user — splitting the PR or upgrading CodeRabbit is the only remaining option.
-- **No issues found** → proceed to Phase 3.
+  If the projected count is still ≥150 after applying the canonical set, split
+  the PR or upgrade CodeRabbit; do not weaken the review.
+
+After a stabilization batch is fully green, archive any completed active plan
+using Step 11 **before** capturing the final review HEAD. Include that
+administrative commit in the same batch. Then open the next bounded review
+cycle:
+
+```bash
+REVIEW_HEAD=$(git rev-parse HEAD)
+REVIEW_COUNT=$(python3 scripts/deploy_review_cycle.py status | python3 -c \
+  'import json,sys; print(len(json.load(sys.stdin)["cycles"]))')
+[ "$REVIEW_COUNT" -lt 3 ] || {
+  python3 scripts/record_factory_event.py deploy outcome blocked
+  echo "review cycle cap reached; deploy is review-unstable" >&2
+  exit 1
+}
+REVIEW_KIND=incremental
+[ "$REVIEW_COUNT" -lt 2 ] || REVIEW_KIND=verification
+python3 scripts/deploy_review_cycle.py start --kind "$REVIEW_KIND" --head "$REVIEW_HEAD"
+python3 scripts/record_factory_event.py deploy stage-start code-review
+git push origin HEAD
+gh pr comment "$PR_NUMBER" --body '@coderabbitai review'
+# Return to Step 9. Do not mutate or push HEAD until this cycle is terminal.
+```
 
 **Fix ALL valid issues**, regardless of whether the code was modified in this PR. "Pre-existing" or "not my code" is NOT a valid reason to skip a real bug, security issue, or correctness problem. If CodeRabbit or Claude found it, and it's a real issue, fix it. Only skip true style nits (formatting, naming preferences, etc.) that have zero correctness impact.
 
@@ -1275,9 +1361,14 @@ gh api repos/{owner}/{repo}/issues/comments/<COMMENT_ID> -X PATCH -f body="<orig
 
 # Phase 3: Finalize
 
-Only enter this phase when the Test Loop is green AND the review is approved.
+Only enter this phase when the Test Loop is green and the exact current HEAD has
+a clean completed review. Enforce that invariant rather than trusting prose:
 
-## Step 11: Archive plan (if applicable)
+```bash
+python3 scripts/deploy_review_cycle.py require-mergeable --head "$(git rev-parse HEAD)"
+```
+
+## Step 11: Archive plan (before the final review)
 
 Check if there's an active plan related to this branch's work:
 
@@ -1285,16 +1376,22 @@ Check if there's an active plan related to this branch's work:
 ls docs/plans/active/ 2>/dev/null
 ```
 
-If a related plan exists in `docs/plans/active/`:
+If a related plan exists in `docs/plans/active/`, it must be archived before
+the final review HEAD is captured:
 
 1. Move it to `docs/plans/completed/`:
    ```bash
    git mv docs/plans/active/<plan-file>.md docs/plans/completed/<plan-file>.md
    ```
-2. Commit and push (no additional review needed for this change):
+2. Commit it into the stabilization batch, but do not push it separately:
    ```bash
-   git add docs/plans/completed/ && git commit -m "docs: archive plan to completed" && git push
+   git add docs/plans/active/ docs/plans/completed/
+   git commit -m "docs: archive plan to completed"
    ```
+
+If this step discovers an active plan after Phase 3 has already started, leave
+Phase 3 and return to Step 10. The final reviewed HEAD must include the archive
+commit even though CodeRabbit path filters exclude documentation.
 
 ## Step 11a: Cleanup stale workspaces
 
@@ -1308,13 +1405,17 @@ This is best-effort — if it fails (e.g., no Temporal API key, no Docker), proc
 
 ## Step 12: Merge
 
-**First, push any unpushed local commits so the PR head is current.** Because the PR was pushed early (Step 4d), any commit made afterward — recorded smoke durations (Step 6), the archived plan (Step 11), or test-loop fix commits — may be local-only. Merging would silently drop them. Push before merging:
+**Never push an unreviewed commit immediately before merge.** Recorded smoke
+durations, plan archives, and test-loop fixes must all have been included in the
+stabilization batch reviewed in Step 10. If local commits remain, return to the
+Test Loop and Step 10 instead of merging:
 
 ```bash
-# Land any commits made after the early Step 4d push onto the PR branch.
 if [ -n "$(git log @{u}..HEAD --oneline 2>/dev/null)" ]; then
-  git push
+  echo "unpushed commits exist after final review; return to Step 10" >&2
+  exit 1
 fi
+python3 scripts/deploy_review_cycle.py require-mergeable --head "$(git rev-parse HEAD)"
 ```
 
 Immediately before merging, start the production-verification lifecycle:
@@ -1327,6 +1428,9 @@ Merge without deleting the branch. Do not delete the local branch or the remote 
 
 ```bash
 gh pr merge <PR_NUMBER> --merge
+DEPLOY_MERGED_SHA=$(gh pr view <PR_NUMBER> --json mergeCommit --jq '.mergeCommit.oid')
+[ -n "$DEPLOY_MERGED_SHA" ] ||
+  { echo "❌ Could not resolve the exact merge commit for PR <PR_NUMBER>"; exit 1; }
 ```
 
 If `main` can be checked out in this worktree, switch back to main and pull:
@@ -1343,14 +1447,107 @@ git fetch origin main
 
 ## Step 13: Wait for deploys
 
-Determine which deploy workflows are relevant based on what files changed in the PR. Check using `git diff main~1..main --name-only`:
+Determine which deploy workflows are relevant based on what files changed in the PR. Check using `git diff "$DEPLOY_MERGED_SHA^1" "$DEPLOY_MERGED_SHA" --name-only`; never substitute the latest `main`, which may already belong to a later PR:
 
-- Changes in `agents/` → poll `deploy-agents.yml`
+- Runtime changes selected by `scripts/classify-agent-runtime-changes.sh`, or a
+  change to `.github/workflows/deploy-agents.yml` itself → poll
+  `deploy-agents.yml`. Additive tests, benchmarks, docs, and coverage harnesses
+  under `agents/` do not trigger that workflow and must not be polled.
 - Changes in `back-end/` → Render auto-deploys (no workflow to poll). **Do NOT just "wait ~60s" — run Step 13a to confirm the merged commit went live AND the app is functionally healthy.**
 - Changes in `front-end/` → Vercel auto-deploys. Wait for a successful GitHub deployment status tied to the merged SHA; a fixed sleep is not proof that the new frontend is live.
 - Changes in `mac-app/` → check if PR had `MAC-APP-RELEASE` label; if so, poll `release-mac-app.yml`
 
-For GitHub Action workflows, wait for the new run to appear then watch it:
+Start every applicable provider lane concurrently in separate foreground tool
+calls immediately after merge: Fly, Render, Vercel, and Mac release are
+independent. Do not wait for one provider before launching another. Each lane
+must record its exact boundary with the matching pair below; a failed lane has
+no finish event and leaves the aggregate production lifecycle incomplete:
+
+- Fly: `deploy production-start fly` → `deploy-agents.yml` watch → `deploy production-finish fly`
+- Render: `deploy production-start render` → exact-SHA live poll → `deploy production-finish render`
+- Vercel: `deploy production-start vercel` → exact-SHA deployment poll → `deploy production-finish vercel`
+- Mac: `deploy production-start mac-release` → `release-mac-app.yml` watch → `deploy production-finish mac-release`
+
+Prefix each marker above with
+`python3 scripts/record_factory_event.py`. For example, the full Fly start is
+`python3 scripts/record_factory_event.py deploy production-start fly` and its
+full finish is
+`python3 scripts/record_factory_event.py deploy production-finish fly`; use the
+same form for Render, Vercel, and Mac release.
+
+Run only the applicable pairs. Put the start immediately before that lane's
+poll/watch command and the finish immediately after its successful terminal
+status. For an activation-gated Fly deploy, the finish marker belongs after the
+exact cutover releases its lock and the workflow completes in Step 13ab. These
+are telemetry calls, not extra gates.
+
+Resolve and retain the exact agent deployment attempt whenever the canonical
+cutover condition is true. The run ID plus run attempt is the
+deployment-scoped Temporal activation token; a prior rollout of the same Git
+SHA cannot authorize it:
+
+```bash
+FINAL_CHANGED=$(git diff --name-only "$DEPLOY_MERGED_SHA^1" "$DEPLOY_MERGED_SHA")
+FINAL_CHANGED_AGENTS=$(printf '%s\n' "$FINAL_CHANGED" | grep -E '^agents/' || true)
+CHANGED_AGENT_RUNTIME=$(printf '%s\n' "$FINAL_CHANGED_AGENTS" |
+  bash "$(git rev-parse --show-toplevel)/scripts/classify-agent-runtime-changes.sh")
+CHANGED_DEPLOY_AGENTS_WORKFLOW=$(printf '%s\n' "$FINAL_CHANGED" |
+  grep -F '.github/workflows/deploy-agents.yml' || true)
+AGENT_CUTOVER_REQUIRED=0
+if [ -n "$CHANGED_AGENT_RUNTIME$CHANGED_DEPLOY_AGENTS_WORKFLOW" ]; then
+  AGENT_CUTOVER_REQUIRED=1
+fi
+
+if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
+  python3 scripts/record_factory_event.py deploy production-start fly
+  AGENT_DEPLOY_RUN_ID=""
+  for i in $(seq 1 120); do
+    AGENT_DEPLOY_RUN_ID=$(gh run list \
+      --workflow deploy-agents.yml \
+      --branch main \
+      --limit 30 \
+      --json databaseId,headSha \
+      --jq ".[] | select(.headSha == \"$DEPLOY_MERGED_SHA\") | .databaseId" |
+      head -1)
+    [ -n "$AGENT_DEPLOY_RUN_ID" ] && break
+    sleep 5
+  done
+  [ -n "$AGENT_DEPLOY_RUN_ID" ] ||
+    { echo "❌ Exact deploy-agents run did not start"; exit 1; }
+  AGENT_DEPLOY_RUN_ATTEMPT=$(gh api "repos/{owner}/{repo}/actions/runs/$AGENT_DEPLOY_RUN_ID" \
+    --jq '.run_attempt')
+  AGENT_DEPLOYMENT_TOKEN="${AGENT_DEPLOY_RUN_ID}-${AGENT_DEPLOY_RUN_ATTEMPT}"
+  echo "✅ Agent deployment token: $AGENT_DEPLOYMENT_TOKEN"
+
+  # Do not wait for workflow completion yet: its final step deliberately holds
+  # the non-canceling production concurrency lock until this exact cutover
+  # reports a terminal commit status. Reaching that step proves deploy, fleet
+  # verification, and scale-down all completed while later deploys remain queued.
+  AGENT_DEPLOY_READY=""
+  for i in $(seq 1 120); do
+    AGENT_DEPLOY_STATE=$(gh run view "$AGENT_DEPLOY_RUN_ID" \
+      --json status,conclusion,jobs \
+      --jq '[.status, (.conclusion // "none"), ([.jobs[].steps[]? | select(.name == "Hold production deploy lock until exact cutover completes")][0].status // "missing")] | join("|")')
+    IFS='|' read -r AGENT_DEPLOY_STATUS AGENT_DEPLOY_CONCLUSION AGENT_DEPLOY_HOLD_STATUS \
+      <<<"$AGENT_DEPLOY_STATE"
+    if [ "$AGENT_DEPLOY_HOLD_STATUS" = "in_progress" ]; then
+      AGENT_DEPLOY_READY=1
+      break
+    fi
+    if [ "$AGENT_DEPLOY_STATUS" = "completed" ]; then
+      echo "❌ Exact deploy-agents run completed before cutover lock acquisition: $AGENT_DEPLOY_CONCLUSION"
+      exit 1
+    fi
+    sleep 5
+  done
+  [ "$AGENT_DEPLOY_READY" = "1" ] ||
+    { echo "❌ Exact deploy-agents run never reached the cutover lock"; exit 1; }
+  echo "✅ Exact candidate fleet deployed; production deploy lock is held"
+fi
+```
+
+For other relevant GitHub Action workflows, wait for the new run to appear then
+watch it:
 
 ```bash
 # Wait up to 60s for a workflow run that started after merge
@@ -1369,7 +1566,8 @@ For a frontend change, wait for Vercel to report the merged commit as live:
 
 ```bash
 if [ -n "$CHANGED_FRONTEND" ]; then
-  MERGED_SHA=$(git rev-parse main)
+  python3 scripts/record_factory_event.py deploy production-start vercel
+  MERGED_SHA="$DEPLOY_MERGED_SHA"
   VERCEL_OK=""
   for i in $(seq 1 90); do
     DEPLOYMENT_ID=$(gh api "repos/{owner}/{repo}/deployments?sha=$MERGED_SHA" \
@@ -1386,6 +1584,7 @@ if [ -n "$CHANGED_FRONTEND" ]; then
     sleep 10
   done
   [ "$VERCEL_OK" = "1" ] || { echo "❌ Vercel did not bring $MERGED_SHA live"; exit 1; }
+  python3 scripts/record_factory_event.py deploy production-finish vercel
 fi
 ```
 
@@ -1403,8 +1602,9 @@ Render has no GitHub Actions run to watch, so the only proof a backend deploy is
 ### Step 1 — Wait for Render to bring the merged commit live
 
 ```bash
+python3 scripts/record_factory_event.py deploy production-start render
 cd "$(git rev-parse --show-toplevel)/back-end" && source .env
-MERGED_SHA=$(git rev-parse main)   # the commit that just merged
+MERGED_SHA="$DEPLOY_MERGED_SHA"   # immutable merge commit captured in Step 12
 echo "Waiting for Render to deploy ${MERGED_SHA:0:7}..."
 DEPLOY_OK=""
 for i in $(seq 1 90); do  # up to ~15 min at 10s (Render builds can be slow)
@@ -1422,6 +1622,7 @@ for i in $(seq 1 90); do  # up to ~15 min at 10s (Render builds can be slow)
 done
 [ "$DEPLOY_OK" = "1" ] || { echo "❌ Render did not bring ${MERGED_SHA:0:7} live (last status: $STATUS)"; exit 1; }
 echo "✅ Render live on ${MERGED_SHA:0:7}"
+python3 scripts/record_factory_event.py deploy production-finish render
 ```
 
 If Render reports `build_failed`/`update_failed`, fetch the deploy logs (`GET /v1/services/$RENDER_SERVICE_ID/deploys/<id>` + the events/log API, or the Render dashboard) and treat it like any deploy failure above — fix, new PR, continue from Step 9.
@@ -1429,6 +1630,7 @@ If Render reports `build_failed`/`update_failed`, fetch the deploy logs (`GET /v
 ### Step 2 — Functional health probe (liveness + DB/Prisma path)
 
 ```bash
+python3 scripts/record_factory_event.py deploy production-start backend-probes
 PROD_URL="https://navi-j9a9.onrender.com"
 API_KEY="AEzycCpQcJ1QKXXECeMSsBUcwGvku9UlNWcAnCGnAag="
 USER_ID="1f85ff25-6e29-4c1b-8739-f917bd101a30"
@@ -1480,13 +1682,237 @@ sys.exit(1 if bad else 0)
 
 If this exits non-zero, the deploy is **unhealthy even though it's live** — treat as a deploy failure: diagnose the error (most likely a schema/migration mismatch or missing env var — see the 2026-06-27 incident for the migration-vs-DB drift pattern), fix it, new PR, continue from Step 9. Do NOT proceed to Step 14 with errors in the prod log.
 
+After the endpoint checks and log scan are both green, close this lane:
+
+```bash
+python3 scripts/record_factory_event.py deploy production-finish backend-probes
+```
+
 **Migration-specific note:** if the error is a Prisma "column/table does not exist", the deployed code expects a schema the prod DB doesn't have. Verify the migration is both present in `back-end/prisma/migrations/` AND actually applied to prod (the migration row in `_prisma_migrations` can be marked applied while the column is absent if a stray `prisma db push` from another workspace dropped it — `back-end/.env` `DATABASE_URL` points at prod). Re-apply the missing DDL idempotently (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`) and re-run Step 2.
+
+## Step 13ab: Replace open workflows after an activation-gated agent deploy
+
+Skip only when `$AGENT_CUTOVER_REQUIRED` is `0`. This is the canonical cutover
+condition shared with Step 13 and Step 13ac: shipped runtime changes and edits
+to `.github/workflows/deploy-agents.yml` require cutover; test-only,
+benchmark-only, documentation-only, and history-ledger changes under `agents/`
+do not.
+
+Run this only after the exact `deploy-agents.yml` attempt reaches its serialized
+lock-hold step and the backend merged commit is live and healthy. The Fly workers
+are healthy-but-standby: they have not constructed production Temporal pollers
+and therefore cannot replay an old history. The command freezes the exact set of
+open root workflow IDs, then uses a bounded pool to seal **every** old generation
+before activating the exact merged worker SHA.
+It terminates each stale execution, appends the terminal
+`new code version deployed, retry this tool` result to unresolved tools, and
+starts a clean replacement from durable DB state. Active descendants are stopped
+with their root; the replacement LLM decides which child work to retry. It does
+not replay histories and does not wait for a natural continue-as-new boundary.
+
+```bash
+if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
+  set -e
+  AGENT_CUTOVER_RELEASE_CONTEXT="agent-cutover/${AGENT_DEPLOYMENT_TOKEN}"
+  AGENT_CUTOVER_RELEASED=0
+  release_agent_cutover_lock() {
+    local state=$1 description=$2
+    gh api "repos/{owner}/{repo}/statuses/$DEPLOY_MERGED_SHA" \
+      -X POST \
+      -f state="$state" \
+      -f context="$AGENT_CUTOVER_RELEASE_CONTEXT" \
+      -f description="$description" >/dev/null
+    AGENT_CUTOVER_RELEASED=1
+  }
+  release_agent_cutover_lock_on_exit() {
+    local exit_code=$?
+    trap - EXIT
+    if [ "$AGENT_CUTOVER_RELEASED" != "1" ]; then
+      release_agent_cutover_lock error "Production workflow cutover failed" || true
+    fi
+    exit "$exit_code"
+  }
+  trap release_agent_cutover_lock_on_exit EXIT
+
+  # Reconfirm this deploy's immutable merge commit before any production work.
+  git fetch origin main
+  git cat-file -e "${DEPLOY_MERGED_SHA}^{commit}" ||
+    { echo "❌ Exact deploy merge commit is unavailable: $DEPLOY_MERGED_SHA"; exit 1; }
+  cd "$(git rev-parse --show-toplevel)/back-end" && source .env
+  # Before sealing even one production history, prove the exact candidate image
+  # can construct its full worker and run real workflow initialization. Only
+  # this deployment attempt polls this isolated queue. The validation stops at
+  # the last boundary before the LLM loop and deletes its fixture.
+  TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE="navi-agent-candidate-${AGENT_DEPLOYMENT_TOKEN}"
+  PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1 \
+    TEMPORAL_TASK_QUEUE=navi-agent-tasks \
+    TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE="$TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE" \
+    TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
+    TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
+    npx tsx scripts/validate-candidate-workflow-image.ts --execute
+
+  # Render's `live` status means traffic has switched, not that the old
+  # instance is gone. It can retain the old process for 60s, then allow up to
+  # 300s of shutdown delay. That old backend predates immutable descendant
+  # workflow IDs, so wait the full bounded window before a tombstone can close
+  # an ambiguous child ID. Compute from the exact deploy's server timestamp so
+  # time already spent in health gates counts toward the drain.
+  RENDER_OLD_INSTANCE_DRAIN_SECONDS="${RENDER_OLD_INSTANCE_DRAIN_SECONDS:-375}"
+  case "$RENDER_OLD_INSTANCE_DRAIN_SECONDS" in
+    ''|*[!0-9]*) echo "❌ RENDER_OLD_INSTANCE_DRAIN_SECONDS must be an integer >= 375"; exit 1 ;;
+  esac
+  [ "$RENDER_OLD_INSTANCE_DRAIN_SECONDS" -ge 375 ] ||
+    { echo "❌ Render old-instance drain cannot be weakened below 375s"; exit 1; }
+  RENDER_DEPLOY_FINISHED_AT=$(
+    curl -fsS -H "Authorization: Bearer $RENDER_API_KEY" \
+      "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=20" |
+      DEPLOY_SHA="$DEPLOY_MERGED_SHA" python3 -c '
+import json, os, sys
+deploy = next(
+    (
+        item["deploy"]
+        for item in json.load(sys.stdin)
+        if (item["deploy"].get("commit") or {}).get("id") == os.environ["DEPLOY_SHA"]
+        and item["deploy"].get("status") == "live"
+    ),
+    None,
+)
+if deploy is None or not deploy.get("finishedAt"):
+    raise SystemExit("exact live Render deploy timestamp was not found")
+print(deploy["finishedAt"])
+'
+  )
+  RENDER_DRAIN_REMAINING=$(
+    RENDER_DEPLOY_FINISHED_AT="$RENDER_DEPLOY_FINISHED_AT" \
+      RENDER_OLD_INSTANCE_DRAIN_SECONDS="$RENDER_OLD_INSTANCE_DRAIN_SECONDS" \
+      python3 -c '
+from datetime import datetime, timezone
+import math, os
+finished = datetime.fromisoformat(os.environ["RENDER_DEPLOY_FINISHED_AT"].replace("Z", "+00:00"))
+elapsed = (datetime.now(timezone.utc) - finished).total_seconds()
+print(max(0, math.ceil(float(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - elapsed)))
+'
+  )
+  while [ "$RENDER_DRAIN_REMAINING" -gt 0 ]; do
+    echo "Waiting for old Render instances/requests to drain: ${RENDER_DRAIN_REMAINING}s"
+    sleep "$([ "$RENDER_DRAIN_REMAINING" -lt 10 ] && echo "$RENDER_DRAIN_REMAINING" || echo 10)"
+    RENDER_DRAIN_REMAINING=$((RENDER_DRAIN_REMAINING - 10))
+  done
+  echo "✅ Old Render instance/request drain window elapsed"
+
+  # Final pre-seal gate. First re-read every retained Fly Machine and reject a
+  # single build/token/validation-queue/activation-policy mismatch. Then run the
+  # exact isolated validation workflow again: successful dispatch proves this
+  # fleet is still polling only its standby queue. Finally prove the GitHub
+  # concurrency lock is still held. No destructive Temporal action occurs
+  # between these checks and migrate-open-agent-workflows.
+  DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
+  (
+    cd "$DEPLOY_ROOT/agents"
+    source .env
+    EXPECTED_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
+      EXPECTED_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
+      EXPECTED_WORKER_VALIDATION_TASK_QUEUE="$TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE" \
+      EXPECTED_WORKER_ACTIVATION_TIMEOUT_SECONDS="7200" \
+      EXPECTED_WORKER_REQUIRE_ACTIVATION="1" \
+      bash "$DEPLOY_ROOT/scripts/verify-agent-candidate-fleet.sh"
+  )
+  cd "$DEPLOY_ROOT/back-end"
+  PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1 \
+    TEMPORAL_TASK_QUEUE=navi-agent-tasks \
+    TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE="$TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE" \
+    TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
+    TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
+    npx tsx scripts/validate-candidate-workflow-image.ts --execute
+  AGENT_DEPLOY_HOLD_STATUS=$(gh run view "$AGENT_DEPLOY_RUN_ID" \
+    --json jobs \
+    --jq '[.jobs[].steps[]? | select(.name == "Hold production deploy lock until exact cutover completes")][0].status // "missing"')
+  [ "$AGENT_DEPLOY_HOLD_STATUS" = "in_progress" ] ||
+    { echo "❌ Exact production deploy lock is no longer held"; exit 1; }
+
+  TEMPORAL_TASK_QUEUE=navi-agent-tasks \
+    TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
+    TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
+    WORKFLOW_MIGRATION_CONCURRENCY="${WORKFLOW_MIGRATION_CONCURRENCY:-16}" \
+    WORKFLOW_MIGRATION_CANARY_COUNT="${WORKFLOW_MIGRATION_CANARY_COUNT:-4}" \
+    WORKFLOW_MIGRATION_BOOTSTRAP_TIMEOUT_MS="${WORKFLOW_MIGRATION_BOOTSTRAP_TIMEOUT_MS:-120000}" \
+    WORKFLOW_MIGRATION_CANDIDATE_TIMEOUT_MS="${WORKFLOW_MIGRATION_CANDIDATE_TIMEOUT_MS:-300000}" \
+    WORKFLOW_MIGRATION_PENDING_START_TIMEOUT_MS="${WORKFLOW_MIGRATION_PENDING_START_TIMEOUT_MS:-120000}" \
+    WORKFLOW_MIGRATION_TERMINAL_CLEANUP_TIMEOUT_MS="${WORKFLOW_MIGRATION_TERMINAL_CLEANUP_TIMEOUT_MS:-900000}" \
+    WORKFLOW_MIGRATION_TERMINAL_CLEANUP_CONCURRENCY="${WORKFLOW_MIGRATION_TERMINAL_CLEANUP_CONCURRENCY:-32}" \
+    npx tsx scripts/migrate-open-agent-workflows.ts --execute
+
+  release_agent_cutover_lock success "Production workflow cutover completed"
+  trap - EXIT
+  gh run watch "$AGENT_DEPLOY_RUN_ID" --exit-status
+  python3 scripts/record_factory_event.py deploy production-finish fly
+fi
+```
+
+The isolated candidate-image gate runs before any production history is sealed;
+failure leaves the existing workflow fleet untouched. The migration command then
+prepares every frozen workflow while the candidate fleet is standby. If even one
+preparation fails, activation never happens and candidate code never sees an old
+history. After exact-SHA activation, it starts four status-stratified replacements
+serially and requires each to atomically persist its restored durable state and
+clear its generation-fenced claim (`durable READY`) before starting the bulk set.
+Any canary failure leaves the bulk set prepared but unstarted. The command must
+exit zero with `failed: 0` and `prepared: 0`. A changed workflow ID is a safe skip
+(another replacement won the race); any other failure blocks completion.
+Rerunning the command is safe: durable claims coalesce and expected-generation
+checks prevent a stale snapshot from replacing a newer workflow.
+The 375-second Render drain is a hard correctness gate, not a propagation
+sleep: `live` switches traffic before Render retires the old process, and an old
+in-flight create request used Temporal's reusable workflow-ID policy. The
+bounded drain guarantees every caller that can outlive a descendant tombstone
+uses the new reject-duplicate policy.
+
+## Step 13ac: Validate workflow replacement edge cases in production
+
+Skip only when `$AGENT_CUTOVER_REQUIRED` is `0`. Run this immediately after Step
+13ab succeeds. This gate creates a uniquely named, isolated set of synthetic
+stale workflows on a never-polled validation queue, replaces them onto the
+production queue, and deletes every exact fixture ID afterward. The replacements
+remain cold, so the gate makes no LLM/provider calls and does not spend model
+credits.
+
+The command must exit zero and print `PASS` for every row. It verifies paused,
+cost-limited, and out-of-credits restoration; counters, context size, iteration
+offset, duration origin, and historical configuration; approval-wait closure and
+late approval rejection; exact-once terminalization of root and descendant
+tools; success-before-seal and late-success races; descendant termination;
+durable bootstrap acknowledgement; pause, resume, and cost-limit-update cutover
+races; exact accounting and provider-attempt iteration deduplication; independent
+cleanup of rapid workflow generations; zero activity growth while cold; clean
+histories without patch markers or nondeterminism; malformed-root fail-closed
+behavior; known-zombie absence; fleet convergence; and fixture cleanup.
+
+```bash
+if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
+  cd "$(git rev-parse --show-toplevel)/back-end"
+  PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1 \
+    TEMPORAL_TASK_QUEUE=navi-agent-tasks \
+    TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
+    TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
+    npx tsx scripts/validate-prod-workflow-migration.ts --execute
+fi
+```
+
+Retain the JSON output as the production migration report card. Any failed row,
+including fixture cleanup, blocks deploy completion and must be diagnosed and
+fixed before Step 13b.
 
 ## Step 13b: Production semantic frontend gate (no skip — always runs)
 
-After all changed services are live and Step 13a is green when applicable, dispatch the trusted production semantic workflow. This runs every frontend semantic spec in one job with four Playwright workers and one shared authenticated session. It includes the four-path, five-sample, full-lifecycle chat ratchet.
+After the changed runtime surfaces exercised by semantics are live (Fly,
+Render, and/or Vercel) and Step 13a is green when applicable, dispatch the
+trusted production semantic workflow. Do not wait for the independent Mac release lane;
+keep it running concurrently. This runs every frontend semantic
+spec in one job with four Playwright workers and one shared authenticated
+session. It includes the four-path, five-sample, full-lifecycle chat ratchet.
 
 ```bash
+python3 scripts/record_factory_event.py deploy production-start semantic
 SEMANTIC_DISPATCH_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 gh workflow run chat-lifecycle-ratchet.yml --ref main \
   -f frontend_url=https://roselabs.ai \
@@ -1507,21 +1933,26 @@ for i in $(seq 1 40); do
 done
 [ -n "$SEMANTIC_RUN_ID" ] || { echo "❌ Production semantic workflow did not start"; exit 1; }
 gh run watch "$SEMANTIC_RUN_ID" --exit-status
+python3 scripts/record_factory_event.py deploy production-finish semantic
 ```
 
 This is a hard deployment gate. If the workflow fails, the deployment is not complete: inspect its Playwright artifacts and service logs, fix the root cause in a new PR, and repeat the deploy loop. Do not report success or proceed to Step 14 while this check is red.
 
 ## Step 13c: AgentCard production lifecycle gate
 
-Skip only when `$CHANGED_AGENTCARD_PAYMENT` is empty. Run after both the backend and frontend merged commits are live:
+Skip only when `$CHANGED_AGENTCARD_PAYMENT` is empty. Run after both the backend
+and frontend merged commits are live. Launch it concurrently with the semantic
+gate because the two checks are isolated:
 
 ```bash
+python3 scripts/record_factory_event.py deploy production-start agentcard
 cd "$(git rev-parse --show-toplevel)/agents" && source venv/bin/activate
 python benchmarks/run_benchmark.py \
   --task agent-payment-production-abandonment \
   --prod \
   --ci \
   --bootstrap
+python3 scripts/record_factory_event.py deploy production-finish agentcard
 ```
 
 This production-only task reserves exactly $1.00 from the existing AgentCard organization float, captures the matching live Stripe payment, issues a live AgentCard, and deliberately leaves merchant checkout unsubmitted. The benchmark must then close the card, observe the organization transfer as `reclaimed` with `livemode=true`, refund the Stripe capture, and report no open payment attention request.

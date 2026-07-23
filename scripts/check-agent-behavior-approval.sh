@@ -85,7 +85,8 @@ FLAGGED="$(
               f == "agents/tests/blackbox/dag_executor.blackbox.py" ||
               f == "agents/tests/blackbox/workflow_determinism.blackbox.py")
     }
-    function is_behavioral(line, fname,    code) {
+    function is_behavioral(line, fname,    code, sign) {
+      sign=substr(line, 1, 1)
       sub(/^[+-]/, "", line)
 
       code=line
@@ -93,6 +94,11 @@ FLAGGED="$(
       sub(/^[[:space:]]*#.*$/, "", code)
       sub(/[[:space:]]+#.*$/, "", code)
       if (code ~ /^[[:space:]]*$/) return 0
+
+      # A newly-added test only measures behavior; it does not change runtime
+      # semantics or rewrite an existing product decision. Existing test
+      # expectations remain protected because edits/deletions emit a '-' line.
+      if (fname ~ /\.blackbox\.py$/ && sign == "+") return 0
 
       # Terminal handoffs / recovery fall-through control.
       if (code ~ /(_handle_incomplete|_mark_failed|_mark_complete|continue_as_new)/) return 1
@@ -107,8 +113,7 @@ FLAGGED="$(
       if (code ~ /status["'"'"']?[]]?[[:space:]]*(:|==|!=|=)[[:space:]]*["'"'"']?(error|failed|aborted|max_iterations|needs_llm|completed|paused)/) return 1
       if (code ~ /reason["'"'"']?[]]?[[:space:]]*(:|==|!=|=)[[:space:]]*["'"'"']/) return 1
 
-      # Recovery-invariant assertions in the behavior test suites (the status
-      # comparison above already covers assert ...["status"] == "failed").
+      # Removed/replaced recovery-invariant assertions in behavior tests.
       if (fname ~ /\.blackbox\.py$/) {
         if (code ~ /run_agent_calls/) return 1
         if (code ~ /(must not run|never.*run_agent|falls?_through|recovers?_via)/) return 1

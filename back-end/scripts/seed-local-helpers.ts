@@ -34,13 +34,70 @@ export type RemoteUserModel = {
   }): Promise<RemoteUserRecord | null>;
 };
 
-export type LocalUserModel = {
-  upsert(args: {
-    where: { userId: string };
-    create: RemoteUserRecord;
-    update: Omit<RemoteUserRecord, 'id'>;
-  }): Promise<unknown>;
+type UserIdentityRecord = {
+  id: string;
+  userId: string;
 };
+
+type UserIdentityModel<T extends UserIdentityRecord> = {
+  upsert(args: { where: { userId: string }; create: T; update: Omit<T, 'id'> }): Promise<unknown>;
+};
+
+export type LocalUserModel = UserIdentityModel<RemoteUserRecord>;
+
+export type ScopedUserRecord = {
+  id: string;
+  userId: string;
+  phone: string | null;
+  usedInviteCode: number | null;
+};
+
+export type ScopedLocalUserModel = UserIdentityModel<ScopedUserRecord>;
+
+export type ScopedRemoteUserModel = {
+  findMany(args: {
+    where: { phone: { in: string[] } };
+    select: {
+      id: true;
+      userId: true;
+      phone: true;
+      usedInviteCode: true;
+    };
+  }): Promise<ScopedUserRecord[]>;
+};
+
+async function syncUserRecordsByIdentity<T extends UserIdentityRecord>(
+  localUser: UserIdentityModel<T>,
+  users: readonly T[]
+): Promise<number> {
+  for (const user of users) {
+    const { id: remoteId, ...rest } = user;
+    void remoteId;
+    await localUser.upsert({
+      where: { userId: user.userId },
+      create: user,
+      update: rest,
+    });
+  }
+  return users.length;
+}
+
+export async function syncWaitlistAccounts(
+  remoteUser: ScopedRemoteUserModel,
+  localUser: ScopedLocalUserModel,
+  phones: string[]
+): Promise<number> {
+  const users = await remoteUser.findMany({
+    where: { phone: { in: phones } },
+    select: {
+      id: true,
+      userId: true,
+      phone: true,
+      usedInviteCode: true,
+    },
+  });
+  return syncUserRecordsByIdentity(localUser, users);
+}
 
 export async function syncUserRecord(
   remoteUser: RemoteUserModel,
@@ -52,14 +109,7 @@ export async function syncUserRecord(
     select: REMOTE_USER_SELECT,
   });
   if (!user) return 0;
-  const { id, ...rest } = user;
-  void id;
-  await localUser.upsert({
-    where: { userId },
-    create: user,
-    update: rest,
-  });
-  return 1;
+  return syncUserRecordsByIdentity(localUser, [user]);
 }
 
 export async function runSyncStep(name: string, fn: () => Promise<number>): Promise<void> {

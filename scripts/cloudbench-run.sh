@@ -80,6 +80,8 @@ BENCHMARK_FAST_MODE_CACHE="${BENCHMARK_FAST_MODE_CACHE:-}"
 BENCHMARK_PEAK_FLY_MACHINES="${BENCHMARK_PEAK_FLY_MACHINES:-}"
 BENCHMARK_VM_USD_PER_HOUR="${BENCHMARK_VM_USD_PER_HOUR:-}"
 BENCHMARK_FRONTEND_URL="${BENCHMARK_FRONTEND_URL:-}"
+BENCHMARK_REPORT_FRONTEND_URL="${BENCHMARK_REPORT_FRONTEND_URL:-}"
+AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL="${AGENTCARD_ONBOARDING_RETURN_URL:-https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback}"
 CLOUDBENCH_START_BARRIER="${CLOUDBENCH_START_BARRIER:-}"
 CLOUDBENCH_BARRIER_TOKEN="${CLOUDBENCH_BARRIER_TOKEN:-}"
 CLOUDBENCH_STATUS_PORT="${CLOUDBENCH_STATUS_PORT:-8011}"
@@ -140,9 +142,74 @@ run_with_heartbeat() {
     wait "$command_pid"
 }
 
+manifest_public_frontend_url() {
+    python3 - "$MANIFEST" <<'PY'
+import json
+import sys
+from urllib.parse import urlparse
+
+try:
+    with open(sys.argv[1]) as f:
+        manifest = json.load(f)
+except Exception:
+    sys.exit(0)
+
+url = (((manifest.get("urls") or {}).get("public")) or "").strip().rstrip("/")
+parsed = urlparse(url)
+if parsed.scheme != "https":
+    sys.exit(0)
+host = (parsed.hostname or "").lower()
+if host in {"localhost", "127.0.0.1"}:
+    sys.exit(0)
+print(url)
+PY
+}
+
+wait_for_benchmark_frontend_url() {
+    if [ "$BENCH_NEEDS_BUNDLED_FRONTEND" != "1" ]; then
+        return 0
+    fi
+    if [ "$BENCH_SIMULATE" = "1" ]; then
+        return 0
+    fi
+
+    local public_url
+    public_url=""
+    log "waiting for public frontend URL required by bundled browser/payment benchmark prompts..."
+    for _ in $(seq 1 180); do
+        public_url="$(manifest_public_frontend_url || true)"
+        if [ -n "$public_url" ] && curl -fsS --max-time 5 "$public_url/test_payment" >/dev/null 2>&1; then
+            BENCHMARK_FRONTEND_URL="$public_url"
+            export BENCHMARK_FRONTEND_URL
+            log "public benchmark frontend ready: $BENCHMARK_FRONTEND_URL"
+            return 0
+        fi
+        sleep 1
+    done
+
+    log "FATAL: bundled browser/payment benchmark requires a public frontend URL, but $MANIFEST did not publish a reachable https urls.public"
+    return 1
+}
+
 # ── Normalize the task list (comma OR space separated) into an array ────────
 # The controller may pass "a,b,c" or "a b c"; accept both.
 read -r -a BENCH_TASK_LIST <<< "$(printf '%s' "$BENCH_TASKS" | tr ',' ' ')"
+BENCH_ENABLE_NON_PURCHASE_GATES=0
+BENCH_NEEDS_BUNDLED_FRONTEND=0
+BENCH_NEEDS_AGENTCARD_ONBOARDING=0
+for task_name in "${BENCH_TASK_LIST[@]}"; do
+    case "$task_name" in
+        gate-source-connect-gmail)
+            BENCH_ENABLE_NON_PURCHASE_GATES=1
+            ;;
+    esac
+    case "$task_name" in
+        agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint)
+            BENCH_NEEDS_BUNDLED_FRONTEND=1
+            BENCH_NEEDS_AGENTCARD_ONBOARDING=1
+            ;;
+    esac
+done
 
 emit_report_and_result() {
     # Always surface whatever report card / run results exist, even on failure,
@@ -319,6 +386,14 @@ cloudbench_verify_env_file "$REPO_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" b
 cloudbench_validate_browser_provider_contract \
     "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
     "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || finish 1
+FRONTEND_SUPABASE_URL="$(cloudbench_env_value "$REPO_DIR/back-end/.env" VITE_SUPABASE_URL)"
+[ -n "$FRONTEND_SUPABASE_URL" ] || FRONTEND_SUPABASE_URL="$(cloudbench_env_value "$REPO_DIR/back-end/.env" SUPABASE_URL)"
+FRONTEND_SUPABASE_ANON_KEY="$(cloudbench_env_value "$REPO_DIR/back-end/.env" VITE_SUPABASE_ANON_KEY)"
+[ -n "$FRONTEND_SUPABASE_ANON_KEY" ] || FRONTEND_SUPABASE_ANON_KEY="$(cloudbench_env_value "$REPO_DIR/agents/.env" SUPABASE_ANON_KEY)"
+if [ "$BENCH_NEEDS_BUNDLED_FRONTEND" = "1" ]; then
+    [ -n "$FRONTEND_SUPABASE_URL" ] || { log "FATAL: bundled frontend benchmark is missing VITE_SUPABASE_URL/SUPABASE_URL"; finish 1; }
+    [ -n "$FRONTEND_SUPABASE_ANON_KEY" ] || { log "FATAL: bundled frontend benchmark is missing VITE_SUPABASE_ANON_KEY/SUPABASE_ANON_KEY"; finish 1; }
+fi
 
 # ── 3. Sync baked deps from the image into the volume checkout ──────────────
 step dep_sync
@@ -500,6 +575,21 @@ fi
 if [ -n "$BENCHMARK_VM_USD_PER_HOUR" ]; then
     STACK_ENV+=("BENCHMARK_VM_USD_PER_HOUR=$BENCHMARK_VM_USD_PER_HOUR")
 fi
+if [ "$BENCH_ENABLE_NON_PURCHASE_GATES" = "1" ]; then
+    STACK_ENV+=("NON_PURCHASE_GATES_ENABLED=1")
+fi
+if [ "$BENCH_NEEDS_BUNDLED_FRONTEND" = "1" ]; then
+    STACK_ENV+=("BENCHMARK_BUNDLED_FRONTEND=true")
+fi
+if [ "$BENCH_NEEDS_AGENTCARD_ONBOARDING" = "1" ]; then
+    STACK_ENV+=("AGENTCARD_ONBOARDING_RETURN_URL=$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL")
+fi
+if [ -n "$FRONTEND_SUPABASE_URL" ]; then
+    STACK_ENV+=("VITE_SUPABASE_URL=$FRONTEND_SUPABASE_URL")
+fi
+if [ -n "$FRONTEND_SUPABASE_ANON_KEY" ]; then
+    STACK_ENV+=("VITE_SUPABASE_ANON_KEY=$FRONTEND_SUPABASE_ANON_KEY")
+fi
 if [ "$BENCH_SIMULATE" = "1" ]; then
     STACK_ENV+=(
         "BENCHMARK_WORLD_MODEL_MODE=simulate"
@@ -572,6 +662,12 @@ for i in $(seq 1 "$STACK_WAIT_SECONDS"); do
         log "FATAL: stack process exited (rc=$stack_rc) before becoming healthy after ${i}s"
         log "───── last 40 lines of stack log ($STACK_LOG) ─────"
         tail -40 "$STACK_LOG" 2>/dev/null | while IFS= read -r _line; do log "  | $_line"; done
+        for _frontend_log in "$CONTEXT_DIR/logs/frontend.log" "$REPO_DIR/front-end/frontend-logs.log"; do
+            if [ -f "$_frontend_log" ]; then
+                log "───── last 80 lines of frontend log ($_frontend_log) ─────"
+                tail -80 "$_frontend_log" 2>/dev/null | while IFS= read -r _line; do log "  | $_line"; done
+            fi
+        done
         if [ "$stack_rc" = 137 ] || dmesg 2>/dev/null | grep -qiE 'out of memory|oom-kill'; then
             log "  ⚠️ rc=137/OOM signature — stack was SIGKILLed (likely out-of-memory); check machine RAM vs concurrent service footprint"
         fi
@@ -607,6 +703,7 @@ if ! $STACK_READY; then
     finish 1
 fi
 log "stack healthy — backend :$BACKEND_PORT, WMH :$WMH_PORT, dashboard :$BENCH_DASHPORT"
+wait_for_benchmark_frontend_url || finish 1
 
 # Fleet batches hold every task here until every isolated stack is healthy.
 # The controller releases all machines together, so slow database/bootstrap
@@ -699,6 +796,21 @@ if [ '$BENCH_TARGET_MODE' = 'prod' ]; then
   unset BENCHMARK_FRONTEND_URL
 elif [ -n '$BENCHMARK_FRONTEND_URL' ]; then
   export BENCHMARK_FRONTEND_URL='$BENCHMARK_FRONTEND_URL'
+else
+  unset BENCHMARK_FRONTEND_URL
+fi
+if [ -n '$BENCHMARK_REPORT_FRONTEND_URL' ]; then
+  export BENCHMARK_REPORT_FRONTEND_URL='$BENCHMARK_REPORT_FRONTEND_URL'
+else
+  unset BENCHMARK_REPORT_FRONTEND_URL
+fi
+if [ '$BENCH_NEEDS_AGENTCARD_ONBOARDING' = '1' ]; then
+  export AGENTCARD_ONBOARDING_RETURN_URL='$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL'
+else
+  unset AGENTCARD_ONBOARDING_RETURN_URL
+fi
+if [ '$BENCH_ENABLE_NON_PURCHASE_GATES' = '1' ]; then
+  export NON_PURCHASE_GATES_ENABLED=1
 fi
 if [ '$BENCH_SIMULATE' = '1' ]; then
   export BENCHMARK_WORLD_MODEL_MODE='simulate'

@@ -34,6 +34,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -391,7 +392,10 @@ def _gate_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
     gate = metadata.get("gate")
     if not isinstance(gate, dict):
         return False
-    expected = task.expected_gate or {}
+    return _gate_matches_expected(task.expected_gate or {}, gate)
+
+
+def _gate_matches_expected(expected: dict, gate: dict) -> bool:
     for key in ("type", "gateKey", "severity"):
         value = expected.get(key)
         if value is not None and not _expected_gate_value_matches(gate.get(key), value):
@@ -408,6 +412,70 @@ def _gate_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
         for key, value in expected_detection.items():
             if not _expected_gate_value_matches(detection.get(key), value):
                 return False
+    return True
+
+
+def _expected_gate_evidence_from_data(task: BenchmarkTask, data: dict) -> Optional[dict]:
+    """Find durable expected-gate evidence in final benchmark data.
+
+    The hot polling path observes pending attention requests via
+    /api/attention-requests, but gate messages are also durably written into the
+    agent transcript. Expected-gate tasks should not fail merely because the
+    polling loop ended before the next attention-request fetch after the gate
+    message was inserted.
+    """
+    if not task.expected_gate:
+        return None
+    expected = task.expected_gate
+    benchmark_state = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
+    if benchmark_state.get("expected_gate_seen") is True:
+        gate = benchmark_state.get("expected_gate")
+        return {
+            "gate": gate if isinstance(gate, dict) else expected,
+            "request_id": benchmark_state.get("expected_gate_request_id"),
+        }
+
+    for request in benchmark_state.get("attention_requests_seen", []) or []:
+        if not isinstance(request, dict):
+            continue
+        metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
+        gate = metadata.get("gate")
+        if isinstance(gate, dict) and _gate_matches_expected(expected, gate):
+            return {"gate": gate, "request_id": request.get("id")}
+
+    for message in data.get("messages", []) or []:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        candidates = [metadata]
+        if isinstance(metadata.get("auxiliary"), dict):
+            candidates.append(metadata["auxiliary"])
+        for candidate in candidates:
+            gate = candidate.get("gate")
+            if not isinstance(gate, dict) or not _gate_matches_expected(expected, gate):
+                continue
+            return {
+                "gate": gate,
+                "request_id": (
+                    candidate.get("attentionRequestId")
+                    or candidate.get("attention_request_id")
+                    or candidate.get("toolCallId")
+                    or candidate.get("tool_call_id")
+                ),
+            }
+    return None
+
+
+def _mark_expected_gate_from_data(task: BenchmarkTask, data: dict) -> bool:
+    evidence = _expected_gate_evidence_from_data(task, data)
+    if not evidence:
+        return False
+    data["_benchmark"] = {
+        **(data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}),
+        "expected_gate_seen": True,
+        "expected_gate": evidence["gate"],
+        "expected_gate_request_id": evidence.get("request_id"),
+    }
     return True
 
 
@@ -544,6 +612,13 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     if parsed.hostname in {"localhost", "127.0.0.1"} and parsed.port:
         return f"{parsed.scheme}://{parsed.hostname}:{parsed.port + 1}"
     return "https://roselabs.ai"
+
+
+def _report_frontend_url_for_benchmark(base_url: str) -> str:
+    explicit = os.environ.get("BENCHMARK_REPORT_FRONTEND_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    return _frontend_url_for_benchmark(base_url)
 
 
 def _payment_receipt_from_attention_request(req: dict) -> dict:
@@ -1086,12 +1161,21 @@ async def _update_world_model_before_simulation(args) -> None:
 
 
 def _evaluate_agent_payment_result(data: dict) -> tuple[bool, str | None]:
-    text = _agent_data_search_text(data)
-    if "payment confirmed" not in text:
-        return False, "agent did not report the test payment confirmation page"
-    if "order" not in text:
-        return False, "agent did not report the confirmation order id"
-    return True, None
+    for message in data.get("messages", []) or []:
+        if not isinstance(message, dict) or message.get("role") != "TOOL":
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "spawn_browser_agent" or metadata.get("toolStatus") != "FINISHED":
+            continue
+        structured = metadata.get("structured_response") or metadata.get("structuredResponse")
+        if not isinstance(structured, dict):
+            continue
+        order_id = structured.get("order_confirmation_id")
+        if isinstance(order_id, str) and re.fullmatch(r"tp_[0-9a-f]{8}", order_id):
+            return True, None
+    return False, "agent did not return a grounded browser payment confirmation order id"
 
 
 async def _evaluate_phone_call_task(
@@ -2263,8 +2347,8 @@ async def post_attachment_message(base_url: str, agent_id: str, file_pointers: L
         return resp.status_code in (200, 201)
 
 
-async def upload_attachment(base_url: str, agent_id: str, filepath: str) -> Optional[dict]:
-    """Upload a file attachment for an agent. Returns FilePointer or None."""
+async def upload_attachment(base_url: str, agent_id: str, filepath: str) -> dict:
+    """Upload a file attachment for an agent. Raises if the required FilePointer is unavailable."""
     headers = await _api_headers()
     # Remove Content-Type — httpx sets multipart boundary automatically
     headers.pop("Content-Type", None)
@@ -2279,10 +2363,13 @@ async def upload_attachment(base_url: str, agent_id: str, filepath: str) -> Opti
             )
         if resp.status_code in (200, 201):
             data = resp.json()
-            return data.get("file_pointer") or data.get("filePointer")
-        else:
-            print(f"    ⚠ Attachment upload failed: {resp.status_code} - {resp.text[:200]}")
-            return None
+            pointer = data.get("file_pointer") or data.get("filePointer")
+            if isinstance(pointer, dict):
+                return pointer
+            raise RuntimeError(f"Attachment upload for {filename} returned no FilePointer")
+        raise RuntimeError(
+            f"Attachment upload failed for {filename}: HTTP {resp.status_code}: {resp.text[:500]}"
+        )
 
 
 # ============================================================
@@ -2993,6 +3080,8 @@ async def poll_agent(
                                     "expected_gate": expected_gate_evidence["gate"],
                                     "expected_gate_request_id": req_id,
                                 }
+                                print(f"    ✅ Expected gate observed {req_id[:8]}")
+                                return data, approvals_triggered, approvals_resolved, None
                             receipt_error = _validate_payment_receipt(task, req, messages=messages)
                             if receipt_error:
                                 data["_benchmark"] = {
@@ -3450,6 +3539,11 @@ def evaluate_task(
             return True, None
         return False, "Expected validated payment-card request but none was observed"
 
+    if task.expected_gate:
+        if _mark_expected_gate_from_data(task, data):
+            return True, None
+        return False, f"Expected gate {task.expected_gate} but none was observed"
+
     # Agent mode: must complete
     if status != "COMPLETED":
         return False, f"Agent status: {status} (expected COMPLETED)"
@@ -3683,6 +3777,14 @@ def _should_delete_agent_after_run(passed: bool, keep_failed_agents: bool) -> bo
     if os.environ.get("BENCHMARK_KEEP_AGENTS") == "true":
         return False
     return passed or not keep_failed_agents
+
+
+def _early_fail_should_pause_agent(reason: Optional[str]) -> bool:
+    """Return whether an early-failed benchmark should stop agent work immediately."""
+    if not reason:
+        return False
+    normalized = reason.lower()
+    return normalized.startswith("timeout after") or "tree stalled" in normalized
 
 
 def _local_victoria_db_container() -> Optional[str]:
@@ -4370,6 +4472,49 @@ def _sync_compute_tokens(
     return True
 
 
+def _refresh_local_claude_token_from_keychain(database_url: str) -> bool:
+    """Overlay this Mac's current Claude OAuth token onto the isolated DB.
+
+    The shared workspace is a useful credential source, but its encrypted
+    Claude row can still look usable after Anthropic has invalidated the OAuth
+    token.  Local Claude Code owns the freshest renewable token in Keychain, so
+    prefer it for Mac-hosted smoke runs after the ordinary source sync.  This is
+    best-effort: hosts without that local credential retain the synced source.
+    """
+    if sys.platform != "darwin" or shutil.which("security") is None:
+        return False
+    decryption_key = load_env_var("CLAUDE_CREDENTIAL_DECRYPTION_KEY", _BACKEND_ENV)
+    if not decryption_key:
+        print("    ⚠ Local Claude keychain refresh skipped: credential encryption key unavailable")
+        return False
+
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    env["CLAUDE_CREDENTIAL_DECRYPTION_KEY"] = decryption_key
+    try:
+        result = _run_seed_subprocess(
+            ["npx", "tsx", "scripts/seed-claude-code-token-from-keychain.ts"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(
+            "    ⚠ Local Claude keychain refresh timed out "
+            f"after {exc.timeout}s: {_seed_sync_error_detail(exc)}"
+        )
+        return False
+    except Exception as exc:
+        print(f"    ⚠ Local Claude keychain refresh error: {exc}")
+        return False
+    if result.returncode != 0:
+        print(f"    ⚠ Local Claude keychain refresh unavailable: {_seed_sync_error_detail(result)}")
+        return False
+    print("    🔑 Refreshed Claude credentials from macOS Keychain")
+    return True
+
+
 def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     """Refresh the complete live browser auth graph (context/provider profiles,
     cookies/storage, CookieBundles, Steel sessions, passwords, and passkeys) from
@@ -4552,6 +4697,9 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
         tolerate_claude_code_unavailable=tolerate_missing_claude,
     ):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
+    database_url = _local_victoria_database_url()
+    if database_url:
+        _refresh_local_claude_token_from_keychain(database_url)
 
 
 def _snapshot_browser_state(ctx: LiveFixtureContext, *, include_passwords: bool) -> dict:
@@ -6700,8 +6848,19 @@ _APPROVAL_SEAT_RE = re.compile(
 )
 
 
-def _run_declared_static_check(evaluator: dict, data: dict) -> tuple[bool, str]:
+def _run_declared_static_check(
+    task_or_evaluator: BenchmarkTask | dict,
+    evaluator_or_data: dict,
+    data: Optional[dict] = None,
+) -> tuple[bool, str]:
     """Execute the small fail-closed static-check surface used by enforced tasks."""
+    if data is None:
+        task: Optional[BenchmarkTask] = None
+        evaluator = task_or_evaluator if isinstance(task_or_evaluator, dict) else {}
+        data = evaluator_or_data
+    else:
+        task = task_or_evaluator if isinstance(task_or_evaluator, BenchmarkTask) else None
+        evaluator = evaluator_or_data
     benchmark_state = data.get("_benchmark", {})
     for check in evaluator.get("checks", []):
         check_type = check.get("type")
@@ -6710,6 +6869,9 @@ def _run_declared_static_check(evaluator: dict, data: dict) -> tuple[bool, str]:
                 return False, "Expected validated payment receipt was not observed"
             continue
         if check_type == "expected_gate":
+            if task is not None and _mark_expected_gate_from_data(task, data) is True:
+                benchmark_state = data.get("_benchmark", {})
+                continue
             if benchmark_state.get("expected_gate_seen") is not True:
                 return False, "Expected typed gate was not observed"
             continue
@@ -6803,7 +6965,7 @@ async def _run_declared_evaluators(
         usage = None
         try:
             if method == "static_check":
-                passed, reasoning = _run_declared_static_check(evaluator, data)
+                passed, reasoning = _run_declared_static_check(task, evaluator, data)
                 score = 1.0 if passed else 0.0
             elif method == "single_turn_llm_judge":
                 judged = await _call_declared_llm_judge(task, evaluator, data)
@@ -7048,11 +7210,8 @@ async def run_single_task(
 
                 print(f"    Uploading {attach_filename}...")
                 fp = await upload_attachment(base_url, agent_id, filepath)
-                if fp:
-                    file_pointers.append(fp)
-                    print("    ✅ Uploaded, FilePointer received")
-                else:
-                    print("    ⚠ Upload returned no FilePointer, continuing anyway")
+                file_pointers.append(fp)
+                print("    ✅ Uploaded, FilePointer received")
 
             # Post a message with all file pointers so the agent can see them
             if file_pointers:
@@ -7113,6 +7272,12 @@ async def run_single_task(
         if realtime_monitor:
             await realtime_monitor.stop()
             realtime_monitor = None
+        if _early_fail_should_pause_agent(early_fail_reason):
+            try:
+                if await pause_agent(base_url, agent_id):
+                    print(f"    ⏸ Paused agent {agent_id[:12]} after early-fail before cleanup")
+            except Exception as pause_error:
+                print(f"    ⚠ Failed to pause early-failed agent {agent_id[:12]}: {pause_error}")
 
         # Get final agent data
         agent = data.get("agent", {})
@@ -7235,13 +7400,15 @@ async def run_single_task(
             "agent_class_step_counts": agent_class_step_counts,
             "min_steps": dict(task.min_steps),
         }
-        min_steps_error = _validate_agent_class_min_steps(
-            task.min_steps,
-            agent_class_step_counts,
-        )
-        if min_steps_error:
-            passed = False
-            failure_reason = f"{failure_reason} | {min_steps_error}" if failure_reason else min_steps_error
+        expected_gate_terminal = task.expected_gate and data["_benchmark"].get("expected_gate_seen") is True
+        if not expected_gate_terminal:
+            min_steps_error = _validate_agent_class_min_steps(
+                task.min_steps,
+                agent_class_step_counts,
+            )
+            if min_steps_error:
+                passed = False
+                failure_reason = f"{failure_reason} | {min_steps_error}" if failure_reason else min_steps_error
 
         # Tree agent count check — counts spawn_agent-type sub-agents only
         # (excludes root and explore agents; explore agents have no output_schema)
@@ -8338,18 +8505,23 @@ def _parallel_task_runners(
     max_concurrency: int | None,
     runner: Callable[[BenchmarkTask], Awaitable[TaskResult]],
 ) -> list[Awaitable[TaskResult]]:
-    """Build task runners with batch and shared browser-profile limits.
+    """Build task runners with the configured batch concurrency.
 
-    Browser sessions persist changes into the benchmark user's provider profile.
-    Two browser-backed tasks therefore cannot safely overlap: whichever session
-    closes last can overwrite cookies, storage, and tabs written by its sibling.
-    Keep that resource exclusive while allowing non-browser work to use the rest
-    of the configured batch concurrency.
+    Isolated local stacks key browser-provider profiles by agent, so browser
+    tasks consume ordinary batch slots and may overlap. Shared/prod stacks keep
+    the legacy one-writer guard because their user profile is intentionally
+    persistent across runs.
     """
     semaphore = (
         asyncio.Semaphore(max_concurrency) if max_concurrency is not None and max_concurrency < len(tasks) else None
     )
-    browser_profile_writer = asyncio.Semaphore(1)
+    isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    browser_profile_writer = None if isolated_browser_profiles else asyncio.Semaphore(1)
 
     async def run_with_batch_limit(task: BenchmarkTask) -> TaskResult:
         if semaphore is None:
@@ -8358,7 +8530,7 @@ def _parallel_task_runners(
             return await runner(task)
 
     async def run_limited(task: BenchmarkTask) -> TaskResult:
-        if task.requires_browser_agent:
+        if task.requires_browser_agent and browser_profile_writer is not None:
             # Acquire the resource-specific lock first so a queued browser task
             # does not consume a general slot that non-browser work can use.
             async with browser_profile_writer:
@@ -8379,8 +8551,37 @@ def _parallel_task_phases(
     shared rows during the fixture. Starting the exclusive phase first makes the
     clean-stack boundary real without sacrificing failed-tree diagnostics.
     """
-    exclusive = [task for task in tasks if task.name in EXCLUSIVE_SHARED_DB_TASK_NAMES]
-    parallel = [task for task in tasks if task.name not in EXCLUSIVE_SHARED_DB_TASK_NAMES]
+    isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+    def uses_shared_browser_auth(task: BenchmarkTask) -> bool:
+        if not getattr(task, "requires_browser_agent", False):
+            return False
+        if getattr(task, "browser_profile_mode", "persistent") == "fresh":
+            return False
+        environment = getattr(task, "environment", None) or {}
+        return bool(
+            getattr(task, "browser_auth_realm", None)
+            or environment.get("live_cookie_domains")
+            or resolve_live_fixtures(environment)
+        )
+
+    exclusive_names = set(EXCLUSIVE_SHARED_DB_TASK_NAMES)
+    if isolated_browser_profiles and any(task.name == BIOMETRICS_WEBDECOY_TASK_NAME for task in tasks):
+        auth_reading_siblings = [
+            task
+            for task in tasks
+            if task.name != BIOMETRICS_WEBDECOY_TASK_NAME and uses_shared_browser_auth(task)
+        ]
+        if not auth_reading_siblings:
+            exclusive_names.discard(BIOMETRICS_WEBDECOY_TASK_NAME)
+
+    exclusive = [task for task in tasks if task.name in exclusive_names]
+    parallel = [task for task in tasks if task.name not in exclusive_names]
     return [("exclusive", exclusive), ("parallel", parallel)]
 
 
@@ -8602,7 +8803,7 @@ async def main_async(args):
 
     def _report_snapshot(running_names: set[str]) -> RunState:
         finished = {r.name for r in run.task_results}
-        fe = _frontend_url_for_benchmark(base_url)
+        fe = _report_frontend_url_for_benchmark(base_url)
         try:
             peak_fly_raw = os.environ.get("BENCHMARK_PEAK_FLY_MACHINES")
             peak_fly_machines = int(peak_fly_raw) if peak_fly_raw else None

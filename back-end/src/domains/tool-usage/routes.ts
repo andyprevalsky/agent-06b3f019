@@ -17,10 +17,46 @@ import {
   AgentNotFoundError,
   AgentOwnershipError,
   AccessDeniedError,
+  WorkflowGenerationMismatchError,
 } from './service';
 
 const log = createLogger('ToolUsage');
 const router = Router();
+
+function saveToolUsageValidationError(body: Record<string, unknown>): string | null {
+  if (body.agent_id === undefined || body.agent_id === null || body.agent_id === '') {
+    return 'agent_id is required';
+  }
+  if (body.user_id === undefined || body.user_id === null || body.user_id === '') {
+    return 'user_id is required';
+  }
+  if (body.tool_name === undefined || body.tool_name === null || body.tool_name === '') {
+    return 'tool_name is required';
+  }
+  if (!Number.isFinite(body.total_cost_cents) || Number(body.total_cost_cents) < 0) {
+    return 'total_cost_cents must be a non-negative number';
+  }
+  if (!Array.isArray(body.usage_items)) return 'usage_items must be an array';
+  if (
+    body.operation_key !== undefined &&
+    (typeof body.operation_key !== 'string' || body.operation_key.length < 1)
+  ) {
+    return 'operation_key must be a non-empty string';
+  }
+  const checkpoint = body.accounting_checkpoint;
+  if (
+    checkpoint !== undefined &&
+    (typeof checkpoint !== 'object' ||
+      checkpoint === null ||
+      !['token_count', 'tokens_in', 'tokens_out', 'own_cost_cents'].every((field) => {
+        const value = (checkpoint as Record<string, unknown>)[field];
+        return Number.isFinite(value) && Number(value) >= 0;
+      }))
+  ) {
+    return 'accounting_checkpoint fields must be non-negative numbers';
+  }
+  return null;
+}
 
 /**
  * Save tool usage
@@ -32,29 +68,20 @@ router.post(
   authenticate,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
-      const { agent_id, user_id, tool_name, total_cost_cents, usage_items } = req.body;
-
-      // Validate required fields
-      if (agent_id === undefined || agent_id === null || agent_id === '') {
-        res.status(400).json({ error: 'agent_id is required' });
+      const validationError = saveToolUsageValidationError(req.body as Record<string, unknown>);
+      if (validationError !== null) {
+        res.status(400).json({ error: validationError });
         return;
       }
-      if (user_id === undefined || user_id === null || user_id === '') {
-        res.status(400).json({ error: 'user_id is required' });
-        return;
-      }
-      if (tool_name === undefined || tool_name === null || tool_name === '') {
-        res.status(400).json({ error: 'tool_name is required' });
-        return;
-      }
-      if (!Number.isFinite(total_cost_cents) || total_cost_cents < 0) {
-        res.status(400).json({ error: 'total_cost_cents must be a non-negative number' });
-        return;
-      }
-      if (!Array.isArray(usage_items)) {
-        res.status(400).json({ error: 'usage_items must be an array' });
-        return;
-      }
+      const {
+        agent_id,
+        user_id,
+        tool_name,
+        total_cost_cents,
+        usage_items,
+        operation_key,
+        accounting_checkpoint,
+      } = req.body;
 
       const result = await saveToolUsage({
         agent_id,
@@ -62,6 +89,12 @@ router.post(
         tool_name,
         total_cost_cents,
         usage_items,
+        operation_key,
+        accounting_checkpoint,
+        workflow_generation:
+          req.isInternal === true
+            ? (req.header('x-agent-workflow-generation') ?? agent_id)
+            : undefined,
       });
 
       res.status(201).json(result);
@@ -72,6 +105,10 @@ router.post(
       }
       if (error instanceof AgentOwnershipError) {
         res.status(403).json({ error: error.message });
+        return;
+      }
+      if (error instanceof WorkflowGenerationMismatchError) {
+        res.status(409).json({ error: error.message });
         return;
       }
 

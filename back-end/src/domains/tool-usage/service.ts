@@ -40,30 +40,73 @@ export class AccessDeniedError extends Error {
   }
 }
 
+export class WorkflowGenerationMismatchError extends Error {
+  constructor() {
+    super('Workflow generation is no longer current');
+    this.name = 'WorkflowGenerationMismatchError';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Save tool usage
 // ---------------------------------------------------------------------------
 
+const EXECUTE_ITERATION_USAGE = new Set(['execute_loop', 'verifier_execute']);
+
+function maxLlmIteration(toolName: string, usageItems: unknown[]): number | null {
+  if (!EXECUTE_ITERATION_USAGE.has(toolName)) return null;
+  let maximum: number | null = null;
+  for (const item of usageItems) {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    const iteration = record.iteration;
+    if (
+      record.type !== 'llm' ||
+      typeof iteration !== 'number' ||
+      !Number.isInteger(iteration) ||
+      iteration < 0 ||
+      iteration > 2_147_483_647
+    ) {
+      continue;
+    }
+    maximum = maximum === null ? iteration : Math.max(maximum, iteration);
+  }
+  return maximum;
+}
+
 export async function saveToolUsage(input: SaveToolUsageInput): Promise<ToolUsageCreated> {
-  const { agent_id, user_id, tool_name, total_cost_cents, usage_items } = input;
+  const {
+    agent_id,
+    user_id,
+    tool_name,
+    total_cost_cents,
+    usage_items,
+    operation_key,
+    accounting_checkpoint,
+    workflow_generation,
+  } = input;
 
-  // Verify agent exists and belongs to user
-  const agent = await repo.findAgentById(agent_id);
-  if (agent === null) {
-    throw new AgentNotFoundError();
-  }
-  if (agent.userId !== user_id) {
-    throw new AgentOwnershipError();
-  }
-
-  // Save tool usage
-  const toolUsage = await repo.createToolUsage({
+  const result = await repo.createToolUsageForWorkflow({
     userId: user_id,
     agentId: agent_id,
+    workflowGeneration: workflow_generation,
     toolName: tool_name,
     totalCostCents: total_cost_cents,
     usageItems: usage_items as Prisma.InputJsonValue,
+    operationKey: operation_key,
+    accountingCheckpoint: accounting_checkpoint,
+    maxLlmIteration: maxLlmIteration(tool_name, usage_items),
   });
+  if (result.status === 'agent_not_found') {
+    throw new AgentNotFoundError();
+  }
+  if (result.status === 'ownership_mismatch') {
+    throw new AgentOwnershipError();
+  }
+  if (result.status === 'stale_generation') {
+    throw new WorkflowGenerationMismatchError();
+  }
+  const { toolUsage } = result;
 
   log.info(`Saved tool usage: ${tool_name} - $${(total_cost_cents / 100).toFixed(2)}`, {
     agent_id,

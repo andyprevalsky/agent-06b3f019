@@ -8,7 +8,12 @@ import {
 } from './card-provider';
 import { prisma } from './database';
 import { createLogger } from './logger';
-import { cancelAuthorizedHold, refundCapturedPurchase, stripe } from './stripe';
+import {
+  cancelAuthorizedHold,
+  refundCapturedPurchase,
+  reversePurchasePaymentIntent,
+  stripe,
+} from './stripe';
 import {
   isWalletFundingConsumedDuringReclaimError,
   isWalletFundingReleasePendingError,
@@ -196,7 +201,7 @@ export async function cleanupAgentPurchaseCards(
         }
         if (purchase.stripePaymentIntentId) {
           try {
-            await refundCapturedPurchase(purchase.stripePaymentIntentId, purchase.id);
+            await reversePurchasePaymentIntent(purchase.stripePaymentIntentId, purchase.id);
           } catch (refundError) {
             await prisma.purchaseSpend.update({
               where: { id: purchase.id },
@@ -323,7 +328,7 @@ export async function reconcileFailedPurchaseFundingReclaims(
           : {}
       );
       if (purchase.stripePaymentIntentId !== null) {
-        await refundCapturedPurchase(purchase.stripePaymentIntentId, purchase.id);
+        await reversePurchasePaymentIntent(purchase.stripePaymentIntentId, purchase.id);
       }
       await prisma.purchaseSpend.update({
         where: { id: purchase.id },

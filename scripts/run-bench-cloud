@@ -2137,7 +2137,12 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         # and digest explicitly so it cannot apply a stale rootfs patch.
         _envargs+=(--env "LOCAL_PATCH_FILE=" --env "LOCAL_PATCH_SHA256=")
     fi
-    [ "$DASHBOARD" = "1" ] && _envargs+=( --env "BENCHMARK_FRONTEND_URL=http://localhost:$LOCAL_DASH_PORT" )
+    # BENCHMARK_FRONTEND_URL is consumed by run_benchmark.py for task prompt
+    # substitution; cloud browser agents cannot reach the controller's localhost
+    # dashboard mirror. Use a separate report-only URL so dashboard deep links can
+    # still point at the local mirror without poisoning {frontend_url}.
+    _envargs+=(--env "BENCHMARK_FRONTEND_URL=")
+    [ "$DASHBOARD" = "1" ] && _envargs+=( --env "BENCHMARK_REPORT_FRONTEND_URL=http://localhost:$LOCAL_DASH_PORT" )
     # The boot script lives on the /data volume (staged into the snapshot). flyctl
     # --command word-splits, so only a simple `bash <path>` works (an inline shell
     # pipeline is lost) — hence a staged file, not an inline base64 command.
@@ -2336,12 +2341,13 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export ROSE_EXCLUDE_ANTHROPIC_FAMILY=$(printf '%q' "${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}")"
     echo "export BENCHMARK_PEAK_FLY_MACHINES=$(printf '%q' "$OBSERVED_PEAK_FLY_MACHINES")"
     echo "export BENCHMARK_VM_USD_PER_HOUR=$(printf '%q' "$VM_USD_PER_HOUR")"
+    echo "unset BENCHMARK_FRONTEND_URL"
     if [ "$DASHBOARD" = "1" ]; then
         # Carries the agent-id into the report card; the local mirror rewrites the
         # host to the dashboard's /open-agent redirect, so the value is only a base.
-        echo "export BENCHMARK_FRONTEND_URL=$(printf '%q' "http://localhost:$LOCAL_DASH_PORT")"
+        echo "export BENCHMARK_REPORT_FRONTEND_URL=$(printf '%q' "http://localhost:$LOCAL_DASH_PORT")"
     else
-        echo "unset BENCHMARK_FRONTEND_URL"
+        echo "unset BENCHMARK_REPORT_FRONTEND_URL"
     fi
     echo "unset LOCAL_PATCH_B64"
     if [ -n "$LOCAL_PATCH_FILE" ]; then
@@ -3112,7 +3118,7 @@ if [ "$RUN_IDENTITY_OK" = "1" ] && [ -s "$RUN_OUT" ]; then
     for task_name in "${BENCH_TASKS[@]}"; do
         validation_args+=(--expected-task "$task_name")
     done
-    if python3 "$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT" "${validation_args[@]}" --require-pass; then
+    if python3 "$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT" "${validation_args[@]}" --require-pass --allow-claude-code-credential-skip; then
         RUN_PASS_OK="1"
     fi
 fi

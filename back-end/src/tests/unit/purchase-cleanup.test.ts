@@ -140,6 +140,10 @@ async function statusOf(purchaseId: string): Promise<PurchaseSpendStatus | undef
   return row?.status;
 }
 
+function capturedPaymentIntent(id: string) {
+  return { id, status: 'succeeded', amount_capturable: 0, amount_received: 1080 };
+}
+
 async function main(): Promise<void> {
   process.stdout.write('Running purchase cleanup unit tests...\n');
 
@@ -166,14 +170,17 @@ async function main(): Promise<void> {
     const purchaseId = await seedHeld(userId, { agentId });
     await seedFunding(purchaseId, userId, PurchaseWalletFundingStatus.FUNDED);
     const wallet = new FakeWalletFundingProvider();
-    await withFakeStripe(async (calls) => {
-      await cleanupAgentPurchaseCards(
-        agentId,
-        new StubCardStateProvider({ status: 'OPEN', balanceCents: 1080 }),
-        wallet
-      );
-      assert.equal(calls.refunds.length, 1, 'unspent cleanup must refund the captured charge');
-    });
+    await withFakeStripe(
+      async (calls) => {
+        await cleanupAgentPurchaseCards(
+          agentId,
+          new StubCardStateProvider({ status: 'OPEN', balanceCents: 1080 }),
+          wallet
+        );
+        assert.equal(calls.refunds.length, 1, 'unspent cleanup must refund the captured charge');
+      },
+      { retrievePaymentIntent: capturedPaymentIntent }
+    );
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.VOIDED);
     assert.equal(wallet.reclaimCalls.length, 1);
     const funding = await prisma.purchaseWalletFunding.findUnique({ where: { purchaseId } });
@@ -283,10 +290,13 @@ async function main(): Promise<void> {
     });
     await seedFunding(purchaseId, userId, PurchaseWalletFundingStatus.FUNDED);
     const wallet = new FakeWalletFundingProvider();
-    await withFakeStripe(async (calls) => {
-      await reconcileFailedPurchaseFundingReclaims(wallet, { userId });
-      assert.equal(calls.refunds.length, 1);
-    });
+    await withFakeStripe(
+      async (calls) => {
+        await reconcileFailedPurchaseFundingReclaims(wallet, { userId });
+        assert.equal(calls.refunds.length, 1);
+      },
+      { retrievePaymentIntent: capturedPaymentIntent }
+    );
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.VOIDED);
     assert.equal(wallet.reclaimCalls.length, 1);
   });
@@ -388,7 +398,10 @@ async function main(): Promise<void> {
           new FakeWalletFundingProvider()
         );
       },
-      { refundError: new Error('stripe refund unavailable') }
+      {
+        refundError: new Error('stripe refund unavailable'),
+        retrievePaymentIntent: capturedPaymentIntent,
+      }
     );
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.REFUND_FAILED);
   });
@@ -401,25 +414,28 @@ async function main(): Promise<void> {
     // merchant settled it. A concurrent cleanup must leave the active release owner alone.
     await seedFunding(purchaseId, userId, PurchaseWalletFundingStatus.RECLAIMING);
     const wallet = new FakeWalletFundingProvider();
-    await withFakeStripe(async (calls) => {
-      await cleanupAgentPurchaseCards(
-        agentId,
-        new StubCardStateProvider({ status: 'CLOSED', balanceCents: 0 }),
-        wallet
-      );
-      assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.HELD);
-      assert.equal(wallet.reclaimCalls.length, 0);
-      assert.equal(calls.refunds.length, 0);
-      await reconcileFailedPurchaseFundingReclaims(wallet, { userId });
-      assert.equal(wallet.reclaimCalls.length, 0, 'minute cron must skip a fresh reclaim owner');
+    await withFakeStripe(
+      async (calls) => {
+        await cleanupAgentPurchaseCards(
+          agentId,
+          new StubCardStateProvider({ status: 'CLOSED', balanceCents: 0 }),
+          wallet
+        );
+        assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.HELD);
+        assert.equal(wallet.reclaimCalls.length, 0);
+        assert.equal(calls.refunds.length, 0);
+        await reconcileFailedPurchaseFundingReclaims(wallet, { userId });
+        assert.equal(wallet.reclaimCalls.length, 0, 'minute cron must skip a fresh reclaim owner');
 
-      await prisma.purchaseWalletFunding.update({
-        where: { purchaseId },
-        data: { updatedAt: new Date(Date.now() - 3 * 60 * 1000) },
-      });
-      await reconcileFailedPurchaseFundingReclaims(wallet, { userId });
-      assert.equal(calls.refunds.length, 1);
-    });
+        await prisma.purchaseWalletFunding.update({
+          where: { purchaseId },
+          data: { updatedAt: new Date(Date.now() - 3 * 60 * 1000) },
+        });
+        await reconcileFailedPurchaseFundingReclaims(wallet, { userId });
+        assert.equal(calls.refunds.length, 1);
+      },
+      { retrievePaymentIntent: capturedPaymentIntent }
+    );
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.VOIDED);
     assert.equal(wallet.reclaimCalls.length, 1);
   });

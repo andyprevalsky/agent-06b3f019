@@ -3,6 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus } from '@prisma/client';
 import * as purchasesService from '../../domains/purchases/service';
+import type { CardProvider } from '../../providers/card-provider';
 import { prisma } from '../../providers/database';
 import { reconcileFailedPurchaseFundingReclaims } from '../../providers/purchaseCleanup';
 import { WalletFundingProviderError } from '../../providers/wallet-funding';
@@ -207,6 +208,72 @@ async function main(): Promise<void> {
     assert(raced?.status === PurchaseSpendStatus.CLEARED, `got ${raced?.status}`);
     assert(raced?.walletFunding?.status === 'CONSUMED', `got ${raced?.walletFunding?.status}`);
     console.log('PASS transaction clearance wins a concurrent wallet funding reclaim');
+
+    const setupFingerprint = `service-agentcard-setup-${randomUUID()}`;
+    const setupUrl = 'https://agentcard.example/onboard/session-123';
+    const setupError = Object.assign(new Error('One Time Agent Payment Setup is required'), {
+      name: 'AgentCardProviderError',
+      status: 409,
+      code: 'agentcard_setup_required',
+      details: {
+        agentcardStatus: 'cardholder_onboarding_required',
+        setupAction: 'complete_agentcard_cardholder_onboarding',
+        setupUrl,
+      },
+    });
+    const setupProvider: CardProvider = {
+      async mintCard() {
+        throw setupError;
+      },
+      async getDetails() {
+        throw new Error('getDetails should not run after setup gate');
+      },
+      async closeCard() {},
+    };
+
+    await withFakeStripe(async (calls) => {
+      let caught: unknown;
+      try {
+        await purchasesService.mintPurchaseCard(
+          {
+            userId,
+            fingerprint: setupFingerprint,
+            merchant: 'Test Merchant',
+            currency: 'USD',
+            lineItems: [{ label: 'Widget', amountCents: 1000 }],
+            fees: [],
+            subtotalCents: 1000,
+            totalCents: 1000,
+          } as never,
+          setupProvider
+        );
+      } catch (error) {
+        caught = error;
+      }
+
+      assert(caught instanceof purchasesService.PurchaseError, 'expected PurchaseError');
+      const purchaseError = caught as purchasesService.PurchaseError;
+      assert(purchaseError.statusCode === 409, `expected 409, got ${purchaseError.statusCode}`);
+      assert(
+        purchaseError.code === 'agentcard_setup_required',
+        `expected agentcard_setup_required, got ${purchaseError.code}`
+      );
+      assert(
+        purchaseError.details.agentcardStatus === 'cardholder_onboarding_required',
+        'setup status must be preserved for the attention gate'
+      );
+      assert(purchaseError.details.setupUrl === setupUrl, 'setup URL must be preserved');
+      assert(calls.cancels.length === 1, 'setup-required failure must cancel the hold');
+
+      const row = await prisma.purchaseSpend.findFirst({
+        where: { userId, fingerprint: setupFingerprint },
+        orderBy: { createdAt: 'desc' },
+      });
+      assert(row !== null, 'setup mint failure should persist a purchase spend row');
+      assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);
+      assert(row?.cardId === null, 'setup mint failure should not store a card id');
+    });
+    console.log('PASS setup-shaped AgentCard errors stay typed at the purchase boundary');
   } finally {
     await prisma.purchaseSpend.deleteMany({ where: { userId } });
     await prisma.subscription.deleteMany({ where: { userId } });

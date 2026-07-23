@@ -1,13 +1,12 @@
 import { stripe, type Stripe } from '../../providers/stripe';
-import { randomBytes } from '../../providers/crypto';
-// eslint-disable-next-line no-restricted-imports -- one-off Supabase RPC for auto-generating Rose API keys on subscription
-import { createClient } from '@supabase/supabase-js';
 import { getUserUsage } from '../../providers/credits';
+import { resumeAgentWorkflow } from '../../providers/agentResume';
 import { createLogger } from '../../providers/logger';
 import { getTemporalClient } from '../../providers/temporal';
 import { resolvePendingGateByKey } from '../../providers/gateResolution';
+import { ensureRoseApiKeyForUser } from '../../providers/supabaseApiKeys';
 import * as repo from './repo';
-import { SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, STRIPE_WEBHOOK_SECRET } from './config';
+import { STRIPE_WEBHOOK_SECRET } from './config';
 
 const log = createLogger('Webhooks');
 
@@ -81,7 +80,7 @@ export async function handlePaymentSuccess(invoice: Stripe.Invoice): Promise<voi
   await unpauseUserAgents(userId);
   await resolvePendingGateByKey(userId, 'subscription', 'SUBSCRIPTION_ACTIVE');
 
-  await autoGenerateApiKeyIfNeeded(userId);
+  await ensureRoseApiKeyForUser(userId);
 }
 
 /**
@@ -105,11 +104,9 @@ async function unpauseUserAgents(userId: string): Promise<void> {
   for (const agent of pausedAgents) {
     if (agent.temporalWorkflowId !== null && agent.temporalWorkflowId !== '') {
       try {
-        const client = await getTemporalClient();
-        const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-        await handle.signal('resume');
-        await repo.updateAgentStatus(agent.id, 'ACTIVE');
-        log.info('Unpaused agent and sent resume signal', {
+        const result = await resumeAgentWorkflow(agent.id);
+        if ('error' in result) throw new Error(result.error);
+        log.info('Persisted credit restoration and resumed agent', {
           workflow_id: agent.temporalWorkflowId,
           agent_id: agent.id,
         });
@@ -127,64 +124,6 @@ async function unpauseUserAgents(userId: string): Promise<void> {
     user_id: userId,
     count: pausedAgents.length,
   });
-}
-
-/**
- * Auto-generate a Rose API key for the user if they don't have one
- * Called when user subscribes - gives them immediate API access
- */
-async function autoGenerateApiKeyIfNeeded(userId: string): Promise<void> {
-  try {
-    const supabaseUrl = SUPABASE_URL;
-    const supabaseServiceKey = SUPABASE_SERVICE_ROLE_KEY;
-
-    if (
-      supabaseUrl === undefined ||
-      supabaseUrl === '' ||
-      supabaseServiceKey === undefined ||
-      supabaseServiceKey === ''
-    ) {
-      log.error('Missing Supabase credentials for API key generation');
-      return;
-    }
-
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
-
-    const { data: existingKeys, error: fetchError } = await supabase
-      .from('RoseApiKey')
-      .select('id')
-      .eq('userId', userId)
-      .limit(1);
-
-    if (fetchError !== null) {
-      log.error('Error checking existing API keys', { error: String(fetchError) });
-      return;
-    }
-
-    if (existingKeys !== null && existingKeys.length > 0) {
-      log.info('User already has API keys, skipping auto-generation', { user_id: userId });
-      return;
-    }
-
-    const apiKey = randomBytes(32).toString('base64url');
-
-    const { error: insertError } = await supabase.from('RoseApiKey').insert({
-      userId,
-      apiKey,
-      name: 'Default (auto-generated)',
-    });
-
-    if (insertError !== null) {
-      log.error('Error creating API key', { error: String(insertError) });
-      return;
-    }
-
-    log.info('Auto-generated Rose API key for user', { user_id: userId });
-  } catch (error) {
-    log.error('Error in autoGenerateApiKeyIfNeeded', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
 }
 
 /**

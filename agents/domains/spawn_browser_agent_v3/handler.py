@@ -7697,6 +7697,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                 if result and result.get("status") == "awaiting_payment_card_approval":
                     from tools.request_payment_card import (
+                        MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
                         build_payment_question,
                         normalize_payment_payload,
                     )
@@ -7772,7 +7773,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         return await workflow.execute_activity(
                             "mint_purchase_card_activity",
                             args=[workflow_instance.user_id or "", payment_payload],
-                            start_to_close_timeout=timedelta(seconds=90),
+                            start_to_close_timeout=timedelta(
+                                seconds=MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS
+                            ),
                             retry_policy=RetryPolicy(maximum_attempts=1),
                         )
 
@@ -7952,6 +7955,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             raise_gate_direct,
                         )
 
+                        checkout_url = None
                         try:
                             checkout_url = await workflow.execute_activity(
                                 mint_subscription_checkout_activity,
@@ -7959,6 +7963,13 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 start_to_close_timeout=timedelta(seconds=30),
                                 retry_policy=RetryPolicy(maximum_attempts=3),
                             )
+                        except Exception as exc:
+                            logger.warning(
+                                "Subscription checkout URL unavailable; raising subscription gate with default action",
+                                error=extract_error_message(exc),
+                            )
+
+                        try:
                             await raise_gate_direct(
                                 workflow_instance,
                                 build_subscription_gate(checkout_url=checkout_url),

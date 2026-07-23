@@ -11,6 +11,7 @@ import structlog
 from temporalio import activity
 
 from config import load_config
+from helpers.workflow_generation import workflow_generation_headers
 
 logger = structlog.get_logger()
 
@@ -26,6 +27,7 @@ async def _update_agent_status_impl(
     tokens_in: int = 0,
     tokens_out: int = 0,
     structured_response: Optional[Dict] = None,
+    iteration_offset: Optional[int] = None,
 ) -> None:
     """
     Core implementation for updating agent status.
@@ -60,11 +62,17 @@ async def _update_agent_status_impl(
         }
         if structured_response is not None:
             payload["structuredResponse"] = structured_response
+        if iteration_offset is not None:
+            payload["iterationOffset"] = iteration_offset
 
         response = await client.patch(
             f"{config.backend.api_url}/api/agents/{agent_id}/status",
             json=payload,
-            headers={"X-API-Key": config.backend.api_key, "Content-Type": "application/json"},
+            headers={
+                "X-API-Key": config.backend.api_key,
+                "Content-Type": "application/json",
+                **workflow_generation_headers(),
+            },
             timeout=30.0,
         )
         response.raise_for_status()
@@ -94,6 +102,7 @@ async def update_agent_status(
     tokens_in: int = 0,
     tokens_out: int = 0,
     structured_response: Optional[Dict] = None,
+    iteration_offset: Optional[int] = None,
 ) -> None:
     """
     Activity wrapper for updating agent status and metrics in the database.
@@ -111,6 +120,7 @@ async def update_agent_status(
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             structured_response=structured_response,
+            iteration_offset=iteration_offset,
         )
     except Exception as e:
         logger.error("Failed to update agent status", agent_id=agent_id, error=str(e))

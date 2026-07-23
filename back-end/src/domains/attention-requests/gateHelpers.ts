@@ -41,6 +41,7 @@ export async function maybeDispatchGateSms(
 
 export async function emitGateMessage(
   agentId: string,
+  workflowGeneration: string,
   gate: Gate,
   requestId: string
 ): Promise<void> {
@@ -50,12 +51,14 @@ export async function emitGateMessage(
       role: 'TOOL',
       text: gate.presentation.title,
       metadata: {
+        workflowGeneration,
         gate,
         attentionRequestId: requestId,
         toolName: 'gate',
         toolStatus: 'IN_PROGRESS',
         toolCallId: requestId,
       },
+      enforceCurrentWorkflowGeneration: true,
     });
   } catch (error) {
     log.error('Failed to emit gate message', { agent_id: agentId, error: errMsg(error) });
