@@ -1172,7 +1172,7 @@ def _evaluate_agent_payment_result(data: dict) -> tuple[bool, str | None]:
         structured = metadata.get("structured_response") or metadata.get("structuredResponse")
         if not isinstance(structured, dict):
             continue
-        order_id = structured.get("order_confirmation_id")
+        order_id = structured.get("order_confirmation_id") or structured.get("payment_confirmation_id")
         if isinstance(order_id, str) and re.fullmatch(r"tp_[0-9a-f]{8}", order_id):
             return True, None
     return False, "agent did not return a grounded browser payment confirmation order id"
