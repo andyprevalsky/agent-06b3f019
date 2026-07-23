@@ -33,6 +33,16 @@ require_text() {
   grep -Fq -- "$text" "$file" || fail "$description"
 }
 
+require_count() {
+  local file="$1"
+  local text="$2"
+  local expected="$3"
+  local description="$4"
+  local actual
+  actual=$(grep -Fc -- "$text" "$file" || true)
+  [ "$actual" = "$expected" ] || fail "$description (expected $expected, found $actual)"
+}
+
 for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_STRUCTURAL_RUNNER_TEST" "$DEPLOY_LIVE_PROBE_RUNNER" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
   [ -f "$file" ] || fail "required semantic deploy gate file is missing: $file"
 done
@@ -68,9 +78,10 @@ require_text "$LIFECYCLE_SPEC" "waitForTemporalWorkflow" "agent lifecycle termin
 # become part of the product latency measurement.
 require_text "$WORKFLOW" "workflow_dispatch:" "production semantic gate must support /deploy dispatch"
 require_text "$WORKFLOW" "github.event.deployment.production_environment == true" "automatic semantic runs must be gated to production Vercel deploys"
-require_text "$WORKFLOW" "npm ci --ignore-scripts --workspace=front-end" "semantic workflow must install locked frontend dependencies"
+require_text "$WORKFLOW" "hashFiles('front-end/package-lock.json')" "semantic workflow cache must follow the committed frontend lockfile"
+require_count "$WORKFLOW" "working-directory: front-end" "4" "semantic workflow dependency and browser steps must run from the frontend package"
+require_text "$WORKFLOW" "npm ci --ignore-scripts --workspaces=false" "semantic workflow must install locked frontend dependencies without resolving the root workspace"
 require_text "$WORKFLOW" "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830" "semantic workflow must pin npm caching to an immutable action SHA"
-require_text "$WORKFLOW" "hashFiles('package-lock.json')" "semantic cache must invalidate with the workspace lockfile"
 if grep -Fq -- "--no-package-lock" "$WORKFLOW"; then
   fail "production semantic installs must not bypass the workspace lockfile"
 fi

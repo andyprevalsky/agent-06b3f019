@@ -1510,13 +1510,13 @@ async function main(): Promise<void> {
     let visible = false;
     do {
       for await (const execution of client.workflow.list({
-        query: `WorkflowId="${oldMarkerId}"`,
+        query: 'WorkflowType="RoseWorkerDeploymentActivationMarker" AND ExecutionStatus="Running"',
       })) {
         if (execution.workflowId === oldMarkerId) visible = true;
       }
       if (!visible) await new Promise((resolve) => setTimeout(resolve, 500));
     } while (!visible && Date.now() < visibilityDeadline);
-    assert(visible, 'validation activation marker was not visible before cleanup');
+    assert(visible, 'validation activation marker was not visible in the cleanup query');
 
     await cleanupSupersededWorkerActivationMarkers(currentMarkerId);
     await assertTerminated(oldMarkerId);
