@@ -911,10 +911,12 @@ def test_deploy_always_gates_changed_cloudbench_controllers() -> None:
     assert "patch_delivery_clears_stale_base64_configuration" in gate
     assert "shared_patch_digest_is_pinned_and_verified" in gate
     assert "fleet_shared_patch_remains_authoritative_until_transport_selection" in gate
+    assert "fleet_patch_packages_clean_unpushed_head_from_fetchable_base" in gate
     assert "declared_patch_payload_cannot_be_missing_or_empty" in gate
     assert "empty_local_patch_cleanup_is_nounset_safe" in gate
     assert "autoscaled_worker_failure_is_removed_and_replaceable" in gate
     assert "autoscaler_scale_down_cancels_pending_worker" in gate
+    assert "fleet_registry_release_id_is_idempotent_with_other_records" in gate
     assert "must never pause for human approval" in gate
     assert "Operational gate maintenance is pre-authorized" in deploy
 
@@ -957,6 +959,55 @@ def test_worktree_patch_includes_unpushed_commits_from_fetchable_base(
     subprocess.run(["git", "-C", str(checkout), "apply", "--binary", "-"], input=patch, check=True)
     assert (checkout / "tracked.txt").read_text() == "working tree\n"
     assert (checkout / "untracked.txt").read_text() == "also shipped\n"
+
+
+def test_fleet_patch_packages_clean_unpushed_head_from_fetchable_base(
+    tmp_path: Path,
+) -> None:
+    """A clean local commit still needs a patch when guests can fetch only its base."""
+    fleet = FLEET_SCRIPT.read_text()
+    patch_setup = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("_machine_priv_ip() {", 1)[0]
+    repo = tmp_path / "repo"
+    checkout = tmp_path / "checkout"
+    output_patch = tmp_path / "fleet.patch"
+    (repo / "scripts").mkdir(parents=True)
+    patch_script = repo / "scripts/create-worktree-patch.sh"
+    patch_script.write_text(WORKTREE_PATCH_SCRIPT.read_text())
+    patch_script.chmod(0o755)
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "bench@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Bench"], check=True)
+    (repo / "tracked.txt").write_text("base\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True)
+    base = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    (repo / "tracked.txt").write_text("clean unpushed commit\n")
+    subprocess.run(["git", "-C", str(repo), "commit", "-am", "local"], check=True, capture_output=True)
+    local = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
+    script = f"""set -euo pipefail
+ROOT_DIR={shlex.quote(str(repo))}
+BENCH_REF={shlex.quote(base)}
+REQUESTED_BENCH_REF={shlex.quote(local)}
+CLOUDBENCH_SKIP_LOCAL_PATCH=0
+cloudbench_worktree_has_changes() {{ return 1; }}
+cloudbench_env_sha256() {{ shasum -a 256 "$1" | awk '{{print $1}}'; }}
+FLEET_PATCH_FILE=""
+{patch_setup}
+test -s "$FLEET_PATCH_FILE"
+cp "$FLEET_PATCH_FILE" {shlex.quote(str(output_patch))}
+"""
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+
+    subprocess.run(["git", "clone", str(repo), str(checkout)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(checkout), "checkout", base], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(checkout), "apply", "--binary", str(output_patch)],
+        check=True,
+        capture_output=True,
+    )
+    assert (checkout / "tracked.txt").read_text() == "clean unpushed commit\n"
 
 
 def test_boot_launch_wires_ipv6_status_server_and_driver_health() -> None:
@@ -1251,15 +1302,12 @@ def test_boot_launch_delivers_the_exact_worktree_patch_to_every_guest() -> None:
     worker_stage = fleet[fleet.index("provision_worker() {") : fleet.index("bench_autoscaler() {")]
     assert 'LOCAL_PATCH_SHA256=$FLEET_PATCH_SHA256' in worker_stage
     assert 'sftp put' in worker_stage
-    patch_upload = next(
-        line
-        for line in worker_stage.splitlines()
-        if "sftp put" in line and "cloudbench-local.patch" in line
-    )
-    assert "if ! fly_with_timeout" in patch_upload
+    patch_upload = worker_stage.split('if [ -n "$FLEET_PATCH_FILE" ]', 1)[1].split(
+        'if run_worker_stage_cmd "launch worker wrapper"', 1
+    )[0]
+    assert 'if ! run_worker_stage_cmd "upload local patch"' in patch_upload
     assert "|| true" not in patch_upload
-    patch_failure_block = worker_stage.split(patch_upload, 1)[1][:500]
-    assert "continue" in patch_failure_block
+    assert "continue" in patch_upload
 
 
 def test_boot_launch_runs_the_current_driver_before_applying_the_patch() -> None:
@@ -1277,10 +1325,11 @@ def test_boot_launch_runs_the_current_driver_before_applying_the_patch() -> None
 
 
 def test_autoscaled_worker_failure_is_removed_and_replaceable(tmp_path: Path) -> None:
-    """Upload failure or a guest that never publishes post-patch readiness
-    must not remain counted as capacity forever."""
+    """Storage, upload, and readiness failures must remain diagnosable while
+    the failed worker is removed so replacement capacity can be created."""
     fleet = FLEET_SCRIPT.read_text()
     pool_count = _extract_fleet_function(fleet, "_pool_ids() {")
+    reap = _extract_fleet_function(fleet, "reap_machine() {")
     cleanup = _worker_cleanup_bundle(fleet)
     provision = _extract_fleet_function(fleet, "provision_worker() {")
     root = tmp_path / "root"
@@ -1289,11 +1338,18 @@ def test_autoscaled_worker_failure_is_removed_and_replaceable(tmp_path: Path) ->
     patch_file = tmp_path / "workspace.patch"
     patch_file.write_text("patch\n")
 
-    for mode in ("upload-failure", "readiness-failure"):
+    for mode in (
+        "storage-not-ready",
+        "storage-failed",
+        "upload-failure",
+        "upload-and-reap-failure",
+        "upload-and-list-failure",
+        "readiness-failure",
+    ):
         out = tmp_path / mode
         reaped = tmp_path / f"{mode}.reaped"
         calls = tmp_path / f"{mode}.calls"
-        script = f"""
+        script = f"""set -euo pipefail
 ROOT_DIR={shlex.quote(str(root))}
 APP=test-app
 BENCH_REF=test-ref
@@ -1301,6 +1357,7 @@ BOX_BACKEND_PORT=3001
 BOX_WMH_PORT=3007
 FLEET_WORKER_VM_SIZE=shared-cpu-1x
 FLEET_WORKER_VM_MEMORY=1024
+FLEET_WORKER_HEALTH_PORT=3103
 FLEET_PATCH_FILE={shlex.quote(str(patch_file))}
 FLEET_PATCH_SHA256=expected
 FLEET_OWNER_TOKEN=test-owner
@@ -1312,6 +1369,7 @@ MODE={shlex.quote(mode)}
 OUT={shlex.quote(str(out))}
 REAPED={shlex.quote(str(reaped))}
 CALLS={shlex.quote(str(calls))}
+: > "$CALLS"
 clone_machine_target() {{
   mkdir -p "$(dirname "$1")"
   printf '%s\n' abc123 >> "$1"
@@ -1320,28 +1378,67 @@ clone_machine_target() {{
 reserve_worker_machine_slot() {{ return 0; }}
 capacity_release_reservation() {{ return 0; }}
 controller_github_token_b64() {{ printf token; }}
-machine_storage_ready() {{ return 0; }}
+machine_storage_ready() {{ [ "$MODE" != storage-not-ready ] && [ "$MODE" != storage-failed ]; }}
+machine_storage_failed() {{ [ "$MODE" = storage-failed ]; }}
 worker_operational() {{ [ "$MODE" != readiness-failure ]; }}
 fly_with_timeout() {{
   shift
   printf '%s\n' "$*" >> "$CALLS"
   case "$*" in
     *"ssh sftp put"*"cloudbench-local.patch"*)
-      [ "$MODE" != upload-failure ] ;;
+      if [ "$MODE" = upload-failure ] \
+          || [ "$MODE" = upload-and-reap-failure ] \
+          || [ "$MODE" = upload-and-list-failure ]; then
+        printf '%s\n' 'SFTP_PROVIDER_SENTINEL: remote volume rejected write' >&2
+        return 42
+      fi ;;
     *) return 0 ;;
   esac
 }}
-reap_machine() {{ printf '%s\n' "$1" > "$REAPED"; }}
+machine_volume_id() {{ printf '%s' volume-abc123; }}
+reap_volume() {{ :; }}
+FLY() {{
+  case "$*" in
+    "machine destroy"*)
+      if [ "$MODE" = upload-and-reap-failure ]; then
+        printf '%s\n' 'DESTROY_PROVIDER_SENTINEL: provider refused destroy' >&2
+        return 37
+      fi
+      [ "$MODE" = upload-and-list-failure ] || printf '%s\n' "$4" > "$REAPED" ;;
+    "machines list"*)
+      if [ "$MODE" = upload-and-list-failure ]; then
+        printf '%s\n' 'LIST_PROVIDER_SENTINEL: provider inventory unavailable' >&2
+        return 55
+      elif [ "$MODE" = upload-and-reap-failure ]; then
+        printf '%s\n' '[{{"id":"abc123"}}]'
+      else
+        printf '%s\n' '[]'
+      fi ;;
+    "machine stop"*) return 0 ;;
+    *) return 0 ;;
+  esac
+}}
 fleet_registry_release_id() {{ :; }}
+sleep() {{ :; }}
 {pool_count}
+{reap}
 {cleanup}
 {provision}
 provision_worker bench workspace primary fd00::1 0 "$OUT"
 wait || true
-test "$(_pool_ids "$OUT")" = 0
-test -s "$REAPED"
-test ! -e "$OUT/worker-abc123.pending"
-test ! -e "$OUT/worker-abc123.ready"
+test -s "$OUT/worker-abc123.stage.log"
+if [ "$MODE" = upload-and-reap-failure ] || [ "$MODE" = upload-and-list-failure ]; then
+  test "$(_pool_ids "$OUT")" = 1
+  test ! -e "$REAPED"
+  test -e "$OUT/worker-abc123.pending"
+  test -s "$OUT/worker-abc123.failed"
+  test -s "$OUT/worker-abc123.cleanup.log"
+else
+  test "$(_pool_ids "$OUT")" = 0
+  test -s "$REAPED"
+  test ! -e "$OUT/worker-abc123.pending"
+  test ! -e "$OUT/worker-abc123.ready"
+fi
 """
         result = subprocess.run(
             ["bash", "-c", script],
@@ -1352,15 +1449,45 @@ test ! -e "$OUT/worker-abc123.ready"
         )
         assert result.returncode == 0, (mode, result.stdout, result.stderr)
         fly_calls = calls.read_text().splitlines()
+        stage_log = (out / "worker-abc123.stage.log").read_text()
+        if mode == "storage-not-ready":
+            assert fly_calls == []
+            assert "storage not ready" in stage_log
+            continue
+        if mode == "storage-failed":
+            assert fly_calls == []
+            assert "storage failed before staging" in stage_log
+            continue
         neutralize = next(i for i, call in enumerate(fly_calls) if "machine update abc123" in call)
         first_start = next(i for i, call in enumerate(fly_calls) if "machine start abc123" in call)
         assert neutralize < first_start
         assert "--env CLOUDBENCH_BOOT=0 --command sleep infinity" in fly_calls[neutralize]
         assert "--skip-start" in fly_calls[neutralize]
+        assert "neutralize cloned boot command" in stage_log
+        assert "start neutralized worker" in stage_log
         launch_calls = [call for call in fly_calls if "ssh console" in call]
         assert len(launch_calls) <= 1
         if mode == "readiness-failure":
             assert len(launch_calls) == 1
+            assert "did not reach queue readiness" in stage_log
+        elif mode == "upload-failure":
+            assert launch_calls == []
+            assert "upload local patch failed rc=42" in stage_log
+            assert "SFTP_PROVIDER_SENTINEL" in stage_log
+        elif mode == "upload-and-reap-failure":
+            assert launch_calls == []
+            assert "upload local patch failed rc=42" in stage_log
+            assert "SFTP_PROVIDER_SENTINEL" in stage_log
+            cleanup_log = (out / "worker-abc123.cleanup.log").read_text()
+            assert "destroy failed rc=37" in cleanup_log
+            assert "DESTROY_PROVIDER_SENTINEL" in cleanup_log
+        elif mode == "upload-and-list-failure":
+            assert launch_calls == []
+            assert "SFTP_PROVIDER_SENTINEL" in stage_log
+            cleanup_log = (out / "worker-abc123.cleanup.log").read_text()
+            assert "machine list failed rc=55" in cleanup_log
+            assert "LIST_PROVIDER_SENTINEL" in cleanup_log
+            assert "refusing to forget worker" in cleanup_log
 
         assert 'ready_deadline=$((SECONDS + worker_ready_timeout))' in provision
         assert 'if worker_operational "$wid"; then' in provision
@@ -1629,6 +1756,37 @@ test ! -e "$OUT/worker-clones.ids.lock"
         timeout=10,
     )
     assert read_error.returncode == 0, read_error.stderr + read_error.stdout
+
+
+def test_fleet_registry_release_id_is_idempotent_with_other_records(tmp_path: Path) -> None:
+    """Removing one worker must not inherit a later nonmatching record's status."""
+    fleet = FLEET_SCRIPT.read_text()
+    helpers = "\n".join(
+        (
+            _extract_fleet_function(fleet, "registry_meta_value() {"),
+            _extract_fleet_function(fleet, "fleet_registry_release_id() {"),
+        )
+    )
+    registry = tmp_path / "registry"
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    target = clones / "a-target"
+    target.write_text("name=target\nid=deadbeef000020\n")
+    other = clones / "z-other"
+    other.write_text("name=other\nid=deadbeef000021\n")
+    script = f"""set -euo pipefail
+FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
+{helpers}
+fleet_registry_release_id deadbeef000020
+test ! -e {shlex.quote(str(target))}
+test -e {shlex.quote(str(other))}
+fleet_registry_release_id deadbeef000020
+test -e {shlex.quote(str(other))}
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], text=True, capture_output=True, check=False, timeout=10
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
 
 
 def test_worker_ledger_lock_recovers_dead_owner_and_rejects_foreign_release(
@@ -2395,10 +2553,14 @@ def test_boot_update_always_submits_a_bounded_post_config_start() -> None:
     assert "FLY machine start" not in claim
     assert 'write_pool_claim "$claim_path"' in claim
     worker_provision = _extract_fleet_function(fleet, "provision_worker() {")
-    storage_ready = worker_provision.index('if machine_storage_ready "$wid"; then')
-    neutralize = worker_provision.index('machine update "$wid"', storage_ready)
+    storage_gate = worker_provision.index('if ! machine_storage_ready "$wid"; then')
+    storage_gate_end = worker_provision.index("\n        fi", storage_gate)
+    storage_wait = worker_provision[storage_gate:storage_gate_end]
+    assert 'machine_storage_failed "$wid"' in storage_wait
+    assert "continue" in storage_wait
+    neutralize = worker_provision.index('machine update "$wid"', storage_gate_end)
     first_start = worker_provision.index('machine start "$wid"', neutralize)
-    assert storage_ready < neutralize < first_start
+    assert storage_gate < storage_gate_end < neutralize < first_start
     assert "--env CLOUDBENCH_BOOT=0" in worker_provision[neutralize:first_start]
     assert "--skip-start" in worker_provision[neutralize:first_start]
 

@@ -726,7 +726,8 @@ print_code_provenance() {
     if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" = "1" ]; then
         echo "  diff   : local changes intentionally excluded (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (pinned; local patch excluded)"
-    elif ! cloudbench_worktree_has_changes "$ROOT_DIR"; then
+    elif [ "$REQUESTED_BENCH_REF" = "$BENCH_REF" ] \
+         && ! cloudbench_worktree_has_changes "$ROOT_DIR"; then
         echo "  diff   : clean working tree (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (clean)"
     else
@@ -773,8 +774,8 @@ reap_volume() {  # reap_volume <volume_id> — destroy a clone's forked volume
     return 1
 }
 
-reap_machine() {  # reap_machine <id> — returns non-zero if the machine survived
-    local id="$1" i vol=""
+reap_machine() {  # reap_machine <id> [diagnostic-log] — non-zero if the machine survived
+    local id="$1" diagnostic_log="${2:-}" i vol="" machines="" command_rc=0
     [ -n "$id" ] || return 0
     if [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; then
         echo "  ❌ refusing to destroy warm source machine $id" >&2
@@ -785,16 +786,109 @@ reap_machine() {  # reap_machine <id> — returns non-zero if the machine surviv
     # BEFORE the machine disappears; destroy it after the machine is confirmed
     # gone.
     vol="$(machine_volume_id "$id")"
+    if [ -n "$diagnostic_log" ]; then
+        printf '[%s] cleanup started for worker %s (volume=%s)\n' \
+            "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
+            "$id" "${vol:-unknown}" >> "$diagnostic_log" 2>/dev/null || true
+    fi
     for i in 1 2 3 4 5; do
-        FLY machine destroy --force "$id" -a "$APP" >/dev/null 2>&1 || true
-        if ! FLY machines list -a "$APP" --json 2>/dev/null | grep -q "\"$id\""; then
+        if [ -n "$diagnostic_log" ]; then
+            printf '[%s] destroy attempt %s/5\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" "$i" \
+                >> "$diagnostic_log" 2>/dev/null || true
+            if FLY machine destroy --force "$id" -a "$APP" \
+                >/dev/null 2>> "$diagnostic_log"; then
+                command_rc=0
+            else
+                command_rc=$?
+            fi
+            printf '[%s] destroy %s rc=%s\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
+                "$([ "$command_rc" = 0 ] && printf succeeded || printf failed)" "$command_rc" \
+                >> "$diagnostic_log" 2>/dev/null || true
+        else
+            FLY machine destroy --force "$id" -a "$APP" >/dev/null 2>&1 || true
+        fi
+
+        command_rc=0
+        if [ -n "$diagnostic_log" ]; then
+            if machines="$(FLY machines list -a "$APP" --json 2>> "$diagnostic_log")"; then
+                command_rc=0
+            else
+                command_rc=$?
+            fi
+        elif machines="$(FLY machines list -a "$APP" --json 2>/dev/null)"; then
+            command_rc=0
+        else
+            command_rc=$?
+        fi
+        if [ "$command_rc" != "0" ]; then
+            if [ -n "$diagnostic_log" ]; then
+                printf '[%s] machine list failed rc=%s; presence remains unknown\n' \
+                    "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
+                    "$command_rc" >> "$diagnostic_log" 2>/dev/null || true
+            fi
+            sleep 3
+            continue
+        fi
+        if ! printf '%s' "$machines" | grep -q "\"$id\""; then
+            if [ -n "$diagnostic_log" ]; then
+                printf '[%s] worker absent after destroy attempt %s/5\n' \
+                    "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" "$i" \
+                    >> "$diagnostic_log" 2>/dev/null || true
+            fi
             reap_volume "$vol" || true
             return 0
         fi
-        [ "$i" = 3 ] && FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
+        if [ -n "$diagnostic_log" ]; then
+            printf '[%s] worker still present after destroy attempt %s/5\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" "$i" \
+                >> "$diagnostic_log" 2>/dev/null || true
+        fi
+        if [ "$i" = 3 ]; then
+            if [ -n "$diagnostic_log" ]; then
+                if FLY machine stop "$id" -a "$APP" >/dev/null 2>> "$diagnostic_log"; then
+                    command_rc=0
+                else
+                    command_rc=$?
+                fi
+                printf '[%s] stop fallback %s rc=%s\n' \
+                    "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
+                    "$([ "$command_rc" = 0 ] && printf succeeded || printf failed)" "$command_rc" \
+                    >> "$diagnostic_log" 2>/dev/null || true
+            else
+                FLY machine stop "$id" -a "$APP" >/dev/null 2>&1 || true
+            fi
+        fi
         sleep 3
     done
-    if FLY machines list -a "$APP" --json 2>/dev/null | grep -q "\"$id\""; then
+
+    command_rc=0
+    if [ -n "$diagnostic_log" ]; then
+        if machines="$(FLY machines list -a "$APP" --json 2>> "$diagnostic_log")"; then
+            command_rc=0
+        else
+            command_rc=$?
+        fi
+    elif machines="$(FLY machines list -a "$APP" --json 2>/dev/null)"; then
+        command_rc=0
+    else
+        command_rc=$?
+    fi
+    if [ "$command_rc" != "0" ]; then
+        if [ -n "$diagnostic_log" ]; then
+            printf '[%s] final machine list failed rc=%s; refusing to forget worker\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
+                "$command_rc" >> "$diagnostic_log" 2>/dev/null || true
+        fi
+        return 1
+    fi
+    if printf '%s' "$machines" | grep -q "\"$id\""; then
+        if [ -n "$diagnostic_log" ]; then
+            printf '[%s] worker remained present after all destroy attempts\n' \
+                "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
+                >> "$diagnostic_log" 2>/dev/null || true
+        fi
         echo "  ⚠️ could not destroy machine $id — check: flyctl machines list -a $APP" >&2
         return 1
     fi
@@ -877,12 +971,15 @@ fleet_registry_record_id() {  # fleet_registry_record_id <clone-name> <machine-i
 }
 
 fleet_registry_release_id() {  # fleet_registry_release_id <machine-id>
-    local id="$1" record recorded_id
+    local id="$1" record recorded_id rc=0
     for record in "$FLEET_REGISTRY_DIR"/clones/*; do
         [ -f "$record" ] || continue
         recorded_id="$(registry_meta_value "$record" id)"
-        [ "$recorded_id" = "$id" ] && rm -f "$record"
+        if [ "$recorded_id" = "$id" ] && ! rm -f "$record"; then
+            rc=1
+        fi
     done
+    return "$rc"
 }
 
 fleet_registry_release_name() {  # fleet_registry_release_name <clone-name>
@@ -3106,7 +3203,8 @@ BOX_WMH_PORT="3007"        # run.sh WMH_PORT = base+6
 FLEET_PATCH_FILE=""
 FLEET_PATCH_SHA256=""
 if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
-   && cloudbench_worktree_has_changes "$ROOT_DIR"; then
+   && { [ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] \
+        || cloudbench_worktree_has_changes "$ROOT_DIR"; }; then
     FLEET_PATCH_FILE="$(mktemp)"
     if ! bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF" > "$FLEET_PATCH_FILE" \
         || [ ! -s "$FLEET_PATCH_FILE" ]; then
@@ -3380,6 +3478,7 @@ cancel_worker_for_scale_down() {  # <bench-output-dir> <desired-worker-count>
 
 cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
     local cleanup_out="$1" cleanup_wid="$2" tracking_tmp ready_tmp grep_status rc=0
+    local cleanup_log="$1/worker-$2.cleanup.log"
     local claim="$1/worker-$2.cleanup-claim" self_pid="${BASHPID:-$$}"
     local claim_token claim_line claim_pid claim_owner claim_started
     claim_token="$self_pid.$(date +%s).$RANDOM"
@@ -3438,7 +3537,8 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
         return 1
     fi
 
-    reap_machine "$cleanup_wid" || rc=1
+    : >> "$cleanup_log" 2>/dev/null || true
+    reap_machine "$cleanup_wid" "$cleanup_log" || rc=1
     [ "$rc" = "0" ] && fleet_registry_release_id "$cleanup_wid" || rc=1
 
     worker_ledger_lock_acquire "$cleanup_out" || return 1
@@ -3545,7 +3645,7 @@ reconcile_worker_failure_outcomes() {  # <bench> <bench-output-dir>
 
 provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <primary_ip> <sim01> <out>
     local bench="$1" ws="$2" primary_id="$3" pip="$4" sim="$5" out="$6"
-    local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file failure_reason
+    local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file stage_log failure_reason
     worker_capacity_token="$FLEET_OWNER_TOKEN-worker-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     if ! reserve_worker_machine_slot "$worker_capacity_token"; then
         printf '%s\n' "Machine-count capacity unavailable for worker clone" > "$out/autoscaler.failed"
@@ -3611,6 +3711,8 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     # proves that Temporal worker.run() reached its queue-polling boundary.
     : > "$out/worker-$wid.pending"
     rm -f "$out/worker-$wid.cancelled"
+    stage_log="$out/worker-$wid.stage.log"
+    : > "$stage_log" 2>/dev/null || true
     local wrapper worker_env; wrapper="$(mktemp)"; worker_env="$(mktemp)"
     chmod 600 "$worker_env" 2>/dev/null || true
     printf 'CLOUDBENCH_GITHUB_TOKEN_B64=%q\n' "$worker_github_token_b64" > "$worker_env"
@@ -3668,39 +3770,73 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
           local ready_tmp="$out/worker-$wid.ready.tmp.$$"
           : > "$ready_tmp" && mv "$ready_tmp" "$out/worker-$wid.ready"
       }
+      log_worker_stage() {
+          printf '[%s] %s\n' \
+              "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" \
+              "$*" >> "$stage_log" 2>/dev/null || true
+      }
+      run_worker_stage_cmd() {
+          local label="$1" rc
+          shift
+          log_worker_stage "attempt ${attempt:-?}/$stage_attempts: $label"
+          if "$@" >> "$stage_log" 2>&1; then
+              log_worker_stage "attempt ${attempt:-?}/$stage_attempts: $label succeeded"
+              return 0
+          else
+              rc=$?
+          fi
+          log_worker_stage "attempt ${attempt:-?}/$stage_attempts: $label failed rc=$rc"
+          return "$rc"
+      }
       launched=0
       worker_neutralized=0
-      for _ in $(seq 1 "$stage_attempts"); do
+      for attempt in $(seq 1 "$stage_attempts"); do
         worker_provision_cancelled && finish_cancelled_worker_provision
-        if machine_storage_ready "$wid"; then
-            # A worker is cloned from this benchmark's primary, whose config is
-            # already set to auto-run cloudbench-boot.sh. Neutralize that copied
-            # command before its first start or staging could race a duplicate
-            # primary benchmark driver on the same task queue/run token.
-            if [ "$worker_neutralized" != "1" ]; then
-                if ! fly_with_timeout 30 machine update "$wid" -a "$APP" \
-                    --env CLOUDBENCH_BOOT=0 --command "sleep infinity" \
-                    --skip-health-checks --skip-start --yes >/dev/null 2>&1; then
-                    sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
-                    continue
-                fi
-                worker_neutralized=1
+        if ! machine_storage_ready "$wid"; then
+            if machine_storage_failed "$wid"; then
+                log_worker_stage "attempt $attempt/$stage_attempts: storage failed before staging"
+                discard_replaceable_worker \
+                    "worker $wid storage failed before staging; see worker-$wid.stage.log"
             fi
-            fly_with_timeout 20 machine start "$wid" -a "$APP" >/dev/null 2>&1 || true
+            log_worker_stage "attempt $attempt/$stage_attempts: storage not ready"
+            sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+            continue
         fi
-          if fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-worker.sh" /data/cloudbench-worker.sh >/dev/null 2>&1 \
-             && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh >/dev/null 2>&1 \
-             && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env >/dev/null 2>&1 \
-             && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh >/dev/null 2>&1; then
+        # A worker is cloned from this benchmark's primary, whose config is
+        # already set to auto-run cloudbench-boot.sh. Neutralize that copied
+        # command before its first start or staging could race a duplicate
+        # primary benchmark driver on the same task queue/run token.
+        if [ "$worker_neutralized" != "1" ]; then
+            if ! run_worker_stage_cmd "neutralize cloned boot command" \
+                fly_with_timeout 30 machine update "$wid" -a "$APP" \
+                --env CLOUDBENCH_BOOT=0 --command "sleep infinity" \
+                --skip-health-checks --skip-start --yes; then
+                sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+                continue
+            fi
+            worker_neutralized=1
+        fi
+        run_worker_stage_cmd "start neutralized worker" \
+            fly_with_timeout 20 machine start "$wid" -a "$APP" || true
+          if run_worker_stage_cmd "upload cloudbench-worker.sh" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-worker.sh" /data/cloudbench-worker.sh \
+             && run_worker_stage_cmd "upload cloudbench-fetch-ref.sh" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh \
+             && run_worker_stage_cmd "upload worker environment" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env \
+             && run_worker_stage_cmd "upload worker wrapper" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh; then
               if [ -n "$FLEET_PATCH_FILE" ]; then
-                  if ! fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1; then
+                  if ! run_worker_stage_cmd "upload local patch" \
+                      fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch; then
                       worker_provision_cancelled && finish_cancelled_worker_provision
                       sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
                       continue
                   fi
               fi
-              if fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
-                  -C "bash -c \"begin=\$(date +%s); : > /data/worker.log; printf '%s\\n' \\\"\$begin\\\" > /data/worker.started-at; setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\"" >/dev/null 2>&1; then
+              if run_worker_stage_cmd "launch worker wrapper" \
+                  fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
+                  -C "bash -c \"begin=\$(date +%s); : > /data/worker.log; printf '%s\\n' \\\"\$begin\\\" > /data/worker.started-at; setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\""; then
                   launched=1
                   break
               fi
@@ -3711,7 +3847,8 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
       rm -f "$wrapper" "$worker_env" 2>/dev/null || true
       if [ "$launched" != "1" ]; then
           worker_provision_cancelled && finish_cancelled_worker_provision
-          discard_replaceable_worker "worker $wid could not be staged and launched"
+          discard_replaceable_worker \
+              "worker $wid could not be staged and launched; see worker-$wid.stage.log"
       fi
 
       ready_deadline=$((SECONDS + worker_ready_timeout))
@@ -3727,7 +3864,9 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
           sleep 5
       done
       worker_provision_cancelled && finish_cancelled_worker_provision
-      discard_replaceable_worker "worker $wid did not reach queue readiness within ${worker_ready_timeout}s"
+      log_worker_stage "worker did not reach queue readiness within ${worker_ready_timeout}s"
+      discard_replaceable_worker \
+          "worker $wid did not reach queue readiness within ${worker_ready_timeout}s; see worker-$wid.stage.log"
     ) &
     return 0
 }
