@@ -1267,7 +1267,10 @@ def deploy_measurement_mode(turn: Turn) -> str:
             value == "production-verify" for value in ordered_pairs[last_review + 1 :]
         )
     )
-    required = [values["Code review"], values["Production verify"]]
+    # ordered_final_pass already proves a paired code-review lifecycle exists
+    # before production verification. Do not also require a historical review
+    # duration: older transcripts intentionally report that timing unavailable.
+    required = [values["Production verify"]]
     runtime = values["Runtime blackbox"]
     if runtime.runs or runtime.incomplete:
         required.append(runtime)

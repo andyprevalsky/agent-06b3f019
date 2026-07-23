@@ -22,6 +22,28 @@ export CONDUCTOR_WORKSPACE_NAME=port-collision-test
 export RUN_SH_SOURCE_ONLY=true
 source "$ROOT_DIR/scripts/run.sh"
 
+isolated_dist_a=$(resolve_frontend_dist_dir "$ROOT_DIR" true 'run/a' 61001)
+isolated_dist_b=$(resolve_frontend_dist_dir "$ROOT_DIR" true 'run/b' 61001)
+shared_dist=$(resolve_frontend_dist_dir "$ROOT_DIR" false '' 61001)
+[ "$isolated_dist_a" != "$isolated_dist_b" ] || {
+    echo "FAIL: concurrent isolated stacks must not share a frontend bundle" >&2
+    exit 1
+}
+[ "$isolated_dist_a" != "$shared_dist" ] || {
+    echo "FAIL: semantic and isolated stacks must not share a frontend bundle" >&2
+    exit 1
+}
+for frontend_dist in "$isolated_dist_a" "$isolated_dist_b" "$shared_dist"; do
+    case "$frontend_dist" in
+        "$ROOT_DIR/.context/frontend-builds/"*) ;;
+        *)
+            echo "FAIL: frontend bundles must remain under the worktree context directory" >&2
+            exit 1
+            ;;
+    esac
+done
+echo "PASS: concurrent benchmark stacks own distinct frontend bundles"
+
 docker_info_quick() {
     return 1
 }

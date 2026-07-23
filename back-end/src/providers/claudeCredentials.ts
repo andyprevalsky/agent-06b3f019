@@ -408,16 +408,19 @@ export async function markPoolTokenRateLimited(
     failureReason?: string | null;
   }
 ): Promise<void> {
-  if (options?.failureReason === 'auth_error') {
+  if (
+    options?.failureReason === 'auth_error' ||
+    options?.failureReason === 'claude_code_auth_error'
+  ) {
     await prisma.integration.update({
       where: { id: poolTokenId },
       data: {
         poolingEnabled: false,
         rateLimitedUntil: null,
-        failureReason: 'auth_error',
+        failureReason: options.failureReason,
       },
     });
-    log.info(`Pool token ${poolTokenId} disabled after auth_error`);
+    log.info(`Pool token ${poolTokenId} disabled after ${options.failureReason}`);
     return;
   }
 
@@ -440,21 +443,24 @@ export async function markUserTokenRateLimited(
     failureReason?: string | null;
   }
 ): Promise<void> {
-  if (options?.failureReason === 'auth_error') {
+  if (
+    options?.failureReason === 'auth_error' ||
+    options?.failureReason === 'claude_code_auth_error'
+  ) {
     await prisma.integration.updateMany({
       where: {
         userId,
         name: 'claude_code',
-        status: 'CONNECTED',
+        status: { in: ['CONNECTED', 'EXPIRED'] },
       },
       data: {
         status: 'EXPIRED',
         isActive: false,
         rateLimitedUntil: null,
-        failureReason: 'auth_error',
+        failureReason: options.failureReason,
       },
     });
-    log.info(`User token for ${userId} disabled after auth_error`);
+    log.info(`User token for ${userId} disabled after ${options.failureReason}`);
     return;
   }
 

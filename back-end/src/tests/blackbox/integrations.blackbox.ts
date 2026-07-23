@@ -4815,6 +4815,14 @@ async function testClaudeCodeExhaustion_marksUserToken() {
     },
   });
   const session = await seedClaudeCodeSession(dummyAgent.id, 'user', null);
+  await prisma.integration.update({
+    where: { id: userInt.id },
+    data: {
+      status: 'EXPIRED',
+      isActive: false,
+      failureReason: 'auth_error',
+    },
+  });
 
   try {
     const banner = "You've hit your limit · resets 9:30pm (UTC)\n";
@@ -4882,6 +4890,52 @@ async function testClaudeCodeAuthFailure_marksPoolTokenLongCooldown() {
     await cleanupSessions([session.taskId]);
     await prisma.agent.delete({ where: { id: dummyAgent.id } });
     await cleanupIntegrations([poolInt.id]);
+  }
+}
+
+async function testClaudeCodeRevokedOauth_disablesUserTokenPermanently() {
+  // Exact production banner from deploy smoke d1f8fa0a. The direct-token path
+  // had already marked the integration EXPIRED/auth_error, but the Claude Code
+  // fallback kept serving its refresh envelope. Once the CLI proves that the
+  // refresh grant is also revoked, exclude the envelope permanently.
+  const caller = await createAnonSession();
+  const userInt = await seedClaudeIntegration(caller.userId, { poolingEnabled: false });
+  const dummyAgent = await prisma.agent.create({
+    data: {
+      id: crypto.randomUUID(),
+      userId: caller.userId,
+      goal: 'dummy-for-revoked-claude-code-test',
+      status: 'STARTING_UP',
+    },
+  });
+  const session = await seedClaudeCodeSession(dummyAgent.id, 'user', null);
+
+  try {
+    const banner =
+      '[Claude] Session started in /home/user\n' +
+      '[Claude] Failed to authenticate. API Error: 401 OAuth access token has been revoked.\n';
+    const res = await request(`${BASE_URL}/api/claude-code-session/${session.taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ output: banner }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    const row = await prisma.integration.findUnique({ where: { id: userInt.id } });
+    assert(row?.status === 'EXPIRED', 'revoked user integration must be expired');
+    assert(row?.isActive === false, 'revoked user integration must be inactive');
+    assert(
+      row?.failureReason === 'claude_code_auth_error',
+      `revoked refresh envelope must be excluded from the auth_error refresh path, got ${row?.failureReason}`
+    );
+    assert(
+      row.rateLimitedUntil === null,
+      'revoked OAuth must not return after a temporary cooldown'
+    );
+  } finally {
+    await cleanupSessions([session.taskId]);
+    await prisma.agent.delete({ where: { id: dummyAgent.id } });
+    await cleanupIntegrations([userInt.id]);
   }
 }
 
@@ -6056,6 +6110,10 @@ async function runAll() {
     {
       name: 'claude-code auth-failure -- pool token marked rate-limited with long cooldown',
       fn: testClaudeCodeAuthFailure_marksPoolTokenLongCooldown,
+    },
+    {
+      name: 'claude-code auth-failure -- revoked user OAuth is permanently excluded',
+      fn: testClaudeCodeRevokedOauth_disablesUserTokenPermanently,
     },
     {
       name: 'claude-code billing-failure -- pool token marked rate-limited with long cooldown',

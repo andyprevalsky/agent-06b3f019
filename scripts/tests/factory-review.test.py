@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -1073,6 +1074,50 @@ class ApprovalLifecycleTest(unittest.TestCase):
         self.assertEqual(values["Production verify"].durations, (240.0,))
         self.assertEqual(values["Runtime blackbox"].durations, (30.0,))
         self.assertEqual(FACTORY_REVIEW.deploy_measurement_mode(turn), "instrumented")
+
+    def test_instrumented_deploy_does_not_require_historical_review_duration(
+        self,
+    ) -> None:
+        def invocation(
+            identifier: str, event: str, value: str, started: float
+        ) -> object:
+            return FACTORY_REVIEW.Invocation(
+                identifier,
+                "Bash",
+                "python3 scripts/record_factory_event.py deploy " f"{event} {value}",
+                factory_event_output("deploy", event, value),
+                started,
+                started + 0.1,
+                False,
+            )
+
+        invocations = (
+            invocation("review-start", "stage-start", "code-review", 1.0),
+            invocation("review-finish", "stage-finish", "code-review", 2.0),
+            invocation("production-start", "stage-start", "production-verify", 3.0),
+            invocation("production-finish", "stage-finish", "production-verify", 4.0),
+            invocation("outcome", "outcome", "completed", 5.0),
+        )
+        turn = FACTORY_REVIEW.Turn(
+            "deploy",
+            "fixture-workspace",
+            "session",
+            "instrumented-deploy-without-review-duration",
+            "2026-07-12T00:00:00Z",
+            6.0,
+            "completed",
+            "completed",
+            invocations,
+        )
+        values = FACTORY_REVIEW.deploy_cycle_timings(invocations)
+        values["Code review"] = FACTORY_REVIEW.StepTiming(
+            0, (), 0.0, incomplete=True
+        )
+
+        with patch.object(FACTORY_REVIEW, "deploy_cycle_timings", return_value=values):
+            self.assertEqual(
+                FACTORY_REVIEW.deploy_measurement_mode(turn), "instrumented"
+            )
 
     def test_factory_event_parser_rejects_searches_and_failed_writers(self) -> None:
         self.assertIsNone(
