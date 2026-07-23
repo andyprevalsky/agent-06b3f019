@@ -160,6 +160,62 @@ if EVENT_NAME=repository_dispatch EXISTING_PR_FOUND=true EXISTING_PR_IS_DRAFT=un
   exit 1
 fi
 
+APPROVED_AGENT=d29e631e-b78a-40dd-8f0b-732d1143a854
+APPROVED_HEAD=0123456789abcdef0123456789abcdef01234567
+APPROVED_RUN=29889633132
+APPROVED_BODY="$(cat <<EOF
+# Evidence
+<!-- rca-complete head=$APPROVED_HEAD agent=$APPROVED_AGENT -->
+<!-- rca-slack ts=1784617220.480779 channel=C0BE1B87882 agent=$APPROVED_AGENT run=$APPROVED_RUN -->
+<!-- rca-verified head=$APPROVED_HEAD agent=$APPROVED_AGENT run=$APPROVED_RUN -->
+EOF
+)"
+
+run_approved_deploy_plan() {
+  env \
+    GITHUB_REPOSITORY=Rose-Ai-Labs/rose \
+    PR_NUMBER=836 \
+    PR_HEAD_SHA="$APPROVED_HEAD" \
+    REVIEW_COMMIT_SHA="$APPROVED_HEAD" \
+    PR_HEAD_REF="auto-rca/$APPROVED_AGENT" \
+    PR_HEAD_REPO=Rose-Ai-Labs/rose \
+    PR_DRAFT=false \
+    PR_TITLE="auto-RCA: Production agent failure $APPROVED_AGENT" \
+    PR_BODY="$APPROVED_BODY" \
+    "$@" "$RCA_TOOL" approved-deploy-plan
+}
+
+approved_output="$TEST_ROOT/approved-output.txt"
+GITHUB_OUTPUT="$approved_output" run_approved_deploy_plan >/dev/null
+grep -Fq "agent_id=$APPROVED_AGENT" "$approved_output" || exit 1
+grep -Fq "run_id=$APPROVED_RUN" "$approved_output" || exit 1
+
+if run_approved_deploy_plan REVIEW_COMMIT_SHA=ffffffffffffffffffffffffffffffffffffffff \
+  >/dev/null 2>&1; then
+  echo 'FAIL: approved deploy accepted a stale review' >&2
+  exit 1
+fi
+if run_approved_deploy_plan PR_DRAFT=true >/dev/null 2>&1; then
+  echo 'FAIL: approved deploy accepted a draft PR' >&2
+  exit 1
+fi
+if run_approved_deploy_plan PR_HEAD_REPO=attacker/rose >/dev/null 2>&1; then
+  echo 'FAIL: approved deploy accepted a fork PR' >&2
+  exit 1
+fi
+if run_approved_deploy_plan \
+  PR_BODY="$APPROVED_BODY
+<!-- rca-verified head=$APPROVED_HEAD agent=$APPROVED_AGENT run=$APPROVED_RUN -->" \
+  >/dev/null 2>&1; then
+  echo 'FAIL: approved deploy accepted duplicate trusted markers' >&2
+  exit 1
+fi
+if run_approved_deploy_plan \
+  PR_BODY="${APPROVED_BODY/run=$APPROVED_RUN --\>/run=123 --\>}" >/dev/null 2>&1; then
+  echo 'FAIL: approved deploy accepted mismatched Slack and verification runs' >&2
+  exit 1
+fi
+
 assert_reconcile_plan() {
   local expected="$1" actual
   shift
@@ -204,6 +260,57 @@ if printf '%s' "$duplicate_pr_pages" | \
   echo "FAIL: multiple open lifecycle PRs were silently accepted" >&2
   exit 1
 fi
+
+slack_pr_pages='[[
+  {"number":9,"state":"open","title":"auto-RCA: Production agent failure d29e631e-b78a-40dd-8f0b-732d1143a854","html_url":"https://github.com/Rose-Ai-Labs/rose/pull/9","body":"<!-- rca-slack ts=1784617220.480779 channel=C0BE1B87882 agent=d29e631e-b78a-40dd-8f0b-732d1143a854 run=123 -->","draft":true,"base":{"ref":"main"},"head":{"ref":"auto-rca/d29e631e-b78a-40dd-8f0b-732d1143a854","repo":{"full_name":"Rose-Ai-Labs/rose"}}},
+  {"number":10,"state":"open","title":"auto-RCA: Production agent failure 11111111-1111-4111-8111-111111111111","html_url":"https://github.com/Rose-Ai-Labs/rose/pull/10","body":"<!-- rca-slack ts=1784617999.999999 channel=C0BE1B87882 agent=11111111-1111-4111-8111-111111111111 run=124 -->","draft":true,"base":{"ref":"main"},"head":{"ref":"auto-rca/11111111-1111-4111-8111-111111111111","repo":{"full_name":"Rose-Ai-Labs/rose"}}}
+]]'
+slack_selected="$(printf '%s' "$slack_pr_pages" | \
+  SLACK_CHANNEL=C0BE1B87882 SLACK_THREAD_TS=1784617220.480779 \
+  GITHUB_REPOSITORY=Rose-Ai-Labs/rose "$RCA_TOOL" select-slack-prs)"
+[ "$(printf '%s' "$slack_selected" | jq -r '.number')" -eq 9 ] || {
+  echo 'FAIL: Slack lifecycle handle did not resolve its exact RCA PR' >&2
+  exit 1
+}
+if printf '%s' "$(printf '%s' "$slack_pr_pages" | jq '.[0] += [.[0][0]]')" | \
+  SLACK_CHANNEL=C0BE1B87882 SLACK_THREAD_TS=1784617220.480779 \
+  GITHUB_REPOSITORY=Rose-Ai-Labs/rose "$RCA_TOOL" select-slack-prs >/dev/null 2>&1; then
+  echo 'FAIL: duplicate Slack lifecycle bindings were silently accepted' >&2
+  exit 1
+fi
+
+feedback_comments='[[
+  {"id":100,"body":"<!-- rca-slack-feedback event=Ev01FIRSTFEEDBACK channel=C0BE1B87882 thread=1784617220.480779 message=1784617333.100000 user=U01REVIEWER -->\n\nFirst feedback","user":{"login":"trusted-reviewer","type":"User"},"author_association":"MEMBER"},
+  {"id":101,"body":"<!-- rca-feedback-consumed ids=100 run=120 -->","user":{"login":"trusted-reviewer","type":"User"},"author_association":"MEMBER"},
+  {"id":102,"body":"<!-- rca-slack-feedback event=Ev01SECONDFEEDBACK channel=C0BE1B87882 thread=1784617220.480779 message=1784617333.200000 user=U01REVIEWER -->\n\nSecond feedback","user":{"login":"trusted-reviewer","type":"User"},"author_association":"MEMBER"},
+  {"id":103,"body":"bot noise","user":{"login":"review-bot","type":"Bot"},"author_association":"NONE"}
+]]'
+feedback_batch="$(printf '%s' "$feedback_comments" | \
+  TRIGGER_COMMENT_ID=102 "$RCA_TOOL" feedback-batch)"
+[ "$(printf '%s' "$feedback_batch" | jq 'length')" -eq 1 ] || {
+  echo 'FAIL: durable feedback queue did not exclude consumed or bot comments' >&2
+  exit 1
+}
+[ "$(printf '%s' "$feedback_batch" | jq -r '.[0].id')" -eq 102 ] || exit 1
+[ "$(printf '%s' "$feedback_batch" | jq -r '.[0].text')" = 'Second feedback' ] || exit 1
+[ "$(printf '%s' "$feedback_batch" | jq -r '.[0].message_ts')" = '1784617333.200000' ] || exit 1
+
+plain_comments="$(printf '%s' "$feedback_comments" | jq \
+  '.[0] += [
+    {"id":104,"body":"Please make the retry fix general.","user":{"login":"maintainer","type":"User"},"author_association":"MEMBER"},
+    {"id":105,"body":"Also cover the timeout boundary.","user":{"login":"maintainer","type":"User"},"author_association":"MEMBER"}
+  ]')"
+plain_batch="$(printf '%s' "$plain_comments" | TRIGGER_COMMENT_ID=105 "$RCA_TOOL" feedback-batch)"
+[ "$(printf '%s' "$plain_batch" | jq -r 'map(select(.id == 104))[0].text')" = \
+  'Please make the retry fix general.' ] || {
+  echo 'FAIL: an older queued ordinary PR comment was lost when a newer comment triggered the run' >&2
+  exit 1
+}
+[ "$(printf '%s' "$plain_batch" | jq -r 'map(select(.id == 105))[0].text')" = \
+  'Also cover the timeout boundary.' ] || {
+  echo 'FAIL: the triggering ordinary PR comment still requires a slash command' >&2
+  exit 1
+}
 
 : > "$TEST_ROOT/gh-calls.txt"
 PATH="$FAKE_BIN:$PATH" \
@@ -481,7 +588,7 @@ grep -Fq 'Workflow run: https://github.com/Rose-Ai-Labs/rose/actions/runs/123' "
 for state in running revising blocked draft ready shipped cancelled; do
   case "$state" in
     running) expected_label='🟡 RCA running' ;;
-    revising) expected_label='🟡 Revising RCA from PR feedback' ;;
+    revising) expected_label='🟡 Revising RCA from reviewer feedback' ;;
     blocked) expected_label='🔴 RCA blocked — draft needs attention' ;;
     draft) expected_label='🔵 Draft PR open (needs attention)' ;;
     ready) expected_label='🟢 Ready for review — approve to ship' ;;
@@ -506,9 +613,116 @@ for state in running revising blocked draft ready shipped cancelled; do
   if [ "$state" = shipped ] || [ "$state" = cancelled ]; then
     ! grep -Fq '*Feedback:*' <<< "$message" || exit 1
   else
-    grep -Fq "*Feedback:* Add a top-level Conversation comment \`/rca <requested changes>\` on the PR." <<< "$message" || exit 1
+    grep -Fq "*Feedback:* Reply normally in this Slack thread, or leave a normal top-level PR comment." <<< "$message" || exit 1
   fi
 done
+
+# Trusted phase telemetry identifies the exact /RCA or /deploy blocker and
+# renders deterministic elapsed times as a human-readable waterfall.
+timeline_event() {
+  local command="$1" step="$2" now="$3" status="${4:-}"
+  PATH="$FAKE_BIN:$PATH" \
+  FAKE_GATE_ROOT="$FAKE_GATE_ROOT" \
+  AUTO_RCA_GATE_STATE_DIR='/var/lib/rose-auto-rca/123' \
+  AUTO_RCA_NOW_EPOCH="$now" \
+  RCA_TIMELINE_STEP="$step" \
+  RCA_TIMELINE_STATUS="$status" \
+    "$RCA_TOOL" "$command" >/dev/null
+}
+timeline_event timeline-start rca-evidence 100
+timeline_event timeline-finish rca-evidence 112 passed
+timeline_event timeline-start rca-primary-investigation 112
+timeline_event timeline-finish rca-primary-investigation 634 passed
+timeline_event timeline-start rca-primary-reproduction 634
+timeline_event timeline-finish rca-primary-reproduction 653 passed
+timeline_event timeline-start deploy-primary-offline 653
+timeline_event timeline-finish deploy-primary-offline 718 passed
+timeline_event timeline-start deploy-primary-smoke 718
+timeline_event timeline-finish deploy-primary-smoke 909 failed
+
+waterfall_message="$(
+  PATH="$FAKE_BIN:$PATH" \
+  FAKE_GATE_ROOT="$FAKE_GATE_ROOT" \
+  AUTO_RCA_GATE_STATE_DIR='/var/lib/rose-auto-rca/123' \
+  AUTO_RCA_NOW_EPOCH=909 \
+  AGENT_ID='d29e631e-b78a-40dd-8f0b-732d1143a854' \
+  AFFECTED_USER_NAME='Ada Lovelace' \
+  RCA_STATE=blocked \
+  RCA_FE_URL='https://roselabs.ai/?agent-id=d29e631e-b78a-40dd-8f0b-732d1143a854' \
+  RCA_PR_URL='https://github.com/Rose-Ai-Labs/rose/pull/999' \
+  RCA_RUN_URL='https://github.com/Rose-Ai-Labs/rose/actions/runs/123' \
+    "$RCA_TOOL" slack-message
+)"
+grep -Fq '*Pipeline step:* /deploy · smoke gates — failed' <<< "$waterfall_message" || {
+  echo 'FAIL: Slack did not identify the exact failed deploy phase' >&2
+  exit 1
+}
+expected_waterfall='*Step waterfall:*
+✅ /RCA · production evidence — 12s
+✅ /RCA · primary investigation — 8m 42s
+✅ /RCA · unchanged local reproduction — 19s
+✅ /deploy · offline gates — 1m 5s
+❌ /deploy · smoke gates — 3m 11s'
+grep -Fq "$expected_waterfall" <<< "$waterfall_message" || {
+  echo 'FAIL: Slack duration waterfall is not human-readable or ordered' >&2
+  exit 1
+}
+
+: > "$TEST_ROOT/gh-calls.txt"
+PATH="$FAKE_BIN:$PATH" \
+CAPTURED_BODY="$CAPTURED_BODY" \
+GH_CALLS="$TEST_ROOT/gh-calls.txt" \
+UNEXPECTED_CALLS="$UNEXPECTED_CALLS" \
+FAKE_GATE_ROOT="$FAKE_GATE_ROOT" \
+FAKE_PR_BODY='# Existing trusted RCA report' \
+FAKE_PR_JSON='{"number":999,"url":"https://github.com/Rose-Ai-Labs/rose/pull/999","isDraft":true}' \
+AUTO_RCA_GATE_STATE_DIR='/var/lib/rose-auto-rca/123' \
+AUTO_RCA_NOW_EPOCH=909 \
+AUTO_RCA_ROOT_DIR="$CHECKOUT" \
+AGENT_ID='d29e631e-b78a-40dd-8f0b-732d1143a854' \
+RCA_BRANCH='auto-rca/d29e631eb78a-123' \
+GITHUB_REPOSITORY='Rose-Ai-Labs/rose' \
+AUTO_RCA_PR_TOKEN='test-pr-token' \
+  "$RCA_TOOL" sync-waterfall >/dev/null
+grep -Fq '## Automated /RCA → /deploy waterfall' "$CAPTURED_BODY" || {
+  echo 'FAIL: final trusted duration waterfall was not persisted on the PR' >&2
+  exit 1
+}
+grep -Fq '*Pipeline step:* /deploy · smoke gates — failed' "$CAPTURED_BODY" || exit 1
+if timeline_event timeline-finish deploy-primary-smoke 910 invented 2>/dev/null; then
+  echo 'FAIL: untrusted timeline status was accepted' >&2
+  exit 1
+fi
+
+: > "$TEST_ROOT/curl-calls.txt"
+PATH="$FAKE_BIN:$PATH" \
+CURL_CALLS="$TEST_ROOT/curl-calls.txt" \
+FAKE_GATE_ROOT="$FAKE_GATE_ROOT" \
+AUTO_RCA_GATE_STATE_DIR='/var/lib/rose-auto-rca/123' \
+AUTO_RCA_NOW_EPOCH=909 \
+AGENT_ID='d29e631e-b78a-40dd-8f0b-732d1143a854' \
+AFFECTED_USER_NAME='Ada Lovelace' \
+RCA_STATE=blocked \
+RCA_FE_URL='https://roselabs.ai/?agent-id=d29e631e-b78a-40dd-8f0b-732d1143a854' \
+RCA_PR_URL='https://github.com/Rose-Ai-Labs/rose/pull/999' \
+RCA_RUN_URL='https://github.com/Rose-Ai-Labs/rose/actions/runs/123' \
+RCA_FEEDBACK_SLACK_USERS='U01REVIEWER' \
+SLACK_BOT_TOKEN='test-slack-token' \
+SLACK_CHANNEL='C0BE1B87882' \
+SLACK_TS='1784617220.480779' \
+  "$RCA_TOOL" slack-reply
+grep -Fq 'https://slack.com/api/chat.postMessage' "$TEST_ROOT/curl-calls.txt" || {
+  echo 'FAIL: completed feedback work did not reply in Slack' >&2
+  exit 1
+}
+grep -Eq '"thread_ts"[[:space:]]*:[[:space:]]*"1784617220\.480779"' "$TEST_ROOT/curl-calls.txt" || {
+  echo 'FAIL: feedback response was not attached to the lifecycle thread' >&2
+  exit 1
+}
+grep -Fq '<@U01REVIEWER>' "$TEST_ROOT/curl-calls.txt" || {
+  echo 'FAIL: Slack response did not address the reviewer whose feedback was handled' >&2
+  exit 1
+}
 
 if AGENT_ID="d29e631e-b78a-40dd-8f0b-732d1143a854" \
   AFFECTED_USER_NAME='Ada Lovelace' \
@@ -628,6 +842,109 @@ if PATH="$FAKE_BIN:$PATH" \
   exit 1
 fi
 
+# The investigator may execute only its declared repro through the immutable
+# broker. The broker must materialize uncommitted edits into isolated archives,
+# remove credentials, normalize the test mode, and leave publishing untouched.
+INVESTIGATOR_REPO="$TEST_ROOT/investigator-repro-repo"
+INVESTIGATOR_CONTEXT="$INVESTIGATOR_REPO/.context/auto-rca"
+INVESTIGATOR_GATE="$TEST_ROOT/investigator-gate"
+INVESTIGATOR_BIN="$TEST_ROOT/investigator-bin"
+mkdir -p "$INVESTIGATOR_REPO/scripts/tests" "$INVESTIGATOR_CONTEXT" \
+  "$INVESTIGATOR_GATE" "$INVESTIGATOR_BIN"
+(
+  cd "$INVESTIGATOR_REPO"
+  git init -q -b main
+  git config user.name test
+  git config user.email test@example.com
+  printf '.context/\n' > .gitignore
+  printf 'broken\n' > behavior.txt
+  printf '#!/usr/bin/env bash\n' > scripts/test.sh
+  git add .
+  git commit -qm baseline
+  baseline="$(git rev-parse HEAD)"
+  git update-ref refs/remotes/origin/main "$baseline"
+  git checkout -qb auto-rca/d29e631eb78a
+  printf 'fixed\n' > behavior.txt
+  printf 'bash scripts/tests/investigator-boundary.test.sh\n' >> scripts/test.sh
+  printf '%s\n' "$baseline" > "$INVESTIGATOR_GATE/baseline.sha"
+)
+cat > "$INVESTIGATOR_BIN/cat" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = /var/lib/rose-auto-rca/456/baseline.sha ]; then
+  exec /bin/cat "$INVESTIGATOR_GATE/baseline.sha"
+fi
+exec /bin/cat "$@"
+SH
+chmod +x "$INVESTIGATOR_BIN/cat"
+cat > "$INVESTIGATOR_REPO/scripts/tests/investigator-boundary.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[ -z "${GITHUB_TOKEN:-}" ]
+[ -z "${RCA_CLAUDE_CODE_OAUTH_TOKEN:-}" ]
+grep -Fxq fixed behavior.txt
+SH
+printf '{"test_path":"scripts/tests/investigator-boundary.test.sh"}\n' > \
+  "$INVESTIGATOR_CONTEXT/repro.json"
+
+run_investigator_repro() {
+  GITHUB_TOKEN='must-not-reach-repro' \
+  RCA_CLAUDE_CODE_OAUTH_TOKEN='must-not-reach-repro' \
+  AGENT_ID="d29e631e-b78a-40dd-8f0b-732d1143a854" \
+  RCA_BRANCH=auto-rca/d29e631eb78a \
+  AUTO_RCA_ROOT_DIR="$INVESTIGATOR_REPO" \
+  AUTO_RCA_CONTEXT_DIR="$INVESTIGATOR_CONTEXT" \
+  AUTO_RCA_GATE_STATE_DIR=/var/lib/rose-auto-rca/456 \
+  INVESTIGATOR_GATE="$INVESTIGATOR_GATE" \
+  PATH="$INVESTIGATOR_BIN:$ORIGINAL_PATH" \
+  "$RCA_TOOL" investigator-repro
+}
+
+investigator_output="$(run_investigator_repro)"
+grep -Fq 'Baseline exit: 1 (must be non-zero)' <<< "$investigator_output" || {
+  echo "FAIL: investigator broker did not record the pre-fix failure" >&2
+  exit 1
+}
+grep -Fq 'Current worktree exit: 0 (must be zero)' <<< "$investigator_output" || {
+  echo "FAIL: investigator broker did not record the post-fix pass" >&2
+  exit 1
+}
+grep -Fq 'Credential-scrubbed investigator reproduction failed before and passed after.' \
+  <<< "$investigator_output" || exit 1
+[ -x "$INVESTIGATOR_REPO/scripts/tests/investigator-boundary.test.sh" ] || {
+  echo "FAIL: investigator broker did not normalize the repro executable bit" >&2
+  exit 1
+}
+[ "$(git -C "$INVESTIGATOR_REPO" rev-list --count HEAD)" -eq 1 ] || {
+  echo "FAIL: investigator broker committed or published model changes" >&2
+  exit 1
+}
+[ -n "$(git -C "$INVESTIGATOR_REPO" status --porcelain)" ] || {
+  echo "FAIL: investigator broker did not leave model changes for publish-draft" >&2
+  exit 1
+}
+
+printf 'broken\n' > "$INVESTIGATOR_REPO/behavior.txt"
+if run_investigator_repro >/dev/null 2>&1; then
+  echo "FAIL: investigator broker accepted a failing current worktree" >&2
+  exit 1
+fi
+grep -Fq 'Current worktree exit: 1 (must be zero)' \
+  "$INVESTIGATOR_CONTEXT/investigator-verification.txt" || exit 1
+
+printf 'fixed\n' > "$INVESTIGATOR_REPO/behavior.txt"
+cat > "$INVESTIGATOR_REPO/scripts/tests/investigator-boundary.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+grep -Eq '^(broken|fixed)$' behavior.txt
+SH
+if run_investigator_repro >/dev/null 2>&1; then
+  echo "FAIL: investigator broker accepted a reproduction that also passes on baseline" >&2
+  exit 1
+fi
+grep -Fq 'Baseline exit: 0 (must be non-zero)' \
+  "$INVESTIGATOR_CONTEXT/investigator-verification.txt" || exit 1
+
 # The trusted verifier must run one byte-identical test against clean baseline
 # and current archives, observe the first fail, observe the second pass, and
 # write root-owned attestations. This uses real git; only sudo is faked.
@@ -655,6 +972,7 @@ SH
   git commit -qm baseline
   baseline="$(git rev-parse HEAD)"
   git update-ref refs/remotes/origin/main "$baseline"
+  printf '%s\n' "$baseline" > "$REAL_GATES/baseline.sha"
   printf 'fixed\n' > behavior.txt
   git add behavior.txt
   git commit -qm fix
