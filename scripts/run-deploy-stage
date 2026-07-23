@@ -2,15 +2,15 @@
 # Time one /deploy gate, tee its output, and append an atomic JSONL stage record.
 set -uo pipefail
 
-ROOT_DIR="$(git rev-parse --show-toplevel)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TIMING_SCRIPT="$ROOT_DIR/scripts/deploy_stage.py"
-LOGGED_COMMAND="$ROOT_DIR/scripts/run_logged_command.py"
+STAGE_RUNNER="$ROOT_DIR/scripts/run_deploy_stage.py"
 RUN_ROOT="${DEPLOY_RUN_ROOT:-$ROOT_DIR/.context/deploy-runs}"
 CURRENT_RUN_FILE="$RUN_ROOT/current"
 
 usage() {
     echo "usage: scripts/run-deploy-stage --start [--run-id ID]" >&2
-    echo "       scripts/run-deploy-stage STAGE -- COMMAND [ARG ...]" >&2
+    echo "       scripts/run-deploy-stage STAGE [--reuse-passed] -- COMMAND [ARG ...]" >&2
     echo "       scripts/run-deploy-stage --summary" >&2
     echo "       scripts/run-deploy-stage --finish" >&2
     echo "       scripts/run-deploy-stage --history" >&2
@@ -85,79 +85,15 @@ fi
 STAGE="${1:-}"
 [[ "$STAGE" =~ ^[A-Za-z0-9._-]+$ ]] || { usage; exit 2; }
 shift
+REUSE_PASSED=""
+if [ "${1:-}" = "--reuse-passed" ]; then
+    REUSE_PASSED="--reuse-passed"
+    shift
+fi
 [ "${1:-}" = "--" ] || { usage; exit 2; }
 shift
 [ "$#" -gt 0 ] || { usage; exit 2; }
-
-ADMISSION_TOKEN="$STAGE-$$-$RANDOM"
-if ! RUN_ID="$(python3 "$TIMING_SCRIPT" lifecycle-admit \
-    --run-root "$RUN_ROOT" \
-    --token "$ADMISSION_TOKEN" \
-    --pid "$$")"; then
-    echo "could not admit deploy stage: $STAGE" >&2
-    exit 2
+if [ -n "$REUSE_PASSED" ]; then
+    exec python3 "$STAGE_RUNNER" --run-root "$RUN_ROOT" "$REUSE_PASSED" "$STAGE" -- "$@"
 fi
-RUN_DIR="$RUN_ROOT/$RUN_ID"
-
-mkdir -p "$RUN_DIR/logs"
-LOG_NAME="$STAGE-$(date -u +%Y%m%d-%H%M%S)-$$.log"
-LOG_RELATIVE="logs/$LOG_NAME"
-LOG_PATH="$RUN_DIR/$LOG_RELATIVE"
-STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-STARTED_EPOCH="$(python3 -c 'import time; print(time.time())')"
-echo "== deploy stage: $STAGE =="
-
-SUPERVISOR_PID=""
-SIGNAL_EXIT=0
-PENDING_SIGNAL=""
-forward_signal() {
-    signal_name="$1"
-    signal_exit="$2"
-    SIGNAL_EXIT="$signal_exit"
-    trap - HUP INT TERM
-    if [ -n "$SUPERVISOR_PID" ]; then
-        PENDING_SIGNAL=""
-        if kill -0 "$SUPERVISOR_PID" 2>/dev/null; then
-            kill -s "$signal_name" "$SUPERVISOR_PID" 2>/dev/null || true
-            wait "$SUPERVISOR_PID" 2>/dev/null || true
-        fi
-    else
-        PENDING_SIGNAL="$signal_name"
-    fi
-}
-trap 'forward_signal HUP 129' HUP
-trap 'forward_signal INT 130' INT
-trap 'forward_signal TERM 143' TERM
-
-python3 "$LOGGED_COMMAND" "$LOG_PATH" -- "$@" &
-SUPERVISOR_PID=$!
-if [ -n "$PENDING_SIGNAL" ]; then
-    pending_signal="$PENDING_SIGNAL"
-    PENDING_SIGNAL=""
-    kill -s "$pending_signal" "$SUPERVISOR_PID" 2>/dev/null || true
-fi
-wait "$SUPERVISOR_PID"
-STAGE_EXIT=$?
-if [ "$SIGNAL_EXIT" -ne 0 ]; then
-    STAGE_EXIT="$SIGNAL_EXIT"
-fi
-trap - HUP INT TERM
-
-FINISHED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-FINISHED_EPOCH="$(python3 -c 'import time; print(time.time())')"
-python3 "$TIMING_SCRIPT" append \
-    --run-dir "$RUN_DIR" \
-    --run-id "$RUN_ID" \
-    --stage "$STAGE" \
-    --started-at "$STARTED_AT" \
-    --finished-at "$FINISHED_AT" \
-    --started-epoch "$STARTED_EPOCH" \
-    --finished-epoch "$FINISHED_EPOCH" \
-    --exit-code "$STAGE_EXIT" \
-    --log "$LOG_RELATIVE" || echo "warning: could not append deploy stage record" >&2
-python3 "$TIMING_SCRIPT" lifecycle-release \
-    --run-root "$RUN_ROOT" \
-    --run-id "$RUN_ID" \
-    --token "$ADMISSION_TOKEN" || echo "warning: could not release deploy stage admission" >&2
-echo "== deploy stage: $STAGE exit=$STAGE_EXIT log=$LOG_PATH =="
-exit "$STAGE_EXIT"
+exec python3 "$STAGE_RUNNER" --run-root "$RUN_ROOT" "$STAGE" -- "$@"

@@ -23,7 +23,12 @@ import {
   syncRequiredCredentialTable,
   syncSteelSessionAuthCredentials,
 } from './seed-local-credentials';
-import { runSyncStep, syncRowsWithConcurrency, syncUserRecord } from './seed-local-helpers';
+import {
+  runSyncStep,
+  syncRowsWithConcurrency,
+  syncUserRecord,
+  syncWaitlistAccounts,
+} from './seed-local-helpers';
 import {
   createScopedBrowserAuthReaders,
   parseCookieDomains,
@@ -859,11 +864,7 @@ async function sync() {
     // (e.g. encryptedPaymentInformation) or offWaitlistAt (may be absent in prod).
     const phones = rows.map((r) => r.phone).filter((p): p is string => p !== null);
     if (phones.length > 0) {
-      const accounts = await remote.user.findMany({
-        where: { phone: { in: phones } },
-        select: { id: true, userId: true, phone: true, usedInviteCode: true },
-      });
-      await upsertById(local.user, accounts);
+      await syncWaitlistAccounts(remote.user, local.user, phones);
     }
     return synced;
   });

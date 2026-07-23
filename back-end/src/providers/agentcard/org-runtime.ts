@@ -35,8 +35,8 @@ export class AgentCardOrgRuntimeError extends Error {
   }
 }
 
-function requiredEnv(name: string, fallbackName?: string): string {
-  const value = process.env[name]?.trim() || process.env[fallbackName ?? '']?.trim();
+function requiredEnv(name: string): string {
+  const value = process.env[name]?.trim();
   if (!value) {
     throw new AgentCardOrgRuntimeError(
       `Missing ${name} environment variable for AgentCard Organization MCP`,
@@ -49,12 +49,8 @@ function requiredEnv(name: string, fallbackName?: string): string {
 }
 
 function hasClientCredentials(): boolean {
-  const clientId =
-    process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID?.trim() ||
-    process.env.AGENTCARD_OAUTH_CLIENT_ID?.trim();
-  const clientSecret =
-    process.env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET?.trim() ||
-    process.env.AGENTCARD_OAUTH_CLIENT_SECRET?.trim();
+  const clientId = process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID?.trim();
+  const clientSecret = process.env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET?.trim();
   return Boolean(clientId && clientSecret);
 }
 
@@ -66,11 +62,8 @@ function looksLikeAuthError(error: unknown): boolean {
 }
 
 function directAccessToken(): string | undefined {
-  const token =
-    process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN ??
-    process.env.AGENTCARD_API_KEY ??
-    process.env.AGENTCARD_ADMIN_MCP_ACCESS_TOKEN;
-  return token?.trim() || undefined;
+  const token = process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN?.trim();
+  return token && !token.startsWith('sk_') ? token : undefined;
 }
 
 export class AgentCardOrgRuntime {
@@ -131,11 +124,8 @@ export class AgentCardOrgRuntime {
           },
           body: new URLSearchParams({
             grant_type: 'client_credentials',
-            client_id: requiredEnv('AGENTCARD_ORG_OAUTH_CLIENT_ID', 'AGENTCARD_OAUTH_CLIENT_ID'),
-            client_secret: requiredEnv(
-              'AGENTCARD_ORG_OAUTH_CLIENT_SECRET',
-              'AGENTCARD_OAUTH_CLIENT_SECRET'
-            ),
+            client_id: requiredEnv('AGENTCARD_ORG_OAUTH_CLIENT_ID'),
+            client_secret: requiredEnv('AGENTCARD_ORG_OAUTH_CLIENT_SECRET'),
             // Bind the token to the MCP audience (RFC 8707), matching the per-user OAuth flow.
             resource: AGENTCARD_MCP_RESOURCE,
           }),

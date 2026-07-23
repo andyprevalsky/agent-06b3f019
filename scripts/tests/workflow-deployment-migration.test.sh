@@ -71,6 +71,12 @@ require_text "$CANDIDATE_VALIDATOR" "process.argv.includes('--execute')" "candid
 require_text "$CANDIDATE_VALIDATOR" "kind: 'validation'" "candidate validator must run the real workflow in validation mode"
 require_text "$CANDIDATE_VALIDATOR" "deployment_initialized_query" "candidate validator must wait through common initialization"
 require_text "$CANDIDATE_VALIDATOR" "workflowTaskFailedEventAttributes" "candidate validator must reject nondeterministic workflow tasks"
+require_text "$CANDIDATE_VALIDATOR" "workflowTaskFailedEventAttributes != null" "candidate validator must ignore protobuf nulls while rejecting real workflow-task failures"
+require_text "$CANDIDATE_VALIDATOR" "activityTaskScheduledEventAttributes != null" "candidate validator must count only real initialization activities"
+require_text "$PROD_VALIDATOR" "workflowTaskFailedEventAttributes != null" "production validator must ignore protobuf nulls while rejecting real workflow-task failures"
+require_text "$PROD_VALIDATOR" "assertSameInstant" "production validator must compare restored timestamps as instants, not format strings"
+require_text "$PROD_VALIDATOR" "tokensIn: 1_360" "production validator must model legacy subtree token counters"
+require_text "$PROD_VALIDATOR" 'WorkflowType="RoseWorkerDeploymentActivationMarker" AND ExecutionStatus="Running"' "production validator must wait with the same visibility query used by marker cleanup"
 require_text "$CANDIDATE_VALIDATOR" "toolUsage.count" "candidate validator must prove no LLM/tool usage was billed"
 require_text "$CANDIDATE_VALIDATOR" "candidate_fixture_cleanup" "candidate validator must report fixture cleanup"
 

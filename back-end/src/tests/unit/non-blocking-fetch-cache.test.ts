@@ -84,17 +84,71 @@ async function run(): Promise<void> {
   // ── (4) delete + clear behave to the Cache contract ──
   assert.strictEqual(fresh.delete(seededKey), true, 'delete() returns true when the entry existed');
   assert.strictEqual(fresh.has(seededKey), false, 'delete() removes memory + disk');
-  // clear() wipes memory synchronously and disk asynchronously; wait for the
-  // just-set async write to flush, clear, then wait for clear's async unlinks.
-  fresh.set('k-clear', { a: 1 });
-  await sleep(150);
+  const deletedUndefinedKey = 'k-deleted-undefined';
+  const deletedUndefinedPath = join(
+    nsDir,
+    `${createHash('sha256').update(deletedUndefinedKey).digest('hex')}.json`
+  );
+  fresh.set(deletedUndefinedKey, undefined);
+  assert.strictEqual(
+    fresh.delete(deletedUndefinedKey),
+    true,
+    'delete() recognizes a present undefined value'
+  );
+  await fresh.flushPendingWrites();
+  assert.strictEqual(
+    existsSync(deletedUndefinedPath),
+    false,
+    'a deferred undefined write must not recreate a deleted entry'
+  );
+
+  // delete/clear must win even when they race a large in-flight write.
+  const deletedDuringWriteKey = 'k-deleted-during-write';
+  const deletedDuringWritePath = join(
+    nsDir,
+    `${createHash('sha256').update(deletedDuringWriteKey).digest('hex')}.json`
+  );
+  fresh.set(deletedDuringWriteKey, { body: 'z'.repeat(8_000_000) });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.strictEqual(
+    fresh.delete(deletedDuringWriteKey),
+    true,
+    'delete() recognizes the in-memory entry while its write is pending'
+  );
+  await fresh.flushPendingWrites();
+  assert.strictEqual(
+    existsSync(deletedDuringWritePath),
+    false,
+    'an older in-flight write must not recreate a deleted fixture'
+  );
+
+  fresh.set('k-clear', { body: 'y'.repeat(8_000_000) });
   fresh.clear();
-  await sleep(150);
+  await fresh.flushPendingWrites();
   assert.strictEqual(fresh.has('k-clear'), false, 'clear() wipes memory + disk');
   assert.strictEqual(
     readdirSync(nsDir).filter((f) => f.endsWith('.json')).length,
     0,
     'clear() removes every fixture file'
+  );
+
+  // Serialization failures occur inside setImmediate; they must stay
+  // best-effort instead of becoming process-level uncaught exceptions.
+  const circular: { self?: unknown } = {};
+  circular.self = circular;
+  fresh.set('k-circular', circular);
+  fresh.set('k-bigint', { value: 1n });
+  await fresh.flushPendingWrites();
+  assert.strictEqual(fresh.get('k-circular'), circular, 'circular values remain memory-resident');
+  assert.deepStrictEqual(
+    fresh.get('k-bigint'),
+    { value: 1n },
+    'bigint values remain memory-resident'
+  );
+  assert.strictEqual(
+    readdirSync(nsDir).filter((f) => f.endsWith('.tmp')).length,
+    0,
+    'failed serialization must not leave temporary files'
   );
 
   writeLine('non-blocking-fetch-cache tests passed');

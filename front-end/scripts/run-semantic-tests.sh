@@ -88,7 +88,11 @@ fi
 # Generate exactly one authenticated session for the complete Playwright run.
 # Every worker injects this session instead of racing the OTP endpoints.
 echo "Generating shared semantic test session..."
-SEMANTIC_SESSION=$(cd "$REPO_DIR/back-end" && npx tsx scripts/generate-test-session.ts)
+if [[ "$PROD_MODE" -eq 1 ]]; then
+  SEMANTIC_SESSION=$(node scripts/generate-prod-test-session.mjs)
+else
+  SEMANTIC_SESSION=$(cd "$REPO_DIR/back-end" && npx tsx scripts/generate-test-session.ts)
+fi
 if [[ -z "$SEMANTIC_SESSION" ]]; then
   echo "FAIL: Could not generate semantic session. Check Supabase test credentials." >&2
   exit 1

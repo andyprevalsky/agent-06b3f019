@@ -189,9 +189,9 @@ async function main(): Promise<void> {
     const handle = client.workflow.getHandle(workflowId);
     const history = await handle.fetchHistory();
     const failures =
-      history.events?.filter((event) => Boolean(event.workflowTaskFailedEventAttributes)) ?? [];
+      history.events?.filter((event) => event.workflowTaskFailedEventAttributes != null) ?? [];
     const activities =
-      history.events?.filter((event) => Boolean(event.activityTaskScheduledEventAttributes))
+      history.events?.filter((event) => event.activityTaskScheduledEventAttributes != null)
         .length ?? 0;
     assert.strictEqual(failures.length, 0);
     assert(activities > 0, 'candidate workflow did not execute common initialization activities');

@@ -282,6 +282,11 @@ async function assertTerminated(workflowId: string): Promise<void> {
   assert.strictEqual(description.status.name, 'TERMINATED');
 }
 
+function assertSameInstant(actual: unknown, expected: Date): void {
+  assert.strictEqual(typeof actual, 'string');
+  assert.strictEqual(new Date(actual).getTime(), expected.getTime());
+}
+
 async function postProductionAgent(
   path: string,
   body: unknown
@@ -387,26 +392,26 @@ async function activityCount(
   return {
     totalEvents: history.events?.length ?? 0,
     activities:
-      history.events?.filter((event) => Boolean(event.activityTaskScheduledEventAttributes))
+      history.events?.filter((event) => event.activityTaskScheduledEventAttributes != null)
         .length ?? 0,
     markers:
-      history.events?.filter((event) => Boolean(event.markerRecordedEventAttributes)).length ?? 0,
+      history.events?.filter((event) => event.markerRecordedEventAttributes != null).length ?? 0,
     workflowTaskFailures:
-      history.events?.filter((event) => Boolean(event.workflowTaskFailedEventAttributes)).length ??
+      history.events?.filter((event) => event.workflowTaskFailedEventAttributes != null).length ??
       0,
     workflowTasks:
       history.events?.filter(
         (event) =>
-          Boolean(event.workflowTaskScheduledEventAttributes) ||
-          Boolean(event.workflowTaskStartedEventAttributes) ||
-          Boolean(event.workflowTaskCompletedEventAttributes)
+          event.workflowTaskScheduledEventAttributes != null ||
+          event.workflowTaskStartedEventAttributes != null ||
+          event.workflowTaskCompletedEventAttributes != null
       ).length ?? 0,
     timers:
       history.events?.filter(
         (event) =>
-          Boolean(event.timerStartedEventAttributes) ||
-          Boolean(event.timerFiredEventAttributes) ||
-          Boolean(event.timerCanceledEventAttributes)
+          event.timerStartedEventAttributes != null ||
+          event.timerFiredEventAttributes != null ||
+          event.timerCanceledEventAttributes != null
       ).length ?? 0,
   };
 }
@@ -482,7 +487,7 @@ async function main(): Promise<void> {
     });
     assert.deepStrictEqual(state.child_tool_counts, { web_search: 1 });
     assert.strictEqual(state.iteration_offset, 12);
-    assert.strictEqual(state.workflow_started_at, stored.createdAt.toISOString());
+    assertSameInstant(state.workflow_started_at, stored.createdAt);
     assert.strictEqual(state.max_iterations, 37);
     assert.deepStrictEqual(state.context_gates, { network: false, recent_communications: true });
     return 'pause, exact own/tree counters, tool counts, iteration budget, and config preserved';
@@ -585,14 +590,9 @@ async function main(): Promise<void> {
             temporalWorkflowId: rejectedChildId,
           },
         }),
-      (error: unknown) => {
-        const prismaError = error as { code?: unknown; message?: unknown };
-        return (
-          prismaError.code === 'P2034' ||
-          (typeof prismaError.message === 'string' &&
-            /stale parent workflow generation/i.test(prismaError.message))
-        );
-      }
+      (error: unknown) =>
+        (error as { code?: unknown }).code === 'P2034' ||
+        (error instanceof Error && /stale parent workflow generation/i.test(error.message))
     );
     assert.strictEqual(await prisma.agent.count({ where: { id: rejectedChildId } }), 0);
     return 'database trigger fenced an old-backend insert before any Temporal start';
@@ -1252,7 +1252,7 @@ async function main(): Promise<void> {
     assert.strictEqual(runtime.context_size, 42_000);
     assert.strictEqual(runtime.message_count, 73);
     assert.strictEqual(runtime.iteration_offset, 12);
-    assert.strictEqual(Date.parse(String(runtime.workflow_started_at)), stored.createdAt.getTime());
+    assertSameInstant(runtime.workflow_started_at, stored.createdAt);
     return 'restored counters, duration origin, controls, and stale running-tool UI';
   });
   await check('cold_workflow_uses_no_resources_while_waiting', async () => {
@@ -1543,7 +1543,7 @@ async function main(): Promise<void> {
       }
       if (!visible) await new Promise((resolve) => setTimeout(resolve, 500));
     } while (!visible && Date.now() < visibilityDeadline);
-    assert(visible, 'validation activation marker was not visible before cleanup');
+    assert(visible, 'validation activation marker was not visible in the cleanup query');
 
     await cleanupSupersededWorkerActivationMarkers(currentMarkerId);
     await assertTerminated(oldMarkerId);
