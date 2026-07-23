@@ -914,6 +914,7 @@ def test_deploy_always_gates_changed_cloudbench_controllers() -> None:
     assert "declared_patch_payload_cannot_be_missing_or_empty" in gate
     assert "empty_local_patch_cleanup_is_nounset_safe" in gate
     assert "autoscaled_worker_failure_is_removed_and_replaceable" in gate
+    assert "autoscaler_scale_down_cancels_pending_worker" in gate
     assert "must never pause for human approval" in gate
     assert "Operational gate maintenance is pre-authorized" in deploy
 
@@ -1368,6 +1369,152 @@ test ! -e "$OUT/worker-abc123.ready"
     assert worker.index("patch payload checksum mismatch") < worker.index(
         'printf \'%s\\n\' "$$" > "$WORKER_READY_FILE"'
     )
+
+
+def test_autoscaler_scale_down_cancels_pending_worker(tmp_path: Path) -> None:
+    """Demand can fall while a cloned worker is still staging.
+
+    Tracked capacity includes that pending clone, so scale-down must select from
+    the authoritative clone ledger instead of requiring a ready worker first.
+    """
+    fleet = FLEET_SCRIPT.read_text()
+    pool_count = _extract_fleet_function(fleet, "_pool_ids() {")
+    ready_count = _extract_fleet_function(fleet, "_ready_pool_ids() {")
+    worker_is_tracked = _extract_fleet_function(fleet, "worker_is_tracked() {")
+    ledger_locks = _worker_ledger_lock_bundle(fleet)
+    cancel_scale_down = (
+        _extract_fleet_function(fleet, "cancel_worker_for_scale_down() {")
+        if "cancel_worker_for_scale_down() {" in fleet
+        else ""
+    )
+    autoscaler = _extract_fleet_function(fleet, "bench_autoscaler() {")
+    worker_id = "deadbeef000003"
+    ready_id = "deadbeef000004"
+
+    for scenario in ("pending-only", "mixed", "stale-count"):
+        mixed_pool = scenario != "pending-only"
+        stale_count = scenario == "stale-count"
+        output = tmp_path / scenario
+        output.mkdir()
+        cleaned = tmp_path / f"{scenario}-cleaned"
+        script = f"""set -u
+APP=test-app
+RUN_ID=test-run
+BOX_HEALTH_PORT=3003
+AUTOSCALE_MAX=15
+AUTOSCALE_POLL=0
+AUTOSCALER_FINALIZATION_WAIT_SECONDS=1
+CLOUDBENCH_BOOT_LAUNCH=0
+OUT={shlex.quote(str(output))}
+WID={worker_id}
+READY_ID={ready_id}
+MIXED_POOL={1 if mixed_pool else 0}
+STALE_COUNT={1 if stale_count else 0}
+CLEANED={shlex.quote(str(cleaned))}
+_machine_priv_ip() {{ printf '%s\n' fd00::1; }}
+inventory_machine_exists() {{ return 0; }}
+release_autoscaler_metrics_owner() {{ return 0; }}
+claim_autoscaler_metrics_port() {{ printf -v "$1" '%s' 5555; }}
+flyctl() {{ /bin/sleep 30; }}
+curl() {{ return 0; }}
+fleet_job_running() {{ kill -0 "$1" 2>/dev/null; }}
+cloudbench_terminate_and_wait() {{
+  shift
+  local pid
+  for pid in "$@"; do
+    [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+}}
+_box_desired() {{
+  if [ "$MIXED_POOL" = 1 ]; then
+    printf '%s\n%s\n' "$WID" "$READY_ID" > "$OUT/worker-clones.ids"
+    printf '%s\n' "$READY_ID" > "$OUT/worker-ready.ids"
+    : > "$OUT/worker-$READY_ID.ready"
+    desired=2
+  else
+    printf '%s\n' "$WID" > "$OUT/worker-clones.ids"
+    desired=1
+  fi
+  : > "$OUT/worker-$WID.pending"
+  : > "$OUT/scale-observed"
+  printf '%s\n' "$desired"
+}}
+cleanup_failed_worker() {{
+  printf '%s\n' "$2" > "$CLEANED"
+  awk -v id="$2" '$0 != id' "$1/worker-clones.ids" > "$1/worker-clones.ids.tmp"
+  mv "$1/worker-clones.ids.tmp" "$1/worker-clones.ids"
+  awk -v id="$2" '$0 != id' "$1/worker-ready.ids" > "$1/worker-ready.ids.tmp"
+  mv "$1/worker-ready.ids.tmp" "$1/worker-ready.ids"
+  rm -f "$1/worker-$2.pending" "$1/worker-$2.ready"
+}}
+reconcile_worker_ready_outcomes() {{
+  if [ -e "$1/scale-observed" ]; then
+    : > "$1/benchmark-child.finished"
+  fi
+  return 0
+}}
+reconcile_worker_failure_outcomes() {{ return 0; }}
+provision_worker() {{ return 99; }}
+{pool_count}
+{ready_count}
+{worker_is_tracked}
+{ledger_locks}
+{cancel_scale_down}
+_pool_ids() {{
+  local f="$1/worker-clones.ids" n
+  [ -f "$f" ] || {{ echo 0; return; }}
+  n="$(grep -c . "$f" 2>/dev/null)"
+  if [ "$STALE_COUNT" = 1 ] && [ ! -e "$OUT/count-race-triggered" ]; then
+    : > "$OUT/count-race-triggered"
+    while [ ! -e "$OUT/count-race-complete" ]; do sleep 0.01; done
+  fi
+  printf '%s\n' "${{n:-0}}"
+}}
+{autoscaler}
+race_pid=""
+if [ "$STALE_COUNT" = 1 ]; then
+  (
+    while [ ! -e "$OUT/count-race-triggered" ]; do sleep 0.01; done
+    worker_ledger_lock_acquire "$OUT"
+    awk -v id="$WID" '$0 != id' "$OUT/worker-clones.ids" > "$OUT/worker-clones.ids.tmp"
+    mv "$OUT/worker-clones.ids.tmp" "$OUT/worker-clones.ids"
+    rm -f "$OUT/worker-$WID.pending"
+    worker_ledger_lock_release "$OUT"
+    : > "$OUT/count-race-complete"
+  ) &
+  race_pid=$!
+fi
+bench_autoscaler task primary workspace 0 "$OUT" 6000
+if [ -n "$race_pid" ]; then wait "$race_pid"; fi
+if [ "$STALE_COUNT" = 1 ]; then
+  test ! -e "$CLEANED"
+  test ! -e "$OUT/worker-$WID.cancelled"
+  test "$(cat "$OUT/worker-clones.ids")" = "$READY_ID"
+  test "$(cat "$OUT/worker-ready.ids")" = "$READY_ID"
+else
+  test -e "$OUT/worker-$WID.cancelled"
+  test "$(cat "$CLEANED")" = "$WID"
+fi
+if [ "$MIXED_POOL" = 1 ] && [ "$STALE_COUNT" != 1 ]; then
+  test "$(cat "$OUT/worker-clones.ids")" = "$READY_ID"
+  test "$(cat "$OUT/worker-ready.ids")" = "$READY_ID"
+elif [ "$MIXED_POOL" != 1 ]; then
+  test ! -s "$OUT/worker-clones.ids"
+fi
+test -e "$OUT/autoscaler.completed-after-child"
+"""
+
+        result = subprocess.run(
+            ["bash", "-c", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+
+        assert result.returncode == 0, result.stderr + result.stdout
 
 
 def test_worker_preflight_failure_records_cleanup_failure_and_keeps_retry_handle(tmp_path: Path) -> None:

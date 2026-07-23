@@ -3334,6 +3334,50 @@ worker_is_tracked() {  # worker_is_tracked <bench-output-dir> <worker-id>
         && grep -Fxq "$wid" "$out/worker-clones.ids" 2>/dev/null
 }
 
+cancel_worker_for_scale_down() {  # <bench-output-dir> <desired-worker-count>
+    local out="$1" want="$2" tracked wid="" candidate rc=0
+    case "$want" in ''|*[!0-9]*) return 1 ;; esac
+
+    # Count, choose, and publish cancellation under the same ledger lock. A
+    # failed provisioner can otherwise remove pending capacity after the count,
+    # leaving scale-down to destroy a healthy ready worker using stale overage.
+    worker_ledger_lock_acquire "$out" || return 1
+    tracked="$(_pool_ids "$out")"
+    case "$tracked" in ''|*[!0-9]*) rc=1 ;; esac
+    if [ "$rc" = "0" ] && [ "$tracked" -gt "$want" ]; then
+        # Retire uncommitted capacity first. Provisioners finish out of order,
+        # so clone-ledger order cannot prove which worker is safe to remove.
+        while IFS= read -r candidate; do
+            [ -n "$candidate" ] || continue
+            if [ -e "$out/worker-$candidate.pending" ] \
+                && [ ! -e "$out/worker-$candidate.cancelled" ]; then
+                wid="$candidate"
+            fi
+        done < "$out/worker-clones.ids"
+        if [ -z "$wid" ]; then
+            while IFS= read -r candidate; do
+                [ -n "$candidate" ] || continue
+                if [ ! -e "$out/worker-$candidate.cancelled" ] \
+                    && worker_is_tracked "$out" "$candidate"; then
+                    wid="$candidate"
+                fi
+            done < "$out/worker-ready.ids"
+        fi
+        if [ -z "$wid" ]; then
+            while IFS= read -r candidate; do
+                [ -n "$candidate" ] || continue
+                [ -e "$out/worker-$candidate.cancelled" ] || wid="$candidate"
+            done < "$out/worker-clones.ids"
+        fi
+        if [ -n "$wid" ] && ! : > "$out/worker-$wid.cancelled"; then
+            rc=1
+        fi
+    fi
+    worker_ledger_lock_release "$out" || rc=1
+    [ "$rc" = "0" ] || return 1
+    printf '%s\n' "$wid"
+}
+
 cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
     local cleanup_out="$1" cleanup_wid="$2" tracking_tmp ready_tmp grep_status rc=0
     local claim="$1/worker-$2.cleanup-claim" self_pid="${BASHPID:-$$}"
@@ -3948,17 +3992,12 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
             echo "  ⤵️  [$bench] scale down -$n (desired=$desired, pool=$cur)"
             for _ in $(seq 1 "$n"); do
                 local wid
-                wid="$(tail -1 "$out/worker-ready.ids" 2>/dev/null)"
-                [ -n "$wid" ] || break
-                # Publish cancellation before provider destroy. A provisioner
-                # staging this worker can then distinguish intentional scale-in
-                # from a real launch/readiness failure and must never poison the
-                # autoscaler's shared failure marker afterward.
-                if ! : > "$out/worker-$wid.cancelled"; then
-                    printf '%s\n' "could not persist worker $wid scale-down cancellation" > "$out/autoscaler.failed"
-                    echo "  ❌ [$bench] mandatory autoscaler: could not persist cancellation for worker $wid" >&2
+                if ! wid="$(cancel_worker_for_scale_down "$out" "$want")"; then
+                    printf '%s\n' "could not select worker for scale-down" > "$out/autoscaler.failed"
+                    echo "  ❌ [$bench] mandatory autoscaler: could not select worker for scale-down" >&2
                     return 1
                 fi
+                [ -n "$wid" ] || break
                 # Only drop the id from tracking once the destroy is CONFIRMED —
                 # an untracked-but-alive machine is a billed-forever zombie. On
                 # failure keep it listed and retry on the next autoscaler tick.
