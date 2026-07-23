@@ -1544,6 +1544,36 @@ def test_agent_payment_accepts_grounded_structured_browser_confirmation():
     assert _evaluate_agent_payment_result(data) == (True, None)
 
 
+def test_agent_payment_accepts_current_payment_confirmation_schema_key():
+    """The browser payment task currently asks for payment_confirmation_id."""
+    from benchmarks.run_benchmark import _evaluate_agent_payment_result
+
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "The final DOM shows Payment confirmed with order ID tp_058813d0.",
+                "metadata": {
+                    "phase": "EXECUTE",
+                    "title": "Browser automation complete",
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "structured_response": {
+                        "payment_confirmation_id": "tp_058813d0",
+                        "purchased_product_names": [
+                            "Aurora Notebook",
+                            "Ceramic Mug",
+                            "Canvas Tote",
+                        ],
+                    },
+                },
+            }
+        ],
+    }
+
+    assert _evaluate_agent_payment_result(data) == (True, None)
+
+
 def test_production_payment_lifecycle_refuses_sandbox_target():
     import pytest
 
@@ -10248,6 +10278,10 @@ async def run_all_tests():
     r.record(
         "agent_payment_grounded_structured_confirmation",
         test_agent_payment_accepts_grounded_structured_browser_confirmation,
+    )
+    r.record(
+        "agent_payment_current_payment_confirmation_key",
+        test_agent_payment_accepts_current_payment_confirmation_schema_key,
     )
     r.record(
         "production_payment_rejects_sandbox_target",
