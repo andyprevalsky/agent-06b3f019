@@ -130,7 +130,8 @@ export async function fetchClaudeCodeCredentials(userId: string): Promise<string
  *
  * Resolution order:
  *   1. User's own `claude_code` integration (if not rate-limited)
- *   2. Pool integration (least-recently-used non-rate-limited token)
+ *   2. User's refreshable OAuth envelope after a direct-token auth failure
+ *   3. Pool integration (least-recently-used non-rate-limited token)
  */
 export async function fetchClaudeCodeCredentialsWithMeta(
   userId: string
@@ -164,8 +165,35 @@ export async function fetchClaudeCodeCredentialsWithMeta(
       }
     } else {
       log.info(
-        `No active claude_code integration for user ${userId} (none synced or rate-limited) — falling back to pool`
+        `No active claude_code integration for user ${userId} (none synced or rate-limited)`
       );
+    }
+
+    // Direct Anthropic calls can reject an expired access token even though the
+    // same persisted OAuth envelope still has a refresh token that Claude Code
+    // can exchange. Keep direct callers off the rejected access token (the
+    // integration remains EXPIRED), but let the CLI consume the full envelope
+    // without re-injecting that known-bad token as CLAUDE_CODE_OAUTH_TOKEN.
+    const directAuthFailedIntegration = await prisma.integration.findFirst({
+      where: {
+        userId,
+        name: 'claude_code',
+        status: 'EXPIRED',
+        failureReason: 'auth_error',
+        OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
+      },
+    });
+    if (directAuthFailedIntegration) {
+      const decrypted = decryptIntegrationCredentials(directAuthFailedIntegration, decryptionKey);
+      if (decrypted) {
+        const result = buildClaudeCodeCredentialResult(decrypted, 'user', userId);
+        if (result?.credentialMode === 'oauth_envelope') {
+          log.info(
+            `Serving refreshable user Claude Code envelope for ${userId} after direct-token auth failure`
+          );
+          return forceOauthEnvelopeRefresh(result);
+        }
+      }
     }
 
     const poolResult = await fetchPoolCredentials();
@@ -199,6 +227,20 @@ function decryptIntegrationCredentials(
     return null;
   }
   return decrypted;
+}
+
+function forceOauthEnvelopeRefresh(result: ClaudeCodeCredentialResult): ClaudeCodeCredentialResult {
+  const parsed = JSON.parse(result.credentials ?? '{}') as Record<string, unknown>;
+  const oauth = parsed.claudeAiOauth as Record<string, unknown>;
+  // The direct API already proved this access token unusable. Preserve it to
+  // satisfy Claude Code's credential schema, but expire the sandbox copy so
+  // the CLI exchanges the refresh token before its first model request.
+  oauth.expiresAt = 0;
+  return {
+    ...result,
+    credentials: JSON.stringify(parsed),
+    accessToken: undefined,
+  };
 }
 
 /**
@@ -421,7 +463,7 @@ export async function markUserTokenRateLimited(
     where: {
       userId,
       name: 'claude_code',
-      status: 'CONNECTED',
+      status: { in: ['CONNECTED', 'EXPIRED'] },
     },
     data: { rateLimitedUntil: until },
   });

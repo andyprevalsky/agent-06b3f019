@@ -75,6 +75,10 @@ import {
   __resetAnthropicApiKeyCooldown,
   isAnthropicApiKeyOnCooldown,
 } from '../../providers/computeCredentials';
+import {
+  fetchClaudeCodeCredentialsWithMeta,
+  markUserTokenRateLimited,
+} from '../../providers/claudeCredentials';
 import { withComputePoolLock } from './compute-pool-lock.testkit';
 config();
 
@@ -4426,6 +4430,71 @@ async function testRotation_userAuthErrorDisablesToken() {
   }
 }
 
+async function testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnvelope() {
+  const caller = await createAnonSession();
+  const poolOwner = await createAnonSession();
+  const userToken = await seedClaudeIntegration(caller.userId, { poolingEnabled: false });
+  const poolToken = await seedClaudeIntegration(poolOwner.userId, {
+    poolingEnabled: true,
+    lastUsedAt: new Date(0),
+  });
+
+  try {
+    const mark = await request(`${BASE_URL}/api/integrations/compute-code/token/rate-limited`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        type: 'claude',
+        source: 'user',
+        userId: caller.userId,
+        failureReason: 'auth_error',
+      }),
+    });
+    assertStatus(mark.status, 200, mark.data);
+
+    const disabled = await prisma.integration.findUnique({ where: { id: userToken.id } });
+    assert(disabled?.status === 'EXPIRED', 'direct auth_error must disable direct token use');
+
+    const codeCredential = await fetchClaudeCodeCredentialsWithMeta(caller.userId);
+    assert(
+      codeCredential?.source === 'user',
+      'Claude Code must retain the user OAuth envelope when only direct access-token auth failed'
+    );
+    assert(
+      codeCredential.credentialMode === 'oauth_envelope',
+      'Claude Code recovery requires a refreshable OAuth envelope'
+    );
+    assert(
+      codeCredential.credentials !== undefined,
+      'Claude Code recovery must include the complete OAuth envelope'
+    );
+    const recoveredEnvelope = JSON.parse(codeCredential.credentials) as {
+      claudeAiOauth?: { expiresAt?: number; refreshToken?: string };
+    };
+    assert(
+      recoveredEnvelope.claudeAiOauth?.expiresAt === 0,
+      'The sandbox envelope must force-refresh the direct access token that failed'
+    );
+    assert(
+      recoveredEnvelope.claudeAiOauth?.refreshToken === 'test-refresh',
+      'The sandbox envelope must preserve the refresh token used by Claude Code'
+    );
+    assert(
+      codeCredential.accessToken === undefined,
+      'Claude Code must not re-inject the direct access token that just failed authentication'
+    );
+
+    await markUserTokenRateLimited(caller.userId, { cooldownMs: 60_000 });
+    const backedOffCredential = await fetchClaudeCodeCredentialsWithMeta(caller.userId);
+    assert(
+      backedOffCredential?.source === 'pool' && backedOffCredential.poolTokenId === poolToken.id,
+      'A Claude Code failure must back off the recovered envelope and use the available pool token'
+    );
+  } finally {
+    await cleanupIntegrations([userToken.id, poolToken.id]);
+  }
+}
+
 async function testRotation_gptUserAuthErrorDisablesToken() {
   const caller = await createAnonSession();
   const poolOwner = await createAnonSession();
@@ -5930,6 +5999,10 @@ async function runAll() {
     {
       name: 'rotation -- user auth_error disables token',
       fn: testRotation_userAuthErrorDisablesToken,
+    },
+    {
+      name: 'rotation -- direct auth_error keeps refreshable Claude Code envelope',
+      fn: testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnvelope,
     },
     {
       name: 'rotation -- GPT user auth_error disables token',
