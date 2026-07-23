@@ -9,7 +9,7 @@ import {
   reclaimPurchaseWalletFunding,
   recordIssuedPurchaseCardFunding,
 } from './purchase-wallet-funding';
-import { cancelAuthorizedHold, refundCapturedPurchase, stripe } from './stripe';
+import { reversePurchasePaymentIntent, stripe } from './stripe';
 import {
   createWalletFundingProvider,
   isWalletFundingConsumedDuringReclaimError,
@@ -61,12 +61,7 @@ async function reversePurchaseAuthorization(
   const paymentIntentId =
     persistedPaymentIntentId ?? (await recoverUnpersistedStripeIntent(purchaseId));
   if (paymentIntentId === null) return null;
-  const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-  if (paymentIntent.status === 'succeeded' || paymentIntent.amount_received > 0) {
-    await refundCapturedPurchase(paymentIntentId, purchaseId);
-  } else {
-    await cancelAuthorizedHold(paymentIntentId);
-  }
+  await reversePurchasePaymentIntent(paymentIntentId, purchaseId);
   return paymentIntentId;
 }
 
@@ -126,24 +121,17 @@ async function compensateAbandonedPurchase(
   let purchase = await loadAbandonedPurchase(purchaseId);
   if (purchase === null) return;
 
-  // A card already persisted may have been exposed after capture but before HELD committed. Reclaim
-  // its transfer before reversing Stripe so a consumed card can never be refunded as if unspent.
-  const paymentReversedBeforeProviderObservation = purchase.cardId === null;
-  if (paymentReversedBeforeProviderObservation) {
-    const paymentIntentId = await reversePurchaseAuthorization(
-      purchase.id,
-      purchase.stripePaymentIntentId
-    );
-    if (paymentIntentId === null) {
-      // The funding marker is written before Stripe. No Stripe PI means the process died before any
-      // provider call could start, so this row is safe to terminate.
-      await discardPendingPurchaseWalletCollection(purchase.id);
-      await prisma.purchaseSpend.updateMany({
-        where: { id: purchase.id, status: PurchaseSpendStatus.FUNDING_ABANDONED },
-        data: { status: PurchaseSpendStatus.FAILED },
-      });
-      return;
-    }
+  const paymentIntentId =
+    purchase.stripePaymentIntentId ?? (await recoverUnpersistedStripeIntent(purchase.id));
+  if (paymentIntentId === null) {
+    // The funding marker is written before Stripe. No Stripe PI means the process died before any
+    // provider call could start, so this row is safe to terminate without replaying AgentCard.
+    await discardPendingPurchaseWalletCollection(purchase.id);
+    await prisma.purchaseSpend.updateMany({
+      where: { id: purchase.id, status: PurchaseSpendStatus.FUNDING_ABANDONED },
+      data: { status: PurchaseSpendStatus.FAILED },
+    });
+    return;
   }
 
   purchase = await loadAbandonedPurchase(purchase.id);
@@ -153,9 +141,7 @@ async function compensateAbandonedPurchase(
   const issued = await ensureIssuedCardIsRecorded(purchase, activeCardProvider);
   if (issued === null) return;
   if (issued.staticCard) {
-    if (!paymentReversedBeforeProviderObservation) {
-      await reversePurchaseAuthorization(purchase.id, purchase.stripePaymentIntentId);
-    }
+    await reversePurchaseAuthorization(purchase.id, paymentIntentId);
     await prisma.purchaseSpend.updateMany({
       where: { id: purchase.id, status: PurchaseSpendStatus.FUNDING_ABANDONED },
       data: { status: PurchaseSpendStatus.VOIDED },
@@ -183,9 +169,7 @@ async function compensateAbandonedPurchase(
     }
     throw error;
   }
-  if (!paymentReversedBeforeProviderObservation) {
-    await reversePurchaseAuthorization(purchase.id, purchase.stripePaymentIntentId);
-  }
+  await reversePurchaseAuthorization(purchase.id, paymentIntentId);
   await prisma.purchaseSpend.updateMany({
     where: { id: purchase.id, status: PurchaseSpendStatus.FUNDING_ABANDONED },
     data: { status: PurchaseSpendStatus.VOIDED },
@@ -195,7 +179,7 @@ async function compensateAbandonedPurchase(
 /** Terminal-agent hook: stop user-owned retries before releasing their Stripe authorization. */
 export async function abandonAgentFundingPending(agentId: string): Promise<void> {
   await prisma.purchaseSpend.updateMany({
-    where: { agentId, status: PurchaseSpendStatus.FUNDING_PENDING, cardId: null },
+    where: { agentId, status: PurchaseSpendStatus.FUNDING_PENDING },
     data: { status: PurchaseSpendStatus.FUNDING_ABANDONED },
   });
 }
@@ -207,7 +191,6 @@ export async function abandonStaleFundingPending(scope?: FundingCompensationScop
     where: {
       ...scopeWhere(scope),
       status: PurchaseSpendStatus.FUNDING_PENDING,
-      cardId: null,
       updatedAt: { lt: staleBefore },
     },
     select: { id: true, updatedAt: true },
@@ -217,7 +200,6 @@ export async function abandonStaleFundingPending(scope?: FundingCompensationScop
       where: {
         id: purchase.id,
         status: PurchaseSpendStatus.FUNDING_PENDING,
-        cardId: null,
         updatedAt: purchase.updatedAt,
       },
       data: { status: PurchaseSpendStatus.FUNDING_ABANDONED },
@@ -226,8 +208,9 @@ export async function abandonStaleFundingPending(scope?: FundingCompensationScop
 }
 
 /**
- * Cancel/refund the user first, then replay the exact AgentCard key until the external outcome is
- * observable. A late card is atomically recorded, closed, and its company transfer released.
+ * Replay the exact AgentCard key until the external outcome is observable. A late card is
+ * atomically recorded, closed, and reclaimed before Stripe is canceled/refunded, so a consumed
+ * card can never receive a free user-payment reversal.
  */
 export async function reconcileAbandonedPurchaseFunding(
   cardProvider?: CardProvider,

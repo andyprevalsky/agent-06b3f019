@@ -42,6 +42,10 @@ export async function findMostRecentPurchaseByUserAndFingerprint(
   });
 }
 
+export async function findPurchaseById(id: string) {
+  return prisma.purchaseSpend.findUnique({ where: { id } });
+}
+
 export async function findRecentPurchaseByUserAndFingerprint(
   userId: string,
   fingerprint: string,

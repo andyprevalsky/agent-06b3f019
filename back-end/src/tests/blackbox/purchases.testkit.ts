@@ -331,6 +331,7 @@ export async function withFakeStripe<T>(
   opts: {
     retrievePaymentIntent?: (id: string) => Promise<unknown> | unknown;
     refundError?: Error;
+    captureError?: Error;
     cancelError?: Error;
     fixedPaymentIntentId?: string;
     afterCapture?: (id: string) => void;
@@ -399,6 +400,7 @@ export async function withFakeStripe<T>(
   paymentIntents.capture = async (id: string) => {
     calls.captures.push(id);
     opts.afterCapture?.(id);
+    if (opts.captureError !== undefined) throw opts.captureError;
     return { id, status: 'succeeded' };
   };
   paymentIntents.cancel = async (id: string) => {

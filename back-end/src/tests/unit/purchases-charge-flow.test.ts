@@ -182,6 +182,91 @@ async function main(): Promise<void> {
     );
   });
 
+  await test('mintPurchaseCard verifies an ambiguous capture response before returning the card', async () => {
+    const userId = await seedSubscribedUser();
+    const provider = new FakeCardProvider();
+    const wallet = new FakeWalletFundingProvider();
+    const input = mintInput(userId);
+    const result = await withFakeStripe(
+      async (calls) => {
+        const outcome = await mintPurchaseCard(input, provider, wallet);
+        assert.equal(calls.captures.length, 1);
+        assert.equal(calls.retrieves.length, 1, 'ambiguous capture must be verified at Stripe');
+        assert.equal(calls.cancels.length, 0);
+        assert.equal(calls.refunds.length, 0);
+        return outcome;
+      },
+      { captureError: new Error('capture response was lost') }
+    );
+    assert.equal(result.status, PurchaseSpendStatus.HELD);
+  });
+
+  await test('mintPurchaseCard never returns a card for a canceled PaymentIntent', async () => {
+    const userId = await seedSubscribedUser();
+    const provider = new FakeCardProvider();
+    const wallet = new FakeWalletFundingProvider();
+    const input = mintInput(userId);
+    const terminalError = Object.assign(new Error('PaymentIntent is already canceled'), {
+      code: 'payment_intent_unexpected_state',
+    });
+    await withFakeStripe(
+      async (calls) => {
+        await assert.rejects(() => mintPurchaseCard(input, provider, wallet), terminalError);
+        assert.equal(calls.captures.length, 1);
+        assert.equal(calls.cancels.length, 0);
+        assert.equal(calls.refunds.length, 0);
+      },
+      {
+        captureError: terminalError,
+        retrievePaymentIntent: (id) => ({
+          id,
+          status: 'canceled',
+          amount_capturable: 0,
+          amount_received: 0,
+        }),
+      }
+    );
+    assert.equal(provider.closeCalls, 1);
+    assert.equal(wallet.reclaimCalls.length, 1);
+    assert.equal(await latestStatus(userId, input.fingerprint), PurchaseSpendStatus.FAILED);
+  });
+
+  await test('mintPurchaseCard recovers a committed card when the DB acknowledgement is lost', async () => {
+    const userId = await seedSubscribedUser();
+    const provider = new FakeCardProvider();
+    const wallet = new FakeWalletFundingProvider();
+    const input = mintInput(userId);
+    const transactionDelegate = prisma as unknown as {
+      $transaction: (...args: unknown[]) => Promise<unknown>;
+    };
+    const originalTransaction = transactionDelegate.$transaction.bind(prisma);
+    const originalMint = provider.mintCard.bind(provider);
+    provider.mintCard = async (request) => {
+      const result = await originalMint(request);
+      transactionDelegate.$transaction = async (...args) => {
+        transactionDelegate.$transaction = originalTransaction;
+        await originalTransaction(...args);
+        throw new Error('database commit acknowledgement was lost');
+      };
+      return result;
+    };
+    try {
+      await withFakeStripe(async (calls) => {
+        await assert.rejects(
+          () => mintPurchaseCard(input, provider, wallet),
+          /database commit acknowledgement was lost/
+        );
+        assert.equal(calls.captures.length, 0);
+        assert.equal(calls.cancels.length, 1);
+      });
+    } finally {
+      transactionDelegate.$transaction = originalTransaction;
+    }
+    assert.equal(provider.closeCalls, 1, 'durably persisted card must be closed');
+    assert.equal(wallet.reclaimCalls.length, 1, 'durably persisted transfer must be reclaimed');
+    assert.equal(await latestStatus(userId, input.fingerprint), PurchaseSpendStatus.FAILED);
+  });
+
   await test('mintPurchaseCard validates its inputs before touching Stripe', async () => {
     const userId = await seedSubscribedUser();
     await assert.rejects(

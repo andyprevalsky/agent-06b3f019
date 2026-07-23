@@ -7,11 +7,14 @@ export function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-export function mcpResultRecord(result: unknown): Record<string, unknown> {
-  const envelope = asRecord(result) ?? {};
-  const structured = asRecord(envelope.toolResult) ?? asRecord(envelope.structuredContent);
-  if (structured !== undefined) return structured;
-  const content = Array.isArray(envelope.content) ? envelope.content : [];
+function assertMcpSuccess(record: Record<string, unknown>): void {
+  if (record.isError === true) {
+    throw new TestPaymentError('AgentCard lifecycle request returned an error', 502);
+  }
+}
+
+function contentRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const content = Array.isArray(record.content) ? record.content : [];
   const text = content
     .map((part) => asRecord(part))
     .filter((part): part is Record<string, unknown> => part !== undefined)
@@ -23,10 +26,47 @@ export function mcpResultRecord(result: unknown): Record<string, unknown> {
       const parsed = asRecord(JSON.parse(text));
       if (parsed !== undefined) return parsed;
     } catch {
-      throw new TestPaymentError('AgentCard transfer lifecycle response was invalid', 502);
+      throw new TestPaymentError('AgentCard lifecycle response was invalid', 502);
     }
   }
-  throw new TestPaymentError('AgentCard transfer lifecycle response was invalid', 502);
+  throw new TestPaymentError('AgentCard lifecycle response was invalid', 502);
+}
+
+export function mcpResultRecord(result: unknown): Record<string, unknown> {
+  const envelope = asRecord(result);
+  if (envelope === undefined) {
+    throw new TestPaymentError('AgentCard lifecycle response was invalid', 502);
+  }
+  assertMcpSuccess(envelope);
+  const toolResult = asRecord(envelope.toolResult);
+  if (toolResult !== undefined) {
+    assertMcpSuccess(toolResult);
+    const structured = asRecord(toolResult.structuredContent);
+    if (structured !== undefined) return structured;
+    if ('content' in toolResult) return contentRecord(toolResult);
+    return toolResult;
+  }
+  const structured = asRecord(envelope.structuredContent);
+  if (structured !== undefined) return structured;
+  return contentRecord(envelope);
+}
+
+export function mcpResultRows(result: unknown, field: string): Record<string, unknown>[] {
+  const record = mcpResultRecord(result);
+  const values = record[field];
+  if (!Array.isArray(values)) {
+    throw new TestPaymentError(`AgentCard lifecycle response missing ${field}`, 502);
+  }
+  return values.map((value, index) => {
+    const row = asRecord(value);
+    if (row === undefined) {
+      throw new TestPaymentError(`AgentCard ${field} lifecycle row ${index} was invalid`, 502);
+    }
+    if (typeof row.id !== 'string' || row.id.trim() === '') {
+      throw new TestPaymentError(`AgentCard ${field} lifecycle row ${index} missing id`, 502);
+    }
+    return row;
+  });
 }
 
 export function integerField(record: Record<string, unknown>, key: string): number {
@@ -48,13 +88,8 @@ export function stringField(record: Record<string, unknown>, key: string): strin
 function providerRows(results: unknown[], field: string): Record<string, unknown>[] {
   const byId = new Map<string, Record<string, unknown>>();
   for (const result of results) {
-    const record = mcpResultRecord(result);
-    const rows = Array.isArray(record[field]) ? record[field] : [];
-    for (const value of rows) {
-      const row = asRecord(value);
-      if (row === undefined) continue;
-      const id = typeof row.id === 'string' ? row.id : JSON.stringify(row);
-      byId.set(id, row);
+    for (const row of mcpResultRows(result, field)) {
+      byId.set(row.id as string, row);
     }
   }
   return [...byId.values()];

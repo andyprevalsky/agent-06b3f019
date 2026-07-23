@@ -29,6 +29,10 @@ import {
 } from '../../domains/test-payment/catalog';
 import { getTestPaymentLifecycle } from '../../domains/test-payment/lifecycle';
 import {
+  listOrgTransferWindow,
+  searchAllStripeHolds,
+} from '../../domains/test-payment/lifecyclePagination';
+import {
   abandonTestPayment,
   configureBenchmarkAgentCardSetup,
   confirmPhoneBenchmarkPayment,
@@ -572,6 +576,41 @@ async function main(): Promise<void> {
           }),
         }),
       /does not cover the purchase window/
+    );
+  });
+
+  await test('transfer lifecycle proof rejects MCP errors and malformed full pages', async () => {
+    await assert.rejects(
+      () =>
+        listOrgTransferWindow(new Date(), async ({ status }) =>
+          status === 'pending'
+            ? { isError: true, structuredContent: { transfers: [] } }
+            : { structuredContent: { transfers: [] } }
+        ),
+      /returned an error/
+    );
+    await assert.rejects(
+      () =>
+        listOrgTransferWindow(new Date(), async ({ status }) => ({
+          structuredContent: {
+            transfers:
+              status === 'pending'
+                ? [...Array.from({ length: 99 }, (_, id) => ({ id: `transfer-${id}` })), null]
+                : [],
+          },
+        })),
+      /row 99 was invalid/
+    );
+    await assert.rejects(
+      () =>
+        listOrgTransferWindow(new Date(), async () => ({
+          structuredContent: { transfers: [{ id: '' }] },
+        })),
+      /missing id/
+    );
+    await assert.rejects(
+      () => searchAllStripeHolds('agent-invalid', async () => ({ data: [{ id: '' }] })),
+      /invalid intent id/
     );
   });
 

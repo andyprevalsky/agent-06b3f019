@@ -86,8 +86,13 @@ export async function classifyFundingResumeFailure(
   walletWasFunded: boolean;
   fundingResumeRequired: boolean;
   walletFundingPrepared: boolean;
+  issuedCardId?: string;
 }> {
   let boundaryError = toPurchaseBoundaryError(error);
+  const durablePurchase = state.providerCallStarted
+    ? await repo.findPurchaseById(purchase.id).catch(() => undefined)
+    : undefined;
+  const issuedCardId = state.issuedCardId ?? durablePurchase?.cardId ?? undefined;
   const funding = state.walletFundingPrepared
     ? await preparePurchaseWalletCollection(purchase, 'usd').catch(() => undefined)
     : undefined;
@@ -96,7 +101,7 @@ export async function classifyFundingResumeFailure(
     funding?.status === PurchaseWalletFundingStatus.CONSUMED;
   const ambiguousExternalOutcome = hasAmbiguousExternalOutcome(error, boundaryError, state);
   const fundingResumeRequired =
-    state.issuedCardId === undefined &&
+    issuedCardId === undefined &&
     state.walletFundingPrepared &&
     ((boundaryError instanceof PurchaseError &&
       boundaryError.code === 'agentcard_company_funding_in_progress') ||
@@ -122,13 +127,20 @@ export async function classifyFundingResumeFailure(
     funding?.status === PurchaseWalletFundingStatus.PENDING
   ) {
     await discardPendingPurchaseWalletCollection(purchase.id).catch(() => undefined);
-    return { boundaryError, walletWasFunded, fundingResumeRequired, walletFundingPrepared: false };
+    return {
+      boundaryError,
+      walletWasFunded,
+      fundingResumeRequired,
+      walletFundingPrepared: false,
+      issuedCardId,
+    };
   }
   return {
     boundaryError,
     walletWasFunded,
     fundingResumeRequired,
     walletFundingPrepared: state.walletFundingPrepared,
+    issuedCardId,
   };
 }
 

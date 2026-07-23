@@ -6,6 +6,7 @@ import {
   asRecord,
   integerField,
   mcpResultRecord,
+  mcpResultRows,
   providerIntegrity,
   stringField,
 } from './lifecycleProviderRecords';
@@ -177,11 +178,7 @@ function mapOrgTransfer(
   transferResults: unknown[]
 ): TestPaymentLifecycle['orgTransfer'] {
   const transfer = transferResults
-    .flatMap((result) => {
-      const transferRecord = mcpResultRecord(result);
-      return Array.isArray(transferRecord.transfers) ? transferRecord.transfers : [];
-    })
-    .map((value) => asRecord(value))
+    .flatMap((result) => mcpResultRows(result, 'transfers'))
     .filter((value) => value?.card_id === purchase.cardId)
     .sort((left, right) => {
       const releasedDifference = transferReleasedCents(right) - transferReleasedCents(left);

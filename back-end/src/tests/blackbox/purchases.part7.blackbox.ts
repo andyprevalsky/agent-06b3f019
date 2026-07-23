@@ -442,13 +442,64 @@ async function testTerminalPendingCompensation(): Promise<void> {
       row.status === PurchaseSpendStatus.FUNDING_ABANDONED,
       `expected FUNDING_ABANDONED, got ${row.status}`
     );
-    assert(calls.cancels.length === 1, 'terminal cleanup must release the Stripe hold');
+    assert(calls.cancels.length === 0, 'Stripe must stay held until AgentCard is observed');
     card.completeFunding();
     await reconcileAbandonedPurchaseFunding(card, wallet, { userId });
     row = await prisma.purchaseSpend.findUniqueOrThrow({ where: { id: purchase.id } });
     assert(row.status === PurchaseSpendStatus.VOIDED, `expected VOIDED, got ${row.status}`);
     assert(card.closeCalls === 1, 'a late card must be closed');
     assert(wallet.reclaimCalls.length === 1, 'a late transfer must be reclaimed');
+    assert(calls.cancels.length === 1, 'Stripe hold releases only after AgentCard reclaim');
+  });
+}
+
+async function testPersistedCardPendingCompensation(): Promise<void> {
+  const userId = await subscribedUser();
+  const agent = await prisma.agent.create({
+    data: { userId, goal: 'persisted funding abandonment test', status: 'FAILED' },
+  });
+  const cardId = `card-pending-${randomUUID()}`;
+  const transferId = `owt-pending-${randomUUID()}`;
+  const purchase = await prisma.purchaseSpend.create({
+    data: {
+      userId,
+      agentId: agent.id,
+      fingerprint: `persisted-pending-${randomUUID()}`,
+      merchant: 'Crash Boundary Merchant',
+      lineItemsJson: { totalCents: 1000 },
+      totalCents: 1000,
+      status: PurchaseSpendStatus.FUNDING_PENDING,
+      cardId,
+      stripePaymentIntentId: `pi_${randomUUID()}`,
+    },
+  });
+  await prisma.purchaseWalletFunding.create({
+    data: {
+      purchaseId: purchase.id,
+      userId,
+      agentId: agent.id,
+      amountCents: 1000,
+      idempotencyKey: `purchase-wallet-fund:${purchase.id}`,
+      status: PurchaseWalletFundingStatus.FUNDED,
+      providerTransferId: transferId,
+    },
+  });
+  let closeCalls = 0;
+  const card = {
+    ...fixedCardProvider(cardId, transferId),
+    async closeCard(id: string) {
+      assert(id === cardId, `unexpected card ${id}`);
+      closeCalls += 1;
+    },
+  };
+  const wallet = new FakeWalletFundingProvider();
+  await withFakeStripe(async (calls) => {
+    await cleanupAgentPurchaseCards(agent.id, card, wallet);
+    const row = await prisma.purchaseSpend.findUniqueOrThrow({ where: { id: purchase.id } });
+    assert(row.status === PurchaseSpendStatus.VOIDED, `expected VOIDED, got ${row.status}`);
+    assert(closeCalls === 1, 'persisted pending card must be closed');
+    assert(wallet.reclaimCalls.length === 1, 'persisted pending transfer must be reclaimed');
+    assert(calls.cancels.length === 1, 'uncaptured Stripe hold must be canceled');
   });
 }
 
@@ -458,7 +509,8 @@ async function main(): Promise<void> {
   await testCrashAfterAgentcardBeforeAtomicRecord();
   await testCrashAfterCaptureBeforeHeldCompensation();
   await testTerminalPendingCompensation();
-  process.stdout.write('PASS purchase crash/concurrency compensation (5/5)\n');
+  await testPersistedCardPendingCompensation();
+  process.stdout.write('PASS purchase crash/concurrency compensation (6/6)\n');
 }
 
 const crashMode = process.env.PURCHASE_CRASH_MODE;

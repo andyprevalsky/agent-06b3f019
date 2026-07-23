@@ -1,5 +1,5 @@
 import { TestPaymentError } from './errors';
-import { asRecord, mcpResultRecord } from './lifecycleProviderRecords';
+import { mcpResultRows } from './lifecycleProviderRecords';
 import type {
   OrgTransferStatus,
   StripeHoldSearch,
@@ -18,11 +18,7 @@ const ORG_TRANSFER_STATUSES: OrgTransferStatus[] = [
 ];
 
 function providerRows(result: unknown, field: string): Record<string, unknown>[] {
-  const record = mcpResultRecord(result);
-  const rows = Array.isArray(record[field]) ? record[field] : [];
-  return rows
-    .map((value) => asRecord(value))
-    .filter((value): value is Record<string, unknown> => value !== undefined);
+  return mcpResultRows(result, field);
 }
 
 function providerCreatedAt(row: Record<string, unknown>, field: string): number | null {
@@ -104,7 +100,15 @@ export async function searchAllStripeHolds(
   let page: string | undefined;
   for (let attempt = 0; attempt < MAX_PROVIDER_PAGES; attempt += 1) {
     const result = await searchStripeHolds(agentId, page);
-    for (const intent of result.data) byId.set(intent.id, intent);
+    if (!Array.isArray(result.data)) {
+      throw new TestPaymentError('Stripe payment history response was invalid', 502);
+    }
+    for (const intent of result.data) {
+      if (typeof intent?.id !== 'string' || intent.id.trim() === '') {
+        throw new TestPaymentError('Stripe payment history contained an invalid intent id', 502);
+      }
+      byId.set(intent.id, intent);
+    }
     if (result.has_more !== true) return { data: [...byId.values()] };
     const nextPage = result.next_page;
     if (typeof nextPage !== 'string' || nextPage === '' || seenPages.has(nextPage)) {

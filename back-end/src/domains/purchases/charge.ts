@@ -1,9 +1,8 @@
 import { createCardProviderForAgent, type CardProvider } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
 import {
-  cancelAuthorizedHold,
   captureAuthorizedHold,
-  refundCapturedPurchase,
+  reversePurchasePaymentIntent,
   stripe,
 } from '../../providers/stripe';
 import {
@@ -217,17 +216,14 @@ async function closeIssuedCardOnFailure(
   }
 }
 
-/** Reverse Stripe (refund if captured, else cancel the hold) after a mint failure. */
+/** Reverse Stripe after a mint failure by re-reading the durable PaymentIntent state. */
 async function reverseStripePaymentOnFailure(
   state: ChargeState,
   purchaseId: string
 ): Promise<void> {
   const paymentIntentId = state.paymentIntentId;
   if (paymentIntentId === undefined || state.walletReclaimFailed) return;
-  const reversePayment = state.paymentIntentCaptured
-    ? refundCapturedPurchase(paymentIntentId, purchaseId)
-    : cancelAuthorizedHold(paymentIntentId);
-  await reversePayment.catch((reverseError) => {
+  await reversePurchasePaymentIntent(paymentIntentId, purchaseId).catch((reverseError) => {
     state.paymentReversalFailed = true;
     log.warn('Failed to reverse Stripe payment after purchase mint failure', {
       purchase_id: purchaseId,
@@ -251,6 +247,7 @@ async function rollbackChargeFailure(
   state.walletWasFunded = fundingFailure.walletWasFunded;
   state.fundingResumeRequired = fundingFailure.fundingResumeRequired;
   state.walletFundingPrepared = fundingFailure.walletFundingPrepared;
+  state.issuedCardId ??= fundingFailure.issuedCardId;
   if (state.fundingResumeRequired) {
     state.walletReclaimFailed = true;
   }
