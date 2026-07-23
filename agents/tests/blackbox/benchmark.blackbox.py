@@ -1364,6 +1364,33 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     assert "?benchmark=agentcard-abandonment" in abandonment.prompt
 
 
+def test_agent_payment_accepts_grounded_structured_browser_confirmation():
+    """A verified browser result must not depend on one exact prose inflection."""
+    from benchmarks.run_benchmark import _evaluate_agent_payment_result
+
+    data = {
+        "agent": {
+            "status": "COMPLETED",
+            "structured_output": {"order_confirmation_id": "tp_6faab326"},
+        },
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "The final DOM shows the payment was confirmed.",
+                "metadata": {
+                    "phase": "EXECUTE",
+                    "title": "Browser automation complete",
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "structured_response": {"order_confirmation_id": "tp_6faab326"},
+                },
+            }
+        ],
+    }
+
+    assert _evaluate_agent_payment_result(data) == (True, None)
+
+
 def test_production_payment_lifecycle_refuses_sandbox_target():
     import pytest
 
@@ -9606,6 +9633,10 @@ async def run_all_tests():
     r.record(
         "agent_payment_requires_lifecycle_evidence",
         test_agent_payment_catalog_requires_terminal_lifecycle_evidence,
+    )
+    r.record(
+        "agent_payment_grounded_structured_confirmation",
+        test_agent_payment_accepts_grounded_structured_browser_confirmation,
     )
     r.record(
         "production_payment_rejects_sandbox_target",

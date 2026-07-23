@@ -1072,12 +1072,21 @@ async def _update_world_model_before_simulation(args) -> None:
 
 
 def _evaluate_agent_payment_result(data: dict) -> tuple[bool, str | None]:
-    text = _agent_data_search_text(data)
-    if "payment confirmed" not in text:
-        return False, "agent did not report the test payment confirmation page"
-    if "order" not in text:
-        return False, "agent did not report the confirmation order id"
-    return True, None
+    for message in data.get("messages", []) or []:
+        if not isinstance(message, dict) or message.get("role") != "TOOL":
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "spawn_browser_agent" or metadata.get("toolStatus") != "FINISHED":
+            continue
+        structured = metadata.get("structured_response") or metadata.get("structuredResponse")
+        if not isinstance(structured, dict):
+            continue
+        order_id = structured.get("order_confirmation_id")
+        if isinstance(order_id, str) and re.fullmatch(r"tp_[0-9a-f]{8}", order_id):
+            return True, None
+    return False, "agent did not return a grounded browser payment confirmation order id"
 
 
 async def _evaluate_phone_call_task(
