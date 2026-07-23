@@ -5,8 +5,12 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKFLOW="$ROOT_DIR/.github/workflows/auto-rca.yml"
 SHIPPED_WORKFLOW="$ROOT_DIR/.github/workflows/auto-rca-shipped.yml"
 RECONCILE_WORKFLOW="$ROOT_DIR/.github/workflows/auto-rca-reconcile.yml"
+APPROVED_DEPLOY_WORKFLOW="$ROOT_DIR/.github/workflows/auto-rca-approved-deploy.yml"
+SLACK_FEEDBACK_WORKFLOW="$ROOT_DIR/.github/workflows/auto-rca-slack-feedback.yml"
 PROMPT="$ROOT_DIR/.github/auto-rca-prompt.txt"
+RCA_COMMAND="$ROOT_DIR/.claude/commands/rca.md"
 RCA_TOOL="$ROOT_DIR/scripts/auto-rca-tool"
+CLAUDE_WRAPPER="$ROOT_DIR/scripts/auto-rca-claude-wrapper"
 TEST_RUNNER="$ROOT_DIR/scripts/test.sh"
 LITERAL_DOLLAR='$'
 
@@ -30,15 +34,34 @@ require_absent() {
 # Trusted event and feedback boundaries.
 require_text "$WORKFLOW" 'issue_comment:' "PR comments must be able to resume an RCA"
 require_text "$WORKFLOW" 'github.event.issue.title || github.run_id' "feedback runs must expose an agent-specific recovery title"
-require_text "$WORKFLOW" "startsWith(github.event.comment.body, '/rca')" "only explicit /rca PR comments may resume an RCA"
-require_text "$WORKFLOW" "grep -Eq '^/rca([[:space:]]|${LITERAL_DOLLAR})'" "feedback command must have an exact /rca boundary"
+require_text "$WORKFLOW" "github.event.comment.user.type == 'User'" "only human-authored feedback comments may resume an RCA"
+require_text "$WORKFLOW" "!contains(github.event.comment.body, '<!-- rca-feedback-consumed')" "consumption markers must not recursively resume the RCA"
+require_absent "$WORKFLOW" "startsWith(github.event.comment.body, '/rca')" "ordinary reviewer feedback must not require a slash command"
+require_absent "$WORKFLOW" "grep -Eq '^/rca" "ordinary reviewer feedback must not be parsed as a slash command"
 require_text "$WORKFLOW" "case \"${LITERAL_DOLLAR}permission\" in admin|maintain)" "only repository maintainers may submit RCA feedback"
 require_text "$WORKFLOW" "collaborators/${LITERAL_DOLLAR}COMMENT_AUTHOR/permission" "reviewer permission must come from GitHub"
 require_text "$WORKFLOW" "[ \"\$(printf '%s' \"\$pr\" | jq -r '.base.ref')\" = main ]" "feedback workflow must require a main-targeting PR"
 require_text "$WORKFLOW" "[ \"${LITERAL_DOLLAR}branch\" != \"auto-rca/${LITERAL_DOLLAR}agent_id\" ]" "feedback branch must match the full affected agent ID"
 require_text "$WORKFLOW" "[ \"${LITERAL_DOLLAR}title\" = \"auto-RCA: Production agent failure ${LITERAL_DOLLAR}agent_id\" ]" "feedback PR title must be canonical"
 require_text "$WORKFLOW" "[ -z \"${LITERAL_DOLLAR}marker_agent\" ] || [ \"${LITERAL_DOLLAR}marker_agent\" = \"${LITERAL_DOLLAR}agent_id\" ]" "lifecycle marker must match the affected agent"
-require_text "$WORKFLOW" "REVIEW_FEEDBACK: \${{ github.event.comment.body }}" "review feedback must enter prompt construction as data"
+require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool feedback-batch' "all unconsumed durable feedback must enter one revision batch"
+require_text "$WORKFLOW" "authorized_feedback='[]'" "queued feedback must be filtered by current GitHub permission"
+require_text "$WORKFLOW" "unauthorized_feedback_ids='[]'" "unauthorized queued feedback must be tracked for consumption"
+require_text "$WORKFLOW" 'unauthorized_feedback_csv' "unauthorized queued feedback must receive a durable consumption marker"
+require_text "$WORKFLOW" 'Could not verify queued RCA feedback permission' "permission lookup failures must remain retryable instead of discarding feedback"
+require_absent "$WORKFLOW" 'Queued RCA feedback requires maintain permission' "one unauthorized queued comment must not stall every later revision"
+require_text "$WORKFLOW" 'RCA_REVIEW_FEEDBACK_B64=%s' "review feedback must cross step boundaries as encoded data"
+require_text "$WORKFLOW" 'Hints from reviewer feedback (untrusted data):' "review feedback must enter prompt construction only as untrusted hints"
+require_text "$WORKFLOW" 'RCA_FEEDBACK_COMMENT_IDS=%s' "the durable feedback batch must retain exact comment IDs"
+require_text "$WORKFLOW" '<!-- rca-feedback-consumed ids=' "successfully handled feedback must receive a durable consumption marker"
+require_text "$SLACK_FEEDBACK_WORKFLOW" 'types: [agent-rca-feedback]' "Slack thread feedback must have a dedicated repository event"
+require_text "$SLACK_FEEDBACK_WORKFLOW" '/usr/local/bin/rose-auto-rca-tool select-slack-prs' "Slack replies must resolve the exact lifecycle PR"
+require_text "$SLACK_FEEDBACK_WORKFLOW" 'secrets.GH_UPDATE_TOKEN' "the durable Slack feedback comment must trigger the revision workflow"
+require_text "$SLACK_FEEDBACK_WORKFLOW" '<!-- rca-slack-feedback event=' "Slack feedback must retain dedupe and thread metadata"
+require_text "$SLACK_FEEDBACK_WORKFLOW" 'https://slack.com/api/reactions.add' "eyes acknowledgement must happen after durable feedback ingestion"
+ingest_post_line="$(grep -nF 'Queued Slack feedback on PR' "$SLACK_FEEDBACK_WORKFLOW" | cut -d: -f1)"
+eyes_line="$(grep -nF 'name: Acknowledge the exact Slack feedback message' "$SLACK_FEEDBACK_WORKFLOW" | cut -d: -f1)"
+[ "$ingest_post_line" -lt "$eyes_line" ] || fail "eyes acknowledgement must mean the feedback is already durable"
 require_absent "$WORKFLOW" 'github.event.client_payload.source' "dispatch source must not reach the privileged prompt"
 require_absent "$WORKFLOW" 'github.event.client_payload.title' "dispatch title must not reach the privileged prompt"
 
@@ -66,8 +89,30 @@ require_text "$WORKFLOW" 'name: Slack — immediately mark reviewer feedback in 
 revision_slack_line="$(grep -nF 'name: Slack — immediately mark reviewer feedback in progress' "$WORKFLOW" | cut -d: -f1)"
 [ "$revision_slack_line" -lt "$begin_line" ] || fail "review feedback must move Slack to revising before branch push"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool slack-update' "all Slack transitions must use the shared broker"
+require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool slack-reply' "the agent result must answer in the lifecycle Slack thread"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool bind-slack' "the Slack handle must be durably bound to the PR"
 require_text "$SHIPPED_WORKFLOW" '/usr/local/bin/rose-auto-rca-tool slack-update' "shipped transition must use the shared broker"
+require_text "$APPROVED_DEPLOY_WORKFLOW" 'pull_request_review:' "approved deploy must be driven by a GitHub PR review"
+require_text "$APPROVED_DEPLOY_WORKFLOW" "github.event.review.state == 'approved'" "only an APPROVED review may authorize deploy"
+require_text "$APPROVED_DEPLOY_WORKFLOW" "github.event.review.user.type == 'User'" "bot reviews must not authorize deploy"
+require_text "$APPROVED_DEPLOY_WORKFLOW" 'admin|maintain|write)' "the approving human must have repository write permission"
+require_text "$APPROVED_DEPLOY_WORKFLOW" '/usr/local/bin/rose-auto-rca-tool approved-deploy-plan' "approved deploy must use the executable lifecycle reducer"
+require_text "$RCA_TOOL" 'approval is stale: it does not cover the current PR head' "approval reducer must bind review to the exact RCA head"
+require_text "$RCA_TOOL" 'trusted verification marker is missing or duplicated' "approval reducer must require exactly one trusted marker"
+require_text "$APPROVED_DEPLOY_WORKFLOW" "[ \"${LITERAL_DOLLAR}workflow\" = 'Auto RCA' ]" "approved deploy must wait for the trusted workflow"
+require_text "$APPROVED_DEPLOY_WORKFLOW" "[ \"${LITERAL_DOLLAR}conclusion\" = success ]" "approved deploy must require a green RCA workflow"
+require_text "$RCA_TOOL" '--defer-human-approval-to-exact-head-pr-review=true' "Auto RCA deploy gates must defer only the human decision to formal exact-head review"
+require_text "$RCA_TOOL" 'AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED=true' "approval deferral must be restricted to the trusted broker"
+require_absent "$WORKFLOW" 'mandatory-human-approval-retrieved=true' "Auto RCA must not claim human approval before the formal review"
+require_text "$APPROVED_DEPLOY_WORKFLOW" 'ref: ${{ env.PR_HEAD_SHA }}' "approval guards must inspect the exact reviewed HEAD"
+require_text "$APPROVED_DEPLOY_WORKFLOW" '/usr/local/bin/rose-prompt-approval-guard' "formal review must satisfy the trusted prompt guard"
+require_text "$APPROVED_DEPLOY_WORKFLOW" '/usr/local/bin/rose-agent-behavior-approval-guard' "formal review must satisfy the trusted behavior guard"
+require_text "$APPROVED_DEPLOY_WORKFLOW" 'mandatory-human-approval-retrieved=true --base-ref=origin/main' "formal review must apply only to the exact main-relative snapshot"
+require_text "$APPROVED_DEPLOY_WORKFLOW" 'name: Refuse approval while reviewer feedback is queued' "approval must not race queued reviewer feedback"
+[ "$(grep -Fc '/usr/local/bin/rose-auto-rca-tool feedback-batch' "$APPROVED_DEPLOY_WORKFLOW")" -eq 2 ] || fail "pending feedback must be checked before gates and immediately before merge"
+[ "$(grep -Fc 'auto-rca-slack-feedback.yml/runs?per_page=100' "$APPROVED_DEPLOY_WORKFLOW")" -eq 2 ] || fail "active Slack ingestion must be checked twice to close the approval race"
+require_text "$APPROVED_DEPLOY_WORKFLOW" "--match-head-commit \"${LITERAL_DOLLAR}PR_HEAD_SHA\"" "merge must remain bound to the approved head"
+require_absent "$APPROVED_DEPLOY_WORKFLOW" 'claude_code_oauth_token' "approved deploy must not invoke another model"
 require_text "$SHIPPED_WORKFLOW" 'terminal_state=shipped' "merged RCA PR must transition the card to shipped"
 require_text "$SHIPPED_WORKFLOW" 'terminal_state=cancelled' "unmerged closed RCA PR must transition the card to cancelled"
 require_text "$SHIPPED_WORKFLOW" "RCA_STATE: ${LITERAL_DOLLAR}{{ env.RCA_TERMINAL_STATE }}" "terminal Slack updates must use the resolved merge state"
@@ -95,6 +140,7 @@ require_text "$RECONCILE_WORKFLOW" '/usr/local/bin/rose-auto-rca-tool bind-slack
 require_text "$RCA_TOOL" "printf 'blocked keep" "failed or canceled draft runs must converge to blocked"
 require_text "$RCA_TOOL" "printf 'ready keep" "successful ready PRs must converge to ready"
 require_text "$RECONCILE_WORKFLOW" 'rca-verified head=' "reconciler must require the trusted ready marker"
+require_text "$RECONCILE_WORKFLOW" '[.[].jobs[]?.steps[]?' "reconciler must descend through slurped workflow-job pages"
 require_text "$RECONCILE_WORKFLOW" "if [ \"${LITERAL_DOLLAR}repair\" = draft ]" "reconciler must repair an invalid ready PR back to draft"
 
 # Investigator failures may not become false-green workflows.
@@ -112,23 +158,59 @@ require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool require-complete' "i
 require_text "$RCA_TOOL" 'keep the PR draft, Slack blocked, and the workflow red' "failure state must be explicit"
 require_text "$WORKFLOW" "RCA_STATE: \${{ steps.finalize.outputs.state || 'blocked' }}" "finalizer failure must still move Slack to blocked"
 
-# Claude has a narrow immutable command surface; credentialed execution and
-# trusted transitions are absent.
-allowed_tools='--allowedTools "Bash(/usr/local/bin/rose-auto-rca-tool evidence),Bash(/usr/local/bin/rose-auto-rca-tool verification),Bash(/usr/local/bin/rose-auto-rca-tool publish-draft)"'
-require_text "$WORKFLOW" "$allowed_tools" "investigator must receive only immutable broker commands"
-require_absent "$WORKFLOW" 'Bash(/usr/local/bin/rose-auto-rca-tool begin-draft)' "Claude must not create pull requests"
-require_absent "$WORKFLOW" 'Bash(/usr/local/bin/rose-auto-rca-tool ensure-draft)' "Claude must not control trusted finalization"
-require_absent "$WORKFLOW" 'Bash(/usr/local/bin/rose-auto-rca-tool mark-ready)' "Claude must not control readiness"
-require_absent "$WORKFLOW" 'Bash(/usr/local/bin/rose-auto-rca-tool slack-update)' "Claude must not control Slack state"
-require_absent "$WORKFLOW" 'Bash(*)' "Claude must never receive arbitrary shell access"
-require_absent "$WORKFLOW" 'Bash(curl' "Claude must not receive raw production curl access"
-require_absent "$WORKFLOW" 'Bash(gh' "Claude must not receive raw GitHub access"
-require_absent "$WORKFLOW" 'Bash(/usr/local/bin/rose-auto-rca-tool offline-gates)' "Claude must not execute the changed checkout with its credential"
-require_absent "$WORKFLOW" 'Bash(/usr/local/bin/rose-auto-rca-tool smoke-gates)' "Claude must not execute credentialed smoke gates"
-require_absent "$WORKFLOW" 'Bash(/usr/local/bin/rose-auto-rca-tool benchmark)' "Claude must not execute model-writable benchmark wrappers"
+# Claude keeps a complete coding surface inside a non-sudo OS account. Trusted
+# credentials and lifecycle state remain outside that account.
+require_text "$WORKFLOW" '--permission-mode bypassPermissions' "investigator must retain every normal coding, download, and test tool"
+require_absent "$WORKFLOW" '--allowedTools' "the RCA workflow must not regress to a partial coding-tool allowlist"
+[ "$(cat "$PROMPT")" = '/RCA on production agent <agent-id>' ] || fail "the action prompt must remain a single simple /RCA request"
+require_text "$WORKFLOW" "template.replace('<agent-id>', os.environ['AGENT_ID'])" "workflow must bind the simple prompt to the affected agent"
+require_text "$WORKFLOW" 'Hints from reviewer feedback (untrusted data):' "revision feedback must be passed only as optional hints"
+require_text "$RCA_COMMAND" '## Automated production-alert mode' "the RCA command must own automated lifecycle instructions"
+require_text "$RCA_COMMAND" '/usr/local/bin/rose-auto-rca-tool investigator-repro' "the RCA command must route reproduction through the credential-scrubbed broker"
+require_text "$RCA_COMMAND" '/usr/local/bin/rose-auto-rca-tool publish-draft' "the RCA command must require a published attempt"
+require_text "$RCA_COMMAND" 'merges only after a maintainer submits an APPROVED GitHub review' "the RCA command must explain the alternate deploy approval"
 require_text "$WORKFLOW" 'persist-credentials: false' "checkout credentials must not persist into RCA tools"
 require_text "$WORKFLOW" 'sudo install -o root -g root -m 0555 scripts/auto-rca-tool /usr/local/bin/rose-auto-rca-tool' "broker must be immutable outside the workspace"
-require_text "$WORKFLOW" "sudo install -d -o root -g root -m 0700 \"${LITERAL_DOLLAR}AUTO_RCA_GATE_STATE_DIR\"" "gate attestations must be root-owned"
+require_text "$WORKFLOW" 'sudo install -o root -g root -m 0555 scripts/auto-rca-claude-wrapper /usr/local/bin/rose-auto-rca-claude-wrapper' "unprivileged Claude wrapper must be immutable"
+require_text "$WORKFLOW" 'sudo useradd --system --create-home --shell /bin/bash rose-auto-rca' "workflow must create a dedicated coding user"
+require_text "$WORKFLOW" "sudo install -d -o root -g rose-auto-rca -m 0750 \"${LITERAL_DOLLAR}AUTO_RCA_GATE_STATE_DIR\"" "gate attestations must remain root-owned and read-selective"
+require_text "$WORKFLOW" "bash -c 'set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.216'" "Claude Code installation must be version-pinned"
+[ "$(grep -Fc 'for attempt in 1 2 3; do' "$WORKFLOW")" -eq 2 ] || fail "both Claude installers must retry transient download failures"
+require_text "$WORKFLOW" 'sudo -n -u rose-auto-rca sudo -n true' "workflow must prove the coding user cannot sudo"
+[ "$(grep -Fc 'path_to_claude_code_executable: /usr/local/bin/rose-auto-rca-claude-wrapper' "$WORKFLOW")" -eq 2 ] || fail "both investigators must use the unprivileged wrapper"
+[ "$(grep -Fc "github_token: ${LITERAL_DOLLAR}{{ github.token }}" "$WORKFLOW")" -eq 2 ] || fail "both investigators must use the short-lived workflow token"
+[ "$(grep -Fc "allowed_non_write_users: ${LITERAL_DOLLAR}{{ github.actor }}" "$WORKFLOW")" -eq 2 ] || fail "both investigators must enable the action's subprocess/PID isolation"
+[ "$(grep -Fc 'name: Restore trusted ownership after' "$WORKFLOW")" -eq 2 ] || fail "both investigators must restore trusted workspace ownership"
+require_text "$WORKFLOW" "steps.restore_primary.outcome == 'success'" "primary trusted verifier must wait for ownership restoration"
+require_text "$WORKFLOW" "steps.restore_retry.outcome == 'success'" "retry trusted verifier must wait for ownership restoration"
+require_text "$WORKFLOW" "if: steps.prepare_primary.outcome == 'success'" "primary investigator must require a prepared coding environment"
+primary_prepare_line="$(grep -nF 'name: Prepare unprivileged primary coding environment' "$WORKFLOW" | cut -d: -f1)"
+primary_action_line="$(grep -nF 'name: Root-cause with dedicated Claude account' "$WORKFLOW" | cut -d: -f1)"
+primary_restore_line="$(grep -nF 'name: Restore trusted ownership after primary attempt' "$WORKFLOW" | cut -d: -f1)"
+primary_verify_line="$(grep -nF 'name: Verify unchanged reproduction after primary attempt' "$WORKFLOW" | cut -d: -f1)"
+[ "$primary_prepare_line" -lt "$primary_action_line" ] && [ "$primary_action_line" -lt "$primary_restore_line" ] && [ "$primary_restore_line" -lt "$primary_verify_line" ] || fail "primary sandbox/restore/verify order is unsafe"
+retry_prepare_line="$(grep -nF 'name: Prepare unprivileged retry coding environment' "$WORKFLOW" | cut -d: -f1)"
+retry_action_line="$(grep -nF 'name: Retry incomplete RCA with secondary Claude account' "$WORKFLOW" | cut -d: -f1)"
+retry_restore_line="$(grep -nF 'name: Restore trusted ownership after retry' "$WORKFLOW" | cut -d: -f1)"
+retry_verify_line="$(grep -nF 'name: Verify unchanged reproduction after retry' "$WORKFLOW" | cut -d: -f1)"
+[ "$retry_prepare_line" -lt "$retry_action_line" ] && [ "$retry_action_line" -lt "$retry_restore_line" ] && [ "$retry_restore_line" -lt "$retry_verify_line" ] || fail "retry sandbox/restore/verify order is unsafe"
+sed -n "${retry_prepare_line},$((retry_action_line - 1))p" "$WORKFLOW" | grep -Fq 'continue-on-error: true' || fail "retry preparation failure must remain a reported blocked state instead of failing the workflow early"
+sed -n "${retry_restore_line},$((retry_verify_line - 1))p" "$WORKFLOW" | grep -Fq 'continue-on-error: true' || fail "retry ownership restoration failure must remain a reported blocked state instead of failing the workflow early"
+require_text "$WORKFLOW" "if: always() && env.RCA_NOOP != 'true' && steps.primary_contract.outputs.complete != 'true'" "retry must run even when the primary investigator never started"
+[ -x "$CLAUDE_WRAPPER" ] || fail "unprivileged Claude wrapper must be executable"
+require_text "$CLAUDE_WRAPPER" 'exec sudo -n -H' "wrapper must enter the unprivileged environment through sudo"
+require_text "$CLAUDE_WRAPPER" "-u \"${LITERAL_DOLLAR}INVESTIGATOR_USER\" env" "wrapper must drop to the dedicated user"
+require_text "$CLAUDE_WRAPPER" "sudo -n -u \"${LITERAL_DOLLAR}INVESTIGATOR_USER\" test -x \"${LITERAL_DOLLAR}CLAUDE_BIN\"" "wrapper preflight must work with a private investigator home"
+require_text "$CLAUDE_WRAPPER" '--preserve-env=CLAUDE_CODE_OAUTH_TOKEN,' "wrapper must preserve authentication without exposing its value in argv"
+require_text "$CLAUDE_WRAPPER" 'CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1' "coding subprocesses must scrub credentials"
+require_text "$CLAUDE_WRAPPER" 'config --local --unset-all credential.helper' "wrapper must remove the action's GitHub credential helper"
+require_text "$CLAUDE_WRAPPER" "https://github.com/${LITERAL_DOLLAR}GITHUB_REPOSITORY.git" "wrapper must restore a credential-free origin"
+require_text "$CLAUDE_WRAPPER" "sudo -n chown \"${LITERAL_DOLLAR}INVESTIGATOR_USER:${LITERAL_DOLLAR}runner_group\" \"${LITERAL_DOLLAR}GITHUB_WORKSPACE/.git/config\"" "sanitized local git config must remain usable by the coding user"
+require_text "$CLAUDE_WRAPPER" 'unset GH_TOKEN GITHUB_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL ACTIONS_ID_TOKEN_REQUEST_TOKEN' "wrapper must discard GitHub and OIDC authority before entering the coding user"
+require_text "$CLAUDE_WRAPPER" "${LITERAL_DOLLAR}INVESTIGATOR_HOME/.local/bin:${LITERAL_DOLLAR}INVESTIGATOR_HOME/.cargo/bin:${LITERAL_DOLLAR}INVESTIGATOR_HOME/go/bin:${LITERAL_DOLLAR}PATH" "downloaded user-space tools must be available on PATH"
+require_absent "$CLAUDE_WRAPPER" 'CLAUDE_CODE_OAUTH_TOKEN=' "wrapper must not place OAuth credentials in process arguments"
+require_absent "$CLAUDE_WRAPPER" 'GH_TOKEN=' "wrapper must not pass GitHub credentials"
+require_absent "$CLAUDE_WRAPPER" 'ACTIONS_ID_TOKEN_REQUEST_TOKEN=' "wrapper must not pass OIDC credentials"
 job_env="$(sed -n '/^    env:/,/^    steps:/p' "$WORKFLOW")"
 for secret_name in GH_TOKEN BACKEND_API_KEY CLICKHOUSE_ENDPOINT CLICKHOUSE_USER CLICKHOUSE_PASSWORD FLY_API_TOKEN SLACK_BOT_TOKEN; do
   if grep -Fq "$secret_name:" <<< "$job_env"; then
@@ -137,18 +219,21 @@ for secret_name in GH_TOKEN BACKEND_API_KEY CLICKHOUSE_ENDPOINT CLICKHOUSE_USER 
 done
 require_text "$WORKFLOW" 'name: Collect production evidence outside the investigator process' "production evidence must be collected before the model runs"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool collect-evidence' "trusted evidence collection is required"
+require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool pin-baseline' "trusted baseline must be pinned before the model runs"
+require_text "$RCA_TOOL" "base=\"${LITERAL_DOLLAR}(trusted_baseline)\"" "reproduction checks must use the root-owned baseline instead of mutable origin/main"
+[ "$(grep -Fc "\"${LITERAL_DOLLAR}AUTO_RCA_GATE_STATE_DIR/git-config\" \"${LITERAL_DOLLAR}GITHUB_WORKSPACE/.git/config\"" "$WORKFLOW")" -eq 2 ] || fail "trusted git config must be restored after both investigators"
+require_text "$RCA_TOOL" "sudo install -o root -g rose-auto-rca -m 0440 \"${LITERAL_DOLLAR}temp_file\" \"${LITERAL_DOLLAR}GATE_STATE_DIR/evidence.txt\"" "investigator evidence must be read-only to the coding user"
+require_text "$RCA_TOOL" "sudo install -o root -g rose-auto-rca -m 0440 \"${LITERAL_DOLLAR}result_file\" \"${LITERAL_DOLLAR}GATE_STATE_DIR/verification.txt\"" "trusted verification must be read-only to the coding user"
 evidence_line="$(grep -nF 'name: Collect production evidence outside the investigator process' "$WORKFLOW" | cut -d: -f1)"
 [ "$begin_line" -lt "$evidence_line" ] || fail "the PR and its links must exist even when production evidence is unavailable"
 
 # The report contract is explicit and HEAD-scoped.
 for heading in '# Evidence' '# Root cause' '# Local reproduction' '# Pre-fix result' '# Post-fix result' '# Verification'; do
-  require_text "$PROMPT" "$heading" "RCA prompt is missing required report heading: $heading"
+  require_text "$RCA_COMMAND" "$heading" "RCA command is missing required report heading: $heading"
 done
-require_text "$PROMPT" '/usr/local/bin/rose-auto-rca-tool evidence' "prompt must gather production evidence"
-require_text "$PROMPT" '.context/auto-rca/repro.json' "prompt must declare a structured reproduction"
-require_text "$PROMPT" 'trusted verifier copies that exact test' "prompt must explain immutable before/after verification"
-require_text "$PROMPT" '/usr/local/bin/rose-auto-rca-tool publish-draft' "prompt must publish the report and branch"
-require_text "$PROMPT" '/usr/local/bin/rose-auto-rca-tool verification' "retry prompt must expose trusted verification status"
+require_text "$RCA_COMMAND" '/usr/local/bin/rose-auto-rca-tool evidence' "RCA command must gather production evidence"
+require_text "$RCA_COMMAND" '.context/auto-rca/repro.json' "RCA command must declare a structured reproduction"
+require_text "$RCA_COMMAND" '/usr/local/bin/rose-auto-rca-tool verification' "RCA command must expose trusted retry status"
 require_text "$RCA_TOOL" '<!-- rca-complete head=' "report must bind completion to HEAD"
 require_text "$RCA_TOOL" '<!-- rca-verified head=' "only the trusted finalizer may attest PR readiness"
 require_text "$RCA_TOOL" "body = re.sub(pattern, '', body).rstrip()" "Slack binding must collapse stale lifecycle markers"
@@ -157,6 +242,13 @@ require_text "$RCA_TOOL" 'repro_passed_for_head' "finalizer must require the imm
 require_text "$RCA_TOOL" 'evidence.agent' "finalizer must require trusted evidence for the affected agent"
 require_text "$RCA_TOOL" 'gate_passed_for_head offline-gates' "finalizer must require offline gate attestation"
 require_text "$RCA_TOOL" 'gate_passed_for_head smoke-gates' "finalizer must require smoke gate attestation"
+require_text "$RCA_TOOL" '/RCA · production evidence' "waterfall must name the production evidence phase"
+require_text "$RCA_TOOL" '/deploy · smoke gates' "waterfall must name the deploy smoke phase"
+require_text "$RCA_TOOL" '*Pipeline step:* %s' "Slack must name the exact current or failed pipeline step"
+require_text "$RCA_TOOL" '*Step waterfall:*' "Slack must include a human-readable duration waterfall"
+require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool timeline-start' "workflow phases must start trusted timers"
+require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool timeline-finish' "workflow phases must finish trusted timers"
+require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool sync-waterfall' "the final trusted waterfall must persist on the PR"
 require_text "$RCA_TOOL" "GH_TOKEN=\"\$AUTO_RCA_PR_TOKEN\" gh pr ready" "only trusted token may mark a PR ready"
 require_text "$RCA_TOOL" "GH_TOKEN=\"\$AUTO_RCA_PR_TOKEN\" gh pr ready --undo" "review feedback or failure must return the PR to draft"
 require_text "$RCA_TOOL" 'diff --name-only --diff-filter=U' "finalizer must reject unresolved merge conflicts"
@@ -201,9 +293,10 @@ fi
 
 expected_slack_message="*Affected user:* Ada Lovelace
 *Current state:* 🔵 Draft PR open (needs attention)
+*Pipeline step:* /RCA · investigation — needs attention
 *Links:* <https://roselabs.ai/?agent-id=550e8400-e29b-41d4-a716-446655440000|FE View> · <https://github.com/Rose-Ai-Labs/rose/pull/999|PR> · <https://github.com/Rose-Ai-Labs/rose/actions/runs/123|GH Action RCA Run>
 *Agent ID:* \`550e8400-e29b-41d4-a716-446655440000\`
-*Feedback:* Add a top-level Conversation comment \`/rca <requested changes>\` on the PR."
+*Feedback:* Reply normally in this Slack thread, or leave a normal top-level PR comment."
 actual_slack_message="$(
   AGENT_ID=550e8400-e29b-41d4-a716-446655440000 \
   AFFECTED_USER_NAME='Ada Lovelace' \
@@ -216,7 +309,7 @@ actual_slack_message="$(
 [ "$actual_slack_message" = "$expected_slack_message" ] || \
   fail "Slack message must retain user, state, three links, agent ID, and feedback instructions"
 
-for workflow in "$WORKFLOW" "$SHIPPED_WORKFLOW" "$RECONCILE_WORKFLOW"; do
+for workflow in "$WORKFLOW" "$SHIPPED_WORKFLOW" "$RECONCILE_WORKFLOW" "$APPROVED_DEPLOY_WORKFLOW" "$SLACK_FEEDBACK_WORKFLOW"; do
   while IFS= read -r action_ref; do
     if ! [[ "$action_ref" =~ @[0-9a-f]{40}$ ]]; then
       fail "action is not pinned to a full commit SHA: $action_ref"
@@ -224,10 +317,10 @@ for workflow in "$WORKFLOW" "$SHIPPED_WORKFLOW" "$RECONCILE_WORKFLOW"; do
   done < <(sed -nE 's/^[[:space:]]*uses:[[:space:]]+([^ #]+).*/\1/p' "$workflow")
 done
 
-ruby -e 'require "yaml"; ARGV.each { |file| YAML.parse_file(file) }' "$WORKFLOW" "$SHIPPED_WORKFLOW" "$RECONCILE_WORKFLOW" || \
+ruby -e 'require "yaml"; ARGV.each { |file| YAML.parse_file(file) }' "$WORKFLOW" "$SHIPPED_WORKFLOW" "$RECONCILE_WORKFLOW" "$APPROVED_DEPLOY_WORKFLOW" "$SLACK_FEEDBACK_WORKFLOW" || \
   fail "workflow YAML must parse"
 if command -v actionlint >/dev/null 2>&1; then
-  actionlint "$WORKFLOW" "$SHIPPED_WORKFLOW" "$RECONCILE_WORKFLOW" || fail "actionlint rejected an Auto RCA workflow"
+  actionlint "$WORKFLOW" "$SHIPPED_WORKFLOW" "$RECONCILE_WORKFLOW" "$APPROVED_DEPLOY_WORKFLOW" "$SLACK_FEEDBACK_WORKFLOW" || fail "actionlint rejected an Auto RCA workflow"
 fi
 
 echo "All auto-RCA workflow checks passed."

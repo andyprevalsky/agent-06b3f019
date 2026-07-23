@@ -59,6 +59,22 @@ expect_flag_pass() {
   echo "PASS: $label"
 }
 
+expect_deferred_pass() {
+  local dir="$1"
+  local label="$2"
+  if ! (
+    cd "$dir" &&
+      AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED=true \
+        bash scripts/check-prompt-human-approval.sh \
+          --defer-human-approval-to-exact-head-pr-review=true >/tmp/prompt-guard-test.out 2>&1
+  ); then
+    echo "FAIL: expected trusted exact-head deferral pass: $label" >&2
+    cat /tmp/prompt-guard-test.out >&2
+    exit 1
+  fi
+  echo "PASS: $label"
+}
+
 false_positive_repo="$(new_repo false-positive-code)"
 mkdir -p "$false_positive_repo/agents/helpers" "$false_positive_repo/agents/tests/blackbox" "$false_positive_repo/agents/workflows"
 cat >"$false_positive_repo/agents/tests/blackbox/workflow.blackbox.py" <<'PY'
@@ -110,6 +126,37 @@ MD
 git -C "$prompt_path_repo" add .claude/commands/deploy.md
 expect_fail "$prompt_path_repo" "prompt artifact path requires approval"
 expect_flag_pass "$prompt_path_repo" "approval flag permits prompt artifact path"
+if (cd "$prompt_path_repo" && env -u AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED \
+  bash scripts/check-prompt-human-approval.sh \
+  --defer-human-approval-to-exact-head-pr-review=true >/tmp/prompt-guard-test.out 2>&1); then
+  echo "FAIL: untrusted caller deferred prompt approval" >&2
+  exit 1
+fi
+echo "PASS: exact-head deferral is restricted to trusted Auto RCA"
+expect_deferred_pass "$prompt_path_repo" "trusted Auto RCA may defer prompt approval to the exact-head review"
+
+prompt_text_repo="$(new_repo prompt-text-path)"
+mkdir -p "$prompt_text_repo/.github"
+cat >"$prompt_text_repo/.github/auto-rca-prompt.txt" <<'TXT'
+New automated RCA instruction.
+TXT
+git -C "$prompt_text_repo" add .github/auto-rca-prompt.txt
+expect_fail "$prompt_text_repo" "prompt text artifact requires approval"
+expect_flag_pass "$prompt_text_repo" "approval flag permits prompt text artifact"
+
+runtime_prompt_repo="$(new_repo runtime-prompt-workflow)"
+mkdir -p "$runtime_prompt_repo/.github/workflows"
+cat >"$runtime_prompt_repo/.github/workflows/auto-rca.yml" <<'YAML'
+name: Auto RCA
+jobs:
+  rca:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "prompt=/RCA on production agent <agent-id>"
+YAML
+git -C "$runtime_prompt_repo" add .github/workflows/auto-rca.yml
+expect_fail "$runtime_prompt_repo" "runtime prompt workflow requires approval"
+expect_flag_pass "$runtime_prompt_repo" "approval flag permits runtime prompt workflow"
 
 prompt_constant_repo="$(new_repo prompt-constant)"
 mkdir -p "$prompt_constant_repo/src"

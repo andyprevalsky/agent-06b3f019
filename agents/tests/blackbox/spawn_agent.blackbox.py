@@ -1851,6 +1851,7 @@ async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
     assert captured["model"] == "rose-1-lite"
     assert captured["claude_token"] == "ctok"
     assert captured["call_site_override"] == "explore_agent"
+    assert captured["cache_sequence_id"] == "agent:a-7:task:task-99:call:explore_agent"
     assert captured["max_iterations"] >= 1
     assert captured["skip_verification"] is True
 
@@ -2066,6 +2067,7 @@ async def test_spawn_explore_agent_activity_inner_callbacks_work():
     assert entry["cache_read_input_tokens"] == 7
     assert entry["cache_creation_input_tokens"] == 3
     assert entry["from_fast_cache"] is True
+    assert entry["cache_sequence_id"] == "agent:a:task:task-1:call:explore_agent"
 
     # post_message dispatched to save_explore_message
     assert len(save_calls) == 2
@@ -2074,6 +2076,27 @@ async def test_spawn_explore_agent_activity_inner_callbacks_work():
     assert save_calls[0]["status"].value == "FINISHED"
     assert save_calls[1]["status"].value == "ERROR"
     assert save_calls[1]["tool_call_id"] == "completion-1"
+
+
+def test_three_sibling_explores_get_stable_isolated_cache_sequences():
+    """Each explore task owns one stable lane even under a shared parent agent."""
+    from loop.run_agent import _resolve_cache_sequence_id
+
+    sequence_ids = {
+        task_id: _resolve_cache_sequence_id(
+            agent_id="parent-agent",
+            task_id=task_id,
+            call_site="explore_agent",
+        )
+        for task_id in ("task-a", "task-b", "task-c")
+    }
+
+    assert len(set(sequence_ids.values())) == 3
+    assert sequence_ids["task-a"] == _resolve_cache_sequence_id(
+        agent_id="parent-agent",
+        task_id="task-a",
+        call_site="explore_agent",
+    )
 
 
 async def test_spawn_explore_agent_activity_execute_tool_dispatch():
@@ -2503,6 +2526,10 @@ async def run_all_tests():
         test_spawn_explore_agent_activity_rejects_empty_or_failed_tool_results,
     )
     await r.record_async("explore_activity_callbacks", test_spawn_explore_agent_activity_inner_callbacks_work)
+    r.record(
+        "explore_cache_sequences_stable_and_isolated",
+        test_three_sibling_explores_get_stable_isolated_cache_sequences,
+    )
     await r.record_async("explore_activity_dispatch", test_spawn_explore_agent_activity_execute_tool_dispatch)
     # handler.py
     await r.record_async("handler_explore_resolves_attachments", test_handler_explore_resolves_attachments)

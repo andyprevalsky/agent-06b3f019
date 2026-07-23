@@ -628,6 +628,7 @@ async def test_execute_dag_tool_llm_activity_args_match_signature():
     assert param_args[24] == "user-1"
     assert param_args[28] is False
     assert param_args[29] is True
+    assert param_args[30] == "agent:agent-1:task:0:call:dag_param_populator"
 
 
 async def test_execute_dag_alias_resolution_spawn_explore():
@@ -868,13 +869,20 @@ async def test_execute_dag_exhausted_alias_retry_never_replays_committed_sibling
         return {"message": "spawned"}
 
     async def on_tokens(prompt_tokens, completion_tokens, model, **kwargs):
-        token_calls.append((prompt_tokens, completion_tokens, model, kwargs["call_site"]))
+        token_calls.append(
+            (prompt_tokens, completion_tokens, model, kwargs["call_site"], kwargs["cache_sequence_id"])
+        )
 
     result, _events, dag = await _run_execute_dag(
         plan_data,
         execute_tool_impl=execute_tool,
         param_tool_calls=param_tool_calls,
-        param_usage={"prompt_tokens": 10, "completion_tokens": 2, "actual_model": "test-model"},
+        param_usage={
+            "prompt_tokens": 10,
+            "completion_tokens": 2,
+            "actual_model": "test-model",
+            "cache_sequence_id": "agent:agent-1:task:0:call:dag_param_populator",
+        },
         pending_context_seen=pending_context_seen,
         on_tokens=on_tokens,
     )
@@ -883,7 +891,16 @@ async def test_execute_dag_exhausted_alias_retry_never_replays_committed_sibling
     assert attempts == {"Tokyo": 1, "New York City": 2}
     assert [(name, goal) for name, goal, _id in recorded] == [("spawn_agent", "Research Tokyo")]
     assert len(token_calls) == 3
-    assert all(call == (10, 2, "test-model", "dag_param_populator") for call in token_calls)
+    assert all(
+        call == (
+            10,
+            2,
+            "test-model",
+            "dag_param_populator",
+            "agent:agent-1:task:0:call:dag_param_populator",
+        )
+        for call in token_calls
+    )
     assert all(pending_context_seen)
     assert dag.tasks[1].state.value == "FAILED"
 

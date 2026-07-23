@@ -2,9 +2,11 @@
 set -euo pipefail
 
 # Trusted command broker for the automated RCA lifecycle. The investigator can
-# only read already-collected evidence/verification output and publish local
-# commits. Commands that touch credentials, execute the changed checkout, push,
-# update PRs, or edit Slack are invoked only by trusted workflow steps.
+# access already-collected evidence/verification output, execute one declared
+# reproduction in a credential-scrubbed archive, and publishes local commits.
+# The coding agent may run normal local commands as its unprivileged OS user;
+# credentials, pushes, PR/Slack mutation, and gate attestations remain trusted
+# workflow operations outside that user's authority.
 
 ROOT_DIR="${AUTO_RCA_ROOT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CONTEXT_DIR="${AUTO_RCA_CONTEXT_DIR:-$ROOT_DIR/.context/auto-rca}"
@@ -103,6 +105,161 @@ read_state() {
   sudo cat "$GATE_STATE_DIR/$name"
 }
 
+timeline_steps() {
+  cat <<'EOF'
+rca-evidence|/RCA · production evidence
+rca-primary-investigation|/RCA · primary investigation
+rca-primary-reproduction|/RCA · unchanged local reproduction
+deploy-primary-offline|/deploy · offline gates
+deploy-primary-smoke|/deploy · smoke gates
+rca-retry-investigation|/RCA · retry investigation
+rca-retry-reproduction|/RCA · retry unchanged reproduction
+deploy-retry-offline|/deploy · retry offline gates
+deploy-retry-smoke|/deploy · retry smoke gates
+deploy-finalize|/deploy · trusted PR finalization
+EOF
+}
+
+timeline_label() {
+  local step="$1" entry
+  while IFS='|' read -r entry label; do
+    if [ "$entry" = "$step" ]; then
+      printf '%s\n' "$label"
+      return
+    fi
+  done < <(timeline_steps)
+  fail "RCA_TIMELINE_STEP is invalid"
+}
+
+timeline_now() {
+  local now="${AUTO_RCA_NOW_EPOCH:-}"
+  if [ -z "$now" ]; then
+    now="$(date +%s)"
+  fi
+  [[ "$now" =~ ^[0-9]+$ ]] || fail "AUTO_RCA_NOW_EPOCH is invalid"
+  printf '%s\n' "$now"
+}
+
+timeline_start() {
+  local step="${RCA_TIMELINE_STEP:-}" now
+  timeline_label "$step" >/dev/null
+  now="$(timeline_now)"
+  record_state "timeline.${step}.start" "$now"
+  record_state "timeline.${step}.status" running
+  printf 'Started %s.\n' "$(timeline_label "$step")"
+}
+
+timeline_finish() {
+  local step="${RCA_TIMELINE_STEP:-}" status="${RCA_TIMELINE_STATUS:-}" now start
+  timeline_label "$step" >/dev/null
+  case "$status" in passed|failed|skipped) ;; *) fail "RCA_TIMELINE_STATUS is invalid" ;; esac
+  start="$(read_state "timeline.${step}.start")"
+  [[ "$start" =~ ^[0-9]+$ ]] || fail "timeline step was not started"
+  now="$(timeline_now)"
+  [ "$now" -ge "$start" ] || fail "timeline end precedes its start"
+  record_state "timeline.${step}.end" "$now"
+  record_state "timeline.${step}.status" "$status"
+  printf 'Finished %s: %s.\n' "$(timeline_label "$step")" "$status"
+}
+
+timeline_waterfall_from_state() {
+  local now step label start end status seconds duration icon
+  local rows='' failed_label='' running_label='' last_label=''
+  now="$(timeline_now)"
+  while IFS='|' read -r step label; do
+    start="$(read_state "timeline.${step}.start" 2>/dev/null || true)"
+    status="$(read_state "timeline.${step}.status" 2>/dev/null || true)"
+    [ -n "$start" ] || continue
+    [[ "$start" =~ ^[0-9]+$ ]] || fail "timeline start is corrupt"
+    case "$status" in
+      running)
+        end="$now"
+        icon='⏳'
+        running_label="$label — in progress"
+        ;;
+      passed)
+        end="$(read_state "timeline.${step}.end")"
+        icon='✅'
+        last_label="$label — passed"
+        ;;
+      failed)
+        end="$(read_state "timeline.${step}.end")"
+        icon='❌'
+        failed_label="$label — failed"
+        ;;
+      skipped)
+        continue
+        ;;
+      *) fail "timeline status is corrupt" ;;
+    esac
+    [[ "$end" =~ ^[0-9]+$ ]] || fail "timeline end is corrupt"
+    [ "$end" -ge "$start" ] || fail "timeline duration is negative"
+    seconds="$((end - start))"
+    if [ "$seconds" -ge 3600 ]; then
+      duration="$((seconds / 3600))h $(((seconds % 3600) / 60))m $((seconds % 60))s"
+    elif [ "$seconds" -ge 60 ]; then
+      duration="$((seconds / 60))m $((seconds % 60))s"
+    else
+      duration="${seconds}s"
+    fi
+    rows+="${icon} ${label} — ${duration}"$'\n'
+  done < <(timeline_steps)
+
+  [ -n "$rows" ] || return 1
+  if [ -n "$running_label" ]; then
+    printf '*Pipeline step:* %s\n' "$running_label"
+  elif { [ "${RCA_STATE:-}" = ready ] || [ "${RCA_STATE:-}" = shipped ]; } \
+    && [ -n "$last_label" ]; then
+    printf '*Pipeline step:* %s\n' "$last_label"
+  elif [ -n "$failed_label" ]; then
+    printf '*Pipeline step:* %s\n' "$failed_label"
+  else
+    printf '*Pipeline step:* %s\n' "${last_label:-/RCA · queued}"
+  fi
+  printf '*Step waterfall:*\n%s' "$rows"
+}
+
+timeline_waterfall_from_pr_body() {
+  [ -n "${RCA_PR_BODY:-}" ] || return 1
+  printf '%s' "$RCA_PR_BODY" | python3 -c '
+import re, sys
+body = sys.stdin.read()
+match = re.search(r"<!-- rca-waterfall-start -->\n(?:##[^\n]*\n\n)?([\s\S]*?)\n<!-- rca-waterfall-end -->", body)
+if not match:
+    raise SystemExit(1)
+print(match.group(1).rstrip())
+'
+}
+
+timeline_waterfall() {
+  if [[ "$GATE_STATE_DIR" =~ ^/var/lib/rose-auto-rca/[0-9]+$ ]] \
+    && timeline_waterfall_from_state; then
+    return
+  fi
+  timeline_waterfall_from_pr_body
+}
+
+waterfall_section() {
+  local waterfall
+  waterfall="$(timeline_waterfall_from_state)" || return 1
+  printf '<!-- rca-waterfall-start -->\n'
+  printf '## Automated /RCA → /deploy waterfall\n\n'
+  printf '%s\n' "$waterfall"
+  printf '<!-- rca-waterfall-end -->\n'
+}
+
+attach_waterfall() {
+  local body="$1" section
+  section="$(waterfall_section)" || { printf '%s' "$body"; return; }
+  printf '%s' "$body" | python3 -c '
+import re, sys
+body = sys.stdin.read()
+body = re.sub(r"\n?<!-- rca-waterfall-start -->[\s\S]*?<!-- rca-waterfall-end -->\n?", "\n", body).rstrip()
+print(body)
+'
+  printf '\n%s' "$section"
+}
+
 gate_passed_for_head() {
   local gate="$1" marker head attested_head
   require_gate_state_dir
@@ -133,6 +290,78 @@ dispatch_plan() {
       ;;
     *) fail "EVENT_NAME is invalid" ;;
   esac
+}
+
+approved_deploy_plan() {
+  local result agent_id run_id
+  require_repo
+  result="$(python3 <<'PY'
+import os
+import re
+
+repository = os.environ["GITHUB_REPOSITORY"]
+number = os.environ.get("PR_NUMBER", "")
+head = os.environ.get("PR_HEAD_SHA", "")
+review_head = os.environ.get("REVIEW_COMMIT_SHA", "")
+head_ref = os.environ.get("PR_HEAD_REF", "")
+head_repo = os.environ.get("PR_HEAD_REPO", "")
+title = os.environ.get("PR_TITLE", "")
+body = os.environ.get("PR_BODY", "")
+draft = os.environ.get("PR_DRAFT", "")
+
+uuid = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
+if not re.fullmatch(r"[0-9]+", number):
+    raise SystemExit("invalid PR number")
+if not re.fullmatch(r"[0-9a-f]{40}", head):
+    raise SystemExit("invalid PR head")
+if review_head != head:
+    raise SystemExit("approval is stale: it does not cover the current PR head")
+if head_repo != repository:
+    raise SystemExit("fork RCA PRs cannot use approved deploy")
+if draft != "false":
+    raise SystemExit("approved deploy requires a ready non-draft PR")
+
+match = re.fullmatch(rf"auto-RCA: Production agent failure ({uuid})", title)
+if not match:
+    raise SystemExit("RCA title is not canonical")
+agent_id = match.group(1)
+short_id = re.sub(r"[^A-Za-z0-9]", "", agent_id)[:12]
+if head_ref != f"auto-rca/{agent_id}" and not re.fullmatch(
+    rf"auto-rca/{re.escape(short_id)}-[0-9]+", head_ref
+):
+    raise SystemExit("RCA branch does not match its agent")
+
+complete = re.findall(
+    rf"<!-- rca-complete head=([0-9a-f]{{40}}) agent=({uuid}) -->", body
+)
+verified = re.findall(
+    rf"<!-- rca-verified head=([0-9a-f]{{40}}) agent=({uuid}) run=([0-9]+) -->",
+    body,
+)
+slack = re.findall(
+    rf"<!-- rca-slack ts=([0-9]{{10,}}\.[0-9]{{6}}) channel=([A-Z0-9]{{9,32}}) agent=({uuid}) run=([0-9]+) -->",
+    body,
+)
+if len(complete) != 1 or complete[0] != (head, agent_id):
+    raise SystemExit("RCA completion marker is missing, duplicated, or stale")
+if len(verified) != 1:
+    raise SystemExit("trusted verification marker is missing or duplicated")
+verified_head, verified_agent, run_id = verified[0]
+if (verified_head, verified_agent) != (head, agent_id):
+    raise SystemExit("trusted verification is stale or belongs to another agent")
+if len(slack) != 1:
+    raise SystemExit("Slack lifecycle marker is missing or duplicated")
+_, _, slack_agent, slack_run = slack[0]
+if (slack_agent, slack_run) != (agent_id, run_id):
+    raise SystemExit("Slack lifecycle marker does not match trusted verification")
+print(f"{agent_id} {run_id}")
+PY
+)" || fail "approved deploy contract failed"
+  read -r agent_id run_id <<< "$result"
+  emit_output agent_id "$agent_id"
+  emit_output run_id "$run_id"
+  printf 'Approved deploy contract: agent=%s run=%s head=%s\n' \
+    "$agent_id" "$run_id" "$PR_HEAD_SHA"
 }
 
 reconcile_plan() {
@@ -208,9 +437,161 @@ print(json.dumps(candidates, separators=(",", ":")))
 PY
 }
 
+select_slack_prs() {
+  require_repo
+  [[ "${SLACK_CHANNEL:-}" =~ ^[A-Z0-9]{9,32}$ ]] || fail "SLACK_CHANNEL is invalid"
+  [[ "${SLACK_THREAD_TS:-}" =~ ^[0-9]{10,}\.[0-9]{6}$ ]] || \
+    fail "SLACK_THREAD_TS is invalid"
+  python3 - "$SLACK_CHANNEL" "$SLACK_THREAD_TS" "$GITHUB_REPOSITORY" 3<&0 <<'PY'
+import json
+import os
+import re
+import sys
+
+channel, thread_ts, repository = sys.argv[1:4]
+payload = json.load(os.fdopen(3))
+pulls = []
+for page in payload if isinstance(payload, list) else []:
+    if isinstance(page, list):
+        pulls.extend(page)
+    elif isinstance(page, dict):
+        pulls.append(page)
+
+uuid = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
+marker = re.compile(
+    rf"<!-- rca-slack ts={re.escape(thread_ts)} channel={re.escape(channel)} "
+    rf"agent=({uuid}) run=([0-9]+) -->"
+)
+candidates = []
+for pull in pulls:
+    body = pull.get("body") or ""
+    matches = marker.findall(body)
+    if len(matches) != 1:
+        continue
+    agent_id, run_id = matches[0]
+    head = pull.get("head") or {}
+    base = pull.get("base") or {}
+    head_repo = head.get("repo") or {}
+    branch = head.get("ref") or ""
+    short_id = re.sub(r"[^A-Za-z0-9]", "", agent_id)[:12]
+    if (
+        pull.get("state") == "open"
+        and pull.get("title") == f"auto-RCA: Production agent failure {agent_id}"
+        and base.get("ref") == "main"
+        and head_repo.get("full_name") == repository
+        and (
+            branch == f"auto-rca/{agent_id}"
+            or re.fullmatch(rf"auto-rca/{re.escape(short_id)}-[0-9]+", branch)
+        )
+    ):
+        candidates.append({
+            "number": pull.get("number"),
+            "url": pull.get("html_url"),
+            "title": pull.get("title"),
+            "body": body,
+            "headRefName": branch,
+            "isDraft": bool(pull.get("draft")),
+            "agentId": agent_id,
+            "runId": run_id,
+        })
+
+if len(candidates) != 1:
+    raise SystemExit(
+        f"expected exactly one open Auto RCA PR for Slack thread {channel}/{thread_ts}, "
+        f"found {len(candidates)}"
+    )
+print(json.dumps(candidates[0], separators=(",", ":")))
+PY
+}
+
+feedback_batch() {
+  [[ "${TRIGGER_COMMENT_ID:-}" =~ ^[0-9]+$ ]] || fail "TRIGGER_COMMENT_ID is invalid"
+  python3 - "$TRIGGER_COMMENT_ID" "${SLACK_CHANNEL:-}" "${SLACK_THREAD_TS:-}" 3<&0 <<'PY'
+import json
+import os
+import re
+import sys
+
+trigger_id = int(sys.argv[1])
+expected_channel, expected_thread = sys.argv[2:4]
+payload = json.load(os.fdopen(3))
+comments = []
+for page in payload if isinstance(payload, list) else []:
+    if isinstance(page, list):
+        comments.extend(page)
+    elif isinstance(page, dict):
+        comments.append(page)
+
+consumed_re = re.compile(r"<!-- rca-feedback-consumed ids=([0-9]+(?:,[0-9]+)*) run=[0-9]+ -->")
+feedback_re = re.compile(
+    r"<!-- rca-slack-feedback "
+    r"event=(Ev[A-Za-z0-9]{8,64}) "
+    r"channel=([A-Z0-9]{9,32}) "
+    r"thread=([0-9]{10,}\.[0-9]{6}) "
+    r"message=([0-9]{10,}\.[0-9]{6}) "
+    r"user=([UW][A-Z0-9]{8,32}) -->\n\n([\s\S]+)"
+)
+consumed = set()
+for comment in comments:
+    body = comment.get("body") or ""
+    match = consumed_re.fullmatch(body.strip())
+    if match:
+        consumed.update(int(value) for value in match.group(1).split(","))
+
+pending = []
+for comment in comments:
+    comment_id = comment.get("id")
+    body = comment.get("body") or ""
+    user = comment.get("user") or {}
+    association = comment.get("author_association") or ""
+    if (
+        not isinstance(comment_id, int)
+        or comment_id in consumed
+        or user.get("type") != "User"
+        or association not in {"OWNER", "MEMBER", "COLLABORATOR"}
+    ):
+        continue
+    match = feedback_re.fullmatch(body.strip())
+    if match:
+        event_id, channel, thread_ts, message_ts, slack_user, text = match.groups()
+        if expected_channel and channel != expected_channel:
+            continue
+        if expected_thread and thread_ts != expected_thread:
+            continue
+        text = text.strip()
+        if not text or len(text) > 8000:
+            continue
+        pending.append({
+            "id": comment_id,
+            "source": "slack",
+            "text": text,
+            "author": user.get("login") or "",
+            "event_id": event_id,
+            "channel": channel,
+            "thread_ts": thread_ts,
+            "message_ts": message_ts,
+            "slack_user": slack_user,
+        })
+        continue
+    if not consumed_re.fullmatch(body.strip()):
+        text = body.strip()
+        if text and len(text) <= 8000:
+            pending.append({
+                "id": comment_id,
+                "source": "github",
+                "text": text,
+                "author": user.get("login") or "",
+            })
+
+pending.sort(key=lambda item: item["id"])
+print(json.dumps(pending, separators=(",", ":")))
+PY
+}
+
 collect_evidence() {
   local temp_file agent_json context_json logs_json
   require_agent_id
+  require_gate_state_dir
   [ -n "${BACKEND_API_KEY:-}" ] || fail "BACKEND_API_KEY is required"
   [ -n "${CLICKHOUSE_ENDPOINT:-}" ] || fail "CLICKHOUSE_ENDPOINT is required"
   [ -n "${CLICKHOUSE_USER:-}" ] || fail "CLICKHOUSE_USER is required"
@@ -235,25 +616,56 @@ collect_evidence() {
     printf '%s\n%s\n\n' '## Alert context' "$context_json"
     printf '%s\n%s\n' '## Retained worker logs' "$logs_json"
   } > "$temp_file"
-  sudo install -o root -g root -m 0400 "$temp_file" "$GATE_STATE_DIR/evidence.txt"
-  record_state evidence.agent "$AGENT_ID"
+  sudo install -o root -g rose-auto-rca -m 0440 "$temp_file" "$GATE_STATE_DIR/evidence.txt"
+  printf '%s\n' "$AGENT_ID" | sudo tee "$GATE_STATE_DIR/evidence.agent" >/dev/null
+  sudo chown root:rose-auto-rca "$GATE_STATE_DIR/evidence.agent"
+  sudo chmod 0440 "$GATE_STATE_DIR/evidence.agent"
   printf 'Trusted production evidence captured.\n'
 }
 
 evidence() {
   require_agent_id
-  [ "$(read_state evidence.agent 2>/dev/null || true)" = "$AGENT_ID" ] || \
+  require_gate_state_dir
+  [ "$(cat "$GATE_STATE_DIR/evidence.agent" 2>/dev/null || true)" = "$AGENT_ID" ] || \
     fail "trusted evidence has not been collected for this agent"
-  read_state evidence.txt
+  cat "$GATE_STATE_DIR/evidence.txt"
 }
 
 verification() {
   require_agent_id
-  if sudo test -f "$GATE_STATE_DIR/verification.txt"; then
-    read_state verification.txt
+  require_gate_state_dir
+  if [ -f "$GATE_STATE_DIR/verification.txt" ]; then
+    cat "$GATE_STATE_DIR/verification.txt"
   else
     printf 'No trusted verification has run yet.\n'
   fi
+}
+
+pin_baseline() {
+  local base
+  require_gate_state_dir
+  require_branch
+  base="$(git -C "$ROOT_DIR" rev-parse origin/main)"
+  [[ "$base" =~ ^[0-9a-f]{40}$ ]] || fail "origin/main did not resolve to a commit SHA"
+  git -C "$ROOT_DIR" cat-file -e "$base^{commit}" || fail "origin/main is not a commit"
+  printf '%s\n' "$base" | sudo tee "$GATE_STATE_DIR/baseline.sha" >/dev/null
+  sudo chown root:rose-auto-rca "$GATE_STATE_DIR/baseline.sha"
+  sudo chmod 0440 "$GATE_STATE_DIR/baseline.sha"
+  sudo install -o root -g root -m 0400 "$ROOT_DIR/.git/config" \
+    "$GATE_STATE_DIR/git-config"
+  printf 'Trusted RCA baseline pinned at %s.\n' "$base"
+}
+
+trusted_baseline() {
+  local base
+  require_gate_state_dir
+  base="$(cat "$GATE_STATE_DIR/baseline.sha" 2>/dev/null || true)"
+  if ! [[ "$base" =~ ^[0-9a-f]{40}$ ]]; then
+    base="$(read_state baseline.sha 2>/dev/null || true)"
+  fi
+  [[ "$base" =~ ^[0-9a-f]{40}$ ]] || fail "trusted RCA baseline is unavailable"
+  git -C "$ROOT_DIR" cat-file -e "$base^{commit}" || fail "trusted RCA baseline commit is unavailable"
+  printf '%s\n' "$base"
 }
 
 benchmark() {
@@ -264,10 +676,8 @@ repro_manifest_path() {
   printf '%s/repro.json' "$CONTEXT_DIR"
 }
 
-verify_repro() {
-  local manifest test_path base head test_hash temp_root base_dir head_dir
-  local before_log after_log before_status after_status result_file
-  require_clean_checkout
+read_repro_test_path() {
+  local manifest test_path
   manifest="$(repro_manifest_path)"
   [ -s "$manifest" ] || fail "write the structured reproduction manifest to $manifest"
   test_path="$(jq -er '.test_path | strings' "$manifest")" || fail "repro manifest needs test_path"
@@ -275,14 +685,131 @@ verify_repro() {
     fail "repro test_path must be a scripts/tests/*.test.sh path"
   [[ "$test_path" != *'..'* ]] || fail "repro test_path may not traverse directories"
   [ -f "$ROOT_DIR/$test_path" ] || fail "repro test does not exist: $test_path"
+  printf '%s\n' "$test_path"
+}
+
+require_cemented_repro() {
+  local test_path="$1"
+  grep -Fq "$(basename "$test_path")" "$ROOT_DIR/scripts/test.sh" || \
+    fail "repro test is not cemented into scripts/test.sh"
+}
+
+run_sanitized_repro() {
+  local workdir="$1" test_path="$2" log_path="$3" home_dir="$4"
+  python3 - "$workdir" "$test_path" "$log_path" "$home_dir" "$PATH" <<'PY'
+import pathlib
+import subprocess
+import sys
+
+workdir, test_path, log_path, home_dir, path = sys.argv[1:]
+env = {
+    "CI": "true",
+    "HOME": home_dir,
+    "PATH": path,
+}
+with pathlib.Path(log_path).open("wb") as output:
+    try:
+        completed = subprocess.run(
+            ["bash", test_path],
+            cwd=workdir,
+            env=env,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            timeout=300,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        output.write(b"\nReproduction timed out after 300 seconds.\n")
+        raise SystemExit(124)
+raise SystemExit(completed.returncode)
+PY
+}
+
+materialize_investigator_head() {
+  local destination="$1" path source
+  git -C "$ROOT_DIR" archive HEAD | tar -x -C "$destination"
+  if ! git -C "$ROOT_DIR" diff --quiet HEAD --; then
+    git -C "$ROOT_DIR" diff --binary HEAD | \
+      git -C "$destination" apply --binary --whitespace=nowarn -
+  fi
+  while IFS= read -r -d '' path; do
+    source="$ROOT_DIR/$path"
+    mkdir -p "$destination/$(dirname "$path")"
+    cp -p "$source" "$destination/$path"
+  done < <(git -C "$ROOT_DIR" ls-files --others --exclude-standard -z)
+}
+
+investigator_repro() {
+  local test_path base test_hash temp_root base_dir head_dir before_log after_log
+  local before_status after_status result_file
+  require_agent_id
+  require_branch
+  if git -C "$ROOT_DIR" diff --name-only --diff-filter=U | grep -q .; then
+    fail "checkout has unresolved merge conflicts"
+  fi
+
+  test_path="$(read_repro_test_path)"
+  chmod +x "$ROOT_DIR/$test_path"
+  require_cemented_repro "$test_path"
+  base="$(trusted_baseline)"
+  test_hash="$(python3 - "$ROOT_DIR/$test_path" <<'PY'
+import hashlib
+import pathlib
+import sys
+print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())
+PY
+)"
+
+  temp_root="$(mktemp -d "${RUNNER_TEMP:-/tmp}/rose-auto-rca-investigator-repro.XXXXXX")"
+  base_dir="$temp_root/base"
+  head_dir="$temp_root/head"
+  before_log="$temp_root/before.log"
+  after_log="$temp_root/after.log"
+  result_file="$CONTEXT_DIR/investigator-verification.txt"
+  mkdir -p "$base_dir" "$head_dir" "$temp_root/home" "$CONTEXT_DIR"
+  trap 'rm -rf "$temp_root"' RETURN
+
+  git -C "$ROOT_DIR" archive "$base" | tar -x -C "$base_dir"
+  materialize_investigator_head "$head_dir"
+  mkdir -p "$base_dir/$(dirname "$test_path")"
+  cp "$ROOT_DIR/$test_path" "$base_dir/$test_path"
+  chmod +x "$base_dir/$test_path" "$head_dir/$test_path"
+
+  set +e
+  run_sanitized_repro "$base_dir" "$test_path" "$before_log" "$temp_root/home"
+  before_status=$?
+  run_sanitized_repro "$head_dir" "$test_path" "$after_log" "$temp_root/home"
+  after_status=$?
+  set -e
+
+  {
+    printf 'Investigator reproduction: %s\n' "$test_path"
+    printf 'Reproduction SHA-256: %s\n' "$test_hash"
+    printf 'Baseline commit: %s\n' "$base"
+    printf 'Baseline exit: %s (must be non-zero)\n' "$before_status"
+    sed -n '1,120p' "$before_log"
+    printf '\nCurrent worktree exit: %s (must be zero)\n' "$after_status"
+    sed -n '1,120p' "$after_log"
+  } > "$result_file"
+  cat "$result_file"
+
+  [ "$before_status" -ne 0 ] || fail "the unchanged reproduction did not fail on the baseline"
+  [ "$after_status" -eq 0 ] || fail "the unchanged reproduction did not pass on the current worktree"
+  printf 'Credential-scrubbed investigator reproduction failed before and passed after.\n'
+}
+
+verify_repro() {
+  local test_path base head test_hash temp_root base_dir head_dir
+  local before_log after_log before_status after_status result_file
+  require_clean_checkout
+  test_path="$(read_repro_test_path)"
   [ -x "$ROOT_DIR/$test_path" ] || fail "repro test must be executable: $test_path"
   git -C "$ROOT_DIR" ls-tree -r --name-only HEAD -- "$test_path" | grep -Fxq "$test_path" || \
     fail "repro test must be committed at HEAD"
-  grep -Fq "$(basename "$test_path")" "$ROOT_DIR/scripts/test.sh" || \
-    fail "repro test is not cemented into scripts/test.sh"
+  require_cemented_repro "$test_path"
 
   head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
-  base="$(git -C "$ROOT_DIR" merge-base origin/main HEAD)"
+  base="$(trusted_baseline)"
   [ "$base" != "$head" ] || fail "repro requires a changed HEAD"
   test_hash="$(python3 - "$ROOT_DIR/$test_path" <<'PY'
 import hashlib
@@ -306,11 +833,9 @@ PY
   chmod +x "$base_dir/$test_path" "$head_dir/$test_path"
 
   set +e
-  (cd "$base_dir" && env -i PATH="$PATH" HOME="$temp_root/home" CI=true \
-    bash "$test_path") >"$before_log" 2>&1
+  run_sanitized_repro "$base_dir" "$test_path" "$before_log" "$temp_root/home"
   before_status=$?
-  (cd "$head_dir" && env -i PATH="$PATH" HOME="$temp_root/home" CI=true \
-    bash "$test_path") >"$after_log" 2>&1
+  run_sanitized_repro "$head_dir" "$test_path" "$after_log" "$temp_root/home"
   after_status=$?
   set -e
 
@@ -325,7 +850,7 @@ PY
     printf '\nCurrent exit: %s (must be zero)\n' "$after_status"
     sed -n '1,120p' "$after_log"
   } > "$result_file"
-  sudo install -o root -g root -m 0400 "$result_file" "$GATE_STATE_DIR/verification.txt"
+  sudo install -o root -g rose-auto-rca -m 0440 "$result_file" "$GATE_STATE_DIR/verification.txt"
 
   [ "$before_status" -ne 0 ] || fail "the unchanged reproduction did not fail on the baseline"
   [ "$after_status" -eq 0 ] || fail "the unchanged reproduction did not pass on the current HEAD"
@@ -358,7 +883,9 @@ PY
 
 offline_gates() {
   require_clean_checkout
-  bash "$ROOT_DIR/scripts/test.sh" --no-smoke
+  AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED=true \
+    bash "$ROOT_DIR/scripts/test.sh" --no-smoke \
+      --defer-human-approval-to-exact-head-pr-review=true
   record_gate offline-gates
 }
 
@@ -393,6 +920,11 @@ body = re.sub(
     "",
     body,
 ).rstrip()
+body = re.sub(
+    r"\n?<!-- rca-waterfall-start -->[\s\S]*?<!-- rca-waterfall-end -->\n?",
+    "\n",
+    body,
+).rstrip()
 complete = f"<!-- rca-complete head={head} agent={agent_id} -->"
 slack = (
     f"<!-- rca-slack ts={slack_ts} channel={slack_channel} "
@@ -407,9 +939,16 @@ PY
 }
 
 publish_draft() {
+  local manifest test_path
   require_agent_id
   require_branch
   require_repo
+
+  manifest="$(repro_manifest_path)"
+  if [ -s "$manifest" ]; then
+    test_path="$(read_repro_test_path)"
+    chmod +x "$ROOT_DIR/$test_path"
+  fi
 
   if [ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal)" ]; then
     git -c core.hooksPath=/dev/null -C "$ROOT_DIR" add -A
@@ -672,6 +1211,7 @@ ensure_draft() {
     reason="The investigator did not publish a complete RCA report. Primary outcome: ${PRIMARY_INVESTIGATOR_OUTCOME:-unknown}; retry outcome: ${RETRY_INVESTIGATOR_OUTCOME:-not-run}."
     body="$(preliminary_body "$reason")"
   fi
+  body="$(attach_waterfall "$body")"
 
   pr_json="$(find_pr_json)"
   pr_url="$(pr_url_from_json "$pr_json")"
@@ -703,6 +1243,22 @@ ensure_draft() {
   printf '%s\n' "$pr_url"
 }
 
+sync_waterfall() {
+  local pr_json pr_number body updated
+  require_agent_id
+  require_branch
+  require_repo
+  [ -n "${AUTO_RCA_PR_TOKEN:-}" ] || fail "AUTO_RCA_PR_TOKEN is required"
+  pr_json="$(find_pr_json)"
+  pr_number="$(pr_number_from_json "$pr_json")"
+  [ -n "$pr_number" ] || fail "no open RCA pull request exists"
+  body="$(GH_TOKEN="$AUTO_RCA_PR_TOKEN" gh api \
+    "repos/$GITHUB_REPOSITORY/pulls/$pr_number" --jq '.body // ""')"
+  updated="$(attach_waterfall "$body")"
+  update_pr_body "$pr_number" "$updated"
+  printf 'Trusted pipeline waterfall synchronized to PR #%s.\n' "$pr_number"
+}
+
 mark_ready() {
   local pr_json pr_url
   require_agent_id
@@ -716,7 +1272,7 @@ mark_ready() {
 }
 
 slack_message() {
-  local affected_user_name state fe_url pr_url run_url label
+  local affected_user_name state fe_url pr_url run_url label waterfall
   require_agent_id
   affected_user_name="${AFFECTED_USER_NAME:-}"
   state="${RCA_STATE:-}"
@@ -730,7 +1286,7 @@ slack_message() {
     fail "AFFECTED_USER_NAME must be one line"
   case "$state" in
     running) label='🟡 RCA running' ;;
-    revising) label='🟡 Revising RCA from PR feedback' ;;
+    revising) label='🟡 Revising RCA from reviewer feedback' ;;
     blocked) label='🔴 RCA blocked — draft needs attention' ;;
     draft) label='🔵 Draft PR open (needs attention)' ;;
     ready) label='🟢 Ready for review — approve to ship' ;;
@@ -745,11 +1301,63 @@ slack_message() {
 
   printf '*Affected user:* %s\n' "$affected_user_name"
   printf '*Current state:* %s\n' "$label"
+  if [ -n "${RCA_PIPELINE_STEP_OVERRIDE:-}" ]; then
+    case "$RCA_PIPELINE_STEP_OVERRIDE" in
+      '/RCA · workflow setup — failed'|\
+      '/RCA · production evidence — failed'|\
+      '/RCA · investigation — failed'|\
+      '/RCA · unchanged local reproduction — failed'|\
+      '/deploy · offline gates — failed'|\
+      '/deploy · smoke gates — failed'|\
+      '/deploy · trusted PR finalization — failed'|\
+      '/deploy · completion contract — failed') ;;
+      *) fail "RCA_PIPELINE_STEP_OVERRIDE is invalid" ;;
+    esac
+    printf '*Pipeline step:* %s\n' "$RCA_PIPELINE_STEP_OVERRIDE"
+  elif waterfall="$(timeline_waterfall 2>/dev/null)"; then
+    printf '%s\n' "$waterfall"
+  else
+    case "$state" in
+      running) printf '*Pipeline step:* /RCA · production evidence — queued\n' ;;
+      revising) printf '*Pipeline step:* /RCA · reviewer feedback — queued\n' ;;
+      draft|blocked) printf '*Pipeline step:* /RCA · investigation — needs attention\n' ;;
+      ready) printf '*Pipeline step:* /deploy · automated gates complete — passed\n' ;;
+      shipped) printf '*Pipeline step:* /deploy · approved exact HEAD — merged\n' ;;
+      cancelled) printf '*Pipeline step:* /deploy · approval — cancelled\n' ;;
+    esac
+  fi
   printf '*Links:* <%s|FE View> · <%s|PR> · <%s|GH Action RCA Run>\n' "$fe_url" "$pr_url" "$run_url"
   printf '%s\n' "*Agent ID:* \`$AGENT_ID\`"
   if [ "$state" != shipped ] && [ "$state" != cancelled ]; then
-    printf '%s\n' "*Feedback:* Add a top-level Conversation comment \`/rca <requested changes>\` on the PR."
+    printf '%s\n' "*Feedback:* Reply normally in this Slack thread, or leave a normal top-level PR comment."
   fi
+}
+
+slack_reply() {
+  local text payload users state
+  [ -n "${SLACK_BOT_TOKEN:-}" ] || fail "SLACK_BOT_TOKEN is required"
+  [[ "${SLACK_CHANNEL:-}" =~ ^[A-Z0-9]{9,32}$ ]] || fail "SLACK_CHANNEL is invalid"
+  [[ "${SLACK_TS:-}" =~ ^[0-9]{10,}\.[0-9]{6}$ ]] || fail "SLACK_TS is invalid"
+  case "${RCA_STATE:-}" in ready|blocked) ;; *) fail "RCA_STATE is invalid for a feedback reply" ;; esac
+  users="${RCA_FEEDBACK_SLACK_USERS:-}"
+  if [ -n "$users" ] && ! [[ "$users" =~ ^[UW][A-Z0-9]{8,32}(,[UW][A-Z0-9]{8,32})*$ ]]; then
+    fail "RCA_FEEDBACK_SLACK_USERS is invalid"
+  fi
+  text=''
+  if [ -n "$users" ]; then
+    text="$(printf '%s' "$users" | awk -F, '{for (i=1;i<=NF;i++) printf "%s<@%s>", (i == 1 ? "" : " "), $i}') "
+  fi
+  state="${RCA_STATE}"
+  if [ "$state" = ready ]; then
+    text+="I finished the requested revision. The trusted /RCA reproduction and automated /deploy gates passed; the exact PR HEAD is ready for approval."
+  else
+    text+="I worked through the requested revision, but the trusted pipeline is still blocked. The exact failed step and elapsed time are shown below and on the PR."
+  fi
+  text+=$'\n'
+  text+="$(slack_message)"
+  payload="$(jq -n --arg c "$SLACK_CHANNEL" --arg ts "$SLACK_TS" --arg t "$text" \
+    '{channel:$c,thread_ts:$ts,text:$t,reply_broadcast:false}')"
+  slack_api chat.postMessage "$payload" >/dev/null
 }
 
 slack_api() {
@@ -817,11 +1425,16 @@ slack_update() {
 
 case "${1:-}" in
   dispatch-plan) [ "$#" -eq 1 ] || fail "dispatch-plan takes no arguments"; dispatch_plan ;;
+  approved-deploy-plan) [ "$#" -eq 1 ] || fail "approved-deploy-plan takes no arguments"; approved_deploy_plan ;;
   reconcile-plan) [ "$#" -eq 1 ] || fail "reconcile-plan takes no arguments"; reconcile_plan ;;
   select-agent-prs) [ "$#" -eq 1 ] || fail "select-agent-prs takes JSON on stdin and no arguments"; select_agent_prs ;;
+  select-slack-prs) [ "$#" -eq 1 ] || fail "select-slack-prs takes JSON on stdin and no arguments"; select_slack_prs ;;
+  feedback-batch) [ "$#" -eq 1 ] || fail "feedback-batch takes JSON on stdin and no arguments"; feedback_batch ;;
   collect-evidence) [ "$#" -eq 1 ] || fail "collect-evidence takes no arguments"; collect_evidence ;;
   evidence) [ "$#" -eq 1 ] || fail "evidence takes no arguments"; evidence ;;
   verification) [ "$#" -eq 1 ] || fail "verification takes no arguments"; verification ;;
+  pin-baseline) [ "$#" -eq 1 ] || fail "pin-baseline takes no arguments"; pin_baseline ;;
+  investigator-repro) [ "$#" -eq 1 ] || fail "investigator-repro takes no arguments"; investigator_repro ;;
   benchmark) [ "$#" -eq 1 ] || fail "benchmark takes no arguments"; benchmark ;;
   verify-repro) [ "$#" -eq 1 ] || fail "verify-repro takes no arguments"; verify_repro ;;
   offline-gates) [ "$#" -eq 1 ] || fail "offline-gates takes no arguments"; offline_gates ;;
@@ -832,8 +1445,13 @@ case "${1:-}" in
   completion-status) [ "$#" -eq 1 ] || fail "completion-status takes no arguments"; completion_status ;;
   require-complete) [ "$#" -eq 1 ] || fail "require-complete takes no arguments"; require_complete ;;
   ensure-draft) [ "$#" -eq 1 ] || fail "ensure-draft takes no arguments"; ensure_draft ;;
+  sync-waterfall) [ "$#" -eq 1 ] || fail "sync-waterfall takes no arguments"; sync_waterfall ;;
   mark-ready) [ "$#" -eq 1 ] || fail "mark-ready takes no arguments"; mark_ready ;;
+  timeline-start) [ "$#" -eq 1 ] || fail "timeline-start takes no arguments"; timeline_start ;;
+  timeline-finish) [ "$#" -eq 1 ] || fail "timeline-finish takes no arguments"; timeline_finish ;;
+  timeline-waterfall) [ "$#" -eq 1 ] || fail "timeline-waterfall takes no arguments"; timeline_waterfall ;;
   slack-message) [ "$#" -eq 1 ] || fail "slack-message takes no arguments"; slack_message ;;
   slack-update) [ "$#" -eq 1 ] || fail "slack-update takes no arguments"; slack_update ;;
-  *) fail "usage: scripts/auto-rca-tool {dispatch-plan|reconcile-plan|select-agent-prs|collect-evidence|evidence|verification|verify-repro|offline-gates|smoke-gates|publish-draft|begin-draft|bind-slack|completion-status|require-complete|ensure-draft|mark-ready|slack-message|slack-update}" ;;
+  slack-reply) [ "$#" -eq 1 ] || fail "slack-reply takes no arguments"; slack_reply ;;
+  *) fail "usage: scripts/auto-rca-tool {dispatch-plan|approved-deploy-plan|reconcile-plan|select-agent-prs|select-slack-prs|feedback-batch|collect-evidence|evidence|verification|pin-baseline|investigator-repro|verify-repro|offline-gates|smoke-gates|publish-draft|begin-draft|bind-slack|completion-status|require-complete|ensure-draft|sync-waterfall|mark-ready|timeline-start|timeline-finish|timeline-waterfall|slack-message|slack-update|slack-reply}" ;;
 esac
