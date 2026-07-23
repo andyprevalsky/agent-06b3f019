@@ -8,6 +8,8 @@ import path from 'node:path';
 
 import { cacheRequestTimeoutMs, objectKey } from '../../../scripts/seed-dump-cache';
 
+const tsxCli = path.resolve(__dirname, '../../../../node_modules/tsx/dist/cli.mjs');
+
 function test(name: string, fn: () => void): void {
   try {
     fn();
@@ -50,18 +52,22 @@ test('CLI fails closed (exit 1) when R2 is unconfigured — caller cold-syncs', 
   const script = path.resolve(__dirname, '../../../scripts/seed-dump-cache.ts');
   let code = 0;
   try {
-    execFileSync('npx', ['tsx', script, 'get', 'tok', '/tmp/seed-dump-cache-test.out'], {
-      // Blank ALL four R2 vars so the script's .env loader can't refill them —
-      // makes "unconfigured" deterministic regardless of the local back-end/.env.
-      env: {
-        ...process.env,
-        R2_BUCKET_TRACE_ARCHIVE: '',
-        R2_ACCOUNT_ID: '',
-        R2_ACCESS_KEY_ID: '',
-        R2_SECRET_ACCESS_KEY: '',
-      },
-      stdio: 'pipe',
-    });
+    execFileSync(
+      process.execPath,
+      [tsxCli, script, 'get', 'tok', '/tmp/seed-dump-cache-test.out'],
+      {
+        // Blank ALL four R2 vars so the script's .env loader can't refill them —
+        // makes "unconfigured" deterministic regardless of the local back-end/.env.
+        env: {
+          ...process.env,
+          R2_BUCKET_TRACE_ARCHIVE: '',
+          R2_ACCOUNT_ID: '',
+          R2_ACCESS_KEY_ID: '',
+          R2_SECRET_ACCESS_KEY: '',
+        },
+        stdio: 'pipe',
+      }
+    );
   } catch (err) {
     code = (err as { status?: number }).status ?? 1;
   }
@@ -72,7 +78,7 @@ test('CLI fails closed (exit 1) on a missing subcommand argument', () => {
   const script = path.resolve(__dirname, '../../../scripts/seed-dump-cache.ts');
   let code = 0;
   try {
-    execFileSync('npx', ['tsx', script, 'get'], { stdio: 'pipe' });
+    execFileSync(process.execPath, [tsxCli, script, 'get'], { stdio: 'pipe' });
   } catch (err) {
     code = (err as { status?: number }).status ?? 1;
   }
@@ -97,18 +103,22 @@ async function testHangingEndpointIsBounded(): Promise<void> {
   assert(address && typeof address !== 'string');
 
   const script = path.resolve(__dirname, '../../../scripts/seed-dump-cache.ts');
-  const child = spawn('npx', ['tsx', script, 'get', 'tok', '/tmp/seed-dump-cache-hang.out'], {
-    env: {
-      ...process.env,
-      R2_BUCKET_TRACE_ARCHIVE: 'test-bucket',
-      R2_ACCOUNT_ID: 'test-account',
-      R2_ACCESS_KEY_ID: 'test-access',
-      R2_SECRET_ACCESS_KEY: 'test-secret',
-      R2_ENDPOINT: `http://127.0.0.1:${address.port}`,
-      SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '250',
-    },
-    stdio: 'pipe',
-  });
+  const child = spawn(
+    process.execPath,
+    [tsxCli, script, 'get', 'tok', '/tmp/seed-dump-cache-hang.out'],
+    {
+      env: {
+        ...process.env,
+        R2_BUCKET_TRACE_ARCHIVE: 'test-bucket',
+        R2_ACCOUNT_ID: 'test-account',
+        R2_ACCESS_KEY_ID: 'test-access',
+        R2_SECRET_ACCESS_KEY: 'test-secret',
+        R2_ENDPOINT: `http://127.0.0.1:${address.port}`,
+        SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '250',
+      },
+      stdio: 'pipe',
+    }
+  );
   let killedByStartupWatchdog = false;
   const startupWatchdog = setTimeout(() => {
     killedByStartupWatchdog = true;
