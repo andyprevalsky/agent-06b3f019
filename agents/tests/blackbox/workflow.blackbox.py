@@ -2851,6 +2851,37 @@ async def test_workflow_check_credits_free_credits_exhausted_raises_subscription
         _restore_workflow(original_workflow)
 
 
+async def test_workflow_check_credits_free_credit_checkout_failure_pauses():
+    """Once usage proves free credits are exhausted, checkout failures must fail closed."""
+    wf = _bare_workflow_instance()
+    wf.user_id = "u-free-credit"
+    wf.agent_id = "a-free-credit"
+    fake = _FakeWorkflowModule()
+
+    async def fake_exec(fn, args=None, **kwargs):
+        name = getattr(fn, "__name__", "")
+        if name == "check_user_usage":
+            return {
+                "has_credits": False,
+                "remaining": 0,
+                "used": 0.01,
+                "total": 0.01,
+                "tier": None,
+            }
+        if name == "mint_subscription_checkout_activity":
+            raise RuntimeError("subscription checkout unavailable")
+        return None
+
+    fake.execute_activity = fake_exec
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_credits()
+        assert wf._has_credits is False
+        assert wf.is_paused is True
+    finally:
+        _restore_workflow(original)
+
+
 async def test_workflow_check_credits_has_credits_no_pause():
     """_check_credits sets _has_credits=True and does not pause when credits ok."""
     wf = _bare_workflow_instance()
@@ -3406,6 +3437,7 @@ async def test_workflow_post_dag_completion_dispatches_attempt_completion_tool()
 
     dispatched_tools = []
     verifier_kwargs = {}
+    token_calls = []
 
     async def fake_execute_tool(tool_name, tool_args, tool_call_id):
         dispatched_tools.append((tool_name, tool_args, tool_call_id))
@@ -3421,14 +3453,19 @@ async def test_workflow_post_dag_completion_dispatches_attempt_completion_tool()
             "reasoning": "Complete",
             "structured_response": {"done": True},
             "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
+                "prompt_tokens": 5,
+                "completion_tokens": 2,
+                "total_tokens": 7,
+                "cache_sequence_id": "post-dag-verifier-sequence",
             },
         }
 
+    async def fake_on_tokens(*args, **kwargs):
+        token_calls.append({"args": args, "kwargs": kwargs})
+
     wf._execute_tool = fake_execute_tool
     wf._refresh_compute_token = fake_refresh_compute_token
+    wf._on_tokens = fake_on_tokens
 
     fake = _FakeWorkflowModule()
     fake.activity_returns["poll_new_messages"] = [
@@ -3463,6 +3500,7 @@ async def test_workflow_post_dag_completion_dispatches_attempt_completion_tool()
     assert verifier_kwargs["tool_call_id"] == expected_tool_call_id
     assert verifier_kwargs["post_message"] == wf._post_message
     assert result["score"] == 1.0
+    assert token_calls[0]["kwargs"]["cache_sequence_id"] == "post-dag-verifier-sequence"
 
 
 async def test_workflow_post_dag_completion_verifier_error_closes_attempt_tool():
@@ -3735,7 +3773,7 @@ async def test_workflow_mark_complete_happy_path():
             and (args[3] or {}).get("toolStatus") == "FINISHED"
         )
         mark_finished_index = next(i for i, (name, _args) in enumerate(fake.activity_calls) if name == "mark_finished")
-        assert mark_finished_index < final_summary_index
+        assert final_summary_index < mark_finished_index
         # Child-completed signal to parent
         signal_names = [s[1] for s in fake.signal_calls]
         assert "child_completed" in signal_names
@@ -4154,6 +4192,7 @@ async def test_workflow_approval_text_repopulates_same_tool_then_executes_once()
             "cache_read_input_tokens": 100,
             "cache_creation_input_tokens": 0,
             "actual_model": "anthropic/claude-sonnet-4.6",
+            "cache_sequence_id": "approval-param-sequence",
         },
     }
     original_workflow = _patch_workflow(fake)
@@ -4190,9 +4229,11 @@ async def test_workflow_approval_text_repopulates_same_tool_then_executes_once()
         assert llm_args[26] == "Call the restaurant and book dinner"
         assert llm_args[28] is True, "JIT calls must force canonical backend context on every worker"
         assert llm_args[29] is True, "JIT must cache the stable context before its unique feedback suffix"
+        assert llm_args[30] == "agent:agent-approval-jit:call:approval_param_populator"
         assert len(token_calls) == 1
         assert token_calls[0]["kwargs"]["cache_read_input_tokens"] == 100
         assert token_calls[0]["kwargs"]["call_site"] == "approval_param_populator"
+        assert token_calls[0]["kwargs"]["cache_sequence_id"] == "approval-param-sequence"
     finally:
         workflow_module.request_user_approval_direct = original_approval
         workflow_module.TOOL_EXECUTORS["call_phone_number"] = original_executor
@@ -4825,6 +4866,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_check_credits_free_credit_subscription_gate",
         test_workflow_check_credits_free_credits_exhausted_raises_subscription_gate,
+    )
+    await r.record_async(
+        "wf_check_credits_free_credit_checkout_failure_pauses",
+        test_workflow_check_credits_free_credit_checkout_failure_pauses,
     )
     await r.record_async("wf_check_credits_has_credits", test_workflow_check_credits_has_credits_no_pause)
     await r.record_async("wf_check_credits_exception", test_workflow_check_credits_on_exception_continues)

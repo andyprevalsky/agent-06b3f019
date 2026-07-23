@@ -2075,25 +2075,6 @@ LIVE_BACKEND_PORT=""
 LIVE_BACKEND_URL=""
 CLOUDBENCH_API_KEY="$( { grep -h '^BACKEND_API_KEY' "$ROOT_DIR/back-end/.env" "$ROOT_DIR/agents/.env" 2>/dev/null | head -1; } | sed -E 's/^BACKEND_API_KEY=//; s/^"//; s/"$//' )"
 
-# Build the local workspace patch before selecting a launch transport. The
-# legacy SSH path uploads it with SFTP; boot-launch injects the same file into
-# the Machine rootfs as part of its one config update. Keeping this outside the
-# branch makes the printed "+patch" provenance true for both transports.
-STAGED_LOCAL_FILES=()
-cleanup_staged_local_files() {
-    for p in "${STAGED_LOCAL_FILES[@]}"; do
-        [ -n "$p" ] && rm -f "$p" 2>/dev/null || true
-    done
-}
-LOCAL_PATCH_FILE=""
-if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
-   && { ! git -C "$ROOT_DIR" diff --quiet --binary \
-        || [ -n "$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | head -1)" ]; }; then
-    LOCAL_PATCH_FILE="$(mktemp)"
-    STAGED_LOCAL_FILES+=("$LOCAL_PATCH_FILE")
-    bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$LOCAL_PATCH_FILE"
-fi
-
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     POST_CONFIG_START_MARKER="$OUT_DIR/post-config-start.accepted"
     rm -f "$POST_CONFIG_START_MARKER"
@@ -2141,7 +2122,12 @@ if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
         # and digest explicitly so it cannot apply a stale rootfs patch.
         _envargs+=(--env "LOCAL_PATCH_FILE=" --env "LOCAL_PATCH_SHA256=")
     fi
-    [ "$DASHBOARD" = "1" ] && _envargs+=( --env "BENCHMARK_FRONTEND_URL=http://localhost:$LOCAL_DASH_PORT" )
+    # BENCHMARK_FRONTEND_URL is consumed by run_benchmark.py for task prompt
+    # substitution; cloud browser agents cannot reach the controller's localhost
+    # dashboard mirror. Use a separate report-only URL so dashboard deep links can
+    # still point at the local mirror without poisoning {frontend_url}.
+    _envargs+=(--env "BENCHMARK_FRONTEND_URL=")
+    [ "$DASHBOARD" = "1" ] && _envargs+=( --env "BENCHMARK_REPORT_FRONTEND_URL=http://localhost:$LOCAL_DASH_PORT" )
     # The boot script lives on the /data volume (staged into the snapshot). flyctl
     # --command word-splits, so only a simple `bash <path>` works (an inline shell
     # pipeline is lost) — hence a staged file, not an inline base64 command.
@@ -2340,12 +2326,13 @@ STAGED_LOCAL_FILES+=("$WRAPPER_LOCAL")
     echo "export ROSE_EXCLUDE_ANTHROPIC_FAMILY=$(printf '%q' "${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}")"
     echo "export BENCHMARK_PEAK_FLY_MACHINES=$(printf '%q' "$OBSERVED_PEAK_FLY_MACHINES")"
     echo "export BENCHMARK_VM_USD_PER_HOUR=$(printf '%q' "$VM_USD_PER_HOUR")"
+    echo "unset BENCHMARK_FRONTEND_URL"
     if [ "$DASHBOARD" = "1" ]; then
         # Carries the agent-id into the report card; the local mirror rewrites the
         # host to the dashboard's /open-agent redirect, so the value is only a base.
-        echo "export BENCHMARK_FRONTEND_URL=$(printf '%q' "http://localhost:$LOCAL_DASH_PORT")"
+        echo "export BENCHMARK_REPORT_FRONTEND_URL=$(printf '%q' "http://localhost:$LOCAL_DASH_PORT")"
     else
-        echo "unset BENCHMARK_FRONTEND_URL"
+        echo "unset BENCHMARK_REPORT_FRONTEND_URL"
     fi
     echo "unset LOCAL_PATCH_B64"
     if [ -n "$LOCAL_PATCH_FILE" ]; then
@@ -3116,7 +3103,7 @@ if [ "$RUN_IDENTITY_OK" = "1" ] && [ -s "$RUN_OUT" ]; then
     for task_name in "${BENCH_TASKS[@]}"; do
         validation_args+=(--expected-task "$task_name")
     done
-    if python3 "$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT" "${validation_args[@]}" --require-pass; then
+    if python3 "$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT" "${validation_args[@]}" --require-pass --allow-claude-code-credential-skip; then
         RUN_PASS_OK="1"
     fi
 fi

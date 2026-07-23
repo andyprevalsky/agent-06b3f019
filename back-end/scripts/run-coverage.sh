@@ -57,6 +57,9 @@ export TRACE_ARCHIVE_ENABLED="${TRACE_ARCHIVE_ENABLED:-1}"
 export TRACE_ARCHIVE_BACKEND="${TRACE_ARCHIVE_BACKEND:-local}"
 export TRACE_ARCHIVE_LOCAL_DIR="${TRACE_ARCHIVE_LOCAL_DIR:-$ROOT_DIR/.context}"
 export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+export BLACKBOX_TEST_CAPTURE_OUTBOUND=1
+export BLACKBOX_TEST_REPLAY_OUTBOUND=1
+source "$SCRIPT_DIR/blackbox-auto-rca-env.sh"
 # Only the weekly admin-health case asserts real Amplitude counts. Keep that
 # strict live probe enabled while preventing non-asserting shape cases from
 # spending the provider's shared query budget.
@@ -222,7 +225,7 @@ fi
 export FAST_MODE_CACHE_DATABASE_URL="$LOCAL_DB_URL"
 
 echo "Starting backend with coverage collection on port $COV_PORT..."
-NODE_V8_COVERAGE="$COV_TMP" PORT="$COV_PORT" DISABLE_GMAIL_SYNC=1 BLACKBOX_TEST_CAPTURE_OUTBOUND=1 BLACKBOX_TEST_REPLAY_OUTBOUND=1 \
+NODE_V8_COVERAGE="$COV_TMP" PORT="$COV_PORT" DISABLE_GMAIL_SYNC=1 \
   node --import tsx src/bootstrap.ts >"$COV_LOG" 2>&1 &
 BACKEND_PID=$!
 

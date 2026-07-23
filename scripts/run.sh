@@ -1596,9 +1596,17 @@ fi
 # tunnel readiness check to fail even though the application is healthy.
 if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
     echo "📦 Building bundled frontend before starting runtime services..."
+    FRONTEND_BUILD_NODE_OPTIONS="${NODE_OPTIONS:-}"
+    case " $FRONTEND_BUILD_NODE_OPTIONS " in
+        *" --max-old-space-size="*) ;;
+        *)
+            FRONTEND_BUILD_NODE_OPTIONS="${FRONTEND_BUILD_NODE_OPTIONS:+$FRONTEND_BUILD_NODE_OPTIONS }--max-old-space-size=${BENCHMARK_FRONTEND_BUILD_OLD_SPACE_MB:-3584}"
+            ;;
+    esac
     (cd front-end && rm -f "$FRONTEND_LOG_FILE" && \
-        VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" VITE_ENABLE_REACT_GRAB=false \
-        VITE_REALTIME_PRIVATE=false npx vite build > "$FRONTEND_LOG_FILE" 2>&1)
+        NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" \
+        VITE_ENABLE_REACT_GRAB=false VITE_REALTIME_PRIVATE=false \
+        npx vite build > "$FRONTEND_LOG_FILE" 2>&1)
 fi
 launch_backend_service
 

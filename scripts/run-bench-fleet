@@ -94,6 +94,13 @@ VOLUME_NAME="cloudbench_data"
 # clones mirror prod's performance-1x/2GB shape.
 FLEET_PRIMARY_VM_SIZE="${CLOUDBENCH_FLEET_PRIMARY_VM_SIZE:-shared-cpu-2x}"
 FLEET_PRIMARY_VM_MEMORY="${CLOUDBENCH_FLEET_PRIMARY_VM_MEMORY:-4096}"
+# A small subset of benchmarks runs the test-payment frontend bundled inside
+# the primary VM. The Vite production build exceeds the default 4GB guest's
+# physical memory during chunk rendering, so only those primaries use a larger
+# shape. Keep the stopped pool at the capacity-safe default; bundled-frontend
+# tasks bypass the pool and clone fresh with this shape.
+FLEET_BUNDLED_FRONTEND_VM_SIZE="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_SIZE:-shared-cpu-4x}"
+FLEET_BUNDLED_FRONTEND_VM_MEMORY="${CLOUDBENCH_FLEET_BUNDLED_FRONTEND_VM_MEMORY:-8192}"
 FLEET_WORKER_VM_SIZE="${CLOUDBENCH_FLEET_WORKER_VM_SIZE:-performance-1x}"
 FLEET_WORKER_VM_MEMORY="${CLOUDBENCH_FLEET_WORKER_VM_MEMORY:-2048}"
 FLEET_WORKER_HEALTH_PORT="${CLOUDBENCH_WORKER_HEALTH_PORT:-3103}"
@@ -118,6 +125,45 @@ SELF_MANAGED_HUB_RUN="0"
 # ── Args ─────────────────────────────────────────────────────────────────────
 BENCHES=()
 SIM_ON_CSV=""
+
+bench_needs_bundled_frontend_primary() {  # bench_needs_bundled_frontend_primary <task>
+    case "$1" in
+        agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+primary_vm_size_for_bench() {  # primary_vm_size_for_bench <task>
+    if bench_needs_bundled_frontend_primary "$1"; then
+        printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_SIZE"
+    else
+        printf '%s\n' "$FLEET_PRIMARY_VM_SIZE"
+    fi
+}
+
+primary_vm_memory_for_bench() {  # primary_vm_memory_for_bench <task>
+    if bench_needs_bundled_frontend_primary "$1"; then
+        printf '%s\n' "$FLEET_BUNDLED_FRONTEND_VM_MEMORY"
+    else
+        printf '%s\n' "$FLEET_PRIMARY_VM_MEMORY"
+    fi
+}
+
+shared_cpu_units_for_vm_size() {  # shared_cpu_units_for_vm_size <vm-size>
+    local vm_size="$1" units
+    case "$vm_size" in
+        shared-cpu-*)
+            units="${vm_size##*-}"
+            units="${units%x}"
+            case "$units" in ''|*[!0-9]*) printf '%s\n' 2 ;; *) printf '%s\n' "$units" ;; esac
+            ;;
+        *)
+            printf '%s\n' 0
+            ;;
+    esac
+}
 BENCH_REF=""
 # Per-workspace hub port: the hub scans THIS workspace's runs-root, so two
 # workspaces must not share a port (the second would adopt the first's hub and
@@ -722,18 +768,30 @@ print_code_provenance() {
         echo "  local  : $REQUESTED_BENCH_REF (complete delta ships on fetchable base)"
     fi
     echo "  pushed : $pushed"
-    untracked_count="$(git -C "$ROOT_DIR" ls-files --others --exclude-standard | wc -l | tr -d ' ')"
+    untracked_count=0
+    while IFS= read -r relative_path; do
+        case "$relative_path" in
+            agents/benchmarks/history/*.jsonl) continue ;;
+        esac
+        untracked_count=$((untracked_count + 1))
+    done < <(git -C "$ROOT_DIR" ls-files --others --exclude-standard)
     if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" = "1" ]; then
         echo "  diff   : local changes intentionally excluded (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (pinned; local patch excluded)"
-    elif ! cloudbench_worktree_has_changes "$ROOT_DIR"; then
+    elif [ "$REQUESTED_BENCH_REF" = "$BENCH_REF" ] \
+         && ! cloudbench_worktree_has_changes "$ROOT_DIR"; then
         echo "  diff   : clean working tree (running committed $head_sha exactly)"
         CODE_SUMMARY="$branch@$head_sha (clean)"
     else
-        dirtystat="$(git -C "$ROOT_DIR" diff --shortstat "$BENCH_REF" 2>/dev/null | sed 's/^ *//')"
+        dirtystat="$(git -C "$ROOT_DIR" diff --shortstat "$BENCH_REF" -- . ":(exclude)agents/benchmarks/history/*.jsonl" 2>/dev/null | sed 's/^ *//')"
         echo "  diff   : DIRTY — shipped as a patch on top of $BENCH_REF: $dirtystat, $untracked_count untracked"
-        git -C "$ROOT_DIR" diff --stat "$BENCH_REF" 2>/dev/null | sed 's/^/           /' | tail -30
-        git -C "$ROOT_DIR" ls-files --others --exclude-standard | sed 's/^/           + /' | tail -30
+        git -C "$ROOT_DIR" diff --stat "$BENCH_REF" -- . ":(exclude)agents/benchmarks/history/*.jsonl" 2>/dev/null | sed 's/^/           /' | tail -30
+        while IFS= read -r relative_path; do
+            case "$relative_path" in
+                agents/benchmarks/history/*.jsonl) continue ;;
+            esac
+            printf '           + %s\n' "$relative_path"
+        done < <(git -C "$ROOT_DIR" ls-files --others --exclude-standard) | tail -30
         CODE_SUMMARY="$branch@$head_sha +patch($dirtystat, $untracked_count untracked)"
     fi
     echo "══════════════════════════════════════════════════════════"
@@ -2848,6 +2906,7 @@ enforce_app_capacity_guard() {
     local shared_cpu_governor shared_cpu_headroom shared_cpu_ceiling
     local app_machine_ceiling primary_nx primary_shared_units requested_machines
     local requested_shared requested_fresh_machines available_pool_machines
+    local requested_pool_eligible_machines bench bench_vm_size bench_shared_units
     local replacement_slots reservation_machine_slots reservation_result reservation_status
     local reservation_outcome reserved_machines reserved_shared
     local capacity_counts active_shared active_perf
@@ -2877,12 +2936,31 @@ enforce_app_capacity_guard() {
     fi
     shared_cpu_ceiling=$(( shared_cpu_governor - shared_cpu_headroom ))
 
-    # Shared units per newly-provisioned primary, parsed from the primary shape
+    # Shared units per default primary, parsed from the primary shape
     # (shared-cpu-Nx → N); default 2 if the shape is non-standard.
     primary_nx="${FLEET_PRIMARY_VM_SIZE##*-}"; primary_nx="${primary_nx%x}"
     case "$primary_nx" in ''|*[!0-9]*) primary_shared_units=2 ;; *) primary_shared_units="$primary_nx" ;; esac
     requested_machines="${PROVISION_POOL:-${#BENCHES[@]}}"
-    requested_shared=$(( requested_machines * primary_shared_units ))
+    requested_pool_eligible_machines="$requested_machines"
+    if [ -n "${PROVISION_POOL:-}" ]; then
+        requested_shared=$(( requested_machines * primary_shared_units ))
+    else
+        requested_shared=0
+        requested_pool_eligible_machines=0
+        for bench in "${BENCHES[@]}"; do
+            bench_vm_size="$(primary_vm_size_for_bench "$bench")"
+            bench_shared_units="$(shared_cpu_units_for_vm_size "$bench_vm_size")"
+            case "$bench_shared_units" in ''|*[!0-9]*)
+                echo "❌ invalid shared-CPU units for primary VM size '$bench_vm_size'" >&2
+                return 1
+                ;;
+            esac
+            requested_shared=$(( requested_shared + bench_shared_units ))
+            if ! bench_needs_bundled_frontend_primary "$bench"; then
+                requested_pool_eligible_machines=$(( requested_pool_eligible_machines + 1 ))
+            fi
+        done
+    fi
     # Pool provisioning does not run the post-clone boot-config update phase.
     [ -n "${PROVISION_POOL:-}" ] && replacement_slots=0
 
@@ -2895,8 +2973,8 @@ enforce_app_capacity_guard() {
         return 1
         ;;
     esac
-    [ "$available_pool_machines" -gt "$requested_machines" ] \
-        && available_pool_machines="$requested_machines"
+    [ "$available_pool_machines" -gt "$requested_pool_eligible_machines" ] \
+        && available_pool_machines="$requested_pool_eligible_machines"
     requested_fresh_machines=$(( requested_machines - available_pool_machines ))
     reservation_machine_slots=$(( requested_fresh_machines + replacement_slots ))
 
@@ -3106,7 +3184,8 @@ BOX_WMH_PORT="3007"        # run.sh WMH_PORT = base+6
 FLEET_PATCH_FILE=""
 FLEET_PATCH_SHA256=""
 if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
-   && cloudbench_worktree_has_changes "$ROOT_DIR"; then
+   && { [ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] \
+        || cloudbench_worktree_has_changes "$ROOT_DIR"; }; then
     FLEET_PATCH_FILE="$(mktemp)"
     if ! bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF" > "$FLEET_PATCH_FILE" \
         || [ ! -s "$FLEET_PATCH_FILE" ]; then
@@ -3313,16 +3392,23 @@ ready_workers_operational() {  # ready_workers_operational <bench-output-dir>
 
 CONTROLLER_GITHUB_TOKEN_B64_CACHE="${CLOUDBENCH_GITHUB_TOKEN_B64:-}"
 controller_github_token_b64() {
-    local token=""
+    local token="" dotenv
     if [ -n "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" ]; then
         printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
         return 0
     fi
-    if command -v gh >/dev/null 2>&1; then
+    token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    if [ -z "$token" ] && command -v gh >/dev/null 2>&1; then
         token="$(gh auth token 2>/dev/null || true)"
     fi
-    [ -n "$token" ] || token="${GITHUB_TOKEN:-}"
-    [ -n "$token" ] || token="${GH_TOKEN:-}"
+    if [ -z "$token" ]; then
+        for dotenv in "$ROOT_DIR/back-end/.env" "$ROOT_DIR/agents/.env"; do
+            [ -f "$dotenv" ] || continue
+            token="$(grep -E '^GITHUB_TOKEN=' "$dotenv" 2>/dev/null | head -1 \
+                | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+            [ -z "$token" ] || break
+        done
+    fi
     [ -n "$token" ] || return 1
     CONTROLLER_GITHUB_TOKEN_B64_CACHE="$(printf '%s' "$token" | base64 | tr -d '\n')"
     printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
@@ -3501,7 +3587,7 @@ reconcile_worker_failure_outcomes() {  # <bench> <bench-output-dir>
 
 provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <primary_ip> <sim01> <out>
     local bench="$1" ws="$2" primary_id="$3" pip="$4" sim="$5" out="$6"
-    local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file failure_reason
+    local wid stage_attempts worker_ready_timeout worker_capacity_token worker_github_token_b64 ready_file stage_log failure_reason
     worker_capacity_token="$FLEET_OWNER_TOKEN-worker-$(python3 -c 'import uuid; print(uuid.uuid4().hex)')"
     if ! reserve_worker_machine_slot "$worker_capacity_token"; then
         printf '%s\n' "Machine-count capacity unavailable for worker clone" > "$out/autoscaler.failed"
@@ -3567,6 +3653,8 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
     # proves that Temporal worker.run() reached its queue-polling boundary.
     : > "$out/worker-$wid.pending"
     rm -f "$out/worker-$wid.cancelled"
+    stage_log="$out/worker-$wid.stage.log"
+    : > "$stage_log" 2>/dev/null || true
     local wrapper worker_env; wrapper="$(mktemp)"; worker_env="$(mktemp)"
     chmod 600 "$worker_env" 2>/dev/null || true
     printf 'CLOUDBENCH_GITHUB_TOKEN_B64=%q\n' "$worker_github_token_b64" > "$worker_env"
@@ -3624,39 +3712,76 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
           local ready_tmp="$out/worker-$wid.ready.tmp.$$"
           : > "$ready_tmp" && mv "$ready_tmp" "$out/worker-$wid.ready"
       }
+      log_worker_stage() {
+          printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)" "$*" >> "$stage_log" 2>/dev/null || true
+      }
+      run_worker_stage_cmd() {
+          local label="$1" rc
+          shift
+          log_worker_stage "attempt ${attempt:-?}/${stage_attempts}: $label"
+          if "$@" >> "$stage_log" 2>&1; then
+              log_worker_stage "attempt ${attempt:-?}/${stage_attempts}: $label succeeded"
+              return 0
+          else
+              rc=$?
+              log_worker_stage "attempt ${attempt:-?}/${stage_attempts}: $label failed rc=$rc"
+              return "$rc"
+          fi
+      }
       launched=0
       worker_neutralized=0
-      for _ in $(seq 1 "$stage_attempts"); do
+      for attempt in $(seq 1 "$stage_attempts"); do
         worker_provision_cancelled && finish_cancelled_worker_provision
-        if machine_storage_ready "$wid"; then
-            # A worker is cloned from this benchmark's primary, whose config is
-            # already set to auto-run cloudbench-boot.sh. Neutralize that copied
-            # command before its first start or staging could race a duplicate
-            # primary benchmark driver on the same task queue/run token.
-            if [ "$worker_neutralized" != "1" ]; then
-                if ! fly_with_timeout 30 machine update "$wid" -a "$APP" \
-                    --env CLOUDBENCH_BOOT=0 --command "sleep infinity" \
-                    --skip-health-checks --skip-start --yes >/dev/null 2>&1; then
-                    sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
-                    continue
-                fi
-                worker_neutralized=1
+        if ! machine_storage_ready "$wid"; then
+            if machine_storage_failed "$wid"; then
+                publish_worker_failure "worker $wid storage failed before staging; see worker-$wid.stage.log"
+                exit 1
             fi
-            fly_with_timeout 20 machine start "$wid" -a "$APP" >/dev/null 2>&1 || true
+            log_worker_stage "attempt $attempt/$stage_attempts: storage not ready"
+            sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+            continue
         fi
-          if fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-worker.sh" /data/cloudbench-worker.sh >/dev/null 2>&1 \
-             && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh >/dev/null 2>&1 \
-             && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env >/dev/null 2>&1 \
-             && fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh >/dev/null 2>&1; then
+        # A worker is cloned from this benchmark's primary, whose config is
+        # already set to auto-run cloudbench-boot.sh. Neutralize that copied
+        # command before its first start or staging could race a duplicate
+        # primary benchmark driver on the same task queue/run token.
+        if [ "$worker_neutralized" != "1" ]; then
+            if ! run_worker_stage_cmd "neutralize cloned boot command" \
+                fly_with_timeout 30 machine update "$wid" -a "$APP" \
+                --env CLOUDBENCH_BOOT=0 --command "sleep infinity" \
+                --skip-health-checks --skip-start --yes; then
+                sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+                continue
+            fi
+            worker_neutralized=1
+        fi
+        run_worker_stage_cmd "start neutralized worker" \
+            fly_with_timeout 20 machine start "$wid" -a "$APP" || true
+        if ! run_worker_stage_cmd "clear stale worker stage files" \
+            fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
+            -C "rm -f /data/cloudbench-worker.sh /data/cloudbench-fetch-ref.sh /tmp/rbw.env /tmp/rbw.sh /tmp/cloudbench-local.patch"; then
+            sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
+            continue
+        fi
+          if run_worker_stage_cmd "upload cloudbench-worker.sh" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-worker.sh" /data/cloudbench-worker.sh \
+             && run_worker_stage_cmd "upload cloudbench-fetch-ref.sh" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh \
+             && run_worker_stage_cmd "upload worker environment" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0600 "$worker_env" /tmp/rbw.env \
+             && run_worker_stage_cmd "upload worker wrapper" \
+                fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0755 "$wrapper" /tmp/rbw.sh; then
               if [ -n "$FLEET_PATCH_FILE" ]; then
-                  if ! fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch >/dev/null 2>&1; then
+                  if ! run_worker_stage_cmd "upload local patch" \
+                      fly_with_timeout 20 ssh sftp put -a "$APP" --machine "$wid" -q -m 0644 "$FLEET_PATCH_FILE" /tmp/cloudbench-local.patch; then
                       worker_provision_cancelled && finish_cancelled_worker_provision
                       sleep "${CLOUDBENCH_WORKER_STAGE_RETRY_SECONDS:-3}"
                       continue
                   fi
               fi
-              if fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
-                  -C "bash -c \"begin=\$(date +%s); : > /data/worker.log; printf '%s\\n' \\\"\$begin\\\" > /data/worker.started-at; setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\"" >/dev/null 2>&1; then
+              if run_worker_stage_cmd "launch worker wrapper" \
+                  fly_with_timeout 20 ssh console -a "$APP" --machine "$wid" \
+                  -C "bash -c \"begin=\$(date +%s); : > /data/worker.log; printf '%s\\n' \\\"\$begin\\\" > /data/worker.started-at; setsid bash /tmp/rbw.sh >> /data/worker.log 2>&1 < /dev/null &\""; then
                   launched=1
                   break
               fi
@@ -3667,7 +3792,7 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
       rm -f "$wrapper" "$worker_env" 2>/dev/null || true
       if [ "$launched" != "1" ]; then
           worker_provision_cancelled && finish_cancelled_worker_provision
-          discard_replaceable_worker "worker $wid could not be staged and launched"
+          discard_replaceable_worker "worker $wid could not be staged and launched; see worker-$wid.stage.log"
       fi
 
       ready_deadline=$((SECONDS + worker_ready_timeout))
@@ -3683,7 +3808,8 @@ provision_worker() {  # provision_worker <bench> <workspace> <primary_id> <prima
           sleep 5
       done
       worker_provision_cancelled && finish_cancelled_worker_provision
-      discard_replaceable_worker "worker $wid did not reach queue readiness within ${worker_ready_timeout}s"
+      log_worker_stage "worker did not reach queue readiness within ${worker_ready_timeout}s"
+      discard_replaceable_worker "worker $wid did not reach queue readiness within ${worker_ready_timeout}s; see worker-$wid.stage.log"
     ) &
     return 0
 }
@@ -3701,6 +3827,16 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     : > "$out/worker-ready.ids"
     rm -f "$out/autoscaler.ready" "$out/autoscaler.failed" \
         "$out/autoscaler.completed-after-child"
+    fail_autoscaler() {  # fail_autoscaler <reason>
+        local reason="$1"
+        if [ ! -s "$out/autoscaler.failed" ]; then
+            if ! printf '%s\n' "$reason" > "$out/autoscaler.failed"; then
+                echo "  ❌ [$bench] mandatory autoscaler: could not persist failure reason: $reason" >&2
+            fi
+        fi
+        echo "  ❌ [$bench] mandatory autoscaler: $reason" >&2
+        return 1
+    }
     complete_autoscaler_after_child() {
         local completed_tmp="$out/autoscaler.completed-after-child.tmp.$$"
         local desired_workers tracked_workers ready_workers terminal_deadline
@@ -3711,8 +3847,10 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
         # invariant used by final acceptance is stable.
         terminal_deadline=$((SECONDS + AUTOSCALER_FINALIZATION_WAIT_SECONDS))
         while :; do
-            reconcile_worker_ready_outcomes "$out" || return 1
-            reconcile_worker_failure_outcomes "$bench" "$out" || return 1
+            reconcile_worker_ready_outcomes "$out" \
+                || fail_autoscaler "could not reconcile worker readiness outcomes"
+            reconcile_worker_failure_outcomes "$bench" "$out" \
+                || fail_autoscaler "could not reconcile worker failure outcomes"
             [ ! -s "$out/autoscaler.failed" ] || return 1
             desired_workers="$(cat "$out/desired-worker-count" 2>/dev/null || true)"
             if ! printf '%s' "$desired_workers" | grep -Eq '^[0-9]+$'; then
@@ -3862,7 +4000,8 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     # lookup failure is not normal termination: a stale/failed publisher must
     # fail closed unless this autoscaler has itself observed child completion.
     while :; do
-        reconcile_worker_ready_outcomes "$out" || return 1
+        reconcile_worker_ready_outcomes "$out" \
+            || fail_autoscaler "could not reconcile worker readiness outcomes"
         if [ -e "$out/benchmark-child.finished" ]; then
             complete_autoscaler_after_child
             return $?
@@ -3948,7 +4087,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
             echo "  ⤵️  [$bench] scale down -$n (desired=$desired, pool=$cur)"
             for _ in $(seq 1 "$n"); do
                 local wid
-                wid="$(tail -1 "$out/worker-ready.ids" 2>/dev/null)"
+                wid="$(tail -1 "$out/worker-clones.ids" 2>/dev/null || true)"
                 [ -n "$wid" ] || break
                 # Publish cancellation before provider destroy. A provisioner
                 # staging this worker can then distinguish intentional scale-in
@@ -3967,10 +4106,17 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
                     echo "  ❌ [$bench] mandatory autoscaler: worker $wid could not be destroyed during scale-down" >&2
                     return 1
                 fi
+                fleet_registry_release_id "$wid"
+                sed '$d' "$out/worker-clones.ids" > "$out/worker-clones.ids.tmp" 2>/dev/null && mv "$out/worker-clones.ids.tmp" "$out/worker-clones.ids" || true
+                awk -v id="$wid" '$0 != id' "$out/worker-ready.ids" > "$out/worker-ready.ids.tmp" 2>/dev/null \
+                    && mv "$out/worker-ready.ids.tmp" "$out/worker-ready.ids" || true
+                rm -f "$out/worker-$wid.pending" "$out/worker-$wid.ready"
             done
         fi
-        reconcile_worker_ready_outcomes "$out" || return 1
-        reconcile_worker_failure_outcomes "$bench" "$out" || return 1
+        reconcile_worker_ready_outcomes "$out" \
+            || fail_autoscaler "could not reconcile worker readiness outcomes"
+        reconcile_worker_failure_outcomes "$bench" "$out" \
+            || fail_autoscaler "could not reconcile worker failure outcomes"
         sleep "$AUTOSCALE_POLL"
     done
 }
@@ -3998,12 +4144,22 @@ for bench in "${BENCHES[@]}"; do
     out="$FLEET_DIR/$bench"
     rm -rf "$out" 2>/dev/null || true; mkdir -p "$out"
     (
+        bench_vm_size="$(primary_vm_size_for_bench "$bench")"
+        bench_vm_memory="$(primary_vm_memory_for_bench "$bench")"
+        pcid=""
         # Prefer a pre-provisioned pool machine (skips the ~300s volume fork);
         # fall back to cloning fresh (bounded + retried) if the pool is empty.
-        pcid="$(claim_pool_machine)"
+        #
+        # Bundled-frontend tasks need a larger primary for the Vite production
+        # build, so they cannot safely claim the default 4GB stopped pool.
+        if bench_needs_bundled_frontend_primary "$bench"; then
+            echo "  ↪️  [$bench] using bundled frontend primary shape ${bench_vm_size}/${bench_vm_memory}MB" >&2
+        else
+            pcid="$(claim_pool_machine)"
+        fi
         if [ -n "$pcid" ]; then
             printf 'pool %s\n' "$pcid" > "$out/.cid"
-        elif pcid="$(clone_machine_target "$out/primary.ids")"; then
+        elif pcid="$(clone_machine_target "$out/primary.ids" "$WARM_ID" "$bench_vm_size" "$bench_vm_memory")"; then
             printf 'clone %s\n' "$pcid" > "$out/.cid"
         fi
     ) &
@@ -4520,7 +4676,15 @@ expected=os.environ["EXPECTED_TASK"]
 child_rc=int(os.environ["CHILD_RC"])
 try:
     check=subprocess.run(
-        [sys.executable, "scripts/cloudbench_result.py", p, "--expected-task", expected, "--require-pass"],
+        [
+            sys.executable,
+            "scripts/cloudbench_result.py",
+            p,
+            "--expected-task",
+            expected,
+            "--require-pass",
+            "--allow-claude-code-credential-skip",
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         check=False,

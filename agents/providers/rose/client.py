@@ -714,6 +714,15 @@ class RoseClient:
             except Exception:
                 logger.debug("rose.complete.dump_chunk_failed", call_site=call_site, exc_info=True)
 
+        def _with_cache_sequence(chunk: StreamChunk) -> StreamChunk:
+            """Expose the exact provider cache namespace on persisted usage."""
+            if chunk.kind != "usage" or not cache_namespace:
+                return chunk
+            return StreamChunk(
+                kind="usage",
+                data={**chunk.data, "cache_sequence_id": cache_namespace},
+            )
+
         def _finalize_dump(error: Optional[BaseException] = None) -> None:
             if not dump_context or not dump_path:
                 return
@@ -1079,6 +1088,7 @@ class RoseClient:
                                         kind="usage",
                                         data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
                                     )
+                                chunk = _with_cache_sequence(chunk)
                                 _record_dump_chunk(chunk)
                                 yield chunk
                         except RoseStallError as exc:
@@ -1245,6 +1255,7 @@ class RoseClient:
                                 kind="usage",
                                 data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
                             )
+                        chunk = _with_cache_sequence(chunk)
                         _record_dump_chunk(chunk)
                         yield chunk
                     logger.info(
@@ -1318,6 +1329,7 @@ class RoseClient:
                                 kind="usage",
                                 data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
                             )
+                        chunk = _with_cache_sequence(chunk)
                         _record_dump_chunk(chunk)
                         yield chunk
                     logger.info(
@@ -1384,6 +1396,7 @@ class RoseClient:
                         kind="usage",
                         data=_normalize_usage_input_tokens(_seen_actual_model, chunk.data),
                     )
+                chunk = _with_cache_sequence(chunk)
                 _record_dump_chunk(chunk)
                 yield chunk
             logger.info(

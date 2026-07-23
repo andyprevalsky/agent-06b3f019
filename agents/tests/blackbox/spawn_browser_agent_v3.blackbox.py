@@ -761,6 +761,112 @@ async def test_browser_agent_recording_respects_disabled_env():
             os.environ["BROWSER_AGENT_RECORDINGS"] = previous_enabled
 
 
+async def test_browser_session_metadata_is_published_when_recording_is_disabled():
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.handler import _publish_browser_session_metadata_message
+    from tools.base import MessageStatus
+
+    session_metadata = {
+        "provider": "kernel",
+        "profile_source": "new_user_persistent",
+        "auth_source": "none",
+        "cookies_injected": False,
+    }
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+            new_callable=AsyncMock,
+        ) as save_mock,
+        patch(
+            "domains.spawn_browser_agent_v3.handler.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as sleep_mock,
+    ):
+        save_mock.side_effect = [False, False, True]
+        with patch.dict(os.environ, {"BROWSER_AGENT_RECORDINGS": "0"}):
+            await _publish_browser_session_metadata_message(
+                agent_id="agent-1",
+                task_id="task-1",
+                browser_url="https://kernel.example/live/session-1",
+                browser_session_metadata=session_metadata,
+            )
+
+    assert save_mock.await_count == 3
+    assert sleep_mock.await_count == 2
+    assert len({call.kwargs["tool_call_id"] for call in save_mock.await_args_list}) == 1
+    kwargs = save_mock.await_args_list[-1].kwargs
+    assert kwargs["title"] == "Browser session ready"
+    assert kwargs["status"] == MessageStatus.FINISHED
+    assert kwargs["action_type"] == "session_init"
+    assert kwargs["task_id"] == "task-1"
+    assert kwargs["browser_url"] == "https://kernel.example/live/session-1"
+    assert kwargs["extra_metadata"] == {"browser_session_metadata": session_metadata}
+
+    # Cement the real activity path and ordering: successful browser setup,
+    # required metadata, credential evidence, then optional recorder setup.
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    browser_ready = source.index(") = browser_result")
+    publish = source.index("await _publish_browser_session_metadata_message(", browser_ready)
+    credential = source.index("await save_browser_credential_ref_message(", publish)
+    recorder = source.index("async def _setup_interaction_layer():", credential)
+    assert browser_ready < publish < credential < recorder
+
+
+async def test_browser_session_metadata_failure_is_fail_closed():
+    from domains.spawn_browser_agent_v3.handler import _publish_browser_session_metadata_message
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as save_mock,
+        patch(
+            "domains.spawn_browser_agent_v3.handler.asyncio.sleep",
+            new_callable=AsyncMock,
+        ) as sleep_mock,
+    ):
+        try:
+            await _publish_browser_session_metadata_message(
+                agent_id="agent-1",
+                task_id="task-1",
+                browser_url="https://kernel.example/live/session-1",
+                browser_session_metadata={"provider": "kernel"},
+            )
+        except RuntimeError as exc:
+            assert "did not acknowledge required browser session metadata" in str(exc)
+        else:
+            raise AssertionError("required browser session metadata must fail closed")
+
+    assert save_mock.await_count == 3
+    assert sleep_mock.await_count == 2
+
+
+async def test_browser_session_metadata_rejects_missing_provider_before_publication():
+    from domains.spawn_browser_agent_v3.handler import _publish_browser_session_metadata_message
+
+    with patch(
+        "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+        new_callable=AsyncMock,
+    ) as save_mock:
+        for invalid_metadata in ({}, {"provider": ""}, {"provider": None}):
+            try:
+                await _publish_browser_session_metadata_message(
+                    agent_id="agent-1",
+                    task_id="task-1",
+                    browser_url="https://kernel.example/live/session-1",
+                    browser_session_metadata=invalid_metadata,
+                )
+            except ValueError as exc:
+                assert "non-empty provider" in str(exc)
+            else:
+                raise AssertionError("missing browser session provider must fail closed")
+
+    assert save_mock.await_count == 0
+
+
 async def test_browser_agent_recording_start_failure_is_best_effort():
     import tempfile
     from pathlib import Path
@@ -4411,7 +4517,7 @@ async def test_save_browser_action_message_posts_metadata():
     )
 
     with patch("config.load_config", return_value=_fake_config()):
-        await save_browser_action_message(
+        accepted = await save_browser_action_message(
             agent_id="ag1",
             title="click",
             message="m",
@@ -4425,6 +4531,7 @@ async def test_save_browser_action_message_posts_metadata():
             output_schema={"fields": []},
         )
 
+    assert accepted is True
     call = assert_captured_call(url_contains="/api/agents/ag1/messages", method="POST")
     body = json.loads(call["requestBody"])
     assert body["role"] == "TOOL"
@@ -4484,14 +4591,52 @@ async def test_save_browser_action_message_swallows_exception():
         "config.load_config",
         side_effect=RuntimeError("cfg fail"),
     ):
-        # Should not raise
-        await save_browser_action_message(
+        # Optional progress callers still do not raise, while required
+        # provenance callers receive an explicit negative acknowledgement.
+        accepted = await save_browser_action_message(
             agent_id="ag",
             title="t",
             message="m",
             status=MessageStatus.FINISHED,
             task_id="t1",
         )
+    assert accepted is False
+
+
+async def test_save_browser_action_message_rejects_non_2xx():
+    from tools.base import MessageStatus
+    from domains.spawn_browser_agent_v3.repo import save_browser_action_message
+
+    setup_mock({"/api/agents/": {"status": 503, "json": {"error": "retry"}}})
+
+    with patch("config.load_config", return_value=_fake_config()):
+        accepted = await save_browser_action_message(
+            agent_id="ag",
+            title="t",
+            message="m",
+            status=MessageStatus.FINISHED,
+            task_id="t1",
+        )
+
+    assert accepted is False
+
+
+async def test_save_browser_action_message_rejects_redirect():
+    from tools.base import MessageStatus
+    from domains.spawn_browser_agent_v3.repo import save_browser_action_message
+
+    setup_mock({"/api/agents/": {"status": 307, "headers": {"location": "/wrong-endpoint"}}})
+
+    with patch("config.load_config", return_value=_fake_config()):
+        accepted = await save_browser_action_message(
+            agent_id="ag",
+            title="t",
+            message="m",
+            status=MessageStatus.FINISHED,
+            task_id="t1",
+        )
+
+    assert accepted is False
 
 
 async def test_save_browser_action_message_tool_name_override():
@@ -10986,6 +11131,7 @@ async def test_spawn_browser_activity_auth_assistance_keeps_live_steel_session_o
         "fingerprint_injection": None,
         "passwords": [],
         "auth_options": {"realm": "example.com"},
+        "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
         "same_session_available": True,
     }
     auth_request = {
@@ -11850,10 +11996,16 @@ class _FakePaymentGateHandle:
         return _result().__await__()
 
 
-async def _drive_payment_card_gate(*, mint_results, reject_gate=False, agentcard_connected=True):
+async def _drive_payment_card_gate(
+    *,
+    mint_results,
+    reject_gate=False,
+    agentcard_connected=True,
+    checkout_error=None,
+):
     """Drive execute_tool through the payment-card gate branch.
 
-    Returns (events, activity_calls, gate_keys). ``mint_results`` is a list
+    Returns (events, activity_calls, gate_keys, gate_payloads). ``mint_results`` is a list
     of dicts returned by successive ``mint_purchase_card_activity`` calls
     (the last value repeats once exhausted).
     """
@@ -11862,6 +12014,7 @@ async def _drive_payment_card_gate(*, mint_results, reject_gate=False, agentcard
 
     activity_calls = []
     gate_keys = []
+    gate_payloads = []
     mint_iter = iter(mint_results)
     last_mint = {}
 
@@ -11922,6 +12075,8 @@ async def _drive_payment_card_gate(*, mint_results, reject_gate=False, agentcard
         if activity_name == "resolve_attention_request_activity":
             return {}
         if not isinstance(activity_name, str):  # mint_subscription_checkout_activity
+            if checkout_error is not None:
+                raise checkout_error
             return "https://checkout.example/subscribe"
         raise AssertionError(f"unexpected activity: {activity_name}")
 
@@ -11934,6 +12089,7 @@ async def _drive_payment_card_gate(*, mint_results, reject_gate=False, agentcard
 
     async def fake_raise_gate_direct(_wf, _gate, *, gate_key):
         gate_keys.append(gate_key)
+        gate_payloads.append(_gate)
         if reject_gate:
             raise GateRejectedError(gate_key)
         return {"resolved": True}
@@ -11977,11 +12133,11 @@ async def _drive_payment_card_gate(*, mint_results, reject_gate=False, agentcard
             "tool-1",
         ):
             events.append(event)
-    return events, activity_calls, gate_keys
+    return events, activity_calls, gate_keys, gate_payloads
 
 
 async def test_manager_payment_gate_agentcard_setup_required_prompts_and_retries():
-    events, activity_calls, _ = await _drive_payment_card_gate(
+    events, activity_calls, _, _ = await _drive_payment_card_gate(
         mint_results=[
             {
                 "status": "agentcard_setup_required",
@@ -12008,7 +12164,7 @@ async def test_manager_payment_gate_agentcard_setup_required_prompts_and_retries
 
 
 async def test_manager_payment_gate_agentcard_setup_times_out_when_never_connected():
-    events, activity_calls, _ = await _drive_payment_card_gate(
+    events, activity_calls, _, _ = await _drive_payment_card_gate(
         mint_results=[{"status": "agentcard_setup_required", "connectUrl": "https://x/connect"}],
         agentcard_connected=False,
     )
@@ -12020,7 +12176,7 @@ async def test_manager_payment_gate_agentcard_setup_times_out_when_never_connect
 
 
 async def test_manager_payment_gate_subscription_rejected_cancels_purchase():
-    events, activity_calls, gate_keys = await _drive_payment_card_gate(
+    events, activity_calls, gate_keys, _ = await _drive_payment_card_gate(
         mint_results=[{"status": "subscription_required"}],
         reject_gate=True,
     )
@@ -12031,7 +12187,7 @@ async def test_manager_payment_gate_subscription_rejected_cancels_purchase():
 
 
 async def test_manager_payment_gate_subscription_still_inactive_after_retry_blocks():
-    events, activity_calls, gate_keys = await _drive_payment_card_gate(
+    events, activity_calls, gate_keys, _ = await _drive_payment_card_gate(
         mint_results=[{"status": "subscription_required"}, {"status": "subscription_required"}],
         reject_gate=False,
     )
@@ -12041,8 +12197,23 @@ async def test_manager_payment_gate_subscription_still_inactive_after_retry_bloc
     assert activity_calls.count("mint_purchase_card_activity") == 2
 
 
+async def test_manager_payment_gate_subscription_checkout_failure_still_raises_gate():
+    events, activity_calls, gate_keys, gate_payloads = await _drive_payment_card_gate(
+        mint_results=[{"status": "subscription_required"}],
+        checkout_error=RuntimeError("STRIPE_SUBSCRIPTION_PRICE_ID is required"),
+        reject_gate=True,
+    )
+    assert gate_keys == ["subscription"]
+    assert gate_payloads[0]["type"] == "subscription"
+    assert gate_payloads[0]["gateKey"] == "subscription"
+    assert gate_payloads[0]["action"]["url"] == "https://roselabs.ai/subscribe"
+    assert "mint_subscription_checkout_activity" in activity_calls
+    cancelled = next(e for e in events if getattr(e, "title", "") == "Purchase cancelled")
+    assert cancelled.metadata["action_type"] == "purchase_cancelled"
+
+
 async def test_manager_payment_gate_kyc_rejected_cancels_purchase():
-    events, _, gate_keys = await _drive_payment_card_gate(
+    events, _, gate_keys, _ = await _drive_payment_card_gate(
         mint_results=[{"status": "kyc_required"}],
         reject_gate=True,
     )
@@ -12052,7 +12223,7 @@ async def test_manager_payment_gate_kyc_rejected_cancels_purchase():
 
 
 async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
-    events, activity_calls, gate_keys = await _drive_payment_card_gate(
+    events, activity_calls, gate_keys, _ = await _drive_payment_card_gate(
         mint_results=[{"status": "kyc_required"}, {"status": "kyc_required"}],
         reject_gate=False,
     )
@@ -12527,6 +12698,14 @@ async def run_all_tests():
     await r.record_async(
         "save_browser_action_message_swallows",
         test_save_browser_action_message_swallows_exception,
+    )
+    await r.record_async(
+        "save_browser_action_message_rejects_non_2xx",
+        test_save_browser_action_message_rejects_non_2xx,
+    )
+    await r.record_async(
+        "save_browser_action_message_rejects_redirect",
+        test_save_browser_action_message_rejects_redirect,
     )
     await r.record_async("save_browser_assistant_message", test_save_browser_assistant_message)
     await r.record_async(
@@ -13030,6 +13209,18 @@ async def run_all_tests():
         test_browser_agent_recording_respects_disabled_env,
     )
     await r.record_async(
+        "browser_session_metadata_published_without_recording",
+        test_browser_session_metadata_is_published_when_recording_is_disabled,
+    )
+    await r.record_async(
+        "browser_session_metadata_failure_is_fail_closed",
+        test_browser_session_metadata_failure_is_fail_closed,
+    )
+    await r.record_async(
+        "browser_session_metadata_rejects_missing_provider",
+        test_browser_session_metadata_rejects_missing_provider_before_publication,
+    )
+    await r.record_async(
         "browser_agent_recording_start_failure_best_effort",
         test_browser_agent_recording_start_failure_is_best_effort,
     )
@@ -13373,6 +13564,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_payment_gate_subscription_still_inactive",
         test_manager_payment_gate_subscription_still_inactive_after_retry_blocks,
+    )
+    await r.record_async(
+        "manager_payment_gate_subscription_checkout_failure_still_raises_gate",
+        test_manager_payment_gate_subscription_checkout_failure_still_raises_gate,
     )
     await r.record_async(
         "manager_payment_gate_kyc_rejected",
