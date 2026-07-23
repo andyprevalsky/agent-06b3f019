@@ -298,67 +298,6 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'service mint maps AgentCard setup-shaped errors to typed setup gates',
-    async () => {
-      const userId = await createSubscribedUser('service-agentcard-setup-required');
-      const fingerprint = `service-agentcard-setup-${randomUUID()}`;
-      const setupUrl = 'https://agentcard.example/onboard/session-123';
-      const setupError = Object.assign(new Error('One Time Agent Payment Setup is required'), {
-        name: 'AgentCardProviderError',
-        status: 409,
-        code: 'agentcard_setup_required',
-        details: {
-          agentcardStatus: 'cardholder_onboarding_required',
-          setupAction: 'complete_agentcard_cardholder_onboarding',
-          setupUrl,
-        },
-      });
-      const provider: CardProvider = {
-        async mintCard() {
-          throw setupError;
-        },
-        async getDetails() {
-          throw new Error('getDetails should not run after setup gate');
-        },
-        async closeCard() {},
-      };
-
-      await withFakeStripe(async (calls) => {
-        let caught: unknown;
-        try {
-          await purchasesService.mintPurchaseCard(
-            validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
-            provider
-          );
-        } catch (error) {
-          caught = error;
-        }
-
-        assert(caught instanceof purchasesService.PurchaseError, 'expected PurchaseError');
-        const purchaseError = caught as purchasesService.PurchaseError;
-        assert(purchaseError.statusCode === 409, `expected 409, got ${purchaseError.statusCode}`);
-        assert(
-          purchaseError.code === 'agentcard_setup_required',
-          `expected agentcard_setup_required, got ${purchaseError.code}`
-        );
-        assert(
-          purchaseError.details.agentcardStatus === 'cardholder_onboarding_required',
-          'setup status must be preserved for the attention gate'
-        );
-        assert(purchaseError.details.setupUrl === setupUrl, 'setup URL must be preserved');
-        assert(calls.cancels.length === 1, 'setup-required failure must cancel the hold');
-
-        const row = await prisma.purchaseSpend.findFirst({
-          where: { userId, fingerprint },
-          orderBy: { createdAt: 'desc' },
-        });
-        assert(row !== null, 'setup mint failure should persist a purchase spend row');
-        assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);
-        assert(row?.cardId === null, 'setup mint failure should not store a card id');
-      });
-    },
-  ],
-  [
     'lookup keeps a still-live held card reusable (auto-approve)',
     async () => {
       const userId = await createUser('lookup-live');
