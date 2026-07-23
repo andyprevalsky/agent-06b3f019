@@ -25,7 +25,7 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence, TextIO
+from typing import Mapping, Sequence, TextIO
 
 AGENTS_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = AGENTS_DIR.parent
@@ -682,6 +682,43 @@ def needs_payment_fixture(tasks: Sequence[str]) -> bool:
 
 def needs_non_purchase_gates(tasks: Sequence[str]) -> bool:
     return bool(NON_PURCHASE_GATE_TASK_NAMES & set(tasks))
+
+
+def _dotenv_values(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip("\"'")
+    return values
+
+
+def validate_agentcard_org_credentials(
+    tasks: Sequence[str],
+    *,
+    env: Mapping[str, str] | None = None,
+    env_path: Path | None = None,
+) -> None:
+    if not (AGENT_PAYMENT_TASK_NAMES & set(tasks)):
+        return
+    configured = _dotenv_values(env_path or REPO_ROOT / "back-end" / ".env")
+    configured.update(os.environ if env is None else env)
+    client_id = configured.get("AGENTCARD_ORG_OAUTH_CLIENT_ID", "").strip()
+    client_secret = configured.get("AGENTCARD_ORG_OAUTH_CLIENT_SECRET", "").strip()
+    direct = configured.get("AGENTCARD_ORG_MCP_ACCESS_TOKEN", "").strip()
+    if direct.startswith("sk_"):
+        direct = ""
+    if direct or (client_id and client_secret):
+        return
+    raise RuntimeError(
+        "AgentCard Organization MCP credentials are missing. API keys (sk_*) are retired; "
+        "run `agentcard companies credentials create`, then set "
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID and AGENTCARD_ORG_OAUTH_CLIENT_SECRET."
+    )
 
 
 def configure_task_environment(tasks: Sequence[str]) -> None:
@@ -1652,6 +1689,7 @@ def run_eval_suite_invocation(*, port: int, args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     selected_tasks = tasks_from_args(args)
+    validate_agentcard_org_credentials(selected_tasks)
     configure_task_environment(selected_tasks)
     if checkpoint_requested(args) and len(selected_tasks) != 1:
         raise ValueError("--checkpoint requires exactly one resolved benchmark task")

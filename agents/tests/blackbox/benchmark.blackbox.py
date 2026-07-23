@@ -932,6 +932,58 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         )
 
 
+def test_payment_benchmark_rejects_retired_agentcard_api_key(tmp_path):
+    """A legacy sk_* key must fail before the expensive lifecycle stack starts."""
+    import pytest
+
+    from benchmarks import local
+
+    env_path = tmp_path / ".env"
+    env_path.write_text('AGENTCARD_API_KEY="sk_test_retired"\n')
+    with pytest.raises(RuntimeError, match=r"API keys \(sk_\*\) are retired"):
+        local.validate_agentcard_org_credentials(
+            ["agent-payment-test-shop"],
+            env={},
+            env_path=env_path,
+        )
+
+
+def test_payment_benchmark_rejects_retired_direct_or_user_credentials(tmp_path):
+    """Only explicit, non-retired organization credentials may start the gate."""
+    import pytest
+
+    from benchmarks import local
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        'AGENTCARD_ORG_MCP_ACCESS_TOKEN="sk_test_retired"\n'
+        'AGENTCARD_OAUTH_CLIENT_ID="user-client"\n'
+        'AGENTCARD_OAUTH_CLIENT_SECRET="user-secret"\n'
+    )
+    with pytest.raises(RuntimeError, match=r"API keys \(sk_\*\) are retired"):
+        local.validate_agentcard_org_credentials(
+            ["agent-payment-test-shop"],
+            env={},
+            env_path=env_path,
+        )
+
+
+def test_payment_benchmark_accepts_org_client_credentials_from_dotenv(tmp_path):
+    """Conductor's shared backend dotenv supplies the lifecycle OAuth client."""
+    from benchmarks import local
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        'AGENTCARD_ORG_OAUTH_CLIENT_ID="client-id"\n'
+        'AGENTCARD_ORG_OAUTH_CLIENT_SECRET="acs_secret"\n'
+    )
+    local.validate_agentcard_org_credentials(
+        ["agent-payment-test-shop"],
+        env={},
+        env_path=env_path,
+    )
+
+
 def test_isolated_benchmark_services_allow_slow_first_sync():
     """System-Postgres fallback must outlive a cold production-data sync."""
     from benchmarks import local
