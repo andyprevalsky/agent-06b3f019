@@ -1636,8 +1636,13 @@ async def _wait_for_expected_payment_lifecycle(
             and isinstance(wallet_funding, dict)
             and wallet_funding.get("status") in {"RECLAIMING", "RECLAIMED"}
         )
-        if (status not in retryable_statuses and not compensation_pending) or time.monotonic() >= deadline:
+        if status not in retryable_statuses and not compensation_pending:
             return lifecycle
+        if time.monotonic() >= deadline:
+            raise RuntimeError(
+                "Payment lifecycle did not reach the expected terminal state before timeout: "
+                f"{error}"
+            )
         await asyncio.sleep(poll_interval_seconds)
         try:
             lifecycle = await (recover_lifecycle or fetch_lifecycle)(base_url, agent_id)
@@ -1701,6 +1706,12 @@ async def ensure_payment_lifecycle_cleanup(
             lifecycle,
             recover_lifecycle=abandon_test_payment,
         )
+        lifecycle_error = _validate_payment_lifecycle(
+            task,
+            {"_benchmark": {"payment_lifecycle": lifecycle}},
+        )
+        if lifecycle_error is not None:
+            raise RuntimeError(lifecycle_error)
         print("    🧹 Confirmed payment-card transfer reclaim and Stripe refund")
         return lifecycle
     except Exception as exc:

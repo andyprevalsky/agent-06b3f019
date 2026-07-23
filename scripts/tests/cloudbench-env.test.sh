@@ -302,6 +302,18 @@ clone_function_source="$(awk '
   capture && /^}$/ { exit }
 ' "$ROOT_DIR/scripts/run-bench-fleet")"
 [ -n "$clone_function_source" ] || fail "could not load production clone command builder"
+fleet_production_function() {
+  awk -v function_name="$1" '
+    $0 ~ "^" function_name "\\(\\)" { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-fleet"
+}
+for function_name in worker_ledger_lock_acquire worker_ledger_lock_release; do
+  function_source="$(fleet_production_function "$function_name")"
+  [ -n "$function_source" ] || fail "could not load production function $function_name"
+  eval "$function_source"
+done
 eval "$clone_function_source"
 WARM_ID="warm-source"
 SNAP_ID="snapshot-1"
@@ -332,7 +344,8 @@ primary_cpus="$(sed -nE 's/.*--vm-size ([^ ]+).*/\1/p' "$clone_args" | sed -nE '
 [ $((16 + 37 * primary_cpus)) -le 160 ] ||
   fail "daily fleet primary shape exceeds the observed Fly CPU governor ceiling"
 unset -f clone_machine_target fleet_registry_record_name fleet_registry_record_id \
-  fleet_registry_release_name machine_storage_ready machine_storage_failed fly_with_timeout
+  fleet_registry_release_name machine_storage_ready machine_storage_failed fly_with_timeout \
+  worker_ledger_lock_acquire worker_ledger_lock_release fleet_production_function
 
 resize_function_source="$(awk '
   /^resize_pool_machine\(\)/ { capture = 1 }

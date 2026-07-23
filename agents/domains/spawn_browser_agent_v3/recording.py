@@ -498,11 +498,11 @@ class BrowserAgentRecorder:
         )
         self._kernel_replay_id: Optional[str] = None
         self.recording_view_url: Optional[str] = None
-        # One replay per Kernel session. rotate_ip evicts the current session and
-        # stands up a new one, so a single replay would only ever capture the first
-        # session (and its IP). We record ONE replay segment per session and hand
-        # the FE the full ordered list, so the recording follows every rotation and
-        # visibly shows the exit IP changing across segments.
+        # One replay per Kernel session. Challenge recovery can replace the current
+        # browser session (and sometimes the provider), so a single replay would only
+        # ever capture the first session. We retain every Kernel segment and, if the
+        # run later moves to screenshot capture, prepend those videos to the single
+        # HTML replay so the BrowserAgentChip still shows the whole tool call.
         self._replay_segments: List[Dict[str, Any]] = []
         self.output_dir = browser_recording_output_dir(agent_id, task_id)
         self.frames_dir = self.output_dir / "frames"
@@ -649,7 +649,7 @@ class BrowserAgentRecorder:
             raise
 
     async def rotate_kernel_replay(self, new_session_id: str) -> None:
-        """Follow a rotate_ip session swap: finalize the current session's replay
+        """Follow a Kernel session swap: finalize the current session's replay
         segment and start a fresh one on the rotated session.
 
         rotate_ip evicts the current Kernel session and stands up a new one on a
@@ -689,6 +689,62 @@ class BrowserAgentRecorder:
             # Keep uses_kernel_replay True: earlier segments are still valid and must
             # be finalized. _start_kernel_replay flipped it off on failure; restore.
             self.uses_kernel_replay = True
+
+    async def transition_browser(
+        self,
+        *,
+        page: Any,
+        session_id: str,
+        browser_url: str,
+        session_metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Move one task recording onto a promoted recovery session.
+
+        Kernel -> Kernel starts another native replay segment. Kernel -> Steel
+        finalizes the outgoing native segment, then resumes screenshot capture on
+        the promoted page; the HTML player prepends the retained Kernel video(s).
+        Once screenshot capture has begun, later Steel/Kernel transitions stay in
+        screenshot mode so one frame timeline remains continuous.
+
+        The handoff is deliberately best-effort at the caller: recording must never
+        break challenge recovery, but a provider transition must not silently close
+        an otherwise healthy recorder.
+        """
+        next_metadata = dict(session_metadata or {})
+        next_provider = next_metadata.get("provider")
+
+        if self.uses_kernel_replay and next_provider == "kernel":
+            self.page = page
+            self.browser_url = browser_url
+            self.session_metadata = next_metadata
+            await self.rotate_kernel_replay(session_id)
+            return
+
+        if self.uses_kernel_replay:
+            # Finalize only the outgoing provider-native segment. The logical task
+            # recorder remains open and changes capture mode exactly once; terminal
+            # closure is owned by close()/the FE finalizer.
+            await self._finalize_kernel_replay_segment()
+            self.uses_kernel_replay = False
+            self._kernel_replay_id = None
+            self.recording_view_url = None
+        elif self._closed:
+            logger.warning(
+                "Ignoring browser recording transition after finalization",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                session_id=session_id,
+            )
+            return
+
+        self.page = page
+        self.session_id = session_id
+        self.browser_url = browser_url
+        self.session_metadata = next_metadata
+        self.frames_dir.mkdir(parents=True, exist_ok=True)
+        await self.capture("browser session changed", action="recovery", force=True)
+        if self._loop_task is None or self._loop_task.done():
+            self._loop_task = asyncio.create_task(self._capture_loop())
 
     @property
     def replay_view_urls(self) -> List[str]:
@@ -802,16 +858,13 @@ class BrowserAgentRecorder:
             )
             return data
 
-    async def stop_kernel_replay(self) -> Optional[str]:
-        """Stop the Kernel replay and return the (finalized) hosted view URL.
+    async def _finalize_kernel_replay_segment(self) -> Optional[str]:
+        """Finalize the current Kernel-native segment without closing the task recorder.
 
         Tolerant of the browser session already being torn down: the persisted
         replay survives session deletion, so we stop best-effort, then re-read the
         view URL from list(); on any failure we fall back to the start-time URL
         (which is valid even pre-stop)."""
-        if self._closed:
-            return self.recording_view_url
-        self._closed = True
         headers = _kernel_replay_headers()
         if headers is None or not self.session_id:
             return self.recording_view_url
@@ -864,6 +917,13 @@ class BrowserAgentRecorder:
             has_view_url=bool(self.recording_view_url),
         )
         return self.recording_view_url
+
+    async def stop_kernel_replay(self) -> Optional[str]:
+        """Terminally close the logical recorder after its final Kernel segment."""
+        if self._closed:
+            return self.recording_view_url
+        self._closed = True
+        return await self._finalize_kernel_replay_segment()
 
     async def _active_page(self):
         """Return the foreground/active tab so the recording FOLLOWS tab switches
@@ -1338,8 +1398,23 @@ class BrowserAgentRecorder:
 
     def _build_html(self, frames: Optional[List[Dict[str, Any]]] = None) -> str:
         playback_frames = frames if frames is not None else self._build_playback_frames()
+        cursor_events = list(self.cursor_events)
+        # Kernel videos already account for elapsed time before screenshot capture
+        # begins. Rebase the screenshot half to zero or real-time playback would
+        # hold its first frame for the entire Kernel duration a second time.
+        if self.replay_view_urls and playback_frames:
+            frame_offset_ms = min(int(frame.get("ts_ms") or 0) for frame in playback_frames)
+            playback_frames = [
+                {**frame, "ts_ms": max(0, int(frame.get("ts_ms") or 0) - frame_offset_ms)}
+                for frame in playback_frames
+            ]
+            cursor_events = [
+                {**event, "ts_ms": max(0, int(event.get("ts_ms") or 0) - frame_offset_ms)}
+                for event in cursor_events
+            ]
         frames_json = json.dumps(playback_frames)
-        cursor_events_json = json.dumps(self.cursor_events)
+        cursor_events_json = json.dumps(cursor_events)
+        prefix_video_urls_json = json.dumps(self.replay_view_urls)
         title = html.escape(f"Browser recording {self.task_id}")
         return f"""<!doctype html>
 <html>
@@ -1357,7 +1432,8 @@ class BrowserAgentRecorder:
     #timeline {{ flex: 1; accent-color: #6aa7ff; }}
     #time {{ font-variant-numeric: tabular-nums; font-size: 12px; color: #9a9aa3; min-width: 58px; text-align: right; }}
     #stage {{ flex: 1; display: flex; align-items: center; justify-content: center; min-height: 0; padding: 4px; background: #050506; }}
-    canvas {{ max-width: 100%; max-height: 100%; }}
+    canvas, #prefixVideo {{ max-width: 100%; max-height: 100%; }}
+    #prefixVideo {{ width: 100%; height: 100%; background: #050506; }}
   </style>
 </head>
 <body>
@@ -1369,13 +1445,15 @@ class BrowserAgentRecorder:
       <input id="timeline" type="range" min="0" max="0" value="0">
       <span id="time"></span>
     </header>
-    <div id="stage"><canvas id="canvas"></canvas></div>
+    <div id="stage"><video id="prefixVideo" controls muted playsinline hidden></video><canvas id="canvas"></canvas></div>
   </div>
 <script>
 const frames = {frames_json};
 const cursorEvents = {cursor_events_json};
+const prefixVideoUrls = {prefix_video_urls_json};
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
+const prefixVideo = document.getElementById('prefixVideo');
 const playBtn = document.getElementById('play');
 const speed = document.getElementById('speed');
 const skipIdle = document.getElementById('skipIdle');
@@ -1394,6 +1472,8 @@ let playheadMs = 0;
 let playing = false;
 let rafId = null;
 let lastRafMs = null;
+let prefixIndex = 0;
+let showingPrefix = false;
 const images = frames.map(f => {{ const img = new Image(); img.src = f.src; return img; }});
 function normalizeCursor(cursor) {{
   if (!cursor || cursor.x == null || cursor.y == null) return null;
@@ -1503,7 +1583,43 @@ function tick(nowMs) {{
   }}
   rafId = requestAnimationFrame(tick);
 }}
+function beginFrameReplay(autoPlay) {{
+  showingPrefix = false;
+  prefixVideo.hidden = true;
+  canvas.hidden = false;
+  timeline.disabled = false;
+  renderAt(0);
+  if (autoPlay) {{
+    playing = true;
+    playBtn.textContent = 'Pause';
+    lastRafMs = null;
+    rafId = requestAnimationFrame(tick);
+  }}
+}}
+function startPrefix(index) {{
+  prefixIndex = index;
+  showingPrefix = true;
+  playing = false;
+  canvas.hidden = true;
+  prefixVideo.hidden = false;
+  timeline.disabled = true;
+  prefixVideo.src = prefixVideoUrls[prefixIndex];
+  time.textContent = `session ${{prefixIndex + 1}}/${{prefixVideoUrls.length}}`;
+  playBtn.textContent = 'Pause';
+  prefixVideo.play().catch(() => {{ playBtn.textContent = 'Play'; }});
+}}
+prefixVideo.onplay = () => {{ if (showingPrefix) playBtn.textContent = 'Pause'; }};
+prefixVideo.onpause = () => {{ if (showingPrefix && !prefixVideo.ended) playBtn.textContent = 'Play'; }};
+prefixVideo.onended = () => {{
+  if (prefixIndex + 1 < prefixVideoUrls.length) startPrefix(prefixIndex + 1);
+  else beginFrameReplay(true);
+}};
 playBtn.onclick = () => {{
+  if (showingPrefix) {{
+    if (prefixVideo.paused) prefixVideo.play().catch(() => {{}});
+    else prefixVideo.pause();
+    return;
+  }}
   playing = !playing;
   playBtn.textContent = playing ? 'Pause' : 'Play';
   if (rafId) cancelAnimationFrame(rafId);
@@ -1524,7 +1640,7 @@ skipIdle.onchange = () => {{
   timeline.max = totalMs;
   renderAt(eff[cur] || 0);
 }};
-renderAt(0);
+if (prefixVideoUrls.length) startPrefix(0); else beginFrameReplay(false);
 </script>
 </body>
 </html>
@@ -1653,8 +1769,34 @@ def browser_network_recording_enabled() -> bool:
     return browser_recordings_enabled()
 
 
+def provider_exit_monitoring_enabled() -> bool:
+    """Keep the lightweight rejection signal active outside local recordings."""
+    value = os.getenv("BROWSER_AGENT_PROVIDER_EXIT_MONITORING", "").strip().lower()
+    if value in TRUE_VALUES:
+        return True
+    if value in FALSE_VALUES:
+        return False
+    return True
+
+
+_FINGERPRINT_POISON_REASON = "ip has used many different fingerprints"
+
+
+def _contains_fingerprint_poison_detection(value: Any) -> bool:
+    """Recognize only an explicit detector verdict, never infer from a score."""
+    if isinstance(value, dict):
+        category = str(value.get("category") or "").strip().lower()
+        reason = " ".join(str(value.get("reason") or "").strip().lower().split())
+        if category == "fingerprint" and reason == _FINGERPRINT_POISON_REASON:
+            return True
+        return any(_contains_fingerprint_poison_detection(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_fingerprint_poison_detection(item) for item in value)
+    return False
+
+
 class BrowserNetworkRecorder:
-    """Dev-only CDP network recorder for response-body debugging."""
+    """CDP network observer with optional local body-log persistence."""
 
     STATIC_EXTENSIONS = (
         ".css",
@@ -1686,6 +1828,7 @@ class BrowserNetworkRecorder:
         task_id: str,
         session_id: str,
         output_dir: Path,
+        persist_network_log: bool = True,
     ) -> None:
         self.browser_session = browser_session
         self.agent_id = agent_id
@@ -1693,6 +1836,7 @@ class BrowserNetworkRecorder:
         self.session_id = session_id
         self.output_dir = output_dir
         self.network_dir = self.output_dir / "network"
+        self.persists_network_log = persist_network_log
         self.entries: Dict[str, Dict[str, Any]] = {}
         # Request IDs that were in flight when the agent last cleared the buffer
         # (read_network_requests clear=True). Their late response events must NOT
@@ -1705,9 +1849,19 @@ class BrowserNetworkRecorder:
         self._started_at = time.monotonic()
         self._closed = False
         self._tasks: set[asyncio.Task] = set()
+        self._provider_exit_rejections: List[Dict[str, Any]] = []
+        self._rejected_network_generations: set[int] = set()
         self._cdp_client: Any = None
+        # CDP requestId values are scoped to one remote browser connection and
+        # can repeat after challenge recovery promotes another provider/session.
+        # Namespace every internal request key by the connection generation so
+        # late events from the outgoing browser cannot corrupt the winner's log.
+        self._network_generation = 0
+        self._body_index = 0
         self._max_entries = max(1, int(os.getenv("BROWSER_AGENT_NETWORK_MAX_ENTRIES", "300")))
         self._max_body_bytes = max(1024, int(os.getenv("BROWSER_AGENT_NETWORK_MAX_BODY_BYTES", "262144")))
+        if not self.persists_network_log:
+            self._max_body_bytes = min(self._max_body_bytes, 65_536)
         self._patterns = [
             item.strip().lower()
             for item in os.getenv("BROWSER_AGENT_NETWORK_CAPTURE_URL_PATTERNS", "").split(",")
@@ -1724,7 +1878,8 @@ class BrowserNetworkRecorder:
         session_id: Optional[str],
         output_dir: Path,
     ) -> Optional["BrowserNetworkRecorder"]:
-        if not browser_network_recording_enabled() or not task_id or not session_id:
+        persist_network_log = browser_network_recording_enabled()
+        if (not persist_network_log and not provider_exit_monitoring_enabled()) or not task_id or not session_id:
             return None
         if not hasattr(browser_session, "get_or_create_cdp_session"):
             logger.warning(
@@ -1740,6 +1895,7 @@ class BrowserNetworkRecorder:
             task_id=task_id,
             session_id=session_id,
             output_dir=output_dir,
+            persist_network_log=persist_network_log,
         )
         try:
             await recorder.start()
@@ -1755,24 +1911,55 @@ class BrowserNetworkRecorder:
         return recorder
 
     async def start(self) -> None:
-        self.network_dir.mkdir(parents=True, exist_ok=True)
+        if self.persists_network_log:
+            self.network_dir.mkdir(parents=True, exist_ok=True)
         cdp_session = await self.browser_session.get_or_create_cdp_session()
         cdp_client = getattr(self.browser_session, "cdp_client", None) or cdp_session.cdp_client
         self._cdp_client = cdp_client
+        self._network_generation += 1
+        generation = self._network_generation
         cdp = cdp_client.register
-        cdp.Network.requestWillBeSent(self._on_request_will_be_sent)
-        cdp.Network.responseReceived(self._on_response_received)
-        cdp.Network.loadingFinished(self._on_loading_finished)
-        cdp.Network.loadingFailed(self._on_loading_failed)
+        cdp.Network.requestWillBeSent(
+            lambda event, session_id: self._on_request_will_be_sent(
+                event, session_id, generation
+            )
+        )
+        cdp.Network.responseReceived(
+            lambda event, session_id: self._on_response_received(
+                event, session_id, generation
+            )
+        )
+        cdp.Network.loadingFinished(
+            lambda event, session_id: self._on_loading_finished(
+                event, session_id, generation, cdp_client
+            )
+        )
+        cdp.Network.loadingFailed(
+            lambda event, session_id: self._on_loading_failed(
+                event, session_id, generation
+            )
+        )
 
         await cdp_client.send.Network.enable(session_id=cdp_session.session_id)
         logger.info(
-            "Browser network response-body recording started",
+            (
+                "Browser network response-body recording started"
+                if self.persists_network_log
+                else "Browser provider-exit monitoring started"
+            ),
             agent_id=self.agent_id,
             task_id=self.task_id,
             session_id=self.session_id,
-            output_dir=str(self.network_dir),
+            **({"output_dir": str(self.network_dir)} if self.persists_network_log else {}),
         )
+
+    async def transition_browser(self, *, browser_session: Any, session_id: str) -> None:
+        """Attach the same logical network log to a promoted browser session."""
+        if self._closed:
+            return
+        self.browser_session = browser_session
+        self.session_id = session_id
+        await self.start()
 
     def _should_capture(self, url: str, resource_type: str, mime_type: str = "") -> bool:
         if not url.startswith(("http://", "https://")):
@@ -1789,7 +1976,22 @@ class BrowserNetworkRecorder:
             marker in lower_mime for marker in ("json", "text/", "html", "xml", "x-www-form-urlencoded", "javascript")
         )
 
-    def _on_request_will_be_sent(self, event: Dict[str, Any], session_id: str | None) -> None:
+    def _request_key(self, request_id: str, generation: int | None = None) -> str:
+        effective_generation = (
+            generation
+            if generation is not None
+            else getattr(self, "_network_generation", 0)
+        )
+        # Keep direct, unstarted unit fixtures readable while production
+        # connections always use a generation-prefixed key.
+        return request_id if effective_generation == 0 else f"{effective_generation}:{request_id}"
+
+    def _on_request_will_be_sent(
+        self,
+        event: Dict[str, Any],
+        session_id: str | None,
+        generation: int | None = None,
+    ) -> None:
         try:
             request_id = event.get("requestId")
             request = event.get("request") or {}
@@ -1797,15 +1999,17 @@ class BrowserNetworkRecorder:
             resource_type = event.get("type") or ""
             if not request_id:
                 return
-            self._active_request_ids.add(request_id)
-            if request_id in self._ignored_request_ids:
+            request_key = self._request_key(request_id, generation)
+            self._active_request_ids.add(request_key)
+            if request_key in self._ignored_request_ids:
                 return
             if len(self.entries) >= self._max_entries:
                 return
             if not self._should_capture(url, resource_type):
                 return
-            self.entries[request_id] = {
+            self.entries[request_key] = {
                 "request_id": request_id,
+                "browser_generation": generation,
                 "session_id": session_id,
                 "method": request.get("method"),
                 "url": url,
@@ -1815,7 +2019,12 @@ class BrowserNetworkRecorder:
         except Exception as exc:
             logger.warning("Browser network request capture failed", error=str(exc))
 
-    def _on_response_received(self, event: Dict[str, Any], session_id: str | None) -> None:
+    def _on_response_received(
+        self,
+        event: Dict[str, Any],
+        session_id: str | None,
+        generation: int | None = None,
+    ) -> None:
         try:
             request_id = event.get("requestId")
             response = event.get("response") or {}
@@ -1824,26 +2033,34 @@ class BrowserNetworkRecorder:
             mime_type = response.get("mimeType") or ""
             if not request_id:
                 return
-            self._active_request_ids.add(request_id)
-            if request_id in self._ignored_request_ids:
+            request_key = self._request_key(request_id, generation)
+            self._active_request_ids.add(request_key)
+            if request_key in self._ignored_request_ids:
+                return
+            # The always-on reputation monitor needs only small JSON detector
+            # responses. Drop all other content before loading its body; full
+            # text/HTML capture remains available when local recording is on.
+            if not getattr(self, "persists_network_log", True) and "json" not in mime_type.lower():
+                self.entries.pop(request_key, None)
                 return
             # Capacity only blocks NEW requests; an already-tracked request must
             # still receive its status/response update (otherwise a page that
             # fills the buffer before responses land leaves every status None and
             # defeats 403/challenge detection).
-            if request_id not in self.entries and len(self.entries) >= self._max_entries:
+            if request_key not in self.entries and len(self.entries) >= self._max_entries:
                 return
             # Only gate NEW requests on the MIME predicate. An already-tracked
             # request must still receive its status/response update even when the
             # response MIME is non-capturable (e.g. application/octet-stream,
             # protobuf); otherwise it keeps status=None and 403/challenge
             # detection via read_network_requests fails.
-            if request_id not in self.entries and not self._should_capture(url, resource_type, mime_type):
+            if request_key not in self.entries and not self._should_capture(url, resource_type, mime_type):
                 return
             entry = self.entries.setdefault(
-                request_id,
+                request_key,
                 {
                     "request_id": request_id,
+                    "browser_generation": generation,
                     "session_id": session_id,
                     "url": url,
                     "resource_type": resource_type,
@@ -1862,35 +2079,63 @@ class BrowserNetworkRecorder:
         except Exception as exc:
             logger.warning("Browser network response capture failed", error=str(exc))
 
-    def _on_loading_finished(self, event: Dict[str, Any], session_id: str | None) -> None:
+    def _on_loading_finished(
+        self,
+        event: Dict[str, Any],
+        session_id: str | None,
+        generation: int | None = None,
+        cdp_client: Any = None,
+    ) -> None:
         request_id = event.get("requestId")
+        request_key = self._request_key(request_id, generation) if request_id else None
         if request_id:
-            self._ignored_request_ids.discard(request_id)
-            self._active_request_ids.discard(request_id)
-        if not request_id or request_id not in self.entries:
+            self._ignored_request_ids.discard(request_key)
+            self._active_request_ids.discard(request_key)
+        if not request_id or request_key not in self.entries:
             return
-        self.entries[request_id]["encoded_data_length"] = event.get("encodedDataLength")
-        self.entries[request_id]["terminal"] = True
-        task = asyncio.create_task(self._fetch_response_body(request_id, session_id))
+        self.entries[request_key]["encoded_data_length"] = event.get("encodedDataLength")
+        self.entries[request_key]["terminal"] = True
+        # Bind the client at event time. A provider handoff can replace
+        # self._cdp_client while an outgoing response body is still in flight.
+        task = asyncio.create_task(
+            self._fetch_response_body(
+                request_key,
+                request_id,
+                session_id,
+                cdp_client or self._cdp_client,
+            )
+        )
         self._tasks.add(task)
         task.add_done_callback(lambda done: self._tasks.discard(done))
 
-    def _on_loading_failed(self, event: Dict[str, Any], session_id: str | None) -> None:
+    def _on_loading_failed(
+        self,
+        event: Dict[str, Any],
+        session_id: str | None,
+        generation: int | None = None,
+    ) -> None:
         request_id = event.get("requestId")
+        request_key = self._request_key(request_id, generation) if request_id else None
         if request_id:
-            self._ignored_request_ids.discard(request_id)
-            self._active_request_ids.discard(request_id)
-        if request_id and request_id in self.entries:
-            self.entries[request_id]["failed"] = True
-            self.entries[request_id]["failure"] = event.get("errorText")
-            self.entries[request_id]["terminal"] = True
+            self._ignored_request_ids.discard(request_key)
+            self._active_request_ids.discard(request_key)
+        if request_id and request_key in self.entries:
+            self.entries[request_key]["failed"] = True
+            self.entries[request_key]["failure"] = event.get("errorText")
+            self.entries[request_key]["terminal"] = True
 
-    async def _fetch_response_body(self, request_id: str, session_id: str | None) -> None:
-        entry = self.entries.get(request_id)
+    async def _fetch_response_body(
+        self,
+        request_key: str,
+        request_id: str,
+        session_id: str | None,
+        cdp_client: Any,
+    ) -> None:
+        entry = self.entries.get(request_key)
         if not entry or self._closed:
             return
         try:
-            response = await self._cdp_client.send.Network.getResponseBody(
+            response = await cdp_client.send.Network.getResponseBody(
                 params={"requestId": request_id},
                 session_id=session_id,
             )
@@ -1904,29 +2149,60 @@ class BrowserNetworkRecorder:
             if truncated:
                 body_bytes = body_bytes[: self._max_body_bytes]
 
-            index = len([item for item in self.entries.values() if item.get("body_file")]) + 1
-            extension = ".json" if "json" in str(entry.get("mime_type", "")).lower() else ".txt"
-            body_path = self.network_dir / f"{index:04d}_{request_id.replace('.', '_')}{extension}"
-            body_path.write_bytes(body_bytes)
-            entry.update(
-                {
-                    "body_file": body_path.name,
-                    "body_size": original_size,
-                    "body_truncated": truncated,
-                    "body_base64_encoded": bool(response.get("base64Encoded")),
-                    "body_captured_at_ms": int((time.monotonic() - self._started_at) * 1000),
-                }
-            )
-            logger.info(
-                "Browser network response body captured",
-                agent_id=self.agent_id,
-                task_id=self.task_id,
-                status=entry.get("status"),
-                url=entry.get("url"),
-                body_file=str(body_path),
-                body_size=original_size,
-                body_truncated=truncated,
-            )
+            if "json" in str(entry.get("mime_type", "")).lower():
+                with contextlib.suppress(json.JSONDecodeError, UnicodeDecodeError):
+                    payload = json.loads(body_bytes.decode("utf-8"))
+                    generation = int(entry.get("browser_generation") or 0)
+                    current_generation = int(getattr(self, "_network_generation", generation))
+                    rejected_generations = getattr(self, "_rejected_network_generations", set())
+                    if (
+                        generation == current_generation
+                        and generation not in rejected_generations
+                        and _contains_fingerprint_poison_detection(payload)
+                    ):
+                        rejected_generations.add(generation)
+                        self._rejected_network_generations = rejected_generations
+                        rejections = getattr(self, "_provider_exit_rejections", [])
+                        rejections.append(
+                            {
+                                "reason": _FINGERPRINT_POISON_REASON,
+                                "url": _redact_url_query(str(entry.get("url") or "")),
+                                "browser_generation": generation,
+                            }
+                        )
+                        self._provider_exit_rejections = rejections
+                        logger.warning(
+                            "Browser provider exit explicitly rejected by fingerprint detector",
+                            agent_id=self.agent_id,
+                            task_id=self.task_id,
+                            browser_generation=generation,
+                        )
+
+            if getattr(self, "persists_network_log", True):
+                self._body_index += 1
+                index = self._body_index
+                extension = ".json" if "json" in str(entry.get("mime_type", "")).lower() else ".txt"
+                body_path = self.network_dir / f"{index:04d}_{request_id.replace('.', '_')}{extension}"
+                body_path.write_bytes(body_bytes)
+                entry.update(
+                    {
+                        "body_file": body_path.name,
+                        "body_size": original_size,
+                        "body_truncated": truncated,
+                        "body_base64_encoded": bool(response.get("base64Encoded")),
+                        "body_captured_at_ms": int((time.monotonic() - self._started_at) * 1000),
+                    }
+                )
+                logger.info(
+                    "Browser network response body captured",
+                    agent_id=self.agent_id,
+                    task_id=self.task_id,
+                    status=entry.get("status"),
+                    url=entry.get("url"),
+                    body_file=str(body_path),
+                    body_size=original_size,
+                    body_truncated=truncated,
+                )
         except Exception as exc:
             entry["body_error"] = str(exc)
             logger.warning(
@@ -1937,6 +2213,19 @@ class BrowserNetworkRecorder:
                 url=entry.get("url"),
                 error=str(exc),
             )
+        finally:
+            # Monitoring-only sessions must stay bounded during long-lived apps.
+            # The rejection queue retains the only signal the runtime needs;
+            # request metadata and parsed response bodies are not exposed or kept.
+            if not getattr(self, "persists_network_log", True):
+                self.entries.pop(request_key, None)
+
+    def pop_provider_exit_rejection(self) -> Optional[Dict[str, Any]]:
+        """Consume one explicit rejection verdict for the active browser exit."""
+        rejections = getattr(self, "_provider_exit_rejections", [])
+        if not rejections:
+            return None
+        return rejections.pop(0)
 
     def query_requests(
         self,
@@ -1984,7 +2273,7 @@ class BrowserNetworkRecorder:
 
     async def close(self) -> Optional[Path]:
         if self._closed:
-            return self.network_dir / "index.json" if self.entries else None
+            return self.network_dir / "index.json" if self.entries and self.persists_network_log else None
         if self._tasks:
             done, pending = await asyncio.wait(self._tasks, timeout=3)
             for task in pending:
@@ -1998,6 +2287,8 @@ class BrowserNetworkRecorder:
                     completed=len(done),
                 )
         self._closed = True
+        if not self.persists_network_log:
+            return None
         if not self.entries:
             return None
         index_path = self.network_dir / "index.json"

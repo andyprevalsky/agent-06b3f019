@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { PurchaseWalletFundingStatus, type PurchaseSpend } from '@prisma/client';
 import { createLogger } from './logger';
 import * as repo from './purchase-wallet-funding-repo';
@@ -147,27 +148,49 @@ export async function consumePurchaseWalletFunding(purchaseId: string): Promise<
  * makes it read as not-live; without this pre-claim a concurrent cleanup pass would observe the
  * not-live card while the funding is still FUNDED, misclassify it as merchant-spent, and consume
  * the transfer — permanently draining the company float. Marking RECLAIMING first makes that pass
- * defer to the in-flight reclaim instead. No-op for any non-FUNDED row (already reclaiming,
- * consumed, terminal, or not yet funded); the subsequent `reclaimPurchaseWalletFunding` handles it.
+ * defer to the in-flight reclaim instead. The explicit claim result lets callers suppress only an
+ * active owner while preserving the legacy close/reconcile behavior for missing or terminal rows.
  */
-export async function beginPurchaseWalletReclaim(purchaseId: string): Promise<void> {
+export type PurchaseWalletReclaimClaim =
+  { status: 'owned'; reclaimLeaseToken: string } | { status: 'already_owned' | 'not_applicable' };
+
+export async function beginPurchaseWalletReclaim(
+  purchaseId: string
+): Promise<PurchaseWalletReclaimClaim> {
   const funding = await repo.findWalletFundingByPurchaseId(purchaseId);
-  if (funding === null || funding.status !== PurchaseWalletFundingStatus.FUNDED) return;
+  if (funding === null) return { status: 'not_applicable' };
+  if (funding.status === PurchaseWalletFundingStatus.RECLAIMING) {
+    return { status: 'already_owned' };
+  }
+  if (funding.status !== PurchaseWalletFundingStatus.FUNDED) {
+    return { status: 'not_applicable' };
+  }
   const reclaimIdempotencyKey =
     funding.reclaimIdempotencyKey ?? `purchase-wallet-reclaim:${purchaseId}`;
-  await repo.markWalletFundingReclaiming(funding.id, {
+  const reclaimLeaseToken = randomUUID();
+  const claimed = await repo.claimWalletFundingReclaim(funding.id, {
     reclaimIdempotencyKey,
-    allowConsumed: false,
+    reclaimLeaseToken,
   });
+  if (claimed.count === 1) return { status: 'owned', reclaimLeaseToken };
+
+  // A competing caller may have advanced the FUNDED row after our read. Suppress only an active
+  // RECLAIMING owner; every other state preserves the legacy close/reconcile behavior.
+  const current = await repo.findWalletFundingByPurchaseId(purchaseId);
+  return current?.status === PurchaseWalletFundingStatus.RECLAIMING
+    ? { status: 'already_owned' }
+    : { status: 'not_applicable' };
 }
 
-export async function reclaimPurchaseWalletFunding(
+const inFlightPurchaseWalletReclaims = new Map<string, Promise<void>>();
+
+async function performPurchaseWalletFundingReclaim(
   purchase: Pick<PurchaseSpend, 'id' | 'userId' | 'agentId' | 'totalCents'> & {
     cardId?: string | null;
   },
   reason: string,
   walletFundingProvider?: WalletFundingProvider,
-  opts: { allowConsumed?: boolean } = {}
+  opts: { allowConsumed?: boolean; reclaimLeaseToken?: string } = {}
 ): Promise<void> {
   const funding = await repo.findWalletFundingByPurchaseId(purchase.id);
   if (funding === null) return;
@@ -193,9 +216,15 @@ export async function reclaimPurchaseWalletFunding(
 
   const reclaimIdempotencyKey =
     funding.reclaimIdempotencyKey ?? `purchase-wallet-reclaim:${purchase.id}`;
+  const reclaimLeaseToken = opts.reclaimLeaseToken ?? randomUUID();
   const reclaiming = await repo.markWalletFundingReclaiming(funding.id, {
     reclaimIdempotencyKey,
+    reclaimLeaseToken,
+    expectedReclaimLeaseToken: funding.reclaimLeaseToken,
     allowConsumed: opts.allowConsumed === true,
+    // A RECLAIMING row has an active owner. Only a caller carrying that exact lease may execute
+    // provider reconciliation; unclaimed callers must wait for the stale-retry CAS.
+    allowReclaiming: opts.reclaimLeaseToken !== undefined,
   });
   if (reclaiming.count === 0) {
     const current = await repo.findWalletFundingByPurchaseId(purchase.id);
@@ -203,14 +232,19 @@ export async function reclaimPurchaseWalletFunding(
     // That is success, not evidence that a merchant consumed the transfer.
     if (current?.status === PurchaseWalletFundingStatus.RECLAIMED) return;
     const consumed = current?.status === PurchaseWalletFundingStatus.CONSUMED;
+    const activeOwner = current?.status === PurchaseWalletFundingStatus.RECLAIMING;
     throw new WalletFundingProviderError(
       consumed
         ? 'AgentCard company transfer was consumed while reclaim started'
-        : 'AgentCard company transfer changed state while reclaim started',
+        : activeOwner
+          ? 'AgentCard company transfer reclaim is already owned'
+          : 'AgentCard company transfer changed state while reclaim started',
       409,
       consumed
         ? 'agentcard_company_transfer_consumed_during_reclaim'
-        : 'agentcard_company_transfer_reclaim_conflict',
+        : activeOwner
+          ? 'agentcard_company_transfer_release_pending'
+          : 'agentcard_company_transfer_reclaim_conflict',
       { fundingStatus: current?.status }
     );
   }
@@ -229,21 +263,26 @@ export async function reclaimPurchaseWalletFunding(
         : {}),
       reason,
     });
-    const reclaimed = await repo.markWalletFundingReclaimed(funding.id, result);
+    const reclaimed = await repo.markWalletFundingReclaimed(funding.id, reclaimLeaseToken, result);
     if (reclaimed.count === 0) {
       const current = await repo.findWalletFundingByPurchaseId(purchase.id);
       // Concurrent reconcilers may both observe the provider release. The winner has already
       // persisted the exact terminal state this call wanted, so the loser is an idempotent success.
       if (current?.status === PurchaseWalletFundingStatus.RECLAIMED) return;
       const consumed = current?.status === PurchaseWalletFundingStatus.CONSUMED;
+      const activeOwner = current?.status === PurchaseWalletFundingStatus.RECLAIMING;
       throw new WalletFundingProviderError(
         consumed
           ? 'AgentCard company transfer was consumed while reclaim completed'
-          : 'AgentCard company transfer changed state while reclaim completed',
+          : activeOwner
+            ? 'AgentCard company transfer reclaim ownership changed before completion'
+            : 'AgentCard company transfer changed state while reclaim completed',
         409,
         consumed
           ? 'agentcard_company_transfer_consumed_during_reclaim'
-          : 'agentcard_company_transfer_reclaim_conflict',
+          : activeOwner
+            ? 'agentcard_company_transfer_release_pending'
+            : 'agentcard_company_transfer_reclaim_conflict',
         { fundingStatus: current?.status }
       );
     }
@@ -251,8 +290,42 @@ export async function reclaimPurchaseWalletFunding(
     if (isWalletFundingReleasePendingError(error)) throw error;
     await repo.markWalletFundingReclaimFailed(
       funding.id,
+      reclaimLeaseToken,
       error instanceof Error ? error.message : String(error)
     );
     throw error;
+  }
+}
+
+/**
+ * Coalesce same-process retries for one provider transfer. The database state machine keeps the
+ * result idempotent, and one owner must observe the transfer release before a later retry starts.
+ * `close_card` belongs exclusively to the card-provider owner; this funding operation is read-only
+ * provider reconciliation and must never replay that mutation.
+ */
+export async function reclaimPurchaseWalletFunding(
+  purchase: Pick<PurchaseSpend, 'id' | 'userId' | 'agentId' | 'totalCents'> & {
+    cardId?: string | null;
+  },
+  reason: string,
+  walletFundingProvider?: WalletFundingProvider,
+  opts: { allowConsumed?: boolean; reclaimLeaseToken?: string } = {}
+): Promise<void> {
+  const existing = inFlightPurchaseWalletReclaims.get(purchase.id);
+  if (existing !== undefined) return existing;
+
+  const reclaim = performPurchaseWalletFundingReclaim(
+    purchase,
+    reason,
+    walletFundingProvider,
+    opts
+  );
+  inFlightPurchaseWalletReclaims.set(purchase.id, reclaim);
+  try {
+    await reclaim;
+  } finally {
+    if (inFlightPurchaseWalletReclaims.get(purchase.id) === reclaim) {
+      inFlightPurchaseWalletReclaims.delete(purchase.id);
+    }
   }
 }

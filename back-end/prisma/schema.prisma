@@ -340,6 +340,7 @@ model PurchaseWalletFunding {
   reclaimProviderTransferId String?
   idempotencyKey            String                      @unique
   reclaimIdempotencyKey     String?
+  reclaimLeaseToken         String?
   metadata                  Json?
   errorMessage              String?
   fundedAt                  DateTime?
@@ -355,13 +356,14 @@ model PurchaseWalletFunding {
 }
 
 model BrowserContext {
-  id               String                   @id @default(uuid())
-  userId           String                   @unique
-  contextId        String?                  @unique
-  createdAt        DateTime                 @default(now())
-  updatedAt        DateTime                 @updatedAt
-  sessions         BrowserSession[]
-  providerProfiles BrowserProviderProfile[]
+  id                     String                   @id @default(uuid())
+  userId                 String                   @unique
+  contextId              String?                  @unique
+  preferredBrowserConfig Json?
+  createdAt              DateTime                 @default(now())
+  updatedAt              DateTime                 @updatedAt
+  sessions               BrowserSession[]
+  providerProfiles       BrowserProviderProfile[]
 
   @@index([userId])
   @@index([contextId])

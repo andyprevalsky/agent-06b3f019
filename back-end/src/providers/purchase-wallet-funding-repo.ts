@@ -93,16 +93,23 @@ export async function markWalletFundingConsumed(purchaseId: string) {
 
 export async function markWalletFundingReclaiming(
   id: string,
-  data: { reclaimIdempotencyKey: string; allowConsumed: boolean }
+  data: {
+    reclaimIdempotencyKey: string;
+    reclaimLeaseToken: string;
+    expectedReclaimLeaseToken: string | null;
+    allowConsumed: boolean;
+    allowReclaiming: boolean;
+  }
 ) {
   return prisma.purchaseWalletFunding.updateMany({
     where: {
       id,
+      reclaimLeaseToken: data.expectedReclaimLeaseToken,
       status: {
         in: [
           PurchaseWalletFundingStatus.FUNDED,
-          PurchaseWalletFundingStatus.RECLAIMING,
           PurchaseWalletFundingStatus.RECLAIM_FAILED,
+          ...(data.allowReclaiming ? [PurchaseWalletFundingStatus.RECLAIMING] : []),
           ...(data.allowConsumed ? [PurchaseWalletFundingStatus.CONSUMED] : []),
         ],
       },
@@ -110,6 +117,64 @@ export async function markWalletFundingReclaiming(
     data: {
       status: PurchaseWalletFundingStatus.RECLAIMING,
       reclaimIdempotencyKey: data.reclaimIdempotencyKey,
+      reclaimLeaseToken: data.reclaimLeaseToken,
+      errorMessage: null,
+    },
+  });
+}
+
+/**
+ * Claim the first close/reclaim attempt for a funded transfer. Unlike
+ * `markWalletFundingReclaiming`, this is intentionally a FUNDED-only CAS: a second cleanup that
+ * arrives while the first one is polling AgentCard must not replay `close_card`. Even though
+ * AgentCard declares close idempotent, the mutation has exactly one owner; all retry paths only
+ * observe the resulting transfer release.
+ */
+export async function claimWalletFundingReclaim(
+  id: string,
+  data: { reclaimIdempotencyKey: string; reclaimLeaseToken: string }
+) {
+  return prisma.purchaseWalletFunding.updateMany({
+    where: { id, status: PurchaseWalletFundingStatus.FUNDED },
+    data: {
+      status: PurchaseWalletFundingStatus.RECLAIMING,
+      reclaimIdempotencyKey: data.reclaimIdempotencyKey,
+      reclaimLeaseToken: data.reclaimLeaseToken,
+      errorMessage: null,
+    },
+  });
+}
+
+/**
+ * Take ownership of a retryable reclaim. The stale timestamp is part of the compare-and-set so
+ * concurrent cron workers cannot both revive the same expired lease and poll provider cleanup.
+ * FUNDED is included for legacy rows whose purchase was marked FUNDING_RECLAIM_FAILED before the
+ * funding row advanced to RECLAIM_FAILED.
+ */
+export async function claimWalletFundingReclaimRetry(
+  id: string,
+  data: {
+    reclaimIdempotencyKey: string;
+    reclaimLeaseToken: string;
+    staleReclaimingBefore: Date;
+  }
+) {
+  return prisma.purchaseWalletFunding.updateMany({
+    where: {
+      id,
+      OR: [
+        { status: PurchaseWalletFundingStatus.FUNDED },
+        { status: PurchaseWalletFundingStatus.RECLAIM_FAILED },
+        {
+          status: PurchaseWalletFundingStatus.RECLAIMING,
+          updatedAt: { lte: data.staleReclaimingBefore },
+        },
+      ],
+    },
+    data: {
+      status: PurchaseWalletFundingStatus.RECLAIMING,
+      reclaimIdempotencyKey: data.reclaimIdempotencyKey,
+      reclaimLeaseToken: data.reclaimLeaseToken,
       errorMessage: null,
     },
   });
@@ -117,13 +182,14 @@ export async function markWalletFundingReclaiming(
 
 export async function markWalletFundingReclaimed(
   id: string,
+  reclaimLeaseToken: string,
   data: {
     providerTransferId?: string;
     metadata?: Record<string, unknown>;
   }
 ) {
   return prisma.purchaseWalletFunding.updateMany({
-    where: { id, status: PurchaseWalletFundingStatus.RECLAIMING },
+    where: { id, status: PurchaseWalletFundingStatus.RECLAIMING, reclaimLeaseToken },
     data: {
       status: PurchaseWalletFundingStatus.RECLAIMED,
       reclaimProviderTransferId: data.providerTransferId,
@@ -134,9 +200,13 @@ export async function markWalletFundingReclaimed(
   });
 }
 
-export async function markWalletFundingReclaimFailed(id: string, error: string) {
+export async function markWalletFundingReclaimFailed(
+  id: string,
+  reclaimLeaseToken: string,
+  error: string
+) {
   return prisma.purchaseWalletFunding.updateMany({
-    where: { id, status: PurchaseWalletFundingStatus.RECLAIMING },
+    where: { id, status: PurchaseWalletFundingStatus.RECLAIMING, reclaimLeaseToken },
     data: {
       status: PurchaseWalletFundingStatus.RECLAIM_FAILED,
       errorMessage: error,

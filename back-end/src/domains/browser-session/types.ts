@@ -37,6 +37,18 @@ export const rotateProxySchema = z.object({
   current_url: z.string().min(1).max(8192).optional(),
 });
 
+export const recoverChallengeSchema = z.object({
+  task_id: z.string().uuid(),
+  current_url: z.string().url().max(8192),
+  storage_state: z
+    .object({
+      cookies: z.array(z.record(z.unknown())).default([]),
+      origins: z.array(z.record(z.unknown())).default([]),
+    })
+    .passthrough(),
+  user_agent: z.string().max(2048).optional(),
+});
+
 export const injectLocalStorageSchema = z.object({
   origin: z.string().url(),
 });
@@ -53,6 +65,7 @@ export type InitSessionInput = z.infer<typeof initSessionSchema>;
 export type CloseSessionInput = z.infer<typeof closeSessionSchema>;
 export type ResumeSessionInput = z.infer<typeof resumeSessionSchema>;
 export type RotateProxyInput = z.infer<typeof rotateProxySchema>;
+export type RecoverChallengeInput = z.infer<typeof recoverChallengeSchema>;
 export type InjectLocalStorageInput = z.infer<typeof injectLocalStorageSchema>;
 export type PrepareSessionCredentialsInput = z.infer<typeof prepareSessionCredentialsSchema>;
 

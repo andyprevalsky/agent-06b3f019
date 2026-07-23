@@ -118,31 +118,36 @@ def test_every_advertised_tool_is_normalizable():
         )
 
 
-def test_rotate_ip_normalizes_and_preserves_reason():
-    # rotate_ip backs the mid-session IP-rotation tool. It must normalize (be in
-    # the allowlist) and carry its `reason` param through to the handler, which
-    # reads params.reason for telemetry.
+def test_recover_from_challenge_normalizes_and_preserves_reason():
+    # The staged recovery tool must normalize and carry its evidence through.
     for completion in (
-        {"thinking": "captcha wall", "action": [{"rotate_ip": {"reason": "captcha wall reappears"}}]},
-        {"thinking": "429s", "action": [{"action_name": "rotate_ip", "reason": "repeated 429s on search"}]},
+        {
+            "thinking": "captcha wall",
+            "action": [{"recover_from_challenge": {"reason": "captcha wall reappears"}}],
+        },
+        {
+            "thinking": "429s",
+            "action": [{"action_name": "recover_from_challenge", "reason": "repeated 429s on search"}],
+        },
     ):
         result = normalize_browser_use_response(completion)
-        assert result["action"] == "rotate_ip", result
+        assert result["action"] == "recover_from_challenge", result
         assert result["params"].get("reason"), result
 
 
-def test_rotate_ip_prompt_uses_fixed_cross_provider_ladder():
-    description = BROWSER_USE_TOOLS["rotate_ip"]["description"]
-    assert "first call" in description
+def test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages():
+    description = BROWSER_USE_TOOLS["recover_from_challenge"]["description"]
+    assert "automatic CAPTCHA solver" in description
+    assert "known challenge cookies" in description
+    assert "parallel cookie-group reductions" in description
+    assert "authentication" in description
     assert "Kernel residential" in description
-    assert "second call" in description
     assert "Kernel mobile" in description
-    assert "third call" in description
-    assert "Kernel to Steel" in description
-    assert "fourth call" in description
-    assert "another Steel residential" in description
-    assert "already began on Steel stays on Steel" in description
-    assert "if mobile" not in description.lower()
+    assert "ISP" in description
+    assert "Steel managed/fixed-IP" in description
+    assert "in parallel" in description
+    assert "user's default" in description
+    assert "rotate_ip" not in BROWSER_USE_TOOLS
 
 
 def test_build_browser_use_system_prompt_uses_native_tools_not_action_list():
@@ -902,9 +907,7 @@ def test_read_network_requests_tool_advertised_and_normalized():
     assert flat["action"] == "read_network_requests"
     assert flat["params"] == {"url_pattern": "/api/", "limit": 50, "clear": True}
 
-    nested = normalize_browser_use_response(
-        {"action": [{"read_network_requests": {"url_pattern": "checkout"}}]}
-    )
+    nested = normalize_browser_use_response({"action": [{"read_network_requests": {"url_pattern": "checkout"}}]})
     assert nested["action"] == "read_network_requests"
     assert nested["params"] == {"url_pattern": "checkout"}
 
@@ -1706,10 +1709,13 @@ async def run_all_tests():
     r.record("normalize_click_coords_missing_y_raises", test_normalize_click_coordinates_missing_y_raises)
     r.record("normalize_non_dict_action_raises", test_normalize_non_dict_action_raises)
     r.record("advertised_tools_are_normalizable", test_every_advertised_tool_is_normalizable)
-    r.record("rotate_ip_preserves_reason", test_rotate_ip_normalizes_and_preserves_reason)
     r.record(
-        "rotate_ip_cross_provider_ladder",
-        test_rotate_ip_prompt_uses_fixed_cross_provider_ladder,
+        "recover_from_challenge_preserves_reason",
+        test_recover_from_challenge_normalizes_and_preserves_reason,
+    )
+    r.record(
+        "recover_from_challenge_stages",
+        test_recovery_prompt_describes_solver_cookie_and_parallel_config_stages,
     )
 
     r.record("params_seconds_to_time_ms", test_params_seconds_to_time_ms)

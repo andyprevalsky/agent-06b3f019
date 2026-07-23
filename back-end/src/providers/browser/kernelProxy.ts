@@ -2,7 +2,7 @@ import type Kernel from '@onkernel/sdk';
 import { prisma } from '../database';
 import type { ProxyGeoLocation } from '../geoip';
 
-export type KernelProxyType = 'residential' | 'mobile';
+export type KernelProxyType = 'residential' | 'mobile' | 'isp';
 
 export interface KernelProxyCandidate {
   proxyKey: string;
