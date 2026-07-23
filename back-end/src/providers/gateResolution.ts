@@ -199,7 +199,5 @@ export async function resolvePendingGateByKey(
   if (request === null) return { resolved: false };
 
   const result = await resolveAndSignal(request, response);
-  return result.resolved
-    ? { resolved: true, request_id: request.id }
-    : { resolved: false };
+  return result.resolved ? { resolved: true, request_id: request.id } : { resolved: false };
 }

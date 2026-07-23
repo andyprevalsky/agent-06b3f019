@@ -2,9 +2,21 @@
  * Agents domain repo mutations — create, update, delete operations.
  */
 
-import type { Prisma, AgentSource, AgentStatus, VerifierType } from '@prisma/client';
-import { prisma, runTransactionWithRetry } from '../../providers/database';
+import type { Prisma, AgentSource, VerifierType } from '@prisma/client';
+import { runTransactionWithRetry } from '../../providers/database';
 import { assertCurrentParentWorkflowGenerations } from './repoParentWorkflowFence';
+
+export {
+  clearWorkflowForTerminalAgent,
+  createAgentTools,
+  createGithubRepoAccess,
+  deleteAgentTools,
+  deleteAttentionRequests,
+  failAgentIfStillActive,
+  replaceAgentTools,
+  softDeleteAgent,
+  updateAgent,
+} from './repoAgentMutations';
 
 // ---------------------------------------------------------------------------
 // Agent mutations
@@ -266,98 +278,5 @@ export async function createAgentBatchTransaction(items: BatchCreateAgentParams[
     });
     const createdById = new Map(createdAgents.map((agent) => [agent.id, agent]));
     return items.map((params) => ({ agent: createdById.get(params.agentId)! }));
-  });
-}
-
-/** Update an agent's fields. */
-export async function updateAgent(agentId: string, data: Record<string, unknown>) {
-  return prisma.agent.update({
-    where: { id: agentId },
-    data,
-  });
-}
-
-/** Mark an agent as FAILED only if it's still in a pre-terminal, non-paused state.
- *  Prevents background error handlers from overwriting user-initiated status changes. */
-export async function failAgentIfStillActive(agentId: string, statusMessage: string) {
-  return prisma.agent.updateMany({
-    where: {
-      id: agentId,
-      status: { in: ['STARTING_UP', 'ACTIVE'] },
-    },
-    data: { status: 'FAILED', statusMessage },
-  });
-}
-
-/** Reactivate a terminal agent for chat by clearing its ended workflow — but ONLY
- *  if the row is still in the exact observed terminal status AND workflow id. If a
- *  concurrent reactivation already changed either, 0 rows update and the caller
- *  reloads instead of clobbering the newer workflow. Returns the update count. */
-export async function clearWorkflowForTerminalAgent(
-  agentId: string,
-  observedStatus: AgentStatus,
-  observedWorkflowId: string,
-  _observedFirstExecutionRunId: string | null
-) {
-  return prisma.agent.updateMany({
-    where: {
-      id: agentId,
-      status: observedStatus,
-      temporalWorkflowId: observedWorkflowId,
-    },
-    data: {
-      temporalWorkflowId: null,
-      temporalFirstExecutionRunId: null,
-      status: 'ACTIVE',
-    },
-  });
-}
-
-/** Soft-delete an agent. */
-export async function softDeleteAgent(agentId: string) {
-  return prisma.agent.update({
-    where: { id: agentId },
-    data: { deletedAt: new Date() },
-  });
-}
-
-/** Delete all attention requests for an agent. */
-export async function deleteAttentionRequests(agentId: string) {
-  return prisma.agentAttentionRequest.deleteMany({
-    where: { agentId },
-  });
-}
-
-/** Create a GitHub repo access record. */
-export async function createGithubRepoAccess(userId: string, repoUrl: string) {
-  return prisma.githubRepoAccess.create({
-    data: { userId, repoUrl },
-  });
-}
-
-/** Delete all tool assignments for an agent. */
-export async function deleteAgentTools(agentId: string) {
-  return prisma.agentTool.deleteMany({
-    where: { agentId },
-  });
-}
-
-/** Create tool assignments for an agent. */
-export async function createAgentTools(agentId: string, toolIds: string[]) {
-  return prisma.agentTool.createMany({
-    data: toolIds.map((toolId) => ({
-      agentId,
-      toolId,
-    })),
-  });
-}
-
-/** Replace tool assignments atomically — delete old, create new in one transaction. */
-export async function replaceAgentTools(agentId: string, toolIds: string[]) {
-  return prisma.$transaction(async (tx) => {
-    await tx.agentTool.deleteMany({ where: { agentId } });
-    await tx.agentTool.createMany({
-      data: toolIds.map((toolId) => ({ agentId, toolId })),
-    });
   });
 }

@@ -50,10 +50,7 @@ function successfulDependencies(terminations: string[]): WorkflowTerminalCleanup
   };
 }
 
-async function forceCleanup(
-  agentIds: string[],
-  dependencies: WorkflowTerminalCleanupDependencies
-) {
+async function forceCleanup(agentIds: string[], dependencies: WorkflowTerminalCleanupDependencies) {
   return cleanupTerminalAgentWorkflowZombies(dependencies, {
     agentIds,
     ignoreGrace: true,
@@ -80,10 +77,7 @@ async function main(): Promise<void> {
       );
       assert.strictEqual(result.discovered, 0);
       assert.strictEqual(terminated, false);
-      assert.strictEqual(
-        await prisma.temporalWorkflowCleanup.count({ where: { agentId } }),
-        1
-      );
+      assert.strictEqual(await prisma.temporalWorkflowCleanup.count({ where: { agentId } }), 1);
     } finally {
       await deleteRun(runId);
     }
@@ -171,9 +165,7 @@ async function main(): Promise<void> {
 
       const terminations: string[] = [];
       await forceCleanup([agentId], successfulDependencies(terminations));
-      assert.deepStrictEqual(terminations, [
-        `${agentId}:workflow-${agentId}:first-${agentId}`,
-      ]);
+      assert.deepStrictEqual(terminations, [`${agentId}:workflow-${agentId}:first-${agentId}`]);
     } finally {
       await deleteRun(runId);
     }
@@ -186,9 +178,7 @@ async function main(): Promise<void> {
     const terminations: string[] = [];
     try {
       await forceCleanup([agentId], successfulDependencies(terminations));
-      assert.deepStrictEqual(terminations, [
-        `${agentId}:workflow-${agentId}:first-${agentId}`,
-      ]);
+      assert.deepStrictEqual(terminations, [`${agentId}:workflow-${agentId}:first-${agentId}`]);
       const after = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
       assert(after.deletedAt instanceof Date);
       assert.strictEqual(after.temporalCleanupPending, false);
@@ -205,14 +195,8 @@ async function main(): Promise<void> {
     try {
       await prisma.agent.update({ where: { id: agentId }, data: { status: 'COMPLETED' } });
       assert.strictEqual(
-        (
-          await clearWorkflowForTerminalAgent(
-            agentId,
-            'COMPLETED',
-            workflowA,
-            `first-${agentId}`
-          )
-        ).count,
+        (await clearWorkflowForTerminalAgent(agentId, 'COMPLETED', workflowA, `first-${agentId}`))
+          .count,
         1
       );
       await prisma.agent.update({
@@ -225,27 +209,21 @@ async function main(): Promise<void> {
       });
       await prisma.agent.update({ where: { id: agentId }, data: { status: 'FAILED' } });
       assert.strictEqual(
-        (
-          await clearWorkflowForTerminalAgent(
-            agentId,
-            'FAILED',
-            workflowB,
-            `first-b-${agentId}`
-          )
-        ).count,
+        (await clearWorkflowForTerminalAgent(agentId, 'FAILED', workflowB, `first-b-${agentId}`))
+          .count,
         1
       );
-      assert.strictEqual(
-        await prisma.temporalWorkflowCleanup.count({ where: { agentId } }),
-        2
-      );
+      assert.strictEqual(await prisma.temporalWorkflowCleanup.count({ where: { agentId } }), 2);
 
       const terminations: string[] = [];
       await forceCleanup([agentId], successfulDependencies(terminations));
-      assert.deepStrictEqual(new Set(terminations), new Set([
-        `${agentId}:${workflowA}:first-${agentId}`,
-        `${agentId}:${workflowB}:first-b-${agentId}`,
-      ]));
+      assert.deepStrictEqual(
+        new Set(terminations),
+        new Set([
+          `${agentId}:${workflowA}:first-${agentId}`,
+          `${agentId}:${workflowB}:first-b-${agentId}`,
+        ])
+      );
       const after = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
       assert.strictEqual(after.temporalWorkflowId, null);
       assert.strictEqual(after.status, 'ACTIVE');
@@ -309,9 +287,7 @@ async function main(): Promise<void> {
         forceCleanup([agentId], successfulDependencies(terminations)),
         forceCleanup([agentId], successfulDependencies(terminations)),
       ]);
-      assert.deepStrictEqual(terminations, [
-        `${agentId}:workflow-${agentId}:first-${agentId}`,
-      ]);
+      assert.deepStrictEqual(terminations, [`${agentId}:workflow-${agentId}:first-${agentId}`]);
       await assertNoPendingTerminalAgentWorkflowCleanup([agentId]);
     } finally {
       await deleteRun(runId);
