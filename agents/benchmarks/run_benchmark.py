@@ -34,6 +34,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -4355,6 +4356,49 @@ def _sync_compute_tokens(
     return True
 
 
+def _refresh_local_claude_token_from_keychain(database_url: str) -> bool:
+    """Overlay this Mac's current Claude OAuth token onto the isolated DB.
+
+    The shared workspace is a useful credential source, but its encrypted
+    Claude row can still look usable after Anthropic has invalidated the OAuth
+    token.  Local Claude Code owns the freshest renewable token in Keychain, so
+    prefer it for Mac-hosted smoke runs after the ordinary source sync.  This is
+    best-effort: hosts without that local credential retain the synced source.
+    """
+    if sys.platform != "darwin" or shutil.which("security") is None:
+        return False
+    decryption_key = load_env_var("CLAUDE_CREDENTIAL_DECRYPTION_KEY", _BACKEND_ENV)
+    if not decryption_key:
+        print("    ⚠ Local Claude keychain refresh skipped: credential encryption key unavailable")
+        return False
+
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    env["CLAUDE_CREDENTIAL_DECRYPTION_KEY"] = decryption_key
+    try:
+        result = _run_seed_subprocess(
+            ["npx", "tsx", "scripts/seed-claude-code-token-from-keychain.ts"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(
+            "    ⚠ Local Claude keychain refresh timed out "
+            f"after {exc.timeout}s: {_seed_sync_error_detail(exc)}"
+        )
+        return False
+    except Exception as exc:
+        print(f"    ⚠ Local Claude keychain refresh error: {exc}")
+        return False
+    if result.returncode != 0:
+        print(f"    ⚠ Local Claude keychain refresh unavailable: {_seed_sync_error_detail(result)}")
+        return False
+    print("    🔑 Refreshed Claude credentials from macOS Keychain")
+    return True
+
+
 def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     """Refresh the complete live browser auth graph (context/provider profiles,
     cookies/storage, CookieBundles, Steel sessions, passwords, and passkeys) from
@@ -4537,6 +4581,9 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
         tolerate_claude_code_unavailable=tolerate_missing_claude,
     ):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
+    database_url = _local_victoria_database_url()
+    if database_url:
+        _refresh_local_claude_token_from_keychain(database_url)
 
 
 def _snapshot_browser_state(ctx: LiveFixtureContext, *, include_passwords: bool) -> dict:
