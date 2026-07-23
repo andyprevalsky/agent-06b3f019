@@ -368,6 +368,7 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ```bash
 bash scripts/tests/workspace-env.test.sh
+bash scripts/tests/seed-cache-decision.test.sh
 bash scripts/tests/semantic-deploy-gate.test.sh
 bash scripts/tests/check-agent-behavior-approval.test.sh
 python3 scripts/tests/factory-review.test.py

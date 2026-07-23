@@ -702,6 +702,23 @@ _SEED_CACHE_TOKEN="${_SCHEMA_HASH}-$(date -u +%Y%m%d 2>/dev/null || echo undated
 # gate on the file, not the environment. seed-dump-cache.ts loads the .env itself.
 _SEED_CACHE_ENABLED=0
 grep -qE '^R2_BUCKET_TRACE_ARCHIVE=.' back-end/.env 2>/dev/null && _SEED_CACHE_ENABLED=1
+_SEED_LOCK_HELD=0
+release_seed_lock_if_held() {
+    if [ "${_SEED_LOCK_HELD:-0}" = "1" ]; then
+        release_benchmark_seed_lock "$_SEED_DUMP"
+        _SEED_LOCK_HELD=0
+    fi
+}
+trap release_seed_lock_if_held EXIT
+
+# BEGIN BENCHMARK_SEED_CONSUMER_CRITICAL_SECTION
+# Hold the pair lock through decision, optional R2 replacement, and synchronous
+# pg_restore. Merely waiting for a producer and then reading was a TOCTOU race:
+# another producer could replace the pair between the wait and restore.
+if [ -n "$_SEED_DUMP" ]; then
+    acquire_benchmark_seed_lock "$_SEED_DUMP"
+    _SEED_LOCK_HELD=1
+fi
 # Decide where the seeded DB comes from (scripts/lib/seed-cache.sh). A stale dump
 # baked into the warm snapshot must fall through to the shared cache, NOT shadow
 # it — the old `[ ! -s ]` guard skipped the download whenever ANY dump existed, so
@@ -741,6 +758,8 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
         fi
     fi
 fi
+release_seed_lock_if_held
+# END BENCHMARK_SEED_CONSUMER_CRITICAL_SECTION
 
 if $DB_RESTORED; then
     # A restored dump USUALLY already carries the Message trgm/grep indexes, but a
@@ -808,12 +827,15 @@ fi
 # instead of re-seeding. Best-effort; the schemahash guards against schema drift.
 if [ -n "$_SEED_DUMP" ]; then
     echo "🗜️  Saving seed dump for fast future warm-starts ($_SEED_DUMP)..."
-    mkdir -p "$(dirname "$_SEED_DUMP")"
+    acquire_benchmark_seed_lock "$_SEED_DUMP"
+    _SEED_LOCK_HELD=1
     _SEED_DUMP_TMP="${_SEED_DUMP}.tmp.$$"
+    _SEED_HASH_TMP="${_SEED_DUMP}.schemahash.tmp.$$"
     rm -f "$_SEED_DUMP_TMP" 2>/dev/null || true
     if PGPASSWORD=postgres pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME" > "$_SEED_DUMP_TMP" 2>/dev/null; then
+        printf '%s' "$_SCHEMA_HASH" > "$_SEED_HASH_TMP"
         mv "$_SEED_DUMP_TMP" "$_SEED_DUMP"
-        printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
+        mv "$_SEED_HASH_TMP" "${_SEED_DUMP}.schemahash"
         echo "   ✅ seed dump saved ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}'))"
         # Publish to the shared cache so the NEXT clone (any workspace — including a
         # neighbor's daily run) restores in seconds instead of cold-syncing. Best-
@@ -824,8 +846,9 @@ if [ -n "$_SEED_DUMP" ]; then
             fi
         fi
     else
-        rm -f "$_SEED_DUMP_TMP" 2>/dev/null || true
+        rm -f "$_SEED_DUMP_TMP" "$_SEED_HASH_TMP" 2>/dev/null || true
     fi
+    release_seed_lock_if_held
 fi
 
 fi   # end: if $DB_RESTORED / else (push + seed + dump)
@@ -1366,7 +1389,7 @@ cleanup() {
     [ -n "$FAIL_DIR" ] && rm -rf "$FAIL_DIR"
     wait 2>/dev/null
 }
-trap cleanup EXIT
+trap 'release_seed_lock_if_held; cleanup' EXIT
 
 # Wrapper: run a service and write its exit code to a temp file on failure
 FAIL_DIR=$(mktemp -d)

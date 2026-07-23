@@ -34,6 +34,7 @@ if str(AGENTS_DIR) not in sys.path:
 
 from benchmarks.benchmark_tasks import all_tasks
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
+from benchmarks.seed_cache_path import seed_dump_path
 
 SERVICES_MANIFEST = REPO_ROOT / ".context" / "services.json"
 SERVICE_LOG = REPO_ROOT / ".context" / "local-benchmark-services.log"
@@ -766,12 +767,17 @@ def _dashboard_context_dir(stack: ServiceStack) -> Path:
     return stack.context_dir
 
 
-def local_seed_dump_path() -> Path:
-    """Schema- and day-scoped cache path for isolated local benchmark databases."""
-    schema = REPO_ROOT / "back-end" / "prisma" / "schema.prisma"
-    schema_hash = hashlib.sha1(schema.read_bytes()).hexdigest()
-    day = time.strftime("%Y%m%d", time.gmtime())
-    return BENCHMARK_CONTEXT_ROOT / "seed-cache" / f"{schema_hash}-{day}.dump"
+def local_seed_dump_path(
+    schema_path: Path | None = None,
+    cache_root: Path | None = None,
+    cache_day: str | None = None,
+) -> Path:
+    """Resolve the producer/consumer seed path through the shared cache contract."""
+    return seed_dump_path(
+        schema_path or REPO_ROOT / "back-end" / "prisma" / "schema.prisma",
+        cache_root or BENCHMARK_CONTEXT_ROOT / "seed-cache",
+        cache_day,
+    )
 
 
 def start_services(
