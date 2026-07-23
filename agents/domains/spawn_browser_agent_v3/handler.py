@@ -7952,6 +7952,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             raise_gate_direct,
                         )
 
+                        checkout_url = None
                         try:
                             checkout_url = await workflow.execute_activity(
                                 mint_subscription_checkout_activity,
@@ -7959,6 +7960,13 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 start_to_close_timeout=timedelta(seconds=30),
                                 retry_policy=RetryPolicy(maximum_attempts=3),
                             )
+                        except Exception as exc:
+                            logger.warning(
+                                "Subscription checkout URL unavailable; raising subscription gate with default action",
+                                error=extract_error_message(exc),
+                            )
+
+                        try:
                             await raise_gate_direct(
                                 workflow_instance,
                                 build_subscription_gate(checkout_url=checkout_url),

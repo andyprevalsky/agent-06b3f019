@@ -392,7 +392,10 @@ def _gate_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
     gate = metadata.get("gate")
     if not isinstance(gate, dict):
         return False
-    expected = task.expected_gate or {}
+    return _gate_matches_expected(task.expected_gate or {}, gate)
+
+
+def _gate_matches_expected(expected: dict, gate: dict) -> bool:
     for key in ("type", "gateKey", "severity"):
         value = expected.get(key)
         if value is not None and not _expected_gate_value_matches(gate.get(key), value):
@@ -409,6 +412,70 @@ def _gate_request_matches_task(task: BenchmarkTask, req: dict) -> bool:
         for key, value in expected_detection.items():
             if not _expected_gate_value_matches(detection.get(key), value):
                 return False
+    return True
+
+
+def _expected_gate_evidence_from_data(task: BenchmarkTask, data: dict) -> Optional[dict]:
+    """Find durable expected-gate evidence in final benchmark data.
+
+    The hot polling path observes pending attention requests via
+    /api/attention-requests, but gate messages are also durably written into the
+    agent transcript. Expected-gate tasks should not fail merely because the
+    polling loop ended before the next attention-request fetch after the gate
+    message was inserted.
+    """
+    if not task.expected_gate:
+        return None
+    expected = task.expected_gate
+    benchmark_state = data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}
+    if benchmark_state.get("expected_gate_seen") is True:
+        gate = benchmark_state.get("expected_gate")
+        return {
+            "gate": gate if isinstance(gate, dict) else expected,
+            "request_id": benchmark_state.get("expected_gate_request_id"),
+        }
+
+    for request in benchmark_state.get("attention_requests_seen", []) or []:
+        if not isinstance(request, dict):
+            continue
+        metadata = request.get("metadata") if isinstance(request.get("metadata"), dict) else {}
+        gate = metadata.get("gate")
+        if isinstance(gate, dict) and _gate_matches_expected(expected, gate):
+            return {"gate": gate, "request_id": request.get("id")}
+
+    for message in data.get("messages", []) or []:
+        metadata = message.get("metadata") if isinstance(message, dict) else None
+        if not isinstance(metadata, dict):
+            continue
+        candidates = [metadata]
+        if isinstance(metadata.get("auxiliary"), dict):
+            candidates.append(metadata["auxiliary"])
+        for candidate in candidates:
+            gate = candidate.get("gate")
+            if not isinstance(gate, dict) or not _gate_matches_expected(expected, gate):
+                continue
+            return {
+                "gate": gate,
+                "request_id": (
+                    candidate.get("attentionRequestId")
+                    or candidate.get("attention_request_id")
+                    or candidate.get("toolCallId")
+                    or candidate.get("tool_call_id")
+                ),
+            }
+    return None
+
+
+def _mark_expected_gate_from_data(task: BenchmarkTask, data: dict) -> bool:
+    evidence = _expected_gate_evidence_from_data(task, data)
+    if not evidence:
+        return False
+    data["_benchmark"] = {
+        **(data.get("_benchmark") if isinstance(data.get("_benchmark"), dict) else {}),
+        "expected_gate_seen": True,
+        "expected_gate": evidence["gate"],
+        "expected_gate_request_id": evidence.get("request_id"),
+    }
     return True
 
 
@@ -545,6 +612,13 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     if parsed.hostname in {"localhost", "127.0.0.1"} and parsed.port:
         return f"{parsed.scheme}://{parsed.hostname}:{parsed.port + 1}"
     return "https://roselabs.ai"
+
+
+def _report_frontend_url_for_benchmark(base_url: str) -> str:
+    explicit = os.environ.get("BENCHMARK_REPORT_FRONTEND_URL", "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    return _frontend_url_for_benchmark(base_url)
 
 
 def _payment_receipt_from_attention_request(req: dict) -> dict:
@@ -2273,8 +2347,8 @@ async def post_attachment_message(base_url: str, agent_id: str, file_pointers: L
         return resp.status_code in (200, 201)
 
 
-async def upload_attachment(base_url: str, agent_id: str, filepath: str) -> Optional[dict]:
-    """Upload a file attachment for an agent. Returns FilePointer or None."""
+async def upload_attachment(base_url: str, agent_id: str, filepath: str) -> dict:
+    """Upload a file attachment for an agent. Raises if the required FilePointer is unavailable."""
     headers = await _api_headers()
     # Remove Content-Type — httpx sets multipart boundary automatically
     headers.pop("Content-Type", None)
@@ -2289,10 +2363,13 @@ async def upload_attachment(base_url: str, agent_id: str, filepath: str) -> Opti
             )
         if resp.status_code in (200, 201):
             data = resp.json()
-            return data.get("file_pointer") or data.get("filePointer")
-        else:
-            print(f"    ⚠ Attachment upload failed: {resp.status_code} - {resp.text[:200]}")
-            return None
+            pointer = data.get("file_pointer") or data.get("filePointer")
+            if isinstance(pointer, dict):
+                return pointer
+            raise RuntimeError(f"Attachment upload for {filename} returned no FilePointer")
+        raise RuntimeError(
+            f"Attachment upload failed for {filename}: HTTP {resp.status_code}: {resp.text[:500]}"
+        )
 
 
 # ============================================================
@@ -3003,6 +3080,8 @@ async def poll_agent(
                                     "expected_gate": expected_gate_evidence["gate"],
                                     "expected_gate_request_id": req_id,
                                 }
+                                print(f"    ✅ Expected gate observed {req_id[:8]}")
+                                return data, approvals_triggered, approvals_resolved, None
                             receipt_error = _validate_payment_receipt(task, req, messages=messages)
                             if receipt_error:
                                 data["_benchmark"] = {
@@ -3459,6 +3538,11 @@ def evaluate_task(
                 return False, lifecycle_error
             return True, None
         return False, "Expected validated payment-card request but none was observed"
+
+    if task.expected_gate:
+        if _mark_expected_gate_from_data(task, data):
+            return True, None
+        return False, f"Expected gate {task.expected_gate} but none was observed"
 
     # Agent mode: must complete
     if status != "COMPLETED":
@@ -6756,8 +6840,19 @@ _APPROVAL_SEAT_RE = re.compile(
 )
 
 
-def _run_declared_static_check(evaluator: dict, data: dict) -> tuple[bool, str]:
+def _run_declared_static_check(
+    task_or_evaluator: BenchmarkTask | dict,
+    evaluator_or_data: dict,
+    data: Optional[dict] = None,
+) -> tuple[bool, str]:
     """Execute the small fail-closed static-check surface used by enforced tasks."""
+    if data is None:
+        task: Optional[BenchmarkTask] = None
+        evaluator = task_or_evaluator if isinstance(task_or_evaluator, dict) else {}
+        data = evaluator_or_data
+    else:
+        task = task_or_evaluator if isinstance(task_or_evaluator, BenchmarkTask) else None
+        evaluator = evaluator_or_data
     benchmark_state = data.get("_benchmark", {})
     for check in evaluator.get("checks", []):
         check_type = check.get("type")
@@ -6766,6 +6861,9 @@ def _run_declared_static_check(evaluator: dict, data: dict) -> tuple[bool, str]:
                 return False, "Expected validated payment receipt was not observed"
             continue
         if check_type == "expected_gate":
+            if task is not None and _mark_expected_gate_from_data(task, data) is True:
+                benchmark_state = data.get("_benchmark", {})
+                continue
             if benchmark_state.get("expected_gate_seen") is not True:
                 return False, "Expected typed gate was not observed"
             continue
@@ -6859,7 +6957,7 @@ async def _run_declared_evaluators(
         usage = None
         try:
             if method == "static_check":
-                passed, reasoning = _run_declared_static_check(evaluator, data)
+                passed, reasoning = _run_declared_static_check(task, evaluator, data)
                 score = 1.0 if passed else 0.0
             elif method == "single_turn_llm_judge":
                 judged = await _call_declared_llm_judge(task, evaluator, data)
@@ -7104,11 +7202,8 @@ async def run_single_task(
 
                 print(f"    Uploading {attach_filename}...")
                 fp = await upload_attachment(base_url, agent_id, filepath)
-                if fp:
-                    file_pointers.append(fp)
-                    print("    ✅ Uploaded, FilePointer received")
-                else:
-                    print("    ⚠ Upload returned no FilePointer, continuing anyway")
+                file_pointers.append(fp)
+                print("    ✅ Uploaded, FilePointer received")
 
             # Post a message with all file pointers so the agent can see them
             if file_pointers:
@@ -7291,13 +7386,15 @@ async def run_single_task(
             "agent_class_step_counts": agent_class_step_counts,
             "min_steps": dict(task.min_steps),
         }
-        min_steps_error = _validate_agent_class_min_steps(
-            task.min_steps,
-            agent_class_step_counts,
-        )
-        if min_steps_error:
-            passed = False
-            failure_reason = f"{failure_reason} | {min_steps_error}" if failure_reason else min_steps_error
+        expected_gate_terminal = task.expected_gate and data["_benchmark"].get("expected_gate_seen") is True
+        if not expected_gate_terminal:
+            min_steps_error = _validate_agent_class_min_steps(
+                task.min_steps,
+                agent_class_step_counts,
+            )
+            if min_steps_error:
+                passed = False
+                failure_reason = f"{failure_reason} | {min_steps_error}" if failure_reason else min_steps_error
 
         # Tree agent count check — counts spawn_agent-type sub-agents only
         # (excludes root and explore agents; explore agents have no output_schema)
@@ -8692,7 +8789,7 @@ async def main_async(args):
 
     def _report_snapshot(running_names: set[str]) -> RunState:
         finished = {r.name for r in run.task_results}
-        fe = _frontend_url_for_benchmark(base_url)
+        fe = _report_frontend_url_for_benchmark(base_url)
         try:
             peak_fly_raw = os.environ.get("BENCHMARK_PEAK_FLY_MACHINES")
             peak_fly_machines = int(peak_fly_raw) if peak_fly_raw else None
