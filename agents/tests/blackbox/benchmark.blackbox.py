@@ -8817,6 +8817,22 @@ def test_people_search_catalog_prompts_route_to_people_search_tool():
         assert "do not satisfy this with plain web_search" in task.prompt
 
 
+def test_people_search_targeted_finishes_after_people_search_enrichment():
+    """Targeted people lookup should not drift into extra web research after enrichment."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("people-search-targeted")
+    fields = {field.get("name"): field for field in (task.response_schema or {}).get("fields", [])}
+
+    assert "After a successful people_search result, finish immediately" in task.prompt
+    assert "do not run supplemental web_search or web_fetch" in task.prompt
+    assert fields["current_title"]["type"] == "str"
+    assert fields["current_company"]["type"] == "str"
+    assert fields["location"]["type"] == "str"
+    assert fields["linkedin_profile_url"]["type"] == "str"
+    assert fields["source_url"]["type"] == "str"
+
+
 def test_kyc_gate_benchmark_uses_canonical_detection_contract():
     """The KYC benchmark must assert the same durable contract the gate builder emits."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -10101,6 +10117,10 @@ async def run_all_tests():
     r.record(
         "people_search_prompts_route_to_people_search",
         test_people_search_catalog_prompts_route_to_people_search_tool,
+    )
+    r.record(
+        "people_search_targeted_finishes_after_enrichment",
+        test_people_search_targeted_finishes_after_people_search_enrichment,
     )
     r.record("every_task_has_base_image_fixture", test_every_task_has_base_image_fixture_by_default)
     r.record("live_fixture_registry_appliers_in_sync", test_live_fixture_registry_appliers_stay_in_sync)

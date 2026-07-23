@@ -3659,7 +3659,7 @@
   {
     "name": "people-search-targeted",
     "title": "People Search — Targeted Lookup via Explore Agent",
-    "prompt": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge — you must look him up. Use explore-agent research. The explore agent must call the dedicated people_search tool with mode=\"enrich\" for Andy Prevalsky / Rose Labs; do not satisfy this with plain web_search. Do NOT use a browser agent, Claude Code, or code sandbox.",
+    "prompt": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge — you must look him up. Use explore-agent research. The explore agent must call the dedicated people_search tool with mode=\"enrich\" for Andy Prevalsky / Rose Labs; do not satisfy this with plain web_search. After a successful people_search result, finish immediately using that profile; do not run supplemental web_search or web_fetch unless people_search returns no usable result or an error. Do NOT use a browser agent, Claude Code, or code sandbox.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [
@@ -3674,6 +3674,40 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "plan",
+    "response_schema": {
+      "fields": [
+        {
+          "name": "current_title",
+          "type": "str",
+          "required": true,
+          "description": "Current professional title from people_search or another cited public source"
+        },
+        {
+          "name": "current_company",
+          "type": "str",
+          "required": true,
+          "description": "Current company from people_search or another cited public source"
+        },
+        {
+          "name": "location",
+          "type": "str",
+          "required": true,
+          "description": "Current/profile location from people_search or another cited public source"
+        },
+        {
+          "name": "linkedin_profile_url",
+          "type": "str",
+          "required": true,
+          "description": "LinkedIn profile URL for the matched Andy Prevalsky profile"
+        },
+        {
+          "name": "source_url",
+          "type": "str",
+          "required": true,
+          "description": "Source URL supporting the current title/company/location/profile"
+        }
+      ]
+    },
     "min_tool_counts": {
       "people_search": 1
     },
