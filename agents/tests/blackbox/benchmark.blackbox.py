@@ -8801,6 +8801,22 @@ def test_dead_subscription_catalog_has_explicit_refund_candidate_contract():
     assert "active/recent" in fields["excluded_subscription_candidates"]["description"]
 
 
+def test_people_search_catalog_prompts_route_to_people_search_tool():
+    """People-search benchmarks must name the tool required by their ratchet."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    expectations = {
+        "people-search-criteria": 'mode="discover"',
+        "people-search-targeted": 'mode="enrich"',
+    }
+    for task_name, expected_mode in expectations.items():
+        task = get_task_by_name(task_name)
+        assert (task.min_tool_counts or {}).get("people_search", 0) >= 1
+        assert "dedicated people_search tool" in task.prompt
+        assert expected_mode in task.prompt
+        assert "do not satisfy this with plain web_search" in task.prompt
+
+
 def test_kyc_gate_benchmark_uses_canonical_detection_contract():
     """The KYC benchmark must assert the same durable contract the gate builder emits."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -10081,6 +10097,10 @@ async def run_all_tests():
     r.record(
         "dead_subscription_explicit_refund_candidate_contract",
         test_dead_subscription_catalog_has_explicit_refund_candidate_contract,
+    )
+    r.record(
+        "people_search_prompts_route_to_people_search",
+        test_people_search_catalog_prompts_route_to_people_search_tool,
     )
     r.record("every_task_has_base_image_fixture", test_every_task_has_base_image_fixture_by_default)
     r.record("live_fixture_registry_appliers_in_sync", test_live_fixture_registry_appliers_stay_in_sync)

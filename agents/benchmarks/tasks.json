@@ -3631,7 +3631,7 @@
   {
     "name": "people-search-criteria",
     "title": "People Search — Criteria Discovery via Explore Agent",
-    "prompt": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in the San Francisco Bay Area. For each person, report their name and a one-line description of their firm or focus. This is a single criteria-based discovery — do NOT drill into individual firms one at a time. Use explore-agent research to find real people on the public web; do NOT use a browser agent, Claude Code, or code sandbox.",
+    "prompt": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in the San Francisco Bay Area. For each person, report their name and a one-line description of their firm or focus. This is a single criteria-based discovery — do NOT drill into individual firms one at a time. Use explore-agent research to find real people on the public web. The explore agent must call the dedicated people_search tool with mode=\"discover\" for the broad criteria search; do not satisfy this with plain web_search. Do NOT use a browser agent, Claude Code, or code sandbox.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [
@@ -3659,7 +3659,7 @@
   {
     "name": "people-search-targeted",
     "title": "People Search — Targeted Lookup via Explore Agent",
-    "prompt": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge — you must look him up. Use explore-agent research; do NOT use a browser agent, Claude Code, or code sandbox.",
+    "prompt": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge — you must look him up. Use explore-agent research. The explore agent must call the dedicated people_search tool with mode=\"enrich\" for Andy Prevalsky / Rose Labs; do not satisfy this with plain web_search. Do NOT use a browser agent, Claude Code, or code sandbox.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [
