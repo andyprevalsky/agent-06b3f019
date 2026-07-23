@@ -1007,6 +1007,25 @@ def test_success_on_payment_card_request_passes_before_agent_completion():
     assert evaluate_task(task, data, approvals_triggered=1) == (True, None)
 
 
+def test_timeout_early_fail_pauses_agent_before_payment_cleanup():
+    """Timed-out prod benchmarks must stop agent work before long cleanup polling."""
+    import inspect
+
+    import benchmarks.run_benchmark as bench
+
+    source = inspect.getsource(bench.run_single_task)
+    poll_index = source.index("await poll_agent(")
+    cleanup_index = source.index("ensure_payment_lifecycle_cleanup", poll_index)
+    pause_index = source.index("pause_agent(base_url, agent_id)", poll_index)
+
+    assert "_early_fail_should_pause_agent" in source[poll_index:cleanup_index]
+    assert pause_index < cleanup_index
+    assert bench._early_fail_should_pause_agent("Timeout after 900s (dynamic cap=900s)")
+    assert bench._early_fail_should_pause_agent("Tree stalled after 240s")
+    assert not bench._early_fail_should_pause_agent(None)
+    assert not bench._early_fail_should_pause_agent("Expected validated payment-card request")
+
+
 def test_payment_receipt_tax_rate_qualifier_preserves_exact_amount():
     """A displayed tax-rate qualifier is equivalent only when its amount is exact."""
     from benchmarks.benchmark_tasks import BenchmarkTask
@@ -10231,6 +10250,10 @@ async def run_all_tests():
     r.record(
         "payment_abandonment_two_step_trajectory",
         test_payment_abandonment_accepts_captured_two_step_trajectory,
+    )
+    r.record(
+        "timeout_early_fail_pauses_before_payment_cleanup",
+        test_timeout_early_fail_pauses_agent_before_payment_cleanup,
     )
     r.record(
         "production_payment_abandonment_two_step_trajectory",

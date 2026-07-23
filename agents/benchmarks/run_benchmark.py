@@ -3776,6 +3776,14 @@ def _should_delete_agent_after_run(passed: bool, keep_failed_agents: bool) -> bo
     return passed or not keep_failed_agents
 
 
+def _early_fail_should_pause_agent(reason: Optional[str]) -> bool:
+    """Return whether an early-failed benchmark should stop agent work immediately."""
+    if not reason:
+        return False
+    normalized = reason.lower()
+    return normalized.startswith("timeout after") or "tree stalled" in normalized
+
+
 def _local_victoria_db_container() -> Optional[str]:
     workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
     if not workspace or not _docker_daemon_ping():
@@ -7215,6 +7223,12 @@ async def run_single_task(
         if realtime_monitor:
             await realtime_monitor.stop()
             realtime_monitor = None
+        if _early_fail_should_pause_agent(early_fail_reason):
+            try:
+                if await pause_agent(base_url, agent_id):
+                    print(f"    ⏸ Paused agent {agent_id[:12]} after early-fail before cleanup")
+            except Exception as pause_error:
+                print(f"    ⚠ Failed to pause early-failed agent {agent_id[:12]}: {pause_error}")
 
         # Get final agent data
         agent = data.get("agent", {})
