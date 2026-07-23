@@ -322,6 +322,8 @@ export async function withFakeStripe<T>(
   opts: {
     retrievePaymentIntent?: (id: string) => Promise<unknown> | unknown;
     refundError?: Error;
+    fixedPaymentIntentId?: string;
+    afterCapture?: (id: string) => void;
   } = {}
 ) {
   const paymentIntents = stripe.paymentIntents as unknown as {
@@ -370,7 +372,9 @@ export async function withFakeStripe<T>(
     const id =
       (idempotencyKey !== undefined
         ? paymentIntentIdsByIdempotencyKey.get(idempotencyKey)
-        : undefined) ?? `pi_${randomUUID()}`;
+        : undefined) ??
+      opts.fixedPaymentIntentId ??
+      `pi_${randomUUID()}`;
     if (idempotencyKey !== undefined) {
       paymentIntentIdsByIdempotencyKey.set(idempotencyKey, id);
     }
@@ -384,6 +388,7 @@ export async function withFakeStripe<T>(
   };
   paymentIntents.capture = async (id: string) => {
     calls.captures.push(id);
+    opts.afterCapture?.(id);
     return { id, status: 'succeeded' };
   };
   paymentIntents.cancel = async (id: string) => {

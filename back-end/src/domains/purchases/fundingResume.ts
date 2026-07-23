@@ -6,7 +6,6 @@ import {
 } from './types';
 import { PurchaseError, toPurchaseBoundaryError } from './errors';
 import { canonicalStoredPurchaseFingerprint } from './fingerprint';
-import { isKycRequiredError } from './kyc';
 import { PURCHASE_STALE_CHARGING_MS } from './config';
 import {
   discardPendingPurchaseWalletCollection,
@@ -68,7 +67,7 @@ function hasAmbiguousExternalOutcome(
   // Once an external mutation starts, ambiguity is a phase fact, not an error-message guess.
   // MCP 500/malformed may follow an AgentCard commit; a lost Stripe response may hide a PI.
   return state.providerCallStarted
-    ? !hasSafeProviderFailureCode(boundaryError) && !isKycRequiredError(error)
+    ? !hasSafeProviderFailureCode(boundaryError)
     : state.stripeAuthorizationStarted && !hasSafeStripeFailureType(error);
 }
 

@@ -469,6 +469,98 @@ async function main(): Promise<void> {
     assert.equal(lifecycle.integrity.agentCardProviderUnlinkedTransferCount, 1);
   });
 
+  await test('getTestPaymentLifecycle pages cards until the purchase window is covered', async () => {
+    const createdAt = new Date();
+    const cardOffsets: number[] = [];
+    const stripePages: Array<string | undefined> = [];
+    const lifecycle = await getTestPaymentLifecycle('agent-paged-cards', {
+      findPurchase: async () => ({
+        id: 'p-paged-cards',
+        userId: 'u-paged-cards',
+        status: PurchaseSpendStatus.FAILED,
+        merchant: 'Rose Labs Test Payment',
+        totalCents: 4396,
+        cardId: null,
+        stripePaymentIntentId: null,
+        createdAt,
+        walletFunding: null,
+      }),
+      findAttentionRequests: async () => [],
+      getOrgCardholderId: async () => 'cardholder-paged',
+      searchStripeHolds: async (_agentId, page) => {
+        stripePages.push(page);
+        return page === undefined
+          ? { data: [{ id: 'pi-page-1' }], has_more: true, next_page: 'stripe-next' }
+          : { data: [{ id: 'pi-page-2' }], has_more: false };
+      },
+      listOrgCards: async (args) => {
+        cardOffsets.push(args.offset ?? 0);
+        if ((args.offset ?? 0) === 0) {
+          return {
+            structuredContent: {
+              cards: Array.from({ length: 100 }, (_, index) => ({
+                id: `newer-card-${index}`,
+                cardholderId: 'cardholder-paged',
+                spendLimitCents: 1,
+                createdAt: new Date(createdAt.getTime() + 1_000).toISOString(),
+              })),
+            },
+          };
+        }
+        return {
+          structuredContent: {
+            cards: [
+              {
+                id: 'target-card',
+                cardholderId: 'cardholder-paged',
+                spendLimitCents: 4396,
+                createdAt: createdAt.toISOString(),
+              },
+            ],
+          },
+        };
+      },
+      listOrgTransfers: async () => ({ structuredContent: { transfers: [] } }),
+    });
+    assert.deepEqual(cardOffsets, [0, 100]);
+    assert.deepEqual(stripePages, [undefined, 'stripe-next']);
+    assert.equal(lifecycle.integrity.stripeProviderPaymentIntentCount, 2);
+    assert.equal(lifecycle.integrity.agentCardProviderCardCount, 1);
+  });
+
+  await test('getTestPaymentLifecycle fails closed when transfer history hides the window', async () => {
+    const createdAt = new Date();
+    await assert.rejects(
+      () =>
+        getTestPaymentLifecycle('agent-transfer-overflow', {
+          findPurchase: async () => ({
+            id: 'p-transfer-overflow',
+            userId: 'u-transfer-overflow',
+            status: PurchaseSpendStatus.FAILED,
+            merchant: 'Rose Labs Test Payment',
+            totalCents: 4396,
+            cardId: null,
+            stripePaymentIntentId: null,
+            createdAt,
+            walletFunding: null,
+          }),
+          findAttentionRequests: async () => [],
+          getOrgCardholderId: async () => 'cardholder-overflow',
+          searchStripeHolds: async () => ({ data: [] }),
+          listOrgCards: async () => ({ structuredContent: { cards: [] } }),
+          listOrgTransfers: async () => ({
+            structuredContent: {
+              transfers: Array.from({ length: 100 }, (_, index) => ({
+                id: `newer-transfer-${index}`,
+                created_at: new Date(createdAt.getTime() + 1_000).toISOString(),
+              })),
+            },
+          }),
+        }),
+      /does not cover the purchase window/
+    );
+  });
+
   process.stdout.write(
     `\nTest-payment service unit tests: ${passed} passed, ${failures.length} failed\n`
   );

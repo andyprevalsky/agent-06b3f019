@@ -9,6 +9,11 @@ import {
   providerIntegrity,
   stringField,
 } from './lifecycleProviderRecords';
+import {
+  listOrgCardWindow,
+  listOrgTransferWindow,
+  searchAllStripeHolds,
+} from './lifecyclePagination';
 import * as testPaymentRepo from './repo';
 import type {
   LifecycleAttention,
@@ -93,10 +98,11 @@ function resolveDependencies(
     getOrgCardholderId: dependencies.getOrgCardholderId ?? getOrgManagedCardholderId,
     searchStripeHolds:
       dependencies.searchStripeHolds ??
-      ((agentId) =>
+      ((agentId, page) =>
         stripe.paymentIntents.search({
           query: `metadata['agentId']:'${agentId}'`,
-          limit: 10,
+          limit: 100,
+          ...(page !== undefined ? { page } : {}),
         })),
   };
 }
@@ -228,15 +234,12 @@ async function buildLoadedLifecycle(
       intentId !== null && intentId !== ''
         ? listStripeRefunds(intentId)
         : Promise.resolve(emptyRefunds),
-      searchStripeHolds(agentId),
+      searchAllStripeHolds(agentId, searchStripeHolds),
       cardholderId !== undefined
-        ? Promise.all([listOrgCards({ cardholder_id: cardholderId, limit: 100 })])
+        ? listOrgCardWindow(cardholderId, purchase.createdAt, listOrgCards)
         : Promise.resolve<unknown[]>([]),
       (cardId !== null && cardId !== '') || cardholderId !== undefined
-        ? Promise.all([
-            listOrgTransfers({ status: 'consumed', limit: 100 }),
-            listOrgTransfers({ limit: 100 }),
-          ])
+        ? listOrgTransferWindow(purchase.createdAt, listOrgTransfers)
         : Promise.resolve<unknown[]>([]),
     ]);
   return {

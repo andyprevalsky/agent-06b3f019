@@ -15,6 +15,7 @@ import { isKycRequiredError, kycRequiredPurchaseError } from './kyc';
 import { getCustomerDefaultPaymentMethodId } from './stripeCustomer';
 import * as repo from './repo';
 import { archivePurchaseBoundary } from './archive';
+import { assertIssuedCardIsSpendable, sanitizeDescriptorSuffix } from './chargeHelpers';
 import { mintCompanyFlowCard } from './companyFlowCard';
 import { classifyFundingResumeFailure } from './fundingResume';
 import {
@@ -56,14 +57,6 @@ interface ChargeState {
    * reclaim — but the user's Stripe hold is still captured normally.
    */
   issuedStaticCard: boolean;
-}
-
-function sanitizeDescriptorSuffix(merchant: string): string {
-  const cleaned = merchant
-    .replace(/[^a-zA-Z0-9 ._-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return (cleaned || 'Purchase').slice(0, 22);
 }
 
 /** Authorize the user's saved card with a manual-capture hold. */
@@ -161,9 +154,13 @@ async function mintCaptureAndIssue(
     state.issuedStaticCard = false;
     state.walletWasFunded = true;
   }
-  await captureAuthorizedHold(paymentIntent.id);
-  state.paymentIntentCaptured = true;
   const details = await state.activeCardProvider.getDetails(minted.cardId);
+  if (!isStaticCard) {
+    // An exact-key replay can return a card created by an earlier attempt. Re-read the provider
+    // state after card+transfer persistence and before charging the user; a closed/consumed or
+    // underfunded replay is reclaimed by rollback and must never reach Stripe capture.
+    assertIssuedCardIsSpendable(details, purchase.totalCents);
+  }
   await archivePurchaseBoundary(input.agentId, purchaseId, 'agentcard-mint-and-details', {
     mint_request: cardRequest,
     mint_response: minted,
@@ -174,6 +171,8 @@ async function mintCaptureAndIssue(
     },
   });
 
+  await captureAuthorizedHold(paymentIntent.id);
+  state.paymentIntentCaptured = true;
   await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.HELD, {
     cardId: minted.cardId,
     stripePaymentIntentId: paymentIntent.id,
@@ -287,7 +286,9 @@ async function rollbackChargeFailure(
   // A genuine AgentCard KYC rejection (not the MCP per-user setup flow, whose
   // error text carries no kyc_required code) surfaces as a typed kyc_required
   // PurchaseError so the agent workflow can raise a KYC gate and retry.
-  if (isKycRequiredError(error)) throw kycRequiredPurchaseError();
+  if (!state.fundingResumeRequired && isKycRequiredError(error)) {
+    throw kycRequiredPurchaseError();
+  }
   throw boundaryError;
 }
 

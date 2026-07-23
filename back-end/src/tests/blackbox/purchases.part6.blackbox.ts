@@ -7,6 +7,7 @@ import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client
 import { mintPurchaseCard } from '../../domains/purchases/service';
 import { PurchaseError } from '../../domains/purchases/errors';
 import { prisma } from '../../providers/database';
+import { AgentCardProviderError, type CardProvider } from '../../providers/card-provider';
 import {
   assert,
   FakeWalletFundingProvider,
@@ -121,7 +122,107 @@ async function main(): Promise<void> {
     assert(calls.captures.length === 1, 'the shared hold must be captured exactly once');
   });
 
-  process.stdout.write('PASS durable AgentCard company-funding resume (1/1)\n');
+  const ambiguousUserId = await createSubscribedUser();
+  const ambiguousFingerprint = `ambiguous-kyc-prose-${randomUUID()}`;
+  const ambiguousProvider: CardProvider = {
+    async mintCard(): Promise<never> {
+      throw new AgentCardProviderError(
+        'AgentCard returned 500; diagnostics mentioned kyc_required after create',
+        500
+      );
+    },
+    async getDetails(): Promise<never> {
+      throw new Error('details must not run for an ambiguous provider response');
+    },
+    async closeCard(): Promise<void> {
+      throw new Error('an unknown card must not be closed without its id');
+    },
+  };
+  await withFakeStripe(async (calls) => {
+    const error = await expectPurchaseError(() =>
+      mintPurchaseCard(
+        mintInput(ambiguousUserId, ambiguousFingerprint),
+        ambiguousProvider,
+        new FakeWalletFundingProvider()
+      )
+    );
+    assert(
+      error.code === 'agentcard_company_funding_in_progress',
+      `ambiguous KYC prose must remain funding-pending, got ${error.code}`
+    );
+    const purchase = await prisma.purchaseSpend.findFirstOrThrow({
+      where: { userId: ambiguousUserId, fingerprint: ambiguousFingerprint },
+      include: { walletFunding: true },
+    });
+    assert(
+      purchase.status === PurchaseSpendStatus.FUNDING_PENDING,
+      `ambiguous response must preserve FUNDING_PENDING, got ${purchase.status}`
+    );
+    assert(
+      purchase.walletFunding?.status === PurchaseWalletFundingStatus.PENDING,
+      `ambiguous response must preserve the funding marker, got ${purchase.walletFunding?.status}`
+    );
+    assert(calls.cancels.length === 0, 'ambiguous provider outcome must preserve the Stripe hold');
+  });
+
+  const closedReplayUserId = await createSubscribedUser();
+  const closedReplayFingerprint = `closed-replay-${randomUUID()}`;
+  const closedReplayCardId = `card-closed-${randomUUID()}`;
+  let closedReplayCloseCalls = 0;
+  const closedReplayProvider: CardProvider = {
+    async mintCard() {
+      return {
+        cardId: closedReplayCardId,
+        last4: '4242',
+        expiry: '12/30',
+        spendLimitCents: 1000,
+        status: 'CLOSED',
+        providerTransferId: `owt_closed_${randomUUID()}`,
+      };
+    },
+    async getDetails() {
+      return {
+        pan: '4242424242424242',
+        cvv: '123',
+        expiry: '12/30',
+        balanceCents: 0,
+        status: 'CLOSED',
+      };
+    },
+    async closeCard() {
+      closedReplayCloseCalls += 1;
+    },
+  };
+  const closedReplayWallet = new FakeWalletFundingProvider();
+  await withFakeStripe(async (calls) => {
+    const error = await expectPurchaseError(() =>
+      mintPurchaseCard(
+        mintInput(closedReplayUserId, closedReplayFingerprint),
+        closedReplayProvider,
+        closedReplayWallet
+      )
+    );
+    assert(
+      error.code === 'agentcard_company_card_unusable',
+      `closed replay must fail as unusable, got ${error.code}`
+    );
+    assert(calls.captures.length === 0, 'a closed replay card must never capture Stripe');
+    assert(calls.cancels.length === 1, 'a closed replay card must release the Stripe hold');
+    assert(closedReplayCloseCalls === 1, 'the unusable card must enter idempotent close cleanup');
+    assert(
+      closedReplayWallet.reclaimCalls.length === 1,
+      'the unusable card transfer must be reclaimed'
+    );
+    const purchase = await prisma.purchaseSpend.findFirstOrThrow({
+      where: { userId: closedReplayUserId, fingerprint: closedReplayFingerprint },
+    });
+    assert(
+      purchase.status === PurchaseSpendStatus.FAILED,
+      `closed replay cleanup must end FAILED, got ${purchase.status}`
+    );
+  });
+
+  process.stdout.write('PASS durable AgentCard company-funding resume (3/3)\n');
 }
 
 main()

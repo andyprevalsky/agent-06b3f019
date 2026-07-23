@@ -16,6 +16,12 @@ export type StripeHold = {
 export type StripeRefundList = {
   data: Array<{ id: string; status: string | null; amount: number }>;
 };
+export type StripeHoldSearch = {
+  data: Array<{ id: string }>;
+  has_more?: boolean;
+  next_page?: string | null;
+};
+export type OrgTransferStatus = 'pending' | 'funded' | 'consumed' | 'reclaimed' | 'failed';
 
 export interface TestPaymentLifecycleDependencies {
   findPurchase?: (agentId: string) => Promise<LifecyclePurchase>;
@@ -26,8 +32,12 @@ export interface TestPaymentLifecycleDependencies {
   ) => Promise<{ status: string; balanceCents: number }>;
   retrieveStripeHold?: (paymentIntentId: string) => Promise<StripeHold>;
   listStripeRefunds?: (paymentIntentId: string) => Promise<StripeRefundList>;
-  listOrgTransfers?: (args: { status?: 'consumed'; limit: number }) => Promise<unknown>;
-  listOrgCards?: (args: { cardholder_id: string; limit: number }) => Promise<unknown>;
+  listOrgTransfers?: (args: { status?: OrgTransferStatus; limit: number }) => Promise<unknown>;
+  listOrgCards?: (args: {
+    cardholder_id: string;
+    limit: number;
+    offset?: number;
+  }) => Promise<unknown>;
   getOrgCardholderId?: (userId: string) => Promise<string | undefined>;
-  searchStripeHolds?: (agentId: string) => Promise<{ data: Array<{ id: string }> }>;
+  searchStripeHolds?: (agentId: string, page?: string) => Promise<StripeHoldSearch>;
 }

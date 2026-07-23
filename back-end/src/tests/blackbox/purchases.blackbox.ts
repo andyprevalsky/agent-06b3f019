@@ -250,7 +250,8 @@ const tests: Array<[string, () => Promise<void>]> = [
           throw new AgentCardProviderError(
             'AgentCard request failed with 422',
             422,
-            '{"code":"customers_needed_kyc","message":"Customer needs KYC"}'
+            '{"code":"customers_needed_kyc","message":"Customer needs KYC"}',
+            'agentcard_kyc_required'
           );
         },
         async getDetails() {
