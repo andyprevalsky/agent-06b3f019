@@ -167,6 +167,8 @@ if [ -n "$CHANGED_BACKEND_LINT_INPUTS" ]; then
     sed 's|^back-end/||' | sort)
 fi
 CHANGED_AGENTS=$(echo "$CHANGED" | grep -E '^agents/' || true)
+CHANGED_AGENT_RUNTIME=$(printf '%s\n' "$CHANGED_AGENTS" |
+  bash "$(git rev-parse --show-toplevel)/scripts/classify-agent-runtime-changes.sh")
 CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
 CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
 CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)' || true)
@@ -243,7 +245,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisf
 
 The prompt guard (Step 0p) only catches changes to **LLM-visible text**. It cannot catch a change to **agent control-flow semantics** — flipping a recoverable failure into a terminal one, deleting a recovery fall-through, or inverting a recovery-invariant test. Those are as consequential as a prompt change but invisible to a text-only gate, and **an automated test cannot validate that the new behavior is the correct product decision** (the author just updates the test to match — all green). Regression precedent: commit `500715a5f` turned every single-planned-task DAG failure into a terminal agent FAILED instead of continuing iteration, and shipped green because its blackbox test was rewritten to bless the new behavior.
 
-This guard scans the narrow agent control-flow layer (`agents/loop/run_agent.py`, `agents/loop/dag_executor.py`, `agents/workflows/agent_workflow.py`) and its behavior tests (`agents/tests/blackbox/{workflow,dag_executor,workflow_determinism}.blackbox.py`) for **hunks that change recovery vs. terminal semantics** — status/reason literals (`error`/`failed`/`aborted`/`max_iterations`/`needs_llm`/`completed`/`paused`), `_handle_incomplete`/`_mark_failed`/`_mark_complete`/`run_agent(` fall-through, `continue_as_new`, or a recovery-invariant test assertion (`run_agent_calls`, "must not run", `recovers_via`, result-status dicts). Comment- and logging-only edits are stripped so they do not trip it.
+This guard scans the narrow agent control-flow layer (`agents/loop/run_agent.py`, `agents/loop/dag_executor.py`, `agents/workflows/agent_workflow.py`) and its behavior tests (`agents/tests/blackbox/{workflow,dag_executor,workflow_determinism}.blackbox.py`) for **hunks that change recovery vs. terminal semantics** — status/reason literals (`error`/`failed`/`aborted`/`max_iterations`/`needs_llm`/`completed`/`paused`), `_handle_incomplete`/`_mark_failed`/`_mark_complete`/`run_agent(` fall-through, `continue_as_new`, or a removed/replaced recovery-invariant test assertion (`run_agent_calls`, "must not run", `recovers_via`, result-status dicts). Purely additive tests do not require approval because they cannot change runtime behavior or rewrite an existing expectation. Comment- and logging-only edits are also stripped.
 
 Run the guard without the approval flag first:
 
@@ -385,11 +387,12 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 4s: Deploy environment + command structural tests (no skip)
 
-The concurrent runner executes exactly these ten independent suites without
+The concurrent runner executes exactly these eleven independent suites without
 changing their assertions or test counts: `bash scripts/tests/workspace-env.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
+`bash scripts/tests/workflow-deployment-migration.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`, and
@@ -402,7 +405,7 @@ bash scripts/run-deploy-stage deploy-command-structural --reuse-passed -- \
   python3 scripts/run-deploy-structural-gates.py
 ```
 
-These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
+These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate and the bounded production workflow migration wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
 
 ## Step 4a: Back-end coverage + blackbox (skip if no back-end/ changes)
 
@@ -482,12 +485,13 @@ Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barri
 ```bash
 bash scripts/tests/cloudbench-env.test.sh
 bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
+bash scripts/tests/seed-dump-toolchain.test.sh
 agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py \
   -k 'cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env'
 cd agents && python scripts/run_blackbox_tests.py benchmark
 ```
 
-All three commands must pass. This operational verification wiring is pre-authorized by Step 0p and must never pause for human approval.
+All four commands must pass. This operational verification wiring is pre-authorized by Step 0p and must never pause for human approval.
 
 ## Step 4c: Credential health check (runs unless explicitly overridden)
 
@@ -1423,6 +1427,9 @@ Merge without deleting the branch. Do not delete the local branch or the remote 
 
 ```bash
 gh pr merge <PR_NUMBER> --merge
+DEPLOY_MERGED_SHA=$(gh pr view <PR_NUMBER> --json mergeCommit --jq '.mergeCommit.oid')
+[ -n "$DEPLOY_MERGED_SHA" ] ||
+  { echo "❌ Could not resolve the exact merge commit for PR <PR_NUMBER>"; exit 1; }
 ```
 
 If `main` can be checked out in this worktree, switch back to main and pull:
@@ -1439,9 +1446,12 @@ git fetch origin main
 
 ## Step 13: Wait for deploys
 
-Determine which deploy workflows are relevant based on what files changed in the PR. Check using `git diff main~1..main --name-only`:
+Determine which deploy workflows are relevant based on what files changed in the PR. Check using `git diff "$DEPLOY_MERGED_SHA^1" "$DEPLOY_MERGED_SHA" --name-only`; never substitute the latest `main`, which may already belong to a later PR:
 
-- Changes in `agents/` → poll `deploy-agents.yml`
+- Runtime changes selected by `scripts/classify-agent-runtime-changes.sh`, or a
+  change to `.github/workflows/deploy-agents.yml` itself → poll
+  `deploy-agents.yml`. Additive tests, benchmarks, docs, and coverage harnesses
+  under `agents/` do not trigger that workflow and must not be polled.
 - Changes in `back-end/` → Render auto-deploys (no workflow to poll). **Do NOT just "wait ~60s" — run Step 13a to confirm the merged commit went live AND the app is functionally healthy.**
 - Changes in `front-end/` → Vercel auto-deploys. Wait for a successful GitHub deployment status tied to the merged SHA; a fixed sleep is not proof that the new frontend is live.
 - Changes in `mac-app/` → check if PR had `MAC-APP-RELEASE` label; if so, poll `release-mac-app.yml`
@@ -1466,9 +1476,77 @@ same form for Render, Vercel, and Mac release.
 
 Run only the applicable pairs. Put the start immediately before that lane's
 poll/watch command and the finish immediately after its successful terminal
-status. These are telemetry calls, not extra gates.
+status. For an activation-gated Fly deploy, the finish marker belongs after the
+exact cutover releases its lock and the workflow completes in Step 13ab. These
+are telemetry calls, not extra gates.
 
-For GitHub Action workflows, wait for the new run to appear then watch it:
+Resolve and retain the exact agent deployment attempt whenever the canonical
+cutover condition is true. The run ID plus run attempt is the
+deployment-scoped Temporal activation token; a prior rollout of the same Git
+SHA cannot authorize it:
+
+```bash
+FINAL_CHANGED=$(git diff --name-only "$DEPLOY_MERGED_SHA^1" "$DEPLOY_MERGED_SHA")
+FINAL_CHANGED_AGENTS=$(printf '%s\n' "$FINAL_CHANGED" | grep -E '^agents/' || true)
+CHANGED_AGENT_RUNTIME=$(printf '%s\n' "$FINAL_CHANGED_AGENTS" |
+  bash "$(git rev-parse --show-toplevel)/scripts/classify-agent-runtime-changes.sh")
+CHANGED_DEPLOY_AGENTS_WORKFLOW=$(printf '%s\n' "$FINAL_CHANGED" |
+  grep -F '.github/workflows/deploy-agents.yml' || true)
+AGENT_CUTOVER_REQUIRED=0
+if [ -n "$CHANGED_AGENT_RUNTIME$CHANGED_DEPLOY_AGENTS_WORKFLOW" ]; then
+  AGENT_CUTOVER_REQUIRED=1
+fi
+
+if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
+  python3 scripts/record_factory_event.py deploy production-start fly
+  AGENT_DEPLOY_RUN_ID=""
+  for i in $(seq 1 120); do
+    AGENT_DEPLOY_RUN_ID=$(gh run list \
+      --workflow deploy-agents.yml \
+      --branch main \
+      --limit 30 \
+      --json databaseId,headSha \
+      --jq ".[] | select(.headSha == \"$DEPLOY_MERGED_SHA\") | .databaseId" |
+      head -1)
+    [ -n "$AGENT_DEPLOY_RUN_ID" ] && break
+    sleep 5
+  done
+  [ -n "$AGENT_DEPLOY_RUN_ID" ] ||
+    { echo "❌ Exact deploy-agents run did not start"; exit 1; }
+  AGENT_DEPLOY_RUN_ATTEMPT=$(gh api "repos/{owner}/{repo}/actions/runs/$AGENT_DEPLOY_RUN_ID" \
+    --jq '.run_attempt')
+  AGENT_DEPLOYMENT_TOKEN="${AGENT_DEPLOY_RUN_ID}-${AGENT_DEPLOY_RUN_ATTEMPT}"
+  echo "✅ Agent deployment token: $AGENT_DEPLOYMENT_TOKEN"
+
+  # Do not wait for workflow completion yet: its final step deliberately holds
+  # the non-canceling production concurrency lock until this exact cutover
+  # reports a terminal commit status. Reaching that step proves deploy, fleet
+  # verification, and scale-down all completed while later deploys remain queued.
+  AGENT_DEPLOY_READY=""
+  for i in $(seq 1 120); do
+    AGENT_DEPLOY_STATE=$(gh run view "$AGENT_DEPLOY_RUN_ID" \
+      --json status,conclusion,jobs \
+      --jq '[.status, (.conclusion // "none"), ([.jobs[].steps[]? | select(.name == "Hold production deploy lock until exact cutover completes")][0].status // "missing")] | join("|")')
+    IFS='|' read -r AGENT_DEPLOY_STATUS AGENT_DEPLOY_CONCLUSION AGENT_DEPLOY_HOLD_STATUS \
+      <<<"$AGENT_DEPLOY_STATE"
+    if [ "$AGENT_DEPLOY_HOLD_STATUS" = "in_progress" ]; then
+      AGENT_DEPLOY_READY=1
+      break
+    fi
+    if [ "$AGENT_DEPLOY_STATUS" = "completed" ]; then
+      echo "❌ Exact deploy-agents run completed before cutover lock acquisition: $AGENT_DEPLOY_CONCLUSION"
+      exit 1
+    fi
+    sleep 5
+  done
+  [ "$AGENT_DEPLOY_READY" = "1" ] ||
+    { echo "❌ Exact deploy-agents run never reached the cutover lock"; exit 1; }
+  echo "✅ Exact candidate fleet deployed; production deploy lock is held"
+fi
+```
+
+For other relevant GitHub Action workflows, wait for the new run to appear then
+watch it:
 
 ```bash
 # Wait up to 60s for a workflow run that started after merge
@@ -1488,7 +1566,7 @@ For a frontend change, wait for Vercel to report the merged commit as live:
 ```bash
 if [ -n "$CHANGED_FRONTEND" ]; then
   python3 scripts/record_factory_event.py deploy production-start vercel
-  MERGED_SHA=$(git rev-parse main)
+  MERGED_SHA="$DEPLOY_MERGED_SHA"
   VERCEL_OK=""
   for i in $(seq 1 90); do
     DEPLOYMENT_ID=$(gh api "repos/{owner}/{repo}/deployments?sha=$MERGED_SHA" \
@@ -1525,7 +1603,7 @@ Render has no GitHub Actions run to watch, so the only proof a backend deploy is
 ```bash
 python3 scripts/record_factory_event.py deploy production-start render
 cd "$(git rev-parse --show-toplevel)/back-end" && source .env
-MERGED_SHA=$(git rev-parse main)   # the commit that just merged
+MERGED_SHA="$DEPLOY_MERGED_SHA"   # immutable merge commit captured in Step 12
 echo "Waiting for Render to deploy ${MERGED_SHA:0:7}..."
 DEPLOY_OK=""
 for i in $(seq 1 90); do  # up to ~15 min at 10s (Render builds can be slow)
@@ -1610,6 +1688,218 @@ python3 scripts/record_factory_event.py deploy production-finish backend-probes
 ```
 
 **Migration-specific note:** if the error is a Prisma "column/table does not exist", the deployed code expects a schema the prod DB doesn't have. Verify the migration is both present in `back-end/prisma/migrations/` AND actually applied to prod (the migration row in `_prisma_migrations` can be marked applied while the column is absent if a stray `prisma db push` from another workspace dropped it — `back-end/.env` `DATABASE_URL` points at prod). Re-apply the missing DDL idempotently (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`) and re-run Step 2.
+
+## Step 13ab: Replace open workflows after an activation-gated agent deploy
+
+Skip only when `$AGENT_CUTOVER_REQUIRED` is `0`. This is the canonical cutover
+condition shared with Step 13 and Step 13ac: shipped runtime changes and edits
+to `.github/workflows/deploy-agents.yml` require cutover; test-only,
+benchmark-only, documentation-only, and history-ledger changes under `agents/`
+do not.
+
+Run this only after the exact `deploy-agents.yml` attempt reaches its serialized
+lock-hold step and the backend merged commit is live and healthy. The Fly workers
+are healthy-but-standby: they have not constructed production Temporal pollers
+and therefore cannot replay an old history. The command freezes the exact set of
+open root workflow IDs, then uses a bounded pool to seal **every** old generation
+before activating the exact merged worker SHA.
+It terminates each stale execution, appends the terminal
+`new code version deployed, retry this tool` result to unresolved tools, and
+starts a clean replacement from durable DB state. Active descendants are stopped
+with their root; the replacement LLM decides which child work to retry. It does
+not replay histories and does not wait for a natural continue-as-new boundary.
+
+```bash
+if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
+  set -e
+  AGENT_CUTOVER_RELEASE_CONTEXT="agent-cutover/${AGENT_DEPLOYMENT_TOKEN}"
+  AGENT_CUTOVER_RELEASED=0
+  release_agent_cutover_lock() {
+    local state=$1 description=$2
+    gh api "repos/{owner}/{repo}/statuses/$DEPLOY_MERGED_SHA" \
+      -X POST \
+      -f state="$state" \
+      -f context="$AGENT_CUTOVER_RELEASE_CONTEXT" \
+      -f description="$description" >/dev/null
+    AGENT_CUTOVER_RELEASED=1
+  }
+  release_agent_cutover_lock_on_exit() {
+    local exit_code=$?
+    trap - EXIT
+    if [ "$AGENT_CUTOVER_RELEASED" != "1" ]; then
+      release_agent_cutover_lock error "Production workflow cutover failed" || true
+    fi
+    exit "$exit_code"
+  }
+  trap release_agent_cutover_lock_on_exit EXIT
+
+  # Reconfirm this deploy's immutable merge commit before any production work.
+  git fetch origin main
+  git cat-file -e "${DEPLOY_MERGED_SHA}^{commit}" ||
+    { echo "❌ Exact deploy merge commit is unavailable: $DEPLOY_MERGED_SHA"; exit 1; }
+  cd "$(git rev-parse --show-toplevel)/back-end" && source .env
+  # Before sealing even one production history, prove the exact candidate image
+  # can construct its full worker and run real workflow initialization. Only
+  # this deployment attempt polls this isolated queue. The validation stops at
+  # the last boundary before the LLM loop and deletes its fixture.
+  TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE="navi-agent-candidate-${AGENT_DEPLOYMENT_TOKEN}"
+  PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1 \
+    TEMPORAL_TASK_QUEUE=navi-agent-tasks \
+    TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE="$TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE" \
+    TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
+    TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
+    npx tsx scripts/validate-candidate-workflow-image.ts --execute
+
+  # Render's `live` status means traffic has switched, not that the old
+  # instance is gone. It can retain the old process for 60s, then allow up to
+  # 300s of shutdown delay. That old backend predates immutable descendant
+  # workflow IDs, so wait the full bounded window before a tombstone can close
+  # an ambiguous child ID. Compute from the exact deploy's server timestamp so
+  # time already spent in health gates counts toward the drain.
+  RENDER_OLD_INSTANCE_DRAIN_SECONDS="${RENDER_OLD_INSTANCE_DRAIN_SECONDS:-375}"
+  case "$RENDER_OLD_INSTANCE_DRAIN_SECONDS" in
+    ''|*[!0-9]*) echo "❌ RENDER_OLD_INSTANCE_DRAIN_SECONDS must be an integer >= 375"; exit 1 ;;
+  esac
+  [ "$RENDER_OLD_INSTANCE_DRAIN_SECONDS" -ge 375 ] ||
+    { echo "❌ Render old-instance drain cannot be weakened below 375s"; exit 1; }
+  RENDER_DEPLOY_FINISHED_AT=$(
+    curl -fsS -H "Authorization: Bearer $RENDER_API_KEY" \
+      "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=20" |
+      DEPLOY_SHA="$DEPLOY_MERGED_SHA" python3 -c '
+import json, os, sys
+deploy = next(
+    (
+        item["deploy"]
+        for item in json.load(sys.stdin)
+        if (item["deploy"].get("commit") or {}).get("id") == os.environ["DEPLOY_SHA"]
+        and item["deploy"].get("status") == "live"
+    ),
+    None,
+)
+if deploy is None or not deploy.get("finishedAt"):
+    raise SystemExit("exact live Render deploy timestamp was not found")
+print(deploy["finishedAt"])
+'
+  )
+  RENDER_DRAIN_REMAINING=$(
+    RENDER_DEPLOY_FINISHED_AT="$RENDER_DEPLOY_FINISHED_AT" \
+      RENDER_OLD_INSTANCE_DRAIN_SECONDS="$RENDER_OLD_INSTANCE_DRAIN_SECONDS" \
+      python3 -c '
+from datetime import datetime, timezone
+import math, os
+finished = datetime.fromisoformat(os.environ["RENDER_DEPLOY_FINISHED_AT"].replace("Z", "+00:00"))
+elapsed = (datetime.now(timezone.utc) - finished).total_seconds()
+print(max(0, math.ceil(float(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - elapsed)))
+'
+  )
+  while [ "$RENDER_DRAIN_REMAINING" -gt 0 ]; do
+    echo "Waiting for old Render instances/requests to drain: ${RENDER_DRAIN_REMAINING}s"
+    sleep "$([ "$RENDER_DRAIN_REMAINING" -lt 10 ] && echo "$RENDER_DRAIN_REMAINING" || echo 10)"
+    RENDER_DRAIN_REMAINING=$((RENDER_DRAIN_REMAINING - 10))
+  done
+  echo "✅ Old Render instance/request drain window elapsed"
+
+  # Final pre-seal gate. First re-read every retained Fly Machine and reject a
+  # single build/token/validation-queue/activation-policy mismatch. Then run the
+  # exact isolated validation workflow again: successful dispatch proves this
+  # fleet is still polling only its standby queue. Finally prove the GitHub
+  # concurrency lock is still held. No destructive Temporal action occurs
+  # between these checks and migrate-open-agent-workflows.
+  DEPLOY_ROOT="$(git rev-parse --show-toplevel)"
+  (
+    cd "$DEPLOY_ROOT/agents"
+    source .env
+    EXPECTED_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
+      EXPECTED_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
+      EXPECTED_WORKER_VALIDATION_TASK_QUEUE="$TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE" \
+      EXPECTED_WORKER_ACTIVATION_TIMEOUT_SECONDS="7200" \
+      EXPECTED_WORKER_REQUIRE_ACTIVATION="1" \
+      bash "$DEPLOY_ROOT/scripts/verify-agent-candidate-fleet.sh"
+  )
+  cd "$DEPLOY_ROOT/back-end"
+  PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1 \
+    TEMPORAL_TASK_QUEUE=navi-agent-tasks \
+    TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE="$TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE" \
+    TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
+    TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
+    npx tsx scripts/validate-candidate-workflow-image.ts --execute
+  AGENT_DEPLOY_HOLD_STATUS=$(gh run view "$AGENT_DEPLOY_RUN_ID" \
+    --json jobs \
+    --jq '[.jobs[].steps[]? | select(.name == "Hold production deploy lock until exact cutover completes")][0].status // "missing"')
+  [ "$AGENT_DEPLOY_HOLD_STATUS" = "in_progress" ] ||
+    { echo "❌ Exact production deploy lock is no longer held"; exit 1; }
+
+  TEMPORAL_TASK_QUEUE=navi-agent-tasks \
+    TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
+    TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
+    WORKFLOW_MIGRATION_CONCURRENCY="${WORKFLOW_MIGRATION_CONCURRENCY:-16}" \
+    WORKFLOW_MIGRATION_CANARY_COUNT="${WORKFLOW_MIGRATION_CANARY_COUNT:-4}" \
+    WORKFLOW_MIGRATION_BOOTSTRAP_TIMEOUT_MS="${WORKFLOW_MIGRATION_BOOTSTRAP_TIMEOUT_MS:-120000}" \
+    WORKFLOW_MIGRATION_CANDIDATE_TIMEOUT_MS="${WORKFLOW_MIGRATION_CANDIDATE_TIMEOUT_MS:-300000}" \
+    WORKFLOW_MIGRATION_PENDING_START_TIMEOUT_MS="${WORKFLOW_MIGRATION_PENDING_START_TIMEOUT_MS:-120000}" \
+    WORKFLOW_MIGRATION_TERMINAL_CLEANUP_TIMEOUT_MS="${WORKFLOW_MIGRATION_TERMINAL_CLEANUP_TIMEOUT_MS:-900000}" \
+    WORKFLOW_MIGRATION_TERMINAL_CLEANUP_CONCURRENCY="${WORKFLOW_MIGRATION_TERMINAL_CLEANUP_CONCURRENCY:-32}" \
+    npx tsx scripts/migrate-open-agent-workflows.ts --execute
+
+  release_agent_cutover_lock success "Production workflow cutover completed"
+  trap - EXIT
+  gh run watch "$AGENT_DEPLOY_RUN_ID" --exit-status
+  python3 scripts/record_factory_event.py deploy production-finish fly
+fi
+```
+
+The isolated candidate-image gate runs before any production history is sealed;
+failure leaves the existing workflow fleet untouched. The migration command then
+prepares every frozen workflow while the candidate fleet is standby. If even one
+preparation fails, activation never happens and candidate code never sees an old
+history. After exact-SHA activation, it starts four status-stratified replacements
+serially and requires each to atomically persist its restored durable state and
+clear its generation-fenced claim (`durable READY`) before starting the bulk set.
+Any canary failure leaves the bulk set prepared but unstarted. The command must
+exit zero with `failed: 0` and `prepared: 0`. A changed workflow ID is a safe skip
+(another replacement won the race); any other failure blocks completion.
+Rerunning the command is safe: durable claims coalesce and expected-generation
+checks prevent a stale snapshot from replacing a newer workflow.
+The 375-second Render drain is a hard correctness gate, not a propagation
+sleep: `live` switches traffic before Render retires the old process, and an old
+in-flight create request used Temporal's reusable workflow-ID policy. The
+bounded drain guarantees every caller that can outlive a descendant tombstone
+uses the new reject-duplicate policy.
+
+## Step 13ac: Validate workflow replacement edge cases in production
+
+Skip only when `$AGENT_CUTOVER_REQUIRED` is `0`. Run this immediately after Step
+13ab succeeds. This gate creates a uniquely named, isolated set of synthetic
+stale workflows on a never-polled validation queue, replaces them onto the
+production queue, and deletes every exact fixture ID afterward. The replacements
+remain cold, so the gate makes no LLM/provider calls and does not spend model
+credits.
+
+The command must exit zero and print `PASS` for every row. It verifies paused,
+cost-limited, and out-of-credits restoration; counters, context size, iteration
+offset, duration origin, and historical configuration; approval-wait closure and
+late approval rejection; exact-once terminalization of root and descendant
+tools; success-before-seal and late-success races; descendant termination;
+durable bootstrap acknowledgement; pause, resume, and cost-limit-update cutover
+races; exact accounting and provider-attempt iteration deduplication; independent
+cleanup of rapid workflow generations; zero activity growth while cold; clean
+histories without patch markers or nondeterminism; malformed-root fail-closed
+behavior; known-zombie absence; fleet convergence; and fixture cleanup.
+
+```bash
+if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
+  cd "$(git rev-parse --show-toplevel)/back-end"
+  PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1 \
+    TEMPORAL_TASK_QUEUE=navi-agent-tasks \
+    TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
+    TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
+    npx tsx scripts/validate-prod-workflow-migration.ts --execute
+fi
+```
+
+Retain the JSON output as the production migration report card. Any failed row,
+including fixture cleanup, blocks deploy completion and must be diagnosed and
+fixed before Step 13b.
 
 ## Step 13b: Production semantic frontend gate (no skip — always runs)
 

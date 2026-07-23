@@ -1038,7 +1038,7 @@ async function testRespond_wrongUser() {
   assertSchema(ErrorResponse, res.data, 'POST /:id/respond (403)');
 }
 
-async function testRespond_repeatOverwritesExistingResponse() {
+async function testRespond_repeatPreservesFirstTerminalResponse() {
   const fixture = await createFixture('respond-repeat');
   const created = await createAttentionRequest(fixture, { question: 'respond-repeat' });
 
@@ -1058,8 +1058,8 @@ async function testRespond_repeatOverwritesExistingResponse() {
 
   const requestAfter = await getRequestById(created.id, authHeaders(fixture.ownerToken));
   assert(
-    requestAfter.userResponse === 'second response',
-    'Repeated respond should overwrite the stored response'
+    requestAfter.userResponse === 'first response',
+    'Repeated respond should preserve the first terminal response'
   );
 }
 
@@ -1368,8 +1368,8 @@ async function runAll() {
         { name: 'bad input -> 400', fn: testRespond_badInput },
         { name: 'wrong user -> 403', fn: testRespond_wrongUser },
         {
-          name: 'repeat respond overwrites previous response',
-          fn: testRespond_repeatOverwritesExistingResponse,
+          name: 'repeat respond preserves first terminal response',
+          fn: testRespond_repeatPreservesFirstTerminalResponse,
         },
       ],
     },

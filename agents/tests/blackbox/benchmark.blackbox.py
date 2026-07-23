@@ -6632,13 +6632,20 @@ def test_local_start_services_releases_port_reservation_after_readiness():
 
 def test_run_sh_seed_dump_targets_isolated_database_atomically():
     """System-Postgres isolated runs must restore/dump their per-run DB safely."""
-    run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
+    scripts = Path(__file__).resolve().parents[3] / "scripts"
+    run_script = (scripts / "run.sh").read_text()
+    save_helper = (scripts / "save-seed-dump.sh").read_text()
 
     assert "bash scripts/restore-seed-dump.sh" in run_script
     assert '"$_SEED_RESTORE_CONTAINER" >/dev/null' in run_script
     assert '"$_SEED_RESTORE_CONTAINER" >/dev/null 2>&1' not in run_script
-    assert 'pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME"' in run_script
-    assert 'mv "$_SEED_DUMP_TMP" "$_SEED_DUMP"' in run_script
+    assert '_SEED_DUMP_CONTAINER="$DB_CONTAINER"' in run_script
+    assert '"$_SEED_DUMP_CONTAINER"; then' in run_script
+    assert '"$LOCAL_DB_NAME"' in run_script
+    assert 'docker exec "$DB_CONTAINER" pg_dump' in save_helper
+    assert '-Fc "$DB_NAME"' in save_helper
+    assert 'mv "$DUMP_TMP" "$DUMP_PATH"' in save_helper
+    assert 'rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash"' in run_script
     required_guard = run_script.index('if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]')
     cold_sync = run_script.index('echo "🌱 Syncing production data to local database (first run)..."')
     assert required_guard < cold_sync

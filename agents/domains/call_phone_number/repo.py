@@ -10,6 +10,7 @@ import structlog
 
 from config import load_config
 from domains.call_phone_number.config import HTTP_TIMEOUT_MESSAGE
+from helpers.workflow_generation import stamp_tool_workflow_generation
 from tools.base import MessageStatus
 
 logger = structlog.get_logger()
@@ -40,6 +41,7 @@ async def save_phone_call_message(
 
         if status == MessageStatus.ERROR:
             metadata["error"] = True
+        metadata = stamp_tool_workflow_generation(metadata) or metadata
 
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_MESSAGE) as client:
             await client.post(

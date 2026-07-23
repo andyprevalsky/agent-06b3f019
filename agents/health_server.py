@@ -20,6 +20,8 @@ app = Flask(__name__)
 # Global state
 worker_status = {
     "healthy": False,
+    "phase": "starting",
+    "build_id": None,
     "started_at": datetime.utcnow().isoformat(),
     "last_heartbeat": datetime.utcnow().isoformat(),
 }
@@ -250,9 +252,9 @@ def health():
     worker_status["last_heartbeat"] = datetime.utcnow().isoformat()
 
     if worker_status["healthy"]:
-        return jsonify({"status": "healthy", "worker": "running", **worker_status}), 200
+        return jsonify({"status": "healthy", "worker": worker_status["phase"], **worker_status}), 200
     else:
-        return jsonify({"status": "unhealthy", "worker": "stopped", **worker_status}), 503
+        return jsonify({"status": "unhealthy", "worker": worker_status["phase"], **worker_status}), 503
 
 
 @app.route("/metrics")
@@ -267,6 +269,10 @@ def metrics():
     metrics_text = f"""# HELP worker_healthy Worker health status (1=healthy, 0=unhealthy)
 # TYPE worker_healthy gauge
 worker_healthy {1 if worker_status["healthy"] else 0}
+
+# HELP worker_polling Whether this process is polling its Temporal task queue
+# TYPE worker_polling gauge
+worker_polling {1 if worker_status["phase"] == "running" else 0}
 
 # HELP worker_uptime_seconds Worker uptime in seconds
 # TYPE worker_uptime_seconds counter
@@ -404,9 +410,11 @@ def benchmark_memory_baseline():
     return jsonify(_benchmark_memory_baseline()), 200
 
 
-def set_worker_status(healthy: bool):
+def set_worker_status(healthy: bool, phase: Optional[str] = None, build_id: Optional[str] = None):
     """Update worker health status."""
     worker_status["healthy"] = healthy
+    worker_status["phase"] = phase or ("running" if healthy else "stopped")
+    worker_status["build_id"] = build_id
     worker_status["last_heartbeat"] = datetime.utcnow().isoformat()
 
 

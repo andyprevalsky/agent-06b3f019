@@ -10,7 +10,8 @@ import { canReadBenchmarkArchive } from '../../providers/benchmarkHubStore';
 import { getClientIP } from '../../providers/geoip';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
-import { createAgentSchema, updateAgentSchema, updateStatusSchema } from './types';
+import { StaleParentWorkflowGenerationError } from '../../providers/workflowGeneration';
+import { createAgentSchema, updateAgentSchema } from './types';
 import * as routeGuards from './routes.guards';
 import * as lifecycleService from './agentLifecycleService';
 import * as controlService from './agentControlService';
@@ -18,6 +19,7 @@ import * as queryService from './agentQueryService';
 import messageRoutes from './routes.messages';
 import batchRoutes from './routes.batch';
 import alertRoutes from './routes.alerts';
+import statusRoutes from './routes.status';
 
 const log = createLogger('Agents');
 const router = Router();
@@ -42,6 +44,10 @@ function handleRouteError(
 ): void {
   if (error instanceof z.ZodError) {
     res.status(400).json({ error: 'Invalid request body', details: error.issues });
+    return;
+  }
+  if (error instanceof StaleParentWorkflowGenerationError) {
+    res.status(409).json({ error: error.message });
     return;
   }
   log.error(msg, {
@@ -201,35 +207,7 @@ router.delete(
   })
 );
 
-router.patch(
-  '/:id/status',
-  auth,
-  asyncHandler<HybridAuthRequest>(async (req, res) => {
-    try {
-      const body = updateStatusSchema.parse(req.body);
-      const updated = await controlService.updateAgentStatus(req.params.id, body);
-      if (updated === null) {
-        res.status(404).json({ error: 'Agent not found' });
-        return;
-      }
-      const u = updated as Record<string, unknown>;
-      res.json({
-        agent_id: u.id,
-        status: u.status,
-        status_message: u.statusMessage,
-        progress: u.progress,
-        token_count: u.tokenCount,
-        tokens_in: u.tokensIn,
-        tokens_out: u.tokensOut,
-        context_size: u.contextSize,
-        message_count: u.messageCount,
-        updated_at: u.updatedAt,
-      });
-    } catch (error) {
-      handleRouteError(res, error, 'Failed to update agent status', { agent_id: req.params.id });
-    }
-  })
-);
+router.use(statusRoutes);
 
 router.patch(
   '/:id',
@@ -238,7 +216,16 @@ router.patch(
     try {
       const userId = req.isInternal === true ? undefined : req.userId;
       const body = updateAgentSchema.parse(req.body);
-      const result = await controlService.updateAgentConfig(req.params.id, body, userId);
+      const generation =
+        req.isInternal === true
+          ? (req.header('x-agent-workflow-generation') ?? req.params.id)
+          : undefined;
+      const result = await controlService.updateAgentConfig(
+        req.params.id,
+        body,
+        userId,
+        generation
+      );
       if ('error' in result) {
         const rb: Record<string, unknown> = { error: result.error };
         if ('current_cost_cents' in result) {

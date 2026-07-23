@@ -37,6 +37,7 @@ from helpers.messages import (
     stream_tool_event,
 )
 from helpers.tracing import backend_api_headers, current_request_id, traced
+from helpers.workflow_generation import workflow_generation_headers
 from providers.fast_cache import client as fast_cache_client
 from providers.fast_cache.client import (
     ensure_position_context as ensure_fast_cache_position_context,
@@ -187,9 +188,7 @@ def _add_cache_breakpoint_before_extra_user_message(messages: List[Dict[str, Any
             continue
         content = message.get("content")
         if isinstance(content, str) and content:
-            message["content"] = [
-                {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
-            ]
+            message["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
             return True
         if isinstance(content, list):
             for block in reversed(content):
@@ -719,7 +718,7 @@ async def _generate_response_schema_with_rose(
     raise last_error or ValueError("Unknown error generating response schema")
 
 
-def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]:  # noqa: C901
+def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]:
     """
     Convert a Pydantic model to a JSON schema ready for OpenAI strict structured outputs.
 
@@ -834,7 +833,7 @@ def prepare_schema_for_openai(pydantic_model: Type[BaseModel]) -> Dict[str, Any]
     return schema
 
 
-def build_verifier_context_messages(  # noqa: C901
+def build_verifier_context_messages(
     context: List[Dict[str, Any]],
     system_prompt: str,
     verifier_file_evidence_by_message: Optional[Dict[str, List[Dict[str, Any]]]] = None,
@@ -1200,7 +1199,7 @@ def _verifier_context_has_successful_browser_result(context: List[Dict[str, Any]
     return any(_is_successful_browser_tool_result(msg) for msg in context)
 
 
-def convert_context_to_messages(  # noqa: C901
+def convert_context_to_messages(
     context: List[Dict[str, Any]],
     include_system: bool = True,
     # Default False: including assistant messages is prone to reward hacking
@@ -1418,7 +1417,7 @@ def inject_llm_only_user_preamble(
     return messages
 
 
-async def build_llm_messages(  # noqa: C901
+async def build_llm_messages(
     context: List[Dict],
     system_prompt: str,
     pre_resolved_ids: Optional[set] = None,
@@ -2011,7 +2010,7 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
     return result
 
 
-async def call_llm_structured_streaming(  # noqa: C901
+async def call_llm_structured_streaming(
     messages: List[Dict[str, Any]],
     model: Optional[str],
     temperature: float,
@@ -3209,7 +3208,7 @@ def _extract_response_from_partial_json(reasoning: str, json_content: str) -> Op
     return "\n\n".join(parts) if parts else None
 
 
-def _extract_nested_agent_json_blob(text: str) -> Optional[Dict[str, Any]]:
+def _extract_nested_agent_json_blob(text: Any) -> Optional[Dict[str, Any]]:
     """
     Best-effort extraction of a nested agent JSON object from text.
     Handles raw JSON and markdown-fenced ```json blocks.
@@ -3533,7 +3532,7 @@ def _content_from_structured_rose_response(
 # The run_agent loop handles LLM calls directly via call_llm_structured_streaming
 
 
-async def _call_llm_verifier(  # noqa: C901
+async def _call_llm_verifier(
     messages: List[Dict[str, Any]],
     model: str,
     config: Any,
@@ -3678,6 +3677,9 @@ async def _call_llm_verifier(  # noqa: C901
             agent_id=agent_id,
             request_id=verifier_request_id,
             dump_extra=dump_extra,
+            deadline_s=VERIFIER_ATTEMPT_DEADLINE_S,
+            ttft_timeout_s=VERIFIER_TTFT_TIMEOUT_S,
+            idle_timeout_s=VERIFIER_IDLE_TIMEOUT_S,
         ):
             chunk_count += 1
             if deferred_fast_cache_acc is not None and fast_cache_accumulate is not None:
@@ -4335,11 +4337,19 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
 # this constant is the single source of truth for the verifier model.
 VERIFIER_MODEL = "rose-labs/rose-1-ultra"
 VERIFIER_MAX_TOKENS = 16000
+# A verifier is advisory and must never outlive the agent benchmark/activity
+# that requested it. Keep each provider attempt short enough to fall through,
+# while also fencing the entire retry loop so six individually bounded attempts
+# cannot accumulate into a multi-minute zombie.
+VERIFIER_ATTEMPT_DEADLINE_S = 75.0
+VERIFIER_TTFT_TIMEOUT_S = 45.0
+VERIFIER_IDLE_TIMEOUT_S = 45.0
+VERIFIER_TOTAL_TIMEOUT_S = 180.0
 
 
 @activity.defn
 @traced("check_progress")
-async def check_progress(  # noqa: C901
+async def check_progress(
     context: List[Dict[str, Any]],
     verifier_system_prompt: str,
     model: str = VERIFIER_MODEL,  # IGNORED — verifier always forces rose-1-ultra. Kept for backward compat.
@@ -4571,27 +4581,34 @@ async def check_progress(  # noqa: C901
         max_retries = 5
         base_delay = 0.2  # 0.2s -> 0.4s -> 0.8s -> 1.6s -> 3.2s
         last_error = None
+        verifier_deadline = asyncio.get_running_loop().time() + VERIFIER_TOTAL_TIMEOUT_S
         for attempt in range(max_retries + 1):
             try:
-                result, usage = await _call_llm_verifier(
-                    messages,
-                    forced_model,
-                    config,
-                    schema_for_call,
-                    claude_token=claude_token,
-                    claude_token_source=claude_token_source,
-                    claude_token_pool_id=claude_token_pool_id,
-                    claude_token_user_id=claude_token_user_id,
-                    gpt_token=gpt_token,
-                    gpt_account_id=gpt_account_id,
-                    gpt_token_source=gpt_token_source,
-                    gpt_token_pool_id=gpt_token_pool_id,
-                    gpt_token_user_id=gpt_token_user_id,
-                    compute_token_lineage_key=compute_token_lineage_key,
-                    compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
-                    call_site=call_site,
-                    agent_id=agent_id,
-                    dump_extra=verifier_dump_extra or None,
+                remaining_s = verifier_deadline - asyncio.get_running_loop().time()
+                if remaining_s <= 0:
+                    raise TimeoutError(f"Verifier exceeded {VERIFIER_TOTAL_TIMEOUT_S:.0f}s total deadline")
+                result, usage = await asyncio.wait_for(
+                    _call_llm_verifier(
+                        messages,
+                        forced_model,
+                        config,
+                        schema_for_call,
+                        claude_token=claude_token,
+                        claude_token_source=claude_token_source,
+                        claude_token_pool_id=claude_token_pool_id,
+                        claude_token_user_id=claude_token_user_id,
+                        gpt_token=gpt_token,
+                        gpt_account_id=gpt_account_id,
+                        gpt_token_source=gpt_token_source,
+                        gpt_token_pool_id=gpt_token_pool_id,
+                        gpt_token_user_id=gpt_token_user_id,
+                        compute_token_lineage_key=compute_token_lineage_key,
+                        compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                        call_site=call_site,
+                        agent_id=agent_id,
+                        dump_extra=verifier_dump_extra or None,
+                    ),
+                    timeout=remaining_s,
                 )
                 break
             except Exception as e:
@@ -4608,15 +4625,19 @@ async def check_progress(  # noqa: C901
                         )
                     delay = base_delay * (2**attempt)
                     jitter = random.uniform(0, delay * 0.5)
+                    sleep_s = delay + jitter
+                    remaining_s = verifier_deadline - asyncio.get_running_loop().time()
+                    if remaining_s <= sleep_s:
+                        raise TimeoutError(f"Verifier exceeded {VERIFIER_TOTAL_TIMEOUT_S:.0f}s total deadline") from e
                     logger.warning(
                         "Verifier call failed, retrying",
                         attempt=attempt + 1,
                         max_retries=max_retries,
-                        delay=round(delay + jitter, 3),
+                        delay=round(sleep_s, 3),
                         fast_cache_read_enabled=False if fast_mode_goal and fast_cache_should_write else None,
                         error=extract_error_message(e),
                     )
-                    await asyncio.sleep(delay + jitter)
+                    await asyncio.sleep(sleep_s)
                 else:
                     raise last_error
 
@@ -4673,7 +4694,7 @@ async def check_progress(  # noqa: C901
 
 @activity.defn
 @traced("call_llm_activity")
-async def call_llm_activity(  # noqa: C901
+async def call_llm_activity(
     messages_or_agent_id: Any,
     model: str,
     tool_names: List[str],
@@ -4995,9 +5016,7 @@ async def call_llm_activity(  # noqa: C901
         if required_tool:
             got = [tc.get("tool") for tc in tool_calls_dict]
             if len(tool_calls_dict) != 1 or got[0] != required_tool:
-                raise LLMStructuredOutputError(
-                    f"LLM must call exactly one tool, '{required_tool}'. Got: {got}"
-                )
+                raise LLMStructuredOutputError(f"LLM must call exactly one tool, '{required_tool}'. Got: {got}")
 
         logger.info(
             "LLM activity completed",
@@ -5155,7 +5174,10 @@ async def set_response_schema_activity(
             try:
                 save_response = await client.patch(
                     f"{backend_url}/api/agents/{agent_id}",
-                    headers=backend_api_headers(api_key),
+                    headers={
+                        **backend_api_headers(api_key),
+                        **workflow_generation_headers(),
+                    },
                     json={"response_schema": schema},
                 )
             except httpx.HTTPError as e:

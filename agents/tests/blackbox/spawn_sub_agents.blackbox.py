@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import uuid
 from unittest.mock import patch
 
 from _test_utils import (
@@ -405,6 +406,9 @@ class _FakeWorkflowModule:
 
     def info(self):
         return _FakeWorkflowInfo()
+
+    def uuid4(self):
+        return uuid.uuid4()
 
     async def execute_activity(self, fn, args=None, **kwargs):
         name = getattr(fn, "__name__", "?")
