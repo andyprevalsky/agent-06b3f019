@@ -17,6 +17,7 @@ import {
   AgentNotFoundError,
   AgentOwnershipError,
   AccessDeniedError,
+  WorkflowGenerationMismatchError,
 } from './service';
 
 const log = createLogger('ToolUsage');
@@ -62,6 +63,10 @@ router.post(
         tool_name,
         total_cost_cents,
         usage_items,
+        workflow_generation:
+          req.isInternal === true
+            ? (req.header('x-agent-workflow-generation') ?? agent_id)
+            : undefined,
       });
 
       res.status(201).json(result);
@@ -72,6 +77,10 @@ router.post(
       }
       if (error instanceof AgentOwnershipError) {
         res.status(403).json({ error: error.message });
+        return;
+      }
+      if (error instanceof WorkflowGenerationMismatchError) {
+        res.status(409).json({ error: error.message });
         return;
       }
 

@@ -10,7 +10,19 @@ const log = createLogger('AgentResume');
 
 export type ResumeAgentWorkflowResult = { success: true } | { error: string; status: number };
 
-export async function resumeAgentWorkflow(agentId: string): Promise<ResumeAgentWorkflowResult> {
+interface ResumeAgentWorkflowDependencies {
+  signalResume?: (workflowId: string) => Promise<void>;
+}
+
+async function signalResume(workflowId: string): Promise<void> {
+  const client = await getTemporalClient();
+  await client.workflow.getHandle(workflowId).signal('resume');
+}
+
+export async function resumeAgentWorkflow(
+  agentId: string,
+  dependencies: ResumeAgentWorkflowDependencies = {}
+): Promise<ResumeAgentWorkflowResult> {
   const agent = await prisma.agent.findUnique({
     where: { id: agentId },
     select: { temporalWorkflowId: true },
@@ -21,9 +33,7 @@ export async function resumeAgentWorkflow(agentId: string): Promise<ResumeAgentW
   /* c8 ignore start -- Temporal signal requires live Temporal server */
   if (agent.temporalWorkflowId !== null) {
     try {
-      const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-      await handle.signal('resume');
+      await (dependencies.signalResume ?? signalResume)(agent.temporalWorkflowId);
     } catch (error) {
       log.warn('Resume signal failed, DB status unchanged', {
         agent_id: agentId,
@@ -31,6 +41,10 @@ export async function resumeAgentWorkflow(agentId: string): Promise<ResumeAgentW
       });
       return { error: 'Cannot resume agent because its workflow is not running', status: 409 };
     }
+    // The workflow validates credits/cost state and persists ACTIVE through its
+    // generation-fenced activity. Do not let this external request race that
+    // decision or claim a resume the workflow rejected.
+    return { success: true };
   }
   /* c8 ignore stop */
 

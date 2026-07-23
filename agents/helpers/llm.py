@@ -37,6 +37,7 @@ from helpers.messages import (
     stream_tool_event,
 )
 from helpers.tracing import backend_api_headers, current_request_id, traced
+from helpers.workflow_generation import workflow_generation_headers
 from providers.fast_cache import client as fast_cache_client
 from providers.fast_cache.client import (
     ensure_position_context as ensure_fast_cache_position_context,
@@ -3667,6 +3668,9 @@ async def _call_llm_verifier(  # noqa: C901
             agent_id=agent_id,
             request_id=verifier_request_id,
             dump_extra=dump_extra,
+            deadline_s=VERIFIER_ATTEMPT_DEADLINE_S,
+            ttft_timeout_s=VERIFIER_TTFT_TIMEOUT_S,
+            idle_timeout_s=VERIFIER_IDLE_TIMEOUT_S,
         ):
             chunk_count += 1
             if deferred_fast_cache_acc is not None and fast_cache_accumulate is not None:
@@ -4324,6 +4328,14 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
 # this constant is the single source of truth for the verifier model.
 VERIFIER_MODEL = "rose-labs/rose-1-ultra"
 VERIFIER_MAX_TOKENS = 16000
+# A verifier is advisory and must never outlive the agent benchmark/activity
+# that requested it. Keep each provider attempt short enough to fall through,
+# while also fencing the entire retry loop so six individually bounded attempts
+# cannot accumulate into a multi-minute zombie.
+VERIFIER_ATTEMPT_DEADLINE_S = 75.0
+VERIFIER_TTFT_TIMEOUT_S = 45.0
+VERIFIER_IDLE_TIMEOUT_S = 45.0
+VERIFIER_TOTAL_TIMEOUT_S = 180.0
 
 
 @activity.defn
@@ -4560,27 +4572,34 @@ async def check_progress(  # noqa: C901
         max_retries = 5
         base_delay = 0.2  # 0.2s -> 0.4s -> 0.8s -> 1.6s -> 3.2s
         last_error = None
+        verifier_deadline = asyncio.get_running_loop().time() + VERIFIER_TOTAL_TIMEOUT_S
         for attempt in range(max_retries + 1):
             try:
-                result, usage = await _call_llm_verifier(
-                    messages,
-                    forced_model,
-                    config,
-                    schema_for_call,
-                    claude_token=claude_token,
-                    claude_token_source=claude_token_source,
-                    claude_token_pool_id=claude_token_pool_id,
-                    claude_token_user_id=claude_token_user_id,
-                    gpt_token=gpt_token,
-                    gpt_account_id=gpt_account_id,
-                    gpt_token_source=gpt_token_source,
-                    gpt_token_pool_id=gpt_token_pool_id,
-                    gpt_token_user_id=gpt_token_user_id,
-                    compute_token_lineage_key=compute_token_lineage_key,
-                    compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
-                    call_site=call_site,
-                    agent_id=agent_id,
-                    dump_extra=verifier_dump_extra or None,
+                remaining_s = verifier_deadline - asyncio.get_running_loop().time()
+                if remaining_s <= 0:
+                    raise TimeoutError(f"Verifier exceeded {VERIFIER_TOTAL_TIMEOUT_S:.0f}s total deadline")
+                result, usage = await asyncio.wait_for(
+                    _call_llm_verifier(
+                        messages,
+                        forced_model,
+                        config,
+                        schema_for_call,
+                        claude_token=claude_token,
+                        claude_token_source=claude_token_source,
+                        claude_token_pool_id=claude_token_pool_id,
+                        claude_token_user_id=claude_token_user_id,
+                        gpt_token=gpt_token,
+                        gpt_account_id=gpt_account_id,
+                        gpt_token_source=gpt_token_source,
+                        gpt_token_pool_id=gpt_token_pool_id,
+                        gpt_token_user_id=gpt_token_user_id,
+                        compute_token_lineage_key=compute_token_lineage_key,
+                        compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                        call_site=call_site,
+                        agent_id=agent_id,
+                        dump_extra=verifier_dump_extra or None,
+                    ),
+                    timeout=remaining_s,
                 )
                 break
             except Exception as e:
@@ -4597,15 +4616,19 @@ async def check_progress(  # noqa: C901
                         )
                     delay = base_delay * (2**attempt)
                     jitter = random.uniform(0, delay * 0.5)
+                    sleep_s = delay + jitter
+                    remaining_s = verifier_deadline - asyncio.get_running_loop().time()
+                    if remaining_s <= sleep_s:
+                        raise TimeoutError(f"Verifier exceeded {VERIFIER_TOTAL_TIMEOUT_S:.0f}s total deadline") from e
                     logger.warning(
                         "Verifier call failed, retrying",
                         attempt=attempt + 1,
                         max_retries=max_retries,
-                        delay=round(delay + jitter, 3),
+                        delay=round(sleep_s, 3),
                         fast_cache_read_enabled=False if fast_mode_goal and fast_cache_should_write else None,
                         error=extract_error_message(e),
                     )
-                    await asyncio.sleep(delay + jitter)
+                    await asyncio.sleep(sleep_s)
                 else:
                     raise last_error
 
@@ -5142,7 +5165,10 @@ async def set_response_schema_activity(
             try:
                 save_response = await client.patch(
                     f"{backend_url}/api/agents/{agent_id}",
-                    headers=backend_api_headers(api_key),
+                    headers={
+                        **backend_api_headers(api_key),
+                        **workflow_generation_headers(),
+                    },
                     json={"response_schema": schema},
                 )
             except httpx.HTTPError as e:

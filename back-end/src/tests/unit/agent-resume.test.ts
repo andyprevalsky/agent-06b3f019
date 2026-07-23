@@ -20,14 +20,17 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
   }
 }
 
-async function createAgent(overrides: { temporalWorkflowId?: string | null }) {
+async function createAgent(overrides: {
+  temporalWorkflowId?: string | null;
+  status?: 'PAUSED' | 'COST_LIMIT_REACHED' | 'OUT_OF_CREDITS';
+}) {
   const id = randomUUID();
   await prisma.agent.create({
     data: {
       id,
       userId: `unit-user-${id}`,
       goal: 'unit resume test',
-      status: 'PAUSED',
+      status: overrides.status ?? 'PAUSED',
       busId: id,
       temporalWorkflowId: overrides.temporalWorkflowId,
     },
@@ -80,13 +83,34 @@ async function main(): Promise<void> {
     }
   });
 
+  await test('live workflow owns the durable resume decision for every cold state', async () => {
+    for (const status of ['PAUSED', 'COST_LIMIT_REACHED', 'OUT_OF_CREDITS'] as const) {
+      const workflowId = `wf-${randomUUID()}`;
+      const agentId = await createAgent({ temporalWorkflowId: workflowId, status });
+      const signals: string[] = [];
+      try {
+        const result = await resumeAgentWorkflow(agentId, {
+          signalResume: async (signaledWorkflowId) => {
+            signals.push(signaledWorkflowId);
+          },
+        });
+        assert.deepStrictEqual(result, { success: true });
+        assert.deepStrictEqual(signals, [workflowId]);
+        const agent = await prisma.agent.findUnique({ where: { id: agentId } });
+        assert.strictEqual(agent?.status, status);
+      } finally {
+        await prisma.agent.deleteMany({ where: { id: agentId } });
+      }
+    }
+  });
+
   if (failures.length > 0) {
     console.error('\nFailures:');
     for (const failure of failures) console.error(`- ${failure}`);
     process.exit(1);
   }
 
-  console.log(`\n${passed}/2 agent resume tests passed`);
+  console.log(`\n${passed}/3 agent resume tests passed`);
 }
 
 main().catch((err: unknown) => {

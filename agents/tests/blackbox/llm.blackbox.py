@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -1030,7 +1031,24 @@ async def test_set_response_schema_activity_success():
                 usage={"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
             )
 
-    with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", FakeRoseClient):
+    generation = "agent-abc:replacement:generation-2"
+    activity_time = datetime.now(timezone.utc)
+    activity_info = SimpleNamespace(
+        workflow_id=generation,
+        workflow_run_id="run-2",
+        activity_id="set-response-schema",
+        activity_type="set_response_schema_activity",
+        attempt=1,
+        task_queue="agents",
+        current_attempt_scheduled_time=activity_time,
+        scheduled_time=activity_time,
+        started_time=activity_time,
+    )
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("temporalio.activity.info", return_value=activity_info),
+        patch("helpers.llm.RoseClient", FakeRoseClient),
+    ):
         from helpers.llm import set_response_schema_activity
 
         result = await set_response_schema_activity("agent-abc", ["goal 1", "goal 2"])
@@ -1050,6 +1068,8 @@ async def test_set_response_schema_activity_success():
     urls = [c["url"] for c in captures]
     assert not any("generate-response-schema" in u for u in urls)
     assert any("/api/agents/agent-abc" in u for u in urls)
+    schema_save = next(c for c in captures if "/api/agents/agent-abc" in c["url"])
+    assert schema_save["requestHeaders"]["x-agent-workflow-generation"] == generation
 
 
 async def test_set_response_schema_activity_uses_internal_auth_only():
@@ -2226,6 +2246,45 @@ async def test_call_llm_verifier_uses_large_output_cap():
     assert all(value == VERIFIER_MAX_TOKENS for value in provider_max_tokens)
 
 
+async def test_call_llm_verifier_bounds_provider_stream_time():
+    """Verifier provider attempts carry explicit deadline, TTFT, and idle bounds."""
+    from config import load_config
+    from helpers.llm import (
+        VERIFIER_ATTEMPT_DEADLINE_S,
+        VERIFIER_IDLE_TIMEOUT_S,
+        VERIFIER_TTFT_TIMEOUT_S,
+        _call_llm_verifier,
+    )
+    from providers.rose.types import StreamChunk
+
+    captured = {}
+
+    async def fake_cached_complete(_client, *, call_site, **kwargs):
+        captured.update(kwargs)
+        yield StreamChunk(kind="metadata", data={"actual_model": "fake", "pool_name": "fake"})
+        yield StreamChunk(kind="content", data={"text": '{"reasoning":"ok","score":1.0}'})
+        yield StreamChunk(
+            kind="usage",
+            data={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        )
+        yield StreamChunk(kind="done", data={})
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("providers.fast_cache.rose_cache.cached_complete", fake_cached_complete),
+    ):
+        result, _usage = await _call_llm_verifier(
+            messages=[{"role": "user", "content": "x"}],
+            model="rose",
+            config=load_config(),
+        )
+
+    assert result["score"] == 1.0
+    assert captured["deadline_s"] == VERIFIER_ATTEMPT_DEADLINE_S
+    assert captured["ttft_timeout_s"] == VERIFIER_TTFT_TIMEOUT_S
+    assert captured["idle_timeout_s"] == VERIFIER_IDLE_TIMEOUT_S
+
+
 async def test_call_llm_verifier_dump_extra_includes_browser_recording_metadata():
     """Verifier dumps preserve browser recording metadata for the HTML renderer."""
     import httpx
@@ -2580,6 +2639,37 @@ async def test_check_progress_disables_fast_cache_read_after_verifier_parse_fail
 
     assert result["score"] == 1.0
     assert seen_contexts == [(True, True), (False, True)]
+
+
+async def test_check_progress_fences_the_entire_verifier_retry_loop():
+    """A hung verifier is cancelled once; retries cannot exceed the total budget."""
+    from helpers.llm import check_progress
+
+    calls = 0
+
+    async def hung_verifier(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        await asyncio.Event().wait()
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.llm._call_llm_verifier", hung_verifier),
+        patch("helpers.llm.VERIFIER_TOTAL_TIMEOUT_S", 0.01),
+        patch("helpers.llm.random.uniform", return_value=0),
+    ):
+        result = await asyncio.wait_for(
+            check_progress(
+                context=[{"role": "USER", "text": "finish", "timestamp": "2024-01-01T00:00:00Z"}],
+                verifier_system_prompt="VERIFY",
+                call_site="verifier_execute",
+            ),
+            timeout=0.5,
+        )
+
+    assert result["score"] == 0.5
+    assert "Verifier exceeded" in result["reasoning"]
+    assert calls == 1
 
 
 async def test_check_progress_browser_success_uses_fast_cache_write_only():
@@ -5969,6 +6059,10 @@ async def run_all_tests():
     await r.record_async("call_llm_verifier_streaming_parses_score", test_call_llm_verifier_streaming_parses_score)
     await r.record_async("call_llm_verifier_uses_large_output_cap", test_call_llm_verifier_uses_large_output_cap)
     await r.record_async(
+        "call_llm_verifier_bounds_provider_stream_time",
+        test_call_llm_verifier_bounds_provider_stream_time,
+    )
+    await r.record_async(
         "call_llm_verifier_dump_extra_includes_browser_recording_metadata",
         test_call_llm_verifier_dump_extra_includes_browser_recording_metadata,
     )
@@ -5997,6 +6091,10 @@ async def run_all_tests():
     await r.record_async(
         "check_progress_disables_fast_cache_read_after_verifier_parse_failure",
         test_check_progress_disables_fast_cache_read_after_verifier_parse_failure,
+    )
+    await r.record_async(
+        "check_progress_fences_the_entire_verifier_retry_loop",
+        test_check_progress_fences_the_entire_verifier_retry_loop,
     )
     await r.record_async(
         "check_progress_browser_success_uses_fast_cache_write_only",
@@ -6199,4 +6297,4 @@ async def run_all_tests():
 
 
 if __name__ == "__main__":
-    asyncio.run(run_all_tests())
+    raise SystemExit(0 if asyncio.run(run_all_tests()) else 1)

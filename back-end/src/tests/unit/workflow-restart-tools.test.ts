@@ -1,4 +1,6 @@
 #!/usr/bin/env tsx
+/* eslint-disable max-lines */
+
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
 import type { Message } from '@prisma/client';
@@ -10,9 +12,18 @@ import {
   DEPLOY_INTERRUPTED_TOOL_MESSAGE,
   finalizeInterruptedWorkflowTools,
 } from '../../providers/staleWorkflowTools';
-import { replaceStaleWorkflow, terminateWorkflowChain } from '../../providers/workflowReplacement';
+import {
+  replaceStaleWorkflow,
+  terminateWorkflowChain,
+  terminateWorkflowChainWithDeadline,
+} from '../../providers/workflowReplacement';
 import { claimWorkflowReplacement } from '../../providers/workflowReplacementState';
 import { messageWorkflowGeneration } from '../../providers/workflowGeneration';
+import {
+  resolveTemporalWorkflowExecutionRefWithClient,
+  startAgentWorkflowExecutionWithClient,
+  TEMPORAL_CONTROL_RPC_TIMEOUT_MS,
+} from '../../providers/temporal';
 import { createTestHarness } from './trace-archive-test-utils';
 
 const { test, finish } = createTestHarness('workflow restart tool reconciliation unit tests');
@@ -253,6 +264,69 @@ async function main(): Promise<void> {
     });
   });
 
+  await test('deployment interruption closes the stale approval request so retry creates a fresh gate', async () => {
+    await withAgent(async (agentId) => {
+      const toolCallId = randomUUID();
+      const requestId = randomUUID();
+      await prisma.agentAttentionRequest.create({
+        data: {
+          id: requestId,
+          userId: `workflow-restart-unit-${agentId}`,
+          agentId,
+          workflowId: agentId,
+          question: 'Approve the stale action?',
+          gateKey: `stale-gate-${requestId}`,
+        },
+      });
+      await postTool(agentId, toolCallId, 'IN_PROGRESS', {
+        toolName: 'request_user_approval',
+        requestUserApproval: { attentionRequestId: requestId },
+      });
+
+      await finalizeInterruptedWorkflowTools(agentId, agentId);
+      await finalizeInterruptedWorkflowTools(agentId, agentId);
+
+      const request = await prisma.agentAttentionRequest.findUniqueOrThrow({
+        where: { id: requestId },
+      });
+      const terminals = (await messagesForCall(agentId, toolCallId)).filter(isTerminal);
+      assert.strictEqual(request.userResponse, DEPLOY_INTERRUPTED_TOOL_MESSAGE);
+      assert.strictEqual(terminals.length, 1);
+      assert.strictEqual(metadataOf(terminals[0]).errorCode, 'DEPLOY_INTERRUPTED');
+    });
+  });
+
+  await test('a recorded user response is preserved when deployment wins the tool lifecycle race', async () => {
+    await withAgent(async (agentId) => {
+      const toolCallId = randomUUID();
+      const requestId = randomUUID();
+      await prisma.agentAttentionRequest.create({
+        data: {
+          id: requestId,
+          userId: `workflow-restart-unit-${agentId}`,
+          agentId,
+          workflowId: agentId,
+          question: 'Approve the racing action?',
+          userResponse: 'approved just before cutover',
+        },
+      });
+      await postTool(agentId, toolCallId, 'IN_PROGRESS', {
+        toolName: 'request_user_approval',
+        attentionRequestId: requestId,
+      });
+
+      await finalizeInterruptedWorkflowTools(agentId, agentId);
+
+      const request = await prisma.agentAttentionRequest.findUniqueOrThrow({
+        where: { id: requestId },
+      });
+      const terminals = (await messagesForCall(agentId, toolCallId)).filter(isTerminal);
+      assert.strictEqual(request.userResponse, 'approved just before cutover');
+      assert.strictEqual(terminals.length, 1);
+      assert.strictEqual(metadataOf(terminals[0]).errorCode, 'DEPLOY_INTERRUPTED');
+    });
+  });
+
   await test('concurrent approval and deployment reconciliation still choose one terminal result', async () => {
     await withAgent(async (agentId) => {
       const toolCallId = randomUUID();
@@ -414,6 +488,65 @@ async function main(): Promise<void> {
     assert.strictEqual(terminationReason, 'Restarting with new worker code');
   });
 
+  await test('replacement describe, start, and terminate deadlines propagate timeout failures', async () => {
+    const timeout = new Error('synthetic Temporal control deadline exceeded');
+    const deadlines: number[] = [];
+    let operationsInvoked = 0;
+    const deadlineClient = {
+      withDeadline: async (deadline: number, _operation: () => Promise<unknown>) => {
+        deadlines.push(deadline);
+        throw timeout;
+      },
+      workflow: {
+        getHandle: () => ({
+          describe: async () => {
+            operationsInvoked += 1;
+            return {};
+          },
+          terminate: async () => {
+            operationsInvoked += 1;
+          },
+        }),
+        start: async () => {
+          operationsInvoked += 1;
+          return {};
+        },
+      },
+    };
+    const startedAt = Date.now();
+
+    await assert.rejects(
+      resolveTemporalWorkflowExecutionRefWithClient(deadlineClient as never, 'workflow-1'),
+      /synthetic Temporal control deadline exceeded/
+    );
+    await assert.rejects(
+      startAgentWorkflowExecutionWithClient(deadlineClient as never, {
+        agentId: 'agent-1',
+        userId: 'user-1',
+        goal: 'bounded replacement start',
+        model: 'rose-labs/rose-1-ultra',
+        reasoningMaxTokens: 2048,
+        verifier: { type: 'FLOAT_LLM_JUDGE' },
+        taskQueue: 'replacement-test-queue',
+      }),
+      /synthetic Temporal control deadline exceeded/
+    );
+    await assert.rejects(
+      terminateWorkflowChainWithDeadline(deadlineClient as never, {
+        workflowId: 'workflow-1',
+        firstExecutionRunId: 'run-1',
+      }),
+      /synthetic Temporal control deadline exceeded/
+    );
+
+    assert.strictEqual(deadlines.length, 3);
+    assert.strictEqual(operationsInvoked, 0);
+    for (const deadline of deadlines) {
+      assert(deadline >= startedAt + TEMPORAL_CONTROL_RPC_TIMEOUT_MS);
+      assert(deadline <= Date.now() + TEMPORAL_CONTROL_RPC_TIMEOUT_MS);
+    }
+  });
+
   await test('workflow replacement terminates, reconciles, then starts in strict order', async () => {
     const events: string[] = [];
     const workflowId = await replaceStaleWorkflow(
@@ -450,6 +583,43 @@ async function main(): Promise<void> {
 
     assert.strictEqual(workflowId.workflowId, 'workflow-2');
     assert.deepStrictEqual(events, ['capture', 'terminate', 'finalize', 'start']);
+  });
+
+  await test('a root snapshot captured before its claim is reused without a racy recapture', async () => {
+    const events: string[] = [];
+    const preTerminationSnapshot = [
+      {
+        toolCallId: 'tool-before-claim',
+        workflowGeneration: 'workflow-1',
+        metadata: { toolCallId: 'tool-before-claim' },
+      },
+    ];
+    await replaceStaleWorkflow(
+      {
+        agentId: 'agent-1',
+        staleExecution: { workflowId: 'workflow-1', firstExecutionRunId: 'run-1' },
+        staleWorkflowGeneration: 'workflow-1',
+        preTerminationSnapshot,
+      },
+      {
+        captureInProgressTools: async () => {
+          throw new Error('root tools must not be recaptured after the generation seal');
+        },
+        terminate: async () => {
+          events.push('terminate');
+        },
+        finalizeInterruptedTools: async (_agentId, _generation, snapshot) => {
+          events.push('finalize');
+          assert.deepStrictEqual(snapshot, preTerminationSnapshot);
+          return { candidates: 1, interrupted: 1 };
+        },
+        startFresh: async () => {
+          events.push('start');
+          return { workflowId: 'workflow-2', firstExecutionRunId: 'run-2' };
+        },
+      }
+    );
+    assert.deepStrictEqual(events, ['terminate', 'finalize', 'start']);
   });
 
   await test('replacement never reconciles or starts when termination fails', async () => {

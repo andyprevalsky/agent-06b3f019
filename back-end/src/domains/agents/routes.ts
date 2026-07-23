@@ -211,7 +211,16 @@ router.patch(
     try {
       const userId = req.isInternal === true ? undefined : req.userId;
       const body = updateAgentSchema.parse(req.body);
-      const result = await controlService.updateAgentConfig(req.params.id, body, userId);
+      const generation =
+        req.isInternal === true
+          ? (req.header('x-agent-workflow-generation') ?? req.params.id)
+          : undefined;
+      const result = await controlService.updateAgentConfig(
+        req.params.id,
+        body,
+        userId,
+        generation
+      );
       if ('error' in result) {
         const rb: Record<string, unknown> = { error: result.error };
         if ('current_cost_cents' in result) {

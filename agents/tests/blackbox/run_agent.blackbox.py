@@ -51,6 +51,7 @@ async def _run_single_iteration(
     response_model=None,
     on_tokens_override=None,
     check_paused_override=None,
+    check_aborted_override=None,
     gpt_token=None,
     gpt_account_id=None,
     iteration_offset=0,
@@ -182,6 +183,7 @@ async def _run_single_iteration(
             goal_text=goal_text,
             on_tokens=on_tokens_override,
             check_paused=check_paused_override,
+            check_aborted=check_aborted_override,
             gpt_token=gpt_token,
             gpt_account_id=gpt_account_id,
         )
@@ -205,6 +207,65 @@ async def test_iteration_offset_is_reported_with_each_billed_llm_turn():
 
     assert result["status"] == "max_iterations"
     assert reports[0]["iteration"] == 7
+
+
+async def test_terminal_abort_stops_before_any_llm_or_tool_work():
+    """A missing parent discovered by the pause check terminates the loop immediately."""
+    checks = []
+
+    async def refresh_parent_state():
+        checks.append("parent_state")
+        return False
+
+    async def check_aborted():
+        checks.append("aborted")
+        return True
+
+    result, posted, executed = await _run_single_iteration(
+        [{"tool": "web_search", "query": "must not run"}],
+        [("web_search", "tc-must-not-run", 1.0)],
+        max_iterations=100,
+        check_paused_override=refresh_parent_state,
+        check_aborted_override=check_aborted,
+    )
+
+    assert result["status"] == "aborted"
+    assert result["token_count"] == 0
+    assert checks == ["parent_state", "aborted"]
+    assert posted == []
+    assert executed == []
+
+
+async def test_out_of_credits_state_does_no_llm_or_tool_work():
+    """A deployment-restored credit pause remains cold until an explicit resume."""
+    from loop import run_agent as run_agent_module
+    from workflows.agent_workflow import AgentWorkflow
+
+    wf = AgentWorkflow()
+    wf._restore_deployment_state(
+        {
+            "version": 1,
+            "kind": "deployment",
+            "prior_status": "OUT_OF_CREDITS",
+        }
+    )
+
+    with (
+        patch.object(run_agent_module, "PAUSED_WAIT_FLOOR_SECONDS", 0.0),
+        patch.object(run_agent_module, "MAX_CONSECUTIVE_PAUSED_ITERATIONS", 1),
+        patch.object(run_agent_module.asyncio, "sleep", new=AsyncMock()),
+    ):
+        result, posted, executed = await _run_single_iteration(
+            [{"tool": "web_search", "query": "must remain cold"}],
+            [("web_search", "tc-credit-cold", 1.0)],
+            max_iterations=100,
+            check_paused_override=wf._check_paused,
+        )
+
+    assert result["status"] == "paused"
+    assert wf._has_credits is False
+    assert posted == []
+    assert executed == []
 
 
 async def test_tool_only_assistant_turn_persists_tool_calls():
@@ -1688,6 +1749,14 @@ async def run_all_tests():
     await r.record_async(
         "iteration_offset_reported_with_usage",
         test_iteration_offset_is_reported_with_each_billed_llm_turn,
+    )
+    await r.record_async(
+        "terminal_abort_stops_before_llm_or_tool_work",
+        test_terminal_abort_stops_before_any_llm_or_tool_work,
+    )
+    await r.record_async(
+        "out_of_credits_does_no_llm_or_tool_work",
+        test_out_of_credits_state_does_no_llm_or_tool_work,
     )
     await r.record_async(
         "tool_only_assistant_turn_persists_tool_calls", test_tool_only_assistant_turn_persists_tool_calls

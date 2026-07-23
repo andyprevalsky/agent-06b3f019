@@ -220,6 +220,11 @@ const UpdateStatusResponse = z.object({
   updated_at: DATE_LIKE,
 });
 
+const WorkflowReplacementBootstrapAckResponse = z.object({
+  acknowledged: z.literal(true),
+  already_acknowledged: z.boolean(),
+});
+
 const UpdateAgentResponse = z.object({
   agent: z.object({
     agent_id: z.string().uuid(),
@@ -1367,6 +1372,7 @@ test('PATCH /:id/status — happy path — schema validated', async () => {
       tokensOut: 2000,
       contextSize: 10000,
       messageCount: 20,
+      iterationOffset: 17,
     }),
   });
   assertStatus(res.status, 200, res.data);
@@ -1375,6 +1381,14 @@ test('PATCH /:id/status — happy path — schema validated', async () => {
   assert(body.progress === 1.0, `Expected progress 1.0, got ${body.progress}`);
   assert(body.token_count === 5000, `Expected token_count 5000, got ${body.token_count}`);
   assert(body.status_message === 'All done', `Expected "All done", got "${body.status_message}"`);
+  const stored = await prisma.agent.findUniqueOrThrow({
+    where: { id: agentId },
+    select: { workflowIterationOffset: true },
+  });
+  assert(
+    stored.workflowIterationOffset === 17,
+    `Expected workflow iteration offset 17, got ${stored.workflowIterationOffset}`
+  );
 
   await deleteTestAgent(agentId, session.user.id);
 });
@@ -1476,6 +1490,131 @@ test('PATCH /:id/status — read-after-write: status visible in detail', async (
   const body = assertSchema(GetAgentResponse, res.data, 'read-after-write status');
   assert(body.agent.status === 'FAILED', `Expected FAILED, got ${body.agent.status}`);
   assert(body.agent.status_message === 'Something broke', 'Status message mismatch');
+
+  await deleteTestAgent(agentId, session.user.id);
+});
+
+// ================= POST /:id/workflow-replacement/bootstrap-ack ===========
+
+test('POST bootstrap-ack — no auth → 401', async () => {
+  const res = await request(
+    `${BASE_URL}/api/agents/${FAKE_UUID}/workflow-replacement/bootstrap-ack`,
+    {
+      method: 'POST',
+      headers: { 'X-Agent-Workflow-Generation': `${FAKE_UUID}:candidate` },
+    }
+  );
+  assertStatus(res.status, 401, res.data);
+});
+
+test('POST bootstrap-ack — user auth cannot consume internal recovery state → 403', async () => {
+  const session = await createAnonymousSession('bootstrap-ack-user-auth');
+  const res = await request(
+    `${BASE_URL}/api/agents/${FAKE_UUID}/workflow-replacement/bootstrap-ack`,
+    {
+      method: 'POST',
+      headers: {
+        ...authHeaders(session.session.access_token),
+        'X-Agent-Workflow-Generation': `${FAKE_UUID}:candidate`,
+      },
+    }
+  );
+  assertStatus(res.status, 403, res.data);
+});
+
+test('POST bootstrap-ack — internal auth requires workflow generation → 400', async () => {
+  const res = await request(
+    `${BASE_URL}/api/agents/${FAKE_UUID}/workflow-replacement/bootstrap-ack`,
+    {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+    }
+  );
+  assertStatus(res.status, 400, res.data);
+});
+
+test('POST bootstrap-ack — generation fenced, durable, and idempotent', async () => {
+  const session = await createAnonymousSession('bootstrap-ack');
+  const agentId = await createTestAgent(session.user.id, 'Bootstrap acknowledgement test');
+  const candidateGeneration = `${agentId}:replacement:${randomUUID()}`;
+  const replacementToken = randomUUID();
+  await prisma.agent.update({
+    where: { id: agentId },
+    data: {
+      temporalWorkflowId: candidateGeneration,
+      temporalFirstExecutionRunId: 'candidate-run',
+      workflowReplacementToken: replacementToken,
+      workflowReplacementState: {
+        version: 1,
+        kind: 'deployment',
+      },
+      staleTemporalWorkflowId: `${agentId}:stale`,
+      staleTemporalFirstExecutionRunId: 'stale-run',
+    },
+  });
+
+  const staleRes = await request(
+    `${BASE_URL}/api/agents/${agentId}/workflow-replacement/bootstrap-ack`,
+    {
+      method: 'POST',
+      headers: {
+        ...apiKeyHeaders(),
+        'X-Agent-Workflow-Generation': `${agentId}:stale`,
+      },
+    }
+  );
+  assertStatus(staleRes.status, 409, staleRes.data);
+  let stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+  assert(
+    stored.workflowReplacementToken === replacementToken,
+    'Stale generation consumed replacement token'
+  );
+  assert(stored.workflowReplacementState !== null, 'Stale generation consumed replacement state');
+
+  const ackRes = await request(
+    `${BASE_URL}/api/agents/${agentId}/workflow-replacement/bootstrap-ack`,
+    {
+      method: 'POST',
+      headers: {
+        ...apiKeyHeaders(),
+        'X-Agent-Workflow-Generation': candidateGeneration,
+      },
+    }
+  );
+  assertStatus(ackRes.status, 200, ackRes.data);
+  const ack = assertSchema(
+    WorkflowReplacementBootstrapAckResponse,
+    ackRes.data,
+    'POST bootstrap-ack'
+  );
+  assert(ack.already_acknowledged === false, 'First acknowledgement reported as duplicate');
+
+  stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+  assert(stored.workflowReplacementToken === null, 'Acknowledgement retained replacement token');
+  assert(stored.workflowReplacementState === null, 'Acknowledgement retained replacement state');
+  assert(stored.staleTemporalWorkflowId === null, 'Acknowledgement retained stale workflow ID');
+  assert(
+    stored.staleTemporalFirstExecutionRunId === null,
+    'Acknowledgement retained stale workflow run ID'
+  );
+
+  const repeatedRes = await request(
+    `${BASE_URL}/api/agents/${agentId}/workflow-replacement/bootstrap-ack`,
+    {
+      method: 'POST',
+      headers: {
+        ...apiKeyHeaders(),
+        'X-Agent-Workflow-Generation': candidateGeneration,
+      },
+    }
+  );
+  assertStatus(repeatedRes.status, 200, repeatedRes.data);
+  const repeated = assertSchema(
+    WorkflowReplacementBootstrapAckResponse,
+    repeatedRes.data,
+    'POST bootstrap-ack repeated'
+  );
+  assert(repeated.already_acknowledged === true, 'Repeated acknowledgement was not idempotent');
 
   await deleteTestAgent(agentId, session.user.id);
 });

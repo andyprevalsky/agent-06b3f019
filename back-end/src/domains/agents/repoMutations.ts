@@ -146,28 +146,6 @@ export async function createAgentTransaction(params: {
   });
 }
 
-/** Update worker-owned fields only while the producing workflow is still current. */
-export async function updateAgentForWorkflow(
-  agentId: string,
-  workflowGeneration: string,
-  data: Prisma.AgentUpdateManyMutationInput
-) {
-  const workflowMatches: Prisma.AgentWhereInput[] = [{ temporalWorkflowId: workflowGeneration }];
-  // A brand-new legacy workflow uses agentId as its Workflow ID and can report
-  // STARTING_UP before the creator stores that ID. Replacement generations are
-  // preclaimed, so they must never use this null compatibility path.
-  if (workflowGeneration === agentId) workflowMatches.push({ temporalWorkflowId: null });
-  const result = await prisma.agent.updateMany({
-    where: {
-      id: agentId,
-      deletedAt: null,
-      OR: workflowMatches,
-    },
-    data,
-  });
-  return result.count === 1;
-}
-
 export interface BatchCreateAgentParams {
   agentId: string;
   userId: string;

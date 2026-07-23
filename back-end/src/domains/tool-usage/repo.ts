@@ -3,7 +3,8 @@
  */
 
 import type { Prisma } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
+import { lockAgentWorkflowGeneration } from '../../providers/workflowGeneration';
 
 /**
  * Find an agent by ID, returning only id and userId.
@@ -15,24 +16,54 @@ export async function findAgentById(agentId: string) {
   });
 }
 
-/**
- * Create a tool usage record.
- */
-export async function createToolUsage(params: {
+/** Create usage only for the workflow generation that still owns the agent. */
+export async function createToolUsageForWorkflow(params: {
   userId: string;
   agentId: string;
+  workflowGeneration: string | undefined;
   toolName: string;
   totalCostCents: number;
   usageItems: Prisma.InputJsonValue;
+  maxLlmIteration: number | null;
 }) {
-  return prisma.toolUsage.create({
-    data: {
-      userId: params.userId,
-      agentId: params.agentId,
-      toolName: params.toolName,
-      totalCostCents: params.totalCostCents,
-      usageItems: params.usageItems,
-    },
+  return runTransactionWithRetry(async (tx) => {
+    await lockAgentWorkflowGeneration(tx, params.agentId);
+    const agent = await tx.agent.findUnique({
+      where: { id: params.agentId },
+      select: {
+        id: true,
+        userId: true,
+        temporalWorkflowId: true,
+      },
+    });
+    if (agent === null) return { status: 'agent_not_found' as const };
+    if (agent.userId !== params.userId) return { status: 'ownership_mismatch' as const };
+
+    const generationMatches =
+      params.workflowGeneration !== undefined &&
+      (agent.temporalWorkflowId === params.workflowGeneration ||
+        (params.workflowGeneration === params.agentId && agent.temporalWorkflowId === null));
+    if (!generationMatches) return { status: 'stale_generation' as const };
+
+    const toolUsage = await tx.toolUsage.create({
+      data: {
+        userId: params.userId,
+        agentId: params.agentId,
+        toolName: params.toolName,
+        totalCostCents: params.totalCostCents,
+        usageItems: params.usageItems,
+      },
+    });
+    if (params.maxLlmIteration !== null) {
+      await tx.agent.updateMany({
+        where: {
+          id: params.agentId,
+          workflowIterationOffset: { lt: params.maxLlmIteration },
+        },
+        data: { workflowIterationOffset: params.maxLlmIteration },
+      });
+    }
+    return { status: 'created' as const, toolUsage };
   });
 }
 

@@ -8,7 +8,7 @@ import * as repo from './repo';
 
 const log = createLogger('Agents');
 const TERMINAL_STATUSES = new Set(['COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED']);
-const IRREVERSIBLE_STATUSES = new Set(TERMINAL_STATUSES);
+const IRREVERSIBLE_STATUSES = new Set(['COMPLETED', 'FAILED']);
 const NON_TERMINAL_STATUSES = new Set(['STARTING_UP', 'ACTIVE', 'PAUSED']);
 
 interface UpdateAgentStatusDependencies {
@@ -50,6 +50,9 @@ function statusUpdate(body: UpdateStatusBody): Prisma.AgentUpdateManyMutationInp
     tokensOut: body.tokensOut,
     contextSize: body.contextSize,
     messageCount: body.messageCount,
+    ...(body.iterationOffset !== undefined && {
+      workflowIterationOffset: body.iterationOffset,
+    }),
     ...(body.structuredResponse !== undefined && {
       structuredResponse: body.structuredResponse as Prisma.InputJsonValue,
     }),
@@ -124,7 +127,7 @@ export async function updateAgentStatus(
   const firstRootTerminal =
     TERMINAL_STATUSES.has(body.status) &&
     before.parentAgentId === null &&
-    !IRREVERSIBLE_STATUSES.has(before.status);
+    !TERMINAL_STATUSES.has(before.status);
   if (firstRootTerminal) await runTerminalAgentCleanup(agentId, body.status, dependencies);
   return result.agent;
 }

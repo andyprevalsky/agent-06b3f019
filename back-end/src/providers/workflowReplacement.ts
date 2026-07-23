@@ -1,6 +1,10 @@
 import type { InterruptedWorkflowToolsResult, ToolProgressCandidate } from './staleWorkflowTools';
-import { WorkflowNotFoundError } from '@temporalio/client';
-import { getTemporalClient, type TemporalWorkflowExecutionRef } from './temporal';
+import { type Client, WorkflowNotFoundError } from '@temporalio/client';
+import {
+  getTemporalClient,
+  type TemporalWorkflowExecutionRef,
+  withTemporalControlDeadline,
+} from './temporal';
 import { createLogger } from './logger';
 
 const log = createLogger('WorkflowReplacement');
@@ -24,13 +28,26 @@ export async function terminateWorkflowChain(
     .terminate('Restarting with new worker code');
 }
 
+export async function terminateWorkflowChainWithDeadline(
+  client: Pick<Client, 'withDeadline'> & { workflow: WorkflowTerminationClient },
+  execution: TemporalWorkflowExecutionRef,
+  deadlineAtMs?: number
+): Promise<void> {
+  await withTemporalControlDeadline(
+    client,
+    () => terminateWorkflowChain(client.workflow, execution),
+    deadlineAtMs
+  );
+}
+
 export async function terminateStaleTemporalWorkflow(
   execution: TemporalWorkflowExecutionRef,
-  agentId: string
+  agentId: string,
+  deadlineAtMs?: number
 ): Promise<void> {
   const client = await getTemporalClient();
   try {
-    await terminateWorkflowChain(client.workflow, execution);
+    await terminateWorkflowChainWithDeadline(client, execution, deadlineAtMs);
     log.info('Terminated stale workflow for replacement', {
       agent_id: agentId,
       workflow_id: execution.workflowId,
@@ -63,20 +80,22 @@ export interface ReplaceStaleWorkflowDependencies {
   startFresh: () => Promise<TemporalWorkflowExecutionRef>;
 }
 
-/** Strictly order shutdown, durable tool reconciliation, and fresh execution. */
-export async function replaceStaleWorkflow(
+export type SealStaleWorkflowDependencies = Omit<ReplaceStaleWorkflowDependencies, 'startFresh'>;
+
+/** Strictly order shutdown and durable tool reconciliation without starting new code. */
+export async function sealStaleWorkflow(
   params: {
     agentId: string;
     staleExecution: TemporalWorkflowExecutionRef | null;
     staleWorkflowGeneration: string | null;
+    preTerminationSnapshot?: ToolProgressCandidate[];
   },
-  dependencies: ReplaceStaleWorkflowDependencies
-): Promise<TemporalWorkflowExecutionRef> {
+  dependencies: SealStaleWorkflowDependencies
+): Promise<void> {
   if (params.staleWorkflowGeneration !== null) {
-    const preTerminationSnapshot = await dependencies.captureInProgressTools(
-      params.agentId,
-      params.staleWorkflowGeneration
-    );
+    const preTerminationSnapshot =
+      params.preTerminationSnapshot ??
+      (await dependencies.captureInProgressTools(params.agentId, params.staleWorkflowGeneration));
     if (params.staleExecution !== null) {
       await dependencies.terminate(params.staleExecution);
     }
@@ -86,5 +105,18 @@ export async function replaceStaleWorkflow(
       preTerminationSnapshot
     );
   }
+}
+
+/** Strictly order shutdown, durable tool reconciliation, and fresh execution. */
+export async function replaceStaleWorkflow(
+  params: {
+    agentId: string;
+    staleExecution: TemporalWorkflowExecutionRef | null;
+    staleWorkflowGeneration: string | null;
+    preTerminationSnapshot?: ToolProgressCandidate[];
+  },
+  dependencies: ReplaceStaleWorkflowDependencies
+): Promise<TemporalWorkflowExecutionRef> {
+  await sealStaleWorkflow(params, dependencies);
   return dependencies.startFresh();
 }

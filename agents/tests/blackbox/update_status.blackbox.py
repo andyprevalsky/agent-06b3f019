@@ -148,4 +148,4 @@ async def run_all_tests():
 
 
 if __name__ == "__main__":
-    asyncio.run(run_all_tests())
+    raise SystemExit(0 if asyncio.run(run_all_tests()) else 1)

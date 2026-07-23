@@ -29,6 +29,7 @@ with workflow.unsafe.imports_passed_through():
     from helpers import (
         check_user_usage,
         fetch_agent_config,
+        finalize_workflow_replacement_bootstrap,
         generate_completion_summary,
         get_model_context_window,
         get_user_context,
@@ -191,10 +192,9 @@ class AgentWorkflow:
         self.context_size: int = 0  # Current context window usage (from last LLM call)
         self.is_paused: bool = False
         self._paused_by_parent: bool = False  # Track if pause was inherited from parent
-        # Orphan detection: a child that inherited a pause from its parent only
-        # unpauses when the parent reports running. If the parent terminates, that
-        # never happens and the child pauses forever (busy-spin livelock). These
-        # let the child detect a gone parent and abort instead of waiting on it.
+        # Orphan detection: every child must stop once Temporal confirms that its
+        # parent chain is gone. Otherwise an active child can keep spending after a
+        # deployment replaces the root, then signal a workflow that no longer exists.
         self._orphaned: bool = False
         self._parent_query_failures_while_paused: int = 0
         self._has_new_messages: bool = False
@@ -307,12 +307,25 @@ class AgentWorkflow:
         self._resume_progress: float = 0.0
         self.iteration_offset: int = 0
 
+    @staticmethod
+    def _serialized_datetime(value: Optional[datetime]) -> Optional[str]:
+        return value.isoformat() if isinstance(value, datetime) else None
+
+    @staticmethod
+    def _restored_datetime(value: Any) -> Optional[datetime]:
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
     def _restore_deployment_state(self, state: Optional[Dict]) -> None:
-        """Restore the durable counters and pause flags captured at a deploy cutover."""
+        """Restore durable deployment or continue-as-new workflow state."""
         if not state:
             return
-        if state.get("version") != 1 or state.get("kind") != "deployment":
-            raise ValueError("Unsupported deployment resume state")
+        if state.get("version") != 1 or state.get("kind") not in {"deployment", "continuation"}:
+            raise ValueError("Unsupported workflow resume state")
 
         def _number(name: str, default: float = 0) -> float:
             value = state.get(name, default)
@@ -345,6 +358,9 @@ class AgentWorkflow:
         self.children_cost_cents = _number_map("children_cost_cents")
         self.children_tokens_in = {key: int(value) for key, value in _number_map("children_tokens_in").items()}
         self.children_tokens_out = {key: int(value) for key, value in _number_map("children_tokens_out").items()}
+        self.child_tool_counts = {
+            key: int(value) for key, value in _number_map("child_tool_counts").items() if value >= 0
+        }
         child_last_tokens = state.get("child_last_tokens")
         if isinstance(child_last_tokens, dict):
             for child_id, child_tokens in child_last_tokens.items():
@@ -363,7 +379,273 @@ class AgentWorkflow:
                 str(key): value for key, value in state["context_gates"].items() if isinstance(value, bool)
             }
         self._cost_limit_reached = self._resume_prior_status == "COST_LIMIT_REACHED"
-        self.is_paused = self._resume_prior_status in {"PAUSED", "COST_LIMIT_REACHED"}
+        if self._resume_prior_status == "OUT_OF_CREDITS":
+            self._has_credits = False
+        self.is_paused = self._resume_prior_status in {"PAUSED", "COST_LIMIT_REACHED", "OUT_OF_CREDITS"}
+
+        runtime = state.get("runtime_state")
+        if not isinstance(runtime, dict):
+            return
+
+        self.last_message_check = self._restored_datetime(runtime.get("last_message_check"))
+        self._paused_by_parent = runtime.get("paused_by_parent") is True
+        self._orphaned = runtime.get("orphaned") is True
+        self._parent_query_failures_while_paused = int(runtime.get("parent_query_failures", 0))
+        self._has_new_messages = runtime.get("has_new_messages") is True
+        self._last_signal_response = (
+            runtime.get("last_signal_response") if isinstance(runtime.get("last_signal_response"), str) else None
+        )
+        if isinstance(runtime.get("signal_responses"), dict):
+            self._signal_responses = dict(runtime["signal_responses"])
+        if isinstance(runtime.get("response_schema_feedback"), list):
+            self._response_schema_feedback = [
+                value for value in runtime["response_schema_feedback"] if isinstance(value, str)
+            ]
+        self._response_schema_revision = int(runtime.get("response_schema_revision", 0))
+        self._response_schema_applied_revision = int(runtime.get("response_schema_applied_revision", 0))
+        self._response_schema_initialized = runtime.get("response_schema_initialized") is True
+        self._response_schema_refresh_failed_revision = int(runtime.get("response_schema_refresh_failed_revision", 0))
+        self._response_schema_refresh_error = (
+            runtime.get("response_schema_refresh_error")
+            if isinstance(runtime.get("response_schema_refresh_error"), str)
+            else None
+        )
+        if isinstance(runtime.get("response_schema_internal_signal_keys"), list):
+            self._response_schema_internal_signal_keys = {
+                value for value in runtime["response_schema_internal_signal_keys"] if isinstance(value, str)
+            }
+        if isinstance(runtime.get("system_prompt_output_schema"), dict):
+            self._system_prompt_output_schema = runtime["system_prompt_output_schema"]
+        self._has_credits = runtime.get("has_credits", self._has_credits) is True
+        self._last_credit_check = int(runtime.get("last_credit_check", 0))
+        self.write_lock_enabled = runtime.get("write_lock_enabled", True) is True
+        self._signup_completed = runtime.get("signup_completed") is True
+        self._signup_dismissed = runtime.get("signup_dismissed") is True
+        if isinstance(runtime.get("context"), list):
+            self.context = list(runtime["context"])
+        self._cloud_agent_lifecycle_tool_call_id = (
+            runtime.get("cloud_agent_lifecycle_tool_call_id")
+            if isinstance(runtime.get("cloud_agent_lifecycle_tool_call_id"), str)
+            else None
+        )
+        self._cloud_agent_lifecycle_start_phase = (
+            runtime.get("cloud_agent_lifecycle_start_phase")
+            if isinstance(runtime.get("cloud_agent_lifecycle_start_phase"), str)
+            else None
+        )
+        if isinstance(runtime.get("cloud_agent_lifecycle_updates_sent"), list):
+            self._cloud_agent_lifecycle_updates_sent = {
+                value for value in runtime["cloud_agent_lifecycle_updates_sent"] if isinstance(value, str)
+            }
+        self._cloud_agent_lifecycle_finished = runtime.get("cloud_agent_lifecycle_finished") is True
+        if isinstance(runtime.get("pending_children"), list):
+            self.pending_children = {value for value in runtime["pending_children"] if isinstance(value, str)}
+        for field_name in (
+            "child_tool_ids",
+            "child_results",
+            "child_workflow_ids",
+        ):
+            value = runtime.get(field_name)
+            if isinstance(value, dict):
+                setattr(self, field_name, dict(value))
+        runtime_child_tool_counts = runtime.get("child_tool_counts")
+        if isinstance(runtime_child_tool_counts, dict):
+            self.child_tool_counts.update(
+                {
+                    str(key): int(value)
+                    for key, value in runtime_child_tool_counts.items()
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
+                }
+            )
+        if isinstance(runtime.get("tools_in_use"), list):
+            self.tools_in_use = {value for value in runtime["tools_in_use"] if isinstance(value, str)}
+        if isinstance(runtime.get("output_schema"), dict):
+            self.output_schema = runtime["output_schema"]
+        self.start_time = self._restored_datetime(runtime.get("start_time"))
+        self._last_tree_cost_emit_at = self._restored_datetime(runtime.get("last_tree_cost_emit_at"))
+        self.compute_token_provider = (
+            runtime.get("compute_token_provider")
+            if runtime.get("compute_token_provider") in {"claude", "gpt"}
+            else None
+        )
+        for field_name in (
+            "claude_max_token",
+            "claude_max_token_source",
+            "claude_max_token_pool_id",
+            "gpt_code_token",
+            "gpt_code_account_id",
+            "gpt_code_token_source",
+            "gpt_code_token_pool_id",
+            "compute_token_lineage_key",
+            "compute_token_fast_cache_affinity_key",
+            "actual_model",
+            "system_name",
+            "custom_system_prompt",
+            "agent_source",
+            "user_context_section",
+            "fast_cache_goal",
+        ):
+            value = runtime.get(field_name)
+            if isinstance(value, str):
+                setattr(self, field_name, value)
+        self.claude_max_token_fetched_at = self._restored_datetime(runtime.get("claude_max_token_fetched_at"))
+        self.compute_token_fetched_at = self._restored_datetime(runtime.get("compute_token_fetched_at"))
+        if isinstance(runtime.get("model_pricing_cache"), dict):
+            self.model_pricing_cache = dict(runtime["model_pricing_cache"])
+        actual_input_price = runtime.get("input_cents_per_1k")
+        if isinstance(actual_input_price, (int, float)) and not isinstance(actual_input_price, bool):
+            self.input_cents_per_1k = float(actual_input_price)
+        actual_output_price = runtime.get("output_cents_per_1k")
+        if isinstance(actual_output_price, (int, float)) and not isinstance(actual_output_price, bool):
+            self.output_cents_per_1k = float(actual_output_price)
+
+    def _apply_deployment_control_state(self, agent_config: Dict[str, Any]) -> None:
+        """Let a pause/resume/limit update that raced cutover win from the DB."""
+        status = agent_config.get("status")
+        if status == "PAUSED":
+            self._resume_prior_status = "PAUSED"
+            self.is_paused = True
+            self._cost_limit_reached = False
+        elif status == "COST_LIMIT_REACHED":
+            self._resume_prior_status = "COST_LIMIT_REACHED"
+            self.is_paused = True
+            self._cost_limit_reached = True
+        elif status == "OUT_OF_CREDITS":
+            self._resume_prior_status = "OUT_OF_CREDITS"
+            self.is_paused = True
+            self._has_credits = False
+        elif status == "ACTIVE":
+            self._resume_prior_status = "ACTIVE"
+            self.is_paused = False
+            self._cost_limit_reached = False
+            self._has_credits = True
+        price_limit = agent_config.get("price_limit_cents")
+        if isinstance(price_limit, int) and not isinstance(price_limit, bool) and price_limit > 0:
+            self.price_limit_cents = price_limit
+
+    def _continuation_resume_state(self, context: Optional[List[Dict]]) -> Dict[str, Any]:
+        """Snapshot every mutable value needed after a continue-as-new boundary."""
+        if self._cost_limit_reached:
+            prior_status = "COST_LIMIT_REACHED"
+        elif not self._has_credits:
+            prior_status = "OUT_OF_CREDITS"
+        elif self.is_paused:
+            prior_status = "PAUSED"
+        else:
+            prior_status = "ACTIVE"
+
+        return {
+            "version": 1,
+            "kind": "continuation",
+            "prior_status": prior_status,
+            "prior_status_message": self._resume_status_message,
+            "progress": self._resume_progress,
+            "token_count": self.token_count,
+            "tokens_in": self.tokens_in,
+            "tokens_out": self.tokens_out,
+            "tree_tokens_in": self.tree_tokens_in,
+            "tree_tokens_out": self.tree_tokens_out,
+            "context_size": self.context_size,
+            "message_count": self.message_count,
+            "own_cost_cents": self.own_cost_cents,
+            "subtree_cost_cents": self.subtree_cost_cents,
+            "children_cost_cents": dict(self.children_cost_cents),
+            "children_tokens_in": dict(self.children_tokens_in),
+            "children_tokens_out": dict(self.children_tokens_out),
+            "child_last_tokens": dict(self.child_last_tokens),
+            "iteration_offset": self.iteration_offset,
+            "max_iterations": self.max_iterations,
+            "context_gates": dict(self.context_gates),
+            "runtime_state": {
+                "last_message_check": self._serialized_datetime(self.last_message_check),
+                "paused_by_parent": self._paused_by_parent,
+                "orphaned": self._orphaned,
+                "parent_query_failures": self._parent_query_failures_while_paused,
+                "has_new_messages": self._has_new_messages,
+                "last_signal_response": self._last_signal_response,
+                "signal_responses": dict(self._signal_responses),
+                "response_schema_feedback": list(self._response_schema_feedback),
+                "response_schema_revision": self._response_schema_revision,
+                "response_schema_applied_revision": self._response_schema_applied_revision,
+                "response_schema_initialized": self._response_schema_initialized,
+                "response_schema_refresh_failed_revision": (self._response_schema_refresh_failed_revision),
+                "response_schema_refresh_error": self._response_schema_refresh_error,
+                "response_schema_internal_signal_keys": sorted(self._response_schema_internal_signal_keys),
+                "system_prompt_output_schema": self._system_prompt_output_schema,
+                "has_credits": self._has_credits,
+                "last_credit_check": self._last_credit_check,
+                "write_lock_enabled": self.write_lock_enabled,
+                "signup_completed": self._signup_completed,
+                "signup_dismissed": self._signup_dismissed,
+                "context": list(context or self.context),
+                "cloud_agent_lifecycle_tool_call_id": self._cloud_agent_lifecycle_tool_call_id,
+                "cloud_agent_lifecycle_start_phase": self._cloud_agent_lifecycle_start_phase,
+                "cloud_agent_lifecycle_updates_sent": sorted(self._cloud_agent_lifecycle_updates_sent),
+                "cloud_agent_lifecycle_finished": self._cloud_agent_lifecycle_finished,
+                "pending_children": sorted(self.pending_children),
+                "child_tool_ids": dict(self.child_tool_ids),
+                "child_tool_counts": dict(self.child_tool_counts),
+                "child_results": dict(self.child_results),
+                "child_workflow_ids": dict(self.child_workflow_ids),
+                "tools_in_use": sorted(self.tools_in_use),
+                "output_schema": self.output_schema,
+                "start_time": self._serialized_datetime(self.start_time),
+                "last_tree_cost_emit_at": self._serialized_datetime(self._last_tree_cost_emit_at),
+                "compute_token_provider": self.compute_token_provider,
+                "claude_max_token": self.claude_max_token,
+                "claude_max_token_fetched_at": self._serialized_datetime(self.claude_max_token_fetched_at),
+                "claude_max_token_source": self.claude_max_token_source,
+                "claude_max_token_pool_id": self.claude_max_token_pool_id,
+                "gpt_code_token": self.gpt_code_token,
+                "gpt_code_account_id": self.gpt_code_account_id,
+                "gpt_code_token_source": self.gpt_code_token_source,
+                "gpt_code_token_pool_id": self.gpt_code_token_pool_id,
+                "compute_token_lineage_key": self.compute_token_lineage_key,
+                "compute_token_fast_cache_affinity_key": (self.compute_token_fast_cache_affinity_key),
+                "compute_token_fetched_at": self._serialized_datetime(self.compute_token_fetched_at),
+                "input_cents_per_1k": self.input_cents_per_1k,
+                "output_cents_per_1k": self.output_cents_per_1k,
+                "model_pricing_cache": dict(self.model_pricing_cache),
+                "actual_model": self.actual_model,
+                "system_name": self.system_name,
+                "custom_system_prompt": self.custom_system_prompt,
+                "agent_source": self.agent_source,
+                "user_context_section": getattr(self, "user_context_section", ""),
+                "fast_cache_goal": self.fast_cache_goal,
+            },
+        }
+
+    def _continuation_args(self, context: Optional[List[Dict]]) -> List[Any]:
+        """Build the single canonical execute continuation argument contract."""
+        return [
+            self.agent_id,
+            self.user_id,
+            self.goal,
+            self.model,
+            self.reasoning_max_tokens,
+            self.verifier,
+            context,
+            self.parent_workflow_id,
+            self.parent_agent_id,
+            self.depth,
+            self.bus_id,
+            "execute_continued",
+            self.max_iterations,
+            self.price_limit_cents,
+            self.context_gates or None,
+            self.fast_mode_cache_enabled,
+            self._continuation_resume_state(context),
+        ]
+
+    def _iteration_resume_kwargs(self) -> Dict[str, int]:
+        """Keep iteration/cache history across replacement and continuation runs."""
+        values = {
+            "iteration_offset": self.iteration_offset,
+            "fast_cache_position_offset": self.iteration_offset,
+        }
+        if self.max_iterations is not None:
+            values["max_iterations"] = self.max_iterations
+        return values
 
     # =========================================================================
     # SIGNALS
@@ -392,6 +674,18 @@ class AgentWorkflow:
             if state.get("is_cost_limit_reached") or state.get("is_paused"):
                 workflow.logger.warning("Cannot resume — parent is still paused/cost-limited")
                 return
+        if not self._has_credits:
+            credit_state = await workflow.execute_activity(
+                check_user_usage,
+                args=[self.user_id],
+                start_to_close_timeout=timedelta(seconds=15),
+                retry_policy=RetryPolicy(maximum_attempts=2),
+            )
+            if not credit_state or credit_state.get("has_credits") is not True:
+                workflow.logger.warning("Cannot resume — user still has no credits")
+                self.is_paused = True
+                return
+            self._has_credits = True
         workflow.logger.info("🟢 Received RESUME signal")
         self.is_paused = False
         self._paused_by_parent = False
@@ -653,7 +947,7 @@ class AgentWorkflow:
         price_limit_cents: int = 100,  # Price limit in cents (default $1.00)
         context_gates: Optional[Dict[str, bool]] = None,  # Control which user context sections to include
         fast_mode_cache_enabled: bool = False,  # Fast Mode aggressive cache (own flag, NOT a context gate)
-        resume_state: Optional[Dict] = None,  # Deployment replacement bootstrap (never used by continue-as-new)
+        resume_state: Optional[Dict] = None,  # Deployment or continue-as-new durable runtime state
     ) -> Dict:
         """Execute agent task: optionally PLAN phase → EXECUTE phase."""
         # Bind agent_id to structlog context so ALL downstream structlog calls
@@ -678,12 +972,56 @@ class AgentWorkflow:
         self.fast_mode_cache_enabled = fast_mode_cache_enabled  # Record/replay third-party responses
         self.max_iterations = max_iterations
         self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
-        self._restore_deployment_state(resume_state)
-        self.start_time = workflow.now()  # Track start time for duration calculation
         self.compute_token_lineage_key = f"agent:{agent_id}"
         self.compute_token_fast_cache_affinity_key = (
             _fast_cache_compute_affinity_key(user_id, goal) if fast_mode_cache_enabled else None
         )
+        self._restore_deployment_state(resume_state)
+        if isinstance(context, list):
+            self.context = list(context)
+        if self.start_time is None:
+            self.start_time = workflow.now()  # Track duration across continue-as-new boundaries
+        is_deployment_bootstrap = bool(resume_state and resume_state.get("kind") == "deployment")
+        if is_deployment_bootstrap:
+            # The replacement was reserved before Temporal start. A user can
+            # pause/resume or raise the cost limit in that gap, so reconcile the
+            # serialized DB winner before acknowledging/restoring status.
+            deployment_control = await workflow.execute_activity(
+                fetch_agent_config,
+                args=[agent_id],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=6),
+            )
+            self._apply_deployment_control_state(deployment_control)
+            # Publish restored durable state and only then consume the replacement
+            # claim. The migration gate treats a cleared claim as READY, so this
+            # single retry-safe activity cannot acknowledge a half-restored agent.
+            bootstrap_status = self._resume_prior_status if self.is_paused else "ACTIVE"
+            await workflow.execute_activity(
+                finalize_workflow_replacement_bootstrap,
+                args=[
+                    agent_id,
+                    bootstrap_status,
+                    self._resume_progress,
+                    self._resume_status_message or "Resumed after code update",
+                    self.token_count,
+                    self.context_size,
+                    self.message_count,
+                    self.tree_tokens_in,
+                    self.tree_tokens_out,
+                    self.iteration_offset,
+                ],
+                start_to_close_timeout=timedelta(seconds=30),
+                retry_policy=RetryPolicy(maximum_attempts=6),
+            )
+            if self.is_paused:
+                # Deployment-restored cold states must not enter run_agent's
+                # bounded pause polling before reaching a durable wait. Consume no
+                # workflow timers or activities until a valid signal unpauses us.
+                await workflow.wait_condition(lambda: not self.is_paused)
+                await self._wait_for_response_schema_refresh()
+                workflow.continue_as_new(args=self._continuation_args(context))
+                return {"status": "paused", "goal": goal}
 
         workflow.logger.info(f"Agent starting: agent={agent_id}, goal='{goal[:50]}', depth={depth}")
 
@@ -751,6 +1089,8 @@ class AgentWorkflow:
                     self.message_count,
                     self.tree_tokens_in,
                     self.tree_tokens_out,
+                    None,
+                    self.iteration_offset,
                 ],
                 start_to_close_timeout=timedelta(seconds=15),
                 retry_policy=RetryPolicy(maximum_attempts=3),
@@ -815,7 +1155,7 @@ class AgentWorkflow:
                 workflow.logger.warning(f"Failed to send agent_started SMS notification: {e}")
 
         # Fetch user context once (for both phases), respecting context_gates
-        user_context_section = ""
+        user_context_section = getattr(self, "user_context_section", "")
 
         # Helper: gate is open unless explicitly set to False
         def _gate_open(name: str) -> bool:
@@ -886,7 +1226,7 @@ class AgentWorkflow:
                 workflow.logger.warning(f"Failed to inject custom system prompt: {e}")
 
         # Fetch response schema and write_lock_enabled from agent config
-        response_schema = None
+        response_schema = self.output_schema
         fetched_parent_agent_id = None
         try:
             agent_config = await workflow.execute_activity(
@@ -895,7 +1235,7 @@ class AgentWorkflow:
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),
             )
-            response_schema = agent_config.get("response_schema")
+            response_schema = agent_config.get("response_schema") or response_schema
             fetched_parent_agent_id = agent_config.get("parent_agent_id")
             self.output_schema = response_schema  # Single source of truth for output schema
             self.write_lock_enabled = agent_config.get("write_lock_enabled", True)  # Default to True (locked)
@@ -962,16 +1302,14 @@ class AgentWorkflow:
         # If sub-agent, check parent's pause/cost-limit state before starting work
         # (covers race condition where signal arrived after spawn but before we're ready)
         if self.parent_workflow_id:
-            state = await self._query_parent_state()
-            if state.get("is_paused"):
-                workflow.logger.info("Parent is paused - inheriting pause state")
-                self.is_paused = True
-                self._paused_by_parent = True
-            if state.get("is_cost_limit_reached"):
-                workflow.logger.info("Parent hit cost limit - inheriting cost limit state")
-                self._cost_limit_reached = True
-                self.is_paused = True
-                self._paused_by_parent = True
+            await self._check_parent_state()
+            if self._orphaned:
+                await self._mark_failed(
+                    context=context or [],
+                    reason="orphaned",
+                    message="Parent agent ended; orphaned sub-agent stopped.",
+                )
+                return {"status": "failed", "reason": "orphaned", "goal": self.goal}
 
         # =====================================================================
         # Tool lists from centralized source of truth
@@ -1029,6 +1367,7 @@ class AgentWorkflow:
                 tools=plan_tools,
                 is_inside_temporal_activity=False,
                 check_paused=self._check_paused,
+                check_aborted=self._check_orphaned,
                 wait_for_messages=self._wait_for_messages,
                 on_context_overflow=self._handle_context_overflow,
                 check_credits=self._check_credits,
@@ -1208,6 +1547,7 @@ class AgentWorkflow:
             initial_context=None,  # Don't pass - run_agent polls from DB
             is_inside_temporal_activity=False,
             check_paused=self._check_paused,
+            check_aborted=self._check_orphaned,
             wait_for_messages=self._wait_for_messages,
             on_context_overflow=self._handle_context_overflow,
             check_credits=self._check_credits,
@@ -1236,9 +1576,7 @@ class AgentWorkflow:
             compute_token_fast_cache_affinity_key=self.compute_token_fast_cache_affinity_key,
             fast_mode_cache_enabled=self.fast_mode_cache_enabled,
             goal_text=self.fast_cache_goal,
-            iteration_offset=self.iteration_offset if self.max_iterations else 0,
-            fast_cache_position_offset=self.iteration_offset,
-            **({"max_iterations": self.max_iterations} if self.max_iterations else {}),
+            **self._iteration_resume_kwargs(),
         )
 
         await self._track_tokens_and_cost(execute_result)
@@ -1640,28 +1978,9 @@ class AgentWorkflow:
                 retry_policy=RetryPolicy(maximum_attempts=2),
             )
 
-        # Temporal SDK requires args=[] for multi-param workflows
-        # Use "execute_continued" to skip DAG re-execution (DAG already ran)
-        workflow.continue_as_new(
-            args=[
-                self.agent_id,
-                self.user_id,
-                self.goal,
-                self.model,
-                self.reasoning_max_tokens,
-                self.verifier,
-                compressed_context,
-                self.parent_workflow_id,
-                self.parent_agent_id,
-                self.depth,
-                self.bus_id,
-                "execute_continued",  # Skip both PLAN and DAG — go straight to LLM
-                self.max_iterations,
-                self.price_limit_cents,
-                self.context_gates or None,  # Preserve context gates across continue_as_new
-                self.fast_mode_cache_enabled,  # Preserve Fast Mode cache flag
-            ]
-        )
+        # The canonical continuation contract also carries mutable counters,
+        # credentials, and signal state so compaction cannot reset billing/limits.
+        workflow.continue_as_new(args=self._continuation_args(compressed_context))
 
     async def _check_paused(self) -> bool:
         """Check if paused, querying parent state first (non-root only)."""
@@ -2729,12 +3048,12 @@ class AgentWorkflow:
 
         state = await self._query_parent_state()
 
-        # Parent confirmed gone (terminated / not found). A child that inherited its
-        # pause from the parent is now orphaned — it can never be unpaused by the
-        # dead parent, so abort instead of waiting forever.
+        # Parent confirmed gone (terminated / not found). Every child is now
+        # orphaned, including an active or independently-paused child: continuing
+        # would spend resources for a root that can no longer consume its result.
         if state.get("parent_missing"):
-            if self._paused_by_parent and not self._orphaned:
-                workflow.logger.warning("Parent workflow gone — orphaned child aborting (was paused by parent)")
+            if not self._orphaned:
+                workflow.logger.warning("Parent workflow gone — orphaned child aborting")
                 self._orphaned = True
                 self.is_paused = False
                 self._paused_by_parent = False
@@ -2832,6 +3151,12 @@ class AgentWorkflow:
         self.tokens_in += tokens_in_delta
         self.tokens_out += tokens_out_delta
         self.token_count += tokens_in_delta + tokens_out_delta
+        if (
+            call_site in {"execute_loop", "verifier_execute"}
+            and isinstance(iteration, int)
+            and not isinstance(iteration, bool)
+        ):
+            self.iteration_offset = max(self.iteration_offset, iteration)
         self.context_size = tokens_in_delta + cache_read_input_tokens + cache_creation_input_tokens
         await self._advance_cloud_agent_lifecycle(CLOUD_AGENT_READY_TITLE, "FINISHED")
 
@@ -3076,19 +3401,20 @@ class AgentWorkflow:
 
         # Signal parent (if we have one)
         if self.parent_workflow_id:
-            try:
-                parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
-                await parent.signal(
-                    "child_cost_update",
-                    {
-                        "child_agent_id": self.agent_id,
-                        "subtree_cost_cents": self.subtree_cost_cents,
-                        "subtree_tokens_in": self.tree_tokens_in,
-                        "subtree_tokens_out": self.tree_tokens_out,
-                    },
-                )
-            except Exception as e:
-                workflow.logger.warning(f"Failed to signal parent cost update: {e}")
+            if not self._orphaned:
+                try:
+                    parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
+                    await parent.signal(
+                        "child_cost_update",
+                        {
+                            "child_agent_id": self.agent_id,
+                            "subtree_cost_cents": self.subtree_cost_cents,
+                            "subtree_tokens_in": self.tree_tokens_in,
+                            "subtree_tokens_out": self.tree_tokens_out,
+                        },
+                    )
+                except Exception as e:
+                    workflow.logger.warning(f"Failed to signal parent cost update: {e}")
         else:
             # We are root - check cost limit
             await self._check_cost_limit()
@@ -3130,6 +3456,8 @@ class AgentWorkflow:
                         self.message_count,
                         self.tree_tokens_in,
                         self.tree_tokens_out,
+                        None,
+                        self.iteration_offset,
                     ],
                     start_to_close_timeout=timedelta(seconds=15),
                     retry_policy=RetryPolicy(maximum_attempts=2),
@@ -3161,6 +3489,8 @@ class AgentWorkflow:
                         self.message_count,
                         self.tokens_in,
                         self.tokens_out,
+                        None,
+                        self.iteration_offset,
                     ],
                     start_to_close_timeout=timedelta(seconds=15),
                     retry_policy=RetryPolicy(maximum_attempts=3),
@@ -3233,6 +3563,8 @@ class AgentWorkflow:
         # Compute default status from flags, but mark whether it was explicit
         if self._cost_limit_reached:
             default_status = "COST_LIMIT_REACHED"
+        elif not self._has_credits:
+            default_status = "OUT_OF_CREDITS"
         elif self.is_paused:
             default_status = "PAUSED"
         else:
@@ -3284,33 +3616,8 @@ class AgentWorkflow:
             # Preserve feedback received while paused before continue-as-new
             # resets this workflow instance's revision counters.
             await self._wait_for_response_schema_refresh()
-            # Temporal SDK requires args=[] for multi-param workflows
-            workflow.continue_as_new(
-                args=[
-                    self.agent_id,
-                    self.user_id,
-                    self.goal,
-                    self.model,
-                    self.reasoning_max_tokens,
-                    self.verifier,
-                    result.get("context"),
-                    self.parent_workflow_id,
-                    self.parent_agent_id,
-                    self.depth,
-                    self.bus_id,
-                    # skip PLAN *and* DAG: on pause/resume the DAG (e.g. a for_each
-                    # fan-out) has already run and spawned its children. Using plain
-                    # "execute" set skip_dag=False, so resume re-ran the DAG and
-                    # re-spawned a fresh fan-out, orphaning the paused children. Match
-                    # the context-overflow continue_as_new, which correctly resumes
-                    # into the LLM loop (it polls the DB for the resumed children).
-                    "execute_continued",
-                    self.max_iterations,
-                    self.price_limit_cents,
-                    self.context_gates or None,  # Preserve context gates across pause/resume
-                    self.fast_mode_cache_enabled,  # Preserve Fast Mode cache flag
-                ]
-            )
+            # Skip PLAN and DAG, and carry the complete mutable runtime snapshot.
+            workflow.continue_as_new(args=self._continuation_args(result.get("context")))
             return result
 
         if result["status"] == "aborted":
@@ -3539,6 +3846,7 @@ class AgentWorkflow:
                     self.tokens_in,
                     self.tokens_out,
                     partial_structured_response,
+                    self.iteration_offset,
                 ],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),
@@ -3573,7 +3881,7 @@ class AgentWorkflow:
                 workflow.logger.warning(f"report_failure_activity dispatch failed (non-fatal): {e}")
 
         # 4. Signal parent with failure context for learning
-        if self.parent_workflow_id:
+        if self.parent_workflow_id and not self._orphaned:
             try:
                 parent = workflow.get_external_workflow_handle(self.parent_workflow_id)
                 await parent.signal(
@@ -3751,6 +4059,7 @@ class AgentWorkflow:
                     self.tokens_out,
                     summary if self.parent_workflow_id else "",
                     structured_response,
+                    self.iteration_offset,
                 ],
                 start_to_close_timeout=timedelta(seconds=30),
                 retry_policy=RetryPolicy(maximum_attempts=3),

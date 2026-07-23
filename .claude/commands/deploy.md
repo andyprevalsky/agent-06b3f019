@@ -152,6 +152,8 @@ if [ -n "$CHANGED_BACKEND_LINT_INPUTS" ]; then
     sed 's|^back-end/||' | sort)
 fi
 CHANGED_AGENTS=$(echo "$CHANGED" | grep -E '^agents/' || true)
+CHANGED_AGENT_RUNTIME=$(printf '%s\n' "$CHANGED_AGENTS" |
+  bash "$(git rev-parse --show-toplevel)/scripts/classify-agent-runtime-changes.sh")
 CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
 CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
 CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)' || true)
@@ -224,7 +226,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) may satisf
 
 The prompt guard (Step 0p) only catches changes to **LLM-visible text**. It cannot catch a change to **agent control-flow semantics** — flipping a recoverable failure into a terminal one, deleting a recovery fall-through, or inverting a recovery-invariant test. Those are as consequential as a prompt change but invisible to a text-only gate, and **an automated test cannot validate that the new behavior is the correct product decision** (the author just updates the test to match — all green). Regression precedent: commit `500715a5f` turned every single-planned-task DAG failure into a terminal agent FAILED instead of continuing iteration, and shipped green because its blackbox test was rewritten to bless the new behavior.
 
-This guard scans the narrow agent control-flow layer (`agents/loop/run_agent.py`, `agents/loop/dag_executor.py`, `agents/workflows/agent_workflow.py`) and its behavior tests (`agents/tests/blackbox/{workflow,dag_executor,workflow_determinism}.blackbox.py`) for **hunks that change recovery vs. terminal semantics** — status/reason literals (`error`/`failed`/`aborted`/`max_iterations`/`needs_llm`/`completed`/`paused`), `_handle_incomplete`/`_mark_failed`/`_mark_complete`/`run_agent(` fall-through, `continue_as_new`, or a recovery-invariant test assertion (`run_agent_calls`, "must not run", `recovers_via`, result-status dicts). Comment- and logging-only edits are stripped so they do not trip it.
+This guard scans the narrow agent control-flow layer (`agents/loop/run_agent.py`, `agents/loop/dag_executor.py`, `agents/workflows/agent_workflow.py`) and its behavior tests (`agents/tests/blackbox/{workflow,dag_executor,workflow_determinism}.blackbox.py`) for **hunks that change recovery vs. terminal semantics** — status/reason literals (`error`/`failed`/`aborted`/`max_iterations`/`needs_llm`/`completed`/`paused`), `_handle_incomplete`/`_mark_failed`/`_mark_complete`/`run_agent(` fall-through, `continue_as_new`, or a removed/replaced recovery-invariant test assertion (`run_agent_calls`, "must not run", `recovers_via`, result-status dicts). Purely additive tests do not require approval because they cannot change runtime behavior or rewrite an existing expectation. Comment- and logging-only edits are also stripped.
 
 Run the guard without the approval flag first:
 
@@ -370,11 +372,12 @@ If any invariant fails, fix the violation. The test output includes remediation 
 bash scripts/tests/workspace-env.test.sh
 bash scripts/tests/semantic-deploy-gate.test.sh
 bash scripts/tests/check-agent-behavior-approval.test.sh
+bash scripts/tests/workflow-deployment-migration.test.sh
 python3 scripts/tests/factory-review.test.py
 bash scripts/tests/run-deploy-stage.test.sh
 ```
 
-These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
+These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate and the bounded production workflow migration wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
 
 ## Step 4a: Back-end coverage + blackbox (skip if no back-end/ changes)
 
@@ -1326,6 +1329,9 @@ Merge without deleting the branch. Do not delete the local branch or the remote 
 
 ```bash
 gh pr merge <PR_NUMBER> --merge
+DEPLOY_MERGED_SHA=$(gh pr view <PR_NUMBER> --json mergeCommit --jq '.mergeCommit.oid')
+[ -n "$DEPLOY_MERGED_SHA" ] ||
+  { echo "❌ Could not resolve the exact merge commit for PR <PR_NUMBER>"; exit 1; }
 ```
 
 If `main` can be checked out in this worktree, switch back to main and pull:
@@ -1342,7 +1348,7 @@ git fetch origin main
 
 ## Step 13: Wait for deploys
 
-Determine which deploy workflows are relevant based on what files changed in the PR. Check using `git diff main~1..main --name-only`:
+Determine which deploy workflows are relevant based on what files changed in the PR. Check using `git diff "$DEPLOY_MERGED_SHA^1" "$DEPLOY_MERGED_SHA" --name-only`; never substitute the latest `main`, which may already belong to a later PR:
 
 - Changes in `agents/` → poll `deploy-agents.yml`
 - Changes in `back-end/` → Render auto-deploys (no workflow to poll). **Do NOT just "wait ~60s" — run Step 13a to confirm the merged commit went live AND the app is functionally healthy.**
@@ -1368,7 +1374,7 @@ For a frontend change, wait for Vercel to report the merged commit as live:
 
 ```bash
 if [ -n "$CHANGED_FRONTEND" ]; then
-  MERGED_SHA=$(git rev-parse main)
+  MERGED_SHA="$DEPLOY_MERGED_SHA"
   VERCEL_OK=""
   for i in $(seq 1 90); do
     DEPLOYMENT_ID=$(gh api "repos/{owner}/{repo}/deployments?sha=$MERGED_SHA" \
@@ -1403,7 +1409,7 @@ Render has no GitHub Actions run to watch, so the only proof a backend deploy is
 
 ```bash
 cd "$(git rev-parse --show-toplevel)/back-end" && source .env
-MERGED_SHA=$(git rev-parse main)   # the commit that just merged
+MERGED_SHA="$DEPLOY_MERGED_SHA"   # immutable merge commit captured in Step 12
 echo "Waiting for Render to deploy ${MERGED_SHA:0:7}..."
 DEPLOY_OK=""
 for i in $(seq 1 90); do  # up to ~15 min at 10s (Render builds can be slow)
@@ -1480,6 +1486,88 @@ sys.exit(1 if bad else 0)
 If this exits non-zero, the deploy is **unhealthy even though it's live** — treat as a deploy failure: diagnose the error (most likely a schema/migration mismatch or missing env var — see the 2026-06-27 incident for the migration-vs-DB drift pattern), fix it, new PR, continue from Step 9. Do NOT proceed to Step 14 with errors in the prod log.
 
 **Migration-specific note:** if the error is a Prisma "column/table does not exist", the deployed code expects a schema the prod DB doesn't have. Verify the migration is both present in `back-end/prisma/migrations/` AND actually applied to prod (the migration row in `_prisma_migrations` can be marked applied while the column is absent if a stray `prisma db push` from another workspace dropped it — `back-end/.env` `DATABASE_URL` points at prod). Re-apply the missing DDL idempotently (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`) and re-run Step 2.
+
+## Step 13ab: Replace open workflows after an agent-runtime deploy
+
+Skip only when `$CHANGED_AGENT_RUNTIME` is empty. Test-only, benchmark-only,
+documentation-only, and history-ledger changes under `agents/` do not require a
+workflow cutover. Any shipped worker/runtime code does.
+
+Run this only after `deploy-agents.yml` is green and the backend merged commit is
+live and healthy. The green Fly workers are healthy-but-standby: they have not
+constructed Temporal pollers and therefore cannot replay an old history. The
+command freezes the exact set of open root workflow IDs, then uses a bounded pool
+to seal **every** old generation before activating the exact merged worker SHA.
+It terminates each stale execution, appends the terminal
+`new code version deployed, retry this tool` result to unresolved tools, and
+starts a clean replacement from durable DB state. Active descendants are stopped
+with their root; the replacement LLM decides which child work to retry. It does
+not replay histories and does not wait for a natural continue-as-new boundary.
+
+```bash
+# Recompute from this deploy's immutable merge commit, not latest main or the
+# pre-review working tree. This cannot race a later PR merging while deploys run.
+git fetch origin main
+git cat-file -e "${DEPLOY_MERGED_SHA}^{commit}" ||
+  { echo "❌ Exact deploy merge commit is unavailable: $DEPLOY_MERGED_SHA"; exit 1; }
+FINAL_CHANGED_AGENTS=$(git diff --name-only "$DEPLOY_MERGED_SHA^1" "$DEPLOY_MERGED_SHA" |
+  grep -E '^agents/' || true)
+CHANGED_AGENT_RUNTIME=$(printf '%s\n' "$FINAL_CHANGED_AGENTS" |
+  bash "$(git rev-parse --show-toplevel)/scripts/classify-agent-runtime-changes.sh")
+
+if [ -n "$CHANGED_AGENT_RUNTIME" ]; then
+  cd "$(git rev-parse --show-toplevel)/back-end" && source .env
+  TEMPORAL_TASK_QUEUE=navi-agent-tasks \
+    TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
+    WORKFLOW_MIGRATION_CONCURRENCY="${WORKFLOW_MIGRATION_CONCURRENCY:-16}" \
+    WORKFLOW_MIGRATION_CANARY_COUNT="${WORKFLOW_MIGRATION_CANARY_COUNT:-3}" \
+    WORKFLOW_MIGRATION_BOOTSTRAP_TIMEOUT_MS="${WORKFLOW_MIGRATION_BOOTSTRAP_TIMEOUT_MS:-120000}" \
+    WORKFLOW_MIGRATION_CANDIDATE_TIMEOUT_MS="${WORKFLOW_MIGRATION_CANDIDATE_TIMEOUT_MS:-300000}" \
+    npx tsx scripts/migrate-open-agent-workflows.ts --execute
+fi
+```
+
+The command prepares every frozen workflow while the candidate fleet is standby.
+If even one preparation fails, activation never happens and candidate code never
+sees an old history. After exact-SHA activation, it starts three replacements
+serially and requires each to atomically persist its restored durable state and
+clear its generation-fenced claim (`durable READY`) before starting the bulk set.
+Any canary failure leaves the bulk set prepared but unstarted. The command must
+exit zero with `failed: 0` and `prepared: 0`. A changed workflow ID is a safe skip
+(another replacement won the race); any other failure blocks completion.
+Rerunning the command is safe: durable claims coalesce and expected-generation
+checks prevent a stale snapshot from replacing a newer workflow.
+
+## Step 13ac: Validate workflow replacement edge cases in production
+
+Skip only when `$CHANGED_AGENT_RUNTIME` is empty. Run this immediately after
+Step 13ab succeeds. This gate creates a uniquely named, isolated set of synthetic
+stale workflows on a never-polled validation queue, replaces them onto the
+production queue, and deletes every exact fixture ID afterward. The replacements
+remain cold, so the gate makes no LLM/provider calls and does not spend model
+credits.
+
+The command must exit zero and print `PASS` for every row. It verifies paused,
+cost-limited, and out-of-credits restoration; counters, context size, iteration
+offset, and historical configuration; approval-wait closure; exact-once
+terminalization of root and descendant tools; success-before-seal and
+late-success races; descendant termination; durable bootstrap acknowledgement;
+zero activity growth while cold; clean histories without patch markers or
+nondeterminism; pause-after-snapshot races; malformed-root fail-closed behavior;
+and fixture cleanup.
+
+```bash
+if [ -n "$CHANGED_AGENT_RUNTIME" ]; then
+  cd "$(git rev-parse --show-toplevel)/back-end"
+  PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1 \
+    TEMPORAL_TASK_QUEUE=navi-agent-tasks \
+    npx tsx scripts/validate-prod-workflow-migration.ts --execute
+fi
+```
+
+Retain the JSON output as the production migration report card. Any failed row,
+including fixture cleanup, blocks deploy completion and must be diagnosed and
+fixed before Step 13b.
 
 ## Step 13b: Production semantic frontend gate (no skip — always runs)
 

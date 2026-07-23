@@ -145,6 +145,7 @@ export const updateStatusSchema = z.object({
   tokensOut: z.number().int().min(0).optional().default(0),
   contextSize: z.number().int().min(0),
   messageCount: z.number().int().min(0),
+  iterationOffset: z.number().int().min(0).optional(),
   structuredResponse: z.record(z.unknown()).optional(),
 });
 

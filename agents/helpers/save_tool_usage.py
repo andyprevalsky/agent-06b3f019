@@ -7,6 +7,7 @@ import structlog
 from temporalio import activity
 
 from config import load_config
+from helpers.workflow_generation import workflow_generation_headers
 
 logger = structlog.get_logger()
 
@@ -51,7 +52,11 @@ async def save_tool_usage(agent_id: str, user_id: str, tool_name: str, usage_ite
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"{backend_url}/api/tool-usage",
-                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+                headers={
+                    "X-API-Key": api_key,
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
                 json={
                     "agent_id": agent_id,
                     "user_id": user_id,

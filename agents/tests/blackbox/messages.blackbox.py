@@ -113,11 +113,31 @@ async def test_post_message_boundary():
 
 
 async def test_post_message_stamps_workflow_generation():
-    """TOOL writes carry the producing Temporal Workflow ID automatically."""
+    """Every internal message carries the producing Temporal Workflow ID header."""
     _setup()
     with (
         patch("temporalio.activity.heartbeat"),
         patch("temporalio.activity.info", return_value=SimpleNamespace(workflow_id="wf-generation-2")),
+    ):
+        from helpers.messages import post_agent_message
+
+        await post_agent_message(
+            agent_id="agent-generation-1",
+            text="Running",
+            role="ASSISTANT",
+            metadata={"source": "agent_loop"},
+        )
+
+    call = assert_captured_call(url_contains="/messages", method="POST")
+    assert call["requestHeaders"]["x-agent-workflow-generation"] == "wf-generation-2"
+
+
+async def test_post_tool_message_stamps_metadata_generation():
+    """TOOL lifecycle metadata also retains its immutable generation identity."""
+    _setup()
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("temporalio.activity.info", return_value=SimpleNamespace(workflow_id="wf-generation-3")),
     ):
         from helpers.messages import post_agent_message
 
@@ -130,7 +150,27 @@ async def test_post_message_stamps_workflow_generation():
 
     call = assert_captured_call(url_contains="/messages", method="POST")
     body = json.loads(call["requestBody"])
-    assert body["metadata"]["workflowGeneration"] == "wf-generation-2"
+    assert body["metadata"]["workflowGeneration"] == "wf-generation-3"
+    assert call["requestHeaders"]["x-agent-workflow-generation"] == "wf-generation-3"
+
+
+async def test_post_message_treats_stale_generation_as_terminal_fence():
+    """A 409 cutover fence completes the old activity instead of retrying forever."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(409, json={"error": "Workflow generation is no longer current"})
+
+    setup_mock_fn(handler)
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.messages import post_agent_message
+
+        result = await post_agent_message(
+            agent_id="agent-stale-message",
+            text="late response",
+            role="ASSISTANT",
+        )
+
+    assert result == {"fenced": True}
 
 
 async def test_post_message_with_file_pointer():
@@ -397,6 +437,37 @@ async def test_update_agent_tree_state_happy_path():
     assert body["status"] == "ACTIVE"
 
 
+async def test_update_agent_tree_state_stamps_workflow_generation():
+    """Tree-state mutations identify the exact workflow generation producing them."""
+    _setup()
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch(
+            "temporalio.activity.info",
+            return_value=SimpleNamespace(workflow_id="agent-tree:replacement:generation-2"),
+        ),
+    ):
+        from helpers.messages import update_agent_tree_state
+
+        await update_agent_tree_state(
+            agent_id="agent-tree",
+            tools_in_use=["web_search"],
+            broadcast_payload={
+                "agentId": "agent-tree",
+                "toolsInUse": ["web_search"],
+                "status": "ACTIVE",
+                "progress": 0.75,
+                "messageCount": 9,
+                "_statusExplicit": True,
+            },
+        )
+
+    patch_call = assert_captured_call(url_contains="/api/agents/agent-tree", method="PATCH")
+    assert patch_call["requestHeaders"]["x-agent-workflow-generation"] == (
+        "agent-tree:replacement:generation-2"
+    )
+
+
 async def test_update_agent_tree_state_no_broadcast():
     """update_agent_tree_state without bus_id only PATCHes (no broadcast)."""
     _setup()
@@ -412,6 +483,43 @@ async def test_update_agent_tree_state_no_broadcast():
     # Only PATCH, no broadcast
     assert all("/realtime/v1/api/broadcast" not in c["url"] for c in captures)
     assert any(c["method"] == "PATCH" for c in captures)
+
+
+async def test_update_agent_tree_state_stale_generation_does_not_broadcast():
+    """A rejected generation CAS cannot leak stale tree state to realtime."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/api/agents/" in str(request.url) and request.method == "PATCH":
+            return httpx.Response(
+                200,
+                json={
+                    "mutation_accepted": False,
+                    "agent": {"temporal_workflow_id": "replacement-generation"},
+                },
+            )
+        if "/realtime/v1/api/broadcast" in str(request.url):
+            return httpx.Response(200, json={})
+        return httpx.Response(404)
+
+    setup_mock_fn(handler)
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.messages import update_agent_tree_state
+
+        await update_agent_tree_state(
+            agent_id="agent-stale-tree",
+            tools_in_use=["stale-tool"],
+            bus_id="bus-stale",
+            broadcast_payload={
+                "agentId": "agent-stale-tree",
+                "toolsInUse": ["stale-tool"],
+                "progress": 1,
+            },
+        )
+    await _flush_broadcasts()
+
+    captures = get_captured_requests()
+    assert any(c["method"] == "PATCH" for c in captures)
+    assert all("/realtime/v1/api/broadcast" not in c["url"] for c in captures)
 
 
 async def test_update_agent_tree_state_handles_broadcast_failure():
@@ -786,6 +894,14 @@ async def run_all_tests():
     await r.record_async("post_message_happy_path", test_post_message_happy_path)
     await r.record_async("post_message_boundary", test_post_message_boundary)
     await r.record_async("post_message_stamps_workflow_generation", test_post_message_stamps_workflow_generation)
+    await r.record_async(
+        "post_tool_message_stamps_metadata_generation",
+        test_post_tool_message_stamps_metadata_generation,
+    )
+    await r.record_async(
+        "post_message_treats_stale_generation_as_terminal_fence",
+        test_post_message_treats_stale_generation_as_terminal_fence,
+    )
     await r.record_async("post_message_with_file_pointer", test_post_message_with_file_pointer)
     await r.record_async("post_message_no_metadata", test_post_message_no_metadata)
     await r.record_async("post_message_raises_on_http_error", test_post_message_raises_on_http_error)
@@ -799,7 +915,15 @@ async def run_all_tests():
     )
     await r.record_async("poll_messages_raises_on_error", test_poll_messages_raises_on_error)
     await r.record_async("update_tree_state_happy_path", test_update_agent_tree_state_happy_path)
+    await r.record_async(
+        "update_tree_state_stamps_workflow_generation",
+        test_update_agent_tree_state_stamps_workflow_generation,
+    )
     await r.record_async("update_tree_state_no_broadcast", test_update_agent_tree_state_no_broadcast)
+    await r.record_async(
+        "update_tree_state_stale_generation_does_not_broadcast",
+        test_update_agent_tree_state_stale_generation_does_not_broadcast,
+    )
     await r.record_async("update_tree_state_broadcast_failure", test_update_agent_tree_state_handles_broadcast_failure)
     await r.record_async("update_tree_state_patch_raises", test_update_agent_tree_state_patch_raises)
     await r.record_async("stream_assistant_chunk_happy", test_stream_assistant_chunk_happy_path)
@@ -820,4 +944,4 @@ async def run_all_tests():
 
 
 if __name__ == "__main__":
-    asyncio.run(run_all_tests())
+    raise SystemExit(0 if asyncio.run(run_all_tests()) else 1)

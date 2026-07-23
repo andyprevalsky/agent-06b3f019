@@ -10,6 +10,38 @@ const log = createLogger('Agents');
 const router = Router();
 const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
 
+router.post(
+  '/:id/workflow-replacement/bootstrap-ack',
+  auth,
+  asyncHandler<HybridAuthRequest>(async (req, res) => {
+    if (req.isInternal !== true) {
+      res.status(403).json({ error: 'Internal workflow authentication required' });
+      return;
+    }
+    const generation = req.header('x-agent-workflow-generation');
+    if (generation === undefined || generation.length === 0) {
+      res.status(400).json({ error: 'X-Agent-Workflow-Generation header is required' });
+      return;
+    }
+    const result = await controlService.acknowledgeWorkflowReplacementBootstrap(
+      req.params.id,
+      generation
+    );
+    if (result === 'not_found') {
+      res.status(404).json({ error: 'Agent not found' });
+      return;
+    }
+    if (result === 'stale_generation') {
+      res.status(409).json({ error: 'Workflow generation is no longer current' });
+      return;
+    }
+    res.json({
+      acknowledged: true,
+      already_acknowledged: result === 'already_acknowledged',
+    });
+  })
+);
+
 router.patch(
   '/:id/status',
   auth,

@@ -5,6 +5,12 @@ on:
     branches: [main]
     paths:
       - 'agents/**'
+      - '!agents/tests/**'
+      - '!agents/benchmarks/**'
+      - '!agents/**/*.md'
+      - '!agents/scripts/run-coverage.sh'
+      - '!agents/scripts/run_blackbox_tests.py'
+      - '!agents/scripts/run_coverage_blackbox_parallel.py'
       - '.github/workflows/deploy-agents.yml'
 
 jobs:
@@ -13,14 +19,56 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       
       - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Classify whether shipped worker runtime changed
+        id: classify
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          # Fail closed if GitHub did not provide a usable before SHA.
+          REQUIRE_ACTIVATION=1
+          if git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            CHANGED_AGENTS=$(git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" -- agents/)
+            CHANGED_RUNTIME=$(printf '%s\n' "$CHANGED_AGENTS" |
+              bash scripts/classify-agent-runtime-changes.sh)
+            if [ -z "$CHANGED_RUNTIME" ]; then REQUIRE_ACTIVATION=0; fi
+          fi
+          echo "require_activation=$REQUIRE_ACTIVATION" >> "$GITHUB_OUTPUT"
+          echo "Temporal activation gate: $REQUIRE_ACTIVATION"
       
       - name: Deploy to Fly.io
-        run: flyctl deploy --remote-only
+        run: >-
+          flyctl deploy --remote-only
+          --env TEMPORAL_WORKER_BUILD_ID="${GITHUB_SHA}"
+          --env TEMPORAL_WORKER_REQUIRE_ACTIVATION="${REQUIRE_ACTIVATION}"
         working-directory: ./agents
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          REQUIRE_ACTIVATION: ${{ steps.classify.outputs.require_activation }}
+
+      - name: Verify every started machine has the exact candidate policy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          REQUIRE_ACTIVATION: ${{ steps.classify.outputs.require_activation }}
+        run: |
+          APP="navi-whisper-lux"
+          MACHINES=$(flyctl machines list -a "$APP" --json)
+          STARTED=$(jq '[.[] | select(.state == "started")] | length' <<<"$MACHINES")
+          MISMATCHED=$(jq --arg sha "$GITHUB_SHA" --arg activation "$REQUIRE_ACTIVATION" \
+            '[.[] | select(.state == "started" and
+              (.config.env.TEMPORAL_WORKER_BUILD_ID != $sha or
+               .config.env.TEMPORAL_WORKER_REQUIRE_ACTIVATION != $activation))] | length' \
+            <<<"$MACHINES")
+          [ "$STARTED" -gt 0 ] || { echo "No started candidate machines"; exit 1; }
+          [ "$MISMATCHED" -eq 0 ] || {
+            echo "$MISMATCHED started machine(s) do not match build $GITHUB_SHA activation=$REQUIRE_ACTIVATION"
+            exit 1
+          }
+          echo "All $STARTED started machines match build $GITHUB_SHA activation=$REQUIRE_ACTIVATION"
 
       - name: Stop excess machines (deploy starts all, scale back to minimum)
         env:
@@ -42,4 +90,3 @@ jobs:
             fi
           done
           echo "Fleet: kept $MIN running, stopped $((COUNT > MIN ? COUNT - MIN : 0)) excess"
-

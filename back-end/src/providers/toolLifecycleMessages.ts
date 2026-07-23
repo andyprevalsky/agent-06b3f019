@@ -201,11 +201,11 @@ async function fenceLatestTerminal(
   });
 }
 
-async function persistLockedToolLifecycleMessage(
+export async function persistLockedToolLifecycleMessage(
   tx: Prisma.TransactionClient,
   params: CreateMessageParams,
   identity: { toolCallId: string; workflowGeneration: string }
-): Promise<{ message: Message; created: boolean }> {
+): Promise<{ message: Message; created: boolean; accepted: boolean }> {
   await lockAgentWorkflowGeneration(tx, params.agentId);
   await lockToolCallLifecycle(tx, params.agentId, identity.workflowGeneration, identity.toolCallId);
   const allCandidates = await tx.message.findMany({
@@ -220,11 +220,15 @@ async function persistLockedToolLifecycleMessage(
     (candidate) => messageWorkflowGeneration(candidate) === identity.workflowGeneration
   );
   const deploymentFence = candidates.find(isDeploymentFencedMessage) ?? null;
-  if (deploymentFence !== null) return { message: deploymentFence, created: false };
+  if (deploymentFence !== null) {
+    return { message: deploymentFence, created: false, accepted: false };
+  }
 
   const workflowId = await currentWorkflowId(tx, params);
   const staleWorkerWrite =
-    workflowId !== undefined && workflowId !== null && workflowId !== identity.workflowGeneration;
+    workflowId !== undefined &&
+    workflowId !== identity.workflowGeneration &&
+    !(workflowId === null && identity.workflowGeneration === params.agentId);
   const effectiveParams = staleWorkerWrite
     ? deploymentInterruptedParams(params, identity)
     : params.enforceCurrentWorkflowGeneration === true && params.allowDeploymentFinalizer !== true
@@ -232,11 +236,15 @@ async function persistLockedToolLifecycleMessage(
       : params;
   if (staleWorkerWrite || params.allowDeploymentFinalizer === true) {
     const latestTerminal = await fenceLatestTerminal(tx, candidates);
-    if (latestTerminal !== null) return { message: latestTerminal, created: false };
+    if (latestTerminal !== null) {
+      return { message: latestTerminal, created: false, accepted: !staleWorkerWrite };
+    }
   }
   if (effectiveParams.skipDuplicateToolCheck !== true) {
     const duplicate = matchingToolMessage(candidates, effectiveParams);
-    if (duplicate !== null) return { message: duplicate, created: false };
+    if (duplicate !== null) {
+      return { message: duplicate, created: false, accepted: !staleWorkerWrite };
+    }
   }
   const message = await tx.message.create({
     data: {
@@ -249,12 +257,12 @@ async function persistLockedToolLifecycleMessage(
       timestamp: new Date(),
     },
   });
-  return { message, created: true };
+  return { message, created: true, accepted: !staleWorkerWrite };
 }
 
 export async function persistToolLifecycleMessage(
   params: CreateMessageParams,
   identity: { toolCallId: string; workflowGeneration: string }
-): Promise<{ message: Message; created: boolean }> {
+): Promise<{ message: Message; created: boolean; accepted: boolean }> {
   return runTransactionWithRetry((tx) => persistLockedToolLifecycleMessage(tx, params, identity));
 }

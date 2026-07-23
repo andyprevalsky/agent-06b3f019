@@ -70,11 +70,16 @@ router.post(
         return;
       }
       const body = postMessageSchema.parse(req.body);
+      const generation =
+        req.isInternal === true
+          ? (req.header('x-agent-workflow-generation') ?? req.params.id)
+          : undefined;
       const result = await messageService.postMessage(
         req.params.id,
         body,
         req.isInternal === true,
-        req.userId
+        req.userId,
+        generation
       );
       if ('error' in result) {
         res.status(result.status ?? 500).json({ error: result.error });

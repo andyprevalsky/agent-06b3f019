@@ -85,6 +85,7 @@ from health_server import run_health_server, set_queue_metrics, set_worker_statu
 
 # Helper activities (workflow orchestration, not exposed to LLM)
 from helpers import (
+    acknowledge_workflow_replacement_bootstrap,
     call_llm,
     call_llm_activity,
     check_progress,
@@ -100,6 +101,7 @@ from helpers import (
     get_user_custom_system_prompt,
     get_user_system_name,
     mark_finished,
+    finalize_workflow_replacement_bootstrap,
     poll_new_messages,
     post_agent_message,
     resolve_fast_cache_goal_activity,
@@ -128,7 +130,8 @@ from helpers.sms_activities import (
     send_direct_sms_activity,
 )
 from helpers.summarize import summarize_and_filter_links
-from helpers.update_tokens import update_agent_tokens_activity, update_agent_tree_cost_activity
+from helpers.update_tokens import update_agent_tree_cost_activity
+from helpers.worker_activation import wait_for_worker_build_activation
 from helpers.world_model_runtime import world_model_step_activity
 from tools.people_search import people_search_activity  # not yet refactored into domains/
 from tools.web_search import web_search_activity  # not yet refactored into domains/
@@ -969,6 +972,28 @@ async def main():
 
     logger.info("Connected to Temporal Cloud")
 
+    build_id = os.getenv("TEMPORAL_WORKER_BUILD_ID")
+    if os.getenv("TEMPORAL_WORKER_REQUIRE_ACTIVATION") == "1":
+        if not build_id:
+            raise RuntimeError("TEMPORAL_WORKER_BUILD_ID is required when worker activation is enabled")
+        set_worker_status(True, phase="standby", build_id=build_id)
+        logger.info(
+            "Worker standby ready; Temporal polling is activation-gated",
+            worker_build_id=build_id,
+            task_queue=config.temporal.task_queue,
+        )
+        marker_id = await wait_for_worker_build_activation(
+            client,
+            build_id,
+            timeout_seconds=float(os.getenv("TEMPORAL_WORKER_ACTIVATION_TIMEOUT_SECONDS", "1800")),
+            poll_interval_seconds=float(os.getenv("TEMPORAL_WORKER_ACTIVATION_POLL_SECONDS", "1")),
+        )
+        logger.info(
+            "Worker build activated; constructing Temporal pollers",
+            worker_build_id=build_id,
+            activation_marker_workflow_id=marker_id,
+        )
+
     # Make client available to query_parent_state_activity
     set_temporal_client(client)
 
@@ -1093,6 +1118,8 @@ async def main():
             mark_compute_token_rate_limited_activity,
             mark_gpt_token_rate_limited_activity,
             update_agent_status,
+            acknowledge_workflow_replacement_bootstrap,
+            finalize_workflow_replacement_bootstrap,
             compress_context,
             generate_completion_summary,
             summarize_tool_result,
@@ -1116,7 +1143,6 @@ async def main():
             get_user_context,
             get_user_system_name,
             get_user_custom_system_prompt,
-            update_agent_tokens_activity,
             update_agent_tree_cost_activity,
             update_agent_tree_state,
             # Fast Mode cache goal resolution (persisted Agent-row goal)
@@ -1206,7 +1232,7 @@ async def main():
             if worker_task.done():
                 await worker_task
                 raise RuntimeError("Temporal worker stopped before reaching readiness")
-        set_worker_status(True)
+        set_worker_status(True, phase="running", build_id=build_id)
         # Preserve the long-standing readiness string consumed by local E2E and
         # operator workflows, but emit it only after the real readiness boundary.
         logger.info("Worker started, waiting for tasks...")

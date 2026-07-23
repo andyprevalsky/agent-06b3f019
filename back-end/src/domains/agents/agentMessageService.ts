@@ -4,7 +4,7 @@
 
 import { getTemporalClient } from '../../providers/temporal';
 import { handleChatMessage } from '../../providers/chat';
-import { createMessage } from '../../providers/messages';
+import { createMessage, createWorkflowMessageGroup } from '../../providers/messages';
 import {
   type FilePointer,
   processUploadedFile,
@@ -158,7 +158,8 @@ export async function postMessage(
   agentId: string,
   body: PostMessageBody,
   isInternal: boolean,
-  userId?: string
+  userId?: string,
+  workflowGeneration?: string
 ) {
   // Determine role based on auth type
   const roleResult = resolveRole(body, isInternal);
@@ -192,25 +193,41 @@ export async function postMessage(
     }
   }
 
-  // Create the text message (optionally with file_pointer for single-file messages)
-  const message = await createMessage({
+  const messageParams = {
     agentId,
     text: body.message,
     role,
     metadata: body.metadata,
     filePointer: body.file_pointer as Record<string, unknown> | undefined,
-    enforceCurrentWorkflowGeneration: isInternal,
-  });
-
-  // Create separate messages for each file attachment (OAI-style)
-  if (body.attachments !== undefined && body.attachments.length > 0) {
-    for (const attachment of body.attachments) {
-      await createMessage({
-        agentId,
-        text: '',
-        role,
-        filePointer: attachment as Record<string, unknown>,
-      });
+  };
+  let message;
+  if (isInternal) {
+    const generation = workflowGeneration ?? agentId;
+    const result = await createWorkflowMessageGroup(
+      messageParams,
+      (body.attachments ?? []) as Array<Record<string, unknown>>,
+      generation
+    );
+    if (!result.accepted || result.message === null) {
+      return {
+        error: 'Workflow generation is no longer current',
+        status: 409,
+      };
+    }
+    message = result.message;
+  } else {
+    message = await createMessage(messageParams);
+    // User attachment rows are external writes and deliberately remain outside
+    // the worker-generation fence.
+    if (body.attachments !== undefined && body.attachments.length > 0) {
+      for (const attachment of body.attachments) {
+        await createMessage({
+          agentId,
+          text: '',
+          role,
+          filePointer: attachment as Record<string, unknown>,
+        });
+      }
     }
   }
 

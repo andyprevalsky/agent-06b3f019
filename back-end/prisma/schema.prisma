@@ -24,6 +24,7 @@ model Agent {
   workflowReplacementState         Json?
   staleTemporalWorkflowId          String?
   staleTemporalFirstExecutionRunId String?
+  workflowIterationOffset          Int             @default(0)
   workflowMaxIterations            Int?
   workflowContextGates             Json?
   model                            String          @default("rose-labs/rose-1-ultra")

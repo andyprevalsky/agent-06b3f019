@@ -5,10 +5,14 @@
 import { getTemporalClient } from '../../providers/temporal';
 import { broadcastAgentUpdate } from '../../providers/chat';
 import { createLogger } from '../../providers/logger';
-import type { UpdateAgentBody } from './types';
+import type { Prisma, UpdateAgentBody } from './types';
 import * as repo from './repo';
 
 const log = createLogger('Agents');
+
+interface UpdateAgentConfigDependencies {
+  signalPriceLimit?: (workflowId: string, newLimitCents: number) => Promise<void>;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -118,7 +122,13 @@ function formatAgentResponse(
 // Update agent config
 // ---------------------------------------------------------------------------
 
-export async function updateAgentConfig(agentId: string, body: UpdateAgentBody, userId?: string) {
+export async function updateAgentConfig(
+  agentId: string,
+  body: UpdateAgentBody,
+  userId?: string,
+  workflowGeneration?: string,
+  dependencies: UpdateAgentConfigDependencies = {}
+) {
   const agent = await repo.findAgentWithVerifier(agentId, userId);
 
   if (!agent) {
@@ -132,46 +142,59 @@ export async function updateAgentConfig(agentId: string, body: UpdateAgentBody, 
     return priceLimitError;
   }
 
-  if (Object.keys(agentUpdateData).length > 0) {
-    await repo.updateAgent(agentId, agentUpdateData);
+  const hasMutation = Object.keys(agentUpdateData).length > 0 || body.tool_ids !== undefined;
+  const accepted = hasMutation
+    ? await repo.updateAgentConfigMutation(
+        agentId,
+        agentUpdateData as Prisma.AgentUpdateManyMutationInput,
+        body.tool_ids,
+        workflowGeneration
+      )
+    : true;
 
-    if (body.tree_cost_cents !== undefined) {
-      await broadcastAgentUpdate(agentId, {
-        treeCostCents: body.tree_cost_cents,
-      });
-    }
+  if (accepted && body.tree_cost_cents !== undefined) {
+    await broadcastAgentUpdate(agentId, {
+      treeCostCents: body.tree_cost_cents,
+    });
   }
 
-  if (body.tool_ids !== undefined) {
-    await repo.replaceAgentTools(agentId, body.tool_ids);
-  }
+  const updatedAgent = await repo.findAgentWithFullRelations(agentId);
 
   // Signal Temporal AFTER all DB writes to ensure persistence first
   if (
+    accepted &&
     body.price_limit_cents !== undefined &&
-    agent.status === 'COST_LIMIT_REACHED' &&
-    agent.temporalWorkflowId !== null
+    updatedAgent?.status === 'COST_LIMIT_REACHED' &&
+    updatedAgent.temporalWorkflowId !== null
   ) {
     try {
-      const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-      await handle.signal('price_limit_increased', {
-        new_limit_cents: body.price_limit_cents,
-      });
+      if (dependencies.signalPriceLimit !== undefined) {
+        await dependencies.signalPriceLimit(
+          updatedAgent.temporalWorkflowId,
+          body.price_limit_cents
+        );
+      } else {
+        const client = await getTemporalClient();
+        const handle = client.workflow.getHandle(updatedAgent.temporalWorkflowId);
+        await handle.signal('price_limit_increased', {
+          new_limit_cents: body.price_limit_cents,
+        });
+      }
       log.info('Signaled price_limit_increased to workflow', {
-        workflow_id: agent.temporalWorkflowId,
+        workflow_id: updatedAgent.temporalWorkflowId,
         agent_id: agentId,
       });
     } catch (error) {
       log.error('Failed to signal price_limit_increased', {
-        workflow_id: agent.temporalWorkflowId,
+        workflow_id: updatedAgent.temporalWorkflowId,
         agent_id: agentId,
         error: error instanceof Error ? error.message : String(error),
       });
     }
   }
 
-  const updatedAgent = await repo.findAgentWithFullRelations(agentId);
-
-  return formatAgentResponse(updatedAgent!);
+  return {
+    ...formatAgentResponse(updatedAgent!),
+    mutation_accepted: accepted,
+  };
 }

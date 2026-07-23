@@ -10,7 +10,6 @@ export {
   createAgentTransaction,
   createAgentBatchTransaction,
   updateAgent,
-  updateAgentForWorkflow,
   failAgentIfStillActive,
   clearWorkflowForTerminalAgent,
   softDeleteAgent,
@@ -21,6 +20,12 @@ export {
   replaceAgentTools,
 } from './repoMutations';
 export type { BatchCreateAgentParams } from './repoMutations';
+export {
+  pauseAgentUnderWorkflowLock,
+  updateAgentConfigMutation,
+  updateAgentForWorkflow,
+  updateAgentUnderWorkflowLock,
+} from './repoWorkflowMutations';
 
 // ---------------------------------------------------------------------------
 // Agent queries

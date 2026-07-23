@@ -30,6 +30,32 @@ function metadataString(metadata: Record<string, unknown>, key: string): string 
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
+function attentionRequestId(metadata: Record<string, unknown>): string | null {
+  const direct = metadataString(metadata, 'attentionRequestId');
+  if (direct !== null) return direct;
+  const approval = metadata.requestUserApproval;
+  if (approval === null || typeof approval !== 'object' || Array.isArray(approval)) return null;
+  return metadataString(approval as Record<string, unknown>, 'attentionRequestId');
+}
+
+async function closeInterruptedAttentionRequest(
+  agentId: string,
+  workflowGeneration: string,
+  metadata: Record<string, unknown>
+): Promise<void> {
+  const requestId = attentionRequestId(metadata);
+  if (requestId === null) return;
+  await prisma.agentAttentionRequest.updateMany({
+    where: {
+      id: requestId,
+      agentId,
+      workflowId: workflowGeneration,
+      userResponse: null,
+    },
+    data: { userResponse: DEPLOY_INTERRUPTED_TOOL_MESSAGE },
+  });
+}
+
 /** Read the latest lifecycle state for every call in one workflow generation. */
 export async function captureInProgressWorkflowTools(
   agentId: string,
@@ -120,7 +146,10 @@ export async function finalizeInterruptedWorkflowTools(
       allowDeploymentFinalizer: true,
     });
     const terminalMetadata = metadataRecord(terminal.metadata);
-    if (terminalMetadata?.errorCode === 'DEPLOY_INTERRUPTED') interrupted += 1;
+    if (terminalMetadata?.errorCode === 'DEPLOY_INTERRUPTED') {
+      await closeInterruptedAttentionRequest(agentId, workflowGeneration, terminalMetadata);
+      interrupted += 1;
+    }
   }
 
   log.info('Reconciled stale workflow tool calls', {

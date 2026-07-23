@@ -10,6 +10,7 @@ export interface SaveToolUsageInput {
   tool_name: string;
   total_cost_cents: number;
   usage_items: unknown[];
+  workflow_generation?: string;
 }
 
 export interface ToolUsageCreated {

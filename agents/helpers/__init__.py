@@ -14,6 +14,10 @@ from .model_info import get_model_context_window
 from .model_pricing import fetch_model_pricing
 from .summarize import compress_context, generate_completion_summary, summarize_tool_result
 from .update_status import update_agent_status
+from .workflow_replacement import (
+    acknowledge_workflow_replacement_bootstrap,
+    finalize_workflow_replacement_bootstrap,
+)
 
 __all__ = [
     "fetch_agent_tools",
@@ -37,6 +41,8 @@ __all__ = [
     "get_user_system_name",
     "get_user_custom_system_prompt",
     "fetch_model_pricing",
+    "acknowledge_workflow_replacement_bootstrap",
+    "finalize_workflow_replacement_bootstrap",
 ]
 
 

@@ -2,38 +2,23 @@
  * Agent control service — pause, resume, restart, update status, update config, signals.
  */
 
-import { WorkflowNotFoundError } from '@temporalio/client';
 import {
   getTemporalClient,
-  readAgentWorkflowLaunchConfig,
-  resolveTemporalWorkflowExecutionRef,
   startAgentWorkflow,
-  startAgentWorkflowExecution,
   type StartAgentWorkflowParams,
-  type TemporalWorkflowExecutionRef,
 } from '../../providers/temporal';
 import { broadcastAgentModeStarted } from '../../providers/chat';
 import { createLogger } from '../../providers/logger';
 import { resumeAgentWorkflow } from '../../providers/agentResume';
-import {
-  captureInProgressWorkflowTools,
-  finalizeInterruptedWorkflowTools,
-} from '../../providers/staleWorkflowTools';
-import {
-  replaceStaleWorkflow,
-  terminateStaleTemporalWorkflow,
-} from '../../providers/workflowReplacement';
-import {
-  claimWorkflowReplacement,
-  completeWorkflowReplacement,
-  markWorkflowReplacementFailed,
-  recordStaleWorkflowChain,
-  type WorkflowReplacementClaim,
-} from '../../providers/workflowReplacementState';
 import * as repo from './repo';
 
 export { updateAgentConfig } from './agentConfigService';
 export { updateAgentStatus } from './agentStatusService';
+export {
+  acknowledgeWorkflowReplacementBootstrap,
+  restartAgent,
+  type RestartAgentOptions,
+} from './agentRestartService';
 
 const log = createLogger('Agents');
 
@@ -43,24 +28,18 @@ const log = createLogger('Agents');
 
 /** Pause a single agent. Children discover parent's paused state via pull-based queries. */
 export async function pauseAgent(agentId: string): Promise<void> {
-  const agent = await repo.findAgentById(agentId);
-
-  if (!agent) {
+  const paused = await repo.pauseAgentUnderWorkflowLock(agentId);
+  if (paused === null) return;
+  if (!paused.paused) {
+    log.info('Skipping pause - already terminal', { agent_id: agentId, status: paused.status });
     return;
   }
-
-  if (agent.status === 'COMPLETED' || agent.status === 'FAILED') {
-    log.info('Skipping pause - already terminal', { agent_id: agentId, status: agent.status });
-    return;
-  }
-
-  await repo.updateAgent(agentId, { status: 'PAUSED' });
 
   /* c8 ignore start -- Temporal signal requires live Temporal server */
-  if (agent.temporalWorkflowId !== null) {
+  if (paused.temporalWorkflowId !== null) {
     try {
       const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      const handle = client.workflow.getHandle(paused.temporalWorkflowId);
       await handle.signal('pause');
     } catch (error) {
       log.warn('Pause signal failed, DB updated. Workflow will sync next iteration', {
@@ -170,115 +149,6 @@ export async function startAgentMode(agentId: string, userId: string) {
     success: true,
     agent_id: agentId,
     workflow_id: workflowId,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Restart
-// ---------------------------------------------------------------------------
-
-async function startReplacementWorkflow(
-  agent: NonNullable<Awaited<ReturnType<typeof repo.findAgentWithVerifier>>>,
-  verifierType: string,
-  claim: WorkflowReplacementClaim
-): Promise<TemporalWorkflowExecutionRef> {
-  const currentParent =
-    agent.parentAgentId !== null ? await repo.findAgentById(agent.parentAgentId) : null;
-  const parentWorkflowId = currentParent?.temporalWorkflowId ?? agent.parentWorkflowId;
-  return startAgentWorkflowExecution({
-    agentId: agent.id,
-    userId: agent.userId,
-    goal: agent.goal,
-    model: agent.model,
-    reasoningMaxTokens: agent.reasoningMaxTokens,
-    verifier: { type: verifierType },
-    workflowId: claim.plannedWorkflowId,
-    ...(parentWorkflowId !== null ? { parentWorkflowId } : {}),
-    ...(agent.parentAgentId !== null ? { parentAgentId: agent.parentAgentId } : {}),
-    ...(agent.busId !== null ? { busId: agent.busId } : {}),
-    depth: agent.depth,
-    priceLimitCents: agent.priceLimitCents,
-    fastModeCacheEnabled: agent.fastModeCacheEnabled,
-    startPhase: 'resume',
-    ...(claim.resumeState.max_iterations !== null
-      ? { maxIterations: claim.resumeState.max_iterations }
-      : {}),
-    ...(claim.resumeState.context_gates !== null
-      ? { contextGates: claim.resumeState.context_gates }
-      : {}),
-    resumeState: claim.resumeState,
-  });
-}
-
-/** Restart an agent's workflow. */
-export async function restartAgent(agentId: string, userId?: string) {
-  const agent = await repo.findAgentWithVerifier(agentId, userId);
-
-  if (!agent) {
-    return { error: 'Agent not found', status: 404 };
-  }
-
-  if (agent.verifier === null) {
-    return { error: 'Agent has no verifier configured', status: 400 };
-  }
-  const verifierType = agent.verifier.type;
-  let historicalLaunchConfig: Awaited<ReturnType<typeof readAgentWorkflowLaunchConfig>> | undefined;
-  if (agent.workflowReplacementToken === null && agent.temporalWorkflowId !== null) {
-    try {
-      historicalLaunchConfig = await readAgentWorkflowLaunchConfig(agent.temporalWorkflowId);
-    } catch (error) {
-      if (!(error instanceof WorkflowNotFoundError)) throw error;
-    }
-  }
-  const claim = await claimWorkflowReplacement(agentId, historicalLaunchConfig);
-  let staleExecution: TemporalWorkflowExecutionRef | null = null;
-  if (claim.staleWorkflowId !== null) {
-    if (claim.staleFirstExecutionRunId !== null) {
-      staleExecution = {
-        workflowId: claim.staleWorkflowId,
-        firstExecutionRunId: claim.staleFirstExecutionRunId,
-      };
-    } else {
-      try {
-        staleExecution = await resolveTemporalWorkflowExecutionRef(claim.staleWorkflowId);
-        await recordStaleWorkflowChain(claim, staleExecution);
-      } catch (error) {
-        if (!(error instanceof WorkflowNotFoundError)) {
-          await markWorkflowReplacementFailed(claim, error);
-          throw error;
-        }
-      }
-    }
-  }
-
-  let execution: TemporalWorkflowExecutionRef;
-  try {
-    execution = await replaceStaleWorkflow(
-      {
-        agentId,
-        staleExecution,
-        staleWorkflowGeneration: claim.staleWorkflowId,
-      },
-      {
-        captureInProgressTools: captureInProgressWorkflowTools,
-        terminate: (stale) => terminateStaleTemporalWorkflow(stale, agentId),
-        finalizeInterruptedTools: finalizeInterruptedWorkflowTools,
-        startFresh: () => startReplacementWorkflow(agent, verifierType, claim),
-      }
-    );
-    await completeWorkflowReplacement(claim, execution);
-  } catch (error) {
-    await markWorkflowReplacementFailed(claim, error);
-    throw error;
-  }
-
-  log.info('Restarted agent', { agent_id: agentId, workflow_id: execution.workflowId });
-
-  return {
-    success: true,
-    agent_id: agentId,
-    workflow_id: execution.workflowId,
-    message: 'Workflow restarted - will continue from existing context',
   };
 }
 

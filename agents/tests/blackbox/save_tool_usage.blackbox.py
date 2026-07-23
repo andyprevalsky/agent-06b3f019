@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from _test_utils import (
@@ -72,14 +73,41 @@ async def test_boundary():
     assert len(body["usage_items"]) == 2
 
 
+async def test_stamps_workflow_generation():
+    """The billing insert identifies the exact workflow generation that produced it."""
+    _setup()
+    generation = "agent-usage:replacement:generation-2"
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch(
+            "temporalio.activity.info",
+            return_value=SimpleNamespace(workflow_id=generation),
+        ),
+    ):
+        from helpers.save_tool_usage import save_tool_usage
+
+        await save_tool_usage(
+            agent_id="agent-usage",
+            user_id="user-usage",
+            tool_name="execute_loop",
+            usage_items=[
+                {"type": "llm", "cost_cents": 3, "iteration": 17},
+            ],
+        )
+
+    call = assert_captured_call(url_contains="/api/tool-usage", method="POST")
+    assert call["requestHeaders"]["x-agent-workflow-generation"] == generation
+
+
 async def run_all_tests():
     print("save-tool-usage blackbox tests:")
     r = BlackboxResult()
     await r.record_async("happy_path", test_happy_path)
     await r.record_async("boundary", test_boundary)
+    await r.record_async("stamps_workflow_generation", test_stamps_workflow_generation)
     teardown_mock()
     return r.all_passed
 
 
 if __name__ == "__main__":
-    asyncio.run(run_all_tests())
+    raise SystemExit(0 if asyncio.run(run_all_tests()) else 1)

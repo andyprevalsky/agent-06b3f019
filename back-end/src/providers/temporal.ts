@@ -11,6 +11,74 @@ import type { WorkflowLaunchConfig, WorkflowResumeState } from './workflowReplac
 const log = createLogger('Temporal');
 
 let client: Client | null = null;
+export const TEMPORAL_CONTROL_RPC_TIMEOUT_MS = 15_000;
+export const WORKER_DEPLOYMENT_ACTIVATION_PREFIX = 'navi-worker-deployment-activation:';
+export const WORKER_DEPLOYMENT_ACTIVATION_TASK_QUEUE = 'navi-worker-deployment-markers';
+
+export function withTemporalControlDeadline<T>(
+  temporalClient: Pick<Client, 'withDeadline'>,
+  operation: () => Promise<T>,
+  deadlineAtMs?: number
+): Promise<T> {
+  const rpcDeadline = Date.now() + TEMPORAL_CONTROL_RPC_TIMEOUT_MS;
+  return temporalClient.withDeadline(
+    deadlineAtMs === undefined ? rpcDeadline : Math.min(rpcDeadline, deadlineAtMs),
+    operation
+  );
+}
+
+export function workerDeploymentActivationWorkflowId(buildId: string): string {
+  if (!/^[0-9a-f]{40}$/.test(buildId)) {
+    throw new Error('Temporal worker build ID must be a lowercase 40-character Git SHA');
+  }
+  return `${WORKER_DEPLOYMENT_ACTIVATION_PREFIX}${buildId}`;
+}
+
+export async function activateTemporalWorkerBuildWithClient(
+  temporalClient: Pick<Client, 'withDeadline' | 'workflow'>,
+  buildId: string,
+  deadlineAtMs?: number
+): Promise<string> {
+  const workflowId = workerDeploymentActivationWorkflowId(buildId);
+  try {
+    const description = await withTemporalControlDeadline(
+      temporalClient,
+      () => temporalClient.workflow.getHandle(workflowId).describe(),
+      deadlineAtMs
+    );
+    if (description.status.name !== 'RUNNING') {
+      throw new Error(
+        `Temporal worker activation marker ${workflowId} is ${description.status.name}`
+      );
+    }
+    return workflowId;
+  } catch (error) {
+    if (!(error instanceof WorkflowNotFoundError)) throw error;
+  }
+
+  try {
+    await withTemporalControlDeadline(
+      temporalClient,
+      () =>
+        temporalClient.workflow.start('RoseWorkerDeploymentActivationMarker', {
+          taskQueue: WORKER_DEPLOYMENT_ACTIVATION_TASK_QUEUE,
+          workflowId,
+          args: [buildId],
+        }),
+      deadlineAtMs
+    );
+  } catch (error) {
+    if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
+  }
+  return workflowId;
+}
+
+export async function activateTemporalWorkerBuild(
+  buildId: string,
+  deadlineAtMs?: number
+): Promise<string> {
+  return activateTemporalWorkerBuildWithClient(await getTemporalClient(), buildId, deadlineAtMs);
+}
 
 /**
  * Get or create a Temporal client connected to Temporal Cloud
@@ -131,15 +199,18 @@ export function buildAgentWorkflowStartHistoryRequest(namespace: string, workflo
 
 /** Read one start event; this does not fetch or replay the workflow's history. */
 export async function readAgentWorkflowLaunchConfig(
-  workflowId: string
+  workflowId: string,
+  deadlineAtMs?: number
 ): Promise<WorkflowLaunchConfig> {
   const temporalClient = await getTemporalClient();
   let response;
   try {
-    response = await temporalClient.withDeadline(Date.now() + 10_000, () =>
-      temporalClient.workflowService.getWorkflowExecutionHistory(
-        buildAgentWorkflowStartHistoryRequest(temporalClient.options.namespace, workflowId)
-      )
+    response = await temporalClient.withDeadline(
+      Math.min(Date.now() + 10_000, deadlineAtMs ?? Number.POSITIVE_INFINITY),
+      () =>
+        temporalClient.workflowService.getWorkflowExecutionHistory(
+          buildAgentWorkflowStartHistoryRequest(temporalClient.options.namespace, workflowId)
+        )
     );
   } catch (error) {
     if (typeof error === 'object' && error !== null && 'code' in error && error.code === 5) {
@@ -183,11 +254,16 @@ export function buildAgentWorkflowArgs(params: StartAgentWorkflowParams): unknow
 }
 
 /** Resolve the immutable chain identity for an already-started workflow. */
-export async function resolveTemporalWorkflowExecutionRef(
-  workflowId: string
+export async function resolveTemporalWorkflowExecutionRefWithClient(
+  temporalClient: Pick<Client, 'withDeadline' | 'workflow'>,
+  workflowId: string,
+  deadlineAtMs?: number
 ): Promise<TemporalWorkflowExecutionRef> {
-  const temporalClient = await getTemporalClient();
-  const description = await temporalClient.workflow.getHandle(workflowId).describe();
+  const description = await withTemporalControlDeadline(
+    temporalClient,
+    () => temporalClient.workflow.getHandle(workflowId).describe(),
+    deadlineAtMs
+  );
   const firstExecutionRunId = description.raw.workflowExecutionInfo?.firstRunId;
   if (typeof firstExecutionRunId !== 'string' || firstExecutionRunId.length === 0) {
     throw new Error(`Temporal did not return a first execution run ID for ${workflowId}`);
@@ -195,11 +271,23 @@ export async function resolveTemporalWorkflowExecutionRef(
   return { workflowId, firstExecutionRunId };
 }
 
-/** Start an agent workflow and retain its immutable Temporal chain identity. */
-export async function startAgentWorkflowExecution(
-  params: StartAgentWorkflowParams
+export async function resolveTemporalWorkflowExecutionRef(
+  workflowId: string,
+  deadlineAtMs?: number
 ): Promise<TemporalWorkflowExecutionRef> {
-  const client = await getTemporalClient();
+  return resolveTemporalWorkflowExecutionRefWithClient(
+    await getTemporalClient(),
+    workflowId,
+    deadlineAtMs
+  );
+}
+
+/** Start an agent workflow and retain its immutable Temporal chain identity. */
+export async function startAgentWorkflowExecutionWithClient(
+  client: Pick<Client, 'withDeadline' | 'workflow'>,
+  params: StartAgentWorkflowParams,
+  deadlineAtMs?: number
+): Promise<TemporalWorkflowExecutionRef> {
   // Use provided task queue or default to environment-specific queue
   const taskQueue = params.taskQueue || process.env.TEMPORAL_TASK_QUEUE;
   if (!taskQueue) {
@@ -216,18 +304,27 @@ export async function startAgentWorkflowExecution(
 
   let execution: TemporalWorkflowExecutionRef;
   try {
-    const handle = await client.workflow.start('AgentWorkflow', {
-      taskQueue,
-      workflowId,
-      args: buildAgentWorkflowArgs(params),
-    });
+    const handle = await withTemporalControlDeadline(
+      client,
+      () =>
+        client.workflow.start('AgentWorkflow', {
+          taskQueue,
+          workflowId,
+          args: buildAgentWorkflowArgs(params),
+        }),
+      deadlineAtMs
+    );
     execution = {
       workflowId: handle.workflowId,
       firstExecutionRunId: handle.firstExecutionRunId,
     };
   } catch (error) {
     if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
-    execution = await resolveTemporalWorkflowExecutionRef(workflowId);
+    execution = await resolveTemporalWorkflowExecutionRefWithClient(
+      client,
+      workflowId,
+      deadlineAtMs
+    );
   }
 
   log.info('Workflow started', {
@@ -236,6 +333,13 @@ export async function startAgentWorkflowExecution(
   });
 
   return execution;
+}
+
+export async function startAgentWorkflowExecution(
+  params: StartAgentWorkflowParams,
+  deadlineAtMs?: number
+): Promise<TemporalWorkflowExecutionRef> {
+  return startAgentWorkflowExecutionWithClient(await getTemporalClient(), params, deadlineAtMs);
 }
 
 /** Backwards-compatible helper for callers that only expose Workflow ID. */
