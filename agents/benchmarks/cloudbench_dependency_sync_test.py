@@ -2970,6 +2970,63 @@ def test_autoscaler_persists_desired_capacity_before_reporting_ready() -> None:
     assert 'ready_workers" -lt "$desired_workers"' in fleet
 
 
+def test_autoscaler_publishes_failure_when_readiness_reconcile_exits(
+    tmp_path: Path,
+) -> None:
+    """Startup must not collapse a silent autoscaler return into an opaque abort."""
+    autoscaler = _extract_fleet_function(
+        FLEET_SCRIPT.read_text(), "bench_autoscaler() {"
+    )
+    out_dir = tmp_path / "bench"
+    script = f"""
+set -uo pipefail
+APP=test-app
+RUN_ID=test-run
+AUTOSCALE_POLL=1
+AUTOSCALER_FINALIZATION_WAIT_SECONDS=1
+BOX_HEALTH_PORT=3003
+CLOUDBENCH_BOOT_LAUNCH=0
+mkdir -p {shlex.quote(str(out_dir))}
+_machine_priv_ip() {{ printf 'fdaa::1'; }}
+inventory_machine_exists() {{ return 0; }}
+reconcile_worker_ready_outcomes() {{ return 1; }}
+reconcile_worker_failure_outcomes() {{ return 0; }}
+release_autoscaler_metrics_owner() {{ return 0; }}
+claim_autoscaler_metrics_port() {{ printf -v "$1" 62345; }}
+cloudbench_terminate_and_wait() {{
+  shift
+  for pid in "$@"; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null || true
+  done
+}}
+curl() {{ return 0; }}
+flyctl() {{ while :; do sleep 60; done; }}
+fleet_job_running() {{
+  local pid="${{1:-}}"
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  jobs -pr | grep -qx "$pid"
+}}
+{autoscaler}
+if bench_autoscaler bench primary ws 0 {shlex.quote(str(out_dir))} 61000; then
+  echo "autoscaler unexpectedly succeeded" >&2
+  exit 2
+fi
+test -s {shlex.quote(str(out_dir / "autoscaler.failed"))}
+grep -F "could not reconcile worker readiness outcomes" \\
+  {shlex.quote(str(out_dir / "autoscaler.failed"))}
+"""
+
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=5,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_autoscaler_stops_cleanly_when_its_benchmark_child_finishes(
     tmp_path: Path,
 ) -> None:

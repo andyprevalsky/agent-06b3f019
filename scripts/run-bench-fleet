@@ -3819,6 +3819,16 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     : > "$out/worker-ready.ids"
     rm -f "$out/autoscaler.ready" "$out/autoscaler.failed" \
         "$out/autoscaler.completed-after-child"
+    fail_autoscaler() {  # fail_autoscaler <reason>
+        local reason="$1"
+        if [ ! -s "$out/autoscaler.failed" ]; then
+            if ! printf '%s\n' "$reason" > "$out/autoscaler.failed"; then
+                echo "  ❌ [$bench] mandatory autoscaler: could not persist failure reason: $reason" >&2
+            fi
+        fi
+        echo "  ❌ [$bench] mandatory autoscaler: $reason" >&2
+        return 1
+    }
     complete_autoscaler_after_child() {
         local completed_tmp="$out/autoscaler.completed-after-child.tmp.$$"
         local desired_workers tracked_workers ready_workers terminal_deadline
@@ -3829,8 +3839,10 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
         # invariant used by final acceptance is stable.
         terminal_deadline=$((SECONDS + AUTOSCALER_FINALIZATION_WAIT_SECONDS))
         while :; do
-            reconcile_worker_ready_outcomes "$out" || return 1
-            reconcile_worker_failure_outcomes "$bench" "$out" || return 1
+            reconcile_worker_ready_outcomes "$out" \
+                || fail_autoscaler "could not reconcile worker readiness outcomes"
+            reconcile_worker_failure_outcomes "$bench" "$out" \
+                || fail_autoscaler "could not reconcile worker failure outcomes"
             [ ! -s "$out/autoscaler.failed" ] || return 1
             desired_workers="$(cat "$out/desired-worker-count" 2>/dev/null || true)"
             if ! printf '%s' "$desired_workers" | grep -Eq '^[0-9]+$'; then
@@ -3980,7 +3992,8 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     # lookup failure is not normal termination: a stale/failed publisher must
     # fail closed unless this autoscaler has itself observed child completion.
     while :; do
-        reconcile_worker_ready_outcomes "$out" || return 1
+        reconcile_worker_ready_outcomes "$out" \
+            || fail_autoscaler "could not reconcile worker readiness outcomes"
         if [ -e "$out/benchmark-child.finished" ]; then
             complete_autoscaler_after_child
             return $?
@@ -4092,8 +4105,10 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
                 rm -f "$out/worker-$wid.pending" "$out/worker-$wid.ready"
             done
         fi
-        reconcile_worker_ready_outcomes "$out" || return 1
-        reconcile_worker_failure_outcomes "$bench" "$out" || return 1
+        reconcile_worker_ready_outcomes "$out" \
+            || fail_autoscaler "could not reconcile worker readiness outcomes"
+        reconcile_worker_failure_outcomes "$bench" "$out" \
+            || fail_autoscaler "could not reconcile worker failure outcomes"
         sleep "$AUTOSCALE_POLL"
     done
 }
