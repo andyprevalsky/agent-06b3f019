@@ -781,6 +781,7 @@ else
 # Sync Prisma schema to local DB (idempotent, dev-only)
 echo "🐘 Syncing Prisma schema..."
 (cd back-end && npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
+(cd back-end && bash scripts/apply-local-workflow-ddl.sh)
 echo "🔎 Ensuring agent-network grep indexes..."
 (cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts)
 

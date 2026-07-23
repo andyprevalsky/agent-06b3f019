@@ -209,8 +209,13 @@ BEGIN
 END $$;
 SQL
   fi
-  echo "Syncing Prisma schema to local test database..."
-  npx prisma db push --skip-generate --accept-data-loss >/dev/null
+  if [[ "${BLACKBOX_TEST_SKIP_SCHEMA_SYNC:-0}" == "1" ]]; then
+    echo "Using schema prepared by the existing backend launcher."
+  else
+    echo "Syncing Prisma schema to local test database..."
+    npx prisma db push --skip-generate --accept-data-loss >/dev/null
+    bash "$SCRIPT_DIR/apply-local-workflow-ddl.sh"
+  fi
   # Credential seeding and smoke execution are separate controls. A caller may
   # pre-seed a valid production credential without disabling the real Codex
   # black-box test that consumes it.
