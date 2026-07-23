@@ -1144,9 +1144,16 @@ async def _update_world_model_before_simulation(args) -> None:
         )
 
 
+_PAYMENT_CONFIRMATION_RE = re.compile(
+    r"\bpayment\s+(?:was\s+)?confirmed\b"
+    r"|\border\s+(?:was\s+)?paid(?:\s+successfully)?\b"
+    r"|\bpaid\s+successfully\b"
+)
+
+
 def _evaluate_agent_payment_result(data: dict) -> tuple[bool, str | None]:
     text = _agent_data_search_text(data)
-    if "payment confirmed" not in text:
+    if not _PAYMENT_CONFIRMATION_RE.search(text):
         return False, "agent did not report the test payment confirmation page"
     if "order" not in text:
         return False, "agent did not report the confirmation order id"

@@ -150,6 +150,35 @@ def test_cloudbench_result_accepts_only_fresh_exact_passing_task_set():
     assert errors == []
 
 
+def test_agent_payment_evaluator_accepts_confirmed_paid_order_language():
+    """Payment tasks should pass when the agent reports a paid order confirmation."""
+    from benchmarks.run_benchmark import _evaluate_agent_payment_result
+
+    passed, reason = _evaluate_agent_payment_result(
+        {
+            "messages": [
+                {
+                    "message": (
+                        "The payment was confirmed. The confirmation page shows: "
+                        "Order ID: tp_c5053b1b. Total charged: $43.96. "
+                        "The order was placed successfully."
+                    )
+                },
+                {
+                    "message": (
+                        "A completed child task returned a grounded structured response "
+                        "covering required fields: order_confirmation_id, total_price_paid. "
+                        "Extracted Output: Order Confirmation Id: tp_c5053b1b, "
+                        "Total Price Paid: 43.96"
+                    )
+                },
+            ]
+        }
+    )
+
+    assert passed, reason
+
+
 def test_cloudbench_result_preserves_fresh_failure_but_never_counts_it_as_pass():
     validator = _load_cloudbench_result_module()
     failed_run = _cloudbench_run(
@@ -9399,6 +9428,10 @@ async def run_all_tests():
     r.record(
         "cloudbench_accepts_fresh_exact_pass",
         test_cloudbench_result_accepts_only_fresh_exact_passing_task_set,
+    )
+    r.record(
+        "agent_payment_accepts_confirmed_paid_order_language",
+        test_agent_payment_evaluator_accepts_confirmed_paid_order_language,
     )
     r.record(
         "cloudbench_preserves_failure_without_passing",
