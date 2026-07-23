@@ -39,6 +39,7 @@ require_text 'Before syncing a dirty controller workspace' "/descend must preser
 require_text 'before preparing each isolated deploy-unit worktree' "/descend must sync before deploy handoff"
 require_text "pause only" "deploy approval must not freeze independent RCA work"
 require_text "Prepare a clean" "/descend must use a fix-only isolated deploy worktree"
+require_text 'bash scripts/prepare-deploy-worktree.sh' "/descend must provision isolated deploy worktrees before /deploy"
 require_text "Bench run:" "/descend header must show benchmark timing"
 require_text "Rows with ⏳ Deploy approval first" "deploy approvals must sort first"
 require_text "Rows with ✅ Deployed #<PR> last" "deployed rows must sort last"

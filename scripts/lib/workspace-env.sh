@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 normalize_conductor_workspace_env() {
-  local pwd_physical workspace_physical actual_name
+  local pwd_physical workspace_physical actual_name deploy_worktree_env
 
   # Cloud builds intentionally generate a stable synthetic workspace name in
   # .cloud-env; do not replace it with the checkout directory basename.
@@ -10,6 +10,21 @@ normalize_conductor_workspace_env() {
   fi
 
   pwd_physical="$(cd "$PWD" && pwd -P)"
+  deploy_worktree_env="$pwd_physical/.context/deploy-worktree.env"
+  if [ -f "$deploy_worktree_env" ]; then
+    # /descend-created deploy worktrees are not registered with Conductor and
+    # otherwise inherit their controller's identity and port range. Rehydrate
+    # the durable child identity on every new shell before resolving resources.
+    . "$deploy_worktree_env"
+    if [ "${ROSE_DEPLOY_WORKTREE_PATH:-}" != "$pwd_physical" ]; then
+      echo "Deploy worktree config belongs to ${ROSE_DEPLOY_WORKTREE_PATH:-unknown}, not $pwd_physical." >&2
+      return 1
+    fi
+    export CONDUCTOR_WORKSPACE_PATH="$pwd_physical"
+    export CONDUCTOR_WORKSPACE_NAME
+    export CONDUCTOR_PORT
+  fi
+
   if [ -n "${CONDUCTOR_WORKSPACE_PATH:-}" ] && [ -d "$CONDUCTOR_WORKSPACE_PATH" ]; then
     workspace_physical="$(cd "$CONDUCTOR_WORKSPACE_PATH" && pwd -P)"
   else
