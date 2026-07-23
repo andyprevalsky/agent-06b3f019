@@ -77,15 +77,11 @@ echo "☁️  Pre-Deploy cloud request: $request_id"
 echo "📊 Benchmarks → Runs: $run_id"
 echo "🧪 Tasks (${#PREDEPLOY_TASKS[@]}): ${PREDEPLOY_TASKS[*]}"
 
-# The hub poller launches the cloud fleet (run-bench-fleet) as a descendant
-# process chain. If THIS controller is interrupted (SIGINT/SIGTERM), the signal
-# does NOT reach the fleet on its own (bash does not forward signals to a
-# foreground child, and macOS has no `setsid` to group them). An un-propagated
-# kill orphans the fleet, so its own cleanup trap never fires and its owned Fly
-# clones (+ autoscaler workers) are left running — bleeding cost until reaped by
-# hand. So run the poller in the background and, on signal, walk the descendant
-# tree with `pgrep -P` to SIGTERM the fleet, letting the fleet's cleanup trap
-# DESTROY its clones; then wait (bounded) for that teardown to drain.
+# The Hub poller launches the cloud fleet with --wait: the actual fleet is in
+# its own session, while the poller waits on an atomic exit-status rendezvous.
+# SIGKILL/session reclamation of this predeploy process therefore cannot bypass
+# fleet cleanup. For cooperative SIGINT/SIGTERM, still walk the descendant tree
+# so cleanup starts immediately instead of leaving the detached run to finish.
 _kill_descendants() {
     local pid="$1" child
     for child in $(pgrep -P "$pid" 2>/dev/null); do _kill_descendants "$child"; done

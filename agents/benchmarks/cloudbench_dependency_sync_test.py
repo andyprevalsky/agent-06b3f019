@@ -6,11 +6,14 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -31,6 +34,7 @@ DRIVER_SCRIPT = ROOT / "scripts" / "cloudbench-run.sh"
 WORKER_SCRIPT = ROOT / "scripts" / "cloudbench-worker.sh"
 FLEET_SCRIPT = ROOT / "scripts" / "run-bench-fleet"
 CLOUD_SCRIPT = ROOT / "scripts" / "run-bench-cloud"
+HUB_POLLER_SCRIPT = ROOT / "scripts" / "run-bench-hub-poller"
 AGENT_LINK_SERVER = ROOT / "agents" / "benchmarks" / "agent_link_server.py"
 PORT_LEASE_SCRIPT = ROOT / "scripts" / "cloudbench-port-lease.py"
 PREDEPLOY_SCRIPT = ROOT / "scripts" / "run-predeploy-cloud"
@@ -826,6 +830,131 @@ def test_predeploy_cloud_runner_selects_the_catalog_smoke_group() -> None:
         "browser-smoke",
         "browser-biometrics-webdecoy",
     ]
+
+
+def test_cloud_hub_poller_supervises_fleet_until_final_bundle(tmp_path: Path) -> None:
+    """A Hub poller must not inherit the interactive fleet's detach default."""
+    request_id = f"poller-foreground-{os.getpid()}-{tmp_path.name}"
+    task_name = "poller-foreground-contract"
+    observed: list[tuple[str, str, dict]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def _json(self, status: int, payload: dict) -> None:
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _body(self) -> dict:
+            length = int(self.headers.get("Content-Length") or 0)
+            return json.loads(self.rfile.read(length) or b"{}")
+
+        def do_GET(self) -> None:
+            if self.path.startswith("/api/benchmarks/run-requests?status=queued"):
+                self._json(
+                    200,
+                    {
+                        "requests": [
+                            {
+                                "id": request_id,
+                                "taskNames": [task_name],
+                                "simOn": [],
+                                "scope": "",
+                                "createdAt": "2026-07-23T00:00:00Z",
+                            }
+                        ]
+                    },
+                )
+                return
+            self._json(404, {})
+
+        def do_PATCH(self) -> None:
+            body = self._body()
+            observed.append(("PATCH", self.path, body))
+            self._json(200, {"ok": True})
+
+        def do_POST(self) -> None:
+            body = self._body()
+            observed.append(("POST", self.path, body))
+            self._json(201, {"run": body})
+
+        def log_message(self, *_args) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+
+    runner = tmp_path / "run-bench"
+    runner_args = tmp_path / "runner.args"
+    runner.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -eu\n"
+        'printf "%s\\n" "$@" > "$RUNNER_ARGS_LOG"\n'
+        'case " $* " in *" --wait "*) ;; *) exit 44 ;; esac\n'
+        'mkdir -p "$BENCHMARK_CONTEXT_DIR"\n'
+        'python3 - "$BENCHMARK_CONTEXT_DIR/run.json" "$TASK_NAME" <<\'PY\'\n'
+        "import json, sys\n"
+        "json.dump({\n"
+        '    "run_id": "fixture-run",\n'
+        '    "suite": "fixture",\n'
+        '    "tasks": [{"name": sys.argv[2], "status": "passed", "passed": True}],\n'
+        "}, open(sys.argv[1], 'w'))\n"
+        "PY\n"
+    )
+    runner.chmod(0o755)
+
+    local_artifact_root = ROOT / "agents" / ".context" / "benchmarks" / f"hub-{request_id}"
+    controller_artifact_root = ROOT / ".context" / "hub-poller-runs" / request_id
+    controller_log = ROOT / ".context" / f"hub-poller-run-{request_id}.log"
+    env = os.environ.copy()
+    env.update(
+        {
+            "BACKEND_API_KEY": "test-key",
+            "HUB_URL": f"http://127.0.0.1:{server.server_address[1]}",
+            "RUN_BENCH_BIN": str(runner),
+            "RUNNER_ARGS_LOG": str(runner_args),
+            "TASK_NAME": task_name,
+            "HUB_SKIP_CATALOG_EXPORT": "1",
+            "HUB_SNAPSHOT_INTERVAL_SECONDS": "0.1",
+            "HUB_UPLOAD_SPOOL_DIR": str(tmp_path / "spool"),
+        }
+    )
+    try:
+        result = subprocess.run(
+            ["bash", str(HUB_POLLER_SCRIPT), "--once"],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        shutil.rmtree(local_artifact_root, ignore_errors=True)
+        shutil.rmtree(controller_artifact_root, ignore_errors=True)
+        controller_log.unlink(missing_ok=True)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    observed_runner_args = runner_args.read_text().splitlines()
+    assert "--wait" in observed_runner_args
+    assert "--foreground" not in observed_runner_args
+    assert any(
+        method == "POST" and path == "/api/benchmarks/runs"
+        for method, path, _body in observed
+    ), observed
+    terminal = [
+        body
+        for method, path, body in observed
+        if method == "PATCH"
+        and path == f"/api/benchmarks/run-requests/{request_id}"
+        and body.get("action") in {"complete", "fail"}
+    ]
+    assert terminal == [{"action": "complete", "run_id": f"hub-{request_id}"}]
 
 
 def test_predeploy_local_runner_selects_the_catalog_smoke_group() -> None:
@@ -3185,6 +3314,9 @@ def test_autoscaler_stops_cleanly_when_its_benchmark_child_finishes(
     assert 'mv "$completed_tmp" "$out/autoscaler.completed-after-child"' in autoscaler
     assert "primary disappeared from provider inventory before child completion" in autoscaler
     assert "mandatory_autoscaler_process_acceptable" in final_acceptance
+    assert final_acceptance.index("worker capacity below desired") < final_acceptance.index(
+        "mandatory_autoscaler_process_acceptable"
+    )
 
     # Inverse regression: an autoscaler that dies first must not be forgiven
     # merely because the child later publishes its independent finish marker.
@@ -3805,11 +3937,17 @@ def test_environment_mutation_is_maintenance_only_and_run_path_read_only() -> No
     cleanup = fleet[cleanup_start:cleanup_end]
     assert cleanup.index("trap - EXIT") < cleanup.index("terminate_and_wait")
     assert cleanup.index("trap '' HUP INT TERM") < cleanup.index("terminate_and_wait")
-    assert ('cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${AUTOSCALER_PIDS[@]:-}"') in cleanup
+    assert ('cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${AUTOSCALER_PIDS[@]:-}"') in cleanup
+    assert ('cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${PROVISION_PIDS[@]:-}"') in cleanup
     assert ('cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${CHILD_PIDS[@]:-}"') in cleanup
     assert "CLOUDBENCH_CHILD_TERM_SECONDS:-30" in fleet
     helper = ENV_HELPER_SCRIPT.read_text()
     assert "cloudbench_terminate_and_wait() {" in helper
+    assert "cloudbench_terminate_tree_and_wait() {" in helper
+    assert "cloudbench_detach_reexec_tracked() {" in helper
+    assert "cloudbench_wait_tracked_detached() {" in helper
+    assert "ps -axo pid=,ppid=,lstart=" in helper
+    assert "cloudbench_pid_matches_start" in helper
     assert 'kill -KILL "$pid"' in helper
     # fleet traps name the signal before exiting (still exit 129/130/143)
     assert "controller received HUP" in fleet and "exit 129' HUP" in fleet
@@ -4042,6 +4180,7 @@ FLY() {{
 fleet_machines_json() {{ FLY machines list -a "$APP" --json; }}
 fleet_registry_record_name() {{ return 0; }}
 fleet_registry_record_id() {{ return 0; }}
+machine_volume_id() {{ printf 'vol-owned-target'; }}
 machine_storage_ready() {{ return 0; }}
 machine_storage_failed() {{ return 1; }}
 {_clone_index_adapter_fixture()}
@@ -4399,6 +4538,8 @@ def _worker_ledger_lock_bundle(source: str) -> str:
 def _clone_machine_bundle(source: str) -> str:
     return "\n".join(
         (
+            "machine_volume_id() { printf 'vol-owned-fixture'; }",
+            "reap_volume() { :; }",
             _worker_ledger_lock_bundle(source),
             _extract_fleet_function(source, "clone_machine_target() {"),
         )
@@ -4407,12 +4548,18 @@ def _clone_machine_bundle(source: str) -> str:
 
 def _worker_cleanup_bundle(source: str) -> str:
     return "\n".join(
-        _extract_fleet_function(source, signature)
-        for signature in (
-            "worker_is_tracked() {",
-            "worker_ledger_lock_acquire() {",
-            "worker_ledger_lock_release() {",
-            "cleanup_failed_worker() {",
+        (
+            "fleet_registry_volume_for_id() { printf 'vol-owned-fixture'; }",
+            "reap_volume() { :; }",
+            *(
+                _extract_fleet_function(source, signature)
+                for signature in (
+                    "worker_is_tracked() {",
+                    "worker_ledger_lock_acquire() {",
+                    "worker_ledger_lock_release() {",
+                    "cleanup_failed_worker() {",
+                )
+            ),
         )
     )
 
@@ -4798,6 +4945,141 @@ reap_volume vol_warm && echo "warm_guard=missing" || echo "warm_guard=held"
     assert "volumes destroy vol_warm" not in log
 
 
+def test_exact_volume_ownership_survives_delayed_visibility_and_failed_delete(
+    tmp_path: Path,
+) -> None:
+    """A clone's mount can appear after its Machine ID. The controller must
+    persist the exact volume before destroying a terminal-storage-failed
+    machine, retain that record when volume deletion fails, and let a later
+    exact-owner recovery delete only that volume."""
+    fleet = FLEET_SCRIPT.read_text()
+    functions = "\n".join(
+        _extract_fleet_function(fleet, signature)
+        for signature in (
+            "fly_with_timeout() {",
+            "reap_volume() {",
+            "reap_machine() {",
+            "registry_meta_value() {",
+            "fleet_registry_record_name() {",
+            "registry_record_machine_identity() {",
+            "fleet_registry_record_id() {",
+            "fleet_registry_release_id() {",
+            "worker_ledger_lock_acquire() {",
+            "worker_ledger_lock_release() {",
+            "registry_record_is_stale_phantom() {",
+            "reap_registry_clones() {",
+            "clone_machine_target() {",
+        )
+    )
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / ("a" * 32)
+    (registry / "clones").mkdir(parents=True)
+    ledger = tmp_path / "owned.ids"
+    machine_state = tmp_path / "machine-state"
+    volume_lookups = tmp_path / "volume-lookups"
+    volumes = tmp_path / "volumes"
+    calls = tmp_path / "calls"
+    machine_state.write_text("1\n")
+    volume_lookups.write_text("0\n")
+    volumes.write_text("vol_exact\nvol_neighbor\n")
+
+    script = f"""set -uo pipefail
+APP=bench-app
+REGION=iad
+WARM_ID=feedface000000
+WARM_VOLUME_ID=vol_warm
+SNAP_ID=snapshot-1
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+FLEET_REGISTRY_DIR={shlex.quote(str(registry))}
+LEDGER={shlex.quote(str(ledger))}
+MACHINE_STATE={shlex.quote(str(machine_state))}
+VOLUME_LOOKUPS={shlex.quote(str(volume_lookups))}
+VOLUMES={shlex.quote(str(volumes))}
+CALLS={shlex.quote(str(calls))}
+FAIL_VOLUME=1
+CLOUDBENCH_CLONE_MAX_ATTEMPTS=1
+CLOUDBENCH_CLONE_STORAGE_READY_SECONDS=10
+sleep() {{ :; }}
+FLY() {{
+  printf '%s\n' "$*" >> "$CALLS"
+  case "$1 $2" in
+    "machine clone")
+      printf 'Machine deadbeef000001 has been created...\\n'
+      return 0 ;;
+    "machine destroy")
+      printf '0\\n' > "$MACHINE_STATE"
+      return 0 ;;
+    "machines list")
+      if [ "$(cat "$MACHINE_STATE")" = "1" ]; then
+        printf '[{{"id":"deadbeef000001","name":"cloudbench-owned"}}]\\n'
+      else
+        printf '[]\\n'
+      fi
+      return 0 ;;
+    "volumes destroy")
+      [ "$3" = "vol_neighbor" ] && return 99
+      [ "$FAIL_VOLUME" = "0" ] || return 1
+      grep -Fxv "$3" "$VOLUMES" > "$VOLUMES.tmp"
+      mv "$VOLUMES.tmp" "$VOLUMES"
+      return 0 ;;
+    "volumes list")
+      python3 - "$VOLUMES" <<'PY'
+import json
+import sys
+print(json.dumps([{{"id": line.strip()}} for line in open(sys.argv[1]) if line.strip()]))
+PY
+      return 0 ;;
+  esac
+  return 0
+}}
+machine_volume_id() {{
+  n="$(cat "$VOLUME_LOOKUPS")"
+  n=$((n + 1))
+  printf '%s\\n' "$n" > "$VOLUME_LOOKUPS"
+  [ "$n" -gt 1 ] && printf 'vol_exact'
+}}
+machine_storage_ready() {{ return 1; }}
+machine_storage_failed() {{ return 0; }}
+registry_resolve_name() {{ return 2; }}
+registry_machine_details() {{
+  [ "$(cat "$MACHINE_STATE")" = "1" ] || return 1
+  record="$(find "$FLEET_REGISTRY_DIR/clones" -type f | head -1)"
+  printf 'created %s' "$(registry_meta_value "$record" name)"
+}}
+registry_runner_count() {{ printf '0'; }}
+{functions}
+
+clone_rc=0
+clone_machine_target "$LEDGER" >/dev/null 2>&1 || clone_rc=$?
+[ "$clone_rc" -ne 0 ] || exit 20
+record="$(find "$FLEET_REGISTRY_DIR/clones" -type f | head -1)"
+[ -n "$record" ] || exit 21
+[ "$(registry_meta_value "$record" id)" = deadbeef000001 ] || exit 22
+[ "$(registry_meta_value "$record" volume_id)" = vol_exact ] || exit 23
+[ "$(cat "$MACHINE_STATE")" = 0 ] || exit 24
+grep -Fxq vol_exact "$VOLUMES" || exit 25
+FAIL_VOLUME=0
+reap_registry_clones "$FLEET_REGISTRY_DIR" forced || exit 26
+[ ! -e "$record" ] || exit 27
+grep -Fxq vol_neighbor "$VOLUMES" || exit 29
+if grep -Fxq vol_exact "$VOLUMES"; then exit 30; fi
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert volume_lookups.read_text().strip() == "2"
+    log = calls.read_text()
+    assert "machine destroy --force deadbeef000001" in log
+    assert "volumes destroy vol_exact" in log
+    assert "volumes destroy vol_neighbor" not in log
+
+
 def test_orphan_volume_sweep_reaps_only_aged_unattached_clone_volumes(tmp_path: Path) -> None:
     """The fleet-start sweep self-heals volumes leaked by killed runs. It must
     destroy ONLY unattached cloudbench_data volumes older than the grace period
@@ -4897,9 +5179,17 @@ cloudbench_detach_reexec "$LOG" bash -c \
     assert "survived" in content, f"detached child died with the launcher: {content!r}"
     sids = dict(line.split("=") for line in content.splitlines() if "=" in line)
     assert sids["launcher_sid"] != sids["child_sid"], "child must run in its OWN session"
-    # the fleet wires --detach before any lock/machine acquisition
+    # Every paid fleet detaches before any lock/machine acquisition. The
+    # detached child receives the explicit foreground marker so default-detach
+    # cannot recurse, while tests/debugging retain an intentional opt-out.
     fleet = FLEET_SCRIPT.read_text()
+    assert '\nDETACH="1"\n' in fleet
     assert "--detach)" in fleet
+    assert '--wait)           DETACH="1"; WAIT_FOR_DETACHED="1"' in fleet
+    assert '--foreground)     DETACH="0"' in fleet
+    assert '"${DETACH_ARGS[@]}" --foreground' in fleet
+    assert 'cloudbench_detach_reexec_tracked "$DETACH_OWNER"' in fleet
+    assert 'cloudbench_wait_tracked_detached "$DETACH_OWNER" "$DETACH_STATUS"' in fleet
     assert fleet.index("cloudbench_detach_reexec") < fleet.index("cloudbench_controller_lock_acquire"), (
         "detach must happen before the controller lock so the surviving process owns it"
     )
@@ -6163,7 +6453,7 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
     # the run's cleanup reaps the snapshot dir
     assert 'rm -rf "$CLOUDBENCH_SCRIPT_SNAPSHOT"' in fleet
     cleanup = _extract_fleet_function(fleet, "cleanup() {")
-    assert cleanup.index('cloudbench_terminate_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${AUTOSCALER_PIDS[@]:-}"') < cleanup.index(
+    assert cleanup.index('cloudbench_terminate_tree_and_wait "${CLOUDBENCH_CHILD_TERM_SECONDS:-30}" "${AUTOSCALER_PIDS[@]:-}"') < cleanup.index(
         'rm -rf "$CLOUDBENCH_SCRIPT_SNAPSHOT"'
     )
 
@@ -8404,3 +8694,12 @@ def test_autoscaler_finalization_budget_covers_worker_provisioning_contract() ->
     provision = _extract_fleet_function(fleet, "provision_worker() {")
     assert 'stage_attempts="$WORKER_STAGE_ATTEMPTS"' in provision
     assert 'worker_ready_timeout="$WORKER_READY_TIMEOUT"' in provision
+    autoscaler = _extract_fleet_function(fleet, "bench_autoscaler() {")
+    assert (
+        '"worker capacity below desired: $ready_workers/$desired_workers workers queue-ready"'
+        in autoscaler
+    )
+    assert (
+        '"worker capacity incomplete: $ready_workers/$tracked_workers workers queue-ready"'
+        in autoscaler
+    )

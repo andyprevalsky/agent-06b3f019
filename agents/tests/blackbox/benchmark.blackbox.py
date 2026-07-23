@@ -197,6 +197,29 @@ def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success()
     assert "logs/worker.log" in controller
 
 
+def test_cloud_fleet_controller_detaches_by_default():
+    """A launcher/session death must not bypass the paid fleet's EXIT cleanup."""
+    repo_root = Path(__file__).resolve().parents[3]
+    fleet = (repo_root / "scripts" / "run-bench-fleet").read_text()
+    detach_default = next(
+        line.strip() for line in fleet.splitlines() if line.startswith("DETACH=")
+    )
+
+    assert detach_default == 'DETACH="1"', (
+        f"fleet launch mode was {detach_default}; paid runs must detach by default"
+    )
+    assert '--wait)           DETACH="1"; WAIT_FOR_DETACHED="1"' in fleet
+    assert '--foreground)     DETACH="0"' in fleet
+    assert "--recover-stale-owner)" in fleet
+    assert "recover_exact_stale_fleet_owner" in fleet
+    assert "volume_id=%s" in fleet
+    assert "Never sweep app-global unattached" in fleet
+    assert fleet.index(detach_default) < fleet.index("while [ $# -gt 0 ]")
+    assert fleet.index("cloudbench_detach_reexec") < fleet.index(
+        "cloudbench_controller_lock_acquire"
+    )
+
+
 def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
     repo_root = Path(__file__).resolve().parents[3]
     behavioral_suite = repo_root / "agents/benchmarks/cloudbench_dependency_sync_test.py"
@@ -9155,6 +9178,10 @@ async def run_all_tests():
     r.record(
         "cloudbench_shell_contract_requires_identity_and_exit",
         test_cloudbench_shell_controllers_require_fresh_identity_and_child_success,
+    )
+    r.record(
+        "cloud_fleet_controller_detaches_by_default",
+        test_cloud_fleet_controller_detaches_by_default,
     )
     r.record(
         "cloudbench_prisma_freshness_permanent_gate",

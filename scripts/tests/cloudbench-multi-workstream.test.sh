@@ -31,6 +31,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
 PIDS=()
 HUB_PIDS=()
+TEST_FAILED=0
 
 cleanup() {
     local pid
@@ -40,11 +41,17 @@ cleanup() {
     for pid in "${PIDS[@]:-}"; do
         wait "$pid" 2>/dev/null || true
     done
-    rm -rf "$TMP_ROOT"
+    if [ "$TEST_FAILED" = "1" ] \
+        && [ "${CLOUDBENCH_TEST_KEEP_TMP_ON_FAILURE:-0}" = "1" ]; then
+        echo "ℹ️  retained failed cloudbench fixture: $TMP_ROOT" >&2
+    else
+        rm -rf "$TMP_ROOT"
+    fi
 }
 trap cleanup EXIT
 
 fail() {
+    TEST_FAILED=1
     echo "FAIL: $1" >&2
     for log in "$TMP_ROOT"/controller-*.log; do
         [ -f "$log" ] || continue
@@ -649,7 +656,17 @@ elif args[:2] == ["machine", "destroy"]:
             print("injected worker scale-down destroy failure", file=sys.stderr)
             sys.exit(1)
     with locked_state() as state:
+        destroyed = find_machine(state, target)
+        destroyed_volumes = {
+            mount.get("volume")
+            for mount in ((destroyed or {}).get("config", {}).get("mounts") or [])
+            if mount.get("volume")
+        }
         state["machines"] = [m for m in state["machines"] if m["id"] != target]
+        state["volumes"] = [
+            volume for volume in state["volumes"]
+            if volume.get("id") not in destroyed_volumes
+        ]
     if os.path.exists(worker_marker):
         open(os.path.join(MARKERS, "worker-scale-down-complete"), "w").close()
 elif args[:3] == ["ssh", "sftp", "put"]:
@@ -865,7 +882,14 @@ journal_must_be_read_only() {  # journal_must_be_read_only <phase>
 
 run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-args...>
     local ws="$1" port="$2" log="$3"
+    local launch_args=()
     shift 3
+    launch_args=("$@")
+    # Most scenarios need direct exit-status control. The default-detach
+    # scenario intentionally omits this opt-out and lets the launcher shell
+    # disappear while the fleet continues in its own session.
+    [ "${CLOUDBENCH_TEST_DEFAULT_DETACH:-0}" = "1" ] ||
+        launch_args+=(--foreground)
     env PATH="$FAKE_BIN:$PATH" \
         FLY_BENCH_API_TOKEN="fake-token" \
         CONDUCTOR_PORT="$port" \
@@ -878,6 +902,8 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
         CLOUDBENCH_FAKE_BREAK_POOL_LEDGER="${CLOUDBENCH_FAKE_BREAK_POOL_LEDGER:-}" \
         CLOUDBENCH_FAKE_FAIL_METRICS_PROXY="${CLOUDBENCH_FAKE_FAIL_METRICS_PROXY:-0}" \
         CLOUDBENCH_FAKE_INVALID_METRICS="${CLOUDBENCH_FAKE_INVALID_METRICS:-0}" \
+        CLOUDBENCH_TEST_IGNORE_CONTROLLER_TERM="${CLOUDBENCH_TEST_IGNORE_CONTROLLER_TERM:-0}" \
+        CLOUDBENCH_DETACHED_RECOVERY_SECONDS="${CLOUDBENCH_DETACHED_RECOVERY_SECONDS:-120}" \
         CLOUDBENCH_CAPACITY_RESERVATION_ROOT="$TMP_ROOT/capacity-reservations" \
         CLOUDBENCH_CLONE_LOOKUP_SECONDS="${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-20}" \
         CLOUDBENCH_POOL_STOP_ATTEMPTS="${CLOUDBENCH_POOL_STOP_ATTEMPTS:-3}" \
@@ -888,7 +914,7 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
         CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0.1 \
         CLOUDBENCH_POLL_INTERVAL=2 \
         CLOUDBENCH_LAUNCH_SETTLE_SECONDS=1 \
-        bash "$ws/scripts/run-bench-fleet" "$@" > "$log" 2>&1
+        bash "$ws/scripts/run-bench-fleet" "${launch_args[@]}" > "$log" 2>&1
 }
 
 write_dead_registry() {  # write_dead_registry <label> <policy> <host> <name> [id] [role]
@@ -906,7 +932,10 @@ cleanup_policy=$policy
 EOF
     {
         printf 'name=%s\n' "$name"
-        [ -n "$id" ] && printf 'id=%s\n' "$id"
+        if [ -n "$id" ]; then
+            printf 'id=%s\n' "$id"
+            printf 'volume_id=vol_%s\n' "$id"
+        fi
         printf 'role=%s\n' "$role"
     } > "$registry/clones/$name"
 }
@@ -920,6 +949,7 @@ import os
 path = os.environ["FAKE_STATE"]
 with open(path) as fh:
     state = json.load(fh)
+volume_id = "vol_" + os.environ["MACHINE_ID"]
 state["machines"].append({
     "id": os.environ["MACHINE_ID"],
     "name": os.environ["MACHINE_NAME"],
@@ -929,8 +959,11 @@ state["machines"].append({
     "ignore_stop": os.environ["IGNORE_STOP"] == "1",
     "region": "iad",
     "private_ip": "fdaa::dead",
-    "config": {"mounts": []},
+    "config": {"mounts": [{"volume": volume_id}]},
 })
+state["volumes"].append(
+    {"id": volume_id, "name": "cloudbench_data_fork", "state": "created"}
+)
 with open(path, "w") as fh:
     json.dump(state, fh)
 PY
@@ -1164,6 +1197,309 @@ journal_must_be_read_only "scenario 2"
     fail "no shared app-environment lock file may survive a concurrent run"
 
 echo "PASS: scenario 2 — two concurrent workstream runs FINISHED WITH SUCCESS on distinct code snapshots"
+
+# Default fleet invocation must survive the disposable launcher that started it,
+# reach terminal aggregation, and clean every exact paid resource. This drives
+# run-bench-fleet itself (not only cloudbench_detach_reexec) through the fake
+# provider while the launching shell returns immediately.
+reset_fake_state
+rm -f "$POOL_A" "$POOL_B"
+rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership" "$FAKE_DIR/markers"
+mkdir -p "$FAKE_DIR/markers"
+: > "$FAKE_DIR/journal.log"
+detached_launcher_log="$TMP_ROOT/controller-default-detach-launcher.log"
+detached_launcher_status=0
+CLOUDBENCH_TEST_DEFAULT_DETACH=1 CLOUDBENCH_TEST_BARRIER_MIN=1 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$detached_launcher_log" \
+    bench-default-detach --timeout 240 || detached_launcher_status=$?
+[ "$detached_launcher_status" -eq 0 ] ||
+    fail "default-detach launcher must return successfully (exit=$detached_launcher_status)"
+grep -qF "fleet controller detached" "$detached_launcher_log" ||
+    fail "default fleet invocation did not detach from its launcher"
+detached_log="$(sed -n 's/^    log: tail -f //p' "$detached_launcher_log" | tail -1)"
+[ -n "$detached_log" ] ||
+    fail "default-detach launcher did not publish its controller log"
+
+# Capture the exact controller while it is still live so EXIT cleanup can stop
+# it if this regression itself aborts early.
+detached_pid=""
+for _ in $(seq 1 100); do
+    detached_meta="$(find "$SANDBOX/.git/cloudbench-fleet-ownership" -name meta -type f -print -quit 2>/dev/null || true)"
+    if [ -n "$detached_meta" ]; then
+        detached_pid="$(sed -n 's/^pid=//p' "$detached_meta" | head -1)"
+        [ -n "$detached_pid" ] && break
+    fi
+    sleep 0.1
+done
+[ -n "$detached_pid" ] || fail "detached fleet never published durable controller ownership"
+PIDS+=("$detached_pid")
+
+for _ in $(seq 1 600); do
+    if grep -qF "1/1 passed" "$detached_log" 2>/dev/null \
+        && ! kill -0 "$detached_pid" 2>/dev/null; then
+        break
+    fi
+    sleep 0.5
+done
+grep -qF "1/1 passed" "$detached_log" ||
+    fail "detached fleet did not reach terminal aggregation"
+if kill -0 "$detached_pid" 2>/dev/null; then
+    fail "detached fleet controller did not exit after terminal cleanup"
+fi
+# The detached PID has been reaped; retain only known-live Hub processes in the
+# harness cleanup list so PID reuse cannot make the test signal a bystander.
+PIDS=("${HUB_PIDS[@]}")
+check_run_record "$WS_A" bench-default-detach "$BASE_REF" workstream-a ||
+    fail "default-detached fleet's run record is wrong"
+
+read -r detached_machines detached_volumes < <(
+    python3 - "$FAKE_DIR/state.json" <<'PY'
+import json, sys
+state = json.load(open(sys.argv[1]))
+machines = ",".join(sorted(item["name"] for item in state["machines"]))
+volumes = ",".join(sorted(item["id"] for item in state["volumes"]))
+print(machines, volumes)
+PY
+)
+[ "$detached_machines" = "cloudbench-warm" ] ||
+    fail "default-detached fleet leaked machines: $detached_machines"
+[ "$detached_volumes" = "vol_aaaa0001" ] ||
+    fail "default-detached fleet leaked volumes: $detached_volumes"
+if find "$SANDBOX/.git/cloudbench-fleet-ownership" -type f -print -quit 2>/dev/null | grep -q .; then
+    fail "default-detached fleet left durable ownership records after cleanup"
+fi
+echo "PASS: scenario 2-detach — disposable launcher returned; detached fleet completed and cleaned every owned resource"
+
+# Hub/predeploy supervisors need the same session durability without giving up
+# synchronous snapshots, final upload, or exact exit status. --wait must block
+# the caller on the detached controller's atomic status marker, not move the
+# paid fleet back into the vulnerable launcher session.
+reset_fake_state
+rm -f "$POOL_A" "$POOL_B"
+rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership" "$FAKE_DIR/markers"
+mkdir -p "$FAKE_DIR/markers"
+: > "$FAKE_DIR/journal.log"
+wait_launcher_log="$TMP_ROOT/controller-detached-wait-launcher.log"
+wait_status=0
+CLOUDBENCH_TEST_DEFAULT_DETACH=1 CLOUDBENCH_TEST_BARRIER_MIN=1 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$wait_launcher_log" \
+    bench-detached-wait --timeout 240 --wait || wait_status=$?
+[ "$wait_status" -eq 0 ] ||
+    fail "detached wait rendezvous must return the fleet's success (exit=$wait_status)"
+grep -qF "waiting for detached fleet completion" "$wait_launcher_log" ||
+    fail "--wait did not retain synchronous supervision"
+grep -qF "detached fleet completed (exit=0)" "$wait_launcher_log" ||
+    fail "--wait did not return the detached controller's exact exit status"
+wait_detached_log="$(sed -n 's/^    log: tail -f //p' "$wait_launcher_log" | tail -1)"
+[ -n "$wait_detached_log" ] && grep -qF "1/1 passed" "$wait_detached_log" ||
+    fail "detached wait controller did not reach terminal aggregation"
+check_run_record "$WS_A" bench-detached-wait "$BASE_REF" workstream-a ||
+    fail "detached wait fleet's run record is wrong"
+read -r wait_machines wait_volumes < <(
+    python3 - "$FAKE_DIR/state.json" <<'PY'
+import json, sys
+state = json.load(open(sys.argv[1]))
+machines = ",".join(sorted(item["name"] for item in state["machines"]))
+volumes = ",".join(sorted(item["id"] for item in state["volumes"]))
+print(machines, volumes)
+PY
+)
+[ "$wait_machines" = "cloudbench-warm" ] ||
+    fail "detached wait fleet leaked machines: $wait_machines"
+[ "$wait_volumes" = "vol_aaaa0001" ] ||
+    fail "detached wait fleet leaked volumes: $wait_volumes"
+if find "$SANDBOX/.git/cloudbench-fleet-ownership" -type f -print -quit 2>/dev/null | grep -q .; then
+    fail "detached wait fleet left durable ownership records after cleanup"
+fi
+if find "$WS_A/.context/fleet/runs" -name 'detached-*.status' -type f -print -quit 2>/dev/null | grep -q .; then
+    fail "detached wait fleet left a consumed status rendezvous"
+fi
+echo "PASS: scenario 2-wait — detached controller preserved synchronous status and cleaned every owned resource"
+
+# Invalid recovery configuration must fail before the detached controller is
+# spawned. Otherwise the launcher returns while a paid fleet continues with no
+# valid bounded recovery contract.
+invalid_recovery_log="$TMP_ROOT/controller-invalid-detached-recovery.log"
+invalid_recovery_status=0
+CLOUDBENCH_TEST_DEFAULT_DETACH=1 CLOUDBENCH_DETACHED_RECOVERY_SECONDS=invalid \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$invalid_recovery_log" \
+    bench-invalid-recovery --timeout 240 --wait || invalid_recovery_status=$?
+[ "$invalid_recovery_status" -eq 2 ] ||
+    fail "invalid detached recovery configuration must fail with usage status 2"
+grep -qF "CLOUDBENCH_DETACHED_RECOVERY_SECONDS must be a positive integer" \
+    "$invalid_recovery_log" ||
+    fail "invalid detached recovery configuration did not report its pre-spawn rejection"
+read -r invalid_machines invalid_volumes < <(
+    python3 - "$FAKE_DIR/state.json" <<'PY'
+import json, sys
+state = json.load(open(sys.argv[1]))
+print(
+    ",".join(sorted(item["name"] for item in state["machines"])),
+    ",".join(sorted(item["id"] for item in state["volumes"])),
+)
+PY
+)
+[ "$invalid_machines" = "cloudbench-warm" ] \
+    && [ "$invalid_volumes" = "vol_aaaa0001" ] ||
+    fail "invalid recovery configuration crossed the paid provider boundary"
+if find "$SANDBOX/.git/cloudbench-fleet-ownership" -type f -print -quit 2>/dev/null | grep -q .; then
+    fail "invalid recovery configuration spawned a durable fleet owner"
+fi
+echo "PASS: scenario 2-wait-config — invalid recovery timeout fails before detach or allocation"
+
+# Cooperative predeploy cancellation walks only the poller/waiter descendant
+# tree; the paid controller has already been reparented into its own session.
+# Drive a controller that ignores TERM after crossing provider allocation. The
+# identity-fenced waiter must escalate to KILL, then an out-of-process recovery
+# controller must reap the exact durable owner before the waiter returns.
+reset_fake_state
+rm -f "$POOL_A" "$POOL_B"
+rm -rf "$SANDBOX/.git/cloudbench-fleet-ownership" "$FAKE_DIR/markers"
+mkdir -p "$FAKE_DIR/markers"
+: > "$FAKE_DIR/journal.log"
+neighbor_token="eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+neighbor_registry="$SANDBOX/.git/cloudbench-fleet-ownership/$neighbor_token"
+neighbor_volume="vol_neighbor_unattached"
+neighbor_host="$(hostname 2>/dev/null || uname -n)"
+neighbor_pid_start="$(ps -p $$ -o lstart= 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+mkdir -p "$neighbor_registry/clones"
+cat > "$neighbor_registry/meta" <<EOF
+version=1
+app=navi-whisper-lux-bench
+host=$neighbor_host
+pid=$$
+pid_start=$neighbor_pid_start
+run_id=live-neighbor
+cleanup_policy=reap
+EOF
+cat > "$neighbor_registry/clones/cloudbench-live-neighbor" <<EOF
+name=cloudbench-live-neighbor
+volume_id=$neighbor_volume
+EOF
+cancel_launcher_log="$TMP_ROOT/controller-detached-wait-cancel.log"
+CLOUDBENCH_TEST_DEFAULT_DETACH=1 CLOUDBENCH_TEST_BARRIER_MIN=2 \
+    CLOUDBENCH_TEST_IGNORE_CONTROLLER_TERM=1 \
+    CLOUDBENCH_DETACHED_RECOVERY_SECONDS=2 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$cancel_launcher_log" \
+    bench-detached-cancel --timeout 240 --wait &
+cancel_launcher_pid=$!
+PIDS+=("$cancel_launcher_pid")
+
+cancel_allocated=0
+for _ in $(seq 1 200); do
+    if FAKE_STATE="$FAKE_DIR/state.json" python3 - <<'PY'
+import json, os
+with open(os.environ["FAKE_STATE"]) as handle:
+    machines = json.load(handle)["machines"]
+raise SystemExit(0 if any(item["name"] != "cloudbench-warm" for item in machines) else 1)
+PY
+    then
+        cancel_allocated=1
+        break
+    fi
+    sleep 0.1
+done
+[ "$cancel_allocated" -eq 1 ] ||
+    fail "detached cancellation fixture never crossed provider allocation"
+FAKE_STATE="$FAKE_DIR/state.json" NEIGHBOR_VOLUME="$neighbor_volume" python3 - <<'PY'
+import json
+import os
+
+path = os.environ["FAKE_STATE"]
+with open(path) as handle:
+    state = json.load(handle)
+state["volumes"].append(
+    {
+        "id": os.environ["NEIGHBOR_VOLUME"],
+        "name": "cloudbench_data",
+        "state": "created",
+        "attached_machine_id": None,
+    }
+)
+with open(path, "w") as handle:
+    json.dump(state, handle)
+PY
+cancel_target_registry=""
+for registry in "$SANDBOX/.git/cloudbench-fleet-ownership"/*; do
+    [ -d "$registry" ] || continue
+    [ "$registry" = "$neighbor_registry" ] && continue
+    cancel_target_registry="$registry"
+    break
+done
+[ -n "$cancel_target_registry" ] ||
+    fail "detached cancellation did not publish its exact target registry"
+
+terminate_test_descendants() {
+    local pid="$1" child
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        terminate_test_descendants "$child"
+    done
+    kill -TERM "$pid" 2>/dev/null || true
+}
+terminate_test_descendants "$cancel_launcher_pid"
+cancel_wait_status=0
+wait "$cancel_launcher_pid" 2>/dev/null || cancel_wait_status=$?
+PIDS=("${HUB_PIDS[@]}")
+[ "$cancel_wait_status" -ne 0 ] ||
+    fail "canceled detached wait unexpectedly returned success"
+
+cancel_clean=0
+for _ in $(seq 1 300); do
+    if FAKE_STATE="$FAKE_DIR/state.json" python3 - <<'PY'
+import json, os
+with open(os.environ["FAKE_STATE"]) as handle:
+    state = json.load(handle)
+machines = [item for item in state["machines"] if item["name"] != "cloudbench-warm"]
+volumes = [
+    item
+    for item in state["volumes"]
+    if item["id"] not in ("vol_aaaa0001", "vol_neighbor_unattached")
+]
+raise SystemExit(0 if not machines and not volumes else 1)
+PY
+    then
+        if [ ! -e "$cancel_target_registry" ] \
+            && [ -f "$neighbor_registry/clones/cloudbench-live-neighbor" ]; then
+            if ! find "$WS_A/.context/fleet/runs" \
+                \( -name 'detached-*.owner' -o -name 'detached-*.status' \) \
+                -type f -print -quit 2>/dev/null | grep -q .; then
+                cancel_clean=1
+                break
+            fi
+        fi
+    fi
+    sleep 0.2
+done
+[ "$cancel_clean" -eq 1 ] ||
+    fail "forwarded detached cancellation did not clean machines, volumes, and ownership"
+FAKE_STATE="$FAKE_DIR/state.json" NEIGHBOR_VOLUME="$neighbor_volume" python3 - <<'PY' ||
+import json
+import os
+
+with open(os.environ["FAKE_STATE"]) as handle:
+    volumes = json.load(handle)["volumes"]
+raise SystemExit(
+    0 if any(item.get("id") == os.environ["NEIGHBOR_VOLUME"] for item in volumes) else 1
+)
+PY
+    fail "exact cancellation recovery destroyed a live neighbor's unattached volume"
+if find "$TMP_ROOT/capacity-reservations/reservations" -type f -print -quit \
+    2>/dev/null | grep -q .; then
+    fail "exact cancellation recovery left a durable capacity reservation"
+fi
+[ ! -e "$WS_A/.context/cloudbench-controller.lock" ] ||
+    fail "exact cancellation recovery left the workspace controller lock"
+cancel_detached_log="$(sed -n 's/^    log: tail -f //p' "$cancel_launcher_log" | tail -1)"
+[ -n "$cancel_detached_log" ] ||
+    fail "TERM-resistant cancellation did not publish its detached controller log"
+grep -qF "survived bounded TERM recovery; escalating" "$cancel_launcher_log" ||
+    fail "TERM-resistant detached controller did not reach KILL escalation"
+grep -qF "force-recovering exact cancelled fleet owner" "$cancel_launcher_log" ||
+    fail "KILL escalation did not invoke exact durable ownership reconciliation"
+grep -qF "exact stale fleet ownership reconciled" "$cancel_launcher_log" ||
+    fail "out-of-process recovery did not prove exact stale ownership cleanup"
+rm -rf "$neighbor_registry"
+echo "PASS: scenario 2-cancel — TERM-resistant allocated fleet was KILLed and exact durable ownership reconciled to zero"
 
 # A freshly cloned Machine can already have its provider-authoritative 6PN
 # address while its derived .internal hostname is absent from Fly DNS. The
@@ -1924,6 +2260,7 @@ write_dead_registry aaa-delayed-name reap "$owner_host" "$delayed_name"
 {
     printf 'name=%s\n' "$same_registry_worker_name"
     printf 'id=%s\n' "$same_registry_worker_id"
+    printf 'volume_id=vol_%s\n' "$same_registry_worker_id"
     printf 'role=autoscaler-worker\n'
 } > "$SANDBOX/.git/cloudbench-fleet-ownership/aaa-delayed-name/clones/$same_registry_worker_name"
 write_dead_registry zzz-autoscaler-worker reap "$owner_host" "$worker_name" "$worker_id" autoscaler-worker
