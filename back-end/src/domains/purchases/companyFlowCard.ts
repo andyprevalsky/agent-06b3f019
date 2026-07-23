@@ -40,7 +40,7 @@ export async function mintCompanyFlowCard(
       const funding = companyFundingInProgressDetails(error);
       if (funding === undefined) throw error;
 
-      if (confirmedTransferId !== funding.transferId) {
+      if (funding.transferId !== undefined && confirmedTransferId !== funding.transferId) {
         const walletFunding = await confirmPurchaseWalletCollection(
           purchase,
           'usd',
@@ -56,22 +56,25 @@ export async function mintCompanyFlowCard(
         });
       }
 
-      // Honor a provider-requested retry-after as the MINIMUM delay (never shorten it below the
-      // default interval, which would hammer/throttle AgentCard). If we cannot wait that long
-      // within the remaining deadline, give up now with the typed 409 instead of over-sleeping.
+      // Honor a provider-requested retry-after as the minimum delay while there is enough room.
+      // If AgentCard's retry hint would overshoot our deadline, do one final retry at the deadline
+      // instead of converting an otherwise-retryable in-progress state into an immediate failure.
       const retryMs =
         funding.retryAfterSeconds !== undefined
           ? Math.max(AGENTCARD_COMPANY_FLOW_RETRY_MS, funding.retryAfterSeconds * 1000)
           : AGENTCARD_COMPANY_FLOW_RETRY_MS;
-      if (Date.now() + retryMs >= deadline) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
         throw new PurchaseError(
           'AgentCard company funding is still in progress; retry this purchase shortly',
           409,
           'agentcard_company_funding_in_progress',
-          { transferId: funding.transferId }
+          {
+            ...(funding.transferId !== undefined ? { transferId: funding.transferId } : {}),
+          }
         );
       }
-      await sleep(retryMs);
+      await sleep(Math.min(retryMs, remainingMs));
     }
   }
 }
