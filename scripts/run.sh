@@ -1597,7 +1597,8 @@ fi
 if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
     echo "📦 Building bundled frontend before starting runtime services..."
     (cd front-end && rm -f "$FRONTEND_LOG_FILE" && \
-        VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" VITE_REALTIME_PRIVATE=false npx vite build > "$FRONTEND_LOG_FILE" 2>&1)
+        VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" VITE_ENABLE_REACT_GRAB=false \
+        VITE_REALTIME_PRIVATE=false npx vite build > "$FRONTEND_LOG_FILE" 2>&1)
 fi
 launch_backend_service
 
