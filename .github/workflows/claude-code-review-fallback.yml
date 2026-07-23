@@ -66,4 +66,4 @@ jobs:
           claude_args: |
             --model opus
             --effort high
-            --max-turns 40
+            --max-turns 80
