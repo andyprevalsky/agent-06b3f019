@@ -17,7 +17,7 @@
  * UI: icon-only trigger; accessible label still reports Simulator On/Off.
  * Hover shows an explanatory tooltip for the current state.
  *
- * Gating: only rendered when the current user is in SIMULATOR_USER_IDS (Andy).
+ * Gating: only rendered for product administrators via SIMULATOR_USER_IDS.
  */
 
 import { Sparkles } from 'lucide-react';

@@ -16,6 +16,7 @@ import QueryInput from '@/features/terminal-component-group/components/QueryInpu
 import RoseToolSetChip from '@/features/terminal-component-group/components/RoseToolSetChip';
 import SimulatorToggle from '@/features/terminal-component-group/components/SimulatorToggle';
 import { TopBar } from '@/features/terminal-component-group/components/query-input/TopBar';
+import { ADMIN_USER_IDS } from '@/features/terminal-component-group/config';
 import { FAST_MODE_USER_IDS } from '@/lib/fastModeAccounts';
 import { SIMULATOR_USER_IDS } from '@/lib/simulatorAccounts';
 import { TOOL_ICONS } from '@/lib/toolIcons';
@@ -193,8 +194,8 @@ describe('Fast Mode account gating', () => {
 });
 
 describe('Simulator account gating', () => {
-  it('shows the simulator toggle in a query box only for Andy', () => {
-    hookMocks.authUserId = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+  it.each(ADMIN_USER_IDS)('shows the simulator toggle for admin account %s', (userId) => {
+    hookMocks.authUserId = userId;
 
     render(
       <TooltipProvider>
@@ -213,8 +214,8 @@ describe('Simulator account gating', () => {
     expect(screen.getByTestId('simulator-toggle')).toHaveAccessibleName('Simulator Off');
   });
 
-  it('hides the simulator toggle for Fast Mode users who are not Andy', () => {
-    hookMocks.authUserId = '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9';
+  it('hides the simulator toggle for non-admin accounts', () => {
+    hookMocks.authUserId = 'simulator-non-admin-user';
 
     render(
       <TooltipProvider>
@@ -232,8 +233,8 @@ describe('Simulator account gating', () => {
     expect(screen.queryByTestId('simulator-toggle')).toBeNull();
   });
 
-  it('config allow-list contains exactly Andy', () => {
-    expect(SIMULATOR_USER_IDS).toEqual(['1f85ff25-6e29-4c1b-8739-f917bd101a30']);
+  it('keeps simulator access in parity with the admin allow-list', () => {
+    expect(SIMULATOR_USER_IDS).toEqual(ADMIN_USER_IDS);
   });
 });
 

@@ -12,41 +12,46 @@ vi.mock('@/features/terminal/api', () => api);
 vi.mock('@amplitude/analytics-browser', () => ({ track: vi.fn() }));
 
 import { useMessageSending } from '@/features/terminal/hooks/useMessageSending';
+import { ADMIN_USER_IDS } from '@/lib/adminAccounts';
 
 describe('Simulator mode agent creation', () => {
-  it('sends simulate mode when the visible Simulator toggle is on', async () => {
-    const { result } = renderHook(() =>
-      useMessageSending({
-        selectedAgentId: null,
-        agentDetail: null,
-        canSubmitGoals: true,
-        isFullySignedIn: true,
-        userId: '1f85ff25-6e29-4c1b-8739-f917bd101a30',
-        clientSource: 'MAC_APP',
-        setCurrentView: vi.fn(),
-        setLoginModalOpen: vi.fn(),
-        setIsLoadingNetwork: vi.fn(),
-        loadAgents: vi.fn(async () => undefined),
-        stagePendingAgentCreation: vi.fn(),
-        reconcilePendingAgentCreation: vi.fn(async () => undefined),
-        rollbackPendingAgentCreation: vi.fn(() => true),
-      }),
-    );
+  it.each(ADMIN_USER_IDS)(
+    'sends simulate mode for admin account %s when the visible Simulator toggle is on',
+    async (userId) => {
+      api.createAgent.mockClear();
+      const { result } = renderHook(() =>
+        useMessageSending({
+          selectedAgentId: null,
+          agentDetail: null,
+          canSubmitGoals: true,
+          isFullySignedIn: true,
+          userId,
+          clientSource: 'MAC_APP',
+          setCurrentView: vi.fn(),
+          setLoginModalOpen: vi.fn(),
+          setIsLoadingNetwork: vi.fn(),
+          loadAgents: vi.fn(async () => undefined),
+          stagePendingAgentCreation: vi.fn(),
+          reconcilePendingAgentCreation: vi.fn(async () => undefined),
+          rollbackPendingAgentCreation: vi.fn(() => true),
+        }),
+      );
 
-    act(() => {
-      result.current.setMessageInput('Run this against the world model');
-      result.current.setSimulatorMode(true);
-    });
+      act(() => {
+        result.current.setMessageInput('Run this against the world model');
+        result.current.setSimulatorMode(true);
+      });
 
-    await act(async () => {
-      await result.current.handleSendMessage();
-    });
+      await act(async () => {
+        await result.current.handleSendMessage();
+      });
 
-    expect(api.createAgent).toHaveBeenCalledOnce();
-    expect(api.createAgent.mock.calls[0]?.[0]).toMatchObject({
-      source: 'MAC_APP',
-      fast_mode_cache_enabled: false,
-      world_model_mode: 'simulate',
-    });
-  });
+      expect(api.createAgent).toHaveBeenCalledOnce();
+      expect(api.createAgent.mock.calls[0]?.[0]).toMatchObject({
+        source: 'MAC_APP',
+        fast_mode_cache_enabled: false,
+        world_model_mode: 'simulate',
+      });
+    },
+  );
 });
