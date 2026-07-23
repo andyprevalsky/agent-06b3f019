@@ -260,6 +260,11 @@ async function assertTerminated(workflowId: string): Promise<void> {
   assert.strictEqual(description.status.name, 'TERMINATED');
 }
 
+function assertSameInstant(actual: unknown, expected: Date): void {
+  assert.strictEqual(typeof actual, 'string');
+  assert.strictEqual(new Date(actual).getTime(), expected.getTime());
+}
+
 async function postProductionAgent(
   path: string,
   body: unknown
@@ -365,27 +370,26 @@ async function activityCount(
   return {
     totalEvents: history.events?.length ?? 0,
     activities:
-      history.events?.filter((event) => event.activityTaskScheduledEventAttributes !== undefined)
+      history.events?.filter((event) => event.activityTaskScheduledEventAttributes != null)
         .length ?? 0,
     markers:
-      history.events?.filter((event) => event.markerRecordedEventAttributes !== undefined).length ??
-      0,
+      history.events?.filter((event) => event.markerRecordedEventAttributes != null).length ?? 0,
     workflowTaskFailures:
-      history.events?.filter((event) => event.workflowTaskFailedEventAttributes !== undefined)
-        .length ?? 0,
+      history.events?.filter((event) => event.workflowTaskFailedEventAttributes != null).length ??
+      0,
     workflowTasks:
       history.events?.filter(
         (event) =>
-          event.workflowTaskScheduledEventAttributes !== undefined ||
-          event.workflowTaskStartedEventAttributes !== undefined ||
-          event.workflowTaskCompletedEventAttributes !== undefined
+          event.workflowTaskScheduledEventAttributes != null ||
+          event.workflowTaskStartedEventAttributes != null ||
+          event.workflowTaskCompletedEventAttributes != null
       ).length ?? 0,
     timers:
       history.events?.filter(
         (event) =>
-          event.timerStartedEventAttributes !== undefined ||
-          event.timerFiredEventAttributes !== undefined ||
-          event.timerCanceledEventAttributes !== undefined
+          event.timerStartedEventAttributes != null ||
+          event.timerFiredEventAttributes != null ||
+          event.timerCanceledEventAttributes != null
       ).length ?? 0,
   };
 }
@@ -395,6 +399,13 @@ async function main(): Promise<void> {
   deploymentLease = await acquireWorkflowDeploymentLease();
   const root = await createDormantAgent('PAUSED');
   const child = await createDormantAgent('PAUSED', { parentAgentId: root.agentId });
+  // Historical running-agent counters could include direct children. Model
+  // that legacy shape so the replacement must recover 680 own + 680 child
+  // tokens instead of treating an own-only fixture as a subtree total.
+  await prisma.agent.update({
+    where: { id: root.agentId },
+    data: { tokensIn: 1_360, tokensOut: 540 },
+  });
   const unresolvedCall = randomUUID();
   const resolvedCall = randomUUID();
   const approvalCall = randomUUID();
@@ -447,7 +458,7 @@ async function main(): Promise<void> {
     });
     assert.deepStrictEqual(state.child_tool_counts, { web_search: 1 });
     assert.strictEqual(state.iteration_offset, 12);
-    assert.strictEqual(state.workflow_started_at, stored.createdAt.toISOString());
+    assertSameInstant(state.workflow_started_at, stored.createdAt);
     assert.strictEqual(state.max_iterations, 37);
     assert.deepStrictEqual(state.context_gates, { network: false, recent_communications: true });
     return 'pause, exact own/tree counters, tool counts, iteration budget, and config preserved';
@@ -550,7 +561,9 @@ async function main(): Promise<void> {
             temporalWorkflowId: rejectedChildId,
           },
         }),
-      /stale parent workflow generation/i
+      (error: unknown) =>
+        (error as { code?: unknown }).code === 'P2034' ||
+        (error instanceof Error && /stale parent workflow generation/i.test(error.message))
     );
     assert.strictEqual(await prisma.agent.count({ where: { id: rejectedChildId } }), 0);
     return 'database trigger fenced an old-backend insert before any Temporal start';
@@ -1192,8 +1205,10 @@ async function main(): Promise<void> {
     assert.strictEqual(stored.status, 'PAUSED');
     assert.strictEqual(stored.temporalWorkflowId, pausedHandle.workflowId);
     assert.strictEqual(stored.tokenCount, 950);
-    assert.strictEqual(stored.tokensIn, 680);
-    assert.strictEqual(stored.tokensOut, 270);
+    // The DB's historical subtree totals remain monotonic while the new
+    // workflow restores only its own durable counters.
+    assert.strictEqual(stored.tokensIn, 1_360);
+    assert.strictEqual(stored.tokensOut, 540);
     assert.strictEqual(stored.contextSize, 42_000);
     assert.strictEqual(stored.messageCount, 73);
     assert.strictEqual(stored.workflowIterationOffset, 12);
@@ -1210,8 +1225,8 @@ async function main(): Promise<void> {
     assert.strictEqual(runtime.context_size, 42_000);
     assert.strictEqual(runtime.message_count, 73);
     assert.strictEqual(runtime.iteration_offset, 12);
-    assert.strictEqual(runtime.workflow_started_at, stored.createdAt.toISOString());
-    return 'restored counters, duration origin, controls, and stale running-tool UI';
+    assertSameInstant(runtime.workflow_started_at, stored.createdAt);
+    return 'restored own counters while preserving monotonic DB subtree totals, duration origin, controls, and stale running-tool UI';
   });
   await check('cold_workflow_uses_no_resources_while_waiting', async () => {
     assert(pausedHandle);
