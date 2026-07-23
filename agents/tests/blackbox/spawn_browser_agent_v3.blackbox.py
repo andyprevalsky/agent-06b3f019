@@ -12237,6 +12237,16 @@ async def test_manager_payment_gate_retries_company_funding_and_mints():
     assert not any(getattr(e, "title", "") == "Payment funding is delayed" for e in events)
 
 
+def test_manager_payment_gate_normalizes_company_funding_retry_delay():
+    from domains.spawn_browser_agent_v3.handler import _normalize_funding_retry_seconds
+
+    for invalid in (True, False, None, "5", float("nan"), float("inf"), 0, -1):
+        assert _normalize_funding_retry_seconds(invalid) == 5.0
+    assert _normalize_funding_retry_seconds(0.001) == 1.0
+    assert _normalize_funding_retry_seconds(5) == 5.0
+    assert _normalize_funding_retry_seconds(600) == 60.0
+
+
 async def test_manager_payment_gate_reports_company_funding_deadline():
     events, activity_calls, _, _ = await _drive_payment_card_gate(
         mint_results=[
@@ -13598,6 +13608,10 @@ async def run_all_tests():
     await r.record_async(
         "manager_payment_gate_company_funding_retry",
         test_manager_payment_gate_retries_company_funding_and_mints,
+    )
+    r.record(
+        "manager_payment_gate_company_funding_retry_delay",
+        test_manager_payment_gate_normalizes_company_funding_retry_delay,
     )
     await r.record_async(
         "manager_payment_gate_company_funding_deadline",

@@ -6,6 +6,9 @@ export type LifecyclePurchase = Awaited<
 export type LifecycleAttention = Awaited<
   ReturnType<typeof testPaymentRepo.findAttentionRequestsByAgentId>
 >;
+export type LifecycleIntegrity = Awaited<
+  ReturnType<typeof testPaymentRepo.findPurchaseLifecycleIntegrityByAgentId>
+>;
 export type StripeHold = {
   id: string;
   status: string;
@@ -26,6 +29,7 @@ export type OrgTransferStatus = 'pending' | 'funded' | 'consumed' | 'reclaimed' 
 export interface TestPaymentLifecycleDependencies {
   findPurchase?: (agentId: string) => Promise<LifecyclePurchase>;
   findAttentionRequests?: (agentId: string) => Promise<LifecycleAttention>;
+  findPurchaseLifecycleIntegrity?: (agentId: string) => Promise<LifecycleIntegrity>;
   getCardSummary?: (
     userId: string,
     cardId: string

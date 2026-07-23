@@ -17,6 +17,7 @@ import {
 import * as testPaymentRepo from './repo';
 import type {
   LifecycleAttention,
+  LifecycleIntegrity,
   LifecyclePurchase,
   StripeHold,
   StripeRefundList,
@@ -24,9 +25,6 @@ import type {
 } from './lifecycleDependencies';
 import type { TestPaymentLifecycle } from './types';
 
-type LifecycleIntegrity = Awaited<
-  ReturnType<typeof testPaymentRepo.findPurchaseLifecycleIntegrityByAgentId>
->;
 type LoadedPurchase = NonNullable<LifecyclePurchase>;
 
 export type { TestPaymentLifecycleDependencies } from './lifecycleDependencies';
@@ -274,10 +272,13 @@ export async function getTestPaymentLifecycle(
     dependencies.findPurchase ?? testPaymentRepo.findLatestPurchaseLifecycleByAgentId;
   const findAttention =
     dependencies.findAttentionRequests ?? testPaymentRepo.findAttentionRequestsByAgentId;
+  const findIntegrity =
+    dependencies.findPurchaseLifecycleIntegrity ??
+    testPaymentRepo.findPurchaseLifecycleIntegrityByAgentId;
   const [purchase, attentionRequests, integrity] = await Promise.all([
     findPurchase(agentId),
     findAttention(agentId),
-    testPaymentRepo.findPurchaseLifecycleIntegrityByAgentId(agentId),
+    findIntegrity(agentId),
   ]);
   if (purchase === null) {
     return {

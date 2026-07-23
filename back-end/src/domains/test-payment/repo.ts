@@ -54,11 +54,15 @@ export async function findPurchaseLifecycleIntegrityByAgentId(agentId: string) {
     walletFundingCount: purchases.filter((purchase) => purchase.walletFunding !== null).length,
     stripePaymentIntentCount: new Set(
       purchases.flatMap((purchase) =>
-        purchase.stripePaymentIntentId === null ? [] : [purchase.stripePaymentIntentId]
+        purchase.stripePaymentIntentId === null || purchase.stripePaymentIntentId === ''
+          ? []
+          : [purchase.stripePaymentIntentId]
       )
     ).size,
     cardCount: new Set(
-      purchases.flatMap((purchase) => (purchase.cardId === null ? [] : [purchase.cardId]))
+      purchases.flatMap((purchase) =>
+        purchase.cardId === null || purchase.cardId === '' ? [] : [purchase.cardId]
+      )
     ).size,
   };
 }

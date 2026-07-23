@@ -87,6 +87,15 @@ async function withStubbedStripe<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+function lifecycleIntegrity(purchaseCount = 0) {
+  return {
+    purchaseCount,
+    walletFundingCount: 0,
+    stripePaymentIntentCount: 0,
+    cardCount: 0,
+  };
+}
+
 async function main(): Promise<void> {
   process.stdout.write('Running test-payment service unit tests...\n');
 
@@ -366,12 +375,14 @@ async function main(): Promise<void> {
   await test('getTestPaymentLifecycle returns a null lifecycle when no purchase exists', async () => {
     const lifecycle = await getTestPaymentLifecycle('agent-none', {
       findPurchase: async () => null,
+      findPurchaseLifecycleIntegrity: async () => lifecycleIntegrity(7),
       findAttentionRequests: async () => [
         { id: 'a1', userResponse: null, metadata: { attentionKind: 'kyc' } },
         { id: 'a2', userResponse: 'ok', metadata: { attentionKind: 'card' } },
       ],
     });
     assert.equal(lifecycle.purchase, null);
+    assert.equal(lifecycle.integrity.purchaseCount, 7);
     assert.deepEqual(lifecycle.attention.openKinds, ['kyc']);
     assert.deepEqual(lifecycle.attention.resolvedKinds, ['card']);
     await assert.rejects(() => getTestPaymentLifecycle('  '), /agentId is required/);
@@ -397,6 +408,7 @@ async function main(): Promise<void> {
           reclaimProviderTransferId: null,
         },
       }),
+      findPurchaseLifecycleIntegrity: async () => lifecycleIntegrity(1),
       findAttentionRequests: async () => [],
       getCardSummary: async (_userId, id) => {
         assert.equal(id, cardId);
@@ -485,6 +497,7 @@ async function main(): Promise<void> {
         createdAt,
         walletFunding: null,
       }),
+      findPurchaseLifecycleIntegrity: async () => lifecycleIntegrity(1),
       findAttentionRequests: async () => [],
       getOrgCardholderId: async () => 'cardholder-paged',
       searchStripeHolds: async (_agentId, page) => {
@@ -544,6 +557,7 @@ async function main(): Promise<void> {
             createdAt,
             walletFunding: null,
           }),
+          findPurchaseLifecycleIntegrity: async () => lifecycleIntegrity(1),
           findAttentionRequests: async () => [],
           getOrgCardholderId: async () => 'cardholder-overflow',
           searchStripeHolds: async () => ({ data: [] }),

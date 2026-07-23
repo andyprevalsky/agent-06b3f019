@@ -14,6 +14,7 @@ import html as html_module
 import importlib
 import inspect
 import json
+import math
 import os
 import random
 import re
@@ -151,6 +152,18 @@ def _normalize_payment_card_last4(value: Any) -> Optional[str]:
     if isinstance(value, str) and re.fullmatch(r"\d{4}", value):
         return value
     return None
+
+
+def _normalize_funding_retry_seconds(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 5.0
+    try:
+        retry_seconds = float(value)
+    except OverflowError:
+        return 5.0
+    if not math.isfinite(retry_seconds) or retry_seconds <= 0:
+        return 5.0
+    return min(max(retry_seconds, 1.0), 60.0)
 
 
 def _build_payment_card_verifier_evidence(last4: Any) -> Optional[Dict[str, Any]]:
@@ -7787,14 +7800,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                             if funding_retry_deadline is None:
                                 funding_retry_deadline = workflow.now() + timedelta(minutes=10)
-                            raw_retry_seconds = minted_card.get("retryAfterSeconds", 5)
-                            retry_seconds = (
-                                raw_retry_seconds
-                                if isinstance(raw_retry_seconds, (int, float))
-                                and raw_retry_seconds > 0
-                                else 5
+                            retry_seconds = _normalize_funding_retry_seconds(
+                                minted_card.get("retryAfterSeconds", 5)
                             )
-                            retry_seconds = min(float(retry_seconds), 60.0)
                             if workflow.now() + timedelta(seconds=retry_seconds) >= funding_retry_deadline:
                                 return minted_card
                             logger.info(

@@ -121,7 +121,7 @@ export async function classifyFundingResumeFailure(
     state.walletFundingPrepared &&
     funding?.status === PurchaseWalletFundingStatus.PENDING
   ) {
-    await discardPendingPurchaseWalletCollection(purchase.id);
+    await discardPendingPurchaseWalletCollection(purchase.id).catch(() => undefined);
     return { boundaryError, walletWasFunded, fundingResumeRequired, walletFundingPrepared: false };
   }
   return {
