@@ -1043,10 +1043,16 @@ def test_deploy_always_gates_changed_cloudbench_controllers() -> None:
 def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()
+    fleet_normalized = " ".join(line.strip().rstrip("\\").strip() for line in fleet.splitlines())
 
     assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in cloud
     assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF"' in fleet
-    assert '[ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] || cloudbench_worktree_has_changes "$ROOT_DIR"' in fleet
+    assert (
+        '[ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] && { '
+        '[ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] '
+        '|| cloudbench_worktree_has_changes "$ROOT_DIR"; }; then'
+        in fleet_normalized
+    )
     assert "cloudbench_fetchable_ref" in fleet
     assert cloud.count('LOCAL_PATCH_FILE=""') == 1
     assert cloud.count('STAGED_LOCAL_FILES=()') == 1
