@@ -14,6 +14,11 @@ import { getPromptSecret } from './config';
 import * as repo from './repo';
 import { resolveCreateMetadata } from './agentCreateMetadata';
 import { prepareAgentStartArchive } from '../../providers/traceArchiveLifecycle';
+import {
+  resumeExistingSubAgent,
+  shouldKeepDescendantStartPending,
+  startSubAgentWorkflow,
+} from './agentDescendantStartService';
 
 const log = createLogger('Agents');
 const DEFAULT_FAST_MODE_USER_IDS = new Set(['1f85ff25-6e29-4c1b-8739-f917bd101a30']);
@@ -56,38 +61,6 @@ export function applyFastModeInheritance(
 }
 
 /* c8 ignore start -- startSubAgentWorkflow, startDirectWorkflow, startChatMode require Temporal/GitHub/LLM infrastructure */
-/** Start a sub-agent workflow. The Agent row already has temporalWorkflowId
- *  set to agentId by createAgentTransaction (workflow ID === agent ID by
- *  convention; see providers/temporal.ts:88), so no UPDATE is needed here. */
-async function startSubAgentWorkflow(
-  body: CreateAgentBody,
-  agentDbId: string,
-  userId: string,
-  verifier: { type: string },
-  priceLimitCents: number
-): Promise<string> {
-  return startAgentWorkflow({
-    agentId: agentDbId,
-    userId,
-    goal: body.goal,
-    model: body.model,
-    reasoningMaxTokens: body.reasoning_max_tokens,
-    verifier: { type: verifier.type },
-    ...(body.task_queue !== undefined ? { taskQueue: body.task_queue } : {}),
-    ...(body.parent_workflow_id !== undefined ? { parentWorkflowId: body.parent_workflow_id } : {}),
-    ...(body.parent_agent_id !== undefined ? { parentAgentId: body.parent_agent_id } : {}),
-    ...(body.depth !== undefined ? { depth: body.depth } : {}),
-    ...(body.bus_id !== undefined ? { busId: body.bus_id } : {}),
-    ...(body.start_phase !== undefined ? { startPhase: body.start_phase } : {}),
-    ...(body.max_iterations !== undefined ? { maxIterations: body.max_iterations } : {}),
-    priceLimitCents,
-    ...(body.context_gates !== undefined ? { contextGates: body.context_gates } : {}),
-    ...(body.fast_mode_cache_enabled !== undefined
-      ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
-      : {}),
-  });
-}
-
 /** Start root agent directly in plan/execute (bypass chat). */
 async function startDirectWorkflow(
   body: CreateAgentBody,
@@ -105,6 +78,7 @@ async function startDirectWorkflow(
     verifier: { type: verifier.type },
     ...(body.task_queue !== undefined ? { taskQueue: body.task_queue } : {}),
     startPhase: body.start_phase!,
+    ...(body.max_iterations !== undefined ? { maxIterations: body.max_iterations } : {}),
     priceLimitCents,
     ...(body.fast_mode_cache_enabled !== undefined
       ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
@@ -194,6 +168,8 @@ export async function createAgent(
     const parent = await repo.findAgentById(body.parent_agent_id);
     applyFastModeInheritance(body, parent?.fastModeCacheEnabled);
   }
+  const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);
+  if (existingSubAgent !== null) return existingSubAgent;
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =
     await resolveCreateMetadata(body.model, clientIP, body.parent_agent_id ?? null, userId);
   const agentId = body.agent_id ?? randomUUID();
@@ -228,6 +204,10 @@ export async function createAgent(
     isBenchmark,
     attachments: body.attachments as Array<Record<string, unknown>> | undefined,
     temporalWorkflowId: willStartWorkflow ? agentId : null,
+    workflowMaxIterations: body.max_iterations,
+    workflowContextGates: body.context_gates,
+    workflowStartPhase: body.start_phase,
+    workflowTaskQueue: body.task_queue,
   });
   const archiveStartFixture = !isSubAgent ? await prepareAgentStartArchive(agent.agent.id) : null;
 
@@ -275,11 +255,13 @@ async function launchAgentWorkflow(
         agent_id: agent.agent.id,
         error: error instanceof Error ? error.message : String(error),
       });
-      await repo.updateAgent(agent.agent.id, {
-        status: 'FAILED',
-        statusMessage:
-          'Failed to start workflow: ' + (error instanceof Error ? error.message : String(error)),
-      });
+      if (!(await shouldKeepDescendantStartPending(agent.agent.id))) {
+        await repo.updateAgent(agent.agent.id, {
+          status: 'FAILED',
+          statusMessage:
+            'Failed to start workflow: ' + (error instanceof Error ? error.message : String(error)),
+        });
+      }
       throw error;
     }
   }

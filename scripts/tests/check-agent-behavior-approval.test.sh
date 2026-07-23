@@ -104,13 +104,28 @@ PY
 git -C "$status_repo" add agents/loop/dag_executor.py
 expect_fail "$status_repo" "a terminal status literal in dag_executor requires approval"
 
-# 3. Inverting a recovery-invariant test assertion.
-test_repo="$(new_repo test-invariant)"
-cat >>"$test_repo/agents/tests/blackbox/workflow.blackbox.py" <<'PY'
+# 3. A purely additive recovery test does not change runtime or rewrite an
+# existing expectation, so it must not require human approval.
+additive_test_repo="$(new_repo additive-test-invariant)"
+cat >>"$additive_test_repo/agents/tests/blackbox/workflow.blackbox.py" <<'PY'
     assert run_agent_calls == []  # regressed: run_agent must not run
 PY
+git -C "$additive_test_repo" add agents/tests/blackbox/workflow.blackbox.py
+expect_pass "$additive_test_repo" "a purely additive recovery test needs no approval"
+
+# 3b. Replacing an existing recovery expectation still requires approval. The
+# deleted side of the diff proves this is not a purely additive test.
+test_repo="$(new_repo test-invariant)"
+cat >>"$test_repo/agents/tests/blackbox/workflow.blackbox.py" <<'PY'
+    assert run_agent_calls == [1]
+PY
 git -C "$test_repo" add agents/tests/blackbox/workflow.blackbox.py
-expect_fail "$test_repo" "inverting a run_agent recovery-invariant assertion requires approval"
+git -C "$test_repo" commit -q -m "seed existing recovery invariant"
+sed -i.bak 's/run_agent_calls == \[1\]/run_agent_calls == []/' \
+  "$test_repo/agents/tests/blackbox/workflow.blackbox.py"
+rm "$test_repo/agents/tests/blackbox/workflow.blackbox.py.bak"
+git -C "$test_repo" add agents/tests/blackbox/workflow.blackbox.py
+expect_fail "$test_repo" "replacing an existing run_agent recovery invariant requires approval"
 
 # 4. Comment-only + logging-only edits to a watched file must NOT fire.
 noise_repo="$(new_repo comment-logging-noise)"
@@ -132,15 +147,19 @@ PY
 git -C "$unwatched_repo" add agents/tools/some_tool.py
 expect_pass "$unwatched_repo" "terminal literals outside the control-flow layer do not fire"
 
-# 6. Inverting a recovery invariant via a subscript COMPARISON (not an assignment)
-#    must fire. `assert result["status"] == "failed"` is the natural test-inversion
-#    shape; a guard that only matched `status: "failed"` assignments would miss it.
+# 6. Replacing a recovery invariant via a subscript COMPARISON (not an assignment)
+#    must fire on the deleted prior expectation.
 compare_repo="$(new_repo compare-assertion)"
 cat >>"$compare_repo/agents/tests/blackbox/workflow.blackbox.py" <<'PY'
-    assert result["status"] == "failed"  # regressed: expect terminal, not recovery
+    assert result["status"] == "needs_llm"
 PY
 git -C "$compare_repo" add agents/tests/blackbox/workflow.blackbox.py
-expect_fail "$compare_repo" 'inverting a status invariant via ["status"] == comparison requires approval'
+git -C "$compare_repo" commit -q -m "seed status recovery assertion"
+sed -i.bak 's/"needs_llm"/"failed"/' \
+  "$compare_repo/agents/tests/blackbox/workflow.blackbox.py"
+rm "$compare_repo/agents/tests/blackbox/workflow.blackbox.py.bak"
+git -C "$compare_repo" add agents/tests/blackbox/workflow.blackbox.py
+expect_fail "$compare_repo" 'replacing a status invariant via ["status"] comparison requires approval'
 
 # 7. DELETING a watched file that carries recovery logic must fire. A deletion
 #    emits "+++ /dev/null", so keying only on the new-side (+++) path would let

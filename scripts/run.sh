@@ -736,6 +736,10 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
         echo "   ✅ DB restored from dump"
     else
         echo "   ⚠️ restore failed — falling back to push + seed"
+        # The target database's own pg_restore just proved this archive bad.
+        # Invalidate it so a failed regeneration cannot make every later boot
+        # retry the same unreadable archive and matching schema sidecar.
+        rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
         if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]; then
             fail_required_seed_dump "Required isolated benchmark seed dump could not be restored; refusing a slow production cold-sync."
         fi
@@ -808,11 +812,13 @@ fi
 # instead of re-seeding. Best-effort; the schemahash guards against schema drift.
 if [ -n "$_SEED_DUMP" ]; then
     echo "🗜️  Saving seed dump for fast future warm-starts ($_SEED_DUMP)..."
-    mkdir -p "$(dirname "$_SEED_DUMP")"
-    _SEED_DUMP_TMP="${_SEED_DUMP}.tmp.$$"
-    rm -f "$_SEED_DUMP_TMP" 2>/dev/null || true
-    if PGPASSWORD=postgres pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME" > "$_SEED_DUMP_TMP" 2>/dev/null; then
-        mv "$_SEED_DUMP_TMP" "$_SEED_DUMP"
+    _SEED_DUMP_CONTAINER=""
+    if ! $USE_SYSTEM_PG; then
+        _SEED_DUMP_CONTAINER="$DB_CONTAINER"
+    fi
+    if PGPASSWORD=postgres bash scripts/save-seed-dump.sh \
+        "$_SEED_DUMP" localhost "$LOCAL_DB_ACTUAL_PORT" postgres "$LOCAL_DB_NAME" \
+        "$_SEED_DUMP_CONTAINER"; then
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
         echo "   ✅ seed dump saved ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}'))"
         # Publish to the shared cache so the NEXT clone (any workspace — including a
@@ -824,7 +830,7 @@ if [ -n "$_SEED_DUMP" ]; then
             fi
         fi
     else
-        rm -f "$_SEED_DUMP_TMP" 2>/dev/null || true
+        echo "   ⚠️ seed dump save failed; no partial archive was published"
     fi
 fi
 

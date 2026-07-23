@@ -15,6 +15,49 @@ import {
 } from './providers/smsSupervisor';
 import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaidTransactions';
 import { runGmailSyncJob } from './services/integrations/gmailSync';
+import { cleanupTerminalAgentWorkflowZombies } from './providers/workflowTerminalCleanup';
+
+function scheduleTemporalWorkflowCleanup(isProduction: boolean): void {
+  const cronLog = createLogger('Cron');
+  if (!isProduction || process.env.DISABLE_TEMPORAL_WORKFLOW_CLEANUP === '1') {
+    cronLog.info('Temporal workflow cleanup disabled', {
+      reason: !isProduction ? 'non-production' : 'DISABLE_TEMPORAL_WORKFLOW_CLEANUP',
+    });
+    return;
+  }
+  let cleanupRunning = false;
+  const runCleanup = () => {
+    if (cleanupRunning) {
+      cronLog.info('Temporal workflow cleanup already running; skipping overlapping tick');
+      return;
+    }
+    cleanupRunning = true;
+    cleanupTerminalAgentWorkflowZombies(
+      {},
+      {
+        batchSize: 100,
+        maxConcurrency: 8,
+        deadlineAtMs: Date.now() + 50_000,
+      }
+    )
+      .then((summary) => {
+        if (summary.discovered > 0) {
+          cronLog.info('Temporal workflow cleanup completed', { ...summary });
+        }
+      })
+      .catch((err: unknown) => {
+        cronLog.error('Temporal workflow cleanup job error; obligations retained for retry', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      })
+      .finally(() => {
+        cleanupRunning = false;
+      });
+  };
+  runCleanup();
+  cron.schedule('* * * * *', runCleanup);
+  cronLog.info('Temporal workflow cleanup scheduled (every minute)');
+}
 
 function scheduleGmailSync(): void {
   if (process.env.DISABLE_GMAIL_SYNC === '1') {
@@ -168,6 +211,7 @@ function scheduleProactiveSmsOutreach(isProduction: boolean): void {
  * unrelated background jobs, so each job self-gates on its DISABLE_* env flag.
  */
 export function registerCronJobs(isProduction: boolean): void {
+  scheduleTemporalWorkflowCleanup(isProduction);
   scheduleGmailSync();
   schedulePlaidSync();
   schedulePurchaseHoldReconcile();
