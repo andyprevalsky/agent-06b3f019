@@ -10,15 +10,22 @@ import {
   createWalletFundingProvider,
   type WalletFundingProvider,
 } from '../../providers/wallet-funding';
-import { PurchaseError, toPurchaseBoundaryError } from './errors';
+import { PurchaseError } from './errors';
 import { isKycRequiredError, kycRequiredPurchaseError } from './kyc';
 import { getCustomerDefaultPaymentMethodId } from './stripeCustomer';
 import * as repo from './repo';
 import { archivePurchaseBoundary } from './archive';
 import { mintCompanyFlowCard } from './companyFlowCard';
-import { recordPurchaseWalletFunding, reclaimPurchaseWalletFunding } from './walletFunding';
+import { classifyFundingResumeFailure } from './fundingResume';
+import {
+  discardPendingPurchaseWalletCollection,
+  preparePurchaseWalletCollection,
+  recordPurchaseWalletFunding,
+  reclaimPurchaseWalletFunding,
+} from './walletFunding';
 import {
   PurchaseSpendStatus,
+  PurchaseWalletFundingStatus,
   type MintPurchaseInput,
   type MintPurchaseResult,
   type PurchaseSpend,
@@ -35,6 +42,9 @@ interface ChargeState {
   paymentReversalFailed: boolean;
   walletWasFunded: boolean;
   walletReclaimFailed: boolean;
+  walletFundingPrepared: boolean;
+  fundingResumeRequired: boolean;
+  fundingRetryClaimed: boolean;
   activeWalletFundingProvider?: WalletFundingProvider;
   activeCardProvider?: CardProvider;
   issuedCardId?: string;
@@ -107,16 +117,26 @@ async function mintCaptureAndIssue(
   state.activeWalletFundingProvider = walletFundingProvider ?? createWalletFundingProvider();
   state.activeCardProvider =
     cardProvider ?? (await createCardProviderForAgent(input.userId, input.agentId));
+  const preparedFunding = await preparePurchaseWalletCollection(purchase, 'usd');
+  state.walletFundingPrepared = true;
+  state.walletWasFunded =
+    preparedFunding.status === PurchaseWalletFundingStatus.FUNDED ||
+    preparedFunding.status === PurchaseWalletFundingStatus.CONSUMED;
   const { cardRequest, minted, providerTransferId } = await mintCompanyFlowCard(
     purchase,
     input,
     state.activeCardProvider,
-    state.activeWalletFundingProvider
+    state.activeWalletFundingProvider,
+    preparedFunding.providerTransferId ?? undefined
   );
   const transferId = minted.providerTransferId ?? providerTransferId;
   const isStaticCard = minted.metadata?.staticCard === true;
   state.issuedCardId = minted.cardId;
   state.issuedStaticCard = isStaticCard;
+  if (isStaticCard) {
+    await discardPendingPurchaseWalletCollection(purchaseId);
+    state.walletFundingPrepared = false;
+  }
   // Persist the issued card id immediately, before capture or any later failure point. A crash
   // between minting and the HELD write would otherwise orphan the funded card with no durable
   // pointer for reconcilers to close it and reclaim its funding.
@@ -223,11 +243,12 @@ async function rollbackChargeFailure(
   error: unknown
 ): Promise<never> {
   const purchaseId = purchase.id;
-  const boundaryError = toPurchaseBoundaryError(error);
-  if (
-    boundaryError instanceof PurchaseError &&
-    boundaryError.code === 'agentcard_company_funding_in_progress'
-  ) {
+  const fundingFailure = await classifyFundingResumeFailure(purchase, error, state);
+  const boundaryError = fundingFailure.boundaryError;
+  state.walletWasFunded = fundingFailure.walletWasFunded;
+  state.fundingResumeRequired = fundingFailure.fundingResumeRequired;
+  state.walletFundingPrepared = fundingFailure.walletFundingPrepared;
+  if (state.fundingResumeRequired) {
     state.walletReclaimFailed = true;
   }
   await closeIssuedCardOnFailure(state, purchase);
@@ -248,11 +269,13 @@ async function rollbackChargeFailure(
   });
   await repo.updatePurchaseStatus(
     purchaseId,
-    state.walletReclaimFailed
-      ? PurchaseSpendStatus.FUNDING_RECLAIM_FAILED
-      : state.paymentIntentCaptured && state.paymentReversalFailed
-        ? PurchaseSpendStatus.REFUND_FAILED
-        : PurchaseSpendStatus.FAILED,
+    state.fundingResumeRequired
+      ? PurchaseSpendStatus.FUNDING_PENDING
+      : state.walletReclaimFailed
+        ? PurchaseSpendStatus.FUNDING_RECLAIM_FAILED
+        : state.paymentIntentCaptured && state.paymentReversalFailed
+          ? PurchaseSpendStatus.REFUND_FAILED
+          : PurchaseSpendStatus.FAILED,
     {
       stripePaymentIntentId: state.paymentIntentId ?? null,
     }
@@ -276,11 +299,16 @@ export async function chargeAndIssueCard(
   cardProvider?: CardProvider,
   walletFundingProvider?: WalletFundingProvider
 ): Promise<MintPurchaseResult> {
+  const fundingRetryClaimed = purchase.cardId === null && purchase.stripePaymentIntentId !== null;
   const state: ChargeState = {
+    paymentIntentId: purchase.stripePaymentIntentId ?? undefined,
     paymentIntentCaptured: false,
     paymentReversalFailed: false,
     walletWasFunded: false,
     walletReclaimFailed: false,
+    walletFundingPrepared: fundingRetryClaimed,
+    fundingResumeRequired: false,
+    fundingRetryClaimed,
     issuedStaticCard: false,
   };
   try {

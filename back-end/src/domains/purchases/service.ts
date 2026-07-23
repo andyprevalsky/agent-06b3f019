@@ -18,11 +18,11 @@ import { kycRequiredPurchaseError } from './kyc';
 import * as repo from './repo';
 import { reclaimPurchaseWalletFunding } from './walletFunding';
 import { chargeAndIssueCard } from './charge';
-import { canonicalStoredPurchaseFingerprint } from './fingerprint';
 import {
   ensureAllLegacyFingerprintsIndexed,
   ensureRecentLegacyFingerprintsIndexed,
 } from './fingerprintBackfill';
+import { canonicalInputFingerprint, purchaseReceipt, tryClaimFundingResume } from './fundingResume';
 import {
   PurchaseSpendStatus,
   type MintPurchaseInput,
@@ -256,22 +256,8 @@ async function openPendingPurchase(
   input: MintPurchaseInput,
   existing: PurchaseSpend | null
 ): Promise<PurchaseSpend> {
-  const receipt = {
-    currency: input.currency,
-    lineItems: input.lineItems,
-    fees: input.fees,
-    subtotalCents: input.subtotalCents,
-    totalCents: input.totalCents,
-  };
-  const canonicalFingerprint = canonicalStoredPurchaseFingerprint({
-    userId: input.userId,
-    merchant: input.merchant,
-    lineItemsJson: receipt,
-    totalCents: input.totalCents,
-  });
-  if (canonicalFingerprint === null) {
-    throw new PurchaseError('purchase receipt cannot be fingerprinted');
-  }
+  const receipt = purchaseReceipt(input);
+  const canonicalFingerprint = canonicalInputFingerprint(input);
 
   if (existing && RETRYABLE_PURCHASE_STATUSES.has(existing.status)) {
     return repo.createPendingPurchase({
@@ -327,18 +313,22 @@ export async function mintPurchaseCard(
       input.fingerprint
     );
   }
+  let resumedPurchase: PurchaseSpend | null = null;
   if (existing) {
-    const reused = await tryReuseExistingPurchase(
-      existing,
-      cardProvider,
-      walletFundingProvider,
-      now
-    );
-    if (reused) return reused;
+    resumedPurchase = await tryClaimFundingResume(existing, input, now);
+    if (resumedPurchase === null) {
+      const reused = await tryReuseExistingPurchase(
+        existing,
+        cardProvider,
+        walletFundingProvider,
+        now
+      );
+      if (reused) return reused;
+    }
   }
 
-  const purchase = await openPendingPurchase(input, existing);
-  if (benchmarkPurchaseKycRequired(input.userId)) {
+  const purchase = resumedPurchase ?? (await openPendingPurchase(input, existing));
+  if (resumedPurchase === null && benchmarkPurchaseKycRequired(input.userId)) {
     await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FAILED);
     throw kycRequiredPurchaseError();
   }
@@ -346,10 +336,15 @@ export async function mintPurchaseCard(
   const subscription = await repo.findSubscriptionByUserId(input.userId);
   const stripeCustomerId = subscription?.stripeCustomerId;
   if (stripeCustomerId === undefined || stripeCustomerId === null || stripeCustomerId === '') {
-    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FAILED);
+    await repo.updatePurchaseStatus(
+      purchase.id,
+      resumedPurchase === null ? PurchaseSpendStatus.FAILED : PurchaseSpendStatus.FUNDING_PENDING
+    );
     throw new PurchaseError('User does not have a Stripe billing customer', 402);
   }
 
-  await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
+  if (resumedPurchase === null) {
+    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
+  }
   return chargeAndIssueCard(purchase, input, stripeCustomerId, cardProvider, walletFundingProvider);
 }

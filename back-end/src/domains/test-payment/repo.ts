@@ -39,6 +39,30 @@ export async function findLatestPurchaseLifecycleByAgentId(agentId: string) {
   });
 }
 
+/** Sanitized cardinality proof so a latest-row lifecycle cannot hide older payment orphans. */
+export async function findPurchaseLifecycleIntegrityByAgentId(agentId: string) {
+  const purchases = await prisma.purchaseSpend.findMany({
+    where: { agentId },
+    select: {
+      cardId: true,
+      stripePaymentIntentId: true,
+      walletFunding: { select: { id: true } },
+    },
+  });
+  return {
+    purchaseCount: purchases.length,
+    walletFundingCount: purchases.filter((purchase) => purchase.walletFunding !== null).length,
+    stripePaymentIntentCount: new Set(
+      purchases.flatMap((purchase) =>
+        purchase.stripePaymentIntentId === null ? [] : [purchase.stripePaymentIntentId]
+      )
+    ).size,
+    cardCount: new Set(
+      purchases.flatMap((purchase) => (purchase.cardId === null ? [] : [purchase.cardId]))
+    ).size,
+  };
+}
+
 export async function findAttentionRequestsByAgentId(agentId: string) {
   return prisma.agentAttentionRequest.findMany({
     where: { agentId },

@@ -31,7 +31,7 @@ export const PURCHASE_STALE_CHARGING_MS = parsePositiveIntEnv(
 export const AGENTCARD_COMPANY_FLOW_MAX_WAIT_MS = parsePositiveIntEnv(
   'AGENTCARD_COMPANY_FLOW_MAX_WAIT_MS',
   process.env.AGENTCARD_COMPANY_FLOW_MAX_WAIT_MS,
-  60 * 1000
+  45 * 1000
 );
 export const AGENTCARD_COMPANY_FLOW_RETRY_MS = parsePositiveIntEnv(
   'AGENTCARD_COMPANY_FLOW_RETRY_MS',

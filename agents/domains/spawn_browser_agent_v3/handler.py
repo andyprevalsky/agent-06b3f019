@@ -7768,13 +7768,39 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             attention_request_id=approval_response.get("attention_request_id"),
                         )
 
+                    funding_retry_deadline = None
+
                     async def mint_payment_card() -> Dict[str, Any]:
-                        return await workflow.execute_activity(
-                            "mint_purchase_card_activity",
-                            args=[workflow_instance.user_id or "", payment_payload],
-                            start_to_close_timeout=timedelta(seconds=90),
-                            retry_policy=RetryPolicy(maximum_attempts=1),
-                        )
+                        nonlocal funding_retry_deadline
+                        while True:
+                            minted_card = await workflow.execute_activity(
+                                "mint_purchase_card_activity",
+                                args=[workflow_instance.user_id or "", payment_payload],
+                                start_to_close_timeout=timedelta(seconds=90),
+                                retry_policy=RetryPolicy(maximum_attempts=1),
+                            )
+                            if minted_card.get("status") != "agentcard_company_funding_in_progress":
+                                return minted_card
+
+                            if funding_retry_deadline is None:
+                                funding_retry_deadline = workflow.now() + timedelta(minutes=10)
+                            raw_retry_seconds = minted_card.get("retryAfterSeconds", 5)
+                            retry_seconds = (
+                                raw_retry_seconds
+                                if isinstance(raw_retry_seconds, (int, float))
+                                and raw_retry_seconds > 0
+                                else 5
+                            )
+                            retry_seconds = min(float(retry_seconds), 60.0)
+                            if workflow.now() + timedelta(seconds=retry_seconds) >= funding_retry_deadline:
+                                return minted_card
+                            logger.info(
+                                "AgentCard company funding pending; resuming same purchase",
+                                agent_id=workflow_instance.agent_id,
+                                task_id=result.get("task_id"),
+                                retry_seconds=retry_seconds,
+                            )
+                            await workflow.sleep(retry_seconds)
 
                     async def create_agentcard_setup_attention(
                         setup_card: Dict[str, Any],
@@ -8043,6 +8069,24 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 },
                             )
                             return
+
+                    if card.get("status") == "agentcard_company_funding_in_progress":
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title="Payment funding is delayed",
+                            message=(
+                                "AgentCard has not confirmed the company funding transfer yet. "
+                                "The approved purchase is preserved and can be retried without "
+                                "creating another charge."
+                            ),
+                            status=MessageStatus.FINISHED,
+                            metadata={
+                                "toolName": "spawn_browser_agent",
+                                "task_id": result.get("task_id"),
+                                "action_type": "purchase_funding_delayed",
+                            },
+                        )
+                        return
 
                     logger.info(
                         "Browser payment card minted",

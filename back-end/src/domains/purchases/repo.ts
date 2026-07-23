@@ -6,6 +6,7 @@ const FINGERPRINT_BACKFILL_LOCK_SEED = 8_675_309;
 const IDEMPOTENT_PURCHASE_STATUSES = [
   PurchaseSpendStatus.PENDING_APPROVAL,
   PurchaseSpendStatus.CHARGING,
+  PurchaseSpendStatus.FUNDING_PENDING,
   PurchaseSpendStatus.HELD,
 ];
 
@@ -144,6 +145,38 @@ export async function updatePurchaseStatus(
         : {}),
     },
   });
+}
+
+/**
+ * Move a crashed company-flow call out of CHARGING without letting a stale reader overwrite a
+ * newer retry. The exact updatedAt value is the optimistic lease observed by the caller.
+ */
+export async function markStalePurchaseFundingPending(id: string, observedUpdatedAt: Date) {
+  return prisma.purchaseSpend.updateMany({
+    where: {
+      id,
+      status: PurchaseSpendStatus.CHARGING,
+      cardId: null,
+      stripePaymentIntentId: { not: null },
+      updatedAt: observedUpdatedAt,
+    },
+    data: { status: PurchaseSpendStatus.FUNDING_PENDING },
+  });
+}
+
+/** Claim one durable funding retry. Concurrent callers cannot both own the same provider replay. */
+export async function claimFundingPendingPurchase(id: string) {
+  const claimed = await prisma.purchaseSpend.updateMany({
+    where: {
+      id,
+      status: PurchaseSpendStatus.FUNDING_PENDING,
+      cardId: null,
+      stripePaymentIntentId: { not: null },
+    },
+    data: { status: PurchaseSpendStatus.CHARGING },
+  });
+  if (claimed.count !== 1) return null;
+  return prisma.purchaseSpend.findUniqueOrThrow({ where: { id } });
 }
 
 export async function createOrGetWalletFunding(data: {

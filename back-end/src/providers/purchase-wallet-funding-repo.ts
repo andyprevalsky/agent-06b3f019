@@ -28,6 +28,12 @@ export async function findWalletFundingByPurchaseId(purchaseId: string) {
   return prisma.purchaseWalletFunding.findUnique({ where: { purchaseId } });
 }
 
+export async function deletePendingWalletFunding(purchaseId: string) {
+  return prisma.purchaseWalletFunding.deleteMany({
+    where: { purchaseId, status: PurchaseWalletFundingStatus.PENDING },
+  });
+}
+
 // Only a funding attempt that is still in flight (PENDING) or previously FAILED may transition to
 // FUNDED/FAILED. Guarding the source status as a compare-and-set stops a late/duplicate funding
 // callback from resurrecting a RECLAIMING/RECLAIMED/CONSUMED row back to FUNDED, and stops a

@@ -3156,6 +3156,12 @@
       "fees": []
     },
     "expected_payment_lifecycle": {
+      "integrity": {
+        "purchaseCount": 1,
+        "walletFundingCount": 1,
+        "stripePaymentIntentCount": 1,
+        "cardCount": 1
+      },
       "purchase": {
         "status": "VOIDED",
         "merchant": "Rose Labs Test Payment",

@@ -301,6 +301,7 @@ async function main(): Promise<void> {
         lineItemsJson: { totalCents: 1080 },
         totalCents: 1080,
         status: PurchaseSpendStatus.CHARGING,
+        cardId: `card-${randomUUID()}`,
         stripePaymentIntentId: `pi_${randomUUID()}`,
         updatedAt: new Date(Date.now() - 60 * 60 * 1000),
       },
@@ -555,6 +556,7 @@ async function main(): Promise<void> {
         lineItemsJson: { totalCents: 1080 },
         totalCents: 1080,
         status: PurchaseSpendStatus.CHARGING,
+        cardId: `card-${randomUUID()}`,
         stripePaymentIntentId: `pi_${randomUUID()}`,
         updatedAt: new Date(Date.now() - 60 * 60 * 1000),
       },
@@ -583,6 +585,7 @@ async function main(): Promise<void> {
         lineItemsJson: { totalCents: 1080 },
         totalCents: 1080,
         status: PurchaseSpendStatus.CHARGING,
+        cardId: `card-${randomUUID()}`,
         stripePaymentIntentId: `pi_${randomUUID()}`,
         updatedAt: new Date(Date.now() - 60 * 60 * 1000),
       },
@@ -593,6 +596,30 @@ async function main(): Promise<void> {
       await reconcileStaleChargingPurchases(wallet, { userId });
     });
     assert.equal(await statusOf(row.id), PurchaseSpendStatus.FUNDING_RECLAIM_FAILED);
+  });
+
+  await test('reconcileStaleChargingPurchases preserves a pre-card funding attempt', async () => {
+    const userId = await seedUser();
+    const row = await prisma.purchaseSpend.create({
+      data: {
+        userId,
+        fingerprint: `fp-${randomUUID()}`,
+        merchant: 'Stale Merchant',
+        lineItemsJson: { totalCents: 1080 },
+        totalCents: 1080,
+        status: PurchaseSpendStatus.CHARGING,
+        stripePaymentIntentId: `pi_${randomUUID()}`,
+        updatedAt: new Date(Date.now() - 60 * 60 * 1000),
+      },
+    });
+    await seedFunding(row.id, userId, PurchaseWalletFundingStatus.PENDING);
+    const wallet = new FakeWalletFundingProvider();
+    await withFakeStripe(async (calls) => {
+      await reconcileStaleChargingPurchases(wallet, { userId });
+      assert.equal(calls.cancels.length, 0);
+    });
+    assert.equal(wallet.reclaimCalls.length, 0);
+    assert.equal(await statusOf(row.id), PurchaseSpendStatus.FUNDING_PENDING);
   });
 
   process.stdout.write(

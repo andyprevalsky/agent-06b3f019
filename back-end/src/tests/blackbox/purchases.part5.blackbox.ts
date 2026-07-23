@@ -216,7 +216,7 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'mint flags funding reclaim required when company funding stays in progress with no transfer',
+    'mint preserves a resumable purchase when company funding stays in progress with no transfer',
     async () => {
       const userId = await createSubscribedUser('funding-in-progress-no-transfer');
       const provider = new FundingInProgressNoTransferCardProvider();
@@ -235,17 +235,24 @@ const tests: Array<[string, () => Promise<void>]> = [
           error instanceof PurchaseError && error.code === 'agentcard_company_funding_in_progress',
           'the typed in-progress funding error must surface'
         );
-        // No card was issued and the funding is treated as reclaim-required, so Stripe must not be
-        // reversed automatically.
+        // No card was issued, but the provider may still finish the idempotent request. Preserve
+        // both the hold and its durable funding marker for a same-purchase retry.
         assert(provider.closeCalls === 0, 'no card was issued, so none should be closed');
         assert(calls.captures.length === 0, 'the hold must not be captured');
-        assert(calls.cancels.length === 0, 'reversal is deferred to manual reconciliation');
-        assert(calls.refunds.length === 0, 'reversal is deferred to manual reconciliation');
+        assert(calls.cancels.length === 0, 'the hold must survive the resumable provider attempt');
+        assert(calls.refunds.length === 0, 'an uncaptured hold is never refunded');
 
-        const row = await prisma.purchaseSpend.findFirst({ where: { userId, fingerprint } });
+        const row = await prisma.purchaseSpend.findFirst({
+          where: { userId, fingerprint },
+          include: { walletFunding: true },
+        });
         assert(
-          row?.status === PurchaseSpendStatus.FUNDING_RECLAIM_FAILED,
-          `expected FUNDING_RECLAIM_FAILED, got ${row?.status}`
+          row?.status === PurchaseSpendStatus.FUNDING_PENDING,
+          `expected FUNDING_PENDING, got ${row?.status}`
+        );
+        assert(
+          row?.walletFunding?.status === PurchaseWalletFundingStatus.PENDING,
+          `expected PENDING funding marker, got ${row?.walletFunding?.status}`
         );
       });
     },
@@ -300,6 +307,7 @@ const tests: Array<[string, () => Promise<void>]> = [
           lineItemsJson: { totalCents: 1000 },
           totalCents: 1000,
           status: PurchaseSpendStatus.CHARGING,
+          cardId: `card_stale_${randomUUID()}`,
           stripePaymentIntentId: `pi_stale_${randomUUID()}`,
           updatedAt: new Date(Date.now() - 60 * 60 * 1000),
         },

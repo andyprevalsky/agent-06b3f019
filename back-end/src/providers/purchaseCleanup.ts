@@ -511,12 +511,41 @@ export async function reconcileStaleChargingPurchases(
       id: true,
       userId: true,
       agentId: true,
+      cardId: true,
       totalCents: true,
       stripePaymentIntentId: true,
+      updatedAt: true,
+      walletFunding: { select: { status: true } },
     },
   });
 
   for (const purchase of stalePurchases) {
+    if (
+      purchase.cardId === null &&
+      purchase.stripePaymentIntentId !== null &&
+      purchase.walletFunding !== null &&
+      (purchase.walletFunding.status === PurchaseWalletFundingStatus.PENDING ||
+        purchase.walletFunding.status === PurchaseWalletFundingStatus.FUNDED ||
+        purchase.walletFunding.status === PurchaseWalletFundingStatus.FAILED)
+    ) {
+      const marked = await prisma.purchaseSpend.updateMany({
+        where: {
+          id: purchase.id,
+          status: PurchaseSpendStatus.CHARGING,
+          cardId: null,
+          updatedAt: purchase.updatedAt,
+        },
+        data: { status: PurchaseSpendStatus.FUNDING_PENDING },
+      });
+      log.warn('Preserved stale AgentCard funding attempt for idempotent retry', {
+        purchase_id: purchase.id,
+        claimed: marked.count === 1,
+      });
+      // Even if the CAS lost, this stale snapshot must not reclaim a purchase that a newer retry
+      // has already claimed and refreshed.
+      continue;
+    }
+
     try {
       await reclaimPurchaseWalletFunding(
         purchase,
