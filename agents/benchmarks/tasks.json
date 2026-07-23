@@ -420,7 +420,7 @@
   {
     "name": "plaid-transactions-dead-subscriptions",
     "title": "Plaid Transactions — Dead Subscriptions",
-    "prompt": "Using only local transaction data through explore agents, identify subscriptions that look unused or dead and propose refund targets.\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn explore agents that call grep with source=\"transactions\".\n- Search for subscription-like transactions using patterns such as subscription|premium|annual|membership|prime|netflix|spotify and use nested filters with status=\"posted\".\n- Do not actually contact merchants or request refunds. Return a refund prep list only.\n- Current date for recency decisions is 2026-07-03.\n- Classify monthly subscriptions with no posted charge in 2026 as stopped billing / dead candidates. Include them even when the refund case is weak.\n- Classify annual subscriptions with a posted charge in the last 400 days as active/recent, not dead.\n- Treat Amazon Prime and Amazon Prime Video as separate merchants. A recent annual Amazon Prime charge means Amazon Prime is active/recent; it does not make older Amazon Prime Video channel billing active.\n- Exclude active/recent recurring services and developer-tool subscriptions from refund_prep_candidates. Put those only in excluded_subscription_candidates with the exclusion reason.\n- Exclude developer-tool subscriptions and explicitly distinguish \"stopped billing\" from \"still active and should cancel\" when transaction data cannot prove usage.\n- Final answer must include merchant name, charge evidence, why it looks like a refund candidate from transaction data, and which candidates were excluded as active/recent or developer tools.",
+    "prompt": "Using only local transaction data through explore agents, identify subscriptions that look unused or dead and propose refund targets.\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn explore agents that call grep with source=\"transactions\".\n- Search for subscription-like transactions using patterns such as subscription|premium|annual|membership|prime|netflix|spotify and use nested filters with status=\"posted\".\n- Do not actually contact merchants or request refunds. Return a refund prep list only.\n- Current date for recency decisions is 2026-07-03.\n- Classify monthly subscriptions with no posted charge in 2026 as stopped billing / dead candidates. Include them even when the refund case is weak.\n- Stopped billing / dead candidates belong in refund_prep_candidates; do not move them to excluded_subscription_candidates just because transaction data cannot prove current billing or current usage.\n- Classify annual subscriptions with a posted charge in the last 400 days as active/recent, not dead.\n- Treat Amazon Prime and Amazon Prime Video as separate merchants. A recent annual Amazon Prime charge means Amazon Prime is active/recent; it does not make older Amazon Prime Video channel billing active.\n- Exclude active/recent recurring services and developer-tool subscriptions from refund_prep_candidates. Put those only in excluded_subscription_candidates with the exclusion reason.\n- Exclude developer-tool subscriptions and explicitly distinguish \"stopped billing\" from \"still active and should cancel\" when transaction data cannot prove usage.\n- Final answer must include merchant name, charge evidence, why it looks like a refund candidate from transaction data, and which candidates were excluded as active/recent or developer tools.",
     "timeout_seconds": 420,
     "is_chat_mode": false,
     "expected_tools": [
@@ -437,6 +437,34 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
+    "response_schema": {
+      "fields": [
+        {
+          "name": "refund_prep_candidates",
+          "type": "list[str]",
+          "required": true,
+          "description": "Merchant names classified as stopped billing / dead candidates from posted transaction data, including weak refund cases"
+        },
+        {
+          "name": "refund_prep_evidence",
+          "type": "str",
+          "required": true,
+          "description": "Charge evidence and reasoning for each refund_prep_candidates merchant"
+        },
+        {
+          "name": "excluded_subscription_candidates",
+          "type": "list[str]",
+          "required": true,
+          "description": "Merchant names excluded only because they are active/recent recurring services or developer-tool subscriptions"
+        },
+        {
+          "name": "excluded_evidence",
+          "type": "str",
+          "required": true,
+          "description": "Charge evidence and exclusion reason for each excluded_subscription_candidates merchant"
+        }
+      ]
+    },
     "min_tool_counts": {
       "spawn_agent": 1,
       "grep": 1

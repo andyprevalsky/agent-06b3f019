@@ -8784,6 +8784,23 @@ def test_suite_selection_excludes_incomplete_entries():
     assert len(suite_names) == len([t for t in all_tasks() if t.status == "ready" and not t.production_only])
 
 
+def test_dead_subscription_catalog_has_explicit_refund_candidate_contract():
+    """Dead-subscription candidates must not be schema-inferred as exclusions."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("plaid-transactions-dead-subscriptions")
+    fields = {field.get("name"): field for field in (task.response_schema or {}).get("fields", [])}
+
+    assert "Stopped billing / dead candidates belong in refund_prep_candidates" in task.prompt
+    assert "do not move them to excluded_subscription_candidates" in task.prompt
+    assert fields["refund_prep_candidates"]["type"] == "list[str]"
+    assert fields["refund_prep_candidates"]["required"] is True
+    assert "stopped billing / dead candidates" in fields["refund_prep_candidates"]["description"]
+    assert fields["refund_prep_evidence"]["type"] == "str"
+    assert fields["excluded_subscription_candidates"]["type"] == "list[str]"
+    assert "active/recent" in fields["excluded_subscription_candidates"]["description"]
+
+
 def test_kyc_gate_benchmark_uses_canonical_detection_contract():
     """The KYC benchmark must assert the same durable contract the gate builder emits."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -10060,6 +10077,10 @@ async def run_all_tests():
     r.record(
         "suite_selection_excludes_incomplete",
         test_suite_selection_excludes_incomplete_entries,
+    )
+    r.record(
+        "dead_subscription_explicit_refund_candidate_contract",
+        test_dead_subscription_catalog_has_explicit_refund_candidate_contract,
     )
     r.record("every_task_has_base_image_fixture", test_every_task_has_base_image_fixture_by_default)
     r.record("live_fixture_registry_appliers_in_sync", test_live_fixture_registry_appliers_stay_in_sync)
