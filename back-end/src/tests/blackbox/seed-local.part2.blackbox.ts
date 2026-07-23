@@ -144,6 +144,23 @@ test('browser-context seed uses a cross-version projection before production mig
   );
 });
 
+test('waitlist account sync uses the tested natural-identity boundary', async () => {
+  const source = readSeedLocalSource();
+  const waitlistStart = source.indexOf("await syncTable('Waitlist'");
+  const waitlistEnd = source.indexOf('throwBrowserAuthSyncFailures', waitlistStart);
+  const waitlistSync = source.slice(waitlistStart, waitlistEnd);
+
+  assert(waitlistStart > 0, 'expected the Waitlist sync step');
+  assert(
+    waitlistSync.includes('syncWaitlistAccounts(remote.user, local.user, phones)'),
+    'expected Waitlist accounts to use the tested User natural-identity boundary'
+  );
+  assert(
+    !waitlistSync.includes('upsertById(local.user'),
+    'Waitlist account refresh must not bypass User natural-identity reconciliation'
+  );
+});
+
 test('passkeys-only seed mode never enters browser state or password sync', async () => {
   const source = readSeedLocalSource();
   const flag = source.indexOf("process.argv.includes('--passkeys-only')");

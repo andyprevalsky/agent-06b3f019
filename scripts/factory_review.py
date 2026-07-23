@@ -246,13 +246,14 @@ STEP_DESCRIPTIONS = {
     "deploy": {
         "Approval guards": "Approval requested → approved or rejected.",
         "Auto-fix": "Formats files and applies lint fixes.",
-        "Static verify": "Lint, types, structure, and credentials.",
+        "Static verify": "Lint, types, structure, and focused live credentials.",
         "Coverage": "Thresholds for backend, frontend, agents, and mac.",
-        "Runtime blackbox": "The same four blackbox suites, run once under coverage.",
+        "Runtime blackbox": (
+            "Four suites under coverage, then focused credential and Amplitude probes."
+        ),
         "Group 3 wall clock": "Wall clock while any Group 3 lane was running.",
         "Code review": (
-            "Explicit request → terminal reviewer result; uninstrumented history "
-            "is not estimated."
+            "Immutable-HEAD CodeRabbit or Claude review; at most three cycles."
         ),
         "Smoke benchmarks": "Agent benchmarks on isolated local stacks.",
         "AgentCard lifecycle": "Payment issuance, recovery, and cleanup E2E.",
@@ -265,9 +266,11 @@ STEP_DESCRIPTIONS = {
         "Total": "Logical deploy, including cross-turn approval waits.",
     },
     "rca": {
-        "Evidence + trace": "Collect logs, timelines, and code history.",
-        "Reproduce + diagnose": "Reproduce locally and prove the root cause.",
-        "Verify + handoff": "Confirm the fix and broader tests.",
+        "Evidence + trace": "Read runtime evidence and trace the first-bad boundary.",
+        "Reproduce + diagnose": "Fail the local repro and prove the deepest owned cause.",
+        "Verify + handoff": (
+            "Pass the unchanged repro, cement it, and complete review or publication."
+        ),
     },
 }
 TREND_SCALES = {"weekly": 12, "monthly": 12, "quarterly": 8}

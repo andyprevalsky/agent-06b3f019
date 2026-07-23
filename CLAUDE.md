@@ -209,7 +209,7 @@ Typical signatures to look for: `peer closed connection` during streaming, `[NO 
 
 ## Factory Workflow Review
 
-Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md`) to generate and open the source-backed `/deploy` and `/RCA` lifecycle, wall-clock, sequencing, and trend report; validate it with `python3 scripts/factory_review.py --self-test`.
+Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md`) to generate and open the source-backed `/deploy`, `/RCA`, and checked-in `/descend` lifecycle, wall-clock, sequencing, and trend report; validate it with `python3 scripts/factory_review.py --self-test`.
 
 ## Critical Rules
 

@@ -1373,6 +1373,116 @@ class ApprovalLifecycleTest(unittest.TestCase):
         self.assertEqual(payload["descend"]["steps"][0]["step"], "RUN_SLICE")
         self.assertIn("/descend", FACTORY_REVIEW.render_html(payload))
 
+    def test_descend_compares_completed_main_lane_windows(self) -> None:
+        records: list[dict[str, object]] = []
+        base_epoch = 1_753_056_000.0
+        step_durations = (10.0, 12.0, 8.0, 6.0)
+        run_durations = (100.0, 120.0, 90.0, 60.0)
+        for index, (step_duration, run_duration) in enumerate(
+            zip(step_durations, run_durations, strict=True)
+        ):
+            run_id = f"run-{index}"
+            started = base_epoch + index * 1_000
+            records.extend(
+                [
+                    {
+                        "record_type": "factory_event",
+                        "record_id": f"start-{index}",
+                        "workflow": "descend",
+                        "event": "stage-start",
+                        "value": "RUN_SLICE",
+                        "recorded_at": f"2026-07-{index + 1:02d}T00:00:00Z",
+                        "recorded_epoch": started,
+                        "run_id": run_id,
+                        "slice": "daily",
+                        "lane": "main",
+                    },
+                    {
+                        "record_type": "factory_event",
+                        "record_id": f"finish-{index}",
+                        "workflow": "descend",
+                        "event": "stage-finish",
+                        "value": "RUN_SLICE",
+                        "recorded_at": f"2026-07-{index + 1:02d}T00:00:10Z",
+                        "recorded_epoch": started + step_duration,
+                        "duration_seconds": step_duration,
+                        "run_id": run_id,
+                        "slice": "daily",
+                        "lane": "main",
+                        "status": "completed",
+                    },
+                    {
+                        "record_type": "factory_event",
+                        "record_id": f"outcome-{index}",
+                        "workflow": "descend",
+                        "event": "outcome",
+                        "value": "completed",
+                        "recorded_at": f"2026-07-{index + 1:02d}T00:02:00Z",
+                        "recorded_epoch": started + run_duration,
+                        "run_id": run_id,
+                        "slice": "daily",
+                        "lane": "main",
+                    },
+                ]
+            )
+        records.extend(
+            [
+                {
+                    "record_type": "factory_event",
+                    "record_id": "failed-main",
+                    "workflow": "descend",
+                    "event": "stage-finish",
+                    "value": "RUN_SLICE",
+                    "recorded_epoch": base_epoch + 10_000,
+                    "duration_seconds": 1.0,
+                    "run_id": "failed",
+                    "lane": "main",
+                    "status": "failed",
+                },
+                {
+                    "record_type": "factory_event",
+                    "record_id": "completed-worker",
+                    "workflow": "descend",
+                    "event": "stage-finish",
+                    "value": "RCA_INFRA_FIX",
+                    "recorded_epoch": base_epoch + 11_000,
+                    "duration_seconds": 1.0,
+                    "run_id": "worker",
+                    "lane": "rca-I-01",
+                    "status": "completed",
+                },
+            ]
+        )
+
+        metrics = FACTORY_REVIEW.descend_metrics(records, window=2)
+
+        self.assertEqual(metrics["step_records"], 4)
+        self.assertEqual(metrics["run_wall_clock"]["completed_runs"], 4)
+        self.assertEqual(metrics["run_wall_clock"]["previous_median_seconds"], 110.0)
+        self.assertEqual(metrics["run_wall_clock"]["recent_median_seconds"], 75.0)
+        self.assertEqual(metrics["run_wall_clock"]["change_percent"], -31.8)
+        self.assertEqual(len(metrics["steps"]), 1)
+        run_slice = metrics["steps"][0]
+        self.assertEqual(run_slice["step"], "RUN_SLICE")
+        self.assertEqual(run_slice["previous_median_seconds"], 11.0)
+        self.assertEqual(run_slice["recent_median_seconds"], 7.0)
+        self.assertEqual(run_slice["change_percent"], -36.4)
+        rendered = FACTORY_REVIEW.render_descend_table(metrics)
+        self.assertIn("Negative change is faster", rendered)
+        self.assertIn("Previous median", rendered)
+        self.assertIn("-36.4%", rendered)
+
+    def test_factory_step_copy_matches_current_optimized_workflows(self) -> None:
+        descriptions = FACTORY_REVIEW.STEP_DESCRIPTIONS
+
+        self.assertIn("Amplitude", descriptions["deploy"]["Runtime blackbox"])
+        self.assertIn("three cycles", descriptions["deploy"]["Code review"])
+        self.assertIn("first-bad boundary", descriptions["rca"]["Evidence + trace"])
+        self.assertIn("cement", descriptions["rca"]["Verify + handoff"])
+        factory_instructions = (ROOT / "CLAUDE.md").read_text()
+        for workflow in ("/deploy", "/RCA", "/descend"):
+            self.assertIn(workflow, factory_instructions)
+
     def test_workflow_commands_require_structured_collection_hooks(self) -> None:
         deploy_command = (ROOT / ".claude/commands/deploy.md").read_text()
         rca_command = (ROOT / ".claude/commands/rca.md").read_text()

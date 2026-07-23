@@ -2,8 +2,8 @@
 
 import {
   runSyncStep,
-  syncScopedUserRecords,
   syncUserRecord,
+  syncWaitlistAccounts,
 } from '../../../scripts/seed-local-helpers';
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -101,7 +101,10 @@ async function testScopedUsersPreserveLocalIdentity(): Promise<void> {
   };
   let stored = existing;
 
-  await syncScopedUserRecords(
+  await syncWaitlistAccounts(
+    {
+      findMany: async () => [remote],
+    },
     {
       upsert: async ({ where, create, update }) => {
         if (where.userId !== stored.userId && create.userId === stored.userId) {
@@ -110,7 +113,7 @@ async function testScopedUsersPreserveLocalIdentity(): Promise<void> {
         stored = { ...stored, ...update };
       },
     },
-    [remote]
+    [remote.phone]
   );
 
   assert(stored.id === existing.id, 'expected the local primary key to be preserved');
