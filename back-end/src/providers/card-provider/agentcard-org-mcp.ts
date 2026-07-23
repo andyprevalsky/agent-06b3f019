@@ -18,6 +18,48 @@ type McpResult = {
 const log = createLogger('AgentCardOrgMCP');
 const TRANSFER_LOOKUP_ATTEMPTS = 20;
 const TRANSFER_LOOKUP_DELAY_MS = 500;
+const TRANSFER_ID_FIELD_NAMES = [
+  'transfer_id',
+  'transferId',
+  'provider_transfer_id',
+  'providerTransferId',
+  'company_transfer_id',
+  'companyTransferId',
+  'org_transfer_id',
+  'orgTransferId',
+  'organization_transfer_id',
+  'organizationTransferId',
+  'wallet_transfer_id',
+  'walletTransferId',
+  'funding_transfer_id',
+  'fundingTransferId',
+];
+const TRANSFER_CONTAINER_NAMES = [
+  'transfer',
+  'company_transfer',
+  'companyTransfer',
+  'org_transfer',
+  'orgTransfer',
+  'organization_transfer',
+  'organizationTransfer',
+  'wallet_transfer',
+  'walletTransfer',
+  'funding_transfer',
+  'fundingTransfer',
+  'provider_transfer',
+  'providerTransfer',
+];
+const TRANSFER_LABELS = [
+  'Transfer ID',
+  'Provider Transfer ID',
+  'Company Transfer ID',
+  'Organization Transfer ID',
+  'Org Transfer ID',
+  'Wallet Transfer ID',
+  'Funding Transfer ID',
+];
+const TRANSFER_ID_PATTERN =
+  /\b(?:owt|tr|transfer|org_transfer|wallet_transfer|funding_transfer|provider_transfer)[_-][A-Za-z0-9_-]+\b/i;
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -75,13 +117,86 @@ function optionalNumber(record: Record<string, unknown>, names: string[]): numbe
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-function companyTransferId(record: Record<string, unknown>): string | undefined {
-  return optionalString(record, [
-    'transfer_id',
-    'transferId',
-    'provider_transfer_id',
-    'providerTransferId',
-  ]);
+function optionalTransferId(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
+}
+
+function transferIdFromText(text: string): string | undefined {
+  for (const label of TRANSFER_LABELS) {
+    const value = labeledValue(text, label);
+    if (value !== undefined) return value.replace(/[.,;:]$/g, '');
+  }
+  return text.match(TRANSFER_ID_PATTERN)?.[0];
+}
+
+function transferIdFromContainer(
+  value: unknown,
+  depth = 0,
+  allowBareId = false
+): string | undefined {
+  if (depth > 5) return undefined;
+  const direct = optionalTransferId(value);
+  if (direct !== undefined) return direct;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const nested = transferIdFromContainer(item, depth + 1, allowBareId);
+      if (nested !== undefined) return nested;
+    }
+    return undefined;
+  }
+  const record = asRecord(value);
+  if (record === undefined) return undefined;
+  const explicit =
+    optionalString(record, TRANSFER_ID_FIELD_NAMES) ??
+    (allowBareId ? optionalString(record, ['id']) : undefined);
+  if (explicit !== undefined) return explicit;
+  for (const containerName of TRANSFER_CONTAINER_NAMES) {
+    const nested = transferIdFromContainer(record[containerName], depth + 1, true);
+    if (nested !== undefined) return nested;
+  }
+  return undefined;
+}
+
+function companyTransferId(record: Record<string, unknown>, text = ''): string | undefined {
+  const direct = optionalString(record, TRANSFER_ID_FIELD_NAMES);
+  if (direct !== undefined) return direct;
+  for (const containerName of TRANSFER_CONTAINER_NAMES) {
+    const nested = transferIdFromContainer(record[containerName], 0, true);
+    if (nested !== undefined) return nested;
+  }
+  for (const [key, value] of Object.entries(record)) {
+    if (/transfer|funding/i.test(key)) {
+      const nested = transferIdFromContainer(value, 0, /transfer/i.test(key));
+      if (nested !== undefined) return nested;
+    }
+    const nestedRecord = asRecord(value);
+    if (nestedRecord !== undefined) {
+      const nested = companyTransferId(nestedRecord);
+      if (nested !== undefined) return nested;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const itemRecord = asRecord(item);
+        if (itemRecord !== undefined) {
+          const nested = companyTransferId(itemRecord);
+          if (nested !== undefined) return nested;
+        }
+      }
+    }
+  }
+  return text === '' ? undefined : transferIdFromText(text);
+}
+
+function recordShape(value: unknown, depth = 0): unknown {
+  if (depth > 3) return 'object';
+  if (Array.isArray(value)) {
+    return { type: 'array', length: value.length, sample: recordShape(value[0], depth + 1) };
+  }
+  const record = asRecord(value);
+  if (record === undefined) return typeof value;
+  return Object.fromEntries(
+    Object.entries(record).map(([key, nested]) => [key, recordShape(nested, depth + 1)])
+  );
 }
 
 function recordArray(record: Record<string, unknown>, names: string[]): Record<string, unknown>[] {
@@ -149,8 +264,12 @@ function throwForGate(record: Record<string, unknown>, result: unknown): void {
   const text = resultText(result);
   const code = errorCode(record, text);
   if (code === 'funding_in_progress') {
-    const transferId = companyTransferId(record);
+    const transferId = companyTransferId(record, text);
     if (transferId === undefined) {
+      log.warn('AgentCard funding_in_progress response omitted a recognized transfer id', {
+        top_level_keys: Object.keys(record),
+        result_shape: recordShape(record),
+      });
       throw new AgentCardProviderError(
         'AgentCard company funding is in progress without a transfer id'
       );
@@ -266,7 +385,7 @@ export class AgentCardOrgMcpProvider implements CardProvider {
     throwForGate(record, result);
     const cardId = requiredString(field(record, ['card_id', 'cardId', 'id']), 'card_id');
     const details = await this.getDetails(cardId);
-    let transferId = companyTransferId(record);
+    let transferId = companyTransferId(record, resultText(result));
     if (fundsSource === 'company_flow' && transferId === undefined) {
       transferId = await this.findCompanyTransferId(cardId);
       if (transferId === undefined) {
@@ -301,15 +420,7 @@ export class AgentCardOrgMcpProvider implements CardProvider {
           (candidate) => optionalString(candidate, ['card_id', 'cardId']) === cardId
         );
         const transferId =
-          transfer === undefined
-            ? undefined
-            : optionalString(transfer, [
-                'id',
-                'transfer_id',
-                'transferId',
-                'provider_transfer_id',
-                'providerTransferId',
-              ]);
+          transfer === undefined ? undefined : transferIdFromContainer(transfer, 0, true);
         if (transferId !== undefined) {
           if (attempt > 1) {
             log.info('Observed delayed AgentCard organization transfer', {
