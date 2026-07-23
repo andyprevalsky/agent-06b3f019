@@ -8212,6 +8212,30 @@ def test_cloud_test_payment_tasks_launch_bundled_frontend_with_supabase_env() ->
     assert 'STACK_ENV+=("VITE_SUPABASE_ANON_KEY=$FRONTEND_SUPABASE_ANON_KEY")' in driver
 
 
+def test_cloud_agentcard_payment_tasks_provide_onboarding_callback_env() -> None:
+    """AgentCard setup-gated payment tasks need the same callback env in cloud.
+
+    Local benchmark setup injects AGENTCARD_ONBOARDING_RETURN_URL for these
+    tasks. The cloud driver launches the backend through a strict STACK_ENV
+    allow-list, so omitting the callback makes setup-session creation fail
+    inside /api/purchases/mint before the benchmark can observe the setup gate.
+    """
+    driver = DRIVER_SCRIPT.read_text()
+
+    assert "BENCH_NEEDS_AGENTCARD_ONBOARDING=0" in driver
+    assert "agent-payment-setup-resume" in driver
+    assert "gate-kyc-card-mint" in driver
+    assert "AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL=" in driver
+    assert (
+        'STACK_ENV+=("AGENTCARD_ONBOARDING_RETURN_URL=$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL")'
+        in driver
+    )
+    assert (
+        "export AGENTCARD_ONBOARDING_RETURN_URL='$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL'"
+        in driver
+    )
+
+
 def test_cloud_stack_failure_surfaces_frontend_build_log() -> None:
     driver = DRIVER_SCRIPT.read_text()
 
