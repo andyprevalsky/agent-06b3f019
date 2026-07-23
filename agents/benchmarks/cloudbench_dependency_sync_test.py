@@ -1035,6 +1035,7 @@ def test_deploy_always_gates_changed_cloudbench_controllers() -> None:
     assert "declared_patch_payload_cannot_be_missing_or_empty" in gate
     assert "empty_local_patch_cleanup_is_nounset_safe" in gate
     assert "autoscaled_worker_failure_publishes_durable_failure_marker" in gate
+    assert "cloud_agentcard_payment_tasks_provide_onboarding_callback_env" in gate
     assert "must never pause for human approval" in gate
     assert "Operational gate maintenance is pre-authorized" in deploy
 
