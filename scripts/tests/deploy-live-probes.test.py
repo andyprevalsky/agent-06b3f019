@@ -4,9 +4,9 @@ from __future__ import annotations
 import importlib.util
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -26,27 +26,37 @@ def _load_module():
 class DeployLiveProbeTests(unittest.TestCase):
     def test_independent_probes_run_concurrently(self) -> None:
         module = _load_module()
-        with tempfile.TemporaryDirectory() as temporary:
-            marker = Path(temporary) / "marker"
-            commands = (
-                module.Command(
-                    "first",
-                    (sys.executable, "-c", f"import time; time.sleep(.3); open({str(marker)!r}, 'a').write('a')"),
-                    ROOT,
-                ),
-                module.Command(
-                    "second",
-                    (sys.executable, "-c", f"import time; time.sleep(.3); open({str(marker)!r}, 'a').write('b')"),
-                    ROOT,
-                ),
-            )
-            started = time.monotonic()
-            results = module.run_commands(commands)
-            elapsed = time.monotonic() - started
+        commands = (
+            module.Command("first", (sys.executable, "-c", "first"), ROOT),
+            module.Command("second", (sys.executable, "-c", "second"), ROOT),
+        )
+        events: list[tuple[str, str]] = []
 
-            self.assertLess(elapsed, 0.52, "two 300ms probes ran serially")
-            self.assertEqual(results, {"first": 0, "second": 0})
-            self.assertCountEqual(marker.read_text(), "ab")
+        class FinishedProcess:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.pid = 1
+
+            def poll(self) -> int:
+                events.append(("poll", self.name))
+                return 0
+
+            def wait(self) -> int:
+                events.append(("wait", self.name))
+                return 0
+
+        def launch(argv, *, cwd, start_new_session):
+            self.assertEqual(cwd, ROOT)
+            self.assertTrue(start_new_session)
+            name = argv[-1]
+            events.append(("launch", name))
+            return FinishedProcess(name)
+
+        with patch.object(module.subprocess, "Popen", side_effect=launch):
+            results = module.run_commands(commands)
+
+        self.assertEqual(events[:2], [("launch", "first"), ("launch", "second")])
+        self.assertEqual(results, {"first": 0, "second": 0})
 
     def test_failure_does_not_interrupt_sibling_evidence(self) -> None:
         module = _load_module()
