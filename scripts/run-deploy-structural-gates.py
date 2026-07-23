@@ -36,6 +36,10 @@ class RunningGate:
 
 GATES = (
     Gate("workspace-env", ("bash", "scripts/tests/workspace-env.test.sh")),
+    Gate(
+        "deploy-worktree-preflight",
+        ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
+    ),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
     Gate(
         "agent-behavior-approval",

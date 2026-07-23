@@ -76,6 +76,21 @@ gate. Run it as the exact standalone command shown, require exit 0 and its
 either is missing. Search output, quoted command text, and failed tool calls are
 not telemetry.
 
+## Step 0i: Isolated deploy-worktree preparation gate
+
+Before any test or mutation, verify that a `/descend`-created deploy worktree
+has its own persistent identity, local port range, credential links,
+dependencies, and ready Postgres container. Primary Conductor worktrees pass
+this check without extra setup:
+
+```bash
+bash scripts/prepare-deploy-worktree.sh --check
+```
+
+If an isolated worktree fails, return it to `/descend` preparation. Do not run
+`scripts/setup-db.sh` with an inherited parent identity and do not borrow a
+different worktree's database.
+
 **You must fix ALL non-overridden failing tests, even if they are not caused by the changes in this branch.** The deploy flow defaults to keeping main green. If a test was already broken before your branch, that is now your responsibility to fix before merging unless the user explicitly overrides that exact gate. This includes infrastructure issues, flaky tests, timeout tuning, missing credentials, third-party integration problems, and anything else.
 
 Run all checks locally. If any step fails, fix the issue and re-run that step. If fixing required code changes, re-run the entire Test Loop from the top.
@@ -370,8 +385,9 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 4s: Deploy environment + command structural tests (no skip)
 
-The concurrent runner executes exactly these nine independent suites without
+The concurrent runner executes exactly these ten independent suites without
 changing their assertions or test counts: `bash scripts/tests/workspace-env.test.sh`,
+`bash scripts/tests/deploy-worktree-preflight.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,
