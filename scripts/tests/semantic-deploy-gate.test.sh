@@ -7,6 +7,7 @@ RUN_SH="$ROOT_DIR/scripts/run.sh"
 HELPERS="$ROOT_DIR/front-end/tests-e2e/helpers.ts"
 LIFECYCLE_SPEC="$ROOT_DIR/front-end/tests-e2e/chat-lifecycle-latency.spec.ts"
 WORKFLOW="$ROOT_DIR/.github/workflows/chat-lifecycle-ratchet.yml"
+FRONTEND_LOCK="$ROOT_DIR/front-end/package-lock.json"
 PROD_SESSION_GENERATOR="$ROOT_DIR/front-end/scripts/generate-prod-test-session.mjs"
 PROD_SESSION_TEST="$ROOT_DIR/scripts/tests/prod-semantic-session.test.mjs"
 DEPLOY_COMMAND="$ROOT_DIR/.claude/commands/deploy.md"
@@ -43,7 +44,7 @@ require_count() {
   [ "$actual" = "$expected" ] || fail "$description (expected $expected, found $actual)"
 }
 
-for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_STRUCTURAL_RUNNER_TEST" "$DEPLOY_LIVE_PROBE_RUNNER" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
+for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$FRONTEND_LOCK" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_STRUCTURAL_RUNNER_TEST" "$DEPLOY_LIVE_PROBE_RUNNER" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
   [ -f "$file" ] || fail "required semantic deploy gate file is missing: $file"
 done
 
@@ -82,6 +83,11 @@ require_text "$WORKFLOW" "hashFiles('front-end/package-lock.json')" "semantic wo
 require_count "$WORKFLOW" "working-directory: front-end" "4" "semantic workflow dependency and browser steps must run from the frontend package"
 require_text "$WORKFLOW" "npm ci --ignore-scripts --workspaces=false" "semantic workflow must install locked frontend dependencies without resolving the root workspace"
 require_text "$WORKFLOW" "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830" "semantic workflow must pin npm caching to an immutable action SHA"
+LOCK_TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/semantic-lock.XXXXXX")
+trap 'rm -rf "$LOCK_TEST_DIR"' EXIT
+cp "$ROOT_DIR/front-end/package.json" "$FRONTEND_LOCK" "$LOCK_TEST_DIR/"
+npm ci --prefix "$LOCK_TEST_DIR" --dry-run --ignore-scripts --no-audit --no-fund >/dev/null ||
+  fail "frontend lockfile must support a standalone clean install"
 if grep -Fq -- "--no-package-lock" "$WORKFLOW"; then
   fail "production semantic installs must not bypass the workspace lockfile"
 fi
