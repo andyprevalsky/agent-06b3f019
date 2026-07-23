@@ -97,7 +97,7 @@ export class NonBlockingFileCache {
     this.mem.set(key, value);
     setImmediate(() => {
       // A delete/clear or newer object value supersedes this deferred write.
-      if (this.mem.get(key) !== value) return;
+      if (!this.mem.has(key) || this.mem.get(key) !== value) return;
       const entry: CacheEntry = { key, value, timestamp: Date.now(), args };
       const data = JSON.stringify(entry, null, 2);
       void fsPromises.writeFile(this.pathFor(key), data, 'utf8').catch(() => {

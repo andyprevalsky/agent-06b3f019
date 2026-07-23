@@ -15,6 +15,7 @@ REVIEW_WAITER="$ROOT_DIR/scripts/wait_for_code_review.py"
 REVIEW_CYCLES="$ROOT_DIR/scripts/deploy_review_cycle.py"
 DEPLOY_ENV="$ROOT_DIR/scripts/lib/deploy-local-env.sh"
 DEPLOY_STRUCTURAL_RUNNER="$ROOT_DIR/scripts/run-deploy-structural-gates.py"
+DEPLOY_STRUCTURAL_RUNNER_TEST="$ROOT_DIR/scripts/tests/run-deploy-structural-gates.test.py"
 DEPLOY_LIVE_PROBE_RUNNER="$ROOT_DIR/scripts/run_deploy_live_probes.py"
 DESCEND_COMMAND_TEST="$ROOT_DIR/scripts/tests/descend-command.test.sh"
 AUTO_RCA_WORKFLOW_TEST="$ROOT_DIR/scripts/tests/auto-rca-workflow.test.sh"
@@ -32,7 +33,7 @@ require_text() {
   grep -Fq -- "$text" "$file" || fail "$description"
 }
 
-for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_LIVE_PROBE_RUNNER" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
+for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_STRUCTURAL_RUNNER_TEST" "$DEPLOY_LIVE_PROBE_RUNNER" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
   [ -f "$file" ] || fail "required semantic deploy gate file is missing: $file"
 done
 
@@ -66,9 +67,12 @@ require_text "$LIFECYCLE_SPEC" "waitForTemporalWorkflow" "agent lifecycle termin
 # become part of the product latency measurement.
 require_text "$WORKFLOW" "workflow_dispatch:" "production semantic gate must support /deploy dispatch"
 require_text "$WORKFLOW" "github.event.deployment.production_environment == true" "automatic semantic runs must be gated to production Vercel deploys"
-require_text "$WORKFLOW" "npm install --ignore-scripts --no-package-lock --prefix front-end" "semantic workflow must install only frontend dependencies"
-require_text "$WORKFLOW" "actions/cache@v4" "semantic workflow must reuse npm downloads"
-require_text "$WORKFLOW" "front-end/package.json" "semantic cache must invalidate with frontend dependencies"
+require_text "$WORKFLOW" "npm ci --ignore-scripts --workspace=front-end" "semantic workflow must install locked frontend dependencies"
+require_text "$WORKFLOW" "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830" "semantic workflow must pin npm caching to an immutable action SHA"
+require_text "$WORKFLOW" "hashFiles('package-lock.json')" "semantic cache must invalidate with the workspace lockfile"
+if grep -Fq -- "--no-package-lock" "$WORKFLOW"; then
+  fail "production semantic installs must not bypass the workspace lockfile"
+fi
 require_text "$RUNNER" 'node scripts/generate-prod-test-session.mjs' "production semantics must not install backend dependencies only to generate auth"
 require_text "$WORKFLOW" "SEMANTIC_WORKERS: 4" "production semantic gate must use four concurrent workers"
 require_text "$WORKFLOW" "bash front-end/scripts/run-semantic-tests.sh --prod" "production gate must run every semantic spec"
@@ -109,6 +113,7 @@ require_text "$DEPLOY_COMMAND" 'bash scripts/tests/run-deploy-stage.test.sh' "/d
 require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/deploy-live-probes.test.py' "/deploy must protect concurrent live-probe scheduling"
 require_text "$DEPLOY_COMMAND" 'python3 scripts/run-deploy-structural-gates.py' "/deploy must schedule independent command-structural suites concurrently"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" 'max_workers=len(GATES)' "command-structural runner must default to full independent-suite concurrency"
+require_text "$DEPLOY_STRUCTURAL_RUNNER" '"deploy-structural-runner"' "command-structural runner must retain its signal-handling regression"
 require_text "$CODERABBIT_CONFIG" 'auto_incremental_review: false' "CodeRabbit must not review every intermediate deploy push"
 require_text "$CODERABBIT_CONFIG" 'auto_pause_after_reviewed_commits: 2' "CodeRabbit must retain a defensive automatic review cap"
 require_text "$DEPLOY_COMMAND" 'scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD"' "/deploy must wait for CodeRabbit on one exact HEAD"

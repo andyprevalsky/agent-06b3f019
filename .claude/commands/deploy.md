@@ -370,7 +370,7 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 4s: Deploy environment + command structural tests (no skip)
 
-The concurrent runner executes exactly these eight independent suites without
+The concurrent runner executes exactly these nine independent suites without
 changing their assertions or test counts: `bash scripts/tests/workspace-env.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
@@ -378,6 +378,7 @@ changing their assertions or test counts: `bash scripts/tests/workspace-env.test
 `python3 scripts/tests/wait-for-code-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`, and
 `bash scripts/tests/run-deploy-stage.test.sh`, and
+`python3 scripts/tests/run-deploy-structural-gates.test.py`, and
 `python3 scripts/tests/deploy-live-probes.test.py`.
 
 ```bash

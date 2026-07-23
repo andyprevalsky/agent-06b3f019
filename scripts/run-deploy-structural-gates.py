@@ -45,6 +45,10 @@ GATES = (
     Gate("wait-for-code-review", ("python3", "scripts/tests/wait-for-code-review.test.py")),
     Gate("deploy-review-cycle", ("python3", "scripts/tests/deploy-review-cycle.test.py")),
     Gate("deploy-stage", ("bash", "scripts/tests/run-deploy-stage.test.sh")),
+    Gate(
+        "deploy-structural-runner",
+        ("python3", "scripts/tests/run-deploy-structural-gates.test.py"),
+    ),
     Gate("deploy-live-probes", ("python3", "scripts/tests/deploy-live-probes.test.py")),
 )
 
@@ -87,7 +91,7 @@ def run_gates(gates: Sequence[Gate], max_workers: int) -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="deploy-structural-") as temporary:
             output_root = Path(temporary)
-            while pending or running:
+            while running or (pending and not received_signal):
                 while pending and len(running) < max_workers and not received_signal:
                     gate = pending.popleft()
                     output_path = output_root / f"{gate.name}.log"
@@ -121,11 +125,12 @@ def run_gates(gates: Sequence[Gate], max_workers: int) -> int:
                     results[item.gate.name] = (exit_code, duration, rendered)
                     running.remove(item)
 
-            for gate in gates:
-                exit_code, duration, rendered = results[gate.name]
-                print(f"\n== {gate.name}: exit={exit_code} duration={duration:.2f}s ==")
-                if rendered:
-                    print(rendered, end="" if rendered.endswith("\n") else "\n")
+            if not received_signal:
+                for gate in gates:
+                    exit_code, duration, rendered = results[gate.name]
+                    print(f"\n== {gate.name}: exit={exit_code} duration={duration:.2f}s ==")
+                    if rendered:
+                        print(rendered, end="" if rendered.endswith("\n") else "\n")
     finally:
         _terminate(running, signal.SIGTERM)
         for item in running:

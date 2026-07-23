@@ -84,6 +84,24 @@ async function run(): Promise<void> {
   // ── (4) delete + clear behave to the Cache contract ──
   assert.strictEqual(fresh.delete(seededKey), true, 'delete() returns true when the entry existed');
   assert.strictEqual(fresh.has(seededKey), false, 'delete() removes memory + disk');
+  const deletedUndefinedKey = 'k-deleted-undefined';
+  const deletedUndefinedPath = join(
+    nsDir,
+    `${createHash('sha256').update(deletedUndefinedKey).digest('hex')}.json`
+  );
+  fresh.set(deletedUndefinedKey, undefined);
+  assert.strictEqual(
+    fresh.delete(deletedUndefinedKey),
+    true,
+    'delete() recognizes a present undefined value'
+  );
+  await sleep(50);
+  assert.strictEqual(
+    existsSync(deletedUndefinedPath),
+    false,
+    'a deferred undefined write must not recreate a deleted entry'
+  );
+
   // clear() wipes memory synchronously and disk asynchronously; wait for the
   // just-set async write to flush, clear, then wait for clear's async unlinks.
   fresh.set('k-clear', { a: 1 });

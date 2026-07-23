@@ -12,14 +12,13 @@ export function ratchetPassword(serviceRoleKey) {
 }
 
 async function findRatchetUserId(supabase) {
-  for (let page = 1; page <= 10; page += 1) {
+  for (let page = 1; ; page += 1) {
     const { data, error } = await supabase.auth.admin.listUsers({ page, perPage: 100 });
     if (error) throw new Error(`Could not list ratchet users: ${error.message}`);
     const user = data.users.find((candidate) => candidate.email === RATCHET_EMAIL);
     if (user) return user.id;
     if (data.users.length < 100) return null;
   }
-  throw new Error('Could not find ratchet user within the first 1,000 auth users');
 }
 
 export async function createProductionSession({
