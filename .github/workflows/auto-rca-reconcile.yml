@@ -39,10 +39,20 @@ jobs:
           DEFAULT_SLACK_CHANNEL: ${{ secrets.SLACK_ERROR_CHANNEL_ID }}
           TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
           TRIGGER_RUN_TITLE: ${{ github.event.workflow_run.display_title }}
+          TRIGGER_RUN_EVENT: ${{ github.event.workflow_run.event }}
+          TRIGGER_RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
           AUTO_RCA_ROOT_DIR: ${{ github.workspace }}
         run: |
           set -euo pipefail
           uuid_re='^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$'
+          if [ "${TRIGGER_RUN_EVENT:-}" = issue_comment ]; then
+            case "${TRIGGER_RUN_CONCLUSION:-}" in
+              skipped|cancelled)
+                echo 'Ignoring a skipped or cancelled issue-comment run; it did not process reviewer feedback.'
+                exit 0
+                ;;
+            esac
+          fi
           trigger_agent_id=''
           trigger_is_feedback=false
           if [[ "${TRIGGER_RUN_ID:-}" =~ ^[0-9]+$ ]]; then
@@ -50,7 +60,9 @@ jobs:
               trigger_agent_id="${TRIGGER_RUN_TITLE#Auto RCA · }"
               if [[ "$trigger_agent_id" == 'auto-RCA: Production agent failure '* ]]; then
                 trigger_agent_id="${trigger_agent_id#auto-RCA: Production agent failure }"
-                trigger_is_feedback=true
+                if [ "${TRIGGER_RUN_EVENT:-}" = issue_comment ]; then
+                  trigger_is_feedback=true
+                fi
               fi
             fi
             if [[ "$trigger_agent_id" =~ $uuid_re ]]; then
@@ -81,8 +93,19 @@ jobs:
             # legacy branch avoids overwriting a partially-pushed primary.
             short_id="$(printf '%s' "$trigger_agent_id" | tr -cd 'a-zA-Z0-9' | cut -c1-12)"
             recovery_branch="auto-rca/${short_id}-${TRIGGER_RUN_ID}"
-            git config user.name "rose-auto-rca[bot]"
-            git config user.email "auto-rca@roselabs.ai"
+            trigger_run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$TRIGGER_RUN_ID")"
+            commit_actor="$(printf '%s' "$trigger_run" | jq -r '.triggering_actor.login // .actor.login // empty')"
+            commit_actor_id="$(printf '%s' "$trigger_run" | jq -r '.triggering_actor.id // .actor.id // empty')"
+            [[ "$commit_actor" =~ ^[A-Za-z0-9-]+(\[bot\])?$ ]] || {
+              echo 'Recovery run has no attributable GitHub actor.' >&2
+              exit 1
+            }
+            [[ "$commit_actor_id" =~ ^[0-9]+$ ]] || {
+              echo 'Recovery run has no attributable GitHub actor ID.' >&2
+              exit 1
+            }
+            git config user.name "$commit_actor"
+            git config user.email "${commit_actor_id}+${commit_actor}@users.noreply.github.com"
             git checkout -B "$recovery_branch" main
             recovery_pr_url="$(AGENT_ID="$trigger_agent_id" RCA_BRANCH="$recovery_branch" \
               GITHUB_RUN_ID="$TRIGGER_RUN_ID" SLACK_TS='' SLACK_CHANNEL="$DEFAULT_SLACK_CHANNEL" \
