@@ -882,7 +882,9 @@ fi   # end: if $DB_RESTORED / else (push + seed + dump)
 
 # ── Pre-flight: ensure node_modules exist for all JS services ──
 JS_SVC_DIRS=(back-end front-end)
-$IS_MAC && JS_SVC_DIRS+=(mac-app)
+if ! $BENCHMARK_MODE && $IS_MAC; then
+    JS_SVC_DIRS+=(mac-app)
+fi
 bash "$SCRIPT_DIR/ensure-workspace-dependencies.sh" "${JS_SVC_DIRS[@]}"
 
 # ── Pre-flight: ensure agents venv exists with deps installed ──
