@@ -170,6 +170,7 @@ record_running_timeline_detail() {
   [[ "$detail" != *$'\n'* && "$detail" != *$'\r'* ]] || \
     fail "timeline detail must be one line"
   for step in \
+    rca-environment \
     deploy-primary-offline deploy-primary-smoke \
     deploy-retry-offline deploy-retry-smoke; do
     status="$(read_state "timeline.${step}.status" 2>/dev/null || true)"
@@ -178,6 +179,12 @@ record_running_timeline_detail() {
       return
     fi
   done
+}
+
+timeline_detail() {
+  local detail="${RCA_TIMELINE_DETAIL:-}"
+  [ -n "$detail" ] || fail "RCA_TIMELINE_DETAIL is required"
+  record_running_timeline_detail "$detail"
 }
 
 timeline_waterfall_from_state() {
@@ -1686,9 +1693,10 @@ case "${1:-}" in
   mark-ready) [ "$#" -eq 1 ] || fail "mark-ready takes no arguments"; mark_ready ;;
   timeline-start) [ "$#" -eq 1 ] || fail "timeline-start takes no arguments"; timeline_start ;;
   timeline-finish) [ "$#" -eq 1 ] || fail "timeline-finish takes no arguments"; timeline_finish ;;
+  timeline-detail) [ "$#" -eq 1 ] || fail "timeline-detail takes no arguments"; timeline_detail ;;
   timeline-waterfall) [ "$#" -eq 1 ] || fail "timeline-waterfall takes no arguments"; timeline_waterfall ;;
   slack-message) [ "$#" -eq 1 ] || fail "slack-message takes no arguments"; slack_message ;;
   slack-update) [ "$#" -eq 1 ] || fail "slack-update takes no arguments"; slack_update ;;
   slack-reply) [ "$#" -eq 1 ] || fail "slack-reply takes no arguments"; slack_reply ;;
-  *) fail "usage: scripts/auto-rca-tool {dispatch-plan|approved-deploy-plan|reconcile-plan|select-agent-prs|select-slack-prs|feedback-batch|collect-evidence|evidence|verification|pin-baseline|investigator-repro|verify-investigator-run|checkpoint-draft|verify-repro|offline-gates|smoke-gates|publish-draft|begin-draft|bind-slack|completion-status|require-complete|ensure-draft|sync-waterfall|mark-ready|timeline-start|timeline-finish|timeline-waterfall|slack-message|slack-update|slack-reply}" ;;
+  *) fail "usage: scripts/auto-rca-tool {dispatch-plan|approved-deploy-plan|reconcile-plan|select-agent-prs|select-slack-prs|feedback-batch|collect-evidence|evidence|verification|pin-baseline|investigator-repro|verify-investigator-run|checkpoint-draft|verify-repro|offline-gates|smoke-gates|publish-draft|begin-draft|bind-slack|completion-status|require-complete|ensure-draft|sync-waterfall|mark-ready|timeline-start|timeline-finish|timeline-detail|timeline-waterfall|slack-message|slack-update|slack-reply}" ;;
 esac

@@ -812,6 +812,13 @@ timeline_event() {
 }
 timeline_event timeline-start rca-evidence 100
 timeline_event timeline-finish rca-evidence 112 passed
+timeline_event timeline-start rca-environment 112
+PATH="$FAKE_BIN:$PATH" \
+FAKE_GATE_ROOT="$FAKE_GATE_ROOT" \
+AUTO_RCA_GATE_STATE_DIR='/var/lib/rose-auto-rca/123' \
+RCA_TIMELINE_DETAIL='frontend locked Node dependencies' \
+  "$RCA_TOOL" timeline-detail >/dev/null
+timeline_event timeline-finish rca-environment 132 failed
 timeline_event timeline-start rca-primary-investigation 112
 timeline_event timeline-finish rca-primary-investigation 634 passed
 timeline_event timeline-start rca-primary-reproduction 634
@@ -842,6 +849,7 @@ grep -Fq '*Pipeline step:* /deploy · smoke gates · Benchmark Hub cloud fleet e
 }
 expected_waterfall='*Step waterfall:*
 ✅ /RCA · production evidence — 12s
+❌ /RCA · test environment setup · frontend locked Node dependencies — 20s
 ✅ /RCA · primary investigation — 8m 42s
 ✅ /RCA · unchanged local reproduction — 19s
 ✅ /deploy · offline gates — 1m 5s
