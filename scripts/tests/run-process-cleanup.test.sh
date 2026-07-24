@@ -19,6 +19,20 @@ trap cleanup EXIT
 
 source "$ROOT_DIR/scripts/lib/run-process-cleanup.sh"
 
+assert_required_service_exit_code() {
+  local input="$1"
+  local expected="$2"
+  local actual
+
+  actual="$(run_required_service_exit_code "$input")"
+  if [ "$actual" = "$expected" ]; then
+    echo "PASS: required service exit $input normalizes to $expected"
+    return 0
+  fi
+  echo "FAIL: required service exit $input normalized to $actual, expected $expected" >&2
+  exit 1
+}
+
 wait_for_process() {
   local pid="$1"
   local attempt
@@ -131,5 +145,7 @@ assert_alive "$other_pid" "other-worktree worker survives"
 assert_db_cleanup_guard "container-old" "container-old" true $'rm -f container-old\nvolume rm victoria-pgdata-test' "isolated owner removes its exact DB instance ID"
 assert_db_cleanup_guard "container-old" "container-new" true "" "stale owner cannot remove a replacement DB container"
 assert_db_cleanup_guard "container-old" "container-old" false "" "normal service cleanup preserves a shared DB instance"
+assert_required_service_exit_code 0 1
+assert_required_service_exit_code 17 17
 
 echo "All run process cleanup tests passed."

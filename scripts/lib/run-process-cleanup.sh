@@ -1,5 +1,19 @@
 #!/usr/bin/env bash
 
+run_required_service_exit_code() {
+  local exit_code="$1"
+
+  # A required long-running service has no successful terminal state while
+  # run.sh is supervising it. Node services commonly translate SIGTERM into a
+  # clean exit, so preserving zero here would leave the rest of the stack alive
+  # and make callers poll a dead service until their much longer task timeout.
+  if [ "$exit_code" -eq 0 ]; then
+    printf '%s\n' 1
+    return 0
+  fi
+  printf '%s\n' "$exit_code"
+}
+
 run_process_env_value() {
   local pid="$1"
   local key="$2"
