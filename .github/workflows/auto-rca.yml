@@ -395,8 +395,8 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client
-          npm ci --no-audit --no-fund
-          npm ci --prefix mac-app --no-audit --no-fund
+          npm install --no-audit --no-fund
+          npm install --prefix mac-app --no-audit --no-fund
           python -m venv agents/venv
           agents/venv/bin/python -m pip install --disable-pip-version-check -q -r agents/requirements.txt
           (cd back-end && npx prisma generate)
