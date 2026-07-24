@@ -1740,14 +1740,62 @@ reserve_cleanup_disk_space() {
     # dependencies, and trace archives. Keep one physically allocated local file
     # that teardown releases before invoking asdf/flyctl, so a mid-run ENOSPC does
     # not strand paid machines merely because those CLIs need shell temporaries.
+    #
+    # The reserve itself must not consume the controller's last usable space:
+    # snapshot verification, patch construction, Fly's config lock, and status
+    # publication all need small local writes before cleanup. Scale the requested
+    # reserve down on a constrained host while preserving both an unreserved
+    # operating headroom and a physically allocated cleanup floor. If both cannot
+    # fit, fail before the first provider mutation.
     local reserve_mb="${CLOUDBENCH_CLEANUP_DISK_RESERVE_MB:-512}"
+    local headroom_mb="${CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB:-256}"
+    local minimum_mb="${CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB:-32}"
+    local available_kb available_mb maximum_reserve_mb allocated_mb remaining_kb remaining_mb
     case "$reserve_mb" in ''|*[!0-9]*) return 1 ;; esac
+    case "$headroom_mb" in ''|*[!0-9]*) return 1 ;; esac
+    case "$minimum_mb" in ''|*[!0-9]*|0) return 1 ;; esac
     [ "$reserve_mb" -ge 1 ] && [ "$reserve_mb" -le 4096 ] || return 1
+    [ "$headroom_mb" -le 16384 ] || return 1
+    [ "$minimum_mb" -le 4096 ] || return 1
+    [ "$minimum_mb" -le "$reserve_mb" ] || minimum_mb="$reserve_mb"
+
+    available_kb="$(df -Pk "$(dirname "$CLEANUP_DISK_RESERVE_FILE")" 2>/dev/null \
+        | awk 'END { print $4 }')" || return 1
+    case "$available_kb" in ''|*[!0-9]*) return 1 ;; esac
+    available_mb=$((available_kb / 1024))
+    maximum_reserve_mb=$((available_mb - headroom_mb))
+    [ "$maximum_reserve_mb" -ge "$minimum_mb" ] || return 1
+    allocated_mb="$reserve_mb"
+    [ "$allocated_mb" -le "$maximum_reserve_mb" ] \
+        || allocated_mb="$maximum_reserve_mb"
+
     rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || return 1
     if ! dd if=/dev/zero of="$CLEANUP_DISK_RESERVE_FILE" \
-        bs=1048576 count="$reserve_mb" conv=fsync >/dev/null 2>&1; then
+        bs=1048576 count="$allocated_mb" conv=fsync >/dev/null 2>&1; then
         rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || true
         return 1
+    fi
+    # A sibling controller or unrelated process can allocate between the
+    # inventory read and this fsync. Validate the actual post-allocation floor;
+    # on a race, release our exact file and fail before provider mutation.
+    remaining_kb="$(df -Pk "$(dirname "$CLEANUP_DISK_RESERVE_FILE")" 2>/dev/null \
+        | awk 'END { print $4 }')" || {
+        rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || true
+        return 1
+    }
+    case "$remaining_kb" in
+        ''|*[!0-9]*)
+            rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || true
+            return 1
+            ;;
+    esac
+    remaining_mb=$((remaining_kb / 1024))
+    if [ "$remaining_mb" -lt "$headroom_mb" ]; then
+        rm -f "$CLEANUP_DISK_RESERVE_FILE" 2>/dev/null || true
+        return 1
+    fi
+    if [ "$allocated_mb" -lt "$reserve_mb" ]; then
+        echo "⚠️  cleanup reserve scaled to ${allocated_mb}MB to preserve ${headroom_mb}MB controller headroom" >&2
     fi
 }
 

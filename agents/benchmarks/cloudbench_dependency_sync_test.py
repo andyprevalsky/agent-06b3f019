@@ -8674,6 +8674,8 @@ def test_fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown(
     script = f"""set -uo pipefail
 CLEANUP_DISK_RESERVE_FILE="$1"
 CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=1
+CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB=0
+CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB=1
 {reserve}
 {release}
 reserve_cleanup_disk_space
@@ -8691,6 +8693,86 @@ provider_teardown
     )
     assert result.returncode == 0, result.stderr
     assert not reserve_path.exists()
+
+    constrained_path = tmp_path / "constrained-reserve"
+    constrained_script = f"""set -uo pipefail
+CLEANUP_DISK_RESERVE_FILE="$1"
+CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=4
+CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB=2
+CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB=1
+df() {{
+  printf '%s\n' \
+    'Filesystem 1024-blocks Used Available Capacity Mounted on' \
+    'fake 10000 5904 4096 60% /fake'
+}}
+{reserve}
+reserve_cleanup_disk_space
+test "$(wc -c < "$CLEANUP_DISK_RESERVE_FILE" | tr -d ' ')" = 2097152
+rm -f "$CLEANUP_DISK_RESERVE_FILE"
+"""
+    constrained = subprocess.run(
+        ["bash", "-c", constrained_script, "reserve", str(constrained_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert constrained.returncode == 0, constrained.stderr
+    assert "scaled to 2MB to preserve 2MB controller headroom" in constrained.stderr
+
+    insufficient_path = tmp_path / "insufficient-reserve"
+    insufficient_script = f"""set -uo pipefail
+CLEANUP_DISK_RESERVE_FILE="$1"
+CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=4
+CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB=2
+CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB=1
+df() {{
+  printf '%s\n' \
+    'Filesystem 1024-blocks Used Available Capacity Mounted on' \
+    'fake 10000 7952 2048 80% /fake'
+}}
+{reserve}
+if reserve_cleanup_disk_space; then exit 42; fi
+test ! -e "$CLEANUP_DISK_RESERVE_FILE"
+"""
+    insufficient = subprocess.run(
+        ["bash", "-c", insufficient_script, "reserve", str(insufficient_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert insufficient.returncode == 0, insufficient.stderr
+
+    raced_path = tmp_path / "raced-reserve"
+    df_calls = tmp_path / "df-calls"
+    raced_script = f"""set -uo pipefail
+CLEANUP_DISK_RESERVE_FILE="$1"
+DF_CALLS="$2"
+CLOUDBENCH_CLEANUP_DISK_RESERVE_MB=4
+CLOUDBENCH_CONTROLLER_DISK_HEADROOM_MB=2
+CLOUDBENCH_MIN_CLEANUP_DISK_RESERVE_MB=1
+: > "$DF_CALLS"
+df() {{
+  count="$(wc -l < "$DF_CALLS" | tr -d ' ')"
+  printf 'x\n' >> "$DF_CALLS"
+  printf '%s\n' 'Filesystem 1024-blocks Used Available Capacity Mounted on'
+  if [ "$count" = 0 ]; then
+    printf '%s\n' 'fake 10000 5904 4096 60% /fake'
+  else
+    printf '%s\n' 'fake 10000 8976 1024 90% /fake'
+  fi
+}}
+{reserve}
+if reserve_cleanup_disk_space; then exit 43; fi
+test ! -e "$CLEANUP_DISK_RESERVE_FILE"
+test "$(wc -l < "$DF_CALLS" | tr -d ' ')" = 2
+"""
+    raced = subprocess.run(
+        ["bash", "-c", raced_script, "reserve", str(raced_path), str(df_calls)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert raced.returncode == 0, raced.stderr
 
     cleanup = _extract_fleet_function(fleet, "cleanup() {")
     release_call = "release_cleanup_disk_reserve"
