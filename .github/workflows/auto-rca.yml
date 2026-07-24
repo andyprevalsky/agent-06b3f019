@@ -6,9 +6,10 @@ run-name: >-
 # State machine:
 # failure -> one draft PR + one Slack card -> running/revising -> blocked|ready
 # -> ordinary Slack thread reply or top-level PR comment -> revising
-# -> blocked|ready -> exact-head human approval -> merge -> shipped, or close
-# without merge -> cancelled. A trusted verifier, not investigator prose, owns
-# every transition, exact step result, and duration out of draft.
+# -> blocked|ready -> exact-head APPROVED review or maintainer /deploy comment
+# -> merge -> shipped, or close without merge -> cancelled. A trusted verifier,
+# not investigator prose, owns every transition, exact step result, and
+# duration out of draft.
 
 on:
   repository_dispatch:
@@ -36,6 +37,7 @@ jobs:
       github.event_name != 'issue_comment' ||
       (github.event.issue.pull_request &&
       github.event.comment.user.type == 'User' &&
+      github.event.comment.body != '/deploy' &&
       !contains(github.event.comment.body, '<!-- rca-feedback-consumed'))
     runs-on: ubuntu-latest
     timeout-minutes: 180

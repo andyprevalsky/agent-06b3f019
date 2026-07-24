@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Each fixture below opts into its own lifecycle state. A real Auto-RCA workflow
+# exports its card handle globally, so clear it before testing the no-handle
+# branch that must create a new card.
+unset SLACK_TS SLACK_CHANNEL
+unset AUTO_RCA_GATE_STATE_DIR RCA_PIPELINE_STEP_OVERRIDE
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RCA_TOOL="$ROOT_DIR/scripts/auto-rca-tool"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/auto-rca-lifecycle.XXXXXX")"
@@ -29,6 +35,7 @@ case "$args" in
     ;;
   *" rev-list --count origin/main..HEAD "*) printf '%s\n' "${FAKE_REV_COUNT:-1}" ;;
   *" rev-parse HEAD "*) printf '0123456789abcdef0123456789abcdef01234567\n' ;;
+  *" cat-file -e "*) ;;
   *" remote set-url origin "*) ;;
   *" push --set-upstream origin "*)
     [ -z "${GIT_CALLS:-}" ] || printf 'push %s\n' "$*" >> "$GIT_CALLS"
@@ -246,9 +253,14 @@ grep -Fq 'retained agent failure' "$FAKE_GATE_ROOT/evidence.txt" || {
 
 mkdir -p "$CHECKOUT/.test-logs/synthetic-failure"
 ln -sfn synthetic-failure "$CHECKOUT/.test-logs/latest"
+printf '%s\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > "$FAKE_GATE_ROOT/baseline.sha"
 printf '%s\n' 'FAIL: dependency preflight could not resolve test package' \
   'credential=test-backend-key' \
   > "$CHECKOUT/.test-logs/synthetic-failure/Dependency_Preflight.log"
+printf '%s\n' 'Dependency Preflight' \
+  > "$CHECKOUT/.test-logs/synthetic-failure/failed-suites.txt"
+printf '%s\n' 1 > "$FAKE_GATE_ROOT/timeline.deploy-primary-offline.start"
+printf '%s\n' running > "$FAKE_GATE_ROOT/timeline.deploy-primary-offline.status"
 cat > "$CHECKOUT/scripts/test.sh" <<'SH'
 #!/usr/bin/env bash
 exit 1
@@ -284,6 +296,11 @@ if grep -Fq 'test-backend-key' <<< "$gate_failure"; then
   echo 'FAIL: deploy failure evidence exposed a workflow credential' >&2
   exit 1
 fi
+[ "$(cat "$FAKE_GATE_ROOT/timeline.deploy-primary-offline.detail")" = \
+  'Dependency Preflight' ] || {
+  echo 'FAIL: offline failure did not record its exact failing suite' >&2
+  exit 1
+}
 
 assert_dispatch_plan() {
   local expected="$1" actual
@@ -324,6 +341,7 @@ run_approved_deploy_plan() {
     REVIEW_COMMIT_SHA="$APPROVED_HEAD" \
     PR_HEAD_REF="auto-rca/$APPROVED_AGENT" \
     PR_HEAD_REPO=Rose-Ai-Labs/rose \
+    PR_BASE_REF=main \
     PR_DRAFT=false \
     PR_TITLE="auto-RCA: Production agent failure $APPROVED_AGENT" \
     PR_BODY="$APPROVED_BODY" \
@@ -334,6 +352,15 @@ approved_output="$TEST_ROOT/approved-output.txt"
 GITHUB_OUTPUT="$approved_output" run_approved_deploy_plan >/dev/null
 grep -Fq "agent_id=$APPROVED_AGENT" "$approved_output" || exit 1
 grep -Fq "run_id=$APPROVED_RUN" "$approved_output" || exit 1
+
+: > "$approved_output"
+encoded_approved_body="$(printf '%s' "$APPROVED_BODY" | base64 | tr -d '\n')"
+GITHUB_OUTPUT="$approved_output" run_approved_deploy_plan \
+  PR_BODY='' PR_BODY_B64="$encoded_approved_body" >/dev/null
+grep -Fq "agent_id=$APPROVED_AGENT" "$approved_output" || {
+  echo 'FAIL: exact-head deploy rejected the encoded PR body used by comment approval' >&2
+  exit 1
+}
 
 if run_approved_deploy_plan REVIEW_COMMIT_SHA=ffffffffffffffffffffffffffffffffffffffff \
   >/dev/null 2>&1; then
@@ -346,6 +373,10 @@ if run_approved_deploy_plan PR_DRAFT=true >/dev/null 2>&1; then
 fi
 if run_approved_deploy_plan PR_HEAD_REPO=attacker/rose >/dev/null 2>&1; then
   echo 'FAIL: approved deploy accepted a fork PR' >&2
+  exit 1
+fi
+if run_approved_deploy_plan PR_BASE_REF=release >/dev/null 2>&1; then
+  echo 'FAIL: approved deploy accepted an Auto-RCA PR not targeting main' >&2
   exit 1
 fi
 if run_approved_deploy_plan \
@@ -443,9 +474,10 @@ feedback_batch="$(printf '%s' "$feedback_comments" | \
 plain_comments="$(printf '%s' "$feedback_comments" | jq \
   '.[0] += [
     {"id":104,"body":"Please make the retry fix general.","user":{"login":"maintainer","type":"User"},"author_association":"MEMBER"},
-    {"id":105,"body":"Also cover the timeout boundary.","user":{"login":"maintainer","type":"User"},"author_association":"MEMBER"}
+    {"id":105,"body":"Also cover the timeout boundary.","user":{"login":"maintainer","type":"User"},"author_association":"MEMBER"},
+    {"id":106,"body":"/deploy","user":{"login":"maintainer","type":"User"},"author_association":"MEMBER"}
   ]')"
-plain_batch="$(printf '%s' "$plain_comments" | TRIGGER_COMMENT_ID=105 "$RCA_TOOL" feedback-batch)"
+plain_batch="$(printf '%s' "$plain_comments" | TRIGGER_COMMENT_ID=106 "$RCA_TOOL" feedback-batch)"
 [ "$(printf '%s' "$plain_batch" | jq -r 'map(select(.id == 104))[0].text')" = \
   'Please make the retry fix general.' ] || {
   echo 'FAIL: an older queued ordinary PR comment was lost when a newer comment triggered the run' >&2
@@ -454,6 +486,10 @@ plain_batch="$(printf '%s' "$plain_comments" | TRIGGER_COMMENT_ID=105 "$RCA_TOOL
 [ "$(printf '%s' "$plain_batch" | jq -r 'map(select(.id == 105))[0].text')" = \
   'Also cover the timeout boundary.' ] || {
   echo 'FAIL: the triggering ordinary PR comment still requires a slash command' >&2
+  exit 1
+}
+[ "$(printf '%s' "$plain_batch" | jq 'map(select(.id == 106)) | length')" -eq 0 ] || {
+  echo 'FAIL: the exact deploy approval command was queued as revision feedback' >&2
   exit 1
 }
 
@@ -784,6 +820,8 @@ timeline_event timeline-start deploy-primary-offline 653
 timeline_event timeline-finish deploy-primary-offline 718 passed
 timeline_event timeline-start deploy-primary-smoke 718
 timeline_event timeline-finish deploy-primary-smoke 909 failed
+printf '%s\n' 'Benchmark Hub cloud fleet execution' \
+  > "$FAKE_GATE_ROOT/timeline.deploy-primary-smoke.detail"
 
 waterfall_message="$(
   PATH="$FAKE_BIN:$PATH" \
@@ -798,7 +836,7 @@ waterfall_message="$(
   RCA_RUN_URL='https://github.com/Rose-Ai-Labs/rose/actions/runs/123' \
     "$RCA_TOOL" slack-message
 )"
-grep -Fq '*Pipeline step:* /deploy · smoke gates — failed' <<< "$waterfall_message" || {
+grep -Fq '*Pipeline step:* /deploy · smoke gates · Benchmark Hub cloud fleet execution — failed' <<< "$waterfall_message" || {
   echo 'FAIL: Slack did not identify the exact failed deploy phase' >&2
   exit 1
 }
@@ -807,7 +845,7 @@ expected_waterfall='*Step waterfall:*
 ✅ /RCA · primary investigation — 8m 42s
 ✅ /RCA · unchanged local reproduction — 19s
 ✅ /deploy · offline gates — 1m 5s
-❌ /deploy · smoke gates — 3m 11s'
+❌ /deploy · smoke gates · Benchmark Hub cloud fleet execution — 3m 11s'
 grep -Fq "$expected_waterfall" <<< "$waterfall_message" || {
   echo 'FAIL: Slack duration waterfall is not human-readable or ordered' >&2
   exit 1
@@ -833,7 +871,7 @@ grep -Fq '## Automated /RCA → /deploy waterfall' "$CAPTURED_BODY" || {
   echo 'FAIL: final trusted duration waterfall was not persisted on the PR' >&2
   exit 1
 }
-grep -Fq '*Pipeline step:* /deploy · smoke gates — failed' "$CAPTURED_BODY" || exit 1
+grep -Fq '*Pipeline step:* /deploy · smoke gates · Benchmark Hub cloud fleet execution — failed' "$CAPTURED_BODY" || exit 1
 if timeline_event timeline-finish deploy-primary-smoke 910 invented 2>/dev/null; then
   echo 'FAIL: untrusted timeline status was accepted' >&2
   exit 1
