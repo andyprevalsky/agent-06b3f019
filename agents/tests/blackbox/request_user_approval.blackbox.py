@@ -152,10 +152,9 @@ async def test_manager_singleton():
 class _FakeWFModule:
     """Stand-in for temporalio.workflow used by service."""
 
-    def __init__(self, activity_results=None, wait_condition_sets_context=None, patched=True):
+    def __init__(self, activity_results=None, wait_condition_sets_context=None):
         self._activity_results = activity_results or {}
         self._wait_sets_context = wait_condition_sets_context  # callable to mutate wf
-        self._patched = patched
         self.logger = type("L", (), {"info": lambda *a, **kw: None, "error": lambda *a, **kw: None})()
         self.activity_calls = []
 
@@ -164,9 +163,6 @@ class _FakeWFModule:
 
     def uuid4(self):
         return "tool-call-uuid"
-
-    def patched(self, patch_id):
-        return self._patched
 
     async def execute_activity(self, fn, args=None, **kwargs):
         name = getattr(fn, "__name__", "?")
@@ -401,17 +397,14 @@ async def test_direct_approval_returns_response_text():
     assert "its 1:45pm local time" in post.message
 
 
-async def test_direct_approval_replays_legacy_message_poll_path():
-    """Pre-patch workflow histories retain their original poll activity sequence."""
+async def test_direct_approval_ignores_unscoped_trailing_messages():
+    """Approval always consumes the exact request-scoped signal response."""
     from domains.request_user_approval.service import request_user_approval_direct
 
     wf = _WFInstance()
     wf._signal_responses["req-legacy"] = "ok"
     wf.context.append({"role": "USER", "text": "Go ahead"})
-    fake = _FakeWFModule(
-        activity_results={"create_approval_request_activity": "req-legacy"},
-        patched=False,
-    )
+    fake = _FakeWFModule(activity_results={"create_approval_request_activity": "req-legacy"})
     restore = _patch_service_workflow(fake)
     try:
         result = await request_user_approval_direct(
@@ -422,7 +415,7 @@ async def test_direct_approval_replays_legacy_message_poll_path():
     finally:
         restore()
 
-    assert result["response"] == "Go ahead"
+    assert result["response"] == "ok"
 
 
 async def test_direct_create_failure_propagates():
@@ -641,7 +634,10 @@ async def run_all_tests():
     await r.record_async("manager_multi_user_msgs", test_manager_multiple_user_messages_collected)
     await r.record_async("direct_rejection", test_direct_rejection_raises_user_rejected)
     await r.record_async("direct_approval", test_direct_approval_returns_response_text)
-    await r.record_async("direct_approval_legacy_replay", test_direct_approval_replays_legacy_message_poll_path)
+    await r.record_async(
+        "direct_approval_scoped_signal",
+        test_direct_approval_ignores_unscoped_trailing_messages,
+    )
     await r.record_async("direct_create_fail", test_direct_create_failure_propagates)
     await r.record_async("direct_sms_notify", test_direct_sms_source_attempts_sms_notify)
     await r.record_async("direct_web_notify", test_direct_web_source_also_fires_sms_notify)

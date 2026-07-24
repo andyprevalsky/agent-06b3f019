@@ -40,8 +40,16 @@ cloudbench_env_sha256() {
 
 cloudbench_worktree_has_changes() {  # <repo-root>
   local repo="$1"
-  ! git -C "$repo" diff --quiet HEAD --binary 2>/dev/null \
-    || [ -n "$(git -C "$repo" ls-files --others --exclude-standard | head -1)" ]
+  local first_untracked
+  ! git -C "$repo" diff --quiet HEAD --binary -- . ":(exclude)agents/benchmarks/history/*.jsonl" 2>/dev/null \
+    && return 0
+  first_untracked="$(
+    git -C "$repo" ls-files --others --exclude-standard \
+      | grep -Ev '^agents/benchmarks/history/[^/]+\.jsonl$' \
+      | head -1 \
+      || true
+  )"
+  [ -n "$first_untracked" ]
 }
 
 cloudbench_central_hub_runs_root() {  # <port>

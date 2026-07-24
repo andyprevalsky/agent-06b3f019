@@ -49,6 +49,7 @@ from benchmarks.report_card import (
     render_report_card,
     write_report_card,
 )
+from benchmarks.run_benchmark import _frontend_url_for_benchmark, _report_frontend_url_for_benchmark
 
 
 def _sample_state(**overrides) -> RunState:
@@ -69,6 +70,15 @@ def _sample_state(**overrides) -> RunState:
     )
     base.update(overrides)
     return RunState(**base)
+
+
+def test_report_frontend_url_does_not_override_prompt_frontend_url(monkeypatch):
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://public.example")
+    monkeypatch.setenv("BENCHMARK_REPORT_FRONTEND_URL", "http://localhost:5050")
+    monkeypatch.delenv("BENCHMARK_FRONTEND_URL", raising=False)
+
+    assert _frontend_url_for_benchmark("http://localhost:3001") == "https://public.example"
+    assert _report_frontend_url_for_benchmark("http://localhost:3001") == "http://localhost:5050"
 
 
 # --- schema + types ---------------------------------------------------------

@@ -25,7 +25,7 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence, TextIO
+from typing import Mapping, Sequence, TextIO
 
 AGENTS_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = AGENTS_DIR.parent
@@ -56,6 +56,11 @@ AGENT_PAYMENT_TASK_NAMES = {
     "agent-payment-abandonment",
     "agent-payment-setup-resume",
 }
+TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
+    "gate-subscription-card-mint",
+    "gate-kyc-card-mint",
+}
+NON_PURCHASE_GATE_TASK_NAMES = {"gate-source-connect-gmail"}
 BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 _PORT_RANGE_RESERVATIONS: dict[int, tuple[TextIO, ...]] = {}
 _RESERVED_PORTS: set[int] = set()
@@ -662,7 +667,9 @@ def _kill_scoped_processes_by_run_id(stack: ServiceStack) -> None:
 
 
 def needs_frontend_tunnel(tasks: Sequence[str]) -> bool:
-    return bool(AGENT_PAYMENT_TASK_NAMES & set(tasks)) and not os.environ.get("BENCHMARK_FRONTEND_URL")
+    return bool(TEST_PAYMENT_FRONTEND_TASK_NAMES & set(tasks)) and not os.environ.get(
+        "BENCHMARK_FRONTEND_URL"
+    )
 
 
 def needs_imessage_relay(tasks: Sequence[str]) -> bool:
@@ -673,10 +680,53 @@ def needs_payment_fixture(tasks: Sequence[str]) -> bool:
     return bool(AGENT_PAYMENT_TASK_NAMES & set(tasks))
 
 
+def needs_non_purchase_gates(tasks: Sequence[str]) -> bool:
+    return bool(NON_PURCHASE_GATE_TASK_NAMES & set(tasks))
+
+
+def _dotenv_values(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip("\"'")
+    return values
+
+
+def validate_agentcard_org_credentials(
+    tasks: Sequence[str],
+    *,
+    env: Mapping[str, str] | None = None,
+    env_path: Path | None = None,
+) -> None:
+    if not (AGENT_PAYMENT_TASK_NAMES & set(tasks)):
+        return
+    configured = _dotenv_values(env_path or REPO_ROOT / "back-end" / ".env")
+    configured.update(os.environ if env is None else env)
+    client_id = configured.get("AGENTCARD_ORG_OAUTH_CLIENT_ID", "").strip()
+    client_secret = configured.get("AGENTCARD_ORG_OAUTH_CLIENT_SECRET", "").strip()
+    direct = configured.get("AGENTCARD_ORG_MCP_ACCESS_TOKEN", "").strip()
+    if direct.startswith("sk_"):
+        direct = ""
+    if direct or (client_id and client_secret):
+        return
+    raise RuntimeError(
+        "AgentCard Organization MCP credentials are missing. API keys (sk_*) are retired; "
+        "run `agentcard companies credentials create`, then set "
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID and AGENTCARD_ORG_OAUTH_CLIENT_SECRET."
+    )
+
+
 def configure_task_environment(tasks: Sequence[str]) -> None:
     if needs_frontend_tunnel(tasks):
         os.environ["BENCHMARK_BUNDLED_FRONTEND"] = "true"
     selected = set(tasks)
+    if needs_non_purchase_gates(tasks):
+        os.environ["NON_PURCHASE_GATES_ENABLED"] = "1"
     if AGENT_PAYMENT_TASK_NAMES & selected:
         # Keep the consolidated isolated lane behaviorally equivalent to the
         # former per-task lifecycle launcher. Payment tasks share one fixture,
@@ -793,6 +843,7 @@ def start_services(
         assert stack.workspace_name
         assert stack.base_port
         env["BENCHMARK_ISOLATED_RUN"] = "true"
+        env["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = "true"
         env["BENCHMARK_CONTEXT_DIR"] = _context_dir_env_value(stack.context_dir)
         env["BENCHMARK_RUN_ID"] = stack.run_id
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
@@ -1638,6 +1689,7 @@ def run_eval_suite_invocation(*, port: int, args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     selected_tasks = tasks_from_args(args)
+    validate_agentcard_org_credentials(selected_tasks)
     configure_task_environment(selected_tasks)
     if checkpoint_requested(args) and len(selected_tasks) != 1:
         raise ValueError("--checkpoint requires exactly one resolved benchmark task")
@@ -1647,6 +1699,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     dashboard: DashboardServer | None = None
     result_paths: list[Path] = []
     stack = build_service_stack(args)
+    previous_isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES")
+    if stack.isolated:
+        # Both the service stack and run_benchmark.py inherit this. Provider
+        # profiles are keyed per agent, so browser benchmarks can use the same
+        # concurrency width as non-browser tasks without cross-run state writes.
+        os.environ["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = "true"
 
     def handle_shutdown(signum: int, _frame: object) -> None:
         print(f"\nReceived signal {signum}; tearing down benchmark services...", file=sys.stderr)
@@ -1761,6 +1819,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("\nAll requested benchmarks passed.")
         return 0
     finally:
+        if previous_isolated_browser_profiles is None:
+            os.environ.pop("BENCHMARK_ISOLATED_BROWSER_PROFILES", None)
+        else:
+            os.environ["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = previous_isolated_browser_profiles
         signal.signal(signal.SIGTERM, previous_sigterm)
         signal.signal(signal.SIGINT, previous_sigint)
         stop_imessage_relay(imessage_relay)

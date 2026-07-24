@@ -20,6 +20,7 @@ from helpers.context_compaction import project_model_context_after_compaction
 from helpers.context_scope import filter_internal_subagent_messages
 from helpers.fetch_config import _fetch_agent_data_impl
 from helpers.tracing import span
+from helpers.workflow_generation import workflow_generation_headers
 
 logger = structlog.get_logger()
 
@@ -733,22 +734,8 @@ async def update_agent_tree_state(
     """
     config = load_config()
 
-    # 1. Broadcast to Supabase bus (real-time updates)
-    if bus_id and broadcast_payload:
-        try:
-            await _queue_realtime_record(f"bus:{bus_id}", "AGENT_STATE_CHANGED", broadcast_payload)
-            logger.info(
-                "Bus broadcast queued",
-                agent_id=agent_id,
-                bus_id=bus_id,
-                topic=f"bus:{bus_id}",
-                tools=broadcast_payload.get("toolsInUse", []),
-            )
-
-        except Exception as e:
-            logger.warning(f"Bus broadcast error (non-fatal): {str(e)}")
-
-    # 2. Persist to database (tools_in_use, progress, messageCount)
+    # Persist first. The backend generation CAS is the authority; broadcasting
+    # before it accepts would let a sealed workflow overwrite current UI state.
     try:
         activity.heartbeat(f"Updating tree state for agent {agent_id}")
 
@@ -767,12 +754,46 @@ async def update_agent_tree_state(
             response = await client.patch(
                 f"{config.backend.api_url}/api/agents/{agent_id}",
                 json=update_payload,
-                headers={"X-API-Key": config.backend.api_key, "Content-Type": "application/json"},
+                headers={
+                    "X-API-Key": config.backend.api_key,
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
                 timeout=10.0,
             )
 
             if response.status_code not in (200, 204):
                 logger.debug(f"Tree state update failed: status={response.status_code}")
+                return
+            accepted = True
+            if response.status_code == 200:
+                try:
+                    accepted = response.json().get("mutation_accepted", True) is True
+                except (ValueError, AttributeError):
+                    accepted = True
+            if not accepted:
+                logger.info(
+                    "Tree state update fenced after workflow replacement",
+                    agent_id=agent_id,
+                )
+                return
+
+        if bus_id and broadcast_payload:
+            try:
+                await _queue_realtime_record(
+                    f"bus:{bus_id}",
+                    "AGENT_STATE_CHANGED",
+                    broadcast_payload,
+                )
+                logger.info(
+                    "Bus broadcast queued after accepted state mutation",
+                    agent_id=agent_id,
+                    bus_id=bus_id,
+                    topic=f"bus:{bus_id}",
+                    tools=broadcast_payload.get("toolsInUse", []),
+                )
+            except Exception as e:
+                logger.warning(f"Bus broadcast error (non-fatal): {str(e)}")
 
     except Exception as e:
         # Don't fail the workflow if update fails - it's best-effort
@@ -853,7 +874,12 @@ async def post_agent_message(
 
         # Add metadata if provided
         if metadata:
-            payload["metadata"] = metadata
+            if role == "TOOL":
+                from helpers.workflow_generation import stamp_tool_workflow_generation
+
+                payload["metadata"] = stamp_tool_workflow_generation(metadata)
+            else:
+                payload["metadata"] = metadata
 
         # Add file_pointer for file attachment messages (OAI-style)
         if file_pointer:
@@ -863,9 +889,20 @@ async def post_agent_message(
             response = await client.post(
                 f"{config.backend.api_url}/api/agents/{agent_id}/messages",
                 json=payload,
-                headers={"X-API-Key": config.backend.api_key, "Content-Type": "application/json"},
+                headers={
+                    "X-API-Key": config.backend.api_key,
+                    "Content-Type": "application/json",
+                    **workflow_generation_headers(),
+                },
                 timeout=30.0,
             )
+            if response.status_code == 409:
+                logger.info(
+                    "Message write fenced after workflow replacement",
+                    agent_id=agent_id,
+                    role=role,
+                )
+                return {"fenced": True}
             if response.status_code != 201:
                 logger.error(
                     f"Failed to post message - HTTP error: agent_id={agent_id}, status_code={response.status_code}, response_body={response.text}, payload={payload}"

@@ -191,6 +191,41 @@ def _merge_tool_counts(own_counts: Dict[str, int], sub_agent_counts: Dict[str, i
     return merged
 
 
+def _durable_child_tool_counts(context: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Recover child usage from terminal spawn rows, deduplicated by tool call."""
+    by_call: Dict[str, Dict[str, int]] = {}
+    for msg in context:
+        metadata = msg.get("metadata", {}) or {}
+        counts = metadata.get("childToolCounts")
+        tool_call_id = metadata.get("toolCallId")
+        if (
+            msg.get("role") != "TOOL"
+            or metadata.get("toolStatus") != "FINISHED"
+            or not isinstance(tool_call_id, str)
+            or not isinstance(counts, dict)
+        ):
+            continue
+        by_call[tool_call_id] = {
+            str(tool_name): int(count)
+            for tool_name, count in counts.items()
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 0
+        }
+    totals: Dict[str, int] = {}
+    for counts in by_call.values():
+        for tool_name, count in counts.items():
+            totals[tool_name] = totals.get(tool_name, 0) + count
+    return totals
+
+
+def _restart_safe_child_tool_counts(context: List[Dict[str, Any]], in_memory_counts: Dict[str, int]) -> Dict[str, int]:
+    """Use the larger durable/runtime total so a restart cannot lose or double-count usage."""
+    durable = _durable_child_tool_counts(context)
+    return {
+        tool_name: max(durable.get(tool_name, 0), in_memory_counts.get(tool_name, 0))
+        for tool_name in durable.keys() | in_memory_counts.keys()
+    }
+
+
 def _format_tool_stats_footer(tool_counts: Dict[str, int]) -> str:
     """
     Format tool usage statistics as a markdown footer.
@@ -1018,7 +1053,8 @@ Just write plain text describing what was done."""
         # Count this agent's tool usage and merge with sub-agent counts
         # (returned as structured data, not appended as text)
         own_tool_counts = _count_tool_usage(context)
-        total_tool_counts = _merge_tool_counts(own_tool_counts, sub_agent_tool_counts or {})
+        child_tool_counts = _restart_safe_child_tool_counts(context, sub_agent_tool_counts or {})
+        total_tool_counts = _merge_tool_counts(own_tool_counts, child_tool_counts)
 
         logger.info(
             "Summary generated",

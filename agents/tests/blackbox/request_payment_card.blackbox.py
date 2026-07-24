@@ -490,6 +490,7 @@ async def test_payment_helper_import_is_workflow_sandbox_safe():
     assert "Brush x1: $6.36" in result["tool_question"]
     assert result["domain_question"] == result["tool_question"]
     assert result["same_fingerprint"] is True
+    assert result["mint_activity_imported"] is True
 
 
 async def test_mint_purchase_card_activity_returns_agentcard_setup_state():
@@ -522,6 +523,18 @@ async def test_mint_purchase_card_activity_returns_agentcard_setup_state():
     assert result["connectUrl"].endswith("/api/agentcard/connect?user=user-123")
     assert result["setupUrl"] == "https://agentcard.test/setup"
     assert result["setupTool"] == "start_kyc"
+
+
+def test_mint_purchase_card_timeout_budget_exceeds_backend_retry_window():
+    """The activity HTTP client must outwait backend AgentCard funding retries."""
+    from domains.request_payment_card import repo
+
+    assert repo.MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS >= 60
+    assert (
+        repo.MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS
+        < repo.MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS
+        < repo.MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS
+    )
 
 
 async def test_agentcard_status_activity_boundary():
@@ -617,6 +630,10 @@ async def run_all_tests():
     await result.record_async(
         "mint_agentcard_setup_state",
         test_mint_purchase_card_activity_returns_agentcard_setup_state,
+    )
+    result.record(
+        "mint_timeout_budget_exceeds_backend_retry_window",
+        test_mint_purchase_card_timeout_budget_exceeds_backend_retry_window,
     )
     await result.record_async("agentcard_status_boundary", test_agentcard_status_activity_boundary)
     teardown_mock()

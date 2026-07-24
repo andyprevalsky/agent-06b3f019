@@ -16,6 +16,3 @@ SMS_NOTIFY_MAX_ATTEMPTS = 2
 
 # Tool name constant (used in event handling)
 TOOL_NAME = "request_user_approval"
-
-# Temporal patch marker for the request-scoped approval response + JIT param refresh.
-APPROVAL_SIGNAL_PARAM_REFRESH_PATCH = "approval-signal-param-refresh-v1"

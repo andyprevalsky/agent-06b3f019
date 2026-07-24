@@ -75,6 +75,10 @@ import {
   __resetAnthropicApiKeyCooldown,
   isAnthropicApiKeyOnCooldown,
 } from '../../providers/computeCredentials';
+import {
+  fetchClaudeCodeCredentialsWithMeta,
+  markUserTokenRateLimited,
+} from '../../providers/claudeCredentials';
 import { withComputePoolLock } from './compute-pool-lock.testkit';
 config();
 
@@ -2124,8 +2128,10 @@ async function testClaudeCodeUpload_rejectsUndecryptable() {
 
 async function testClaudeCodeToken_notFound() {
   const { accessToken } = await createAnonSession();
-  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
-    headers: await authHeadersWithoutExistingClaudePools(accessToken),
+  const res = await withComputePoolLock(async () => {
+    return request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
+      headers: await authHeadersWithoutExistingClaudePools(accessToken),
+    });
   });
   assertStatus(res.status, 404, res.data);
   assertSchema(ErrorResponse, res.data, 'claude-code token not found');
@@ -3224,8 +3230,10 @@ async function testClaudeCodeCredentials_upload() {
 // 17. Claude Code credentials get token: returns 404 for anon user without onboarding
 async function testClaudeCodeCredentials_getToken() {
   const { accessToken } = await createAnonSession();
-  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
-    headers: await authHeadersWithoutExistingClaudePools(accessToken),
+  const res = await withComputePoolLock(async () => {
+    return request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
+      headers: await authHeadersWithoutExistingClaudePools(accessToken),
+    });
   });
   assertStatus(res.status, 404, res.data);
   assertSchema(ErrorResponse, res.data, 'claude-code token anon missing');
@@ -4422,6 +4430,71 @@ async function testRotation_userAuthErrorDisablesToken() {
   }
 }
 
+async function testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnvelope() {
+  const caller = await createAnonSession();
+  const poolOwner = await createAnonSession();
+  const userToken = await seedClaudeIntegration(caller.userId, { poolingEnabled: false });
+  const poolToken = await seedClaudeIntegration(poolOwner.userId, {
+    poolingEnabled: true,
+    lastUsedAt: new Date(0),
+  });
+
+  try {
+    const mark = await request(`${BASE_URL}/api/integrations/compute-code/token/rate-limited`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        type: 'claude',
+        source: 'user',
+        userId: caller.userId,
+        failureReason: 'auth_error',
+      }),
+    });
+    assertStatus(mark.status, 200, mark.data);
+
+    const disabled = await prisma.integration.findUnique({ where: { id: userToken.id } });
+    assert(disabled?.status === 'EXPIRED', 'direct auth_error must disable direct token use');
+
+    const codeCredential = await fetchClaudeCodeCredentialsWithMeta(caller.userId);
+    assert(
+      codeCredential?.source === 'user',
+      'Claude Code must retain the user OAuth envelope when only direct access-token auth failed'
+    );
+    assert(
+      codeCredential.credentialMode === 'oauth_envelope',
+      'Claude Code recovery requires a refreshable OAuth envelope'
+    );
+    assert(
+      codeCredential.credentials !== undefined,
+      'Claude Code recovery must include the complete OAuth envelope'
+    );
+    const recoveredEnvelope = JSON.parse(codeCredential.credentials) as {
+      claudeAiOauth?: { expiresAt?: number; refreshToken?: string };
+    };
+    assert(
+      recoveredEnvelope.claudeAiOauth?.expiresAt === 0,
+      'The sandbox envelope must force-refresh the direct access token that failed'
+    );
+    assert(
+      recoveredEnvelope.claudeAiOauth?.refreshToken === 'test-refresh',
+      'The sandbox envelope must preserve the refresh token used by Claude Code'
+    );
+    assert(
+      codeCredential.accessToken === undefined,
+      'Claude Code must not re-inject the direct access token that just failed authentication'
+    );
+
+    await markUserTokenRateLimited(caller.userId, { cooldownMs: 60_000 });
+    const backedOffCredential = await fetchClaudeCodeCredentialsWithMeta(caller.userId);
+    assert(
+      backedOffCredential?.source === 'pool' && backedOffCredential.poolTokenId === poolToken.id,
+      'A Claude Code failure must back off the recovered envelope and use the available pool token'
+    );
+  } finally {
+    await cleanupIntegrations([userToken.id, poolToken.id]);
+  }
+}
+
 async function testRotation_gptUserAuthErrorDisablesToken() {
   const caller = await createAnonSession();
   const poolOwner = await createAnonSession();
@@ -4742,6 +4815,14 @@ async function testClaudeCodeExhaustion_marksUserToken() {
     },
   });
   const session = await seedClaudeCodeSession(dummyAgent.id, 'user', null);
+  await prisma.integration.update({
+    where: { id: userInt.id },
+    data: {
+      status: 'EXPIRED',
+      isActive: false,
+      failureReason: 'auth_error',
+    },
+  });
 
   try {
     const banner = "You've hit your limit · resets 9:30pm (UTC)\n";
@@ -4809,6 +4890,52 @@ async function testClaudeCodeAuthFailure_marksPoolTokenLongCooldown() {
     await cleanupSessions([session.taskId]);
     await prisma.agent.delete({ where: { id: dummyAgent.id } });
     await cleanupIntegrations([poolInt.id]);
+  }
+}
+
+async function testClaudeCodeRevokedOauth_disablesUserTokenPermanently() {
+  // Exact production banner from deploy smoke d1f8fa0a. The direct-token path
+  // had already marked the integration EXPIRED/auth_error, but the Claude Code
+  // fallback kept serving its refresh envelope. Once the CLI proves that the
+  // refresh grant is also revoked, exclude the envelope permanently.
+  const caller = await createAnonSession();
+  const userInt = await seedClaudeIntegration(caller.userId, { poolingEnabled: false });
+  const dummyAgent = await prisma.agent.create({
+    data: {
+      id: crypto.randomUUID(),
+      userId: caller.userId,
+      goal: 'dummy-for-revoked-claude-code-test',
+      status: 'STARTING_UP',
+    },
+  });
+  const session = await seedClaudeCodeSession(dummyAgent.id, 'user', null);
+
+  try {
+    const banner =
+      '[Claude] Session started in /home/user\n' +
+      '[Claude] Failed to authenticate. API Error: 401 OAuth access token has been revoked.\n';
+    const res = await request(`${BASE_URL}/api/claude-code-session/${session.taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ output: banner }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    const row = await prisma.integration.findUnique({ where: { id: userInt.id } });
+    assert(row?.status === 'EXPIRED', 'revoked user integration must be expired');
+    assert(row?.isActive === false, 'revoked user integration must be inactive');
+    assert(
+      row?.failureReason === 'claude_code_auth_error',
+      `revoked refresh envelope must be excluded from the auth_error refresh path, got ${row?.failureReason}`
+    );
+    assert(
+      row.rateLimitedUntil === null,
+      'revoked OAuth must not return after a temporary cooldown'
+    );
+  } finally {
+    await cleanupSessions([session.taskId]);
+    await prisma.agent.delete({ where: { id: dummyAgent.id } });
+    await cleanupIntegrations([userInt.id]);
   }
 }
 
@@ -5226,8 +5353,10 @@ async function testPasswordRequest_happy() {
 // 10. Claude Code credentials token for user without onboarding
 async function testClaudeCodeToken_noOnboarding() {
   const session = await createAnonSession();
-  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
-    headers: await authHeadersWithoutExistingClaudePools(session.accessToken),
+  const res = await withComputePoolLock(async () => {
+    return request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
+      headers: await authHeadersWithoutExistingClaudePools(session.accessToken),
+    });
   });
   assertStatus(res.status, 404, res.data);
   assertSchema(ErrorResponse, res.data, 'claude-code token no onboarding missing');
@@ -5926,6 +6055,10 @@ async function runAll() {
       fn: testRotation_userAuthErrorDisablesToken,
     },
     {
+      name: 'rotation -- direct auth_error keeps refreshable Claude Code envelope',
+      fn: testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnvelope,
+    },
+    {
       name: 'rotation -- GPT user auth_error disables token',
       fn: testRotation_gptUserAuthErrorDisablesToken,
     },
@@ -5977,6 +6110,10 @@ async function runAll() {
     {
       name: 'claude-code auth-failure -- pool token marked rate-limited with long cooldown',
       fn: testClaudeCodeAuthFailure_marksPoolTokenLongCooldown,
+    },
+    {
+      name: 'claude-code auth-failure -- revoked user OAuth is permanently excluded',
+      fn: testClaudeCodeRevokedOauth_disablesUserTokenPermanently,
     },
     {
       name: 'claude-code billing-failure -- pool token marked rate-limited with long cooldown',

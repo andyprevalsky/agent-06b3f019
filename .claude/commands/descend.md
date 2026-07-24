@@ -391,6 +391,22 @@ Prepare a clean isolated worktree containing only that unit and start a
 background sub-agent running /deploy. This fix-only handoff is mandatory because
 /deploy ships its entire worktree.
 
+Before starting that worker, hydrate and provision the isolated worktree from
+the controller. This creates a persistent child identity and collision-free
+port range, links the controller's local credential files, installs missing
+dependencies, and starts a Postgres container owned by the child worktree:
+
+~~~bash
+bash scripts/prepare-deploy-worktree.sh \
+  --worktree "$DEPLOY_WORKTREE" \
+  --source "$(git rev-parse --show-toplevel)"
+~~~
+
+Require this command to pass before the worker starts. Never run the controller's
+`scripts/setup-db.sh` from the child: an inherited Conductor identity can reset
+the controller database. Database cleanup or reclamation is a separate RCA; the
+preflight fails closed instead of deleting an existing mismatched container.
+
 The main controller does not block on deploys. It continues remaining RCAs and
 reruns, actively tracks every deploy worker, and updates the lifecycle ledger.
 If another deploy merges first, remaining deploy units sync origin/main and

@@ -90,7 +90,7 @@ class SpawnSubAgentManager(ToolManager):
         logger.info("Recovered terminal child result from durable state", child_agent_id=child_agent_id)
         return True
 
-    async def execute_tool(  # noqa: C901
+    async def execute_tool(
         self,
         workflow_instance: Any,
         tool_call: Dict[str, Any],
@@ -151,6 +151,7 @@ class SpawnSubAgentManager(ToolManager):
 
             parent_model = getattr(workflow_instance, "model", "rose-labs/rose-1-lite")
             parent_source = getattr(workflow_instance, "agent_source", "WEB")
+            child_agent_id = str(workflow.uuid4())
 
             result = await workflow.execute_activity(
                 spawn_sub_agent_activity,
@@ -165,6 +166,7 @@ class SpawnSubAgentManager(ToolManager):
                     bus_id,
                     parent_source,
                     parent_attachments,
+                    [child_agent_id],
                 ],
                 start_to_close_timeout=timedelta(seconds=60),
                 retry_policy=RetryPolicy(maximum_attempts=3),
@@ -406,16 +408,15 @@ class SpawnSubAgentManager(ToolManager):
         ]
 
 
-# Singleton instance
-_manager_instance: SpawnSubAgentManager | None = None
+# Singleton holder avoids rebinding module state from get_manager.
+_manager_instances: list[SpawnSubAgentManager] = []
 
 
 def get_manager() -> SpawnSubAgentManager:
     """Get or create manager singleton."""
-    global _manager_instance  # noqa: PLW0603
-    if _manager_instance is None:
-        _manager_instance = SpawnSubAgentManager()
-    return _manager_instance
+    if not _manager_instances:
+        _manager_instances.append(SpawnSubAgentManager())
+    return _manager_instances[0]
 
 
 async def spawn_sub_agent(workflow_instance: Any, tool_call: Dict[str, Any], tool_call_id: str) -> str | None:

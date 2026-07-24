@@ -25,8 +25,9 @@
  *   - observability: covered by the runner's manifest and artifact directory
  *
  * Invariants not applicable:
- *   - state transition: no state machine, just append-only records
- *   - atomicity: single-row inserts, no multi-table transactions
+ *   - state transition: no state machine; workflow-iteration advancement is monotonic
+ *   - atomicity: generation-fenced insert + iteration advancement is covered by the real-DB
+ *     tool-usage-generation-fence unit race suite
  *   - referential integrity: tested via agent ownership checks (403)
  *   - event/job cardinality: no events emitted
  *   - time/clock: createdAt is server-generated, not user-supplied

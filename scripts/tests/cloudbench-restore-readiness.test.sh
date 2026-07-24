@@ -65,14 +65,22 @@ grep -q -- '--single-transaction' "$RESTORE_HELPER" \
   || fail "restore helper must make the restore atomic"
 echo "PASS 2 — restore helper targets \$LOCAL_DB_NAME atomically (not a hardcoded db)"
 
-# ── 3: the seed-dump pg_dump must dump the app's $LOCAL_DB_NAME ───────────────
-DUMP_LINE="$(grep -E 'pg_dump .*-Fc "\$LOCAL_DB_NAME"' "$RUN_SH" || true)"
-[ -n "$DUMP_LINE" ] || fail "could not find the seed-dump pg_dump command in run.sh"
-echo "$DUMP_LINE" | grep -qE -- '-Fc "\$LOCAL_DB_NAME"' \
-  || fail "seed-dump pg_dump must dump \"\$LOCAL_DB_NAME\" (found: $DUMP_LINE)"
-echo "$DUMP_LINE" | grep -qE -- '-Fc victoria( |$|>)' \
-  && fail "seed-dump pg_dump still hardcodes victoria instead of \$LOCAL_DB_NAME (found: $DUMP_LINE)"
-echo "PASS 3 — seed-dump pg_dump dumps \$LOCAL_DB_NAME (not a hardcoded db)"
+# ── 3: seed dumps must use the target DB's matching client + database ─────────
+SAVE_HELPER="$ROOT_DIR/scripts/save-seed-dump.sh"
+[ -f "$SAVE_HELPER" ] || fail "missing save-seed-dump.sh"
+SAVE_CALL="$(grep -A2 -E 'bash scripts/save-seed-dump\.sh' "$RUN_SH" || true)"
+[ -n "$SAVE_CALL" ] || fail "could not find the save-seed-dump.sh call in run.sh"
+echo "$SAVE_CALL" | grep -q '"\$LOCAL_DB_NAME"' \
+  || fail "save helper must receive \$LOCAL_DB_NAME (found: $SAVE_CALL)"
+echo "$SAVE_CALL" | grep -q '"\$_SEED_DUMP_CONTAINER"' \
+  || fail "save helper must receive the target container (found: $SAVE_CALL)"
+grep -q '_SEED_DUMP_CONTAINER="\$DB_CONTAINER"' "$RUN_SH" \
+  || fail "Docker mode must select the target DB container for pg_dump"
+grep -q 'docker exec "\$DB_CONTAINER" pg_dump .* -Fc "\$DB_NAME"' "$SAVE_HELPER" \
+  || fail "Docker save must use the target container's pg_dump and database argument"
+grep -q 'mv "\$DUMP_TMP" "\$DUMP_PATH"' "$SAVE_HELPER" \
+  || fail "save helper must atomically publish the completed archive"
+echo "PASS 3 — seed-dump uses the target DB/client and publishes atomically"
 
 # ── 4: restore must NOT swallow stderr to /dev/null (keep it diagnosable) ─────
 echo "$RESTORE_CALL" | grep -qE '2>&1' \

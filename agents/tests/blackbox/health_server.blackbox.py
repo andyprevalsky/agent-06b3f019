@@ -18,7 +18,7 @@ def test_health_endpoint():
     assert response.status_code == 503
     data = response.get_json()
     assert data["status"] == "unhealthy"
-    assert data["worker"] == "stopped"
+    assert data["worker"] == "starting"
 
     set_worker_status(True)
     response = client.get("/health")
@@ -26,6 +26,19 @@ def test_health_endpoint():
     data = response.get_json()
     assert data["status"] == "healthy"
     assert data["worker"] == "running"
+
+    set_worker_status(True, phase="standby", build_id="a" * 40)
+    response = client.get("/health")
+    assert response.status_code == 200
+    data = response.get_json()
+    assert data["worker"] == "standby"
+    assert data["build_id"] == "a" * 40
+    metrics = client.get("/metrics").get_data(as_text=True)
+    assert "worker_polling 0" in metrics
+
+    set_worker_status(True, phase="running", build_id="a" * 40)
+    metrics = client.get("/metrics").get_data(as_text=True)
+    assert "worker_polling 1" in metrics
 
     set_worker_status(False)
     response = client.get("/health")

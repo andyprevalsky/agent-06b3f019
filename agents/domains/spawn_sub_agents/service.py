@@ -214,6 +214,7 @@ async def spawn_sub_agent_activity(
     bus_id: str | None = None,
     parent_source: str = "WEB",
     parent_attachments: ParentAttachments | None = None,
+    child_agent_ids: List[str] | None = None,
 ) -> SpawnResult:
     """Activity: Spawn multiple sub-agents to work on parallel subtasks.
 
@@ -283,6 +284,8 @@ async def spawn_sub_agent_activity(
                         parent_source=parent_source,
                         resolved_attachments=resolved_attachments,
                     )
+                    if child_agent_ids is not None and len(child_agent_ids) == len(sub_agents):
+                        payload["agent_id"] = child_agent_ids[index]
 
                     last_error = "unknown error"
                     for attempt in range(1, MAX_SPAWN_ATTEMPTS + 1):

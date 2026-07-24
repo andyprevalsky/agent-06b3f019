@@ -135,3 +135,51 @@ export async function refundCapturedPurchase(
     { idempotencyKey: `purchase-refund:${purchaseId}` }
   );
 }
+
+function paymentIntentStatus(paymentIntent: unknown): {
+  status?: string;
+  amountCapturable?: number;
+  amountReceived?: number;
+} {
+  const candidate = paymentIntent as {
+    status?: unknown;
+    amount_capturable?: unknown;
+    amount_received?: unknown;
+  };
+  return {
+    status: typeof candidate.status === 'string' ? candidate.status : undefined,
+    amountCapturable:
+      typeof candidate.amount_capturable === 'number' ? candidate.amount_capturable : undefined,
+    amountReceived:
+      typeof candidate.amount_received === 'number' ? candidate.amount_received : undefined,
+  };
+}
+
+/**
+ * Reverse a purchase PaymentIntent after its AgentCard funding was reclaimed.
+ * Manual-capture holds must be canceled; only already-captured charges can be refunded.
+ */
+export async function reversePurchasePaymentIntent(
+  paymentIntentId: string,
+  purchaseId: string
+): Promise<'canceled' | 'refunded' | 'noop'> {
+  const intent = paymentIntentStatus(await stripe.paymentIntents.retrieve(paymentIntentId));
+  if (intent.status === 'canceled') {
+    return 'noop';
+  }
+  if (
+    intent.status === 'requires_capture' ||
+    (intent.amountCapturable !== undefined && intent.amountCapturable > 0)
+  ) {
+    await cancelAuthorizedHold(paymentIntentId);
+    return 'canceled';
+  }
+  if (
+    intent.status === 'requires_payment_method' &&
+    (intent.amountReceived === undefined || intent.amountReceived === 0)
+  ) {
+    return 'noop';
+  }
+  await refundCapturedPurchase(paymentIntentId, purchaseId);
+  return 'refunded';
+}

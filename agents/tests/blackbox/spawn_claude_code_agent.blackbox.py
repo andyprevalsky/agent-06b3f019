@@ -1748,6 +1748,69 @@ async def test_spawn_activity_happy_path_end_to_end():
     fake_collector.stop.assert_awaited()
 
 
+async def test_spawn_activity_fast_exit_auth_failure_is_terminal():
+    """A fast CLI 401 is re-checked after exit and never reaches the verifier."""
+    from temporalio.exceptions import ApplicationError
+
+    from domains.spawn_claude_code_agent import service
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+
+    fake_collector = AsyncMock()
+    fake_collector.start = AsyncMock()
+    fake_collector.stop = AsyncMock()
+    close_session = AsyncMock(return_value={})
+    verifier = AsyncMock()
+
+    async def fake_create_session(**_kwargs):
+        return {
+            "task_id": "revoked-task",
+            "sandbox_id": "revoked-sandbox",
+            "ws_url": "wss://x",
+            "uploaded_files": [],
+            "github_repo_url": None,
+        }
+
+    async def fake_loop(**kwargs):
+        kwargs["terminal"].feed(
+            "[Claude] Session started in /home/user\n"
+            "[Claude] Failed to authenticate. API Error: 401 OAuth access token has been revoked.\n"
+        )
+        return (1, False, [], 0, 0, [])
+
+    with (
+        patch.object(service, "SandboxLogCollector", lambda *a, **kw: fake_collector),
+        patch.object(service, "create_e2b_session", side_effect=fake_create_session),
+        patch.object(service, "_run_agentic_loop", side_effect=fake_loop),
+        patch.object(service, "_run_verifier", verifier),
+        patch.object(service, "persist_terminal_output", AsyncMock()),
+        patch.object(service, "close_e2b_session", close_session),
+        patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value=None)),
+        patch(
+            "helpers.model_pricing.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        try:
+            await service.spawn_claude_code_activity(
+                user_id="u",
+                agent_id="a",
+                goal="g",
+                tool_call_id="tc",
+                output_schema={"fields": []},
+            )
+            raise AssertionError("revoked OAuth must terminate the activity")
+        except ApplicationError as error:
+            assert error.non_retryable is True
+            assert error.type == "CLAUDE_CODE_FATAL"
+            assert "401" in str(error)
+
+    verifier.assert_not_awaited()
+    close_session.assert_awaited_once()
+    fake_collector.stop.assert_awaited()
+
+
 async def test_spawn_activity_cancelled_cleanup():
     """CancelledError triggers cleanup path and returns 'cancelled' status."""
     from domains.spawn_claude_code_agent import service
@@ -2307,6 +2370,10 @@ async def run_all_tests():
     )
     await r.record_async("spawn_activity_requires_schema", test_spawn_activity_requires_output_schema)
     await r.record_async("spawn_activity_happy", test_spawn_activity_happy_path_end_to_end)
+    await r.record_async(
+        "spawn_activity_fast_exit_auth_failure",
+        test_spawn_activity_fast_exit_auth_failure_is_terminal,
+    )
     await r.record_async("spawn_activity_cancelled", test_spawn_activity_cancelled_cleanup)
     await r.record_async("spawn_activity_error_reraises", test_spawn_activity_error_reraises_after_cleanup)
     # SpawnClaudeCodeAgentManager.execute_tool

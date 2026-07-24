@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+validate_local_database_url() {
+  local variable_name=$1
+  local value=${!variable_name:-}
+  if [ -z "$value" ]; then
+    echo "$variable_name must be explicitly set for a local Prisma push" >&2
+    exit 2
+  fi
+  node -e '
+    const parsed = new URL(process.argv[1]);
+    if (!["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)) process.exit(1);
+  ' "$value" || {
+    echo "Refusing Prisma push: $variable_name is not a localhost database" >&2
+    exit 2
+  }
+}
+
+# Prisma schema.prisma has a directUrl. Overriding only DATABASE_URL can still
+# send db push to DIRECT_URL, so both values must independently be local.
+validate_local_database_url DATABASE_URL
+validate_local_database_url DIRECT_URL
+
+if [ "${PRISMA_LOCAL_PUSH_DRY_RUN:-0}" = "1" ]; then
+  echo "Local Prisma push target validation passed"
+  exit 0
+fi
+
+exec npx prisma db push "$@"

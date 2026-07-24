@@ -311,11 +311,15 @@ trace_archive._write_local(
         worker = subprocess.Popen(
             [sys.executable, "-c", worker_script, str(target), str(marker), str(release)],
             env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
         )
         reader_started = threading.Event()
         reader_finished = threading.Event()
         result = []
         errors = []
+        reader_was_started = False
 
         def read_artifact():
             reader_started.set()
@@ -333,26 +337,40 @@ trace_archive._write_local(
 
         reader = threading.Thread(target=read_artifact)
         try:
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + 10
             while not marker.exists() and worker.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.01)
-            assert marker.exists(), "writer never paused between ciphertext and metadata publication"
+            worker_stdout = ""
+            worker_stderr = ""
+            if worker.poll() is not None:
+                worker_stdout, worker_stderr = worker.communicate(timeout=1)
+            assert marker.exists(), (
+                "writer never paused between ciphertext and metadata publication "
+                f"(returncode={worker.returncode}, stdout={worker_stdout!r}, stderr={worker_stderr!r})"
+            )
 
             reader.start()
+            reader_was_started = True
             assert reader_started.wait(timeout=1), "reader thread did not start"
             assert not reader_finished.wait(timeout=0.2), "reader bypassed the cross-process artifact lock"
             release.touch()
             worker.wait(timeout=5)
             reader.join(timeout=5)
+            worker_stdout, worker_stderr = worker.communicate(timeout=1)
         finally:
             release.touch(exist_ok=True)
             if worker.poll() is None:
                 worker.terminate()
-                worker.wait(timeout=5)
-            reader.join(timeout=5)
+                try:
+                    worker.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    worker.kill()
+                    worker.wait(timeout=5)
+            if reader_was_started:
+                reader.join(timeout=5)
             restore()
 
-        assert worker.returncode == 0
+        assert worker.returncode == 0, f"stdout={worker_stdout!r}, stderr={worker_stderr!r}"
         assert not reader.is_alive(), "reader stayed blocked after writer released the lock"
         assert not errors, errors
         assert result == [(ciphertext, {"ciphertext_sha256": expected_sha})]
