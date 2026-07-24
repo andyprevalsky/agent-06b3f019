@@ -29,6 +29,8 @@ import {
   recordWorkflowReplacementStartAcceptance,
   type WorkflowReplacementClaim,
 } from '../../providers/workflowReplacementState';
+import { workflowReplacementDeploymentAttempt } from '../../providers/workflowReplacementResumeState';
+import { cleanupTerminalAgentWorkflowZombies } from '../../providers/workflowTerminalCleanup';
 import type { UpdateStatusBody } from './types';
 import * as repo from './repo';
 
@@ -36,6 +38,7 @@ const log = createLogger('Agents');
 
 export interface RestartAgentOptions {
   expectedWorkflowId?: string;
+  deploymentAttempt?: string;
   deadlineAtMs?: number;
 }
 
@@ -129,6 +132,74 @@ async function startReplacementWorkflow(
   );
 }
 
+interface StartedWorkflowAcceptanceDependencies {
+  recordAcceptance: typeof recordWorkflowReplacementStartAcceptance;
+  terminate: typeof terminateStaleTemporalWorkflow;
+  cleanup: (agentId: string, deadlineAtMs?: number) => Promise<unknown>;
+}
+
+const startedWorkflowAcceptanceDependencies: StartedWorkflowAcceptanceDependencies = {
+  recordAcceptance: recordWorkflowReplacementStartAcceptance,
+  terminate: terminateStaleTemporalWorkflow,
+  cleanup: (agentId, deadlineAtMs) =>
+    cleanupTerminalAgentWorkflowZombies(
+      {},
+      {
+        agentIds: [agentId],
+        ignoreGrace: true,
+        maxConcurrency: 1,
+        batchSize: 1,
+        deadlineAtMs,
+      }
+    ),
+};
+
+/** Compensate an accepted Temporal start if a newer DB generation won first. */
+export async function acceptStartedWorkflowReplacement(
+  claim: WorkflowReplacementClaim,
+  execution: TemporalWorkflowExecutionRef,
+  deadlineAtMs?: number,
+  dependencyOverrides: Partial<StartedWorkflowAcceptanceDependencies> = {}
+): Promise<void> {
+  const dependencies = { ...startedWorkflowAcceptanceDependencies, ...dependencyOverrides };
+  if (await dependencies.recordAcceptance(claim, execution)) return;
+
+  let directTerminationError: unknown;
+  try {
+    await dependencies.terminate(execution, claim.agentId, deadlineAtMs);
+  } catch (error) {
+    directTerminationError = error;
+  }
+  try {
+    // The rejected acceptance durably recorded this exact execution. Consume
+    // that obligation now; if cleanup fails, the cron retains it for retry.
+    await dependencies.cleanup(claim.agentId, deadlineAtMs);
+  } catch (cleanupError) {
+    throw new AggregateError(
+      directTerminationError === undefined
+        ? [cleanupError]
+        : [directTerminationError, cleanupError],
+      `Stale workflow replacement ${execution.workflowId} could not be fully cleaned up`
+    );
+  }
+  throw new Error(
+    `Workflow replacement ${execution.workflowId} became stale before start acceptance and was terminated`
+  );
+}
+
+/** Keep a pre-lock tool snapshot only when the claim sealed that same generation. */
+export async function captureClaimedStaleWorkflowTools(
+  agentId: string,
+  claimedStaleWorkflowId: string | null,
+  capturedStaleWorkflowId: string | null,
+  preClaimSnapshot: Awaited<ReturnType<typeof captureInProgressWorkflowTools>>,
+  capture: typeof captureInProgressWorkflowTools = captureInProgressWorkflowTools
+): Promise<Awaited<ReturnType<typeof captureInProgressWorkflowTools>>> {
+  if (claimedStaleWorkflowId === capturedStaleWorkflowId) return preClaimSnapshot;
+  if (claimedStaleWorkflowId === null) return [];
+  return capture(agentId, claimedStaleWorkflowId);
+}
+
 async function sealClaimedReplacement(
   agentId: string,
   claim: WorkflowReplacementClaim,
@@ -186,10 +257,15 @@ export async function prepareAgentWorkflowReplacement(
   }
   if (agent.verifier === null) return { error: 'Agent has no verifier configured', status: 400 };
 
+  const rotatesPriorDeployment =
+    agent.workflowReplacementToken !== null &&
+    options.deploymentAttempt !== undefined &&
+    workflowReplacementDeploymentAttempt(agent.workflowReplacementState) !==
+      options.deploymentAttempt;
   const capturedStaleWorkflowId =
-    agent.workflowReplacementToken !== null
-      ? agent.staleTemporalWorkflowId
-      : agent.temporalWorkflowId;
+    agent.workflowReplacementToken === null || rotatesPriorDeployment
+      ? agent.temporalWorkflowId
+      : agent.staleTemporalWorkflowId;
   const preTerminationSnapshot =
     capturedStaleWorkflowId === null
       ? []
@@ -202,7 +278,12 @@ export async function prepareAgentWorkflowReplacement(
   const claim =
     expectedWorkflowId === null
       ? await claimWorkflowReplacement(agentId, launchConfig)
-      : await claimWorkflowReplacement(agentId, launchConfig, { expectedWorkflowId });
+      : await claimWorkflowReplacement(agentId, launchConfig, {
+          expectedWorkflowId,
+          ...(options.deploymentAttempt === undefined
+            ? {}
+            : { deploymentAttempt: options.deploymentAttempt }),
+        });
   assertRestartDeadline(options.deadlineAtMs, 'replacement claim');
   if ('skipped' in claim) {
     return {
@@ -215,12 +296,19 @@ export async function prepareAgentWorkflowReplacement(
     };
   }
 
+  const claimedPreTerminationSnapshot = await captureClaimedStaleWorkflowTools(
+    agentId,
+    claim.staleWorkflowId,
+    capturedStaleWorkflowId,
+    preTerminationSnapshot
+  );
+  assertRestartDeadline(options.deadlineAtMs, 'claimed tool snapshot');
   const staleExecution = await staleExecutionForReplacement(claim, options.deadlineAtMs);
   const finalClaim = await sealClaimedReplacement(
     agentId,
     claim,
     staleExecution,
-    preTerminationSnapshot,
+    claimedPreTerminationSnapshot,
     options.deadlineAtMs
   );
   return {
@@ -250,7 +338,7 @@ export async function startPreparedAgentWorkflowReplacement(
       deadlineAtMs
     );
     assertRestartDeadline(deadlineAtMs, 'candidate start acceptance');
-    await recordWorkflowReplacementStartAcceptance(claim, execution);
+    await acceptStartedWorkflowReplacement(claim, execution, deadlineAtMs);
     log.info('Restarted agent', { agent_id: agentId, workflow_id: execution.workflowId });
     return {
       success: true,

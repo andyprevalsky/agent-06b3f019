@@ -27,17 +27,51 @@ export async function recordWorkflowReplacementStartAcceptance(
   claim: WorkflowReplacementClaim,
   execution: TemporalWorkflowExecutionRef
 ): Promise<boolean> {
-  const result = await prisma.agent.updateMany({
-    where: {
-      id: claim.agentId,
-      temporalWorkflowId: claim.plannedWorkflowId,
-    },
-    data: {
-      temporalWorkflowId: execution.workflowId,
-      temporalFirstExecutionRunId: execution.firstExecutionRunId,
-    },
+  return runTransactionWithRetry(async (tx) => {
+    await lockAgentWorkflowGeneration(tx, claim.agentId);
+    const result = await tx.agent.updateMany({
+      where: {
+        id: claim.agentId,
+        temporalWorkflowId: claim.plannedWorkflowId,
+        deletedAt: null,
+        status: { notIn: ['COMPLETED', 'FAILED'] },
+      },
+      data: {
+        temporalWorkflowId: execution.workflowId,
+        temporalFirstExecutionRunId: execution.firstExecutionRunId,
+      },
+    });
+    if (result.count === 1) return true;
+
+    // Temporal accepted this execution after a newer DB generation won.
+    // Preserve an exact cleanup obligation before reporting the stale start.
+    const agentExists = await tx.agent.count({ where: { id: claim.agentId } });
+    if (agentExists === 1) {
+      await tx.temporalWorkflowCleanup.upsert({
+        where: {
+          agentId_workflowId: {
+            agentId: claim.agentId,
+            workflowId: execution.workflowId,
+          },
+        },
+        create: {
+          agentId: claim.agentId,
+          workflowId: execution.workflowId,
+          firstExecutionRunId: execution.firstExecutionRunId,
+          notBefore: new Date(),
+        },
+        update: {
+          firstExecutionRunId: execution.firstExecutionRunId,
+          notBefore: new Date(),
+        },
+      });
+      await tx.agent.update({
+        where: { id: claim.agentId },
+        data: { temporalCleanupPending: true },
+      });
+    }
+    return false;
   });
-  return result.count === 1;
 }
 
 /**

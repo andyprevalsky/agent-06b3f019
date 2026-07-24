@@ -6,6 +6,7 @@ import { prisma } from '../../providers/database';
 import {
   acknowledgeWorkflowReplacementBootstrap,
   claimWorkflowReplacement,
+  refreshWorkflowReplacementResumeState,
   recordWorkflowReplacementStartAcceptance,
 } from '../../providers/workflowReplacementState';
 import {
@@ -161,6 +162,83 @@ async function main(): Promise<void> {
       assert('skipped' in alreadyAdvanced);
       assert.strictEqual(alreadyAdvanced.currentWorkflowId, first.plannedWorkflowId);
       assert.strictEqual(alreadyAdvanced.frozenWorkflowId, null);
+    });
+  });
+
+  await test('a later deployment rotates a non-ready candidate but same-attempt retries coalesce', async () => {
+    await withAgent(async (agentId) => {
+      const originalWorkflowId = `${agentId}:original`;
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: {
+          temporalWorkflowId: originalWorkflowId,
+          status: 'PAUSED',
+          tokenCount: 777,
+          workflowIterationOffset: 9,
+        },
+      });
+
+      const initialClaim = await claimWorkflowReplacement(agentId, undefined, {
+        expectedWorkflowId: originalWorkflowId,
+        deploymentAttempt: 'build-a:attempt-a',
+      });
+      assert(!('skipped' in initialClaim));
+      const first = await refreshWorkflowReplacementResumeState(initialClaim);
+      assert.strictEqual(first.resumeState.deployment_attempt, 'build-a:attempt-a');
+      await recordWorkflowReplacementStartAcceptance(first, {
+        workflowId: first.plannedWorkflowId,
+        firstExecutionRunId: 'candidate-a-run',
+      });
+      const sameAttempt = await claimWorkflowReplacement(agentId, undefined, {
+        expectedWorkflowId: originalWorkflowId,
+        deploymentAttempt: 'build-a:attempt-a',
+      });
+      assert(!('skipped' in sameAttempt));
+      assert.strictEqual(sameAttempt.token, first.token);
+      assert.strictEqual(sameAttempt.plannedWorkflowId, first.plannedWorkflowId);
+
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: { status: 'FAILED', statusMessage: 'candidate A failed before READY' },
+      });
+      const failedCandidate = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      await assert.rejects(
+        claimWorkflowReplacement(agentId, undefined, {
+          expectedWorkflowId: originalWorkflowId,
+          deploymentAttempt: 'build-a:attempt-a',
+        }),
+        /failed before durable readiness/
+      );
+      assert.deepStrictEqual(
+        await prisma.agent.findUniqueOrThrow({ where: { id: agentId } }),
+        failedCandidate,
+        'a same-attempt retry must fail closed without rotating or mutating its candidate'
+      );
+      const second = await claimWorkflowReplacement(agentId, undefined, {
+        expectedWorkflowId: first.plannedWorkflowId,
+        deploymentAttempt: 'build-b:attempt-b',
+      });
+      assert(!('skipped' in second));
+      assert.notStrictEqual(second.token, first.token);
+      assert.notStrictEqual(second.plannedWorkflowId, first.plannedWorkflowId);
+      assert.strictEqual(second.staleWorkflowId, first.plannedWorkflowId);
+      assert.strictEqual(second.staleFirstExecutionRunId, 'candidate-a-run');
+      assert.strictEqual(second.resumeState.deployment_attempt, 'build-b:attempt-b');
+      assert.strictEqual(second.resumeState.prior_status, 'PAUSED');
+      assert.strictEqual(second.resumeState.token_count, 777);
+      assert.strictEqual(second.resumeState.iteration_offset, 9);
+
+      const secondRetry = await claimWorkflowReplacement(agentId, undefined, {
+        expectedWorkflowId: first.plannedWorkflowId,
+        deploymentAttempt: 'build-b:attempt-b',
+      });
+      assert(!('skipped' in secondRetry));
+      assert.strictEqual(secondRetry.token, second.token);
+      assert.strictEqual(secondRetry.plannedWorkflowId, second.plannedWorkflowId);
+      const stored = await prisma.agent.findUniqueOrThrow({ where: { id: agentId } });
+      assert.strictEqual(stored.status, 'STARTING_UP');
+      assert.strictEqual(stored.staleTemporalWorkflowId, first.plannedWorkflowId);
+      assert.strictEqual(stored.temporalWorkflowId, second.plannedWorkflowId);
     });
   });
 

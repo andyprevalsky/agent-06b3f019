@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { type AgentStatus, type Message } from '@prisma/client';
 import { WorkflowNotFoundError } from '@temporalio/client';
 import {
+  acceptStartedWorkflowReplacement,
   finalizeWorkflowReplacementBootstrap,
   prepareAgentWorkflowReplacement,
   startPreparedAgentWorkflowReplacement,
@@ -36,7 +37,10 @@ import {
   waitForWorkflowReplacementBootstrap,
 } from '../src/providers/workflowDeploymentMigration';
 import { resolveAndSignal } from '../src/providers/gateResolution';
-import { recordWorkflowResumeIntent } from '../src/providers/workflowReplacementState';
+import {
+  recordWorkflowReplacementStartAcceptance,
+  recordWorkflowResumeIntent,
+} from '../src/providers/workflowReplacementState';
 import { resumeAgentWorkflow } from '../src/providers/agentResume';
 import { cleanupTerminalAgentWorkflowZombies } from '../src/providers/workflowTerminalCleanup';
 import {
@@ -377,6 +381,7 @@ async function startAndReady(prepared: PreparedAgentWorkflowReplacement): Promis
   workflowIds.add(started.workflow_id);
   await waitForWorkflowReplacementBootstrap(prepared.agentId, started.workflow_id, {
     timeoutMs: 120_000,
+    requireInitialized: true,
   });
   const client = await getTemporalClient();
   return {
@@ -1268,6 +1273,122 @@ async function main(): Promise<void> {
     const counts = await activityCount(pausedHandle.handle);
     assert.strictEqual(counts.markers, 0);
     assert.strictEqual(counts.workflowTaskFailures, 0);
+  });
+
+  await check('failed_candidate_next_deploy_rotates_generation', async () => {
+    const fixture = await createDormantAgent('PAUSED');
+    const preparedA = await prepareAgentWorkflowReplacement(fixture.agentId, undefined, {
+      expectedWorkflowId: fixture.staleWorkflowId,
+      deploymentAttempt: `validation-build-a:${runId}`,
+      deadlineAtMs: Date.now() + 120_000,
+    });
+    assert.strictEqual(preparedA.prepared, true);
+    if (preparedA.prepared !== true) throw new Error('candidate A was not prepared');
+
+    const candidateA = await startAgentWorkflowExecution({
+      agentId: fixture.agentId,
+      userId,
+      goal: 'Production workflow replacement retry validation fixture',
+      model: 'rose-labs/rose-1-lite',
+      reasoningMaxTokens: 256,
+      verifier: { type: 'FLOAT_LLM_JUDGE' },
+      taskQueue: dormantQueue,
+      workflowId: preparedA.claim.plannedWorkflowId,
+      startPhase: 'resume',
+      priceLimitCents: 250,
+      ...(preparedA.claim.resumeState.max_iterations === null
+        ? {}
+        : { maxIterations: preparedA.claim.resumeState.max_iterations }),
+      ...(preparedA.claim.resumeState.context_gates === null
+        ? {}
+        : { contextGates: preparedA.claim.resumeState.context_gates }),
+      resumeState: preparedA.claim.resumeState,
+    });
+    workflowIds.add(candidateA.workflowId);
+    await recordWorkflowReplacementStartAcceptance(preparedA.claim, candidateA);
+    await prisma.agent.update({
+      where: { id: fixture.agentId },
+      data: { status: 'FAILED', statusMessage: 'candidate A failed before READY' },
+    });
+
+    const preparedB = await prepareAgentWorkflowReplacement(fixture.agentId, undefined, {
+      expectedWorkflowId: candidateA.workflowId,
+      deploymentAttempt: `validation-build-b:${runId}`,
+      deadlineAtMs: Date.now() + 120_000,
+    });
+    assert.strictEqual(preparedB.prepared, true);
+    if (preparedB.prepared !== true) throw new Error('candidate B was not prepared');
+    assert.notStrictEqual(preparedB.claim.plannedWorkflowId, candidateA.workflowId);
+    assert.strictEqual(preparedB.claim.staleWorkflowId, candidateA.workflowId);
+    assert.strictEqual(preparedB.claim.resumeState.prior_status, 'PAUSED');
+    assert.strictEqual(preparedB.claim.resumeState.token_count, 950);
+    assert.strictEqual(
+      preparedB.claim.resumeState.deployment_attempt,
+      `validation-build-b:${runId}`
+    );
+    await assertTerminated(candidateA.workflowId);
+
+    const ready = await startAndReady(preparedB);
+    const stored = await prisma.agent.findUniqueOrThrow({ where: { id: fixture.agentId } });
+    assert.strictEqual(stored.temporalWorkflowId, ready.workflowId);
+    assert.strictEqual(stored.workflowReplacementToken, null);
+    assert.strictEqual(stored.status, 'PAUSED');
+    assert.strictEqual(await ready.handle.query('is_paused_query'), true);
+    return 'candidate A terminated; candidate B minted clean and restored the original durable snapshot';
+  });
+
+  await check('late_stale_replacement_start_is_compensated', async () => {
+    const fixture = await createDormantAgent('PAUSED');
+    const preparedA = await prepareAgentWorkflowReplacement(fixture.agentId, undefined, {
+      expectedWorkflowId: fixture.staleWorkflowId,
+      deploymentAttempt: `late-start-build-a:${runId}`,
+      deadlineAtMs: Date.now() + 120_000,
+    });
+    assert.strictEqual(preparedA.prepared, true);
+    if (preparedA.prepared !== true) throw new Error('late-start candidate A was not prepared');
+    const preparedB = await prepareAgentWorkflowReplacement(fixture.agentId, undefined, {
+      expectedWorkflowId: preparedA.claim.plannedWorkflowId,
+      deploymentAttempt: `late-start-build-b:${runId}`,
+      deadlineAtMs: Date.now() + 120_000,
+    });
+    assert.strictEqual(preparedB.prepared, true);
+    if (preparedB.prepared !== true) throw new Error('late-start candidate B was not prepared');
+
+    const lateA = await startAgentWorkflowExecution({
+      agentId: fixture.agentId,
+      userId,
+      goal: 'Late stale workflow replacement start validation fixture',
+      model: 'rose-labs/rose-1-lite',
+      reasoningMaxTokens: 256,
+      verifier: { type: 'FLOAT_LLM_JUDGE' },
+      taskQueue: dormantQueue,
+      workflowId: preparedA.claim.plannedWorkflowId,
+      startPhase: 'resume',
+      priceLimitCents: 250,
+      ...(preparedA.claim.resumeState.max_iterations === null
+        ? {}
+        : { maxIterations: preparedA.claim.resumeState.max_iterations }),
+      ...(preparedA.claim.resumeState.context_gates === null
+        ? {}
+        : { contextGates: preparedA.claim.resumeState.context_gates }),
+      resumeState: preparedA.claim.resumeState,
+    });
+    workflowIds.add(lateA.workflowId);
+    await assert.rejects(
+      acceptStartedWorkflowReplacement(preparedA.claim, lateA, Date.now() + 120_000),
+      /became stale before start acceptance and was terminated/
+    );
+    await assertTerminated(lateA.workflowId);
+    const stored = await prisma.agent.findUniqueOrThrow({ where: { id: fixture.agentId } });
+    assert.strictEqual(stored.temporalWorkflowId, preparedB.claim.plannedWorkflowId);
+    assert.strictEqual(stored.workflowReplacementToken, preparedB.claim.token);
+    assert.strictEqual(
+      await prisma.temporalWorkflowCleanup.count({
+        where: { agentId: fixture.agentId, workflowId: lateA.workflowId },
+      }),
+      0
+    );
+    return 'late candidate A start was rejected, terminated, reconciled, and could not displace candidate B';
   });
 
   for (const status of ['COST_LIMIT_REACHED', 'OUT_OF_CREDITS'] as const) {

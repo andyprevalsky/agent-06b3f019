@@ -1,6 +1,7 @@
 import { WorkflowNotFoundError } from '@temporalio/client';
 import { readAgentWorkflowLaunchConfig } from '../../providers/temporal';
 import { captureInProgressWorkflowTools } from '../../providers/staleWorkflowTools';
+import { workflowReplacementDeploymentAttempt } from '../../providers/workflowReplacementResumeState';
 import * as repo from './repo';
 
 interface AgentRestartPreflightDependencies {
@@ -17,6 +18,7 @@ const defaultDependencies: AgentRestartPreflightDependencies = {
 
 export interface AgentWorkflowReplacementPreflightOptions {
   expectedWorkflowId?: string;
+  deploymentAttempt?: string;
   deadlineAtMs?: number;
 }
 
@@ -43,9 +45,27 @@ export async function preflightAgentWorkflowReplacement(
     const dependencies = { ...defaultDependencies, ...dependencyOverrides };
     assertDeadline(options.deadlineAtMs, 'candidate preflight');
     const agent = await dependencies.findAgentWithVerifier(agentId, userId);
-    if (agent === null || agent.status === 'COMPLETED' || agent.status === 'FAILED') {
+    if (agent === null || agent.status === 'COMPLETED') {
       return { outcome: 'skipped' };
     }
+    const rotatesPriorDeployment =
+      agent.workflowReplacementToken !== null &&
+      options.deploymentAttempt !== undefined &&
+      workflowReplacementDeploymentAttempt(agent.workflowReplacementState) !==
+        options.deploymentAttempt;
+    const failedSameDeployment =
+      agent.status === 'FAILED' &&
+      agent.workflowReplacementToken !== null &&
+      options.deploymentAttempt !== undefined &&
+      workflowReplacementDeploymentAttempt(agent.workflowReplacementState) ===
+        options.deploymentAttempt;
+    if (failedSameDeployment) {
+      return {
+        outcome: 'failed',
+        error: `Existing workflow replacement candidate failed before durable readiness for deployment attempt ${options.deploymentAttempt}`,
+      };
+    }
+    if (agent.status === 'FAILED' && !rotatesPriorDeployment) return { outcome: 'skipped' };
     const expectedWorkflowId = options.expectedWorkflowId;
     if (
       expectedWorkflowId !== undefined &&
@@ -62,7 +82,7 @@ export async function preflightAgentWorkflowReplacement(
     }
 
     const staleWorkflowId =
-      agent.workflowReplacementToken === null
+      agent.workflowReplacementToken === null || rotatesPriorDeployment
         ? agent.temporalWorkflowId
         : agent.staleTemporalWorkflowId;
     if (staleWorkflowId !== null) {
