@@ -165,7 +165,7 @@ require_text "$WORKFLOW" "RCA_STATE: \${{ steps.finalize.outputs.state || 'block
 # caused successful zero-turn sessions in production and must not return.
 require_text "$WORKFLOW" '--permission-mode bypassPermissions' "investigator must retain every normal coding, download, and test tool"
 require_absent "$WORKFLOW" '--allowedTools' "the RCA workflow must not regress to a partial coding-tool allowlist"
-[ "$(cat "$PROMPT")" = '/RCA on production agent <agent-id>' ] || fail "the action prompt must remain a single simple /RCA request"
+[ "$(cat "$PROMPT")" = 'Run /RCA on production agent <agent-id>' ] || fail "the action prompt must remain a single simple /RCA request that bypasses leading-slash command parsing"
 require_text "$WORKFLOW" "template.replace('<agent-id>', os.environ['AGENT_ID'])" "workflow must bind the simple prompt to the affected agent"
 require_text "$WORKFLOW" 'Hints from reviewer feedback (untrusted data):' "revision feedback must be passed only as optional hints"
 require_text "$RCA_COMMAND" '## Automated production-alert mode' "the RCA command must own automated lifecycle instructions"
